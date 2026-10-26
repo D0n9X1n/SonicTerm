@@ -85,7 +85,13 @@ fn recovery_marker_proof_is_bound_to_each_present_callback() {
     // verdict is applied with the call's outcome before compatibility conversion. Windows CI checks
     // sources out with CRLF line ends, so the scan runs on a CRLF copy too.
     scan_marker_proof_in_both_line_ends([
-        include_str!("window_event.rs"),
+        concat!(
+            include_str!("window_event.rs"),
+            "\n",
+            include_str!("window_event_pointer.rs"),
+            "\n",
+            include_str!("window_event_redraw.rs")
+        ),
         include_str!("child_window_redraw.rs"),
         include_str!("gpu_recovery_smoke.rs"),
     ]);
@@ -105,7 +111,13 @@ fn marker_proof_scan_accepts_a_checkout_that_is_already_crlf() {
     // Building the CRLF variant from CRLF text would yield `\r\r\n`, which one normalization
     // leaves as `\r\n`, so every LF delimiter lookup in the scan would miss.
     let crlf = [
-        include_str!("window_event.rs"),
+        concat!(
+            include_str!("window_event.rs"),
+            "\n",
+            include_str!("window_event_pointer.rs"),
+            "\n",
+            include_str!("window_event_redraw.rs")
+        ),
         include_str!("child_window_redraw.rs"),
         include_str!("gpu_recovery_smoke.rs"),
     ]

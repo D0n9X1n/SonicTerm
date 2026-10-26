@@ -196,7 +196,13 @@ fn a_zero_software_frame_is_reported_rather_than_omitted() {
 /// workspace constructs one.
 #[test]
 fn the_sampling_path_calls_the_renderer_reporter() {
-    const SAMPLING_SOURCE: &str = include_str!("retention.rs");
+    const SAMPLING_SOURCE: &str = concat!(
+        include_str!("retention.rs"),
+        "\n",
+        include_str!("retention_measure.rs"),
+        "\n",
+        include_str!("retention_trim.rs")
+    );
 
     assert!(
         SAMPLING_SOURCE.contains("self.log_renderer_retention()"),
@@ -221,7 +227,13 @@ fn the_sampling_path_calls_the_renderer_reporter() {
 /// and a hoisted call would read as correctly placed.
 #[test]
 fn the_reporter_runs_only_on_a_taken_sample() {
-    const SAMPLING_SOURCE: &str = include_str!("retention.rs");
+    const SAMPLING_SOURCE: &str = concat!(
+        include_str!("retention.rs"),
+        "\n",
+        include_str!("retention_measure.rs"),
+        "\n",
+        include_str!("retention_trim.rs")
+    );
 
     let body_start = SAMPLING_SOURCE
         .find("fn sample_pane_retention")
@@ -340,7 +352,10 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
         ("frame_pacing.rs", include_str!("frame_pacing.rs")),
         ("input_dispatch.rs", include_str!("input_dispatch.rs")),
         ("locale.rs", include_str!("locale.rs")),
-        ("os_drag.rs", include_str!("os_drag.rs")),
+        (
+            "os_drag.rs",
+            concat!(include_str!("os_drag.rs"), "\n", include_str!("os_drag_registry.rs")),
+        ),
         ("owners.rs", include_str!("owners.rs")),
         ("pane_exit.rs", include_str!("pane_exit.rs")),
         ("pane_refresh.rs", include_str!("pane_refresh.rs")),
@@ -351,7 +366,16 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
         ("shared_gpu.rs", include_str!("shared_gpu.rs")),
         // Only the App wrapper; the GPU-free TabContainer primitive above it stays excluded.
         ("tab_transfer.rs", include_str!("tab_transfer.rs").split("impl App {").nth(1).unwrap()),
-        ("tear_out.rs", include_str!("tear_out.rs")),
+        (
+            "tear_out.rs",
+            concat!(
+                include_str!("tear_out.rs"),
+                "\n",
+                include_str!("tear_out_destination.rs"),
+                "\n",
+                include_str!("tear_out_warm.rs")
+            ),
+        ),
         ("tear_out/drag_target.rs", include_str!("tear_out/drag_target.rs")),
         ("tear_out/os_handoff.rs", include_str!("tear_out/os_handoff.rs")),
         ("test_hooks_overlays.rs", include_str!("test_hooks_overlays.rs")),
@@ -368,8 +392,28 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
         ("splitter_input.rs", include_str!("splitter_input.rs")),
         ("child_window_pointer.rs", include_str!("child_window_pointer.rs")),
         ("child_window_redraw.rs", include_str!("child_window_redraw.rs")),
-        ("misc.rs", include_str!("misc.rs")),
-        ("spawn_pane.rs", include_str!("spawn_pane.rs")),
+        (
+            "misc.rs",
+            concat!(
+                include_str!("misc.rs"),
+                "\n",
+                include_str!("misc_clipboard.rs"),
+                "\n",
+                include_str!("misc_window_create.rs")
+            ),
+        ),
+        (
+            "spawn_pane.rs",
+            concat!(
+                include_str!("spawn_pane.rs"),
+                "\n",
+                include_str!("spawn_pane_commands.rs"),
+                "\n",
+                include_str!("spawn_pane_output.rs"),
+                "\n",
+                include_str!("spawn_pane_vt.rs")
+            ),
+        ),
         ("tab_state.rs", include_str!("tab_state.rs")),
     ];
     let raw: Vec<_> = sources

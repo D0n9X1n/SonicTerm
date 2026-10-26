@@ -55,7 +55,14 @@ fn maintenance_uses_device_gate(source: &str) -> bool {
 /// Maintenance must retain the stopped-device gate under Unix and Windows checkout line endings.
 #[test]
 fn maintenance_consults_the_device_gate() {
-    let lf_source = include_str!("tear_out.rs").replace("\r\n", "\n");
+    let lf_source = concat!(
+        include_str!("tear_out.rs"),
+        "\n",
+        include_str!("tear_out_destination.rs"),
+        "\n",
+        include_str!("tear_out_warm.rs")
+    )
+    .replace("\r\n", "\n");
     for source in [lf_source.clone(), lf_source.replace('\n', "\r\n")] {
         assert!(maintenance_uses_device_gate(&source));
     }
@@ -64,7 +71,14 @@ fn maintenance_consults_the_device_gate() {
 /// Line-ending handling must not hide a missing device predicate or an ungated spawn rule.
 #[test]
 fn maintenance_source_rejects_ungated_prewarming() {
-    let lf_source = include_str!("tear_out.rs").replace("\r\n", "\n");
+    let lf_source = concat!(
+        include_str!("tear_out.rs"),
+        "\n",
+        include_str!("tear_out_destination.rs"),
+        "\n",
+        include_str!("tear_out_warm.rs")
+    )
+    .replace("\r\n", "\n");
     for source in [lf_source.clone(), lf_source.replace('\n', "\r\n")] {
         let without_predicate = source.replace("GpuRenderer::device_accepts_gpu_work", "false");
         assert!(!maintenance_uses_device_gate(&without_predicate));

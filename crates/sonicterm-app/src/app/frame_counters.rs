@@ -30,44 +30,6 @@ pub(crate) enum HistogramUnit {
     Micros,
 }
 
-impl HistogramUnit {
-    fn bounds(self) -> &'static [u64] {
-        match self {
-            Self::Millis => &MILLIS_BOUNDS,
-            Self::Micros => &MICROS_BOUNDS,
-        }
-    }
-
-    fn micros_per_unit(self) -> u64 {
-        match self {
-            Self::Millis => 1_000,
-            Self::Micros => 1,
-        }
-    }
-
-    fn suffix(self) -> &'static str {
-        match self {
-            Self::Millis => "ms",
-            Self::Micros => "us",
-        }
-    }
-
-    /// The bucket a value falls in; a value equal to a bound belongs to that bound's bucket.
-    fn bucket(self, value_us: u64) -> usize {
-        let per_unit = self.micros_per_unit();
-        let bounds = self.bounds();
-        bounds.iter().position(|bound| value_us <= bound * per_unit).unwrap_or(bounds.len())
-    }
-
-    fn bound_of(self, bucket: usize) -> Bound {
-        let bounds = self.bounds();
-        match bounds.get(bucket) {
-            Some(bound) => Bound::AtMost(*bound),
-            None => Bound::Above(bounds[bounds.len() - 1]),
-        }
-    }
-}
-
 /// Where a maximum or p95 lies: at or below a bucket bound, or in the overflow bucket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Bound {
@@ -75,16 +37,6 @@ pub(crate) enum Bound {
     AtMost(u64),
     /// Above the largest bound, in the histogram's unit.
     Above(u64),
-}
-
-impl Bound {
-    /// `le_<unit>=N` or `gt_<unit>=N`, the field form a line prints.
-    fn field(self, suffix: &str) -> String {
-        match self {
-            Self::AtMost(bound) => format!("le_{suffix}={bound}"),
-            Self::Above(bound) => format!("gt_{suffix}={bound}"),
-        }
-    }
 }
 
 /// A cumulative bucket histogram and the exact sum of its recorded microseconds.
@@ -95,162 +47,12 @@ pub(crate) struct Histogram {
     sum_us: u64,
 }
 
-impl Histogram {
-    /// An empty histogram with `unit` buckets.
-    pub(crate) const fn new(unit: HistogramUnit) -> Self {
-        Self { unit, buckets: [0; BUCKETS], sum_us: 0 }
-    }
-
-    /// Record one duration, in microseconds.
-    pub(crate) fn record_us(&mut self, value_us: u64) {
-        self.buckets[self.unit.bucket(value_us)] += 1;
-        self.sum_us = self.sum_us.saturating_add(value_us);
-    }
-
-    /// Recorded durations.
-    pub(crate) fn count(&self) -> u64 {
-        self.buckets.iter().sum()
-    }
-
-    /// The exact sum of the recorded microseconds.
-    pub(crate) fn sum_us(&self) -> u64 {
-        self.sum_us
-    }
-
-    /// A microsecond histogram from a renderer's bucket `counts` (overflow last) and exact sum.
-    pub(crate) fn from_micros(counts: &[u64], sum_us: u64) -> Self {
-        let mut histogram = Self::new(HistogramUnit::Micros);
-        for (slot, count) in histogram.buckets.iter_mut().zip(counts) {
-            *slot = *count;
-        }
-        histogram.sum_us = sum_us;
-        histogram
-    }
-
-    /// A millisecond histogram from a renderer's bucket `counts` (overflow last) and exact sum.
-    pub(crate) fn from_millis(counts: &[u64], sum_us: u64) -> Self {
-        let mut histogram = Self::new(HistogramUnit::Millis);
-        for (slot, count) in histogram.buckets.iter_mut().zip(counts) {
-            *slot = *count;
-        }
-        histogram.sum_us = sum_us;
-        histogram
-    }
-
-    /// The unit, bounds, used bucket counts (overflow last) and exact sum, borrowed.
-    fn buckets(&self) -> HistogramBuckets<'_> {
-        let bounds = self.unit.bounds();
-        HistogramBuckets {
-            unit: self.unit.suffix(),
-            bounds,
-            counts: &self.buckets[..=bounds.len()],
-            sum_us: self.sum_us,
-        }
-    }
-
-    /// The bound of the highest bucket holding a value; `None` when empty.
-    pub(crate) fn max(&self) -> Option<Bound> {
-        self.buckets.iter().rposition(|count| *count > 0).map(|bucket| self.unit.bound_of(bucket))
-    }
-
-    /// The bound of the bucket holding the 95th percentile; `None` when empty.
-    pub(crate) fn p95(&self) -> Option<Bound> {
-        let rank = self.count().saturating_mul(95).div_ceil(100);
-        if rank == 0 {
-            // When: `rank` is 0, the histogram is empty, so it has no p95.
-            return None;
-        }
-        let mut cumulative = 0;
-        self.buckets
-            .iter()
-            .position(|count| {
-                cumulative += count;
-                cumulative >= rank
-            })
-            .map(|bucket| self.unit.bound_of(bucket))
-    }
-
-    /// The histogram's fields on a line: buckets, sum, p95 and max bounds; empty when no events.
-    pub(crate) fn line_fields(&self, name: &str) -> String {
-        let (Some(p95), Some(max)) = (self.p95(), self.max()) else {
-            // When: `p95` or `max` is None, the histogram is empty and contributes no fields.
-            return String::new();
-        };
-        let suffix = self.unit.suffix();
-        let used = &self.buckets[..=self.unit.bounds().len()];
-        let buckets: Vec<String> = used.iter().map(ToString::to_string).collect();
-        format!(
-            "{name}_{suffix}=[{}] {name}_sum_us={} {name}_p95_{} {name}_max_{}",
-            buckets.join(","),
-            self.sum_us,
-            p95.field(suffix),
-            max.field(suffix)
-        )
-    }
-
-    /// Add `other`'s counts, as a closed window's totals join `closed_windows`.
-    fn add(&mut self, other: &Self) {
-        for (slot, count) in self.buckets.iter_mut().zip(other.buckets) {
-            *slot += count;
-        }
-        self.sum_us += other.sum_us;
-    }
-
-    /// What was recorded since `earlier`, a snapshot of this same cumulative histogram.
-    pub(crate) fn delta_since(&self, earlier: &Self) -> Self {
-        let mut buckets = [0; BUCKETS];
-        for (slot, (later, before)) in
-            buckets.iter_mut().zip(self.buckets.iter().zip(&earlier.buckets))
-        {
-            *slot = later.saturating_sub(*before);
-        }
-        Self { unit: self.unit, buckets, sum_us: self.sum_us.saturating_sub(earlier.sum_us) }
-    }
-}
-
 /// A histogram that several threads record into.
 #[derive(Debug)]
 pub(crate) struct AtomicHistogram {
     unit: HistogramUnit,
     buckets: [AtomicU64; BUCKETS],
     sum_us: AtomicU64,
-}
-
-impl AtomicHistogram {
-    /// An empty shared histogram with `unit` buckets.
-    pub(crate) fn new(unit: HistogramUnit) -> Self {
-        Self {
-            unit,
-            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
-            sum_us: AtomicU64::new(0),
-        }
-    }
-
-    /// Record one duration, in microseconds.
-    // Ordering: buckets and sum_us use Relaxed; they are statistics and order nothing.
-    pub(crate) fn record_us(&self, value_us: u64) {
-        self.buckets[self.unit.bucket(value_us)].fetch_add(1, Ordering::Relaxed);
-        self.sum_us.fetch_add(value_us, Ordering::Relaxed);
-    }
-
-    /// Add a thread-local histogram's counts, as a dispatch scope drains its tally.
-    // Ordering: shared buckets and sum_us use Relaxed; they are statistics and order nothing.
-    fn add(&self, local: &Histogram) {
-        for (shared, count) in self.buckets.iter().zip(local.buckets) {
-            shared.fetch_add(count, Ordering::Relaxed);
-        }
-        self.sum_us.fetch_add(local.sum_us, Ordering::Relaxed);
-    }
-
-    /// The cumulative counts, read field by field; a concurrent record may land in either read.
-    // Ordering: buckets and sum_us load Relaxed; a snapshot is observational and orders nothing.
-    pub(crate) fn snapshot(&self) -> Histogram {
-        Histogram {
-            unit: self.unit,
-            buckets: std::array::from_fn(|bucket| self.buckets[bucket].load(Ordering::Relaxed)),
-            sum_us: self.sum_us.load(Ordering::Relaxed),
-        }
-    }
 }
 
 /// Limits one counter source to one line a second and one `final=1` line.
@@ -315,18 +117,6 @@ struct NativeTotals {
     spare: Vec<(winit::window::WindowId, u64)>,
 }
 
-impl NativeTotals {
-    /// Move `entries` into the totals by window, leaving `entries` empty with its capacity.
-    fn fold(&mut self, entries: &mut Vec<(winit::window::WindowId, u64)>) {
-        for (id, count) in entries.drain(..) {
-            match self.registered.iter_mut().find(|entry| entry.0 == id) {
-                Some(entry) => entry.1 += count,
-                None => self.unregistered += count,
-            }
-        }
-    }
-}
-
 impl Default for DispatchTotals {
     fn default() -> Self {
         Self {
@@ -334,79 +124,6 @@ impl Default for DispatchTotals {
             locks: AtomicU64::new(0),
             native: Mutex::new(NativeTotals::default()),
         }
-    }
-}
-
-impl DispatchTotals {
-    // Ordering: locks uses Relaxed; it is a statistic, ordering nothing.
-    fn absorb(&self, mut tally: DispatchTally) {
-        self.wait.add(&tally.wait);
-        self.locks.fetch_add(tally.locks, Ordering::Relaxed);
-        // The requests join their windows and the emptied storage waits for the next dispatch.
-        let mut native = self.native.lock();
-        native.fold(&mut tally.native);
-        native.spare = std::mem::take(&mut tally.native);
-    }
-
-    /// Storage for a dispatch's requests: the previous dispatch's, or a new one at the first
-    /// dispatch and in a nested one, which finds the spare taken.
-    fn take_spare(&self) -> Vec<(winit::window::WindowId, u64)> {
-        let spare = std::mem::take(&mut self.native.lock().spare);
-        if spare.capacity() == 0 {
-            // When: no `spare` storage is left, this dispatch allocates the bounded tally once.
-            return Vec::with_capacity(NATIVE_TALLY_CAPACITY);
-        }
-        spare
-    }
-
-    /// Move a full tally's requests into the totals mid-dispatch, keeping its storage.
-    fn attribute(&self, entries: &mut Vec<(winit::window::WindowId, u64)>) {
-        self.native.lock().fold(entries);
-    }
-
-    /// Give registered window `id` an entry, so its requests are attributed to it.
-    pub(crate) fn register_native(&self, id: winit::window::WindowId) {
-        let mut native = self.native.lock();
-        if !native.registered.iter().any(|entry| entry.0 == id) {
-            // the window is new, so it gets an entry starting at zero.
-            native.registered.push((id, 0));
-        }
-    }
-
-    /// Native redraw requests drained so far for window `id`.
-    fn native_requests(&self, id: winit::window::WindowId) -> u64 {
-        let native = self.native.lock();
-        native.registered.iter().find(|entry| entry.0 == id).map_or(0, |entry| entry.1)
-    }
-
-    /// Requests drained for ids that were not registered.
-    fn unregistered_requests(&self) -> u64 {
-        self.native.lock().unregistered
-    }
-
-    /// Windows with a drained-request entry.
-    #[cfg(test)]
-    fn registered_entries(&self) -> usize {
-        self.native.lock().registered.len()
-    }
-
-    /// Remove retiring window `id`'s entry, returning its drained requests.
-    fn take_native_requests(&self, id: winit::window::WindowId) -> u64 {
-        let mut native = self.native.lock();
-        let position = native.registered.iter().position(|entry| entry.0 == id);
-        position.map_or(0, |index| native.registered.swap_remove(index).1)
-    }
-}
-
-/// Add `count` requests for window `id` to `native`.
-fn add_native(
-    native: &mut Vec<(winit::window::WindowId, u64)>,
-    id: winit::window::WindowId,
-    count: u64,
-) {
-    match native.iter_mut().find(|entry| entry.0 == id) {
-        Some(entry) => entry.1 += count,
-        None => native.push((id, count)),
     }
 }
 
@@ -422,17 +139,6 @@ struct DispatchTally {
     native: Vec<(winit::window::WindowId, u64)>,
     /// The App this dispatch counts for, so a full tally can hand its requests over.
     sink: Option<Arc<DispatchTotals>>,
-}
-
-impl DispatchTally {
-    const fn new() -> Self {
-        Self {
-            wait: Histogram::new(HistogramUnit::Micros),
-            locks: 0,
-            native: Vec::new(),
-            sink: None,
-        }
-    }
 }
 
 thread_local! {
@@ -451,26 +157,6 @@ pub(crate) struct DispatchScope {
     outer: Option<(bool, DispatchTally)>,
 }
 
-impl DispatchScope {
-    /// Open a dispatch; `sink` is the App's totals when its gate is on, `None` when it is off.
-    pub(crate) fn enter(sink: Option<Arc<DispatchTotals>>) -> Self {
-        let enclosing_counts = COUNTING.with(Cell::get);
-        if sink.is_none() && !enclosing_counts {
-            // When: `sink` is None and no `enclosing_counts` dispatch counts, nothing is written.
-            return Self { sink, outer: None };
-        }
-        // A counting dispatch reuses its App's request storage, so a request allocates nothing.
-        let tally = DispatchTally {
-            native: sink.as_deref().map_or_else(Vec::new, DispatchTotals::take_spare),
-            sink: sink.clone(),
-            ..DispatchTally::new()
-        };
-        let outer_tally = TALLY.with(|cell| cell.replace(tally));
-        COUNTING.with(|cell| cell.set(sink.is_some()));
-        Self { sink, outer: Some((enclosing_counts, outer_tally)) }
-    }
-}
-
 // Lifecycle: DispatchScope drains its own tally into its App, then restores the enclosing dispatch.
 impl Drop for DispatchScope {
     fn drop(&mut self) {
@@ -484,97 +170,6 @@ impl Drop for DispatchScope {
             sink.absorb(tally);
         }
     }
-}
-
-/// Ask `window` to redraw, counting the request for its window inside a counting dispatch.
-/// Every App-side native request goes through here; scheduling is exactly `request_redraw`.
-pub(crate) fn request_native_redraw(window: &winit::window::Window) {
-    note_native_request(window.id());
-    window.request_redraw();
-}
-
-/// Count one native redraw request for window `id` in the open dispatch; outside a counting
-/// dispatch it reads one thread-local flag and writes nothing.
-pub(crate) fn note_native_request(id: winit::window::WindowId) {
-    if !COUNTING.with(Cell::get) {
-        // When: `COUNTING` is false, no counting App is dispatching; nothing is recorded.
-        return;
-    }
-    TALLY.with(|cell| {
-        let tally = &mut *cell.borrow_mut();
-        let full = tally.native.len() == NATIVE_TALLY_CAPACITY;
-        if full && !tally.native.iter().any(|entry| entry.0 == id) {
-            // the tally is full and `id` is new: its requests go to the App now, keeping the storage.
-            if let Some(sink) = &tally.sink {
-                sink.attribute(&mut tally.native);
-            }
-        }
-        add_native(&mut tally.native, id, 1);
-    });
-}
-
-/// Remove window `id`'s requests from the open dispatch, for a window that dispatch retires.
-fn take_pending_native(id: winit::window::WindowId) -> u64 {
-    if !COUNTING.with(Cell::get) {
-        // When: `COUNTING` is false, the open dispatch tallied nothing.
-        return 0;
-    }
-    TALLY.with(|cell| {
-        let native = &mut cell.borrow_mut().native;
-        let position = native.iter().position(|entry| entry.0 == id);
-        position.map_or(0, |index| native.swap_remove(index).1)
-    })
-}
-
-#[cfg(test)]
-fn pending_native_capacity() -> usize {
-    TALLY.with(|cell| cell.borrow().native.capacity())
-}
-
-#[cfg(test)]
-fn pending_native_requests() -> u64 {
-    TALLY.with(|cell| cell.borrow().native.iter().map(|entry| entry.1).sum())
-}
-
-/// Lock a pane parser on the event-loop thread, timing the wait inside a counting dispatch.
-/// Outside one it is exactly `lock()`.
-pub(crate) fn lock_parser<Value>(parser: &Mutex<Value>) -> MutexGuard<'_, Value> {
-    lock_counted(parser, &mut Instant::now)
-}
-
-/// `lock_parser` with an injectable clock.
-// Lock order: parser -> cell; the TALLY cell is borrowed briefly while the parser guard is held.
-pub(crate) fn lock_counted<'parser, Value>(
-    parser: &'parser Mutex<Value>,
-    clock: &mut impl FnMut() -> Instant,
-) -> MutexGuard<'parser, Value> {
-    if !COUNTING.with(Cell::get) {
-        // When: `COUNTING` is false, no counting dispatch is open; no clock is read, nothing written.
-        return parser.lock();
-    }
-    let before_lock = clock();
-    let guard = parser.lock();
-    let wait_us = micros_between(before_lock, clock());
-    TALLY.with(|cell| {
-        let mut tally = cell.borrow_mut();
-        tally.wait.record_us(wait_us);
-        tally.locks += 1;
-    });
-    guard
-}
-
-/// This thread's undrained `(locks, waits)`.
-#[cfg(test)]
-fn current_tally() -> (u64, u64) {
-    TALLY.with(|cell| {
-        let tally = cell.borrow();
-        (tally.locks, tally.wait.count())
-    })
-}
-
-/// Whole microseconds from `from` to `to`; zero when `to` is earlier.
-fn micros_between(from: Instant, to: Instant) -> u64 {
-    u64::try_from(to.saturating_duration_since(from).as_micros()).unwrap_or(u64::MAX)
 }
 
 /// The four instants of one VT parser section: before `lock()`, as it returns, after parsing
@@ -638,29 +233,6 @@ impl Default for VtFrameStats {
     }
 }
 
-impl VtFrameStats {
-    /// Record one parser section after its guard dropped: wait, parse and hold, its bytes, and the wait's
-    /// nanosecond total and section count.
-    // A seam for span correlation: this section's lock-acquisition interval would be kept here, per pane.
-    // Ordering: parse_bytes, parser_lock_wait_ns and parser_sections use Relaxed; statistics, ordering nothing.
-    pub(crate) fn record_section(&self, times: &VtSectionTimes, parsed_bytes: u64) {
-        self.parser_lock_wait.record_us(micros_between(times.before_lock, times.locked_at));
-        let wait = times.locked_at.saturating_duration_since(times.before_lock);
-        let wait_ns = u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX);
-        self.parser_lock_wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
-        self.parser_sections.fetch_add(1, Ordering::Relaxed);
-        self.parse.record_us(micros_between(times.locked_at, times.parsed_at));
-        self.parser_lock_hold.record_us(micros_between(times.locked_at, times.released_at));
-        self.parse_bytes.fetch_add(parsed_bytes, Ordering::Relaxed);
-    }
-
-    /// Count one output batch; a batch may take the lock several times.
-    // Ordering: batches uses Relaxed; the count is a statistic and orders nothing.
-    pub(crate) fn note_batch(&self) {
-        self.batches.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 /// A pane's counter handles, present only when its App's gate is on. The pane and its VT
 /// worker share them: the worker publishes into `pending_flush` and the event loop takes it.
 #[derive(Clone, Debug)]
@@ -676,44 +248,14 @@ pub(crate) struct PaneFrameCounters {
     pub(crate) sections: Option<Arc<super::guard_correlation::PaneSectionLog>>,
 }
 
-impl PaneFrameCounters {
-    /// A pane's handles over its App's VT statistics, with no pending flush, an idle watch and no log.
-    pub(crate) fn new(vt: Arc<VtFrameStats>) -> Self {
-        Self {
-            vt,
-            pending_flush: Arc::new(AtomicU64::new(0)),
-            echo: Arc::new(super::echo_watch::EchoWatch::new()),
-            sections: None,
-        }
-    }
-}
-
 #[cfg(test)]
 thread_local! {
     /// Test-only: `flush_clock_ns` reads made on this thread.
     static FLUSH_CLOCK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Test-only: `flush_clock_ns` reads made so far on this thread.
-#[cfg(test)]
-pub(crate) fn flush_clock_reads() -> u64 {
-    FLUSH_CLOCK_READS.with(std::cell::Cell::get)
-}
-
 /// The run clock's process-wide epoch: set once, at its first use, and never reset.
 static CLOCK_EPOCH: OnceLock<Instant> = OnceLock::new();
-
-/// The process-wide epoch every frame-counter and guard-correlation nanosecond counts from. The
-/// first call sets it; the perf harness calls it before its startup phase so every phase converts.
-#[doc(hidden)]
-pub fn clock_epoch() -> Instant {
-    epoch_in(&CLOCK_EPOCH)
-}
-
-/// The epoch held by `cell`, set to now by the first caller; concurrent first callers agree.
-pub(crate) fn epoch_in(cell: &OnceLock<Instant>) -> Instant {
-    *cell.get_or_init(Instant::now)
-}
 
 #[cfg(test)]
 thread_local! {
@@ -721,53 +263,6 @@ thread_local! {
     /// so a test can observe the constructor setting a cell nothing else has touched.
     pub(crate) static CONSTRUCTOR_EPOCH_CELL: std::cell::Cell<Option<&'static OnceLock<Instant>>> =
         const { std::cell::Cell::new(None) };
-}
-
-/// The epoch cell the counters' constructor initializes: the process's, or a test's injected one.
-fn constructor_epoch_cell() -> &'static OnceLock<Instant> {
-    #[cfg(test)]
-    if let Some(cell) = CONSTRUCTOR_EPOCH_CELL.with(std::cell::Cell::get) {
-        // When: a test injected a cell on this thread, the constructor initializes that one.
-        return cell;
-    }
-    &CLOCK_EPOCH
-}
-
-/// Nanoseconds since a process-wide epoch, never 0, which a flush slot reserves for "none".
-pub(crate) fn flush_clock_ns() -> u64 {
-    #[cfg(test)]
-    FLUSH_CLOCK_READS.with(|reads| reads.set(reads.get() + 1));
-    u64::try_from(clock_epoch().elapsed().as_nanos()).unwrap_or(u64::MAX).max(1)
-}
-
-/// Publish a targeted flush before its redraw request is sent. The oldest pending flush stays;
-/// one that finds it still pending is counted as coalesced, and returns true.
-// Ordering: slot's Release exchange precedes send_event; consume_flush's Acquire swap pairs with it.
-// Its failure load, flushes and flushes_coalesced are Relaxed.
-pub(crate) fn publish_flush(slot: &AtomicU64, now_ns: u64, stats: &VtFrameStats) -> bool {
-    stats.flushes.fetch_add(1, Ordering::Relaxed);
-    let stored = slot.compare_exchange(0, now_ns.max(1), Ordering::Release, Ordering::Relaxed);
-    let coalesced = stored.is_err();
-    if coalesced {
-        // an earlier flush is still pending, it keeps its time and this one only counts.
-        stats.flushes_coalesced.fetch_add(1, Ordering::Relaxed);
-    }
-    coalesced
-}
-
-/// Count a flush while the pane has no redraw target; no timestamp is stored.
-// Ordering: flushes and flushes_untargeted use Relaxed; they are statistics and order nothing.
-pub(crate) fn note_untargeted_flush(stats: &VtFrameStats) {
-    stats.flushes.fetch_add(1, Ordering::Relaxed);
-    stats.flushes_untargeted.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Take the pane's pending flush at a redraw: its age in nanoseconds, or `None` when none was
-/// pending. A flush published during the swap is taken now or left for the next redraw.
-// Ordering: slot swaps Acquire, pairing with publish_flush's Release, so the time read is the one stored.
-pub(crate) fn consume_flush(slot: &AtomicU64, now_ns: u64) -> Option<u64> {
-    let flushed_at_ns = slot.swap(0, Ordering::Acquire);
-    (flushed_at_ns != 0).then(|| now_ns.saturating_sub(flushed_at_ns))
 }
 
 /// The frame and lock counters one App owns, present only when its gate is on.
@@ -979,214 +474,6 @@ impl std::fmt::Display for FrameCountersTooLate {
     }
 }
 
-impl std::error::Error for FrameCountersTooLate {}
-
-impl super::App {
-    /// Turn this App's frame counters on whatever the log filter says. Only an App that has
-    /// created no window, pane or renderer accepts it, so no reader ever sees the gate change.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FrameCountersTooLate`] once the App has created a window or a pane.
-    #[doc(hidden)]
-    pub fn force_frame_counters_on(&mut self) -> Result<(), FrameCountersTooLate> {
-        if self.frame_counters_sealed.get() {
-            // When: `frame_counters_sealed` is set, a window or pane exists and may have read the gate.
-            return Err(FrameCountersTooLate);
-        }
-        self.frame_counters.get_or_insert_with(AppFrameCounters::new);
-        Ok(())
-    }
-
-    /// The start of a timed dispatch; `None`, with no clock read, when the gate is off.
-    pub(super) fn frame_clock_start(&self) -> Option<Instant> {
-        self.frame_counters.as_ref().map(|_| Instant::now())
-    }
-
-    /// Count a `new_events` wake by its cause.
-    pub(super) fn note_frame_wake(&mut self, cause: &winit::event::StartCause) {
-        if let Some(counters) = self.frame_counters.as_mut() {
-            // The gate is on, so every wake counts; none authorizes a line by itself.
-            counters.note_wake(cause);
-        }
-    }
-
-    /// Count a `user_event` wake.
-    pub(super) fn note_frame_user_wake(&mut self) {
-        if let Some(counters) = self.frame_counters.as_mut() {
-            // The gate is on, so every user event counts.
-            counters.wake_user += 1;
-        }
-    }
-
-    /// Count status line work with `update`, when the gate is on.
-    pub(super) fn note_status_line(&mut self, update: impl FnOnce(&mut StatusLineCounters)) {
-        if let Some(counters) = self.frame_counters.as_mut() {
-            // The gate is on, so the status line work is counted.
-            update(&mut counters.status_line);
-        }
-    }
-
-    /// Add the time since `started` to the startup step `step` picks, when the gate is on.
-    pub(super) fn note_startup(
-        &mut self,
-        started: Instant,
-        step: impl FnOnce(&mut StartupSpans) -> &mut u64,
-    ) {
-        if let Some(counters) = self.frame_counters.as_mut() {
-            // The gate is on, so the step's time is recorded.
-            let elapsed_ns = Instant::now().saturating_duration_since(started).as_nanos();
-            *step(&mut counters.startup) += u64::try_from(elapsed_ns).unwrap_or(u64::MAX);
-        }
-    }
-
-    /// Apply `update` to the hover counters, when the gate is on; nothing runs when it is off.
-    pub(super) fn note_hover(&mut self, update: impl FnOnce(&mut HoverCounters)) {
-        if let Some(counters) = self.frame_counters.as_mut() {
-            // The gate is on, so the hover work is counted.
-            update(&mut counters.hover);
-        }
-    }
-
-    /// Record a dispatch started at `started`, when the gate is on.
-    pub(super) fn note_frame_dispatch(&mut self, kind: DispatchKind, started: Option<Instant>) {
-        if let (Some(started), Some(counters)) = (started, self.frame_counters.as_mut()) {
-            // the gate is on, the dispatch's duration is recorded.
-            counters.record_dispatch(kind, micros_between(started, Instant::now()));
-        }
-    }
-
-    /// A `RedrawRequested` for window `id`: count it and take the pending flush of each pane it
-    /// draws, the active tab's leaves or only its zoomed pane. A hidden pane's flush stays
-    /// pending until a redraw shows it. The tree is walked in place, allocating nothing.
-    pub(super) fn note_redraw_requested(&mut self, id: winit::window::WindowId) {
-        let Some(window) = self.windows.get_mut(&id) else {
-            // When: the window is gone, there is nothing to count.
-            return;
-        };
-        let Some(counters) = window.redraw.frame_counters.as_deref_mut() else {
-            // When: the window's `frame_counters` is None, the gate is off; no flush atomic is touched.
-            return;
-        };
-        counters.redraw_requested += 1;
-        let Some(tab) = window.tab_states.get(window.tabs.active_index()) else {
-            // When: no tab state matches `active_index`, the window draws no pane and takes no flush.
-            return;
-        };
-        let (panes, now_ns) = (&window.panes, flush_clock_ns());
-        for_each_shown_pane(&tab.tree, &mut |pane_id| {
-            if let Some(pane) = panes.get(&pane_id).and_then(|pane| pane.frame_counters.as_ref()) {
-                // the shown pane counts, its pending flush is taken.
-                counters.take_flush(&pane.pending_flush, now_ns);
-            }
-        });
-    }
-
-    /// Record a `window_event` dispatch for window `id` started at `started`. `counted` says
-    /// whether the window counted when the dispatch began. A window the dispatch closed gets
-    /// this time before its `final=1` line prints and its totals move to `closed_windows`.
-    pub(super) fn note_window_handler(
-        &mut self,
-        id: winit::window::WindowId,
-        started: Instant,
-        counted: bool,
-    ) {
-        let Some(app) = self.frame_counters.as_mut() else {
-            // When: `frame_counters` is None, the gate is off and no clock is read.
-            return;
-        };
-        let elapsed_us = micros_between(started, Instant::now());
-        let live = self
-            .windows
-            .get_mut(&id)
-            .and_then(|window| window.redraw.frame_counters.as_deref_mut());
-        let closing = app.closing.as_mut().filter(|closing| counted && closing.id == id);
-        if let Some(counters) = live {
-            // the window still exists and counts, its handler time is recorded.
-            counters.note_handler(elapsed_us);
-        } else if let Some(closing) = closing {
-            // When: `closing` holds this window, its own dispatch closed it; the time joins it first.
-            closing.counters.note_handler(elapsed_us);
-        } else if counted {
-            // When: the window `counted` but already retired, the time joins closed_windows.
-            app.closed_windows.record_histogram_us("handler", HistogramUnit::Millis, elapsed_us);
-        }
-        app.dispatching = None;
-        app.finish_closing();
-    }
-
-    /// Start window `id`'s `window_event` dispatch, returning whether the window counts. If
-    /// the dispatch closes it, its `final=1` line waits until its handler time is recorded.
-    pub(super) fn begin_window_handler(&mut self, id: winit::window::WindowId) -> bool {
-        let Some(app) = self.frame_counters.as_mut() else {
-            // When: `frame_counters` is None, the gate is off and nothing is written.
-            return false;
-        };
-        // A window an earlier dispatch closed without recording its time is finalized now.
-        app.finish_closing();
-        app.dispatching = Some(id);
-        self.windows.get(&id).is_some_and(|window| window.redraw.frame_counters.is_some())
-    }
-
-    /// Count one serviced output event (`PaneOutput` or `RequestRedraw`) for window `id`.
-    pub(super) fn note_user_request_redraw(&mut self, id: winit::window::WindowId) {
-        let window = self.windows.get_mut(&id);
-        if let Some(counters) =
-            window.and_then(|window| window.redraw.frame_counters.as_deref_mut())
-        {
-            // the window counts, the output's redraw request is recorded.
-            counters.note_user_request();
-        }
-    }
-
-    /// Open one dispatch on the event-loop thread for this App.
-    pub(super) fn frame_dispatch_scope(&self) -> DispatchScope {
-        // Each dispatch starts a fresh once-per-window redraw record.
-        self.dispatch_redraws.begin();
-        DispatchScope::enter(
-            self.frame_counters.as_ref().map(|counters| Arc::clone(&counters.dispatch)),
-        )
-    }
-
-    /// The counter handles for a pane being created; `None` when the gate is off. The first
-    /// pane seals the gate with a plain write to event-loop-owned state.
-    pub(super) fn pane_frame_counters(&self) -> Option<PaneFrameCounters> {
-        self.frame_counters_sealed.set(true);
-        // The gate is now fixed, so the foreground worker's statistics are too.
-        self.fg_probes.seal_stats(
-            self.frame_counters.as_ref().map(|counters| Arc::clone(&counters.fg_worker)),
-        );
-        self.frame_counters
-            .as_ref()
-            .map(|counters| PaneFrameCounters::new(Arc::clone(&counters.vt)))
-    }
-}
-
-/// Visit each pane a tab with `tree` draws: only the zoomed pane while one is zoomed, otherwise
-/// every leaf in order. It recurses in place, so a redraw allocates nothing to find its panes.
-pub(crate) fn for_each_shown_pane(
-    tree: &sonicterm_ui::pane::PaneTree,
-    visit: &mut impl FnMut(u64),
-) {
-    if let Some(zoomed) = tree.zoomed_pane_id() {
-        visit(zoomed);
-    } else {
-        // When: `zoomed_pane_id` is None, every leaf of the tab is drawn.
-        for_each_leaf(tree, visit);
-    }
-}
-
-/// Visit every leaf of `tree`, first subtree first.
-fn for_each_leaf(tree: &sonicterm_ui::pane::PaneTree, visit: &mut impl FnMut(u64)) {
-    match tree {
-        sonicterm_ui::pane::PaneTree::Leaf { id, .. } => visit(*id),
-        sonicterm_ui::pane::PaneTree::Split { first, second, .. } => {
-            for_each_leaf(first, visit);
-            for_each_leaf(second, visit);
-        }
-    }
-}
-
 /// The deferral rule that won in `begin_window_redraw`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeferRule {
@@ -1332,192 +619,12 @@ impl Default for WindowFrameCounters {
     }
 }
 
-impl WindowFrameCounters {
-    /// Count one settled attempt; a presented frame also records the interval since the last one.
-    pub(super) fn record_settlement(
-        &mut self,
-        outcome: super::redraw::FrameSettlement,
-        now: Instant,
-    ) {
-        use super::redraw::FrameSettlement;
-        match outcome {
-            FrameSettlement::Presented => {
-                self.presented += 1;
-                if let Some(previous) = self.last_presented {
-                    // an earlier frame presented, the interval between the two is recorded.
-                    self.present_interval.record_us(micros_between(previous, now));
-                }
-                self.last_presented = Some(now);
-            }
-            FrameSettlement::Cached => self.cached += 1,
-            FrameSettlement::Settled => self.settled += 1,
-            FrameSettlement::Retry(_) => self.retry += 1,
-            FrameSettlement::SurfaceRetry(_) => self.surface_retry += 1,
-            FrameSettlement::Stopped(_) => self.stopped += 1,
-            FrameSettlement::Failed => self.failed += 1,
-        }
-    }
-
-    /// Take one drawn pane's pending flush; its age to this redraw is one observation.
-    pub(crate) fn take_flush(&mut self, slot: &AtomicU64, now_ns: u64) {
-        if let Some(age_ns) = consume_flush(slot, now_ns) {
-            // the pane had a pending flush, its age to this redraw is one observation.
-            self.flush_to_redraw.record_us(age_ns / 1_000);
-        }
-    }
-
-    /// Record one `window_event` dispatch's duration.
-    pub(crate) fn note_handler(&mut self, elapsed_us: u64) {
-        self.handler.record_us(elapsed_us);
-    }
-
-    /// Whether a frame attempt or a flush observation happened since the last line, read from
-    /// two plain counts so a redraw decides without building a record.
-    pub(crate) fn redraw_activity_since_line(&self) -> bool {
-        self.attempts > self.line_attempts || self.flush_to_redraw.count() > self.line_flushes
-    }
-
-    /// Remember the counts a line just printed.
-    fn mark_line(&mut self) {
-        self.line_attempts = self.attempts;
-        self.line_flushes = self.flush_to_redraw.count();
-    }
-
-    /// Count one serviced output event (`PaneOutput` or `RequestRedraw`) for the window.
-    pub(crate) fn note_user_request(&mut self) {
-        self.user_request_redraw += 1;
-    }
-
-    /// Count the rule that deferred a redraw.
-    pub(crate) fn note_defer(&mut self, rule: DeferRule) {
-        match rule {
-            DeferRule::Timeout => self.defer_timeout += 1,
-            DeferRule::Contention => self.defer_contention += 1,
-            DeferRule::Sync => self.defer_sync += 1,
-            DeferRule::Streaming => self.defer_streaming += 1,
-        }
-    }
-
-    /// Count a frame collection that found a visible lock busy.
-    pub(crate) fn note_contention(&mut self, images: bool) {
-        if images {
-            self.contention_images += 1;
-        } else {
-            // When: `images` is false, the busy lock was a visible parser, not an image store.
-            self.contention_parser += 1;
-        }
-    }
-}
-
 /// A set of cumulative counts and histograms, the unit lines and snapshots are built from.
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct CounterRecord {
     counts: Vec<(&'static str, u64)>,
     histograms: Vec<(&'static str, Histogram)>,
-}
-
-impl CounterRecord {
-    /// The count named `name`, if the record has it.
-    pub fn count(&self, name: &str) -> Option<u64> {
-        self.counts.iter().find(|(field, _)| *field == name).map(|(_, value)| *value)
-    }
-
-    /// Events in the histogram named `name`, if the record has it.
-    pub fn histogram_count(&self, name: &str) -> Option<u64> {
-        self.histogram(name).map(Histogram::count)
-    }
-
-    /// The exact microsecond sum of the histogram named `name`, if the record has it.
-    pub fn histogram_sum_us(&self, name: &str) -> Option<u64> {
-        self.histogram(name).map(Histogram::sum_us)
-    }
-
-    fn histogram(&self, name: &str) -> Option<&Histogram> {
-        self.histograms.iter().find(|(field, _)| *field == name).map(|(_, histogram)| histogram)
-    }
-
-    /// Append a count.
-    pub(crate) fn push_count(&mut self, name: &'static str, value: u64) {
-        self.counts.push((name, value));
-    }
-
-    /// Append a histogram.
-    pub(crate) fn push_histogram(&mut self, name: &'static str, histogram: Histogram) {
-        self.histograms.push((name, histogram));
-    }
-
-    /// Add `other`'s counts and histograms, matching fields by name.
-    pub(crate) fn merge(&mut self, other: &Self) {
-        for (name, value) in &other.counts {
-            match self.counts.iter_mut().find(|entry| entry.0 == *name) {
-                Some(entry) => entry.1 += value,
-                None => self.counts.push((name, *value)),
-            }
-        }
-        for (name, histogram) in &other.histograms {
-            match self.histograms.iter_mut().find(|entry| entry.0 == *name) {
-                Some(entry) => entry.1.add(histogram),
-                None => self.histograms.push((name, histogram.clone())),
-            }
-        }
-    }
-
-    /// Record one `value_us` observation in the histogram named `name`, adding it in `unit`
-    /// when the record has none.
-    pub(crate) fn record_histogram_us(
-        &mut self,
-        name: &'static str,
-        unit: HistogramUnit,
-        value_us: u64,
-    ) {
-        match self.histograms.iter_mut().find(|entry| entry.0 == name) {
-            Some(entry) => entry.1.record_us(value_us),
-            None => {
-                let mut histogram = Histogram::new(unit);
-                histogram.record_us(value_us);
-                self.histograms.push((name, histogram));
-            }
-        }
-    }
-
-    /// What grew since `earlier`, an older record of the same source.
-    pub(crate) fn delta_since(&self, earlier: &Self) -> Self {
-        let counts = self
-            .counts
-            .iter()
-            .map(|(name, value)| (*name, value.saturating_sub(earlier.count(name).unwrap_or(0))))
-            .collect();
-        let histograms = self
-            .histograms
-            .iter()
-            .map(|(name, histogram)| {
-                let delta = earlier
-                    .histogram(name)
-                    .map_or_else(|| histogram.clone(), |before| histogram.delta_since(before));
-                (*name, delta)
-            })
-            .collect();
-        Self { counts, histograms }
-    }
-
-    /// The histogram named `name` with its unit, bounds, used bucket counts and exact sum.
-    #[doc(hidden)]
-    pub fn histogram_buckets(&self, name: &str) -> Option<HistogramBuckets<'_>> {
-        self.histogram(name).map(Histogram::buckets)
-    }
-
-    /// The record's nonzero fields on a line.
-    fn line_fields(&self) -> String {
-        let counts = self
-            .counts
-            .iter()
-            .filter(|(_, value)| *value > 0)
-            .map(|(name, value)| format!("{name}={value}"));
-        let histograms =
-            self.histograms.iter().map(|(name, histogram)| histogram.line_fields(name));
-        counts.chain(histograms).filter(|field| !field.is_empty()).collect::<Vec<_>>().join(" ")
-    }
 }
 
 /// One histogram of a [`CounterRecord`], exported for the perf harness.
@@ -1542,64 +649,6 @@ pub(crate) struct LineState {
     since: Instant,
 }
 
-impl LineState {
-    /// A source that opened at `now`.
-    pub(crate) fn new(now: Instant) -> Self {
-        Self { cadence: LineCadence::default(), previous: CounterRecord::default(), since: now }
-    }
-
-    /// Whether a line could print at `now`; nothing is allocated to find out.
-    pub(crate) fn ready(&self, now: Instant) -> bool {
-        self.cadence.ready(now)
-    }
-
-    /// The line for `current` at `now`, at most one a second and only when `authorized`.
-    pub(crate) fn line(
-        &mut self,
-        label: &str,
-        current: &CounterRecord,
-        now: Instant,
-        authorized: bool,
-    ) -> Option<String> {
-        if !self.cadence.line_due(now, authorized) {
-            // When: `line_due` refuses, the source printed within a second, only maintains, or is closed.
-            return None;
-        }
-        Some(self.render(label, "", current, now))
-    }
-
-    /// The `final=1` line at close or exit, when counts are pending; nothing prints after it.
-    pub(crate) fn final_line(
-        &mut self,
-        label: &str,
-        current: &CounterRecord,
-        now: Instant,
-    ) -> Option<String> {
-        let pending = !current.delta_since(&self.previous).line_fields().is_empty();
-        if !self.cadence.final_line(pending) {
-            // When: nothing is pending, or the final line already printed, the source just closes.
-            return None;
-        }
-        Some(self.render(label, " final=1", current, now))
-    }
-
-    fn render(
-        &mut self,
-        label: &str,
-        marker: &str,
-        current: &CounterRecord,
-        now: Instant,
-    ) -> String {
-        let delta = current.delta_since(&self.previous);
-        let span_ms = now.saturating_duration_since(self.since).as_millis();
-        self.previous = current.clone();
-        self.since = now;
-        format!("window={label}{marker} span_ms={span_ms} {}", delta.line_fields())
-            .trim_end()
-            .to_owned()
-    }
-}
-
 /// Every counter an App holds, read field by field; nothing is reset.
 #[doc(hidden)]
 #[derive(Clone, Debug)]
@@ -1612,277 +661,134 @@ pub struct FrameCountersSnapshot {
     pub closed_windows: CounterRecord,
 }
 
-/// Print one counter line.
-fn log_line(line: &str) {
-    tracing::debug!(target: "frame_counters", "[frame_counters] {line}");
-}
+#[cfg(test)]
+#[path = "frame_counters_tests.rs"]
+mod frame_counters_tests;
 
-impl AppFrameCounters {
-    /// Print a retired window's `final=1` line and move its totals to `closed_windows`.
-    fn retire(
-        &mut self,
-        counters: &mut WindowFrameCounters,
-        stats: Option<sonicterm_gpu::frame_stats::FrameStats>,
-        native: u64,
-    ) {
-        let record = counters.record(stats, native);
-        if let Some(line) = counters.line.final_line(&counters.label(), &record, Instant::now()) {
-            log_line(&line);
-        }
-        self.closed_windows.merge(&record);
-    }
+#[path = "frame_counters_dispatch.rs"]
+mod dispatch;
+#[path = "frame_counters_histogram.rs"]
+mod histogram;
+pub use dispatch::clock_epoch;
+use dispatch::{constructor_epoch_cell, micros_between, take_pending_native};
+pub(crate) use dispatch::{
+    consume_flush, epoch_in, flush_clock_ns, lock_parser, note_native_request,
+    note_untargeted_flush, publish_flush,
+};
+#[path = "frame_counters_record.rs"]
+mod record;
+use record::log_line;
 
-    /// Finalize the window a dispatch closed, now that its handler time is recorded.
-    fn finish_closing(&mut self) {
-        if let Some(mut closing) = self.closing.take() {
-            // a dispatch closed a window, so it retires now with that dispatch's time.
-            self.retire(&mut closing.counters, closing.stats, closing.native);
-        }
-    }
+#[cfg(test)]
+use dispatch::{current_tally, pending_native_capacity, pending_native_requests};
 
-    /// Counters for a window registering now.
-    pub(crate) fn window_counters(&mut self, main: bool) -> Box<WindowFrameCounters> {
-        self.windows_registered += 1;
-        Box::new(WindowFrameCounters {
-            ordinal: self.windows_registered,
-            main,
-            ..WindowFrameCounters::default()
-        })
-    }
+#[cfg(test)]
+pub(crate) use dispatch::flush_clock_reads;
 
-    /// The App's cumulative counts: VT statistics, dispatch waits and probes, wakes and stalls.
-    // Ordering: each value loads Relaxed; a record is observational and orders nothing.
-    pub(crate) fn record(&self) -> CounterRecord {
-        let mut record = CounterRecord::default();
-        let (vt, dispatch) = (&self.vt, &self.dispatch);
-        for (name, value) in [
-            ("parse_bytes", &vt.parse_bytes),
-            ("batches", &vt.batches),
-            ("flushes", &vt.flushes),
-            ("flushes_untargeted", &vt.flushes_untargeted),
-            ("flushes_coalesced", &vt.flushes_coalesced),
-            ("flushes_suppressed", &vt.flushes_suppressed),
-            ("sync_timeouts", &vt.sync_timeouts),
-            ("ui_parser_locks", &dispatch.locks),
-            ("parser_lock_wait_ns", &vt.parser_lock_wait_ns),
-            ("parser_sections", &vt.parser_sections),
-            ("ui_guard_custody_ns", &self.custody.custody_ns),
-            ("ui_guard_custodies", &self.custody.custodies),
-            ("frame_dispatch_ns", &self.custody.dispatch_ns),
-            ("frame_dispatches", &self.custody.dispatches),
-            ("frame_dispatch_failed_ns", &self.custody.dispatch_failed_ns),
-            ("frame_dispatches_failed", &self.custody.dispatches_failed),
-            ("fg_worker_probes", &self.fg_worker.probes),
-            ("fg_worker_panes", &self.fg_worker.panes),
-            ("fg_results_stale", &self.fg_worker.stale),
-        ] {
-            record.push_count(name, value.load(Ordering::Relaxed));
-        }
-        for (name, value) in [
-            // The event loop no longer probes; these stay as real zeros so a comparison against a
-            // base that probed there shows that work falling to zero.
-            ("fg_probe_calls", 0),
-            ("fg_probe_panes", 0),
-            ("native_request_redraw_unregistered", dispatch.unregistered_requests()),
-            ("wake_init", self.wake_init),
-            ("wake_poll", self.wake_poll),
-            ("wake_wait_cancelled", self.wake_wait_cancelled),
-            ("wake_resume_time", self.wake_resume_time),
-            ("wake_user", self.wake_user),
-            ("hover_lookups", self.hover.lookups),
-            ("hover_detections", self.hover.detections),
-            ("hover_cache_hits", self.hover.cache_hits),
-            ("hover_rows_read", self.hover.rows_read),
-            ("path_probes_submitted", self.hover.probes_submitted),
-            ("quick_select_rows_scanned", self.hover.quick_select_rows_scanned),
-            ("status_line_samples", self.status_line.samples),
-            ("status_line_wakes", self.status_line.wakes),
-            ("status_line_redraws", self.status_line.redraws),
-            ("status_line_sel_counts", self.status_line.sel_counts),
-            ("status_line_sel_cells", self.status_line.sel_cells),
-            ("status_line_history_shows", self.status_line.history_shows),
-            ("status_line_held_shows", self.status_line.held_shows),
-            ("status_line_glyph_shows", self.status_line.glyph_shows),
-            ("program_progress_events", self.status_line.program_progress),
-            ("program_notify_events", self.status_line.program_notifies),
-            ("program_toast_redraws", self.status_line.program_toast_redraws),
-            ("taskbar_progress_deliveries", self.status_line.taskbar_deliveries),
-            ("status_line_tree_builds", self.status_line.tree_builds),
-            ("status_line_full_passes", self.status_line.full_passes),
-            ("startup_window_ns", self.startup.window_ns),
-            ("startup_adapter_install_ns", self.startup.adapter_install_ns),
-            ("startup_renderer_ns", self.startup.renderer_ns),
-            ("startup_load_checks_ns", self.startup.load_checks_ns),
-            ("startup_pane_spawn_ns", self.startup.pane_spawn_ns),
-        ] {
-            record.push_count(name, value);
-        }
-        for (name, histogram) in [
-            ("parser_lock_wait", vt.parser_lock_wait.snapshot()),
-            ("parser_lock_hold", vt.parser_lock_hold.snapshot()),
-            ("parse", vt.parse.snapshot()),
-            ("ui_parser_wait", dispatch.wait.snapshot()),
-            ("fg_probe", Histogram::new(HistogramUnit::Micros)),
-            ("fg_worker_probe", self.fg_worker.probe.snapshot()),
-            ("about_to_wait", self.about_to_wait.clone()),
-            ("user_event", self.user_event.clone()),
-            ("new_events", self.new_events.clone()),
-        ] {
-            record.push_histogram(name, histogram);
-        }
-        record
+impl DispatchTotals {
+    // Ordering: locks uses Relaxed; it is a statistic, ordering nothing.
+    fn absorb(&self, mut tally: DispatchTally) {
+        self.wait.add(&tally.wait);
+        self.locks.fetch_add(tally.locks, Ordering::Relaxed);
+        // The requests join their windows and the emptied storage waits for the next dispatch.
+        let mut native = self.native.lock();
+        native.fold(&mut tally.native);
+        native.spare = std::mem::take(&mut tally.native);
     }
 }
 
-impl WindowFrameCounters {
-    /// The window's line label: `main`, or `child-N` by registration order.
-    pub(crate) fn label(&self) -> String {
-        if self.main {
-            "main".to_owned()
-        } else {
-            // When: `main` is false, the window is numbered by registration order.
-            format!("child-{}", self.ordinal)
+impl DispatchTotals {
+    /// Storage for a dispatch's requests: the previous dispatch's, or a new one at the first
+    /// dispatch and in a nested one, which finds the spare taken.
+    fn take_spare(&self) -> Vec<(winit::window::WindowId, u64)> {
+        let spare = std::mem::take(&mut self.native.lock().spare);
+        if spare.capacity() == 0 {
+            // When: no `spare` storage is left, this dispatch allocates the bounded tally once.
+            return Vec::with_capacity(NATIVE_TALLY_CAPACITY);
         }
+        spare
     }
+}
 
-    /// The window's cumulative counts, with its renderer's statistics when it has a renderer.
-    /// `native_requests` are the App's native redraw requests for the window; the renderer's
-    /// own requests add to them.
-    pub(crate) fn record(
-        &self,
-        renderer: Option<sonicterm_gpu::frame_stats::FrameStats>,
-        native_requests: u64,
-    ) -> CounterRecord {
-        let renderer_requests = renderer.map_or(0, |stats| stats.native_request_redraw);
-        let mut record = CounterRecord::default();
-        for (name, value) in [
-            ("attempts", self.attempts),
-            ("presented", self.presented),
-            ("cached", self.cached),
-            ("settled", self.settled),
-            ("retry", self.retry),
-            ("surface_retry", self.surface_retry),
-            ("stopped", self.stopped),
-            ("failed", self.failed),
-            ("contention_parser", self.contention_parser),
-            ("contention_images", self.contention_images),
-            ("defer_timeout", self.defer_timeout),
-            ("defer_contention", self.defer_contention),
-            ("defer_sync", self.defer_sync),
-            ("defer_streaming", self.defer_streaming),
-            ("stream_clock_exempt", self.stream_clock_exempt),
-            ("display_link_ticks", self.display_link_ticks),
-            ("display_link_admissions", self.display_link_admissions),
-            ("display_link_fallbacks", self.display_link_fallbacks),
-            ("contention_retry_armed", self.contention_retry_armed),
-            ("dirt_ack_dropped", self.dirt_ack_dropped),
-            ("native_request_redraw", native_requests + renderer_requests),
-            ("user_request_redraw", self.user_request_redraw),
-            ("redraw_requested", self.redraw_requested),
-        ] {
-            record.push_count(name, value);
-        }
-        for (name, histogram) in [
-            ("present_interval", &self.present_interval),
-            ("handler", &self.handler),
-            ("flush_to_redraw", &self.flush_to_redraw),
-        ] {
-            record.push_histogram(name, histogram.clone());
-        }
-        if let Some(stats) = renderer {
-            // the window has a renderer, its statistics join the window's record.
-            for (name, value) in [
-                ("vertex_bytes", stats.vertex_bytes),
-                ("index_bytes", stats.index_bytes),
-                ("damage_permille_sum", stats.damage_permille_sum),
-                ("damaged_frames", stats.damaged_frames),
-                // Union-rect waste in permille; damaged_frames is its denominator.
-                ("damage_waste_permille_sum", stats.damage_waste_permille_sum),
-                ("software_frames", stats.software_frames),
-                ("gpu_frames", stats.gpu_frames),
-                ("row_cache_hits", stats.row_cache_hits),
-                ("row_cache_misses", stats.row_cache_misses),
-                ("shape_requests", stats.shape_requests),
-                ("full_frames", stats.full_frames),
-                // Presented partial frames, partial plans reassembled Full, and hashed row cells.
-                ("partial_frames", stats.partial_frames),
-                ("partial_fallbacks", stats.partial_fallbacks),
-                ("row_cells_hashed", stats.row_cells_hashed),
-                ("row_cache_invalidate_visits", stats.row_cache_invalidate_visits),
-                ("row_cache_invalidate_us", stats.row_cache_invalidate_us),
-                ("recolor_glyphs_visited", stats.recolor_glyphs_visited),
-                ("font_fallback_applies", stats.font_fallback_applies),
-                ("glyph_atlas_growths", stats.glyph_atlas_growths),
-                ("atlas_growth_abandoned", stats.atlas_growth_abandoned),
-                // Attempt and preparation timings are nanoseconds, kept as plain counts.
-                ("shape_ns", stats.shape_ns),
-                ("raster_ns", stats.raster_ns),
-                ("raster_calls", stats.raster_calls),
-                ("raster_tiles", stats.raster_tiles),
-                ("font_generation_applies", stats.font_generation_applies),
-                ("font_prepare_ns", stats.font_prepare_ns),
-                ("font_generation_prepare_ns", stats.font_generation_prepare_ns),
-                // Kept tab titles and chrome runs drawn without shaping, and those shaped on a
-                // miss; the misses' requests also count in `shape_requests`.
-                ("tab_title_reuses", stats.tab_title_reuses),
-                ("tab_title_prepares", stats.tab_title_prepares),
-                ("chrome_run_reuses", stats.chrome_run_reuses),
-                ("chrome_run_prepares", stats.chrome_run_prepares),
-                ("render_attempts", stats.attempts.attempts),
-                ("render_attempts_presented", stats.attempts.presented),
-                ("render_attempt_ns", stats.attempts.attempt_ns),
-                ("render_attempt_shape_ns", stats.attempts.shape_ns),
-                ("render_attempt_raster_ns", stats.attempts.raster_ns),
-                ("render_attempt_shape_requests", stats.attempts.shape_requests),
-                ("render_attempt_raster_calls", stats.attempts.raster_calls),
-                ("render_attempt_raster_tiles", stats.attempts.raster_tiles),
-                ("apply_attempts", stats.apply_attempts.attempts),
-                ("apply_attempts_presented", stats.apply_attempts.presented),
-                ("apply_attempt_ns", stats.apply_attempts.attempt_ns),
-                ("apply_attempt_shape_ns", stats.apply_attempts.shape_ns),
-                ("apply_attempt_raster_ns", stats.apply_attempts.raster_ns),
-                ("apply_attempt_shape_requests", stats.apply_attempts.shape_requests),
-                ("apply_attempt_raster_calls", stats.apply_attempts.raster_calls),
-                ("apply_attempt_raster_tiles", stats.apply_attempts.raster_tiles),
-            ] {
-                record.push_count(name, value);
-            }
-            let assembly = Histogram::from_micros(&stats.assembly_buckets, stats.assembly_sum_us);
-            record.push_histogram("assembly", assembly);
-            let growth = Histogram::from_millis(
-                &stats.atlas_growth_to_present_buckets,
-                stats.atlas_growth_to_present_sum_us,
-            );
-            record.push_histogram("atlas_growth_to_present", growth);
-        }
-        record
+impl DispatchTotals {
+    /// Move a full tally's requests into the totals mid-dispatch, keeping its storage.
+    fn attribute(&self, entries: &mut Vec<(winit::window::WindowId, u64)>) {
+        self.native.lock().fold(entries);
     }
+}
+
+impl DispatchTotals {
+    /// Give registered window `id` an entry, so its requests are attributed to it.
+    pub(crate) fn register_native(&self, id: winit::window::WindowId) {
+        let mut native = self.native.lock();
+        if !native.registered.iter().any(|entry| entry.0 == id) {
+            // the window is new, so it gets an entry starting at zero.
+            native.registered.push((id, 0));
+        }
+    }
+}
+
+impl DispatchTotals {
+    /// Native redraw requests drained so far for window `id`.
+    fn native_requests(&self, id: winit::window::WindowId) -> u64 {
+        let native = self.native.lock();
+        native.registered.iter().find(|entry| entry.0 == id).map_or(0, |entry| entry.1)
+    }
+}
+
+impl DispatchTotals {
+    /// Requests drained for ids that were not registered.
+    fn unregistered_requests(&self) -> u64 {
+        self.native.lock().unregistered
+    }
+}
+
+impl DispatchTotals {
+    /// Windows with a drained-request entry.
+    #[cfg(test)]
+    fn registered_entries(&self) -> usize {
+        self.native.lock().registered.len()
+    }
+}
+
+impl DispatchTotals {
+    /// Remove retiring window `id`'s entry, returning its drained requests.
+    fn take_native_requests(&self, id: winit::window::WindowId) -> u64 {
+        let mut native = self.native.lock();
+        let position = native.registered.iter().position(|entry| entry.0 == id);
+        position.map_or(0, |index| native.registered.swap_remove(index).1)
+    }
+}
+
+/// Ask `window` to redraw, counting the request for its window inside a counting dispatch.
+/// Every App-side native request goes through here; scheduling is exactly `request_redraw`.
+pub(crate) fn request_native_redraw(window: &winit::window::Window) {
+    note_native_request(window.id());
+    window.request_redraw();
+}
+
+/// `lock_parser` with an injectable clock.
+// Lock order: parser -> cell; the TALLY cell is borrowed briefly while the parser guard is held.
+pub(crate) fn lock_counted<'parser, Value>(
+    parser: &'parser Mutex<Value>,
+    clock: &mut impl FnMut() -> Instant,
+) -> MutexGuard<'parser, Value> {
+    if !COUNTING.with(Cell::get) {
+        // When: `COUNTING` is false, no counting dispatch is open; no clock is read, nothing written.
+        return parser.lock();
+    }
+    let before_lock = clock();
+    let guard = parser.lock();
+    let wait_us = micros_between(before_lock, clock());
+    TALLY.with(|cell| {
+        let mut tally = cell.borrow_mut();
+        tally.wait.record_us(wait_us);
+        tally.locks += 1;
+    });
+    guard
 }
 
 impl super::App {
-    /// This App's counters, read field by field; `None` when its gate is off. Nothing is reset.
-    #[doc(hidden)]
-    pub fn frame_counters_snapshot(&self) -> Option<FrameCountersSnapshot> {
-        let app = self.frame_counters.as_ref()?;
-        let windows = self
-            .windows
-            .iter()
-            .filter_map(|(id, window)| {
-                let counters = window.redraw.frame_counters.as_deref()?;
-                let stats =
-                    window.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);
-                Some((*id, counters.record(stats, app.dispatch.native_requests(*id))))
-            })
-            .collect();
-        // A window its own dispatch is closing already counts as closed, so no total dips.
-        let mut closed_windows = app.closed_windows.clone();
-        if let Some(closing) = &app.closing {
-            // a window is between retirement and its handler time; its totals are closed ones.
-            closed_windows.merge(&closing.counters.record(closing.stats, closing.native));
-        }
-        Some(FrameCountersSnapshot { app: app.record(), windows, closed_windows })
-    }
-
     /// A window was removed: print its `final=1` line and move its totals to `closed_windows`.
     /// A window its own running dispatch removed waits for that dispatch's handler time.
     pub(super) fn retire_window_counters(
@@ -1914,18 +820,9 @@ impl super::App {
         }
         app.retire(counters, stats, native);
     }
+}
 
-    /// Print the lines a `window_event` or `user_event` authorizes. `window` names the window
-    /// and whether the event was its `RedrawRequested`, which authorizes a line only when it
-    /// led to a frame attempt or took a flush.
-    pub(super) fn emit_frame_lines(&mut self, window: Option<(winit::window::WindowId, bool)>) {
-        if self.frame_counters.is_none() {
-            // When: `frame_counters` is None, the gate is off; no clock is read and nothing prints.
-            return;
-        }
-        self.emit_frame_lines_at(window, Instant::now());
-    }
-
+impl super::App {
     /// [`Self::emit_frame_lines`] at `now`.
     pub(super) fn emit_frame_lines_at(
         &mut self,
@@ -1968,7 +865,9 @@ impl super::App {
             }
         }
     }
+}
 
+impl super::App {
     /// At exit, print each source's `final=1` line.
     pub(super) fn finish_frame_lines(&mut self) {
         let Some(app) = self.frame_counters.as_mut() else {
@@ -1998,6 +897,8 @@ impl super::App {
     }
 }
 
-#[cfg(test)]
-#[path = "frame_counters_tests.rs"]
-mod frame_counters_tests;
+#[path = "frame_counters_app.rs"]
+mod app;
+pub(crate) use app::for_each_shown_pane;
+
+impl std::error::Error for FrameCountersTooLate {}

@@ -543,340 +543,219 @@ pub(in crate::app) struct OutputFlush {
     redraw_probe: crate::app::invariants::RedrawCoalescerProbe,
 }
 
-impl OutputFlush {
-    /// A decision with nothing pending, whose latch has seen the pane's published resets.
-    pub(in crate::app) fn new(pane_id: u64, handles: &PaneVtHandles) -> Self {
-        // A pane runs exactly one worker, so an update already open when it starts was opened by a
-        // parser this worker never published for; it has no deadline of its own and never holds.
-        let sync_latch = SyncLatch::for_pane(handles);
-        Self {
-            pane_id,
-            pending: false,
-            pending_since: None,
-            pending_bytes: 0,
-            released_epoch: sync_latch.epoch,
-            sync_latch,
-            held: None,
-            redraw_probe: crate::app::invariants::RedrawCoalescerProbe::new(),
-        }
-    }
-
-    /// How long the worker waits for more output at `now`.
-    pub(in crate::app) fn wait(&self, now: Instant) -> Duration {
-        if let Some((_, deadline)) = self.held {
-            // When: `self.held` names an open update, wake at its deadline so a silent one is released.
-            return deadline.saturating_duration_since(now);
-        }
-        if self.pending {
-            crate::app::PTY_REDRAW_QUIESCENT
-        } else {
-            // When: `self.pending` is false and nothing is held, park until output or exit arrives.
-            PANE_IDLE_WAIT
-        }
-    }
-
-    /// Note a batch of `byte_count` bytes received at `now`, before it is parsed.
-    pub(in crate::app) fn receive(&mut self, byte_count: usize, now: Instant) {
-        if byte_count > 0 {
-            self.pending_bytes = self.pending_bytes.saturating_add(byte_count);
-            self.pending_since.get_or_insert(now);
-        }
-    }
-
-    /// Decide after a batch has been parsed and published.
+impl App {
+    /// Start the PTY for a new pane: the launch's command run directly, or the shell.
     ///
-    /// A reset anywhere in the batch flushes at once; an open update holds until its deadline;
-    /// otherwise output flushes on size or age, else coalesces.
-    pub(in crate::app) fn after_batch(
-        &mut self,
-        handles: &PaneVtHandles,
-        now: Instant,
-        send: impl FnOnce(),
-    ) {
-        if self.sync_latch.reset_pending {
-            // When: `reset_pending` latched a reset in any section, the published batch flushes now.
-            send();
-            self.sync_latch.reset_pending = false;
-            self.clear_pending();
-            self.refresh_hold(handles);
-            return;
-        }
-        self.refresh_hold(handles);
-        if let Some((epoch, deadline)) = self.held {
-            // When: `self.held` names an open update, keep coalescing and send only at its deadline.
-            self.pending = true;
-            if now >= deadline {
-                // The update outlived its bound; present what it has.
-                self.release_timeout(handles, epoch, send);
-            }
-            return;
-        }
-        let pending_for = self
-            .pending_since
-            .map(|since| now.saturating_duration_since(since))
-            .unwrap_or(Duration::ZERO);
-        if crate::app::should_flush_pending_pty_redraw(self.pending_bytes, pending_for) {
-            // should_flush_pending_pty_redraw accepted pending_bytes and pending_for: dispatch the coalesced frame.
-            send();
-            let reason = if self.pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
-                crate::app::invariants::FlushReason::Buffer
-            } else {
-                crate::app::invariants::FlushReason::Interval
+    /// A command failure starts nothing else. Its sanitized reason is written
+    /// into the pane's own grid, logged at `warn`, and posted as a
+    /// notification; it never falls back to a shell. Logs name the launch
+    /// kind, the program's file name, the argument count and byte lengths,
+    /// the cwd source and `hold`, never an argument value, a path or a title.
+    pub(super) fn spawn_launch_pty(
+        &self,
+        pane_id: u64,
+        parser: &Arc<Mutex<Parser>>,
+        launch: &super::pane_launch::PaneLaunch,
+        cols: u16,
+        rows: u16,
+        shell_opts: &sonicterm_io::pty::ShellSpawnOpts,
+    ) -> Result<PtyHandle, ()> {
+        let cwd_source = launch.cwd_source.map_or("default", sonicterm_types::CwdSource::as_str);
+        let Some(command) = launch.command.as_ref() else {
+            // When: `command` is absent, the pane runs the configured shell exactly as before.
+            return match PtyHandle::spawn_default_shell(cols, rows, shell_opts.clone()) {
+                Ok(pty) => {
+                    tracing::info!(
+                        target: "sonicterm_app::launch",
+                        pane = pane_id,
+                        kind = launch.kind(),
+                        cwd_source,
+                        hold = launch.hold,
+                        "pane launched"
+                    );
+                    Ok(pty)
+                }
+                Err(error) => {
+                    tracing::error!("failed to spawn pty: {error}");
+                    Err(())
+                }
             };
-            self.redraw_probe.note_redraw(crate::app::PTY_REDRAW_QUIESCENT, reason);
-            self.clear_pending();
-        } else {
-            // When: should_flush_pending_pty_redraw is false, retain the batch for coalescing.
-            self.pending = true;
-        }
-    }
-
-    /// Decide at a quiet wake: pending output flushes once.
-    pub(in crate::app) fn on_quiet(
-        &mut self,
-        handles: &PaneVtHandles,
-        now: Instant,
-        send: impl FnOnce(),
-    ) {
-        if let Some((epoch, deadline)) = self.held {
-            // When: `self.held` names an open update, a quiet wake releases it only at its deadline.
-            if now >= deadline {
-                // The update outlived its bound; present what it has.
-                self.release_timeout(handles, epoch, send);
-            }
-            return;
-        }
-        if self.pending {
-            // pending is true at the quiet wake: dispatch the coalesced trailing frame.
-            send();
-            self.redraw_probe.note_redraw(
-                crate::app::PTY_REDRAW_QUIESCENT,
-                crate::app::invariants::FlushReason::Interval,
-            );
-            self.clear_pending();
-        }
-    }
-
-    /// Decide at disconnect: the shell's final output flushes whatever the mode.
-    pub(in crate::app) fn on_disconnect(&mut self, send: impl FnOnce()) {
-        if self.pending {
-            // pending is true at disconnect: dispatch the shell's final output.
-            send();
-            self.clear_pending();
-        }
-    }
-
-    /// Hold for the parser's update when it is open in an epoch after the released one.
-    ///
-    /// Release identity is the parser's full epoch, which the latch read under the lock; the
-    /// published epoch is truncated and is compared only for equality, never for order.
-    fn refresh_hold(&mut self, handles: &PaneVtHandles) {
-        let (set, epoch) = (self.sync_latch.set, self.sync_latch.epoch);
-        self.held = (set && epoch > self.released_epoch).then(|| {
-            let published = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
-            let deadline = published
-                .deadline
-                .filter(|_| published.epoch == epoch & SYNC_EPOCH_MASK)
-                // This worker published the deadline with its epoch; the origin is the passed
-                // fallback should that store ever be missing.
-                .unwrap_or_else(super::sync_clock::origin);
-            (epoch, deadline)
-        });
-    }
-
-    /// Release update `epoch` at its deadline: flush what it holds, log it, and count it.
-    // Ordering: sync_timeouts uses Relaxed; it is a statistic and orders nothing.
-    fn release_timeout(&mut self, handles: &PaneVtHandles, epoch: u64, send: impl FnOnce()) {
-        if self.pending {
-            // Output parsed during the update is presented now; later output flushes normally.
-            send();
-            self.clear_pending();
-        }
-        self.released_epoch = epoch;
-        self.held = None;
-        tracing::debug!(
-            target: "sonicterm_app::sync_output",
-            pane_id = self.pane_id,
-            epoch,
-            "synchronized output held past 150 ms; released"
-        );
-        if let Some(counters) = handles.frame_counters.as_ref() {
-            counters.vt.sync_timeouts.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Forget the output a flush just covered.
-    fn clear_pending(&mut self) {
-        self.pending = false;
-        self.pending_since = None;
-        self.pending_bytes = 0;
-    }
-}
-
-impl PaneVtHandles {
-    /// Flush this pane's output through `send`, coalesced on its outstanding token as the worker does.
-    pub(in crate::app) fn send_output_with(&self, send: impl FnOnce(WindowId) -> bool) {
-        send_output_redraw(
-            &self.redraw_target,
-            &self.output_outstanding,
-            self.frame_counters.as_ref(),
-            Instant::now,
-            send,
-        );
-    }
-}
-
-/// Send this pane's output event to its current redraw target.
-fn send_pane_output(handles: &PaneVtHandles, proxy: &EventLoopProxy<UserEvent>, pane_id: u64) {
-    send_output_redraw(
-        &handles.redraw_target,
-        &handles.output_outstanding,
-        handles.frame_counters.as_ref(),
-        Instant::now,
-        |window_id| proxy.send_event(UserEvent::PaneOutput { window_id, pane_id }).is_ok(),
-    );
-}
-
-/// Send at most one outstanding output event to the pane's current redraw target.
-///
-/// A targeted flush always publishes its timestamp (gate on), then sends only when no event is
-/// outstanding; otherwise it is counted as suppressed (gate on). A send the event loop refuses
-/// releases the token so the next flush sends again. An untargeted flush leaves the token alone.
-/// An armed echo watch records the publication before the token decision and the decision after
-/// it, reading `now` only then; it never changes the decision or the send.
-// Ordering: output_outstanding swaps AcqRel with the event loop's acknowledgement; a refused send
-// stores Release. flushes_suppressed is a Relaxed statistic.
-pub(in crate::app) fn send_output_redraw(
-    redraw_target: &Mutex<Option<WindowId>>,
-    output_outstanding: &AtomicBool,
-    counters: Option<&super::frame_counters::PaneFrameCounters>,
-    mut now: impl FnMut() -> Instant,
-    send: impl FnOnce(WindowId) -> bool,
-) {
-    let mut targeted = false;
-    let mut decided = None;
-    super::redraw_target::dispatch(redraw_target, |target| {
-        targeted = true;
-        let publication = counters.and_then(|counters| {
-            // The timestamp is published before the send, so the event loop never wakes without it.
-            let now_ns = super::frame_counters::flush_clock_ns();
-            let coalesced =
-                super::frame_counters::publish_flush(&counters.pending_flush, now_ns, &counters.vt);
-            counters.echo.record_publication(Some(target), coalesced, &mut now)
-        });
-        let outcome = if output_outstanding.swap(true, Ordering::AcqRel) {
-            // output_outstanding was already set: that queued event's service reads this batch.
-            if let Some(counters) = counters {
-                counters.vt.flushes_suppressed.fetch_add(1, Ordering::Relaxed);
-            }
-            super::echo_watch::EchoDeliveryOutcome::Suppressed
-        } else if send(target) {
-            // When: send(target) queued the event, its token stays set until the event loop services it.
-            super::echo_watch::EchoDeliveryOutcome::Sent
-        } else {
-            // When: send refused the event, the loop is gone and nothing is queued; the token must not stay set.
-            output_outstanding.store(false, Ordering::Release);
-            super::echo_watch::EchoDeliveryOutcome::Refused
         };
-        decided = publication.map(|publication| (publication, outcome));
-    });
-    if let (Some((publication, outcome)), Some(counters)) = (decided, counters) {
-        // the armed watch recorded this flush's publication, so its token decision is recorded too.
-        counters.echo.record_delivery(publication, outcome, now());
-    }
-    if let (false, Some(counters)) = (targeted, counters) {
-        // the pane has no redraw target, no window can consume a timestamp; none is stored.
-        super::frame_counters::note_untargeted_flush(&counters.vt);
-        counters.echo.record_publication(None, false, &mut now);
-    }
-}
-
-/// Publish the parser's synchronized output to the pane; the caller holds the parser lock.
-///
-/// A new epoch that is set gets a deadline `SYNC_OUTPUT_TIMEOUT` from `now`; a repeated set keeps it.
-// Ordering: sync_resets and sync_deadline_word store Relaxed, then sync_word Release;
-// a later epoch's deadline_word is rejected by its epoch tag.
-fn publish_sync_output(handles: &PaneVtHandles, state: SyncState, now: impl FnOnce() -> Instant) {
-    handles.sync_resets.store(state.resets, Ordering::Relaxed);
-    let published_epoch = (handles.sync_word.load(Ordering::Relaxed) >> 1) & SYNC_EPOCH_MASK;
-    if state.set && state.epoch & SYNC_EPOCH_MASK != published_epoch {
-        // A newly opened epoch starts its own deadline; a repeated set keeps the old one.
-        let deadline = pack_sync_deadline(state.epoch, now() + SYNC_OUTPUT_TIMEOUT);
-        handles.sync_deadline_word.store(deadline, Ordering::Relaxed);
-    }
-    #[cfg(test)]
-    PUBLISH_PAUSE.with(|slot| {
-        if let Some(pause) = slot.borrow_mut().as_mut() {
-            pause();
+        let program = command.program_file_name();
+        if !launch.executable_still_matches() {
+            // When: `executable_still_matches` is false, the opened file was replaced after classification.
+            let message = format!("Not run: {program} changed before it could start.");
+            tracing::warn!(
+                target: "sonicterm_app::launch",
+                pane = pane_id,
+                kind = launch.kind(),
+                reason = "identity_changed",
+                "pane command did not start"
+            );
+            self.report_launch_failure(parser, message);
+            return Err(());
         }
-    });
-    handles.sync_word.store(sync_word_of(state), Ordering::Release);
-}
-
-/// Publish one completed nonempty batch only after parser, media, and host side effects return.
-pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
-    handles: &PaneVtHandles,
-    bytes: Bytes,
-    read_at: Option<Instant>,
-    command_started: &mut Option<Instant>,
-    sync_latch: &mut SyncLatch,
-    proxy: Option<&EventLoopProxy<UserEvent>>,
-    send_reply: impl FnMut(Vec<u8>),
-) {
-    publish_pane_vt_batch_with(
-        handles,
-        bytes,
-        read_at,
-        command_started,
-        sync_latch,
-        super::media::decode_inline_image,
-        |event| {
-            if let Some(proxy) = proxy {
-                // When: proxy exists, deliver the typed host event on the app event loop.
-                let _ = proxy.send_event(event);
+        let scheme = launch.scheme().unwrap_or("none");
+        let spawn = sonicterm_io::pty::CommandSpawn {
+            program: command.program.clone(),
+            args: command.args.clone(),
+            cwd: launch.cwd.clone().or_else(crate::launch_cli::home_dir).unwrap_or_default(),
+        };
+        match PtyHandle::spawn_command(&spawn, cols, rows, shell_opts) {
+            Ok(pty) => {
+                tracing::info!(
+                    target: "sonicterm_app::launch",
+                    pane = pane_id,
+                    kind = launch.kind(),
+                    scheme,
+                    program = %program,
+                    arg_count = command.args.len(),
+                    cwd_source,
+                    hold = launch.hold,
+                    "pane launched"
+                );
+                let arg_bytes: Vec<usize> = command.args.iter().map(|arg| arg.len()).collect();
+                tracing::debug!(
+                    target: "sonicterm_app::launch",
+                    pane = pane_id,
+                    ?arg_bytes,
+                    "pane command argument byte lengths"
+                );
+                Ok(pty)
             }
-        },
-        Instant::now,
-        send_reply,
-    );
-}
+            Err(error) => {
+                // The error's text names only the program's file name and the rule it broke.
+                let message = error.to_string();
+                tracing::warn!(
+                    target: "sonicterm_app::launch",
+                    pane = pane_id,
+                    program = %program,
+                    reason = %message,
+                    "pane command did not start"
+                );
+                self.report_launch_failure(parser, message);
+                Err(())
+            }
+        }
+    }
 
-/// Parse one batch with the given decoder, event sink and clock, then publish its generation.
-// Ordering: output_generation Release pairs with the window's pre-lock Acquire snapshot.
-#[allow(clippy::too_many_arguments)]
-pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
-    handles: &PaneVtHandles,
-    bytes: Bytes,
-    read_at: Option<Instant>,
-    command_started: &mut Option<Instant>,
-    sync_latch: &mut SyncLatch,
-    decode_media: Decode,
-    emit_event: Emit,
-    now: Now,
-    send_reply: Send,
-) where
-    Bytes: AsRef<[u8]>,
-    Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
-    Emit: FnMut(UserEvent),
-    Now: FnMut() -> Instant,
-    Send: FnMut(Vec<u8>),
-{
-    let nonempty = !bytes.as_ref().is_empty();
-    process_pane_vt_batch_with(
-        handles,
-        bytes,
-        read_at,
-        command_started,
-        sync_latch,
-        decode_media,
-        emit_event,
-        now,
-        send_reply,
-    );
-    if nonempty {
-        handles.output_generation.fetch_add(1, Ordering::Release);
+    /// Write a command's failure `message` into its pane's grid and post it as a notification.
+    fn report_launch_failure(&self, parser: &Arc<Mutex<Parser>>, message: String) {
+        super::pane_exit::write_local_line(parser, &message);
+        if let Some(proxy) = self.event_loop_proxy.as_ref() {
+            // When: `event_loop_proxy` is set, surface the failure in the notification bubble.
+            let _ = proxy.send_event(UserEvent::LaunchFailed { message });
+        }
+    }
+
+    /// The shell spawn options for a new pane, main or child: the launch's own options, clean
+    /// startup under the runtime smoke, and output read timestamps exactly when the pane's frame
+    /// counters are on. The gate is fixed by then, so the reader's flag is fixed for its life.
+    pub(super) fn pane_spawn_opts(
+        &self,
+        launch: &super::pane_launch::PaneLaunch,
+        frame_counters_on: bool,
+    ) -> sonicterm_io::pty::ShellSpawnOpts {
+        sonicterm_io::pty::ShellSpawnOpts {
+            clean_e2e: self.runtime_smoke.is_some(),
+            diagnostic_timestamps: frame_counters_on,
+            ..launch.shell_spawn_opts(
+                self.config.terminal.term_program.clone(),
+                self.config.terminal.shell.clone(),
+            )
+        }
+    }
+
+    // Lock order: test_pane_launches releases before parser; neither guard survives PTY or worker creation.
+    pub(super) fn spawn_pane(
+        &self,
+        pane_id: u64,
+        launch: &super::pane_launch::PaneLaunch,
+    ) -> PaneState {
+        #[cfg(test)]
+        self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
+        let (cols, rows) =
+            self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((80, 24));
+        // Honour the user's configured scrollback depth instead of the
+        // Grid's built-in 10k default.
+        let mut grid = Grid::new(cols, rows);
+        grid.set_scrollback_limit(self.config.terminal.scrollback);
+        let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+            grid,
+            None,
+            Arc::clone(&self.capture_staging_pool),
+        )));
+        // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
+        // reply — without this nvim guesses (27,29,30) for bg and the
+        // neo-tree icon cells visibly differ from SonicTerm's clear surface
+        // . Also seeds the OSC 4 palette so CLIs like Copilot can read
+        // the full colour set and enable their prompt frame.
+        {
+            let mut parser_guard = crate::app::frame_counters::lock_parser(&parser);
+            super::seed_parser_theme_colors(&mut parser_guard, &self.theme);
+        }
+        let redraw_target = Arc::new(Mutex::new(self.main_window_id));
+        // The gate is read before the PTY exists, so its reader stamps reads from the first one.
+        let frame_counters = self.pane_frame_counters();
+        let shell_opts = self.pane_spawn_opts(launch, frame_counters.is_some());
+        let pty = match self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts) {
+            Ok(pty) => {
+                // When: spawn_launch_pty returns Ok(pty), stage any launch draft before the worker starts.
+                match launch.draft_for_shell(pty.shell_program_path()) {
+                    Ok(Some(draft)) => {
+                        Self::queue_pty_input(
+                            self.event_loop_proxy.as_ref(),
+                            &pty,
+                            pane_id,
+                            super::PtyInputSource::ScriptDraft,
+                            draft.into_bytes(),
+                        );
+                    }
+                    Ok(None) => {
+                        // When: draft_for_shell returns Ok(None), start the shell without staged script input.
+                    }
+                    Err(rejection) => {
+                        // When: draft_for_shell returns Err(rejection), warn and notify the event loop.
+                        let message = launch.draft_rejection_message(rejection);
+                        tracing::warn!(%message);
+                        if let Some(proxy) = self.event_loop_proxy.as_ref() {
+                            // When: event_loop_proxy is Some(proxy), surface the draft rejection to the UI.
+                            let _ = proxy.send_event(UserEvent::ScriptDraftRejected { message });
+                        }
+                    }
+                }
+                Some(pty)
+            }
+            Err(()) => None,
+        };
+        let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
+        state.hold_on_exit = launch.hold;
+        self.reserve_pane_teardown(&mut state);
+        let mut frame_counters = frame_counters;
+        state.guard_correlation = self.attach_guard_correlation(pane_id, &mut frame_counters);
+        state.frame_counters = frame_counters;
+        state.redraw_target = redraw_target;
+        if state.pty.is_some() {
+            spawn_pane_workers(pane_id, &state, self.event_loop_proxy.clone(), "sonicterm-vt-loop");
+        }
+        state
     }
 }
+
+#[cfg(test)]
+#[path = "spawn_pane_tests.rs"]
+mod spawn_pane_tests;
+
+#[path = "spawn_pane_output.rs"]
+mod output;
+pub(in crate::app) use output::send_output_redraw;
+use output::{publish_sync_output, send_pane_output};
+#[path = "spawn_pane_vt.rs"]
+mod vt;
+pub(in crate::app) use vt::{process_pane_vt_batch_and_publish, publish_pane_vt_batch_with};
+
+#[path = "spawn_pane_commands.rs"]
+mod commands;
 
 // Lock order: parser -> echo slot (pre_read, post_read); inline_images -> inline_media_charge after parser releases,
 // command_events after both.
@@ -1088,437 +967,3 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         }
     }
 }
-
-impl App {
-    /// Start the PTY for a new pane: the launch's command run directly, or the shell.
-    ///
-    /// A command failure starts nothing else. Its sanitized reason is written
-    /// into the pane's own grid, logged at `warn`, and posted as a
-    /// notification; it never falls back to a shell. Logs name the launch
-    /// kind, the program's file name, the argument count and byte lengths,
-    /// the cwd source and `hold`, never an argument value, a path or a title.
-    pub(super) fn spawn_launch_pty(
-        &self,
-        pane_id: u64,
-        parser: &Arc<Mutex<Parser>>,
-        launch: &super::pane_launch::PaneLaunch,
-        cols: u16,
-        rows: u16,
-        shell_opts: &sonicterm_io::pty::ShellSpawnOpts,
-    ) -> Result<PtyHandle, ()> {
-        let cwd_source = launch.cwd_source.map_or("default", sonicterm_types::CwdSource::as_str);
-        let Some(command) = launch.command.as_ref() else {
-            // When: `command` is absent, the pane runs the configured shell exactly as before.
-            return match PtyHandle::spawn_default_shell(cols, rows, shell_opts.clone()) {
-                Ok(pty) => {
-                    tracing::info!(
-                        target: "sonicterm_app::launch",
-                        pane = pane_id,
-                        kind = launch.kind(),
-                        cwd_source,
-                        hold = launch.hold,
-                        "pane launched"
-                    );
-                    Ok(pty)
-                }
-                Err(error) => {
-                    tracing::error!("failed to spawn pty: {error}");
-                    Err(())
-                }
-            };
-        };
-        let program = command.program_file_name();
-        if !launch.executable_still_matches() {
-            // When: `executable_still_matches` is false, the opened file was replaced after classification.
-            let message = format!("Not run: {program} changed before it could start.");
-            tracing::warn!(
-                target: "sonicterm_app::launch",
-                pane = pane_id,
-                kind = launch.kind(),
-                reason = "identity_changed",
-                "pane command did not start"
-            );
-            self.report_launch_failure(parser, message);
-            return Err(());
-        }
-        let scheme = launch.scheme().unwrap_or("none");
-        let spawn = sonicterm_io::pty::CommandSpawn {
-            program: command.program.clone(),
-            args: command.args.clone(),
-            cwd: launch.cwd.clone().or_else(crate::launch_cli::home_dir).unwrap_or_default(),
-        };
-        match PtyHandle::spawn_command(&spawn, cols, rows, shell_opts) {
-            Ok(pty) => {
-                tracing::info!(
-                    target: "sonicterm_app::launch",
-                    pane = pane_id,
-                    kind = launch.kind(),
-                    scheme,
-                    program = %program,
-                    arg_count = command.args.len(),
-                    cwd_source,
-                    hold = launch.hold,
-                    "pane launched"
-                );
-                let arg_bytes: Vec<usize> = command.args.iter().map(|arg| arg.len()).collect();
-                tracing::debug!(
-                    target: "sonicterm_app::launch",
-                    pane = pane_id,
-                    ?arg_bytes,
-                    "pane command argument byte lengths"
-                );
-                Ok(pty)
-            }
-            Err(error) => {
-                // The error's text names only the program's file name and the rule it broke.
-                let message = error.to_string();
-                tracing::warn!(
-                    target: "sonicterm_app::launch",
-                    pane = pane_id,
-                    program = %program,
-                    reason = %message,
-                    "pane command did not start"
-                );
-                self.report_launch_failure(parser, message);
-                Err(())
-            }
-        }
-    }
-
-    /// Write a command's failure `message` into its pane's grid and post it as a notification.
-    fn report_launch_failure(&self, parser: &Arc<Mutex<Parser>>, message: String) {
-        super::pane_exit::write_local_line(parser, &message);
-        if let Some(proxy) = self.event_loop_proxy.as_ref() {
-            // When: `event_loop_proxy` is set, surface the failure in the notification bubble.
-            let _ = proxy.send_event(UserEvent::LaunchFailed { message });
-        }
-    }
-
-    /// The shell spawn options for a new pane, main or child: the launch's own options, clean
-    /// startup under the runtime smoke, and output read timestamps exactly when the pane's frame
-    /// counters are on. The gate is fixed by then, so the reader's flag is fixed for its life.
-    pub(super) fn pane_spawn_opts(
-        &self,
-        launch: &super::pane_launch::PaneLaunch,
-        frame_counters_on: bool,
-    ) -> sonicterm_io::pty::ShellSpawnOpts {
-        sonicterm_io::pty::ShellSpawnOpts {
-            clean_e2e: self.runtime_smoke.is_some(),
-            diagnostic_timestamps: frame_counters_on,
-            ..launch.shell_spawn_opts(
-                self.config.terminal.term_program.clone(),
-                self.config.terminal.shell.clone(),
-            )
-        }
-    }
-
-    // Lock order: test_pane_launches releases before parser; neither guard survives PTY or worker creation.
-    pub(super) fn spawn_pane(
-        &self,
-        pane_id: u64,
-        launch: &super::pane_launch::PaneLaunch,
-    ) -> PaneState {
-        #[cfg(test)]
-        self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
-        let (cols, rows) =
-            self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((80, 24));
-        // Honour the user's configured scrollback depth instead of the
-        // Grid's built-in 10k default.
-        let mut grid = Grid::new(cols, rows);
-        grid.set_scrollback_limit(self.config.terminal.scrollback);
-        let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
-            grid,
-            None,
-            Arc::clone(&self.capture_staging_pool),
-        )));
-        // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
-        // reply — without this nvim guesses (27,29,30) for bg and the
-        // neo-tree icon cells visibly differ from SonicTerm's clear surface
-        // . Also seeds the OSC 4 palette so CLIs like Copilot can read
-        // the full colour set and enable their prompt frame.
-        {
-            let mut parser_guard = crate::app::frame_counters::lock_parser(&parser);
-            super::seed_parser_theme_colors(&mut parser_guard, &self.theme);
-        }
-        let redraw_target = Arc::new(Mutex::new(self.main_window_id));
-        // The gate is read before the PTY exists, so its reader stamps reads from the first one.
-        let frame_counters = self.pane_frame_counters();
-        let shell_opts = self.pane_spawn_opts(launch, frame_counters.is_some());
-        let pty = match self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts) {
-            Ok(pty) => {
-                // When: spawn_launch_pty returns Ok(pty), stage any launch draft before the worker starts.
-                match launch.draft_for_shell(pty.shell_program_path()) {
-                    Ok(Some(draft)) => {
-                        Self::queue_pty_input(
-                            self.event_loop_proxy.as_ref(),
-                            &pty,
-                            pane_id,
-                            super::PtyInputSource::ScriptDraft,
-                            draft.into_bytes(),
-                        );
-                    }
-                    Ok(None) => {
-                        // When: draft_for_shell returns Ok(None), start the shell without staged script input.
-                    }
-                    Err(rejection) => {
-                        // When: draft_for_shell returns Err(rejection), warn and notify the event loop.
-                        let message = launch.draft_rejection_message(rejection);
-                        tracing::warn!(%message);
-                        if let Some(proxy) = self.event_loop_proxy.as_ref() {
-                            // When: event_loop_proxy is Some(proxy), surface the draft rejection to the UI.
-                            let _ = proxy.send_event(UserEvent::ScriptDraftRejected { message });
-                        }
-                    }
-                }
-                Some(pty)
-            }
-            Err(()) => None,
-        };
-        let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
-        state.hold_on_exit = launch.hold;
-        self.reserve_pane_teardown(&mut state);
-        let mut frame_counters = frame_counters;
-        state.guard_correlation = self.attach_guard_correlation(pane_id, &mut frame_counters);
-        state.frame_counters = frame_counters;
-        state.redraw_target = redraw_target;
-        if state.pty.is_some() {
-            spawn_pane_workers(pane_id, &state, self.event_loop_proxy.clone(), "sonicterm-vt-loop");
-        }
-        state
-    }
-}
-
-impl App {
-    pub(super) fn split_active(&mut self, dir: Direction) {
-        let Some(window) = self.main() else {
-            // When: `main` is absent, no destination exists for a new pane or PTY.
-            return;
-        };
-        let Some(tab) = window.tab_states.get(window.tabs.active_index()) else {
-            // When: `tab_states` has no active tab, refuse before creating a speculative PTY.
-            return;
-        };
-        if !tab.tree.leaves().contains(&tab.active_pane)
-            || !window.panes.contains_key(&tab.active_pane)
-        {
-            // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
-            return;
-        }
-        let launch =
-            super::pane_launch::PaneLaunch::from_window(Some(window), &self.local_hostname);
-        let new_id = next_pane_id();
-        let mut new_pane = Some(self.spawn_pane(new_id, &launch));
-        let did_split = 'install: {
-            let Some(window) = self.main_mut() else {
-                // When: main_mut has no destination, leave the spawned pane outside the window for retirement.
-                break 'install false;
-            };
-            let tab_index = window.tabs.active_index();
-            let split_ok = {
-                let Some(tab_state) = window.tab_states.get_mut(tab_index) else {
-                    // When: tab_states lacks tab_index, retain the uninstalled pane for the common retirement path.
-                    break 'install false;
-                };
-                let focus = tab_state.active_pane;
-                if tab_state.tree.split(focus, dir, new_id) {
-                    tab_state.active_pane = new_id;
-                    true
-                } else {
-                    // When: tree.split returns false, keep the existing pane layout and ownership.
-                    false
-                }
-            };
-            if split_ok {
-                window.panes.insert(new_id, new_pane.take().expect("uninstalled split pane"));
-            }
-            split_ok
-        };
-        if let Some(pane) = new_pane {
-            self.retire_pane(pane);
-        }
-        if did_split {
-            // Own the new pane now rather than on the next 30-second sample:
-            // until it has an owner its memory is attributed to nothing, and
-            // anything reserving against it has no owner to reserve against.
-            self.reconcile_pane_owners();
-            self.resize_visible_panes();
-            if let Some(renderer) = self.main_renderer_mut() {
-                renderer.flash_pane_focus(new_id);
-            }
-            if let Some(main_window) = self.main_window() {
-                crate::app::frame_counters::request_native_redraw(main_window);
-            }
-        }
-    }
-    pub(super) fn close_active_pane(&mut self) {
-        let mut retired = None;
-        let outcome = {
-            let Some(window) = self.main_mut() else {
-                // When: main_mut returns None, there is no active window pane to close.
-                return;
-            };
-            let tab_index = window.tabs.active_index();
-            let inner = {
-                let Some(tab_state) = window.tab_states.get_mut(tab_index) else {
-                    // When: tab_states.get_mut cannot find tab_index, there is no active pane tree to close.
-                    return;
-                };
-                let focus = tab_state.active_pane;
-                if matches!(tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
-                    (Some(tab_index), None)
-                } else {
-                    // When: matches finds no focused PaneTree::Leaf, close only the split pane.
-                    let new_focus = tab_state
-                        .tree
-                        .leaves()
-                        .into_iter()
-                        .find(|id| *id != focus)
-                        .unwrap_or(focus);
-                    if tab_state.tree.close(focus) {
-                        // A successful tree close activates its surviving sibling.
-                        tab_state.active_pane = new_focus;
-                        // Same reason as the exit-driven path: the search was
-                        // scanning the grid that just went away.
-                        if let Some(search) = tab_state.search.as_mut() {
-                            search.invalidate_for_new_grid();
-                        }
-                        (None, Some(focus))
-                    } else {
-                        // When: tree.close returns false, preserve the pane and tab unchanged.
-                        (None, None)
-                    }
-                }
-            };
-            if let (_, Some(focus)) = inner {
-                retired = window.remove_pane(focus);
-            }
-            inner
-        };
-        if let Some(pane) = retired {
-            self.retire_pane(pane);
-        }
-        match outcome {
-            (Some(tab_index), _) => self.close_tab_at(tab_index),
-            (_, Some(_focus)) => {
-                // the surviving sibling's PaneRect just grew to cover
-                // the closed pane's area. Push the new layout into its Grid
-                // + PtyHandle (matches split / zoom / resize-split paths and
-                // mirrors `close_active_pane_in_child`). Without this the
-                // survivor keeps its narrow split-time column count and
-                // shell output wraps at the old width until the OS window
-                // is resized. The actual resize is delegated to
-                // `resize_visible_panes` which routes through the pure
-                // helper `resize_panes_to_rects` — the path tested by
-                // `close_sibling_pane_resizes_survivor_to_full_width` in
-                // `crates/sonicterm-app/tests/per_pane_resize.rs`.
-                self.resize_visible_panes();
-                if let Some(active_id) = self.active_pane_id() {
-                    if let Some(renderer) = self.main_renderer_mut() {
-                        renderer.flash_pane_focus(active_id);
-                    }
-                }
-                if let Some(main_window) = self.main_window() {
-                    crate::app::frame_counters::request_native_redraw(main_window);
-                }
-            }
-            _ => {
-                // When: outcome closes neither a tab nor a pane, no layout update is required.
-            }
-        }
-    }
-    pub(super) fn focus_pane_dir(&mut self, dir: Direction) {
-        let Some(window) = self.main_mut() else {
-            // When: main_mut returns None, there is no pane focus to move.
-            return;
-        };
-        let tab_idx = window.tabs.active_index();
-        let Some(next) = window
-            .tab_states
-            .get(tab_idx)
-            .and_then(|tab| tab.tree.focus_neighbor(tab.active_pane, dir))
-        else {
-            // When: the active tab has no pane in `dir`, focus stays unchanged.
-            return;
-        };
-        if let Some(change) = window.begin_pane_focus_change(next) {
-            window.finish_pane_focus_change(change);
-        }
-    }
-
-    pub(super) fn toggle_active_pane_zoom(&mut self) {
-        let toggled = {
-            let Some(window) = self.main_mut() else {
-                // When: main_mut returns None, there is no pane zoom state to toggle.
-                return;
-            };
-            let tab_index = window.tabs.active_index();
-            let Some(tab_state) = window.tab_states.get_mut(tab_index) else {
-                // When: tab_states.get_mut cannot find tab_index, there is no active pane tree to zoom.
-                return;
-            };
-            tab_state.tree.toggle_zoom(tab_state.active_pane)
-        };
-        if toggled {
-            self.resize_visible_panes();
-            if let Some(main_window) = self.main_window() {
-                crate::app::frame_counters::request_native_redraw(main_window);
-            }
-        }
-    }
-
-    pub(super) fn toggle_broadcast(&mut self, scope: sonicterm_cfg::keymap::BroadcastScope) {
-        self.toggle_broadcast_for(self.frontmost_kind(), scope);
-    }
-
-    pub(super) fn toggle_broadcast_for(
-        &mut self,
-        kind: FrontmostKind,
-        scope: sonicterm_cfg::keymap::BroadcastScope,
-    ) {
-        let Some(source_pane) = self.active_pane_id_for_kind(kind) else {
-            // When: active_pane_id_for_kind returns None, no pane can source the broadcast.
-            return;
-        };
-        self.broadcast = self.broadcast.toggled(scope, source_pane);
-        self.request_redraw_all_terminal_windows();
-    }
-
-    pub(super) fn resize_active_split(&mut self, dir: Direction) {
-        let resized = {
-            let Some(window) = self.main_mut() else {
-                // When: main_mut returns None, there is no active split to resize.
-                return;
-            };
-            let tab_index = window.tabs.active_index();
-            let Some(tab_state) = window.tab_states.get_mut(tab_index) else {
-                // When: tab_states.get_mut cannot find tab_index, there is no active split tree.
-                return;
-            };
-            tab_state.tree.resize_split(tab_state.active_pane, dir, 0.05)
-        };
-        if resized {
-            self.resize_visible_panes();
-            if let Some(main_window) = self.main_window() {
-                crate::app::frame_counters::request_native_redraw(main_window);
-            }
-        }
-    }
-
-    pub(super) fn resize_visible_panes(&mut self) {
-        let viewport = self.test_viewport_override;
-        if let Some(window) = self.main_mut() {
-            window.complete_topology_change(
-                super::TopologyChange {
-                    resize_visible: true,
-                    focus_feedback: None,
-                    dirt: super::window_state::TopologyDirt::Window,
-                },
-                viewport,
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-#[path = "spawn_pane_tests.rs"]
-mod spawn_pane_tests;

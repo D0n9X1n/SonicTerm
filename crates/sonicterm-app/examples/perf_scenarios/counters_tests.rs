@@ -977,7 +977,12 @@ fn growth_counts_key_each_counted_window_by_the_memory_lines_native_label() {
     assert_eq!(live, std::collections::BTreeMap::from([(format!("{counted:?}"), 3)]));
     assert_eq!(closed, 0);
     assert_eq!(growth_counts([], Some(4)).1, 4);
-    let memory_snapshot = include_str!("../../src/app/memory_snapshot.rs").replace("\r\n", "\n");
+    let memory_snapshot = concat!(
+        include_str!("../../src/app/memory_snapshot.rs"),
+        "\n",
+        include_str!("../../src/app/memory_snapshot_renderer.rs")
+    )
+    .replace("\r\n", "\n");
     assert!(
         memory_snapshot.contains("let label = format!(\"{window_id:?}\");"),
         "the memory line no longer labels a visible renderer with its window id's Debug form"

@@ -249,13 +249,22 @@ fn completion_through_the_adapters_keeps_the_input_exemption_and_settles_once() 
 /// only through `finish_window_redraw`, exactly once, and settles nothing itself.
 #[test]
 fn the_completion_adapter_has_one_settlement_path() {
-    let source = include_str!("redraw.rs").replace("\r\n", "\n");
-    let adapter = method_body(&source, "pub(super) fn complete_window_redraw(");
+    let source = concat!(
+        include_str!("redraw.rs"),
+        "\n",
+        include_str!("redraw_admission.rs"),
+        "\n",
+        include_str!("redraw_state.rs"),
+        "\n",
+        include_str!("redraw_window.rs")
+    )
+    .replace("\r\n", "\n");
+    let adapter = method_body(&source, "fn complete_window_redraw(");
     assert_eq!(adapter.matches("finish_window_redraw(").count(), 1, "{adapter}");
     for forbidden in [".settle(", "last_render =", "stream_clock =", "complete_attempt("] {
         assert!(!adapter.contains(forbidden), "the adapter must not use {forbidden} itself");
     }
-    let finish = method_body(&source, "pub(super) fn finish_window_redraw(");
+    let finish = method_body(&source, "fn finish_window_redraw(");
     assert_eq!(finish.matches("complete_attempt(").count(), 1, "{finish}");
     assert!(!finish.contains(".settle("), "{finish}");
 }
@@ -268,7 +277,13 @@ fn the_completion_adapter_has_one_settlement_path() {
 #[test]
 fn redraw_handlers_reach_pacing_only_through_the_adapters() {
     let code_of = |source: &str| crate::app::source_scan_support::code_views(source).0;
-    let main = code_of(include_str!("window_event.rs"));
+    let main = code_of(concat!(
+        include_str!("window_event.rs"),
+        "\n",
+        include_str!("window_event_pointer.rs"),
+        "\n",
+        include_str!("window_event_redraw.rs")
+    ));
     let child_route = code_of(include_str!("child_window.rs"));
     let child_redraw = code_of(include_str!("child_window_redraw.rs"));
     let main_handler = method_body(&main, "fn handle_main_redraw_requested(");

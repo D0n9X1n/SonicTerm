@@ -286,244 +286,7 @@ struct LiveRendererSettings<'a> {
     tab_bar_visible: bool,
 }
 
-fn live_renderer_settings<'a>(
-    config: &'a Config,
-    theme: &'a Theme,
-    tab_bar_visible: bool,
-    origin: ChildRendererOrigin,
-) -> LiveRendererSettings<'a> {
-    let refresh_cached_state = origin == ChildRendererOrigin::WarmPool;
-    LiveRendererSettings {
-        font: refresh_cached_state.then_some(LiveFontSettings {
-            family: &config.font.family,
-            size: config.font.size,
-            line_height: config.font.line_height,
-            weight_scale: config.font.effective_weight_scale(),
-        }),
-        theme: refresh_cached_state.then_some(theme),
-        background: theme.colors.background.0.as_str(),
-        subpixel_aa: config.font.subpixel_aa,
-        tab_bar_visible,
-    }
-}
-
 impl App {
-    /// Settings for a warm-pool renderer: a hidden window that may never draw, so its glyph
-    /// atlas starts at the 256 floor and grows after adoption like any other.
-    fn warm_renderer_settings(&self) -> sonicterm_gpu::core::RendererSettings<'_> {
-        sonicterm_gpu::core::RendererSettings {
-            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Minimum,
-            ..self.tear_out_renderer_settings("warm")
-        }
-    }
-
-    fn tear_out_renderer_settings(
-        &self,
-        role: &'static str,
-    ) -> sonicterm_gpu::core::RendererSettings<'_> {
-        sonicterm_gpu::core::RendererSettings {
-            font_family: &self.config.font.family,
-            font_dirs: &self.font_dirs,
-            font_size: self.config.font.size,
-            line_height_mult: self.config.font.line_height,
-            font_weight_scale: self.config.font.effective_weight_scale(),
-            subpixel_aa: self.config.font.subpixel_aa,
-            padding: [
-                self.config.window.padding_left,
-                self.config.window.padding_right,
-                self.config.window.padding_top,
-                self.config.window.padding_bottom,
-            ],
-            appearance: sonicterm_gpu::core::SurfaceAppearance {
-                backdrop: self.config.appearance.backdrop,
-                opacity: self.config.appearance.opacity,
-                scrollbar: self.config.appearance.scrollbar,
-                panel_padding: self.config.appearance.panel_padding,
-                software_render_mode: self.config.appearance.software_render_mode,
-            },
-            role,
-            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
-        }
-    }
-
-    pub(super) fn configure_child_renderer(
-        &self,
-        renderer: &mut GpuRenderer,
-        window: &Window,
-        origin: ChildRendererOrigin,
-    ) -> bool {
-        if let Some(proxy) = self.event_loop_proxy.clone() {
-            // Preserve generation-tagged recovery notifications through the available event-loop proxy.
-            renderer.set_device_state_waker(super::gpu_recovery::generation_waker(
-                proxy.clone(),
-                renderer.device_generation(),
-            ));
-            // A fallback face published for this window's fonts wakes this window.
-            renderer.set_font_fallback_waker(super::font_fallback_waker(proxy, window.id()));
-        }
-        renderer.set_cursor_shape(self.config.terminal.cursor_shape);
-        renderer.set_cursor_blink(self.config.terminal.cursor_blink);
-        renderer.set_software_render_degrade(crate::app::should_degrade_for_software_render(
-            self.config.appearance.software_render_mode,
-            renderer.is_software_rendering(),
-        ));
-        renderer.set_titlebar_inset(0.0);
-        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
-        let live = live_renderer_settings(&self.config, &self.theme, self.tab_bar_visible, origin);
-        // RendererSettings does not carry tab-bar visibility, so every fresh or
-        // pooled child receives the current app value here.
-        renderer.set_subpixel_aa_mode(live.subpixel_aa);
-        renderer.set_tab_bar_visible(live.tab_bar_visible);
-        super::install_native_window_background(window, live.background);
-        if let Some(font) = live.font {
-            // Runtime font-weight and theme actions walk visible windows only.
-            // A pooled renderer captured both values when it was hidden, so
-            // adoption must resynchronize it before its first visible frame.
-            // Fresh renderers already received them from their constructors and
-            // `live.font` is None, skipping the expensive atlas/font rebuild.
-            renderer.set_font(font.family, font.size, font.line_height, font.weight_scale);
-        }
-        if let Some(theme) = live.theme {
-            renderer.set_theme(theme);
-        }
-        let real_sf = window_dpi(window);
-        renderer.force_rebuild_for_scale(real_sf);
-        let target = super::apply_terminal_window_minimum(window, renderer);
-        // A configured child presents its first frame, which no synchronized hold can keep back.
-        renderer.try_resize_outcome(target.width.max(1), target.height.max(1))
-            != sonicterm_gpu::core::ResizeOutcome::Rejected
-    }
-
-    pub(super) fn warm_window_pool_maintain(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(software_rendering) = self.main_renderer().map(|renderer| {
-            renderer.is_software_rendering() || renderer.is_software_render_degraded()
-        }) else {
-            // When: `main_renderer` is absent, so the software-rendering state that
-            // sizes the pool cannot be read; skip maintenance rather than size it wrong.
-            return;
-        };
-        // A stopped device refuses every renderer, so prewarming would churn hidden windows.
-        let device_accepts_gpu_work =
-            self.main_renderer().is_some_and(GpuRenderer::device_accepts_gpu_work);
-        let configured = self.config.window.warm_window_pool;
-        let target = super::warm_window_pool_target(configured, software_rendering);
-        let count_before = self.warm_window_pool.len();
-        if self.warm_window_pool.len() > target {
-            self.warm_window_pool.truncate(target);
-        }
-        if super::warm_window_pool_may_spawn(
-            device_accepts_gpu_work,
-            self.warm_window_pool.len(),
-            configured,
-            software_rendering,
-        ) {
-            if let Some(warm) = self.create_warm_window(event_loop) {
-                self.warm_window_pool.push(warm);
-            }
-        }
-        if self.warm_window_pool.len() != count_before {
-            tracing::debug!(
-                target: "memory",
-                configured,
-                target,
-                software_rendering,
-                warm_renderer_count = self.warm_window_pool.len(),
-                "warm renderer pool maintained"
-            );
-        }
-    }
-
-    fn create_warm_window(&mut self, event_loop: &ActiveEventLoop) -> Option<super::WarmWindow> {
-        let attrs = super::with_app_icon(super::with_backdrop_transparency(
-            with_integrated_titlebar(
-                Window::default_attributes()
-                    .with_title(super::NATIVE_WINDOW_TITLE)
-                    .with_decorations(true)
-                    .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0))
-                    .with_visible(false),
-            ),
-            self.config.appearance.backdrop,
-            self.config.appearance.software_render_mode,
-        ));
-        let attrs = self.native_drop_attributes(attrs);
-        let window = match event_loop.create_window(attrs) {
-            Ok(window) => Arc::new(window),
-            Err(error) => {
-                // When: `create_window` failed, so there is no window to pool; the pool
-                // only pre-warms, so a short pool costs tear-out latency, not correctness.
-                tracing::warn!("warm-window-pool: create_window failed: {error}");
-                return None;
-            }
-        };
-        window.set_ime_allowed(true);
-        // A dormant adapter must exist before the spare is first shown at tear-out.
-        self.install_accessibility(event_loop, &window);
-        let settings = self.warm_renderer_settings();
-        let shared_gpu = self.shared_gpu_context();
-        let mut renderer = match shared_gpu.map_or_else(
-            || GpuRenderer::new(window.clone(), event_loop, &self.theme, settings),
-            |ctx| {
-                GpuRenderer::new_with_shared_context(
-                    window.clone(),
-                    event_loop,
-                    &self.theme,
-                    settings,
-                    ctx,
-                )
-            },
-        ) {
-            Ok(renderer) => renderer,
-            Err(error) => {
-                // When: `GpuRenderer` construction failed, so the created window has no
-                // renderer to pool; drop it rather than pool a window that cannot draw.
-                tracing::warn!("warm-window-pool: renderer init failed: {error}");
-                return None;
-            }
-        };
-        if !self.configure_child_renderer(&mut renderer, &window, ChildRendererOrigin::Fresh) {
-            // When: `configure_child_renderer` rejected the initial size, so this window
-            // cannot render; drop it rather than leave an unusable entry in the pool.
-            tracing::error!("warm-window-pool: renderer rejected unsafe initial size");
-            return None;
-        }
-        Some(super::WarmWindow { window, renderer, created_at: Instant::now() })
-    }
-
-    fn take_warm_window(&mut self) -> Option<super::WarmWindow> {
-        self.warm_window_pool.pop()
-    }
-
-    /// Test hook: build one warm-pool window exactly as pool maintenance does, pool it, and return
-    /// its id; `None` when its window or renderer could not be built.
-    #[doc(hidden)]
-    pub fn __test_prewarm_window(&mut self, event_loop: &ActiveEventLoop) -> Option<WindowId> {
-        let warm = self.create_warm_window(event_loop)?;
-        let id = warm.window.id();
-        self.warm_window_pool.push(warm);
-        Some(id)
-    }
-
-    /// Test hook: the glyph atlas dimension of pooled warm window `id`, `None` once it left the pool.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __test_warm_glyph_atlas_dim(&self, id: WindowId) -> Option<u32> {
-        self.warm_window_pool
-            .iter()
-            .find(|warm| warm.window.id() == id)
-            .map(|warm| warm.renderer.glyph_atlas_facts().dim)
-    }
-
-    /// Test hook: tear the main window's tab at `index` out through the production route, which
-    /// adopts a pooled warm window when one is ready.
-    #[doc(hidden)]
-    pub fn __test_tear_out_tab(&mut self, event_loop: &ActiveEventLoop, index: usize) -> bool {
-        self.tear_out_tab(event_loop, index)
-    }
-
-    pub(super) fn is_warm_window_id(&self, win_id: WindowId) -> bool {
-        self.warm_window_pool.iter().any(|warm| warm.window.id() == win_id)
-    }
-
     /// The id of the tab currently at `idx` in `window`.
     ///
     /// Recorded when a tear-out is queued so the request names a tab rather
@@ -773,324 +536,6 @@ impl App {
         })
     }
 
-    /// Build and configure a hidden destination without mutating pane state.
-    fn prepare_tear_out_destination(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        screen_pos: Option<(i32, i32)>,
-        source: &'static str,
-        request: super::WindowRequest,
-    ) -> Result<PreparedDestination, DestinationFailure> {
-        let tear_start = Instant::now();
-        let spare_accepts_gpu_work =
-            self.warm_window_pool.last().map(|warm| warm.renderer.device_accepts_gpu_work());
-        if let Some(stage) = warm_destination_refusal(spare_accepts_gpu_work) {
-            // When: `warm_destination_refusal` returns a stage, the stopped spare stays pooled.
-            return Err(DestinationFailure::new(
-                ChildRendererOrigin::WarmPool,
-                stage,
-                "warm destination's GPU device stopped accepting work".to_owned(),
-                DestinationUnwind::nothing(),
-            ));
-        }
-        let (window, renderer, create_window_ms, renderer_init_ms, resize_ms) = match self
-            .take_warm_window()
-        {
-            Some(mut warm) => {
-                // When: `take_warm_window` returns `Some`, adopt that hidden
-                // renderer rather than constructing another destination.
-                if let Some((screen_x, screen_y)) = screen_pos {
-                    warm.window
-                        .set_outer_position(winit::dpi::PhysicalPosition::new(screen_x, screen_y));
-                }
-                let resize_start = Instant::now();
-                if !self.configure_child_renderer(
-                    &mut warm.renderer,
-                    &warm.window,
-                    ChildRendererOrigin::WarmPool,
-                ) {
-                    // When: pooled adoption mutated the renderer but rejected its
-                    // size, retire that hidden entry rather than returning it poisoned.
-                    return Err(DestinationFailure::new(
-                        ChildRendererOrigin::WarmPool,
-                        TearOutStage::RendererConfigure,
-                        "renderer rejected unsafe child size".to_owned(),
-                        DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
-                    ));
-                }
-                if !super::apply_window_request(&warm.window, &mut warm.renderer, request) {
-                    // When: inherited sizing exceeds renderer bounds, retire the mutated hidden window and restore its source.
-                    return Err(DestinationFailure::new(
-                        ChildRendererOrigin::WarmPool,
-                        TearOutStage::RendererConfigure,
-                        "renderer rejected inherited child size".to_owned(),
-                        DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
-                    ));
-                }
-                if !warm.renderer.device_accepts_gpu_work() {
-                    // When: `device_accepts_gpu_work` fails, retire the adopted spare.
-                    return Err(DestinationFailure::new(
-                        ChildRendererOrigin::WarmPool,
-                        TearOutStage::RendererConfigure,
-                        "warm destination's GPU device stopped during adoption".to_owned(),
-                        DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
-                    ));
-                }
-                let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
-                (warm.window, warm.renderer, 0.0, 0.0, resize_ms)
-            }
-            None => {
-                // When: `take_warm_window` returns `None`, construct a fresh
-                // destination hidden so every failure remains invisible.
-                let mut attrs = super::with_app_icon(super::with_backdrop_transparency(
-                    with_integrated_titlebar(
-                        Window::default_attributes()
-                            .with_title(super::NATIVE_WINDOW_TITLE)
-                            .with_decorations(true)
-                            .with_inner_size(request.inner_size)
-                            .with_visible(false),
-                    ),
-                    self.config.appearance.backdrop,
-                    self.config.appearance.software_render_mode,
-                ));
-                if let Some((screen_x, screen_y)) = screen_pos {
-                    attrs =
-                        attrs.with_position(winit::dpi::PhysicalPosition::new(screen_x, screen_y));
-                }
-                let create_start = Instant::now();
-                let attrs = self.native_drop_attributes(attrs);
-                let window = event_loop.create_window(attrs).map(Arc::new).map_err(|error| {
-                    DestinationFailure::new(
-                        ChildRendererOrigin::Fresh,
-                        TearOutStage::CreateWindow,
-                        error.to_string(),
-                        DestinationUnwind::nothing(),
-                    )
-                })?;
-                let create_window_ms = create_start.elapsed().as_secs_f32() * 1000.0;
-                window.set_ime_allowed(true);
-                // A dormant adapter must exist before the destination is first shown.
-                self.install_accessibility(event_loop, &window);
-                let shared_gpu = self.shared_gpu_context();
-                let renderer_settings = self.tear_out_renderer_settings("child");
-                let renderer_start = Instant::now();
-                let mut renderer = shared_gpu
-                    .map_or_else(
-                        || {
-                            GpuRenderer::new(
-                                window.clone(),
-                                event_loop,
-                                &self.theme,
-                                renderer_settings,
-                            )
-                        },
-                        |ctx| {
-                            GpuRenderer::new_with_shared_context(
-                                window.clone(),
-                                event_loop,
-                                &self.theme,
-                                renderer_settings,
-                                ctx,
-                            )
-                        },
-                    )
-                    .map_err(|error| {
-                        DestinationFailure::new(
-                            ChildRendererOrigin::Fresh,
-                            TearOutStage::RendererInit,
-                            error.to_string(),
-                            DestinationUnwind::drop_fresh(window.clone(), None),
-                        )
-                    })?;
-                let renderer_init_ms = renderer_start.elapsed().as_secs_f32() * 1000.0;
-                let resize_start = Instant::now();
-                if !self.configure_child_renderer(
-                    &mut renderer,
-                    &window,
-                    ChildRendererOrigin::Fresh,
-                ) {
-                    // When: fresh configuration rejects the hidden destination,
-                    // its renderer and window remain owned by the failure.
-                    return Err(DestinationFailure::new(
-                        ChildRendererOrigin::Fresh,
-                        TearOutStage::RendererConfigure,
-                        "renderer rejected unsafe child size".to_owned(),
-                        DestinationUnwind::drop_fresh(window, Some(renderer)),
-                    ));
-                }
-                if !renderer.device_accepts_gpu_work() {
-                    // When: `device_accepts_gpu_work` fails, drop the fresh destination.
-                    return Err(DestinationFailure::new(
-                        ChildRendererOrigin::Fresh,
-                        TearOutStage::RendererConfigure,
-                        "fresh destination's GPU device stopped during sizing".to_owned(),
-                        DestinationUnwind::drop_fresh(window, Some(renderer)),
-                    ));
-                }
-                let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
-                (window, renderer, create_window_ms, renderer_init_ms, resize_ms)
-            }
-        };
-        let mut timing = crate::app::TearOutTiming::new(source, tear_start);
-        timing.create_window_ms = create_window_ms;
-        timing.renderer_init_ms = renderer_init_ms;
-        timing.resize_ms = resize_ms;
-        Ok(PreparedDestination { window, renderer, timing })
-    }
-
-    /// Install a fully prepared destination and then reveal it exactly once.
-    fn commit_torn_out_window(
-        &mut self,
-        mut transaction: DetachedTab,
-        mut destination: PreparedDestination,
-    ) -> Option<WindowId> {
-        let install_start = Instant::now();
-        destination.renderer.set_render_timing_label("child");
-        let win_id = destination.window.id();
-        if let Err(error) = self.register_window_with_os_drag_backend(win_id, &destination.window) {
-            // When: native registration refuses the destination, preserve the detached source before any ownership transfer.
-            drop(destination);
-            self.rollback_detached_tab(transaction);
-            tracing::error!(?win_id, %error, "tear-out native drop-target registration failed; source restored");
-            return None;
-        }
-        if !destination.renderer.device_accepts_gpu_work() {
-            // When: device_accepts_gpu_work fails after native registration, revoke custody before restoring the source.
-            self.release_child_window_registries(win_id);
-            drop(destination);
-            self.rollback_detached_tab(transaction);
-            tracing::warn!(
-                ?win_id,
-                "tear-out GPU device stopped during registration; source restored"
-            );
-            return None;
-        }
-        let owner = self
-            .governor
-            .create_child(
-                self.governor.root_owner(),
-                super::OwnerKind::Window,
-                super::tracking_only_owner_limits(),
-            )
-            .map(|id| super::OwnerGuard::new(self.governor.clone(), id))
-            .ok();
-        let mut child_tabs = TabBar::new();
-        child_tabs.push(transaction.tab.clone());
-        let mut tab_states = Vec::with_capacity(1);
-        self.windows.reserve(1);
-        if let Err(error) = self
-            .transfer_pane_owners(&mut transaction.panes, owner.as_ref().map(super::OwnerGuard::id))
-        {
-            // When: transfer_pane_owners refuses custody, release native registration before retiring hidden artifacts.
-            self.release_child_window_registries(win_id);
-            drop(destination);
-            drop(owner);
-            self.rollback_detached_tab(transaction);
-            tracing::warn!(?error, "tear-out accounting refused; source transaction restored");
-            return None;
-        }
-        tab_states.push(transaction.state);
-        // Each independent redraw-target guard is released before the pane map
-        // moves into the destination window; no two pane locks are nested.
-        for pane in transaction.panes.values() {
-            *pane.redraw_target.lock() = Some(win_id);
-        }
-
-        // Both pacing clocks start at one instant, so neither paces a new window differently.
-        let created_at = Instant::now();
-        let child = WindowState {
-            owner,
-            pending_receipts: Vec::new(),
-            role: crate::app::WindowRole::Terminal,
-            custom_window_name: String::new(),
-            window: Some(destination.window.clone()),
-            renderer: Some(destination.renderer),
-            tabs: child_tabs,
-            tab_states,
-            panes: transaction.panes,
-            cursor_pos: (0.0, 0.0),
-            mouse_down: false,
-            pointer_gesture: None,
-            selection: None,
-            last_click_time: None,
-            last_click_cell: (0, 0),
-            click_count: 0,
-            select_mode: SelectMode::Cell,
-            select_anchor: (0, 0),
-            copy_mode: None,
-            modifiers: ModifiersState::empty(),
-            pty_pressed_keys: std::collections::HashMap::new(),
-            last_render: created_at,
-            stream_clock: created_at,
-            retry_not_before: None,
-            visible_frame_invalid: false,
-            redraw: Default::default(),
-            display_link: Default::default(),
-            hover_link: false,
-            hover_unresolved: false,
-            pressed_tab: None,
-            drag_session: None,
-            drag_target: None,
-            dpi_scale: 1.0,
-            ime: ImeState::new(),
-            ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
-            hovered_url: None,
-            link_preview: None,
-            path_probe: crate::app::path_target::PathProbeState::default(),
-            status_strip: None,
-            sel_status: Default::default(),
-            ime_discarded_at: None,
-            alert_settings: None,
-            hover_detection: crate::app::path_target::HoverDetectionCache::default(),
-            notification: None,
-            hidden: false,
-            scrollbar_drag: None,
-            splitter_drag: None,
-            splitter_hover: None,
-            scrollbar_vis: std::collections::HashMap::new(),
-            pending_tear_out_timing: Some(destination.timing),
-            test_drag_chip_marker: None,
-            test_renderer_focus_marker: None,
-            test_pane_viewport: None,
-            #[cfg(test)]
-            test_image_atlas_release: None,
-            #[cfg(test)]
-            test_strip_settings: None,
-        };
-        self.insert_window_registered(win_id, child);
-        // Now that the child WindowState exists, size each migrated pane to
-        // its OWN split sub-rect (via compute_pane_rects_for) instead of the
-        // full child grid. Sizing every pane to the whole `(cols, rows)` is
-        // what makes a torn-out SPLIT overlap — the left pane stays
-        // full-window wide and wraps/paints across the divider into the right
-        // pane. For a single-pane tab this is equivalent to a full-grid resize.
-        if let Some(child) = self.windows.get_mut(&win_id) {
-            super::child_window::resize_visible_panes_in_child(child);
-        }
-        if let Some(child) = self.windows.get_mut(&win_id) {
-            if let Some(timing) = child.pending_tear_out_timing.as_mut() {
-                timing.install_ms = install_start.elapsed().as_secs_f32() * 1000.0;
-                tracing::warn!(
-                    target: "tear_out_timing",
-                    source = timing.source,
-                    create_window_ms = timing.create_window_ms,
-                    renderer_init_ms = timing.renderer_init_ms,
-                    resize_ms = timing.resize_ms,
-                    install_ms = timing.install_ms,
-                    "tear-out install latency breakdown"
-                );
-            }
-        }
-        // Both origins were hidden throughout preparation. The destination is
-        // now registered and sized, so its first visible frame is complete.
-        destination.window.set_visible(true);
-        crate::app::frame_counters::request_native_redraw(&destination.window);
-        // A consumed pooled window is not replaced here; the pool refills on
-        // the next idle tick rather than on this path.
-        self.frontmost_window = Some(win_id);
-        Some(win_id)
-    }
-
     /// source-side post-tear-out cleanup, factored
     /// out so unit tests can drive it without an `ActiveEventLoop`.
     ///
@@ -1264,3 +709,214 @@ mod tear_out_tests;
 #[cfg(test)]
 #[path = "tear_out_timing_tests.rs"]
 mod tear_out_timing_tests;
+
+#[path = "tear_out_warm.rs"]
+mod warm;
+use warm::live_renderer_settings;
+#[path = "tear_out_destination.rs"]
+mod destination;
+
+impl App {
+    /// Install a fully prepared destination and then reveal it exactly once.
+    fn commit_torn_out_window(
+        &mut self,
+        mut transaction: DetachedTab,
+        mut destination: PreparedDestination,
+    ) -> Option<WindowId> {
+        let install_start = Instant::now();
+        destination.renderer.set_render_timing_label("child");
+        let win_id = destination.window.id();
+        if let Err(error) = self.register_window_with_os_drag_backend(win_id, &destination.window) {
+            // When: native registration refuses the destination, preserve the detached source before any ownership transfer.
+            drop(destination);
+            self.rollback_detached_tab(transaction);
+            tracing::error!(?win_id, %error, "tear-out native drop-target registration failed; source restored");
+            return None;
+        }
+        if !destination.renderer.device_accepts_gpu_work() {
+            // When: device_accepts_gpu_work fails after native registration, revoke custody before restoring the source.
+            self.release_child_window_registries(win_id);
+            drop(destination);
+            self.rollback_detached_tab(transaction);
+            tracing::warn!(
+                ?win_id,
+                "tear-out GPU device stopped during registration; source restored"
+            );
+            return None;
+        }
+        let owner = self
+            .governor
+            .create_child(
+                self.governor.root_owner(),
+                super::OwnerKind::Window,
+                super::tracking_only_owner_limits(),
+            )
+            .map(|id| super::OwnerGuard::new(self.governor.clone(), id))
+            .ok();
+        let mut child_tabs = TabBar::new();
+        child_tabs.push(transaction.tab.clone());
+        let mut tab_states = Vec::with_capacity(1);
+        self.windows.reserve(1);
+        if let Err(error) = self
+            .transfer_pane_owners(&mut transaction.panes, owner.as_ref().map(super::OwnerGuard::id))
+        {
+            // When: transfer_pane_owners refuses custody, release native registration before retiring hidden artifacts.
+            self.release_child_window_registries(win_id);
+            drop(destination);
+            drop(owner);
+            self.rollback_detached_tab(transaction);
+            tracing::warn!(?error, "tear-out accounting refused; source transaction restored");
+            return None;
+        }
+        tab_states.push(transaction.state);
+        // Each independent redraw-target guard is released before the pane map
+        // moves into the destination window; no two pane locks are nested.
+        for pane in transaction.panes.values() {
+            *pane.redraw_target.lock() = Some(win_id);
+        }
+
+        // Both pacing clocks start at one instant, so neither paces a new window differently.
+        let created_at = Instant::now();
+        let child = WindowState {
+            owner,
+            pending_receipts: Vec::new(),
+            role: crate::app::WindowRole::Terminal,
+            custom_window_name: String::new(),
+            window: Some(destination.window.clone()),
+            renderer: Some(destination.renderer),
+            tabs: child_tabs,
+            tab_states,
+            panes: transaction.panes,
+            cursor_pos: (0.0, 0.0),
+            mouse_down: false,
+            pointer_gesture: None,
+            selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
+            copy_mode: None,
+            modifiers: ModifiersState::empty(),
+            pty_pressed_keys: std::collections::HashMap::new(),
+            last_render: created_at,
+            stream_clock: created_at,
+            retry_not_before: None,
+            visible_frame_invalid: false,
+            redraw: Default::default(),
+            display_link: Default::default(),
+            hover_link: false,
+            hover_unresolved: false,
+            pressed_tab: None,
+            drag_session: None,
+            drag_target: None,
+            dpi_scale: 1.0,
+            ime: ImeState::new(),
+            ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
+            hovered_url: None,
+            link_preview: None,
+            path_probe: crate::app::path_target::PathProbeState::default(),
+            status_strip: None,
+            sel_status: Default::default(),
+            ime_discarded_at: None,
+            alert_settings: None,
+            hover_detection: crate::app::path_target::HoverDetectionCache::default(),
+            notification: None,
+            hidden: false,
+            scrollbar_drag: None,
+            splitter_drag: None,
+            splitter_hover: None,
+            scrollbar_vis: std::collections::HashMap::new(),
+            pending_tear_out_timing: Some(destination.timing),
+            test_drag_chip_marker: None,
+            test_renderer_focus_marker: None,
+            test_pane_viewport: None,
+            #[cfg(test)]
+            test_image_atlas_release: None,
+            #[cfg(test)]
+            test_strip_settings: None,
+        };
+        self.insert_window_registered(win_id, child);
+        // Now that the child WindowState exists, size each migrated pane to
+        // its OWN split sub-rect (via compute_pane_rects_for) instead of the
+        // full child grid. Sizing every pane to the whole `(cols, rows)` is
+        // what makes a torn-out SPLIT overlap — the left pane stays
+        // full-window wide and wraps/paints across the divider into the right
+        // pane. For a single-pane tab this is equivalent to a full-grid resize.
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            super::child_window::resize_visible_panes_in_child(child);
+        }
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            if let Some(timing) = child.pending_tear_out_timing.as_mut() {
+                timing.install_ms = install_start.elapsed().as_secs_f32() * 1000.0;
+                tracing::warn!(
+                    target: "tear_out_timing",
+                    source = timing.source,
+                    create_window_ms = timing.create_window_ms,
+                    renderer_init_ms = timing.renderer_init_ms,
+                    resize_ms = timing.resize_ms,
+                    install_ms = timing.install_ms,
+                    "tear-out install latency breakdown"
+                );
+            }
+        }
+        // Both origins were hidden throughout preparation. The destination is
+        // now registered and sized, so its first visible frame is complete.
+        destination.window.set_visible(true);
+        crate::app::frame_counters::request_native_redraw(&destination.window);
+        // A consumed pooled window is not replaced here; the pool refills on
+        // the next idle tick rather than on this path.
+        self.frontmost_window = Some(win_id);
+        Some(win_id)
+    }
+}
+
+impl App {
+    pub(super) fn configure_child_renderer(
+        &self,
+        renderer: &mut GpuRenderer,
+        window: &Window,
+        origin: ChildRendererOrigin,
+    ) -> bool {
+        if let Some(proxy) = self.event_loop_proxy.clone() {
+            // Preserve generation-tagged recovery notifications through the available event-loop proxy.
+            renderer.set_device_state_waker(super::gpu_recovery::generation_waker(
+                proxy.clone(),
+                renderer.device_generation(),
+            ));
+            // A fallback face published for this window's fonts wakes this window.
+            renderer.set_font_fallback_waker(super::font_fallback_waker(proxy, window.id()));
+        }
+        renderer.set_cursor_shape(self.config.terminal.cursor_shape);
+        renderer.set_cursor_blink(self.config.terminal.cursor_blink);
+        renderer.set_software_render_degrade(crate::app::should_degrade_for_software_render(
+            self.config.appearance.software_render_mode,
+            renderer.is_software_rendering(),
+        ));
+        renderer.set_titlebar_inset(0.0);
+        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
+        let live = live_renderer_settings(&self.config, &self.theme, self.tab_bar_visible, origin);
+        // RendererSettings does not carry tab-bar visibility, so every fresh or
+        // pooled child receives the current app value here.
+        renderer.set_subpixel_aa_mode(live.subpixel_aa);
+        renderer.set_tab_bar_visible(live.tab_bar_visible);
+        super::install_native_window_background(window, live.background);
+        if let Some(font) = live.font {
+            // Runtime font-weight and theme actions walk visible windows only.
+            // A pooled renderer captured both values when it was hidden, so
+            // adoption must resynchronize it before its first visible frame.
+            // Fresh renderers already received them from their constructors and
+            // `live.font` is None, skipping the expensive atlas/font rebuild.
+            renderer.set_font(font.family, font.size, font.line_height, font.weight_scale);
+        }
+        if let Some(theme) = live.theme {
+            renderer.set_theme(theme);
+        }
+        let real_sf = window_dpi(window);
+        renderer.force_rebuild_for_scale(real_sf);
+        let target = super::apply_terminal_window_minimum(window, renderer);
+        // A configured child presents its first frame, which no synchronized hold can keep back.
+        renderer.try_resize_outcome(target.width.max(1), target.height.max(1))
+            != sonicterm_gpu::core::ResizeOutcome::Rejected
+    }
+}

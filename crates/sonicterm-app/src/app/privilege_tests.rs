@@ -142,7 +142,16 @@ fn inactive_tab_foreground_privilege_refreshes_without_moving_focus_or_changing_
 fn main_and_child_render_paths_refresh_visible_tab_privilege_state() {
     // Protect the indexed privilege refresh from being omitted by either window render path.
     for (name, source) in [
-        ("main", include_str!("window_event.rs")),
+        (
+            "main",
+            concat!(
+                include_str!("window_event.rs"),
+                "\n",
+                include_str!("window_event_pointer.rs"),
+                "\n",
+                include_str!("window_event_redraw.rs")
+            ),
+        ),
         ("child", concat!(include_str!("child_window.rs"), include_str!("child_window_redraw.rs"))),
     ] {
         assert!(
@@ -156,7 +165,17 @@ fn main_and_child_render_paths_refresh_visible_tab_privilege_state() {
 fn main_and_child_render_paths_forward_the_same_process_privilege_snapshot() {
     // Protect torn-out windows from omitting or independently recomputing the process warning.
     for (name, source, tabs) in [
-        ("main", include_str!("window_event.rs"), "tabs_mref"),
+        (
+            "main",
+            concat!(
+                include_str!("window_event.rs"),
+                "\n",
+                include_str!("window_event_pointer.rs"),
+                "\n",
+                include_str!("window_event_redraw.rs")
+            ),
+            "tabs_mref",
+        ),
         (
             "child",
             concat!(include_str!("child_window.rs"), include_str!("child_window_redraw.rs")),

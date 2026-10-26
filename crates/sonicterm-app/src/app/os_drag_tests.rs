@@ -62,10 +62,28 @@ fn every_native_creation_selects_drop_ownership_before_create_window() {
     for (source, creations) in [
         (include_str!("event_loop.rs"), 1),
         (include_str!("event_loop/windows.rs"), 0),
-        (include_str!("tear_out.rs"), 2),
+        (
+            concat!(
+                include_str!("tear_out.rs"),
+                "\n",
+                include_str!("tear_out_destination.rs"),
+                "\n",
+                include_str!("tear_out_warm.rs")
+            ),
+            2,
+        ),
         (include_str!("tear_out/drag_target.rs"), 0),
         (include_str!("tear_out/os_handoff.rs"), 0),
-        (include_str!("misc.rs"), 1),
+        (
+            concat!(
+                include_str!("misc.rs"),
+                "\n",
+                include_str!("misc_clipboard.rs"),
+                "\n",
+                include_str!("misc_window_create.rs")
+            ),
+            1,
+        ),
     ] {
         let selected: Vec<_> = source.match_indices("self.native_drop_attributes(attrs)").collect();
         let created: Vec<_> = source
@@ -95,14 +113,25 @@ fn drop_registration_precedes_irreversible_destination_effects() {
         startup.find("register_window_with_os_drag_backend").unwrap()
             < startup.find("self.seed_initial_tabs()").unwrap()
     );
-    let new_window = include_str!("misc.rs");
-    let new_window =
-        &new_window[new_window.find("pub(super) fn create_new_terminal_window(").unwrap()..];
+    let new_window = concat!(
+        include_str!("misc.rs"),
+        "\n",
+        include_str!("misc_clipboard.rs"),
+        "\n",
+        include_str!("misc_window_create.rs")
+    );
+    let new_window = &new_window[new_window.find("fn create_new_terminal_window(").unwrap()..];
     assert!(
         new_window.find("register_window_with_os_drag_backend").unwrap()
             < new_window.find("spawn_pane_state_for_child").unwrap()
     );
-    let tear_out = include_str!("tear_out.rs");
+    let tear_out = concat!(
+        include_str!("tear_out.rs"),
+        "\n",
+        include_str!("tear_out_destination.rs"),
+        "\n",
+        include_str!("tear_out_warm.rs")
+    );
     let tear_out = &tear_out[tear_out.find("fn commit_torn_out_window(").unwrap()..];
     let register = tear_out.find("register_window_with_os_drag_backend").unwrap();
     let transfer = tear_out.find("transfer_pane_owners").unwrap();

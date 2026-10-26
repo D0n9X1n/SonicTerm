@@ -206,7 +206,13 @@ fn every_pointer_move_and_leave_is_recorded_before_any_handler() {
         dispatch(&mut app, window, &WindowEvent::CursorLeft { device_id: DeviceId::dummy() });
         assert_eq!(app.windows[&window].cursor_pos, (-1.0, -1.0));
     }
-    let source = include_str!("window_event.rs");
+    let source = concat!(
+        include_str!("window_event.rs"),
+        "\n",
+        include_str!("window_event_pointer.rs"),
+        "\n",
+        include_str!("window_event_redraw.rs")
+    );
     let record = source
         .find("self.record_window_pointer(win_id, &event);")
         .expect("the dispatcher records the pointer");
@@ -414,9 +420,19 @@ fn a_dpi_change_reaches_the_renderer_that_measures_the_tabs() {
     // winit alone builds a ScaleFactorChanged event, so this pins its route: both windows hand
     // the new scale to the renderer, whose tab font key includes it, and the dispatcher marks
     // the window for the redraw that measures the tabs again.
-    for (name, source) in
-        [("main", include_str!("window_event.rs")), ("child", include_str!("child_window.rs"))]
-    {
+    for (name, source) in [
+        (
+            "main",
+            concat!(
+                include_str!("window_event.rs"),
+                "\n",
+                include_str!("window_event_pointer.rs"),
+                "\n",
+                include_str!("window_event_redraw.rs")
+            ),
+        ),
+        ("child", include_str!("child_window.rs")),
+    ] {
         let arm = source
             .find("WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale")
             .expect("scale arm");
@@ -427,7 +443,13 @@ fn a_dpi_change_reaches_the_renderer_that_measures_the_tabs() {
     assert!(
         include_str!("window_setup.rs").contains("renderer.set_scale_factor(dpi_scale as f32);")
     );
-    let dispatcher = include_str!("window_event.rs");
+    let dispatcher = concat!(
+        include_str!("window_event.rs"),
+        "\n",
+        include_str!("window_event_pointer.rs"),
+        "\n",
+        include_str!("window_event_redraw.rs")
+    );
     let mark = dispatcher
         .find("window.mark_redraw(super::redraw::RedrawCause::Input);")
         .expect("input mark");
@@ -442,7 +464,16 @@ fn only_the_redraw_paths_measure_tab_widths() {
     // right before drawing and settles the widths on the frame's outcome, so the pointer, drag,
     // tear-out and snapshot paths read the widths of the frame on screen.
     for (name, source) in [
-        ("main", include_str!("window_event.rs")),
+        (
+            "main",
+            concat!(
+                include_str!("window_event.rs"),
+                "\n",
+                include_str!("window_event_pointer.rs"),
+                "\n",
+                include_str!("window_event_redraw.rs")
+            ),
+        ),
         ("child", include_str!("child_window_redraw.rs")),
     ] {
         let hold = source
@@ -470,7 +501,7 @@ fn only_the_redraw_paths_measure_tab_widths() {
         ("window_pointer", include_str!("window_pointer.rs")),
         ("child_window_pointer", include_str!("child_window_pointer.rs")),
         ("child_window", include_str!("child_window.rs")),
-        ("os_drag", include_str!("os_drag.rs")),
+        ("os_drag", concat!(include_str!("os_drag.rs"), "\n", include_str!("os_drag_registry.rs"))),
         ("drag_target", include_str!("tear_out/drag_target.rs")),
     ] {
         assert!(!source.contains("measure_tab_widths"), "{name} must read the stored widths");

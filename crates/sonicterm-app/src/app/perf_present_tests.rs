@@ -185,7 +185,14 @@ fn only_a_presented_attempt_emits_its_lines() {
 /// settles, numbering them with the main renderer's presented count.
 #[test]
 fn the_main_redraw_records_under_its_guards_and_commits_after_settling() {
-    let source = include_str!("window_event.rs").replace("\r\n", "\n");
+    let source = concat!(
+        include_str!("window_event.rs"),
+        "\n",
+        include_str!("window_event_pointer.rs"),
+        "\n",
+        include_str!("window_event_redraw.rs")
+    )
+    .replace("\r\n", "\n");
     let at = |needle: &str| source.find(needle).unwrap_or_else(|| panic!("{needle}"));
     let recheck = at("self.abandon_synchronized_frame(win_id, &sync_states, now)");
     let collect = at("self.s10_candidates(");

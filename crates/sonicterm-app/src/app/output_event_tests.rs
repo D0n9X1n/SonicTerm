@@ -459,7 +459,7 @@ fn output_arms_route_only_through_the_service_and_only_the_worker_builds_pane_ou
         }
     }
     builders.sort();
-    assert_eq!(builders, ["spawn_pane.rs: UserEvent::PaneOutput"]);
+    assert_eq!(builders, ["spawn_pane_output.rs: UserEvent::PaneOutput"]);
 }
 
 /// `owners()` with the alerts segment listed on the child window's strip.

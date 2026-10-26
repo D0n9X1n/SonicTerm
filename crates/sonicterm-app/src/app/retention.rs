@@ -91,126 +91,6 @@ pub struct PaneRetention {
     pub pty_input: ResourceAmount,
 }
 
-impl PaneRetention {
-    /// Sum of every seam.
-    ///
-    /// Saturating rather than checked: this figure exists to be reported, and
-    /// a diagnostic that fails to render when the number is alarmingly large
-    /// is a diagnostic that is absent exactly when it is needed. The seams are
-    /// individually capped well below `usize::MAX`, so saturation is
-    /// unreachable in practice.
-    #[must_use]
-    pub fn total(&self) -> ResourceAmount {
-        [
-            self.grid_visible,
-            self.grid_history,
-            self.grid_alternate,
-            self.parser,
-            self.hyperlinks,
-            self.inline_media,
-            self.pty_output,
-            self.pty_input,
-        ]
-        .into_iter()
-        .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
-            bytes: acc.bytes.saturating_add(part.bytes),
-            items: acc.items.saturating_add(part.items),
-        })
-    }
-
-    /// The seam holding the most bytes, for reporting the dominant term first.
-    #[must_use]
-    pub fn largest_seam(&self) -> (&'static str, ResourceAmount) {
-        [
-            ("grid_visible", self.grid_visible),
-            ("grid_history", self.grid_history),
-            ("grid_alternate", self.grid_alternate),
-            ("parser", self.parser),
-            ("hyperlinks", self.hyperlinks),
-            ("inline_media", self.inline_media),
-            ("pty_output", self.pty_output),
-            ("pty_input", self.pty_input),
-        ]
-        .into_iter()
-        .max_by_key(|(_, amount)| amount.bytes)
-        .unwrap_or(("grid_visible", ResourceAmount::default()))
-    }
-}
-
-/// Measure what `pane` retains right now.
-///
-/// Takes the parser and inline-media locks briefly. Callers on the render path
-/// must not block on either — this is for diagnostics and periodic reporting,
-/// not per-frame use. Returns `None` when either lock is held, so a busy pane
-/// delays a complete measurement rather than reporting a partial one as exact.
-#[must_use]
-pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
-    let parser = pane.parser.try_lock()?;
-    let regions = parser.grid().retained_amount_by_region();
-    let hyperlink_bytes = parser.hyperlinks().retained_bytes();
-    let hyperlink_items = parser.hyperlinks().len();
-    let parser_amount = parser.retained_amount();
-    drop(parser);
-
-    let inline_images = pane.inline_images.try_lock()?;
-    let inline_media = super::media::retained_inline_media(&inline_images);
-    drop(inline_images);
-
-    // Ring memory, not payload: the queued views are windows into the reader's
-    // reused 64 KiB ring, so a pane holding 64 bytes of keystroke echo is
-    // holding 64 KiB. `items` is the queued chunk count, which is what the
-    // slot bound is expressed in.
-    let pty_output = pane.pty.as_ref().map_or_else(ResourceAmount::default, |pty| ResourceAmount {
-        bytes: sonicterm_io::pty::queued_output_bytes(pty),
-        items: pty.out_rx.len(),
-    });
-
-    let pty_input = pane.pty.as_ref().map_or_else(ResourceAmount::default, |pty| {
-        let bytes = pty.queued_input_bytes();
-        ResourceAmount { bytes, items: usize::from(bytes > 0) }
-    });
-
-    Some(PaneRetention {
-        grid_visible: regions.visible,
-        grid_history: regions.history,
-        grid_alternate: regions.alternate,
-        parser: parser_amount,
-        hyperlinks: ResourceAmount { bytes: hyperlink_bytes, items: hyperlink_items },
-        inline_media,
-        pty_output,
-        pty_input,
-    })
-}
-
-/// Sum retention across panes.
-///
-/// The per-pane figures are each bounded; this is the number that is not. A
-/// session's total is the product of its pane count and per-pane ceilings,
-/// with nothing above the pane saying no — which is why it is worth reporting
-/// even though every contributing pane is individually compliant.
-#[must_use]
-pub fn measure_panes<'a>(panes: impl IntoIterator<Item = &'a PaneState>) -> PaneRetention {
-    panes.into_iter().filter_map(measure_pane).fold(PaneRetention::default(), |acc, pane| {
-        PaneRetention {
-            grid_visible: add(acc.grid_visible, pane.grid_visible),
-            grid_history: add(acc.grid_history, pane.grid_history),
-            grid_alternate: add(acc.grid_alternate, pane.grid_alternate),
-            parser: add(acc.parser, pane.parser),
-            hyperlinks: add(acc.hyperlinks, pane.hyperlinks),
-            inline_media: add(acc.inline_media, pane.inline_media),
-            pty_output: add(acc.pty_output, pane.pty_output),
-            pty_input: add(acc.pty_input, pane.pty_input),
-        }
-    })
-}
-
-fn add(left: ResourceAmount, right: ResourceAmount) -> ResourceAmount {
-    ResourceAmount {
-        bytes: left.bytes.saturating_add(right.bytes),
-        items: left.items.saturating_add(right.items),
-    }
-}
-
 /// Bring every pane's inline media back inside the process ceiling.
 ///
 /// Returns the bytes reclaimed, so a caller can log the figure and a test can
@@ -288,32 +168,6 @@ pub(crate) fn trim_panes_over_pool_ceiling<'a>(
         reclaimed = reclaimed.saturating_add(before.saturating_sub(after));
     }
     reclaimed
-}
-
-/// Emit one pane's retention to the memory log.
-///
-/// Reports the dominant seam explicitly: a total on its own says a pane is
-/// large without saying which subsystem to look at, and the remedy differs
-/// per seam.
-pub fn log_pane_retention(label: &str, retention: &PaneRetention) {
-    let total = retention.total();
-    let (seam, largest) = retention.largest_seam();
-    tracing::debug!(
-        target: "memory",
-        pane = label,
-        total_bytes = total.bytes,
-        grid_visible_bytes = retention.grid_visible.bytes,
-        grid_history_bytes = retention.grid_history.bytes,
-        grid_alternate_bytes = retention.grid_alternate.bytes,
-        parser_bytes = retention.parser.bytes,
-        hyperlink_bytes = retention.hyperlinks.bytes,
-        inline_media_bytes = retention.inline_media.bytes,
-        pty_output_bytes = retention.pty_output.bytes,
-        pty_input_bytes = retention.pty_input.bytes,
-        largest_seam = seam,
-        largest_seam_bytes = largest.bytes,
-        "pane retention"
-    );
 }
 
 /// How often pane retention is sampled for the memory log.
@@ -1007,109 +861,42 @@ impl TrimSource {
     }
 }
 
-/// Every eligibility rule of a covered-window trim except the renderer itself, device-free.
-///
-/// `device_accepts` is `None` without a renderer, else whether its device accepts GPU work. The
-/// renderer is checked last, so a test without a device can prove every earlier rule passed.
-pub(super) fn trim_eligibility(
-    redraw: &super::redraw::WindowRedrawState,
-    device_accepts: Option<bool>,
-    now: Instant,
-    rule: TrimRule,
-) -> Result<(), TrimSkip> {
-    let Some(occluded_since) = redraw.occluded_since.filter(|_| redraw.native_occluded) else {
-        // When: native_occluded is false or occluded_since is None, the window is not covered.
-        return Err(TrimSkip::NotOccluded);
-    };
-    if rule == TrimRule::After30s
-        && now.saturating_duration_since(occluded_since) < COVERED_TRIM_AFTER
-    {
-        // When: rule is After30s and the covered stretch is shorter than COVERED_TRIM_AFTER.
-        return Err(TrimSkip::TooRecent);
-    }
-    if redraw.trimmed {
-        // When: trimmed is set, this covered stretch was already trimmed once.
-        return Err(TrimSkip::AlreadyTrimmed);
-    }
-    if redraw.parked {
-        // When: parked is set, the window's topology is invalid and its renderer must stay as is.
-        return Err(TrimSkip::Parked);
-    }
-    if redraw.stopped_generation.is_some() || device_accepts == Some(false) {
-        // When: stopped_generation is set or device_accepts is false, recovery owns the renderer.
-        return Err(TrimSkip::DeviceUnavailable);
-    }
-    if device_accepts.is_none() {
-        // When: device_accepts is None, the window has no renderer to trim.
-        return Err(TrimSkip::NoRenderer);
-    }
-    Ok(())
-}
-
-impl super::App {
-    /// Trim window `window_id`'s renderer when every covered-window rule holds under `rule`.
-    ///
-    /// The one production body behind both the retention pass and the perf hook. A skipped or
-    /// refused trim changes nothing; a trim numbers itself in `trim_seq` and marks the stretch.
-    pub(super) fn trim_window_if_eligible(
-        &mut self,
-        window_id: WindowId,
-        now: Instant,
-        rule: TrimRule,
-    ) -> TrimDecision {
-        if self.is_warm_window_id(window_id) {
-            // When: is_warm_window_id names a warm spare, it was never shown and is never trimmed.
-            return TrimDecision::Skipped(TrimSkip::Warm);
-        }
-        let Some(window) = self.windows.get_mut(&window_id) else {
-            // When: window_id names no live window, there is nothing to trim.
-            return TrimDecision::Skipped(TrimSkip::NoWindow);
-        };
-        let device_accepts =
-            window.renderer.as_ref().map(|renderer| renderer.device_accepts_gpu_work());
-        if let Err(reason) = trim_eligibility(&window.redraw, device_accepts, now, rule) {
-            // When: trim_eligibility refuses, the reason is reported and nothing is released.
-            return TrimDecision::Skipped(reason);
-        }
-        let Some(renderer) = window.renderer.as_mut() else {
-            // When: renderer is None, which trim_eligibility already excluded.
-            return TrimDecision::Skipped(TrimSkip::NoRenderer);
-        };
-        let report = renderer.trim_for_occlusion();
-        if report.refused {
-            // When: report.refused, the device stopped between the check and the trim.
-            return TrimDecision::Skipped(TrimSkip::DeviceUnavailable);
-        }
-        window.redraw.trimmed = true;
-        window.redraw.trim_released_requested_bytes = report.gpu_released_requested_bytes;
-        self.trim_seq += 1;
-        self.last_trim_source = Some(rule.source());
-        TrimDecision::Trimmed { trim_seq: self.trim_seq }
-    }
-
-    /// The retention pass's trim: every live window covered for 30 s gives back what it can rebuild.
-    pub(super) fn trim_covered_renderers(&mut self, now: Instant) {
-        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
-        for window_id in window_ids {
-            let decision = self.trim_window_if_eligible(window_id, now, TrimRule::After30s);
-            #[cfg(test)]
-            self.test_scheduler_trims.push((window_id, decision));
-            #[cfg(not(test))]
-            let _ = decision;
-        }
-    }
-
-    /// Trim window `window_id`'s renderer now, as the covered-window retention rule would but
-    /// without its 30 s age, for a perf checkpoint. Every other rule applies; it runs no
-    /// retention pass, reclamation or charge and leaves the sample cadence alone.
-    #[cfg(any(test, feature = "perf-hook-trim"))]
-    #[doc(hidden)]
-    pub fn __trim_covered_now(&mut self, window_id: WindowId) -> TrimDecision {
-        let now = (self.dispatch_clock)();
-        self.trim_window_if_eligible(window_id, now, TrimRule::IgnoreAge)
-    }
-}
-
 #[cfg(test)]
 #[path = "retention_tests.rs"]
 mod retention_tests;
+
+#[path = "retention_measure.rs"]
+mod measure;
+use measure::add;
+pub use measure::{measure_pane, measure_panes};
+#[path = "retention_trim.rs"]
+mod trim;
+
+/// Emit one pane's retention to the memory log.
+///
+/// Reports the dominant seam explicitly: a total on its own says a pane is
+/// large without saying which subsystem to look at, and the remedy differs
+/// per seam.
+pub fn log_pane_retention(label: &str, retention: &PaneRetention) {
+    let total = retention.total();
+    let (seam, largest) = retention.largest_seam();
+    tracing::debug!(
+        target: "memory",
+        pane = label,
+        total_bytes = total.bytes,
+        grid_visible_bytes = retention.grid_visible.bytes,
+        grid_history_bytes = retention.grid_history.bytes,
+        grid_alternate_bytes = retention.grid_alternate.bytes,
+        parser_bytes = retention.parser.bytes,
+        hyperlink_bytes = retention.hyperlinks.bytes,
+        inline_media_bytes = retention.inline_media.bytes,
+        pty_output_bytes = retention.pty_output.bytes,
+        pty_input_bytes = retention.pty_input.bytes,
+        largest_seam = seam,
+        largest_seam_bytes = largest.bytes,
+        "pane retention"
+    );
+}
+
+#[cfg(test)]
+use trim::trim_eligibility;

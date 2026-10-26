@@ -448,7 +448,13 @@ fn reopened_palette_does_not_inherit_the_capture() {
 /// The shared field handler runs before the palette modal handler in window dispatch.
 #[test]
 fn field_pointer_runs_before_the_palette_modal() {
-    const SRC: &str = include_str!("window_event.rs");
+    const SRC: &str = concat!(
+        include_str!("window_event.rs"),
+        "\n",
+        include_str!("window_event_pointer.rs"),
+        "\n",
+        include_str!("window_event_redraw.rs")
+    );
     // Both run inside `route_shared_pointer`, which main and torn-out windows share.
     let field = SRC.find("self.field_pointer_event(win_id, event)").expect("field hook");
     let modal =

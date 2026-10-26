@@ -223,7 +223,8 @@ fn a_stale_os_sample_is_dropped() {
 /// R and Esc reach them first; the report branch sits only inside the terminal owner's arm.
 #[test]
 fn report_keys_run_only_after_composition_search_and_copy_mode() {
-    let source = include_str!("window_keyboard.rs");
+    let source =
+        concat!(include_str!("window_keyboard.rs"), "\n", include_str!("window_keyboard_ime.rs"));
     let terminal_arm = source.find("Some(WindowKeyOwner::Terminal) =>").expect("terminal arm");
     let report_branch = source.find("self.handle_memory_report_key(").expect("report branch");
     for earlier in [

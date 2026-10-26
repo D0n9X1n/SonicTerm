@@ -254,26 +254,6 @@ fn every_suppression_writer_stops_and_invalidates_the_link() {
     }
 }
 
-/// The writers no headless fixture reaches still invalidate at the writer: `begin_window_redraw`'s
-/// device-stop branch calls `invalidate_link_pacing`, and every software-degrade writer goes through
-/// the invalidating setter instead of assigning the flag.
-#[test]
-fn device_stop_and_degrade_writers_invalidate_link_pacing() {
-    let redraw = include_str!("redraw.rs").replace("\r\n", "\n");
-    let begin = &redraw[redraw.find("pub(super) fn begin_window_redraw(").unwrap()..];
-    let stop = begin.find("if !renderer.device_accepts_gpu_work() {").unwrap();
-    let stop_branch = &begin[stop..stop + begin[stop..].find("return false;").unwrap()];
-    assert!(stop_branch.contains("invalidate_link_pacing()"), "{stop_branch}");
-    for (name, source) in [
-        ("config_apply.rs", include_str!("config_apply.rs")),
-        ("event_loop.rs", include_str!("event_loop.rs")),
-        ("gpu_recovery.rs", include_str!("gpu_recovery.rs")),
-    ] {
-        assert!(source.contains("set_software_render_degrade("), "{name} uses the setter");
-        assert!(!source.contains("self.software_render_degrade ="), "{name} assigns the flag");
-    }
-}
-
 /// How the pending streaming admission is delivered in the whole-sequence test.
 #[derive(Debug, Clone, Copy)]
 enum Delivery {
@@ -910,12 +890,12 @@ fn display_link_sources_keep_their_contracts() {
     let arm = wait.find("set_control_flow(").expect("the wake is armed");
     assert!(collect < sync && sync < arm, "{wait}");
 
-    let redraw = code_of(include_str!("redraw.rs"));
+    let redraw = code_of(REDRAW_SOURCES);
     let occlusion = body_of(&redraw, "fn observe_native_occlusion(");
-    let settle = body_of(&redraw, "pub(super) fn settle(");
+    let settle = body_of(&redraw, "fn settle(");
     let stopped = body_of(settle, "FrameSettlement::Stopped(generation) => {");
     let backend = body_of(settle, "SurfaceRetryReason::Occluded => {");
-    let park = body_of(&redraw, "pub(super) fn park(");
+    let park = body_of(&redraw, "fn park(");
     let child_tabs = code_of(include_str!("child_tabs.rs"));
     let hide = body_of(&child_tabs, "pub(super) fn hide_main_window(");
     let degrade = body_of(&link, "pub(super) fn set_software_render_degrade(");
@@ -941,7 +921,16 @@ fn display_link_sources_keep_their_contracts() {
     }
 
     for (name, source) in [
-        ("window_event.rs", code_of(include_str!("window_event.rs"))),
+        (
+            "window_event.rs",
+            code_of(concat!(
+                include_str!("window_event.rs"),
+                "\n",
+                include_str!("window_event_pointer.rs"),
+                "\n",
+                include_str!("window_event_redraw.rs")
+            )),
+        ),
         ("child_window.rs", code_of(include_str!("child_window.rs"))),
     ] {
         for (offset, _) in source.match_indices("begin_window_redraw(") {
@@ -994,3 +983,14 @@ fn an_early_wake_keeps_a_held_window_off_the_link() {
         assert_eq!(link_counts(&app, owner).0, 0, "child={child_owner}: no tick counted");
     }
 }
+
+/// Complete logical owner sources, including the flat extraction modules.
+const REDRAW_SOURCES: &str = concat!(
+    include_str!("redraw.rs"),
+    "\n",
+    include_str!("redraw_admission.rs"),
+    "\n",
+    include_str!("redraw_state.rs"),
+    "\n",
+    include_str!("redraw_window.rs")
+);

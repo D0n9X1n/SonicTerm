@@ -1,19 +1,18 @@
 use super::*;
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+pub(super) use std::sync::{Arc, Mutex};
+pub(super) use std::time::{Duration, Instant};
 
-use sonicterm_logging::graphics_memory::{GraphicsMemory, GraphicsSource};
-use sonicterm_types::ResourceAmount;
-use tracing::field::{Field, Visit};
+pub(super) use sonicterm_types::ResourceAmount;
+pub(super) use tracing::field::{Field, Visit};
 
 #[derive(Debug)]
-struct FakeRenderer {
-    id: u64,
+pub(super) struct FakeRenderer {
+    pub(super) id: u64,
 }
 
 /// Build a unique five-field allocator reading so selection and summing mistakes are visible.
-fn fake_allocator(id: u64) -> sonicterm_gpu::core::AllocatorSnapshot {
+pub(super) fn fake_allocator(id: u64) -> sonicterm_gpu::core::AllocatorSnapshot {
     sonicterm_gpu::core::AllocatorSnapshot {
         allocated_bytes: id,
         reserved_bytes: id + 10,
@@ -22,114 +21,8 @@ fn fake_allocator(id: u64) -> sonicterm_gpu::core::AllocatorSnapshot {
         largest_block_bytes: id + 40,
     }
 }
-
-/// The main renderer supplies the shared-device report exactly once.
-///
-/// A counted accessor and unique fixture values fail if production reads peer renderers or sums
-/// their reports.
-#[test]
-fn shared_allocator_is_read_once_from_the_main_renderer_without_summing() {
-    let calls = std::cell::Cell::new(0);
-    let main = FakeRenderer { id: 1 };
-    let visible_a = FakeRenderer { id: 2 };
-    let visible_b = FakeRenderer { id: 3 };
-    let warm = FakeRenderer { id: 4 };
-    let visible = [("WindowId(3)", &visible_a), ("WindowId(2)", &visible_b)];
-    let warm = [("0", &warm)];
-
-    let reading =
-        read_authoritative_allocator(Some(("WindowId(1)", &main)), &visible, &warm, |renderer| {
-            calls.set(calls.get() + 1);
-            Some(fake_allocator(renderer.id))
-        })
-        .expect("main renderer selected");
-
-    assert_eq!(calls.get(), 1);
-    assert_eq!(reading.source, AllocatorSource::MainWindow);
-    assert_eq!(reading.label, "WindowId(1)");
-    assert_eq!(reading.snapshot, Some(fake_allocator(1)));
-}
-
-/// Visible fallback chooses the lowest renderer label regardless of input order.
-///
-/// Three permutations model nondeterministic `HashMap` iteration and must produce one identical
-/// read and attribution.
-#[test]
-fn visible_allocator_selection_is_stable_across_input_order() {
-    let highest = FakeRenderer { id: 1 };
-    let lowest = FakeRenderer { id: 2 };
-    let middle = FakeRenderer { id: 3 };
-    let orders = [
-        [("WindowId(9)", &highest), ("WindowId(2)", &lowest), ("WindowId(5)", &middle)],
-        [("WindowId(5)", &middle), ("WindowId(9)", &highest), ("WindowId(2)", &lowest)],
-        [("WindowId(2)", &lowest), ("WindowId(5)", &middle), ("WindowId(9)", &highest)],
-    ];
-
-    for visible in orders {
-        let calls = std::cell::Cell::new(0);
-        let reading = read_authoritative_allocator(None, &visible, &[], |renderer| {
-            calls.set(calls.get() + 1);
-            Some(fake_allocator(renderer.id))
-        })
-        .expect("visible renderer selected");
-        assert_eq!(calls.get(), 1);
-        assert_eq!(reading.source, AllocatorSource::VisibleWindow);
-        assert_eq!(reading.label, "WindowId(2)");
-        assert_eq!(reading.snapshot, Some(fake_allocator(2)));
-    }
-}
-
-/// The first warm renderer is used only when no visible renderer is available.
-///
-/// The counted accessor proves the fallback performs one query against warm slot zero.
-#[test]
-fn allocator_selection_uses_warm_only_without_a_visible_renderer() {
-    let calls = std::cell::Cell::new(0);
-    let warm = FakeRenderer { id: 7 };
-    let reading = read_authoritative_allocator(None, &[], &[("0", &warm)], |renderer| {
-        calls.set(calls.get() + 1);
-        Some(fake_allocator(renderer.id))
-    })
-    .expect("warm renderer selected");
-
-    assert_eq!(calls.get(), 1);
-    assert_eq!(reading.source, AllocatorSource::WarmPool);
-    assert_eq!(reading.label, "0");
-    assert_eq!(reading.snapshot, Some(fake_allocator(7)));
-}
-
-/// A renderer-less snapshot performs no allocator query and returns no reading.
-///
-/// The accessor counter stays zero, distinguishing absence from an unsupported backend report.
-#[test]
-fn allocator_selection_reads_nothing_when_no_renderer_exists() {
-    let calls = std::cell::Cell::new(0);
-    let reading = read_authoritative_allocator::<FakeRenderer>(None, &[], &[], |renderer| {
-        calls.set(calls.get() + 1);
-        Some(fake_allocator(renderer.id))
-    });
-    assert_eq!(calls.get(), 0);
-    assert_eq!(reading, None);
-}
-
-/// An unsupported backend is still queried once and retained as an explicit absent report.
-///
-/// Returning `None` from the counted accessor separates backend capability from no-renderer state.
-#[test]
-fn unsupported_allocator_report_is_still_exactly_one_read() {
-    let calls = std::cell::Cell::new(0);
-    let main = FakeRenderer { id: 1 };
-    let reading = read_authoritative_allocator(Some(("WindowId(1)", &main)), &[], &[], |_| {
-        calls.set(calls.get() + 1);
-        None
-    })
-    .expect("main renderer selected");
-
-    assert_eq!(calls.get(), 1);
-    assert_eq!(reading.snapshot, None);
-}
-use tracing_subscriber::layer::{Context, SubscriberExt};
-use tracing_subscriber::{EnvFilter, Layer, Registry};
+pub(super) use tracing_subscriber::layer::{Context, SubscriberExt};
+pub(super) use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 /// One captured `tracing` event: its message, target, and every field.
 ///
@@ -139,25 +32,25 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 /// that handled only integers would silently drop exactly the fields whose
 /// presence this module is responsible for.
 #[derive(Debug, Default, Clone)]
-struct CapturedEvent {
+pub(super) struct CapturedEvent {
     message: String,
-    target: String,
-    level: String,
+    pub(super) target: String,
+    pub(super) level: String,
     numbers: Vec<(String, u64)>,
     strings: Vec<(String, String)>,
 }
 
 impl CapturedEvent {
-    fn number(&self, name: &str) -> Option<u64> {
+    pub(super) fn number(&self, name: &str) -> Option<u64> {
         self.numbers.iter().find(|(key, _)| key == name).map(|(_, value)| *value)
     }
 
-    fn text(&self, name: &str) -> Option<&str> {
+    pub(super) fn text(&self, name: &str) -> Option<&str> {
         self.strings.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
     }
 
     /// Every field name the event carried, whatever its shape.
-    fn field_names(&self) -> Vec<&str> {
+    pub(super) fn field_names(&self) -> Vec<&str> {
         self.numbers
             .iter()
             .map(|(key, _)| key.as_str())
@@ -192,7 +85,7 @@ impl Visit for CapturedEvent {
 }
 
 #[derive(Clone, Default)]
-struct CaptureLayer {
+pub(super) struct CaptureLayer {
     events: Arc<Mutex<Vec<CapturedEvent>>>,
 }
 
@@ -209,7 +102,7 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
 }
 
 /// Run `body` with a capturing subscriber and return every event it emitted.
-fn capture(body: impl FnOnce()) -> Vec<CapturedEvent> {
+pub(super) fn capture(body: impl FnOnce()) -> Vec<CapturedEvent> {
     let layer = CaptureLayer::default();
     let subscriber = Registry::default().with(layer.clone());
     sonicterm_logging::test_capture::with_default(subscriber, body);
@@ -222,7 +115,7 @@ fn capture(body: impl FnOnce()) -> Vec<CapturedEvent> {
 /// Distinct from [`capture`], which admits everything. A test that only ever
 /// runs under a permissive subscriber proves a line is emitted and says
 /// nothing about whether any shipped configuration admits it.
-fn capture_at(filter: &str, body: impl FnOnce()) -> Vec<CapturedEvent> {
+pub(super) fn capture_at(filter: &str, body: impl FnOnce()) -> Vec<CapturedEvent> {
     let layer = CaptureLayer::default();
     let subscriber = Registry::default()
         .with(EnvFilter::try_new(filter).expect("valid filter"))
@@ -236,7 +129,7 @@ fn capture_at(filter: &str, body: impl FnOnce()) -> Vec<CapturedEvent> {
 ///
 /// Distinct powers of two per pane seam: any subset sums to a unique value, so
 /// a field dropped from the emitted line cannot be masked by the others.
-fn populated_snapshot() -> MemorySnapshot {
+pub(super) fn populated_snapshot() -> MemorySnapshot {
     MemorySnapshot {
         process: ProcessMemory {
             private_committed: MemoryMetric::Bytes(1_000),
@@ -310,7 +203,7 @@ fn populated_snapshot() -> MemorySnapshot {
 }
 
 /// A snapshot holding nothing at all.
-fn empty_snapshot() -> MemorySnapshot {
+pub(super) fn empty_snapshot() -> MemorySnapshot {
     MemorySnapshot {
         process: ProcessMemory::unsupported(),
         session: PaneRetention::default(),
@@ -326,127 +219,6 @@ fn empty_snapshot() -> MemorySnapshot {
     }
 }
 
-/// The snapshot is one INFO record on the `memory` target.
-///
-/// Both halves matter. INFO is what makes it survivable — the report exists
-/// for a session that was killed, where nobody thought to raise the level
-/// first. One record is what makes it diffable: split across several, a reader
-/// would have to correlate timestamps to reconstruct a single instant.
-#[test]
-fn the_snapshot_is_a_single_info_record_on_the_memory_target() {
-    let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
-
-    assert_eq!(events.len(), 1, "the aggregate must be exactly one record, not one per subject");
-    assert_eq!(events[0].target, "memory");
-    assert_eq!(
-        events[0].level, "INFO",
-        "the snapshot must be INFO; at DEBUG it is absent from every session that did not \
-         predict its own crash"
-    );
-}
-
-/// Every field is present, including the ones holding zero.
-///
-/// A field omitted when empty makes successive samples structurally different,
-/// which defeats the diffing this line exists for. Worse, it leaves a reader
-/// unable to tell "this class held nothing" from "this class stopped being
-/// reported" — and those have opposite implications.
-#[test]
-fn every_field_is_emitted_even_when_it_holds_nothing() {
-    let events = capture(|| emit_memory_snapshot(&empty_snapshot(), None));
-    let event = &events[0];
-    let present = event.field_names();
-
-    for field in [
-        "process_private_committed_bytes",
-        "process_resident_bytes",
-        "process_virtual_bytes",
-        "process_private_committed_delta",
-        "process_resident_delta",
-        "process_virtual_delta",
-        "session_total_bytes",
-        "session_delta",
-        "grid_visible_bytes",
-        "grid_history_bytes",
-        "grid_alternate_bytes",
-        "parser_bytes",
-        "hyperlink_bytes",
-        "inline_media_bytes",
-        "pty_output_bytes",
-        "pty_input_bytes",
-        "panes_total",
-        "panes_sampled",
-        "panes_contended",
-        "renderer_total_bytes",
-        "renderer_total_items",
-        "renderer_row_glyph_cache_bytes",
-        "renderer_row_glyph_cache_items",
-        "renderer_row_quad_cache_bytes",
-        "renderer_row_quad_cache_items",
-        "renderer_delta",
-        "live_renderers",
-        "renderers",
-        "allocator_state",
-        "allocator_source",
-        "allocator_label",
-        "allocator_allocated_bytes",
-        "allocator_reserved_bytes",
-        "allocator_allocations",
-        "allocator_blocks",
-        "allocator_largest_block_bytes",
-    ] {
-        assert!(
-            present.contains(&field),
-            "{field:?} is missing from a zero-valued snapshot. Successive samples must have \
-             the same shape or they cannot be diffed. Fields present: {present:?}"
-        );
-    }
-}
-
-/// Each pane class carries its own figure, not a share of the total.
-///
-/// Distinct powers of two, so a class wired to the wrong source produces a
-/// value no other class can account for. A total-only check would pass while
-/// every class pointed at the wrong subsystem.
-#[test]
-fn each_pane_class_reports_its_own_bytes() {
-    let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
-    let event = &events[0];
-
-    assert_eq!(event.number("grid_visible_bytes"), Some(1));
-    assert_eq!(event.number("grid_history_bytes"), Some(2));
-    assert_eq!(event.number("grid_alternate_bytes"), Some(4));
-    assert_eq!(event.number("parser_bytes"), Some(8));
-    assert_eq!(event.number("hyperlink_bytes"), Some(16));
-    assert_eq!(event.number("inline_media_bytes"), Some(32));
-    assert_eq!(event.number("pty_output_bytes"), Some(64));
-    assert_eq!(event.number("pty_input_bytes"), Some(128));
-    assert_eq!(
-        event.number("session_total_bytes"),
-        Some(255),
-        "the session total must fold all eight seams; a missing term leaves a gap the other \
-         seven cannot produce"
-    );
-    assert_eq!(event.number("panes_total"), Some(4));
-    assert_eq!(event.number("panes_sampled"), Some(3));
-}
-
-/// A contended pane is counted, so a partial total says it is partial.
-///
-/// Measurement takes `try_lock` and skips what it cannot read. A busy pane
-/// holds more memory than an idle one, so a silently-omitted pane understates
-/// the session at exactly the moment it is largest.
-#[test]
-fn panes_skipped_for_lock_contention_are_reported() {
-    let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
-    assert_eq!(
-        events[0].number("panes_contended"),
-        Some(1),
-        "a skipped pane must be visible in the line; otherwise a partial total is \
-         indistinguishable from a complete one"
-    );
-}
-
 /// Both renderer roles appear, each with its own identity and figures.
 ///
 /// A warm renderer holds a full-size glyph atlas exactly like a visible one,
@@ -454,7 +226,7 @@ fn panes_skipped_for_lock_contention_are_reported() {
 /// remedy the visible lines imply, closing a window, cannot reach a warm
 /// renderer at all.
 #[test]
-fn visible_and_warm_renderers_are_both_reported_with_their_roles() {
+pub(super) fn visible_and_warm_renderers_are_both_reported_with_their_roles() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
     let rendered = events[0].text("renderers").expect("the breakdown field is emitted");
 
@@ -496,7 +268,7 @@ fn visible_and_warm_renderers_are_both_reported_with_their_roles() {
 /// Two snapshots with reversed inputs exercise the production serializer, which sorts by role and
 /// label before joining entries.
 #[test]
-fn renderer_breakdown_order_is_stable_across_input_order() {
+pub(super) fn renderer_breakdown_order_is_stable_across_input_order() {
     let make = |label: &str, role| RendererSummary {
         label: label.to_string(),
         role,
@@ -533,7 +305,7 @@ fn renderer_breakdown_order_is_stable_across_input_order() {
 
 /// Renderer totals fold every renderer and every retained part.
 #[test]
-fn renderer_totals_fold_every_renderer() {
+pub(super) fn renderer_totals_fold_every_renderer() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
     let event = &events[0];
 
@@ -554,7 +326,7 @@ fn renderer_totals_fold_every_renderer() {
 /// contributing no summary line — a discrepancy that is invisible if the count
 /// is computed from the summaries.
 #[test]
-fn the_live_renderer_count_is_reported_independently_of_the_summaries() {
+pub(super) fn the_live_renderer_count_is_reported_independently_of_the_summaries() {
     let mut snapshot = populated_snapshot();
     snapshot.live_renderers = 7;
 
@@ -571,7 +343,7 @@ fn the_live_renderer_count_is_reported_independently_of_the_summaries() {
 ///
 /// A blank field reads as a bug in the logger. `none` is a statement.
 #[test]
-fn a_session_with_no_renderer_says_none() {
+pub(super) fn a_session_with_no_renderer_says_none() {
     let events = capture(|| emit_memory_snapshot(&empty_snapshot(), None));
     let event = &events[0];
     assert_eq!(event.text("renderers"), Some("none"));
@@ -586,7 +358,7 @@ fn a_session_with_no_renderer_says_none() {
 /// Distinct fixture values prove every field comes from the single authoritative reading rather
 /// than one copy per visible or warm renderer.
 #[test]
-fn measured_allocator_is_emitted_once_without_renderer_multiplication() {
+pub(super) fn measured_allocator_is_emitted_once_without_renderer_multiplication() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
     let event = &events[0];
 
@@ -605,7 +377,7 @@ fn measured_allocator_is_emitted_once_without_renderer_multiplication() {
 /// Clearing only the report exercises the unsupported state without turning it into no-renderer
 /// or measured zeroes.
 #[test]
-fn unsupported_allocator_report_is_explicit_not_zero() {
+pub(super) fn unsupported_allocator_report_is_explicit_not_zero() {
     let mut snapshot = populated_snapshot();
     snapshot.allocator.as_mut().expect("allocator reading").snapshot = None;
     let events = capture(|| emit_memory_snapshot(&snapshot, None));
@@ -622,7 +394,7 @@ fn unsupported_allocator_report_is_explicit_not_zero() {
 /// `+0` would claim the process had not moved, which is a measurement. There
 /// is no measurement here — there is no earlier sample.
 #[test]
-fn the_first_sample_reports_deltas_as_unavailable() {
+pub(super) fn the_first_sample_reports_deltas_as_unavailable() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
     let event = &events[0];
 
@@ -644,7 +416,7 @@ fn the_first_sample_reports_deltas_as_unavailable() {
 
 /// A later sample reports signed movement against the previous one.
 #[test]
-fn a_later_sample_reports_signed_movement() {
+pub(super) fn a_later_sample_reports_signed_movement() {
     let first = populated_snapshot();
     let mut second = populated_snapshot();
     second.process.resident = MemoryMetric::Bytes(3_500);
@@ -673,7 +445,7 @@ fn a_later_sample_reports_signed_movement() {
 /// figure is not the same as the figure not having moved, and a reader acting
 /// on "did not move" would rule out the wrong subsystem.
 #[test]
-fn an_unsupported_process_figure_never_produces_a_numeric_delta() {
+pub(super) fn an_unsupported_process_figure_never_produces_a_numeric_delta() {
     let mut first = populated_snapshot();
     first.process.private_committed = MemoryMetric::Unsupported;
     let mut second = populated_snapshot();
@@ -703,7 +475,7 @@ fn an_unsupported_process_figure_never_produces_a_numeric_delta() {
 /// behind it works and says nothing about whether any shipped configuration
 /// opens that gate.
 #[test]
-fn a_configured_info_session_records_the_snapshot() {
+pub(super) fn a_configured_info_session_records_the_snapshot() {
     let filter = sonicterm_logging::filter_for_level(sonicterm_logging::LogLevel::Info);
     let events = capture_at(filter, || emit_memory_snapshot(&populated_snapshot(), None));
 
@@ -723,7 +495,7 @@ fn a_configured_info_session_records_the_snapshot() {
 /// test above while flooding a session that merely turned on informational
 /// logging.
 #[test]
-fn an_info_session_does_not_record_the_debug_detail() {
+pub(super) fn an_info_session_does_not_record_the_debug_detail() {
     let filter = sonicterm_logging::filter_for_level(sonicterm_logging::LogLevel::Info);
     let events = capture_at(filter, || {
         emit_memory_snapshot(&populated_snapshot(), None);
@@ -751,7 +523,7 @@ fn an_info_session_does_not_record_the_debug_detail() {
 /// breakdown carries the latter. This scans every emitted field value for a
 /// sentinel that would only appear if titles or terminal text ever reached it.
 #[test]
-fn the_snapshot_carries_no_user_content() {
+pub(super) fn the_snapshot_carries_no_user_content() {
     let mut snapshot = populated_snapshot();
     // A label shaped like the identifiers production emits. If a future change
     // substituted a window title here, the sentinel below would surface in the
@@ -778,7 +550,7 @@ fn the_snapshot_carries_no_user_content() {
 }
 
 #[test]
-fn inline_media_contention_marks_the_snapshot_partial() {
+pub(super) fn inline_media_contention_marks_the_snapshot_partial() {
     let mut app = super::super::App::new(
         sonicterm_cfg::theme::Theme::default(),
         sonicterm_cfg::config::Config::default(),
@@ -810,7 +582,7 @@ fn inline_media_contention_marks_the_snapshot_partial() {
 /// per wake. Pinned here against the real gate so a change to the interval
 /// cannot silently make the snapshot per-wake.
 #[test]
-fn sampling_repeats_on_the_shared_cadence() {
+pub(super) fn sampling_repeats_on_the_shared_cadence() {
     let start = Instant::now();
     let mut last: Option<Instant> = None;
 
@@ -834,7 +606,7 @@ fn sampling_repeats_on_the_shared_cadence() {
 
 /// The fields a checkpoint sample adds to the periodic line in a build with the trim hook, as
 /// every unit-test build is: four checkpoint tags and three trim tags.
-const CHECKPOINT_FIELDS: [&str; 7] = [
+pub(super) const CHECKPOINT_FIELDS: [&str; 7] = [
     "checkpoint_index",
     "checkpoint_label",
     "checkpoint_attempt",
@@ -845,7 +617,7 @@ const CHECKPOINT_FIELDS: [&str; 7] = [
 ];
 
 /// A one-pane app, for the checkpoint hook.
-fn app_with_one_pane() -> (super::super::App, winit::window::WindowId, u64) {
+pub(super) fn app_with_one_pane() -> (super::super::App, winit::window::WindowId, u64) {
     let mut app = super::super::App::new(
         sonicterm_cfg::theme::Theme::default(),
         sonicterm_cfg::config::Config::default(),
@@ -860,7 +632,7 @@ fn app_with_one_pane() -> (super::super::App, winit::window::WindowId, u64) {
 /// four checkpoint tags, with the index, label and attempt it was given, complete when no pane is
 /// contended, and the three trim tags. A periodic line carries none of the tags.
 #[test]
-fn a_checkpoint_sample_is_the_periodic_line_plus_four_tags() {
+pub(super) fn a_checkpoint_sample_is_the_periodic_line_plus_four_tags() {
     let (mut app, _window, _pane) = app_with_one_pane();
     let mut returned = None;
     let events = capture(|| returned = Some(app.__perf_checkpoint_memory(2, "end", 3)));
@@ -890,7 +662,7 @@ fn a_checkpoint_sample_is_the_periodic_line_plus_four_tags() {
 /// A pane whose parser lock is held during the call makes the sample partial: the line says
 /// `checkpoint_complete=false` and the call reports the contended pane.
 #[test]
-fn a_contended_pane_makes_the_checkpoint_sample_partial() {
+pub(super) fn a_contended_pane_makes_the_checkpoint_sample_partial() {
     let (mut app, window, pane_id) = app_with_one_pane();
     let parser = Arc::clone(
         &app.windows
@@ -911,7 +683,7 @@ fn a_contended_pane_makes_the_checkpoint_sample_partial() {
 }
 
 /// One `bytes`-byte image appended to `pane`, trimmed to its budget as a decode does.
-fn decode_image(pane: &super::super::PaneState, id: u64, bytes: usize) {
+pub(super) fn decode_image(pane: &super::super::PaneState, id: u64, bytes: usize) {
     let evicted = {
         let mut images = pane.inline_images.lock();
         images.push(sonicterm_render_model::InlineImage {
@@ -933,7 +705,7 @@ fn decode_image(pane: &super::super::PaneState, id: u64, bytes: usize) {
 /// so siblings cannot share them). After the call every one of those is exactly as before: the
 /// cadence, the totals, the capture and its stall evidence, the pane's media and the pool's bytes.
 #[test]
-fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
+pub(super) fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
     use crate::app::media::{InlineMediaPool, MAX_PROCESS_INLINE_MEDIA_BYTES};
     const IMAGE_BYTES: usize = 1024 * 1024;
     let pool = InlineMediaPool::new();
@@ -1041,7 +813,7 @@ fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
 /// inside the renderer breakdown, and that GPU figure never enters `renderer_total_bytes`, which
 /// counts CPU storage only.
 #[test]
-fn a_trimmed_renderer_reports_its_gpu_release_outside_the_renderer_total() {
+pub(super) fn a_trimmed_renderer_reports_its_gpu_release_outside_the_renderer_total() {
     let untrimmed = populated_snapshot();
     let mut trimmed = populated_snapshot();
     trimmed.renderers[0].trimmed = true;
@@ -1071,7 +843,7 @@ fn a_trimmed_renderer_reports_its_gpu_release_outside_the_renderer_total() {
 /// before any trim they read false, `none` and 0; after a trim they read the trimmed window, the
 /// source that requested it and its number. A periodic line carries none of the three.
 #[test]
-fn a_checkpoint_line_carries_the_trim_state_and_a_periodic_line_does_not() {
+pub(super) fn a_checkpoint_line_carries_the_trim_state_and_a_periodic_line_does_not() {
     let (mut app, window, _pane) = app_with_one_pane();
     let before = capture(|| {
         app.__perf_checkpoint_memory(0, "covered", 1);
@@ -1120,7 +892,8 @@ fn a_checkpoint_line_carries_the_trim_state_and_a_periodic_line_does_not() {
 
 /// One trimmed renderer entry exactly as the breakdown writes it. The comparison script's parser
 /// tests build their lines from this same text, so a rename on either side fails one of them.
-const TRIMMED_RENDERER_ENTRY: &str = "visible[WindowId(1)] glyph=512/5 image=256/2 row_glyph=64/4 \
+pub(super) const TRIMMED_RENDERER_ENTRY: &str =
+    "visible[WindowId(1)] glyph=512/5 image=256/2 row_glyph=64/4 \
      row_quad=32/3 software=1024/1 vertex=272/1 row_ink=48/40 frame_scratch=96/2 chrome_cache=24/3 \
      total=2328/61 glyph_atlas_dim=512 glyph_atlas_packed_pixels=4000 glyph_atlas_growths=1 \
      glyph_atlas_evictions=0 glyph_atlas_fit=512 glyph_atlas_max_tile=25x16 renderer_trimmed=true \
@@ -1129,7 +902,7 @@ const TRIMMED_RENDERER_ENTRY: &str = "visible[WindowId(1)] glyph=512/5 image=256
 /// The renderer entry's trim fields keep renderer-local names, byte for byte as the comparison
 /// script's tests expect them, so its top-level `trimmed` tag can never be read from a renderer.
 #[test]
-fn the_renderer_entry_names_its_trim_fields_apart_from_the_checkpoint_tags() {
+pub(super) fn the_renderer_entry_names_its_trim_fields_apart_from_the_checkpoint_tags() {
     let mut summary = populated_snapshot().renderers.remove(0);
     summary.trimmed = true;
     summary.gpu_released_requested_bytes = 8_388_608;
@@ -1143,7 +916,7 @@ fn the_renderer_entry_names_its_trim_fields_apart_from_the_checkpoint_tags() {
 
 /// Every field name an event records, in record order; the message is not a field here.
 #[derive(Default)]
-struct OrderedNames(Vec<String>);
+pub(super) struct OrderedNames(Vec<String>);
 
 impl Visit for OrderedNames {
     fn record_debug(&mut self, field: &Field, _value: &dyn std::fmt::Debug) {
@@ -1155,7 +928,7 @@ impl Visit for OrderedNames {
 
 /// Layer that records each event's field names in order.
 #[derive(Clone, Default)]
-struct OrderLayer {
+pub(super) struct OrderLayer {
     names: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
@@ -1168,126 +941,11 @@ impl<S: tracing::Subscriber> Layer<S> for OrderLayer {
 }
 
 /// The field names of the one event `body` emits, in order.
-fn ordered_field_names(body: impl FnOnce()) -> Vec<String> {
+pub(super) fn ordered_field_names(body: impl FnOnce()) -> Vec<String> {
     let layer = OrderLayer::default();
     let subscriber = Registry::default().with(layer.clone());
     sonicterm_logging::test_capture::with_default(subscriber, body);
     let mut events = layer.names.lock().expect("not poisoned").clone();
     assert_eq!(events.len(), 1);
     events.remove(0)
-}
-
-/// Contract: the graphics fields are appended. Every field a periodic line carried before them
-/// keeps its name and position, so a reader or tool that parses the line by its existing fields
-/// is unaffected, and the eight graphics fields follow in a fixed order.
-#[test]
-fn graphics_fields_are_appended_after_the_unchanged_prefix() {
-    let prefix = [
-        "process_private_committed_bytes",
-        "process_resident_bytes",
-        "process_virtual_bytes",
-        "process_private_committed_delta",
-        "process_resident_delta",
-        "process_virtual_delta",
-        "session_total_bytes",
-        "session_delta",
-        "grid_visible_bytes",
-        "grid_history_bytes",
-        "grid_alternate_bytes",
-        "parser_bytes",
-        "hyperlink_bytes",
-        "inline_media_bytes",
-        "pty_output_bytes",
-        "pty_input_bytes",
-        "panes_total",
-        "panes_sampled",
-        "panes_contended",
-        "renderer_total_bytes",
-        "renderer_total_items",
-        "renderer_row_glyph_cache_bytes",
-        "renderer_row_glyph_cache_items",
-        "renderer_row_quad_cache_bytes",
-        "renderer_row_quad_cache_items",
-        "renderer_delta",
-        "live_renderers",
-        "live_fg_probe_workers",
-        "renderers",
-        "allocator_state",
-        "allocator_source",
-        "allocator_label",
-        "allocator_allocated_bytes",
-        "allocator_reserved_bytes",
-        "allocator_allocations",
-        "allocator_blocks",
-        "allocator_largest_block_bytes",
-    ];
-    let graphics_fields = [
-        "graphics_os_source",
-        "graphics_os_footprint_bytes",
-        "graphics_os_nofootprint_bytes",
-        "graphics_os_dedicated_bytes",
-        "graphics_os_shared_bytes",
-        "graphics_requested_live_bytes",
-        "graphics_requested_live_resources",
-        "graphics_renderers",
-        "graphics_requested_created",
-        "graphics_requested_released",
-        "graphics_os_unavailable_reason",
-    ];
-    let names = ordered_field_names(|| emit_memory_snapshot(&populated_snapshot(), None));
-    assert_eq!(names[..prefix.len()], prefix.map(str::to_string));
-    assert_eq!(names[prefix.len()..], graphics_fields.map(str::to_string));
-}
-
-/// Contract: the graphics fields carry the OS figure under its source and each renderer's
-/// requested bytes by class; a figure the OS did not give is `unsupported`, never `0`.
-#[test]
-fn graphics_fields_carry_the_os_figure_and_each_renderer_ledger() {
-    use sonicterm_gpu::graphics_ledger::{GraphicsLedgerSnapshot, GraphicsTally};
-    let mut ledger = GraphicsLedgerSnapshot::default();
-    ledger.classes[0] = GraphicsTally {
-        live_bytes: 300,
-        live_resources: 3,
-        created_bytes: 600,
-        created_resources: 6,
-        released_bytes: 300,
-        released_resources: 3,
-    };
-    ledger.classes[2] = GraphicsTally { live_bytes: 40, live_resources: 1, ..Default::default() };
-    let graphics = GraphicsReading {
-        os: GraphicsMemory {
-            footprint: MemoryMetric::Bytes(4096),
-            ..GraphicsMemory::unavailable(GraphicsSource::TaskVmInfo)
-        },
-        renderers: vec![RendererGraphics { label: "WindowId(1)".into(), role: "visible", ledger }],
-    };
-    let events = capture(|| {
-        emit_memory_snapshot_with_graphics(&populated_snapshot(), None, &graphics);
-    });
-    let event = &events[0];
-    assert_eq!(event.text("graphics_os_source"), Some("task_vm_info"));
-    assert_eq!(event.text("graphics_os_footprint_bytes"), Some("4096"));
-    assert_eq!(event.text("graphics_os_nofootprint_bytes"), Some("unsupported"));
-    assert_eq!(event.text("graphics_os_dedicated_bytes"), Some("unsupported"));
-    assert_eq!(event.number("graphics_requested_live_bytes"), Some(340));
-    assert_eq!(event.number("graphics_requested_live_resources"), Some(4));
-    assert_eq!(
-        event.text("graphics_renderers"),
-        Some(
-            "visible[WindowId(1)] surface=300/3 frame_texture=0/0 glyph_atlas=40/1 \
-             image_atlas=0/0 present_buffers=0/0 requested_total=340/4 surface_count=exact"
-        )
-    );
-    assert_eq!(
-        event.text("graphics_requested_created"),
-        Some("surface=600/6 frame_texture=0/0 glyph_atlas=0/0 image_atlas=0/0 present_buffers=0/0")
-    );
-    assert_eq!(
-        event.text("graphics_requested_released"),
-        Some("surface=300/3 frame_texture=0/0 glyph_atlas=0/0 image_atlas=0/0 present_buffers=0/0")
-    );
-    assert_eq!(event.text("graphics_os_unavailable_reason"), Some("none"));
-    let unsampled = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
-    assert_eq!(unsampled[0].text("graphics_os_source"), Some("none"));
-    assert_eq!(unsampled[0].text("graphics_renderers"), Some("none"));
 }
