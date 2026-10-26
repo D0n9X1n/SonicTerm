@@ -339,6 +339,11 @@ Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
 **阅读：** `src/db.rs`、`src/locator/`、`src/shaper/`、`src/rasterizer/`、
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`。
 
+`loaded_font.rs` 负责已加载字体操作，`font_resolution.rs` 负责配置字体链解析。
+FreeType 名称、尺寸与库/流操作放在私有 `ftwrap_*` 同级文件中；`hbwrap_paint.rs`
+负责绘制回调，`rasterizer/freetype_surface.rs` 负责 COLR 边界和 Cairo 重放。
+原有公开路径及原生资源所有权保持不变。
+
 ### `sonicterm-engine`
 
 **职责：** 小型字体引擎边界。`FontStack` 把塑形与光栅结果转换为单元格尺寸和

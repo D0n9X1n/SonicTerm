@@ -541,7 +541,13 @@ fn raster_timing_excludes_character_identifiers() {
 // Capture belongs to each queued request, and the blocking caller measures shaping separately from receiving.
 #[test]
 fn timing_wiring_preserves_request_and_wait_boundaries() {
-    let source = include_str!("lib.rs");
+    let source = concat!(
+        include_str!("lib.rs"),
+        "\n",
+        include_str!("loaded_font.rs"),
+        "\n",
+        include_str!("font_resolution.rs")
+    );
     let scheduler = source
         .split("fn schedule_fallback_resolve")
         .nth(1)

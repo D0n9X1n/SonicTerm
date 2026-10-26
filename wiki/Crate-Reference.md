@@ -384,6 +384,11 @@ Android and non-macOS Unix builds also use `sonicterm-fontconfig` as
 **Read:** `src/db.rs`, `src/locator/`, `src/shaper/`, `src/rasterizer/`,
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`.
 
+`loaded_font.rs` owns loaded-face operations; `font_resolution.rs` owns configured-chain
+resolution. FreeType names, metrics and library/stream operations are private `ftwrap_*`
+siblings; `hbwrap_paint.rs` owns paint callbacks and `rasterizer/freetype_surface.rs` owns
+COLR bounds and Cairo replay. The original public paths and native ownership remain unchanged.
+
 ### `sonicterm-engine`
 
 **Role:** small font-facing engine seam. `FontStack` turns shaping and raster

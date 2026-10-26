@@ -12,7 +12,12 @@ keys. New font behavior should land here instead of depending on
 - `shaper/harfbuzz.rs` - shaping boundary.
 - `rasterizer/` - FreeType, HarfBuzz, and COLR raster support.
 - `parser.rs`, `rangeset.rs`, `units.rs`, `color.rs` - shared font helpers.
-- `fcwrap.rs`, `ftwrap.rs`, `hbwrap.rs` - FFI-safe wrappers.
+- `loaded_font.rs` - loaded-face shaping, fallback adoption and rasterizer lookup;
+  `font_resolution.rs` resolves configured chains and entity/style/size faces.
+- `fcwrap.rs`, `ftwrap.rs`, `hbwrap.rs` - FFI-safe wrappers. FreeType face names,
+  metrics and library/stream operations live in private `ftwrap_names.rs`,
+  `ftwrap_metrics.rs` and `ftwrap_library.rs`; `hbwrap_paint.rs` owns paint callbacks.
+- `rasterizer/freetype_surface.rs` - COLR recording bounds, clip boxes and Cairo replay.
 - `font_bytes.rs` - one shared, immutable buffer per generation of an on-disk colour font (a
   face listing `SVG ` or `COLR`); its FreeType memory streams and HarfBuzz blobs hold it.
   Ordinary fonts keep the callback stream. Share bytes, never faces.
