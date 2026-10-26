@@ -44,7 +44,7 @@ top-level unknown keys but loses comments, formatting, and nested unknown keys.
 
 | Key | Default | Behavior |
 | --- | --- | --- |
-| `family` | platform monospace | Primary font family. The default is the platform's own monospace face: `"Menlo"` on macOS, `"Cascadia Mono"` on Windows (Consolas where Cascadia Mono is not installed), and fontconfig's `"monospace"` on Linux. SonicTerm bundles no text face. The starter config leaves `family` commented out. At startup SonicTerm enumerates the installed monospace families on a worker thread, so the first frame never waits; when the config file names no family and the live family is still the platform default, the first platform default that is installed becomes the session's family (a family set any other way, such as in a config built in memory, is kept), and nothing is written until **Save Current Settings**. A family that is not installed falls back to that default, and the log names the miss and the face used instead once per process. Missing glyphs use the fallback chain, which reaches the bundled Symbols Nerd Font Mono for Powerline and Nerd Font icons before system fallback. |
+| `family` | platform monospace | Primary font family. The default is the platform's own monospace face: `"Menlo"` on macOS, `"Cascadia Mono"` on Windows (Consolas where Cascadia Mono is not installed), and fontconfig's `"monospace"` on Linux. SonicTerm bundles no text face. The starter config leaves `family` commented out. When the config names no family and the platform default is missing, the face SonicTerm resolved for regular text in its place (Consolas when Cascadia Mono is absent) becomes the session's family, in memory only; nothing is written until **Save Current Settings**. Installed families are enumerated only the first time **Font: Choose Family…** opens. A family that is not installed falls back to that default, and the log names the miss and the face used instead once per process. Missing glyphs use the fallback chain, which reaches the bundled Symbols Nerd Font Mono for Powerline and Nerd Font icons before system fallback. |
 | `size` | `13` | Font size in points. |
 | `line_height` | `1.3` | Line-height multiplier. |
 | `weight_scale` | `1.0` | Post-selection weight for all monochrome glyphs, including bold, italic, and fallback faces. Valid values are `0.5..=5.0`; other values become `1.0`. At a fixed size/DPI, cell metrics, bitmap dimensions, bearings, and advances do not change. Color artwork is unchanged. |
@@ -61,9 +61,9 @@ blending. Every other combination—including Mica, Acrylic, Tabbed, opacity bel
 and blue coverage to matching display channels; `bgr` swaps red and blue.
 For shaping and fallback details, see [Rendering and Fonts](Rendering-and-Fonts).
 
-**Font: Choose Family…** (`choose_font_family`) lists the installed monospace
-families from the font catalog in the palette, with the live family marked `✓`;
-typing filters them. Moving the highlight with the arrow keys applies the
+**Font: Choose Family…** (`choose_font_family`) enumerates the installed
+monospace families on a worker thread the first time the picker opens and lists
+them in the palette, with the live family marked `✓`; typing filters them. Moving the highlight with the arrow keys applies the
 highlighted family live to every window, Enter or a click keeps it for the session,
 and Escape or a click outside restores the family the picker opened with. Rows are
 drawn in the palette's own face; the terminal text previews the family. Before the

@@ -21,6 +21,8 @@ impl App {
     /// and highlighted. Before the catalog is ready, only the live family is listed.
     pub(in crate::app) fn open_font_family_picker(&mut self) {
         self.palette_pointer_capture = None;
+        // Installed families are enumerated the first time the picker opens, never at startup.
+        self.start_font_catalog();
         let attached = match self.frontmost_kind() {
             FrontmostKind::Child(id) => Some(id),
             _ => None,

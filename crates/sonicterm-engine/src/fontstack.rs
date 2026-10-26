@@ -328,7 +328,7 @@ impl FontStack {
     /// The face for `(bold, italic)` at this stack's size, memoized per style until the shared
     /// configuration's `face_epoch` moves. A fallback merge mutates the shared face in place, so
     /// the memoized `Rc` shapes with merged handles without being resolved again.
-    fn font_for_style(
+    pub(crate) fn font_for_style(
         &self,
         bold: bool,
         italic: bool,

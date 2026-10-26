@@ -154,6 +154,7 @@ impl App {
             configured_weight_scale,
             configured_font_family,
             font_catalog: font_catalog::FontCatalog::default(),
+            font_enumerator: sonicterm_gpu::installed_monospace_families,
             font_picker_original: None,
             font_family_generation: 0,
             #[cfg(test)]

@@ -219,10 +219,6 @@ pub enum UserEvent {
     FontCatalogReady {
         /// Installed monospace families, sorted.
         families: Vec<String>,
-        /// Whether the config file names `[font] family`; a fresh install's does not.
-        family_configured: bool,
-        /// The font-family generation the worker started at.
-        generation: u64,
     },
     /// A font fallback worker published faces for `notice_id`, the notice of the body stack in
     /// `window_id`'s renderer. The handler acknowledges it and requests a frame only when that
@@ -637,6 +633,8 @@ pub struct App {
     pub(super) configured_font_family: String,
     /// Installed monospace families, enumerated once per process off the UI thread.
     pub(super) font_catalog: font_catalog::FontCatalog,
+    /// Enumerates installed monospace families for the catalog worker; tests inject a counter.
+    pub(super) font_enumerator: font_catalog::FontEnumerator,
     /// The live family when the font picker opened, restored when the picker is cancelled.
     pub(super) font_picker_original: Option<String>,
     /// Moves on every reload, save and picker choice of the font family, so a catalog report the

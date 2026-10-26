@@ -80,7 +80,7 @@ fn an_open_picker_fills_in_when_the_catalog_lands() {
     assert_eq!(labels(&app), ["✓ Menlo"]);
     app.command_palette.input_str("e");
     let catalog = vec!["Menlo".to_string(), "Monaco".to_string(), "Rec Mono".to_string()];
-    app.adopt_font_catalog_from(&["Menlo"], catalog, true, app.font_family_generation);
+    app.adopt_font_catalog(catalog);
     assert_eq!(labels(&app), ["✓ Menlo", "  Rec Mono"]);
     assert_eq!(app.command_palette.query(), "e");
     assert_eq!(app.command_palette.selected_font_family(), Some("Menlo"));

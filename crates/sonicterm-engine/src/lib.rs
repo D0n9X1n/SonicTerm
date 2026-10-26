@@ -7,6 +7,7 @@
 #![warn(clippy::min_ident_chars)]
 
 mod fontstack;
+mod resolved_family;
 /// The platform's default monospace families, in preference order; the first is
 /// [`DEFAULT_FONT_FAMILY`].
 pub use config::DEFAULT_MONOSPACE_FAMILIES;

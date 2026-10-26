@@ -545,9 +545,7 @@ impl App {
                 self.handle_font_fallback_ready(window_id, notice_id);
             }
             UserEvent::ForegroundProbeReady => self.drain_foreground_probe_results(Instant::now()),
-            UserEvent::FontCatalogReady { families, family_configured, generation } => {
-                self.adopt_font_catalog(families, family_configured, generation);
-            }
+            UserEvent::FontCatalogReady { families } => self.adopt_font_catalog(families),
             UserEvent::GpuDeviceStateChanged => {
                 self.request_device_state_redraws();
                 self.service_gpu_recovery(event_loop, Instant::now());
@@ -1075,7 +1073,6 @@ impl App {
         let checks_started = std::time::Instant::now();
         self.record_startup_load_errors();
         self.note_startup(checks_started, |spans| &mut spans.load_checks_ns);
-        self.start_font_catalog();
         // Both pacing clocks start at one instant, so neither paces a new window differently.
         let created_at = std::time::Instant::now();
         let shadow = super::WindowState {
@@ -1203,6 +1200,8 @@ impl App {
             let _ = recorder.record(BreadcrumbEvent::Lifecycle(LifecycleEvent::Ready));
         }
 
+        // The face the main renderer resolved is the session's family when the config names none.
+        self.adopt_resolved_font_family();
         let (cols, rows) = self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((0, 0));
         tracing::info!(
             "SonicTerm ready. theme={} keymap={} bindings={} grid={}x{}",

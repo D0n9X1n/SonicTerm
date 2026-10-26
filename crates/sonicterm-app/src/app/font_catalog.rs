@@ -1,17 +1,17 @@
-//! The installed monospace families, enumerated once per process off the UI thread.
+//! The installed monospace families for the font picker, and the family a fresh start adopts.
 //!
-//! The first frame never waits for it: until the report arrives, the font stack's fallback chain
-//! already draws with a platform default. On a start whose config names no `[font] family`, the
-//! report picks the first platform default the host has installed, in memory only.
+//! Enumerating installed fonts parses every font file, so it runs on a worker thread and only the
+//! first time the picker opens: a launch that never opens the picker never pays for it. A fresh
+//! start's family comes from the face the body stack resolved, not from the catalog.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::{App, UserEvent};
 
 /// Where the installed-family enumeration stands.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum FontCatalog {
-    /// Not started: the main window does not exist yet.
+    /// Not started: the picker has not opened yet.
     #[default]
     Idle,
     /// The worker is enumerating.
@@ -25,26 +25,24 @@ pub(crate) enum FontCatalog {
 pub(crate) struct FontCatalogReport {
     /// Installed monospace families, sorted.
     pub(crate) families: Vec<String>,
-    /// Whether the config file named `[font] family` when the worker read it.
-    pub(crate) family_configured: bool,
 }
 
-/// Run `enumerate` on a worker thread and hand its report to `deliver`; returns at once.
-///
-/// The worker reads `config_path` first, so the report says whether this start's config names a
-/// family. A worker that cannot start leaves the catalog loading, and nothing is adopted.
-pub(crate) fn spawn<E, D>(config_path: Option<PathBuf>, enumerate: E, deliver: D)
+/// The function that enumerates installed monospace families; tests inject a counting one.
+pub(crate) type FontEnumerator = fn() -> anyhow::Result<Vec<String>>;
+
+/// Run `enumerate` on a worker thread and hand its report to `deliver`; returns at once. A worker
+/// that cannot start leaves the catalog loading.
+pub(crate) fn spawn<E, D>(enumerate: E, deliver: D)
 where
     E: FnOnce() -> anyhow::Result<Vec<String>> + Send + 'static,
     D: FnOnce(FontCatalogReport) + Send + 'static,
 {
     let job = move || {
-        let family_configured = config_path.as_deref().is_some_and(config_sets_family);
         let families = enumerate().unwrap_or_else(|error| {
             tracing::warn!("installed font enumeration failed: {error:#}");
             Vec::new()
         });
-        deliver(FontCatalogReport { families, family_configured });
+        deliver(FontCatalogReport { families });
     };
     if let Err(error) = std::thread::Builder::new().name("sonicterm-font-catalog".into()).spawn(job)
     {
@@ -63,90 +61,73 @@ pub(crate) fn config_sets_family(path: &Path) -> bool {
     }
 }
 
-/// The first of `candidates` that `installed` lists, compared without case and returned in its
-/// installed spelling; `None` when none is listed, as for fontconfig's `monospace` alias.
-pub(crate) fn first_installed(candidates: &[&str], installed: &[String]) -> Option<String> {
-    candidates.iter().find_map(|candidate| {
-        installed.iter().find(|family| family.eq_ignore_ascii_case(candidate)).cloned()
-    })
-}
-
 impl App {
-    /// Start the catalog worker once per process, after the main window exists and any isolated
-    /// config path is installed. Without an event loop there is nothing to report back to.
+    /// Start the catalog worker the first time the picker opens; later opens reuse the loading or
+    /// ready catalog. Without an event loop, as in unit tests, the report is dropped.
     pub(super) fn start_font_catalog(&mut self) {
         if self.font_catalog != FontCatalog::Idle {
-            // When: `font_catalog` already started or finished, a later main window adds nothing.
+            // When: `font_catalog` already started or finished, no second enumeration runs.
             return;
         }
-        let Some(proxy) = self.event_loop_proxy.clone() else {
-            // When: `event_loop_proxy` is None, as in unit tests, no worker could report back.
-            return;
-        };
         self.font_catalog = FontCatalog::Loading;
-        let generation = self.font_family_generation;
-        let config_path =
-            self.runtime_config_path.clone().or_else(sonicterm_cfg::config::Config::default_path);
+        let proxy = self.event_loop_proxy.clone();
         // No handle is kept or joined: once the event loop ends, `send_event` returns
         // `EventLoopClosed` on every backend, so a late report is dropped as the worker finishes.
-        spawn(config_path, sonicterm_gpu::installed_monospace_families, move |report| {
-            let _ = proxy.send_event(UserEvent::FontCatalogReady {
-                families: report.families,
-                family_configured: report.family_configured,
-                generation,
-            });
+        spawn(self.font_enumerator, move |report| {
+            if let Some(proxy) = proxy {
+                // When: `proxy` is Some, an event loop is running to receive the report.
+                let _ = proxy.send_event(UserEvent::FontCatalogReady { families: report.families });
+            }
         });
     }
 
-    /// Record the worker's report and log the session family. On a start whose config names no
-    /// family, while the live family is still the loaded platform default, the first installed
-    /// platform default becomes the live family and the configured baseline, in memory only.
-    pub(super) fn adopt_font_catalog(
-        &mut self,
-        families: Vec<String>,
-        family_configured: bool,
-        generation: u64,
-    ) {
-        self.adopt_font_catalog_from(
-            sonicterm_gpu::DEFAULT_MONOSPACE_FAMILIES,
-            families,
+    /// Record the worker's report as the picker's rows, refreshing an open picker in place.
+    pub(super) fn adopt_font_catalog(&mut self, families: Vec<String>) {
+        tracing::info!(monospace_families = families.len(), "font catalog ready");
+        self.font_catalog = FontCatalog::Ready(families);
+        // A picker opened while the catalog loaded now lists it.
+        self.refresh_font_family_picker();
+    }
+
+    /// At startup, when the config names no family and the live family is still the platform
+    /// default, the family of the face the main renderer resolved for regular text becomes the live
+    /// family and the baseline, in memory only. Logs the session family.
+    pub(super) fn adopt_resolved_font_family(&mut self) {
+        let resolved = self.main_renderer().and_then(|renderer| renderer.resolved_font_family());
+        let config_path =
+            self.runtime_config_path.clone().or_else(sonicterm_cfg::config::Config::default_path);
+        let family_configured = config_path.as_deref().is_some_and(config_sets_family);
+        let generation = self.font_family_generation;
+        self.adopt_resolved_family_from(
+            sonicterm_gpu::DEFAULT_MONOSPACE_FAMILIES[0],
+            resolved,
             family_configured,
             generation,
         );
     }
 
-    /// [`Self::adopt_font_catalog`] against explicit platform default `candidates`. A report whose
-    /// `generation` is not the current font-family generation adopts nothing.
-    pub(super) fn adopt_font_catalog_from(
+    /// [`Self::adopt_resolved_font_family`] with an explicit platform `default`, the `resolved`
+    /// face's family and the font-family `generation` the reading was taken at.
+    pub(super) fn adopt_resolved_family_from(
         &mut self,
-        candidates: &[&str],
-        families: Vec<String>,
+        default: &str,
+        resolved: Option<String>,
         family_configured: bool,
         generation: u64,
     ) {
-        // Only the platform default may be replaced: a family set in a config the worker never
-        // read, such as one built in memory, is as deliberate as one in the file.
-        let on_default =
-            candidates.first().is_some_and(|default| *default == self.config.font.family);
-        // A report started before a reload, save or picker choice describes a config that is gone.
-        let untouched = generation == self.font_family_generation
-            && !family_configured
-            && on_default
-            && self.config.font.family == self.configured_font_family;
-        let adopted = untouched.then(|| first_installed(candidates, &families)).flatten();
-        if let Some(family) = adopted.filter(|family| *family != self.config.font.family) {
-            // An installed default other than the live family becomes the session's family.
+        // Only the platform default may be replaced, only when the config names no family, and only
+        // while no reload, save or picker choice has moved the family since the reading was taken.
+        let untouched = !family_configured
+            && generation == self.font_family_generation
+            && self.config.font.family == default
+            && self.configured_font_family == default;
+        let adopted = resolved.filter(|family| untouched && *family != self.config.font.family);
+        if let Some(family) = adopted {
+            // A face other than the default stood in for it, so it becomes the session's family.
             self.configured_font_family = family.clone();
             self.set_font_family(&family);
         }
-        tracing::info!(
-            family = %self.config.font.family,
-            monospace_families = families.len(),
-            "font catalog ready"
-        );
-        self.font_catalog = FontCatalog::Ready(families);
-        // A picker opened while the catalog loaded now lists it.
-        self.refresh_font_family_picker();
+        tracing::info!(family = %self.config.font.family, "font family resolved");
     }
 }
 
