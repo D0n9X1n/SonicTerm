@@ -153,17 +153,18 @@ python3 scripts/local-gate.py
 | `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `linux-core` |
 | `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
 | `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
-| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
+| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `linux-coverage` |
+| `macos-logic-coverage` | `scripts/macos-logic-coverage.sh` | macOS | `local` | `rust`, `llvm-cov` | `macos-core` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests-runtime` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
 | `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`, `native` | `windows-tests-runtime` |
 | `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`, `native` | `windows-tests-runtime` |
-| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
-| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
-| `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-smoke` |
+| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
+| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
+| `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`, `native` | `macos-core` |
 | `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`, `native` | `windows-checks` |
-| `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
+| `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
 | `windows-target` | `bash scripts/check-windows-target.sh` | macOS | `optional` | `rust`, `win-target`, `bash` | — |
@@ -254,6 +255,10 @@ Before trusting a green run:
   9 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`, so
   a passing subset figure says nothing about code in those crates. The per-crate
   floor in `scripts/coverage-baseline.json` catches regressions, not low coverage.
+  CI measures it on Linux (`linux-coverage`), so those floors do not measure
+  macOS-only code; `macos-logic-coverage.sh` in `macos-core` holds only the
+  macOS-only logic inside the subset (`sonicterm-ui`'s `text_edit.rs` and
+  `command_label.rs`) to the baseline's `macos` section.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS, so a
   Windows-gated test file that would fail to *compile* still reports `ok`
   locally. The optional `windows-target` step narrows that gap by linting and
@@ -366,7 +371,7 @@ a reproduction.
     (`S2/flood` 2, `S1/atlas-retry` 2, `S6/rest` 2, `S11/release` 1, `S1/status-line` 1 and
     `S12/status-line` 1 on both platforms, `S11/gdi` and `S11/wgpu` 2 on Windows),
     its rows read `(runs N of M)`, and release runs are uncapped. One macOS job
-    builds both refs once; four macOS
+    builds both refs once; three macOS
     shards measure its binaries, bound to the run, attempt and manifest digest;
     five Windows shards each build; every comparison passes `--require-base`; and
     the `Performance comparison result` job passes only when all of them did.

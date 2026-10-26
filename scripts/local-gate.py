@@ -570,7 +570,10 @@ STEPS = (
          ("rust", "bash"), _SCRIPT_TESTS),
     # Executed directly, as ci.yml does, so it needs a POSIX host.
     Step("logic-coverage", ("scripts/rust-logic-coverage.sh",), ("macos", "linux"), 1200,
-         "local", ("rust", "native", "llvm-cov"), ("macos-coverage",)),
+         "local", ("rust", "native", "llvm-cov"), ("linux-coverage",)),
+    # The macOS-only floor instruments one crate: a cold build plus its tests, well inside the workspace run's budget.
+    Step("macos-logic-coverage", ("scripts/macos-logic-coverage.sh",), ("macos",), 900,
+         "local", ("rust", "llvm-cov"), ("macos-core",)),
     Step("windows-warp-allocator",
          ("cargo", "test", "-p", "sonicterm-gpu", "--test", "windows_warp_allocator_baseline",
           "--", "--nocapture"),
@@ -591,14 +594,14 @@ STEPS = (
          ("windows",), 4200, "local", ("rust", "native"), (_WINDOWS_RUNTIME,)),
     Step("macos-selection-build",
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "native_split_selection"),
-         ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
+         ("macos",), 1500, "local", ("rust", "native"), ("macos-core", "macos-smoke")),
     Step("macos-selection-smoke", ("python3", "scripts/native-selection-smoke.py"),
-         ("macos",), 300, "local", ("rust", "native"), ("macos-smoke",)),
+         ("macos",), 300, "local", ("rust", "native"), ("macos-core", "macos-smoke")),
     # The smoke builds its own debug perf_scenarios example, then runs three short cases (S1, S3, and S1
     # ended as at its deadline), each retried up to 3 times: the selection build's 1500 s cold-build
     # allowance plus 100 s for each of up to 12 harness runs.
     Step("macos-perf-smoke", ("python3", "scripts/perf-compare.py", "--smoke"),
-         ("macos",), 2700, "local", ("rust", "native"), ("macos-smoke",)),
+         ("macos",), 2700, "local", ("rust", "native"), ("macos-core", "macos-smoke")),
     # The head harness overlaid on the previous release tag, checked (not built) in an isolated target with
     # the features and harness cfgs a comparison would derive: a cold check of the workspace (3600 s) plus
     # the worktree and overlay. Ubuntu's example roots exclude the probe, so only macOS and Windows run it.
@@ -607,7 +610,7 @@ STEPS = (
     Step("windows-perf-previous-release", ("python", "scripts/perf-compare.py", "--check-previous-release"),
          ("windows",), 4200, "local", ("rust", "native"), ("windows-checks",)),
     Step("release-macos", ("cargo", "build", "--release", "-p", "sonicterm-mac"), ("macos",), 1500,
-         "release", ("rust", "native"), ("macos-smoke",)),
+         "release", ("rust", "native"), ("macos-core", "macos-smoke")),
     Step("release-windows", ("cargo", "build", "--release", "-p", "sonicterm-windows"),
          ("windows",), 1500, "release", ("rust", "native"), ("windows-smoke",), windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("release-linux", ("cargo", "build", "--release", "-p", "sonicterm-linux"), ("linux",),
@@ -833,7 +836,7 @@ CI_ONLY = (
            ("windows-native", "windows-checks", _WINDOWS_WORKSPACE, _WINDOWS_HARNESS, _WINDOWS_HARNESS_FEATURES,
             _WINDOWS_HARNESS_API, _WINDOWS_RUNTIME, "windows-smoke", "windows-glyph-oracle"),
            "installs the vcpkg Cairo that the native prerequisite names; it checks nothing"),
-    CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-llvm-cov", ("macos-coverage",),
+    CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-llvm-cov", ("macos-core", "linux-coverage"),
            "installs the pinned cargo-llvm-cov that the llvm-cov prerequisite names; it checks nothing"),
     CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-deny", ("linux-core",),
            "installs the pinned cargo-deny that the cargo-deny prerequisite names; it checks nothing"),
@@ -879,7 +882,14 @@ CI_ONLY = (
            "--log-file \"$RUNNER_TEMP/sonicterm-macos-smoke-${{ matrix.arch }}.log\" "
            "-- target/release/sonicterm-mac --runtime-smoke",
            ("macos-smoke",),
-           "runs the release-macos binary's native runtime smoke on each hosted architecture"),
+           "runs the release-macos binary's native runtime smoke on the Intel image"),
+    CiOnly("runtime-evidence",
+           "python3 scripts/native-smoke-runner.py --timeout-seconds 45 "
+           "--state-dir \"$RUNNER_TEMP/sonicterm-macos-smoke-aarch64\" "
+           "--log-file \"$RUNNER_TEMP/sonicterm-macos-smoke-aarch64.log\" "
+           "-- target/release/sonicterm-mac --runtime-smoke",
+           ("macos-core",),
+           "runs the release-macos binary's native runtime smoke on Apple Silicon in the core gates"),
     CiOnly("runtime-evidence",
            "python scripts/native-smoke-runner.py --timeout-seconds 45 "
            "--state-dir \"$env:RUNNER_TEMP\\sonicterm-windows-smoke\" "
@@ -893,7 +903,14 @@ CI_ONLY = (
            "--log-file \"$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}.log\" "
            "-- target/release/sonicterm-mac --runtime-smoke",
            ("macos-smoke",),
-           "runs the release-macos binary's persistent frame-validation smoke on each hosted architecture"),
+           "runs the release-macos binary's persistent frame-validation smoke on the Intel image"),
+    CiOnly("runtime-evidence",
+           "python3 scripts/native-smoke-runner.py --timeout-seconds 45 --scenario frame-validation "
+           "--state-dir \"$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-aarch64\" "
+           "--log-file \"$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-aarch64.log\" "
+           "-- target/release/sonicterm-mac --runtime-smoke",
+           ("macos-core",),
+           "runs the release-macos binary's persistent frame-validation smoke on Apple Silicon in the core gates"),
     CiOnly("runtime-evidence",
            "python scripts/native-smoke-runner.py --timeout-seconds 45 --scenario frame-validation "
            "--state-dir \"$env:RUNNER_TEMP\\sonicterm-windows-frame-validation-smoke\" "
@@ -907,7 +924,14 @@ CI_ONLY = (
            "--log-file \"$RUNNER_TEMP/sonicterm-macos-device-recovery-smoke-${{ matrix.arch }}.log\" "
            "-- target/release/sonicterm-mac --runtime-smoke",
            ("macos-smoke",),
-           "runs shared-device recovery in the release-macos binary on each hosted architecture"),
+           "runs shared-device recovery in the release-macos binary on the Intel image"),
+    CiOnly("runtime-evidence",
+           "python3 scripts/native-smoke-runner.py --timeout-seconds 45 --scenario device-recovery "
+           "--state-dir \"$RUNNER_TEMP/sonicterm-macos-device-recovery-smoke-aarch64\" "
+           "--log-file \"$RUNNER_TEMP/sonicterm-macos-device-recovery-smoke-aarch64.log\" "
+           "-- target/release/sonicterm-mac --runtime-smoke",
+           ("macos-core",),
+           "runs shared-device recovery in the release-macos binary on Apple Silicon in the core gates"),
     CiOnly("runtime-evidence",
            "python scripts/native-smoke-runner.py --timeout-seconds 45 --scenario device-recovery "
            "--state-dir \"$env:RUNNER_TEMP\\sonicterm-windows-device-recovery-smoke\" "
@@ -920,12 +944,23 @@ CI_ONLY = (
            ("macos-smoke",),
            "packages the release-macos binary; workspace-crates runs the bundle tool tests"),
     CiOnly("package-evidence",
+           "bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-aarch64",
+           ("macos-core",),
+           "packages the Apple Silicon release-macos binary; workspace-crates runs the bundle tool tests"),
+    CiOnly("package-evidence",
            "python3 scripts/test-macos-package.py "
            "--dmg \"dist/SonicTerm-ci-mac-${{ matrix.arch }}.dmg\" "
            "--state-dir \"$RUNNER_TEMP/sonicterm-macos-package-${{ matrix.arch }}\" "
            "--max-minimum-macos \"${{ matrix.minimum }}\"",
            ("macos-smoke",),
            "validates the packaged DMG; workspace-crates runs test-macos-package_tests.py"),
+    CiOnly("package-evidence",
+           "python3 scripts/test-macos-package.py "
+           "--dmg \"dist/SonicTerm-ci-mac-aarch64.dmg\" "
+           "--state-dir \"$RUNNER_TEMP/sonicterm-macos-package-aarch64\" "
+           "--max-minimum-macos \"14.0\"",
+           ("macos-core",),
+           "validates the Apple Silicon packaged DMG; workspace-crates runs test-macos-package_tests.py"),
     CiOnly("package-evidence",
            "python3 scripts/prepare-release-assets.py check-version --tag \"$tag\"",
            ("linux-packages",),
@@ -1515,26 +1550,41 @@ def ci_job_commands(workflow: str) -> dict[str, list[tuple[str, str]]]:
     return result
 
 
-# The commands the macos-smoke job must run unconditionally, in this order, before the release build.
+# The commands each macOS smoke job must run unconditionally, in this order, before the release build.
 _MACOS_SMOKE_GATES = (
     "cargo build --locked -p sonicterm-app --example native_split_selection",
     "python3 scripts/native-selection-smoke.py",
     "python3 scripts/perf-compare.py --smoke",
 )
 _MACOS_RELEASE_BUILD = "cargo build --release -p sonicterm-mac"
+# macos-core runs the Apple Silicon smoke on its macos-14 runner; macos-smoke runs the Intel one.
+_MACOS_SMOKE_JOBS = ("macos-core", "macos-smoke")
 
 
 def macos_smoke_ci_problems(workflow: str) -> list[str]:
-    """Keep native selection and the perf scenario smoke mandatory and ordered in both macOS smoke legs."""
-    match = re.search(r"(?ms)^  macos-smoke:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
-    if match is None:
-        return ["the macOS smoke gates require the macos-smoke job"]
-    body = match[1]
+    """Keep native selection and the perf scenario smoke mandatory and ordered for both macOS architectures."""
+    problems = []
+    for job in _MACOS_SMOKE_JOBS:
+        body = _job_body(workflow, job)
+        if body is None:
+            problems.append(f"the macOS smoke gates require the {job} job")
+            continue
+        problems.extend(_macos_smoke_job_problems(job, body))
+    return problems
+
+
+def _macos_smoke_job_problems(job: str, body: str) -> list[str]:
+    """Check one macOS smoke job: unconditional, on its architecture, with the gates ordered."""
     problems = []
     if re.search(r"(?m)^    (?:if|continue-on-error):", body):
-        problems.append("macos-smoke must not be conditional or advisory")
-    if (re.findall(r"(?m)^            arch: (\S+)\s*$", body) != ["aarch64", "x86_64"]
-            or re.search(r"(?m)^        exclude:", body)):
+        problems.append(f"{job} must not be conditional or advisory")
+    # When: macos-core packages the aarch64 bundle by name; macos-smoke's matrix must hold only the Intel leg.
+    if job == "macos-core":
+        covered = "ci mac-aarch64\n" in body
+    else:
+        covered = (re.findall(r"(?m)^            arch: (\S+)\s*$", body) == ["x86_64"]
+                   and not re.search(r"(?m)^        exclude:", body))
+    if not covered:
         problems.append("the macOS smoke gates must run on both macOS architectures")
     step_bodies = re.split(r"(?m)^      - ", body)[1:]
     positions: dict[str, int] = {}
@@ -1542,12 +1592,12 @@ def macos_smoke_ci_problems(workflow: str) -> list[str]:
         matches = [index for index, step in enumerate(step_bodies)
                    if "        run: " + command + "\n" in step]
         if len(matches) != 1:
-            problems.append(f"macos-smoke needs one mandatory `{command}` step")
+            problems.append(f"{job} needs one mandatory `{command}` step")
             continue
         positions[command] = matches[0]
         if command in _MACOS_SMOKE_GATES and re.search(
                 r"(?m)^(?:        )?(?:if|continue-on-error):", step_bodies[matches[0]]):
-            problems.append(f"macos-smoke step `{command}` must not be conditional or advisory")
+            problems.append(f"{job} step `{command}` must not be conditional or advisory")
     build, selection, perf = _MACOS_SMOKE_GATES
     for ordered, message in (
         ((build, selection, _MACOS_RELEASE_BUILD),
@@ -1558,7 +1608,7 @@ def macos_smoke_ci_problems(workflow: str) -> list[str]:
         indexes = [positions[command] for command in ordered if command in positions]
         # Each command owns a distinct step, so a sorted index list is a strictly increasing one.
         if len(indexes) == len(ordered) and indexes != sorted(indexes):
-            problems.append(message)
+            problems.append(f"{job}: {message}")
     return problems
 
 

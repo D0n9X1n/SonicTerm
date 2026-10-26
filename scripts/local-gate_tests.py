@@ -1644,7 +1644,7 @@ class TableTests(unittest.TestCase):
             self.assertEqual(gate.command_text(step), command)
             self.assertEqual(step.hosts, ("macos",))
             self.assertEqual(step.evidence, "local")
-            self.assertEqual(step.ci_jobs, ("macos-smoke",))
+            self.assertEqual(step.ci_jobs, ("macos-core", "macos-smoke"))
             self.assertEqual(step.timeout_s, timeout)
             self.assertIn(step, gate.select_steps("macos"))
         selected = [step.id for step in gate.select_steps("macos")]
@@ -1704,11 +1704,11 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(
             set(jobs),
             {
-                "macos-core", "macos-coverage", "macos-smoke", "macos", "tooling",
+                "macos-core", "macos-smoke", "macos", "tooling",
                 "windows-native", "windows-glyph-oracle", "windows-checks", "windows-tests-workspace", "windows-tests-harness",
                 "windows-tests-harness-features", "windows-tests-harness-api", "windows-tests-runtime",
                 "windows-smoke", "windows",
-                "linux-core", "linux-packages", "linux",
+                "linux-core", "linux-coverage", "linux-packages", "linux",
             },
         )
         commands = {job: [command for _label, command in pairs] for job, pairs in jobs.items()}
@@ -1733,8 +1733,9 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(gate.ci_only_problems(ROOT, WORKFLOW), [])
 
     def test_macos_smoke_gates_cannot_be_skipped_or_made_advisory(self):
-        # Both native matrix legs inherit the mandatory selection build, selection smoke and perf scenario
-        # smoke; no job- or step-level `if:` or `continue-on-error:` may bypass any of them.
+        # Both architectures inherit the mandatory selection build, selection smoke and perf scenario smoke:
+        # Apple Silicon in macos-core, Intel in macos-smoke. No job- or step-level `if:` or
+        # `continue-on-error:` may bypass any of them in either job.
         self.assertEqual(gate.macos_smoke_ci_problems(WORKFLOW), [])
         for command in (
             "cargo build --locked -p sonicterm-app --example native_split_selection",
@@ -1742,18 +1743,38 @@ class CiParityTests(unittest.TestCase):
             "python3 scripts/perf-compare.py --smoke",
         ):
             line = "        run: " + command
-            self.assertEqual(WORKFLOW.count(line), 1)
+            # One step in each job: macos-core's is the file's first, macos-smoke's its last.
+            self.assertEqual(WORKFLOW.count(line), 2)
+            for job, occurrence in (("macos-core", 0), ("macos-smoke", 1)):
+                def mutate(new_line: str) -> str:
+                    """Replace only this job's occurrence of the step's run line."""
+                    pieces = WORKFLOW.split(line)
+                    return line.join(pieces[:occurrence + 1]) + new_line + line.join(pieces[occurrence + 1:])
+                for bypass in ("if: false", "continue-on-error: true"):
+                    mutated = mutate("        " + bypass + "\n" + line)
+                    self.assertTrue(gate.ci_parity_problems(mutated))
+                    # The guard itself names the bypassed job and step, not only some other parity finding.
+                    self.assertIn(f"{job} step `{command}` must not be conditional or advisory",
+                                  gate.macos_smoke_ci_problems(mutated))
+                self.assertTrue(gate.ci_parity_problems(mutate("        run: echo omitted")))
+        for job in ("macos-core", "macos-smoke"):
             for bypass in ("if: false", "continue-on-error: true"):
-                mutated = WORKFLOW.replace(line, "        " + bypass + "\n" + line, 1)
+                mutated = WORKFLOW.replace(f"  {job}:\n", f"  {job}:\n    " + bypass + "\n", 1)
                 self.assertTrue(gate.ci_parity_problems(mutated))
-                # The guard itself names the bypassed step, not only some other parity finding.
-                self.assertIn(f"macos-smoke step `{command}` must not be conditional or advisory",
-                              gate.macos_smoke_ci_problems(mutated))
-            self.assertTrue(gate.ci_parity_problems(WORKFLOW.replace(line, "        run: echo omitted", 1)))
-        for bypass in ("if: false", "continue-on-error: true"):
-            mutated = WORKFLOW.replace("  macos-smoke:\n", "  macos-smoke:\n    " + bypass + "\n", 1)
+                self.assertIn(f"{job} must not be conditional or advisory", gate.macos_smoke_ci_problems(mutated))
+        # Neither architecture may drop out, and the Intel matrix may not regain an Apple Silicon leg that
+        # would run that architecture twice.
+        message = "the macOS smoke gates must run on both macOS architectures"
+        for mutated in (
+            WORKFLOW.replace("arch: x86_64", "arch: omitted", 1),
+            WORKFLOW.replace("ci mac-aarch64\n", "ci mac-omitted\n", 1),
+            WORKFLOW.replace("          - runner: macos-15-intel\n",
+                             "          - runner: macos-14\n            arch: aarch64\n"
+                             "          - runner: macos-15-intel\n", 1),
+        ):
+            self.assertNotEqual(mutated, WORKFLOW)
+            self.assertIn(message, gate.macos_smoke_ci_problems(mutated))
             self.assertTrue(gate.ci_parity_problems(mutated))
-        self.assertTrue(gate.ci_parity_problems(WORKFLOW.replace("arch: x86_64", "arch: omitted", 1)))
 
     def test_native_selection_build_and_run_precede_release_packaging(self):
         # A retained executable must never stand in for the current source's fixture build.
@@ -1765,16 +1786,20 @@ class CiParityTests(unittest.TestCase):
             "      - name: Require macOS native split selection\n"
             "        run: python3 scripts/native-selection-smoke.py\n\n"
         )
-        self.assertIn(build + smoke, WORKFLOW)
+        self.assertEqual(WORKFLOW.count(build + smoke), 2)
+        message = "native selection must build then run before the release build and packaging"
+        # The first occurrence is macos-core's Apple Silicon steps, the last macos-smoke's Intel ones.
         reversed_steps = WORKFLOW.replace(build + smoke, smoke + build, 1)
-        self.assertTrue(gate.macos_smoke_ci_problems(reversed_steps))
+        self.assertIn(f"macos-core: {message}", gate.macos_smoke_ci_problems(reversed_steps))
         late_steps = WORKFLOW.replace(build + smoke, "", 1).replace(
             "      - name: Upload macOS package evidence\n",
             build + smoke + "      - name: Upload macOS package evidence\n", 1)
-        self.assertTrue(gate.macos_smoke_ci_problems(late_steps))
+        self.assertIn(f"macos-core: {message}", gate.macos_smoke_ci_problems(late_steps))
+        intel_reversed = (smoke + build).join(WORKFLOW.rsplit(build + smoke, 1))
+        self.assertIn(f"macos-smoke: {message}", gate.macos_smoke_ci_problems(intel_reversed))
 
     def test_perf_smoke_runs_after_the_selection_smoke_and_before_the_release_build(self):
-        # Both legs run the perf scenario smoke between the native selection smoke and the release build;
+        # Both architectures run the perf scenario smoke between the native selection smoke and the release build;
         # moving it before the selection smoke or after the release build fails the guard.
         selection = (
             "      - name: Require macOS native split selection\n"
@@ -1788,13 +1813,16 @@ class CiParityTests(unittest.TestCase):
         self.assertIn(selection + perf + release, WORKFLOW)
         message = ("the perf scenario smoke must run after the native selection smoke "
                    "and before the release build")
+        # The first occurrence is macos-core's Apple Silicon steps, the last macos-smoke's Intel ones.
         early = WORKFLOW.replace(selection + perf, perf + selection, 1)
-        self.assertIn(message, gate.macos_smoke_ci_problems(early))
+        self.assertIn(f"macos-core: {message}", gate.macos_smoke_ci_problems(early))
         late = WORKFLOW.replace(perf, "", 1).replace(
             "      - name: Upload macOS package evidence\n",
             perf + "      - name: Upload macOS package evidence\n", 1)
-        self.assertIn(message, gate.macos_smoke_ci_problems(late))
+        self.assertIn(f"macos-core: {message}", gate.macos_smoke_ci_problems(late))
         self.assertTrue(gate.ci_parity_problems(late))
+        intel_early = (perf + selection).join(WORKFLOW.rsplit(selection + perf, 1))
+        self.assertIn(f"macos-smoke: {message}", gate.macos_smoke_ci_problems(intel_early))
 
     def test_windows_perf_smoke_is_required_locally_on_windows(self):
         # The scenario harness must build and run on Windows: the compile-only build first, then the smoke,
@@ -2151,7 +2179,7 @@ class CiParserTests(unittest.TestCase):
 
     def test_every_unmodeled_job_form_raises(self):
         # Protect parity from jobs whose steps the reader cannot see: each form raises.
-        anchor = "  macos-coverage:\n"
+        anchor = "  linux-coverage:\n"
         self.assertEqual(WORKFLOW.count(anchor), 1)
         forms = {
             "reusable workflow job": "  reusable:\n    uses: ./.github/workflows/other.yml\n\n",

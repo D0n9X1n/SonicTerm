@@ -62,17 +62,18 @@ python3 scripts/local-gate.py
 | `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `linux-core` |
 | `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-tests-workspace`、`linux-core` |
 | `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `tooling`、`windows-tests-workspace`、`linux-core` |
-| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `macos-coverage` |
+| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `linux-coverage` |
+| `macos-logic-coverage` | `scripts/macos-logic-coverage.sh` | macOS | `local` | `rust`、`llvm-cov` | `macos-core` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests-runtime` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
 | `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`、`native` | `windows-tests-runtime` |
 | `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`、`native` | `windows-tests-runtime` |
-| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`、`native` | `macos-smoke` |
-| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`、`native` | `macos-smoke` |
-| `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`、`native` | `macos-smoke` |
+| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`、`native` | `macos-core`、`macos-smoke` |
+| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`、`native` | `macos-core`、`macos-smoke` |
+| `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`、`native` | `macos-core`、`macos-smoke` |
 | `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`、`native` | `macos-core` |
 | `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`、`native` | `windows-checks` |
-| `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-smoke` |
+| `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-core`、`macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`、`native` | `linux-packages` |
 | `windows-target` | `bash scripts/check-windows-target.sh` | macOS | `optional` | `rust`、`win-target`、`bash` | — |
@@ -758,9 +759,8 @@ job 完成。被取代、被取消或被跳过的运行从不算作成功。
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
 该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。允许两种缺口：base 未声明 `perf-counters` 时的计数器组，
 它仍显示 `n/a`；以及因 harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行任何内容。其他任何被阻止的一侧仍会失败，
-没有可运行内容的选择也永远不会通过。四个 macOS 分片运行 S7、S4、S1/atlas-retry 与 S12/status-line；
-S10/sync、S9、S11、S6、S1、S5、S6/rest 与 S1/status-line；S10、S11/release、S2/flood、S12 与 S6/flood；
-以及 S2、S3、S8 与 S6/selection-drag。五个 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
+没有可运行内容的选择也永远不会通过。三个 macOS 分片运行 S7、S4、S1/atlas-retry、S12/status-line、S3、S8 与 S6/selection-drag；
+S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line 与 S12；以及 S10、S11/release、S2、S2/flood 与 S6/flood。五个 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
 S2、S10/sync 与 S6/rest；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，其中 macOS 分配根据实测阶段成本重新均衡，35 分钟余量仍由 exact-head 计时验证；Windows 的 S7 还运行 S1/status-line 与 S12/status-line。
 各平台包含 S9 的分片（macOS 的 S9-S10sync，Windows 的 S9-S10）还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
 lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
@@ -800,7 +800,8 @@ report。没有它的旧运行按历史模式读取：每个 job 的证据是在
 超出为 1，job 行无法对上时为 2。由作者为 pull request 的证据运行它；工作流不会运行它。
 
 `macos-perf-smoke` gate
-步骤在两个 `macos-smoke` 分支中运行 `python3 scripts/perf-compare.py --smoke`。它以 debug 构建
+步骤在 `macos-core`（Apple Silicon）与 `macos-smoke`（Intel）中运行
+`python3 scripts/perf-compare.py --smoke`。它以 debug 构建
 当前树的 harness，以 `--short` 运行三个简短用例（S1、S3，以及会话一启动就像到达截止时间的运行那样被终止的 S1），只检查
 该树的资源能否解析、结果 schema、焦点安全、`~/.sonicterm` 快照、App 是否加载了配置的主字体，以及清理后没有进程残留。它不断言任何耗时数值，
 因此通过只说明工具可用，从不说明某项改动更快。在 Windows 上，`windows-tests-runtime` job 构建 harness 并运行
@@ -812,13 +813,14 @@ smoke 的失败规则见[本地 gate](Local-Gate-zh-CN#性能场景-smoke)。
 
 ## Coverage 证据与重新建立基线
 
-per-crate 下限只在 macOS arm64 CI runner 上强制执行，而 CI 跟随 stable Rust channel，因此新的
-stable 版本或 runner 镜像可能在源码不变时改变 crate 的测量覆盖率。所以每次 coverage 运行都会保留
+per-crate 下限只在 `linux-coverage` job 的 x86_64 Linux 容器中强制执行，macOS 专用下限只在 macOS 14
+arm64 runner 上强制执行。CI 跟随 stable Rust channel，因此新的 stable 版本、runner 镜像或容器镜像可能在
+源码不变时改变测量覆盖率。所以每次 coverage 运行都会保留
 证据，下限只能根据已保留运行的已验证证据调整。
 
 ### 证据 artifact
 
-`macOS logic coverage` job 为每个 coverage 步骤已开始的 run attempt，在成功和失败后，只要 runner
+`Linux logic coverage` job 为每个 coverage 步骤已开始的 run attempt，在成功和失败后，只要 runner
 仍能执行清理步骤，就上传一个 artifact：`rust-logic-coverage-evidence-<run id>-<attempt>`。在该步骤
 之前失败（checkout、工具链、缓存或 `cargo-llvm-cov` 安装）不会留下 artifact；它的 job 日志是唯一的
 诊断信息。上传步骤保留 90 天（受仓库策略限制），并设置 `if-no-files-found: error`，
@@ -895,7 +897,7 @@ gh run download "$run" -R D0n9X1n/SonicTerm \
 gh api "repos/D0n9X1n/SonicTerm/actions/runs/$run/attempts/$attempt" \
   --jq '[.repository.full_name, .path, .run_attempt, .event, .status, .head_sha] | @tsv'
 gh api "repos/D0n9X1n/SonicTerm/actions/runs/$run/attempts/$attempt/jobs?per_page=100" \
-  --jq '.jobs[] | select(.name == "macOS logic coverage") | [.conclusion, .head_sha] | @tsv'
+  --jq '.jobs[] | select(.name == "Linux logic coverage") | [.conclusion, .head_sha] | @tsv'
 python3 -c 'import json, sys; record = json.load(open(sys.argv[1])); record.pop("tree_entries"); print(json.dumps(record, indent=2))' \
   "$dir/coverage-provenance.json"
 commit="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["commit"])' "$dir/coverage-provenance.json")"
@@ -908,8 +910,8 @@ gh api "repos/D0n9X1n/SonicTerm/git/commits/$commit" \
 - `.repository.full_name` 等于 `repository`，`.path` 等于 `workflow`，即
   `.github/workflows/ci.yml`。
 - `.run_attempt` 等于 `run_attempt`，artifact 名称等于 `artifact`。
-- 该 attempt 的 `.status` 为 `completed`；`macOS logic coverage` job（记录中的 `job`，即
-  `macos-coverage`）存在，且两项检查都为 `exit status 0` 时结论为 `success`，否则为 `failure`。
+- 该 attempt 的 `.status` 为 `completed`；`Linux logic coverage` job（记录中的 `job`，即
+  `linux-coverage`）存在，且两项检查都为 `exit status 0` 时结论为 `success`，否则为 `failure`。
 - 记录写明 `measurement: complete`。
 - push 运行中，`commit` 等于该 attempt 的 `.head_sha`。pull request 运行中，`commit` 是 GitHub 的
   测试 merge commit，且 `.head_sha` 等于 `pull_request_head`。
@@ -931,7 +933,7 @@ gh api "repos/D0n9X1n/SonicTerm/git/commits/$commit" \
    python3 scripts/coverage-floor.py --update-baseline \
      --report "$dir/measurement/coverage-summary.json" \
      --metadata "$dir/measurement/workspace-metadata.json" \
-     --baseline scripts/coverage-baseline.json --target aarch64-apple-darwin \
+     --baseline scripts/coverage-baseline.json --target x86_64-unknown-linux-gnu \
      --provenance "$dir/coverage-provenance.json" \
      --crate NAME --reason "CAUSE"
    ```
@@ -942,12 +944,34 @@ gh api "repos/D0n9X1n/SonicTerm/git/commits/$commit" \
    说明起因：工具链或镜像变化可能导致 DROP，但仅凭这一点不能成为降低下限的理由。
 5. 像其它下限变更一样评审并提交 diff。
 
+### macOS 专用下限
+
+baseline 的 `macos` 段为 80% 子集中的 macOS 专用逻辑保存逐文件下限，由 `macos-core` 中的
+`scripts/macos-logic-coverage.sh` 在 `aarch64-apple-darwin` 上测量。脚本在测量前固定 checkout，并在报告旁写入
+provenance 记录：运行、host、镜像、工具链、`cargo-llvm-cov`、commit、tree 以及报告的 SHA-256。该 job 在成功和
+失败后都把两者上传为 `macos-logic-coverage-evidence-<run id>-<attempt>`。
+
+与 crate 下限一样，该段只能根据这份经过验证的记录修改。按上文获取 artifact，并通过 GitHub API 核对其运行与
+job（使用此 artifact 名称与 `macOS core gates` job），然后只重写这一段；所有 crate 下限保持不变：
+
+```bash
+python3 scripts/coverage-floor.py macos-floor --update \
+  --report "$dir/coverage-summary.json" --provenance "$dir/coverage-provenance.json" \
+  --baseline scripts/coverage-baseline.json --target aarch64-apple-darwin \
+  --source-root "$PWD" --reason "CAUSE"
+```
+
+`--file PATH` 向该段添加文件。更新会拒绝缺失、本地、不完整或发生漂移的记录，来自其它 job 或 artifact 的记录，
+SHA-256 与记录不符的报告，不是 `scripts/pinned-tools.json` 固定版本的 `cargo-llvm-cov`，以及 coverage 相关内容
+与 checkout 不同的被测 tree。它从记录中取得 host，并在所述原因后追加运行、job、artifact、host、镜像、工具链与 commit。
+
 ### 拒绝条件
 
 检查器离线运行，只检查完整性；每次拒绝都会指出不同之处。`--update-baseline` 会拒绝：
 
 - 不带 `--provenance` 修改指名 CI host 的 baseline；只有 CI 从不强制执行的 `--runner local`
   baseline 可以不带它写入；
+- `cargo-llvm-cov` 不是 `scripts/pinned-tools.json` 所固定版本的记录；
 - 不完整的记录（会指出失败阶段），或缺少字段的记录；
 - 指出 checkout 漂移的记录；
 - 不恰好包含 `subset-gate` 与 `floor` 两项的 `checks`，其中某项的状态不是 gate 脚本写出的状态

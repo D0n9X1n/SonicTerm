@@ -64,17 +64,18 @@ python3 scripts/local-gate.py
 | `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `linux-core` |
 | `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
 | `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
-| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
+| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `linux-coverage` |
+| `macos-logic-coverage` | `scripts/macos-logic-coverage.sh` | macOS | `local` | `rust`, `llvm-cov` | `macos-core` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests-runtime` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
 | `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`, `native` | `windows-tests-runtime` |
 | `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`, `native` | `windows-tests-runtime` |
-| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
-| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
-| `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-smoke` |
+| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
+| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
+| `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`, `native` | `macos-core` |
 | `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`, `native` | `windows-checks` |
-| `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
+| `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
 | `windows-target` | `bash scripts/check-windows-target.sh` | macOS | `optional` | `rust`, `win-target`, `bash` | — |
@@ -1153,9 +1154,9 @@ its `comparison.md` opens with `**Incomplete comparison:**`. Two gaps are
 allowed: a counters set on a base that does not declare `perf-counters`, which
 still reads `n/a`, and a diagnostic declared unavailable on both sides because
 its harness API cfg is off, which runs nothing. Any other blocked side still
-fails, and a selection with nothing runnable never passes. The four macOS shards run S7, S4, S1/atlas-retry and S12/status-line;
-S10/sync, S9, S11, S6, S1, S5, S6/rest and S1/status-line;
-S10, S11/release, S2/flood, S12 and S6/flood; and S2, S3, S8 and S6/selection-drag.
+fails, and a selection with nothing runnable never passes. The three macOS shards run S7, S4, S1/atlas-retry, S12/status-line,
+S3, S8 and S6/selection-drag; S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line and S12;
+and S10, S11/release, S2, S2/flood and S6/flood.
 The five Windows shards run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2, S10/sync and S6/rest; S4, S5, S11, S11/release,
 S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, with the macOS partition rebalanced from measured phase costs; exact-head timing still verifies the 35-minute margin; Windows S7 also runs S1/status-line and S12/status-line. On each platform the shard holding S9 (macOS
@@ -1229,7 +1230,8 @@ and 2 when the rows do not reconcile. The author runs it for a pull request's
 evidence; the workflow does not.
 
 The `macos-perf-smoke` gate step runs
-`python3 scripts/perf-compare.py --smoke` in both `macos-smoke` legs. It builds
+`python3 scripts/perf-compare.py --smoke` in `macos-core` (Apple Silicon) and
+`macos-smoke` (Intel). It builds
 the current tree's harness in debug, runs three short cases with `--short` (S1,
 S3, and an S1 killed like a run at its deadline as soon as its session starts),
 and checks only that the tree's assets resolve, the result schema, focus safety,
@@ -1249,15 +1251,16 @@ rules.
 
 ## Coverage evidence and rebaselining
 
-The per-crate floor is enforced only on the macOS arm64 CI runner, and CI tracks
-the stable Rust channel, so a new stable release or runner image can move a
-crate's measured coverage with no source change. Each coverage run therefore
+The per-crate floor is enforced only in the `linux-coverage` job's x86_64 Linux
+container, and the macOS-only floor only on the macOS 14 arm64 runner. CI tracks
+the stable Rust channel, so a new stable release, runner image or container
+image can move measured coverage with no source change. Each coverage run therefore
 keeps its evidence, and a floor changes only from a retained run's verified
 evidence.
 
 ### Evidence artifact
 
-The `macOS logic coverage` job uploads one artifact per run attempt whose
+The `Linux logic coverage` job uploads one artifact per run attempt whose
 coverage step started, `rust-logic-coverage-evidence-<run id>-<attempt>`, after
 success and after failure whenever the runner can still run cleanup steps. A
 failure before that step (checkout, toolchain, cache, or the `cargo-llvm-cov`
@@ -1361,7 +1364,7 @@ gh run download "$run" -R D0n9X1n/SonicTerm \
 gh api "repos/D0n9X1n/SonicTerm/actions/runs/$run/attempts/$attempt" \
   --jq '[.repository.full_name, .path, .run_attempt, .event, .status, .head_sha] | @tsv'
 gh api "repos/D0n9X1n/SonicTerm/actions/runs/$run/attempts/$attempt/jobs?per_page=100" \
-  --jq '.jobs[] | select(.name == "macOS logic coverage") | [.conclusion, .head_sha] | @tsv'
+  --jq '.jobs[] | select(.name == "Linux logic coverage") | [.conclusion, .head_sha] | @tsv'
 python3 -c 'import json, sys; record = json.load(open(sys.argv[1])); record.pop("tree_entries"); print(json.dumps(record, indent=2))' \
   "$dir/coverage-provenance.json"
 commit="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["commit"])' "$dir/coverage-provenance.json")"
@@ -1375,8 +1378,8 @@ When the run published them, the report and inventory are in
 - `.repository.full_name` equals `repository`, and `.path` equals `workflow`,
   `.github/workflows/ci.yml`.
 - `.run_attempt` equals `run_attempt`, and the artifact name equals `artifact`.
-- The attempt's `.status` is `completed`, and the `macOS logic coverage` job
-  (the record's `job`, `macos-coverage`) exists with conclusion `success` when
+- The attempt's `.status` is `completed`, and the `Linux logic coverage` job
+  (the record's `job`, `linux-coverage`) exists with conclusion `success` when
   both checks read `exit status 0`, and `failure` otherwise.
 - The record says `measurement: complete`.
 - On a push run, `commit` equals the attempt's `.head_sha`. On a pull-request
@@ -1403,7 +1406,7 @@ commit, and its tree.
    python3 scripts/coverage-floor.py --update-baseline \
      --report "$dir/measurement/coverage-summary.json" \
      --metadata "$dir/measurement/workspace-metadata.json" \
-     --baseline scripts/coverage-baseline.json --target aarch64-apple-darwin \
+     --baseline scripts/coverage-baseline.json --target x86_64-unknown-linux-gnu \
      --provenance "$dir/coverage-provenance.json" \
      --crate NAME --reason "CAUSE"
    ```
@@ -1417,6 +1420,34 @@ commit, and its tree.
    lowering a floor.
 5. Review and commit the diff like any other floor change.
 
+### macOS-only floor
+
+The baseline's `macos` section holds per-file floors for the macOS-only logic in the
+80% subset, measured on `aarch64-apple-darwin` by `scripts/macos-logic-coverage.sh`
+in `macos-core`. The script pins the checkout before measuring and writes a provenance
+record beside its report: the run, host, image, toolchain, `cargo-llvm-cov`, commit,
+tree and the report's SHA-256. The job uploads both as
+`macos-logic-coverage-evidence-<run id>-<attempt>` after success and after failure.
+
+The section changes only from that verified record, as a crate floor does. Retrieve
+the artifact and check its run and job through the GitHub API as above, with this
+artifact name and the `macOS core gates` job, then rewrite the section alone; every
+crate floor stays verbatim:
+
+```bash
+python3 scripts/coverage-floor.py macos-floor --update \
+  --report "$dir/coverage-summary.json" --provenance "$dir/coverage-provenance.json" \
+  --baseline scripts/coverage-baseline.json --target aarch64-apple-darwin \
+  --source-root "$PWD" --reason "CAUSE"
+```
+
+`--file PATH` adds a file to the section. The update refuses a missing, local,
+incomplete or drifted record, a record from another job or artifact, a report whose
+SHA-256 differs from the record's, a `cargo-llvm-cov` other than the release
+`scripts/pinned-tools.json` pins, and a measured tree whose coverage-relevant content
+differs from the checkout. It takes the host from the record and appends the run,
+job, artifact, host, image, toolchain and commit to the stated reason.
+
 ### Refusals
 
 The checker works offline and checks integrity; each refusal names what
@@ -1424,6 +1455,8 @@ differs. `--update-baseline` refuses:
 
 - a change to a baseline that names a CI host without `--provenance`; only a
   `--runner local` baseline, which CI never enforces, is written without one;
+- a record whose `cargo-llvm-cov` is not the release `scripts/pinned-tools.json`
+  pins;
 - an incomplete record, naming the failed phase, or a record with a missing
   field;
 - a record that names checkout drift;

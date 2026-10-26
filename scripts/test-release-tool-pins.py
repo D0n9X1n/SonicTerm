@@ -18,8 +18,12 @@ PINS = {
     "WIX_TOOLSET_VERSION": "3.14.1.20250415",
     "CARGO_LLVM_COV_VERSION": "0.9.0",
 }
-# SHA-256 of cargo-llvm-cov 0.9.0's aarch64-apple-darwin release archive.
-COVERAGE_TOOL_SHA256 = "1bbf5dc8ad82e0f6ff0eb923aa6a691c760adb60f797cdcb454e204b9399c4f0"
+# SHA-256 of cargo-llvm-cov 0.9.0's release archive for each coverage host: Linux logic coverage and the
+# macOS-only coverage step in macOS core gates.
+COVERAGE_TOOL_SHA256 = {
+    ("linux", "x86_64"): "bc2122fd7bd9b6d3eb371690ed085f82e5a8bf1851f4645ef521d12ed04b2616",
+    ("macos", "aarch64"): "1bbf5dc8ad82e0f6ff0eb923aa6a691c760adb60f797cdcb454e204b9399c4f0",
+}
 
 
 def require(text: str, needle: str, subject: str) -> None:
@@ -101,14 +105,14 @@ def main() -> None:
         "Install WiX Toolset",
         'choco install wixtoolset --version "${{ env.WIX_TOOLSET_VERSION }}" --no-progress -y',
     )
-    # Coverage installs the pinned release's prebuilt arm64 binary through the pinned-tool script,
-    # which checks the manifest's digest before it unpacks anything.
+    # Each coverage host installs the pinned release's prebuilt binary through the pinned-tool script,
+    # which checks that host's digest from the manifest before it unpacks anything.
     coverage_tool = PINNED_TOOLS["cargo-llvm-cov"]
-    if (coverage_tool["version"], coverage_tool["sha256"]) != (
-        PINS["CARGO_LLVM_COV_VERSION"], COVERAGE_TOOL_SHA256
-    ):
+    coverage_digests = {(pin["os"], pin["arch"]): pin["sha256"] for pin in coverage_tool.get("platforms", [])}
+    if (coverage_tool["version"], coverage_digests) != (PINS["CARGO_LLVM_COV_VERSION"], COVERAGE_TOOL_SHA256):
         raise AssertionError(f"scripts/pinned-tools.json pins cargo-llvm-cov {coverage_tool!r}")
-    require_in_step(CI_WORKFLOW, "Install cargo-llvm-cov", "run: bash scripts/install-pinned-tool.sh cargo-llvm-cov")
+    for step in ("Install cargo-llvm-cov", "Install cargo-llvm-cov for macOS-only coverage"):
+        require_in_step(CI_WORKFLOW, step, "run: bash scripts/install-pinned-tool.sh cargo-llvm-cov")
     forbid(CI_WORKFLOW, "cargo install cargo-llvm-cov", "CI workflow")
     require_in_step(RELEASE, "Build and register msi asset", "--target x86_64-pc-windows-msvc")
     require_in_step(RELEASE, "Build and register msi asset", "--install-version $numericVersion")

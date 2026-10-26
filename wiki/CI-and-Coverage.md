@@ -78,7 +78,7 @@ any stash.
 ### macOS 14 and Windows latest
 
 The stable required checks are fail-closed aggregate jobs: `macos-14 / unit
-tests` requires `macos-core`, `macos-coverage`, `macos-smoke`, and `tooling`, while
+tests` requires `macos-core`, `macos-smoke`, and `tooling`, while
 `windows-latest / unit tests` requires `windows-native`, `windows-glyph-oracle`, `windows-checks`, the
 five Windows test shards (`windows-tests-workspace`, `windows-tests-harness`,
 `windows-tests-harness-features`, `windows-tests-harness-api` and
@@ -96,14 +96,44 @@ checks, plus release-note, wiki-publish, resource-inventory, soak and resource-b
 script tests. These commands remain local gates on every supported host; the existing
 macOS aggregate requires the tooling job, so none became optional. The working-set
 measurement stays in macos-core to reuse its compiled harness without adding a cold
-macOS build or competing with perf for another runner slot. Its independent coverage shard installs the pinned
-`cargo-llvm-cov` release's prebuilt Apple Silicon binary with
-`scripts/install-pinned-tool.sh`, which checks its SHA-256 before unpacking it
+macOS build or competing with perf for another runner slot. Logic coverage runs in its own
+`linux-coverage` job, in the `ubuntu:22.04` container `linux-core` uses, outside the macOS
+runner pool the perf comparison waits for. The container gives its tests the workspace
+gate's Cairo, FreeType and Fontconfig; the `ubuntu-latest` host's newer Cairo draws COLR
+sweep gradients differently. The job names that container as its image identity, since
+the runner does not export one into a container. It installs the pinned `cargo-llvm-cov`
+release's prebuilt static x86_64 Linux binary with
+`scripts/install-pinned-tool.sh`, which checks that host's SHA-256 before unpacking it
 (expected to save the minute a source build takes), then runs the deterministic logic coverage gate, and uploads its
-evidence artifact after success and after failure once the coverage step has started. The
-`macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
-and macOS 15 Intel with distinct dependency-cache keys. Its Intel lane may save
-dependencies only on a push to `main`; the Apple Silicon lane restores only.
+evidence artifact after success and after failure once the coverage step has started.
+
+Because the floors are measured on Linux, the per-crate floors in
+`scripts/coverage-baseline.json` no longer measure macOS-only code: CoreText font
+discovery, the macOS PTY and IO paths, macOS logging, and the `sonicterm-mac` binary
+compile out there, and the Linux-only code (Fontconfig discovery, `sonicterm-linux`)
+is measured instead. The 80% gate and its crate list are unchanged. Platform-independent
+logic that used to sit behind `cfg(target_os = "macos")`, the UTF-16 to UTF-8 boundary
+conversion and the `open` and `xdg-open` URL command builders, now compiles and is
+tested on every Unix host, so the Linux run measures it. The macOS-only logic left in
+the 80% subset, the AppKit word boundary in `sonicterm-ui`'s `text_edit.rs` and the
+macOS arms of `command_label.rs`, keeps its own floor: `macos-core` installs the macOS
+pin of the same tool, runs `scripts/macos-logic-coverage.sh`, which instruments
+`sonicterm-ui` alone, holds each file to the baseline's `macos` section with the same
+1 pp tolerance, and uploads its report and a provenance record after success and after
+failure; only that record, verified, can change the section. A file floor
+catches a loss larger than the tolerance: losing the AppKit boundary's coverage, 7 of
+`text_edit.rs`'s 160 lines, moves it by about 4 pp, while one macOS arm of `command_label.rs` is below 1 pp
+of that file and is not caught.
+
+The
+native runtime smoke builds shipping release binaries on macOS 14 Apple Silicon,
+as steps at the end of `macos-core`, and on macOS 15 Intel, in the one-leg
+`macos-smoke` matrix, with distinct dependency-cache keys. The Intel lane may save
+dependencies only on a push to `main`; the Apple Silicon lane shares `macos-core`'s
+cache entry. It has no job of its own because the repository runs at most five macOS
+jobs at once, and a separate leg would hold a slot the perf comparison's shards wait
+for. Those steps follow the core gates, so an earlier core-gate failure skips them;
+the Intel lane still reports on its own.
 Before the release build, both lanes build and run the native split-selection
 fixture ([Native split selection](Local-Gate#native-split-selection)), then the
 performance scenario smoke, which checks the comparison tooling without timing
@@ -172,18 +202,22 @@ built-in font identity is bound by the source digest, and GDI memory-face names 
 
 Windows cache families are `check-windows-latest` (written by `windows-checks`),
 `test-windows-latest` (written by `windows-tests-workspace`, restored by the oracle and all
-test shards), and `release-windows-latest` (written by `windows-smoke`). The macOS coverage
-job uses its separate `instrumented-macos-14` family. Its coverage script still discards instrumented
+test shards), and `release-windows-latest` (written by `windows-smoke`). The Linux coverage
+job uses its separate `instrumented-ubuntu-22.04` family. Its coverage script still discards instrumented
 outputs before measurement, so that family provides no warm instrumented-build guarantee. No workspace artifacts are cached;
 every writer saves only after a successful push to `main`, never on a pull request. The
 other macOS and Linux cache policies are unchanged. Compiler/environment hashing remains
 enabled; a static-check archive can no longer occupy the test-codegen cache key.
 Overlapping main runs can still race to save an immutable key.
 
-The four macOS perf shards keep their artifact names and every scenario exactly once:
-`S7-S4` holds S7, S4, atlas-retry and S12/status-line; `S9-S10sync` adds S6/rest and S1/status-line;
-`S10-S11release` adds S12/default and S6/flood; `S2-S3-S8-S12` drops those two. The 35-minute PR budget includes queues. No extra macOS
-job competes with perf for a runner slot; exact-head CI timing, not local estimates,
+The three macOS perf shards keep their artifact names and run every scenario
+exactly once, in sets of about 19 minutes from run 40344066083's per-variant times:
+`S7-S4` runs S7, S4, atlas-retry, S12/status-line, S3, S8 and S6/selection-drag;
+`S9-S10sync` runs S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line and S12;
+`S10-S11release` runs S10, S11/release, S2, S2/flood and S6/flood. All three start
+when the binaries land: this repository runs at most five macOS jobs at once, and CI
+holds two (core gates, which also runs the aarch64 smoke, and the Intel smoke). The
+35-minute PR budget includes queues; exact-head CI timing, not local estimates,
 verifies the remaining margin. Runs, counters, S9 laps and release lengths are unchanged.
 
 A compatible successful `main` job must populate a key before a later run can
@@ -214,7 +248,7 @@ progress, not a passing check.
 ### Ubuntu 22.04
 
 The stable `ubuntu 22.04 / workspace, packages, X11, Wayland` aggregate requires
-`linux-core` and `linux-packages`, using the same fail-closed result check as
+`linux-core`, `linux-coverage`, and `linux-packages`, using the same fail-closed result check as
 the macOS and Windows aggregates. The core shard installs the compile-time Linux
 dependencies plus Vulkan/lavapipe for GPU tests and adapter probes, measures the
 real PTY close baseline after Cargo restore, then runs format, Clippy, Rustdoc (including `sonicterm-resource` with its `test-util`
@@ -279,9 +313,10 @@ gestures. See [Platform Integration](Platform-Integration).
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
   deterministic subset. Its ignore regex excludes 9 whole crates, including
   `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
-  other crates. CI runs it only on macOS, although the local runner also selects
-  it on Linux. A green percentage does not cover native windows, real PTYs, GPU
-  surfaces, generated FFI, installers, or Windows-only logic.
+  other crates. CI runs it on Linux, in the `linux-coverage` job's `ubuntu:22.04`
+  container; the local runner selects it on macOS and Linux. A green percentage
+  does not cover native windows, real PTYs, GPU surfaces, generated FFI,
+  installers, or macOS-only and Windows-only logic.
 - The same run reports its profiles again without the ignore regex and prints
   line coverage for every workspace member, and `scripts/coverage-floor.py`
   holds each measured crate to its entry in `scripts/coverage-baseline.json`.
@@ -292,13 +327,23 @@ gestures. See [Platform Integration](Platform-Integration).
   lines. Test, vendored, generated, and build-script code is excluded with
   printed counts; a crate with no eligible line prints `not measured` with its
   reason. The floor catches regressions, not low coverage: a crate that stays
-  low still passes. The `sonicterm-windows` and `sonicterm-linux` rows measure
-  code compiled on macOS, not execution on those platforms. The baseline is
-  keyed to the macOS arm64 CI runner; CI on another host fails as not
-  comparable, and local runs print informational deltas without a verdict. Floor
-  numbers change only in a reviewed diff from a retained run's verified
-  evidence, as [Coverage evidence and rebaselining](Development-and-Release#coverage-evidence-and-rebaselining)
+  low still passes. Every row measures code compiled on Linux: macOS-only font
+  discovery, PTY and IO paths, logging, and the `sonicterm-mac` binary compile
+  out and are not measured, and the `sonicterm-mac` and `sonicterm-windows` rows
+  measure only what compiles there, not execution on those platforms. The
+  baseline is keyed to the `linux-coverage` job's x86_64 Linux container; CI on
+  another host fails as not comparable, and local runs print informational
+  deltas without a verdict. Floor numbers change only in a reviewed diff from a
+  retained run's verified evidence, as [Coverage evidence and rebaselining](Development-and-Release#coverage-evidence-and-rebaselining)
   describes.
+- `scripts/macos-logic-coverage.sh` in `macos-core` holds the macOS-only logic in
+  the 80% subset, the AppKit word boundary in `sonicterm-ui`'s `text_edit.rs` and
+  the macOS arms of `command_label.rs`, to per-file floors in the baseline's
+  `macos` section. CI enforces them only on the macOS 14 arm64 runner, and they
+  change only from a verified `macos-core` record. The run instruments
+  `sonicterm-ui` alone, so macOS-only code in other crates has no floor, and a
+  file floor misses a loss smaller than the 1.0 percentage point tolerance, such
+  as one macOS arm of `command_label.rs`.
 - `cargo deny --locked check` enforces the advisory, license, ban, and source
   policy in `deny.toml`, in the `linux-core` job and in the local gate, for every
   target. A green audit does not mean the ignored advisories are gone: each

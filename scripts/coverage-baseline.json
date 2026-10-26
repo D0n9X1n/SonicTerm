@@ -1,46 +1,46 @@
 {
   "schema": "sonicterm-coverage-baseline/1",
   "host": {
-    "target": "aarch64-apple-darwin",
-    "runner": "macos14/ARM64"
+    "target": "x86_64-unknown-linux-gnu",
+    "runner": "ubuntu22-container/X64"
   },
   "tolerance_pp": 1.0,
-  "reason": "Block-glyph invariant and spinner-boundary regressions admit the crate to the 80% subset gate; raise only its floor from exact-head CI evidence. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/36199047692 attempt 1, job macos-coverage, evidence artifact rust-logic-coverage-evidence-36199047692-1, on aarch64-apple-darwin on macos14/ARM64 (image 20260831.0302.1) with rustc 1.98.1 (48a229cea 2026-09-01) and cargo-llvm-cov 0.9.0, at commit f2cf2fa97726f8936cc6a890749f0768374469e2, the test merge of pull-request head 5f4a25420073f79bdf7678d0fa5b82941fbd2996.",
+  "reason": "Host migration from aarch64-apple-darwin on macos14/ARM64 to x86_64-unknown-linux-gnu on ubuntu22-container/X64. Logic coverage moves from the macOS runner to the linux-coverage job's ubuntu:22.04 container, so every crate floor is re-recorded on Linux, where macOS-only code compiles out and Linux-only code is measured. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/40401978787 attempt 1, job linux-coverage, evidence artifact rust-logic-coverage-evidence-40401978787-1, on x86_64-unknown-linux-gnu on ubuntu22-container/X64 (image ubuntu:22.04) with rustc 1.99.1 (58cf8f9c3 2026-10-13) and cargo-llvm-cov 0.9.0, at commit 168892019bbf4b6438d936d409f713d8b8be3454, the test merge of pull-request head 858b2cdeda23a6e80e5774b34882565ca2ab3c96.",
   "crates": {
     "sonicterm-app": {
-      "lines": 19055,
-      "covered": 10054,
-      "percent": 52.76
+      "lines": 36754,
+      "covered": 25748,
+      "percent": 70.05
     },
     "sonicterm-app-core": {
-      "lines": 396,
-      "covered": 387,
+      "lines": 397,
+      "covered": 388,
       "percent": 97.73
     },
     "sonicterm-block-glyph": {
-      "lines": 4785,
-      "covered": 4688,
-      "percent": 97.97
+      "lines": 4812,
+      "covered": 4707,
+      "percent": 97.82
     },
     "sonicterm-cfg": {
-      "lines": 2513,
-      "covered": 2278,
-      "percent": 90.65
+      "lines": 4290,
+      "covered": 4029,
+      "percent": 93.92
     },
     "sonicterm-engine": {
-      "lines": 470,
-      "covered": 452,
-      "percent": 96.17
+      "lines": 626,
+      "covered": 605,
+      "percent": 96.65
     },
     "sonicterm-font": {
-      "lines": 5850,
-      "covered": 3043,
-      "percent": 52.02
+      "lines": 7225,
+      "covered": 5556,
+      "percent": 76.9
     },
     "sonicterm-font-config": {
       "lines": 317,
-      "covered": 292,
-      "percent": 92.11
+      "covered": 295,
+      "percent": 93.06
     },
     "sonicterm-freetype": {
       "lines": 76,
@@ -48,73 +48,92 @@
       "percent": 97.37
     },
     "sonicterm-gpu": {
-      "lines": 7335,
-      "covered": 2675,
-      "percent": 36.47
+      "lines": 15844,
+      "covered": 9344,
+      "percent": 58.98
     },
     "sonicterm-grid": {
-      "lines": 2092,
-      "covered": 1823,
-      "percent": 87.14
+      "lines": 2494,
+      "covered": 2234,
+      "percent": 89.57
     },
     "sonicterm-io": {
-      "lines": 1147,
-      "covered": 1035,
-      "percent": 90.24
+      "lines": 1843,
+      "covered": 1691,
+      "percent": 91.75
     },
     "sonicterm-linux": {
-      "lines": 71,
-      "covered": 67,
-      "percent": 94.37
+      "lines": 549,
+      "covered": 295,
+      "percent": 53.73
     },
     "sonicterm-logging": {
-      "lines": 1839,
-      "covered": 1526,
-      "percent": 82.98
+      "lines": 2214,
+      "covered": 1841,
+      "percent": 83.15
     },
     "sonicterm-mac": {
-      "lines": 641,
-      "covered": 74,
-      "percent": 11.54
+      "lines": 260,
+      "covered": 166,
+      "percent": 63.85
     },
     "sonicterm-render-model": {
-      "lines": 128,
-      "covered": 126,
-      "percent": 98.44
+      "lines": 217,
+      "covered": 215,
+      "percent": 99.08
     },
     "sonicterm-resource": {
-      "lines": 1644,
-      "covered": 1428,
-      "percent": 86.86
+      "lines": 1944,
+      "covered": 1731,
+      "percent": 89.04
     },
     "sonicterm-text": {
-      "lines": 569,
-      "covered": 439,
-      "percent": 77.15
+      "lines": 1431,
+      "covered": 1282,
+      "percent": 89.59
     },
     "sonicterm-types": {
-      "lines": 516,
-      "covered": 465,
-      "percent": 90.12
+      "lines": 666,
+      "covered": 634,
+      "percent": 95.2
     },
     "sonicterm-ui": {
-      "lines": 4355,
-      "covered": 3829,
-      "percent": 87.92
+      "lines": 7166,
+      "covered": 6614,
+      "percent": 92.3
     },
     "sonicterm-vt": {
-      "lines": 1975,
-      "covered": 1710,
-      "percent": 86.58
+      "lines": 2206,
+      "covered": 1953,
+      "percent": 88.53
     },
     "sonicterm-windows": {
-      "lines": 191,
-      "covered": 91,
-      "percent": 47.64
+      "lines": 260,
+      "covered": 166,
+      "percent": 63.85
     }
   },
   "not_measured": {
     "sonicterm-fontconfig": "declarations only: src/lib.rs holds hand-written Fontconfig FFI types, constants, and extern declarations with no function body, so it has no instrumented line; sonicterm-font links it only on non-macOS Unix, so it is also target-inapplicable on this host.",
     "sonicterm-harfbuzz": "generated only: src/lib.rs, its only library source, is rust-bindgen output counted under generated code; build.rs compiles the HarfBuzz C/C++ sources, which Rust coverage does not instrument."
+  },
+  "macos": {
+    "host": {
+      "target": "aarch64-apple-darwin",
+      "runner": "macos14/ARM64"
+    },
+    "reason": "Re-seed the macOS-only floors from CI: the committed seeds were measured locally with cargo-llvm-cov 0.8.7, and this is the PR's verified macos-core record with the pinned release. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/40395703266 attempt 1, job macos-core, evidence artifact macos-logic-coverage-evidence-40395703266-1, on aarch64-apple-darwin on macos14/ARM64 (image 20260831.0302.1) with rustc 1.99.1 (58cf8f9c3 2026-10-13) and cargo-llvm-cov 0.9.0, at commit 1d678dd6df6754f57a94c8b0d7537561ae4cf1a1, the test merge of pull-request head 7f0129af3726243b004fe223fa7fb392bb00f7c0.",
+    "files": {
+      "crates/sonicterm-ui/src/command_label.rs": {
+        "lines": 561,
+        "covered": 554,
+        "percent": 98.75
+      },
+      "crates/sonicterm-ui/src/text_edit.rs": {
+        "lines": 160,
+        "covered": 159,
+        "percent": 99.38
+      }
+    }
   }
 }

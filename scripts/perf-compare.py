@@ -1487,9 +1487,12 @@ CELL_LAYOUT_CHECKPOINT = "end"
 CELL_LAYOUT_MIN_SHARE = Fraction(3, 10)
 CELL_LAYOUT_MIN_SAVING_BYTES = 8 * 1024 * 1024
 CELL_LAYOUT_GRID_FIELDS = ("grid_visible_bytes", "grid_history_bytes", "grid_alternate_bytes")
-# The shard holding S12 on each platform. macOS moved S12 to S2-S3-S8-S12 when it went to four shards; its earlier
-# S1-S3-S6-S8-S12 artifacts still read.
-CELL_LAYOUT_SHARDS = {"macOS": ("S2-S3-S8-S12", "S1-S3-S6-S8-S12"), "Windows": ("S1-S3-S6-S8-S12",)}
+# The shards whose artifacts hold S12 on each platform: macOS runs it in S9-S10sync, and its artifacts from the
+# S10-S11release, S2-S3-S8-S12 and S1-S3-S6-S8-S12 layouts still read.
+CELL_LAYOUT_SHARDS = {
+    "macOS": ("S9-S10sync", "S10-S11release", "S2-S3-S8-S12", "S1-S3-S6-S8-S12"),
+    "Windows": ("S1-S3-S6-S8-S12",),
+}
 # `perf-comparison-<pr>-<head sha>-<platform>-<shard>-<attempt>`, as perf.yml names each comparison artifact.
 CELL_LAYOUT_ARTIFACT = re.compile(r"perf-comparison-\d+-(?P<head>[0-9a-f]{40})-(?P<platform>macOS|Windows)-"
                                   r"(?P<shard>.+)-(?P<attempt>\d+)")

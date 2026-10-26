@@ -106,10 +106,10 @@ fn mac_word_deletion_matches_native_text_view_boundaries() {
     assert_eq!(edit("keep foo/bar", "keep foo/bar".len(), TextEdit::DeletePreviousWord).0, "keep ");
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn native_word_boundary_conversion_rejects_surrogate_interiors() {
     // Native UTF-16 offsets must resolve exactly, never rounding through an astral character or past the caret.
+    // The conversion is plain string arithmetic, so it runs on every host, not only beside AppKit.
     let text = "a\u{1f642}你";
     for (utf16, utf8) in [(0, 0), (1, 1), (3, 5), (4, 8)] {
         assert_eq!(utf16_boundary_to_utf8(text, utf16), Some(utf8));

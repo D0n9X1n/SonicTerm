@@ -736,6 +736,31 @@ class PinnedToolTests(unittest.TestCase):
                                          {"scripts/pinned-tools.json": manifest(drop, **changes)}))
                 self.assertIn(expected, found)
 
+    def test_per_platform_pins_are_checked_one_by_one(self):
+        # Protect the per-host form: each pin needs its own digest, host, member and release URL, no two
+        # pins may name one host, and a per-host list may not sit beside a top-level pin.
+        flat = json.loads(manifest())["cargo-deny"]
+        pin = {key: flat.pop(key) for key in ("os", "arch", "url", "sha256", "member")}
+        other = dict(pin, os="macos", arch="aarch64")
+
+        def platform_manifest(pins, **changes) -> str:
+            """A one-tool manifest whose cargo-deny entry pins `pins`, with `changes` applied."""
+            return json.dumps({"cargo-deny": dict(flat, platforms=pins, **changes)})
+
+        workflow = {"ci.yml": run_workflow(INSTALL)}
+        self.assertEqual(checked(workflow, {"scripts/pinned-tools.json": platform_manifest([pin, other])}), [])
+        for case, text, expected in (
+            ("empty list", platform_manifest([]), "cargo-deny: platforms must be a non-empty list"),
+            ("duplicate host", platform_manifest([pin, dict(pin)]), "one archive per os and arch"),
+            ("beside a top-level pin", platform_manifest([pin], sha256=DIGEST), "cannot both pin an archive"),
+            ("bad digest", platform_manifest([pin, dict(other, sha256="abc")]), "cargo-deny platforms[1]: sha256"),
+            ("bad host", platform_manifest([dict(pin, os="windows")]), "cargo-deny platforms[0]: os"),
+            ("bad url", platform_manifest([dict(pin, url="https://example.com/{version}/deny.tar.gz")]),
+             "cargo-deny platforms[0]: url"),
+        ):
+            with self.subTest(case=case):
+                self.assertIn(expected, messages(checked(workflow, {"scripts/pinned-tools.json": text})))
+
     def test_a_tool_is_installed_only_by_the_script_with_its_name_alone(self):
         # Protect the single install path: extra arguments, an unknown tool, another installer,
         # or a manifest tool no workflow installs are each rejected.
@@ -873,7 +898,7 @@ class RepositoryTests(unittest.TestCase):
         contracts = {
             "macos": (
                 "macos-14 / unit tests",
-                ("macos-core", "macos-coverage", "macos-smoke", "tooling"),
+                ("macos-core", "macos-smoke", "tooling"),
             ),
             "windows": (
                 "windows-latest / unit tests",
@@ -881,7 +906,7 @@ class RepositoryTests(unittest.TestCase):
             ),
             "linux": (
                 "ubuntu 22.04 / workspace, packages, X11, Wayland",
-                ("linux-core", "linux-packages"),
+                ("linux-core", "linux-coverage", "linux-packages"),
             ),
         }
 
@@ -952,7 +977,8 @@ class RepositoryTests(unittest.TestCase):
     def test_frame_validation_runs_after_default_with_own_deadline_and_state(self):
         # Every native smoke shard and all three release jobs need a fresh process and isolated evidence.
         for workflow, job_name, platform in (
-            ("ci.yml", "macos-smoke", "macOS"), ("ci.yml", "windows-smoke", "Windows"),
+            ("ci.yml", "macos-core", "macOS"), ("ci.yml", "macos-smoke", "macOS"),
+            ("ci.yml", "windows-smoke", "Windows"),
             ("release.yml", "build-mac-x86_64", "macOS"),
             ("release.yml", "build-mac-aarch64", "macOS"),
             ("release.yml", "build-windows", "Windows"),
@@ -1147,7 +1173,7 @@ jobs:
         intel = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.runner == 'macos-15-intel' }}"
         contracts = {
             "macos-core": ("unit-macos-14", main),
-            "macos-coverage": ("instrumented-macos-14", main),
+            "linux-coverage": ("instrumented-ubuntu-22.04", main),
             "macos-smoke": ("unit-${{ matrix.runner }}", intel),
             "windows-checks": ("check-windows-latest", main),
             "windows-tests-workspace": ("test-windows-latest", main),
@@ -1383,54 +1409,65 @@ jobs:
 class MacPackageGateTests(unittest.TestCase):
     """The macOS shipping artifact is the .dmg, so every gate must exercise that file."""
 
-    def test_ci_smoke_fans_out_over_both_mac_architectures_with_isolated_caches(self):
+    def test_ci_smoke_covers_both_mac_architectures_with_isolated_caches(self):
         # One architecture's bundle cannot stand in for the other's: Intel and
-        # Apple Silicon resolve different Cairo and font binaries, and a shared
-        # cache key would let one leg restore the other's target directory.
+        # Apple Silicon resolve different Cairo and font binaries. Apple Silicon
+        # runs in macos-core on macos-14 and Intel in macos-smoke's one leg, and
+        # their distinct cache keys keep either from restoring the other's target.
         job = job_block("ci.yml", "macos-smoke")
         self.assertIn("name: macOS native runtime smoke (${{ matrix.arch }})", job)
         self.assertIn("runs-on: ${{ matrix.runner }}", job)
         self.assertIn("fail-fast: false", job)
-        self.assertIn("- runner: macos-14\n            arch: aarch64", job)
+        self.assertEqual(re.findall(r"(?m)^          - runner: (\S+)$", job), ["macos-15-intel"])
         self.assertIn("- runner: macos-15-intel\n            arch: x86_64", job)
         self.assertIn(
             "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-${{ matrix.runner }}", job
         )
         self.assertNotIn("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14", job)
-        # Both legs upload from one job id, so an artifact name without the
-        # architecture collides and the second leg's evidence is discarded.
-        names = re.findall(r"(?m)^          name: (.+)$", job)
-        self.assertTrue(names, "no upload-artifact names found in macos-smoke")
-        for name in names:
-            with self.subTest(artifact=name):
-                self.assertIn("${{ matrix.arch }}", name)
+        core = job_block("ci.yml", "macos-core")
+        self.assertIn("runs-on: macos-14", core)
+        self.assertIn("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14", core)
+        # Each job's smoke evidence names its architecture, so the two jobs'
+        # artifacts never collide and each says which bundle it describes.
+        for job_name, arch in (("macos-core", "aarch64"), ("macos-smoke", "${{ matrix.arch }}")):
+            names = [
+                name
+                for name in re.findall(r"(?m)^          name: (.+)$", job_block("ci.yml", job_name))
+                if name.startswith("sonicterm-macos-")
+            ]
+            self.assertEqual(len(names), 4, f"smoke artifact names in {job_name}")
+            for name in names:
+                with self.subTest(job=job_name, artifact=name):
+                    self.assertIn(f"-{arch}-", name)
 
     def test_ci_smoke_validates_the_packaged_dmg_after_the_raw_binary_smoke(self):
         # The raw smoke proves the build tree runs where Homebrew's Cairo is on
         # the loader path; only the relocated, signed .dmg proves what ships.
-        job = job_block("ci.yml", "macos-smoke")
-        self.assertIn("brew install cairo pkg-config", job)
-        self.assertIn("-- target/release/sonicterm-mac --runtime-smoke", job)
-        self.assertIn(
-            "bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci "
-            "mac-${{ matrix.arch }}",
-            job,
-        )
-        self.assertIn(
-            '--dmg "dist/SonicTerm-ci-mac-${{ matrix.arch }}.dmg"', job
-        )
-        self.assertIn(
-            '--state-dir "$RUNNER_TEMP/sonicterm-macos-package-${{ matrix.arch }}"', job
-        )
-        self.assertLess(job.index("--runtime-smoke"), job.index("make-macos-dmg.sh"))
-        self.assertLess(job.index("make-macos-dmg.sh"), job.index("test-macos-package.py"))
+        # Each architecture's job packages and validates its own bundle.
+        for job_name, arch in (("macos-core", "aarch64"), ("macos-smoke", "${{ matrix.arch }}")):
+            with self.subTest(job=job_name):
+                job = job_block("ci.yml", job_name)
+                self.assertIn("brew install cairo pkg-config", job)
+                self.assertIn("-- target/release/sonicterm-mac --runtime-smoke", job)
+                self.assertIn(
+                    f"bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-{arch}",
+                    job,
+                )
+                self.assertIn(f'--dmg "dist/SonicTerm-ci-mac-{arch}.dmg"', job)
+                self.assertIn(
+                    f'--state-dir "$RUNNER_TEMP/sonicterm-macos-package-{arch}"', job
+                )
+                self.assertLess(job.index("--runtime-smoke"), job.index("make-macos-dmg.sh"))
+                self.assertLess(job.index("make-macos-dmg.sh"), job.index("test-macos-package.py"))
 
     def test_ci_package_validation_has_no_timeout_override(self):
-        # The validator retains its own process deadlines without a CI step override.
-        job = job_block("ci.yml", "macos-smoke")
-        step = job.split("- name: Validate packaged macOS dmg", 1)[1]
-        step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
-        self.assertNotIn("timeout-minutes:", step)
+        # The validator retains its own process deadlines without a CI step override, in both macOS jobs.
+        for job_name in ("macos-core", "macos-smoke"):
+            with self.subTest(job=job_name):
+                job = job_block("ci.yml", job_name)
+                step = job.split("- name: Validate packaged macOS dmg", 1)[1]
+                step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
+                self.assertNotIn("timeout-minutes:", step)
 
     def test_release_builds_and_validates_each_dmg_on_its_own_architecture(self):
         # Packaging Intel bytes on an Apple Silicon host cannot run the bundle
@@ -1513,13 +1550,14 @@ class MacPackageGateTests(unittest.TestCase):
         # or Homebrew bottle that raises LC_BUILD_VERSION fails the gate rather
         # than silently shipping a build that excludes supported hosts.
         # Apple Silicon ships a 14.0 floor, Intel 15.0, matching each runner.
-        self.assertIn(
-            'minimum: "14.0"', job_block("ci.yml", "macos-smoke")
-        )
-        self.assertIn(
-            'minimum: "15.0"', job_block("ci.yml", "macos-smoke")
-        )
+        # macos-core packages the Apple Silicon bundle with a literal ceiling;
+        # macos-smoke's Intel leg reads its ceiling from the matrix.
+        core = job_block("ci.yml", "macos-core")
+        self.assertIn('SONICTERM_MAX_MACOS_MINIMUM: "14.0"', core)
+        self.assertIn('--max-minimum-macos "14.0"', shell_commands(core))
         smoke = job_block("ci.yml", "macos-smoke")
+        self.assertIn('minimum: "15.0"', smoke)
+        self.assertNotIn('minimum: "14.0"', smoke)
         self.assertIn(
             "SONICTERM_MAX_MACOS_MINIMUM: ${{ matrix.minimum }}", smoke
         )
@@ -1543,6 +1581,7 @@ class MacPackageGateTests(unittest.TestCase):
         # said nothing about the bundle users open, which is where the missing
         # self-contained Cairo and font payload actually failed.
         gates = (
+            ("ci.yml", "macos-core"),
             ("ci.yml", "macos-smoke"),
             ("release.yml", "build-mac-aarch64"),
             ("release.yml", "build-mac-x86_64"),

@@ -37,6 +37,16 @@ prove only that the record is self-consistent; the documented retrieval through
 the GitHub API binds it to its run, commit, and tree. A failing CI run can print a proposed baseline between marker
 lines as a preview; a DROP prints none, and the check never writes the baseline.
 
+The optional `macos` section holds per-file floors for macOS-only logic in the
+80% subset, which the Linux floors cannot see because it compiles only on macOS.
+The `macos-floor` subcommand checks a report from scripts/macos-logic-coverage.sh
+against it with the same tolerance, enforced only in CI on the section's own
+host. `macos-floor --update --reason TEXT --provenance FILE` rewrites that
+section alone, leaving every crate floor verbatim, and only from the verified
+record `record-macos-provenance` writes in the macos-core job: like a crate
+floor, a macOS floor never changes from a stated host or a local measurement.
+Both kinds of record must name the cargo-llvm-cov release scripts/pinned-tools.json pins.
+
 Exit status: 0 when the floor holds or the run is informational, 1 when the
 floor fails in CI, 2 for usage or input errors.
 """
@@ -64,7 +74,7 @@ LLVM_EXPORT_TYPE = "llvm.coverage.json.export"
 PROPOSAL_BEGIN = "----- BEGIN PROPOSED scripts/coverage-baseline.json -----"
 PROPOSAL_END = "----- END PROPOSED scripts/coverage-baseline.json -----"
 
-# The evidence the macos-coverage job uploads, and the record tying it to its run.
+# The evidence the linux-coverage job uploads, and the record tying it to its run.
 PROVENANCE_SCHEMA = "sonicterm-coverage-provenance/1"
 EVIDENCE_DIRECTORY = "target/rust-logic-coverage-evidence"
 # The report and inventory are published together as this subdirectory of the evidence.
@@ -82,7 +92,12 @@ INVENTORY_FILE = "workspace-metadata.json"
 PROVENANCE_FILE = "coverage-provenance.json"
 EVIDENCE_ARTIFACT_PREFIX = "rust-logic-coverage-evidence"
 COVERAGE_WORKFLOW = ".github/workflows/ci.yml"
-COVERAGE_JOB = "macos-coverage"
+COVERAGE_JOB = "linux-coverage"
+# The job, artifact and record of the macOS-only floor, which scripts/macos-logic-coverage.sh writes in macos-core.
+MACOS_JOB = "macos-core"
+MACOS_ARTIFACT_PREFIX = "macos-logic-coverage-evidence"
+# The manifest whose cargo-llvm-cov release every record must name.
+PINNED_TOOLS_PATH = "scripts/pinned-tools.json"
 BASELINE_PATH = "scripts/coverage-baseline.json"
 REBASELINE_PROCEDURE = 'the "Coverage evidence and rebaselining" section of Development-and-Release'
 LOCAL_RUNNER = "local"
@@ -258,6 +273,16 @@ class Entry:
 
 
 @dataclass
+class MacosSection:
+    """Per-file floors for macOS-only logic, measured on their own macOS host."""
+
+    target: str
+    runner: str
+    reason: str
+    files: Dict[str, Entry]
+
+
+@dataclass
 class Baseline:
     """The reviewed floor and the host identity it is valid for."""
 
@@ -267,6 +292,7 @@ class Baseline:
     reason: str
     crates: Dict[str, Entry]
     not_measured: Dict[str, str]
+    macos: Optional[MacosSection] = None
 
 
 @dataclass(frozen=True)
@@ -506,7 +532,7 @@ def unmeasured_detail(crate: CrateCoverage) -> str:
     return "no reported file"
 
 
-_BASELINE_KEYS = {"schema", "host", "tolerance_pp", "reason", "crates", "not_measured"}
+_BASELINE_KEYS = {"schema", "host", "tolerance_pp", "reason", "crates", "not_measured", "macos"}
 
 
 def parse_baseline(document: object, source: str) -> Baseline:
@@ -539,20 +565,9 @@ def parse_baseline(document: object, source: str) -> Baseline:
         problems.append("crates must be an object")
         raw_crates = {}
     for name, entry in raw_crates.items():
-        if not isinstance(entry, dict) or set(entry) != {"lines", "covered", "percent"}:
-            problems.append(f"crates.{name} must hold exactly lines, covered, and percent")
-            continue
-        lines, covered, percent = entry["lines"], entry["covered"], entry["percent"]
-        if not _count(lines) or lines == 0 or not _count(covered) or covered > lines:
-            problems.append(f"crates.{name} needs lines > 0 and 0 <= covered <= lines")
-            continue
-        exact = covered * 100 / lines
-        # NaN compares false against the slop, so finiteness is checked first.
-        if not _finite_number(percent) or abs(percent - exact) > PERCENT_SLOP:
-            problems.append(f"crates.{name}.percent must be the finite value {round(exact, 2)} "
-                            f"for {covered}/{lines}")
-            continue
-        crates[name] = Entry(lines, covered)
+        parsed = _parse_entry(f"crates.{name}", entry, problems)
+        if parsed is not None:
+            crates[name] = parsed
     not_measured: Dict[str, str] = {}
     raw_declared = document.get("not_measured")
     if not isinstance(raw_declared, dict):
@@ -566,9 +581,53 @@ def parse_baseline(document: object, source: str) -> Baseline:
     overlap = sorted(set(raw_crates) & set(raw_declared))
     if overlap:
         problems.append(f"crates and not_measured both name {overlap}")
+    macos = _parse_macos(document["macos"], problems) if "macos" in document else None
     if problems:
         raise InputError(f"baseline {source} is invalid: " + "; ".join(problems))
-    return Baseline(target, runner, float(tolerance), reason, crates, not_measured)
+    return Baseline(target, runner, float(tolerance), reason, crates, not_measured, macos)
+
+
+def _parse_entry(label: str, entry: object, problems: List[str]) -> Optional[Entry]:
+    """Validate one recorded floor, a crate's or a macOS file's; report a problem and return None when invalid."""
+    if not isinstance(entry, dict) or set(entry) != {"lines", "covered", "percent"}:
+        problems.append(f"{label} must hold exactly lines, covered, and percent")
+        return None
+    lines, covered, percent = entry["lines"], entry["covered"], entry["percent"]
+    if not _count(lines) or lines == 0 or not _count(covered) or covered > lines:
+        problems.append(f"{label} needs lines > 0 and 0 <= covered <= lines")
+        return None
+    exact = covered * 100 / lines
+    # NaN compares false against the slop, so finiteness is checked first.
+    if not _finite_number(percent) or abs(percent - exact) > PERCENT_SLOP:
+        problems.append(f"{label}.percent must be the finite value {round(exact, 2)} for {covered}/{lines}")
+        return None
+    return Entry(lines, covered)
+
+
+def _parse_macos(raw: object, problems: List[str]) -> Optional[MacosSection]:
+    """Validate the optional macOS section: its own host, its reason, and at least one file floor."""
+    if not isinstance(raw, dict) or set(raw) != {"host", "reason", "files"}:
+        problems.append("macos must hold exactly host, reason, and files")
+        return None
+    host = raw["host"]
+    target = host.get("target") if isinstance(host, dict) else None
+    runner = host.get("runner") if isinstance(host, dict) else None
+    if (not isinstance(host, dict) or set(host) != {"target", "runner"} or not isinstance(target, str)
+            or not target.strip() or not isinstance(runner, str) or not runner.strip()):
+        problems.append("macos.host must hold exactly non-empty target and runner strings")
+    reason = raw["reason"]
+    if not isinstance(reason, str) or not reason.strip():
+        problems.append("macos.reason must state why the macOS floors last changed")
+    files: Dict[str, Entry] = {}
+    raw_files = raw["files"]
+    if not isinstance(raw_files, dict) or not raw_files:
+        problems.append("macos.files must name at least one file")
+        raw_files = {}
+    for path, entry in raw_files.items():
+        parsed = _parse_entry(f"macos.files.{path}", entry, problems)
+        if parsed is not None:
+            files[path] = parsed
+    return MacosSection(str(target), str(runner), str(reason), files)
 
 
 def load_baseline(path: str) -> Baseline:
@@ -722,20 +781,29 @@ def render_exclusions(exclusions: Dict[str, ExclusionTotals]) -> List[str]:
     return lines
 
 
+def _entry_document(entry: Entry) -> dict:
+    """Return the JSON form of one recorded floor."""
+    return {"lines": entry.lines, "covered": entry.covered, "percent": round(entry.covered * 100 / entry.lines, 2)}
+
+
 def baseline_document(baseline: Baseline) -> dict:
     """Return the canonical JSON document for a baseline, with sorted crate keys."""
-    return {
+    document = {
         "schema": SCHEMA,
         "host": {"target": baseline.target, "runner": baseline.runner},
         "tolerance_pp": baseline.tolerance_pp,
         "reason": baseline.reason,
-        "crates": {
-            name: {"lines": entry.lines, "covered": entry.covered,
-                   "percent": round(entry.covered * 100 / entry.lines, 2)}
-            for name, entry in sorted(baseline.crates.items())
-        },
+        "crates": {name: _entry_document(entry) for name, entry in sorted(baseline.crates.items())},
         "not_measured": {name: baseline.not_measured[name] for name in sorted(baseline.not_measured)},
     }
+    # The macOS section follows the crate floors, so rewriting either leaves the other's lines unchanged.
+    if baseline.macos is not None:
+        document["macos"] = {
+            "host": {"target": baseline.macos.target, "runner": baseline.macos.runner},
+            "reason": baseline.macos.reason,
+            "files": {path: _entry_document(entry) for path, entry in sorted(baseline.macos.files.items())},
+        }
+    return document
 
 
 def render_document(document: dict) -> str:
@@ -758,14 +826,15 @@ def additions_proposal(baseline: Baseline, crates: Dict[str, CrateCoverage], fin
             declared.pop(finding.crate, None)
         elif finding.kind == UNEXPLAINED:
             declared[finding.crate] = ""
-    return baseline_document(Baseline(baseline.target, baseline.runner, baseline.tolerance_pp, "", entries, declared))
+    return baseline_document(Baseline(baseline.target, baseline.runner, baseline.tolerance_pp, "", entries, declared,
+                                      baseline.macos))
 
 
 def rebaseline_proposal(baseline: Baseline, crates: Dict[str, CrateCoverage], target: str, runner: str) -> dict:
     """Propose a complete baseline for this host, keeping declared reasons that still apply."""
     entries = {name: Entry(crate.lines, crate.covered) for name, crate in crates.items() if crate.measured}
     declared = {name: baseline.not_measured.get(name, "") for name, crate in crates.items() if not crate.measured}
-    return baseline_document(Baseline(target, runner, baseline.tolerance_pp, "", entries, declared))
+    return baseline_document(Baseline(target, runner, baseline.tolerance_pp, "", entries, declared, baseline.macos))
 
 
 def provenance(target: str, runner: str, toolchain: Optional[str], tool: str, env: Mapping[str, str]) -> str:
@@ -781,12 +850,12 @@ def provenance(target: str, runner: str, toolchain: Optional[str], tool: str, en
     return ", ".join(parts)
 
 
-def evidence_artifact(env: Mapping[str, str]) -> Optional[str]:
-    """Name the evidence artifact the coverage job uploads for this run attempt, or None outside CI."""
+def evidence_artifact(env: Mapping[str, str], prefix: str = EVIDENCE_ARTIFACT_PREFIX) -> Optional[str]:
+    """Name the evidence artifact a coverage job uploads for this run attempt, or None outside CI."""
     run_id, attempt = env.get("GITHUB_RUN_ID"), env.get("GITHUB_RUN_ATTEMPT")
     if env.get("GITHUB_ACTIONS") != "true" or not run_id or not attempt:
         return None
-    return f"{EVIDENCE_ARTIFACT_PREFIX}-{run_id}-{attempt}"
+    return f"{prefix}-{run_id}-{attempt}"
 
 
 def run_url(env: Mapping[str, str]) -> Optional[str]:
@@ -913,7 +982,7 @@ def full_update(
         raise InputError("refusing to write a baseline: these members are not measured and not declared: "
                          + "; ".join(undeclared)
                          + ". Add each to \"not_measured\" with its reason, then rerun.")
-    return Baseline(target, runner, tolerance, reason, entries, declared)
+    return Baseline(target, runner, tolerance, reason, entries, declared, existing.macos if existing else None)
 
 
 def partial_update(
@@ -938,7 +1007,7 @@ def partial_update(
                              "declare it in \"not_measured\" with a reason instead")
         entries[name] = Entry(crate.lines, crate.covered)
         declared.pop(name, None)
-    return Baseline(existing.target, existing.runner, existing.tolerance_pp, reason, entries, declared)
+    return Baseline(existing.target, existing.runner, existing.tolerance_pp, reason, entries, declared, existing.macos)
 
 
 def describe_update(old: Optional[Baseline], new: Baseline) -> List[str]:
@@ -1266,13 +1335,24 @@ def build_record(root: str, phase: str, state: str, exit_status: int, env: Mappi
         if drift:
             named = "checkout drifted from its pin: " + "; ".join(drift)
             failure = f"{failure}; {named}" if state == "failed" else named
-    verbose = (rustc_verbose or "").strip()
     return {
         "schema": PROVENANCE_SCHEMA,
         "measurement": "complete" if complete else "incomplete",
         "failed_phase": failed_phase,
         "failure": failure,
         "checks": checks,
+        **_run_fields(env, pin, target, rustc_verbose, tool, evidence_artifact(env)),
+        "report_sha256": report_sha,
+        "inventory_sha256": inventory_sha,
+        "checkout_drift": drift,
+    }
+
+
+def _run_fields(env: Mapping[str, str], pin: Mapping[str, object], target: Optional[str],
+                rustc_verbose: Optional[str], tool: Optional[str], artifact: Optional[str]) -> dict:
+    """The run, host, toolchain and checkout fields every provenance record carries."""
+    verbose = (rustc_verbose or "").strip()
+    return {
         "target": target or None,
         "runner": runner_identity(env),
         "image_version": env.get("ImageVersion") or None,
@@ -1287,15 +1367,31 @@ def build_record(root: str, phase: str, state: str, exit_status: int, env: Mappi
         "event": env.get("GITHUB_EVENT_NAME") or None,
         "ref": env.get("GITHUB_REF") or None,
         "run_url": run_url(env),
-        "artifact": evidence_artifact(env),
+        "artifact": artifact,
         "commit": pin["commit"],
         "tree": pin["tree"],
         "pull_request_head": env.get("COVERAGE_PULL_REQUEST_HEAD") or None,
-        "report_sha256": report_sha,
-        "inventory_sha256": inventory_sha,
         "worktree_changes": pin["worktree_changes"],
         "tree_entries": pin["tree_entries"],
-        "checkout_drift": drift,
+    }
+
+
+def build_macos_record(root: str, env: Mapping[str, str], pin: Mapping[str, object], target: str,
+                       rustc_verbose: str, report: str) -> dict:
+    """Describe one finished macOS-only measurement: its run, host, toolchain, checkout and report digest.
+
+    The macOS floor has no subset gate or workspace inventory, so the record binds the report alone. The
+    checkout is sampled again here, after the measurement, to name where it differs from the pin.
+    """
+    return {
+        "schema": PROVENANCE_SCHEMA,
+        "measurement": "complete",
+        "failed_phase": None,
+        "failure": None,
+        **_run_fields(env, pin, target, rustc_verbose, load_report(report).tool,
+                      evidence_artifact(env, MACOS_ARTIFACT_PREFIX)),
+        "report_sha256": file_sha256(report),
+        "checkout_drift": checkout_drift(pin, root),
     }
 
 
@@ -1322,6 +1418,22 @@ def run_record(argv: List[str], env: Mapping[str, str]) -> int:
     args = build_record_parser().parse_args(argv)
     record = build_record(args.root, args.phase, args.state, args.exit_status, env, load_pin(args.pin),
                           args.target, args.rustc_verbose, args.llvm_cov, args.report, args.metadata)
+    _write_atomic(Path(args.output), json.dumps(record, indent=2, sort_keys=True, ensure_ascii=True) + "\n")
+    return DRIFT_EXIT_STATUS if record["checkout_drift"] else 0
+
+
+def run_record_macos(argv: List[str], env: Mapping[str, str]) -> int:
+    """Write the macOS-only measurement's record; return DRIFT_EXIT_STATUS when the checkout drifted, else 0."""
+    parser = argparse.ArgumentParser(prog="coverage-floor.py record-macos-provenance",
+                                     description="Write the provenance record of one macOS-only coverage run.")
+    parser.add_argument("--output", required=True, help="the record to write; it is replaced atomically")
+    parser.add_argument("--root", required=True, help="the checkout the run measures")
+    parser.add_argument("--pin", required=True, help="the checkout pin that pin-checkout wrote before measuring")
+    parser.add_argument("--target", required=True, help="host target triple from rustc -vV")
+    parser.add_argument("--rustc-verbose", required=True, help="the full rustc -vV output")
+    parser.add_argument("--report", required=True, help="the JSON report the measurement wrote")
+    args = parser.parse_args(argv)
+    record = build_macos_record(args.root, env, load_pin(args.pin), args.target, args.rustc_verbose, args.report)
     _write_atomic(Path(args.output), json.dumps(record, indent=2, sort_keys=True, ensure_ascii=True) + "\n")
     return DRIFT_EXIT_STATUS if record["checkout_drift"] else 0
 
@@ -1403,8 +1515,34 @@ def measured_tree_problems(measured: dict, root: str, baseline_path: Path) -> Li
     return problems
 
 
-def verify_provenance(path: str, report_path: str, metadata_path: str, report: Report, target: str,
-                      runner: Optional[str], baseline_path: Path) -> Provenance:
+@dataclass(frozen=True)
+class EvidenceKind:
+    """Which coverage job a record must come from, its artifact, and whether it binds a workspace inventory."""
+
+    job: str
+    artifact_prefix: str
+    inventory: bool
+
+
+# The crate floors' run binds its report, inventory and subset-gate and floor checks; the macOS-only run its report.
+CRATE_EVIDENCE = EvidenceKind(COVERAGE_JOB, EVIDENCE_ARTIFACT_PREFIX, True)
+MACOS_EVIDENCE = EvidenceKind(MACOS_JOB, MACOS_ARTIFACT_PREFIX, False)
+
+
+def pinned_tool_problems(tool: str, root: str) -> List[str]:
+    """Refuse a record whose cargo-llvm-cov is not the release this checkout's manifest pins."""
+    try:
+        entry = json.loads((Path(root) / PINNED_TOOLS_PATH).read_text(encoding="utf-8"))["cargo-llvm-cov"]
+        expected = entry["version_output"].replace("{version}", entry["version"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        return [f"{PINNED_TOOLS_PATH} in this checkout does not pin cargo-llvm-cov ({error!r})"]
+    if tool != expected:
+        return [f"the record names {tool}, not {expected}, the version {PINNED_TOOLS_PATH} pins"]
+    return []
+
+
+def verify_provenance(path: str, report_path: str, metadata_path: Optional[str], report: Report, target: str,
+                      runner: Optional[str], baseline_path: Path, kind: EvidenceKind = CRATE_EVIDENCE) -> Provenance:
     """Refuse a record that is incomplete, disagrees with its files or the stated host, or measured other content.
 
     The checks are offline integrity checks: matching digests prove that the files agree with the
@@ -1421,10 +1559,12 @@ def verify_provenance(path: str, report_path: str, metadata_path: str, report: R
     if document.get("runner") == LOCAL_RUNNER:
         raise InputError(f"provenance record {path} was measured outside CI (runner {LOCAL_RUNNER!r}); only a CI "
                          "run's record can change a floor")
-    missing = [name for name in REQUIRED_RECORD_FIELDS if not _text(document.get(name))]
+    # A macOS-only record binds no inventory and runs no subset gate, so it carries neither.
+    missing = [name for name in REQUIRED_RECORD_FIELDS
+               if (kind.inventory or name != "inventory_sha256") and not _text(document.get(name))]
     if document.get("event") == "pull_request" and not _text(document.get("pull_request_head")):
         missing.append("pull_request_head")
-    if not isinstance(document.get("checks"), dict):
+    if kind.inventory and not isinstance(document.get("checks"), dict):
         missing.append("checks")
     if not isinstance(document.get("tree_entries"), dict) or not document.get("tree_entries"):
         missing.append("tree_entries")
@@ -1432,11 +1572,13 @@ def verify_provenance(path: str, report_path: str, metadata_path: str, report: R
         missing.append("worktree_changes")
     if missing:
         raise InputError(f"provenance record {path} is missing required field(s): {', '.join(missing)}")
-    problems = checks_problems(document["checks"])
+    problems = checks_problems(document["checks"]) if kind.inventory else []
     if document.get("checkout_drift"):
         problems.append("the record names checkout drift: " + "; ".join(map(str, document["checkout_drift"])))
-    for label, file_path, key in (("report", report_path, "report_sha256"),
-                                  ("inventory", metadata_path, "inventory_sha256")):
+    digests = [("report", report_path, "report_sha256")]
+    if kind.inventory:
+        digests.append(("inventory", metadata_path, "inventory_sha256"))
+    for label, file_path, key in digests:
         actual = file_sha256(file_path)
         if actual != document[key]:
             problems.append(f"the {label} {file_path} has SHA-256 {actual}, but the record's {key} is {document[key]}")
@@ -1448,11 +1590,11 @@ def verify_provenance(path: str, report_path: str, metadata_path: str, report: R
         problems.append(f"the record's rustc -vV reports host {host}, but its target is {document['target']}")
     if verbose[0].strip() != document["rustc_version"]:
         problems.append("the record's rustc_version is not the first line of its rustc -vV output")
-    if document["job"] != COVERAGE_JOB:
-        problems.append(f"the record's job is {document['job']}, not {COVERAGE_JOB}")
+    if document["job"] != kind.job:
+        problems.append(f"the record's job is {document['job']}, not {kind.job}")
     if document["workflow"] != COVERAGE_WORKFLOW:
         problems.append(f"the record's workflow is {document['workflow']}, not {COVERAGE_WORKFLOW}")
-    artifact = f"{EVIDENCE_ARTIFACT_PREFIX}-{document['run_id']}-{document['run_attempt']}"
+    artifact = f"{kind.artifact_prefix}-{document['run_id']}-{document['run_attempt']}"
     if document["artifact"] != artifact:
         problems.append(f"the record's artifact is {document['artifact']}, not {artifact}")
     if target != document["target"]:
@@ -1468,6 +1610,7 @@ def verify_provenance(path: str, report_path: str, metadata_path: str, report: R
     else:
         problems += identity_problems(document, root)
         problems += measured_tree_problems(document["tree_entries"], root, baseline_path)
+        problems += pinned_tool_problems(document["cargo_llvm_cov"], root)
     if problems:
         raise InputError(f"provenance record {path} does not verify: " + "; ".join(problems))
     return Provenance(document["target"], document["runner"], document["image_version"], document["rustc_version"],
@@ -1527,6 +1670,129 @@ def run_update(args: argparse.Namespace, out) -> int:
     return 0
 
 
+def _macos_measured(report: Report, source_root: str) -> Dict[str, ReportFile]:
+    """Map each reported file under `source_root` to its repository-relative path."""
+    roots = _root_forms(source_root)
+    measured: Dict[str, ReportFile] = {}
+    for report_file in report.files:
+        absolute = _absolute(report_file.filename)
+        relative = next((path for path in (_relative(absolute, root) for root in roots) if path), None)
+        if relative is not None:
+            measured[relative] = report_file
+    return measured
+
+
+def run_macos_floor(argv: List[str], env: Mapping[str, str], out) -> int:
+    """Check, or with --update rewrite, the baseline's macOS section; return the exit status."""
+    parser = argparse.ArgumentParser(prog="coverage-floor.py macos-floor",
+                                     description="Per-file floors for macOS-only logic, measured on macOS.")
+    parser.add_argument("--report", required=True, help="cargo llvm-cov report --json --summary-only output")
+    parser.add_argument("--baseline", required=True, help="baseline JSON, normally scripts/coverage-baseline.json")
+    parser.add_argument("--target", required=True, help="host target triple of the instrumented build (rustc -vV)")
+    parser.add_argument("--source-root", required=True, help="directory the report's absolute filenames sit under")
+    parser.add_argument("--update", action="store_true", help="rewrite the macOS section from this report")
+    parser.add_argument("--reason", help="with --update, why the macOS floors change")
+    parser.add_argument("--provenance", metavar="FILE",
+                        help="with --update, the record of the macos-core run that measured the report")
+    parser.add_argument("--runner", help="with --update, a check against the record's runner")
+    parser.add_argument("--file", action="append", metavar="PATH",
+                        help="with --update, a repository-relative file to add to the section (repeatable)")
+    args = parser.parse_args(argv)
+    report = load_report(args.report)
+    baseline = load_baseline(args.baseline)
+    measured = _macos_measured(report, args.source_root)
+    if args.update:
+        return _update_macos(args, baseline, report, measured, out)
+    misplaced = [flag for flag, value in (("--reason", args.reason), ("--runner", args.runner),
+                                          ("--file", args.file), ("--provenance", args.provenance))
+                 if value is not None]
+    # Check mode takes the runner from the CI environment, so a stated one cannot fake a match.
+    if misplaced:
+        raise InputError(", ".join(misplaced) + " is only valid with --update")
+    section = baseline.macos
+    if section is None:
+        raise InputError(f"baseline {args.baseline} has no macos section to check")
+    runner = runner_identity(env)
+    in_ci = env.get("GITHUB_ACTIONS") == "true"
+    enforced = in_ci and (args.target, runner) == (section.target, section.runner)
+    tolerance = Fraction(str(baseline.tolerance_pp))
+    lines = [
+        f"macOS-only logic coverage ({report.tool})",
+        f"  host:     {args.target} on {runner}",
+        f"  baseline: {section.target} on {section.runner}, tolerance {baseline.tolerance_pp} pp ({args.baseline})",
+        "",
+    ]
+    failures = []
+    for file_path, entry in sorted(section.files.items()):
+        report_file = measured.get(file_path)
+        if report_file is None or report_file.lines == 0:
+            failures.append(f"{file_path}: not measured; this run reports no instrumented line for it")
+            lines.append(f"{file_path}  not measured  floor {_pct(entry.percent)} ({entry.covered}/{entry.lines})")
+            continue
+        percent = Fraction(report_file.covered * 100, report_file.lines)
+        delta = percent - entry.percent
+        # Exact fractions, as for the crate floors: a drop of exactly the tolerance holds.
+        dropped = delta < -tolerance
+        lines.append(f"{file_path}  {_pct(percent)} ({report_file.covered}/{report_file.lines})  "
+                     f"floor {_pct(entry.percent)} ({entry.covered}/{entry.lines})  {_delta(delta)}  "
+                     + ("DROP" if dropped else "ok"))
+        if dropped:
+            failures.append(f"{file_path}: {_pct(percent)} is {float(-delta):.2f} pp below its floor "
+                            f"{_pct(entry.percent)}; the tolerance is {baseline.tolerance_pp} pp")
+    lines.append("")
+    lines += [f"  - {failure}" for failure in failures]
+    if enforced and not failures:
+        lines.append(f"macOS floor PASS: {len(section.files)} files within {baseline.tolerance_pp} pp of their floors")
+        status = 0
+    elif enforced:
+        lines.append(f"macOS floor FAIL: {len(failures)} finding(s) listed above")
+        status = 1
+    elif in_ci:
+        lines.append(f"macOS floor FAIL: not comparable: the macos section is for {section.target} on "
+                     f"{section.runner}, this run is {args.target} on {runner}; a floor from another host is "
+                     "never a passing result")
+        status = 1
+    else:
+        lines.append(f"macOS floor: informational only; no verdict outside CI. CI on {section.target} on "
+                     f"{section.runner} enforces it.")
+        status = 0
+    print("\n".join(lines), file=out)
+    return status
+
+
+def _update_macos(args: argparse.Namespace, baseline: Baseline, report: Report, measured: Dict[str, ReportFile],
+                  out) -> int:
+    """Rewrite only the baseline's macOS section from a verified macos-core run, keeping every crate floor verbatim."""
+    reason = (args.reason or "").strip()
+    if not reason:
+        raise InputError("macos-floor --update requires a non-empty --reason stating why the floors change")
+    # As for the crate floors, only a verified CI record changes a floor; a stated host or a local run never does.
+    if not args.provenance:
+        raise InputError("macos-floor --update requires --provenance FILE, the record of the macos-core run that "
+                         f"measured the report; retrieve and verify it as {REBASELINE_PROCEDURE} describes")
+    record = verify_provenance(args.provenance, args.report, None, report, args.target,
+                               (args.runner or "").strip() or None, Path(args.baseline), MACOS_EVIDENCE)
+    paths = set(baseline.macos.files if baseline.macos else ()) | set(args.file or ())
+    if not paths:
+        raise InputError("macos-floor --update needs --file PATH while the baseline has no macos section")
+    files: Dict[str, Entry] = {}
+    for file_path in sorted(paths):
+        report_file = measured.get(file_path)
+        if report_file is None or report_file.lines == 0:
+            raise InputError(f"macos-floor --update: {file_path} has no instrumented line in this report")
+        files[file_path] = Entry(report_file.lines, report_file.covered)
+    baseline.macos = MacosSection(record.target, record.runner, f"{reason.rstrip('.')}. {record.sentence()}", files)
+    text = render_document(baseline_document(baseline))
+    baseline_path = Path(args.baseline)
+    parse_baseline(json.loads(text), str(baseline_path))
+    _write_atomic(baseline_path, text)
+    print(f"Wrote the macos section of {baseline_path} for {record.target} on {record.runner} from the verified "
+          "provenance record: "
+          + ", ".join(f"{file_path} {_pct(entry.percent)}" for file_path, entry in files.items())
+          + ". Review and commit the diff.", file=out)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Return the command-line parser."""
     parser = argparse.ArgumentParser(description="Per-crate line-coverage report and regression floor.")
@@ -1557,7 +1823,9 @@ def main(argv: Optional[List[str]] = None, env: Optional[Mapping[str, str]] = No
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     argv = list(sys.argv[1:] if argv is None else argv)
-    subcommands = {"record-provenance": lambda rest: run_record(rest, env), "pin-checkout": run_pin}
+    subcommands = {"record-provenance": lambda rest: run_record(rest, env), "pin-checkout": run_pin,
+                   "macos-floor": lambda rest: run_macos_floor(rest, env, stdout),
+                   "record-macos-provenance": lambda rest: run_record_macos(rest, env)}
     if argv[:1] and argv[0] in subcommands:
         try:
             return subcommands[argv[0]](argv[1:])

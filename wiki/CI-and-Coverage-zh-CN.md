@@ -47,7 +47,7 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 ### macOS 14 与 Windows latest
 
 稳定的必需检查是 fail-closed 汇总 job：`macos-14 / unit tests` 同时依赖 `macos-core`、
-`macos-coverage`、`macos-smoke` 与 `tooling`，而 `windows-latest / unit tests` 同时依赖
+`macos-smoke` 与 `tooling`，而 `windows-latest / unit tests` 同时依赖
 `windows-native`、`windows-glyph-oracle`、`windows-checks`、五个 Windows 测试 shard（`windows-tests-workspace`、
 `windows-tests-harness`、`windows-tests-harness-features`、`windows-tests-harness-api` 与
 `windows-tests-runtime`）以及 `windows-smoke`，其结果循环逐一检查它们。每个汇总 job
@@ -59,12 +59,28 @@ macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再
 resource baseline 采集。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版本、raw-exit、window-owner、
 工作流供应链、注释与脚本标识符检查，以及发布说明、Wiki 发布、资源清单、soak 和资源基线脚本测试。
 这些命令仍是各支持主机的本地 gate；既有 macOS 汇总要求 tooling 成功，因此没有检查变为可选。
-工作集测量留在 macos-core，复用已编译 harness，避免增加 macOS 冷构建及与 perf 竞争 runner。独立的 coverage shard 安装固定版本
-`cargo-llvm-cov` 发布的 Apple Silicon 预编译二进制：由 `scripts/install-pinned-tool.sh` 安装，解包前先校验其 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
+工作集测量留在 macos-core，复用已编译 harness，避免增加 macOS 冷构建及与 perf 竞争 runner。logic coverage
+在独立的 `linux-coverage` job 中、`linux-core` 所用的 `ubuntu:22.04` 容器内运行，不占用性能对比等待的 macOS runner 池。
+容器让其测试使用与 workspace gate 相同的 Cairo、FreeType 与 Fontconfig；`ubuntu-latest` host 上较新的 Cairo 绘制 COLR
+扫描渐变的结果不同。runner 不会把镜像标识导出到容器中，因此该 job 以这个容器作为其镜像标识。它安装固定版本
+`cargo-llvm-cov` 发布的静态链接 x86_64 Linux 预编译二进制：由 `scripts/install-pinned-tool.sh` 安装，解包前先校验该 host 的 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
-`macos-smoke` 矩阵分别在 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release
-二进制，使用不同依赖缓存键。Intel lane 仅在推送到 `main` 时可保存依赖；Apple Silicon
-lane 只恢复缓存。
+
+由于下限在 Linux 上测量，`scripts/coverage-baseline.json` 中的逐 crate 下限不再测量 macOS 专用代码：
+CoreText 字体发现、macOS PTY 与 IO 路径、macOS 日志以及 `sonicterm-mac` 二进制在 Linux 上不参与编译，
+转而测量 Linux 专用代码（Fontconfig 字体发现、`sonicterm-linux`）。80% gate 及其 crate 列表不变。
+原先位于 `cfg(target_os = "macos")` 之后、与平台无关的逻辑（UTF-16 到 UTF-8 边界转换，以及 `open` 与
+`xdg-open` URL 命令构建器）现在在每个 Unix host 上编译并测试，因此 Linux 运行会测量它们。80% 子集中剩余的
+macOS 专用逻辑（`sonicterm-ui` 的 `text_edit.rs` 中的 AppKit 单词边界，以及 `command_label.rs` 的 macOS 分支）
+保留独立下限：`macos-core` 安装同一工具的 macOS 固定版本，运行只对 `sonicterm-ui` 插桩的
+`scripts/macos-logic-coverage.sh`，按 baseline 的 `macos` 段以同样 1 pp 容差检查每个文件，并在成功和失败后
+上传报告与 provenance 记录；只有经过验证的该记录才能修改该段。文件下限能发现超过容差的损失：失去 AppKit 边界的覆盖（`text_edit.rs` 160 行中的 7 行）会使该文件下降约 4 pp，而
+`command_label.rs` 的单个 macOS 分支不到该文件的 1 pp，无法被发现。
+原生运行时 smoke 分别在 macOS 14 Apple Silicon（作为 `macos-core` 末尾的步骤）和 macOS 15
+Intel（单分支的 `macos-smoke` 矩阵）上构建 release 二进制，使用不同依赖缓存键。Intel lane
+仅在推送到 `main` 时可保存依赖；Apple Silicon lane 共用 `macos-core` 的缓存条目。它不单独占用
+job，是因为本仓库同时最多运行五个 macOS job，单独的分支会占用一个性能对比分片等待的槽位。这些
+步骤排在 core gates 之后，因此前面的 core gate 失败时会跳过它们；Intel lane 仍独立报告结果。
 在 release 构建之前，两个 lane 先构建并运行原生分屏选择 fixture（[原生分屏选择](Local-Gate-zh-CN#原生分屏选择)），
 再运行性能场景 smoke，它检查对比工具本身而不计时（[性能场景 smoke](Local-Gate-zh-CN#性能场景-smoke)）；
 任一 smoke 失败时，job 会上传其证据。release 构建之后，两个 lane 都要求原始二进制的有界 smoke 成功，
@@ -115,17 +131,19 @@ Workspace、普通/计数器、frame-texture/echo 和 API-cfg 套件各自绘制
 
 Windows 缓存分为 `check-windows-latest`（`windows-checks` 写入）、`test-windows-latest`
 （`windows-tests-workspace` 写入，oracle 与全部测试 shard 恢复）及 `release-windows-latest`
-（`windows-smoke` 写入）。macOS coverage job 使用独立的 `instrumented-macos-14`。coverage 脚本在测量前仍丢弃插桩输出，
+（`windows-smoke` 写入）。Linux coverage job 使用独立的 `instrumented-ubuntu-22.04`。coverage 脚本在测量前仍丢弃插桩输出，
 因此该缓存不保证插桩构建已预热。
 不缓存 workspace artifact；写入仅发生于成功的 `main` push，PR 从不写入。其它 macOS 与 Linux
 缓存策略不变。编译器及环境哈希仍启用；静态检查归档不能再占据测试 codegen key。
 重叠的 main run 仍可能竞争保存同一不可变 key。
 
-四个 macOS perf shard 保留 artifact 名称，每个场景恰好运行一次：`S7-S4` 保留 S7、S4、
-atlas-retry 及 S12/status-line；`S9-S10sync` 增加 S6/rest 和 S1/status-line；`S10-S11release` 增加 S12/default
-及 S6/flood；`S2-S3-S8-S12` 移除这两项。PR 的 35 分钟预算包含
-排队时间。不增加与 perf 竞争 runner 的 macOS job；余量由 exact-head CI 计时验证，而不是
-本地估算。运行次数、计数器、S9 laps 与发布测量长度均不变。
+三个 macOS perf shard 保留 artifact 名称，每个场景恰好运行一次，按 run 40344066083
+的各变体实测时间分为约 19 分钟的三组：`S7-S4` 运行 S7、S4、atlas-retry、S12/status-line、S3、S8 与
+S6/selection-drag；`S9-S10sync` 运行 S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line 与 S12；
+`S10-S11release` 运行 S10、S11/release、S2、S2/flood 与 S6/flood。三组在二进制产物就绪时同时开始：
+本仓库同时最多运行五个 macOS job，CI 占用其中两个（同时运行 aarch64 smoke 的 core gates，以及 Intel
+smoke）。PR 的 35 分钟预算包含排队时间；余量由 exact-head CI 计时验证，而不是本地估算。运行次数、
+计数器、S9 laps 与发布测量长度均不变。
 
 兼容且成功的 `main` job 必须先填充 key，后续 run 才可能命中；编译器或依赖变化仍可能
 导致 miss。缓存复用可减少依赖编译，不能缩短托管 runner 的排队时间。冷缓存构建以及
@@ -149,7 +167,7 @@ resource-baseline 采集器同样输出并刷新每条命令的开始/结束进�
 ### Ubuntu 22.04
 
 稳定的 `ubuntu 22.04 / workspace, packages, X11, Wayland` 汇总 job 同时依赖
-`linux-core` 与 `linux-packages`，并使用与 macOS、Windows 相同的 fail-closed 结果检查。
+`linux-core`、`linux-coverage` 与 `linux-packages`，并使用与 macOS、Windows 相同的 fail-closed 结果检查。
 core shard 安装 Linux 编译依赖，并为 GPU 测试和 adapter probe 安装 Vulkan/lavapipe，
 在 Cargo 缓存恢复后测量真实 PTY 关闭基线，随后运行 format、Clippy、Rustdoc（包括带 `test-util` feature 的 `sonicterm-resource`）、一次性
 workspace 测试、doctest、第一方注释、脚本标识符、exit、Rust 版本、window-owner、工作流供应链、Linux package、
@@ -198,8 +216,9 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 9 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
-  中点名的原生/控制器文件。CI 只在 macOS 上运行它，但本地 runner 在 Linux 上也会选择它。
-  Coverage 通过不能证明原生窗口、真实 PTY、GPU surface、生成 FFI、installer 或 Windows-only logic。
+  中点名的原生/控制器文件。CI 在 Linux 上、`linux-coverage` job 的 `ubuntu:22.04` 容器中运行它；
+  本地 runner 在 macOS 与 Linux 上都会选择它。Coverage 通过不能证明原生窗口、真实 PTY、GPU surface、
+  生成 FFI、installer，或 macOS-only 与 Windows-only logic。
 - 同一次运行还不带 ignore regex 重新报告同一批 profile，打印每个 workspace member 的
   line coverage，并由 `scripts/coverage-floor.py` 把每个已测量 crate 与
   `scripts/coverage-baseline.json` 中的条目比较。crate 比条目低 1.0 个百分点以上或
@@ -207,10 +226,16 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
   有条目的 crate 不再被测量、member 既未测量也未声明，或已声明的 crate 开始报告代码行。
   测试、vendored、生成与 build script 代码会被排除并打印计数；没有可计入行的 crate 显示为
   `not measured` 及其原因。该下限只拦截回归，不拦截低覆盖率：一直偏低的 crate 仍会通过。
-  `sonicterm-windows` 与 `sonicterm-linux` 两行测量的是在 macOS 上编译的代码，不是这些平台
-  上的执行覆盖率。baseline 绑定 macOS arm64 CI runner；其它 host 上的 CI 以不可比较失败，
-  本地运行只打印参考性 delta，不给结论。下限数值只能根据已保留运行的已验证证据，通过经过评审的 diff 调整，
-  见 [Coverage 证据与重新建立基线](Development-and-Release-zh-CN#coverage-证据与重新建立基线)。
+  每一行测量的都是在 Linux 上编译的代码：macOS 专用的字体发现、PTY 与 IO 路径、日志以及
+  `sonicterm-mac` 二进制不参与编译，因此不被测量；`sonicterm-mac` 与 `sonicterm-windows` 两行只测量能在
+  Linux 上编译的部分，不是这些平台上的执行覆盖率。baseline 绑定 `linux-coverage` job 的 x86_64 Linux
+  容器；其它 host 上的 CI 以不可比较失败，本地运行只打印参考性 delta，不给结论。下限数值只能根据已保留运行的
+  已验证证据，通过经过评审的 diff 调整，见 [Coverage 证据与重新建立基线](Development-and-Release-zh-CN#coverage-证据与重新建立基线)。
+- `macos-core` 中的 `scripts/macos-logic-coverage.sh` 按 baseline 的 `macos` 段，为 80% 子集中的 macOS
+  专用逻辑（`sonicterm-ui` 的 `text_edit.rs` 中的 AppKit 单词边界，以及 `command_label.rs` 的 macOS 分支）
+  设置逐文件下限。CI 只在 macOS 14 arm64 runner 上强制执行这些下限，且只能根据经过验证的 `macos-core`
+  记录修改。该运行只对 `sonicterm-ui` 插桩，因此其它 crate 中的 macOS 专用代码没有下限；文件下限也无法发现
+  小于 1.0 个百分点容差的损失，例如 `command_label.rs` 的单个 macOS 分支。
 - `cargo deny --locked check` 在 `linux-core` job 与本地 gate 中，对所有 target 执行 `deny.toml`
   中的 advisory、license、ban 与 source policy。审计通过不代表被忽略的 advisory 已消失：每个
   `ignore` 条目都写明其依赖路径、上游 issue，以及可将其移除的版本。

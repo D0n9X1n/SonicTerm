@@ -16,7 +16,7 @@ set -euo pipefail
 # which leaves the excluded native paths in the measured surface instead of
 # filtering them out.
 #
-# Once this script starts, it leaves evidence for the macos-coverage job to
+# Once this script starts, it leaves evidence for the linux-coverage job to
 # upload after success and after failure. It pins the checkout before its first
 # record, rewrites a provenance record in EVIDENCE_DIR when each phase starts
 # and when one fails, and stages the JSON report and the workspace inventory.

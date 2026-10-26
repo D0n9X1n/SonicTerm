@@ -216,58 +216,135 @@ jobs:
           path: target/v1.2.0-baseline/evidence-macos-14
           if-no-files-found: error
 
-  macos-coverage:
-    name: macOS logic coverage
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The Apple Silicon native smoke runs here rather than in its own job: the repository has five
+      # concurrent macOS slots, and a separate leg would hold one the perf comparison's shards wait for.
+      # The Intel smoke stays in macos-smoke on its own image. 14.0 is the declared Apple Silicon
+      # deployment floor, asserted as a ceiling, as in macos-smoke's matrix.
+      - name: Install native dependencies
+        run: brew install cairo pkg-config
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
-        with:
-          toolchain: stable
+      - name: Build macOS native selection fixture
+        run: cargo build --locked -p sonicterm-app --example native_split_selection
 
-      - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-instrumented-macos-14
-          add-job-id-key: false
-          cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Require macOS native split selection
+        run: python3 scripts/native-selection-smoke.py
 
-      # The pinned release's prebuilt arm64 binary saves the minute a source build takes. The script takes its
-      # version, URL and SHA-256 from scripts/pinned-tools.json and checks the digest before it unpacks anything.
-      - name: Install cargo-llvm-cov
-        run: bash scripts/install-pinned-tool.sh cargo-llvm-cov
+      - name: Require macOS perf scenario smoke
+        run: python3 scripts/perf-compare.py --smoke
 
-      # The pull-request head reaches provenance through env; the runner supplies other run metadata.
-      - name: Run Rust logic coverage gate
-        id: coverage
-        shell: bash
+      - name: Build macOS release binary for runtime smoke
+        run: cargo build --release -p sonicterm-mac
+
+      - name: Require macOS native runtime smoke
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-smoke-aarch64" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-smoke-aarch64.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
+      - name: Require macOS GPU frame-validation smoke
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 --scenario frame-validation \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-aarch64" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-aarch64.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
+      - name: Require macOS GPU device-recovery smoke
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 --scenario device-recovery \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-device-recovery-smoke-aarch64" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-device-recovery-smoke-aarch64.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
+      # As in macos-smoke: the relocated, self-contained bundle is what a user opens, packaged with
+      # hdiutil and the tracked icon.
+      - name: Package macOS dmg for validation
         env:
-          COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: scripts/rust-logic-coverage.sh
+          SONICTERM_MAX_MACOS_MINIMUM: "14.0"
+        run: bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-aarch64
 
-      # One artifact per run attempt whose coverage step started, after success
-      # and after failure: the provenance record, plus measurement/ with the
-      # report and inventory once they are published. A failure before the
-      # coverage step leaves no artifact; its job log is the only diagnostic.
-      - name: Upload coverage evidence
-        if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
+      - name: Validate packaged macOS dmg
+        run: |
+          python3 scripts/test-macos-package.py \
+            --dmg "dist/SonicTerm-ci-mac-aarch64.dmg" \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-package-aarch64" \
+            --max-minimum-macos "14.0"
+
+      - name: Upload macOS package evidence
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rust-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/rust-logic-coverage-evidence
-          retention-days: 90
+          # Evidence and logs only; the validated .dmg is a CI-local build, not a release asset.
+          name: sonicterm-macos-package-evidence-aarch64-${{ github.sha }}
+          path: ${{ runner.temp }}/sonicterm-macos-package-aarch64/package-evidence.json
+          if-no-files-found: ignore
+
+      - name: Upload macOS native selection evidence
+        if: ${{ failure() && env.SONICTERM_SELECTION_LOG_DIR != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-macos-selection-aarch64-${{ github.sha }}
+          path: ${{ env.SONICTERM_SELECTION_LOG_DIR }}
           if-no-files-found: error
+
+      - name: Upload macOS perf scenario smoke evidence
+        if: ${{ failure() && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-macos-perf-smoke-aarch64-${{ github.sha }}
+          path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
+          if-no-files-found: error
+
+      - name: Upload macOS native smoke logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-macos-smoke-logs-aarch64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/sonicterm-macos-smoke-aarch64.log
+            ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-aarch64.log
+            ${{ runner.temp }}/sonicterm-macos-device-recovery-smoke-aarch64.log
+            ${{ runner.temp }}/sonicterm-macos-smoke-aarch64/logs/**
+            ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-aarch64/logs/**
+            ${{ runner.temp }}/sonicterm-macos-device-recovery-smoke-aarch64/logs/**
+            ${{ runner.temp }}/sonicterm-macos-package-aarch64/**
+            dist/*.dmg.creation-*/*.log
+            dist/*.dmg.creation-*/result.json
+          if-no-files-found: ignore
+
+      # Linux logic coverage cannot see the macOS-only logic in the 80% subset (sonicterm-ui's AppKit word
+      # boundary and macOS arms), so this runner holds it to the baseline's macos section.
+      - name: Install cargo-llvm-cov for macOS-only coverage
+        run: bash scripts/install-pinned-tool.sh cargo-llvm-cov
+
+      # The pull-request head reaches the provenance record through env; the runner supplies other run metadata.
+      - name: Run macOS-only logic coverage
+        id: macos_coverage
+        env:
+          COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: scripts/macos-logic-coverage.sh
+
+      # The report and its provenance record, after success and after failure: the only evidence that can
+      # change the macos section. A run that stopped before measuring leaves nothing to upload.
+      - name: Upload macOS-only coverage evidence
+        if: ${{ !cancelled() && steps.macos_coverage.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/macos-logic-coverage-evidence
+          retention-days: 90
+          if-no-files-found: ignore
 
   macos-smoke:
     name: macOS native runtime smoke (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
-      # Both legs must report: Intel and Apple Silicon resolve different Cairo
-      # and font binaries, so one architecture's result cannot stand in for the
-      # other's, and a cancelled sibling would hide which one regressed.
+      # The Intel leg only: Apple Silicon runs the same steps in macos-core.
+      # Intel and Apple Silicon resolve different Cairo and font binaries, so
+      # one architecture's result cannot stand in for the other's.
       fail-fast: false
       matrix:
         include:
@@ -275,9 +352,6 @@ jobs:
           # asserted as a ceiling rather than read back from the build. A newer
           # SDK or a Homebrew bottle raising LC_BUILD_VERSION must fail the gate
           # and be decided deliberately, never raise the shipped floor silently.
-          - runner: macos-14
-            arch: aarch64
-            minimum: "14.0"
           - runner: macos-15-intel
             arch: x86_64
             minimum: "15.0"
@@ -292,7 +366,7 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # Keyed by runner: an x86_64 leg restoring the aarch64 target
+          # Keyed by runner: the x86_64 leg restoring macos-core's aarch64 target
           # directory would rebuild anyway, and would poison the shared entry.
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-${{ matrix.runner }}
           add-job-id-key: false
@@ -401,7 +475,7 @@ jobs:
   macos:
     name: macos-14 / unit tests
     runs-on: ubuntu-latest
-    needs: [macos-core, macos-coverage, macos-smoke, tooling]
+    needs: [macos-core, macos-smoke, tooling]
     if: always()
     steps:
       - name: Verify macOS shards
@@ -409,10 +483,9 @@ jobs:
         env:
           TOOLING: ${{ needs.tooling.result }}
           CORE: ${{ needs.macos-core.result }}
-          COVERAGE: ${{ needs.macos-coverage.result }}
           SMOKE: ${{ needs.macos-smoke.result }}
         run: |
-          for result in "$CORE" "$COVERAGE" "$SMOKE" "$TOOLING"; do
+          for result in "$CORE" "$SMOKE" "$TOOLING"; do
             test "$result" = "success"
           done
 
@@ -1128,6 +1201,75 @@ jobs:
             test "$result" = "success"
           done
 
+  linux-coverage:
+    name: Linux logic coverage
+    # Logic coverage runs on Linux, where the macOS runner pool is not shared with the perf comparison. The
+    # macOS-only logic it cannot see keeps its own floor in macos-core.
+    runs-on: ubuntu-latest
+    # linux-core's container, so the tests see the same Cairo, FreeType and Fontconfig as the workspace gate; the
+    # host image's newer Cairo draws COLR sweep gradients differently.
+    container: ubuntu:22.04
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+      # The runner does not export its image identity into a container, so the job names the container image
+      # the provenance record and the baseline's host are keyed to.
+      ImageOS: ubuntu22-container
+      ImageVersion: "ubuntu:22.04"
+    steps:
+      - name: Install runner and native dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config python3 \
+            libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            mesa-vulkan-drivers libvulkan1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+
+      - name: Restore Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-instrumented-ubuntu-22.04
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # The pinned release's prebuilt static x86_64 binary saves the minute a source build takes. The script takes its
+      # version, URL and this host's SHA-256 from scripts/pinned-tools.json and checks the digest before it unpacks.
+      - name: Install cargo-llvm-cov
+        run: bash scripts/install-pinned-tool.sh cargo-llvm-cov
+
+      # The pull-request head reaches provenance through env; the runner supplies other run metadata.
+      - name: Run Rust logic coverage gate
+        id: coverage
+        shell: bash
+        env:
+          COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: scripts/rust-logic-coverage.sh
+
+      # One artifact per run attempt whose coverage step started, after success
+      # and after failure: the provenance record, plus measurement/ with the
+      # report and inventory once they are published. A failure before the
+      # coverage step leaves no artifact; its job log is the only diagnostic.
+      - name: Upload coverage evidence
+        if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rust-logic-coverage-evidence
+          retention-days: 90
+          if-no-files-found: error
+
   linux-core:
     name: Ubuntu core gates
     runs-on: ubuntu-latest
@@ -1353,15 +1495,16 @@ jobs:
   linux:
     name: ubuntu 22.04 / workspace, packages, X11, Wayland
     runs-on: ubuntu-latest
-    needs: [linux-core, linux-packages]
+    needs: [linux-core, linux-coverage, linux-packages]
     if: always()
     steps:
       - name: Verify Ubuntu shards
         shell: bash
         env:
           CORE: ${{ needs.linux-core.result }}
+          COVERAGE: ${{ needs.linux-coverage.result }}
           PACKAGES: ${{ needs.linux-packages.result }}
         run: |
-          for result in "$CORE" "$PACKAGES"; do
+          for result in "$CORE" "$COVERAGE" "$PACKAGES"; do
             test "$result" = "success"
           done

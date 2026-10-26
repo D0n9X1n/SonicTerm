@@ -44,13 +44,14 @@ case "$(uname -m)" in
 esac
 
 # One field per line: version, digest, os, arch, url, member, version output, then each
-# version-check argument. The reader refuses an unknown tool and malformed pins.
-fields="$(python3 - "$manifest" "$tool" <<'PY'
+# version-check argument. The reader refuses an unknown tool and malformed pins. An entry pins
+# one archive at its top level, or one per host in `platforms`, from which it takes this host's.
+fields="$(python3 - "$manifest" "$tool" "$host_os" "$host_arch" <<'PY'
 import json
 import re
 import sys
 
-manifest_path, tool = sys.argv[1], sys.argv[2]
+manifest_path, tool, host_os, host_arch = sys.argv[1:5]
 with open(manifest_path, encoding="utf-8") as handle:
     tools = json.load(handle)
 entry = tools.get(tool) if isinstance(tools, dict) else None
@@ -59,12 +60,23 @@ if not isinstance(entry, dict):
 version = entry.get("version")
 if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
     sys.exit(f"install-pinned-tool: {tool} version {version!r} is not an exact X.Y.Z")
-digest = entry.get("sha256")
+platforms = entry.get("platforms")
+if platforms is None:
+    pin = entry
+else:
+    if not isinstance(platforms, list) or not all(isinstance(candidate, dict) for candidate in platforms):
+        sys.exit(f"install-pinned-tool: {tool} platforms must be a list of pins")
+    matches = [candidate for candidate in platforms
+               if (candidate.get("os"), candidate.get("arch")) == (host_os, host_arch)]
+    if len(matches) != 1:
+        sys.exit(f"install-pinned-tool: {tool} has no single pin for {host_os}/{host_arch}")
+    pin = matches[0]
+digest = pin.get("sha256")
 if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
     sys.exit(f"install-pinned-tool: {tool} sha256 must be 64 lowercase hex digits")
 lines = [version, digest]
-for key in ("os", "arch", "url", "member", "version_output"):
-    value = entry.get(key)
+for key, source in (("os", pin), ("arch", pin), ("url", pin), ("member", pin), ("version_output", entry)):
+    value = source.get(key)
     if not isinstance(value, str) or not value or "\n" in value:
         sys.exit(f"install-pinned-tool: {tool} has no usable {key}")
     lines.append(value.replace("{version}", version))

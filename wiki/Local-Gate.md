@@ -350,8 +350,9 @@ cause; later deadlines fail. Neither result satisfies native acceptance.
 
 macOS runs the same fixture through an example on the process main thread.
 Ordinary workspace tests and coverage do not execute the example, so the macOS
-local gate explicitly builds and runs it. Both required `macos-smoke` CI matrix
-legs run the same commands before the release build and packaging, without CI
+local gate explicitly builds and runs it. Both required CI lanes, Apple Silicon
+in `macos-core` and Intel in `macos-smoke`, run the same commands before the
+release build and packaging, without CI
 job or step timeout
 overrides. The local example-build budget remains 25 minutes; selection runtime
 limits are independent and unchanged. On macOS the fixture forwards `new_events`
@@ -532,8 +533,9 @@ cases is retried up to 3 times. The 100 s is each run's `run_step` deadline.
 Outside the smoke, that deadline is 30 s past the harness's own deadline, at or
 just before the point where the harness's watchdog would abort the harness. The
 smoke caps it at 100 s, so for S1 and S3, whose deadline with `--short` is 80 s,
-it is 20 s past that deadline. Both required `macos-smoke` CI matrix legs run
-the same command after the native split selection and before the release build,
+it is 20 s past that deadline. Both required CI lanes, Apple Silicon in
+`macos-core` and Intel in `macos-smoke`, run the same command after the native
+split selection and before the release build,
 without CI job or step timeout overrides. The CI parity check fails when that
 step gains an `if:` or `continue-on-error:`, or moves out of that position.
 

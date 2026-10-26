@@ -57,12 +57,12 @@ FILES = {
 FLOORS = {"sonicterm-grid": (400, 360), "sonicterm-vt": (200, 174)}
 
 
-def export(files, root=ROOT):
-    """Build an llvm-cov JSON summary export from {path: (lines, covered)}."""
+def export(files, root=ROOT, version="0.9.0"):
+    """Build an llvm-cov JSON summary export from {path: (lines, covered)}, written by cargo-llvm-cov `version`."""
     return {
         "type": floor.LLVM_EXPORT_TYPE,
         "version": "3.1.0",
-        "cargo_llvm_cov": {"version": "0.9.0", "manifest_path": f"{root}/Cargo.toml"},
+        "cargo_llvm_cov": {"version": version, "manifest_path": f"{root}/Cargo.toml"},
         "data": [{
             "files": [
                 {
@@ -168,7 +168,7 @@ def clean_env():
 
 RUSTC_VERBOSE = ("rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229cea\n"
                  "host: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 20.1.8")
-# The macos-coverage job's environment; the runner sets every variable here.
+# The coverage job's environment; the runner sets every variable here. The host values are fixtures.
 RUN_ENV = {
     **CI_ENV,
     "ImageVersion": "20260915.0150",
@@ -176,7 +176,7 @@ RUN_ENV = {
     "GITHUB_WORKFLOW_REF": "D0n9X1n/SonicTerm/.github/workflows/ci.yml@refs/heads/main",
     "GITHUB_RUN_ID": "36087392875",
     "GITHUB_RUN_ATTEMPT": "1",
-    "GITHUB_JOB": "macos-coverage",
+    "GITHUB_JOB": "linux-coverage",
     "GITHUB_EVENT_NAME": "push",
     "GITHUB_REF": "refs/heads/main",
     "GITHUB_SERVER_URL": "https://github.com",
@@ -187,6 +187,9 @@ CHECKOUT = {
     "crates/sonicterm-grid/src/grid.rs": "pub fn grid() {}\n",
     "crates/sonicterm-vt/src/vt.rs": "pub fn vt() {}\n",
     "scripts/coverage-floor.py": "# policy\n",
+    # The release every fixture record's cargo-llvm-cov must match.
+    "scripts/pinned-tools.json": json.dumps({"cargo-llvm-cov": {"version": "0.9.0",
+                                                               "version_output": "cargo-llvm-cov {version}"}}) + "\n",
     "README.md": "# SonicTerm\n",
     "wiki/Home.md": "# Home\n",
     ".gitignore": "/target\n__pycache__/\n",
@@ -241,7 +244,8 @@ def record(root, output, phase, state, env, exit_status=0, report=None, meta=Non
 
 
 @contextmanager
-def retained_run(files=FILES, members=MEMBERS, base=None, env=RUN_ENV, phase="floor", state="failed", exit_status=1):
+def retained_run(files=FILES, members=MEMBERS, base=None, env=RUN_ENV, phase="floor", state="failed", exit_status=1,
+                 version="0.9.0"):
     """Yield a checkout holding the baseline, plus a retained run's report, inventory, and record.
 
     The default run completed its measurement and then failed the floor, as a run that reports a
@@ -257,7 +261,7 @@ def retained_run(files=FILES, members=MEMBERS, base=None, env=RUN_ENV, phase="fl
         paths = {"root": checkout, "baseline": checkout / "scripts" / "coverage-baseline.json",
                  "report": evidence / floor.REPORT_FILE, "metadata": evidence / floor.INVENTORY_FILE,
                  "provenance": evidence / floor.PROVENANCE_FILE}
-        paths["report"].write_text(json.dumps(export(files), indent=2) + "\n", encoding="utf-8")
+        paths["report"].write_text(json.dumps(export(files, version=version), indent=2) + "\n", encoding="utf-8")
         paths["metadata"].write_text(json.dumps(metadata(members), indent=2) + "\n", encoding="utf-8")
         record(checkout, paths["provenance"], phase, state, env, exit_status, paths["report"], paths["metadata"])
         yield paths
@@ -660,7 +664,7 @@ class UpdateBaselineTests(unittest.TestCase):
         self.assertEqual(stored.not_measured, declared)
         self.assertTrue(stored.reason.startswith(
             "initial floors from CI run 1. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/"
-            "36087392875 attempt 1, job macos-coverage"), stored.reason)
+            "36087392875 attempt 1, job linux-coverage"), stored.reason)
         for fact in (ARTIFACT, "macos14/ARM64 (image 20260915.0150)", "rustc 1.98.1 (48a229cea 2026-09-01)",
                      "cargo-llvm-cov 0.9.0"):
             self.assertIn(fact, stored.reason)
@@ -1040,20 +1044,32 @@ class SessionRunnerTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 30)
         grandchild = int(pid_file.read_text(encoding="utf-8"))
 
-        def alive():
+        def state():
+            """The grandchild's process state: None once it is gone, else its /proc state letter, or ? without /proc."""
             try:
                 os.kill(grandchild, 0)
             except ProcessLookupError:
-                return False
-            return True
+                return None
+            try:
+                stat = Path(f"/proc/{grandchild}/stat").read_text(encoding="utf-8")
+            except OSError:
+                return "?"
+            # The state follows the parenthesized command name, which may itself hold spaces or parentheses.
+            return stat.rsplit(")", 1)[1].split()[0]
 
-        # The killed grandchild is reparented and reaped by its new parent; allow a moment for that.
+        def alive():
+            # A killed grandchild reparented to a container's PID 1 that never reaps it stays a zombie (Z): it has
+            # exited and holds no pipe, so it counts as killed.
+            return state() not in (None, "Z")
+
+        # The killed grandchild is reparented and reaped, or left a zombie, by its new parent; allow a moment for that.
         deadline = time.monotonic() + 5
         while alive() and time.monotonic() < deadline:
             time.sleep(0.05)
         if alive():
+            survived = state()
             os.kill(grandchild, signal.SIGKILL)
-            self.fail(f"grandchild {grandchild} survived the harness timeout")
+            self.fail(f"grandchild {grandchild} survived the harness timeout (state {survived})")
 
 
 class RebaselineProvenanceTests(unittest.TestCase):
@@ -1301,11 +1317,11 @@ class DropGuidanceTests(unittest.TestCase):
 
 
 class CoverageWorkflowTests(unittest.TestCase):
-    """The macos-coverage job preserves evidence upload policy without custom timeout overrides."""
+    """The linux-coverage job preserves evidence upload policy without custom timeout overrides."""
 
     def test_coverage_job_preserves_upload_contract_without_timeout_overrides(self):
         # Upload is eligible after the gate starts, but a hung gate may exhaust the platform job limit.
-        job = ci_job("macos-coverage")
+        job = ci_job("linux-coverage")
         gate = ci_step(job, "Run Rust logic coverage gate")
         upload = ci_step(job, "Upload coverage evidence")
         self.assertIn("id: coverage", gate)
@@ -1323,6 +1339,24 @@ class CoverageWorkflowTests(unittest.TestCase):
         self.assertLess(job.index("- name: Run Rust logic coverage gate"), job.index("- name: Upload coverage evidence"))
 
         self.assertNotRegex(job, r"(?m)^\s*(?:-\s*)?timeout-minutes\s*:")
+
+    def test_macos_core_holds_macos_only_logic_to_its_floor_and_keeps_the_evidence(self):
+        # The macOS-only floor runs in macOS core gates, records its report's provenance, and uploads both after
+        # success and failure under the artifact name the verifier expects.
+        job = ci_job("macos-core")
+        gate = ci_step(job, "Run macOS-only logic coverage")
+        upload = ci_step(job, "Upload macOS-only coverage evidence")
+        self.assertIn("id: macos_coverage", gate)
+        self.assertIn("run: scripts/macos-logic-coverage.sh", gate)
+        self.assertIn("COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}", gate)
+        self.assertIn("if: ${{ !cancelled() && steps.macos_coverage.conclusion != 'skipped' }}", upload)
+        self.assertIn(f"name: {floor.MACOS_ARTIFACT_PREFIX}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}",
+                      upload)
+        self.assertIn("path: target/macos-logic-coverage-evidence\n", upload)
+        self.assertNotRegex(job, r"(?m)^\s*(?:-\s*)?timeout-minutes\s*:")
+        script = (_HERE / "macos-logic-coverage.sh").read_text(encoding="utf-8")
+        for command in ("pin-checkout", "record-macos-provenance", "macos-floor"):
+            self.assertIn(command, script)
 
     def test_gate_script_writes_the_evidence_the_workflow_uploads(self):
         # The script's evidence directory and file names are the ones the upload and the floor expect.
@@ -1585,14 +1619,210 @@ class InputValidationTests(unittest.TestCase):
         self.assertIn("cannot read baseline", run.stderr)
 
 
+MACOS_FILE = "crates/sonicterm-ui/src/text_edit.rs"
+
+
+def with_macos(base, files, target=TARGET, runner=RUNNER, reason="fixture macOS floor"):
+    """Add a macos section of {path: (lines, covered)} floors to a baseline document."""
+    base["macos"] = {
+        "host": {"target": target, "runner": runner},
+        "reason": reason,
+        "files": {path: {"lines": lines, "covered": covered, "percent": round(covered * 100 / lines, 2)}
+                  for path, (lines, covered) in files.items()},
+    }
+    return base
+
+
+def macos_floor(files, base, env, *extra, target=TARGET):
+    """Run the macos-floor subcommand on a fixture report; return the run and the baseline as it is afterwards."""
+    with workspace(export(files), None, base) as paths:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        argv = ["macos-floor", "--report", str(paths["report"]), "--baseline", str(paths["baseline"]),
+                "--target", target, "--source-root", ROOT, *extra]
+        status = floor.main(argv, env=env, stdout=stdout, stderr=stderr)
+        written = json.loads(paths["baseline"].read_text(encoding="utf-8"))
+        return Run(status, stdout.getvalue(), stderr.getvalue()), written
+
+
+class MacosFloorTests(unittest.TestCase):
+    """The macos section holds macOS-only logic to per-file floors on its own host."""
+
+    def test_the_floor_holds_within_tolerance_and_fails_beyond_it_in_ci_on_its_host(self):
+        # 159/160 is the floor; 158/160 is 0.625 pp lower and holds, 150/160 is 5.6 pp lower and fails.
+        base = with_macos(baseline(FLOORS), {MACOS_FILE: (160, 159)})
+        held, _ = macos_floor({**FILES, MACOS_FILE: (160, 158)}, base, CI_ENV)
+        self.assertEqual(held.status, 0, held.stdout + held.stderr)
+        self.assertIn("macOS floor PASS", held.stdout)
+        dropped, _ = macos_floor({**FILES, MACOS_FILE: (160, 150)}, base, CI_ENV)
+        self.assertEqual(dropped.status, 1)
+        self.assertIn(f"{MACOS_FILE}: 93.75% is", dropped.stdout)
+        self.assertIn("pp below its floor 99.38%", dropped.stdout)
+
+    def test_a_missing_file_fails_and_another_host_is_never_a_pass(self):
+        # A floor file the run did not measure fails on the section's host; CI elsewhere fails as not comparable;
+        # outside CI the result is informational whatever the numbers.
+        base = with_macos(baseline(FLOORS), {MACOS_FILE: (160, 159)})
+        missing, _ = macos_floor(FILES, base, CI_ENV)
+        self.assertEqual(missing.status, 1)
+        self.assertIn(f"{MACOS_FILE}: not measured", missing.stdout)
+        linux_ci = {"GITHUB_ACTIONS": "true", "ImageOS": "ubuntu24", "RUNNER_ARCH": "X64"}
+        elsewhere, _ = macos_floor({**FILES, MACOS_FILE: (160, 159)}, base, linux_ci)
+        self.assertEqual(elsewhere.status, 1)
+        self.assertIn("not comparable", elsewhere.stdout)
+        local, _ = macos_floor({**FILES, MACOS_FILE: (160, 100)}, base, LOCAL_ENV)
+        self.assertEqual(local.status, 0)
+        self.assertIn("informational only", local.stdout)
+
+    def test_update_and_check_refuse_misplaced_or_missing_arguments(self):
+        # An update states why and names its verified record; check mode takes no update flags.
+        base = with_macos(baseline(FLOORS), {MACOS_FILE: (160, 159)})
+        report = {**FILES, MACOS_FILE: (160, 159)}
+        for extra, message in (
+            (("--update", "--provenance", "record.json"), "--reason"),
+            (("--update", "--reason", "why"), "--provenance FILE"),
+            (("--reason", "why"), "only valid with --update"),
+            (("--provenance", "record.json"), "only valid with --update"),
+        ):
+            with self.subTest(extra=extra):
+                run, _ = macos_floor(report, base, LOCAL_ENV, *extra)
+                self.assertEqual(run.status, 2)
+                self.assertIn(message, run.stderr)
+
+    def test_the_section_is_validated_and_kept_by_crate_updates(self):
+        # A malformed section fails the whole baseline; crate updates and proposals keep the section verbatim.
+        valid = with_macos(baseline(FLOORS), {MACOS_FILE: (160, 159)})
+        parsed = floor.parse_baseline(valid, "fixture")
+        self.assertEqual(floor.baseline_document(parsed), valid)
+        for case, mutate, message in (
+            ("no files", lambda document: document["macos"].update(files={}), "macos.files must name"),
+            ("extra key", lambda document: document["macos"].update(extra=1), "macos must hold exactly"),
+            ("wrong percent", lambda document: document["macos"]["files"][MACOS_FILE].update(percent=50.0),
+             f"macos.files.{MACOS_FILE}.percent"),
+            ("no reason", lambda document: document["macos"].update(reason=" "), "macos.reason"),
+        ):
+            with self.subTest(case=case):
+                document = json.loads(json.dumps(valid))
+                mutate(document)
+                with self.assertRaises(floor.InputError) as raised:
+                    floor.parse_baseline(document, "fixture")
+                self.assertIn(message, str(raised.exception))
+        updated = floor.partial_update(parsed, {}, None, TARGET, RUNNER, "no crate changes", [])
+        self.assertEqual(updated.macos, parsed.macos)
+        self.assertEqual(floor.rebaseline_proposal(parsed, {}, TARGET, RUNNER)["macos"], valid["macos"])
+
+
+# A macos-core run's environment: the crate job's fixture runner, under the job that runs the macOS-only floor.
+MACOS_RUN_ENV = {**RUN_ENV, "GITHUB_JOB": "macos-core"}
+MACOS_ARTIFACT = "macos-logic-coverage-evidence-36087392875-1"
+
+
+@contextmanager
+def macos_retained_run(files, env=MACOS_RUN_ENV, base=None, version="0.9.0"):
+    """Yield a checkout holding the baseline, plus a retained macos-core run's report and provenance record."""
+    with tempfile.TemporaryDirectory() as directory:
+        checkout, evidence = Path(directory) / "checkout", Path(directory) / "evidence"
+        checkout.mkdir()
+        evidence.mkdir()
+        git(checkout, "init", "-q")
+        document = baseline(FLOORS) if base is None else base
+        commit_files(checkout, {**CHECKOUT, "scripts/coverage-baseline.json": json.dumps(document, indent=2) + "\n"})
+        paths = {"root": checkout, "baseline": checkout / "scripts" / "coverage-baseline.json",
+                 "report": evidence / floor.REPORT_FILE, "provenance": evidence / floor.PROVENANCE_FILE}
+        paths["report"].write_text(json.dumps(export(files, root=str(checkout), version=version), indent=2) + "\n",
+                                   encoding="utf-8")
+        pin = evidence / "checkout-pin.json"
+        pin_checkout(checkout, pin)
+        stderr = io.StringIO()
+        status = floor.main(["record-macos-provenance", "--output", str(paths["provenance"]), "--root", str(checkout),
+                             "--pin", str(pin), "--target", TARGET, "--rustc-verbose", RUSTC_VERBOSE,
+                             "--report", str(paths["report"])], env=env, stdout=io.StringIO(), stderr=stderr)
+        if status != 0:
+            raise AssertionError(f"record-macos-provenance exited {status}: {stderr.getvalue()}")
+        yield paths
+
+
+def macos_update(paths, *extra):
+    """Run macos-floor --update against a retained macos-core run's report, outside CI."""
+    stdout, stderr = io.StringIO(), io.StringIO()
+    argv = ["macos-floor", "--update", "--report", str(paths["report"]), "--baseline", str(paths["baseline"]),
+            "--target", TARGET, "--source-root", str(paths["root"]), *extra]
+    status = floor.main(argv, env=LOCAL_ENV, stdout=stdout, stderr=stderr)
+    return Run(status, stdout.getvalue(), stderr.getvalue())
+
+
+class MacosProvenanceTests(unittest.TestCase):
+    """The macOS floors change only from a verified macos-core record, as the crate floors do."""
+
+    def test_update_without_a_verified_record_is_refused(self):
+        # The probe that once passed: arbitrary low numbers labelled as the CI host never replace the floors.
+        with macos_retained_run({**FILES, MACOS_FILE: (160, 2)}) as paths:
+            before = paths["baseline"].read_text(encoding="utf-8")
+            run = macos_update(paths, "--reason", "probe", "--runner", RUNNER, "--file", MACOS_FILE)
+            self.assertEqual(run.status, 2, run.stdout)
+            self.assertIn("--provenance FILE", run.stderr)
+            self.assertEqual(paths["baseline"].read_text(encoding="utf-8"), before)
+
+    def test_records_that_do_not_verify_are_refused(self):
+        # A local record, another job's record, a report changed after its record, and a report from a
+        # cargo-llvm-cov other than the pinned one are each refused, and the baseline is left as it was.
+        for case, options, tamper, message in (
+            ("local", {"env": LOCAL_ENV}, False, "measured outside CI"),
+            ("other job", {"env": RUN_ENV}, False, "not macos-core"),
+            ("changed report", {}, True, "SHA-256"),
+            ("unpinned tool", {"version": "0.8.7"}, False, "the version scripts/pinned-tools.json pins"),
+        ):
+            with self.subTest(case=case), macos_retained_run({**FILES, MACOS_FILE: (160, 159)}, **options) as paths:
+                if tamper:
+                    changed = export({**FILES, MACOS_FILE: (160, 2)}, root=str(paths["root"]))
+                    paths["report"].write_text(json.dumps(changed, indent=2) + "\n", encoding="utf-8")
+                before = paths["baseline"].read_text(encoding="utf-8")
+                run = macos_update(paths, "--reason", "probe", "--file", MACOS_FILE,
+                                   "--provenance", str(paths["provenance"]))
+                self.assertEqual(run.status, 2, run.stdout)
+                self.assertIn(message, run.stderr)
+                self.assertEqual(paths["baseline"].read_text(encoding="utf-8"), before)
+
+    def test_a_verified_macos_core_record_rewrites_only_the_section(self):
+        # The verified record supplies the host and appends its run to the reason; every crate floor stays verbatim,
+        # and a section the baseline does not hold yet must name its files.
+        with macos_retained_run({**FILES, MACOS_FILE: (160, 159)}) as paths:
+            unnamed = macos_update(paths, "--reason", "seed", "--provenance", str(paths["provenance"]))
+            self.assertEqual(unnamed.status, 2)
+            self.assertIn("--file PATH", unnamed.stderr)
+            run = macos_update(paths, "--reason", "seed", "--file", MACOS_FILE, "--provenance", str(paths["provenance"]))
+            self.assertEqual(run.status, 0, run.stderr)
+            written = json.loads(paths["baseline"].read_text(encoding="utf-8"))
+            self.assertEqual(written["crates"], baseline(FLOORS)["crates"])
+            self.assertEqual(written["macos"]["host"], {"target": TARGET, "runner": RUNNER})
+            self.assertEqual(written["macos"]["files"], {MACOS_FILE: {"lines": 160, "covered": 159, "percent": 99.38}})
+            self.assertIn(f"job macos-core, evidence artifact {MACOS_ARTIFACT}", written["macos"]["reason"])
+
+    def test_a_crate_record_from_an_unpinned_cargo_llvm_cov_is_refused(self):
+        # The crate floors need the cargo-llvm-cov release the checkout pins, as the macOS floors do.
+        with retained_run(version="0.8.7") as paths:
+            run = update(paths, "--provenance", str(paths["provenance"]), "--reason", "probe")
+            self.assertEqual(run.status, 2, run.stdout)
+            self.assertIn("the version scripts/pinned-tools.json pins", run.stderr)
+
+
 class RepositoryContractTests(unittest.TestCase):
     """The committed baseline and gate script agree with the repository."""
 
-    def test_committed_baseline_is_valid_and_keyed_to_the_macos_arm64_ci_runner(self):
-        # The committed floor loads and names the host CI enforces it on.
+    def test_committed_baseline_is_valid_and_keyed_to_the_linux_coverage_container(self):
+        # The committed floor loads and names the host CI enforces it on: linux-coverage's ubuntu:22.04 container.
         committed = floor.load_baseline(str(_HERE / "coverage-baseline.json"))
-        self.assertEqual((committed.target, committed.runner), ("aarch64-apple-darwin", "macos14/ARM64"))
+        self.assertEqual((committed.target, committed.runner), ("x86_64-unknown-linux-gnu", "ubuntu22-container/X64"))
         self.assertEqual(committed.tolerance_pp, 1.0)
+
+    def test_committed_macos_section_names_the_macos_only_logic_files(self):
+        # The macOS-only floor covers the subset files whose AppKit and macOS branches compile only on macOS.
+        committed = floor.load_baseline(str(_HERE / "coverage-baseline.json"))
+        self.assertIsNotNone(committed.macos)
+        self.assertEqual((committed.macos.target, committed.macos.runner), ("aarch64-apple-darwin", "macos14/ARM64"))
+        self.assertEqual(set(committed.macos.files), {"crates/sonicterm-ui/src/text_edit.rs",
+                                                      "crates/sonicterm-ui/src/command_label.rs"})
+        for file_path in committed.macos.files:
+            self.assertTrue((_REPO / file_path).is_file(), file_path)
 
     def test_baseline_names_are_workspace_packages(self):
         # A typo fails here in seconds; the full inventory check needs the instrumented run.

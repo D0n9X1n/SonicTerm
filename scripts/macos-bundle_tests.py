@@ -716,9 +716,10 @@ class DmgTests(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), b"previous verified image")
 
     def test_failure_uploads_only_include_image_attempt_logs_and_result(self):
-        # CI and both release architectures retain diagnostics without distributing partial disk images.
+        # Both CI architectures (Apple Silicon in macos-core, Intel in macos-smoke) and both release architectures
+        # retain diagnostics without distributing partial disk images.
         root = Path(__file__).resolve().parent.parent
-        for workflow, count in (("ci.yml", 1), ("release.yml", 2)):
+        for workflow, count in (("ci.yml", 2), ("release.yml", 2)):
             text = (root / ".github/workflows" / workflow).read_text()
             steps = [step for step in re.split(r"(?m)^      - ", text)
                      if step.startswith("name: Upload macOS native smoke logs")]
