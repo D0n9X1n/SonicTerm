@@ -1202,15 +1202,26 @@ jobs:
     # Logic coverage runs on Linux, where the macOS runner pool is not shared with the perf comparison. The
     # macOS-only logic it cannot see keeps its own floor in macos-core.
     runs-on: ubuntu-latest
+    # linux-core's container, so the tests see the same Cairo, FreeType and Fontconfig as the workspace gate; the
+    # host image's newer Cairo draws COLR sweep gradients differently.
+    container: ubuntu:22.04
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+      # The runner does not export its image identity into a container, so the job names the container image
+      # the provenance record and the baseline's host are keyed to.
+      ImageOS: ubuntu22-container
+      ImageVersion: "ubuntu:22.04"
     steps:
-      # The packages linux-core installs, on the runner host so its image identity reaches the provenance record.
-      - name: Install native dependencies
+      - name: Install runner and native dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config python3 \
+            libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-0 \
             mesa-vulkan-drivers libvulkan1
 
@@ -1224,12 +1235,12 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-instrumented-ubuntu-latest
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-instrumented-ubuntu-22.04
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
-      # The pinned release's prebuilt x86_64 binary saves the minute a source build takes. The script takes its
+      # The pinned release's prebuilt static x86_64 binary saves the minute a source build takes. The script takes its
       # version, URL and this host's SHA-256 from scripts/pinned-tools.json and checks the digest before it unpacks.
       - name: Install cargo-llvm-cov
         run: bash scripts/install-pinned-tool.sh cargo-llvm-cov

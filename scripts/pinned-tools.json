@@ -15,8 +15,8 @@
       {
         "os": "linux",
         "arch": "x86_64",
-        "url": "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v{version}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz",
-        "sha256": "b068f7c98841aacb9c4f382b4a0c184ae82f49b56a32d442b429b2961c73be15",
+        "url": "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v{version}/cargo-llvm-cov-x86_64-unknown-linux-musl.tar.gz",
+        "sha256": "bc2122fd7bd9b6d3eb371690ed085f82e5a8bf1851f4645ef521d12ed04b2616",
         "member": "cargo-llvm-cov"
       },
       {

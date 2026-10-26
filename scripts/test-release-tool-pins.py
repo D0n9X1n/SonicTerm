@@ -21,7 +21,7 @@ PINS = {
 # SHA-256 of cargo-llvm-cov 0.9.0's release archive for each coverage host: Linux logic coverage and the
 # macOS-only coverage step in macOS core gates.
 COVERAGE_TOOL_SHA256 = {
-    ("linux", "x86_64"): "b068f7c98841aacb9c4f382b4a0c184ae82f49b56a32d442b429b2961c73be15",
+    ("linux", "x86_64"): "bc2122fd7bd9b6d3eb371690ed085f82e5a8bf1851f4645ef521d12ed04b2616",
     ("macos", "aarch64"): "1bbf5dc8ad82e0f6ff0eb923aa6a691c760adb60f797cdcb454e204b9399c4f0",
 }
 

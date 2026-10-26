@@ -97,8 +97,12 @@ script tests. These commands remain local gates on every supported host; the exi
 macOS aggregate requires the tooling job, so none became optional. The working-set
 measurement stays in macos-core to reuse its compiled harness without adding a cold
 macOS build or competing with perf for another runner slot. Logic coverage runs in its own
-`linux-coverage` job on `ubuntu-latest`, outside the macOS runner pool the perf comparison
-waits for. It installs the pinned `cargo-llvm-cov` release's prebuilt x86_64 Linux binary with
+`linux-coverage` job, in the `ubuntu:22.04` container `linux-core` uses, outside the macOS
+runner pool the perf comparison waits for. The container gives its tests the workspace
+gate's Cairo, FreeType and Fontconfig; the `ubuntu-latest` host's newer Cairo draws COLR
+sweep gradients differently. The job names that container as its image identity, since
+the runner does not export one into a container. It installs the pinned `cargo-llvm-cov`
+release's prebuilt static x86_64 Linux binary with
 `scripts/install-pinned-tool.sh`, which checks that host's SHA-256 before unpacking it
 (expected to save the minute a source build takes), then runs the deterministic logic coverage gate, and uploads its
 evidence artifact after success and after failure once the coverage step has started.
@@ -198,7 +202,7 @@ built-in font identity is bound by the source digest, and GDI memory-face names 
 Windows cache families are `check-windows-latest` (written by `windows-checks`),
 `test-windows-latest` (written by `windows-tests-workspace`, restored by the oracle and all
 test shards), and `release-windows-latest` (written by `windows-smoke`). The Linux coverage
-job uses its separate `instrumented-ubuntu-latest` family. Its coverage script still discards instrumented
+job uses its separate `instrumented-ubuntu-22.04` family. Its coverage script still discards instrumented
 outputs before measurement, so that family provides no warm instrumented-build guarantee. No workspace artifacts are cached;
 every writer saves only after a successful push to `main`, never on a pull request. The
 other macOS and Linux cache policies are unchanged. Compiler/environment hashing remains

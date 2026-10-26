@@ -1173,7 +1173,7 @@ jobs:
         intel = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.runner == 'macos-15-intel' }}"
         contracts = {
             "macos-core": ("unit-macos-14", main),
-            "linux-coverage": ("instrumented-ubuntu-latest", main),
+            "linux-coverage": ("instrumented-ubuntu-22.04", main),
             "macos-smoke": ("unit-${{ matrix.runner }}", intel),
             "windows-checks": ("check-windows-latest", main),
             "windows-tests-workspace": ("test-windows-latest", main),

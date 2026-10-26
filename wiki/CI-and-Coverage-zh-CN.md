@@ -60,8 +60,10 @@ resource baseline 采集。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版
 工作流供应链、注释与脚本标识符检查，以及发布说明、Wiki 发布、资源清单、soak 和资源基线脚本测试。
 这些命令仍是各支持主机的本地 gate；既有 macOS 汇总要求 tooling 成功，因此没有检查变为可选。
 工作集测量留在 macos-core，复用已编译 harness，避免增加 macOS 冷构建及与 perf 竞争 runner。logic coverage
-在 `ubuntu-latest` 上独立的 `linux-coverage` job 中运行，不占用性能对比等待的 macOS runner 池。它安装固定版本
-`cargo-llvm-cov` 发布的 x86_64 Linux 预编译二进制：由 `scripts/install-pinned-tool.sh` 安装，解包前先校验该 host 的 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
+在独立的 `linux-coverage` job 中、`linux-core` 所用的 `ubuntu:22.04` 容器内运行，不占用性能对比等待的 macOS runner 池。
+容器让其测试使用与 workspace gate 相同的 Cairo、FreeType 与 Fontconfig；`ubuntu-latest` host 上较新的 Cairo 绘制 COLR
+扫描渐变的结果不同。runner 不会把镜像标识导出到容器中，因此该 job 以这个容器作为其镜像标识。它安装固定版本
+`cargo-llvm-cov` 发布的静态链接 x86_64 Linux 预编译二进制：由 `scripts/install-pinned-tool.sh` 安装，解包前先校验该 host 的 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
 
 由于下限在 Linux 上测量，`scripts/coverage-baseline.json` 中的逐 crate 下限不再测量 macOS 专用代码：
@@ -129,7 +131,7 @@ Workspace、普通/计数器、frame-texture/echo 和 API-cfg 套件各自绘制
 
 Windows 缓存分为 `check-windows-latest`（`windows-checks` 写入）、`test-windows-latest`
 （`windows-tests-workspace` 写入，oracle 与全部测试 shard 恢复）及 `release-windows-latest`
-（`windows-smoke` 写入）。Linux coverage job 使用独立的 `instrumented-ubuntu-latest`。coverage 脚本在测量前仍丢弃插桩输出，
+（`windows-smoke` 写入）。Linux coverage job 使用独立的 `instrumented-ubuntu-22.04`。coverage 脚本在测量前仍丢弃插桩输出，
 因此该缓存不保证插桩构建已预热。
 不缓存 workspace artifact；写入仅发生于成功的 `main` push，PR 从不写入。其它 macOS 与 Linux
 缓存策略不变。编译器及环境哈希仍启用；静态检查归档不能再占据测试 codegen key。
