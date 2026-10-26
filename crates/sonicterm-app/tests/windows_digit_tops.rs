@@ -1,7 +1,11 @@
 #![cfg(target_os = "windows")]
-//! Each Cascadia Mono digit's ink top in a real Windows software frame is where its own outline puts
-//! it. DirectWrite draws with grid fitting disabled, so a round top that overshoots the flat ones by
-//! a fraction of a pixel shows one row higher once that fraction's coverage shows.
+//! Where Cascadia Mono's digits land in a real Windows software frame. Placement is checked
+//! absolutely: a digit whose outline rests on the baseline (yMin 0) has its last ink row just above
+//! the renderer's own baseline row. Tops are checked relative to each other: two digits' first ink
+//! rows differ by what their outlines predict, so the round 2, which overshoots the flat 7 by 20 of
+//! 2048 units, shows one row higher at 21.75 px. Absolute tops are not asserted: DirectWrite inks a
+//! top row the outline barely touches at some strikes (every digit at 14.5 px), which no
+//! outline-coverage threshold models.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -82,6 +86,22 @@ fn hex_rgb(hex: &str) -> Result<[u8; 3], String> {
         (Some(red), Some(green), Some(blue)) => Ok([red, green, blue]),
         _ => Err(format!("not a #rrggbb colour: {hex}")),
     }
+}
+
+/// One digit's outline prediction and the ink the frame drew for it.
+struct DigitInk {
+    /// The digit drawn.
+    digit: char,
+    /// Whether the outline's lowest point is on the baseline, so its last ink row is just above it.
+    flat_bottom: bool,
+    /// Rows above the baseline the outline predicts ink in.
+    rows_above_baseline: u32,
+    /// Whether the predicted top row's coverage is clear of the ink threshold.
+    decided: bool,
+    /// The first row with ink.
+    top_row: Option<u32>,
+    /// The last row with ink.
+    bottom_row: Option<u32>,
 }
 
 /// Draw `0123456789` at `scale` and compare each digit's measured ink top with the top its outline
@@ -193,57 +213,91 @@ fn check_scale(active: &ActiveEventLoop, scale: f32) -> Result<Option<Vec<String
     // row's glyphs are placed from, never from the drawn ink.
     let baseline = (top + baseline_in_cell).round() as u32;
     let threshold = ink_threshold(foreground, [background[2], background[1], background[0]]);
-    let mut predictions = Vec::new();
+    let mut digits = Vec::new();
     for (column, digit) in ('0'..='9').enumerate() {
         let extent = glyph_extent(&font, digit).ok_or_else(|| format!("no outline for {digit}"))?;
         let predicted = predicted_ink_top(extent, strike_px, threshold);
         let decided = (predicted.top_row_coverage - threshold).abs() >= DECISION_MARGIN;
-        // The bottom row is printed beside the top: a misplaced glyph moves both, a raster that
-        // inks one more row at its top moves only the top.
         let ink = ink_rows(column as u32);
-        let (measured, bottom) = (ink.first().copied(), ink.last().copied());
+        let (top_row, bottom_row) = (ink.first().copied(), ink.last().copied());
         println!(
-            "digit_top scale={scale} strike_px={strike_px} digit={digit} y_max={} \
+            "digit_top scale={scale} strike_px={strike_px} digit={digit} y_min={} y_max={} \
              top_row_coverage={:.3} threshold={threshold:.3} baseline={baseline} \
-             predicted={:?} measured={measured:?} bottom={bottom:?} decided={decided}",
+             predicted={:?} measured={top_row:?} bottom={bottom_row:?} decided={decided}",
+            extent.y_min,
             extent.y_max,
             predicted.top_row_coverage,
             baseline.checked_sub(predicted.rows_above_baseline)
         );
-        predictions.push((digit, predicted.rows_above_baseline, decided, measured));
+        digits.push(DigitInk {
+            digit,
+            flat_bottom: extent.y_min == 0,
+            rows_above_baseline: predicted.rows_above_baseline,
+            decided,
+            top_row,
+            bottom_row,
+        });
     }
-    // Each decided digit whose measured top is not `baseline_row` less its predicted rows.
-    let mismatches = |baseline_row: u32| -> Vec<String> {
-        predictions
+    let flat: Vec<char> =
+        digits.iter().filter(|ink| ink.flat_bottom).map(|ink| ink.digit).collect();
+    let mut failures = Vec::new();
+    if !['1', '2', '7'].iter().all(|digit| flat.contains(digit)) {
+        // When: 1, 2 or 7 is not flat-bottomed, this is not the face the placement check expects.
+        failures.push(format!("{FAMILY}'s flat-bottomed digits are {flat:?}, not 1, 2 and 7"));
+    }
+    // Each flat-bottomed digit whose last ink row is not just above `baseline_row`.
+    let misplaced = |baseline_row: u32| -> Vec<String> {
+        digits
             .iter()
-            .filter(|(_, rows, decided, measured)| {
-                *decided && *measured != baseline_row.checked_sub(*rows)
-            })
-            .map(|(digit, rows, _, measured)| {
+            .filter(|ink| ink.flat_bottom && ink.bottom_row != baseline_row.checked_sub(1))
+            .map(|ink| {
                 format!(
-                    "{digit} at {scale}x: its outline puts the top at {:?}, the frame at {measured:?}",
-                    baseline_row.checked_sub(*rows)
+                    "{} at {scale}x: last ink row {:?}, baseline row {baseline_row}",
+                    ink.digit, ink.bottom_row
                 )
             })
             .collect()
     };
-    let mut failures = mismatches(baseline);
-    if mismatches(baseline + 1).is_empty() {
-        // When: a baseline 1 px low still matches, the comparison cannot see a misplaced baseline.
+    failures.extend(misplaced(baseline));
+    if misplaced(baseline + 1).is_empty() {
+        // When: a baseline 1 px low still matches, the bottom check cannot see a misplaced baseline.
         failures.push(format!("at {scale}x a baseline 1 px below the renderer's still matched"));
+    }
+    let decided: Vec<&DigitInk> = digits.iter().filter(|ink| ink.decided).collect();
+    for (index, first) in decided.iter().enumerate() {
+        for second in &decided[index + 1..] {
+            let (Some(first_top), Some(second_top)) = (first.top_row, second.top_row) else {
+                // When: either decided digit drew no ink, its top cannot be compared.
+                failures
+                    .push(format!("{} or {} drew no ink at {scale}x", first.digit, second.digit));
+                continue;
+            };
+            let measured = i64::from(first_top) - i64::from(second_top);
+            let predicted =
+                i64::from(second.rows_above_baseline) - i64::from(first.rows_above_baseline);
+            if measured != predicted {
+                // When: `measured` differs from `predicted`, the two tops are not where the outlines put them.
+                failures.push(format!(
+                    "{} and {} at {scale}x: tops differ by {measured} rows, outlines by {predicted}",
+                    first.digit, second.digit
+                ));
+            }
+        }
     }
     Ok(Some(failures))
 }
 
-/// Each Cascadia Mono digit's measured ink top, at every scale the font-weight test checks, is where
-/// its outline predicts above the renderer's own baseline (cell top plus its baseline offset), and a
-/// baseline 1 px lower fails the same comparison. The round 2 overshoots the flat 7 by 20 of 2048 units, so at 21.75 px it
-/// shows one row higher. A top within `DECISION_MARGIN` of the threshold is printed, not asserted;
-/// a host without the face skips with a printed reason.
+/// At every scale the font-weight test checks, each flat-bottomed Cascadia Mono digit's last ink row
+/// is the renderer's baseline row less one, and a baseline 1 px lower fails that check. Each pair of
+/// decided digits' tops differ by what their outlines predict; a top within `DECISION_MARGIN` of the
+/// ink threshold is printed, not compared. A host without the face skips with a printed reason.
 #[test]
 fn cascadia_mono_digit_tops_follow_their_outlines() {
     let event_loop = EventLoop::builder().with_any_thread(true).build().expect("an event loop");
     let mut probe = Probe { outcome: None };
     event_loop.run_app(&mut probe).expect("the event loop runs");
-    probe.outcome.expect("the probe ran").expect("digit tops follow their outlines");
+    probe
+        .outcome
+        .expect("the probe ran")
+        .expect("digits sit on the baseline and their tops follow their outlines");
 }
