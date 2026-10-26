@@ -122,7 +122,7 @@
       "target": "aarch64-apple-darwin",
       "runner": "macos14/ARM64"
     },
-    "reason": "Seed floors for the macOS-only logic in the 80% subset (the AppKit word boundary in text_edit.rs and the macOS arms of command_label.rs), which the Linux crate floors cannot see. Measured locally on aarch64-apple-darwin with cargo-llvm-cov 0.8.7 by scripts/macos-logic-coverage.sh's command; re-record from the macos-core job's uploaded macos-logic-coverage-report when CI's numbers differ.",
+    "reason": "Re-seed the macOS-only floors from CI: the committed seeds were measured locally with cargo-llvm-cov 0.8.7, and this is the PR's verified macos-core record with the pinned release. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/40395703266 attempt 1, job macos-core, evidence artifact macos-logic-coverage-evidence-40395703266-1, on aarch64-apple-darwin on macos14/ARM64 (image 20260831.0302.1) with rustc 1.99.1 (58cf8f9c3 2026-10-13) and cargo-llvm-cov 0.9.0, at commit 1d678dd6df6754f57a94c8b0d7537561ae4cf1a1, the test merge of pull-request head 7f0129af3726243b004fe223fa7fb392bb00f7c0.",
     "files": {
       "crates/sonicterm-ui/src/command_label.rs": {
         "lines": 561,
