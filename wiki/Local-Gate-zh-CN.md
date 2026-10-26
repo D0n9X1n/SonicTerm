@@ -133,7 +133,7 @@ Windows 进程约束回归测试通过 `local-gate_tests.py` 运行，该测试�
 
 `ci.yml` 保留显式步骤以显示逐步进度，但不设置 job 或步骤的超时覆盖项；GitHub Actions 平台限制仍然适用。
 表格校验命令与 job 的对应关系，不校验超时一致性，也不生成工作流。
-`scripts/local-gate_tests.py` 通过 `check-workflow-supply-chain.sh` 在 `macos-core`、
+`scripts/local-gate_tests.py` 通过 `check-workflow-supply-chain.sh` 在 `tooling`、
 `windows-checks` 与 `linux-core` 中运行。以下情况会使它失败：表格命令没有出现在它所列的 CI job 中；
 `ci.yml` 步骤运行了 `scripts/` gate 或 `cargo fmt|clippy|doc|test` 命令，但它既不是表格步骤，
 也不在附带理由的仅 CI 列表中；[开发与发布](Development-and-Release-zh-CN#本地验证-gate)页面、其英文页面或 `CLAUDE.md` 的 gate 块与
@@ -209,7 +209,7 @@ dev 与 build 依赖闭包，并使用独立的 target 目录。它还对固定�
 vendored 源码：它的 pkg-config 探测会拒绝交叉编译 target；绕过后，第一个原生阻塞点是
 `sonicterm-freetype` 中 vendored zlib 所需的 Windows CRT 头文件。该检查只做编译与 lint；
 Windows 代码仍只在 Windows CI 中运行。CI 不运行该步骤，而是运行一项静态的分类完整性检查：
-`scripts/local-gate_tests.py` 在 `macos-core`、`windows-checks` 与 `linux-core` 中比对该脚本的两个
+`scripts/local-gate_tests.py` 在 `tooling`、`windows-checks` 与 `linux-core` 中比对该脚本的两个
 crate 列表与 workspace 成员，而不运行该脚本，因此每个新 crate 都必须归类。
 
 Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、每次字重操作和缓存
@@ -289,7 +289,7 @@ harness 自身的单元测试 `cargo test --locked -p sonicterm-app --example pe
 `linux-core`）中带该 feature 检查此 example，因此计数器代码在每个主机上都会被构建、测试和检查。
 `perf-scenarios-frame-texture-tests` 与 `perf-scenarios-frame-texture-clippy` 以 `--features perf-frame-texture`
 做同样的事，从而编译进 harness 的帧纹理读取。在 Windows 上，这些 feature 测试改在
-`windows-tests-harness-features` shard 中与 glyph 工作集测量一起运行，因此 CI 在每个平台上对每个 feature 的测试
+`windows-tests-harness-features` shard 中消费 exact-run 的 `windows-glyph-oracle` artifact，因此 CI 在每个平台上对每个 feature 的测试
 恰好运行一次，而不是放在普通测试所在的 job 中。
 
 S2 回显时间线的 App 访问器只在同时具备 `perf-echo-trace` 与 `perf_echo_timeline_api` 时才被调用，其他构建
@@ -299,7 +299,7 @@ S2 回显时间线的 App 访问器只在同时具备 `perf-echo-trace` 与 `per
 以及两者皆有（`perf-scenarios-harness-api-echo-trace-clippy` 与 `-tests`，在同样的 cfg 上再加 `perf-echo-trace`）。
 只有最后这一对会构建并测试真正的适配器。其检查在 `macos-core`、`windows-checks` 与 `linux-core` 中运行，其测试在
 `macos-core` 与 `linux-core` 中运行；在 Windows 上则在 `windows-tests-harness-api` 中、紧接 harness API 测试之后运行，
-与之共用编译器标志，因此不新增 Windows job。
+仅向目标传入 cfg 的启动器保持依赖标志不变；全部 feature/cfg 组合仍有测试。
 
 `macos-perf-smoke` 检查的是对比工具本身，而不是性能。它运行
 `python3 scripts/perf-compare.py --smoke`：以 debug 构建当前树的 `perf_scenarios` example，不使用
@@ -399,7 +399,8 @@ S8 与 S9，都以它结尾。其它每个计时区间都在写入之后开始�
 A/A 对比也在测量中包含它。
 
 `scripts/perf-compare_tests.py` 测试该脚本，包括上述失败规则；`check-workflow-supply-chain.sh` 在
-macOS、Windows 与 Linux 上运行它。如何运行和阅读对比见[开发与发布](Development-and-Release-zh-CN#性能对比)。
+Ubuntu tooling/core 与 Windows checks 中运行它。本地 macOS gate 仍运行整套测试；
+CI 将 macOS 专属监管回归测试保留在 macos-core。如何运行和阅读对比见[开发与发布](Development-and-Release-zh-CN#性能对比)。
 
 ### Windows
 

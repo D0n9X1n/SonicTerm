@@ -16,6 +16,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -119,8 +120,8 @@ WINDOWS_TEST_WORK = (
     '      - name: Measure the glyph atlas working set\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture\n',
     '      - name: Run scenario harness unit tests with the frame texture reading\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture\n',
     '      - name: Run scenario harness unit tests with the echo trace\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace\n',
-    '      - name: Run scenario harness unit tests with the harness API cfgs\n        shell: bash\n        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim\n',
-    '      - name: Run scenario harness unit tests with the harness API cfgs and the echo trace\n        shell: bash\n        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace\n',
+    '      - name: Run scenario harness unit tests with the harness API cfgs\n        shell: bash\n        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim\n',
+    '      - name: Run scenario harness unit tests with the harness API cfgs and the echo trace\n        shell: bash\n        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace\n',
     '      - name: Report host window capability\n        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture\n',
     '      - name: Report host adapter classification\n        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture\n',
     '      - name: Report renderer churn baseline\n        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture\n',
@@ -142,19 +143,20 @@ WINDOWS_TEST_WORK = (
     "      - name: Upload resource baseline evidence\n        if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: resource-baseline-evidence-windows-latest\n          path: target/v1.2.0-baseline/evidence-windows-latest\n          if-no-files-found: error\n",
 )
 
-# The six setup steps every Windows test shard repeats, verbatim from the former job: each shard restores the
-# Cargo cache that windows-checks writes on main, `unit-windows-latest`, and never saves one.
+# Common Windows setup; workspace is the sole test-codegen cache writer on main.
+# Oracle consumers insert verified artifact setup; the producer brackets its measurement with publication.
 WINDOWS_SHARD_SETUP = (
     '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n',
     '      - name: Install Rust\n        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1\n        with:\n          toolchain: stable\n',
     '      - name: Resolve vcpkg commit\n        id: vcpkg\n        shell: pwsh\n        run: |\n          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\\vcpkg" }\n          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8\n          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8\n',
     "      - name: Restore vcpkg binaries (Cairo)\n        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}\n          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}\n          restore-keys: |\n            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-\n",
     '      - name: Install Cairo for Windows\n        shell: pwsh\n        run: .\\scripts\\setup-windows-cairo.ps1\n',
-    "      - name: Restore Cargo dependencies\n        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n        with:\n          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest\n          add-job-id-key: false\n          cache-workspace-crates: false\n          save-if: false\n",
+    "      - name: Restore Cargo dependencies\n        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n        with:\n          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest\n          add-job-id-key: false\n          cache-workspace-crates: false\n          save-if: false\n",
 )
 
 # Each shard's preserved work, in order, by step name; together they are the former job's work exactly once.
 WINDOWS_SHARD_WORK = {
+    "windows-glyph-oracle": ("Measure the glyph atlas working set",),
     "windows-tests-workspace": (
         "Run workspace unit and integration tests", "Run workspace documentation tests",
         "Test MSI validator", "Run release-note unit test", "Test wiki publisher",
@@ -164,7 +166,7 @@ WINDOWS_SHARD_WORK = {
     ),
     "windows-tests-harness": ("Run scenario harness unit tests", "Run scenario harness unit tests with frame counters"),
     "windows-tests-harness-features": (
-        "Measure the glyph atlas working set", "Run scenario harness unit tests with the frame texture reading",
+        "Run scenario harness unit tests with the frame texture reading",
         "Run scenario harness unit tests with the echo trace",
     ),
     "windows-tests-harness-api": (
@@ -186,6 +188,11 @@ def windows_work_step(name: str) -> str:
     return next(step for step in WINDOWS_TEST_WORK if step.startswith(f"      - name: {name}\n"))
 
 
+ORACLE_CONSUMER_SETUP = ('      - name: Download the exact-run helper oracle\n        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n        with:\n          name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}\n          path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}\n', '      - name: Verify helper sources fonts and provenance\n        env:\n          ORACLE_ATTEMPT: ${{ needs.windows-glyph-oracle.outputs.attempt }}\n          ORACLE_DIGEST: ${{ needs.windows-glyph-oracle.outputs.digest }}\n        run: python3 scripts/glyph-oracle.py verify\n')
+ORACLE_PRODUCER_BEFORE = ('      - name: Bind glyph helper inputs\n        run: python3 scripts/glyph-oracle.py prepare\n',)
+ORACLE_PRODUCER_AFTER = ('      - name: Seal the verified helper oracle\n        id: oracle\n        run: python3 scripts/glyph-oracle.py seal\n', '      - name: Publish the helper oracle\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: glyph-oracle-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ env.SONICTERM_GLYPH_ORACLE_EXPORT }}\n          if-no-files-found: error\n')
+
+
 def windows_shard_problems(workflow: str) -> list[str]:
     """Check each Windows test shard runs its pinned setup, then exactly its pinned work, unchanged and in order."""
     problems: list[str] = []
@@ -195,16 +202,27 @@ def windows_shard_problems(workflow: str) -> list[str]:
             continue
         block = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", workflow.split(f"\n  {shard}:\n", 1)[1], maxsplit=1)[0]
         head, _, body = block.partition("    steps:\n")
-        if "    runs-on: windows-latest\n" not in head or "    needs: [windows-native]\n" not in head:
+        consumer = shard not in ("windows-tests-runtime", "windows-glyph-oracle")
+        dependencies = "windows-native, windows-glyph-oracle" if consumer else "windows-native"
+        if "    runs-on: windows-latest\n" not in head or f"    needs: [{dependencies}]\n" not in head:
             problems.append(f"{shard} must run on windows-latest after windows-native")
         if re.search(r"(?m)^    (?:if|continue-on-error):", head):
             problems.append(f"{shard} must not be conditional or advisory")
+        body = re.sub(r"(?m)^      #.*\n", "", body)
         steps = [step.rstrip("\n") + "\n" for step in re.split(r"(?m)^(?=      - )", body) if step.startswith("      - ")]
         setup = list(WINDOWS_SHARD_SETUP)
-        # When: the first six steps differ from the pinned setup, a step was dropped, edited or disguised as setup.
+        if shard == "windows-tests-workspace":
+            setup[-1] = setup[-1].replace("save-if: false", "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}")
+        if consumer:
+            setup[5:5] = ORACLE_CONSUMER_SETUP
+        if shard == "windows-glyph-oracle":
+            setup.extend(ORACLE_PRODUCER_BEFORE)
+        # When: setup differs from the pinned sequence, a step was dropped, edited or disguised as setup.
         if steps[:len(setup)] != setup:
-            problems.append(f"{shard} does not begin with the six pinned setup steps")
+            problems.append(f"{shard} does not begin with the pinned setup steps")
         expected = [windows_work_step(name) for name in names]
+        if shard == "windows-glyph-oracle":
+            expected.extend(ORACLE_PRODUCER_AFTER)
         if steps[len(setup):] != expected:
             problems.append(f"{shard} does not run exactly its pinned work steps in order")
     return problems
@@ -673,7 +691,7 @@ class PinnedToolTests(unittest.TestCase):
     def test_the_committed_manifest_and_workflows_pass(self):
         # Protect the committed pins: both tools are in the manifest and installed by the script.
         tools = json.loads((_HERE / "pinned-tools.json").read_text(encoding="utf-8"))
-        self.assertEqual(set(tools), {"cargo-deny", "cargo-llvm-cov"})
+        self.assertEqual(set(tools), {"cargo-deny", "cargo-llvm-cov", "actionlint"})
         for tool in tools:
             self.assertIn(f"run: bash scripts/install-pinned-tool.sh {tool}\n", CI_WORKFLOW)
         self.assertEqual(checker.check(_HERE.parent), [])
@@ -700,6 +718,7 @@ class PinnedToolTests(unittest.TestCase):
         files = {"scripts/pinned-tools.json": manifest()}
         self.assertEqual(checked({"ci.yml": run_workflow(INSTALL)}, files), [])
         for case, drop, changes, expected in (
+            ("version policy type", (), {"version_first_line": "true"}, "version_first_line must be boolean"),
             ("missing member", ("member",), {}, "cargo-deny: member"),
             ("missing os", ("os",), {}, "cargo-deny: os"),
             ("missing arch", ("arch",), {}, "cargo-deny: arch"),
@@ -854,11 +873,11 @@ class RepositoryTests(unittest.TestCase):
         contracts = {
             "macos": (
                 "macos-14 / unit tests",
-                ("macos-core", "macos-coverage", "macos-smoke"),
+                ("macos-core", "macos-coverage", "macos-smoke", "tooling"),
             ),
             "windows": (
                 "windows-latest / unit tests",
-                ("windows-native", "windows-checks", *WINDOWS_TEST_SHARDS, "windows-smoke"),
+                ("windows-native", "windows-glyph-oracle", "windows-checks", *WINDOWS_TEST_SHARDS, "windows-smoke"),
             ),
             "linux": (
                 "ubuntu 22.04 / workspace, packages, X11, Wayland",
@@ -995,7 +1014,7 @@ class RepositoryTests(unittest.TestCase):
         disguised = ("      - name: Install Rust evidence copy\n"
                      "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
                      "        with:\n          name: copy\n          path: target\n")
-        shared_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest\n"
+        shared_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest\n"
         restore_only = "save-if: false\n"
         relocated = in_shard("windows-tests-runtime", gdi_upload + "\n", "")
         relocated_head, relocated_tail = relocated.split("  windows-tests-workspace:\n", 1)
@@ -1032,7 +1051,7 @@ class RepositoryTests(unittest.TestCase):
                 "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n"),
             "a pull-request writer": in_shard("windows-tests-harness", restore_only, "save-if: true\n"),
             "cache namespace removed": in_shard(
-                "windows-tests-harness", shared_key, "shared-key: unit-windows-latest\n"),
+                "windows-tests-harness", shared_key, "shared-key: test-windows-latest\n"),
             # The action hashes the Rust toolchain and environment into the key by default; disabling it would let
             # a shard restore artifacts built under other compiler settings.
             "environment hashing disabled": in_shard(
@@ -1043,26 +1062,68 @@ class RepositoryTests(unittest.TestCase):
                 self.assertTrue(mutated != workflow, "the mutation did not apply")
                 self.assertTrue(windows_shard_problems(mutated))
 
+    @unittest.skipUnless(shutil.which("actionlint"), "actionlint runs in the mandatory tooling job")
+    def test_actionlint_rejects_job_level_runner_context(self):
+        # The old source checker accepted a workflow GitHub could not schedule. Exercise the real
+        # expression validator: workspace is valid at job scope, runner.temp is not.
+        source = """name: fixture
+on: push
+jobs:
+  example:
+    runs-on: ubuntu-latest
+    env:
+      ORACLE: ${{ github.workspace }}/oracle
+    steps:
+      - run: true
+"""
+        for invalid in (False, True):
+            text = source.replace("github.workspace", "runner.temp") if invalid else source
+            completed = subprocess.run(["actionlint", "-shellcheck=", "-pyflakes=", "-"], input=text,
+                                       capture_output=True, text=True, timeout=30)
+            if invalid:
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn('context "runner" is not allowed here', completed.stdout + completed.stderr)
+            else:
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_tooling_job_preserves_each_relocated_gate_and_requires_actionlint(self):
+        # These eleven commands leave the macOS critical chain, not CI: the aggregate contract
+        # above requires this job's success, and none of its commands is conditional or advisory.
+        block = job_block("ci.yml", "tooling")
+        self.assertIn("runs-on: ubuntu-latest", block)
+        self.assertNotRegex(block, r"(?m)^\s+(?:if|continue-on-error):")
+        for script in ("check-rust-version.sh", "check-no-raw-process-exit.sh", "check-window-owner-registration.sh",
+                       "check-workflow-supply-chain.sh", "check-authored-rust-comments.sh", "check-script-identifiers.sh",
+                       "test-release-notes.sh", "test-wiki-publish.sh", "test-resource-inventory.sh",
+                       "test-soak-harness.sh", "test-resource-baseline-evidence.sh"):
+            command = f"run: bash scripts/{script}"
+            self.assertEqual(block.count(command), 1, script)
+            self.assertNotIn(command, job_block("ci.yml", "macos-core"), script)
+        self.assertIn("run: bash scripts/install-pinned-tool.sh actionlint", block)
+        self.assertIn("run: actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml", block)
+        for job in ("windows-glyph-oracle", "windows-tests-workspace", "windows-tests-harness",
+                    "windows-tests-harness-features", "windows-tests-harness-api"):
+            header = job_block("ci.yml", job).split("    steps:", 1)[0]
+            self.assertNotIn("runner.temp", header)
+            self.assertIn("${{ github.workspace }}/ci-glyph-oracle", header)
+
     def test_ci_caches_are_bounded_and_cairo_is_published_immediately(self):
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", text)
-        # Twelve restores: three macOS, the Windows checks and five Windows test shards, the Windows smoke,
-        # and two Linux. Three use the ordinary main-push writer condition: macOS core, the Windows checks and Linux
-        # core; the macOS smoke matrix's Intel lane is a fourth, Intel-only writer. The Windows test shards and smoke
-        # restore the checks shard's key.
-        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 12)
-        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 12)
-        self.assertEqual(text.count("add-job-id-key: false"), 12)
-        self.assertEqual(text.count("cache-workspace-crates: false"), 12)
+        # Thirteen restores, six main-only writers plus Intel smoke; check/test/release/instrumented are distinct.
+        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 13)
+        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 13)
+        self.assertEqual(text.count("add-job-id-key: false"), 13)
+        self.assertEqual(text.count("cache-workspace-crates: false"), 13)
         self.assertEqual(
             text.count(
                 "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
             ),
-            3,
+            6,
         )
-        self.assertEqual(text.count("save-if: false"), 8)
+        self.assertEqual(text.count("save-if: false"), 6)
 
         native = text.split("  windows-native:\n", 1)[1]
         native = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", native, maxsplit=1)[0]
@@ -1086,15 +1147,16 @@ class RepositoryTests(unittest.TestCase):
         intel = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.runner == 'macos-15-intel' }}"
         contracts = {
             "macos-core": ("unit-macos-14", main),
-            "macos-coverage": ("unit-macos-14", "false"),
+            "macos-coverage": ("instrumented-macos-14", main),
             "macos-smoke": ("unit-${{ matrix.runner }}", intel),
-            "windows-checks": ("unit-windows-latest", main),
-            "windows-tests-workspace": ("unit-windows-latest", "false"),
-            "windows-tests-harness": ("unit-windows-latest", "false"),
-            "windows-tests-harness-features": ("unit-windows-latest", "false"),
-            "windows-tests-harness-api": ("unit-windows-latest", "false"),
-            "windows-tests-runtime": ("unit-windows-latest", "false"),
-            "windows-smoke": ("unit-windows-latest", "false"),
+            "windows-checks": ("check-windows-latest", main),
+            "windows-tests-workspace": ("test-windows-latest", main),
+            "windows-tests-harness": ("test-windows-latest", "false"),
+            "windows-tests-harness-features": ("test-windows-latest", "false"),
+            "windows-tests-harness-api": ("test-windows-latest", "false"),
+            "windows-tests-runtime": ("test-windows-latest", "false"),
+            "windows-smoke": ("release-windows-latest", main),
+            "windows-glyph-oracle": ("test-windows-latest", "false"),
             "linux-core": ("linux-ubuntu-22.04", main),
             "linux-packages": ("linux-ubuntu-22.04", "false"),
         }
@@ -1130,7 +1192,7 @@ class RepositoryTests(unittest.TestCase):
             encoding="utf-8"
         )
         for job_name in (
-            "windows-native", "windows-checks", *WINDOWS_TEST_SHARDS, "windows-smoke",
+            "windows-native", "windows-glyph-oracle", "windows-checks", *WINDOWS_TEST_SHARDS, "windows-smoke",
         ):
             with self.subTest(job=job_name):
                 job = text.split(f"  {job_name}:\n", 1)[1]

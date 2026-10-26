@@ -73,6 +73,7 @@ if (-not (Test-Path -LiteralPath $cairoPc)) {
 
 $toolDir = Split-Path -Parent $pkgConfig
 $exports = [ordered]@{
+    SONICTERM_CAIRO_BIN_DIR = (Join-Path -Path $targetRoot -ChildPath "bin")
     PKG_CONFIG = $pkgConfig
     PKG_CONFIG_PATH = $pkgConfigPath
     SYSTEM_DEPS_CAIRO_LINK = "static"
@@ -85,9 +86,12 @@ foreach ($entry in $exports.GetEnumerator()) {
     }
 }
 
-$env:PATH = "$toolDir;$env:PATH"
+# Static Cairo needs no DLL today; a caller-selected dynamic triplet uses this same explicit runtime path.
+$cairoBin = $exports.SONICTERM_CAIRO_BIN_DIR
+$env:PATH = "$cairoBin;$toolDir;$env:PATH"
 if ($env:GITHUB_PATH) {
     Add-Content -LiteralPath $env:GITHUB_PATH -Value $toolDir
+    Add-Content -LiteralPath $env:GITHUB_PATH -Value $cairoBin
 }
 
 Write-Host "Configured cairo:$Triplet for cairo-sys-rs via $pkgConfig"

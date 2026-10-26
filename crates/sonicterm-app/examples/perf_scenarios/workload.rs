@@ -1358,3 +1358,7 @@ impl RowRunWorkload {
 #[cfg(test)]
 #[path = "workload_tests.rs"]
 mod workload_tests;
+
+#[cfg(test)]
+#[path = "glyph_oracle.rs"]
+pub(crate) mod glyph_oracle;

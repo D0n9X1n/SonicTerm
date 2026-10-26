@@ -8782,6 +8782,7 @@ def build_identity(trees: Mapping[str, Path], features: Mapping[str, Sequence[st
         "features": {side: list(features[side]) for side in SIDES},
         # The harness API cfgs both sides build with, and the compiler flags their builds compose at launch.
         "harness_cfgs": list(harness_cfgs),
+        "harness_cfg_scope": "example-target-v1",
         "rustflags": list(rustflags),
         "runner_image": {"os": environ.get("ImageOS", ""), "version": environ.get("ImageVersion", "")},
     }
@@ -8857,7 +8858,8 @@ def load_prebuilt(args: argparse.Namespace, shas: Mapping[str, str], digest: str
             raise _refuse(f"{side} SHA {manifest.get(f'{side}_sha')} is not this job's {shas[side]}")
     if manifest.get("harness_hash") != digest:
         raise _refuse(f"harness hash {manifest.get('harness_hash')} is not this job's {digest}")
-    checks = (("features", "features"), ("harness_cfgs", "harness cfgs"), ("rustflags", "compiler flags"),
+    checks = (("features", "features"), ("harness_cfgs", "harness cfgs"),
+              ("harness_cfg_scope", "harness cfg scope"), ("rustflags", "compiler flags"),
               ("target", "target"), ("toolchain", "toolchain"), ("runner_image", "runner image"),
               ("profile", "profile"))
     # Cfg names and compiler flags are lists of strings, checked by type before equality, so a number or boolean

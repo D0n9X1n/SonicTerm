@@ -73,7 +73,7 @@ class InstallPinnedToolTests(unittest.TestCase):
         for command in ("curl", "tar"):
             real = shutil.which(command)
             wrapper = self.wrappers / command
-            wrapper.write_text(f'#!/bin/sh\ntouch "{self.markers / command}"\nexec "{real}" "$@"\n')
+            wrapper.write_text(f'#!/bin/sh\ntouch "{self.markers / command}"\nexec "{real}" "$@"\n', encoding="utf-8")
             wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
 
     def entry(self, **changes) -> dict:
@@ -170,6 +170,22 @@ class InstallPinnedToolTests(unittest.TestCase):
         for arguments in ((), (TOOL, "https://example.com/other.tar.gz"), (TOOL, "--version", "9.9.9")):
             with self.subTest(arguments=arguments):
                 self.assert_refused_before(self.install(*arguments), "curl", "usage")
+
+    def test_build_metadata_is_accepted_only_with_explicit_first_line_policy(self):
+        # actionlint reports provenance after its version. Only an explicit boolean pin permits
+        # extra lines, and a different first-line version still removes the installed binary.
+        output = f"{TOOL} {VERSION}\nbuilt with fixture compiler"
+        self.archive.write_bytes(release_archive(output))
+        self.assertNotEqual(self.install(TOOL).returncode, 0)
+        self.assertEqual(self.install(TOOL, entry=self.entry(version_first_line=True)).returncode, 0)
+        self.archive.write_bytes(release_archive(f"{TOOL} 0.0.1\nbuilt with fixture compiler"))
+        completed = self.install(TOOL, entry=self.entry(version_first_line=True))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(self.installed().exists())
+        for marker in self.markers.iterdir():
+            marker.unlink()
+        self.assert_refused_before(self.install(TOOL, entry=self.entry(version_first_line="true")),
+                                   "curl", "version_first_line must be boolean")
 
     def test_a_binary_reporting_another_version_is_removed(self):
         # Protect against an archive whose binary is not the pinned release.

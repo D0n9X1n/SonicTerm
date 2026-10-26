@@ -78,8 +78,8 @@ any stash.
 ### macOS 14 and Windows latest
 
 The stable required checks are fail-closed aggregate jobs: `macos-14 / unit
-tests` requires `macos-core`, `macos-coverage`, and `macos-smoke`, while
-`windows-latest / unit tests` requires `windows-native`, `windows-checks`, the
+tests` requires `macos-core`, `macos-coverage`, `macos-smoke`, and `tooling`, while
+`windows-latest / unit tests` requires `windows-native`, `windows-glyph-oracle`, `windows-checks`, the
 five Windows test shards (`windows-tests-workspace`, `windows-tests-harness`,
 `windows-tests-harness-features`, `windows-tests-harness-api` and
 `windows-tests-runtime`), and `windows-smoke`; its result loop tests every one.
@@ -88,9 +88,15 @@ results, so a failed, cancelled, or skipped shard cannot turn into a successful
 required check.
 
 The macOS core shard first measures the real PTY close baseline after Cargo
-restore, then runs source-policy checks, strict Rustdoc, the one-pass workspace
-test gate, workspace doctests, host probes, tooling tests, and real resource-baseline
-capture. Its independent coverage shard installs the pinned
+restore, then runs Rust checks, strict Rustdoc, the one-pass workspace test gate,
+workspace doctests, host probes, the macOS-only process-group custody test, and real
+resource-baseline capture. The required `tooling` job runs on Ubuntu: Rust-version,
+raw-exit, window-owner, workflow supply-chain, authored-comment and script-identifier
+checks, plus release-note, wiki-publish, resource-inventory, soak and resource-baseline
+script tests. These commands remain local gates on every supported host; the existing
+macOS aggregate requires the tooling job, so none became optional. The working-set
+measurement stays in macos-core to reuse its compiled harness without adding a cold
+macOS build or competing with perf for another runner slot. Its independent coverage shard installs the pinned
 `cargo-llvm-cov` release's prebuilt Apple Silicon binary with
 `scripts/install-pinned-tool.sh`, which checks its SHA-256 before unpacking it
 (expected to save the minute a source build takes), then runs the deterministic logic coverage gate, and uploads its
@@ -128,10 +134,8 @@ checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longe
   workspace tests, doctests, the MSI validator and the tooling tests, and captures and uploads real
   resource-baseline evidence.
 - `windows-tests-harness` runs the scenario harness's unit tests, then the same tests with frame counters.
-- `windows-tests-harness-features` measures the glyph atlas working set, then runs the harness tests with the
-  frame-texture reading and with the echo trace.
-- `windows-tests-harness-api` runs the harness tests with every harness API cfg, whose compiler flags rebuild
-  the dependency tree in that shard only.
+- `windows-tests-harness-features` runs the harness tests with the frame-texture reading and with the echo trace.
+- `windows-tests-harness-api` runs the harness tests with every harness API cfg; only the example receives those flags.
 - `windows-tests-runtime` first measures the real PTY close baseline after Cargo restore, so its test-binary
   build stays cold, then runs the host probes, fail-closed GDI presentation verification, the WARP allocator,
   software-selection presentation, and the perf scenario harness build and its smoke, which checks the
@@ -139,23 +143,48 @@ checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longe
   the perf smoke fails, the shard uploads its evidence. Its probe reruns print reports for integration tests that
   `windows-tests-workspace` already runs. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
-restore-only `windows-smoke` shard builds the shipping release binary and
+`windows-smoke` shard builds the shipping release binary and
 requires its bounded native smoke plus `frame-validation` and `device-recovery`
 scenario smokes in separate steps with native process deadlines.
 
-Rust-consuming shards share a dependency cache key within each platform and
-architecture, excluding workspace-crate artifacts. The Apple Silicon core,
-Windows checks, and Linux core shards are their keys' only writers; the five
-Windows test shards restore the Windows checks shard's key and never save. A
-restored archive reuses only compatible dependencies, build scripts,
-proc-macros and native outputs, so a test shard can still compile much of its
-tree, and the harness API shard's compiler flags can make restored
-dependencies unusable. The Intel
-macOS smoke lane is its architecture's only writer because it has no core shard.
-Every writer saves only on a push to `main`; other shards and every pull-request
-lane restore only. Release builds neither restore nor save Rust caches. This
-bounds entries and avoids duplicate writers within one workflow run; overlapping
-`main` runs can still compete to save the same immutable key.
+`workflow-syntax` runs pinned actionlint against CI and perf workflows, checking GitHub
+expression-context availability as well as syntax. The tooling job installs its digest-pinned
+Linux binary; local hosts install the same version on PATH. The supply-chain script also runs
+it whenever available; its absence cannot bypass the separate required syntax gate.
+
+Windows cfg-on tests run the exact Cargo-reported libtest executable under process-tree custody.
+The launcher restores Cargo build-script native directories and profile/deps paths on PATH,
+and `setup-windows-cairo.ps1` publishes the selected triplet's bin directory as
+`SONICTERM_CAIRO_BIN_DIR` and on PATH. Static Cairo remains the default; dynamic triplets
+therefore retain their DLL lookup path too.
+
+`windows-glyph-oracle` runs the unchanged ignored working-set gate once. Only after every
+completeness, exact drift and start-size check passes does it publish the four S9/S12,
+72/144-DPI helper tile sets. The manifest binds all tracked source bytes (including bundled
+fonts), system/user font bytes and GDI registry mappings, runner image, Rust/Cargo versions, checkout SHA, run ID and
+producer attempt. Consumers verify its output digest and all bindings before testing.
+Failed-job reruns name the successful producer's attempt, not their own. Missing or stale
+artifacts fail; local runs without an artifact still measure the helper directly.
+Workspace, ordinary/counters, frame-texture/echo and API-cfg suites each draw their own real
+renderer, retain all completeness/representative-glyph checks, and compare every resident
+identity and actual size against the helper. Font content hashes replace machine-local paths;
+built-in font identity is bound by the source digest, and GDI memory-face names by the full font inventory.
+
+Windows cache families are `check-windows-latest` (written by `windows-checks`),
+`test-windows-latest` (written by `windows-tests-workspace`, restored by the oracle and all
+test shards), and `release-windows-latest` (written by `windows-smoke`). The macOS coverage
+job uses its separate `instrumented-macos-14` family. Its coverage script still discards instrumented
+outputs before measurement, so that family provides no warm instrumented-build guarantee. No workspace artifacts are cached;
+every writer saves only after a successful push to `main`, never on a pull request. The
+other macOS and Linux cache policies are unchanged. Compiler/environment hashing remains
+enabled; a static-check archive can no longer occupy the test-codegen cache key.
+Overlapping main runs can still race to save an immutable key.
+
+The four macOS perf shards keep their artifact names and every scenario exactly once:
+`S7-S4` holds S7, S4, atlas-retry and S12/status-line; `S9-S10sync` adds S6/rest and S1/status-line;
+`S10-S11release` adds S12/default and S6/flood; `S2-S3-S8-S12` drops those two. The 35-minute PR budget includes queues. No extra macOS
+job competes with perf for a runner slot; exact-head CI timing, not local estimates,
+verifies the remaining margin. Runs, counters, S9 laps and release lengths are unchanged.
 
 A compatible successful `main` job must populate a key before a later run can
 hit it; compiler or dependency changes can still cause a miss. Cache reuse can
@@ -318,7 +347,7 @@ or run; artifacts built earlier in the same run are allowed. Text cannot prove
 what a shell will run, so the rule does not try to judge an inline installer.
 The rule is a guardrail against common mistakes, not a security boundary: a
 determined workflow author can still fetch a file another way, and reviewing
-workflow changes is the control. Prebuilt tools (`cargo-deny`, `cargo-llvm-cov`) are
+workflow changes is the control. Prebuilt tools (`cargo-deny`, `cargo-llvm-cov`, `actionlint`) are
 installed only by `bash scripts/install-pinned-tool.sh <tool>`. Its only input is
 the tool name: it reads the version, release URL and SHA-256 from
 `scripts/pinned-tools.json`, downloads into a fresh directory, checks that file's

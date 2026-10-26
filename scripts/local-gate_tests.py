@@ -151,7 +151,7 @@ def run_quietly(steps, root: Path, log_dir: Path):
 
 def marker_code(target: Path) -> str:
     """Return Python code that proves a step ran by writing a marker file."""
-    return f"import pathlib; pathlib.Path({str(target)!r}).write_text('ran')"
+    return f"import pathlib; pathlib.Path({str(target)!r}).write_text('ran', encoding='utf-8')"
 
 
 # The Windows error for removing a folder that another handle still holds open.
@@ -598,7 +598,7 @@ class WindowsPreparationTests(unittest.TestCase):
     def test_script_feature_drift_refuses_all_launches(self):
         # A changed script selection must not execute stale preparation records or the original script.
         path = self.root / "scripts/check-workspace-crates.sh"
-        path.write_text(path.read_text().replace("--features serde", "--features different", 1))
+        path.write_text(path.read_text(encoding="utf-8").replace("--features serde", "--features different", 1), encoding="utf-8")
         result = self.run_step("workspace-crates")
         self.assertEqual(result.status, gate.FAIL)
         self.assertEqual(self.calls, [])
@@ -634,7 +634,7 @@ class WindowsPreparationTests(unittest.TestCase):
         # Known CRLF/continuations are supported; each source/record drift must fail before any launch.
         workspace = self.root / "scripts/check-workspace-crates.sh"
         feasibility = self.root / "scripts/pty-backend-feasibility.sh"
-        original = workspace.read_text()
+        original = workspace.read_text(encoding="utf-8")
         doc_flags = 'RUSTDOCFLAGS="-D warnings -A rustdoc::invalid_html_tags" '
         workspace.write_bytes(original.replace("\n", "\r\n").encode())
         self.assertEqual(self.run_step("workspace-crates").status, gate.PASS)
@@ -661,22 +661,22 @@ class WindowsPreparationTests(unittest.TestCase):
         )
         for text in mutations:
             with self.subTest(text=text):
-                workspace.write_text(text)
+                workspace.write_text(text, encoding="utf-8")
                 self.calls.clear()
                 result = self.run_step("workspace-crates")
                 self.assertEqual(result.status, gate.FAIL)
                 self.assertEqual(self.calls, [])
                 self.assertEqual(result.phases[-1].status, gate.NOT_RUN)
-        workspace.write_text(original)
-        text = feasibility.read_text()
+        workspace.write_text(original, encoding="utf-8")
+        text = feasibility.read_text(encoding="utf-8")
         for mutated in (text.replace("cargo run", "cargo test"), text + "\ncargo check\n",
                         text.replace("2>/dev/null", "2>&1")):
             with self.subTest(feasibility=mutated):
-                feasibility.write_text(mutated)
+                feasibility.write_text(mutated, encoding="utf-8")
                 self.calls.clear()
                 self.assertEqual(self.run_step("pty-feasibility").status, gate.FAIL)
                 self.assertEqual(self.calls, [])
-        feasibility.write_text(text)
+        feasibility.write_text(text, encoding="utf-8")
         canonical = next(step for step in gate.STEPS if step.id == "workspace-crates")
         changed_record = dataclasses.replace(canonical.windows_preparations[0], argv=("cargo", "check"))
         altered = dataclasses.replace(canonical, windows_preparations=(changed_record, *canonical.windows_preparations[1:]))
@@ -717,7 +717,7 @@ class WindowsPreparationTests(unittest.TestCase):
         self.assertEqual(self.calls[0][1]["deadline"], self.calls[1][1]["deadline"])
         self.assertTrue(all(call[1]["cwd"] == self.root for call in self.calls))
         self.assertEqual(self.calls[-1][1]["env"], {"PATH": "fixture"})
-        text = result.log_path.read_text()
+        text = result.log_path.read_text(encoding="utf-8")
         self.assertIn("phase=preparation-1", text)
         self.assertIn("phase=execution", text)
         report = gate.GateReport("windows", (result,), gate.GitSnapshot(False), gate.GitSnapshot(False), (), self.root)
@@ -772,7 +772,7 @@ class WindowsPreparationTests(unittest.TestCase):
     def test_parity_failure_records_every_planned_phase_as_not_run(self):
         # A rejected preparation plan must be distinguishable from a plan that never existed.
         path = self.root / "scripts/check-workspace-crates.sh"
-        path.write_text(path.read_text().replace("--features serde", "--features changed", 1))
+        path.write_text(path.read_text(encoding="utf-8").replace("--features serde", "--features changed", 1), encoding="utf-8")
         result = self.run_step("workspace-crates")
         self.assertEqual(self.calls, [])
         self.assertEqual([phase.name for phase in result.phases],
@@ -847,7 +847,7 @@ class RunnerTests(unittest.TestCase):
             survivor = base / "grandchild-survived"
             grandchild = (
                 "import pathlib, time; time.sleep(3); "
-                f"pathlib.Path({str(survivor)!r}).write_text('alive')"
+                f"pathlib.Path({str(survivor)!r}).write_text('alive', encoding='utf-8')"
             )
             hang = (
                 "import subprocess, sys, time; "
@@ -942,7 +942,7 @@ class RunnerTests(unittest.TestCase):
             seen = base / "seen"
             code = (
                 "import os, pathlib; "
-                f"pathlib.Path({str(seen)!r}).write_text(os.environ['LOCAL_GATE_PROBE'])"
+                f"pathlib.Path({str(seen)!r}).write_text(os.environ['LOCAL_GATE_PROBE'], encoding='utf-8')"
             )
             step = python_step("env", code, env=(("LOCAL_GATE_PROBE", "-D warnings"),))
             report, _console = run_quietly([step], root, base / "logs")
@@ -960,7 +960,7 @@ class RunnerTests(unittest.TestCase):
             survivor = base / "leftover-survived"
             child = (
                 "import pathlib, time; time.sleep(4); "
-                f"pathlib.Path({str(survivor)!r}).write_text('alive')"
+                f"pathlib.Path({str(survivor)!r}).write_text('alive', encoding='utf-8')"
             )
             leader = (
                 "import subprocess, sys; "
@@ -1704,8 +1704,8 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(
             set(jobs),
             {
-                "macos-core", "macos-coverage", "macos-smoke", "macos",
-                "windows-native", "windows-checks", "windows-tests-workspace", "windows-tests-harness",
+                "macos-core", "macos-coverage", "macos-smoke", "macos", "tooling",
+                "windows-native", "windows-glyph-oracle", "windows-checks", "windows-tests-workspace", "windows-tests-harness",
                 "windows-tests-harness-features", "windows-tests-harness-api", "windows-tests-runtime",
                 "windows-smoke", "windows",
                 "linux-core", "linux-packages", "linux",
@@ -2926,7 +2926,7 @@ class HarnessFlagTests(unittest.TestCase):
         steps = {step.id: step for step in gate.STEPS}
         for lint_id in ("perf-scenarios-harness-api-clippy", "perf-scenarios-harness-api-echo-trace-clippy"):
             lint = steps[lint_id]
-            enabled = [lint.argv[index + 1] for index, word in enumerate(lint.argv) if word == "--cfg"]
+            enabled = list(lint.harness_cfgs)
             self.assertEqual(enabled, expected, lint_id)
         for test_id in ("perf-scenarios-harness-api-tests", "perf-scenarios-harness-api-echo-trace-tests"):
             self.assertEqual(list(steps[test_id].harness_cfgs), expected, test_id)
@@ -3041,20 +3041,83 @@ class HarnessFlagTests(unittest.TestCase):
                 gate.compose_harness_rustflags(environ, (owned,))
         self.assertTrue(gate.compose_harness_rustflags({"CARGO_ENCODED_RUSTFLAGS": "--cfg\x1f perf_other_api "}, ()))
 
-    def test_the_runner_composes_the_flags_at_launch_without_replacing_inherited_ones(self):
-        # A step with harness cfgs runs with the inherited flags plus the composed ones; a step whose inherited
-        # flags conflict with its cfgs fails at launch and never runs.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            expected = "\x1f".join(["-C", "debuginfo=1", *DECLARED_HARNESS_CFGS, "--cfg", "perf_atlas_retry_api"])
-            code = f"import os; assert os.environ['CARGO_ENCODED_RUSTFLAGS']=={expected!r}, os.environ"
-            step = python_step("composed", code, harness_cfgs=("perf_atlas_retry_api",))
-            result = gate.run_step(step, 1, root, root, dict(os.environ, RUSTFLAGS="-C debuginfo=1"))
-            self.assertEqual(result.status, gate.PASS, result.log_path.read_text(errors="replace"))
-            refused = gate.run_step(python_step("conflict", "raise SystemExit(0)", harness_cfgs=()), 2, root, root,
-                                    dict(os.environ, RUSTFLAGS="--cfg perf_atlas_retry_api"))
-            self.assertEqual(refused.status, gate.LAUNCH)
-            self.assertIn("perf_atlas_retry_api", refused.detail)
+    def test_target_cfg_plans_preserve_dependencies_and_all_lint_modes(self):
+        # API flags are final-target arguments, never Cargo-wide environment changes. Tests compile a real
+        # libtest binary; lint retains all-targets coverage plus cfg-on normal and test example targets.
+        steps = {step.id: step for step in gate.STEPS}
+        test = steps["perf-scenarios-harness-api-tests"]
+        planned, = gate.target_compile_steps(test)
+        self.assertEqual(planned.argv[:2], ("cargo", "rustc"))
+        self.assertIn("--profile", planned.argv)
+        self.assertEqual(planned.argv[planned.argv.index("--profile") + 1], "test")
+        self.assertLess(planned.argv.index("--"), planned.argv.index("--cfg"))
+        self.assertEqual(planned.env, ())
+        self.assertTrue(gate._reviewed_step(planned))
+        lint = gate.target_compile_steps(steps["perf-scenarios-harness-api-clippy"])
+        self.assertEqual(len(lint), 4)
+        self.assertIn("--all-targets", lint[0].argv)
+        self.assertNotIn("--cfg", lint[0].argv)
+        for step in lint[1:]:
+            self.assertNotIn("--all-targets", step.argv)
+            self.assertIn("--cfg", step.argv)
+        self.assertEqual({(plan.argv[plan.argv.index("--example") + 1], "--test" in plan.argv)
+                          for plan in lint[1:]}, {("perf_scenarios", False), ("perf_scenarios", True),
+                                                 ("perf_scenarios_alloc", False)})
+        self.assertIn("--test", lint[2].argv)
+        self.assertEqual(lint[2].env, (("RUSTC_WORKSPACE_WRAPPER", "clippy-driver"),))
+        self.assertNotIn("RUSTFLAGS=", gate.command_text(test))
+        self.assertIn("harness-target.py", gate.command_text(test))
+
+    def test_macos_only_custody_test_stays_in_a_required_macos_step(self):
+        # Relocating the portable suite must not turn its macOS-only zombie-group test into a Linux skip.
+        step = next(step for step in gate.STEPS if step.id == "macos-gate-custody")
+        self.assertEqual(step.hosts, ("macos",))
+        self.assertEqual(step.ci_jobs, ("macos-core",))
+        self.assertEqual(step.argv[-1],
+                         "RunnerTests.test_a_zombie_only_group_kill_is_refused_on_macos_and_the_step_is_still_reaped")
+        self.assertIn(step, gate.select_steps("macos"))
+        self.assertNotIn(step, gate.select_steps("windows"))
+        self.assertNotIn(step, gate.select_steps("linux"))
+
+    def test_cfg_on_lint_preserves_every_consuming_target_cfg_pair(self):
+        # --all-targets previously covered both roots and all seven API cfgs. Check the consumer
+        # source inventory independently of the planner, so a new root cannot silently lose cfg-on lint.
+        package = ROOT / "crates/sonicterm-app"
+        manifest = (package / "Cargo.toml").read_text(encoding="utf-8")
+        cfg_names = set(gate.HARNESS_API_CFG_NAMES)
+        baseline = set()
+        for section in re.split(r"(?m)^\[\[example\]\]\s*$", manifest)[1:]:
+            name = re.search(r'^name\s*=\s*"([^"]+)"', section, re.M)[1]
+            source = package / re.search(r'^path\s*=\s*"([^"]+)"', section, re.M)[1]
+            body = source.read_text(encoding="utf-8")
+            consumes = set(re.findall(r"\bperf_\w+_api\b", body))
+            for module in re.findall(r"(?m)^mod (\w+);", body):
+                module_path = source.parent / f"{module}.rs"
+                if module_path.exists():
+                    consumes.update(re.findall(r"\bperf_\w+_api\b", module_path.read_text(encoding="utf-8")))
+            baseline.update((name, cfg) for cfg in consumes & cfg_names)
+        expected = {(target, cfg) for target in ("perf_scenarios", "perf_scenarios_alloc") for cfg in cfg_names}
+        self.assertEqual(baseline, expected)
+        for step in gate.STEPS:
+            if step.id not in ("perf-scenarios-harness-api-clippy", "perf-scenarios-harness-api-echo-trace-clippy"):
+                continue
+            after = set()
+            for plan in gate.target_compile_steps(step):
+                if "--cfg" in plan.argv:
+                    target = plan.argv[plan.argv.index("--example") + 1]
+                    after.update((target, plan.argv[index + 1]) for index, token in enumerate(plan.argv) if token == "--cfg")
+            self.assertEqual(after, baseline, step.id)
+
+    def test_cfg_inventory_reads_utf8_even_with_a_legacy_windows_default(self):
+        # A UTF-8 macOS locale cannot expose Windows cp1252 decoding failures. Force that default
+        # only for omitted encodings and run the real non-ASCII source inventory, not an ASCII fixture.
+        read_text = Path.read_text
+
+        def legacy_read(path, encoding=None, errors=None, **options):
+            return read_text(path, encoding=encoding or "cp1252", errors=errors, **options)
+
+        with mock.patch.object(Path, "read_text", legacy_read):
+            self.test_cfg_on_lint_preserves_every_consuming_target_cfg_pair()
 
     def test_every_comparison_build_composes_its_cfgs_and_no_step_fixes_its_flags(self):
         # Each comparison build and previous-release check carries its cfg subset for launch-time composition, the

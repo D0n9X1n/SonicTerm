@@ -22,6 +22,68 @@ env:
   CI_CACHE_NAMESPACE: ci-v3
 
 jobs:
+  tooling:
+    name: Platform-independent script gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Install actionlint
+        run: bash scripts/install-pinned-tool.sh actionlint
+
+      - name: Validate workflow syntax and contexts
+        run: actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml
+
+      - name: Check declared rust-version against the lock
+        shell: bash
+        run: bash scripts/check-rust-version.sh
+
+      - name: Check process exit paths
+        shell: bash
+        run: bash scripts/check-no-raw-process-exit.sh
+
+      - name: Check window owner registration
+        shell: bash
+        run: bash scripts/check-window-owner-registration.sh
+
+      - name: Check workflow supply chain
+        shell: bash
+        run: bash scripts/check-workflow-supply-chain.sh
+
+      - name: Check authored Rust comments
+        shell: bash
+        run: bash scripts/check-authored-rust-comments.sh
+
+      - name: Check script identifiers
+        shell: bash
+        run: bash scripts/check-script-identifiers.sh
+
+      - name: Run release-note unit test
+        shell: bash
+        run: bash scripts/test-release-notes.sh
+
+      - name: Test wiki publisher
+        shell: bash
+        run: bash scripts/test-wiki-publish.sh
+
+      - name: Verify resource inventory
+        shell: bash
+        run: bash scripts/test-resource-inventory.sh
+
+      - name: Run deterministic soak control gate
+        shell: bash
+        run: bash scripts/test-soak-harness.sh
+
+      - name: Test resource baseline evidence collector
+        shell: bash
+        run: bash scripts/test-resource-baseline-evidence.sh
+
   macos-core:
     name: macOS core gates
     runs-on: macos-14
@@ -73,39 +135,18 @@ jobs:
       # Every harness API cfg's code compiles only with its cfg, which perf-compare sets when both refs
       # have the entry's methods; each host lints all of them at once, with the counters they need.
       - name: Lint perf scenarios with the harness API cfgs
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings
       # The same lint with perf-echo-trace as well: only this step compiles the S2 echo timeline's
       # adapter, which needs both the feature and its cfg.
       - name: Lint perf scenarios with the harness API cfgs and the echo trace
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings
 
       - name: Validate workspace manifests
         shell: bash
         run: cargo metadata --no-deps --format-version 1 > /dev/null
 
-      - name: Check declared rust-version against the lock
-        shell: bash
-        run: bash scripts/check-rust-version.sh
-
-      - name: Check process exit paths
-        shell: bash
-        run: bash scripts/check-no-raw-process-exit.sh
-
-      - name: Check window owner registration
-        shell: bash
-        run: bash scripts/check-window-owner-registration.sh
-
-      - name: Check workflow supply chain
-        shell: bash
-        run: bash scripts/check-workflow-supply-chain.sh
-
-      - name: Check authored Rust comments
-        shell: bash
-        run: bash scripts/check-authored-rust-comments.sh
-
-      - name: Check script identifiers
-        shell: bash
-        run: bash scripts/check-script-identifiers.sh
+      - name: Verify macOS process-group custody
+        run: python3 scripts/local-gate_tests.py RunnerTests.test_a_zombie_only_group_kill_is_refused_on_macos_and_the_step_is_still_reaped
 
       - name: Check public Rustdoc
         shell: bash
@@ -140,11 +181,11 @@ jobs:
 
       - name: Run scenario harness unit tests with the harness API cfgs
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
       - name: Run scenario harness unit tests with the harness API cfgs and the echo trace
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -155,29 +196,9 @@ jobs:
       - name: Report renderer churn baseline
         run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
 
-      - name: Run release-note unit test
-        shell: bash
-        run: bash scripts/test-release-notes.sh
-
-      - name: Test wiki publisher
-        shell: bash
-        run: bash scripts/test-wiki-publish.sh
-
       - name: Verify frozen PTY feasibility evidence
         shell: bash
         run: bash scripts/pty-backend-feasibility.sh --check
-
-      - name: Verify resource inventory
-        shell: bash
-        run: bash scripts/test-resource-inventory.sh
-
-      - name: Run deterministic soak control gate
-        shell: bash
-        run: bash scripts/test-soak-harness.sh
-
-      - name: Test resource baseline evidence collector
-        shell: bash
-        run: bash scripts/test-resource-baseline-evidence.sh
 
       - name: Capture real resource baseline evidence
         id: capture_resource_baseline
@@ -209,10 +230,10 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-instrumented-macos-14
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # The pinned release's prebuilt arm64 binary saves the minute a source build takes. The script takes its
       # version, URL and SHA-256 from scripts/pinned-tools.json and checks the digest before it unpacks anything.
@@ -380,17 +401,18 @@ jobs:
   macos:
     name: macos-14 / unit tests
     runs-on: ubuntu-latest
-    needs: [macos-core, macos-coverage, macos-smoke]
+    needs: [macos-core, macos-coverage, macos-smoke, tooling]
     if: always()
     steps:
       - name: Verify macOS shards
         shell: bash
         env:
+          TOOLING: ${{ needs.tooling.result }}
           CORE: ${{ needs.macos-core.result }}
           COVERAGE: ${{ needs.macos-coverage.result }}
           SMOKE: ${{ needs.macos-smoke.result }}
         run: |
-          for result in "$CORE" "$COVERAGE" "$SMOKE"; do
+          for result in "$CORE" "$COVERAGE" "$SMOKE" "$TOOLING"; do
             test "$result" = "success"
           done
 
@@ -471,7 +493,7 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-check-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -500,11 +522,11 @@ jobs:
       # Every harness API cfg's code compiles only with its cfg, which perf-compare sets when both refs
       # have the entry's methods; each host lints all of them at once, with the counters they need.
       - name: Lint perf scenarios with the harness API cfgs
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings
       # The same lint with perf-echo-trace as well: only this step compiles the S2 echo timeline's
       # adapter, which needs both the feature and its cfg.
       - name: Lint perf scenarios with the harness API cfgs and the echo trace
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings
 
       - name: Validate workspace manifests
         shell: bash
@@ -546,8 +568,9 @@ jobs:
   windows-tests-workspace:
     name: Windows workspace tests
     runs-on: windows-latest
-    needs: [windows-native]
+    needs: [windows-native, windows-glyph-oracle]
     env:
+      SONICTERM_GLYPH_ORACLE_DIR: ${{ github.workspace }}/ci-glyph-oracle
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -577,13 +600,26 @@ jobs:
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
+      # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
+      - name: Download the exact-run helper oracle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
+          path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
+
+      - name: Verify helper sources fonts and provenance
+        env:
+          ORACLE_ATTEMPT: ${{ needs.windows-glyph-oracle.outputs.attempt }}
+          ORACLE_DIGEST: ${{ needs.windows-glyph-oracle.outputs.digest }}
+        run: python3 scripts/glyph-oracle.py verify
+
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Run workspace unit and integration tests
         shell: bash
@@ -643,8 +679,9 @@ jobs:
   windows-tests-harness:
     name: Windows scenario harness tests
     runs-on: windows-latest
-    needs: [windows-native]
+    needs: [windows-native, windows-glyph-oracle]
     env:
+      SONICTERM_GLYPH_ORACLE_DIR: ${{ github.workspace }}/ci-glyph-oracle
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -674,10 +711,23 @@ jobs:
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
+      # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
+      - name: Download the exact-run helper oracle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
+          path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
+
+      - name: Verify helper sources fonts and provenance
+        env:
+          ORACLE_ATTEMPT: ${{ needs.windows-glyph-oracle.outputs.attempt }}
+          ORACLE_DIGEST: ${{ needs.windows-glyph-oracle.outputs.digest }}
+        run: python3 scripts/glyph-oracle.py verify
+
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: false
@@ -688,11 +738,15 @@ jobs:
       - name: Run scenario harness unit tests with frame counters
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
-  windows-tests-harness-features:
-    name: Windows scenario harness feature tests
+  windows-glyph-oracle:
+    name: Windows glyph helper oracle
     runs-on: windows-latest
     needs: [windows-native]
+    outputs:
+      digest: ${{ steps.oracle.outputs.digest }}
+      attempt: ${{ steps.oracle.outputs.attempt }}
     env:
+      SONICTERM_GLYPH_ORACLE_EXPORT: ${{ github.workspace }}/ci-glyph-oracle
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -725,13 +779,83 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: false
 
+      - name: Bind glyph helper inputs
+        run: python3 scripts/glyph-oracle.py prepare
+
       - name: Measure the glyph atlas working set
         run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture
+
+      - name: Seal the verified helper oracle
+        id: oracle
+        run: python3 scripts/glyph-oracle.py seal
+
+      - name: Publish the helper oracle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: glyph-oracle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SONICTERM_GLYPH_ORACLE_EXPORT }}
+          if-no-files-found: error
+
+  windows-tests-harness-features:
+    name: Windows scenario harness feature tests
+    runs-on: windows-latest
+    needs: [windows-native, windows-glyph-oracle]
+    env:
+      SONICTERM_GLYPH_ORACLE_DIR: ${{ github.workspace }}/ci-glyph-oracle
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+
+      - name: Resolve vcpkg commit
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore vcpkg binaries (Cairo)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo for Windows
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
+      # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
+      - name: Download the exact-run helper oracle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
+          path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
+
+      - name: Verify helper sources fonts and provenance
+        env:
+          ORACLE_ATTEMPT: ${{ needs.windows-glyph-oracle.outputs.attempt }}
+          ORACLE_DIGEST: ${{ needs.windows-glyph-oracle.outputs.digest }}
+        run: python3 scripts/glyph-oracle.py verify
+
+      - name: Restore Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
 
       - name: Run scenario harness unit tests with the frame texture reading
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
@@ -742,8 +866,9 @@ jobs:
   windows-tests-harness-api:
     name: Windows scenario harness API cfg tests
     runs-on: windows-latest
-    needs: [windows-native]
+    needs: [windows-native, windows-glyph-oracle]
     env:
+      SONICTERM_GLYPH_ORACLE_DIR: ${{ github.workspace }}/ci-glyph-oracle
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -773,21 +898,34 @@ jobs:
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
+      # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
+      - name: Download the exact-run helper oracle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
+          path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
+
+      - name: Verify helper sources fonts and provenance
+        env:
+          ORACLE_ATTEMPT: ${{ needs.windows-glyph-oracle.outputs.attempt }}
+          ORACLE_DIGEST: ${{ needs.windows-glyph-oracle.outputs.digest }}
+        run: python3 scripts/glyph-oracle.py verify
+
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: false
 
       - name: Run scenario harness unit tests with the harness API cfgs
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
       - name: Run scenario harness unit tests with the harness API cfgs and the echo trace
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
 
   windows-tests-runtime:
     name: Windows runtime gates
@@ -826,7 +964,7 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: false
@@ -918,10 +1056,10 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-release-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build Windows release binary for runtime smoke
         run: cargo build --release -p sonicterm-windows
@@ -970,13 +1108,14 @@ jobs:
   windows:
     name: windows-latest / unit tests
     runs-on: ubuntu-latest
-    needs: [windows-native, windows-checks, windows-tests-workspace, windows-tests-harness, windows-tests-harness-features, windows-tests-harness-api, windows-tests-runtime, windows-smoke]
+    needs: [windows-native, windows-glyph-oracle, windows-checks, windows-tests-workspace, windows-tests-harness, windows-tests-harness-features, windows-tests-harness-api, windows-tests-runtime, windows-smoke]
     if: always()
     steps:
       - name: Verify Windows shards
         shell: bash
         env:
           NATIVE: ${{ needs.windows-native.result }}
+          ORACLE: ${{ needs.windows-glyph-oracle.result }}
           CHECKS: ${{ needs.windows-checks.result }}
           TESTS_WORKSPACE: ${{ needs.windows-tests-workspace.result }}
           TESTS_HARNESS: ${{ needs.windows-tests-harness.result }}
@@ -985,7 +1124,7 @@ jobs:
           TESTS_RUNTIME: ${{ needs.windows-tests-runtime.result }}
           SMOKE: ${{ needs.windows-smoke.result }}
         run: |
-          for result in "$NATIVE" "$CHECKS" "$TESTS_WORKSPACE" "$TESTS_HARNESS" "$TESTS_HARNESS_FEATURES" "$TESTS_HARNESS_API" "$TESTS_RUNTIME" "$SMOKE"; do
+          for result in "$NATIVE" "$ORACLE" "$CHECKS" "$TESTS_WORKSPACE" "$TESTS_HARNESS" "$TESTS_HARNESS_FEATURES" "$TESTS_HARNESS_API" "$TESTS_RUNTIME" "$SMOKE"; do
             test "$result" = "success"
           done
 
@@ -1053,11 +1192,11 @@ jobs:
       # Every harness API cfg's code compiles only with its cfg, which perf-compare sets when both refs
       # have the entry's methods; each host lints all of them at once, with the counters they need.
       - name: Lint perf scenarios with the harness API cfgs
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings
       # The same lint with perf-echo-trace as well: only this step compiles the S2 echo timeline's
       # adapter, which needs both the feature and its cfg.
       - name: Lint perf scenarios with the harness API cfgs and the echo trace
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings
 
       - name: Check public Rustdoc
         run: |
@@ -1084,11 +1223,11 @@ jobs:
 
       - name: Run scenario harness unit tests with the harness API cfgs
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
       - name: Run scenario harness unit tests with the harness API cfgs and the echo trace
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
 
       # The pinned release's prebuilt binary. The script takes its version, URL and SHA-256 from
       # scripts/pinned-tools.json and checks the digest before it unpacks anything.

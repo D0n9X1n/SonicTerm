@@ -197,7 +197,7 @@ or a cold build can therefore report `TIMEOUT` for a step that would pass; rerun
 `ci.yml` keeps explicit steps for per-step progress without job or step timeout
 overrides; GitHub Actions platform limits still apply. The table checks command
 and job parity, not timeout parity, and is not generated into the workflow.
-`scripts/local-gate_tests.py` runs through `check-workflow-supply-chain.sh` in `macos-core`, `windows-checks`, and
+`scripts/local-gate_tests.py` runs through `check-workflow-supply-chain.sh` in `tooling`, `windows-checks`, and
 `linux-core`. It fails when a table command is missing from a CI job it names,
 when a `ci.yml` step runs a `scripts/` gate or a `cargo fmt|clippy|doc|test`
 command that is neither a table step nor on the reasoned CI-only list, and when
@@ -309,7 +309,7 @@ blocker is `sonicterm-freetype`'s vendored zlib, which needs Windows CRT
 headers. The check compiles and lints only; Windows CI is the only place
 Windows code runs. CI runs a static classification-completeness check instead of
 the step: `scripts/local-gate_tests.py` compares the script's two crate lists
-with the workspace members in `macos-core`, `windows-checks`, and `linux-core`
+with the workspace members in `tooling`, `windows-checks`, and `linux-core`
 without running the script, so every new crate must be classified.
 
 The Windows `windows_font_weight_present` test yields to native message dispatch
@@ -414,7 +414,7 @@ with the feature wherever `clippy` runs (`macos-core`, `windows-checks` and `lin
 counter code is built, tested and linted on every host. `perf-scenarios-frame-texture-tests` and
 `perf-scenarios-frame-texture-clippy` do the same with `--features perf-frame-texture`, which compiles
 in the harness's frame-texture reading. On Windows the feature tests run in the
-`windows-tests-harness-features` shard instead, beside the glyph working-set measurement, so CI runs each
+`windows-tests-harness-features` shard instead, consuming the exact-run `windows-glyph-oracle` artifact, so CI runs each
 feature's tests exactly once per platform rather than in the plain tests' job.
 
 The S2 echo timeline's App accessor is named only with both `perf-echo-trace` and
@@ -427,7 +427,7 @@ and both (`perf-scenarios-harness-api-echo-trace-clippy` and `-tests`, the same 
 `perf-echo-trace` added). The last pair alone builds and tests the real adapter. Its lint
 runs in `macos-core`, `windows-checks` and `linux-core`, and its tests in `macos-core`
 and `linux-core` and, on Windows, in `windows-tests-harness-api` after the harness-API
-tests, whose compiler flags they share, so no Windows job is added.
+tests. The target-only launcher leaves dependency flags unchanged; every feature/cfg combination remains tested.
 
 `macos-perf-smoke` checks the comparison tooling, not performance. It runs
 `python3 scripts/perf-compare.py --smoke`, which builds the current tree's
@@ -571,7 +571,8 @@ background I/O. Both sides of a comparison run the same harness, so both pay
 the cost, and an A/A comparison, with one ref on both sides, measures with it.
 
 `scripts/perf-compare_tests.py` tests the script, including these failure rules,
-and `check-workflow-supply-chain.sh` runs it on macOS, Windows, and Linux.
+and `check-workflow-supply-chain.sh` runs it in Ubuntu tooling and core, and Windows checks.
+Local macOS gates still run the suite; CI keeps its macOS-only custody regression on macos-core.
 [Development and Release](Development-and-Release#comparing-performance)
 describes how to run and read a comparison.
 

@@ -2152,7 +2152,7 @@ class ExecuteRunTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue((evidence / name).is_file())
         self.assertEqual(list(self.temp_root.iterdir()), [])
-        self.assertTrue(json.loads((evidence / "cleanup.json").read_text())["settled"])
+        self.assertTrue(json.loads((evidence / "cleanup.json").read_text(encoding="utf-8"))["settled"])
 
     def test_deadline_case_kills_the_harness_group_and_cleanup_ends_the_sessions(self):
         # Killed at GO like a step deadline: no result, every PTY session still ended by cleanup.
@@ -2228,7 +2228,7 @@ class ExecuteRunTests(unittest.TestCase):
         self.hang_answer = ("TIMEOUT", -9, "")
         outcome, evidence, _gate = self.run_plan(smoke=False)
         self.assertTrue(outcome.cleanup.passed)
-        self.assertTrue(json.loads((evidence / "cleanup.json").read_text())["settled"])
+        self.assertTrue(json.loads((evidence / "cleanup.json").read_text(encoding="utf-8"))["settled"])
         kind, reasons = perf.classify_outcome(outcome)
         self.assertEqual(kind, "cleanup")
         self.assertTrue(any(UNCOUNTED_STOP in reason for reason in reasons), reasons)
@@ -2261,7 +2261,7 @@ class ExecuteRunTests(unittest.TestCase):
         kind, reasons = perf.classify_outcome(outcome)
         self.assertEqual(kind, "home")
         self.assertTrue(any("config.toml" in reason or "created" in reason for reason in reasons))
-        self.assertTrue(json.loads((evidence / "home-check.json").read_text())["violations"])
+        self.assertTrue(json.loads((evidence / "home-check.json").read_text(encoding="utf-8"))["violations"])
 
     def test_windows_run_is_settled_by_job_custody(self):
         # On Windows the gate's job, not anchor cleanup, proves teardown; cleanup.json keeps its counts and members.
@@ -2284,7 +2284,7 @@ class ExecuteRunTests(unittest.TestCase):
         self.assertEqual(perf.classify_outcome(outcome), ("valid", []))
         self.assertEqual((self.table.kills, self.table.group_kills), ([], []))
         self.assertEqual(gate.steps[0].hosts, ("windows",))
-        recorded = json.loads((evidence / "cleanup.json").read_text())
+        recorded = json.loads((evidence / "cleanup.json").read_text(encoding="utf-8"))
         self.assertEqual(recorded["cleanup"], "none")
         self.assertEqual(recorded["before_cleanup"]["active_processes"], 0)
         self.assertEqual(recorded["before_cleanup"]["members"]["processes"][0]["pid"], HARNESS_PID)
@@ -2319,10 +2319,10 @@ class ExecuteRunTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             outcome = perf.execute_run(plan, host, evidence)
         self.assertEqual(perf.classify_outcome(outcome)[0], "focus")
-        recorded = json.loads((evidence / "outcome.json").read_text())
+        recorded = json.loads((evidence / "outcome.json").read_text(encoding="utf-8"))
         self.assertEqual([(change["from_pid"], change["to_pid"]) for change in recorded["foreground_changes"]],
                          [(100, 200)])
-        samples = (evidence / "front-samples.log").read_text().splitlines()
+        samples = (evidence / "front-samples.log").read_text(encoding="utf-8").splitlines()
         self.assertTrue(samples)
         self.assertTrue(all(json.loads(line)["argv"] == ["GetForegroundWindow"] for line in samples))
 
@@ -2617,7 +2617,7 @@ class SmokeTests(unittest.TestCase):
                     self.assertEqual(perf.smoke_main({"GITHUB_ENV": str(env_file)}, runner), code)
                 evidence = seen[0]
                 self.assertTrue(evidence.name.startswith("sonicterm-perf-evidence-"))
-                self.assertIn(f"SONICTERM_PERF_EVIDENCE_DIR={evidence}\n", env_file.read_text())
+                self.assertIn(f"SONICTERM_PERF_EVIDENCE_DIR={evidence}\n", env_file.read_text(encoding="utf-8"))
                 self.assertIn(str(evidence), output.getvalue())
                 self.assertEqual(evidence.exists(), code != 0)
                 if evidence.exists():
@@ -2786,7 +2786,7 @@ class RunSetTests(unittest.TestCase):
         paths = {Path(evidence).name: Path(evidence) / perf.CLASSIFICATION_FILE
                  for _side, evidence, _kind, _why in result.attempts}
         self.assertTrue(all(path.is_file() for path in paths.values()), "every attempt's classification is written")
-        written = {name: json.loads(path.read_text()) for name, path in paths.items()}
+        written = {name: json.loads(path.read_text(encoding="utf-8")) for name, path in paths.items()}
         self.assertEqual(written["01-base"], {"side": "base", "kind": "valid", "reasons": []})
         self.assertEqual((written["02-head"]["kind"], written["02-head"]["side"]), ("grid", "head"))
         self.assertEqual(written["02-head"]["reasons"], list(result.attempts[1][3]))
@@ -3411,7 +3411,7 @@ class CompareDriverTests(CompareHarness, unittest.TestCase):
         code, _gate, _git_calls, plans, _work, out = self.compare(assets=("head",))
         self.assertEqual(code, 0)
         self.assertEqual([plan.side for plan in plans], ["head"])
-        self.assertIn("blocked: base cannot run perf_scenarios", (out / "comparison.md").read_text())
+        self.assertIn("blocked: base cannot run perf_scenarios", (out / "comparison.md").read_text(encoding="utf-8"))
         with self.assertRaises(ValueError):
             self.compare(assets=("base",))
 
@@ -3420,7 +3420,7 @@ class CompareDriverTests(CompareHarness, unittest.TestCase):
         code, _gate, _git_calls, plans, _work, out = self.compare(base_build="FAIL")
         self.assertEqual(code, 0)
         self.assertEqual([plan.side for plan in plans], ["head"])
-        self.assertIn("blocked: base cannot build perf_scenarios: error[E0599]", (out / "comparison.md").read_text())
+        self.assertIn("blocked: base cannot build perf_scenarios: error[E0599]", (out / "comparison.md").read_text(encoding="utf-8"))
 
 
 
@@ -3642,6 +3642,7 @@ class PrebuiltManifestTests(PrebuiltHarness, unittest.TestCase):
             self.assertEqual(entry["path"], f"{side}/{perf.executable_name(perf.HARNESS_EXAMPLE)}")
             self.assertEqual(entry["sha256"], hashlib.sha256((binaries / entry["path"]).read_bytes()).hexdigest())
             self.assertTrue(os.access(binaries / entry["path"], os.X_OK))
+        self.assertEqual(manifest["harness_cfg_scope"], "example-target-v1")
         self.assertEqual(manifest["target"], "aarch64-apple-darwin")
         self.assertEqual(manifest["toolchain"], {"rustc": RUSTC_VV.strip(),
                                                  "cargo": "cargo 1.99.0 (abcdef 2026-09-01)"})
@@ -3721,6 +3722,12 @@ class PrebuiltRefusalTests(PrebuiltHarness, unittest.TestCase):
                     {side: [perf.COUNTERS_FEATURE]}))
                 self.refused(f"features", binaries, digest)
                 shutil.rmtree(binaries)
+
+    def test_a_global_cfg_build_cannot_substitute_for_target_scoped_binaries(self):
+        # Compiler flag spelling alone does not state which crates received it; bind placement too.
+        binaries, digest = self.produce()
+        digest = self.rewrite(binaries, lambda data: data.update(harness_cfg_scope="workspace"))
+        self.refused("harness cfg scope", binaries, digest)
 
     def test_rule_7_target_toolchain_or_image_differs(self):
         # A rolled-over toolchain or runner image fails closed rather than mixing builds and runs.
@@ -5257,13 +5264,13 @@ class WindowsComparisonLegTests(unittest.TestCase):
         self.assertEqual(shard["scenarios"].split()[:6], ["S4", "S5", "S11"] + PLATFORM_SCENARIOS["Windows"])
 
     def test_the_macos_shards_are_the_reviewed_four_set_partition(self):
-        # The partition balanced from trial-2 costs (about 830 s each); a change here needs remeasuring. S6/rest
-        # joined S7-S4, the shortest set, on an estimate the exact-head run must confirm.
+        # S7 sheds rest and startup; S12/default and S6/flood leave the late-starting set. Exact-head
+        # CI must measure this partition including runner queues against the unchanged 35-minute budget.
         self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
-            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S6/rest", "S1/status-line", "S12/status-line"],
-            "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5"],
-            "S10-S11release": ["S10", "S11/release", "S2/flood"],
-            "S2-S3-S8-S12": ["S2", "S12", "S3", "S8", "S6/selection-drag", "S6/flood"],
+            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S12/status-line"],
+            "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5", "S6/rest", "S1/status-line"],
+            "S10-S11release": ["S10", "S11/release", "S2/flood", "S12", "S6/flood"],
+            "S2-S3-S8-S12": ["S2", "S3", "S8", "S6/selection-drag"],
         })
 
     def test_the_atlas_retry_variant_runs_in_the_shard_its_projection_names(self):
@@ -6416,7 +6423,7 @@ class ForegroundTests(unittest.TestCase):
             sampler = perf.FrontSampler(log_path, None, set(), sample=lambda: foreground(0x1234, 77))
             with contextlib.redirect_stdout(io.StringIO()):
                 sampler.sample()
-            self.assertEqual(json.loads(log_path.read_text())["argv"], ["GetForegroundWindow"])
+            self.assertEqual(json.loads(log_path.read_text(encoding="utf-8"))["argv"], ["GetForegroundWindow"])
 
     def test_another_app_taking_the_foreground_invalidates_a_desk_run(self):
         # At a desk any foreground change during the run may have moved the user's focus, so the run is invalid.

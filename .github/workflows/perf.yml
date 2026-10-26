@@ -206,37 +206,34 @@ jobs:
       # report. In the measured trials at most five macOS jobs ran at once and CI's macOS core held one throughout,
       # so four slots reached these shards; a fifth shard queued behind another and set the critical path (in runs
       # 37603251975 and 37610393219 the last comparison ended at +1,895 s and +1,880 s, the workflows at +1,902 s
-      # and +1,888 s). Four shards remove that second wave. Each set
-      # is about 830 s of measured runs (trial-2 phase envelopes scaled to each shard's measured window): S7 with
-      # S4 and S1/atlas-retry; S10/sync with S9 (and its laps set), S11, S6, S1 and S5; S10 with S11/release and
-      # S2/flood; S2 with S12, S3, S8, S6/selection-drag and S6/flood. Every scenario stays in exactly one shard.
+      # and +1,888 s). Four shards remove that second wave. The partition
+      # retains every scenario exactly once while redistributing measured work.
       # S11/release holds 65 s after its media-free frame, so --short caps it at one run per side; S2/flood,
       # S1/atlas-retry and S6/rest run twice per side (--list run_caps). A release comparison runs them uncapped.
-      # S6/rest joins S7-S4, the shard with the shortest set. Its added time is not estimated here: the
-      # exact-head run, read with scripts/perf-critical-path.py, is the measurement.
-      # S1/status-line and S12/status-line join S7-S4 too, one run per side in each set (--list run_caps):
-      # nominally about 1 min for S1 and 2 min for S12, not measured; the exact-head run is the measurement.
+      # Measured S7 dominates its old set. Keep S4, atlas-retry and S12/status-line; move the smaller
+      # cases, and remove S12/default plus S6/flood from the last-starting set. Shard names remain
+      # stable artifact identities. Exact-head elapsed time, including queues, must stay below 35 min.
       matrix:
         include:
           - platform: macOS
             runner: macos-14
             shard: S7-S4
-            scenarios: S7 S4 S1/atlas-retry S6/rest S1/status-line S12/status-line
+            scenarios: S7 S4 S1/atlas-retry S12/status-line
             laps: ""
           - platform: macOS
             runner: macos-14
             shard: S9-S10sync
-            scenarios: S10/sync S9 S11 S6 S1 S5
+            scenarios: S10/sync S9 S11 S6 S1 S5 S6/rest S1/status-line
             laps: S9
           - platform: macOS
             runner: macos-14
             shard: S10-S11release
-            scenarios: S10 S11/release S2/flood
+            scenarios: S10 S11/release S2/flood S12 S6/flood
             laps: ""
           - platform: macOS
             runner: macos-14
             shard: S2-S3-S8-S12
-            scenarios: S2 S12 S3 S8 S6/selection-drag S6/flood
+            scenarios: S2 S3 S8 S6/selection-drag
             laps: ""
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit

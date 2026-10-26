@@ -73,6 +73,10 @@ if not isinstance(arguments, list) or not arguments or not all(
     isinstance(argument, str) and argument and "\n" not in argument for argument in arguments
 ):
     sys.exit(f"install-pinned-tool: {tool} has no usable version_args")
+first_line = entry.get("version_first_line", False)
+if not isinstance(first_line, bool):
+    sys.exit(f"install-pinned-tool: {tool} version_first_line must be boolean")
+lines.append("true" if first_line else "false")
 lines.extend(arguments)
 print("\n".join(lines))
 PY
@@ -87,6 +91,7 @@ check_args=()
   IFS= read -r url
   IFS= read -r member
   IFS= read -r version_output
+  IFS= read -r version_first_line
   while IFS= read -r argument; do
     check_args+=("$argument")
   done
@@ -123,7 +128,15 @@ tar -xzf "$archive" -C "$workdir/unpacked" "$member"
 mkdir -p "$cargo_bin"
 install -m 0755 "$workdir/unpacked/$member" "$cargo_bin/$tool"
 
-if ! reported="$("$cargo_bin/$tool" "${check_args[@]}" 2>&1)" || [ "$reported" != "$version_output" ]; then
+if ! reported="$("$cargo_bin/$tool" "${check_args[@]}" 2>&1)"; then
+  rm -f "$cargo_bin/$tool"
+  fail "$tool could not report its version"
+fi
+# actionlint follows its version with build metadata; exact first-line matching remains version-pinned.
+if [ "$version_first_line" = true ]; then
+  reported="${reported%%$'\n'*}"
+fi
+if [ "$reported" != "$version_output" ]; then
   rm -f "$cargo_bin/$tool"
   fail "$tool reports '$reported', not '$version_output'"
 fi

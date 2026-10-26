@@ -103,7 +103,7 @@ class ExecutorTests(unittest.TestCase):
             marker = Path(directory) / "descendant-survived"
             child = (
                 "import pathlib,time; time.sleep(3); "
-                "pathlib.Path({!r}).write_text('alive')"
+                "pathlib.Path({!r}).write_text('alive', encoding='utf-8')"
             ).format(str(marker))
             parent = (
                 "import subprocess,sys,time; "
@@ -457,15 +457,22 @@ class WorkflowShapeTests(unittest.TestCase):
         )
         self.assertIn("  macos-smoke:\n", workflow)
         self.assertIn("  windows-smoke:\n", workflow)
-        self.assertIn(
-            "needs: [macos-core, macos-coverage, macos-smoke]",
-            workflow,
-        )
-        self.assertIn(
-            "needs: [windows-native, windows-checks, windows-tests-workspace, windows-tests-harness, "
-            "windows-tests-harness-features, windows-tests-harness-api, windows-tests-runtime, windows-smoke]",
-            workflow,
-        )
+        # New dependencies must be checked, not merely scheduled: a failed portable gate or
+        # helper producer must fail its platform aggregate even when every native smoke passed.
+        for job, needs, variable, dependency in (
+            ("macos", "macos-core, macos-coverage, macos-smoke, tooling", "TOOLING", "tooling"),
+            ("windows", "windows-native, windows-glyph-oracle, windows-checks, windows-tests-workspace, "
+             "windows-tests-harness, windows-tests-harness-features, windows-tests-harness-api, "
+             "windows-tests-runtime, windows-smoke", "ORACLE", "windows-glyph-oracle"),
+        ):
+            with self.subTest(aggregate=job):
+                body = workflow.split(f"  {job}:\n", 1)[1]
+                body = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", body, maxsplit=1)[0]
+                self.assertIn(f"needs: [{needs}]", body)
+                self.assertIn("if: always()", body)
+                self.assertIn(f"{variable}: ${{{{ needs.{dependency}.result }}}}", body)
+                self.assertRegex(body, rf'for result in [^\n]*"\${variable}"[^\n]*; do\n'
+                                       r'\s+test "\$result" = "success"\n\s+done')
         self.assertIn("Require macOS native runtime smoke", workflow)
         self.assertIn("Require Windows native runtime smoke", workflow)
         self.assertEqual(workflow.count("Require Windows GDI capability=EXERCISED"), 1)
@@ -480,8 +487,8 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertIn("--log-file", workflow)
         self.assertIn("target/release/sonicterm-mac", workflow)
         self.assertIn("target/release/sonicterm-windows.exe", workflow)
-        # The smoke jobs restore the cache their core job wrote and never write one of their own.
-        for smoke in ("macos-coverage", "windows-smoke", "linux-packages"):
+        # Linux packages restores its core cache; Windows release and macOS instrumented caches have producers.
+        for smoke in ("linux-packages",):
             after = workflow.split(f"  {smoke}:\n", 1)[1]
             body = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", after, maxsplit=1)[0]
             self.assertIn("save-if: false", body, smoke)

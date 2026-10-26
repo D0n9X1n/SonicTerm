@@ -1315,6 +1315,10 @@ fn glyph_atlas_working_set() {
                      {provenance}): {reason}"
                 )),
             }
+            // CI seals these rows only after this test returns successfully, including every drift check.
+            if let Err(error) = crate::workload::glyph_oracle::export(name, dpi, &set) {
+                failures.push(format!("{name}@{scale}: oracle export: {error}"));
+            }
             local.push(RuleInput {
                 label: format!("{platform} {scale}x {name} helper"),
                 outcome: set.fit_outcome,
@@ -1573,7 +1577,7 @@ mod real_renderer_coverage {
     use sonicterm_cfg::theme::Theme;
     use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
     use sonicterm_gpu::glyph_working_set::{
-        measure_glyph_working_set, representative_gaps, representative_identities, TileIdentity,
+        measure_glyph_working_set, representative_gaps, representative_identities,
     };
     use winit::application::ApplicationHandler;
     use winit::dpi::PhysicalSize;
@@ -1800,24 +1804,35 @@ mod real_renderer_coverage {
                 &format!("{case}: representative codepoints not drawn: {gaps:?}"),
             )?;
         }
-        let helper =
-            measure_glyph_working_set(&lines, &TITLES, FONT_FAMILY, size_pt, dpi, &font_dirs())
+        // Only helper work is shared; every suite still proves its own resident identities and sizes.
+        let helper = match crate::workload::glyph_oracle::load(name, dpi)? {
+            Some(tiles) => tiles,
+            None => {
+                let measured = measure_glyph_working_set(
+                    &lines,
+                    &TITLES,
+                    FONT_FAMILY,
+                    size_pt,
+                    dpi,
+                    &font_dirs(),
+                )
                 .map_err(|error| {
                     format!("{case}: the helper measurement is incomplete: {error}")
                 })?;
-        let missing: Vec<&TileIdentity> = identities
-            .keys()
-            .filter(|identity| !helper.tile_identities.contains_key(*identity))
-            .take(20)
-            .collect();
+                crate::workload::glyph_oracle::identities(&measured.tile_identities)?
+            }
+        };
+        let identities = crate::workload::glyph_oracle::identities(&identities)?;
+        let missing: Vec<&String> =
+            identities.keys().filter(|identity| !helper.contains_key(*identity)).take(20).collect();
         check(
             missing.is_empty(),
             &format!("{case}: resident tiles the helper missed: {missing:?}"),
         )?;
-        let resized: Vec<(&TileIdentity, [u32; 2], [u32; 2])> = identities
+        let resized: Vec<(&String, [u32; 2], [u32; 2])> = identities
             .iter()
             .filter_map(|(identity, size)| {
-                let measured = helper.tile_identities[identity];
+                let measured = helper[identity];
                 (measured != *size).then_some((identity, *size, measured))
             })
             .take(20)
