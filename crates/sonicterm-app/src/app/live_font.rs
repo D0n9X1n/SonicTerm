@@ -31,13 +31,18 @@ impl App {
     /// Rebuild every renderer's font from the live `[font]` values and refit each window's panes
     /// to the new cell size.
     fn apply_live_font(&mut self) {
-        let LiveFontRequest { family, size, line_height: line_h, weight_scale } =
-            self.live_font_request();
+        let request = self.live_font_request();
+        let LiveFontRequest { family, size, line_height: line_h, weight_scale } = request.clone();
         if let Some(renderer) = self.main_renderer_mut() {
             renderer.set_font(&family, size, line_h, weight_scale);
         }
         // the loop below covers main + every child.
-        for child in self.windows.values_mut() {
+        for (window_id, child) in self.windows.iter_mut() {
+            // Every window is handed the same request; the test recorder sees each one.
+            #[cfg(test)]
+            self.live_font_log.push((*window_id, request.clone()));
+            #[cfg(not(test))]
+            let _ = window_id;
             {
                 let Some(renderer) = child.renderer.as_mut() else {
                     // When: child.renderer is None for test-seeded entries; skip so the

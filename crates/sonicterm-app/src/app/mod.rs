@@ -642,6 +642,9 @@ pub struct App {
     /// Moves on every reload, save and picker choice of the font family, so a catalog report the
     /// worker started before one of them is recognised as stale and adopts nothing.
     pub(super) font_family_generation: u64,
+    /// Test recorder: each window and the font request `apply_live_font` handed its renderer.
+    #[cfg(test)]
+    pub(in crate::app) live_font_log: Vec<(winit::window::WindowId, live_font::LiveFontRequest)>,
     pub(super) keymap: Keymap,
     // The main window holds no state of its own here. Its renderer, tabs,
     // tab states, panes, selection, modifiers, copy mode, last render, cursor

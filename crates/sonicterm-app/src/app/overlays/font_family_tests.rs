@@ -108,3 +108,41 @@ fn preview_and_cancel_keep_the_zoom_and_strip_scale() {
     assert_eq!(app.live_font_request(), zoomed);
     assert_eq!(app.current_status_line().font_scale.as_f32(), strip_scale);
 }
+
+/// Previewing a family hands it to every window's renderer at the zoomed size, and Escape hands
+/// every window the family the picker opened with; the strip's session `font_scale` is untouched.
+#[test]
+fn preview_and_escape_reach_every_window() {
+    use crate::app::live_font::LiveFontRequest;
+    let (mut app, first) = picker_app("Menlo");
+    let second = app.__test_seed_child_window(&["two"]);
+    app.run_action_for_window(&Action::IncreaseFontSize, first);
+    app.run_action_for_window(&Action::DecreaseStatusLineFontScale, first);
+    let zoomed = app.live_font_request();
+    let strip_scale = app.current_status_line().font_scale.as_f32();
+    let received = |app: &App, window| -> Vec<LiveFontRequest> {
+        let log = app.live_font_log.iter().filter(|(id, _)| *id == window);
+        log.map(|(_, request)| request.clone()).collect()
+    };
+    app.live_font_log.clear();
+    assert!(app.run_action_for_window(&Action::ChooseFontFamily, first));
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowDown));
+    let previewing = LiveFontRequest { family: "Monaco".into(), ..zoomed.clone() };
+    for window in [first, second] {
+        assert_eq!(
+            received(&app, window),
+            std::slice::from_ref(&previewing),
+            "{window:?} previews"
+        );
+    }
+    app.live_font_log.clear();
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape));
+    for window in [first, second] {
+        assert_eq!(
+            received(&app, window),
+            std::slice::from_ref(&zoomed),
+            "{window:?} gets the original back"
+        );
+    }
+    assert_eq!(app.current_status_line().font_scale.as_f32(), strip_scale);
+}
