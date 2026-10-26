@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use sonicterm_cfg::config::Config;
@@ -128,18 +128,61 @@ fn an_explicit_changed_or_newer_family_is_kept() {
     assert_eq!(reloaded.config.font.family, "Cascadia Mono");
 }
 
-/// The worker the picker started is kept, and shutdown never waits for it. A report that lands
-/// after `finish_session` is ignored without a panic and changes neither the catalog nor the font.
+/// How long the gated enumerator waits to be released, so a failing test cannot hang on it.
+const GATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The gated enumerator's gate: it signals the first sender once enumeration has started, then
+/// waits on the receiver. Only the shutdown test installs it.
+static GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
+
+/// An enumerator held inside enumeration until the test releases its gate, or `GATE_TIMEOUT` ends.
+fn gated_enumerator() -> anyhow::Result<Vec<String>> {
+    let gate = GATE.lock().unwrap_or_else(PoisonError::into_inner).take();
+    if let Some((entered, release)) = gate {
+        let _ = entered.send(());
+        // A timeout means the test failed before releasing the gate; enumeration ends anyway.
+        let _ = release.recv_timeout(GATE_TIMEOUT);
+    }
+    Ok(vec!["Menlo".to_owned(), "Monaco".to_owned()])
+}
+
+/// Releases the gate when dropped, so the worker ends on every path out of the test.
+struct Release(mpsc::Sender<()>);
+
+// Lifecycle: dropping the guard releases a waiting worker and clears a gate no worker took.
+impl Drop for Release {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+        GATE.lock().unwrap_or_else(PoisonError::into_inner).take();
+    }
+}
+
+/// Shutdown never waits on enumeration: with the worker held inside it, `finish_session` returns
+/// while the worker still runs. The worker ends once released, and its report, delivered after
+/// shutdown, changes nothing.
 #[test]
 fn a_report_after_finish_session_changes_nothing() {
+    let (entered_tx, entered) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *GATE.lock().unwrap_or_else(PoisonError::into_inner) = Some((entered_tx, release_rx));
+    let release = Release(release_tx);
     let mut app = app_with_family("Menlo");
-    app.font_enumerator = || Ok(vec!["Menlo".to_string(), "Monaco".to_string()]);
+    app.font_enumerator = gated_enumerator;
     let child = app.__test_seed_child_window(&["work"]);
     assert!(app.run_action_for_window(&Action::ChooseFontFamily, child));
+    entered.recv_timeout(GATE_TIMEOUT).expect("the worker entered enumeration");
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape));
     app.finish_session();
     let worker = app.font_catalog_worker.take().expect("the picker started a worker");
-    worker.join().expect("the worker finishes on its own");
+    assert!(!worker.is_finished(), "finish_session waited for the held enumeration");
+    drop(release);
+    let deadline = Instant::now() + GATE_TIMEOUT;
+    while !worker.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(worker.is_finished(), "the released worker ends");
+    worker.join().expect("the worker ends without panicking");
+    // A unit test runs no event loop, so the report is delivered here, as the event loop would.
     app.adopt_font_catalog(vec!["Menlo".into(), "Monaco".into()]);
     assert_eq!(app.font_catalog, FontCatalog::Loading);
     assert_eq!(app.config.font.family, "Menlo");
