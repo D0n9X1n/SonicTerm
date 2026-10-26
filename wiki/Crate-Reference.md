@@ -399,6 +399,10 @@ results into cell metrics and atlas `RasterTile`s.
 
 **Read:** `src/fontstack.rs`.
 
+`fontstack_weight.rs` privately owns checked monochrome coverage transforms. The stack
+retains native face ownership and the original public paths; gated frame-shaping fixtures
+live once in test-only `fontstack_frame_fixture.rs` with a flat test sibling.
+
 ### `sonicterm-block-glyph`
 
 **Role:** geometry and rasterization for box drawing, block elements,
