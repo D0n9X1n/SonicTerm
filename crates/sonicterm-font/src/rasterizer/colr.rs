@@ -337,7 +337,7 @@ fn premultiplied_argb(color: SrgbaTuple) -> u32 {
 /// Paint a COLRv1 sweep gradient over the current clip.
 ///
 /// Cairo has no sweep-gradient primitive. Each device pixel of the current clip's extents is mapped back to
-/// user space and takes the colour [`SweepColors`] gives its angle around `(center_x, center_y)`; the raster
+/// user space and takes the colour `SweepColors` gives its angle around `(center_x, center_y)`; the raster
 /// is then painted as an image source under the clip. Computing every pixel's colour directly keeps the
 /// result independent of Cairo's mesh rasterizer, which some Cairo builds (Ubuntu 26.04's 1.18.4) draw with
 /// whole quadrants wrong. A color line left with no usable stop, a non-finite centre or angle, a zero-span
