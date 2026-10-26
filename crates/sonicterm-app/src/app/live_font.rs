@@ -32,25 +32,25 @@ impl App {
     /// to the new cell size.
     fn apply_live_font(&mut self) {
         let request = self.live_font_request();
-        let LiveFontRequest { family, size, line_height: line_h, weight_scale } = request.clone();
-        if let Some(renderer) = self.main_renderer_mut() {
-            renderer.set_font(&family, size, line_h, weight_scale);
-        }
-        // the loop below covers main + every child.
+        // `self.windows` holds the main window and every child, so each renderer is rebuilt once.
         for (window_id, child) in self.windows.iter_mut() {
-            // Every window is handed the same request; the test recorder sees each one.
-            #[cfg(test)]
-            self.live_font_log.push((*window_id, request.clone()));
             #[cfg(not(test))]
             let _ = window_id;
-            {
-                let Some(renderer) = child.renderer.as_mut() else {
-                    // When: child.renderer is None for test-seeded entries; skip so the
-                    // new size reaches only windows that can actually rasterize it.
+            let target: &mut dyn LiveFontTarget = match child.renderer.as_mut() {
+                Some(renderer) => renderer,
+                #[cfg(test)]
+                None => {
+                    // When: child.renderer is None in a test-seeded window; its recorder takes the delivery.
+                    &mut LiveFontRecorder { window_id: *window_id, log: &mut self.live_font_log }
+                }
+                #[cfg(not(test))]
+                None => {
+                    // When: child.renderer is None, the window cannot rasterize, so no font is rebuilt.
                     continue;
-                };
-                renderer.set_font(&family, size, line_h, weight_scale);
-            }
+                }
+            };
+            // Every window's new font is delivered here, and only here.
+            target.deliver(&request);
             let Some(renderer) = child.renderer.as_ref() else {
                 // When: child.renderer is None for test-seeded entries, so there is no
                 // cell_size or padding inset to fit new pane rects against.
@@ -92,4 +92,33 @@ pub(super) struct LiveFontRequest {
     pub(super) line_height: f32,
     /// The effective monochrome weight scale.
     pub(super) weight_scale: f32,
+}
+
+/// Where `apply_live_font` delivers a window's new font: its renderer, or in tests a recorder for a
+/// window that has none.
+trait LiveFontTarget {
+    /// Rebuild this window's font from `request`.
+    fn deliver(&mut self, request: &LiveFontRequest);
+}
+
+impl LiveFontTarget for sonicterm_gpu::core::GpuRenderer {
+    fn deliver(&mut self, request: &LiveFontRequest) {
+        self.set_font(&request.family, request.size, request.line_height, request.weight_scale);
+    }
+}
+
+/// The test target for a window with no renderer: it records the request the window was handed.
+#[cfg(test)]
+struct LiveFontRecorder<'log> {
+    /// The window being delivered to.
+    window_id: winit::window::WindowId,
+    /// The app's log of deliveries.
+    log: &'log mut Vec<(winit::window::WindowId, LiveFontRequest)>,
+}
+
+#[cfg(test)]
+impl LiveFontTarget for LiveFontRecorder<'_> {
+    fn deliver(&mut self, request: &LiveFontRequest) {
+        self.log.push((self.window_id, request.clone()));
+    }
 }
