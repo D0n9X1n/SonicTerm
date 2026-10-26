@@ -641,7 +641,10 @@ glyph that drew nothing (refused by the atlas, rasterized nothing, or too large
 to place) and a tab title that never shaped. The test then checks that every
 resident tile is in the helper's set at the same raster size and, for S9, that
 representative emoji and CJK codepoints from the fixture's last line are
-resident real tiles at both scales. It proves only the glyphs that frame
+resident real tiles at both scales, found by codepoint whatever face drew them: a
+system fallback face depends on which codepoints are requested together, so the
+test prints each one's drawn and isolated faces as `glyph_atlas_representative`
+lines rather than requiring them to match. It proves only the glyphs that frame
 requested, not every glyph the helper measures. The guard was set once these
 checks passed on Windows CI and the measured rows were recorded.
 

@@ -1413,7 +1413,7 @@ fn an_incomplete_helper_measurement_is_refused_before_the_drift_check() {
 
 /// Representative S9 emoji and CJK scalars, taken from the fixture's last line, which the real
 /// renderer's viewport shows at both scales (the cursor sits on the row below it). Test 17 checks
-/// that each resolves to a resident real tile.
+/// that a resident body tile draws each with pixels, whatever fallback face drew it.
 const S9_REPRESENTATIVE_CODEPOINTS: [char; 6] = ['😀', '🍣', '🌏', '漢', '字', 'あ'];
 
 /// Every representative codepoint is drawn by S9: each appears on the fixture's last line, so the
@@ -1596,7 +1596,7 @@ mod real_renderer_coverage {
     use sonicterm_cfg::theme::Theme;
     use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
     use sonicterm_gpu::glyph_working_set::{
-        measure_glyph_working_set, representative_gaps, representative_identities,
+        measure_glyph_working_set, representative_gaps, representative_identities, TileIdentity,
     };
     use winit::application::ApplicationHandler;
     use winit::dpi::PhysicalSize;
@@ -1753,7 +1753,7 @@ mod real_renderer_coverage {
     /// It then holds every required footer symbol and title character as a real tile, prints its
     /// atlas as a `source=real_renderer` row, every resident tile resolves to an identity (face,
     /// glyph, strike, variant and flags), each identity is in the helper's set with the same
-    /// raster size, and for S9 each representative codepoint resolves to a resident real tile.
+    /// raster size, and for S9 a resident body tile draws each representative codepoint with pixels.
     fn covered(
         active: &ActiveEventLoop,
         name: &str,
@@ -1810,14 +1810,40 @@ mod real_renderer_coverage {
         let dpi = (72.0 * scale).round() as usize;
         if name == "S9" {
             // When: the fixture is S9, its representative emoji and CJK must be real resident tiles.
-            let resolved = representative_identities(
+            let body_tiles = renderer.__test_resident_body_tiles();
+            let sizes: Vec<_> = body_tiles.iter().map(|(key, size, _)| (*key, *size)).collect();
+            let gaps = representative_gaps(&super::S9_REPRESENTATIVE_CODEPOINTS, &sizes);
+            // Diagnostics only: shaping a codepoint alone may pick another fallback face than the frame.
+            let alone = representative_identities(
                 &super::S9_REPRESENTATIVE_CODEPOINTS,
                 FONT_FAMILY,
                 size_pt,
                 dpi,
                 &font_dirs(),
             );
-            let gaps = representative_gaps(&resolved, &identities);
+            let label = |identity: Option<&TileIdentity>| {
+                identity.map_or_else(
+                    || "unresolved".to_owned(),
+                    |identity| {
+                        format!(
+                            "{} glyph {}",
+                            identity.source.face.source, identity.source.glyph_id
+                        )
+                    },
+                )
+            };
+            for (codepoint, isolated) in &alone {
+                let drawn: Vec<String> = body_tiles
+                    .iter()
+                    .filter(|(key, _, _)| key.ch == *codepoint)
+                    .map(|(_, _, identity)| label(identity.as_ref()))
+                    .collect();
+                println!(
+                    "glyph_atlas_representative fixture=S9 scale={scale} codepoint={codepoint} \
+                     drawn={drawn:?} alone={}",
+                    label(isolated.as_ref())
+                );
+            }
             check(
                 gaps.is_empty(),
                 &format!("{case}: representative codepoints not drawn: {gaps:?}"),

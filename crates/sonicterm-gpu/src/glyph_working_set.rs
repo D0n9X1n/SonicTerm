@@ -470,27 +470,28 @@ fn codepoint_identity(
     tile_identity(stack, key, &info)
 }
 
-/// Every representative codepoint the renderer's resident tiles do not hold as a real raster, with
-/// why: `no real glyph` (it resolved to no tile identity), `not resident`, or `no pixels`.
+/// Every representative codepoint no resident body tile draws with pixels, with why: `not resident`
+/// (no tile for it) or `no pixels` (its tiles are all empty). Tiles are matched by codepoint,
+/// whatever face drew them, because a system fallback face depends on the codepoints requested
+/// together.
 #[must_use]
 pub fn representative_gaps(
-    resolved: &[(char, Option<TileIdentity>)],
-    resident: &HashMap<TileIdentity, [u32; 2]>,
+    codepoints: &[char],
+    resident: &[(GlyphKey, [u32; 2])],
 ) -> Vec<(char, &'static str)> {
-    resolved
+    codepoints
         .iter()
-        .filter_map(|(codepoint, identity)| {
-            let Some(identity) = identity else {
-                // When: identity is None, the codepoint resolved to no real glyph, which is a gap.
-                return Some((*codepoint, "no real glyph"));
-            };
-            match resident.get(identity) {
-                None => Some((*codepoint, "not resident")),
-                Some([width_px, height_px]) if *width_px == 0 || *height_px == 0 => {
-                    Some((*codepoint, "no pixels"))
-                }
-                Some(_) => None,
-            }
+        .filter_map(|codepoint| {
+            let sizes: Vec<[u32; 2]> = resident
+                .iter()
+                .filter(|(key, _)| {
+                    key.ch == *codepoint && key.raster_variant == GlyphRasterVariant::Normal
+                })
+                .map(|(_, size)| *size)
+                .collect();
+            let drawn = sizes.iter().any(|[width_px, height_px]| *width_px > 0 && *height_px > 0);
+            let gap = if sizes.is_empty() { "not resident" } else { "no pixels" };
+            (!drawn).then_some((*codepoint, gap))
         })
         .collect()
 }

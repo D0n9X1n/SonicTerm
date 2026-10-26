@@ -505,33 +505,23 @@ fn a_representative_codepoint_resolves_to_its_real_tile_identity() {
     assert_eq!(resolved[1], ('\u{F0000}', None), "no face covers U+F0000");
 }
 
-/// Each representative codepoint must be resident in the renderer's atlas with a real raster: an
-/// unresolved codepoint, an identity the atlas does not hold, and a resident zero-size tile are each
-/// a named gap, and a resident real tile is not.
+/// A representative codepoint counts as drawn when some resident body tile for it carries pixels,
+/// whatever face drew it; one with no tile, only empty tiles, or only a tile of another raster role
+/// is a named gap.
 #[test]
-fn a_representative_gap_names_each_unresolved_absent_or_empty_tile() {
-    let identity = |glyph_id: u32| TileIdentity {
-        source: sonicterm_engine::ResolvedGlyphFace {
-            face: sonicterm_engine::FaceIdentity { source: "face.ttf".into(), face_index: 0 },
-            glyph_id,
-            strike_px_milli: 14_000,
-        },
-        raster_variant: GlyphRasterVariant::Normal,
-        bold: false,
-        italic: false,
-        is_color: false,
-        is_subpixel: false,
-    };
-    let resident = HashMap::from([(identity(1), [8, 12]), (identity(3), [0, 12])]);
-    let resolved = vec![
-        ('a', Some(identity(1))),
-        ('b', None),
-        ('c', Some(identity(2))),
-        ('d', Some(identity(3))),
+fn a_representative_gap_names_each_absent_or_empty_codepoint() {
+    let body =
+        |codepoint: char, font_slot: u8| GlyphKey::shaped(codepoint, font_slot, 7, false, false);
+    let resident = vec![
+        (body('a', 3), [8, 12]),
+        (body('b', 0), [0, 12]),
+        (GlyphKey { raster_variant: GlyphRasterVariant::TabTitle, ..body('d', 0) }, [8, 12]),
+        (body('e', 0), [0, 0]),
+        (body('e', 5), [9, 12]),
     ];
     assert_eq!(
-        representative_gaps(&resolved, &resident),
-        vec![('b', "no real glyph"), ('c', "not resident"), ('d', "no pixels")]
+        representative_gaps(&['a', 'b', 'c', 'd', 'e'], &resident),
+        vec![('b', "no pixels"), ('c', "not resident"), ('d', "not resident")]
     );
 }
 

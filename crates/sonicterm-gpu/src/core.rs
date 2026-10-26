@@ -5428,6 +5428,33 @@ impl GpuRenderer {
         })
     }
 
+    /// Test seam: every resident body-text tile with its raster size and, when its stack resolves
+    /// it, its identity, so a test can find the tile the renderer drew for a codepoint.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_resident_body_tiles(
+        &self,
+    ) -> Vec<(sonicterm_types::GlyphKey, [u32; 2], Option<crate::glyph_working_set::TileIdentity>)>
+    {
+        let mut tiles = Vec::new();
+        for key in self.glyph_atlas.resident_tile_keys() {
+            let Some(info) = self.glyph_atlas.get(key) else {
+                // When: `get(key)` finds no entry, the tile left the atlas since the key list was taken.
+                continue;
+            };
+            if key.raster_variant != GlyphRasterVariant::Normal || info.missing || info.oversize {
+                // When: `key.raster_variant` is chrome, or `info` is a missing or oversize sentinel, it is no body tile.
+                continue;
+            }
+            let identity = self
+                .font_stack
+                .as_ref()
+                .and_then(|stack| crate::glyph_working_set::tile_identity(stack, key, &info));
+            tiles.push((key, info.px_size, identity));
+        }
+        tiles
+    }
+
     /// Apply a new font family / size / line-height multiplier without
     /// reconstructing the renderer.
     ///
