@@ -1,11 +1,12 @@
 #![cfg(target_os = "windows")]
 //! Where Cascadia Mono's digits land in a real Windows software frame. Placement is checked
-//! absolutely: a digit whose outline rests on the baseline (yMin 0) has its last ink row just above
-//! the renderer's own baseline row. Tops are checked relative to each other: two digits' first ink
-//! rows differ by what their outlines predict, so the round 2, which overshoots the flat 7 by 20 of
-//! 2048 units, shows one row higher at 21.75 px. Absolute tops are not asserted: DirectWrite inks a
-//! top row the outline barely touches at some strikes (every digit at 14.5 px), which no
-//! outline-coverage threshold models.
+//! absolutely: every digit 0-9 is drawn, and its last ink row is just above the renderer's own
+//! baseline row. That holds for the round-bottomed digits too, whose 20-30 unit overshoot below the
+//! baseline (of 2048) never inks a row at these strikes. Tops are checked relative to each other:
+//! two digits' first ink rows differ by what their outlines predict, so the round 2, which
+//! overshoots the flat 7 by 20 units, shows one row higher at 21.75 px. Absolute tops are not
+//! asserted: DirectWrite inks a top row the outline barely touches at some strikes (every digit at
+//! 14.5 px), which no outline-coverage threshold models.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -92,8 +93,8 @@ fn hex_rgb(hex: &str) -> Result<[u8; 3], String> {
 struct DigitInk {
     /// The digit drawn.
     digit: char,
-    /// Whether the outline's lowest point is on the baseline, so its last ink row is just above it.
-    flat_bottom: bool,
+    /// The outline's lowest point in font units; below 0 it overshoots the baseline.
+    y_min: i16,
     /// Rows above the baseline the outline predicts ink in.
     rows_above_baseline: u32,
     /// Whether the predicted top row's coverage is clear of the ink threshold.
@@ -231,28 +232,29 @@ fn check_scale(active: &ActiveEventLoop, scale: f32) -> Result<Option<Vec<String
         );
         digits.push(DigitInk {
             digit,
-            flat_bottom: extent.y_min == 0,
+            y_min: extent.y_min,
             rows_above_baseline: predicted.rows_above_baseline,
             decided,
             top_row,
             bottom_row,
         });
     }
-    let flat: Vec<char> =
-        digits.iter().filter(|ink| ink.flat_bottom).map(|ink| ink.digit).collect();
-    let mut failures = Vec::new();
-    if !['1', '2', '7'].iter().all(|digit| flat.contains(digit)) {
-        // When: 1, 2 or 7 is not flat-bottomed, this is not the face the placement check expects.
-        failures.push(format!("{FAMILY}'s flat-bottomed digits are {flat:?}, not 1, 2 and 7"));
-    }
-    // Each flat-bottomed digit whose last ink row is not just above `baseline_row`.
+    let mut failures: Vec<String> = digits
+        .iter()
+        .filter(|ink| ink.top_row.is_none() || ink.bottom_row.is_none())
+        .map(|ink| format!("{} drew no ink at {scale}x", ink.digit))
+        .collect();
+    // Each digit whose last ink row is not just above `baseline_row`, naming those whose outline
+    // overshoots the baseline, which at these strikes still inks no row below it.
     let misplaced = |baseline_row: u32| -> Vec<String> {
         digits
             .iter()
-            .filter(|ink| ink.flat_bottom && ink.bottom_row != baseline_row.checked_sub(1))
+            .filter(|ink| ink.bottom_row != baseline_row.checked_sub(1))
             .map(|ink| {
+                let overshoot =
+                    if ink.y_min < 0 { " (its outline overshoots the baseline)" } else { "" };
                 format!(
-                    "{} at {scale}x: last ink row {:?}, baseline row {baseline_row}",
+                    "{} at {scale}x: last ink row {:?}, baseline row {baseline_row}{overshoot}",
                     ink.digit, ink.bottom_row
                 )
             })
@@ -263,13 +265,12 @@ fn check_scale(active: &ActiveEventLoop, scale: f32) -> Result<Option<Vec<String
         // When: a baseline 1 px low still matches, the bottom check cannot see a misplaced baseline.
         failures.push(format!("at {scale}x a baseline 1 px below the renderer's still matched"));
     }
+    // The margin exemption applies only here: a top too close to the threshold is not compared.
     let decided: Vec<&DigitInk> = digits.iter().filter(|ink| ink.decided).collect();
     for (index, first) in decided.iter().enumerate() {
         for second in &decided[index + 1..] {
             let (Some(first_top), Some(second_top)) = (first.top_row, second.top_row) else {
-                // When: either decided digit drew no ink, its top cannot be compared.
-                failures
-                    .push(format!("{} or {} drew no ink at {scale}x", first.digit, second.digit));
+                // When: either digit drew no ink, which the drawn check above already reports.
                 continue;
             };
             let measured = i64::from(first_top) - i64::from(second_top);
@@ -287,10 +288,10 @@ fn check_scale(active: &ActiveEventLoop, scale: f32) -> Result<Option<Vec<String
     Ok(Some(failures))
 }
 
-/// At every scale the font-weight test checks, each flat-bottomed Cascadia Mono digit's last ink row
-/// is the renderer's baseline row less one, and a baseline 1 px lower fails that check. Each pair of
-/// decided digits' tops differ by what their outlines predict; a top within `DECISION_MARGIN` of the
-/// ink threshold is printed, not compared. A host without the face skips with a printed reason.
+/// At every scale the font-weight test checks, every Cascadia Mono digit 0-9 is drawn and its last
+/// ink row is the renderer's baseline row less one, and a baseline 1 px lower fails that check. Each
+/// pair of decided digits' tops differ by what their outlines predict; only this comparison skips a
+/// top within `DECISION_MARGIN` of the ink threshold. A host without the face skips with a reason.
 #[test]
 fn cascadia_mono_digit_tops_follow_their_outlines() {
     let event_loop = EventLoop::builder().with_any_thread(true).build().expect("an event loop");
