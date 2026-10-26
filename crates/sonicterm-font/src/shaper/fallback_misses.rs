@@ -6,6 +6,10 @@ use crate::{ftwrap, hbwrap as harfbuzz};
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+/// How many characters one slot records before its set starts over. A cleared miss costs one
+/// reopen of the face, so the bound only trades memory for an occasional open.
+pub(crate) const MAX_MISSES_PER_SLOT: usize = 4_096;
+
 /// How deep `draws` follows a canonical decomposition; Unicode's are at most four deep.
 const DECOMPOSITION_DEPTH: u32 = 4;
 
@@ -29,16 +33,29 @@ impl FallbackMisses {
         })
     }
 
-    /// Record the characters of `run` that `face`, slot `font_idx`'s face, cannot draw. A run the
+    /// Record the characters of `run` that `face`, slot `font_idx`'s face, cannot draw; the main
+    /// slot records nothing and each slot holds at most [`MAX_MISSES_PER_SLOT`]. A run the
     /// face completed no cluster of can still hold characters it draws, such as a base beside an
     /// unsupported combining mark, so each character is asked of the face itself.
     pub(crate) fn record(&self, font_idx: FallbackIdx, face: &ftwrap::Face, run: &str) {
-        let Some(misses) = self.slots.get(font_idx) else {
-            // When: `font_idx` names no slot, there is no record to add to.
+        let Some(misses) = self.slots.get(font_idx).filter(|_| font_idx > 0) else {
+            // When: `font_idx` is the main slot, which is never skipped, or names no slot.
             return;
         };
-        let undrawable = run.chars().filter(|character| !draws(face, u32::from(*character), 0));
-        misses.borrow_mut().extend(undrawable);
+        let mut misses = misses.borrow_mut();
+        for character in run.chars().filter(|character| !draws(face, u32::from(*character), 0)) {
+            if misses.len() >= MAX_MISSES_PER_SLOT && !misses.contains(&character) {
+                // A full set starts over, so one slot never grows past the bound.
+                misses.clear();
+            }
+            misses.insert(character);
+        }
+    }
+
+    /// How many characters slot `font_idx` has recorded.
+    #[cfg(test)]
+    pub(crate) fn recorded(&self, font_idx: FallbackIdx) -> usize {
+        self.slots.get(font_idx).map_or(0, |misses| misses.borrow().len())
     }
 }
 
@@ -66,3 +83,7 @@ fn draws(face: &ftwrap::Face, codepoint: u32, depth: u32) -> bool {
         } != 0;
     decomposes && [first, second].into_iter().any(|part| part != 0 && draws(face, part, depth + 1))
 }
+
+#[cfg(test)]
+#[path = "fallback_misses_tests.rs"]
+mod fallback_misses_tests;
