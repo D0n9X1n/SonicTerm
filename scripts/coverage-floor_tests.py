@@ -1808,10 +1808,10 @@ class MacosProvenanceTests(unittest.TestCase):
 class RepositoryContractTests(unittest.TestCase):
     """The committed baseline and gate script agree with the repository."""
 
-    def test_committed_baseline_is_valid_and_keyed_to_the_macos_arm64_ci_runner(self):
-        # The committed floor loads and names the host CI enforces it on.
+    def test_committed_baseline_is_valid_and_keyed_to_the_linux_coverage_container(self):
+        # The committed floor loads and names the host CI enforces it on: linux-coverage's ubuntu:22.04 container.
         committed = floor.load_baseline(str(_HERE / "coverage-baseline.json"))
-        self.assertEqual((committed.target, committed.runner), ("aarch64-apple-darwin", "macos14/ARM64"))
+        self.assertEqual((committed.target, committed.runner), ("x86_64-unknown-linux-gnu", "ubuntu22-container/X64"))
         self.assertEqual(committed.tolerance_pp, 1.0)
 
     def test_committed_macos_section_names_the_macos_only_logic_files(self):
