@@ -468,7 +468,7 @@ CPU `GlyphAtlas` 是正方形 BGRA8 纹理，按需增长到最大 2048×2048（
 性能比较的 base 侧。辅助程序行和 Windows 真实渲染器行来自 `main` 上的 `push` CI 运行，或来自改变工作集
 的确切头提交上的 `pull_request` CI 运行；`pull_request` 行写明其拉取请求，其他行都不写。工作集步骤把每个
 实时辅助程序测量与其记录行精确比较，因此改变辅助程序适配结果、最大图块或豆腐块数量的改动会一直失败，
-直到重新记录这些行。重新记录时，让 CI 在改变工作集的头提交上运行，然后把每条
+直到重新记录这些行。这些行绑定到录制时的运行器镜像（`sonicterm-text` 的 `recording_image.rs` 中的 `RECORDING_IMAGES`：每个平台的镜像、`ImageVersion` 和 `RUNNER_ARCH`），只有在该镜像上比较才是精确的。在 CI（`GITHUB_ACTIONS=true`）上，任何其他镜像都会使该步骤失败，并提示“re-record the helper rows on <image>”。没有运行器镜像的本地主机把差异作为提示打印。完整性（`incomplete_glyphs` 为 0）、没有未批准的光栅化失败，以及实时 fit 不超过起始常量，在任何主机上都是必需的。重新录制时也要更新录制镜像。重新记录时，让 CI 在改变工作集的头提交上运行，然后把每条
 `glyph_atlas_working_set ... source=helper` 行（真实渲染器有变化时，还有每条 `source=real_renderer` 行）
 连同作业 id 和日志行复制进表中，并一起设置该来源的运行、尝试、提交、来源侧和拉取请求。该步骤先打印
 每一行，最后只失败一次并列出所有漂移，因此一次运行就能得到完整的辅助程序行。真实渲染器行由其作业中

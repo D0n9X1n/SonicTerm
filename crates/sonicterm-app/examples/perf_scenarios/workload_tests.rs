@@ -1185,6 +1185,7 @@ fn missing_required_chrome(
 fn glyph_atlas_working_set() {
     use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
     use sonicterm_text::glyph_atlas::{ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    use sonicterm_text::recording_image::{drift_policy, DriftPolicy, HostImage};
     use sonicterm_text::start_size_inputs::{
         normalize_raster_failures, ruled_start, start_rule, validate_table_start, InputSource,
         RuleInput, RASTER_EXCEPTIONS, SIZING_ORACLE_COMPLETE, START_SIZE_INPUTS,
@@ -1201,6 +1202,11 @@ fn glyph_atlas_working_set() {
     let fixtures = [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)];
     let titles = ["zsh", "perf_scenarios", "S12 covered window"];
     let platform = platform_name();
+    // The rows hold exactly only on the image they were recorded on; CI on another image fails.
+    let policy = drift_policy(platform, &HostImage::from_env());
+    if let DriftPolicy::Rerecord(reason) = &policy {
+        failures.push(reason.clone());
+    }
     for (scale, dpi, constant) in [(1, 72, START_ATLAS_DIM_1X), (2, 144, START_ATLAS_DIM_2X)] {
         match validate_table_start(scale, constant) {
             Ok(table) => println!(
@@ -1309,6 +1315,10 @@ fn glyph_atlas_working_set() {
                 recorded.map_or_else(|| "none".to_owned(), |row| row.provenance.describe());
             match check {
                 HelperCheck::Matches | HelperCheck::MaximumOnly => {}
+                HelperCheck::Drifted(reason) if policy == DriftPolicy::Advisory => println!(
+                    "glyph_atlas_working_set advisory: {name} at {scale}x differs from its recorded \
+                     helper row, recorded on another image ({provenance}): {reason}"
+                ),
                 HelperCheck::Drifted(reason) => failures.push(format!(
                     "{name} at {scale}x drifted from its recorded helper row ({provenance}): {reason}"
                 )),

@@ -33,6 +33,7 @@
 // same edit as a stub the renderer can construct against.
 pub mod face_content;
 pub mod glyph_atlas;
+pub mod recording_image;
 pub mod row_glyph_cache;
 pub mod shape;
 pub mod start_size_inputs;

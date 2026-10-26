@@ -10,6 +10,8 @@ It holds no shape-result cache.
 - `glyph_atlas.rs` - atlas pages and glyph placement.
 - `row_glyph_cache.rs` - content-keyed row glyph cache: position-free records, pins, staged slots, quotas and budgets.
 - `face_content.rs` - a face's content identity: the namespaced SHA-256 of the bytes it was loaded from.
+- `recording_image.rs` - the runner image each platform's helper rows were recorded on, and
+  the drift policy for a host on another image.
 - `lib.rs` - public exports.
 
 ## Local gate
@@ -54,7 +56,11 @@ cargo build -p sonicterm-text
   `pull_request` run on the exact head that changed the working set, which
   names its PR. To re-record, copy the `glyph_atlas_working_set` lines of one
   run with their job ids and log lines; the working-set step prints every row
-  before it fails once, and its drift check stays exact. `SIZING_ORACLE_COMPLETE` is true; `ruled_start` still refuses a
+  before it fails once, and its drift check is exact on the image the rows were recorded on
+  (`recording_image::RECORDING_IMAGES`: runner image, `ImageVersion` and `RUNNER_ARCH` per
+  platform). On CI another image fails the step with "re-record the helper rows on <image>"; a
+  local host on another image prints differences as advisory. Completeness, unapproved raster
+  failures and the live fit stay mandatory everywhere. Re-recording also updates the image. `SIZING_ORACLE_COMPLETE` is true; `ruled_start` still refuses a
   scale missing any `required_inputs` row, and a row with nonzero
   `incomplete_glyphs` always selects 2048. Changing a start constant means new
   rows and the rule's new answer, never an edited constant alone. `RASTER_EXCEPTIONS` (empty) exempts a raster
