@@ -198,11 +198,14 @@ fn check_scale(active: &ActiveEventLoop, scale: f32) -> Result<Option<Vec<String
         let extent = glyph_extent(&font, digit).ok_or_else(|| format!("no outline for {digit}"))?;
         let predicted = predicted_ink_top(extent, strike_px, threshold);
         let decided = (predicted.top_row_coverage - threshold).abs() >= DECISION_MARGIN;
-        let measured = ink_rows(column as u32).first().copied();
+        // The bottom row is printed beside the top: a misplaced glyph moves both, a raster that
+        // inks one more row at its top moves only the top.
+        let ink = ink_rows(column as u32);
+        let (measured, bottom) = (ink.first().copied(), ink.last().copied());
         println!(
             "digit_top scale={scale} strike_px={strike_px} digit={digit} y_max={} \
              top_row_coverage={:.3} threshold={threshold:.3} baseline={baseline} \
-             predicted={:?} measured={measured:?} decided={decided}",
+             predicted={:?} measured={measured:?} bottom={bottom:?} decided={decided}",
             extent.y_max,
             predicted.top_row_coverage,
             baseline.checked_sub(predicted.rows_above_baseline)
