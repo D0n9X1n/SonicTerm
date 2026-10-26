@@ -635,6 +635,8 @@ pub struct App {
     pub(super) font_catalog: font_catalog::FontCatalog,
     /// Enumerates installed monospace families for the catalog worker; tests inject a counter.
     pub(super) font_enumerator: font_catalog::FontEnumerator,
+    /// The catalog worker, once the picker started it; kept so it is owned, never joined.
+    pub(super) font_catalog_worker: Option<std::thread::JoinHandle<()>>,
     /// The live family when the font picker opened, restored when the picker is cancelled.
     pub(super) font_picker_original: Option<String>,
     /// Moves on every reload, save and picker choice of the font family, so a catalog report the

@@ -127,3 +127,20 @@ fn an_explicit_changed_or_newer_family_is_kept() {
     reloaded.adopt_resolved_family_from("Cascadia Mono", resolved(), false, before);
     assert_eq!(reloaded.config.font.family, "Cascadia Mono");
 }
+
+/// The worker the picker started is kept, and shutdown never waits for it. A report that lands
+/// after `finish_session` is ignored without a panic and changes neither the catalog nor the font.
+#[test]
+fn a_report_after_finish_session_changes_nothing() {
+    let mut app = app_with_family("Menlo");
+    app.font_enumerator = || Ok(vec!["Menlo".to_string(), "Monaco".to_string()]);
+    let child = app.__test_seed_child_window(&["work"]);
+    assert!(app.run_action_for_window(&Action::ChooseFontFamily, child));
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape));
+    app.finish_session();
+    let worker = app.font_catalog_worker.take().expect("the picker started a worker");
+    worker.join().expect("the worker finishes on its own");
+    app.adopt_font_catalog(vec!["Menlo".into(), "Monaco".into()]);
+    assert_eq!(app.font_catalog, FontCatalog::Loading);
+    assert_eq!(app.config.font.family, "Menlo");
+}

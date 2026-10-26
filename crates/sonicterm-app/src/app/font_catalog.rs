@@ -30,9 +30,9 @@ pub(crate) struct FontCatalogReport {
 /// The function that enumerates installed monospace families; tests inject a counting one.
 pub(crate) type FontEnumerator = fn() -> anyhow::Result<Vec<String>>;
 
-/// Run `enumerate` on a worker thread and hand its report to `deliver`; returns at once. A worker
-/// that cannot start leaves the catalog loading.
-pub(crate) fn spawn<E, D>(enumerate: E, deliver: D)
+/// Run `enumerate` on a worker thread and hand its report to `deliver`; returns its handle at once.
+/// A worker that cannot start leaves the catalog loading and returns `None`.
+pub(crate) fn spawn<E, D>(enumerate: E, deliver: D) -> Option<std::thread::JoinHandle<()>>
 where
     E: FnOnce() -> anyhow::Result<Vec<String>> + Send + 'static,
     D: FnOnce(FontCatalogReport) + Send + 'static,
@@ -44,10 +44,13 @@ where
         });
         deliver(FontCatalogReport { families });
     };
-    if let Err(error) = std::thread::Builder::new().name("sonicterm-font-catalog".into()).spawn(job)
-    {
-        // The catalog then stays loading, and the picker lists only the current family.
-        tracing::warn!("font catalog worker did not start: {error}");
+    match std::thread::Builder::new().name("sonicterm-font-catalog".into()).spawn(job) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            // The catalog then stays loading, and the picker lists only the current family.
+            tracing::warn!("font catalog worker did not start: {error}");
+            None
+        }
     }
 }
 
@@ -71,9 +74,9 @@ impl App {
         }
         self.font_catalog = FontCatalog::Loading;
         let proxy = self.event_loop_proxy.clone();
-        // No handle is kept or joined: once the event loop ends, `send_event` returns
-        // `EventLoopClosed` on every backend, so a late report is dropped as the worker finishes.
-        spawn(self.font_enumerator, move |report| {
+        // The handle is kept but never joined: finish_session does not wait for enumeration. After the
+        // loop ends `send_event` returns `EventLoopClosed`, and a report after shutdown is ignored.
+        self.font_catalog_worker = spawn(self.font_enumerator, move |report| {
             if let Some(proxy) = proxy {
                 // When: `proxy` is Some, an event loop is running to receive the report.
                 let _ = proxy.send_event(UserEvent::FontCatalogReady { families: report.families });
@@ -83,6 +86,10 @@ impl App {
 
     /// Record the worker's report as the picker's rows, refreshing an open picker in place.
     pub(super) fn adopt_font_catalog(&mut self, families: Vec<String>) {
+        if self.session_finished.is_some() {
+            // When: `session_finished` is set, the session has ended and a late report changes nothing.
+            return;
+        }
         tracing::info!(monospace_families = families.len(), "font catalog ready");
         self.font_catalog = FontCatalog::Ready(families);
         // A picker opened while the catalog loaded now lists it.
