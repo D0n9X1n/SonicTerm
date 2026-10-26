@@ -98,3 +98,16 @@ fn a_configured_or_changed_family_is_kept() {
     assert_eq!(changed.configured_font_family, "Cascadia Mono");
     assert_eq!(changed.font_catalog, FontCatalog::Ready(installed));
 }
+
+/// A config built in memory, as the perf harness builds one, never reaches the file the worker
+/// reads; its non-default family must survive even though that file names none, or the live font
+/// changes under a running session and every pane refits.
+#[test]
+fn a_non_default_family_survives_an_unconfigured_report() {
+    let installed = vec!["Cascadia Mono".to_string(), "Consolas".to_string()];
+    let mut app = app_with_family("Consolas");
+    app.adopt_font_catalog_from(&["Cascadia Mono", "Consolas"], installed.clone(), false);
+    assert_eq!(app.config.font.family, "Consolas");
+    assert_eq!(app.configured_font_family, "Consolas");
+    assert_eq!(app.font_catalog, FontCatalog::Ready(installed));
+}
