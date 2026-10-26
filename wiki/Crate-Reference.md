@@ -224,6 +224,10 @@ asset lookup, typed URI/path detection, and safe URI-open policy.
 **Read:** `src/{config,theme,keymap,assets,url_scan,url_open,launch_url,dimension}.rs`.
 `launch_url.rs` validates `ssh:` and `x-man-page:` links into fixed client argv.
 
+`config.rs` keeps the schema and loading API; private siblings `config_persist.rs`,
+`config_status_save.rs`, and `config_template.rs` own atomic persistence,
+comment-preserving status-list edits, and the starter template. Public config paths stay unchanged.
+
 ### `sonicterm-ui`
 
 **Role:** renderer-independent UI state and layout for tabs, panes, command

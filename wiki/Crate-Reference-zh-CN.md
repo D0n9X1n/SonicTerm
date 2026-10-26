@@ -205,6 +205,10 @@ grant 可以接纳。接纳关闭后，不再走这条正常重试路径。
 **阅读：** `src/{config,theme,keymap,assets,url_scan,url_open,launch_url,dimension}.rs`。
 `launch_url.rs` 把 `ssh:` 和 `x-man-page:` 链接校验为固定客户端的 argv。
 
+`config.rs` 保留配置结构与加载 API；私有同级文件 `config_persist.rs`、
+`config_status_save.rs` 和 `config_template.rs` 分别负责原子保存、保留注释的状态栏列表编辑
+和初始配置模板。公开配置路径保持不变。
+
 ### `sonicterm-ui`
 
 **职责：** 与渲染器无关的界面状态和布局，包括标签页、窗格、命令面板、搜索、

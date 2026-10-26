@@ -6,7 +6,9 @@ and target safety. This crate is the only place that should parse
 `sonicterm.toml`, theme TOML, keymap TOML, and clickable URI/path text.
 
 ## Key files
-- `config.rs` - user config schema, defaults, load/fallback behavior.
+- `config.rs` - user config schema, defaults, load/fallback behavior; private siblings
+  `config_persist.rs`, `config_status_save.rs`, and `config_template.rs` own atomic persistence,
+  comment-preserving status-list edits, and the starter template.
 - `theme.rs` - theme schema and named/path loading.
 - `keymap.rs` - keymap schema and action binding resolution.
 - `assets.rs` - bundled and user asset directory lookup.
