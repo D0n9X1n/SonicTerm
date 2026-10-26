@@ -61,8 +61,7 @@ resource baseline 采集。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版
 这些命令仍是各支持主机的本地 gate；既有 macOS 汇总要求 tooling 成功，因此没有检查变为可选。
 工作集测量留在 macos-core，复用已编译 harness，避免增加 macOS 冷构建及与 perf 竞争 runner。logic coverage
 在独立的 `linux-coverage` job 中、`linux-core` 所用的 `ubuntu:22.04` 容器内运行，不占用性能对比等待的 macOS runner 池。
-容器让其测试使用与 workspace gate 相同的 Cairo、FreeType 与 Fontconfig；`ubuntu-latest` host 上较新的 Cairo 绘制 COLR
-扫描渐变的结果不同。runner 不会把镜像标识导出到容器中，因此该 job 以这个容器作为其镜像标识。它安装固定版本
+容器让其测试使用与 workspace gate 相同的 Cairo、FreeType 与 Fontconfig，也就是其 baseline 测量时所用的库。runner 不会把镜像标识导出到容器中，因此该 job 以这个容器作为其镜像标识。它安装固定版本
 `cargo-llvm-cov` 发布的静态链接 x86_64 Linux 预编译二进制：由 `scripts/install-pinned-tool.sh` 安装，解包前先校验该 host 的 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
 

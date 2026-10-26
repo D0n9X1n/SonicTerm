@@ -1,5 +1,8 @@
 use crate::color::{SrgbaPixel, SrgbaTuple};
-use cairo::{Context, Extend, LinearGradient, Matrix, Mesh, MeshCorner, Operator, RadialGradient};
+use cairo::{
+    Context, Extend, Filter, Format, ImageSurface, LinearGradient, Matrix, Operator,
+    RadialGradient, SurfacePattern,
+};
 
 #[cfg(test)]
 #[path = "colr_tests.rs"]
@@ -102,22 +105,11 @@ pub enum DrawOp {
     ClosePath,
 }
 
-/// Total Bezier patches one sweep gradient may contribute to its mesh.
+/// Pixels a sweep gradient's raster may span on each axis: the glyph raster's own limit.
 ///
-/// A hostile color line can ask for billions of patches through extreme angles
-/// or a near-zero tiling span. The budget bounds the work at a level far above
-/// any well-formed gradient, which needs 16 patches for a full turn.
-const MAX_SWEEP_PATCHES: usize = 4096;
-
-/// Bezier splits one angular span may be divided into.
-///
-/// Splits are chosen from the span width, so an out-of-range angle produced by
-/// a malformed offset would otherwise scale the count without limit. Clamping
-/// degrades such a span to a coarse approximation instead of a hang.
-const MAX_SWEEP_SPLITS: usize = 256;
-
-/// Repeats of the stop list a Repeat/Reflect sweep may tile across the turn.
-const MAX_SWEEP_TILES: usize = 1000;
+/// The raster covers the current clip in device space, so a clip larger than any glyph the rasterizer accepts
+/// is painted only up to this bound and a malformed clip cannot allocate without limit.
+const MAX_SWEEP_RASTER_DIMENSION: usize = crate::rasterizer::MAX_RASTERIZED_GLYPH_DIMENSION;
 
 /// Drop stops carrying a non-finite offset and report whether any remain.
 ///
@@ -244,520 +236,191 @@ pub fn paint_radial_gradient(
     Ok(())
 }
 
-#[derive(Copy, Clone, Debug)]
-struct Point {
-    horizontal: f64,
-    vertical: f64,
-}
-
-impl Point {
-    fn dot(&self, other: Self) -> f64 {
-        (self.horizontal * other.horizontal) + (self.vertical * other.vertical)
-    }
-
-    fn normalize(self) -> Self {
-        let len = self.dot(self).sqrt();
-        Self { horizontal: self.horizontal / len, vertical: self.vertical / len }
-    }
-
-    pub fn sum(self, other: Self) -> Self {
-        Self {
-            horizontal: self.horizontal + other.horizontal,
-            vertical: self.vertical + other.vertical,
-        }
-    }
-
-    pub fn difference(self, other: Self) -> Self {
-        Self {
-            horizontal: self.horizontal - other.horizontal,
-            vertical: self.vertical - other.vertical,
-        }
-    }
-
-    pub fn scale(self, factor: f64) -> Self {
-        Self { horizontal: self.horizontal * factor, vertical: self.vertical * factor }
-    }
-
-    /// Compute a vector from the supplied angle
-    pub fn from_angle(angle: f64) -> Self {
-        let (sine, cosine) = angle.sin_cos();
-        Self { horizontal: cosine, vertical: sine }
-    }
-}
-
-fn interpolate(start: f64, end: f64, fraction: f64) -> f64 {
-    start + fraction * (end - start)
-}
-
-#[derive(Debug)]
-struct Patch {
-    start: Point,
-    start_control: Point,
-    end_control: Point,
-    end: Point,
-    color0: SrgbaTuple,
-    color1: SrgbaTuple,
-}
-
-impl Patch {
-    fn add_to_mesh(&self, center: Point, mesh: &Mesh) {
-        mesh.begin_patch();
-        mesh.move_to(center.horizontal, center.vertical);
-        mesh.line_to(self.start.horizontal, self.start.vertical);
-        mesh.curve_to(
-            self.start_control.horizontal,
-            self.start_control.vertical,
-            self.end_control.horizontal,
-            self.end_control.vertical,
-            self.end.horizontal,
-            self.end.vertical,
-        );
-        mesh.line_to(center.horizontal, center.vertical);
-
-        fn set_corner_color(mesh: &Mesh, corner: MeshCorner, color: SrgbaTuple) {
-            let SrgbaTuple(red, green, blue, alpha) = color;
-
-            mesh.set_corner_color_rgba(corner, red.into(), green.into(), blue.into(), alpha.into());
-        }
-
-        set_corner_color(mesh, MeshCorner::MeshCorner0, self.color0);
-        set_corner_color(mesh, MeshCorner::MeshCorner1, self.color0);
-        set_corner_color(mesh, MeshCorner::MeshCorner2, self.color1);
-        set_corner_color(mesh, MeshCorner::MeshCorner3, self.color1);
-
-        mesh.end_patch();
-    }
-}
-
-/// Approximate the span `start_angle`..`end_angle` with Bezier patches around `center`.
-///
-/// `budget` is the mesh's remaining patch allowance, decremented as patches are
-/// emitted; the split count is clamped to `MAX_SWEEP_SPLITS` so a malformed
-/// angle cannot scale the loop without limit. A non-finite span yields no
-/// patches because Cairo cannot represent its coordinates.
-#[allow(clippy::too_many_arguments)]
-fn add_sweep_gradient_patches(
-    mesh: &Mesh,
-    center: Point,
-    radius: f64,
-    start_angle: f64,
-    start_color: SrgbaTuple,
-    end_angle: f64,
-    end_color: SrgbaTuple,
-    budget: &mut usize,
-) {
-    if !start_angle.is_finite() || !end_angle.is_finite() {
-        // When: start_angle or end_angle is non-finite, Cairo cannot represent the
-        // patch coordinates, so the span contributes nothing.
-        return;
-    }
-    const MAX_ANGLE: f64 = std::f64::consts::PI / 8.;
-    let num_splits = (((end_angle - start_angle).abs() / MAX_ANGLE).ceil() as usize)
-        .min(MAX_SWEEP_SPLITS)
-        .min(*budget);
-
-    let mut start_direction = Point::from_angle(start_angle);
-    let mut color0 = start_color;
-
-    for idx in 0..num_splits {
-        let fraction = (idx as f64 + 1.) / num_splits as f64;
-
-        let angle1 = interpolate(start_angle, end_angle, fraction);
-        let color1 = start_color.interpolate(end_color, fraction);
-
-        let end_direction = Point::from_angle(angle1);
-
-        let bisector = start_direction.sum(end_direction).normalize();
-        let tangent = Point { horizontal: -bisector.vertical, vertical: bisector.horizontal };
-
-        fn compute_control(
-            bisector: Point,
-            tangent: Point,
-            direction: Point,
-            center: Point,
-            radius: f64,
-        ) -> Point {
-            let intersection = bisector.sum(
-                tangent
-                    .scale(direction.difference(bisector).dot(direction) / tangent.dot(direction)),
-            );
-            intersection
-                .difference(direction)
-                .scale(0.33333)
-                .sum(intersection)
-                .scale(radius)
-                .sum(center)
-        }
-
-        let patch = Patch {
-            color0,
-            color1,
-            start: center.sum(start_direction.scale(radius)),
-            end: center.sum(end_direction.scale(radius)),
-            start_control: compute_control(bisector, tangent, start_direction, center, radius),
-            end_control: compute_control(bisector, tangent, end_direction, center, radius),
-        };
-
-        patch.add_to_mesh(center, mesh);
-        *budget -= 1;
-
-        start_direction = end_direction;
-        color0 = color1;
-    }
-}
-
-/// Find the tile index whose stop list first reaches the visible turn.
-///
-/// The index is derived in constant time so a valid narrow span can begin more
-/// than `MAX_SWEEP_TILES` copies away without being mistaken for unbounded work.
-/// Emission remains separately bounded by the tile and patch budgets. A
-/// degenerate, reversed, non-finite, or unrepresentable span yields no tile.
-fn first_visible_tile(first_angle: f64, last_angle: f64, span: f64) -> Option<isize> {
-    if !span.is_finite() || span <= 0. || !first_angle.is_finite() || !last_angle.is_finite() {
-        // When: the stop span is not finite and forward-moving, so it cannot
-        // define a stable Repeat or Reflect tile sequence.
-        return None;
-    }
-
-    // When: first_angle or last_angle determines which span endpoint must be shifted to the visible turn.
-    let tile = if first_angle >= 0. {
-        -(first_angle / span).ceil()
-    } else if last_angle < 0. {
-        (-last_angle / span).ceil()
-    } else {
-        0.
-    };
-
-    if !tile.is_finite() || tile < isize::MIN as f64 || tile >= isize::MAX as f64 {
-        // When: tile is non-finite or outside isize, the bounded emission loop cannot represent it.
-        return None;
-    }
-
-    Some(tile as isize)
-}
-
 const PI_TIMES_2: f64 = std::f64::consts::PI * 2.;
 
-/// Tile `color_line` into `mesh` as the Bezier approximation of a sweep.
+/// The colour a COLRv1 sweep gradient gives each angle around its centre.
 ///
-/// Emits nothing for a color line left with no usable stop, so the first/last
-/// stop reads below cannot index an empty vector. Total emission is capped at
-/// `MAX_SWEEP_PATCHES`, which bounds the work for a hostile color line without
-/// affecting a well-formed one.
-fn apply_sweep_gradient_patches(
-    mesh: &Mesh,
-    mut color_line: ColorLine,
-    center: Point,
-    radius: f64,
-    mut start_angle: f64,
-    mut end_angle: f64,
-) {
-    if !prepare_color_stops(&mut color_line) {
-        // When: prepare_color_stops leaves color_line with no usable stop, so
-        // the first/last stop reads below would index an empty vector.
-        return;
-    }
-    if !center.horizontal.is_finite()
-        || !center.vertical.is_finite()
-        || !radius.is_finite()
-        || !start_angle.is_finite()
-        || !end_angle.is_finite()
-    {
-        // When: center, radius, start_angle, or end_angle is non-finite, Cairo cannot represent the sweep coordinates.
-        return;
-    }
+/// A stop sits at `start_angle + offset * (end_angle - start_angle)`, and the stops are kept in angle order.
+/// Between two stops the colour is interpolated on premultiplied channels. Pad clamps an angle to the first or
+/// last stop; Reflect mirrors every other repeat of the stop span; Repeat, and any other extend, repeats it.
+/// Angles are measured in user space from the positive x axis towards positive y, the way Cairo turns.
+struct SweepColors {
+    angles: Vec<f64>,
+    colors: Vec<SrgbaTuple>,
+    extend: Extend,
+}
 
-    let mut budget = MAX_SWEEP_PATCHES;
-
-    if start_angle == end_angle {
-        // When: start_angle equals end_angle the sweep has no width, so only
-        // Pad's flat fill outside the degenerate sweep can contribute.
-        if color_line.extend == Extend::Pad {
-            if start_angle > 0. {
-                let first_color = color_line.color_stops[0].color.into();
-                add_sweep_gradient_patches(
-                    mesh,
-                    center,
-                    radius,
-                    0.,
-                    first_color,
-                    start_angle,
-                    first_color,
-                    &mut budget,
-                );
-            }
-            if end_angle < PI_TIMES_2 {
-                let last = color_line.color_stops.len() - 1;
-                let last_color = color_line.color_stops[last].color.into();
-                add_sweep_gradient_patches(
-                    mesh,
-                    center,
-                    radius,
-                    end_angle,
-                    last_color,
-                    PI_TIMES_2,
-                    last_color,
-                    &mut budget,
-                );
-            }
+impl SweepColors {
+    /// Build the colour lookup, or None when the sweep paints nothing: no usable stop, a non-finite angle, or a
+    /// Repeat or Reflect line whose stops span no finite angle.
+    fn new(mut color_line: ColorLine, start_angle: f64, end_angle: f64) -> Option<Self> {
+        if !prepare_color_stops(&mut color_line)
+            || !start_angle.is_finite()
+            || !end_angle.is_finite()
+        {
+            // When: color_line has no usable stop or an angle is non-finite, so no angle has a colour.
+            return None;
         }
-        return;
-    }
-
-    if end_angle < start_angle {
-        std::mem::swap(&mut start_angle, &mut end_angle);
-        color_line.color_stops.reverse();
-        for stop in &mut color_line.color_stops {
-            stop.offset = 1.0 - stop.offset;
+        let span = end_angle - start_angle;
+        let mut stops: Vec<(f64, SrgbaTuple)> = color_line
+            .color_stops
+            .iter()
+            .map(|stop| (start_angle + stop.offset * span, stop.color.into()))
+            .collect();
+        if stops.iter().any(|(angle, _)| !angle.is_finite()) {
+            // When: an offset times the sweep overflowed, so a stop has no representable angle.
+            return None;
         }
+        // A backwards sweep puts later offsets at smaller angles; reversing first keeps a hard stop's pair in
+        // angle order through the stable sort below.
+        if span < 0. {
+            stops.reverse();
+        }
+        stops.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let extend = color_line.extend;
+        let stop_span = stops[stops.len() - 1].0 - stops[0].0;
+        if extend != Extend::Pad && !(stop_span.is_finite() && stop_span > 0.) {
+            // When: extend repeats the stops but stop_span is not a finite positive angle, so there is no period to tile.
+            return None;
+        }
+        let (angles, colors) = stops.into_iter().unzip();
+        Some(Self { angles, colors, extend })
     }
 
-    let angles: Vec<f64> = color_line
-        .color_stops
-        .iter()
-        .map(|stop| start_angle + stop.offset * (end_angle - start_angle))
-        .collect();
-    let colors: Vec<SrgbaTuple> =
-        color_line.color_stops.iter().map(|stop| stop.color.into()).collect();
-
-    let n_stops = angles.len();
-
-    if color_line.extend == Extend::Pad {
-        // When: color_line uses Extend::Pad, so angles outside the sweep are
-        // filled with the nearest end colour rather than repeated.
-        let mut color0 = colors[0];
-        let mut pos = 0;
-        while pos < n_stops {
-            if angles[pos] >= 0. {
-                // When: angles reached the visible range at pos, so the scan
-                // for the first drawable stop ends here.
-                if pos > 0 {
-                    let fraction = (0. - angles[pos - 1]) / (angles[pos] - angles[pos - 1]);
-
-                    color0 = colors[pos - 1].interpolate(colors[pos], fraction);
+    /// The straight sRGBA colour at `angle`, in radians.
+    fn color_at(&self, angle: f64) -> SrgbaTuple {
+        let first = self.angles[0];
+        let last = self.angles[self.angles.len() - 1];
+        let position = match self.extend {
+            Extend::Pad => angle,
+            Extend::Reflect => {
+                let period = last - first;
+                let tiles = ((angle - first) / period).floor();
+                let local = (angle - first) - tiles * period;
+                // An odd repeat runs the stop span backwards from the last stop.
+                if tiles.rem_euclid(2.) == 1. {
+                    last - local
+                } else {
+                    // When: tiles is even, so this repeat runs the stop span forwards from the first stop.
+                    first + local
                 }
-                break;
             }
-            pos += 1;
-        }
-        if pos == n_stops {
-            // When: pos ran past the last stop, so the whole colour line sits
-            // behind zero and its final colour fills the full turn.
-
-            /* everything is below 0 */
-            color0 = colors[n_stops - 1];
-            add_sweep_gradient_patches(
-                mesh,
-                center,
-                radius,
-                0.,
-                color0,
-                PI_TIMES_2,
-                color0,
-                &mut budget,
-            );
-            return;
-        }
-
-        add_sweep_gradient_patches(
-            mesh,
-            center,
-            radius,
-            0.,
-            color0,
-            angles[pos],
-            colors[pos],
-            &mut budget,
-        );
-
-        pos += 1;
-        while pos < n_stops {
-            if angles[pos] <= PI_TIMES_2 {
-                add_sweep_gradient_patches(
-                    mesh,
-                    center,
-                    radius,
-                    angles[pos - 1],
-                    colors[pos - 1],
-                    angles[pos],
-                    colors[pos],
-                    &mut budget,
-                );
-            } else {
-                // When: angles[pos] overshot a full turn, so the span is cut at
-                // 2*PI with an interpolated colour and the scan stops.
-                let fraction = (PI_TIMES_2 - angles[pos - 1]) / (angles[pos] - angles[pos - 1]);
-                let color1 = colors[pos - 1].interpolate(colors[pos], fraction);
-                add_sweep_gradient_patches(
-                    mesh,
-                    center,
-                    radius,
-                    angles[pos - 1],
-                    colors[pos - 1],
-                    PI_TIMES_2,
-                    color1,
-                    &mut budget,
-                );
-                break;
-            }
-            pos += 1;
-        }
-
-        if pos == n_stops {
-            /* everything is below 2*M_PI */
-            color0 = colors[n_stops - 1];
-            add_sweep_gradient_patches(
-                mesh,
-                center,
-                radius,
-                angles[n_stops - 1],
-                color0,
-                PI_TIMES_2,
-                color0,
-                &mut budget,
-            );
-        }
-    } else {
-        // When: color_line extends by Repeat or Reflect, so the stop list is
-        // tiled across the turn instead of padded.
-        let span = angles[n_stops - 1] - angles[0];
-        let Some(first_tile) = first_visible_tile(angles[0], angles[n_stops - 1], span) else {
-            // When: no tile index brings the stop list into the visible turn, so
-            // the sweep contributes nothing rather than tiling a zero-width span.
-            return;
+            _ => first + (angle - first).rem_euclid(last - first),
         };
-        let span = span.abs();
-
-        // Tiling runs forward from the first visible tile. The upper bound is
-        // offset from `first_tile`, because a bound of `first_tile.min(..)` can
-        // never exceed `first_tile` and so yields an empty range for every
-        // `first_tile`, emitting no patches at all.
-        let tile_end = first_tile.saturating_add(MAX_SWEEP_TILES as isize);
-
-        for tile in first_tile..tile_end {
-            if budget == 0 {
-                // When: the patch budget is spent, so further tiles cannot add
-                // ink and the loop stops instead of scanning to the cap.
-                return;
-            }
-            for stop_index in 1..n_stops {
-                let (
-                    segment_start_angle,
-                    segment_end_angle,
-                    segment_start_color,
-                    segment_end_color,
-                );
-
-                if tile % 2 != 0 && color_line.extend == Extend::Reflect {
-                    segment_start_angle = angles[0] + angles[n_stops - 1]
-                        - angles[n_stops - 1 - (stop_index - 1)]
-                        + (tile as f64) * span;
-                    segment_end_angle = angles[0] + angles[n_stops - 1]
-                        - angles[n_stops - 1 - stop_index]
-                        + (tile as f64) * span;
-                    segment_start_color = colors[n_stops - 1 - (stop_index - 1)];
-                    segment_end_color = colors[n_stops - 1 - stop_index];
-                } else {
-                    // When: this is an even tile, or color_line does not
-                    // Reflect, so stop order runs forward unmirrored.
-                    segment_start_angle = angles[stop_index - 1] + (tile as f64) * span;
-                    segment_end_angle = angles[stop_index] + (tile as f64) * span;
-                    segment_start_color = colors[stop_index - 1];
-                    segment_end_color = colors[stop_index];
-                }
-
-                if segment_end_angle < 0. {
-                    // When: segment_end_angle is still behind zero, so this whole
-                    // tile segment lies outside the visible turn.
-                    continue;
-                }
-
-                if segment_start_angle < 0. {
-                    let fraction =
-                        (0. - segment_start_angle) / (segment_end_angle - segment_start_angle);
-                    let color = segment_start_color.interpolate(segment_end_color, fraction);
-                    add_sweep_gradient_patches(
-                        mesh,
-                        center,
-                        radius,
-                        0.,
-                        color,
-                        segment_end_angle,
-                        segment_end_color,
-                        &mut budget,
-                    );
-                } else if segment_end_angle >= PI_TIMES_2 {
-                    // When: segment_end_angle reaches a full turn, so this segment
-                    // closes the sweep and no later tile can contribute.
-                    let fraction = (PI_TIMES_2 - segment_start_angle)
-                        / (segment_end_angle - segment_start_angle);
-                    let color = segment_start_color.interpolate(segment_end_color, fraction);
-                    add_sweep_gradient_patches(
-                        mesh,
-                        center,
-                        radius,
-                        segment_start_angle,
-                        segment_start_color,
-                        PI_TIMES_2,
-                        color,
-                        &mut budget,
-                    );
-                    return;
-                } else {
-                    // When: segment_start_angle and segment_end_angle both sit inside
-                    // the visible turn, so the segment is drawn whole with no clipping.
-                    add_sweep_gradient_patches(
-                        mesh,
-                        center,
-                        radius,
-                        segment_start_angle,
-                        segment_start_color,
-                        segment_end_angle,
-                        segment_end_color,
-                        &mut budget,
-                    );
-                }
-            }
+        if position < first {
+            // When: the position lies before the first stop, which only Pad reaches, so the first colour fills it.
+            return self.colors[0];
         }
+        if position >= last {
+            // When: the position lies at or past the last stop, so the last colour fills it.
+            return self.colors[self.colors.len() - 1];
+        }
+        // The first stop past the position bounds its segment; at a hard stop that is the later colour's stop.
+        let upper = self.angles.partition_point(|stop_angle| *stop_angle <= position);
+        let lower = upper - 1;
+        let fraction = (position - self.angles[lower]) / (self.angles[upper] - self.angles[lower]);
+        self.colors[lower].interpolate(self.colors[upper], fraction)
     }
+}
+
+/// One premultiplied Cairo ARGB32 pixel from a straight sRGBA colour.
+fn premultiplied_argb(color: SrgbaTuple) -> u32 {
+    let SrgbaTuple(red, green, blue, alpha) = color;
+    let alpha = alpha.clamp(0., 1.);
+    let channel = |value: f32| (value.clamp(0., 1.) * alpha * 255.).round() as u32;
+    (((alpha * 255.).round() as u32) << 24)
+        | (channel(red) << 16)
+        | (channel(green) << 8)
+        | channel(blue)
 }
 
 /// Paint a COLRv1 sweep gradient over the current clip.
 ///
-/// Cairo has no sweep-gradient primitive, so the sweep is approximated by a
-/// mesh of Bezier patches spanning `start_angle`..`end_angle` around
-/// `(center_x, center_y)`. The radius is taken from the farthest corner of the current clip
-/// extents, so the mesh always covers the region being painted; the color
-/// line's extend mode decides how angles outside the sweep are filled. A color
-/// line left with no usable stop paints nothing.
+/// Cairo has no sweep-gradient primitive. Each device pixel of the current clip's extents is mapped back to
+/// user space and takes the colour [`SweepColors`] gives its angle around `(center_x, center_y)`; the raster
+/// is then painted as an image source under the clip. Computing every pixel's colour directly keeps the
+/// result independent of Cairo's mesh rasterizer, which some Cairo builds (Ubuntu 26.04's 1.18.4) draw with
+/// whole quadrants wrong. A color line left with no usable stop, a non-finite centre or angle, a zero-span
+/// Repeat or Reflect line, a singular transform, and a clip covering no pixel paint nothing.
 pub fn paint_sweep_gradient(
     context: &Context,
     center_x: f64,
     center_y: f64,
     start_angle: f64,
     end_angle: f64,
-    mut color_line: ColorLine,
+    color_line: ColorLine,
 ) -> anyhow::Result<()> {
-    if !prepare_color_stops(&mut color_line) {
-        // When: prepare_color_stops leaves color_line with no usable stop, so
-        // the mesh would be empty and the clip is left untouched.
+    if !center_x.is_finite() || !center_y.is_finite() {
+        // When: center_x or center_y is non-finite, so no pixel has a representable angle around the centre.
+        return Ok(());
+    }
+    let Some(colors) = SweepColors::new(color_line, start_angle, end_angle) else {
+        // When: SweepColors has no colour for any angle, so the clip is left untouched.
+        return Ok(());
+    };
+    let user_to_device = context.matrix();
+    let Ok(device_to_user) = user_to_device.try_invert() else {
+        // When: user_to_device has no inverse, so no device pixel maps back to a user-space angle.
+        return Ok(());
+    };
+
+    let (clip_left, clip_top, clip_right, clip_bottom) = context.clip_extents()?;
+    let corners = [
+        (clip_left, clip_top),
+        (clip_right, clip_top),
+        (clip_left, clip_bottom),
+        (clip_right, clip_bottom),
+    ]
+    .map(|(corner_x, corner_y)| user_to_device.transform_point(corner_x, corner_y));
+    let device_left = corners.iter().map(|corner| corner.0).fold(f64::INFINITY, f64::min).floor();
+    let device_top = corners.iter().map(|corner| corner.1).fold(f64::INFINITY, f64::min).floor();
+    let device_right =
+        corners.iter().map(|corner| corner.0).fold(f64::NEG_INFINITY, f64::max).ceil();
+    let device_bottom =
+        corners.iter().map(|corner| corner.1).fold(f64::NEG_INFINITY, f64::max).ceil();
+    if ![device_left, device_top, device_right, device_bottom].iter().all(|edge| edge.is_finite()) {
+        // When: a clip edge has no finite device position, so the raster has no extent to cover.
+        return Ok(());
+    }
+    let width_px = ((device_right - device_left).max(0.) as usize).min(MAX_SWEEP_RASTER_DIMENSION);
+    let height_px = ((device_bottom - device_top).max(0.) as usize).min(MAX_SWEEP_RASTER_DIMENSION);
+    if width_px == 0 || height_px == 0 {
+        // When: width_px or height_px is zero, the clip covers no device pixel and there is nothing to paint.
         return Ok(());
     }
 
-    let (clip_left, clip_top, clip_right, clip_bottom) = context.clip_extents()?;
+    let mut raster = ImageSurface::create(Format::ARgb32, width_px as i32, height_px as i32)?;
+    let stride = raster.stride() as usize;
+    {
+        let mut pixels =
+            raster.data().map_err(|error| anyhow::anyhow!("sweep raster: {error:?}"))?;
+        for row in 0..height_px {
+            for column in 0..width_px {
+                // Each pixel takes the colour at its centre, mapped back into the sweep's user space.
+                let (user_x, user_y) = device_to_user.transform_point(
+                    device_left + column as f64 + 0.5,
+                    device_top + row as f64 + 0.5,
+                );
+                let angle = (user_y - center_y).atan2(user_x - center_x).rem_euclid(PI_TIMES_2);
+                let at = row * stride + column * 4;
+                pixels[at..at + 4]
+                    .copy_from_slice(&premultiplied_argb(colors.color_at(angle)).to_ne_bytes());
+            }
+        }
+    }
 
-    let max_x = ((clip_left - center_x) * (clip_left - center_x))
-        .max((clip_right - center_x) * (clip_right - center_x));
-    let max_y = ((clip_top - center_y) * (clip_top - center_y))
-        .max((clip_bottom - center_y) * (clip_bottom - center_y));
-    let radius = (max_x + max_y).sqrt();
-
-    let mesh = Mesh::new();
-    let center = Point { horizontal: center_x, vertical: center_y };
-    apply_sweep_gradient_patches(&mesh, color_line, center, radius, start_angle, end_angle);
-    context.set_source(mesh)?;
-    context.paint()?;
-
+    // The raster's pixel (column, row) covers device pixel (device_left + column, device_top + row), so the
+    // source is placed in device space with the user transform reset for the paint.
+    let pattern = SurfacePattern::create(&raster);
+    let mut placement = Matrix::identity();
+    placement.translate(-device_left, -device_top);
+    pattern.set_matrix(placement);
+    pattern.set_filter(Filter::Nearest);
+    context.save()?;
+    context.identity_matrix();
+    let painted = context.set_source(&pattern).and_then(|()| context.paint());
+    context.restore()?;
+    painted?;
     Ok(())
 }
 

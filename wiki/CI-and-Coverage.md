@@ -99,8 +99,7 @@ measurement stays in macos-core to reuse its compiled harness without adding a c
 macOS build or competing with perf for another runner slot. Logic coverage runs in its own
 `linux-coverage` job, in the `ubuntu:22.04` container `linux-core` uses, outside the macOS
 runner pool the perf comparison waits for. The container gives its tests the workspace
-gate's Cairo, FreeType and Fontconfig; the `ubuntu-latest` host's newer Cairo draws COLR
-sweep gradients differently. The job names that container as its image identity, since
+gate's Cairo, FreeType and Fontconfig, the libraries its baseline was measured with. The job names that container as its image identity, since
 the runner does not export one into a container. It installs the pinned `cargo-llvm-cov`
 release's prebuilt static x86_64 Linux binary with
 `scripts/install-pinned-tool.sh`, which checks that host's SHA-256 before unpacking it
