@@ -5691,6 +5691,14 @@ impl GpuRenderer {
         font_size * self.scale_factor
     }
 
+    /// How far below a body row's cell top its glyphs' baseline sits, in raster pixels: four fifths
+    /// of the cell height. Every row's glyph quads are placed from this offset.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn baseline_y_in_cell(&self) -> f32 {
+        self.cell_h * 0.8
+    }
+
     /// Scale a logical-px chrome constant into the renderer's physical/raster-px
     /// coordinate space. Chrome layout literals (badge/search-bar/palette sizes,
     /// paddings, radii, sub-cell thicknesses) are authored at scale-factor 1.0;
@@ -6820,7 +6828,7 @@ impl GpuRenderer {
         // a reasonable ascent for monospace fonts at the configured
         // line-height; finer baseline control would require querying
         // font metrics.
-        let baseline_y_in_cell = cell_h * 0.8;
+        let baseline_y_in_cell = self.baseline_y_in_cell();
         let software_presenter = self.uses_windows_software_presenter();
 
         let raster_px = self.raster_px(self.font_size);

@@ -155,10 +155,9 @@ fn check_scale(active: &ActiveEventLoop, scale: f32) -> Result<Option<Vec<String
     app.__test_set_frontmost_window(Some(id));
     render(&mut app, active, id)?;
     // The face file and strike the renderer drew the 7 from, so the outline is the one it drew.
-    let tiles = app
-        .__test_window_renderer_mut(id)
-        .ok_or("the window has a renderer")?
-        .__test_resident_body_tiles();
+    let renderer = app.__test_window_renderer_mut(id).ok_or("the window has a renderer")?;
+    let tiles = renderer.__test_resident_body_tiles();
+    let baseline_in_cell = renderer.baseline_y_in_cell();
     let (face_path, strike_px) = tiles
         .iter()
         .find_map(|(key, _, identity)| {
@@ -190,38 +189,52 @@ fn check_scale(active: &ActiveEventLoop, scale: f32) -> Result<Option<Vec<String
             })
             .collect()
     };
-    let seven = glyph_extent(&font, '7').ok_or("no outline for 7")?;
-    if seven.y_min != 0 {
-        return Err(format!("{FAMILY}'s 7 starts at {} units, not on the baseline", seven.y_min));
-    }
-    // The 7 stands on the baseline with no partial row below it, so its last ink row is just above.
-    let baseline = ink_rows(7).last().copied().ok_or("the 7 drew no ink")? + 1;
+    // The baseline comes from the renderer's own geometry, the cell's top plus the offset every
+    // row's glyphs are placed from, never from the drawn ink.
+    let baseline = (top + baseline_in_cell).round() as u32;
     let threshold = ink_threshold(foreground, [background[2], background[1], background[0]]);
-    let mut mismatches = Vec::new();
+    let mut predictions = Vec::new();
     for (column, digit) in ('0'..='9').enumerate() {
         let extent = glyph_extent(&font, digit).ok_or_else(|| format!("no outline for {digit}"))?;
         let predicted = predicted_ink_top(extent, strike_px, threshold);
-        let expected = baseline.checked_sub(predicted.rows_above_baseline);
-        let measured = ink_rows(column as u32).first().copied();
         let decided = (predicted.top_row_coverage - threshold).abs() >= DECISION_MARGIN;
+        let measured = ink_rows(column as u32).first().copied();
         println!(
             "digit_top scale={scale} strike_px={strike_px} digit={digit} y_max={} \
-             top_row_coverage={:.3} threshold={threshold:.3} predicted={expected:?} \
-             measured={measured:?} decided={decided}",
-            extent.y_max, predicted.top_row_coverage
+             top_row_coverage={:.3} threshold={threshold:.3} baseline={baseline} \
+             predicted={:?} measured={measured:?} decided={decided}",
+            extent.y_max,
+            predicted.top_row_coverage,
+            baseline.checked_sub(predicted.rows_above_baseline)
         );
-        if decided && measured != expected {
-            // When: a decided top differs, the frame placed this digit off its outline's ink top.
-            mismatches.push(format!(
-                "{digit} at {scale}x: its outline puts the top at {expected:?}, the frame at {measured:?}"
-            ));
-        }
+        predictions.push((digit, predicted.rows_above_baseline, decided, measured));
     }
-    Ok(Some(mismatches))
+    // Each decided digit whose measured top is not `baseline_row` less its predicted rows.
+    let mismatches = |baseline_row: u32| -> Vec<String> {
+        predictions
+            .iter()
+            .filter(|(_, rows, decided, measured)| {
+                *decided && *measured != baseline_row.checked_sub(*rows)
+            })
+            .map(|(digit, rows, _, measured)| {
+                format!(
+                    "{digit} at {scale}x: its outline puts the top at {:?}, the frame at {measured:?}",
+                    baseline_row.checked_sub(*rows)
+                )
+            })
+            .collect()
+    };
+    let mut failures = mismatches(baseline);
+    if mismatches(baseline + 1).is_empty() {
+        // When: a baseline 1 px low still matches, the comparison cannot see a misplaced baseline.
+        failures.push(format!("at {scale}x a baseline 1 px below the renderer's still matched"));
+    }
+    Ok(Some(failures))
 }
 
 /// Each Cascadia Mono digit's measured ink top, at every scale the font-weight test checks, is where
-/// its outline predicts. The round 2 overshoots the flat 7 by 20 of 2048 units, so at 21.75 px it
+/// its outline predicts above the renderer's own baseline (cell top plus its baseline offset), and a
+/// baseline 1 px lower fails the same comparison. The round 2 overshoots the flat 7 by 20 of 2048 units, so at 21.75 px it
 /// shows one row higher. A top within `DECISION_MARGIN` of the threshold is printed, not asserted;
 /// a host without the face skips with a printed reason.
 #[test]
