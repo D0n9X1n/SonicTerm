@@ -102,3 +102,37 @@ fn missing_fallback_replaces_a_nonzero_multibyte_cluster_without_panicking() {
         UnicodeWidthStr::width("\u{1f600}\u{fe0e}") as u16
     );
 }
+
+/// A fallback face that drew nothing for a run is unloaded and is not reopened for a later run of
+/// only those characters. Shaping a missing emoji six times opens the base face and the fallback
+/// once each, and every attempt shapes alike, so the skip changes no output.
+#[test]
+fn a_fallback_that_drew_nothing_is_not_reopened_for_the_same_characters() {
+    let base = ParsedFont::from_locator(&bundled_font_handle()).unwrap();
+    let italic = FontDataSource::OnDisk(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fonts/rec-mono/RecMonoSt.Helens-Italic.ttf"),
+    );
+    let fallback =
+        ParsedFont::from_locator(&FontDataHandle { source: italic, ..bundled_font_handle() })
+            .unwrap();
+    let config = config::ConfigHandle::new(config::Config::default());
+    let shaper = HarfbuzzShaper::new(&config, &[base, fallback]).unwrap();
+    FACES_OPENED.with(|count| count.set(0));
+    let shape = || {
+        let mut missing = Vec::new();
+        let glyphs = shaper
+            .shape("a\u{1f600}", 12.0, 96, &mut missing, None, Direction::LeftToRight, None, None)
+            .unwrap();
+        glyphs.iter().map(|glyph| (glyph.glyph_pos, glyph.font_idx)).collect::<Vec<_>>()
+    };
+    let first = shape();
+    for _ in 0..5 {
+        assert_eq!(shape(), first, "a skipped fallback shapes as an opened one did");
+    }
+    assert_eq!(
+        FACES_OPENED.with(std::cell::Cell::get),
+        2,
+        "the base and the fallback open once each"
+    );
+}

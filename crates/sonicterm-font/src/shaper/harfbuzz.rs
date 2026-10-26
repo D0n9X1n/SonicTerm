@@ -112,6 +112,9 @@ struct MetricsKey {
 pub struct HarfbuzzShaper {
     handles: Vec<ParsedFont>,
     fonts: Vec<RefCell<Option<FontPair>>>,
+    /// Per slot, the characters its face drew nothing for when it was unloaded; a run of only these
+    /// does not reopen it.
+    misses: Vec<RefCell<std::collections::HashSet<char>>>,
     lib: ftwrap::Library,
     metrics: RefCell<HashMap<MetricsKey, FontMetrics>>,
     features: Vec<harfbuzz::hb_feature_t>,
@@ -166,6 +169,7 @@ impl HarfbuzzShaper {
             fonts.push(RefCell::new(None));
         }
 
+        let misses = (0..handles.len()).map(|_| RefCell::new(Default::default())).collect();
         let lang = harfbuzz::language_from_string("en")?;
 
         let features: Vec<harfbuzz::hb_feature_t> = config
@@ -174,7 +178,26 @@ impl HarfbuzzShaper {
             .filter_map(|feature| harfbuzz::feature_from_string(feature).ok())
             .collect();
 
-        Ok(Self { fonts, handles, lib, metrics: RefCell::new(HashMap::new()), features, lang })
+        Ok(Self {
+            fonts,
+            misses,
+            handles,
+            lib,
+            metrics: RefCell::new(HashMap::new()),
+            features,
+            lang,
+        })
+    }
+
+    /// Whether fallback slot `font_idx` is unloaded and its face already drew nothing for every
+    /// character of `run`, so opening it again would only shape notdef.
+    fn known_miss(&self, font_idx: FallbackIdx, run: &str) -> bool {
+        let unloaded = self.fonts.get(font_idx).is_some_and(|slot| slot.borrow().is_none());
+        let missed = self.misses.get(font_idx).is_some_and(|misses| {
+            let misses = misses.borrow();
+            !run.is_empty() && run.chars().all(|character| misses.contains(&character))
+        });
+        font_idx > 0 && unloaded && missed
     }
 
     fn load_fallback(
@@ -239,6 +262,8 @@ impl HarfbuzzShaper {
                         features,
                         last_size_and_dpi: RefCell::new(None),
                     });
+                    #[cfg(test)]
+                    FACES_OPENED.with(|count| count.set(count.get() + 1));
                 }
 
                 Ok(Some(RefMut::map(opt_pair, |opt_pair| opt_pair.as_mut().unwrap())))
@@ -246,8 +271,8 @@ impl HarfbuzzShaper {
         }
     }
 
-    // Lock order: font before last_size_and_dpi while shaping, then opt_pair
-    // alone during cleanup, after both of those are dropped.
+    // Lock order: font before last_size_and_dpi while shaping, then opt_pair alone during cleanup
+    // once both are dropped, then misses once opt_pair is released.
     #[allow(clippy::too_many_arguments)]
     fn do_shape(
         &self,
@@ -286,6 +311,11 @@ impl HarfbuzzShaper {
         let mut no_more_fallbacks = false;
 
         loop {
+            if !no_more_fallbacks && self.known_miss(font_idx, &text[range.clone()]) {
+                // When: `known_miss` says this unloaded face drew none of the run, try the next one.
+                font_idx += 1;
+                continue;
+            }
             match self.load_fallback(font_idx, dpi).context("load_fallback")? {
                 Some(mut pair) => {
                     // When: load_fallback produced a pair, so this font_idx has
@@ -640,6 +670,10 @@ impl HarfbuzzShaper {
                         self.handles[font_idx]
                     );
                     opt_pair.borrow_mut().take();
+                    // A later run of only these characters skips the face instead of reopening it.
+                    if let Some(misses) = self.misses.get(font_idx) {
+                        misses.borrow_mut().extend(text[range.clone()].chars());
+                    }
                 } else if let Some(pair) = &mut *opt_pair.borrow_mut() {
                     // When: opt_pair still holds a face that did resolve glyphs,
                     // so it is marked to survive this unload pass.
@@ -926,6 +960,12 @@ impl<'a> ClusterResolver<'a> {
             None => self.map.get(&start),
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Faces this thread's shapers opened, so a test can count reopenings.
+    static FACES_OPENED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
