@@ -27,7 +27,24 @@
 const MEDIA_SRC: &str = include_str!("../../sonicterm-app/src/app/media.rs");
 const RETENTION_SRC: &str = include_str!("../../sonicterm-app/src/app/retention.rs");
 const SNAPSHOT_SRC: &str = include_str!("../../sonicterm-app/src/app/memory_snapshot.rs");
-const VT_SRC: &str = include_str!("../../sonicterm-vt/src/vt.rs");
+const VT_SRC: &str = concat!(
+    include_str!("../../sonicterm-vt/src/vt.rs"),
+    "\n",
+    include_str!("../../sonicterm-vt/src/vt_capture.rs"),
+    "\n",
+    include_str!("../../sonicterm-vt/src/vt_dispatch.rs"),
+    "\n",
+    include_str!("../../sonicterm-vt/src/vt_modes.rs"),
+    "\n",
+    include_str!("../../sonicterm-vt/src/vt_osc.rs"),
+    "\n",
+    include_str!("../../sonicterm-vt/src/vt_performer.rs"),
+    "\n",
+    include_str!("../../sonicterm-vt/src/vt_raw_osc.rs"),
+    "\n",
+    include_str!("../../sonicterm-vt/src/vt_stream.rs"),
+    "\n",
+);
 const HYPERLINK_SRC: &str = include_str!("../../sonicterm-grid/src/hyperlink.rs");
 
 fn sources() -> [(&'static str, &'static str); 5] {
@@ -35,7 +52,7 @@ fn sources() -> [(&'static str, &'static str); 5] {
         ("sonicterm-app/src/app/media.rs", MEDIA_SRC),
         ("sonicterm-app/src/app/retention.rs", RETENTION_SRC),
         ("sonicterm-app/src/app/memory_snapshot.rs", SNAPSHOT_SRC),
-        ("sonicterm-vt/src/vt.rs", VT_SRC),
+        ("sonicterm-vt/src/vt*.rs", VT_SRC),
         ("sonicterm-grid/src/hyperlink.rs", HYPERLINK_SRC),
     ]
 }
@@ -183,7 +200,7 @@ fn the_scanner_finds_the_diagnostic_fields_it_checks() {
     let vt_fields = logged_fields(VT_SRC);
     let uri_bytes = vt_fields.iter().find(|(_, name, _)| name == "uri_bytes");
     let (_, _, value) = uri_bytes.expect(
-        "the scanner must find `uri_bytes` in vt.rs — it is the canonical example of \
+        "the scanner must find `uri_bytes` in the VT sources — it is the canonical example of \
          logging a measurement of user content rather than the content",
     );
     assert!(
