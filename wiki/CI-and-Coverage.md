@@ -94,7 +94,10 @@ resource-baseline capture. The required `tooling` job runs on Ubuntu: Rust-versi
 raw-exit, window-owner, workflow supply-chain, authored-comment and script-identifier
 checks, plus release-note, wiki-publish, resource-inventory, soak and resource-baseline
 script tests. These commands remain local gates on every supported host; the existing
-macOS aggregate requires the tooling job, so none became optional. The working-set
+macOS aggregate requires the tooling job, so none became optional. The tooling job also
+installs the runner image's own Cairo and Fontconfig and runs the COLR painting tests
+(`colr-tests`) against them: that Cairo is newer than the `ubuntu:22.04` container's the
+other Linux jobs use, so a Cairo update that changes how COLR glyphs draw fails CI. The working-set
 measurement stays in macos-core to reuse its compiled harness without adding a cold
 macOS build or competing with perf for another runner slot. Logic coverage runs in its own
 `linux-coverage` job, in the `ubuntu:22.04` container `linux-core` uses, outside the macOS

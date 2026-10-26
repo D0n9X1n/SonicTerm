@@ -59,6 +59,8 @@ macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再
 resource baseline 采集。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版本、raw-exit、window-owner、
 工作流供应链、注释与脚本标识符检查，以及发布说明、Wiki 发布、资源清单、soak 和资源基线脚本测试。
 这些命令仍是各支持主机的本地 gate；既有 macOS 汇总要求 tooling 成功，因此没有检查变为可选。
+tooling job 还会安装 runner 镜像自带的 Cairo 与 Fontconfig，并针对它们运行 COLR 绘制测试（`colr-tests`）：
+该 Cairo 比其它 Linux job 所用 `ubuntu:22.04` 容器中的更新，因此改变 COLR 字形绘制方式的 Cairo 更新会让 CI 失败。
 工作集测量留在 macos-core，复用已编译 harness，避免增加 macOS 冷构建及与 perf 竞争 runner。logic coverage
 在独立的 `linux-coverage` job 中、`linux-core` 所用的 `ubuntu:22.04` 容器内运行，不占用性能对比等待的 macOS runner 池。
 容器让其测试使用与 workspace gate 相同的 Cairo、FreeType 与 Fontconfig，也就是其 baseline 测量时所用的库。runner 不会把镜像标识导出到容器中，因此该 job 以这个容器作为其镜像标识。它安装固定版本
