@@ -32,7 +32,7 @@ fn production_shaping_logs_exclude_payloads_from_crash_history() {
     let mut absent = base.clone();
     absent.handle.source = FontDataSource::OnDisk(directory.join("missing.ttf"));
     let config = config::ConfigHandle::new(config::Config::default());
-    let shaper = HarfbuzzShaper::new(&config, &[base, absent]).unwrap();
+    let shaper = HarfbuzzShaper::new(&config, &[base, absent], 2).unwrap();
     let text = "synthetic-run-\u{1f600}\u{fe0e}";
     let mut missing = Vec::new();
     let glyphs = shaper
@@ -84,7 +84,7 @@ fn missing_fallback_replaces_a_nonzero_multibyte_cluster_without_panicking() {
             .join("src/shaper/sonicterm-missing-fallback-font.ttf"),
     );
     let config = config::ConfigHandle::new(config::Config::default());
-    let shaper = HarfbuzzShaper::new(&config, &[base, missing_fallback]).unwrap();
+    let shaper = HarfbuzzShaper::new(&config, &[base, missing_fallback], 2).unwrap();
     let text = "a\u{1f600}\u{fe0e}";
     let mut no_glyphs = Vec::new();
 
@@ -101,4 +101,77 @@ fn missing_fallback_replaces_a_nonzero_multibyte_cluster_without_panicking() {
         replacements.iter().map(|glyph| u16::from(glyph.num_cells)).sum::<u16>(),
         UnicodeWidthStr::width("\u{1f600}\u{fe0e}") as u16
     );
+}
+
+/// The on-disk face at `path`, face 0.
+fn face_at(path: PathBuf) -> FontDataHandle {
+    FontDataHandle { source: FontDataSource::OnDisk(path), ..bundled_font_handle() }
+}
+
+/// A shaper over `handles` whose first `configured` are the configured chain.
+fn shaper_with(handles: &[FontDataHandle], configured: usize) -> HarfbuzzShaper {
+    let parsed: Vec<ParsedFont> =
+        handles.iter().map(|handle| ParsedFont::from_locator(handle).unwrap()).collect();
+    let config = config::ConfigHandle::new(config::Config::default());
+    HarfbuzzShaper::new(&config, &parsed, configured).unwrap()
+}
+
+/// Each glyph `shaper` gives `text`, as (glyph id, face index).
+fn glyphs(shaper: &HarfbuzzShaper, text: &str) -> Vec<(u32, usize)> {
+    let mut missing = Vec::new();
+    let shaped = shaper
+        .shape(text, 12.0, 96, &mut missing, None, Direction::LeftToRight, None, None)
+        .unwrap();
+    shaped.iter().map(|glyph| (glyph.glyph_pos, glyph.font_idx)).collect()
+}
+
+/// A configured fallback face that drew nothing stays resident: shaping a missing emoji six times
+/// opens each configured face once. A face fallback discovery appended keeps WezTerm's rule, so it
+/// is unloaded after each run it draws nothing for and reopens every time. Output never changes.
+#[test]
+fn configured_faces_stay_resident_and_discovered_faces_unload() {
+    let italic = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test-fonts/rec-mono/RecMonoSt.Helens-Italic.ttf");
+    let opens = |configured: usize| {
+        let shaper = shaper_with(&[bundled_font_handle(), face_at(italic.clone())], configured);
+        FACES_OPENED.with(|count| count.set(0));
+        let first = glyphs(&shaper, "a\u{1f600}");
+        for _ in 0..5 {
+            assert_eq!(glyphs(&shaper, "a\u{1f600}"), first, "a resident face shapes alike");
+        }
+        FACES_OPENED.with(std::cell::Cell::get)
+    };
+    assert_eq!(opens(2), 2, "both configured faces open once");
+    assert_eq!(opens(1), 7, "the discovered face reopens for each of the six runs");
+}
+
+/// Shaping history never changes a run's glyphs, whether the second face is configured or
+/// discovered: 一 after 一 + U+035C with [Symbols Nerd Font Mono, Rec Mono], and E + U+0302 after E
+/// and U+0302 alone with [Symbols, CJKSymbolsFallback face 0], whose components map to nothing on
+/// their own but whose composition maps. Each matches a fresh shaper.
+#[test]
+fn shaping_history_never_changes_a_runs_glyphs() {
+    let symbols = face_at(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/fonts/SymbolsNerdFontMono-Regular.ttf"),
+    );
+    let cjk_symbols = PathBuf::from("/System/Library/Fonts/CJKSymbolsFallback.ttc");
+    for configured in [1, 2] {
+        let handles = [symbols.clone(), bundled_font_handle()];
+        let used = shaper_with(&handles, configured);
+        glyphs(&used, "\u{4e00}\u{35c}");
+        let fresh = glyphs(&shaper_with(&handles, configured), "\u{4e00}");
+        assert_eq!(glyphs(&used, "\u{4e00}"), fresh, "一 with {configured} configured");
+        if !cjk_symbols.exists() {
+            // When: the host has no CJKSymbolsFallback.ttc, the composition case cannot run.
+            println!("skipped E + U+0302: {} is absent", cjk_symbols.display());
+            continue;
+        }
+        let handles = [symbols.clone(), face_at(cjk_symbols.clone())];
+        let used = shaper_with(&handles, configured);
+        glyphs(&used, "E");
+        glyphs(&used, "\u{302}");
+        let fresh = glyphs(&shaper_with(&handles, configured), "E\u{302}");
+        assert_eq!(glyphs(&used, "E\u{302}"), fresh, "E + U+0302 with {configured} configured");
+    }
 }

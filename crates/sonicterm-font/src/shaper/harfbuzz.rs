@@ -112,6 +112,9 @@ struct MetricsKey {
 pub struct HarfbuzzShaper {
     handles: Vec<ParsedFont>,
     fonts: Vec<RefCell<Option<FontPair>>>,
+    /// Handles below this index are the configured chain, whose opened faces stay resident;
+    /// handles at or above it were appended by fallback discovery and keep WezTerm's unload rule.
+    configured_handle_count: usize,
     lib: ftwrap::Library,
     metrics: RefCell<HashMap<MetricsKey, FontMetrics>>,
     features: Vec<harfbuzz::hb_feature_t>,
@@ -158,7 +161,11 @@ impl HarfbuzzShaper {
     /// first shaping attempt that reaches it, so a large fallback list costs
     /// nothing until it is actually consulted. Per-font HarfBuzz features come
     /// from `config` and are overridden per handle when one names its own.
-    pub fn new(config: &ConfigHandle, handles: &[ParsedFont]) -> anyhow::Result<Self> {
+    pub fn new(
+        config: &ConfigHandle,
+        handles: &[ParsedFont],
+        configured_handle_count: usize,
+    ) -> anyhow::Result<Self> {
         let lib = ftwrap::Library::new()?;
         let handles = handles.to_vec();
         let mut fonts = vec![];
@@ -174,7 +181,15 @@ impl HarfbuzzShaper {
             .filter_map(|feature| harfbuzz::feature_from_string(feature).ok())
             .collect();
 
-        Ok(Self { fonts, handles, lib, metrics: RefCell::new(HashMap::new()), features, lang })
+        Ok(Self {
+            fonts,
+            configured_handle_count,
+            handles,
+            lib,
+            metrics: RefCell::new(HashMap::new()),
+            features,
+            lang,
+        })
     }
 
     fn load_fallback(
@@ -239,6 +254,8 @@ impl HarfbuzzShaper {
                         features,
                         last_size_and_dpi: RefCell::new(None),
                     });
+                    #[cfg(test)]
+                    FACES_OPENED.with(|count| count.set(count.get() + 1));
                 }
 
                 Ok(Some(RefMut::map(opt_pair, |opt_pair| opt_pair.as_mut().unwrap())))
@@ -630,11 +647,12 @@ impl HarfbuzzShaper {
 
         if !shaped_any {
             if let Some(opt_pair) = self.fonts.get(font_idx) {
-                if direct_clusters == 0 {
-                    // If we've never shaped anything from this font, and we didn't
-                    // shape it just now, then we're probably a fallback font from
-                    // the system and unlikely to be useful to keep around, so we
-                    // unload it.
+                if direct_clusters == 0 && font_idx < self.configured_handle_count {
+                    // When: `direct_clusters` is 0 and `font_idx` is configured, keep the face
+                    // resident, so the next run that reaches it does not reopen it.
+                } else if direct_clusters == 0 {
+                    // When: `direct_clusters` is 0 for a discovered face, unload it as WezTerm does;
+                    // a system fallback that drew nothing is unlikely to be needed again.
                     log::trace!(target: "sonicterm_font::payload",
                         "Shaper didn't resolve glyphs from {:?}, so unload it",
                         self.handles[font_idx]
@@ -655,6 +673,11 @@ impl HarfbuzzShaper {
 }
 
 impl FontShaper for HarfbuzzShaper {
+    #[cfg(test)]
+    fn configured_handle_count(&self) -> usize {
+        self.configured_handle_count
+    }
+
     fn shape(
         &self,
         text: &str,
@@ -926,6 +949,12 @@ impl<'a> ClusterResolver<'a> {
             None => self.map.get(&start),
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Faces this thread's shapers opened, so a test can count reopenings.
+    static FACES_OPENED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

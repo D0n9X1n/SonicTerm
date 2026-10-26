@@ -152,6 +152,10 @@ lazy_static::lazy_static! {
 pub struct LoadedFont {
     rasterizers: RefCell<HashMap<FallbackIdx, Box<dyn FontRasterizer>>>,
     handles: RefCell<Vec<ParsedFont>>,
+    /// How many leading `handles` the configuration resolved; the shaper keeps their faces resident.
+    /// Fallback discovery only appends (`insert_fallback_handles` pushes), so the handles below
+    /// this boundary never move and it stays valid through every shaper rebuild.
+    configured_handle_count: usize,
     shaper: RefCell<Box<dyn FontShaper>>,
     metrics: FontMetrics,
     pixel_geometry: DisplayPixelGeometry,
@@ -213,8 +217,11 @@ impl LoadedFont {
         }
         if loaded {
             if let Some(font_config) = self.font_config.upgrade() {
-                *self.shaper.borrow_mut() =
-                    new_shaper(&font_config.config.borrow(), &self.handles.borrow())?;
+                *self.shaper.borrow_mut() = new_shaper(
+                    &font_config.config.borrow(),
+                    &self.handles.borrow(),
+                    self.configured_handle_count,
+                )?;
             }
         }
         Ok(loaded)
@@ -991,15 +998,17 @@ impl FontConfigInner {
         let attributes = text_style.font_with_fallback();
         let (handles, _loaded) = self.resolve_font_helper_impl(&attributes, pixel_size)?;
 
-        let shaper = new_shaper(&config, &handles)?;
+        let shaper = new_shaper(&config, &handles, handles.len())?;
 
         let metrics = shaper.metrics(font_size, dpi).with_context(|| {
             format!("obtaining metrics for font_size={} @ dpi {}", font_size, dpi)
         })?;
 
+        let configured_handle_count = handles.len();
         let loaded = Rc::new(LoadedFont {
             rasterizers: RefCell::new(HashMap::new()),
             handles: RefCell::new(handles),
+            configured_handle_count,
             shaper: RefCell::new(shaper),
             metrics,
             font_size,
@@ -1231,7 +1240,7 @@ impl FontConfigInner {
             }
         }
 
-        Ok((new_shaper(config, &handles)?, handles))
+        Ok((new_shaper(config, &handles, handles.len())?, handles))
     }
 
     /// Given a text style, load (with caching) the font that best
@@ -1326,9 +1335,11 @@ impl FontConfigInner {
             }
         }
 
+        let configured_handle_count = handles.len();
         let loaded = Rc::new(LoadedFont {
             rasterizers: RefCell::new(HashMap::new()),
             handles: RefCell::new(handles),
+            configured_handle_count,
             shaper: RefCell::new(shaper),
             metrics,
             font_size,

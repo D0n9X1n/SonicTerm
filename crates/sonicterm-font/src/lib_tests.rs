@@ -929,3 +929,26 @@ fn a_fontconfig_substitution_for_a_missing_family_is_reported() {
     assert_eq!(resolve("monospace"), "Rec Mono St.Helens");
     assert!(!reported("monospace"), "an alias resolving to another face is not a miss");
 }
+
+/// The configured boundary survives a fallback merge: after `insert_fallback_handles` appends a
+/// discovered face and rebuilds the shaper, the shaper's configured count is still the configured
+/// chain's, not the enlarged handle count, so the appended face keeps WezTerm's unload rule.
+#[test]
+fn the_configured_boundary_survives_a_fallback_merge() {
+    let gate = Arc::new(Latch::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = fallback_configuration("boundary", locator(&gate, &calls));
+    let font = fixture.configuration.default_font().unwrap();
+    let configured = font.configured_handle_count;
+    assert_eq!(font.shaper.borrow().configured_handle_count(), configured);
+    let handles = font.handles.borrow().len();
+    let merged = font.insert_fallback_handles(vec![fallback_fixture(&['é'], false)]).unwrap();
+    assert!(merged, "the merge appends a discovered face");
+    assert_eq!(font.handles.borrow().len(), handles + 1);
+    assert_eq!(
+        font.shaper.borrow().configured_handle_count(),
+        configured,
+        "the rebuilt shaper keeps the configured boundary"
+    );
+    gate.open();
+}
