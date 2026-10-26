@@ -109,3 +109,7 @@ pub mod test_support;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;
+
+#[cfg(test)]
+#[path = "governor_test_support.rs"]
+mod governor_test_support;
