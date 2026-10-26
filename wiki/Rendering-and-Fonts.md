@@ -355,10 +355,13 @@ losing their artwork in a ClearType mask; other DirectWrite failures also fall
 back to FreeType. macOS and other Unix systems use FreeType. FreeType
 supports monochrome, grayscale, LCD subpixel, BGRA color strikes, and
 COLR/SVG handoff. HarfBuzz/COLR paint paths use Cairo-backed drawing for layered
-color glyphs and linear, radial, and sweep gradients. A gradient whose color
-line carries no usable stop paints nothing, and sweep tiling is bounded, so a
-malformed or extreme color line degrades to a coarse approximation rather than
-unbounded work. A COLR face needs valid CPAL color entries; its palette labels,
+color glyphs and linear, radial, and sweep gradients. Cairo has no sweep
+gradient, so a sweep is colored pixel by pixel from each pixel's angle around
+its center and painted as an image under the clip. That keeps it independent
+of Cairo's mesh rasterizer, which some Cairo builds (Ubuntu 26.04's 1.18.4)
+draw with whole quadrants wrong. A gradient whose color line carries no usable
+stop paints nothing, and a malformed or extreme sweep costs one color lookup
+per pixel rather than unbounded work. A COLR face needs valid CPAL color entries; its palette labels,
 entry labels and flags are optional. A version-0 CPAL table, such as Noto Color
 Emoji's, has none of them and still renders: an absent label reads as an empty
 name and absent flags as 0. A present label is a name ID: it resolves to the

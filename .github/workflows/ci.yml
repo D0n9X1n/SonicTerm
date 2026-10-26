@@ -34,6 +34,18 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
+      # The COLR painting tests run against this host's own Cairo, which is newer than the ubuntu:22.04
+      # container's the other Linux jobs use, so a Cairo update that changes how COLR glyphs draw fails here.
+      - name: Install Cairo and Fontconfig for the COLR tests
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libcairo2-dev libfontconfig1-dev
+
+      - name: Run the COLR painting tests on the runner's Cairo
+        run: cargo test --locked -p sonicterm-font --lib colr_
+
       - name: Install actionlint
         run: bash scripts/install-pinned-tool.sh actionlint
 

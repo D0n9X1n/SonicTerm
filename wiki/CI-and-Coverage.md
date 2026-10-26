@@ -94,13 +94,15 @@ resource-baseline capture. The required `tooling` job runs on Ubuntu: Rust-versi
 raw-exit, window-owner, workflow supply-chain, authored-comment and script-identifier
 checks, plus release-note, wiki-publish, resource-inventory, soak and resource-baseline
 script tests. These commands remain local gates on every supported host; the existing
-macOS aggregate requires the tooling job, so none became optional. The working-set
+macOS aggregate requires the tooling job, so none became optional. The tooling job also
+installs the runner image's own Cairo and Fontconfig and runs the COLR painting tests
+(`colr-tests`) against them: that Cairo is newer than the `ubuntu:22.04` container's the
+other Linux jobs use, so a Cairo update that changes how COLR glyphs draw fails CI. The working-set
 measurement stays in macos-core to reuse its compiled harness without adding a cold
 macOS build or competing with perf for another runner slot. Logic coverage runs in its own
 `linux-coverage` job, in the `ubuntu:22.04` container `linux-core` uses, outside the macOS
 runner pool the perf comparison waits for. The container gives its tests the workspace
-gate's Cairo, FreeType and Fontconfig; the `ubuntu-latest` host's newer Cairo draws COLR
-sweep gradients differently. The job names that container as its image identity, since
+gate's Cairo, FreeType and Fontconfig, the libraries its baseline was measured with. The job names that container as its image identity, since
 the runner does not export one into a container. It installs the pinned `cargo-llvm-cov`
 release's prebuilt static x86_64 Linux binary with
 `scripts/install-pinned-tool.sh`, which checks that host's SHA-256 before unpacking it

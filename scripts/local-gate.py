@@ -574,6 +574,10 @@ STEPS = (
     # The macOS-only floor instruments one crate: a cold build plus its tests, well inside the workspace run's budget.
     Step("macos-logic-coverage", ("scripts/macos-logic-coverage.sh",), ("macos",), 900,
          "local", ("rust", "llvm-cov"), ("macos-core",)),
+    # The COLR painting tests against the host's own Cairo. CI runs them on the ubuntu-latest image, whose Cairo
+    # is newer than the ubuntu:22.04 container's that the other Linux jobs use; one crate's tests, so 900 s.
+    Step("colr-tests", ("cargo", "test", "--locked", "-p", "sonicterm-font", "--lib", "colr_"), ("linux",), 900,
+         "local", ("rust", "native"), ("tooling",)),
     Step("windows-warp-allocator",
          ("cargo", "test", "-p", "sonicterm-gpu", "--test", "windows_warp_allocator_baseline",
           "--", "--nocapture"),
