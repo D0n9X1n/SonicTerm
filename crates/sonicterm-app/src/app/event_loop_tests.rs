@@ -242,7 +242,8 @@ fn all_terminal_window_creation_paths_apply_the_minimum() {
 fn live_metric_change_paths_refresh_the_minimum() {
     let main_events = include_str!("window_event.rs");
     let child_events = include_str!("child_window.rs");
-    let config = include_str!("config_apply.rs");
+    // Font size and family changes live in live_font.rs; padding and tab-bar changes in config_apply.rs.
+    let config = [include_str!("config_apply.rs"), include_str!("live_font.rs")].concat();
 
     assert!(main_events.contains("apply_window_dpi_transition("));
     assert!(child_events.contains("apply_window_dpi_transition("));

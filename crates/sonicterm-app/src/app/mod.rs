@@ -452,6 +452,7 @@ pub use keyboard_protocol::HeldKey;
 mod about;
 mod about_window;
 mod keymap_dispatch;
+mod live_font;
 mod locale;
 mod media;
 mod memory_report;

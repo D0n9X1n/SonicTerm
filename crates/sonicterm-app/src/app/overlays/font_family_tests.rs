@@ -92,7 +92,7 @@ fn an_open_picker_fills_in_when_the_catalog_lands() {
 /// no headless renderer, so this checks the request `apply_live_font` hands each window's renderer.
 #[test]
 fn preview_and_cancel_keep_the_zoom_and_strip_scale() {
-    use crate::app::config_apply::LiveFontRequest;
+    use crate::app::live_font::LiveFontRequest;
     let (mut app, child) = picker_app("Menlo");
     app.run_action_for_window(&Action::IncreaseFontSize, child);
     app.run_action_for_window(&Action::DecreaseStatusLineFontScale, child);
