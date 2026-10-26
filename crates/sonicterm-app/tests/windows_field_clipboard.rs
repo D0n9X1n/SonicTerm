@@ -1093,6 +1093,8 @@ fn start(active: &ActiveEventLoop) -> Result<Session, String> {
     let mut config = Config::default();
     config.appearance.software_render_mode = SoftwareRenderMode::Force;
     config.locale = "en".into();
+    // The fixture directory alone does not select it: the default family is the host's own face.
+    config.font.family = "Rec Mono St.Helens".into();
     let keymap = Keymap {
         meta: Meta { name: "native-field-clipboard".into(), version: "1.0".into() },
         bindings: vec![
