@@ -117,8 +117,9 @@ document types at `LSHandlerRank=Alternate` (scripts: `public.shell-script` and
 `com.apple.terminal.shell-script`; Unix executables: `public.unix-executable`), and one
 `CFBundleURLTypes` entry, `com.d0n9x1n.sonicterm.terminal-links`, for the `ssh` and
 `x-man-page` schemes. `telnet` is not declared. These declarations make SonicTerm
-available; installing changes no default handler. All four unchanged
-Rec Mono faces are stored once: the runtime and AppKit/CoreText share this path.
+available; installing changes no default handler. The bundled Symbols Nerd Font
+Mono and its MIT license are stored once: the runtime and AppKit/CoreText share
+this path. The text face is the system's Menlo, so no text font is packaged.
 
 `scripts/macos-bundle.py` recursively collects the executable's non-system dylib
 closure from installed Homebrew kegs, verifies architecture, rewrites loads to
@@ -147,8 +148,8 @@ run `python3 scripts/test-macos-package.py --dmg <image> --state-dir <new-direct
 The validator installs a read-only-mounted image into a scratch path, checks
 signatures and the dependency manifest, then exercises the app and Cairo drawing
 with Homebrew filesystem reads denied for those child processes. A native
-LaunchServices probe verifies all four font URLs point into the bundle, rather
-than accidentally finding installed copies. It checks basic Cairo gradient
+LaunchServices probe verifies the bundled symbols font's URL points into the
+bundle, rather than accidentally finding an installed copy. It checks basic Cairo gradient
 pixels; that probe is not an exhaustive COLR glyph test. Only the exact `open -W`
 exit-before-wait `kevent`/“No such process” error is accepted when the fresh report
 already ends with one complete passing verdict; other launch failures and timeouts
@@ -332,7 +333,7 @@ SonicTerm-<tag>-linux-x86_64/
 ├── share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 ├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
 ├── LICENSE
-├── LICENSE-Rec-Mono-OFL-1.1
+├── LICENSE-SymbolsNerdFont-MIT
 ├── LICENSE-winit-Apache-2.0
 └── README.md
 ```
@@ -347,15 +348,16 @@ The Debian package is `SonicTerm-<tag>-linux-x86_64.deb` and installs:
 /usr/share/man/man1/sonicterm.1.gz
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 /usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
-/usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,LICENSE-winit-Apache-2.0,README.md}
+/usr/share/doc/sonicterm/{copyright,LICENSE-SymbolsNerdFont-MIT,LICENSE-winit-Apache-2.0,README.md}
 ```
 
 The builder checks x86_64 ELF identity and rejects GLIBC requirements newer
 than 2.35. `dpkg-shlibdeps` derives linked `Depends`; the script also adds
 `libxkbcommon-x11-0` because winit loads it dynamically for X11. The portable
 archive's host must provide `libxkbcommon-x11.so.0` when using X11. The package
-script verifies all four Rec Mono faces plus themes, keymaps, icons, and English
-and Simplified Chinese catalogs.
+script verifies the bundled symbols font plus themes, keymaps, icons, and English
+and Simplified Chinese catalogs. The text face is fontconfig's `monospace`, so the
+package carries no text font.
 
 The Debian man page is compressed with `gzip -n -9`, so it carries no name or
 timestamp, and installed with mode `0644`. The terminal entry declares the

@@ -62,7 +62,9 @@ terminal cell. Resize, DPI, font, and padding changes invalidate the old layout.
 ### Font discovery and matching
 
 `sonicterm-engine::FontStack` adapts `sonicterm-font` to the renderer. The
-configured primary family defaults to `Rec Mono St.Helens`. Matching includes
+configured primary family defaults to the platform's own monospace face: Menlo
+on macOS, Cascadia Mono on Windows, and fontconfig's `monospace` on Linux.
+SonicTerm bundles no text face. Matching includes
 family, style, weight, stretch, face index, variation, and codepoint coverage.
 Malformed, missing, or out-of-range variable-font metadata falls back to the
 base OS/2 weight and width instead of aborting.
@@ -74,17 +76,49 @@ Platform discovery stays behind `FontLocator`:
 - other Unix systems use Fontconfig and restrict candidates to monospaced,
   dual-width, or character-cell faces.
 
-After the configured primary family, the code-owned fallback list tries
-JetBrains Mono, Symbols Nerd Font Mono, and Noto Color Emoji. If no loaded face
+After the configured primary family, the code-owned fallback list
+(`config::DEFAULT_MONOSPACE_FAMILIES` in `sonicterm-font-config`) tries every
+platform default monospace family the primary is not (Menlo; Cascadia Mono, then
+Consolas; or `monospace`), then the bundled Symbols Nerd Font Mono and Noto Color
+Emoji. Terminal text and the tab-title, palette-footer, and status-line views
+share that chain, because they are views of one body stack.
+
+```mermaid
+flowchart LR
+    primary["Configured family"] --> defaults["Platform default monospace families"]
+    defaults --> symbols["Bundled Symbols Nerd Font Mono"]
+    symbols --> emoji["Noto Color Emoji"]
+    emoji --> system["Background system fallback"]
+```
+
+When the configured family is not installed, the first platform default that
+loads supplies text and cell metrics, never the symbols or emoji font. The log
+names the missing family and the face used instead at error level, once per
+process; a missing platform default, such as Cascadia Mono on a Windows release
+without it, is logged once at info level instead. Because configured font
+directories are searched before native discovery, the bundled symbols file wins
+over an installed copy of the same family. If no loaded face
 covers a codepoint, a background resolver finds a
 platform font and appends it to that `FontStack`. Automatic resolution ranks a
 font containing an OpenType `MATH` table after text fonts. It does not exclude
 that font: it may still supply a codepoint no text font covers. A family named
 explicitly in `[font]` remains authoritative whether or not it contains `MATH`.
 
+The first time the font picker opens, a `sonicterm-font-catalog` worker
+enumerates the installed font files through the platform locator and keeps each
+family whose first face sets every ASCII letter and digit with one shared advance.
+The advances are measured because some monospace faces, such as Monaco, leave the
+`isFixedPitch` flag clear; icon fonts lack the letters and stay out. Startup never
+enumerates, and later opens reuse the catalog. The worker logs `font catalog ready`
+at info level with the number of monospace families. At startup, when the config
+names no family and the platform default is the live family, the family of the face
+the body stack resolved for regular text becomes the session family and baseline,
+in memory only, and is logged as `font family resolved`; nothing is written until
+the user saves.
+
 Packaged font directories remain attached to live and warm renderers across
-font reloads. This is required for Linux packages, which carry all four bundled
-Rec Mono faces without installing them system-wide.
+font reloads. Every package carries the bundled Symbols Nerd Font Mono there
+without installing it system-wide.
 
 ### Tab-title process icons
 
@@ -135,7 +169,8 @@ process-level state through both GPU and Windows software rendering. This tab
 chrome does not modify executable resources, native window icons, taskbar, Dock,
 application-switcher, or package icons.
 
-These are Private Use Area codepoints supplied by the bundled Rec Mono faces:
+These are Private Use Area codepoints supplied by the bundled Symbols Nerd Font
+Mono:
 
 | Application | Exact aliases | Bundled glyph identity | Codepoint |
 | --- | --- | --- | --- |
@@ -606,7 +641,10 @@ glyph that drew nothing (refused by the atlas, rasterized nothing, or too large
 to place) and a tab title that never shaped. The test then checks that every
 resident tile is in the helper's set at the same raster size and, for S9, that
 representative emoji and CJK codepoints from the fixture's last line are
-resident real tiles at both scales. It proves only the glyphs that frame
+resident real tiles at both scales, found by codepoint whatever face drew them: a
+system fallback face depends on which codepoints are requested together, so the
+test prints each one's drawn and isolated faces as `glyph_atlas_representative`
+lines rather than requiring them to match. It proves only the glyphs that frame
 requested, not every glyph the helper measures. The guard was set once these
 checks passed on Windows CI and the measured rows were recorded.
 
@@ -620,7 +658,17 @@ side. Helper and Windows real-renderer rows come either from a `push` CI run on
 working set; a `pull_request` row names its pull request and no other row does.
 The working-set step compares each live helper measurement with its row
 exactly, so a change that moves a helper's fit, largest tile or tofu count fails
-until the rows are re-recorded. To re-record, let CI run on the head that
+until the rows are re-recorded. The rows are bound to the runner image they were
+recorded on (`RECORDING_IMAGES` in `sonicterm-text`'s `recording_image.rs`: image,
+`ImageVersion` and `RUNNER_ARCH` per platform). A host is on that image when its
+`ImageVersion` matches and its `RUNNER_ARCH` matches regardless of case; `ImageOS`
+is not compared. There, and on every CI runner (`GITHUB_ACTIONS=true`), the
+comparison is exact. On CI a difference fails the step with "re-record the helper
+rows on <host image>" and names the recording image; identical rows on another
+image pass and print the image mismatch as a note. Off CI, a host on another image
+prints the differences as advisory. Completeness (`incomplete_glyphs` 0), no
+unapproved raster failure and a live fit within the start constant stay mandatory
+on every host. Re-recording also updates the recorded image. To re-record, let CI run on the head that
 changes the working set, then copy every `glyph_atlas_working_set ...
 source=helper` line (and, when the real renderer changed, every
 `source=real_renderer` line) with its job id and log line into the table,

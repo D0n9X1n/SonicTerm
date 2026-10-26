@@ -7,7 +7,8 @@ use sonicterm_engine::FontStack;
 pub(crate) static TRACKED_FONT_STACK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn tracked_font_stack(font_size: f64) -> FontStack {
-    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
         vec![assets],
@@ -53,7 +54,7 @@ impl sonicterm_font::locator::FontLocator for RecMonoLocator {
         let handle = FontDataHandle {
             source: FontDataSource::OnDisk(
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+                    .join("../sonicterm-font/test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf"),
             ),
             index: 0,
             variation: 0,

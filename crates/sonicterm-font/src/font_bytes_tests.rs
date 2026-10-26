@@ -154,7 +154,7 @@ fn unreadable_paths_keep_their_errors() {
 /// The bundled Rec Mono Regular, an ordinary outline font with no `SVG ` or `COLR` table.
 fn rec_mono_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf")
+        .join("test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf")
 }
 
 /// Contract: an ordinary font is never read whole. Its FreeType face opens on the callback

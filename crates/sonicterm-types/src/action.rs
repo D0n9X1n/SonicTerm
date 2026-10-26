@@ -129,6 +129,8 @@ pub enum Action {
     ResetFontWeight,
     /// Persist the current font size and weight without persisting the session theme.
     SaveCurrentSettings,
+    /// List the installed monospace families in the palette and switch the font family live.
+    ChooseFontFamily,
 
     /// Apply a theme by name for the current session.
     /// Bound from the View → Theme submenu in the macOS menubar.

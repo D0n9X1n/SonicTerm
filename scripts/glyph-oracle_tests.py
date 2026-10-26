@@ -14,6 +14,7 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location("glyph_oracle", Path(__file__).with_name("glyph-oracle.py"))
 oracle = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(oracle)
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class OracleTests(unittest.TestCase):
@@ -25,35 +26,55 @@ class OracleTests(unittest.TestCase):
             for name in oracle.ROWS:
                 fixture, dpi = name.removesuffix(".json").split("-")
                 (directory / name).write_text(json.dumps({"schema": 1, "fixture": fixture, "dpi": int(dpi),
-                    "family": "Rec Mono St.Helens", "size": "13.0", "tiles": {"face": [24, 16]}}), encoding="utf-8")
+                    "family": "Consolas", "size": "13.0", "tiles": {"face": [24, 16]}}), encoding="utf-8")
             identity = {"source": "source-digest", "fonts": {"system": "font-digest"},
                         "environment": {"GITHUB_SHA": "head", "GITHUB_RUN_ID": "run",
                                         "ImageOS": "windows", "ImageVersion": "image"},
                         "producer_attempt": "1", "rustc": "rustc version", "cargo": "cargo version"}
-            raw = json.dumps({"identity": identity, "files": oracle.validate_rows(directory)}).encode()
+            raw = json.dumps({"identity": identity, "files": oracle.validate_rows(directory, "Consolas")}).encode()
             manifest = directory / "manifest.json"
             manifest.write_bytes(raw)
             digest = hashlib.sha256(raw).hexdigest()
-            oracle.verify(directory, identity, digest)
+            oracle.verify(directory, identity, digest, "Consolas")
             for key in identity:
                 changed = copy.deepcopy(identity)
                 changed[key] = "different"
                 with self.subTest(binding=key), self.assertRaises(ValueError):
-                    oracle.verify(directory, changed, digest)
+                    oracle.verify(directory, changed, digest, "Consolas")
             with self.assertRaises(ValueError):
-                oracle.verify(directory, identity, "wrong digest")
+                oracle.verify(directory, identity, "wrong digest", "Consolas")
             manifest.write_bytes(raw + b" ")
             with self.assertRaises(ValueError):
-                oracle.verify(directory, identity, digest)
+                oracle.verify(directory, identity, digest, "Consolas")
             manifest.write_bytes(raw)
             payload = directory / oracle.ROWS[0]
             original = payload.read_bytes()
             payload.write_bytes(original + b" ")
             with self.assertRaises(ValueError):
-                oracle.verify(directory, identity, digest)
+                oracle.verify(directory, identity, digest, "Consolas")
             payload.unlink()
             with self.assertRaises(OSError):
-                oracle.verify(directory, identity, digest)
+                oracle.verify(directory, identity, digest, "Consolas")
+
+    def test_rows_bind_the_family_the_harness_pins(self):
+        # The validator reads the harness's pinned family from workload.rs, so Windows rows naming the
+        # retired bundled face are refused and rows naming Consolas pass; macOS pins Menlo.
+        self.assertEqual(oracle.pinned_family(ROOT, "win32"), "Consolas")
+        self.assertEqual(oracle.pinned_family(ROOT, "darwin"), "Menlo")
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = Path(scratch)
+            for family, accepted in (("Rec Mono St.Helens", False), ("Consolas", True)):
+                for name in oracle.ROWS:
+                    fixture, dpi = name.removesuffix(".json").split("-")
+                    (directory / name).write_text(json.dumps({"schema": 1, "fixture": fixture, "dpi": int(dpi),
+                        "family": family, "size": "13.0", "tiles": {"face": [24, 16]}}), encoding="utf-8")
+                with self.subTest(family=family):
+                    pinned = oracle.pinned_family(ROOT, "win32")
+                    if accepted:
+                        oracle.validate_rows(directory, pinned)
+                    else:
+                        with self.assertRaises(ValueError):
+                            oracle.validate_rows(directory, pinned)
 
     def test_source_inventory_hashes_names_and_bytes(self):
         # A checkout SHA alone is insufficient: edited source/font bytes and renamed files change identity.
@@ -93,19 +114,19 @@ class OracleTests(unittest.TestCase):
                         ("rustc", "-vV"): b"toolchain", ("cargo", "-V"): b"cargo"}[arguments]
             with patch.dict(os.environ, environment), patch.dict("sys.modules", winreg=registry), \
                     patch.object(oracle, "command", probe):
-                original = oracle.identity(root, "1")
-                self.assertNotEqual(original, oracle.identity(root, "2"))
+                original = oracle.identity(root, "1", "Consolas")
+                self.assertNotEqual(original, oracle.identity(root, "2", "Consolas"))
                 font.write_bytes(b"replacement")
-                changed = oracle.identity(root, "1")
+                changed = oracle.identity(root, "1", "Consolas")
                 self.assertNotEqual(original["fonts"], changed["fonts"])
                 self.assertNotEqual(original["font_registrations"], changed["font_registrations"])
                 with patch.dict(os.environ, GITHUB_SHA="other"), self.assertRaises(ValueError):
-                    oracle.identity(root, "1")
+                    oracle.identity(root, "1", "Consolas")
                 with patch.dict(os.environ, ImageVersion=""), self.assertRaises(ValueError):
-                    oracle.identity(root, "1")
+                    oracle.identity(root, "1", "Consolas")
                 font.unlink()
                 with self.assertRaises(OSError):
-                    oracle.identity(root, "1")
+                    oracle.identity(root, "1", "Consolas")
 
 
 if __name__ == "__main__":

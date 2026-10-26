@@ -44,7 +44,7 @@ top-level unknown keys but loses comments, formatting, and nested unknown keys.
 
 | Key | Default | Behavior |
 | --- | --- | --- |
-| `family` | `"Rec Mono St.Helens"` | Primary font family. Missing glyphs use the fallback chain. |
+| `family` | platform monospace | Primary font family. The default is the platform's own monospace face: `"Menlo"` on macOS, `"Cascadia Mono"` on Windows (Consolas where Cascadia Mono is not installed), and fontconfig's `"monospace"` on Linux. SonicTerm bundles no text face. The starter config leaves `family` commented out. When the config names no family and the platform default is missing, the face SonicTerm resolved for regular text in its place (Consolas when Cascadia Mono is absent) becomes the session's family, in memory only; nothing is written until **Save Current Settings**. Installed families are enumerated only the first time **Font: Choose Family…** opens. A family that is not installed falls back to that default, and the log names the miss and the face used instead once per process. Missing glyphs use the fallback chain, which reaches the bundled Symbols Nerd Font Mono for Powerline and Nerd Font icons before system fallback. |
 | `size` | `13` | Font size in points. |
 | `line_height` | `1.3` | Line-height multiplier. |
 | `weight_scale` | `1.0` | Post-selection weight for all monochrome glyphs, including bold, italic, and fallback faces. Valid values are `0.5..=5.0`; other values become `1.0`. At a fixed size/DPI, cell metrics, bitmap dimensions, bearings, and advances do not change. Color artwork is unchanged. |
@@ -60,6 +60,15 @@ blending. Every other combination—including Mica, Acrylic, Tabbed, opacity bel
 `off` preserves the alpha-max grayscale output; `rgb` maps logical red, green,
 and blue coverage to matching display channels; `bgr` swaps red and blue.
 For shaping and fallback details, see [Rendering and Fonts](Rendering-and-Fonts).
+
+**Font: Choose Family…** (`choose_font_family`) enumerates the installed
+monospace families on a worker thread the first time the picker opens and lists
+them in the palette, with the live family marked `✓`; typing filters them. Moving the highlight with the arrow keys applies the
+highlighted family live to every window, Enter or a click keeps it for the session,
+and Escape or a click outside restores the family the picker opened with. Rows are
+drawn in the palette's own face; the terminal text previews the family. Before the
+catalog is ready the picker lists only the live family. **Save Current Settings**
+writes `[font] family` by the rule in [Saving current settings](#saving-current-settings).
 
 #### `[window]`
 
@@ -290,6 +299,10 @@ live renderer policy. A live `subpixel_aa` change invalidates and redraws the
 presented frame without rebuilding fonts, raster tiles, or either atlas.
 
 ### Saving current settings
+
+Save also writes `[font] family` when the file already names one, updating it in
+place, or when the live family differs from the one the session started with, as
+**Font: Choose Family…** changes it; an unchanged family is not added.
 
 **Save Current Settings** writes the live font values in
 `~/.sonicterm/sonicterm.toml`:

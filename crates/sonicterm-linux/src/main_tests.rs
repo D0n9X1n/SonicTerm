@@ -292,12 +292,12 @@ fn linux_normalization_is_idempotent_and_silent_after_the_first_pass() {
 }
 
 #[test]
-fn linux_runtime_assets_include_platform_keymap_and_all_font_faces() {
+fn linux_runtime_assets_include_platform_keymap_and_packaged_fonts() {
     // Protect development and packaged layouts through their shared asset resolver contract.
     let assets = asset_dir();
     assert!(assets.join("keymaps/sonicterm-linux.toml").is_file());
     for face in PACKAGED_FONT_FILES {
-        assert!(assets.join("fonts").join(face).is_file(), "missing packaged face {face}");
+        assert!(assets.join("fonts").join(face).is_file(), "missing packaged font {face}");
     }
 }
 
@@ -326,4 +326,27 @@ fn windows_only_modes_are_refused_on_linux() {
 fn main_refuses_non_linux_hosts() {
     let error = main().expect_err("the Linux binary must not start elsewhere");
     assert!(error.to_string().contains("supported only on Linux"), "{error}");
+}
+
+/// The app's font directory ships only the bundled symbols font, its license and the README;
+/// the text face comes from the host, so no full monospace family is packaged.
+#[test]
+fn bundled_font_directory_holds_only_the_symbols_font_and_its_license() {
+    let mut names: Vec<String> = std::fs::read_dir(asset_dir().join("fonts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["LICENSE-SymbolsNerdFont.txt", "README.md", "SymbolsNerdFontMono-Regular.ttf"]
+    );
+    assert_eq!(PACKAGED_FONT_FILES, ["SymbolsNerdFontMono-Regular.ttf"]);
+}
+
+/// The config default and the font stack's default name one family, so an unconfigured
+/// install asks the stack for the same face its fallback chain is built around.
+#[test]
+fn config_and_font_stack_share_the_default_family() {
+    assert_eq!(sonicterm_cfg::config::DEFAULT_FONT_FAMILY, sonicterm_engine::DEFAULT_FONT_FAMILY);
 }

@@ -53,7 +53,8 @@ padding 不变。受资源限制而行数较少的网格不吸收整行的未使
 ### 字体发现与匹配
 
 `sonicterm-engine::FontStack` 把 `sonicterm-font` 适配给渲染器。默认主字体族是
-`Rec Mono St.Helens`。匹配会考虑字体族、样式、字重、字宽、字体面索引、变体和码点
+平台自带的等宽字体：macOS 为 Menlo，Windows 为 Cascadia Mono，Linux 为 fontconfig 的
+`monospace`。SonicTerm 不内置正文字体。匹配会考虑字体族、样式、字重、字宽、字体面索引、变体和码点
 覆盖范围。可变字体元数据损坏、缺失或越界时，会回退到基础 OS/2 字重与字宽，不会中止应用。
 
 平台字体发现隐藏在 `FontLocator` 之后：
@@ -62,13 +63,35 @@ padding 不变。受资源限制而行数较少的网格不吸收整行的未使
 - Windows 使用 DirectWrite/GDI 描述信息并提取原始字体；
 - 其它 Unix 系统使用 Fontconfig，并把候选限制为等宽、双宽或字符单元字体。
 
-配置主字体之后，代码内置回退列表依次尝试 JetBrains Mono、Symbols Nerd Font Mono 和
-Noto Color Emoji。已加载字体都不覆盖某码点时，后台解析器查找平台字体并追加到该 `FontStack`。自动解析会把带 OpenType `MATH` 表的字体排在
+配置主字体之后，代码内置回退列表（`sonicterm-font-config` 中的
+`config::DEFAULT_MONOSPACE_FAMILIES`）先尝试主字体以外的每个平台默认等宽字体（Menlo；
+Cascadia Mono，然后 Consolas；或 `monospace`），再尝试内置的 Symbols Nerd Font Mono 和
+Noto Color Emoji。终端正文以及标签页标题、命令面板页脚和状态行视图共用这条回退链，因为它们都是同一个正文字体栈的视图。
+
+```mermaid
+flowchart LR
+    primary["配置的字体族"] --> defaults["平台默认等宽字体"]
+    defaults --> symbols["内置 Symbols Nerd Font Mono"]
+    symbols --> emoji["Noto Color Emoji"]
+    emoji --> system["后台系统回退"]
+```
+
+配置的字体族未安装时，由第一个能加载的平台默认字体提供正文和单元格度量，绝不会由符号字体或
+emoji 字体提供。日志以 error 级别记录缺失的字体族和实际使用的字体，每个进程只记录一次；缺失的是平台默认字体时
+（例如没有 Cascadia Mono 的 Windows 版本），改为以 info 级别记录一次。配置的字体目录先于原生发现被搜索，
+因此内置的符号字体文件优先于系统中安装的同名字体。已加载字体都不覆盖某码点时，后台解析器查找平台字体并追加到该 `FontStack`。自动解析会把带 OpenType `MATH` 表的字体排在
 文本字体之后，但不会排除它；没有文本字体覆盖时，数学字体仍可提供该码点。在 `[font]`
 中显式指定的字体族始终优先，不受 `MATH` 表影响。
 
-字体重载后，已打包字体目录仍会附着在可见和预热渲染器上。Linux 包不会把随附的四个
-Rec Mono face 安装到系统，因此必须保留这些目录。
+首次打开字体选择器时，`sonicterm-font-catalog` 工作线程通过平台定位器枚举已安装的字体文件，
+保留其首个字体面以同一前进宽度绘制全部 ASCII 字母和数字的字体族。前进宽度经过实际测量，因为
+Monaco 等等宽字体没有设置 `isFixedPitch` 标志；图标字体缺少这些字母，不会被列入。启动时从不枚举，
+之后再次打开会复用该目录。该线程以 info 级别记录 `font catalog ready`，附带等宽字体族数量。启动时，
+若配置未指定字体族且当前字体族仍是平台默认字体，正文字体栈为常规文字实际解析到的字体族成为本次会话的字体族和基准，
+仅保存在内存中，并以 `font family resolved` 记录；用户保存之前不会写入任何内容。
+
+字体重载后，已打包字体目录仍会附着在可见和预热渲染器上。每个安装包都在其中携带内置的
+Symbols Nerd Font Mono，且不会把它安装到系统。
 
 ### 标签页进程图标
 
@@ -104,7 +127,7 @@ U+F07B，否则使用终端字形 U+F489。
 窗口通过 GPU 和 Windows 软件渲染路径绘制同一个进程级状态。此标签页界面元素不会修改
 可执行文件资源、原生窗口图标、任务栏、Dock、应用切换器或软件包图标。
 
-以下是内置 Rec Mono 字体提供的私用区码点：
+以下是内置 Symbols Nerd Font Mono 提供的私用区码点：
 
 | 应用 | 精确别名 | 内置字形名称 | 码点 |
 | --- | --- | --- | --- |
@@ -436,7 +459,7 @@ CPU `GlyphAtlas` 是正方形 BGRA8 纹理，按需增长到最大 2048×2048（
 一帧已呈现且其终端行与 chrome 都未报告缺失字形的画面。两项报告都包含未画出任何内容的成形字形
 （被图集拒绝、光栅化结果为空，或大到无法放置）以及从未完成整形的标签标题。随后测试检查每个
 常驻图块都以相同光栅尺寸出现在辅助程序的集合中，并且对 S9 检查取自夹具最后一行的代表性 emoji
-与 CJK 码位在两个缩放下都是常驻的真实图块。它只证明该帧请求过的字形，而不是辅助程序测量的每个
+与 CJK 码位在两个缩放下都是常驻的真实图块；它按码位查找这些图块，不论由哪个字体绘制，因为系统回退字体取决于一起请求的码位，所以测试把每个码位实际绘制的字体和单独整形的字体打印为 `glyph_atlas_representative` 行，而不要求两者一致。它只证明该帧请求过的字形，而不是辅助程序测量的每个
 字形。这些检查在 Windows CI 上通过、测量行也已记录后，该开关才被设置。
 
 `START_SIZE_INPUTS` 中的每一行都带有来源：运行 id、尝试次数、测量的提交、来源侧、拉取请求、观测集，
@@ -445,7 +468,7 @@ CPU `GlyphAtlas` 是正方形 BGRA8 纹理，按需增长到最大 2048×2048（
 性能比较的 base 侧。辅助程序行和 Windows 真实渲染器行来自 `main` 上的 `push` CI 运行，或来自改变工作集
 的确切头提交上的 `pull_request` CI 运行；`pull_request` 行写明其拉取请求，其他行都不写。工作集步骤把每个
 实时辅助程序测量与其记录行精确比较，因此改变辅助程序适配结果、最大图块或豆腐块数量的改动会一直失败，
-直到重新记录这些行。重新记录时，让 CI 在改变工作集的头提交上运行，然后把每条
+直到重新记录这些行。这些行绑定到录制时的运行器镜像（`sonicterm-text` 的 `recording_image.rs` 中的 `RECORDING_IMAGES`：每个平台的镜像、`ImageVersion` 和 `RUNNER_ARCH`）。主机的 `ImageVersion` 相同，且 `RUNNER_ARCH` 在不区分大小写时相同，即视为在该镜像上；不比较 `ImageOS`。在该镜像上以及任何 CI 运行器（`GITHUB_ACTIONS=true`）上，比较都是精确的。在 CI 上，差异会使该步骤失败，提示“re-record the helper rows on <host image>”并给出录制镜像；在其他镜像上行完全相同时，该步骤通过，并把镜像不一致作为说明打印。不在 CI 上时，其他镜像上的差异作为提示打印。完整性（`incomplete_glyphs` 为 0）、没有未批准的光栅化失败，以及实时 fit 不超过起始常量，在任何主机上都是必需的。重新录制时也要更新录制镜像。重新记录时，让 CI 在改变工作集的头提交上运行，然后把每条
 `glyph_atlas_working_set ... source=helper` 行（真实渲染器有变化时，还有每条 `source=real_renderer` 行）
 连同作业 id 和日志行复制进表中，并一起设置该来源的运行、尝试、提交、来源侧和拉取请求。该步骤先打印
 每一行，最后只失败一次并列出所有漂移，因此一次运行就能得到完整的辅助程序行。真实渲染器行由其作业中

@@ -16,20 +16,24 @@ use sonicterm_font::{
 use sonicterm_text::glyph_atlas::{RasterTile, Rasterizer};
 use sonicterm_types::glyph_key::GlyphKey;
 
-/// Default primary font family. Matches `sonicterm_cfg::DEFAULT_FONT_FAMILY`
-/// — the brand default the project ships with. Duplicated here (rather
-/// than imported) because `sonicterm-engine` deliberately does not depend
-/// on `sonicterm-cfg`; if a caller needs to override the family it should
-/// invoke [`FontStack::try_new_with_family`].
-pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
+/// Default primary font family: the host's preferred monospace face, the first of
+/// [`config::DEFAULT_MONOSPACE_FAMILIES`]. Matches `sonicterm_cfg::config::DEFAULT_FONT_FAMILY`,
+/// which `sonicterm-engine` does not import because it does not depend on `sonicterm-cfg`; a
+/// caller that needs another family invokes [`FontStack::try_new_with_family`].
+pub const DEFAULT_FONT_FAMILY: &str = config::DEFAULT_MONOSPACE_FAMILIES[0];
 
-/// Synthesized fallback chain appended after the user's primary family.
-/// Order matters: JetBrains Mono first (bundled by sonicterm-font itself,
-/// always resolvable), then Symbols Nerd Font Mono for Powerline / Nerd
-/// Font PUA glyphs the primary may lack, then Noto Color Emoji as the
-/// last-resort color fallback.
-const FALLBACK_FAMILIES: &[&str] =
-    &["JetBrains Mono", "Symbols Nerd Font Mono", "Noto Color Emoji"];
+/// The fallback chain appended after `primary_family`: every platform default monospace family
+/// other than the primary, then the bundled symbols font for Powerline and Nerd Font icons, then
+/// Noto Color Emoji. A missing primary therefore takes the host's own text face, and icons reach
+/// the bundled font before system fallback.
+fn fallback_families(primary_family: &str) -> Vec<&'static str> {
+    config::DEFAULT_MONOSPACE_FAMILIES
+        .iter()
+        .copied()
+        .filter(|family| *family != primary_family)
+        .chain([config::BUNDLED_SYMBOLS_FAMILY, "Noto Color Emoji"])
+        .collect()
+}
 
 /// Global `use_this_configuration` install guard. The wezterm `config`
 /// crate keeps a process-wide `Configuration` slot read by
@@ -76,12 +80,10 @@ pub struct FontStack {
 }
 
 impl FontStack {
-    /// Construct a [`FontStack`] using the project's default font
-    /// family (`DEFAULT_FONT_FAMILY` — "Rec Mono St.Helens") backed by
-    /// the synthesized `FALLBACK_FAMILIES` chain. On first call this
-    /// installs a process-wide wezterm `Config` so that
-    /// `FontConfiguration::new(None, dpi)` selects sonicterm's primary
-    /// family instead of sonicterm-font's bundled JetBrains Mono default.
+    /// Construct a [`FontStack`] using the platform's default monospace
+    /// family ([`DEFAULT_FONT_FAMILY`]) backed by the synthesized fallback
+    /// chain. On first call this installs a process-wide font `Config` so that
+    /// `FontConfiguration::new(None, dpi)` selects the same primary family.
     pub fn try_new(dpi: usize) -> Result<Self> {
         Self::try_new_full(DEFAULT_FONT_FAMILY, 14.0, dpi)
     }
@@ -136,7 +138,7 @@ impl FontStack {
             Some(build_config_with_font_dirs(
                 primary_family,
                 font_size_pt,
-                FALLBACK_FAMILIES,
+                &fallback_families(primary_family),
                 font_dirs,
             )),
             dpi,
@@ -326,7 +328,7 @@ impl FontStack {
     /// The face for `(bold, italic)` at this stack's size, memoized per style until the shared
     /// configuration's `face_epoch` moves. A fallback merge mutates the shared face in place, so
     /// the memoized `Rc` shapes with merged handles without being resolved again.
-    fn font_for_style(
+    pub(crate) fn font_for_style(
         &self,
         bold: bool,
         italic: bool,
@@ -1002,7 +1004,7 @@ fn install_default_config(primary_family: &str, font_size_pt: f64) {
         sonicterm_font::use_sonic_font_configuration(
             primary_family,
             font_size_pt,
-            FALLBACK_FAMILIES,
+            &fallback_families(primary_family),
         );
     });
 }

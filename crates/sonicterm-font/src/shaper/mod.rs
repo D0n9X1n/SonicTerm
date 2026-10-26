@@ -115,6 +115,10 @@ pub trait FontShaper {
     /// at the specified size.
     fn metrics(&self, size: f64, dpi: u32) -> anyhow::Result<FontMetrics>;
 
+    /// How many leading handles are the configured chain, whose faces this shaper keeps resident.
+    #[cfg(test)]
+    fn configured_handle_count(&self) -> usize;
+
     /// Compute the metrics for a given fallback font at the specified size
     fn metrics_for_idx(&self, font_idx: usize, size: f64, dpi: u32) -> anyhow::Result<FontMetrics>;
 }
@@ -125,10 +129,11 @@ pub use config::FontShaperSelection;
 pub fn new_shaper(
     config: &config::ConfigHandle,
     handles: &[ParsedFont],
+    configured_handle_count: usize,
 ) -> anyhow::Result<Box<dyn FontShaper>> {
     match config.font_shaper {
         FontShaperSelection::Harfbuzz => {
-            Ok(Box::new(harfbuzz::HarfbuzzShaper::new(config, handles)?))
+            Ok(Box::new(harfbuzz::HarfbuzzShaper::new(config, handles, configured_handle_count)?))
         }
         FontShaperSelection::Allsorts => {
             anyhow::bail!("The incomplete Allsorts shaper has been removed");

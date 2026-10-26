@@ -327,7 +327,8 @@ fn ordinary_white_and_color_glyph_emission_does_not_warn() {
         tracing::warn!(target: "sonic::render::glyph", "glyph-positive-control");
         let mut stack = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
             &[("Rec Mono St.Helens", false)],
-            vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+            vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../sonicterm-font/test-fonts/rec-mono")],
             14.0,
             72,
             1.0,
@@ -3511,18 +3512,17 @@ fn title_size_helper_is_used_only_for_title_stack_and_title_rendering() {
 }
 
 /// The longest `status-checklist-footer` across the shipped locales, by character count.
-fn longest_checklist_footer() -> String {
+fn longest_localized_footer(key: &str) -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/i18n");
+    let prefix = format!("{key} = ");
     ["en", "ja", "zh-CN"]
         .iter()
         .filter_map(|locale| std::fs::read_to_string(root.join(locale).join("messages.ftl")).ok())
         .filter_map(|text| {
-            text.lines()
-                .find_map(|line| line.strip_prefix("status-checklist-footer = "))
-                .map(str::to_owned)
+            text.lines().find_map(|line| line.strip_prefix(prefix.as_str())).map(str::to_owned)
         })
         .max_by_key(|footer| footer.chars().count())
-        .expect("every locale has a checklist footer")
+        .expect("every locale has the footer")
 }
 
 #[test]
@@ -3543,6 +3543,7 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
         CommandPaletteMode::TabColor,
         CommandPaletteMode::Confirm,
         CommandPaletteMode::StatusSegments,
+        CommandPaletteMode::FontFamily,
     ] {
         let mut palette = CommandPalette::new();
         match mode {
@@ -3554,9 +3555,19 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
                 palette.start_confirm("title", "Apply", "Cancel", Vec::new())
             }
             // The checklist footer comes from the host; check the longest localized one.
-            CommandPaletteMode::StatusSegments => {
-                palette.start_status_segments("title", longest_checklist_footer(), Vec::new(), None)
-            }
+            CommandPaletteMode::StatusSegments => palette.start_status_segments(
+                "title",
+                longest_localized_footer("status-checklist-footer"),
+                Vec::new(),
+                None,
+            ),
+            // The font picker footer also comes from the host.
+            CommandPaletteMode::FontFamily => palette.start_font_family(
+                "title",
+                longest_localized_footer("font-picker-footer"),
+                Vec::new(),
+                "",
+            ),
         }
         let layout = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 1.0)
             .expect("open palette has layout");
@@ -4803,9 +4814,10 @@ fn upload_staging_row_is_the_live_vertex_scratch_not_the_atlas_figure() {
     assert_eq!(rows, vec![scratch], "one UploadStaging row, equal to the vertex scratch");
 }
 
-/// The packaged Rec Mono St.Helens stack, built the way production builds it from `assets/fonts`.
-fn packaged_font_stack() -> sonicterm_engine::FontStack {
-    let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+/// The Rec Mono St.Helens test fixture stack, built through the production font-directory constructor.
+fn rec_mono_font_stack() -> sonicterm_engine::FontStack {
+    let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     sonicterm_engine::FontStack::try_new_full_with_weight_and_font_dirs(
         "Rec Mono St.Helens",
         14.0,
@@ -4813,7 +4825,7 @@ fn packaged_font_stack() -> sonicterm_engine::FontStack {
         1.0,
         &[fonts],
     )
-    .expect("the tracked packaged fonts build a stack")
+    .expect("the tracked Rec Mono fixture build a stack")
 }
 
 /// A `cols`x4 grid with 8 rows of history: per-row foreground and background colours,
@@ -5019,7 +5031,7 @@ fn render_parity_frame(
 /// rows still shown, and only a resized pane, released with its old width, replays none.
 #[test]
 fn pointer_operations_render_the_same_from_warmed_caches_as_from_fresh_ones() {
-    let stack = packaged_font_stack();
+    let stack = rec_mono_font_stack();
     let wide = parity_grid(6);
     let narrow = parity_grid(4);
     let live_top = wide.scrollback_len() as u64;
@@ -6422,9 +6434,9 @@ struct GlyphRig {
 }
 
 impl GlyphRig {
-    /// A rig with the packaged fonts, 10x20 cells, baseline 16 and a 400x200 surface.
+    /// A rig with the Rec Mono fixture fonts, 10x20 cells, baseline 16 and a 400x200 surface.
     fn new(software_presenter: bool) -> Self {
-        Self::with_stack(packaged_font_stack(), software_presenter)
+        Self::with_stack(rec_mono_font_stack(), software_presenter)
     }
 
     /// A rig shaping and rasterizing with `stack`, otherwise as [`GlyphRig::new`] builds one.
@@ -7976,7 +7988,7 @@ fn borrowed_runs_emit_the_same_records_and_completeness() {
         ("ligature", text_grid(8, &["a=>b!=c"])),
     ];
     for (name, grid) in &rows {
-        let stack = packaged_font_stack();
+        let stack = rec_mono_font_stack();
         let (glyphs, tofu, missing, complete) = oracle_row(grid, &stack);
         let mut rig = GlyphRig::with_stack(stack, false);
         rig.begin(grid);
@@ -8003,7 +8015,7 @@ fn borrowed_runs_emit_the_same_records_and_completeness() {
             ('=', CellFlags::ITALIC),
         ],
     );
-    let stack = packaged_font_stack();
+    let stack = rec_mono_font_stack();
     let (whole, _, _, whole_complete) = oracle_row(&three_runs, &stack);
     assert!(whole_complete, "the row is complete when every run shapes");
     let mut rig = GlyphRig::with_stack(stack, false);
@@ -8194,7 +8206,7 @@ fn oracle_cell_at<'cell>(cells: &[(u16, &'cell Cell)], col: u16) -> Option<&'cel
 }
 
 /// Build one style run through the production run builder into fresh records with `atlas` and
-/// the packaged font, at row 0 of a 16-column, 10x20-cell row; returns the records and
+/// the Rec Mono fixture, at row 0 of a 16-column, 10x20-cell row; returns the records and
 /// whether the run was complete.
 fn build_run_records(
     atlas: &mut GlyphAtlas,
@@ -8233,7 +8245,7 @@ fn borrowed_run_records_follow_each_lead_cell() {
     // cluster and a distinct colour per cell, every record's colour, wide bit and extras bit equal
     // those of the cell an independent linear scan finds at the record's lead column, and every
     // cell of the run leads at least one record.
-    let stack = packaged_font_stack();
+    let stack = rec_mono_font_stack();
     let colours = [(200, 30, 30), (30, 200, 30), (30, 30, 200), (200, 200, 30), (30, 200, 200)];
     let mut combining =
         Cell::plain('e', Color::Rgb(200, 30, 200), Color::Default, CellFlags::empty());
@@ -8329,7 +8341,7 @@ fn later_runs_keep_their_exact_records_after_the_first_fails() {
     // Three styled runs share one row's records. When the first run's shaping fails, it adds no
     // record and the row is incomplete, while runs 2 and 3 add exactly the records each builds
     // on its own over the same atlas order: the failed run leaves nothing behind.
-    let stack = packaged_font_stack();
+    let stack = rec_mono_font_stack();
     let run_cells = |text: &str, first_col: u16, flags: CellFlags, tint: u8| -> Vec<(u16, Cell)> {
         text.chars()
             .enumerate()
@@ -8442,7 +8454,7 @@ fn later_runs_are_processed_after_an_incomplete_run() {
     assert!(!rig.cache.contains(7, emitted.key), "the row is not admitted");
 }
 
-/// The shaped atlas key a fresh packaged rig draws `character` with: a real (nonzero) glyph id from
+/// The shaped atlas key a fresh Rec Mono fixture rig draws `character` with: a real (nonzero) glyph id from
 /// its face, so a test can seed that exact key before the row is drawn again.
 fn shaped_key_of(character: char) -> sonicterm_types::glyph_key::GlyphKey {
     let grid = text_grid(2, &[&character.to_string()]);
@@ -8454,7 +8466,7 @@ fn shaped_key_of(character: char) -> sonicterm_types::glyph_key::GlyphKey {
         .resident_tile_keys()
         .into_iter()
         .find(|key| key.ch == character && key.glyph_id != 0)
-        .expect("the packaged stack shapes the character to a real glyph id")
+        .expect("the Rec Mono fixture stack shapes the character to a real glyph id")
 }
 
 /// A shaped glyph with a real id whose rasterization produced nothing is drawn as nothing, so it

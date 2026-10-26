@@ -130,3 +130,24 @@ fn counting_allocator_counts_only_inside_its_scope() {
     assert!(!COUNTING.with(std::cell::Cell::get), "the scope restored the previous setting");
     drop(held);
 }
+
+/// A native test that loads the Rec Mono fixture directory also selects its family. The default
+/// family is the host's own monospace face, so loading the files alone measures whatever face the
+/// runner has instead of the fixture.
+#[test]
+fn native_tests_that_load_the_rec_mono_fixture_select_it() {
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut unpinned = Vec::new();
+    for entry in std::fs::read_dir(&tests).expect("the tests directory") {
+        let path = entry.expect("a tests entry").path();
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            // When: `read_to_string` fails, the entry is a directory, which holds no fixture setup.
+            continue;
+        };
+        if source.contains("test-fonts/rec-mono") && !source.contains("\"Rec Mono St.Helens\"") {
+            unpinned.push(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+        }
+    }
+    unpinned.sort();
+    assert!(unpinned.is_empty(), "load the Rec Mono fixture without selecting it: {unpinned:?}");
+}

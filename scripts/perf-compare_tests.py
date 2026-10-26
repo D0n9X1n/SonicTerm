@@ -2085,8 +2085,8 @@ class ExecuteRunTests(unittest.TestCase):
                 (scratch / relative).write_bytes(raw)
         output = "harness finished\n"
         if self.font_error:
-            output = ('E config: Unable to load the configured primary font "Rec Mono St.Helens" (weight=Regular, '
-                      'stretch=Normal, style=Normal). Fallback fonts are being used instead\n') + output
+            output = ('E config: Unable to load the configured primary font "Menlo" (weight=Regular, '
+                      'stretch=Normal, style=Normal). Using "Symbols Nerd Font Mono" instead\n') + output
         return "PASS", 0, output
 
     def run_plan(self, deadline=False, smoke=True, environ=None, name=None, short=None, counters=False, side="head"):
@@ -2184,7 +2184,7 @@ class ExecuteRunTests(unittest.TestCase):
         outcome, _evidence, _gate = self.run_plan()
         kind, reasons = perf.classify_outcome(outcome)
         self.assertEqual(kind, "font")
-        self.assertIn("Rec Mono St.Helens", reasons[0])
+        self.assertIn("Menlo", reasons[0])
         self.assertEqual(perf.smoke_verdict(kind), "fail")
 
     def test_an_unresolved_home_check_invalidates_the_run(self):
@@ -3207,7 +3207,7 @@ class CompareHarness:
                     trim.parent.mkdir(parents=True, exist_ok=True)
                     trim.write_text(TRIM_SOURCE, encoding="utf-8")
                 if tree.name in assets:
-                    font = tree / "assets" / "fonts" / "RecMonoSt.Helens-Regular.ttf"
+                    font = tree / "assets" / "fonts" / "SymbolsNerdFontMono-Regular.ttf"
                     font.parent.mkdir(parents=True)
                     font.write_bytes(b"font")
                 if tree.name == "head":
@@ -3992,7 +3992,7 @@ class AssetCheckTests(unittest.TestCase):
     def fonts(self, assets):
         """Give an assets directory the tracked font the harness configures."""
         (assets / "fonts").mkdir(parents=True)
-        (assets / "fonts" / "RecMonoSt.Helens-Regular.ttf").write_bytes(b"font")
+        (assets / "fonts" / "SymbolsNerdFontMono-Regular.ttf").write_bytes(b"font")
 
     def problem(self):
         return perf.asset_problem(self.binary, self.tree, platform="darwin")

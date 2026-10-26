@@ -82,7 +82,7 @@ impl sonicterm_font::locator::FontLocator for RecMonoLocator {
         let handle = FontDataHandle {
             source: FontDataSource::OnDisk(
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+                    .join("../sonicterm-font/test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf"),
             ),
             index: 0,
             variation: 0,

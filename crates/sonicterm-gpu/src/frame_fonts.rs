@@ -209,3 +209,10 @@ pub(super) fn prepare_frame_fonts<Key, Preedit>(
 #[cfg(test)]
 #[path = "frame_fonts_tests.rs"]
 mod frame_fonts_tests;
+
+impl super::GpuRenderer {
+    /// The family of the face the body stack resolved for regular text; `None` before a stack loads.
+    pub fn resolved_font_family(&self) -> Option<String> {
+        self.font_stack.as_ref()?.resolved_family()
+    }
+}

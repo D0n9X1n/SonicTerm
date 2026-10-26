@@ -504,7 +504,7 @@ fn scratch_config_loads_strictly_with_pinned_values() {
         .unwrap();
         let config = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
         assert_eq!((config.window.cols, config.window.rows), (250, rows));
-        assert_eq!((config.font.family.as_str(), config.font.size), ("Rec Mono St.Helens", 13.0));
+        assert_eq!((config.font.family.as_str(), config.font.size), (FONT_FAMILY, 13.0));
         assert_eq!(config.logging.level, level);
         assert_eq!(config.terminal.shell, Some(format!("{scratch}/workload/role.sh")));
         assert_eq!(config.terminal.scrollback, scrollback);
@@ -667,10 +667,12 @@ fn windows_config_names_the_harness_as_the_shell() {
     let config = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
     assert_eq!(config.terminal.shell.as_deref(), Some(harness));
     std::fs::remove_dir_all(&dir).unwrap();
-    let posix = "[window]\ncols = 250\nrows = 40\n\n\
-                 [font]\nfamily = \"Rec Mono St.Helens\"\nsize = 13.0\n\n\
-                 [logging]\nlevel = \"info\"\n\n\
-                 [terminal]\nshell = '/tmp/perf-test/workload/role.sh'\nscrollback = 1000\n";
+    let posix = format!(
+        "[window]\ncols = 250\nrows = 40\n\n\
+         [font]\nfamily = \"{FONT_FAMILY}\"\nsize = 13.0\n\n\
+         [logging]\nlevel = \"info\"\n\n\
+         [terminal]\nshell = '/tmp/perf-test/workload/role.sh'\nscrollback = 1000\n"
+    );
     assert_eq!(config_toml(&idle, SCRATCH, false), posix);
 }
 
@@ -1183,6 +1185,7 @@ fn missing_required_chrome(
 fn glyph_atlas_working_set() {
     use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
     use sonicterm_text::glyph_atlas::{ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    use sonicterm_text::recording_image::{drift_policy, DriftVerdict, HostImage};
     use sonicterm_text::start_size_inputs::{
         normalize_raster_failures, ruled_start, start_rule, validate_table_start, InputSource,
         RuleInput, RASTER_EXCEPTIONS, SIZING_ORACLE_COMPLETE, START_SIZE_INPUTS,
@@ -1199,6 +1202,11 @@ fn glyph_atlas_working_set() {
     let fixtures = [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)];
     let titles = ["zsh", "perf_scenarios", "S12 covered window"];
     let platform = platform_name();
+    // The rows hold exactly on their recording image and on every CI host; elsewhere drift is advisory.
+    let policy = drift_policy(platform, &HostImage::from_env());
+    if let Some(note) = policy.note() {
+        println!("glyph_atlas_working_set note: {note}");
+    }
     for (scale, dpi, constant) in [(1, 72, START_ATLAS_DIM_1X), (2, 144, START_ATLAS_DIM_2X)] {
         match validate_table_start(scale, constant) {
             Ok(table) => println!(
@@ -1305,15 +1313,26 @@ fn glyph_atlas_working_set() {
             );
             let provenance =
                 recorded.map_or_else(|| "none".to_owned(), |row| row.provenance.describe());
-            match check {
-                HelperCheck::Matches | HelperCheck::MaximumOnly => {}
-                HelperCheck::Drifted(reason) => failures.push(format!(
+            // A refusal fails on every host; only a dimension drift depends on the host image.
+            let drift = match check {
+                HelperCheck::Matches | HelperCheck::MaximumOnly => None,
+                HelperCheck::Drifted(reason) => Some(format!(
                     "{name} at {scale}x drifted from its recorded helper row ({provenance}): {reason}"
                 )),
-                HelperCheck::Refused(reason) => failures.push(format!(
-                    "glyph_atlas_working_set refused: {platform} {name} at {scale}x (recorded row: \
-                     {provenance}): {reason}"
-                )),
+                HelperCheck::Refused(reason) => {
+                    failures.push(format!(
+                        "glyph_atlas_working_set refused: {platform} {name} at {scale}x (recorded row: \
+                         {provenance}): {reason}"
+                    ));
+                    None
+                }
+            };
+            match policy.judge(drift.as_deref()) {
+                DriftVerdict::Holds => {}
+                DriftVerdict::Advisory(advisory) => {
+                    println!("glyph_atlas_working_set advisory: {advisory}")
+                }
+                DriftVerdict::Fails(failure) => failures.push(failure),
             }
             // CI seals these rows only after this test returns successfully, including every drift check.
             if let Err(error) = crate::workload::glyph_oracle::export(name, dpi, &set) {
@@ -1394,7 +1413,7 @@ fn an_incomplete_helper_measurement_is_refused_before_the_drift_check() {
 
 /// Representative S9 emoji and CJK scalars, taken from the fixture's last line, which the real
 /// renderer's viewport shows at both scales (the cursor sits on the row below it). Test 17 checks
-/// that each resolves to a resident real tile.
+/// that a resident body tile draws each with pixels, whatever fallback face drew it.
 const S9_REPRESENTATIVE_CODEPOINTS: [char; 6] = ['😀', '🍣', '🌏', '漢', '字', 'あ'];
 
 /// Every representative codepoint is drawn by S9: each appears on the fixture's last line, so the
@@ -1577,7 +1596,7 @@ mod real_renderer_coverage {
     use sonicterm_cfg::theme::Theme;
     use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
     use sonicterm_gpu::glyph_working_set::{
-        measure_glyph_working_set, representative_gaps, representative_identities,
+        measure_glyph_working_set, representative_gaps, representative_identities, TileIdentity,
     };
     use winit::application::ApplicationHandler;
     use winit::dpi::PhysicalSize;
@@ -1622,7 +1641,7 @@ mod real_renderer_coverage {
         pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
     }
 
-    /// The packaged scenario fonts, so the renderer and the helper load the same faces.
+    /// The app's font directory, so the renderer and the helper load the same faces.
     fn font_dirs() -> Vec<PathBuf> {
         vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")]
     }
@@ -1734,7 +1753,7 @@ mod real_renderer_coverage {
     /// It then holds every required footer symbol and title character as a real tile, prints its
     /// atlas as a `source=real_renderer` row, every resident tile resolves to an identity (face,
     /// glyph, strike, variant and flags), each identity is in the helper's set with the same
-    /// raster size, and for S9 each representative codepoint resolves to a resident real tile.
+    /// raster size, and for S9 a resident body tile draws each representative codepoint with pixels.
     fn covered(
         active: &ActiveEventLoop,
         name: &str,
@@ -1791,14 +1810,40 @@ mod real_renderer_coverage {
         let dpi = (72.0 * scale).round() as usize;
         if name == "S9" {
             // When: the fixture is S9, its representative emoji and CJK must be real resident tiles.
-            let resolved = representative_identities(
+            let body_tiles = renderer.__test_resident_body_tiles();
+            let sizes: Vec<_> = body_tiles.iter().map(|(key, size, _)| (*key, *size)).collect();
+            let gaps = representative_gaps(&super::S9_REPRESENTATIVE_CODEPOINTS, &sizes);
+            // Diagnostics only: shaping a codepoint alone may pick another fallback face than the frame.
+            let alone = representative_identities(
                 &super::S9_REPRESENTATIVE_CODEPOINTS,
                 FONT_FAMILY,
                 size_pt,
                 dpi,
                 &font_dirs(),
             );
-            let gaps = representative_gaps(&resolved, &identities);
+            let label = |identity: Option<&TileIdentity>| {
+                identity.map_or_else(
+                    || "unresolved".to_owned(),
+                    |identity| {
+                        format!(
+                            "{} glyph {}",
+                            identity.source.face.source, identity.source.glyph_id
+                        )
+                    },
+                )
+            };
+            for (codepoint, isolated) in &alone {
+                let drawn: Vec<String> = body_tiles
+                    .iter()
+                    .filter(|(key, _, _)| key.ch == *codepoint)
+                    .map(|(_, _, identity)| label(identity.as_ref()))
+                    .collect();
+                println!(
+                    "glyph_atlas_representative fixture=S9 scale={scale} codepoint={codepoint} \
+                     drawn={drawn:?} alone={}",
+                    label(isolated.as_ref())
+                );
+            }
             check(
                 gaps.is_empty(),
                 &format!("{case}: representative codepoints not drawn: {gaps:?}"),
@@ -1886,7 +1931,7 @@ mod real_renderer_coverage {
 const ROW_RUN_COLS: usize = 250;
 
 /// Cells `text` occupies: every non-ASCII character in the row-run fixtures is a wide CJK
-/// character from the bundled faces, so it takes two cells.
+/// character, so it takes two cells.
 fn fixture_cells(text: &str) -> usize {
     text.chars().map(|character| if character.is_ascii() { 1 } else { 2 }).sum()
 }

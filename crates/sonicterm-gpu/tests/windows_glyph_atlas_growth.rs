@@ -108,7 +108,8 @@ fn counting_renderer(
             )
             .map_err(|error| error.to_string())?,
     );
-    let font_dirs = [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let font_dirs =
+        [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono")];
     let mode = if software { SoftwareRenderMode::Force } else { SoftwareRenderMode::Off };
     let settings = RendererSettings {
         font_family: "Rec Mono St.Helens",
@@ -216,7 +217,7 @@ impl sonicterm_font::locator::FontLocator for PinnedColourLocator {
 }
 
 /// Whether this host has a colour face for the colour glyph, established apart from the renderer
-/// under test: the packaged family with the pinned system emoji face as its only fallback shapes
+/// under test: the Rec Mono fixture family with the pinned system emoji face as its only fallback shapes
 /// the glyph to a fallback slot, which rasterizes to a colour tile with painted pixels. `Err`
 /// names the step that found no colour face; only then may the colour sub-case be skipped.
 fn probe_colour_face() -> Result<(), String> {
@@ -228,7 +229,9 @@ fn probe_colour_face() -> Result<(), String> {
     }
     let stack = sonicterm_engine::FontStack::try_new_with_locator_for_test(
         "Rec Mono St.Helens",
-        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+        vec![
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono")
+        ],
         Arc::new(PinnedColourLocator),
         14.0,
         96,

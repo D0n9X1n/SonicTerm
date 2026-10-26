@@ -17,6 +17,8 @@ pub(super) enum PalettePointerTarget {
     Entry(PaletteEntry),
     /// A status line checklist row, by what it does.
     StatusRow(StatusSegmentRowKind),
+    /// A font picker row, by family.
+    FontRow(String),
     Outside,
 }
 
@@ -29,6 +31,11 @@ enum PalettePointerHit {
     StatusRow {
         index: usize,
         kind: StatusSegmentRowKind,
+    },
+    /// A font picker row at filtered `index`.
+    FontRow {
+        index: usize,
+        family: String,
     },
     Outside,
     Inside,
@@ -59,6 +66,12 @@ impl App {
                 let kind = rows.get(row.item_index)?.kind;
                 return Some(PalettePointerHit::StatusRow { index: row.item_index, kind });
             }
+            if self.command_palette.mode() == CommandPaletteMode::FontFamily {
+                // When: mode is FontFamily, the row is named by its family.
+                let rows = self.command_palette.font_family_rows();
+                let family = rows.get(row.item_index)?.family.clone();
+                return Some(PalettePointerHit::FontRow { index: row.item_index, family });
+            }
             let entry = self.command_palette.visible().get(row.item_index).copied()?.clone();
             return Some(PalettePointerHit::Row { index: row.item_index, entry });
         }
@@ -79,7 +92,9 @@ impl App {
             || !self.command_palette.is_open()
             || !matches!(
                 self.command_palette.mode(),
-                CommandPaletteMode::Commands | CommandPaletteMode::StatusSegments
+                CommandPaletteMode::Commands
+                    | CommandPaletteMode::StatusSegments
+                    | CommandPaletteMode::FontFamily
             )
             || self.palette_ime_is_composing()
         {
@@ -87,6 +102,12 @@ impl App {
             return;
         }
         match (capture.target, hit) {
+            (PalettePointerTarget::Outside, Some(PalettePointerHit::Outside))
+                if self.command_palette.mode() == CommandPaletteMode::FontFamily =>
+            {
+                // An outside click cancels the picker and restores the font it opened with.
+                self.close_font_family_picker(false);
+            }
             (PalettePointerTarget::Outside, Some(PalettePointerHit::Outside)) => {
                 self.command_palette.close();
                 self.palette_attached_window = None;
@@ -113,6 +134,13 @@ impl App {
                 }
                 // The checklist's window is `window_id` here; an activation already asked once.
                 self.request_checklist_redraw();
+            }
+            (
+                PalettePointerTarget::FontRow(pressed),
+                Some(PalettePointerHit::FontRow { index, family }),
+            ) if pressed == family && self.command_palette.select_font_row(index) => {
+                // The picker row released on is the one pressed: keep that family and close.
+                self.close_font_family_picker(true);
             }
             _ => {
                 // When: `hit` no longer names `capture.target`, leave the modal open without dispatch.
@@ -185,7 +213,9 @@ impl App {
                 // When: `MouseInput` belongs to the modal, never forward either half of the click to a terminal.
                 if !matches!(
                     self.command_palette.mode(),
-                    CommandPaletteMode::Commands | CommandPaletteMode::StatusSegments
+                    CommandPaletteMode::Commands
+                        | CommandPaletteMode::StatusSegments
+                        | CommandPaletteMode::FontFamily
                 ) || self.palette_ime_is_composing()
                     || *button != MouseButton::Left
                 {
@@ -204,6 +234,15 @@ impl App {
                                     window_id,
                                     target: PalettePointerTarget::Entry(entry),
                                 })
+                            }
+                            Some(PalettePointerHit::FontRow { index, family }) => {
+                                // A picker row is highlighted on press and applied on release.
+                                self.command_palette.select_font_row(index).then_some(
+                                    PalettePointerCapture {
+                                        window_id,
+                                        target: PalettePointerTarget::FontRow(family),
+                                    },
+                                )
                             }
                             Some(PalettePointerHit::StatusRow { index, kind }) => {
                                 // A heading cannot be pressed; a row is highlighted on press.

@@ -38,6 +38,8 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/child_window_pointer.rs` - child pointer chrome, hover, selection, left-button and wheel routing.
 - `src/app/child_tabs.rs` - child tab and pane operations and child PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
+- `src/app/live_font.rs` - live font size and family changes in every window and the
+  `LiveFontRequest` each renderer receives.
 - `src/app/memory_report.rs`, `memory_report_window.rs` - the Memory Usage report: its text model, the
   report-window action gate and keys, the PTY-less report window, and its off-thread OS sample.
   `WindowRole::MemoryReport` never counts as a terminal window, drop target or broadcast receiver.

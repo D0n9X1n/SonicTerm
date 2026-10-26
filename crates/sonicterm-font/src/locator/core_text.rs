@@ -11,7 +11,7 @@ use core_foundation::string::{CFString, CFStringRef};
 use core_text::font::*;
 use core_text::font_descriptor::*;
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 lazy_static::lazy_static! {
     static ref FALLBACK: Vec<ParsedFont> = build_fallback_list();
@@ -138,6 +138,8 @@ impl FontLocator for CoreTextFontLocator {
         codepoints: &[char],
     ) -> anyhow::Result<Vec<ParsedFont>> {
         let mut matches = vec![];
+        // Candidates parsed earlier in this request, by the PostScript name of the face CoreText chose.
+        let mut parsed: HashMap<String, Vec<ParsedFont>> = HashMap::new();
 
         let menlo =
             new_from_name("Menlo", 0.0).map_err(|_| anyhow::anyhow!("failed to get Menlo font"))?;
@@ -169,11 +171,14 @@ impl FontLocator for CoreTextFontLocator {
                 // SAFETY: `font` is non-null with +1 ownership; the wrapper consumes that ownership.
                 unsafe { CTFont::wrap_under_create_rule(font) };
 
-            let candidates = handles_from_descriptor(&font.copy_descriptor());
+            // Codepoints served by one face reuse its parsed candidates, whose coverage is computed once.
+            let candidates = parsed
+                .entry(font.postscript_name())
+                .or_insert_with(|| handles_from_descriptor(&font.copy_descriptor()));
 
             let mut matched_any = false;
 
-            for font in candidates {
+            for font in candidates.iter() {
                 if font.names().family == ".LastResort"
                     || font.names().postscript_name.as_deref() == Some("LastResort")
                 {
@@ -195,7 +200,7 @@ impl FontLocator for CoreTextFontLocator {
                     // Explicitly check coverage because the list may not
                     // actually match the text we asked about(!)
                     if !cov.is_empty() {
-                        matches.push((cov.len(), font));
+                        matches.push((cov.len(), font.clone()));
                         matched_any = true;
                     }
                 }

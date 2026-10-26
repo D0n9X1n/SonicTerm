@@ -103,7 +103,7 @@ static BOOL probeCairo(NSString *path) {
         CFRelease(font);
     }
     BOOL cairoOK = !cairoPath || probeCairo(cairoPath);
-    BOOL ok = specs.count == 4 && passed == 4 && cairoOK;
+    BOOL ok = specs.count > 0 && passed == specs.count && cairoOK;
     fprintf(report, "RESULT fonts=%lu/%lu cairo=%s verdict=%s\n", (unsigned long)passed,
             (unsigned long)specs.count, cairoPath ? (cairoOK ? "PASS" : "FAIL") : "NOT_REQUESTED", ok ? "PASS" : "FAIL");
     fclose(report);

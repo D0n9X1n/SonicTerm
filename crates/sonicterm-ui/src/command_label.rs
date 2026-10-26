@@ -58,6 +58,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "DecreaseFontWeight",
     "ResetFontWeight",
     "SaveCurrentSettings",
+    "ChooseFontFamily",
     "ApplyTheme",
     "ToggleTabBar",
     "ToggleStatusLine",
@@ -472,6 +473,12 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
             "command-reset-status-line-font-scale",
             &["status", "font", "size", "reset", "default"],
         ),
+        Action::ChooseFontFamily => (
+            "ChooseFontFamily",
+            Appearance,
+            "command-choose-font-family",
+            &["font", "family", "typeface", "monospace", "switch"],
+        ),
         Action::ChooseStatusLineSegments => (
             "ChooseStatusLineSegments",
             Appearance,
@@ -598,6 +605,7 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         Action::OpenCommandPalette
         | Action::RenameWindow
         | Action::ChooseStatusLineSegments
+        | Action::ChooseFontFamily
         | Action::FocusStatusLine => (Requirement::Window, true),
         Action::CloseTab
         | Action::CloseActivePaneOrTab
@@ -684,6 +692,7 @@ pub fn label(action: &Action) -> String {
         Action::DecreaseStatusLineFontScale => "Status Line: Smaller Text".into(),
         Action::ResetStatusLineFontScale => "Status Line: Reset Text Size".into(),
         Action::ChooseStatusLineSegments => "Status Line: Choose Segments".into(),
+        Action::ChooseFontFamily => "Font: Choose Family…".into(),
         Action::FocusStatusLine => "Focus Status Line".into(),
         Action::RenameTab => "Rename Active Tab".into(),
         Action::RenameWindow => "Rename Window".into(),

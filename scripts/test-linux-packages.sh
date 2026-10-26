@@ -50,10 +50,8 @@ stage_output="$({
 
 [[ -x "$stage/sonicterm" ]] || fail "portable binary is missing or not executable"
 for required in \
-  assets/fonts/RecMonoSt.Helens-Regular.ttf \
-  assets/fonts/RecMonoSt.Helens-Bold.ttf \
-  assets/fonts/RecMonoSt.Helens-Italic.ttf \
-  assets/fonts/RecMonoSt.Helens-BoldItalic.ttf \
+  assets/fonts/SymbolsNerdFontMono-Regular.ttf \
+  assets/fonts/LICENSE-SymbolsNerdFont.txt \
   assets/keymaps/sonicterm-linux.toml \
   assets/themes/wezterm.toml \
   assets/i18n/en/messages.ftl \
@@ -65,13 +63,19 @@ for required in \
   share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml \
   share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png \
   LICENSE \
-  LICENSE-Rec-Mono-OFL-1.1 \
+  LICENSE-SymbolsNerdFont-MIT \
   LICENSE-winit-Apache-2.0 \
   README.md; do
   [[ -f "$stage/$required" ]] || fail "staged payload is missing $required"
 done
 cmp -s "$root/crates/sonicterm-winit/LICENSE" "$stage/LICENSE-winit-Apache-2.0" || \
   fail "staged winit license differs from the pinned source license"
+cmp -s "$root/assets/fonts/LICENSE-SymbolsNerdFont.txt" "$stage/LICENSE-SymbolsNerdFont-MIT" || \
+  fail "staged symbols font license differs from the bundled license"
+# The text face comes from fontconfig, so the payload carries no monospace text family.
+staged_fonts="$(find "$stage/assets/fonts" -name '*.ttf' -exec basename {} \; | sort | tr '\n' ' ')"
+[[ "$staged_fonts" == "SymbolsNerdFontMono-Regular.ttf " ]] || \
+  fail "staged payload must ship only the symbols font, found: $staged_fonts"
 
 [[ "$(stat -c '%a' "$stage/sonicterm" 2>/dev/null || stat -f '%Lp' "$stage/sonicterm")" == "755" ]] || \
   fail "staged binary mode is not 755"
@@ -85,6 +89,7 @@ for required_text in \
   'debian/control' \
   'libxkbcommon-x11-0' \
   '"$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"' \
+  '"$deb_root/usr/share/doc/sonicterm/LICENSE-SymbolsNerdFont-MIT"' \
   'SOURCE_DATE_EPOCH' \
   '--sort=name' \
   '--numeric-owner' \
@@ -153,6 +158,11 @@ for license in "$portable_root/LICENSE-winit-Apache-2.0" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"; do
   cmp -s "$root/crates/sonicterm-winit/LICENSE" "$license" || \
     fail "package winit license is missing or differs from the pinned source license: $license"
+done
+for license in "$portable_root/LICENSE-SymbolsNerdFont-MIT" \
+  "$deb_root/usr/share/doc/sonicterm/LICENSE-SymbolsNerdFont-MIT"; do
+  cmp -s "$root/assets/fonts/LICENSE-SymbolsNerdFont.txt" "$license" || \
+    fail "package symbols font license is missing or differs from the bundled license: $license"
 done
 
 [[ -f "$portable_root/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop" ]] || \

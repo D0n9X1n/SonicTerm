@@ -37,7 +37,7 @@ struct TileFacts {
 fn tracked_font_dirs() -> Vec<PathBuf> {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     vec![
-        repo.join("assets/fonts"),
+        repo.join("crates/sonicterm-font/test-fonts/rec-mono"),
         repo.join("crates/sonicterm-harfbuzz/harfbuzz/src/wasm/sample/c"),
     ]
 }

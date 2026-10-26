@@ -545,6 +545,7 @@ impl App {
                 self.handle_font_fallback_ready(window_id, notice_id);
             }
             UserEvent::ForegroundProbeReady => self.drain_foreground_probe_results(Instant::now()),
+            UserEvent::FontCatalogReady { families } => self.adopt_font_catalog(families),
             UserEvent::GpuDeviceStateChanged => {
                 self.request_device_state_redraws();
                 self.service_gpu_recovery(event_loop, Instant::now());
@@ -1199,6 +1200,8 @@ impl App {
             let _ = recorder.record(BreadcrumbEvent::Lifecycle(LifecycleEvent::Ready));
         }
 
+        // The face the main renderer resolved is the session's family when the config names none.
+        self.adopt_resolved_font_family();
         let (cols, rows) = self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((0, 0));
         tracing::info!(
             "SonicTerm ready. theme={} keymap={} bindings={} grid={}x{}",

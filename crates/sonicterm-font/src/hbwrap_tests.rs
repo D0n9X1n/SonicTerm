@@ -11,7 +11,7 @@ fn concurrent_font_lifetimes_preserve_shared_callback_tables() {
                 let handle = FontDataHandle {
                     source: FontDataSource::BuiltIn {
                         name: "concurrent-font",
-                        data: include_bytes!("../../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+                        data: include_bytes!("../test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf"),
                     },
                     index: 0,
                     variation: 0,

@@ -82,9 +82,17 @@ pub(crate) type CoveragePause = Option<(usize, std::sync::Arc<dyn Fn() + Send + 
 #[cfg(test)]
 pub(crate) static COVERAGE_PAUSE: Mutex<CoveragePause> = Mutex::new(None);
 
-/// Run the coverage pause installed for `font`, if any, outside every lock of `font`.
+#[cfg(test)]
+thread_local! {
+    /// Coverage computations made on this thread, so a test can count one request's.
+    pub(crate) static COVERAGE_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count a coverage computation on this thread, then run the coverage pause installed for `font`,
+/// if any, outside every lock of `font`.
 #[cfg(test)]
 fn pause_coverage_for_test(font: &ParsedFont) {
+    COVERAGE_COMPUTED.with(|count| count.set(count.get() + 1));
     let address = font as *const ParsedFont as usize;
     let hook = COVERAGE_PAUSE
         .lock()

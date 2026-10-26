@@ -276,9 +276,9 @@ fn shape_with_held_locator(blocking: bool) -> Vec<crate::shaper::GlyphInfo> {
         sonicterm_logging::test_capture::with_default(subscriber, || {
             let mut settings = config::Config::default();
             settings.font_locator = config::FontLocatorSelection::ConfigDirsOnly;
-            settings.font_dirs = vec![
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")
-            ];
+            settings.font_dirs =
+                vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("test-fonts/rec-mono")];
             settings.font.font = vec![config::FontAttributes::new("Rec Mono St.Helens")];
             settings.warn_about_missing_glyphs = false;
             let mut inner =
@@ -506,7 +506,7 @@ fn raster_timing_excludes_character_identifiers() {
     let mut settings = config::Config::default();
     settings.font_locator = config::FontLocatorSelection::ConfigDirsOnly;
     settings.font_dirs =
-        vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+        vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-fonts/rec-mono")];
     settings.font.font = vec![config::FontAttributes::new("Rec Mono St.Helens")];
     let fonts =
         crate::FontConfiguration::new(Some(config::ConfigHandle::new(settings)), 96).unwrap();

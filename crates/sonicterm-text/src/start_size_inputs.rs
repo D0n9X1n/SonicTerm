@@ -100,11 +100,12 @@ pub const PUSH_RUN_ID: u64 = 37_517_293_271;
 /// The commit the perf comparison's base side and the push CI run measured.
 pub const MEASURED_SHA: &str = "865acccd18a6e09cf7126dfc6f65830729fd71b7";
 /// The pull-request CI run whose working-set step measured the helper rows.
-pub const HELPER_RUN_ID: u64 = 40_075_489_870;
-/// The pull request that run measured: the change that added the status line's own raster size.
-pub const HELPER_PULL_REQUEST: u32 = 1689;
+pub const HELPER_RUN_ID: u64 = 40_318_123_389;
+/// The pull request that run measured: the change that replaced the bundled text face with the
+/// platform's own monospace face.
+pub const HELPER_PULL_REQUEST: u32 = 1711;
 /// The exact pull-request head the helper run measured.
-pub const HELPER_MEASURED_SHA: &str = "22c1a5231195bde8c6f5f0208cbeec4b1bb5cad3";
+pub const HELPER_MEASURED_SHA: &str = "2cabd00f29443612d8cd4a6f4858d38d176d0e7e";
 
 /// A perf-end row: the visible renderer's atlas at a certified `end` checkpoint of an accepted
 /// base-side attempt, at scale 1, which fit the 256 floor with every required glyph drawn.
@@ -541,15 +542,15 @@ pub const START_SIZE_INPUTS: &[StartSizeInput] = &[
         r"D:\a\_temp\perf-comparison\runs\S9-default\timed\09-base checkpoint 0 end",
     ),
     // Helper: the glyph-atlas-working-set step on each platform, from the pull-request run on the
-    // head that gave the status line its own raster size.
-    helper_row("macos", 1, "S9", 1024, [23, 20], 181370, "job 120817805823 line 10187"),
-    helper_row("macos", 1, "S12", 1024, [23, 16], 144592, "job 120817805823 line 10188"),
-    helper_row("macos", 2, "S9", 2048, [45, 31], 650168, "job 120817805823 line 10192"),
-    helper_row("macos", 2, "S12", 2048, [45, 31], 553612, "job 120817805823 line 10197"),
-    helper_row("windows", 1, "S9", 1024, [24, 16], 191012, "job 120817925706 line 993"),
-    helper_row("windows", 1, "S12", 1024, [24, 16], 163104, "job 120817925706 line 994"),
-    helper_row("windows", 2, "S9", 2048, [46, 31], 671793, "job 120817925706 line 998"),
-    helper_row("windows", 2, "S12", 2048, [46, 31], 570227, "job 120817925706 line 999"),
+    // head that made the platform monospace face the scenarios' text face.
+    helper_row("macos", 1, "S9", 1024, [20, 20], 183984, "job 121555774360 line 9070"),
+    helper_row("macos", 1, "S12", 1024, [19, 17], 153224, "job 121555774360 line 9071"),
+    helper_row("macos", 2, "S9", 2048, [36, 33], 667708, "job 121555774360 line 9075"),
+    helper_row("macos", 2, "S12", 2048, [36, 33], 594042, "job 121555774360 line 9076"),
+    helper_row("windows", 1, "S9", 1024, [16, 15], 181276, "job 121556063193 line 764"),
+    helper_row("windows", 1, "S12", 1024, [16, 15], 159376, "job 121556063193 line 765"),
+    helper_row("windows", 2, "S9", 2048, [30, 30], 645878, "job 121556063193 line 769"),
+    helper_row("windows", 2, "S12", 2048, [30, 30], 565182, "job 121556063193 line 770"),
     // Real renderer: Windows test 17, once per test invocation that ran it.
     real_row(1, "S9", 256, [16, 15], 13847, "workspace-crates", "job 112454017976 line 11453"),
     real_row(2, "S9", 512, [30, 29], 48156, "workspace-crates", "job 112454017976 line 11458"),

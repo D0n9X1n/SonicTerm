@@ -174,7 +174,9 @@ impl App {
                     self.window_rename_target.and_then(|key| self.window_keys.resolve(key))
                         == Some(window_id)
                 }
-                CommandPaletteMode::Commands | CommandPaletteMode::StatusSegments => true,
+                CommandPaletteMode::Commands
+                | CommandPaletteMode::StatusSegments
+                | CommandPaletteMode::FontFamily => true,
             };
             let session = self.command_palette.session();
             return live.then_some(FieldTarget::Palette { mode, session });

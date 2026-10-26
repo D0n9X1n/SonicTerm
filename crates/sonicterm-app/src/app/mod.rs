@@ -215,6 +215,11 @@ pub enum UserEvent {
     ClearShapeCache,
     /// The foreground-probe worker stored results, or stopped; drain its result map.
     ForegroundProbeReady,
+    /// The font catalog worker enumerated the installed monospace families.
+    FontCatalogReady {
+        /// Installed monospace families, sorted.
+        families: Vec<String>,
+    },
     /// A font fallback worker published faces for `notice_id`, the notice of the body stack in
     /// `window_id`'s renderer. The handler acknowledges it and requests a frame only when that
     /// generation is not applied yet; an event for a replaced notice does nothing.
@@ -406,6 +411,7 @@ mod event_loop;
 mod fg_probe;
 mod field_input;
 mod field_pointer;
+mod font_catalog;
 mod frame_counters;
 mod guard_correlation;
 pub use guard_correlation::{
@@ -442,6 +448,7 @@ pub use keyboard_protocol::HeldKey;
 mod about;
 mod about_window;
 mod keymap_dispatch;
+mod live_font;
 mod locale;
 mod media;
 mod memory_report;
@@ -620,6 +627,25 @@ pub struct App {
     /// same rule as [`Self::configured_font_size`]: `ResetFontWeight` returns
     /// here, and only an explicit reload moves it.
     pub(super) configured_weight_scale: f32,
+    /// Font family this session started with: the loaded config's `[font] family`, or the platform
+    /// default the font catalog adopted when the config names none. Only an explicit reload, or a
+    /// save, moves it after that.
+    pub(super) configured_font_family: String,
+    /// Installed monospace families, enumerated once per process off the UI thread.
+    pub(super) font_catalog: font_catalog::FontCatalog,
+    /// Enumerates installed monospace families for the catalog worker; tests inject a counter.
+    pub(super) font_enumerator: font_catalog::FontEnumerator,
+    /// The catalog worker, once the picker started it; kept so it is owned, never joined.
+    pub(super) font_catalog_worker: Option<std::thread::JoinHandle<()>>,
+    /// The live family when the font picker opened, restored when the picker is cancelled.
+    pub(super) font_picker_original: Option<String>,
+    /// Moves on every reload, save and picker choice of the font family, so a catalog report the
+    /// worker started before one of them is recognised as stale and adopts nothing.
+    pub(super) font_family_generation: u64,
+    /// Test recorder: each renderer-less window and the font request `apply_live_font` delivered to
+    /// it, through the seam that delivers a renderer's.
+    #[cfg(test)]
+    pub(in crate::app) live_font_log: Vec<(winit::window::WindowId, live_font::LiveFontRequest)>,
     pub(super) keymap: Keymap,
     // The main window holds no state of its own here. Its renderer, tabs,
     // tab states, panes, selection, modifiers, copy mode, last render, cursor

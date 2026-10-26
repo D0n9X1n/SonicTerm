@@ -259,9 +259,11 @@ fn run_probe(active: &ActiveEventLoop) -> Result<NativeKeys, String> {
     let mut config = Config::default();
     config.appearance.software_render_mode = SoftwareRenderMode::Force;
     config.locale = "en".into();
-    // Native text assertions require the shipped face, not a font installed only on the developer's machine.
-    let font_dirs =
-        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    // Native text assertions measure the Rec Mono fixture, so select it: the default family is the
+    // host's own face, whose Japanese labels arrive through asynchronous system fallback.
+    config.font.family = "Rec Mono St.Helens".into();
+    let font_dirs = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono")];
     let keymap = Keymap {
         meta: Meta { name: "native-hint".into(), version: "1.0".into() },
         bindings: vec![

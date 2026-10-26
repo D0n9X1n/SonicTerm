@@ -19,13 +19,10 @@ mod default_handlers;
 #[cfg(target_os = "linux")]
 mod launcher_progress;
 
+/// Fonts the Linux package ships in `assets/fonts`: only the symbols font, since the text face
+/// comes from fontconfig's `monospace`.
 #[cfg(any(target_os = "linux", test))]
-const PACKAGED_FONT_FILES: &[&str] = &[
-    "RecMonoSt.Helens-Regular.ttf",
-    "RecMonoSt.Helens-Bold.ttf",
-    "RecMonoSt.Helens-Italic.ttf",
-    "RecMonoSt.Helens-BoldItalic.ttf",
-];
+const PACKAGED_FONT_FILES: &[&str] = &["SymbolsNerdFontMono-Regular.ttf"];
 
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,7 +221,7 @@ fn preflight_linux_fonts(config: &Config) -> Result<()> {
     for face in PACKAGED_FONT_FILES {
         let path = font_dir.join(face);
         if !path.is_file() {
-            // When: a packaged Rec Mono face is absent, startup cannot provide the shipped font contract.
+            // When: the packaged symbols font is absent, Powerline and Nerd Font icons lose their bundled source.
             anyhow::bail!("packaged font is missing: {}", path.display());
         }
     }

@@ -127,3 +127,29 @@ fn freetype_load_flag_values_format_deterministically() {
         "NO_HINTING|NO_BITMAP"
     );
 }
+
+/// The implicit default face is the host's own monospace family, never a bundled one, and every
+/// style's fallback chain tries each platform default before the bundled symbols font.
+#[test]
+fn default_face_is_the_platform_monospace_and_fallback_ends_with_bundled_symbols() {
+    let expected: &[&str] = if cfg!(target_os = "macos") {
+        &["Menlo"]
+    } else if cfg!(windows) {
+        &["Cascadia Mono", "Consolas"]
+    } else {
+        &["monospace"]
+    };
+    assert_eq!(FontAttributes::default().family, expected[0]);
+
+    let style = TextStyle { font: vec![FontAttributes::new("Example Mono")], foreground: None };
+    let families: Vec<_> = style
+        .font_with_fallback()
+        .into_iter()
+        .map(|attr| (attr.family, attr.is_fallback))
+        .collect();
+    let mut wanted = vec![("Example Mono".to_string(), false)];
+    wanted.extend(expected.iter().map(|family| ((*family).to_string(), true)));
+    wanted.push(("Noto Color Emoji".to_string(), true));
+    wanted.push(("Symbols Nerd Font Mono".to_string(), true));
+    assert_eq!(families, wanted);
+}

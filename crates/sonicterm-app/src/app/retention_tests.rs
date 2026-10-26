@@ -1686,8 +1686,8 @@ fn live_renderer(
             )
             .map_err(|error| error.to_string())?,
     );
-    let font_dirs =
-        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let font_dirs = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono")];
     let settings = RendererSettings {
         font_family: "Rec Mono St.Helens",
         font_dirs: &font_dirs,

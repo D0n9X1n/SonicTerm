@@ -172,6 +172,8 @@ impl App {
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
         let new_cfg = Self::normalize_config(&self.config_normalizer, new_cfg);
         self.configured_font_size = new_cfg.font.size;
+        self.configured_font_family = new_cfg.font.family.clone();
+        self.font_family_generation += 1;
         self.configured_weight_scale = new_cfg.font.effective_weight_scale();
         // Config is only applied on an explicit user reload, so it must
         // render immediately rather than at the next vsync deadline.
@@ -760,54 +762,6 @@ impl App {
         }
         tracing::info!("font weight_scale -> {weight_scale}");
     }
-    pub(super) fn set_font_size(&mut self, size: f32) {
-        self.config.font.size = size;
-        let family = self.config.font.family.clone();
-        let line_h = self.config.font.line_height;
-        let weight_scale = self.config.font.effective_weight_scale();
-        if let Some(renderer) = self.main_renderer_mut() {
-            renderer.set_font(&family, size, line_h, weight_scale);
-        }
-        // the loop below covers main + every child.
-        for child in self.windows.values_mut() {
-            {
-                let Some(renderer) = child.renderer.as_mut() else {
-                    // When: child.renderer is None for test-seeded entries; skip so the
-                    // new size reaches only windows that can actually rasterize it.
-                    continue;
-                };
-                renderer.set_font(&family, size, line_h, weight_scale);
-            }
-            let Some(renderer) = child.renderer.as_ref() else {
-                // When: child.renderer is None for test-seeded entries, so there is no
-                // cell_size or padding inset to fit new pane rects against.
-                continue;
-            };
-            let rects = App::compute_pane_rects_for(child);
-            let (cell_width, cell_height) = renderer.cell_size();
-            let inset = [
-                renderer.padding_left_px(),
-                renderer.padding_right_px(),
-                renderer.padding_top_px(),
-                renderer.padding_bottom_px(),
-            ];
-            resize_panes_to_rects(&child.panes, &rects, cell_width, cell_height, inset);
-        }
-        self.refresh_all_window_minimums();
-        if let Some(window) = self.main_window() {
-            crate::app::frame_counters::request_native_redraw(window);
-        }
-        for child in self.windows.values() {
-            // When: child.renderer is None only for test-seeded entries, which carry
-            // no window either, so child.request_redraw would already do nothing.
-            if child.renderer.is_none() {
-                continue;
-            }
-            child.request_window_redraw();
-        }
-        tracing::info!("font size -> {size}pt");
-    }
-
     /// Resolve SonicTerm's standard user-config path for saving current settings.
     pub(super) fn current_settings_path(&self) -> anyhow::Result<PathBuf> {
         #[cfg(test)]
@@ -842,10 +796,22 @@ impl App {
         let size = self.config.font.size;
         let weight_scale = self.config.font.effective_weight_scale();
         let status_line = self.status_line_save();
-        let written = Config::persist_runtime_values(path, size, weight_scale, Some(&status_line))
-            .with_context(|| format!("persist current settings to {}", path.display()))?;
+        let family = sonicterm_cfg::config::FamilySave {
+            live: &self.config.font.family,
+            baseline: &self.configured_font_family,
+        };
+        let written = Config::persist_runtime_values(
+            path,
+            size,
+            weight_scale,
+            Some(family),
+            Some(&status_line),
+        )
+        .with_context(|| format!("persist current settings to {}", path.display()))?;
         self.configured_font_size = size;
         self.configured_weight_scale = weight_scale;
+        self.configured_font_family = self.config.font.family.clone();
+        self.font_family_generation += 1;
         self.adopt_saved_status_line(written);
         Ok(())
     }

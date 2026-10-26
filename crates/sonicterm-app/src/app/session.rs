@@ -114,6 +114,7 @@ impl App {
         command_palette.set_keymap(&keymap, &i18n);
         let configured_font_size = config.font.size;
         let configured_weight_scale = config.font.effective_weight_scale();
+        let configured_font_family = config.font.family.clone();
         let font_dirs = vec![sonicterm_cfg::assets::asset_dir().join("fonts")];
         let path_workers = event_loop_proxy.as_ref().and_then(|proxy| {
             match path_target::PathWorkers::start(proxy.clone()) {
@@ -151,6 +152,14 @@ impl App {
             font_dirs,
             configured_font_size,
             configured_weight_scale,
+            configured_font_family,
+            font_catalog: font_catalog::FontCatalog::default(),
+            font_enumerator: sonicterm_gpu::installed_monospace_families,
+            font_catalog_worker: None,
+            font_picker_original: None,
+            font_family_generation: 0,
+            #[cfg(test)]
+            live_font_log: Vec::new(),
             keymap,
             clipboard: Clipboard::new().ok(),
             #[cfg(target_os = "windows")]

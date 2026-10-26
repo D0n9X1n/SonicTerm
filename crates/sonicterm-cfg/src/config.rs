@@ -475,19 +475,23 @@ impl Default for Config {
     }
 }
 
-/// Default font family. "Rec Mono St.Helens" is the brand default the project
-/// ships with. All four variants
-/// (Regular, Italic, Bold, BoldItalic) are bundled in `assets/fonts/` as
-/// `RecMonoSt.Helens-*.ttf`, built from MOSconfig/recursive-code-config
-/// v1.2.2 and distributed under the SIL Open Font License 1.1. The
-/// bundled files' name tables declare the family `"Rec Mono St.Helens"`
-/// (with the dot) — that's the exact name to use here. When the family is
-/// missing the renderer falls through to the system mono chain. The
-/// bundled `Rec Mono St.Helens` TTFs are Nerd-Font-patched, so Powerline
-/// (U+E0B0–U+E0BF) and Nerd Font PUA (U+E000–U+F8FF) glyphs resolve in
-/// the primary slot without needing a system Nerd Font install. Users can
-/// override via `[font] family = "..."` in `sonicterm.toml`.
-pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
+/// Default font family: the platform's own monospace face, so an unconfigured install renders
+/// with a family the host already provides. SonicTerm bundles no text face.
+///
+/// macOS uses Menlo. Windows asks for Cascadia Mono, and the font stack falls back to Consolas
+/// where Cascadia Mono is not installed. Linux and other Unix systems ask fontconfig for its
+/// `monospace` alias. Matches `sonicterm_engine::DEFAULT_FONT_FAMILY`; this crate does not
+/// depend on the font stack, so the value is repeated here. Powerline and Nerd Font icons come
+/// from the bundled `assets/fonts/SymbolsNerdFontMono-Regular.ttf` in every fallback chain.
+/// Users override the family with `[font] family = "..."` in `sonicterm.toml`.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_FONT_FAMILY: &str = "Menlo";
+/// Default font family: the platform's own monospace face (Cascadia Mono on Windows).
+#[cfg(windows)]
+pub const DEFAULT_FONT_FAMILY: &str = "Cascadia Mono";
+/// Default font family: the face fontconfig resolves for its `monospace` alias.
+#[cfg(not(any(target_os = "macos", windows)))]
+pub const DEFAULT_FONT_FAMILY: &str = "monospace";
 
 impl Default for FontConfig {
     fn default() -> Self {
@@ -705,8 +709,27 @@ impl Config {
     where
         F: FnOnce(&Path) -> Result<()>,
     {
-        Self::persist_runtime_values_before_commit(path, size, weight_scale, None, before_commit)
-            .map(|_| ())
+        Self::persist_runtime_values_before_commit(
+            path,
+            size,
+            weight_scale,
+            None,
+            None,
+            before_commit,
+        )
+        .map(|_| ())
+    }
+
+    /// Whether config `text` names `[font] family`. Text that does not parse counts as naming one,
+    /// so a broken file is never taken for a fresh install whose family may be chosen for it.
+    pub fn sets_font_family(text: &str) -> bool {
+        match text.parse::<toml::Table>() {
+            Ok(table) => table
+                .get("font")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|font| font.contains_key("family")),
+            Err(_) => true,
+        }
     }
 
     /// Persist the runtime font values and, with `status_line`, the session's `[status_line]`
@@ -718,18 +741,21 @@ impl Config {
     /// explicit list. A key in the file is updated in place, even to its default; an absent key is
     /// written only when the session differs from its default. `preset` and
     /// per-segment keys are never written. The rendered document must parse and resolve to exactly
-    /// the session's values before it replaces the file. Returns the written `[status_line]`,
-    /// resolved, as the new baseline.
+    /// the session's values before it replaces the file. With `family`, `[font] family` follows
+    /// the same rule against the family the session started with. Returns the written
+    /// `[status_line]`, resolved, as the new baseline.
     pub fn persist_runtime_values(
         path: &Path,
         size: f32,
         weight_scale: f32,
+        family: Option<FamilySave<'_>>,
         status_line: Option<&crate::status_overrides::StatusLineSave>,
     ) -> Result<crate::status_overrides::WrittenStatusLine> {
         Self::persist_runtime_values_before_commit(
             path,
             size,
             weight_scale,
+            family,
             status_line,
             |_| Ok(()),
         )
@@ -739,6 +765,7 @@ impl Config {
         path: &Path,
         size: f32,
         weight_scale: f32,
+        family: Option<FamilySave<'_>>,
         status_line: Option<&crate::status_overrides::StatusLineSave>,
         before_commit: F,
     ) -> Result<crate::status_overrides::WrittenStatusLine>
@@ -765,6 +792,9 @@ impl Config {
             .with_context(|| format!("format-preserving parse config at {destination:?}"))?;
 
         patch_font_runtime_values(&mut document, size, weight_scale)?;
+        if let Some(family) = family {
+            patch_font_family(&mut document, family)?;
+        }
         if let Some(save) = status_line {
             let disk = on_disk
                 .status_line
@@ -888,6 +918,50 @@ fn apply_line_ending(mut rendered: String, line_ending: LineEnding) -> String {
         rendered = rendered.replace('\n', "\r\n");
     }
     rendered
+}
+
+/// The session's font family for Save, beside the family the session started with.
+///
+/// Save writes `[font] family` when the file already names one, updating it in place, or when
+/// `live` differs from `baseline`; an absent key whose value never changed stays absent.
+#[derive(Debug, Clone, Copy)]
+pub struct FamilySave<'a> {
+    /// The live family.
+    pub live: &'a str,
+    /// The family the session started with.
+    pub baseline: &'a str,
+}
+
+/// Write `[font] family` by the Save rule: a key in the file is updated in place, keeping its
+/// decor; an absent key is written only when the live family differs from the starting one.
+fn patch_font_family(document: &mut DocumentMut, family: FamilySave<'_>) -> Result<()> {
+    let present = document
+        .get("font")
+        .and_then(Item::as_table_like)
+        .is_some_and(|font| font.contains_key("family"));
+    if !present && family.live == family.baseline {
+        // When: the key is absent and the family never changed, Save adds nothing.
+        return Ok(());
+    }
+    if document.get("font").is_none() {
+        document.insert("font", Item::Table(Table::new()));
+    }
+    let font = document
+        .get_mut("font")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| anyhow::anyhow!("font must be a table or inline table"))?;
+    let mut replacement = toml_edit::value(family.live);
+    if let Some(existing) = font.get_mut("family") {
+        // The file names `family`: its value changes in place and keeps its comments.
+        if let (Some(old), Some(new)) = (existing.as_value(), replacement.as_value_mut()) {
+            *new.decor_mut() = old.decor().clone();
+        }
+        *existing = replacement;
+    } else {
+        // When: `font.get_mut("family")` is None, the family changed, so only that key is inserted.
+        font.insert("family", replacement);
+    }
+    Ok(())
 }
 
 fn patch_font_runtime_values(
@@ -1449,8 +1523,10 @@ tab_min_width = {tab_min_width}
 tab_max_width = {tab_max_width}
 
 [font]
-# Font family and metrics. SonicTerm ships "Rec Mono St.Helens" by default.
-family = "{font_family}"
+# Font family and metrics. Unset, SonicTerm uses the platform's own monospace face:
+# Menlo on macOS, Cascadia Mono (or Consolas) on Windows, fontconfig's monospace on Linux.
+# Name another installed monospace family to use it instead.
+# family = "{font_family}"
 # Font size in logical pixels.
 size = {font_size}
 # Line-height multiplier. 1.1 is close to WezTerm's default terminal spacing.

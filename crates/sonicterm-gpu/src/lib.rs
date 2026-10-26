@@ -82,6 +82,8 @@ pub mod missing_glyphs;
 /// window or device, so CI can choose the glyph atlas start size.
 #[doc(hidden)]
 pub mod glyph_working_set;
+/// A glyph's ink top predicted from its outline, for native layout tests.
+pub mod outline_ink;
 
 /// The perf-end glyph completeness checkpoint: what a presented `Full` frame certified, and whether it
 /// still describes the scene and atlas.
@@ -100,6 +102,12 @@ pub use frame_plan::{__replacement_plans_noop, ReplacementShape};
 /// Test hook: the style runs the row emitter cuts a row into; not a supported API.
 #[doc(hidden)]
 pub use row_runs::__row_shape_runs;
+
+/// Installed monospace font families from the platform locator; slow, so callers run it on a
+/// worker thread.
+pub use sonicterm_engine::installed_monospace_families;
+/// The platform's default monospace families, in preference order.
+pub use sonicterm_engine::DEFAULT_MONOSPACE_FAMILIES;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

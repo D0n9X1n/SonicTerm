@@ -34,8 +34,8 @@ impl FontDatabase {
 
     /// Build a database from fonts found in the configured font directories.
     ///
-    /// This includes SonicTerm's tracked St.Helens asset directory when the
-    /// caller configures it; [`Self::with_built_in`] remains empty.
+    /// This includes SonicTerm's asset font directory, which holds the bundled
+    /// symbols font, when the caller configures it; [`Self::with_built_in`] remains empty.
     pub fn with_font_dirs(config: &Config) -> anyhow::Result<Self> {
         let mut font_info = vec![];
         for path in &config.font_dirs {
@@ -76,9 +76,9 @@ impl FontDatabase {
 
     /// Builds the empty compatibility database for compiled-in fallback fonts.
     ///
-    /// SonicTerm's bundled St.Helens faces load through configured asset
-    /// directories. Other fallback faces come from native platform discovery,
-    /// so this legacy resolver slot intentionally contains no private bundles.
+    /// SonicTerm's bundled symbols font loads through the configured asset
+    /// directory. Text faces and other fallback faces come from native platform
+    /// discovery, so this legacy resolver slot intentionally contains no private bundles.
     pub fn with_built_in() -> anyhow::Result<Self> {
         Ok(Self::new())
     }

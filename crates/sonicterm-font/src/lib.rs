@@ -11,7 +11,7 @@ use config::{
 };
 use diagnostic_timing::{RequestTiming, Timing};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::AtomicBool;
@@ -33,6 +33,7 @@ pub enum Direction {
     RightToLeft,
 }
 
+pub mod catalog;
 mod diagnostic_timing;
 mod fallback_notice;
 mod font_bytes;
@@ -151,6 +152,10 @@ lazy_static::lazy_static! {
 pub struct LoadedFont {
     rasterizers: RefCell<HashMap<FallbackIdx, Box<dyn FontRasterizer>>>,
     handles: RefCell<Vec<ParsedFont>>,
+    /// How many leading `handles` the configuration resolved; the shaper keeps their faces resident.
+    /// Fallback discovery only appends (`insert_fallback_handles` pushes), so the handles below
+    /// this boundary never move and it stays valid through every shaper rebuild.
+    configured_handle_count: usize,
     shaper: RefCell<Box<dyn FontShaper>>,
     metrics: FontMetrics,
     pixel_geometry: DisplayPixelGeometry,
@@ -212,8 +217,11 @@ impl LoadedFont {
         }
         if loaded {
             if let Some(font_config) = self.font_config.upgrade() {
-                *self.shaper.borrow_mut() =
-                    new_shaper(&font_config.config.borrow(), &self.handles.borrow())?;
+                *self.shaper.borrow_mut() = new_shaper(
+                    &font_config.config.borrow(),
+                    &self.handles.borrow(),
+                    self.configured_handle_count,
+                )?;
             }
         }
         Ok(loaded)
@@ -990,15 +998,17 @@ impl FontConfigInner {
         let attributes = text_style.font_with_fallback();
         let (handles, _loaded) = self.resolve_font_helper_impl(&attributes, pixel_size)?;
 
-        let shaper = new_shaper(&config, &handles)?;
+        let shaper = new_shaper(&config, &handles, handles.len())?;
 
         let metrics = shaper.metrics(font_size, dpi).with_context(|| {
             format!("obtaining metrics for font_size={} @ dpi {}", font_size, dpi)
         })?;
 
+        let configured_handle_count = handles.len();
         let loaded = Rc::new(LoadedFont {
             rasterizers: RefCell::new(HashMap::new()),
             handles: RefCell::new(handles),
+            configured_handle_count,
             shaper: RefCell::new(shaper),
             metrics,
             font_size,
@@ -1171,38 +1181,66 @@ impl FontConfigInner {
         let attributes = style.font_with_fallback();
 
         let (handles, loaded) = self.resolve_font_helper_impl(&attributes, pixel_size)?;
+        // The first loaded face supplies text and cell metrics, so it is the one a miss falls back to.
+        let replacement = match handles.first() {
+            Some(face) => format!("Using {:?} instead", face.names().family),
+            None => "No replacement face loaded".to_string(),
+        };
 
         for attr in &attributes {
-            if !attr.is_synthetic && !attr.is_fallback && !loaded.contains(attr) {
-                let is_primary = config.font.font.iter().any(|a| !a.is_fallback && a == attr);
-                let derived_from_primary =
-                    config.font.font.iter().any(|a| !a.is_fallback && a.family == attr.family);
-                let identity = format!(
-                    "{:?} (weight={}, stretch={}, style={})",
-                    attr.family, attr.weight, attr.stretch, attr.style
-                );
-                let explanation = if is_primary {
-                    format!("Unable to load the configured primary font {identity}")
-                } else if derived_from_primary {
-                    // When: derived_from_primary matches a non-fallback family, identify the unmatched variant without blaming a fallback.
-                    format!(
+            if attr.is_synthetic || attr.is_fallback {
+                // When: `attr` is synthetic or a fallback, a miss there is expected and never reported.
+                continue;
+            }
+            let using = if !loaded.contains(attr) {
+                replacement.clone()
+            } else if let Some(face) = fontconfig_substitute(attr, &handles) {
+                // When: `fontconfig_substitute` finds another family under `attr`'s name, it is not installed.
+                format!("Using {:?} instead", face.names().family)
+            } else {
+                // When: `attr` loaded under its own name, there is no miss to report.
+                continue;
+            };
+            let identity = format!(
+                "{:?} (weight={}, stretch={}, style={})",
+                attr.family, attr.weight, attr.stretch, attr.style
+            );
+            if config::DEFAULT_MONOSPACE_FAMILIES.contains(&attr.family.as_str()) {
+                // When: `DEFAULT_MONOSPACE_FAMILIES` contains `attr.family`, the next default stands in; log at info, not as an error.
+                let message =
+                    format!("Platform default font {identity} is not installed. {using}.");
+                if first_report(&message) {
+                    log::info!("{message}");
+                }
+                continue;
+            }
+            let is_primary = config.font.font.iter().any(|a| !a.is_fallback && a == attr);
+            let derived_from_primary =
+                config.font.font.iter().any(|a| !a.is_fallback && a.family == attr.family);
+            let explanation = if is_primary {
+                format!("Unable to load the configured primary font {identity}")
+            } else if derived_from_primary {
+                // When: derived_from_primary matches a non-fallback family, identify the unmatched variant without blaming a fallback.
+                format!(
                         "Unable to load a font variant derived from the configured primary font: {identity}"
                     )
-                } else {
-                    // When: neither is_primary nor derived_from_primary matches, the request is not the configured primary selection.
-                    format!("Unable to load the requested font {identity}")
-                };
+            } else {
+                // When: neither is_primary nor derived_from_primary matches, the request is not the configured primary selection.
+                format!("Unable to load the requested font {identity}")
+            };
 
-                config::show_error(&format!(
-                    "{explanation}. Fallback fonts are being used instead, and text \
-                     may not render as intended. Check [font].family in sonicterm.toml \
-                     and ensure the font is available to SonicTerm. See \
+            let message = format!(
+                    "{explanation}. {using}, and text may not render as intended. \
+                     Check [font].family in sonicterm.toml and ensure the font is available \
+                     to SonicTerm. See \
                      https://github.com/D0n9X1n/SonicTerm/wiki/Configuration for font configuration."
-                ));
+                );
+            if first_report(&message) {
+                config::show_error(&message);
             }
         }
 
-        Ok((new_shaper(config, &handles)?, handles))
+        Ok((new_shaper(config, &handles, handles.len())?, handles))
     }
 
     /// Given a text style, load (with caching) the font that best
@@ -1297,9 +1335,11 @@ impl FontConfigInner {
             }
         }
 
+        let configured_handle_count = handles.len();
         let loaded = Rc::new(LoadedFont {
             rasterizers: RefCell::new(HashMap::new()),
             handles: RefCell::new(handles),
+            configured_handle_count,
             shaper: RefCell::new(shaper),
             metrics,
             font_size,
@@ -1545,6 +1585,42 @@ impl FontConfiguration {
     pub fn list_system_fonts(&self) -> anyhow::Result<Vec<ParsedFont>> {
         self.inner.locator.enumerate_all_fonts()
     }
+}
+
+/// Generic family names fontconfig resolves to a configured face; that is the alias working, not a
+/// missing family.
+const GENERIC_FAMILIES: [&str; 8] =
+    ["monospace", "mono", "sans-serif", "sans", "serif", "system-ui", "emoji", "math"];
+
+/// The face fontconfig substituted for `attr`: one tagged with `attr`'s family whose real family,
+/// full name, PostScript name and aliases all differ from it. `None` for a generic alias.
+fn fontconfig_substitute<'a>(
+    attr: &config::FontAttributes,
+    handles: &'a [ParsedFont],
+) -> Option<&'a ParsedFont> {
+    if GENERIC_FAMILIES.iter().any(|alias| alias.eq_ignore_ascii_case(&attr.family)) {
+        // When: `attr.family` is a generic alias, resolving it to another face is expected.
+        return None;
+    }
+    handles.iter().find(|face| {
+        matches!(&face.handle.origin,
+            crate::locator::FontOrigin::FontConfigMatch(requested) if *requested == attr.family)
+            && !face.names().family.eq_ignore_ascii_case(&attr.family)
+            && !face.matches_full_or_ps_name(attr)
+            && !face.matches_alias(attr)
+    })
+}
+
+/// Font diagnostics already reported in this process, so a miss that every resize, zoom, or new
+/// window repeats reaches the log once.
+static REPORTED_FONT_DIAGNOSTICS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Whether `message` is reported for the first time in this process; records it either way.
+fn first_report(message: &str) -> bool {
+    REPORTED_FONT_DIAGNOSTICS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(message.to_owned())
 }
 
 #[cfg(test)]
