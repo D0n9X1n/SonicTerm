@@ -822,6 +822,8 @@ def _manifest(root: Path) -> tuple[dict, list[Finding]]:
         ):
             findings.append(Finding(PINNED_MANIFEST, 1,
                                     f"{tool}: version_args must be a non-empty list of strings"))
+        if not isinstance(entry.get("version_first_line", False), bool):
+            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: version_first_line must be boolean"))
         output = entry.get("version_output")
         if not isinstance(output, str) or not output or "\n" in output:
             findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: version_output must be a non-empty string"))

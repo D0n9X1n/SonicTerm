@@ -18,5 +18,16 @@
     "member": "cargo-llvm-cov",
     "version_args": ["llvm-cov", "--version"],
     "version_output": "cargo-llvm-cov {version}"
+  },
+  "actionlint": {
+    "version": "1.7.12",
+    "os": "linux",
+    "arch": "x86_64",
+    "url": "https://github.com/rhysd/actionlint/releases/download/v{version}/actionlint_{version}_linux_amd64.tar.gz",
+    "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+    "member": "actionlint",
+    "version_args": ["-version"],
+    "version_output": "{version}",
+    "version_first_line": true
   }
 }

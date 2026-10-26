@@ -41,11 +41,19 @@ fi
   cd "$ROOT/scripts"
   "$PY" check-workflow-supply-chain_tests.py
   "$PY" local-gate_tests.py
+  "$PY" glyph-oracle_tests.py
+  "$PY" harness-target_tests.py
   "$PY" native-selection-smoke_tests.py
   "$PY" perf-compare_tests.py
   "$PY" perf-critical-path_tests.py
   "$PY" perf-flags_tests.py
   "$PY" install-pinned-tool_tests.py
 )
+
+# The mandatory workflow-syntax step installs actionlint in CI's tooling job. Also check here whenever
+# available locally or on another host, without requiring a second platform-specific installer.
+if command -v actionlint >/dev/null 2>&1; then
+  actionlint -shellcheck= -pyflakes= "$ROOT/.github/workflows/ci.yml" "$ROOT/.github/workflows/perf.yml"
+fi
 
 exec "$PY" "$ROOT/scripts/check-workflow-supply-chain.py" --root "$ROOT"

@@ -191,7 +191,7 @@ printf '{"role":%s,"leader_pid":%s,"anchor_pid":%s,"tty":"%s"}\n' "$role" "$$" "
 mv "$scratch/sessions/$role.json.tmp" "$scratch/sessions/$role.json"
 while [ ! -e "$scratch/acks/$role" ]; do sleep 0.05; done
 printf 'READY %s\n' "$role"
-while [ ! -e "$scratch/go/$role" ]; do sleep 0.05; done
+if [ -p "$scratch/go/$role" ]; then read -r _go < "$scratch/go/$role"; else while [ ! -e "$scratch/go/$role" ]; do sleep 0.05; done; fi
 case "$role" in
 0)
     export PS1='perf$ '
@@ -205,62 +205,62 @@ esac
 
 /// SHA-256 of every plan's role script, keyed `<scenario> <variant> <full|short>`.
 const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
-    ("S1 atlas-retry full", "5f421ba9b70f6192e1d4873044c970d0173ba23e068e18dfcf19e2514ca47d0b"),
-    ("S1 atlas-retry short", "f17352b1a7ac0623741485790348964943a48fcaea4129aa5cafea90be7daf9d"),
-    ("S1 default full", "edbe606ddd384910eb1da472407c41ea22dfbe76e4328017a831cc47042f83c6"),
-    ("S1 default short", "e0f2554d5d2cd7cd9db6a15f9fa3086652357ac3088181b86996174afe2e1359"),
-    ("S1 status-line full", "829eef5a559a5a8724cada968fd264ad8b09b27f69663ba4b60364c1eaa8c254"),
-    ("S1 status-line short", "567dde88a4e5ce4de53fdff23f48531472c92a0dc69f99282a56611b27fe32b0"),
-    ("S1 gdi full", "922fa48f7c0b81b136e107ede7f96feea700eaf36fb7cafe41e880ec913d4d5d"),
-    ("S1 gdi short", "52697ce9881d23f19d5935e6e7f9b27d4b77ac6fcdacdb025045cb1dc22e7d67"),
-    ("S1 role-exit full", "a5601180eb49ced355e02fa921b73910cd4cc32c19a5039a81614d446b5a6869"),
-    ("S1 role-exit short", "0d41d14acc6768f69ad644df2a253a8eb87f4d470a4811d96212fd997b7622f5"),
-    ("S1 wgpu full", "3229137b759764a6611e1940c8ed64e39b550d110d85962dce99ca4f23c1778d"),
-    ("S1 wgpu short", "b1ca245149ddb1e11f30f8756495b95cea27e16b600e9cb7cca6622fd9ae5a39"),
-    ("S10 default full", "cb07c1e367527e027e25f645d99ae0439812691e70f261ed83d15027dc028e3a"),
-    ("S10 default short", "81166f7998126b6f6e542b38c2f35bc713e3d4160bacc1642fc39c6de0e56da6"),
-    ("S10 sync full", "4f63a578b7af98adfb1119e792ce2df8f03887829f4df676d3102cd7f41b74fb"),
-    ("S10 sync short", "52660b862b19d2e3b5f67e7fc1b3ca7622675dd9fdfe52d9ef71c9aa48dcb3f2"),
-    ("S11 default full", "da59aee4c2d1ff1e729e54ec606c4f026a1b612937eb53d67a26a14e7fe1dfb9"),
-    ("S11 default short", "34d256b25f0f1253a97b8df5e7aafc5fa8b64e9d5ad00ccc7acdd9d59b0ef63d"),
-    ("S11 gdi full", "aa97aa1d01ffff0062e2f32c67169d1c405e0c77b00c1051e3ab0065387f625e"),
-    ("S11 gdi short", "a30182709d9b7ed043797cf10123c302f807d41a1d5b76e8aa82af55bd1cbd76"),
-    ("S11 release full", "925eaff1dcf090e5b38acbcdfc9b0e1c03068f00af9adaa6b2587dd2049f32d2"),
-    ("S11 release short", "a33cfaee240d3655fcd53a45955586f285727978b4b0944e542164f4620be05c"),
-    ("S11 wgpu full", "f97598ad46bf4a8e0c7459f94e84497b0ef6b0a7f135f6807bd4c85593ec1258"),
-    ("S11 wgpu short", "a34fc1428ba1444d714aa603ed670d7c88e3c852a51fbc6bb1997b80392fb47d"),
-    ("S12 default full", "7a95a0b1b682cc2c75c9f198861af487908e966af93abfc1ee800e375b3ee433"),
-    ("S12 default short", "12e58739e0e173d693595f72b1915631fe532349fbb3e33b726d372e36c88a77"),
-    ("S12 status-line full", "b984ba5b5085b58c3e26b7699fdb76c8b4fb84f33f8c36644c2030b0dc0c14b0"),
-    ("S12 status-line short", "24657fbb29b89bd13535177b112fe57182873abb125dbf311c3e5ad9ead561eb"),
-    ("S2 default full", "910c0fc83d8cdae5a3feb69d07809cfceeda5cd3501371fd89f2be6e654d5e23"),
-    ("S2 default short", "cda27e9cdf2161c513c001158abe51c1206e5a309e5e1872d697a242c7b0de68"),
-    ("S2 flood full", "62ac538f1cf8f4356e8a874bdef2347ac5171181548e5103616249c109ea4930"),
-    ("S2 flood short", "288286f34676da844e89fed17db41eae96928d2ae6f347771bc5b5ff0e9795d4"),
-    ("S3 default full", "513dafbfef040419cdfa6e2209b6744ce83eb8d4336aabcce7754c308c7860d5"),
-    ("S3 default short", "d9d2342dd97d3ea62ed9bd70bc81fee24f1f3f5321a5b0bff57c55bfdc488898"),
-    ("S4 default full", "81626dd9100d6ec6b28cd9e9d11802114cd3e34b4cf8a76ecdaf7fcded2f5869"),
-    ("S4 default short", "288fd54a708ac09e0950a62e3d4f9c1728aa97cf05b358343e80f1a8e9aa7c1c"),
-    ("S5 default full", "485406d66b686f62a675e60b6a564af1afc580680dc113be284307a92dac8616"),
-    ("S5 default short", "2c05c242f02ca5c2499847c9563daeef4d330f4bb0f60089ea40bf5950b75498"),
-    ("S5 gdi full", "fb1b8179379a270c46a216c871108568e5cbc20c2c74ae9dab28a5495d6626ee"),
-    ("S5 gdi short", "5c693b8e732554e32b9e5b07966995e54202ffe351635d902c8b58e684cfe98d"),
-    ("S5 wgpu full", "b7068fe3a6572e5a9832fd8c77fd16c9c2552683ef0b7f497f0d932369b7e686"),
-    ("S5 wgpu short", "263c5c026fa8af5256a109b3bdc449e2cb84530b20c209f3a4d6bce7393c97f0"),
-    ("S6 default full", "ddb6609874ec7c01eb39d22445ef809132e49673ffd098adaab478f70372aa83"),
-    ("S6 default short", "263ae81928978b6938dac22c16822ade0f26812fcc9012649fe35c5fb72d2bd9"),
-    ("S6 flood full", "ae12beb3c10a444d36001f20ac30ed973bdd3a2f9f9de740cb7983dc1b9a79cd"),
-    ("S6 flood short", "7b4d3320fd201f1cca9e93a9545b59ad8aab8fcc02db8138e2868c629704bfeb"),
-    ("S6 rest full", "60062364a7adea23e03d9be4f7406b8098505facdba4b2fb159187c6f3262ee8"),
-    ("S6 rest short", "e6d46d41e825334c14ae8b0225167912ebf004c58f2e30f6799f7a2746d96caf"),
-    ("S6 selection-drag full", "a0d20c1c6bb05037839b82ddeb24362373923b0498628bc922ae523856ac7e85"),
-    ("S6 selection-drag short", "febef4c45ea35262cf1f37bd9a1e6dea37310d985b80f8ceb2472f6c73edaf1b"),
-    ("S7 default full", "f253827bf744454cb31bbe9bb2587b2df13f4887073ecfcb197505e6c229e6ac"),
-    ("S7 default short", "cd05c9831c7270f57d413360092d364de9906227dc9591095f4788bcfda4c1f2"),
-    ("S8 default full", "334db98046ae2d64f3f93fa052c0b0b5c7aa1b5e4ee851f27522b12342138099"),
-    ("S8 default short", "a1f91422f69ef712ffb2a41b425eefa93d21f05476212070d23db99c7acc0c76"),
-    ("S9 default full", "b3c97a61dabacae2112ab69765ca76a873321684f47ebc81ef2a20cfd5d320bb"),
-    ("S9 default short", "e94f518867d49a6bdeaf72a020549c15cda569e58319562c48f61aca51cb5035"),
+    ("S1 atlas-retry full", "719bfe93ca100bd8aa7c88d5a70421df8ffa0797387baf8e55d3430d8ed85159"),
+    ("S1 atlas-retry short", "3ad8edf1efd44fbb434cdfcbf10a67bf9a0df05843e650e69a5699514a1ca12f"),
+    ("S1 default full", "fac6505124bd493744dbb8738cebcdbab4969fb56cba37c3bf4e74f4446b1ef9"),
+    ("S1 default short", "416899e3488ac5fb8b2543997cee2baaeef4dddeef6dd287993243afcd80fa06"),
+    ("S1 gdi full", "8671b3f8ea813ef1e2e5d7bde78e50fd23dbdeb3abf35ecc78995944bef91111"),
+    ("S1 gdi short", "14b0f10f88fd7d75e44e0192b2d9913bd817007c8717355ea3acba401b16b79a"),
+    ("S1 role-exit full", "d8b4ac8707036e0b22f4544afdfe4683b4d0b2c73cf9af7cbf8cb7f046bbb92c"),
+    ("S1 role-exit short", "7312104a6d7ff1a9c7ea70a5113bbfccea388fe1cb1a51e5aff4d355e24d11c9"),
+    ("S1 status-line full", "21492e48d4cb7fece9d206d0d34972c66f58272990b34813cb897a1f8e721c11"),
+    ("S1 status-line short", "07ce72fafeb71d24696ec2e57050465680d9e7898b2890bb44da0a2ecd5e04c3"),
+    ("S1 wgpu full", "1bfb1b8ec08185ac9f52133a92825f36588fff7582defaa489f75a61811792a6"),
+    ("S1 wgpu short", "6d5bb317c5fb6a297ef362e450ff599ceb439368e1205bc9ab2eb50d5bcfd07a"),
+    ("S10 default full", "ec83408ef54d54f0f3b0989be5fcc2b6be8eaf86d4d1de5ebe718bcf43e61fb1"),
+    ("S10 default short", "a329e1a8a78390cf46494f8c8e9a3f6305f7c6a907b9d9940502ec41f7833a3e"),
+    ("S10 sync full", "2f99331c4ba2a7c6a6d31cb549bdeb0d56253f70d50f0e4d8807541fb9347826"),
+    ("S10 sync short", "2d0e10cc479c763d6f64e09f35c2e52de8e7619e7a7290fadb2e594a0aa5c3c9"),
+    ("S11 default full", "d3e9d0b3a54cf85d42a16870cc258f011185b3cc5409f75b79d9fc62dba900b0"),
+    ("S11 default short", "9bb8ae50215767c464d3dd168affa108a8e612b217550906f338ff08b7c0e1c8"),
+    ("S11 gdi full", "3ef47a844e901b2836f77ef6548fec78807d345f49524228a3e7430490d79514"),
+    ("S11 gdi short", "acf8b3247fa585a29ae4c9053c54efee75f915a4689030839321e3de6c0da29e"),
+    ("S11 release full", "f5981966ea5a6a183762ddb9fe889e4ef928844ff8fb0b5eae1c5d4d3f407976"),
+    ("S11 release short", "94ed4514566191948541725f67102a38b054bc59180cb9cc7cec12a9693b933f"),
+    ("S11 wgpu full", "e56affac6c4b15036336ee85f66be0005408fe978c738fddfa8eb6c30b8d2895"),
+    ("S11 wgpu short", "9b2bf3ac61745112108d3ef8f3e38c1db077ad0704fe1123367d1089a3811e16"),
+    ("S12 default full", "3d60537ebeaab2c8f0e7d18f0fac8ae015e5927eed94ffbd3e15c12db76373b4"),
+    ("S12 default short", "800f25bd5fd34f2e15749136b3f6b7b23df09bab219127dc07da9cc0845e0022"),
+    ("S12 status-line full", "a1407eb7222747d569bbd761157d651ebacd4334a3134332595310ea1a43e65e"),
+    ("S12 status-line short", "4a03c33e4327ab15b3d551cef06c4345f3c7ece37f8cfd262dadfa1c0b1a9315"),
+    ("S2 default full", "b8794652682021a93564b1a2821feb8336f918626dde0156749fc8245abf8864"),
+    ("S2 default short", "0a29f4e7229a367ab9f687772abb28d8120420f2bcad9592f26e7cbd7a5accba"),
+    ("S2 flood full", "c80b829c203c03d8a7bd02df240c39996c067ae4b80f88b02ad6576712eb477f"),
+    ("S2 flood short", "f8b4bbf8f0aea9ed8b93f7a311af9e2608a04b0170bd69941e5a27ba6e6f54de"),
+    ("S3 default full", "12b8b7fc1ddecb3119b906641ae11d5533bbfaa7ee48cd85cb58409fd7bac939"),
+    ("S3 default short", "454ba851ad2ac3038d87c74b973a4f65173d6e2a597bf28867204871a21c562e"),
+    ("S4 default full", "c0d00aef8743d934be6d50fb21428f32f7a7e60fa8055d323e52746fd044058e"),
+    ("S4 default short", "3616cc09f09a6f8d6fcaacd792e2a362ab336ae6031ce91b37582e9205f1c371"),
+    ("S5 default full", "2b9fe5553e3cef6279e430f3808faa5c9fa3551dc7acdd53ae8e52adfacdb950"),
+    ("S5 default short", "de2d10a7449cb0216df18ac0a339298a7cd07035d12aa36fc613eced7adeda74"),
+    ("S5 gdi full", "6fd9602dae468cfd0a17b84031b107539bc5ff20555abe142e802bc18ea0592a"),
+    ("S5 gdi short", "eb71b4fbff7e0d71740a0b979a16724b2083d07c9bbf14b1dc6aa3f4bb730e67"),
+    ("S5 wgpu full", "d051e7c02f8f55e38b0dc577aa57d1ca8ad59087034eeaf819db531c78361599"),
+    ("S5 wgpu short", "ec1886dbc09898bc13adb6a05c6d6eadaa2005a885f030f0a5fd399ac7a6ffa3"),
+    ("S6 default full", "9864653bc7f88db5a160cd74c68404541d371d3247d495b5db4de68680fdfa47"),
+    ("S6 default short", "735d2424ae451cb72494c84a39aacd6e7cfb186956ec214b8021d9b4bd8bfc4b"),
+    ("S6 flood full", "1e740b04d7b0b15cac6014923c669d6b59809ca9b237f7dc994412025c95fb00"),
+    ("S6 flood short", "063788dcb3da6995a11ac2cfdae9e8cf5f4ce9920e4b1f752b0eef2b6443809e"),
+    ("S6 rest full", "b880315de67856eeffb66252d1dcd2641cfd278cf8ec54bb34249a8272de1ab3"),
+    ("S6 rest short", "4b6228b6e44753a85275322760c568dbb2e91d4346442027dca5e3f67fe88fdd"),
+    ("S6 selection-drag full", "ea90120cc78d5150787211e3ca90363bb39195c01def76f783a537d4bdbf9192"),
+    ("S6 selection-drag short", "a75bea918151beb718c836bbae15d2712f98f796e6a97feedf8943c59d554a9a"),
+    ("S7 default full", "9f08a3ceff1862800648cbbf60f0a5cf43fd2ac17f96b8dd3f69efc5c185dce7"),
+    ("S7 default short", "075f538393f42e86b87f4f1a7ebb8f951c3b298391eeaad895185b28678392b9"),
+    ("S8 default full", "e903a64e0a7210ead6832a47af0d3206309cfcf92700a2c95d72e42817f1bcdc"),
+    ("S8 default short", "afe9d2b6a1e2606892cfce766935e15327c34fbc63e45eda25ef180ccd70219e"),
+    ("S9 default full", "e8b589db3e6877ac295220e3349d750a00226f6684dcf95aee80be0321725814"),
+    ("S9 default short", "6276da9704628cdabacc26f25ca655d3f7fd67bcf1637111cc6d6c68d38f4232"),
 ];
 
 /// SHA-256 of every distinct fixture, keyed by file and length or by frame set.
@@ -1315,6 +1315,10 @@ fn glyph_atlas_working_set() {
                      {provenance}): {reason}"
                 )),
             }
+            // CI seals these rows only after this test returns successfully, including every drift check.
+            if let Err(error) = crate::workload::glyph_oracle::export(name, dpi, &set) {
+                failures.push(format!("{name}@{scale}: oracle export: {error}"));
+            }
             local.push(RuleInput {
                 label: format!("{platform} {scale}x {name} helper"),
                 outcome: set.fit_outcome,
@@ -1573,7 +1577,7 @@ mod real_renderer_coverage {
     use sonicterm_cfg::theme::Theme;
     use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
     use sonicterm_gpu::glyph_working_set::{
-        measure_glyph_working_set, representative_gaps, representative_identities, TileIdentity,
+        measure_glyph_working_set, representative_gaps, representative_identities,
     };
     use winit::application::ApplicationHandler;
     use winit::dpi::PhysicalSize;
@@ -1800,24 +1804,35 @@ mod real_renderer_coverage {
                 &format!("{case}: representative codepoints not drawn: {gaps:?}"),
             )?;
         }
-        let helper =
-            measure_glyph_working_set(&lines, &TITLES, FONT_FAMILY, size_pt, dpi, &font_dirs())
+        // Only helper work is shared; every suite still proves its own resident identities and sizes.
+        let helper = match crate::workload::glyph_oracle::load(name, dpi)? {
+            Some(tiles) => tiles,
+            None => {
+                let measured = measure_glyph_working_set(
+                    &lines,
+                    &TITLES,
+                    FONT_FAMILY,
+                    size_pt,
+                    dpi,
+                    &font_dirs(),
+                )
                 .map_err(|error| {
                     format!("{case}: the helper measurement is incomplete: {error}")
                 })?;
-        let missing: Vec<&TileIdentity> = identities
-            .keys()
-            .filter(|identity| !helper.tile_identities.contains_key(*identity))
-            .take(20)
-            .collect();
+                crate::workload::glyph_oracle::identities(&measured.tile_identities)?
+            }
+        };
+        let identities = crate::workload::glyph_oracle::identities(&identities)?;
+        let missing: Vec<&String> =
+            identities.keys().filter(|identity| !helper.contains_key(*identity)).take(20).collect();
         check(
             missing.is_empty(),
             &format!("{case}: resident tiles the helper missed: {missing:?}"),
         )?;
-        let resized: Vec<(&TileIdentity, [u32; 2], [u32; 2])> = identities
+        let resized: Vec<(&String, [u32; 2], [u32; 2])> = identities
             .iter()
             .filter_map(|(identity, size)| {
-                let measured = helper.tile_identities[identity];
+                let measured = helper[identity];
                 (measured != *size).then_some((identity, *size, measured))
             })
             .take(20)

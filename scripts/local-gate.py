@@ -20,7 +20,7 @@ after the run; changes are reported, never cleaned.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import difflib
 import hashlib
@@ -92,6 +92,8 @@ PRE_EXISTING_LIMIT = 40
 
 # Each prerequisite key maps to its (English, Chinese) legend text.
 PREREQUISITES = {
+    "actionlint": ("`actionlint` at the version `scripts/pinned-tools.json` pins.",
+                   "`scripts/pinned-tools.json` 固定版本的 `actionlint`。"),
     "rust": (
         "the Rust toolchain from `rust-toolchain.toml`, with rustfmt and clippy.",
         "`rust-toolchain.toml` 指定的 Rust 工具链，包含 rustfmt 与 clippy。",
@@ -178,9 +180,8 @@ class Step:
     shell: str | None = None
     windows_policy: WindowsPolicy = WindowsPolicy.STRICT
     windows_preparations: tuple[Preparation, ...] = ()
-    # The harness API cfgs this step builds with; None for a step that composes no harness flags. When set,
-    # the runner composes the compiler flags at launch (`compose_harness_rustflags`): every table entry is
-    # declared and these are set, on top of the flags the step inherits.
+    # The harness-only cfgs; None leaves execution unchanged. Each selected example receives declarations
+    # and enabled cfgs as final-target arguments, without changing dependency compiler flags.
     harness_cfgs: tuple[str, ...] | None = None
 
 
@@ -303,6 +304,25 @@ def compose_harness_rustflags(environ: Mapping[str, str], enabled: Sequence[str]
                                    for token in ("--cfg", name)]
 
 
+def harness_dependency_environment(environ: Mapping[str, str], enabled: Sequence[str]) -> dict[str, str]:
+    """Validate inherited cfgs, then move agreeing owned cfgs out of dependency-wide flags."""
+    compose_harness_rustflags(environ, enabled)
+    inherited = _inherited_rustflags(environ)
+    kept = []
+    index = 0
+    while index < len(inherited):
+        token = inherited[index]
+        width = 2 if token == "--cfg" and index + 1 < len(inherited) else 1
+        specs = _set_cfgs(inherited[index:index + width])
+        if not any(_owned_cfg(spec) is not None for spec in specs):
+            kept.extend(inherited[index:index + width])
+        index += width
+    environment = dict(environ)
+    if kept != inherited:
+        environment["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(kept)
+    return environment
+
+
 _PLAIN_WORD = re.compile(r"^[A-Za-z0-9_@%+=:,./\\-]+$")
 
 
@@ -314,12 +334,9 @@ def _display_word(word: str) -> str:
 
 
 def command_text(step: Step) -> str:
-    """Render a step as the single command line that ci.yml and the docs show. A step with harness cfgs shows
-    the flags it composes from an empty environment as `RUSTFLAGS=`, which is what CI, inheriting none, runs."""
+    """Render the canonical command, including the target-only launcher for API cfgs."""
     words = [f"{name}={_display_word(value)}" for name, value in step.env]
-    if step.harness_cfgs is not None:
-        words.append(f"RUSTFLAGS={_display_word(' '.join(compose_harness_rustflags({}, step.harness_cfgs)))}")
-    words.extend(_display_word(word) for word in step.argv)
+    words.extend(_display_word(word) for word in target_launch_argv(step, display=True))
     return " ".join(words)
 
 
@@ -327,7 +344,75 @@ def launch_argv(step: Step) -> tuple[str, ...]:
     """Return the argv the runner starts, wrapping a PowerShell script in `pwsh -File`."""
     if step.shell == "pwsh":
         return ("pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", *step.argv)
-    return step.argv
+    return target_launch_argv(step)
+
+
+def target_launch_argv(step: Step, *, display: bool = False) -> tuple[str, ...]:
+    """Route cfg-bearing Cargo commands through the target-only compiler/test launcher."""
+    if step.harness_cfgs is None:
+        return step.argv
+    script = "scripts/harness-target.py" if display else str(_HERE / "harness-target.py")
+    python = "python3" if display else sys.executable
+    return (python, script, "--cfgs", ",".join(step.harness_cfgs) or "none", "--", *step.argv)
+
+
+# The target launcher registers only plans derived from this process's canonical catalog.
+_TARGET_COMPILE_STEPS: list[Step] = []
+# Both roots include the API-gated modules; alloc_main has test=false in Cargo.toml.
+HARNESS_LINT_TARGETS = (("perf_scenarios", False), ("perf_scenarios", True), ("perf_scenarios_alloc", False))
+
+
+def target_compile_steps(original: Step) -> tuple[Step, ...]:
+    """Plan cfg-scoped compilation; Cargo JSON identifies the test executable, never a glob."""
+    if not _reviewed_step(original) or original.harness_cfgs is None:
+        raise ValueError("target compilation requires a canonical cfg-bearing step")
+    words = list(original.argv)
+    operation = words[1]
+    extra = []
+    if "--" in words:
+        boundary = words.index("--")
+        extra, words = words[boundary + 1:], words[:boundary]
+    examples = [words[index + 1] for index, word in enumerate(words) if word == "--example"]
+    if not examples or set(examples) - {"perf_scenarios", "perf_scenarios_alloc"}:
+        raise ValueError("only the scenario harness targets accept API cfgs")
+    cfg_flags = compose_harness_rustflags({}, original.harness_cfgs)
+    plans = []
+    if operation == "clippy":
+        # Keep the original all-targets lint, then lint both cfg-on harness modes alone.
+        plans.append(tuple([*words, "--", *extra]))
+        selected = [word for word in words if word != "--all-targets"]
+        selected[1] = "rustc"
+        # cargo clippy forwards its arguments to the package library too. rustc's final-target
+        # arguments plus the Clippy driver lint each API consumer without enabling dependency cfgs.
+        for example, tests in HARNESS_LINT_TARGETS:
+            target = list(selected)
+            target[target.index("--example") + 1] = example
+            plans.append(tuple([*target, "--profile", "check", "--", *extra, *cfg_flags,
+                                *(["--test"] if tests else []), "--emit=metadata"]))
+    else:
+        words[1] = "rustc"
+        selected = []
+        skip = False
+        for word in words:
+            if skip:
+                skip = False
+            elif word == "--example":
+                skip = True
+            else:
+                selected.append(word)
+        if not any(word.startswith("--message-format") for word in selected):
+            selected.append("--message-format=json-render-diagnostics")
+        if operation in ("test", "check"):
+            selected += ["--profile", operation]
+        for example in examples:
+            plans.append(tuple([*selected, "--example", example, "--", *cfg_flags,
+                                *(["--emit=metadata"] if operation == "check" else [])]))
+    steps = tuple(Step(f"{original.id}-target-{number}", argv, original.hosts, original.timeout_s,
+                       original.evidence, original.prerequisites, (),
+                       env=(("RUSTC_WORKSPACE_WRAPPER", "clippy-driver"),) if operation == "clippy" and number else (),
+                       windows_policy=WindowsPolicy.COMPILE_ONLY) for number, argv in enumerate(plans))
+    _TARGET_COMPILE_STEPS.extend(steps)
+    return steps
 
 
 _RUSTDOC_WARNINGS = (("RUSTDOCFLAGS", "-D warnings"),)
@@ -335,6 +420,8 @@ _RUSTDOC_WARNINGS = (("RUSTDOCFLAGS", "-D warnings"),)
 # Rust 1.99 reads one `<kbd>*</kbd>` list as nested emphasis, so its doc phase allows only that lint.
 _WINIT_RUSTDOC_FLAGS = (("RUSTDOCFLAGS", "-D warnings -A rustdoc::invalid_html_tags"),)
 _CORE_CHECKS = ("macos-core", "windows-checks", "linux-core")
+_SCRIPT_CHECKS = ("tooling", "windows-checks", "linux-core")
+_SCRIPT_TESTS = ("tooling", "windows-tests-workspace", "linux-core")
 # Windows splits its tests across parallel shards, so each test step names the shard that runs it there.
 _WINDOWS_WORKSPACE = "windows-tests-workspace"
 _WINDOWS_HARNESS = "windows-tests-harness"
@@ -385,33 +472,40 @@ STEPS = (
     # entry's methods; every host lints all of them at once, with the counters they need.
     Step("perf-scenarios-harness-api-clippy",
          ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios", "--all-targets",
-          "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim", "--", "-D", "warnings",
-          *_HARNESS_API_CFG_FLAGS),
-         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
+          "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim", "--", "-D", "warnings"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY,
+         harness_cfgs=HARNESS_API_CFG_NAMES),
     # The same lint with perf-echo-trace as well: the S2 echo timeline's adapter needs both the feature and its
     # cfg, so only this step compiles it; the two steps above compile its cfg-off sides.
     Step("perf-scenarios-harness-api-echo-trace-clippy",
          ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios", "--all-targets",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace", "--", "-D",
-          "warnings", *_HARNESS_API_CFG_FLAGS),
-         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
+          "warnings"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY,
+         harness_cfgs=HARNESS_API_CFG_NAMES),
     Step("doc", ("cargo", "doc", "--workspace", "--no-deps"), HOSTS, 600, "local",
          ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc-resource-features",
          ("cargo", "doc", "-p", "sonicterm-resource", "--all-features", "--no-deps"),
          HOSTS, 600, "local", ("rust",), ("linux-core",), env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("authored-comments", ("bash", "scripts/check-authored-rust-comments.sh"), HOSTS, 300,
-         "local", ("bash",), _CORE_CHECKS),
+         "local", ("bash",), _SCRIPT_CHECKS),
     Step("script-identifiers", ("bash", "scripts/check-script-identifiers.sh"), HOSTS, 300,
-         "local", ("bash",), _CORE_CHECKS),
+         "local", ("bash",), _SCRIPT_CHECKS),
     Step("no-raw-exit", ("bash", "scripts/check-no-raw-process-exit.sh"), HOSTS, 120, "local",
-         ("bash",), _CORE_CHECKS),
+         ("bash",), _SCRIPT_CHECKS),
     Step("rust-version", ("bash", "scripts/check-rust-version.sh"), HOSTS, 300, "local",
-         ("rust", "bash"), _CORE_CHECKS),
+         ("rust", "bash"), _SCRIPT_CHECKS),
     Step("window-owner", ("bash", "scripts/check-window-owner-registration.sh"), HOSTS, 120,
-         "local", ("bash",), _CORE_CHECKS),
+         "local", ("bash",), _SCRIPT_CHECKS),
     Step("workflow-supply-chain", ("bash", "scripts/check-workflow-supply-chain.sh"), HOSTS, 120,
-         "local", ("rust", "bash"), _CORE_CHECKS),
+         "local", ("rust", "bash"), _SCRIPT_CHECKS),
+    # Keep the one macOS-only custody regression on macOS when the portable suite moves to Ubuntu.
+    Step("macos-gate-custody", ("python3", "scripts/local-gate_tests.py",
+                              "RunnerTests.test_a_zombie_only_group_kill_is_refused_on_macos_and_the_step_is_still_reaped"),
+         ("macos",), 60, "local", ("bash",), ("macos-core",)),
+    Step("workflow-syntax", ("actionlint", "-shellcheck=", "-pyflakes=", ".github/workflows/ci.yml",
+                             ".github/workflows/perf.yml"), HOSTS, 60, "local", ("actionlint",), ("tooling",)),
     # The dependency audit reads only Cargo.lock and deny.toml, so CI runs it once, in linux-core.
     Step("cargo-deny", ("cargo", "deny", "--locked", "check"), HOSTS, 300, "local",
          ("rust", "cargo-deny"), ("linux-core",)),
@@ -435,7 +529,7 @@ STEPS = (
     Step("glyph-atlas-working-set",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "glyph_atlas_working_set", "--", "--ignored", "--nocapture"),
-         ("macos", "windows"), 900, "local", ("rust", "native"), ("macos-core", _WINDOWS_HARNESS_FEATURES)),
+         ("macos", "windows"), 900, "local", ("rust", "native"), ("macos-core", "windows-glyph-oracle")),
     # The same unit tests with the frame-texture reading compiled in, wherever the plain ones run.
     Step("perf-scenarios-frame-texture-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
@@ -446,14 +540,13 @@ STEPS = (
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-echo-trace"),
          HOSTS, 900, "local", ("rust", "native"), _HARNESS_FEATURE_TESTS),
-    # The counters-enabled unit tests with every harness API cfg compiled in, composed at launch: one changed
-    # compiler-flag set, so one dependency rebuild covers all of them.
+    # Every API cfg is passed only to the example test target; dependency fingerprints remain shared.
     Step("perf-scenarios-harness-api-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim"),
          HOSTS, 900, "local", ("rust", "native"), _HARNESS_API_TESTS, harness_cfgs=HARNESS_API_CFG_NAMES),
-    # The same tests with perf-echo-trace as well, so the echo timeline's real adapter is built and tested; it
-    # shares the step above's compiler flags, so it adds a rebuild of this crate only.
+    # The same tests with perf-echo-trace build and test the echo timeline's real adapter;
+    # only the example receives the API compiler flags.
     Step("perf-scenarios-harness-api-echo-trace-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace"),
@@ -462,19 +555,19 @@ STEPS = (
          "local", ("rust", "bash"), ("macos-core", _WINDOWS_WORKSPACE),
          windows_preparations=(Preparation(_FEASIBILITY_BUILD),)),
     Step("resource-inventory", ("bash", "scripts/test-resource-inventory.sh"), HOSTS, 300, "local",
-         ("bash",), ("macos-core", _WINDOWS_WORKSPACE)),
+         ("bash",), ("tooling", _WINDOWS_WORKSPACE)),
     Step("resource-baseline-tests", ("bash", "scripts/test-resource-baseline-evidence.sh"), HOSTS,
-         300, "local", ("bash",), ("macos-core", _WINDOWS_WORKSPACE)),
+         300, "local", ("bash",), ("tooling", _WINDOWS_WORKSPACE)),
     Step("soak-harness", ("bash", "scripts/test-soak-harness.sh"), HOSTS, 300, "local",
-         ("bash",), ("macos-core", _WINDOWS_WORKSPACE)),
+         ("bash",), ("tooling", _WINDOWS_WORKSPACE)),
     Step("linux-packages-tests", ("bash", "scripts/test-linux-packages.sh"), HOSTS, 300, "local",
          ("bash",), ("linux-core",)),
     Step("release-assets-tests", ("bash", "scripts/test-release-assets.sh"), HOSTS, 300, "local",
          ("rust", "bash"), ("linux-core",)),
     Step("release-notes-tests", ("bash", "scripts/test-release-notes.sh"), HOSTS, 300, "local",
-         ("bash",), _WORKSPACE_TESTS),
+         ("bash",), _SCRIPT_TESTS),
     Step("wiki-publish-tests", ("bash", "scripts/test-wiki-publish.sh"), HOSTS, 300, "local",
-         ("rust", "bash"), _WORKSPACE_TESTS),
+         ("rust", "bash"), _SCRIPT_TESTS),
     # Executed directly, as ci.yml does, so it needs a POSIX host.
     Step("logic-coverage", ("scripts/rust-logic-coverage.sh",), ("macos", "linux"), 1200,
          "local", ("rust", "native", "llvm-cov"), ("macos-coverage",)),
@@ -612,7 +705,7 @@ def _reviewed_step(step: Step) -> bool:
     """Whether `step` is one of the gate's own step objects, not a copy that could claim their authority."""
     reviewed = (*STEPS, *PERF_BUILDS.values(), *PERF_BUILD_CATALOG.values(), *PREVIOUS_RELEASE_CHECKS.values(),
                 *(step for catalog in PERF_CFG_BUILDS.values() for step in catalog.values()))
-    return any(step is canonical for canonical in reviewed)
+    return any(step is canonical for canonical in (*reviewed, *_TARGET_COMPILE_STEPS))
 
 
 _PREPARATION_SCRIPTS = {
@@ -727,9 +820,18 @@ class CiOnly:
 CI_ONLY_KINDS = ("setup", "evidence-rerun", "runtime-evidence", "package-evidence")
 
 CI_ONLY = (
+    CiOnly("setup", "bash scripts/install-pinned-tool.sh actionlint", ("tooling",),
+           "installs the pinned workflow syntax checker required by workflow-syntax"),
+    CiOnly("runtime-evidence", "python3 scripts/glyph-oracle.py prepare", ("windows-glyph-oracle",),
+           "binds the exact source/font/toolchain inputs before the canonical helper gate"),
+    CiOnly("runtime-evidence", "python3 scripts/glyph-oracle.py seal", ("windows-glyph-oracle",),
+           "publishes only a successful canonical helper gate's four rows"),
+    CiOnly("runtime-evidence", "python3 scripts/glyph-oracle.py verify",
+           (_WINDOWS_WORKSPACE, _WINDOWS_HARNESS, _WINDOWS_HARNESS_FEATURES, _WINDOWS_HARNESS_API),
+           "verifies the exact producer artifact before each real-renderer consumer suite"),
     CiOnly("setup", ".\\scripts\\setup-windows-cairo.ps1",
            ("windows-native", "windows-checks", _WINDOWS_WORKSPACE, _WINDOWS_HARNESS, _WINDOWS_HARNESS_FEATURES,
-            _WINDOWS_HARNESS_API, _WINDOWS_RUNTIME, "windows-smoke"),
+            _WINDOWS_HARNESS_API, _WINDOWS_RUNTIME, "windows-smoke", "windows-glyph-oracle"),
            "installs the vcpkg Cairo that the native prerequisite names; it checks nothing"),
     CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-llvm-cov", ("macos-coverage",),
            "installs the pinned cargo-llvm-cov that the llvm-cov prerequisite names; it checks nothing"),
@@ -1191,6 +1293,8 @@ def _unfamiliar(number: int, what: str) -> ValueError:
 
 def job_host(job: str) -> str | None:
     """Return the host a platform shard runs on, from its job-name prefix."""
+    if job == "tooling":
+        return "linux"
     for host in HOSTS:
         if job.startswith(host):
             return host
@@ -1895,7 +1999,8 @@ class StepResult:
         return self.status == PASS or (
             self.status == CLEANED_NOT_NATURAL and self.exit_code == 0
             and self.windows_policy == WindowsPolicy.COMPILE_ONLY
-            and (self.id in _COMPILE_ONLY_STEPS or self.id in PERF_BUILDS)
+            and (self.id in _COMPILE_ONLY_STEPS or self.id in PERF_BUILDS
+                 or any(self.id == step.id for step in _TARGET_COMPILE_STEPS))
             and self.custody is not None and self.custody.get("empty") is True
             and self.custody.get("cleanup") == "terminated"
             and self.custody.get("bootstrap_reaped") is True
@@ -2323,6 +2428,100 @@ def _run_windows_step(step, root, env, log, log_path, started, output_limit_byte
                    custody, tuple(phases))
 
 
+def harness_test_executable(text: str) -> tuple[str, Path]:
+    """Select one real libtest example artifact from Cargo JSON, never a stale globbed binary."""
+    found = set()
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if record.get("reason") == "compiler-artifact" and record.get("profile", {}).get("test") \
+                and record.get("target", {}).get("name") == "perf_scenarios" \
+                and record.get("target", {}).get("kind") == ["example"] and record.get("executable") \
+                and record.get("manifest_path"):
+            found.add((record["executable"], Path(record["manifest_path"]).parent))
+    if len(found) != 1:
+        raise ValueError(f"expected one harness test executable, found {sorted(found)}")
+    return found.pop()
+
+
+def harness_test_environment(environ: Mapping[str, str], executable: str, cargo_output: str,
+                             *, windows: bool = os.name == "nt") -> dict[str, str]:
+    """Restore Cargo's native runtime search paths for directly launched libtest binaries."""
+    environment = dict(environ)
+    if not windows:
+        return environment
+    # The setup script supplies this exact triplet root, including when callers choose a dynamic triplet.
+    paths = [value for value in [environment.get("SONICTERM_CAIRO_BIN_DIR")] if value]
+    # Cargo propagates build-script native paths under the target directory plus its profile/deps dirs.
+    profile = Path(executable).parent.parent
+    for line in cargo_output.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("reason") != "build-script-executed":
+            continue
+        for linked in record.get("linked_paths", []):
+            directory = linked.split("=", 1)[-1]
+            if Path(directory).is_relative_to(profile):
+                paths.append(directory)
+    paths.extend([str(profile / "deps"), str(profile)])
+    existing = next((name for name in environment if name.upper() == "PATH"), "PATH")
+    paths.extend(environment.get(existing, "").split(";"))
+    environment[existing] = ";".join(dict.fromkeys(value for value in paths if value))
+    return environment
+
+
+def _run_harness_step(step, index, root, log_dir, environ, output_limit_bytes):
+    """Supervise compilation and libtest directly under one deadline, with no nested wrapper process."""
+    started = time.monotonic()
+    log_path = _step_log_path(log_dir, index, step)
+    environ = dict(environ)
+    environ.update(step.env)
+    with os.fdopen(_create_output(log_path), "wb") as log:
+        try:
+            environ = harness_dependency_environment(environ, step.harness_cfgs)
+            plans = list(target_compile_steps(step))
+            if step.argv[1] == "clippy" and environ.get("RUSTC_WORKSPACE_WRAPPER"):
+                raise ValueError("target lint cannot replace an inherited workspace compiler wrapper")
+            execution_root = root
+            with tempfile.TemporaryDirectory(prefix="harness-phases-", dir=log_dir) as directory:
+                phase_logs = Path(directory)
+                remaining_output = output_limit_bytes
+                phases = []
+                for number, plan in enumerate(plans):
+                    remaining_s = step.timeout_s - (time.monotonic() - started)
+                    if remaining_s <= 0:
+                        return _finish(log, step, log_path, started, TIMEOUT, None, "harness deadline exhausted")
+                    bounded = replace(plan, timeout_s=remaining_s)
+                    if plan.windows_policy == WindowsPolicy.COMPILE_ONLY:
+                        _TARGET_COMPILE_STEPS.append(bounded)
+                    phase_root = execution_root if plan.id == "harness-tests" else root
+                    result = run_step(bounded, number, phase_root, phase_logs, environ,
+                                      output_limit_bytes=remaining_output)
+                    raw = result.log_path.read_bytes()
+                    log.write(raw)
+                    if remaining_output is not None:
+                        remaining_output = max(0, remaining_output - len(raw))
+                    if not result.accepted:
+                        return _finish(log, step, log_path, started, result.status, result.exit_code, result.detail)
+                    if result.phases:
+                        phases.extend(replace(phase, name=f"target-{number}-{phase.name}") for phase in result.phases)
+                    if step.argv[1] == "test" and number == 0:
+                        executable, execution_root = harness_test_executable(raw.decode("utf-8", errors="replace"))
+                        environ = harness_test_environment(environ, executable, raw.decode("utf-8", errors="replace"))
+                        plans.append(Step("harness-tests", (executable,), step.hosts, step.timeout_s,
+                                          step.evidence, (), ()))
+                if phases:
+                    phases[-1] = replace(phases[-1], name="execution")
+                verdict = CLEANED_NOT_NATURAL if any(phase.status == CLEANED_NOT_NATURAL for phase in phases) else PASS
+                return _finish(log, step, log_path, started, verdict, 0, "", phases=tuple(phases))
+        except (ValueError, OSError) as error:
+            return _finish(log, step, log_path, started, LAUNCH, None, f"harness target: {error}")
+
+
 def run_step(step: Step, index: int, root: Path, log_dir: Path,
              environ: Mapping[str, str], *, output_limit_bytes: int | None = None) -> StepResult:
     """Run one step in its own process group under a deadline that kills the group, logging its output.
@@ -2333,24 +2532,16 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
     Windows checks owned job accounting before output EOF and records forced compilation
     cleanup separately. An optional limit retains a prefix, drains excess bytes, and fails on overflow.
     """
+    if step.harness_cfgs is not None:
+        return _run_harness_step(step, index, root, log_dir, environ, output_limit_bytes)
     log_path = _step_log_path(log_dir, index, step)
     env = dict(environ)
     env.update(step.env)
     argv = launch_argv(step)
     started = time.monotonic()
-    conflict = None
-    if step.harness_cfgs is not None:
-        # The flags are composed here, at launch, from what the step inherits: never replaced by a fixed value.
-        try:
-            env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(compose_harness_rustflags(env, step.harness_cfgs))
-        except HarnessFlagConflict as error:
-            conflict = str(error)
     # A new file renamed onto log_path, so a link an earlier step left there is replaced.
     with os.fdopen(_create_output(log_path), "wb") as log:
         _write_header(log, step, argv, root)
-        if conflict is not None:
-            # When: `conflict` names an inherited flag against the decision, the build would not match it.
-            return _finish(log, step, log_path, started, LAUNCH, None, f"compiler flags: {conflict}")
         if WINDOWS_JOB is not None:
             return _run_windows_step(step, root, env, log, log_path, started, output_limit_bytes)
         program = resolve_program(argv[0], root, env)

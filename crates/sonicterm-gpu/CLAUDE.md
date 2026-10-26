@@ -29,7 +29,7 @@ the production glyph path.
 - `field_geometry.rs` - clipped query caret/selection geometry and hit testing bound to the last presented field.
 - `tab_title_font.rs` - device-free tab-title font state (stack, raster size, width key) that `set_font`, the scale rebuild and `measure_tab_widths` share.
 - `frame_scratch.rs` - renderer-owned per-frame draw vectors; a pass leases them after its unchanged and no-op exits, the lease or presentation restores them on every exit, and every restoration clears each vector and holds it within its cap; only a completed assembly also shrinks by the vertex-scratch rule and drops column-edge slots above its peak, so a failed or retried frame keeps its warm capacity.
-- `chrome_cache.rs` - device-free tab-title (64 slots by position), search-overlay run (32 slots) and UI palette caches; `chrome_cache_seam.rs` is the hidden integration-test seam over them.
+- `chrome_cache.rs` - device-free tab-title (64 slots by position), search-overlay and status line strip run (32 slots) and UI palette caches; `chrome_cache_seam.rs` is the hidden integration-test seam over them.
 
 ## Local gate
 ```bash

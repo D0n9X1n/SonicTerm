@@ -406,7 +406,7 @@ pub fn fit_strip(
 /// Emit the strip's band, hairline and glyphs; chips are colored text with no background. Glyphs are
 /// clipped to the band so no ink lands outside it.
 #[allow(clippy::too_many_arguments)]
-pub fn emit_strip(
+pub(crate) fn emit_strip(
     placed: &[PlacedSegment],
     separators: &[PlacedPart],
     geometry: &StripGeometry,
@@ -414,6 +414,8 @@ pub fn emit_strip(
     font_stack: Option<&sonicterm_engine::FontStack>,
     rasterizer: Option<&mut impl Rasterizer>,
     atlas: &mut GlyphAtlas,
+    runs: &mut crate::chrome_cache::ChromeRunCache,
+    reuse: bool,
     quads: &mut Vec<QuadInstance>,
     glyphs: &mut Vec<GlyphInstance>,
 ) {
@@ -439,16 +441,31 @@ pub fn emit_strip(
     let baseline = strip_baseline(geometry);
     let first_glyph = glyphs.len();
     for part in placed.iter().flat_map(|segment| &segment.parts).chain(separators) {
-        // A chip has no background: its tone colors its text and `is_chip` makes it bold.
-        let run = chrome_text::layout_with_raster_variant(
-            font_stack,
+        if part.text.is_empty() || screen_w <= 0.0 || screen_h <= 0.0 {
+            // When: the part has no text or the surface has no area, nothing is shaped or drawn.
+            continue;
+        }
+        // A chip has no background: its tone colors its text and `is_chip` makes it bold. Each part
+        // is kept by text, bold, stack and size (DPI is in `text_px`), so an unchanged strip is not
+        // reshaped; every face replacement clears the kept runs.
+        let attrs = ChromeAttrs { bold: part.tone.is_chip(), italic: false };
+        let key = crate::chrome_cache::ChromeRunKey::new(
+            crate::chrome_cache::ChromeStack::StatusLine,
+            attrs,
+            text_px,
+            text_px,
+        );
+        let handle = runs.prepare(font_stack, &part.text, key, reuse);
+        let Some(view) = runs.view(&handle) else {
+            // When: `runs.view(&handle)` is None, shaping failed; the part is dropped and reported.
+            chrome_text::note_unshaped_chrome(&part.text);
+            continue;
+        };
+        let run = chrome_text::layout_view(
+            view,
             rasterizer,
             atlas,
-            &part.text,
             colors.text(part.tone),
-            ChromeAttrs { bold: part.tone.is_chip(), italic: false },
-            text_px,
-            text_px,
             (part.left.round(), baseline),
             geometry.screen,
             None,

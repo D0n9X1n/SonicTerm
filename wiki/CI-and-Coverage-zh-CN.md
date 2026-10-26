@@ -47,15 +47,19 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 ### macOS 14 与 Windows latest
 
 稳定的必需检查是 fail-closed 汇总 job：`macos-14 / unit tests` 同时依赖 `macos-core`、
-`macos-coverage` 与 `macos-smoke`，而 `windows-latest / unit tests` 同时依赖
-`windows-native`、`windows-checks`、五个 Windows 测试 shard（`windows-tests-workspace`、
+`macos-coverage`、`macos-smoke` 与 `tooling`，而 `windows-latest / unit tests` 同时依赖
+`windows-native`、`windows-glyph-oracle`、`windows-checks`、五个 Windows 测试 shard（`windows-tests-workspace`、
 `windows-tests-harness`、`windows-tests-harness-features`、`windows-tests-harness-api` 与
 `windows-tests-runtime`）以及 `windows-smoke`，其结果循环逐一检查它们。每个汇总 job
 都使用 `if: always()`，且只接受显式 `success`，因此任一 shard 失败、取消或跳过都不会变成
 成功的必需检查。
 
-macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、workspace doctest、host probe、
-工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本
+macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行 Rust 检查、严格 Rustdoc、
+一次性 workspace 测试 gate、workspace doctest、host probe、macOS 专属进程组监管测试与真实
+resource baseline 采集。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版本、raw-exit、window-owner、
+工作流供应链、注释与脚本标识符检查，以及发布说明、Wiki 发布、资源清单、soak 和资源基线脚本测试。
+这些命令仍是各支持主机的本地 gate；既有 macOS 汇总要求 tooling 成功，因此没有检查变为可选。
+工作集测量留在 macos-core，复用已编译 harness，避免增加 macOS 冷构建及与 perf 竞争 runner。独立的 coverage shard 安装固定版本
 `cargo-llvm-cov` 发布的 Apple Silicon 预编译二进制：由 `scripts/install-pinned-tool.sh` 安装，解包前先校验其 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
 `macos-smoke` 矩阵分别在 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release
@@ -81,24 +85,47 @@ Windows 测试分为五个并行 shard，每个都重复 checkout、Rust、Cairo
 - `windows-tests-workspace` 运行一次性 workspace 测试、doctest、
   MSI validator 与工具测试，并采集、上传真实 resource baseline 证据。
 - `windows-tests-harness` 运行场景 harness 的单元测试，再运行启用帧计数器的同一组测试。
-- `windows-tests-harness-features` 测量 glyph atlas 工作集，再运行启用帧纹理读取和 echo trace 的 harness 测试。
-- `windows-tests-harness-api` 运行启用全部 harness API cfg 的 harness 测试；这些编译器标志只在该 shard 中重建依赖树。
+- `windows-tests-harness-features` 运行启用帧纹理读取和 echo trace 的 harness 测试。
+- `windows-tests-harness-api` 运行启用全部 harness API cfg 的 harness 测试；这些编译器标志只传给 example 目标。
 - `windows-tests-runtime` 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，使其测试二进制仍是冷构建，然后运行 host probe、fail-closed GDI 呈现验证、WARP allocator、software-selection presentation，
   以及性能场景 harness 的构建及其 smoke（在软件适配器上检查对比工具，不检查计时，见 [Windows](Local-Gate-zh-CN#windows)）；
   GDI probe 或性能 smoke 失败时，该 shard 上传其证据。它的 probe 重跑只为打印报告，对应的集成测试已由
   `windows-tests-workspace` 运行。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
-只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
+`windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
 另有带原生进程期限的独立步骤，要求其 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
 
-同一平台及架构中使用 Rust 的 shard 共用依赖 cache key，不缓存 workspace crate artifact。
-Apple Silicon core、Windows checks 和 Linux core 分别是各自 key 的唯一写入者；五个 Windows 测试 shard
-恢复 Windows checks shard 的 key，且从不保存。恢复的归档只能复用兼容的依赖、构建脚本、proc-macro 与原生
-输出，因此测试 shard 仍可能编译大部分依赖树，而 harness API shard 的编译器标志可能使恢复的依赖无法复用。Intel
-macOS 没有 core shard，因此其 smoke lane 是该架构的唯一写入者。所有写入都仅限推送到
-`main`；其它 shard 和全部 pull-request lane 只恢复缓存。Release 构建既不恢复也不保存
-Rust 缓存。这样既限制条目，也避免同一次工作流内出现重复写入者；相互重叠的 `main`
-run 仍可能竞争保存同一个不可变 key。
+`workflow-syntax` 使用固定版本 actionlint 检查 CI 与 perf 工作流，包括 GitHub 表达式上下文
+可用性及语法。tooling job 安装摘要固定的 Linux 二进制；本地主机在 PATH 中安装相同版本。
+供应链脚本在工具可用时也运行它；缺失工具不能绕过独立的必需语法 gate。
+
+Windows cfg-on 测试在进程树监管下直接运行 Cargo 报告的精确 libtest 文件。启动器把 Cargo
+构建脚本的原生目录及 profile/deps 路径恢复到 PATH；`setup-windows-cairo.ps1` 将所选 triplet
+的 bin 目录写入 `SONICTERM_CAIRO_BIN_DIR` 和 PATH。Cairo 默认仍为静态链接，动态 triplet
+也保留 DLL 查找路径。
+
+`windows-glyph-oracle` 只运行一次原有的 ignored 工作集 gate。只有全部完整性、精确漂移和
+起始尺寸检查通过后，才发布 S9/S12 在 72/144 DPI 下的四组 helper tile。清单绑定全部受跟踪
+源码字节（含打包字体）、系统及用户字体字节和 GDI 注册表映射、runner 镜像、Rust/Cargo 版本、检出 SHA、run ID
+与生产者 attempt。消费者在测试前验证输出摘要及全部绑定。失败 job 重跑使用成功生产者的
+attempt，而非自己的 attempt；缺失或过期 artifact 会失败。本地未指定 artifact 时仍直接测量 helper。
+Workspace、普通/计数器、frame-texture/echo 和 API-cfg 套件各自绘制真实 renderer，保留全部
+完整性及代表字形检查，并将每个驻留身份与实际尺寸同 helper 比较。字体内容摘要替代机器路径；
+内置字体身份由源码摘要绑定，GDI 内存字体名称由完整字体清单绑定。
+
+Windows 缓存分为 `check-windows-latest`（`windows-checks` 写入）、`test-windows-latest`
+（`windows-tests-workspace` 写入，oracle 与全部测试 shard 恢复）及 `release-windows-latest`
+（`windows-smoke` 写入）。macOS coverage job 使用独立的 `instrumented-macos-14`。coverage 脚本在测量前仍丢弃插桩输出，
+因此该缓存不保证插桩构建已预热。
+不缓存 workspace artifact；写入仅发生于成功的 `main` push，PR 从不写入。其它 macOS 与 Linux
+缓存策略不变。编译器及环境哈希仍启用；静态检查归档不能再占据测试 codegen key。
+重叠的 main run 仍可能竞争保存同一不可变 key。
+
+四个 macOS perf shard 保留 artifact 名称，每个场景恰好运行一次：`S7-S4` 保留 S7、S4、
+atlas-retry 及 S12/status-line；`S9-S10sync` 增加 S6/rest 和 S1/status-line；`S10-S11release` 增加 S12/default
+及 S6/flood；`S2-S3-S8-S12` 移除这两项。PR 的 35 分钟预算包含
+排队时间。不增加与 perf 竞争 runner 的 macOS job；余量由 exact-head CI 计时验证，而不是
+本地估算。运行次数、计数器、S9 laps 与发布测量长度均不变。
 
 兼容且成功的 `main` job 必须先填充 key，后续 run 才可能命中；编译器或依赖变化仍可能
 导致 miss。缓存复用可减少依赖编译，不能缩短托管 runner 的排队时间。冷缓存构建以及
@@ -221,7 +248,7 @@ job 中的每个 action——包括那些只做编译和打包的 job。在 rele
 运行拉取的 `actions/download-artifact` 步骤同样会失败；同一次运行中先前构建的 artifact 允许
 下载。文本无法证明 shell 实际会执行什么，因此该规则不尝试判断内联安装步骤。该规则是防止常见
 失误的护栏，而不是安全边界：执意为之的工作流作者仍能以其他方式获取文件，真正的控制手段是审阅
-工作流改动。预编译工具（`cargo-deny`、`cargo-llvm-cov`）只能通过
+工作流改动。预编译工具（`cargo-deny`、`cargo-llvm-cov`、`actionlint`）只能通过
 `bash scripts/install-pinned-tool.sh <tool>` 安装。它唯一的输入是工具名：从
 `scripts/pinned-tools.json` 读取版本、release URL 与 SHA-256，下载到新建目录，校验该文件的
 SHA-256，之后才解包并安装。安装脚本信任 runner `PATH` 上的工具（`curl`、`sha256sum` 或

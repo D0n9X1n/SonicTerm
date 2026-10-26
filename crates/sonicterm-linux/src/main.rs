@@ -188,9 +188,9 @@ fn runtime_smoke_spec(
 }
 
 #[cfg(target_os = "linux")]
-fn load_config(mode: StartupMode, warnings: &mut Vec<String>) -> Config {
+fn load_config(mode: StartupMode, warnings: &mut Vec<String>) -> (Config, Option<anyhow::Error>) {
     let config = if mode == StartupMode::RuntimeSmoke {
-        linux_default_config()
+        (linux_default_config(), None)
     } else {
         match Config::default_path() {
             Some(path) => {
@@ -200,22 +200,22 @@ fn load_config(mode: StartupMode, warnings: &mut Vec<String>) -> Config {
                         path.display()
                     ));
                 }
-                Config::load_or_default_collecting(&path, warnings)
+                Config::load_or_default_reporting(&path, warnings)
             }
-            None => linux_default_config(),
+            None => (linux_default_config(), None),
         }
     };
     config
 }
 
 #[cfg(target_os = "linux")]
-fn load_theme(name: &str) -> Theme {
-    Theme::load_name_or_default(name, &asset_dir())
+fn load_theme(name: &str) -> (Theme, Option<anyhow::Error>) {
+    Theme::load_name_reporting(name, &asset_dir())
 }
 
 #[cfg(target_os = "linux")]
-fn load_keymap(name: &str) -> Keymap {
-    Keymap::load_name_or_default(name, &asset_dir())
+fn load_keymap(name: &str) -> (Keymap, Option<anyhow::Error>) {
+    Keymap::load_name_reporting(name, &asset_dir())
 }
 
 #[cfg(target_os = "linux")]
@@ -282,7 +282,7 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
     }
 
     let mut config_warnings = Vec::new();
-    let config = load_config(mode, &mut config_warnings);
+    let (config, config_error) = load_config(mode, &mut config_warnings);
     let log_config = config.logging.clone();
     sonicterm_logging::cleanup_log_files(&log_dir, &log_config);
     let _log_guard = sonicterm_logging::init_in(&log_config, &log_dir).ok();
@@ -308,16 +308,24 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
     tracing::info!(
         "Linux native menu, desktop notifications, and cross-process tab drag are unavailable; using in-app fallbacks"
     );
-    let (theme, keymap) = if mode == StartupMode::RuntimeSmoke {
+    let (theme, keymap, startup_loads) = if mode == StartupMode::RuntimeSmoke {
         let assets = asset_dir();
         (
             Theme::load_or_default(&assets.join("themes").join(format!("{}.toml", config.theme))),
             Keymap::load_or_default(
                 &assets.join("keymaps").join(format!("{}.toml", config.keymap)),
             ),
+            None,
         )
     } else {
-        (load_theme(&config.theme), load_keymap(&config.keymap))
+        let (theme, theme_error) = load_theme(&config.theme);
+        let (keymap, keymap_error) = load_keymap(&config.keymap);
+        let loads = sonicterm_app::StartupLoads {
+            config: config_error,
+            theme: theme_error,
+            keymap: keymap_error,
+        };
+        (theme, keymap, Some(loads))
     };
     let machine = sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
     let process_privilege = detect_process_privilege();
@@ -325,6 +333,10 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
     let mut shell = sonicterm_app::shell::LinuxShell::new(machine, theme, config, keymap)
         .with_process_privilege(process_privilege)
         .with_config_normalizer(Box::new(normalize_linux_config));
+    if let Some(loads) = startup_loads {
+        // When: an interactive start loaded the files, the strip shows their fallbacks.
+        shell = shell.with_startup_loads(loads);
+    }
     if mode == StartupMode::Interactive {
         let theme_loader: sonicterm_app::ThemeLoader =
             Box::new(|name| Theme::load_name_or_path(name, &asset_dir()));

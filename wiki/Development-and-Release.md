@@ -34,34 +34,36 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
-| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
-| `perf-scenarios-harness-api-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-harness-api-clippy` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-harness-api-echo-trace-clippy` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
-| `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
-| `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
-| `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
-| `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
-| `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
-| `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
+| `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
+| `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
+| `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-checks`, `linux-core` |
+| `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
+| `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-checks`, `linux-core` |
+| `macos-gate-custody` | `python3 scripts/local-gate_tests.py RunnerTests.test_a_zombie_only_group_kill_is_refused_on_macos_and_the_step_is_still_reaped` | macOS | `local` | `bash` | `macos-core` |
+| `workflow-syntax` | `actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml` | macOS, Windows, Linux | `local` | `actionlint` | `tooling` |
 | `cargo-deny` | `cargo deny --locked check` | macOS, Windows, Linux | `local` | `rust`, `cargo-deny` | `linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests-workspace`, `linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-workspace`, `linux-core` |
 | `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness`, `linux-core` |
 | `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness`, `linux-core` |
-| `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS, Windows | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features` |
+| `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS, Windows | `local` | `rust`, `native` | `macos-core`, `windows-glyph-oracle` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features`, `linux-core` |
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features`, `linux-core` |
-| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
-| `perf-scenarios-harness-api-echo-trace-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --check-cfg cfg(perf_taskbar_progress_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api --cfg perf_taskbar_progress_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
+| `perf-scenarios-harness-api-tests` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
+| `perf-scenarios-harness-api-echo-trace-tests` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests-workspace` |
-| `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests-workspace` |
-| `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests-workspace` |
-| `soak-harness` | `bash scripts/test-soak-harness.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests-workspace` |
+| `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace` |
+| `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace` |
+| `soak-harness` | `bash scripts/test-soak-harness.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace` |
 | `linux-packages-tests` | `bash scripts/test-linux-packages.sh` | macOS, Windows, Linux | `local` | `bash` | `linux-core` |
 | `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `linux-core` |
-| `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests-workspace`, `linux-core` |
-| `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests-workspace`, `linux-core` |
+| `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
+| `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests-runtime` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
@@ -83,6 +85,7 @@ Local hosts are the hosts where the runner selects a step. CI jobs are where CI 
 
 Needs:
 
+- `actionlint`: `actionlint` at the version `scripts/pinned-tools.json` pins.
 - `rust`: the Rust toolchain from `rust-toolchain.toml`, with rustfmt and clippy.
 - `native`: the platform's native build libraries: Cairo and pkg-config on macOS (`brew install cairo pkg-config`), Cairo from `scripts/setup-windows-cairo.ps1` on Windows, and the packages the `linux-core` job installs on Linux.
 - `bash`: `bash` on `PATH`; on Windows, run the gate from Git Bash so Git's `bash` is found first.
@@ -232,11 +235,15 @@ harness's recorder buffers are allocated only for an armed sample and reused. Th
 entry on at once, in two steps built from the table, `perf-scenarios-harness-api-clippy`
 and `perf-scenarios-harness-api-tests`; `perf-scenarios-harness-api-echo-trace-clippy` and
 `perf-scenarios-harness-api-echo-trace-tests` do the same with `perf-echo-trace` as well,
-the only steps that compile the S2 echo timeline's adapter ([Local gate](Local-Gate)). The test step passes the cfgs through
-`RUSTFLAGS`, and a changed `RUSTFLAGS` invalidates every dependency's build, so
-one combined test step costs one dependency rebuild for all entries instead of
-one per entry. The lint step passes them after `--`, which reaches only the
-linted crates; combining it saves repeated linting, not dependency rebuilds.
+the only steps that compile the S2 echo timeline's adapter ([Local gate](Local-Gate)). `scripts/harness-target.py` passes the API cfgs only to the selected example via
+`cargo rustc`; tests use `--profile test` and run the exact libtest executable named by
+Cargo JSON. Compilation and execution retain separate process-tree supervision under one
+step deadline. Linting retains the all-targets pass and adds cfg-on normal and test
+passes for `perf_scenarios`, plus the normal `perf_scenarios_alloc` target (its manifest
+sets `test=false`). Both roots consume the seven API cfgs; a target/cfg inventory test
+holds coverage equal to the original all-targets lint, with and without echo tracing.
+Windows direct test execution restores the native runtime PATH, including the selected
+vcpkg Cairo bin directory and Cargo's native/deps directories. Dependency `RUSTFLAGS` do not change, so cfg-on/off reuse codegen artifacts.
 CI runs only the all-off and all-on combinations; a comparison against a base
 that defines only some entries builds that subset itself. A test fails if an entry is missing from those steps or from `Cargo.toml`'s
 `check-cfg` list. Before building, perf-compare looks for
@@ -248,11 +255,10 @@ proof that the method's signature or the build's target compiles it; the build
 that follows still fails closed. An entry is on for both sides only when both
 trees define all its methods, and off for both otherwise, so a base never
 inherits the head's API. None is a Cargo feature, and the feature
-selection does not change. The gate composes each comparison build's compiler
-flags at launch from what the build inherits: `CARGO_ENCODED_RUSTFLAGS` when
-set, otherwise `RUSTFLAGS` split on spaces (never both), followed by
-`--check-cfg cfg(<name>)` for every entry and `--cfg <name>` for each entry that
-is on. An inherited flag that sets an entry the decision leaves off, or sets it
+selection does not change. The gate validates inherited compiler flags at launch: `CARGO_ENCODED_RUSTFLAGS` when
+set, otherwise `RUSTFLAGS` split on spaces (never both). Unrelated inherited flags stay unchanged; agreeing inherited API cfgs move to the final target;
+`--check-cfg cfg(<name>)` for every entry and `--cfg <name>` for each enabled entry
+are additional final-target arguments, including comparison and previous-release builds. An inherited flag that sets an entry the decision leaves off, or sets it
 to a value, refuses the build; the cfg spec is read as rustc reads it, so
 `--cfg X` and `--cfg=X`, whitespace around the spec, a raw identifier and a
 `X="v"` form are all recognized, in either source. The decision and the composed flags are in the
@@ -773,7 +779,28 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   `first_present_ms`, `last_present_ms`, `first_present_seq` and
   `last_present_seq` (ms from the phase's start, and the presented count) when it
   presented a frame, else `present_missing: "no-presentation"`, plus
-  `nonpresenting_redraws`. Deferred redraws come only from the counters runs'
+  `nonpresenting_redraws`. `first_present_ms` is the first frame presented
+  after GO. The phase that releases the roles to print (a transition that ends
+  on sentinels) also records two optional diagnostics:
+  `go_to_first_output_ms`, from GO to the first dispatch at which a role's
+  cursor has moved from where it was when GO was written, and
+  `first_output_to_present_ms`, from that output to the first frame presented
+  after it. Either is absent when the phase did not see it, which is never a
+  schema problem; the table shows how many runs recorded each, and no flag
+  reads them. GO
+  releases each role without a poll: a POSIX role blocks reading its
+  `go/<role>` FIFO, and a Windows program role blocks accepting on a loopback
+  port it publishes in `go/<role>.port`. Every phase also records
+  `dispatch_presenting_ms` and `dispatch_nonpresenting_ms`, its redraw
+  dispatches split by whether they presented, held to the same duration rule;
+  the table adds `presenting dispatch` and `non-presenting dispatch` rows beside
+  the pooled `dispatch` rows, so a shift in the presenting share moves neither
+  (a harness without them shows n/a). The counters runs' App section adds
+  `status_line_full_passes` (0 while the strip is hidden and no assistive
+  technology listens) and the main window's startup step times from the wgpu
+  adapter to its first pane: `startup_window_ns`, `startup_adapter_install_ns`,
+  `startup_renderer_ns`, `startup_load_checks_ns` and `startup_pane_spawn_ns`.
+  Deferred redraws come only from the counters runs'
   admission counters. Every duration (`dispatch_ms`, `present_interval_ms`,
   `cpu_user_s`, `cpu_system_s`) must be finite and at least zero, and no phase
   may end before it starts. The comparison refuses a list whose capabilities
@@ -1126,13 +1153,12 @@ its `comparison.md` opens with `**Incomplete comparison:**`. Two gaps are
 allowed: a counters set on a base that does not declare `perf-counters`, which
 still reads `n/a`, and a diagnostic declared unavailable on both sides because
 its harness API cfg is off, which runs nothing. Any other blocked side still
-fails, and a selection with nothing runnable never passes. The four macOS shards run S7, S4, S1/atlas-retry, S6/rest,
-S1/status-line and S12/status-line;
-S10/sync, S9, S11, S6, S1 and S5; S10, S11/release and S2/flood; and S2, S12, S3,
-S8, S6/selection-drag and S6/flood. The five Windows shards run S7; S9, S10, S6/flood,
+fails, and a selection with nothing runnable never passes. The four macOS shards run S7, S4, S1/atlas-retry and S12/status-line;
+S10/sync, S9, S11, S6, S1, S5, S6/rest and S1/status-line;
+S10, S11/release, S2/flood, S12 and S6/flood; and S2, S3, S8 and S6/selection-drag.
+The five Windows shards run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2, S10/sync and S6/rest; S4, S5, S11, S11/release,
-S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, which balances each
-platform's measured shard times; Windows S7 also runs S1/status-line and S12/status-line. On each platform the shard holding S9 (macOS
+S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, with the macOS partition rebalanced from measured phase costs; exact-head timing still verifies the 35-minute margin; Windows S7 also runs S1/status-line and S12/status-line. On each platform the shard holding S9 (macOS
 S9-S10sync, Windows S9-S10) also runs S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
 `laps` field; the other entries pass no laps flags), and each platform's table
 gives its own `fallback_receive` verdict. A bare scenario ID selects only its default

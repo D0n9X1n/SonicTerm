@@ -7582,6 +7582,8 @@ impl GpuRenderer {
                 self.status_line_font_stack.as_ref(),
                 strip_rasterizer.as_mut(),
                 &mut self.glyph_atlas,
+                &mut self.chrome_caches.runs,
+                self.chrome_reuse,
                 &mut *quads,
                 &mut *glyph_instances,
             );

@@ -57,7 +57,12 @@ fn a_presentation_trace_keeps_the_first_and_last_presenting_redraw_and_counts_th
     trace.observe_redraw(7.5, Some(9));
     assert_eq!(
         trace,
-        PresentTrace { first: Some((2.0, 5)), last: Some((7.5, 9)), nonpresenting: 2 }
+        PresentTrace {
+            first: Some((2.0, 5)),
+            last: Some((7.5, 9)),
+            nonpresenting: 2,
+            ..Default::default()
+        }
     );
     assert_eq!(trace.missing(), None);
 }
@@ -70,4 +75,36 @@ fn a_trace_without_a_presenting_redraw_is_missing_as_no_presentation() {
     trace.observe_redraw(1.0, None);
     assert_eq!((trace.first, trace.last, trace.nonpresenting), (None, None, 1));
     assert_eq!(trace.missing(), Some("no-presentation"));
+}
+
+#[test]
+fn a_frame_before_the_first_output_is_the_first_present_but_not_the_output_diagnostic() {
+    // The first present is the first frame after GO, whatever it shows. The output diagnostics time GO to
+    // the roles' first output, and that output to the first frame presented after it.
+    let mut trace = PresentTrace::default();
+    trace.await_output(1.5);
+    trace.observe_redraw(2.0, Some(5));
+    assert_eq!(
+        trace.first,
+        Some((2.0, 5)),
+        "a frame before the first output is still the first present"
+    );
+    assert_eq!(trace.output_diagnostics(), (None, None), "no output noted yet");
+    trace.note_output(55.0);
+    trace.observe_redraw(60.0, Some(6));
+    assert_eq!(trace.first, Some((2.0, 5)));
+    assert_eq!(trace.last, Some((60.0, 6)));
+    assert_eq!(
+        trace.output_diagnostics(),
+        (Some(56.5), Some(5.0)),
+        "GO to output, output to frame"
+    );
+    let mut plain = PresentTrace::default();
+    plain.observe_redraw(2.0, Some(5));
+    assert_eq!(plain.first, Some((2.0, 5)));
+    assert_eq!(
+        plain.output_diagnostics(),
+        (None, None),
+        "a phase that releases nothing records none"
+    );
 }

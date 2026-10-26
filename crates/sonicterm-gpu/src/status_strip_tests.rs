@@ -131,6 +131,8 @@ fn strip_ink_never_leaves_its_band() {
         Some(&stack),
         Some(&mut raster),
         &mut atlas,
+        &mut crate::chrome_cache::ChromeRunCache::default(),
+        true,
         &mut quads,
         &mut glyphs,
     );
@@ -144,6 +146,82 @@ fn strip_ink_never_leaves_its_band() {
             top + height
         );
     }
+}
+
+/// Run `work` inside a frame-stats counting scope and return its output with the counters it moved.
+fn counted<Output>(work: impl FnOnce() -> Output) -> (Output, crate::frame_stats::FrameStats) {
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let output = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        work()
+    };
+    (output, sink.snapshot())
+}
+
+/// A strip of one value part, one chip part and one separator at 12 px text.
+fn two_part_strip(
+) -> (Vec<PlacedSegment>, Vec<sonicterm_render_model::boundary::ui::status_line::PlacedPart>) {
+    use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
+    let part = |text: &str, tone, left| PlacedPart { text: text.into(), tone, left, width: 80.0 };
+    let placed = vec![PlacedSegment {
+        index: 0,
+        left: 10.0,
+        width: 200.0,
+        parts: vec![
+            part("Mem: 41 MB", StatusTone::Value, 10.0),
+            part("COPY", StatusTone::Chip, 100.0),
+        ],
+    }];
+    (placed, vec![part(" · ", StatusTone::Value, 190.0)])
+}
+
+#[test]
+fn an_unchanged_strip_draws_again_without_shaping() {
+    // The strip's parts are kept as prepared runs keyed by text, bold, stack, size and DPI, so a
+    // second present of an unchanged view shapes nothing and draws the same glyphs.
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = chrome_stack();
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let geometry = StripGeometry {
+        top: 100.0,
+        height: 20.0,
+        position: StatusPosition::Bottom,
+        screen: (400.0, 200.0),
+        scale_factor: 1.0,
+        font_raster_px: 20.0,
+        font_scale: 0.6,
+        cap_height: 8.0,
+    };
+    let (placed, separators) = two_part_strip();
+    let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
+    let palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(&theme);
+    let colors = StatusColors::resolve(&theme, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
+    let mut runs = crate::chrome_cache::ChromeRunCache::default();
+    let mut draw = || {
+        let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
+        emit_strip(
+            &placed,
+            &separators,
+            &geometry,
+            &colors,
+            Some(&stack),
+            Some(&mut raster),
+            &mut atlas,
+            &mut runs,
+            true,
+            &mut quads,
+            &mut glyphs,
+        );
+        glyphs.iter().map(|glyph| glyph.rect).collect::<Vec<_>>()
+    };
+    let (cold, cold_stats) = counted(&mut draw);
+    assert!(cold_stats.shape_requests >= 1, "the first present shapes the parts");
+    let (warm, warm_stats) = counted(&mut draw);
+    assert_eq!(warm_stats.shape_requests, 0, "an unchanged view is drawn from kept runs");
+    assert_eq!(cold, warm, "and draws the same glyphs");
 }
 
 /// A light fixture theme (every bundled theme is dark) whose yellow fails 3:1 on the strip.
@@ -344,6 +422,8 @@ fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) -> f32 {
         Some(stack),
         Some(&mut raster),
         &mut atlas,
+        &mut crate::chrome_cache::ChromeRunCache::default(),
+        true,
         &mut quads,
         &mut glyphs,
     );
@@ -619,6 +699,8 @@ fn emit_one_part(
         Some(&stack),
         Some(&mut raster),
         &mut atlas,
+        &mut crate::chrome_cache::ChromeRunCache::default(),
+        true,
         &mut quads,
         &mut glyphs,
     );
@@ -687,6 +769,8 @@ fn capital_centering_error(position: StatusPosition, scale: f32) -> f32 {
         Some(&stack),
         Some(&mut raster),
         &mut atlas,
+        &mut crate::chrome_cache::ChromeRunCache::default(),
+        true,
         &mut quads,
         &mut glyphs,
     );
@@ -847,6 +931,8 @@ fn the_strip_draws_a_separator_between_adjacent_segments() {
         Some(&stack),
         Some(&mut raster),
         &mut atlas,
+        &mut crate::chrome_cache::ChromeRunCache::default(),
+        true,
         &mut quads,
         &mut glyphs,
     );

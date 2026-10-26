@@ -134,6 +134,12 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "program_toast_redraws",
             "taskbar_progress_deliveries",
             "status_line_tree_builds",
+            "status_line_full_passes",
+            "startup_window_ns",
+            "startup_adapter_install_ns",
+            "startup_renderer_ns",
+            "startup_load_checks_ns",
+            "startup_pane_spawn_ns",
             "about_to_wait_ms",
             "user_event_ms",
             "new_events_ms",
@@ -787,6 +793,12 @@ const NEWER_SOURCES: &[&str] = &[
     "program_toast_redraws",
     "taskbar_progress_deliveries",
     "status_line_tree_builds",
+    "status_line_full_passes",
+    "startup_window_ns",
+    "startup_adapter_install_ns",
+    "startup_renderer_ns",
+    "startup_load_checks_ns",
+    "startup_pane_spawn_ns",
 ];
 
 #[test]
