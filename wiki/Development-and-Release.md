@@ -1423,21 +1423,29 @@ commit, and its tree.
 
 The baseline's `macos` section holds per-file floors for the macOS-only logic in the
 80% subset, measured on `aarch64-apple-darwin` by `scripts/macos-logic-coverage.sh`
-in `macos-core`. That job uploads its report as
-`macos-logic-coverage-report-<run id>-<attempt>` after success and after failure.
-To change the section, download that report from a run on the exact reviewed head
-and rewrite the section alone; every crate floor stays verbatim:
+in `macos-core`. The script pins the checkout before measuring and writes a provenance
+record beside its report: the run, host, image, toolchain, `cargo-llvm-cov`, commit,
+tree and the report's SHA-256. The job uploads both as
+`macos-logic-coverage-evidence-<run id>-<attempt>` after success and after failure.
+
+The section changes only from that verified record, as a crate floor does. Retrieve
+the artifact and check its run and job through the GitHub API as above, with this
+artifact name and the `macOS core gates` job, then rewrite the section alone; every
+crate floor stays verbatim:
 
 ```bash
 python3 scripts/coverage-floor.py macos-floor --update \
-  --report "$dir/coverage-summary.json" --baseline scripts/coverage-baseline.json \
-  --target aarch64-apple-darwin --source-root "$PWD" --runner macos14/ARM64 \
-  --reason "CAUSE. Measured by run <run id> attempt <attempt>."
+  --report "$dir/coverage-summary.json" --provenance "$dir/coverage-provenance.json" \
+  --baseline scripts/coverage-baseline.json --target aarch64-apple-darwin \
+  --source-root "$PWD" --reason "CAUSE"
 ```
 
-`--file PATH` adds a file to the section. The update records the report's numbers,
-the stated host, and the reason. It has no provenance record, so the reason must name
-the run it came from, and the reviewer checks that run's report.
+`--file PATH` adds a file to the section. The update refuses a missing, local,
+incomplete or drifted record, a record from another job or artifact, a report whose
+SHA-256 differs from the record's, a `cargo-llvm-cov` other than the release
+`scripts/pinned-tools.json` pins, and a measured tree whose coverage-relevant content
+differs from the checkout. It takes the host from the record and appends the run,
+job, artifact, host, image, toolchain and commit to the stated reason.
 
 ### Refusals
 
@@ -1446,6 +1454,8 @@ differs. `--update-baseline` refuses:
 
 - a change to a baseline that names a CI host without `--provenance`; only a
   `--runner local` baseline, which CI never enforces, is written without one;
+- a record whose `cargo-llvm-cov` is not the release `scripts/pinned-tools.json`
+  pins;
 - an incomplete record, naming the failed phase, or a record with a missing
   field;
 - a record that names checkout drift;

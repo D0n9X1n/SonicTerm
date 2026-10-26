@@ -119,7 +119,8 @@ the 80% subset, the AppKit word boundary in `sonicterm-ui`'s `text_edit.rs` and 
 macOS arms of `command_label.rs`, keeps its own floor: `macos-core` installs the macOS
 pin of the same tool, runs `scripts/macos-logic-coverage.sh`, which instruments
 `sonicterm-ui` alone, holds each file to the baseline's `macos` section with the same
-1 pp tolerance, and uploads its report after success and after failure. A file floor
+1 pp tolerance, and uploads its report and a provenance record after success and after
+failure; only that record, verified, can change the section. A file floor
 catches a loss larger than the tolerance: losing the AppKit boundary's coverage, 7 of
 `text_edit.rs`'s 160 lines, moves it by about 4 pp, while one macOS arm of `command_label.rs` is below 1 pp
 of that file and is not caught.

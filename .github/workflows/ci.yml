@@ -320,19 +320,23 @@ jobs:
       - name: Install cargo-llvm-cov for macOS-only coverage
         run: bash scripts/install-pinned-tool.sh cargo-llvm-cov
 
+      # The pull-request head reaches the provenance record through env; the runner supplies other run metadata.
       - name: Run macOS-only logic coverage
         id: macos_coverage
+        env:
+          COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
         run: scripts/macos-logic-coverage.sh
 
-      # The report a reviewer re-records the macos section from, after success and after failure.
-      - name: Upload macOS-only coverage report
+      # The report and its provenance record, after success and after failure: the only evidence that can
+      # change the macos section. A run that stopped before measuring leaves nothing to upload.
+      - name: Upload macOS-only coverage evidence
         if: ${{ !cancelled() && steps.macos_coverage.conclusion != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: macos-logic-coverage-report-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/macos-logic-coverage/coverage-summary.json
+          name: macos-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/macos-logic-coverage-evidence
           retention-days: 90
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   macos-smoke:
     name: macOS native runtime smoke (${{ matrix.arch }})

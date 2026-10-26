@@ -57,12 +57,12 @@ FILES = {
 FLOORS = {"sonicterm-grid": (400, 360), "sonicterm-vt": (200, 174)}
 
 
-def export(files, root=ROOT):
-    """Build an llvm-cov JSON summary export from {path: (lines, covered)}."""
+def export(files, root=ROOT, version="0.9.0"):
+    """Build an llvm-cov JSON summary export from {path: (lines, covered)}, written by cargo-llvm-cov `version`."""
     return {
         "type": floor.LLVM_EXPORT_TYPE,
         "version": "3.1.0",
-        "cargo_llvm_cov": {"version": "0.9.0", "manifest_path": f"{root}/Cargo.toml"},
+        "cargo_llvm_cov": {"version": version, "manifest_path": f"{root}/Cargo.toml"},
         "data": [{
             "files": [
                 {
@@ -187,6 +187,9 @@ CHECKOUT = {
     "crates/sonicterm-grid/src/grid.rs": "pub fn grid() {}\n",
     "crates/sonicterm-vt/src/vt.rs": "pub fn vt() {}\n",
     "scripts/coverage-floor.py": "# policy\n",
+    # The release every fixture record's cargo-llvm-cov must match.
+    "scripts/pinned-tools.json": json.dumps({"cargo-llvm-cov": {"version": "0.9.0",
+                                                               "version_output": "cargo-llvm-cov {version}"}}) + "\n",
     "README.md": "# SonicTerm\n",
     "wiki/Home.md": "# Home\n",
     ".gitignore": "/target\n__pycache__/\n",
@@ -241,7 +244,8 @@ def record(root, output, phase, state, env, exit_status=0, report=None, meta=Non
 
 
 @contextmanager
-def retained_run(files=FILES, members=MEMBERS, base=None, env=RUN_ENV, phase="floor", state="failed", exit_status=1):
+def retained_run(files=FILES, members=MEMBERS, base=None, env=RUN_ENV, phase="floor", state="failed", exit_status=1,
+                 version="0.9.0"):
     """Yield a checkout holding the baseline, plus a retained run's report, inventory, and record.
 
     The default run completed its measurement and then failed the floor, as a run that reports a
@@ -257,7 +261,7 @@ def retained_run(files=FILES, members=MEMBERS, base=None, env=RUN_ENV, phase="fl
         paths = {"root": checkout, "baseline": checkout / "scripts" / "coverage-baseline.json",
                  "report": evidence / floor.REPORT_FILE, "metadata": evidence / floor.INVENTORY_FILE,
                  "provenance": evidence / floor.PROVENANCE_FILE}
-        paths["report"].write_text(json.dumps(export(files), indent=2) + "\n", encoding="utf-8")
+        paths["report"].write_text(json.dumps(export(files, version=version), indent=2) + "\n", encoding="utf-8")
         paths["metadata"].write_text(json.dumps(metadata(members), indent=2) + "\n", encoding="utf-8")
         record(checkout, paths["provenance"], phase, state, env, exit_status, paths["report"], paths["metadata"])
         yield paths
@@ -1324,18 +1328,23 @@ class CoverageWorkflowTests(unittest.TestCase):
 
         self.assertNotRegex(job, r"(?m)^\s*(?:-\s*)?timeout-minutes\s*:")
 
-    def test_macos_core_holds_macos_only_logic_to_its_floor_and_keeps_the_report(self):
-        # The macOS-only floor runs in macOS core gates, and its report is uploaded after success and failure.
+    def test_macos_core_holds_macos_only_logic_to_its_floor_and_keeps_the_evidence(self):
+        # The macOS-only floor runs in macOS core gates, records its report's provenance, and uploads both after
+        # success and failure under the artifact name the verifier expects.
         job = ci_job("macos-core")
         gate = ci_step(job, "Run macOS-only logic coverage")
-        upload = ci_step(job, "Upload macOS-only coverage report")
+        upload = ci_step(job, "Upload macOS-only coverage evidence")
         self.assertIn("id: macos_coverage", gate)
         self.assertIn("run: scripts/macos-logic-coverage.sh", gate)
+        self.assertIn("COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}", gate)
         self.assertIn("if: ${{ !cancelled() && steps.macos_coverage.conclusion != 'skipped' }}", upload)
-        self.assertIn("path: target/macos-logic-coverage/coverage-summary.json", upload)
+        self.assertIn(f"name: {floor.MACOS_ARTIFACT_PREFIX}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}",
+                      upload)
+        self.assertIn("path: target/macos-logic-coverage-evidence\n", upload)
         self.assertNotRegex(job, r"(?m)^\s*(?:-\s*)?timeout-minutes\s*:")
         script = (_HERE / "macos-logic-coverage.sh").read_text(encoding="utf-8")
-        self.assertIn("coverage-floor.py\" macos-floor", script)
+        for command in ("pin-checkout", "record-macos-provenance", "macos-floor"):
+            self.assertIn(command, script)
 
     def test_gate_script_writes_the_evidence_the_workflow_uploads(self):
         # The script's evidence directory and file names are the ones the upload and the floor expect.
@@ -1652,32 +1661,20 @@ class MacosFloorTests(unittest.TestCase):
         self.assertEqual(local.status, 0)
         self.assertIn("informational only", local.stdout)
 
-    def test_update_rewrites_only_the_macos_section(self):
-        # The update records the named file from this report and its host, and leaves every crate floor as it was.
-        base = baseline(FLOORS)
-        run, written = macos_floor({**FILES, MACOS_FILE: (160, 159)}, base, LOCAL_ENV, "--update",
-                                   "--reason", "seed", "--runner", RUNNER, "--file", MACOS_FILE)
-        self.assertEqual(run.status, 0, run.stderr)
-        self.assertEqual(written["crates"], base["crates"])
-        self.assertEqual(written["macos"], {"host": {"target": TARGET, "runner": RUNNER}, "reason": "seed",
-                                            "files": {MACOS_FILE: {"lines": 160, "covered": 159, "percent": 99.38}}})
-
     def test_update_and_check_refuse_misplaced_or_missing_arguments(self):
-        # An update states why and on which runner; check mode takes no update flags; a new section names files.
+        # An update states why and names its verified record; check mode takes no update flags.
         base = with_macos(baseline(FLOORS), {MACOS_FILE: (160, 159)})
         report = {**FILES, MACOS_FILE: (160, 159)}
         for extra, message in (
-            (("--update", "--runner", RUNNER), "--reason"),
-            (("--update", "--reason", "why"), "--runner"),
+            (("--update", "--provenance", "record.json"), "--reason"),
+            (("--update", "--reason", "why"), "--provenance FILE"),
             (("--reason", "why"), "only valid with --update"),
+            (("--provenance", "record.json"), "only valid with --update"),
         ):
             with self.subTest(extra=extra):
                 run, _ = macos_floor(report, base, LOCAL_ENV, *extra)
                 self.assertEqual(run.status, 2)
                 self.assertIn(message, run.stderr)
-        run, _ = macos_floor(report, baseline(FLOORS), LOCAL_ENV, "--update", "--reason", "why", "--runner", RUNNER)
-        self.assertEqual(run.status, 2)
-        self.assertIn("--file PATH", run.stderr)
 
     def test_the_section_is_validated_and_kept_by_crate_updates(self):
         # A malformed section fails the whole baseline; crate updates and proposals keep the section verbatim.
@@ -1700,6 +1697,100 @@ class MacosFloorTests(unittest.TestCase):
         updated = floor.partial_update(parsed, {}, None, TARGET, RUNNER, "no crate changes", [])
         self.assertEqual(updated.macos, parsed.macos)
         self.assertEqual(floor.rebaseline_proposal(parsed, {}, TARGET, RUNNER)["macos"], valid["macos"])
+
+
+# A macos-core run's environment: the crate job's fixture runner, under the job that runs the macOS-only floor.
+MACOS_RUN_ENV = {**RUN_ENV, "GITHUB_JOB": "macos-core"}
+MACOS_ARTIFACT = "macos-logic-coverage-evidence-36087392875-1"
+
+
+@contextmanager
+def macos_retained_run(files, env=MACOS_RUN_ENV, base=None, version="0.9.0"):
+    """Yield a checkout holding the baseline, plus a retained macos-core run's report and provenance record."""
+    with tempfile.TemporaryDirectory() as directory:
+        checkout, evidence = Path(directory) / "checkout", Path(directory) / "evidence"
+        checkout.mkdir()
+        evidence.mkdir()
+        git(checkout, "init", "-q")
+        document = baseline(FLOORS) if base is None else base
+        commit_files(checkout, {**CHECKOUT, "scripts/coverage-baseline.json": json.dumps(document, indent=2) + "\n"})
+        paths = {"root": checkout, "baseline": checkout / "scripts" / "coverage-baseline.json",
+                 "report": evidence / floor.REPORT_FILE, "provenance": evidence / floor.PROVENANCE_FILE}
+        paths["report"].write_text(json.dumps(export(files, root=str(checkout), version=version), indent=2) + "\n",
+                                   encoding="utf-8")
+        pin = evidence / "checkout-pin.json"
+        pin_checkout(checkout, pin)
+        stderr = io.StringIO()
+        status = floor.main(["record-macos-provenance", "--output", str(paths["provenance"]), "--root", str(checkout),
+                             "--pin", str(pin), "--target", TARGET, "--rustc-verbose", RUSTC_VERBOSE,
+                             "--report", str(paths["report"])], env=env, stdout=io.StringIO(), stderr=stderr)
+        if status != 0:
+            raise AssertionError(f"record-macos-provenance exited {status}: {stderr.getvalue()}")
+        yield paths
+
+
+def macos_update(paths, *extra):
+    """Run macos-floor --update against a retained macos-core run's report, outside CI."""
+    stdout, stderr = io.StringIO(), io.StringIO()
+    argv = ["macos-floor", "--update", "--report", str(paths["report"]), "--baseline", str(paths["baseline"]),
+            "--target", TARGET, "--source-root", str(paths["root"]), *extra]
+    status = floor.main(argv, env=LOCAL_ENV, stdout=stdout, stderr=stderr)
+    return Run(status, stdout.getvalue(), stderr.getvalue())
+
+
+class MacosProvenanceTests(unittest.TestCase):
+    """The macOS floors change only from a verified macos-core record, as the crate floors do."""
+
+    def test_update_without_a_verified_record_is_refused(self):
+        # The probe that once passed: arbitrary low numbers labelled as the CI host never replace the floors.
+        with macos_retained_run({**FILES, MACOS_FILE: (160, 2)}) as paths:
+            before = paths["baseline"].read_text(encoding="utf-8")
+            run = macos_update(paths, "--reason", "probe", "--runner", RUNNER, "--file", MACOS_FILE)
+            self.assertEqual(run.status, 2, run.stdout)
+            self.assertIn("--provenance FILE", run.stderr)
+            self.assertEqual(paths["baseline"].read_text(encoding="utf-8"), before)
+
+    def test_records_that_do_not_verify_are_refused(self):
+        # A local record, another job's record, a report changed after its record, and a report from a
+        # cargo-llvm-cov other than the pinned one are each refused, and the baseline is left as it was.
+        for case, options, tamper, message in (
+            ("local", {"env": LOCAL_ENV}, False, "measured outside CI"),
+            ("other job", {"env": RUN_ENV}, False, "not macos-core"),
+            ("changed report", {}, True, "SHA-256"),
+            ("unpinned tool", {"version": "0.8.7"}, False, "the version scripts/pinned-tools.json pins"),
+        ):
+            with self.subTest(case=case), macos_retained_run({**FILES, MACOS_FILE: (160, 159)}, **options) as paths:
+                if tamper:
+                    changed = export({**FILES, MACOS_FILE: (160, 2)}, root=str(paths["root"]))
+                    paths["report"].write_text(json.dumps(changed, indent=2) + "\n", encoding="utf-8")
+                before = paths["baseline"].read_text(encoding="utf-8")
+                run = macos_update(paths, "--reason", "probe", "--file", MACOS_FILE,
+                                   "--provenance", str(paths["provenance"]))
+                self.assertEqual(run.status, 2, run.stdout)
+                self.assertIn(message, run.stderr)
+                self.assertEqual(paths["baseline"].read_text(encoding="utf-8"), before)
+
+    def test_a_verified_macos_core_record_rewrites_only_the_section(self):
+        # The verified record supplies the host and appends its run to the reason; every crate floor stays verbatim,
+        # and a section the baseline does not hold yet must name its files.
+        with macos_retained_run({**FILES, MACOS_FILE: (160, 159)}) as paths:
+            unnamed = macos_update(paths, "--reason", "seed", "--provenance", str(paths["provenance"]))
+            self.assertEqual(unnamed.status, 2)
+            self.assertIn("--file PATH", unnamed.stderr)
+            run = macos_update(paths, "--reason", "seed", "--file", MACOS_FILE, "--provenance", str(paths["provenance"]))
+            self.assertEqual(run.status, 0, run.stderr)
+            written = json.loads(paths["baseline"].read_text(encoding="utf-8"))
+            self.assertEqual(written["crates"], baseline(FLOORS)["crates"])
+            self.assertEqual(written["macos"]["host"], {"target": TARGET, "runner": RUNNER})
+            self.assertEqual(written["macos"]["files"], {MACOS_FILE: {"lines": 160, "covered": 159, "percent": 99.38}})
+            self.assertIn(f"job macos-core, evidence artifact {MACOS_ARTIFACT}", written["macos"]["reason"])
+
+    def test_a_crate_record_from_an_unpinned_cargo_llvm_cov_is_refused(self):
+        # The crate floors need the cargo-llvm-cov release the checkout pins, as the macOS floors do.
+        with retained_run(version="0.8.7") as paths:
+            run = update(paths, "--provenance", str(paths["provenance"]), "--reason", "probe")
+            self.assertEqual(run.status, 2, run.stdout)
+            self.assertIn("the version scripts/pinned-tools.json pins", run.stderr)
 
 
 class RepositoryContractTests(unittest.TestCase):

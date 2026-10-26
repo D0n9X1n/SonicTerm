@@ -946,19 +946,23 @@ gh api "repos/D0n9X1n/SonicTerm/git/commits/$commit" \
 ### macOS 专用下限
 
 baseline 的 `macos` 段为 80% 子集中的 macOS 专用逻辑保存逐文件下限，由 `macos-core` 中的
-`scripts/macos-logic-coverage.sh` 在 `aarch64-apple-darwin` 上测量。该 job 在成功和失败后都把报告上传为
-`macos-logic-coverage-report-<run id>-<attempt>`。要修改该段，从精确评审 head 的运行中下载该报告，只重写
-这一段；所有 crate 下限保持不变：
+`scripts/macos-logic-coverage.sh` 在 `aarch64-apple-darwin` 上测量。脚本在测量前固定 checkout，并在报告旁写入
+provenance 记录：运行、host、镜像、工具链、`cargo-llvm-cov`、commit、tree 以及报告的 SHA-256。该 job 在成功和
+失败后都把两者上传为 `macos-logic-coverage-evidence-<run id>-<attempt>`。
+
+与 crate 下限一样，该段只能根据这份经过验证的记录修改。按上文获取 artifact，并通过 GitHub API 核对其运行与
+job（使用此 artifact 名称与 `macOS core gates` job），然后只重写这一段；所有 crate 下限保持不变：
 
 ```bash
 python3 scripts/coverage-floor.py macos-floor --update \
-  --report "$dir/coverage-summary.json" --baseline scripts/coverage-baseline.json \
-  --target aarch64-apple-darwin --source-root "$PWD" --runner macos14/ARM64 \
-  --reason "CAUSE. Measured by run <run id> attempt <attempt>."
+  --report "$dir/coverage-summary.json" --provenance "$dir/coverage-provenance.json" \
+  --baseline scripts/coverage-baseline.json --target aarch64-apple-darwin \
+  --source-root "$PWD" --reason "CAUSE"
 ```
 
-`--file PATH` 向该段添加文件。更新会记录报告中的数字、所述 host 与原因。它没有 provenance 记录，因此
-原因必须写明来源运行，评审者需核对该运行的报告。
+`--file PATH` 向该段添加文件。更新会拒绝缺失、本地、不完整或发生漂移的记录，来自其它 job 或 artifact 的记录，
+SHA-256 与记录不符的报告，不是 `scripts/pinned-tools.json` 固定版本的 `cargo-llvm-cov`，以及 coverage 相关内容
+与 checkout 不同的被测 tree。它从记录中取得 host，并在所述原因后追加运行、job、artifact、host、镜像、工具链与 commit。
 
 ### 拒绝条件
 
@@ -966,6 +970,7 @@ python3 scripts/coverage-floor.py macos-floor --update \
 
 - 不带 `--provenance` 修改指名 CI host 的 baseline；只有 CI 从不强制执行的 `--runner local`
   baseline 可以不带它写入；
+- `cargo-llvm-cov` 不是 `scripts/pinned-tools.json` 所固定版本的记录；
 - 不完整的记录（会指出失败阶段），或缺少字段的记录；
 - 指出 checkout 漂移的记录；
 - 不恰好包含 `subset-gate` 与 `floor` 两项的 `checks`，其中某项的状态不是 gate 脚本写出的状态

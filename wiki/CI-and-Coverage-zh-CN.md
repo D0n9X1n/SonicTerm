@@ -74,7 +74,7 @@ CoreText 字体发现、macOS PTY 与 IO 路径、macOS 日志以及 `sonicterm-
 macOS 专用逻辑（`sonicterm-ui` 的 `text_edit.rs` 中的 AppKit 单词边界，以及 `command_label.rs` 的 macOS 分支）
 保留独立下限：`macos-core` 安装同一工具的 macOS 固定版本，运行只对 `sonicterm-ui` 插桩的
 `scripts/macos-logic-coverage.sh`，按 baseline 的 `macos` 段以同样 1 pp 容差检查每个文件，并在成功和失败后
-上传报告。文件下限能发现超过容差的损失：失去 AppKit 边界的覆盖（`text_edit.rs` 160 行中的 7 行）会使该文件下降约 4 pp，而
+上传报告与 provenance 记录；只有经过验证的该记录才能修改该段。文件下限能发现超过容差的损失：失去 AppKit 边界的覆盖（`text_edit.rs` 160 行中的 7 行）会使该文件下降约 4 pp，而
 `command_label.rs` 的单个 macOS 分支不到该文件的 1 pp，无法被发现。
 原生运行时 smoke 分别在 macOS 14 Apple Silicon（作为 `macos-core` 末尾的步骤）和 macOS 15
 Intel（单分支的 `macos-smoke` 矩阵）上构建 release 二进制，使用不同依赖缓存键。Intel lane
