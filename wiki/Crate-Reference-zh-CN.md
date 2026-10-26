@@ -286,6 +286,9 @@ macOS 文本编辑通过 AppKit attributed-string 纯字符串单词边界 API �
 
 **阅读：** `src/{glyph_atlas,row_glyph_cache,shape,lib}.rs`。
 
+`start_size_inputs.rs` 负责图集尺寸策略和光栅拒绝计数；私有同级文件
+`start_size_inputs_recorded.rs` 保存原样的测量记录及来源校验。
+
 ### `sonicterm-font-config`
 
 **职责：** 字体配置值模型，包括文本样式、属性、字重、宽度、光栅器选择和策略。

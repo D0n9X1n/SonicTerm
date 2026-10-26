@@ -326,6 +326,9 @@ the GPU crate has one declared model boundary.
 
 **Read:** `src/{glyph_atlas,row_glyph_cache,shape,lib}.rs`.
 
+`start_size_inputs.rs` owns atlas sizing policy and raster-refusal accounting; its private
+`start_size_inputs_recorded.rs` sibling holds the unchanged measured rows and provenance checks.
+
 ### `sonicterm-font-config`
 
 **Role:** font configuration value model: text styles, attributes, weights,
