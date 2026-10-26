@@ -111,3 +111,21 @@ fn a_non_default_family_survives_an_unconfigured_report() {
     assert_eq!(app.configured_font_family, "Consolas");
     assert_eq!(app.font_catalog, FontCatalog::Ready(installed));
 }
+
+/// A report that lands after the event loop ended is dropped quietly. The delivery here sends on a
+/// channel whose receiver is gone, as `EventLoopProxy::send_event` does once the loop exits
+/// (`EventLoopClosed` on every winit backend), and the worker still finishes without a panic.
+#[test]
+fn a_report_after_shutdown_is_dropped_quietly() {
+    let (loop_tx, loop_rx) = mpsc::channel::<FontCatalogReport>();
+    drop(loop_rx);
+    let (done_tx, done_rx) = mpsc::channel();
+    spawn(
+        None,
+        || Ok(vec!["Menlo".to_string()]),
+        move |report| {
+            done_tx.send(loop_tx.send(report).is_err()).unwrap();
+        },
+    );
+    assert_eq!(done_rx.recv_timeout(Duration::from_secs(10)), Ok(true));
+}

@@ -86,6 +86,8 @@ impl App {
         self.font_catalog = FontCatalog::Loading;
         let config_path =
             self.runtime_config_path.clone().or_else(sonicterm_cfg::config::Config::default_path);
+        // No handle is kept or joined: once the event loop ends, `send_event` returns
+        // `EventLoopClosed` on every backend, so a late report is dropped as the worker finishes.
         spawn(config_path, sonicterm_gpu::installed_monospace_families, move |report| {
             let _ = proxy.send_event(UserEvent::FontCatalogReady {
                 families: report.families,
