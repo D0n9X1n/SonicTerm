@@ -221,6 +221,8 @@ pub enum UserEvent {
         families: Vec<String>,
         /// Whether the config file names `[font] family`; a fresh install's does not.
         family_configured: bool,
+        /// The font-family generation the worker started at.
+        generation: u64,
     },
     /// A font fallback worker published faces for `notice_id`, the notice of the body stack in
     /// `window_id`'s renderer. The handler acknowledges it and requests a frame only when that
@@ -636,6 +638,9 @@ pub struct App {
     pub(super) font_catalog: font_catalog::FontCatalog,
     /// The live family when the font picker opened, restored when the picker is cancelled.
     pub(super) font_picker_original: Option<String>,
+    /// Moves on every reload, save and picker choice of the font family, so a catalog report the
+    /// worker started before one of them is recognised as stale and adopts nothing.
+    pub(super) font_family_generation: u64,
     pub(super) keymap: Keymap,
     // The main window holds no state of its own here. Its renderer, tabs,
     // tab states, panes, selection, modifiers, copy mode, last render, cursor

@@ -73,7 +73,12 @@ fn an_unconfigured_start_adopts_the_first_installed_default_in_memory() {
     let path = dir.join("sonicterm.toml");
     app.runtime_config_path = Some(path.clone());
     let installed = vec!["Consolas".to_string(), "Fira Code".to_string()];
-    app.adopt_font_catalog_from(&["Cascadia Mono", "Consolas"], installed.clone(), false);
+    app.adopt_font_catalog_from(
+        &["Cascadia Mono", "Consolas"],
+        installed.clone(),
+        false,
+        app.font_family_generation,
+    );
     assert_eq!(app.config.font.family, "Consolas");
     assert_eq!(app.configured_font_family, "Consolas");
     assert_eq!(app.font_catalog, FontCatalog::Ready(installed));
@@ -87,13 +92,23 @@ fn a_configured_or_changed_family_is_kept() {
     let installed = vec!["Consolas".to_string()];
     let candidates = ["Cascadia Mono", "Consolas"];
     let mut configured = app_with_family("Cascadia Mono");
-    configured.adopt_font_catalog_from(&candidates, installed.clone(), true);
+    configured.adopt_font_catalog_from(
+        &candidates,
+        installed.clone(),
+        true,
+        configured.font_family_generation,
+    );
     assert_eq!(configured.config.font.family, "Cascadia Mono");
     assert_eq!(configured.font_catalog, FontCatalog::Ready(installed.clone()));
 
     let mut changed = app_with_family("Cascadia Mono");
     changed.config.font.family = "Monaco".into();
-    changed.adopt_font_catalog_from(&candidates, installed.clone(), false);
+    changed.adopt_font_catalog_from(
+        &candidates,
+        installed.clone(),
+        false,
+        changed.font_family_generation,
+    );
     assert_eq!(changed.config.font.family, "Monaco");
     assert_eq!(changed.configured_font_family, "Cascadia Mono");
     assert_eq!(changed.font_catalog, FontCatalog::Ready(installed));
@@ -106,7 +121,12 @@ fn a_configured_or_changed_family_is_kept() {
 fn a_non_default_family_survives_an_unconfigured_report() {
     let installed = vec!["Cascadia Mono".to_string(), "Consolas".to_string()];
     let mut app = app_with_family("Consolas");
-    app.adopt_font_catalog_from(&["Cascadia Mono", "Consolas"], installed.clone(), false);
+    app.adopt_font_catalog_from(
+        &["Cascadia Mono", "Consolas"],
+        installed.clone(),
+        false,
+        app.font_family_generation,
+    );
     assert_eq!(app.config.font.family, "Consolas");
     assert_eq!(app.configured_font_family, "Consolas");
     assert_eq!(app.font_catalog, FontCatalog::Ready(installed));
@@ -128,4 +148,24 @@ fn a_report_after_shutdown_is_dropped_quietly() {
         },
     );
     assert_eq!(done_rx.recv_timeout(Duration::from_secs(10)), Ok(true));
+}
+
+/// A reload that names the platform default itself, applied while the worker that read no family
+/// still enumerates, wins over that worker's stale report: the reloaded family is kept.
+#[test]
+fn a_report_older_than_a_reload_keeps_the_reloaded_family() {
+    let mut app = app_with_family("Cascadia Mono");
+    let spawned_at = app.font_family_generation;
+    let mut reloaded = Config::default();
+    reloaded.font.family = "Cascadia Mono".into();
+    app.apply_new_config(reloaded);
+    let installed = vec!["Consolas".to_string()];
+    app.adopt_font_catalog_from(
+        &["Cascadia Mono", "Consolas"],
+        installed.clone(),
+        false,
+        spawned_at,
+    );
+    assert_eq!(app.config.font.family, "Cascadia Mono");
+    assert_eq!(app.font_catalog, FontCatalog::Ready(installed));
 }

@@ -173,6 +173,7 @@ impl App {
         let new_cfg = Self::normalize_config(&self.config_normalizer, new_cfg);
         self.configured_font_size = new_cfg.font.size;
         self.configured_font_family = new_cfg.font.family.clone();
+        self.font_family_generation += 1;
         self.configured_weight_scale = new_cfg.font.effective_weight_scale();
         // Config is only applied on an explicit user reload, so it must
         // render immediately rather than at the next vsync deadline.
@@ -770,6 +771,7 @@ impl App {
     /// Switch the live font family in every window for this session, without saving it.
     pub(super) fn set_font_family(&mut self, family: &str) {
         self.config.font.family = family.to_owned();
+        self.font_family_generation += 1;
         self.apply_live_font();
         tracing::info!("font family -> {family}");
     }
@@ -880,6 +882,7 @@ impl App {
         self.configured_font_size = size;
         self.configured_weight_scale = weight_scale;
         self.configured_font_family = self.config.font.family.clone();
+        self.font_family_generation += 1;
         self.adopt_saved_status_line(written);
         Ok(())
     }

@@ -545,8 +545,8 @@ impl App {
                 self.handle_font_fallback_ready(window_id, notice_id);
             }
             UserEvent::ForegroundProbeReady => self.drain_foreground_probe_results(Instant::now()),
-            UserEvent::FontCatalogReady { families, family_configured } => {
-                self.adopt_font_catalog(families, family_configured);
+            UserEvent::FontCatalogReady { families, family_configured, generation } => {
+                self.adopt_font_catalog(families, family_configured, generation);
             }
             UserEvent::GpuDeviceStateChanged => {
                 self.request_device_state_redraws();

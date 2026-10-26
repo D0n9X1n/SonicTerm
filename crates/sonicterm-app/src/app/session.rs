@@ -155,6 +155,7 @@ impl App {
             configured_font_family,
             font_catalog: font_catalog::FontCatalog::default(),
             font_picker_original: None,
+            font_family_generation: 0,
             keymap,
             clipboard: Clipboard::new().ok(),
             #[cfg(target_os = "windows")]

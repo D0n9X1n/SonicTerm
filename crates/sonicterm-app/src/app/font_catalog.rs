@@ -84,6 +84,7 @@ impl App {
             return;
         };
         self.font_catalog = FontCatalog::Loading;
+        let generation = self.font_family_generation;
         let config_path =
             self.runtime_config_path.clone().or_else(sonicterm_cfg::config::Config::default_path);
         // No handle is kept or joined: once the event loop ends, `send_event` returns
@@ -92,6 +93,7 @@ impl App {
             let _ = proxy.send_event(UserEvent::FontCatalogReady {
                 families: report.families,
                 family_configured: report.family_configured,
+                generation,
             });
         });
     }
@@ -99,26 +101,36 @@ impl App {
     /// Record the worker's report and log the session family. On a start whose config names no
     /// family, while the live family is still the loaded platform default, the first installed
     /// platform default becomes the live family and the configured baseline, in memory only.
-    pub(super) fn adopt_font_catalog(&mut self, families: Vec<String>, family_configured: bool) {
+    pub(super) fn adopt_font_catalog(
+        &mut self,
+        families: Vec<String>,
+        family_configured: bool,
+        generation: u64,
+    ) {
         self.adopt_font_catalog_from(
             sonicterm_gpu::DEFAULT_MONOSPACE_FAMILIES,
             families,
             family_configured,
+            generation,
         );
     }
 
-    /// [`Self::adopt_font_catalog`] against explicit platform default `candidates`.
+    /// [`Self::adopt_font_catalog`] against explicit platform default `candidates`. A report whose
+    /// `generation` is not the current font-family generation adopts nothing.
     pub(super) fn adopt_font_catalog_from(
         &mut self,
         candidates: &[&str],
         families: Vec<String>,
         family_configured: bool,
+        generation: u64,
     ) {
         // Only the platform default may be replaced: a family set in a config the worker never
         // read, such as one built in memory, is as deliberate as one in the file.
         let on_default =
             candidates.first().is_some_and(|default| *default == self.config.font.family);
-        let untouched = !family_configured
+        // A report started before a reload, save or picker choice describes a config that is gone.
+        let untouched = generation == self.font_family_generation
+            && !family_configured
             && on_default
             && self.config.font.family == self.configured_font_family;
         let adopted = untouched.then(|| first_installed(candidates, &families)).flatten();
