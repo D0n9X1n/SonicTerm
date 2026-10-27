@@ -45,8 +45,10 @@ cargo run -p sonicterm-linux     # Linux；可执行文件名为 sonicterm
 文件作用域内受测试条件约束、且含有这些属性的内联模块也会失败。
 纯辅助模块及为测试而导入的构建代码，如果自身没有这些属性，则保留实现文件名。
 
-该源码扫描不会展开 `cfg_attr(test, path = …)` 或 `include!`，不会解析内联模块内部嵌套的声明，
-也不会展开 `macro_rules!` 生成的测试。这些形式需要人工审查；检查通过既不能证明其所有权，也不豁免命名规则。
+crate 根文件（`lib.rs`、`main.rs`、示例根文件）本身不得包含测试，无论内联还是裸写；
+只有 `tests/` 和 `benches/` 目标可以。由于没有任何声明指向它们，这条规则也会拦住通过
+`cfg_attr(test, path = …)`、`include!` 或内联模块内嵌套声明引入的文件。该源码扫描不会展开
+`macro_rules!` 生成的测试；这类测试需要人工审查，检查通过既不能证明其所有权，也不豁免命名规则。
 它读取全部受跟踪的第一方 Rust，
 包括声明自行编写测试的生成 crate root，但排除原生上游源码树。
 `sonicterm-ui` 和 `sonicterm-render-model` 的 crate-root 套件还要求每个直接源模块

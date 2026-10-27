@@ -451,10 +451,12 @@ a reproduction.
   Files with real `#[test]`/`#[bench]` attributes are suites regardless of their
   filename or declaration gate; a missing or production-admitting gate fails.
   File-scope test-gated inline modules containing such attributes also fail.
-  This is a source scan, not Rust expansion: it does not resolve
-  `cfg_attr(test, path = …)`, `include!`, declarations nested inside an inline
-  module, or `macro_rules!`-generated tests. Those forms need manual review;
-  a green check does not prove their ownership or permit bypassing this rule.
+  A crate root (`lib.rs`, `main.rs`, an example root) may not hold tests
+  itself, inline or bare; only `tests/` and `benches/` targets may. That rule
+  also catches files reached through `cfg_attr(test, path = …)`, `include!` or
+  a declaration nested inside an inline module, since nothing declares them.
+  This is a source scan, not Rust expansion: `macro_rules!`-generated tests
+  need manual review, and a green check does not prove their ownership.
 - **`tests/` is for cross-crate integration only.** Reserve each crate's
   `tests/` directory for genuine integration tests that exercise the crate
   through its public API or across crate boundaries. Do not put trivial

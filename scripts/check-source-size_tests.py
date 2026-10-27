@@ -242,6 +242,22 @@ class RustTestOwnershipTests(unittest.TestCase):
                     problems = self.problems({"foo.rs": source})
                     self.assertTrue(any("inline test suite" in item for item in problems), problems)
 
+    def test_crate_roots_cannot_hold_inline_or_bare_tests(self):
+        # Nothing declares a crate root, so its own text is the only place an ungated suite could hide.
+        for root in ["crates/foo/src/lib.rs", "crates/foo/src/main.rs", "crates/foo/examples/demo.rs"]:
+            for body in ["mod tests { #[test] fn contract() {} }",
+                         "#[cfg(test)] mod tests { #[test] fn contract() {} }",
+                         "#[test] fn contract() {}"]:
+                with self.subTest(root=root, body=body):
+                    problems = self.problems({root: body})
+                    self.assertTrue(any("test" in item and root in item for item in problems), problems)
+
+    def test_integration_and_bench_roots_may_hold_tests(self):
+        # tests/ and benches/ targets are their own crates; their #[test] functions are the suite.
+        for root in ["crates/foo/tests/contract.rs", "crates/foo/tests/suite/main.rs", "crates/foo/benches/speed.rs"]:
+            with self.subTest(root=root):
+                self.assertEqual(self.problems({root: "#[test] fn contract() {}"}), [])
+
     def test_inline_helpers_and_literal_test_text_do_not_hide_following_suites(self):
         # Inspecting an inline body must ignore fake test attributes and resume at the next file-scope item.
         for body in [
@@ -256,8 +272,9 @@ class RustTestOwnershipTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertEqual(self.problems({"foo.rs": source, "foo_tests.rs": ""}), [])
 
-    def test_documented_expansion_and_nested_declaration_limits(self):
-        # This source scanner is not rustc: these forms need review, not a claim that the gate expands them.
+    def test_undeclared_files_reached_by_expansion_or_nesting_are_caught(self):
+        # cfg_attr paths, include! and nested declarations leave the file holding #[test] undeclared,
+        # so the crate-root rule rejects it even though the scanner does not expand those forms.
         cases = [
             {"lib.rs": '#[cfg(test)] #[cfg_attr(test, path = "alternate.rs")] mod helper;',
              "alternate.rs": "#[test] fn contract() {}"},
@@ -265,12 +282,17 @@ class RustTestOwnershipTests(unittest.TestCase):
              "alternate.rs": "#[test] fn contract() {}"},
             {"lib.rs": '#[cfg(test)] mod outer { #[path = "helper.rs"] mod helper; }',
              "helper.rs": "#[test] fn contract() {}"},
-            {"lib.rs": '#[cfg(test)] mod helper;',
-             "helper.rs": 'macro_rules! suite { () => { #[test] fn contract() {} }; } suite!();'},
         ]
         for files in cases:
             with self.subTest(files=files):
-                self.assertEqual(self.problems(files), [])
+                problems = self.problems(files)
+                self.assertTrue(any("crate root holds tests" in item for item in problems), problems)
+
+    def test_documented_macro_generated_test_limit(self):
+        # This source scanner is not rustc: tests produced by macro_rules! expansion need review.
+        files = {"lib.rs": '#[cfg(test)] mod helper;',
+                 "helper.rs": 'macro_rules! suite { () => { #[test] fn contract() {} }; } suite!();'}
+        self.assertEqual(self.problems(files), [])
 
     def test_helper_imports_are_not_mistaken_for_test_suites(self):
         # Build-code test imports and source-scanner fixtures have no test functions of their own.

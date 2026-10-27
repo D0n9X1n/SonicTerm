@@ -479,8 +479,9 @@ bless 运行会重写该表、以十六进制打印每个变化的栅格，并�
 文件作用域的外部模块只要含有 `#[test]`/`#[bench]`，无论文件名或声明条件如何都会检查；
 文件作用域内受测试条件约束的内联套件则会被拒绝。
 完整的命名与超长套件拆分规则见[仓库与工具链](Repository-and-Toolchain-zh-CN)。
-该源码扫描不会展开 `cfg_attr(test, path = …)`、`include!` 或 `macro_rules!` 生成的测试，
-也不会解析内联模块内部嵌套的声明。这些形式需要人工审查；gate 通过并不能证明其所有权。
+crate 根文件（`lib.rs`、`main.rs`、示例根文件）本身不得包含测试；只有 `tests/` 和 `benches/`
+目标可以，这也会拦住通过 `cfg_attr(test, path = …)`、`include!` 或嵌套声明引入的文件。
+该源码扫描不会展开 `macro_rules!` 生成的测试；这类测试需要人工审查，gate 通过并不能证明其所有权。
 
 `source-size` 运行 `python3 scripts/check-source-size.py`：先运行契约测试，
 再读取 `git ls-files -z` 所列路径在工作树中的字节。每个源文件最多 1,000 个物理行；

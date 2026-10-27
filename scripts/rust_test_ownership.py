@@ -213,6 +213,32 @@ def ownership_problems(sources: dict[str, str]) -> list[str]:
             problems.append(f"{path}: no owning #[path] declaration")
         elif len(owners) != 1:
             problems.append(f"{path}: expected one owner declaration, found {len(owners)}: {', '.join(owners)}")
+    problems.extend(_crate_root_problems(sources))
+    return problems
+
+
+def _crate_root_problems(sources: dict[str, str]) -> list[str]:
+    """Reject tests written directly in a crate root, which no parent declaration can gate.
+
+    A `tests/` or `benches/` target is its own test crate, so its `#[test]` functions are the suite.
+    Every other undeclared file (`lib.rs`, `main.rs`, an example root) keeps tests in a sibling file.
+    """
+    declared = set()
+    for owner, source in sources.items():
+        try:
+            modules = declared_modules(source)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        for module in modules:
+            declared.update(_module_targets(PurePosixPath(owner), module))
+    problems = []
+    for path, source in sorted(sources.items()):
+        parts = PurePosixPath(path).parts
+        if path in declared or "tests" in parts or "benches" in parts:
+            continue
+        if _contains_test_attribute(source):
+            problems.append(f"{path}: crate root holds tests; move them to an owner-named sibling "
+                            f"{PurePosixPath(path).stem}_tests.rs declared under #[cfg(test)]")
     return problems
 
 
