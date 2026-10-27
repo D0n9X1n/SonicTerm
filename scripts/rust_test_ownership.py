@@ -271,6 +271,9 @@ def _cargo_packages(manifests: dict[str, str]) -> list[_Package]:
 
 def _is_test_target(path: str, packages: list[_Package]) -> bool:
     """Whether Cargo builds `path` as an integration-test or bench target of its own package."""
+    if any(path in package.test_targets for package in packages):
+        # When: a manifest lists `path` as a test or bench target, Cargo builds it even outside that package's folder.
+        return True
     owners = [package for package in packages
               if package.root in ("", ".") or path.startswith(package.root.rstrip("/") + "/")]
     if not owners:

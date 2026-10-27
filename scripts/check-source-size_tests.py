@@ -278,6 +278,12 @@ class RustTestOwnershipTests(unittest.TestCase):
                     '[package]\nname = "foo"\nautotests = false\n[[test]]\nname = "probe"\n'}
         self.assertEqual(self.problems({"crates/foo/tests/probe.rs": "#[test] fn contract() {}"}, manifest), [])
 
+    def test_explicit_targets_outside_their_package_directory_are_targets(self):
+        # Cargo resolves [[test]]/[[bench]] paths relative to the manifest, even outside the package folder.
+        manifest = {"crates/foo/Cargo.toml":
+                    '[package]\nname = "foo"\n[[test]]\nname = "contract"\npath = "../shared/contract.rs"\n'}
+        self.assertEqual(self.problems({"crates/shared/contract.rs": "#[test] fn contract() {}"}, manifest), [])
+
     def test_disabled_auto_discovery_does_not_exempt_tests_or_benches_files(self):
         # With autotests/autobenches off, tests/ and benches/ files are targets only when listed as such;
         # a bin or example placed there is an ordinary crate root and may not hold tests.
