@@ -1,8 +1,16 @@
 pub(super) use super::{is_quit_chord, PointerCell};
+#[cfg(windows)]
+use super::{pointer_report_bytes, wheel_report_bytes, PointerReportKind};
+#[cfg(windows)]
+use crate::app::PointerGestureOwner;
 pub(super) use crate::app::{child_window::child_no_button_motion_report, hovered_url::HoveredUrl};
+#[cfg(windows)]
+use sonicterm_cfg::config::ScrollbarMode;
 pub(super) use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 pub(super) use sonicterm_ui::pane::SplitAxis;
 pub(super) use winit::keyboard::KeyCode;
+#[cfg(windows)]
+use winit::keyboard::ModifiersState;
 
 /// The main dispatcher followed by the files that hold its handlers, so whole-file
 /// absence and count checks cover every main-window event path.

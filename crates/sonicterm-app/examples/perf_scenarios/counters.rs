@@ -460,9 +460,12 @@ mod counters_tests;
 
 #[path = "counters_api.rs"]
 mod api;
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) use api::atlas_reading;
+#[cfg(all(feature = "perf-counters", any(target_os = "macos", windows)))]
+pub(crate) use api::gate_on;
 #[cfg(feature = "perf-counters")]
-pub(crate) use api::{enable, gate_on, snapshot_totals};
+pub(crate) use api::{enable, snapshot_totals};
 
 #[cfg(all(test, feature = "perf-counters"))]
 pub(crate) use api::read_field;

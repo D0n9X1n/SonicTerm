@@ -696,8 +696,6 @@ fn unix_identity(pid: u32) -> Result<Option<((u64, u64), bool)>> {
 #[cfg(windows)]
 #[path = "test_hooks_close_baseline_detached_fixture.rs"]
 mod test_hooks_close_baseline_detached_fixture;
-#[cfg(windows)]
-use test_hooks_close_baseline_detached_fixture::*;
 
 #[cfg(windows)]
 #[path = "test_hooks_close_baseline_process_fixture.rs"]

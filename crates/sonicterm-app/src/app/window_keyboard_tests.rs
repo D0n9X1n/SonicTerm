@@ -1,8 +1,10 @@
 pub(super) use crate::app::{window_event::begin_pointer_gesture, App, PointerCell};
+#[cfg(windows)]
+use sonicterm_cfg::keymap::Action;
 pub(super) use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 pub(super) use sonicterm_vt::vt::MouseTracking;
 #[cfg(windows)]
-pub(super) use winit::keyboard::{KeyCode, PhysicalKey};
+pub(super) use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
 pub(super) fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
     PointerCell { pane_id, row, col }

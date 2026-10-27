@@ -947,17 +947,26 @@ mod record_tests;
 
 #[path = "record_grid.rs"]
 mod grid;
+#[cfg(any(target_os = "macos", windows, all(test, feature = "perf-echo-trace")))]
+pub(crate) use grid::prompt_identity;
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) use grid::{
-    armed_token, bulk_tail_mismatch, echo_target, line_row_near_cursor, missing_wide_tokens,
-    park_entry_problem, park_snapshot, planned_rows, prompt_identity, prompt_origin, protocol_rows,
-    retained_text, row_count_mismatch, sentinel_row, snapshot_echo, snapshot_identity_changed,
-    wide_tokens,
+    armed_token, bulk_tail_mismatch, park_entry_problem, park_snapshot, planned_rows,
+    retained_text, row_count_mismatch, snapshot_identity_changed,
+};
+pub(crate) use grid::{
+    echo_target, line_row_near_cursor, missing_wide_tokens, prompt_origin, protocol_rows,
+    sentinel_row, snapshot_echo, wide_tokens,
 };
 
 #[path = "record_latency.rs"]
 mod latency;
+#[cfg(any(target_os = "macos", windows, all(test, feature = "perf-echo-trace")))]
+pub(crate) use latency::echo_outcome;
 use latency::ns_to_ms;
-pub(crate) use latency::{attribute_dispatch, duration_ns, echo_outcome, split_in_scope};
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use latency::split_in_scope;
+pub(crate) use latency::{attribute_dispatch, duration_ns};
 #[path = "record_result.rs"]
 mod result;
 #[cfg(any(test, not(perf_completeness_api)))]
@@ -974,7 +983,9 @@ mod slow_dispatch;
 #[cfg(test)]
 pub(crate) use grid::foreground_lock_note;
 
+#[cfg(all(test, any(target_os = "macos", windows)))]
+pub(crate) use result::checkpoint_memory_support;
 #[cfg(test)]
-pub(crate) use result::{checkpoint_memory_support, filetime_seconds};
+pub(crate) use result::filetime_seconds;
 
 use slow_dispatch::ByDuration;

@@ -734,9 +734,10 @@ pub(crate) use plan::plan_for;
 pub(crate) use plan::{all_plans, all_plans_on};
 #[path = "scenarios_progress.rs"]
 mod progress;
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use progress::park_progress;
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) use progress::{
-    accessibility_phase_presents, park_progress, program_phase_progress,
-    status_line_posix_progress, status_line_progress,
+    accessibility_phase_presents, program_phase_progress, status_line_posix_progress,
+    status_line_progress,
 };

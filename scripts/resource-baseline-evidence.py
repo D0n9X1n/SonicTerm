@@ -72,7 +72,9 @@ def classify_platform(runner_label: str, facts: dict) -> dict:
 
 
 def _pty_test_command(name: str, test_name: str) -> CommandSpec:
-    full_name = "pty::pty_tests::{}".format(test_name)
+    # Exact filters follow the source owner; a stale path runs zero tests and fails evidence validation.
+    owner = "pty_child" if name in ("pty-child-exit", "pty-descendant-cleanup") else "pty_teardown"
+    full_name = "pty::{owner}::{owner}_tests::{test}".format(owner=owner, test=test_name)
     return CommandSpec(
         name,
         (

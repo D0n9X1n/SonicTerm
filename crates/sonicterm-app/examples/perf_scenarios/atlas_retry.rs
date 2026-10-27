@@ -741,6 +741,7 @@ mod atlas_retry_tests;
 #[path = "atlas_retry_evidence.rs"]
 mod evidence;
 pub(crate) use evidence::{
-    distinct_keys, escape_text, failure_observation, fixture_text, read_session, records_problem,
-    recovery_json, relative_ms, scene_problem, settle_observation,
+    distinct_keys, escape_text, fixture_text, records_problem, recovery_json, scene_problem,
 };
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use evidence::{failure_observation, read_session, relative_ms, settle_observation};

@@ -229,3 +229,12 @@ pub(super) use core_row_fixture::{
 #[path = "core_oracle_fixture.rs"]
 mod core_oracle_fixture;
 pub(super) use core_oracle_fixture::*;
+
+/// Inline media is a shipping rendering phase; only the row-shape monotonicity check is debug-only.
+#[test]
+fn inline_image_module_is_available_without_debug_assertions() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let declaration = "#[path = \"core_inline_images.rs\"]\nmod inline_images;";
+    assert!(source.contains(declaration));
+    assert!(!source.contains(&format!("#[cfg(debug_assertions)]\n{declaration}")));
+}

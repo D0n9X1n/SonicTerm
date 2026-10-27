@@ -138,7 +138,7 @@ TEST_ATTRIBUTE = re.compile(
 IMPLEMENTED_TEST = re.compile(
     r"^[ \t]*#\[test\][ \t]*\n"  # a real #[test], not inside a comment
     r"(?P<attrs>(?:[ \t]*#\[[^\n]*\][ \t]*\n)*)"  # attributes before the fn
-    r"[ \t]*(?:pub[ \t]+)?(?:async[ \t]+)?fn[ \t]+(?P<name>v120_[a-z0-9_]+)[ \t]*\(",
+    r"[ \t]*(?:pub(?:\([^\n)]*\))?[ \t]+)?(?:async[ \t]+)?fn[ \t]+(?P<name>v120_[a-z0-9_]+)[ \t]*\(",
     re.MULTILINE,
 )
 IGNORE_ATTRIBUTE = re.compile(r"#\[\s*ignore\b")

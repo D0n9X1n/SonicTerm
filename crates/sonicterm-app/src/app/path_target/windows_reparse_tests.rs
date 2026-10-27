@@ -2,6 +2,8 @@
 
 use super::super::windows_tests::*;
 use super::*;
+#[cfg(windows)]
+use crate::app::path_target::probe_worker::open_path;
 
 /// A file symlink on a local fixed disk, with an absolute or a relative target, classifies like the
 /// file it names, and dispatch passes Explorer the file's real, link-free path, so the file is

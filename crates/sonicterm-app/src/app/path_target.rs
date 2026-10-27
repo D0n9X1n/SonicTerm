@@ -579,12 +579,11 @@ pub(super) use logical::target_at_row_cell;
 use logical::{logical_path_scan_at_cell, row_target_candidates_at_cell};
 #[path = "path_target_resolve.rs"]
 mod resolve;
+#[cfg(any(target_os = "macos", test))]
+use resolve::normalize_posix_absolute;
 #[cfg(test)]
 use resolve::token_bounds;
-use resolve::{
-    detected_target_chars, detected_target_enabled, normalize_posix_absolute, row_fingerprint,
-    unsafe_path_cell,
-};
+use resolve::{detected_target_chars, detected_target_enabled, row_fingerprint, unsafe_path_cell};
 pub(super) use resolve::{local_launch_cwd, native_home_dir, resolve_detected_path};
 #[path = "path_target_pane_spans.rs"]
 mod pane_spans;
