@@ -7,7 +7,12 @@ GDI presentation. `TextPipeline` remains a callable compatibility pipeline, not
 the production glyph path.
 
 ## Key files
-- `core.rs` - renderer owner, frame assembly, surface lifecycle.
+- `core.rs` - renderer owner and compatibility exports; private `core_*` siblings hold its
+  constructors, settings, surface, row emission and frame lifecycle methods.
+- `core_assemble.rs` - CPU assembly coordinator, scratch lease, retry decisions and receipts;
+  `core_assemble_*` phases emit in the same painter order through borrowed `core_assembly_context`.
+- `core_source.rs` - test-only complete renderer source corpus for structural contracts;
+  extracted phases remain in the device-gate reachability graph.
 - `atlas_lifecycle.rs` - private atlas reset, promotion/demotion, gated upload rebuild and retry settlement.
 - `device_errors.rs` - per-device wgpu error and loss state, the GPU-work gate,
   the frame-outcome decision, and the test fault kinds.
@@ -15,7 +20,7 @@ the production glyph path.
 - `completeness.rs` - the perf-end glyph completeness certificate: stored at each presented `Full` frame with its scene (`FrameKey::scene`, the key without dirt fields) and atlas stamp, extended by same-scene frames (so the counts are an upper bound after partial updates), read by `GpuRenderer::completeness_checkpoint` only while scene and atlas still match.
 - `row_ink.rs` - per-row ink records of the presented frame, valid only for the absolute row and content stamp they were drawn from; a partial plan emits by them.
 - `present.rs` - the presentation seam: the wgpu and Windows GDI presenters and the typed `PresentOutcome`.
-- `software_frame.rs` - platform-neutral CPU composition and flat sibling pixel tests.
+- `software_frame.rs` - co-located CPU pixel loops, sampling, blending and shared color encoding; flat sibling pixel tests.
 - `software_windows.rs` - Windows-only HWND/HDC presentation of a validated borrowed frame.
 - `recovery.rs`, `recovery_context.rs`, `rebind.rs` - pure recovery coordinator, owned context negotiation, and same-callback renderer rebind driven by the App.
 - `quad.rs` - cursor, selection, underline, pane border, and UI quads.
@@ -40,7 +45,8 @@ cargo build -p sonicterm-gpu
 - `trim_for_occlusion` releases only what the next frame rebuilds, inside the device gate; it never touches the glyph atlas, its retry or eviction state. A trimmed frame texture is restored by `ensure_frame_texture`, the first step of the wgpu present, and every other texture install clears the mark.
 - `core.rs` and `text_pipeline.rs` are hot files; keep changes narrow.
 - CPU composition stays in `software_frame`, compiled for Windows and every host's
-  unit tests, with no native imports or unsafe code. Preserve pixel assertions and
+  unit tests; its shared color encoding also compiles on every host. Keep pixel loops and
+  their color math together for non-LTO builds, with no native imports or unsafe code. Preserve pixel assertions and
   tolerances, including the headless wgpu comparisons. Only the Windows bridge
   receives a borrowed `BgraFrame`; non-Windows production has no CPU presenter.
 - Production consumes `FramePlan` decisions once; keep grids, UI controllers, native handles, and copied rows out of the plan.

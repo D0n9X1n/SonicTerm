@@ -221,6 +221,24 @@ class PlatformClassificationTests(unittest.TestCase):
 
 
 class CommandContractTests(unittest.TestCase):
+    def test_exact_filters_name_declared_source_owners(self):
+        # A mocked libtest transcript cannot detect a stale qualified filter; resolve each maintained owner in source too.
+        source_root = _HERE.parent / "crates/sonicterm-io/src"
+        parent = (source_root / "pty.rs").read_text(encoding="utf-8")
+        for family in ("macos", "windows"):
+            for spec in evidence.command_specs({"family": family}, "python3"):
+                if spec.expected_test is None:
+                    continue
+                with self.subTest(test=spec.expected_test):
+                    namespace, owner, tests, name = spec.expected_test.split("::")
+                    self.assertEqual(namespace, "pty")
+                    self.assertIn(f'mod {owner};', parent)
+                    declaration = (source_root / f"{owner}.rs").read_text(encoding="utf-8")
+                    self.assertIn(f'#[path = "{tests}.rs"]', declaration)
+                    self.assertIn(f'mod {tests};', declaration)
+                    body = (source_root / f"{tests}.rs").read_text(encoding="utf-8")
+                    self.assertEqual(len(re.findall(r"(?m)^fn " + re.escape(name) + r"\(", body)), 1)
+
     def test_macos_runs_exact_real_pty_cleanup_and_harness_commands(self):
         profile = evidence.classify_platform("macos-14", _macos_facts())
         specs = evidence.command_specs(profile, "python3")
@@ -231,7 +249,7 @@ class CommandContractTests(unittest.TestCase):
                     "pty-child-exit",
                     (
                         "cargo", "test", "-p", "sonicterm-io", "--lib",
-                        "pty::pty_tests::child_exit_probe_observes_short_lived_process",
+                        "pty::pty_child::pty_child_tests::child_exit_probe_observes_short_lived_process",
                         "--", "--exact", "--nocapture",
                     ),
                 ),
@@ -239,7 +257,7 @@ class CommandContractTests(unittest.TestCase):
                     "pty-descendant-cleanup",
                     (
                         "cargo", "test", "-p", "sonicterm-io", "--lib",
-                        "pty::pty_tests::observed_shell_exit_still_kills_background_process_group",
+                        "pty::pty_child::pty_child_tests::observed_shell_exit_still_kills_background_process_group",
                         "--", "--exact", "--nocapture",
                     ),
                 ),
@@ -259,7 +277,7 @@ class CommandContractTests(unittest.TestCase):
                 "pty-child-exit",
                 (
                     "cargo", "test", "-p", "sonicterm-io", "--lib",
-                    "pty::pty_tests::child_exit_probe_observes_short_lived_process",
+                    "pty::pty_child::pty_child_tests::child_exit_probe_observes_short_lived_process",
                     "--", "--exact", "--nocapture",
                 ),
             ),
@@ -267,7 +285,7 @@ class CommandContractTests(unittest.TestCase):
                 "pty-thread-cleanup",
                 (
                     "cargo", "test", "-p", "sonicterm-io", "--lib",
-                    "pty::pty_tests::dropping_live_windows_pty_terminates_native_io_threads",
+                    "pty::pty_teardown::pty_teardown_tests::dropping_live_windows_pty_terminates_native_io_threads",
                     "--", "--exact", "--nocapture",
                 ),
             ),
@@ -275,7 +293,7 @@ class CommandContractTests(unittest.TestCase):
                 "conpty-close-drain",
                 (
                     "cargo", "test", "-p", "sonicterm-io", "--lib",
-                    "pty::pty_tests::conpty_close_runs_while_output_reader_is_draining",
+                    "pty::pty_teardown::pty_teardown_tests::conpty_close_runs_while_output_reader_is_draining",
                     "--", "--exact", "--nocapture",
                 ),
             ),

@@ -293,3 +293,6 @@ Dependabot 的 `github-actions` 生态被刻意设为不过滤，这与 `cargo` 
 不同。固定的 SHA 没有浮动 tag 去吸收上游修复，因此一个 Dependabot 无法推进的固定引用就是
 一个会腐坏的固定引用，它压住的安全补丁永远不会到达。Dependabot 会同时改写 SHA 和它的尾注
 版本号。
+
+必需的 `tooling` job 还运行 `source-size`，先验证契约测试，再强制跟踪的第一方源文件
+不得超过 1,000 行。精确范围和排除项见[本地门禁](Local-Gate-zh-CN)。

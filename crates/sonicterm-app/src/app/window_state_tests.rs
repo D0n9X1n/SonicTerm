@@ -304,10 +304,40 @@ fn window_wide_dirt_callers_inventory() {
     }
     for (name, source, expected) in [
         ("config_apply.rs", include_str!("config_apply.rs"), 3),
-        ("misc.rs", include_str!("misc.rs"), 4),
-        ("redraw.rs", include_str!("redraw.rs"), 1),
+        (
+            "misc.rs",
+            concat!(
+                include_str!("misc.rs"),
+                "\n",
+                include_str!("misc_clipboard.rs"),
+                "\n",
+                include_str!("misc_window_create.rs")
+            ),
+            4,
+        ),
+        (
+            "redraw.rs",
+            concat!(
+                include_str!("redraw.rs"),
+                "\n",
+                include_str!("redraw_admission.rs"),
+                "\n",
+                include_str!("redraw_state.rs"),
+                "\n",
+                include_str!("redraw_window.rs")
+            ),
+            1,
+        ),
         ("search_handle.rs", include_str!("search_handle.rs"), 1),
-        ("window_keyboard.rs", include_str!("window_keyboard.rs"), 2),
+        (
+            "window_keyboard.rs",
+            concat!(
+                include_str!("window_keyboard.rs"),
+                "\n",
+                include_str!("window_keyboard_ime.rs")
+            ),
+            2,
+        ),
         ("window_state.rs", include_str!("window_state.rs"), 1),
     ] {
         assert_eq!(count(source), expected, "{name} window-wide dirt callers");
@@ -332,9 +362,30 @@ fn every_window_constructor_starts_both_clocks_together() {
     assert!(app.windows.contains_key(&child));
     // The native constructors cannot run headless, so their literals are pinned by source.
     for (name, source) in [
-        ("event_loop.rs", include_str!("event_loop.rs")),
-        ("misc.rs", include_str!("misc.rs")),
-        ("tear_out.rs", include_str!("tear_out.rs")),
+        (
+            "event_loop.rs",
+            concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs")),
+        ),
+        (
+            "misc.rs",
+            concat!(
+                include_str!("misc.rs"),
+                "\n",
+                include_str!("misc_clipboard.rs"),
+                "\n",
+                include_str!("misc_window_create.rs")
+            ),
+        ),
+        (
+            "tear_out.rs",
+            concat!(
+                include_str!("tear_out.rs"),
+                "\n",
+                include_str!("tear_out_destination.rs"),
+                "\n",
+                include_str!("tear_out_warm.rs")
+            ),
+        ),
         ("test_hooks_windows.rs", include_str!("test_hooks_windows.rs")),
     ] {
         let source = source.replace("\r\n", "\n");

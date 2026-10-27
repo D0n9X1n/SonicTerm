@@ -1,158 +1,10 @@
-use sonicterm_grid::grid::Grid;
-use sonicterm_ui::pane::Rect;
-use sonicterm_vt::vt::{CaptureStagingPool, MediaProtocol};
+pub(super) use sonicterm_grid::grid::Grid;
+pub(super) use sonicterm_ui::pane::Rect;
+pub(super) use sonicterm_vt::vt::{CaptureStagingPool, MediaProtocol};
 
 use super::*;
 
-/// READONLY affects new user gestures, not cursor-position replies sent through the production parser batch and reply spool.
-#[cfg(any(windows, unix))]
-#[test]
-fn real_pty_readonly_parser_reply_uses_production_spool() {
-    use crate::app::{
-        mod_tests::{input_test_windows, PtySubmissions},
-        pty_test_support::{isolated, phase},
-    };
-    use sonicterm_ui::copy_mode::CopyModeState;
-    if isolated() {
-        return;
-    }
-    let (mut app, windows) = input_test_windows();
-    let observed = PtySubmissions::start();
-    for (window, pane_id) in windows {
-        app.windows.get_mut(&window).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
-        assert!(!app.admits_new_user_input(pane_id));
-        let pane = &app.windows[&window].panes[&pane_id];
-        let pty = pane.pty.as_ref().unwrap();
-        let replies = pty.reply_sender();
-        let handles = PaneVtHandles::from_pane_state(pane);
-        let before = pty.input_diagnostics().completed_messages;
-        let mut submitted = Vec::new();
-        phase(pane_id, "parser-query");
-        process_pane_vt_batch_and_publish(
-            &handles,
-            b"\x1b[6n",
-            None,
-            &mut None,
-            &mut SyncLatch::default(),
-            None,
-            |bytes| {
-                assert!(
-                    handles.parser.try_lock().is_some(),
-                    "reply writes must release the parser first"
-                );
-                let actual = bytes.clone();
-                replies.send(bytes).expect("production reply spool must accept cursor reply");
-                submitted.push(actual);
-            },
-        );
-        assert_eq!(submitted, vec![b"\x1b[1;1R".to_vec()]);
-        phase(pane_id, "reply-writer-completion");
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while pty.input_diagnostics().completed_messages == before && Instant::now() < deadline {
-            while pty.out_rx.try_recv().is_ok() {}
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(
-            pty.input_diagnostics().completed_messages,
-            before + 1,
-            "pane {pane_id} reply writer did not complete"
-        );
-        assert!(observed.take().is_empty(), "parser replies never become user-input admissions");
-    }
-}
-
-#[test]
-fn reply_bursts_preserve_every_byte_and_release_parser_before_delivery() {
-    // More queries than either old queue could hold must arrive in order without holding pane locks.
-    let (_pane, handles) = pane_and_worker_handles();
-    let mut expected = Vec::new();
-    let mut input = Vec::new();
-    for row in 1..=24 {
-        for col in 1..=80 {
-            input.extend_from_slice(format!("\x1b[{row};{col}H\x1b[6n").as_bytes());
-            expected.extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
-        }
-    }
-    input.extend_from_slice(b"done");
-    let mut delivered = Vec::new();
-    let mut submissions = 0;
-    process_pane_vt_batch_with(
-        &handles,
-        &input,
-        None,
-        &mut None,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        Instant::now,
-        |bytes| {
-            assert!(handles.parser.try_lock().is_some());
-            assert!(handles.inline_images.try_lock().is_some());
-            assert!(handles.command_events.try_lock().is_some());
-            submissions += 1;
-            assert!(bytes.len() <= 32 * 1024);
-            delivered.extend(bytes);
-        },
-    );
-    assert_eq!(delivered, expected);
-    assert_eq!(submissions, 1, "small replies share one bounded submission per output batch");
-}
-
-#[test]
-fn reply_spool_admission_leaves_parser_available_with_visible_output_applied() {
-    // A storage operation must leave rendering and resizing access to the already-updated grid.
-    let (_pane, handles) = pane_and_worker_handles();
-    let parser = handles.parser.clone();
-    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
-    let (resume_tx, resume_rx) = crossbeam_channel::bounded(1);
-    let worker = std::thread::spawn(move || {
-        process_pane_vt_batch_with(
-            &handles,
-            b"\x1b[6nX",
-            None,
-            &mut None,
-            &mut SyncLatch::default(),
-            |_| None,
-            |_| {},
-            Instant::now,
-            |bytes| {
-                entered_tx.send(bytes).unwrap();
-                resume_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-            },
-        );
-    });
-    let reply = entered_rx.recv_timeout(Duration::from_secs(3));
-    let available = parser.try_lock().map(|guard| guard.grid().cursor.col);
-    resume_tx.send(()).unwrap();
-    worker.join().unwrap();
-    assert_eq!(reply.unwrap(), b"\x1b[1;1R");
-    assert_eq!(available, Some(1));
-    assert_eq!(parser.lock().grid().row(0)[0].ch, 'X');
-}
-
-#[test]
-fn reply_delivery_failure_does_not_abandon_visible_output() {
-    // Input failure must not end the sole output/exit observer or discard already-buffered visible output.
-    let (_pane, handles) = pane_and_worker_handles();
-    let mut failed_reply = None;
-    process_pane_vt_batch_with(
-        &handles,
-        b"\x1b[6nX",
-        None,
-        &mut None,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        Instant::now,
-        |bytes| {
-            failed_reply = Some(bytes);
-        },
-    );
-    assert_eq!(failed_reply.unwrap(), b"\x1b[1;1R");
-    assert_eq!(handles.parser.lock().grid().row(0)[0].ch, 'X');
-}
-
-fn app_with_unavailable_shell() -> App {
+pub(super) fn app_with_unavailable_shell() -> App {
     // A child path below the test executable cannot launch a shell or read user shell profiles.
     let shell = std::env::current_exe().expect("test executable").join("unavailable-shell");
     let config = Config {
@@ -165,191 +17,9 @@ fn app_with_unavailable_shell() -> App {
     App::new(Theme::default(), config, Keymap::default())
 }
 
-#[test]
-fn main_split_after_zoom_keeps_active_parser_visible_in_every_direction() {
-    // Exercise the real main split path without launching a user shell; native runs cover live PTYs.
-    for nested in [false, true] {
-        for direction in [Direction::Left, Direction::Right, Direction::Up, Direction::Down] {
-            let mut app = app_with_unavailable_shell();
-            app.__test_seed_tab("main");
-            let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
-            assert!(app.__test_set_main_pane_viewport(outer, 10.0, 10.0));
-            app.resize_visible_panes();
-            if nested {
-                app.split_active(Direction::Right);
-            }
-            let window = app.main().expect("main window");
-            let tab = &window.tab_states[window.tabs.active_index()];
-            let previous_active = tab.active_pane;
-            let mut expected = tab.tree.clone();
-            app.toggle_active_pane_zoom();
-            assert_eq!(app.compute_active_pane_rects(), [(previous_active, outer)]);
-            for pane in app.main().expect("main window").panes.values() {
-                pane.parser.lock().grid_mut().clear_dirty();
-            }
-
-            app.split_active(direction);
-
-            let window = app.main().expect("main window");
-            let tab = &window.tab_states[window.tabs.active_index()];
-            let active = tab.active_pane;
-            assert_ne!(active, previous_active);
-            assert!(expected.split(previous_active, direction, active));
-            let rects = app.compute_active_pane_rects();
-            assert_eq!(rects, expected.layout(outer), "nested={nested}, {direction:?}");
-            assert_eq!(tab.tree.zoomed_pane_id(), None);
-            assert_eq!(rects.iter().filter(|(id, _)| *id == active).count(), 1);
-            let guards: Vec<_> = rects
-                .iter()
-                .map(|(id, rect)| {
-                    let pane = window.panes.get(id).expect("visible pane is live");
-                    (*id, pane.parser.try_lock().expect("coherent parser guard"), *rect)
-                })
-                .collect();
-            assert!(guards.iter().any(|(id, _, _)| *id == active));
-            for (id, parser, rect) in &guards {
-                let grid = parser.grid();
-                assert_eq!(
-                    (grid.cols, grid.rows),
-                    ((rect.w / 10.0) as u16, (rect.h / 10.0) as u16)
-                );
-                if *id == active || *id == previous_active {
-                    assert!(grid.dirty_rows().count() > 0, "split participants must redraw");
-                }
-            }
-            assert!(
-                window.panes[&active].pty.is_none(),
-                "shell failure does not refuse a valid split"
-            );
-        }
-    }
-}
-
-#[test]
-fn main_split_refusal_preserves_zoom_focus_and_live_panes() {
-    // Invalid focus and missing live state must leave the pre-existing zoomed topology unchanged.
-    for missing_live_pane in [false, true] {
-        let mut app = app_with_unavailable_shell();
-        let pane = app.__test_seed_tab("main");
-        let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
-        assert!(app.__test_set_main_pane_viewport(outer, 10.0, 10.0));
-        app.toggle_active_pane_zoom();
-        let window = app.main_mut().expect("main window");
-        if missing_live_pane {
-            window.panes.remove(&pane);
-        } else {
-            window.tab_states[0].active_pane = u64::MAX;
-        }
-        let active = window.tab_states[0].active_pane;
-        let mut panes_before: Vec<_> = window.panes.keys().copied().collect();
-        panes_before.sort_unstable();
-        let layout_before = window.tab_states[0].tree.layout(outer);
-
-        app.split_active(Direction::Right);
-
-        let window = app.main().expect("main window");
-        let tab = &window.tab_states[0];
-        let mut panes_after: Vec<_> = window.panes.keys().copied().collect();
-        panes_after.sort_unstable();
-        assert_eq!(panes_after, panes_before);
-        assert_eq!(tab.active_pane, active);
-        assert_eq!(tab.tree.leaves(), [pane]);
-        assert_eq!(tab.tree.zoomed_pane_id(), Some(pane));
-        assert_eq!(tab.tree.layout(outer), layout_before);
-    }
-}
-
-#[test]
-fn main_split_without_window_or_tab_leaves_topology_empty() {
-    // Missing destinations are no-ops rather than installing a pane outside a tab tree.
-    let mut app = app_with_unavailable_shell();
-    app.split_active(Direction::Down);
-    assert!(app.main_window_id.is_none());
-    assert!(app.windows.is_empty());
-
-    app.__test_synthetic_main();
-    app.split_active(Direction::Down);
-    let window = app.main().expect("synthetic main");
-    assert!(window.tab_states.is_empty());
-    assert!(window.panes.is_empty());
-}
-
-/// Both main spawn routes must pass the active pane's OSC 7 directory to the PTY boundary.
-#[test]
-fn main_tab_and_split_inherit_exact_active_pane_cwd() {
-    for split in [false, true] {
-        let mut app = app_with_unavailable_shell();
-        let pane = app.__test_seed_tab("source");
-        app.__test_seed_tab("unrelated tab");
-        app.main_mut().unwrap().tabs.activate(0);
-        let child = app.__test_seed_child_window(&["unrelated window"]);
-        app.frontmost_window = Some(child);
-        let native = if cfg!(windows) { "/C:/work/source" } else { "/work/source" };
-        app.__test_advance_pane_parser(
-            pane,
-            format!("\x1b]7;file://localhost{native}\x07").as_bytes(),
-        );
-        if split {
-            app.split_active(Direction::Right);
-        } else {
-            app.new_tab("new");
-        }
-        let expected = if cfg!(windows) { r"C:\work\source" } else { "/work/source" };
-        let launches = app.test_pane_launches.borrow();
-        assert_eq!(launches.len(), 1);
-        assert_eq!(launches[0].1.cwd, Some(std::path::PathBuf::from(expected)));
-    }
-}
-
-/// Finishing a prompt must not start execution timing while the user edits the command.
-#[test]
-fn prompt_end_does_not_start_command_timer() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let mut started = None;
-    process_pane_vt_batch_with(
-        &handles,
-        b"\x1b]133;B\x07",
-        None,
-        &mut started,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        Instant::now,
-        |_| {},
-    );
-    assert_eq!(started, None);
-}
-
-/// Execution duration starts at C, not B, and B/D without execution has no duration.
-#[test]
-fn command_duration_excludes_prompt_editing_time() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let base = Instant::now();
-    let mut times =
-        [0, 60, 63, 64, 70].into_iter().map(|seconds| base + Duration::from_secs(seconds));
-    let mut started = None;
-    process_pane_vt_batch_with(
-        &handles,
-        b"\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;B\x07\x1b]133;D;0\x07",
-        None,
-        &mut started,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        || times.next().unwrap(),
-        |_| {},
-    );
-    let events = handles.command_events.lock();
-    assert_eq!(events[0].event, CommandEvent::PromptEnd);
-    assert_eq!(events[1].event, CommandEvent::CmdStart);
-    assert_eq!(events[2].duration, Some(Duration::from_secs(3)));
-    assert_eq!(events[4].duration, None);
-    assert_eq!(started, None);
-}
-
 /// A pane and its worker handles that stage captures and trim media in private
 /// pools, so a batch that opens a capture is admitted whatever sibling tests hold.
-fn pane_and_worker_handles() -> (PaneState, PaneVtHandles) {
+pub(super) fn pane_and_worker_handles() -> (PaneState, PaneVtHandles) {
     let parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());
     let pane = PaneState::new_with_media_pool(
         Arc::new(Mutex::new(parser)),
@@ -360,292 +30,8 @@ fn pane_and_worker_handles() -> (PaneState, PaneVtHandles) {
     (pane, worker)
 }
 
-/// The app-side VT dispatcher must process every host-owned event after releasing the parser.
-#[test]
-fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let parser = handles.parser.clone();
-    let base = Instant::now();
-    let mut ticks = [base, base + Duration::from_secs(7)].into_iter();
-    let mut command_started = None;
-    let mut emitted = Vec::new();
-    let mut decoder_unlocked = None;
-    let payload = base64::engine::general_purpose::STANDARD.encode("copied");
-    let bytes = format!(
-        "\x1b_Gf=100,a=T;image\x1b\\\x1b[?25l\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m\x1b[>1u\x1b]52;c;{payload}\x1b\\\x1b]133;C\x1b\\\x1b]133;D;0\x1b\\"
-    );
-
-    process_pane_vt_batch_with(
-        &handles,
-        bytes.as_bytes(),
-        None,
-        &mut command_started,
-        &mut SyncLatch::default(),
-        |media| {
-            decoder_unlocked = Some(parser.try_lock().is_some());
-            assert_eq!(media.protocol, MediaProtocol::Kitty);
-            Some(InlineImage {
-                id: 1,
-                row: media.row,
-                col: media.col,
-                width: 1,
-                height: 1,
-                bgra: Arc::from([1, 2, 3, 255]),
-            })
-        },
-        |event| emitted.push(event),
-        || ticks.next().expect("one timestamp per command marker"),
-        |_| {},
-    );
-
-    assert_eq!(
-        decoder_unlocked,
-        Some(true),
-        "a media event must reach decoding only after the parser guard is released"
-    );
-    assert!(!handles.cursor_visible.load(Ordering::Relaxed));
-    // One atomic publication keeps the keyboard modes, Kitty flags, and routing epoch coherent.
-    let snapshot = handles.keyboard_input.load(Ordering::Relaxed);
-    assert_eq!(snapshot, parser.lock().keyboard_input_snapshot());
-    assert_eq!((snapshot >> 8) as u8, 1);
-    let keyboard_modes = sonicterm_vt::vt::KeyboardModes::from_bits(snapshot as u8);
-    assert!(keyboard_modes.application_cursor_keys());
-    assert!(keyboard_modes.application_keypad());
-    assert!(keyboard_modes.backarrow_key());
-    assert!(keyboard_modes.newline());
-    assert_eq!(keyboard_modes.modify_other_keys(), 2);
-    let attempts =
-        crate::app::spawn_pane::ClipAttempts { total: 1, accepted: 1, refused: 0, latest: None };
-    assert_eq!(
-        emitted,
-        [
-            UserEvent::ClipboardWrite { pane_id: 0, text: "copied".into() },
-            UserEvent::ClipboardAttempts { pane_id: 0, attempts },
-        ]
-    );
-    let commands = handles.command_events.lock();
-    assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0].event, CommandEvent::CmdStart);
-    assert_eq!(commands[1].event, CommandEvent::CmdEnd(Some(0)));
-    assert_eq!(commands[1].duration, Some(Duration::from_secs(7)));
-    drop(commands);
-    let images = handles.inline_images.lock();
-    assert_eq!(images.len(), 1);
-    assert_eq!(&*images[0].bgra, &[1, 2, 3, 255]);
-}
-
-#[test]
-fn pane_keyboard_snapshot_initializes_from_existing_parser_state() {
-    // A pane attached to an already-negotiated parser must not briefly expose default keyboard flags.
-    let mut parser = Parser::new(Grid::new(80, 24));
-    parser.advance(b"\x1b[?9001h\x1b[?1h");
-    let expected = parser.keyboard_input_snapshot();
-    let pane = PaneState::new(Arc::new(Mutex::new(parser)), None);
-    assert_eq!(pane.keyboard_input.load(Ordering::Relaxed), expected);
-}
-
-#[test]
-fn parser_test_input_publishes_negotiated_keyboard_snapshot() {
-    // Native input integration feeds genuine child output through the same coherent negotiation snapshot.
-    let mut app = App::new(Default::default(), Default::default(), Default::default());
-    let pane_id = app.__test_seed_tab("native-negotiation");
-    assert!(app.__test_advance_pane_parser(pane_id, b"\x1b[?9001h"));
-    let pane = app.pane_by_id(pane_id).unwrap();
-    assert_eq!(
-        pane.keyboard_input.load(Ordering::Relaxed),
-        pane.parser.lock().keyboard_input_snapshot()
-    );
-}
-
-/// A VT batch publishes the pointer-routing byte after it parses, so a pointer handler
-/// reads tracking, SGR, alternate-screen and DECCKM state the batch set without locking.
-#[test]
-fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let mut command_started = None;
-    process_pane_vt_batch_with(
-        &handles,
-        b"\x1b[?1002h\x1b[?1006h\x1b[?1049h\x1b[?1h",
-        None,
-        &mut command_started,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        Instant::now,
-        |_| {},
-    );
-    let published = handles.pointer_input.load(Ordering::Relaxed);
-    assert_eq!(published, handles.parser.lock().pointer_input_snapshot());
-    let modes = sonicterm_vt::vt::PointerModes::from_bits(published);
-    assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::ButtonMotion);
-    assert!(modes.sgr() && modes.is_alt() && modes.application_cursor());
-
-    // A later batch that resets the modes republishes them; the byte never keeps a stale mode.
-    process_pane_vt_batch_with(
-        &handles,
-        b"\x1b[?1002l\x1b[?1049l",
-        None,
-        &mut command_started,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        Instant::now,
-        |_| {},
-    );
-    let modes =
-        sonicterm_vt::vt::PointerModes::from_bits(handles.pointer_input.load(Ordering::Relaxed));
-    assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::Off);
-    assert!(modes.sgr() && !modes.is_alt() && modes.application_cursor());
-}
-
-/// A pane attached to a parser that already negotiated mouse tracking starts with that
-/// state published, so the first pointer event never routes with default modes.
-#[test]
-fn pane_pointer_snapshot_initializes_from_existing_parser_state() {
-    let mut parser = Parser::new(Grid::new(80, 24));
-    parser.advance(b"\x1b[?1003h\x1b[?1006h");
-    let expected = parser.pointer_input_snapshot();
-    let pane = PaneState::new(Arc::new(Mutex::new(parser)), None);
-    assert_eq!(pane.pointer_input.load(Ordering::Relaxed), expected);
-    assert_eq!(pane.pointer_modes().tracking(), sonicterm_vt::vt::MouseTracking::AnyMotion);
-}
-
-/// The main and child parser test hooks publish the pointer byte as the VT worker does,
-/// so integration tests that set modes through them drive the real pointer routes.
-#[test]
-fn parser_test_hooks_publish_pointer_snapshot_in_main_and_child() {
-    let mut app = App::new(Default::default(), Default::default(), Default::default());
-    let pane_id = app.__test_seed_tab("pointer-main");
-    assert!(app.__test_advance_pane_parser(pane_id, b"\x1b[?1000h"));
-    let pane = app.pane_by_id(pane_id).unwrap();
-    assert_eq!(pane.pointer_modes().tracking(), sonicterm_vt::vt::MouseTracking::Button);
-
-    let child = app.__test_seed_child_window(&["pointer-child"]);
-    let child_pane = app.windows[&child].tab_states[0].active_pane;
-    assert!(app.__test_advance_child_pane_parser(child, child_pane, b"\x1b[?1003h\x1b[?1049h"));
-    let modes = app.windows[&child].panes[&child_pane].pointer_modes();
-    assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::AnyMotion);
-    assert!(modes.is_alt());
-}
-
-/// Worker handles derived from a completed pane must share every mutable store with that pane.
-#[test]
-fn pane_derived_worker_handles_share_every_store_with_the_pane() {
-    let (pane, worker) = pane_and_worker_handles();
-
-    assert!(Arc::ptr_eq(&worker.parser, &pane.parser));
-    assert!(Arc::ptr_eq(&worker.redraw_target, &pane.redraw_target));
-    assert!(Arc::ptr_eq(&worker.command_events, &pane.command_events));
-    assert!(Arc::ptr_eq(&worker.inline_images, &pane.inline_images));
-    assert!(Arc::ptr_eq(&worker.cursor_visible, &pane.cursor_visible));
-    assert!(Arc::ptr_eq(&worker.keyboard_input, &pane.keyboard_input));
-    assert!(Arc::ptr_eq(&worker.pointer_input, &pane.pointer_input));
-    assert!(Arc::ptr_eq(&worker.inline_media_charge, &pane.inline_media_charge));
-    assert!(Arc::ptr_eq(&worker.sync_word, &pane.sync_word));
-    assert!(Arc::ptr_eq(&worker.sync_deadline_word, &pane.sync_deadline_word));
-    assert!(Arc::ptr_eq(&worker.sync_resets, &pane.sync_resets));
-}
-
-/// The media pool outlives the app while a VT worker still holds a pane's
-/// charge, and the charge returns its slot once the worker lets go.
-#[test]
-fn a_worker_keeps_the_media_pool_alive_after_the_app_closes() {
-    let pool = crate::app::media::InlineMediaPool::new();
-    let mut app = crate::app::App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        sonicterm_cfg::config::Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    )
-    .with_inline_media_pool(pool.clone());
-    let pane_id = app.__test_seed_tab("worker");
-    let main = app.__test_main_window_id().expect("the synthetic main window exists");
-    let worker = PaneVtHandles::from_pane_state(&app.windows[&main].panes[&pane_id]);
-
-    drop(app);
-    assert_eq!(pool.live_charges(), 1, "the worker still holds the pane's charge");
-    assert!(Arc::ptr_eq(worker.inline_media_charge.lock().pool(), &pool));
-
-    drop(worker);
-    assert_eq!(pool.live_charges(), 0, "the last holder returns the charge");
-}
-
-/// The production worker wrapper publishes only after complete batch side effects return and both locks are free.
-#[test]
-fn worker_output_generation_is_published_after_complete_nonempty_batches() {
-    let (pane, handles) = pane_and_worker_handles();
-    assert!(Arc::ptr_eq(&pane.output_generation, &handles.output_generation));
-    let generation = Arc::clone(&handles.output_generation);
-    let mut replies = 0;
-    process_pane_vt_batch_and_publish(
-        &handles,
-        b"x\x1b[6n",
-        None,
-        &mut None,
-        &mut SyncLatch::default(),
-        None,
-        |_| {
-            replies += 1;
-            assert_eq!(
-                generation.load(Ordering::Acquire),
-                0,
-                "publication must follow reply dispatch"
-            );
-            assert!(handles.parser.try_lock().is_some());
-            assert!(handles.inline_images.try_lock().is_some());
-        },
-    );
-    assert_eq!(replies, 1);
-    assert_eq!(generation.load(Ordering::Acquire), 1);
-    assert!(handles.parser.try_lock().is_some());
-    assert!(handles.inline_images.try_lock().is_some());
-    process_pane_vt_batch_and_publish(
-        &handles,
-        b"",
-        None,
-        &mut None,
-        &mut SyncLatch::default(),
-        None,
-        |_| {},
-    );
-    assert_eq!(generation.load(Ordering::Acquire), 1, "empty input is not output publication");
-    process_pane_vt_batch_and_publish(
-        &handles,
-        b"y",
-        None,
-        &mut None,
-        &mut SyncLatch::default(),
-        None,
-        |_| {},
-    );
-    assert_eq!(generation.load(Ordering::Acquire), 2);
-}
-
-/// Main and child spawn the same pane-owned worker, and publication precedes its coalesced redraw dispatch.
-#[test]
-fn worker_spawn_roles_publish_their_own_pane_not_an_app_global() {
-    let source = include_str!("spawn_pane.rs");
-    let child = concat!(
-        include_str!("child_window.rs"),
-        include_str!("child_tabs.rs"),
-        include_str!("splitter_input.rs"),
-        include_str!("child_window_pointer.rs"),
-        include_str!("child_window_redraw.rs")
-    );
-    assert!(!source.contains("pty_burst_gen") && !child.contains("pty_burst_gen"));
-    assert!(source.contains("output_generation: pane.output_generation.clone()"));
-    assert!(child.contains("super::spawn_pane::spawn_pane_workers("));
-    let wrapper = source.find("fn process_pane_vt_batch_and_publish<").unwrap();
-    assert!(source[wrapper..].contains("publish_pane_vt_batch_with("));
-    let publisher = source.find("fn publish_pane_vt_batch_with<").unwrap();
-    let parse = source[publisher..].find("process_pane_vt_batch_with(").unwrap();
-    let publish = source[publisher..]
-        .find("handles.output_generation.fetch_add(1, Ordering::Release)")
-        .unwrap();
-    assert!(parse < publish);
-}
-
 /// A pane worker whose pane counts into `stats`.
-fn counting_worker_handles(
+pub(super) fn counting_worker_handles(
     stats: &Arc<crate::app::frame_counters::VtFrameStats>,
 ) -> (PaneState, PaneVtHandles) {
     let parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());
@@ -660,215 +46,8 @@ fn counting_worker_handles(
     (pane, worker)
 }
 
-/// A counting worker reads its clock once before `lock()` and three times under the guard, and
-/// records wait, parse and hold from those instants once the guard has dropped.
-#[test]
-fn counting_worker_times_each_parser_section_from_four_clock_reads() {
-    use std::sync::atomic::Ordering::Relaxed;
-    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
-    let (_pane, handles) = counting_worker_handles(&stats);
-    let start = Instant::now();
-    let mut clock_reads = 0_u64;
-    let clock = || {
-        clock_reads += 1;
-        start + Duration::from_micros(clock_reads * 10)
-    };
-    process_pane_vt_batch_with(
-        &handles,
-        b"hello",
-        None,
-        &mut None,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        clock,
-        |_| {},
-    );
-    assert_eq!(clock_reads, 4, "one read before lock() and three under the guard");
-    let (wait, parse, hold) = (
-        stats.parser_lock_wait.snapshot(),
-        stats.parse.snapshot(),
-        stats.parser_lock_hold.snapshot(),
-    );
-    assert_eq!((wait.sum_us(), parse.sum_us(), hold.sum_us()), (10, 10, 20));
-    assert_eq!((stats.batches.load(Relaxed), stats.parse_bytes.load(Relaxed)), (1, 5));
-}
-
-/// With its App's gate off a worker reads no clock for a plain batch.
-#[test]
-fn worker_without_counters_reads_no_clock() {
-    let (_pane, handles) = pane_and_worker_handles();
-    assert!(handles.frame_counters.is_none());
-    let mut clock_reads = 0_u32;
-    let clock = || {
-        clock_reads += 1;
-        Instant::now()
-    };
-    process_pane_vt_batch_with(
-        &handles,
-        b"hello",
-        None,
-        &mut None,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        clock,
-        |_| {},
-    );
-    assert_eq!(clock_reads, 0);
-}
-
-/// A targeted flush is published before its output event is sent, a second one before the
-/// redraw only coalesces, an untargeted one stores nothing, and without counters the send is
-/// unchanged. The token is cleared between sends, as servicing each event would.
-#[test]
-fn output_redraw_publishes_the_flush_before_sending() {
-    use std::sync::atomic::Ordering::{Acquire, Relaxed};
-    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
-    let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
-    let window_id = WindowId::from(7);
-    let target = Mutex::new(Some(window_id));
-    let outstanding = AtomicBool::new(false);
-    let mut sent = Vec::new();
-    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
-        assert_ne!(counters.pending_flush.load(Acquire), 0, "published before the send");
-        sent.push(window);
-        true
-    });
-    outstanding.store(false, Relaxed);
-    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
-        sent.push(window);
-        true
-    });
-    assert_eq!((stats.flushes.load(Relaxed), stats.flushes_coalesced.load(Relaxed)), (2, 1));
-    assert_ne!(counters.pending_flush.swap(0, Acquire), 0);
-    let untargeted = Mutex::new(None::<WindowId>);
-    outstanding.store(false, Relaxed);
-    send_output_redraw(&untargeted, &outstanding, Some(&counters), Instant::now, |window| {
-        sent.push(window);
-        true
-    });
-    assert_eq!(counters.pending_flush.load(Relaxed), 0, "nothing stored without a target");
-    assert_eq!(stats.flushes_untargeted.load(Relaxed), 1);
-    send_output_redraw(&target, &outstanding, None, Instant::now, |window| {
-        sent.push(window);
-        true
-    });
-    assert_eq!(sent, [window_id; 3]);
-}
-
-/// N targeted flushes before their event is serviced send one event and count N-1 as
-/// suppressed while every flush still counts; the oldest pending timestamp stays; an untargeted
-/// flush counts as untargeted, leaves the token alone and is never counted as suppressed.
-#[test]
-fn outstanding_output_event_coalesces_later_flushes() {
-    use std::sync::atomic::Ordering::{Acquire, Relaxed};
-    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
-    let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
-    let window_id = WindowId::from(7);
-    let target = Mutex::new(Some(window_id));
-    let outstanding = AtomicBool::new(false);
-    let mut sent = Vec::new();
-    let flush_count = 5_u64;
-    let mut first_published = 0;
-    for flush in 0..flush_count {
-        send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
-            sent.push(window);
-            true
-        });
-        if flush == 0 {
-            first_published = counters.pending_flush.load(Acquire);
-        }
-    }
-    assert_eq!(sent, [window_id], "one event while it is outstanding");
-    assert!(outstanding.load(Acquire), "the token stays set until the event is serviced");
-    assert_eq!(stats.flushes.load(Relaxed), flush_count);
-    assert_eq!(stats.flushes_suppressed.load(Relaxed), flush_count - 1);
-    assert_eq!(counters.pending_flush.load(Acquire), first_published, "oldest flush kept");
-
-    let untargeted = Mutex::new(None::<WindowId>);
-    send_output_redraw(&untargeted, &outstanding, Some(&counters), Instant::now, |window| {
-        sent.push(window);
-        true
-    });
-    assert_eq!(stats.flushes_untargeted.load(Relaxed), 1);
-    assert_eq!(
-        stats.flushes_suppressed.load(Relaxed),
-        flush_count - 1,
-        "untargeted is not suppressed"
-    );
-    assert!(outstanding.load(Acquire), "an untargeted flush leaves the token");
-    outstanding.store(false, Relaxed);
-    send_output_redraw(&untargeted, &outstanding, Some(&counters), Instant::now, |window| {
-        sent.push(window);
-        true
-    });
-    assert!(!outstanding.load(Acquire), "an untargeted flush never sets the token");
-    assert_eq!(sent, [window_id]);
-}
-
-/// A send the event loop refuses (it has gone) clears the token and is not counted as
-/// suppressed, so the next flush sends again; a delivered send leaves the token set.
-#[test]
-fn failed_output_send_clears_the_token_and_the_next_flush_sends() {
-    use std::sync::atomic::Ordering::{Acquire, Relaxed};
-    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
-    let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
-    let window_id = WindowId::from(7);
-    let target = Mutex::new(Some(window_id));
-    let outstanding = AtomicBool::new(false);
-    let mut attempts = Vec::new();
-    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
-        attempts.push(window);
-        false
-    });
-    assert!(!outstanding.load(Acquire), "a failed send releases the token");
-    assert_eq!(stats.flushes_suppressed.load(Relaxed), 0, "a failed send is not suppressed");
-    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
-        attempts.push(window);
-        true
-    });
-    assert_eq!(attempts, [window_id; 2], "the next flush sends");
-    assert!(outstanding.load(Acquire), "a delivered send holds the token");
-    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
-        attempts.push(window);
-        true
-    });
-    assert_eq!(attempts, [window_id; 2]);
-    assert_eq!(stats.flushes_suppressed.load(Relaxed), 1);
-}
-
-/// With the App's gate off a worker still coalesces through the token, but reads no flush clock;
-/// with it on, every targeted flush reads the clock once, sent or suppressed.
-#[test]
-fn gate_off_output_events_still_coalesce_without_reading_the_flush_clock() {
-    use crate::app::frame_counters::flush_clock_reads;
-    let window_id = WindowId::from(7);
-    let target = Mutex::new(Some(window_id));
-    let outstanding = AtomicBool::new(false);
-    let mut sent = Vec::new();
-    let before = flush_clock_reads();
-    for _ in 0..3 {
-        send_output_redraw(&target, &outstanding, None, Instant::now, |window| {
-            sent.push(window);
-            true
-        });
-    }
-    assert_eq!(sent, [window_id], "the token coalesces with the gate off too");
-    assert_eq!(flush_clock_reads(), before, "no clock read with the gate off");
-
-    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
-    let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
-    let gate_on = AtomicBool::new(false);
-    let before = flush_clock_reads();
-    for _ in 0..3 {
-        send_output_redraw(&target, &gate_on, Some(&counters), Instant::now, |_| true);
-    }
-    assert_eq!(flush_clock_reads(), before + 3, "one read per targeted flush with the gate on");
-}
-
 /// The pane's published synchronized-output word, decoded deadline and reset count.
-fn published_sync(handles: &PaneVtHandles) -> (u64, Option<Instant>, u64) {
+pub(super) fn published_sync(handles: &PaneVtHandles) -> (u64, Option<Instant>, u64) {
     (
         handles.sync_word.load(Ordering::Acquire),
         read_published_sync(&handles.sync_word, &handles.sync_deadline_word).deadline,
@@ -876,101 +55,11 @@ fn published_sync(handles: &PaneVtHandles) -> (u64, Option<Instant>, u64) {
     )
 }
 
-/// Under a held parser guard the published word equals the parser's `synchronized_output()`, the
-/// reset count is the parser's, and a set word carries the deadline stored with its epoch: the
-/// injected clock at the batch that opened the epoch plus the 150 ms bound. A repeated set keeps
-/// that deadline, and a new epoch gets a new one.
-#[test]
-fn sync_word_matches_the_parser_under_its_guard() {
-    use crate::app::sync_clock;
-    let (_pane, handles) = pane_and_worker_handles();
-    let origin = sync_clock::origin();
-    let mut clock_ms = 10_u64;
-    let mut latch = SyncLatch::default();
-    let feed = |bytes: &[u8], at_ms: u64, latch: &mut SyncLatch| {
-        let at = origin + Duration::from_millis(at_ms);
-        process_pane_vt_batch_with(
-            &handles,
-            bytes,
-            None,
-            &mut None,
-            latch,
-            |_| None,
-            |_| {},
-            || at,
-            |_| {},
-        );
-    };
-    let check = |expected_deadline_ms: Option<u64>| {
-        let parser = handles.parser.lock();
-        let state = parser.synchronized_output();
-        let (word, deadline, resets) = published_sync(&handles);
-        assert_eq!(word, sync_word_of(state), "{state:?}");
-        assert_eq!(resets, state.resets);
-        if let Some(deadline_ms) = expected_deadline_ms {
-            let expected = Duration::from_millis(deadline_ms) + SYNC_OUTPUT_TIMEOUT;
-            assert_eq!(deadline, Some(origin + expected));
-        }
-    };
-    check(None);
-    // A fresh pane holds nothing: its word is clear and its deadline has already passed.
-    assert_eq!(published_sync(&handles), (0, Some(origin), 0));
-
-    feed(b"\x1b[?2026hrow", clock_ms, &mut latch);
-    check(Some(10));
-    clock_ms += 40;
-    feed(b"\x1b[?2026hmore", clock_ms, &mut latch);
-    check(Some(10));
-    clock_ms += 40;
-    feed(b"\x1b[?2026l", clock_ms, &mut latch);
-    check(None);
-    assert!(latch.reset_pending, "the reset is latched for the flush decision");
-    clock_ms += 40;
-    feed(b"\x1b[?2026h", clock_ms, &mut latch);
-    check(Some(130));
-    feed(b"\x1bc", clock_ms, &mut latch);
-    check(None);
-    assert_eq!(published_sync(&handles).2, 2, "RIS is published as a reset");
-}
-
-/// A reader that takes the parser guard while a worker thread opens and closes updates always sees
-/// the word that matches the parser it holds: both are written under that guard.
-#[test]
-fn sync_word_never_disagrees_with_a_held_parser_across_threads() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let worker_handles = handles.clone();
-    let worker = std::thread::spawn(move || {
-        let mut latch = SyncLatch::default();
-        for _ in 0..500 {
-            for bytes in [&b"\x1b[?2026hx"[..], b"\x1b[?2026l", b"\x1b[?2026h\x1b[?2026ly"] {
-                process_pane_vt_batch_and_publish(
-                    &worker_handles,
-                    bytes,
-                    None,
-                    &mut None,
-                    &mut latch,
-                    None,
-                    |_| {},
-                );
-            }
-        }
-    });
-    let mut checks = 0_u32;
-    while !worker.is_finished() || checks == 0 {
-        let parser = handles.parser.lock();
-        let state = parser.synchronized_output();
-        assert_eq!(handles.sync_word.load(Ordering::Acquire), sync_word_of(state));
-        assert_eq!(handles.sync_resets.load(Ordering::Relaxed), state.resets);
-        checks += 1;
-    }
-    worker.join().unwrap();
-}
-
 /// Run one batch as the VT worker does: note it, parse and publish it through the production
 /// publisher with the worker's latch, then take the flush decision. One instant, `at`, is both the
 /// publication's clock (the deadline) and the decision's. Each send records the
 /// output generation it observed, so a test can tell whether the batch was published first.
-fn worker_step(
+pub(super) fn worker_step(
     handles: &PaneVtHandles,
     flush: &mut OutputFlush,
     bytes: &[u8],
@@ -993,50 +82,8 @@ fn worker_step(
         .after_batch(handles, at, || sends.push(handles.output_generation.load(Ordering::Acquire)));
 }
 
-/// Without synchronized output the worker's flush decision is the coalescer it has always been:
-/// a small batch waits, 128 KiB or 8 ms of pending age flushes, the 3 ms quiet wake flushes once,
-/// and disconnect flushes pending output. Separate workers keep each case to one interval flush,
-/// which the debug coalescer probe spaces in real time.
-#[test]
-fn unbracketed_output_flushes_on_size_age_quiet_and_disconnect() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let start = Instant::now();
-    let mut sends = Vec::new();
-
-    let mut by_size = OutputFlush::new(1, &handles);
-    assert_eq!(by_size.wait(start), PANE_IDLE_WAIT, "an idle worker parks");
-    worker_step(&handles, &mut by_size, b"a", start, &mut sends);
-    assert!(sends.is_empty(), "a small fresh batch is coalesced");
-    assert_eq!(by_size.wait(start), crate::app::PTY_REDRAW_QUIESCENT);
-    let large = vec![b'x'; crate::app::PTY_REDRAW_FLUSH_BYTES];
-    worker_step(&handles, &mut by_size, &large, start, &mut sends);
-    assert_eq!(sends.len(), 1, "128 KiB pending flushes at once");
-    assert_eq!(by_size.wait(start), PANE_IDLE_WAIT);
-
-    let mut by_age = OutputFlush::new(1, &handles);
-    worker_step(&handles, &mut by_age, b"a", start, &mut sends);
-    worker_step(&handles, &mut by_age, b"b", start + Duration::from_millis(7), &mut sends);
-    assert_eq!(sends.len(), 1, "7 ms of pending age is not enough");
-    worker_step(&handles, &mut by_age, b"c", start + Duration::from_millis(8), &mut sends);
-    assert_eq!(sends.len(), 2, "8 ms of pending age flushes");
-
-    let mut quiet = OutputFlush::new(1, &handles);
-    quiet.on_quiet(&handles, start, || sends.push(0));
-    assert_eq!(sends.len(), 2, "a quiet wake with nothing pending sends nothing");
-    worker_step(&handles, &mut quiet, b"a", start, &mut sends);
-    quiet.on_quiet(&handles, start + Duration::from_millis(3), || sends.push(0));
-    assert_eq!(sends.len(), 3, "the quiet wake flushes pending output once");
-
-    let mut disconnect = OutputFlush::new(1, &handles);
-    disconnect.on_disconnect(|| sends.push(0));
-    assert_eq!(sends.len(), 3, "a disconnect with nothing pending sends nothing");
-    worker_step(&handles, &mut disconnect, b"a", start, &mut sends);
-    disconnect.on_disconnect(|| sends.push(0));
-    assert_eq!(sends.len(), 4, "a disconnect flushes pending output");
-}
-
 /// The instant the pane's published synchronized-output deadline names.
-fn published_deadline(handles: &PaneVtHandles) -> Instant {
+pub(super) fn published_deadline(handles: &PaneVtHandles) -> Instant {
     read_published_sync(&handles.sync_word, &handles.sync_deadline_word)
         .deadline
         .expect("the deadline belongs to the published epoch")
@@ -1044,10 +91,10 @@ fn published_deadline(handles: &PaneVtHandles) -> Instant {
 
 /// One captured tracing event: its target, message and integer fields.
 #[derive(Clone, Debug, Default)]
-struct SyncLogEvent {
-    target: String,
-    message: String,
-    fields: Vec<(String, u64)>,
+pub(super) struct SyncLogEvent {
+    pub(super) target: String,
+    pub(super) message: String,
+    pub(super) fields: Vec<(String, u64)>,
 }
 
 impl tracing::field::Visit for SyncLogEvent {
@@ -1064,7 +111,7 @@ impl tracing::field::Visit for SyncLogEvent {
 
 /// A layer that keeps every event it sees.
 #[derive(Clone, Default)]
-struct SyncLogCapture(Arc<Mutex<Vec<SyncLogEvent>>>);
+pub(super) struct SyncLogCapture(Arc<Mutex<Vec<SyncLogEvent>>>);
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SyncLogCapture {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
@@ -1076,7 +123,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SyncLogCapture {
 }
 
 /// Run `body` under a capturing subscriber and return what it logged.
-fn capture_sync_log(body: impl FnOnce()) -> Vec<SyncLogEvent> {
+pub(super) fn capture_sync_log(body: impl FnOnce()) -> Vec<SyncLogEvent> {
     use tracing_subscriber::layer::SubscriberExt;
     let capture = SyncLogCapture::default();
     let subscriber = tracing_subscriber::Registry::default().with(capture.clone());
@@ -1085,258 +132,13 @@ fn capture_sync_log(body: impl FnOnce()) -> Vec<SyncLogEvent> {
     events
 }
 
-/// While a synchronized update is open the worker keeps parsing but sends nothing, past 128 KiB
-/// and past 8 ms of pending age, and waits only until the update's deadline; the reset sends
-/// exactly one output event and the worker returns to idle.
-#[test]
-fn an_open_update_holds_output_until_its_reset() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let mut flush = OutputFlush::new(1, &handles);
-    let mut sends = Vec::new();
-    let start = test_base();
-    worker_step(&handles, &mut flush, b"\x1b[?2026h", start, &mut sends);
-    let deadline = published_deadline(&handles);
-    let large = vec![b'x'; crate::app::PTY_REDRAW_FLUSH_BYTES];
-    worker_step(&handles, &mut flush, &large, start + Duration::from_millis(1), &mut sends);
-    worker_step(&handles, &mut flush, b"row", start + Duration::from_millis(9), &mut sends);
-    assert!(sends.is_empty(), "held output sends nothing past the size and age thresholds");
-    let at = start + Duration::from_millis(10);
-    assert_eq!(flush.wait(at), deadline.saturating_duration_since(at), "wake at the deadline");
-    assert!(flush.wait(at) > crate::app::PTY_REDRAW_QUIESCENT);
-    flush.on_quiet(&handles, start + Duration::from_millis(12), || sends.push(0));
-    assert!(sends.is_empty(), "a quiet wake before the deadline sends nothing");
-    worker_step(
-        &handles,
-        &mut flush,
-        b"\x1b[?2026l",
-        start + Duration::from_millis(20),
-        &mut sends,
-    );
-    assert_eq!(sends.len(), 1, "the reset sends exactly one output event");
-    assert_eq!(flush.wait(start + Duration::from_millis(20)), PANE_IDLE_WAIT);
-}
-
-/// A silent stuck update is released at its deadline, not before: one output event, one
-/// `sync_timeouts`, and one debug line naming the pane and epoch. Later output in that epoch
-/// flushes normally, and a new update holds again.
-#[test]
-fn a_stuck_update_is_released_once_at_its_deadline() {
-    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
-    let (_pane, handles) = counting_worker_handles(&stats);
-    let mut flush = OutputFlush::new(7, &handles);
-    let mut sends = Vec::new();
-    let start = test_base();
-    worker_step(&handles, &mut flush, b"\x1b[?2026hrow", start, &mut sends);
-    let deadline = published_deadline(&handles);
-    flush.on_quiet(&handles, deadline - Duration::from_nanos(1), || sends.push(0));
-    assert!(sends.is_empty(), "one nanosecond early sends nothing");
-    let log = capture_sync_log(|| flush.on_quiet(&handles, deadline, || sends.push(0)));
-    assert_eq!(sends.len(), 1, "the deadline releases the update once");
-    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
-    let released: Vec<_> =
-        log.iter().filter(|event| event.target == "sonicterm_app::sync_output").collect();
-    assert_eq!(released.len(), 1, "{log:?}");
-    assert!(released[0].message.contains("held past 150 ms"), "{:?}", released[0]);
-    assert!(released[0].fields.contains(&("pane_id".to_owned(), 7)), "{:?}", released[0]);
-    assert!(released[0].fields.contains(&("epoch".to_owned(), 1)), "{:?}", released[0]);
-    flush.on_quiet(&handles, deadline + Duration::from_millis(1), || sends.push(0));
-    assert_eq!(sends.len(), 1, "a released update is not released twice");
-
-    let after = deadline + Duration::from_millis(1);
-    worker_step(&handles, &mut flush, b"more", after, &mut sends);
-    assert_eq!(flush.wait(after), crate::app::PTY_REDRAW_QUIESCENT, "the epoch flushes normally");
-    flush.on_quiet(&handles, after + Duration::from_millis(3), || sends.push(0));
-    assert_eq!(sends.len(), 2);
-    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
-
-    // The mode is still set after a timeout, so a new update starts with its reset.
-    worker_step(
-        &handles,
-        &mut flush,
-        b"\x1b[?2026l",
-        after + Duration::from_millis(10),
-        &mut sends,
-    );
-    assert_eq!(sends.len(), 3, "the late reset flushes");
-    let reopened = after + Duration::from_millis(20);
-    worker_step(&handles, &mut flush, b"\x1b[?2026hnext", reopened, &mut sends);
-    let next_deadline = published_deadline(&handles);
-    flush.on_quiet(&handles, next_deadline - Duration::from_millis(1), || sends.push(0));
-    assert_eq!(sends.len(), 3, "a new update holds again");
-}
-
-/// A pane that closes in the middle of an update still shows its final output: disconnect
-/// flushes whatever the mode.
-#[test]
-fn disconnect_flushes_a_held_update() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let mut flush = OutputFlush::new(1, &handles);
-    let mut sends = Vec::new();
-    worker_step(&handles, &mut flush, b"\x1b[?2026hlast", test_base(), &mut sends);
-    assert!(sends.is_empty());
-    flush.on_disconnect(|| sends.push(0));
-    assert_eq!(sends.len(), 1);
-}
-
-/// A batch that ends one update and opens the next (`?2026l … ?2026h`) sends exactly one output
-/// event, and the next update holds from its own epoch until its reset.
-#[test]
-fn a_reset_and_set_in_one_batch_flushes_once_and_holds_again() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let mut flush = OutputFlush::new(1, &handles);
-    let mut sends = Vec::new();
-    let start = test_base();
-    worker_step(&handles, &mut flush, b"\x1b[?2026hA", start, &mut sends);
-    worker_step(&handles, &mut flush, b"B\x1b[?2026lC\x1b[?2026hD", start, &mut sends);
-    assert_eq!(sends.len(), 1, "the reset inside the batch flushes it");
-    assert!(!flush.sync_latch.reset_pending);
-    worker_step(&handles, &mut flush, b"E", start + Duration::from_millis(9), &mut sends);
-    let deadline = published_deadline(&handles);
-    flush.on_quiet(&handles, deadline - Duration::from_millis(1), || sends.push(0));
-    assert_eq!(sends.len(), 1, "the new epoch holds");
-    worker_step(
-        &handles,
-        &mut flush,
-        b"\x1b[?2026l",
-        start + Duration::from_millis(20),
-        &mut sends,
-    );
-    assert_eq!(sends.len(), 2);
-}
-
-/// The release event is sent only after the batch is published: when the sender runs, the
-/// generation has advanced and the batch's decoded image is already installed. Servicing the event
-/// then advances the window's `Output` cause, and no other cause, through the visible-output filter.
-#[test]
-fn release_is_sent_after_the_batch_generation_is_published() {
-    use crate::app::{
-        output_event::OutputEvent,
-        redraw::{FrameSettlement, RedrawCause},
-    };
-    let mut app = App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        sonicterm_cfg::config::Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    )
-    .with_capture_staging_pool(CaptureStagingPool::new())
-    .with_inline_media_pool(crate::app::media::InlineMediaPool::new());
-    app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
-    let pane_id = app.windows[&main].tab_states[0].active_pane;
-    let pane = &app.windows[&main].panes[&pane_id];
-    *pane.redraw_target.lock() = Some(main);
-    let handles = PaneVtHandles::from_pane_state(pane);
-    let mut flush = OutputFlush::new(pane_id, &handles);
-    let base = test_base();
-    let decode = |media: &MediaEvent| {
-        Some(InlineImage {
-            id: 1,
-            row: media.row,
-            col: media.col,
-            width: 1,
-            height: 1,
-            bgra: Arc::from([1, 2, 3, 255]),
-        })
-    };
-    let mut queued = Vec::new();
-    let deliver = |handles: &PaneVtHandles, queued: &mut Vec<(u64, usize)>| {
-        send_output_redraw(
-            &handles.redraw_target,
-            &handles.output_outstanding,
-            None,
-            Instant::now,
-            |_| {
-                queued.push((
-                    handles.output_generation.load(Ordering::Acquire),
-                    handles.inline_images.lock().len(),
-                ));
-                true
-            },
-        );
-    };
-
-    // A previous batch has been flushed, serviced and presented, so its generation is settled.
-    flush.receive(5, base);
-    publish_pane_vt_batch_with(
-        &handles,
-        b"first",
-        None,
-        &mut None,
-        &mut flush.sync_latch,
-        decode,
-        |_| {},
-        || base,
-        |_| {},
-    );
-    deliver(&handles, &mut queued);
-    app.service_output_event(OutputEvent::Pane { window_id: main, pane_id }, base);
-    let snapshot = app.snapshot_window_redraw_at(main, base).unwrap();
-    app.finish_window_redraw(main, &snapshot, FrameSettlement::Presented, base);
-    queued.clear();
-
-    let update = b"\x1b[?2026h\x1b_Gf=100,a=T;image\x1b\\paint\x1b[?2026l";
-    let at = base + Duration::from_millis(5);
-    flush.receive(update.len(), at);
-    publish_pane_vt_batch_with(
-        &handles,
-        update,
-        None,
-        &mut None,
-        &mut flush.sync_latch,
-        decode,
-        |_| {},
-        || at,
-        |_| {},
-    );
-    flush.after_batch(&handles, at, || deliver(&handles, &mut queued));
-    assert_eq!(queued, [(2, 1)], "sent once, after the generation and the decoded image");
-    let causes = |app: &App| {
-        let redraw = &app.windows[&main].redraw;
-        (redraw.cause_generation(RedrawCause::Output), redraw.cause_generation(RedrawCause::Chrome))
-    };
-    let (output_before, chrome_before) = causes(&app);
-    app.service_output_event(OutputEvent::Pane { window_id: main, pane_id }, at);
-    assert_eq!(causes(&app), (output_before + 1, chrome_before), "the Output route, not Chrome");
-}
-
 /// The parser sections a counting worker has timed so far.
-fn sections_parsed(stats: &crate::app::frame_counters::VtFrameStats) -> u64 {
+pub(super) fn sections_parsed(stats: &crate::app::frame_counters::VtFrameStats) -> u64 {
     stats.parse.snapshot().count()
 }
 
-/// A reset survives later parser sections of the same batch: with the reset in the first or the
-/// middle of several reply-split sections and the mode set again at the end, the batch sends
-/// exactly one event after its generation is published, the latch is cleared after that send, and
-/// the new update holds; a batch whose sections hold no reset sends nothing.
-#[test]
-fn a_reset_split_from_the_batch_end_by_replies_still_flushes() {
-    let cases: [(&str, &[u8], usize, u64); 3] = [
-        ("first section", b"\x1b[?2026l\x1b[?2026$pX\x1b[?2026h", 1, 2),
-        ("middle section", b"a\x1b[?2026$p\x1b[?2026l\x1b[?2026h\x1b[?2026$pb", 1, 3),
-        ("no reset", b"a\x1b[?2026$pb\x1b[?2026$pc", 0, 3),
-    ];
-    for (name, batch, expected_sends, expected_sections) in cases {
-        let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
-        let (_pane, handles) = counting_worker_handles(&stats);
-        let mut flush = OutputFlush::new(1, &handles);
-        let mut sends = Vec::new();
-        let start = test_base();
-        worker_step(&handles, &mut flush, b"\x1b[?2026h", start, &mut sends);
-        let sections_before = sections_parsed(&stats);
-        worker_step(&handles, &mut flush, batch, start + Duration::from_millis(1), &mut sends);
-        assert_eq!(sections_parsed(&stats) - sections_before, expected_sections, "{name}");
-        let generation = handles.output_generation.load(Ordering::Acquire);
-        assert_eq!(sends, vec![generation; expected_sends], "{name}");
-        assert!(!flush.sync_latch.reset_pending, "{name}: cleared after the flush");
-        worker_step(&handles, &mut flush, b"next", start + Duration::from_millis(9), &mut sends);
-        let deadline = published_deadline(&handles);
-        flush.on_quiet(&handles, deadline - Duration::from_millis(1), || sends.push(0));
-        assert_eq!(sends.len(), expected_sends, "{name}: the update still open holds");
-    }
-}
-
 /// The text of the `fn name` item in `source`, through its closing brace at the same indent.
-fn item_body<'source>(source: &'source str, signature: &str) -> &'source str {
+pub(super) fn item_body<'source>(source: &'source str, signature: &str) -> &'source str {
     let start = source.find(signature).unwrap_or_else(|| panic!("{signature} not found"));
     let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
     let indent = &source[line_start..start];
@@ -1345,168 +147,22 @@ fn item_body<'source>(source: &'source str, signature: &str) -> &'source str {
     &source[start..end]
 }
 
-/// In the worker, the size/age and quiet flushes are reached only past the synchronized-output
-/// hold check, while the disconnect flush, and the loop's disconnect arm, consult no hold; the
-/// disconnect arm sends the final output before it reports the exit; and the loop takes its flush
-/// decision only after the batch has been published.
-#[test]
-fn threshold_and_quiet_flushes_sit_behind_the_hold_and_disconnect_does_not() {
-    let source = include_str!("spawn_pane.rs").replace("\r\n", "\n");
-    let after_batch = item_body(&source, "pub(in crate::app) fn after_batch(");
-    let hold = after_batch.find("self.held").expect("after_batch checks the hold");
-    let threshold = after_batch.find("should_flush_pending_pty_redraw").expect("threshold");
-    assert!(hold < threshold, "{after_batch}");
-    let quiet = item_body(&source, "pub(in crate::app) fn on_quiet(");
-    let hold = quiet.find("self.held").expect("on_quiet checks the hold");
-    let flush = quiet.find("if self.pending").expect("quiet flush");
-    assert!(hold < flush, "{quiet}");
-    let disconnect = item_body(&source, "pub(in crate::app) fn on_disconnect(");
-    assert!(disconnect.contains("send()"), "{disconnect}");
-    assert!(!disconnect.contains("held") && !disconnect.contains("sync"), "{disconnect}");
-    let arm_start =
-        source.find("Err(crossbeam_channel::RecvTimeoutError::Disconnected) =>").unwrap();
-    let arm = &source[arm_start..arm_start + source[arm_start..].find("break;").unwrap()];
-    assert!(arm.contains("flush.on_disconnect(") && !arm.contains("held"), "{arm}");
-    // The shell's final output is sent before its exit is reported, so the last frame is not lost.
-    let final_output = arm.find("flush.on_disconnect(").unwrap();
-    let exit = arm.find("report_pane_exit(").expect("the disconnect arm reports the exit");
-    assert!(final_output < exit, "{arm}");
-    // The worker loop decides only after the batch is published, so a release sees its generation.
-    let ok_arm = &source[source.find("Ok(bytes) =>").unwrap()..arm_start];
-    let publish = ok_arm.find("process_pane_vt_batch_and_publish(").expect("loop publishes");
-    let decide = ok_arm.find("flush.after_batch(").expect("loop decides");
-    assert!(publish < decide, "{ok_arm}");
-}
-
 /// The deadline publication stores for a batch parsed at `at`: the bound, at microsecond precision.
-fn stored_deadline(at: Instant) -> Instant {
+pub(super) fn stored_deadline(at: Instant) -> Instant {
     crate::app::sync_clock::instant_at_micros(crate::app::sync_clock::micros_at(
         at + SYNC_OUTPUT_TIMEOUT,
     ))
 }
 
-/// A lock-free reader that loads the pane between a new epoch's deadline store and its word store
-/// sees the old epoch, its reset count, and no deadline, never the next epoch's deadline; once the
-/// word is stored, the new epoch, its resets and its own deadline read together.
-#[test]
-fn a_lock_free_reader_never_pairs_a_word_with_another_epochs_deadline() {
-    let (_pane, handles) = pane_and_worker_handles();
-    let base = crate::app::sync_clock::origin() + Duration::from_secs(5);
-    let open = b"\x1b[?2026h";
-    publish_pane_vt_batch_with(
-        &handles,
-        open,
-        None,
-        &mut None,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        || base,
-        |_| {},
-    );
-    let first = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
-    assert_eq!((first.set, first.epoch, first.resets), (true, 1, 0));
-    assert_eq!(first.deadline, Some(stored_deadline(base)));
-
-    let (paused_tx, paused_rx) = crossbeam_channel::bounded(1);
-    let (resume_tx, resume_rx) = crossbeam_channel::bounded::<()>(1);
-    let worker_handles = handles.clone();
-    let later = base + Duration::from_millis(40);
-    let worker = std::thread::spawn(move || {
-        set_publish_pause(Some(Box::new(move || {
-            paused_tx.send(()).unwrap();
-            resume_rx.recv().unwrap();
-        })));
-        let renew = b"\x1b[?2026l\x1b[?2026h";
-        publish_pane_vt_batch_with(
-            &worker_handles,
-            renew,
-            None,
-            &mut None,
-            &mut SyncLatch::default(),
-            |_| None,
-            |_| {},
-            || later,
-            |_| {},
-        );
-    });
-    paused_rx.recv_timeout(Duration::from_secs(3)).expect("the worker pauses before its word");
-    let torn = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
-    resume_tx.send(()).unwrap();
-    worker.join().unwrap();
-    assert_eq!((torn.set, torn.epoch, torn.resets), (true, 1, 0), "the word is not stored yet");
-    assert_eq!(torn.deadline, None, "the next epoch's deadline is not this epoch's");
-    let second = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
-    assert_eq!((second.set, second.epoch, second.resets), (true, 2, 1));
-    assert_eq!(second.deadline, Some(stored_deadline(later)));
-}
-
 /// A test timeline's start: a whole number of microseconds after the deadline origin, so a
 /// published deadline is exactly its batch's instant plus the bound.
-fn test_base() -> Instant {
+pub(super) fn test_base() -> Instant {
     crate::app::sync_clock::origin() + Duration::from_secs(5)
-}
-
-/// A worker that keeps receiving output during an update releases it on the batch that reaches
-/// the deadline, with one clock for publication and decision: a batch one nanosecond earlier
-/// sends nothing, the batch at the deadline sends one release and counts one timeout, and later
-/// output in that epoch flushes normally.
-#[test]
-fn a_busy_worker_releases_an_update_on_the_batch_at_its_deadline() {
-    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
-    let (_pane, handles) = counting_worker_handles(&stats);
-    let mut flush = OutputFlush::new(3, &handles);
-    let mut sends = Vec::new();
-    let base = test_base();
-    worker_step(&handles, &mut flush, b"\x1b[?2026hrow", base, &mut sends);
-    let deadline = published_deadline(&handles);
-    assert_eq!(deadline, base + SYNC_OUTPUT_TIMEOUT, "published from the decision's clock");
-    worker_step(&handles, &mut flush, b"a", deadline - Duration::from_nanos(1), &mut sends);
-    assert!(sends.is_empty(), "one nanosecond early sends nothing");
-    worker_step(&handles, &mut flush, b"b", deadline, &mut sends);
-    assert_eq!(sends.len(), 1, "the batch at the deadline releases once");
-    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
-    worker_step(&handles, &mut flush, b"c", deadline + Duration::from_millis(1), &mut sends);
-    assert_eq!(sends.len(), 1, "later output coalesces normally");
-    worker_step(&handles, &mut flush, b"d", deadline + Duration::from_millis(9), &mut sends);
-    assert_eq!(sends.len(), 2, "and flushes on age");
-    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
-}
-
-/// The worker identifies released updates by the parser's full epoch, not the published 31-bit
-/// one: an update timed out as the last epoch before the published epoch wraps does not stop the
-/// next update, published as epoch 0, from holding and then expiring normally.
-#[test]
-fn an_update_after_the_published_epoch_wraps_still_holds() {
-    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
-    let (_pane, handles) = counting_worker_handles(&stats);
-    handles.parser.lock().__test_set_sync_epoch((1 << 31) - 2);
-    let mut flush = OutputFlush::new(5, &handles);
-    let mut sends = Vec::new();
-    let base = test_base();
-    worker_step(&handles, &mut flush, b"\x1b[?2026hlast", base, &mut sends);
-    let last_deadline = published_deadline(&handles);
-    flush.on_quiet(&handles, last_deadline, || sends.push(0));
-    assert_eq!((sends.len(), stats.sync_timeouts.load(Ordering::Relaxed)), (1, 1));
-    let reset_at = last_deadline + Duration::from_millis(10);
-    worker_step(&handles, &mut flush, b"\x1b[?2026l", reset_at, &mut sends);
-    assert_eq!(sends.len(), 2, "the late reset flushes");
-
-    let opened = reset_at + Duration::from_millis(10);
-    worker_step(&handles, &mut flush, b"\x1b[?2026hfirst", opened, &mut sends);
-    let published = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
-    assert_eq!((published.set, published.epoch), (true, 0), "the published epoch wrapped");
-    let deadline = published_deadline(&handles);
-    flush.on_quiet(&handles, opened + Duration::from_millis(3), || sends.push(0));
-    assert_eq!(sends.len(), 2, "the wrapped epoch holds");
-    flush.on_quiet(&handles, deadline, || sends.push(0));
-    assert_eq!(sends.len(), 3, "and expires once at its deadline");
-    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 2);
 }
 
 /// A counting worker over a `cols` x `rows` grid keeping `scrollback` history rows, targeted at
 /// window 7, with its pane's echo watch.
-fn echo_worker(
+pub(super) fn echo_worker(
     cols: u16,
     rows: u16,
     scrollback: usize,
@@ -1528,12 +184,12 @@ fn echo_worker(
 }
 
 /// The window every echo worker targets.
-fn echo_window() -> WindowId {
+pub(super) fn echo_window() -> WindowId {
     WindowId::from(7)
 }
 
 /// Arm `watch` with `token` for `character` at (`abs_row`, `col`) under the grid's identity now.
-fn arm_echo(
+pub(super) fn arm_echo(
     watch: &crate::app::echo_watch::EchoWatch,
     handles: &PaneVtHandles,
     token: u64,
@@ -1546,7 +202,7 @@ fn arm_echo(
 }
 
 /// Parse and publish one batch with every clock read at `at`.
-fn echo_batch(handles: &PaneVtHandles, bytes: &[u8], at: Instant) {
+pub(super) fn echo_batch(handles: &PaneVtHandles, bytes: &[u8], at: Instant) {
     publish_pane_vt_batch_with(
         handles,
         bytes,
@@ -1562,7 +218,7 @@ fn echo_batch(handles: &PaneVtHandles, bytes: &[u8], at: Instant) {
 
 /// Flush the worker's output with every new clock read at `at`, delivering through `accept`;
 /// returns the windows it sent to.
-fn echo_flush(handles: &PaneVtHandles, at: Instant, accept: bool) -> Vec<WindowId> {
+pub(super) fn echo_flush(handles: &PaneVtHandles, at: Instant, accept: bool) -> Vec<WindowId> {
     let mut sent = Vec::new();
     send_output_redraw(
         &handles.redraw_target,
@@ -1578,349 +234,15 @@ fn echo_flush(handles: &PaneVtHandles, at: Instant, accept: bool) -> Vec<WindowI
 }
 
 /// The watch's record, which every armed test has.
-fn echo_trace(watch: &crate::app::echo_watch::EchoWatch) -> crate::app::echo_watch::EchoTrace {
+pub(super) fn echo_trace(
+    watch: &crate::app::echo_watch::EchoWatch,
+) -> crate::app::echo_watch::EchoTrace {
     watch.peek().expect("an armed record")
-}
-
-/// The section in which the target goes from absent to present records the generation its batch
-/// publishes and that section's parse instant.
-#[test]
-fn absent_to_present_records_the_batch_generation() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"a", base + Duration::from_millis(2));
-    let appearance = echo_trace(&watch).appearance.expect("the echo appeared");
-    assert_eq!(appearance.generation, 1);
-    assert_eq!(handles.output_generation.load(Ordering::Acquire), 1, "the batch it names");
-    assert_eq!(appearance.parsed_at, base + Duration::from_millis(2));
-    assert!(!appearance.sync_open);
-}
-
-/// A batch that parses in several sections, split at a DECRQM reply, records the one generation
-/// the whole batch publishes, whichever section the echo appears in.
-#[test]
-fn a_reply_split_batch_records_one_generation() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    echo_batch(&handles, b"z", base);
-    arm_echo(&watch, &handles, 1, (0, 2, 'X'), base);
-    let stats = Arc::clone(&handles.frame_counters.as_ref().expect("counting").vt);
-    let sections_before = sections_parsed(&stats);
-    echo_batch(&handles, b"a\x1b[?2026$pX", base + Duration::from_millis(1));
-    assert!(sections_parsed(&stats) - sections_before >= 2, "the batch took several sections");
-    let appearance = echo_trace(&watch).appearance.expect("the echo appeared");
-    assert_eq!(appearance.generation, 2, "the batch's generation, not a section's");
-    assert_eq!(handles.output_generation.load(Ordering::Acquire), 2);
-}
-
-/// An empty batch parses nothing, so it records no fact.
-#[test]
-fn an_empty_batch_records_nothing() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"", base);
-    let trace = echo_trace(&watch);
-    assert_eq!(trace.appearance, None);
-    assert!(!(trace.pre_present || trace.identity_changed || trace.lost));
-}
-
-/// An echo already in the cell before arming is never an absent-to-present appearance; the next
-/// section's pre-read records it as pre-present.
-#[test]
-fn a_present_echo_before_arming_reads_first_appearance_unobserved() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    echo_batch(&handles, b"a", base);
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"b", base + Duration::from_millis(1));
-    let trace = echo_trace(&watch);
-    assert!(trace.pre_present);
-    assert_eq!(trace.appearance, None);
-}
-
-/// Evicting an older history row changes what every absolute index names, even when the target
-/// row survives, so the section records an identity change and no appearance.
-#[test]
-fn eviction_of_an_older_row_reads_row_identity_changed() {
-    let (_pane, handles, watch) = echo_worker(10, 2, 2);
-    let base = test_base();
-    // Two rows in history, two visible: r0, r1 | r2, r3.
-    echo_batch(&handles, b"r0\r\nr1\r\nr2\r\nr3", base);
-    // The target is r3's column 3, still absent; r0 is evicted by the next line.
-    arm_echo(&watch, &handles, 1, (3, 3, 'q'), base);
-    echo_batch(&handles, b"\r\nzz", base + Duration::from_millis(1));
-    let trace = echo_trace(&watch);
-    assert!(trace.identity_changed);
-    assert_eq!(trace.appearance, None);
-}
-
-/// Evicting the target row itself records an identity change.
-#[test]
-fn eviction_of_the_target_reads_row_identity_changed() {
-    let (_pane, handles, watch) = echo_worker(10, 2, 1);
-    let base = test_base();
-    // History holds r0; r1 and r2 are visible.
-    echo_batch(&handles, b"r0\r\nr1\r\nr2", base);
-    arm_echo(&watch, &handles, 1, (0, 5, 'q'), base);
-    echo_batch(&handles, b"\r\nzz", base + Duration::from_millis(1));
-    let trace = echo_trace(&watch);
-    assert!(trace.identity_changed, "the target row was evicted");
-    assert_eq!(trace.appearance, None);
-}
-
-/// Switching to the alternate screen changes the screen epoch, so the section records an
-/// identity change.
-#[test]
-fn a_screen_switch_reads_row_identity_changed() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"\x1b[?1049ha", base + Duration::from_millis(1));
-    let trace = echo_trace(&watch);
-    assert!(trace.identity_changed);
-    assert_eq!(trace.appearance, None, "an identity change records no appearance");
-}
-
-/// An echo that appears, is overwritten and reappears keeps its first appearance and is marked
-/// lost; the reappearance is not a second appearance.
-#[test]
-fn overwrite_then_reappearance_reads_echo_overwritten() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    echo_batch(&handles, b"\rb", base + Duration::from_millis(2));
-    echo_batch(&handles, b"\ra", base + Duration::from_millis(3));
-    let trace = echo_trace(&watch);
-    assert!(trace.lost);
-    let appearance = trace.appearance.expect("the first appearance");
-    assert_eq!((appearance.generation, appearance.parsed_at), (1, base + Duration::from_millis(1)));
-}
-
-/// Every targeted flush takes exactly one token decision and sends once, whatever the watch's
-/// state: unarmed, armed with no appearance, eligible, already published, and armed again under a
-/// new token while a publication was in flight. Only the eligible flush records a publication and
-/// its delivery.
-#[test]
-fn each_targeted_flush_takes_one_token_decision_in_every_watch_state() {
-    use std::sync::atomic::Ordering::Relaxed;
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let stats = Arc::clone(&handles.frame_counters.as_ref().expect("counting").vt);
-    let base = test_base();
-    let release = |handles: &PaneVtHandles| handles.output_outstanding.store(false, Relaxed);
-    // Unarmed.
-    assert_eq!(echo_flush(&handles, base, true), [echo_window()]);
-    assert_eq!(watch.peek(), None, "nothing recorded while unarmed");
-    release(&handles);
-    // Armed, no appearance.
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    assert_eq!(echo_flush(&handles, base, true), [echo_window()]);
-    assert_eq!(echo_trace(&watch).publication, None);
-    release(&handles);
-    // Eligible.
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    assert_eq!(echo_flush(&handles, base + Duration::from_millis(2), true), [echo_window()]);
-    let trace = echo_trace(&watch);
-    let publication = trace.publication.expect("the eligible flush is published");
-    assert_eq!(publication.window, Some(echo_window()));
-    let delivery = trace.delivery.expect("and its decision");
-    assert_eq!(
-        (delivery.seq, delivery.outcome),
-        (publication.seq, crate::app::echo_watch::EchoDeliveryOutcome::Sent)
-    );
-    release(&handles);
-    // Already published.
-    assert_eq!(echo_flush(&handles, base + Duration::from_millis(3), true), [echo_window()]);
-    assert_eq!(echo_trace(&watch).publication, Some(publication), "the first one stays");
-    release(&handles);
-    // A re-arm between the flush's token load and its slot lock: the stale publication is discarded.
-    let rearm_watch = Arc::clone(&watch);
-    let identity = trace.target.identity;
-    crate::app::echo_watch::pause_next_writer(move || {
-        let target = crate::app::echo_watch::EchoWatchTarget {
-            abs_row: 0,
-            col: 1,
-            character: 'b',
-            identity,
-        };
-        rearm_watch.arm(crate::app::echo_watch::ArmToken::for_test(2), target, base);
-    });
-    assert_eq!(echo_flush(&handles, base + Duration::from_millis(4), true), [echo_window()]);
-    let fresh = echo_trace(&watch);
-    assert_eq!(
-        (fresh.target.character, fresh.publication),
-        ('b', None),
-        "nothing for the new token"
-    );
-    assert_eq!(stats.flushes.load(Relaxed), 5, "one decision per flush");
-    assert_eq!(stats.flushes_suppressed.load(Relaxed), 0);
-}
-
-/// A flush published while the previous event is outstanding still records its decision, as
-/// suppressed, and counts as suppressed.
-#[test]
-fn a_suppressed_flush_reaches_delivery_recording() {
-    use std::sync::atomic::Ordering::Relaxed;
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let stats = Arc::clone(&handles.frame_counters.as_ref().expect("counting").vt);
-    let base = test_base();
-    handles.output_outstanding.store(true, Relaxed);
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    assert!(echo_flush(&handles, base + Duration::from_millis(2), true).is_empty());
-    let delivery = echo_trace(&watch).delivery.expect("the decision is recorded");
-    assert_eq!(delivery.outcome, crate::app::echo_watch::EchoDeliveryOutcome::Suppressed);
-    assert_eq!(stats.flushes_suppressed.load(Relaxed), 1);
-}
-
-/// A send the event loop refuses records `Refused` and still clears the token.
-#[test]
-fn a_refused_send_reads_send_refused_and_clears_the_token() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    assert_eq!(echo_flush(&handles, base + Duration::from_millis(2), false), [echo_window()]);
-    let delivery = echo_trace(&watch).delivery.expect("the decision is recorded");
-    assert_eq!(delivery.outcome, crate::app::echo_watch::EchoDeliveryOutcome::Refused);
-    assert!(!handles.output_outstanding.load(Ordering::Acquire), "the token is cleared");
-}
-
-/// The flush path's own clock is read 0 times unarmed (targeted or not), 0 times armed before any
-/// appearance, once for an eligible untargeted flush and twice for an eligible targeted one.
-#[test]
-fn new_clock_reads_by_state() {
-    use std::cell::Cell;
-    let base = test_base();
-    let reads = Cell::new(0_u32);
-    let clock = || {
-        reads.set(reads.get() + 1);
-        base + Duration::from_millis(5)
-    };
-    let flush = |handles: &PaneVtHandles, clock: &mut dyn FnMut() -> Instant| {
-        send_output_redraw(
-            &handles.redraw_target,
-            &handles.output_outstanding,
-            handles.frame_counters.as_ref(),
-            clock,
-            |_| true,
-        );
-        handles.output_outstanding.store(false, Ordering::Relaxed);
-    };
-    let mut counted = Vec::new();
-    let mut measure = |handles: &PaneVtHandles| {
-        let before = reads.get();
-        let mut tick = clock;
-        flush(handles, &mut tick);
-        counted.push(reads.get() - before);
-    };
-    let (_pane, targeted, watch) = echo_worker(80, 24, 100);
-    measure(&targeted);
-    let (_untargeted_pane, untargeted, untargeted_watch) = echo_worker(80, 24, 100);
-    *untargeted.redraw_target.lock() = None;
-    measure(&untargeted);
-    arm_echo(&watch, &targeted, 1, (0, 0, 'a'), base);
-    measure(&targeted);
-    arm_echo(&untargeted_watch, &untargeted, 1, (0, 0, 'a'), base);
-    echo_batch(&untargeted, b"a", base + Duration::from_millis(1));
-    measure(&untargeted);
-    echo_batch(&targeted, b"a", base + Duration::from_millis(1));
-    measure(&targeted);
-    assert_eq!(counted, [0, 0, 0, 1, 2]);
-}
-
-/// The publication is in the record when the token decision runs, and is stamped before it.
-#[test]
-fn publication_is_recorded_before_the_token_decision() {
-    use std::cell::Cell;
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    let tick = Cell::new(0_u64);
-    let mut seen_at_send = None;
-    send_output_redraw(
-        &handles.redraw_target,
-        &handles.output_outstanding,
-        handles.frame_counters.as_ref(),
-        || {
-            tick.set(tick.get() + 1);
-            base + Duration::from_millis(10 * tick.get())
-        },
-        |_| {
-            let trace = watch.peek().expect("armed");
-            seen_at_send = Some((trace.publication.is_some(), trace.delivery.is_some()));
-            true
-        },
-    );
-    assert_eq!(seen_at_send, Some((true, false)), "published, not yet decided, at the send");
-    let trace = echo_trace(&watch);
-    let published_at = trace.publication.expect("published").published_at;
-    assert!(published_at < trace.delivery.expect("decided").decided_at);
-}
-
-/// A take between the publication and its decision sees the publication without a decision, and
-/// the decision written after the take is discarded; without the pause the decision is recorded,
-/// stamped after the publication.
-#[test]
-fn a_writer_paused_between_publication_and_delivery_reads_not_observed_or_after_present() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    let (taken_tx, taken_rx) = std::sync::mpsc::channel();
-    let pause_watch = Arc::clone(&watch);
-    crate::app::echo_watch::pause_before_delivery(move || {
-        let taken = pause_watch.take(crate::app::echo_watch::ArmToken::for_test(1));
-        taken_tx.send(taken).expect("test receiver");
-    });
-    echo_flush(&handles, base + Duration::from_millis(2), true);
-    let taken = taken_rx.recv_timeout(Duration::from_secs(5)).expect("the pause point ran");
-    let crate::app::echo_watch::SlotTake::Trace(trace) = taken else {
-        panic!("take at the pause returned {taken:?}")
-    };
-    assert!(trace.publication.is_some(), "the publication is in the taken record");
-    assert_eq!(trace.delivery, None, "the decision was not yet recorded");
-    assert_eq!(echo_trace(&watch).delivery, None, "the late decision was discarded");
-
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    let tick = std::cell::Cell::new(0_u64);
-    send_output_redraw(
-        &handles.redraw_target,
-        &handles.output_outstanding,
-        handles.frame_counters.as_ref(),
-        || {
-            tick.set(tick.get() + 1);
-            base + Duration::from_millis(10 * tick.get())
-        },
-        |_| true,
-    );
-    let trace = echo_trace(&watch);
-    let decided_at = trace.delivery.expect("recorded").decided_at;
-    assert!(decided_at > trace.publication.expect("published").published_at);
-}
-
-/// The echo's publication finds an earlier flush still pending, so it is marked coalesced.
-#[test]
-fn a_coalesced_flush_sets_coalesced() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    echo_batch(&handles, b"z", base);
-    echo_flush(&handles, base, true);
-    handles.output_outstanding.store(false, Ordering::Relaxed);
-    arm_echo(&watch, &handles, 1, (0, 1, 'a'), base);
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    echo_flush(&handles, base + Duration::from_millis(2), true);
-    assert!(echo_trace(&watch).publication.expect("published").coalesced);
 }
 
 /// One worker step through the production flush decision, delivering through `send_output_redraw`
 /// with every clock read at `at`.
-fn echo_worker_step(
+pub(super) fn echo_worker_step(
     handles: &PaneVtHandles,
     flush: &mut OutputFlush,
     bytes: &[u8],
@@ -1942,139 +264,8 @@ fn echo_worker_step(
     flush.after_batch(handles, at, || sends.extend(echo_flush(handles, at, true)));
 }
 
-/// An echo parsed inside a synchronized update is held with it: nothing is published until the
-/// reset's flush, and the appearance records that the update was open.
-#[test]
-fn an_echo_held_by_a_synchronized_update_publishes_at_the_reset_with_sync_open() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let mut flush = OutputFlush::new(1, &handles);
-    let base = test_base();
-    let mut sends = Vec::new();
-    echo_worker_step(&handles, &mut flush, b"\x1b[?2026h", base, &mut sends);
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_worker_step(&handles, &mut flush, b"a", base + Duration::from_millis(1), &mut sends);
-    assert!(sends.is_empty(), "held while the update is open");
-    assert_eq!(echo_trace(&watch).publication, None);
-    echo_worker_step(
-        &handles,
-        &mut flush,
-        b"\x1b[?2026l",
-        base + Duration::from_millis(4),
-        &mut sends,
-    );
-    assert_eq!(sends, [echo_window()], "the reset flushes once");
-    let trace = echo_trace(&watch);
-    assert!(trace.appearance.expect("appeared").sync_open);
-    let published_at = trace.publication.expect("published at the reset").published_at;
-    assert_eq!(published_at, base + Duration::from_millis(4));
-}
-
-/// An update that never resets is released at its published deadline, and the echo it held is
-/// published by that release.
-#[test]
-fn an_echo_held_past_the_deadline_publishes_at_release_timeout() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let mut flush = OutputFlush::new(1, &handles);
-    let base = test_base();
-    let mut sends = Vec::new();
-    echo_worker_step(&handles, &mut flush, b"\x1b[?2026h", base, &mut sends);
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_worker_step(&handles, &mut flush, b"a", base + Duration::from_millis(1), &mut sends);
-    let deadline = published_deadline(&handles);
-    flush.on_quiet(&handles, deadline, || sends.extend(echo_flush(&handles, deadline, true)));
-    assert_eq!(sends, [echo_window()], "released once at the deadline");
-    let published_at = echo_trace(&watch).publication.expect("published").published_at;
-    assert_eq!(published_at, deadline);
-}
-
-/// An armed batch takes the slot lock on the worker thread; once the harness takes the record the
-/// worker takes none. Each count brackets only the worker's batch and flush, on its own thread.
-#[test]
-fn a_taken_watch_stops_the_workers_slot_locks() {
-    use crate::app::echo_watch::slot_locks;
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    let before = slot_locks();
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    echo_flush(&handles, base + Duration::from_millis(2), true);
-    let armed_locks = slot_locks() - before;
-    assert!(armed_locks >= 1, "an armed batch locks the slot");
-    watch.take(crate::app::echo_watch::ArmToken::for_test(1));
-    handles.output_outstanding.store(false, Ordering::Relaxed);
-    let before = slot_locks();
-    echo_batch(&handles, b"b", base + Duration::from_millis(3));
-    echo_flush(&handles, base + Duration::from_millis(4), true);
-    assert_eq!(slot_locks() - before, 0, "a taken watch costs the worker no lock");
-}
-
-/// A worker handle created after facts were recorded (a new handle for each batch, as the test
-/// hooks make) resumes from the record: the echo it saw appear reads lost when overwritten, never
-/// pre-present.
-#[test]
-fn a_new_worker_handle_resumes_from_the_recorded_facts() {
-    let (pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
-    echo_batch(&handles, b"a", base + Duration::from_millis(1));
-    let fresh = PaneVtHandles::from_pane_state(&pane);
-    echo_batch(&fresh, b"\rb", base + Duration::from_millis(2));
-    let trace = echo_trace(&watch);
-    assert!(trace.lost, "the overwrite after the appearance is lost");
-    assert!(!trace.pre_present, "the recorded appearance is not re-read as pre-present");
-}
-
-/// A new pane's reader stamps output reads exactly when its frame counters are on, and the other
-/// spawn options are the launch's own: the shell, `TERM_PROGRAM` and working directory pass
-/// through.
-#[test]
-fn pane_spawn_options_stamp_reads_only_with_the_frame_counter_gate() {
-    let app = App::new(Theme::default(), Config::default(), Keymap::default());
-    let launch = super::super::pane_launch::PaneLaunch {
-        cwd: Some(std::path::PathBuf::from("/work")),
-        ..Default::default()
-    };
-    for gate in [false, true] {
-        let opts = app.pane_spawn_opts(&launch, gate);
-        assert_eq!(opts.diagnostic_timestamps, gate, "gate {gate}");
-        assert_eq!(opts.cwd, Some(std::path::PathBuf::from("/work")));
-        assert_eq!(opts.term_program, app.config.terminal.term_program);
-        assert!(!opts.clean_e2e, "no runtime smoke");
-    }
-}
-
-/// Both pane creation paths, main and child, read the gate before spawning and pass it to the PTY
-/// through the one options helper and the one launch spawn helper, then store the same counters on the pane, so no path starts a reader
-/// that disagrees with its pane. A child pane needs a native window, so this pins the source.
-#[test]
-fn main_and_child_panes_take_the_read_stamp_flag_from_the_gate_before_spawning() {
-    for (name, source) in [
-        ("spawn_pane.rs", include_str!("spawn_pane.rs")),
-        ("child_tabs.rs", include_str!("child_tabs.rs")),
-    ] {
-        let gate = source
-            .find("let frame_counters = self.pane_frame_counters();")
-            .unwrap_or_else(|| panic!("{name} reads the gate"));
-        let opts = source
-            .find("self.pane_spawn_opts(launch, frame_counters.is_some())")
-            .unwrap_or_else(|| panic!("{name} passes the gate to the spawn options"));
-        let spawn = source[opts..]
-            .find("self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts)")
-            .map(|offset| opts + offset)
-            .unwrap_or_else(|| panic!("{name} spawns with those options"));
-        assert!(
-            gate < opts && opts < spawn,
-            "{name} reads the gate, builds the options, then spawns"
-        );
-        assert!(
-            source[spawn..].contains("frame_counters = frame_counters;"),
-            "{name} stores the same counters"
-        );
-    }
-}
-
 /// Arm `watch` as a timeline owner would, with token `token`, for `X` at row 0, column 2.
-fn arm_echo_timeline(
+pub(super) fn arm_echo_timeline(
     watch: &crate::app::echo_watch::EchoWatch,
     handles: &PaneVtHandles,
     token: u64,
@@ -2096,7 +287,12 @@ fn arm_echo_timeline(
 }
 
 /// Parse and publish one batch whose chunk was read at `read_at`, every parse clock read at `at`.
-fn echo_batch_read(handles: &PaneVtHandles, bytes: &[u8], read_at: Option<Instant>, at: Instant) {
+pub(super) fn echo_batch_read(
+    handles: &PaneVtHandles,
+    bytes: &[u8],
+    read_at: Option<Instant>,
+    at: Instant,
+) {
     publish_pane_vt_batch_with(
         handles,
         bytes,
@@ -2111,7 +307,7 @@ fn echo_batch_read(handles: &PaneVtHandles, bytes: &[u8], read_at: Option<Instan
 }
 
 /// Freeze and transfer token `token`'s timeline from `watch` as the owner's take would.
-fn echo_timeline_of(
+pub(super) fn echo_timeline_of(
     watch: &crate::app::echo_watch::EchoWatch,
     token: u64,
 ) -> crate::app::EchoTimelineV1 {
@@ -2124,7 +320,7 @@ fn echo_timeline_of(
 }
 
 /// The recorded `LatestChunkRead` times, in record order.
-fn chunk_reads(timeline: &crate::app::EchoTimelineV1) -> Vec<u64> {
+pub(super) fn chunk_reads(timeline: &crate::app::EchoTimelineV1) -> Vec<u64> {
     timeline
         .events
         .iter()
@@ -2133,43 +329,8 @@ fn chunk_reads(timeline: &crate::app::EchoTimelineV1) -> Vec<u64> {
         .collect()
 }
 
-/// Every section of a reply-split batch consumes the same chunk, so the section where the echo
-/// appears, here a later one, carries that chunk's read stamp, not its own parse instant.
-#[test]
-fn a_later_section_of_one_chunk_carries_the_chunks_read_stamp() {
-    let (_pane, handles, watch) = echo_worker(80, 24, 100);
-    let base = test_base();
-    echo_batch(&handles, b"z", base);
-    arm_echo_timeline(&watch, &handles, 1, base);
-    let stats = Arc::clone(&handles.frame_counters.as_ref().expect("counting").vt);
-    let sections_before = sections_parsed(&stats);
-    let read_at = base + Duration::from_millis(1);
-    echo_batch_read(&handles, b"a\x1b[?2026$pX", Some(read_at), base + Duration::from_millis(3));
-    assert!(sections_parsed(&stats) - sections_before >= 2, "the batch took several sections");
-    let timeline = echo_timeline_of(&watch, 1);
-    assert!(timeline.chunk_timestamps);
-    assert_eq!(chunk_reads(&timeline), [1_000_000], "the chunk's read, 1 ms after arm");
-}
-
-/// An unstamped chunk, and a chunk read before arm, record no `LatestChunkRead`; neither is ever
-/// replaced by zero or by the parse instant.
-#[test]
-fn an_unstamped_or_pre_arm_chunk_records_no_read() {
-    for pre_arm in [false, true] {
-        let (_pane, handles, watch) = echo_worker(80, 24, 100);
-        let base = test_base();
-        // The pre-arm read is an explicit offset before the arm, never the process's own `now()`.
-        let read_at = pre_arm.then(|| base - Duration::from_millis(1));
-        echo_batch(&handles, b"z", base);
-        arm_echo_timeline(&watch, &handles, 1, base);
-        echo_batch_read(&handles, b"aX", read_at, base + Duration::from_millis(3));
-        assert!(echo_trace(&watch).appearance.is_some(), "the echo appeared ({read_at:?})");
-        assert!(chunk_reads(&echo_timeline_of(&watch, 1)).is_empty(), "{read_at:?}");
-    }
-}
-
 /// Worker handles whose counters carry a section log, and that log.
-fn counting_worker_with_log(
+pub(super) fn counting_worker_with_log(
 ) -> (PaneState, PaneVtHandles, Arc<crate::app::guard_correlation::PaneSectionLog>) {
     let (mut pane, _) = pane_and_worker_handles();
     let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
@@ -2181,82 +342,8 @@ fn counting_worker_with_log(
     (pane, handles, log)
 }
 
-/// A counting worker publishes each parser section with D2.1a's own `before_lock` and `locked_at`
-/// reads, so a record's endpoints are exactly the instants the section counters recorded.
-#[test]
-fn a_counting_worker_publishes_its_section_with_the_section_reads() {
-    let epoch = crate::app::frame_counters::clock_epoch();
-    let (_pane, handles, log) = counting_worker_with_log();
-    let mut tick_ns = 1_000_u64;
-    process_pane_vt_batch_with(
-        &handles,
-        b"abc",
-        None,
-        &mut None,
-        &mut SyncLatch::default(),
-        |_| None,
-        |_| {},
-        || {
-            tick_ns += 1_000;
-            epoch + Duration::from_nanos(tick_ns)
-        },
-        |_| {},
-    );
-    let pane = log.take(crate::app::guard_correlation::LogBuffers::new()).0;
-    let expected = crate::app::guard_correlation::SectionRecordV1 {
-        section_seq: 1,
-        before_lock_ns: 2_000,
-        locked_at_ns: 3_000,
-    };
-    assert_eq!(pane.records, vec![expected], "the first read is before_lock, the second locked_at");
-    assert!(pane.pending.is_none() && pane.abandoned.is_empty());
-}
-
-/// T4: a worker section that unwinds after `locked_at` abandons its registration only after the parser
-/// guard is released, so the log mutex is never taken under a parser guard; nothing stays pending.
-#[test]
-fn a_worker_section_unwinding_after_its_lock_is_abandoned_after_the_guard() {
-    let epoch = crate::app::frame_counters::clock_epoch();
-    let (_pane, handles, log) = counting_worker_with_log();
-    let parser = Arc::clone(&handles.parser);
-    let parser_free = Arc::new(AtomicBool::new(false));
-    let seen = Arc::clone(&parser_free);
-    crate::app::guard_correlation::ABANDON_PROBE.with(|probe| {
-        *probe.borrow_mut() =
-            Some(Box::new(move || seen.store(parser.try_lock().is_some(), Ordering::SeqCst)));
-    });
-    let mut reads = 0_u64;
-    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        process_pane_vt_batch_with(
-            &handles,
-            b"abc",
-            None,
-            &mut None,
-            &mut SyncLatch::default(),
-            |_| None,
-            |_| {},
-            || {
-                reads += 1;
-                // The third read is parsed_at, under the parser guard and after locked_at.
-                assert!(reads < 3, "the section unwinds after locked_at");
-                epoch + Duration::from_nanos(reads * 1_000)
-            },
-            |_| {},
-        );
-    }));
-    crate::app::guard_correlation::ABANDON_PROBE.with(|probe| *probe.borrow_mut() = None);
-    assert!(unwound.is_err());
-    assert!(
-        parser_free.load(Ordering::SeqCst),
-        "the parser guard was released before the log mutex"
-    );
-    let pane = log.take(crate::app::guard_correlation::LogBuffers::new()).0;
-    assert_eq!(pane.abandoned.iter().map(|entry| entry.section_seq).collect::<Vec<_>>(), vec![1]);
-    assert!(pane.pending.is_none() && pane.records.is_empty());
-}
-
 /// Run one VT batch of `bytes` through pane 7's worker handles and return what it emitted.
-fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
+pub(super) fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
     let (_pane, handles) = pane_and_worker_handles();
     let handles = handles.with_pane_id(7);
     let mut emitted = Vec::new();
@@ -2274,53 +361,8 @@ fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
     emitted
 }
 
-/// Accepted writes stay separate events in order, then one payload-free summary follows; a batch of
-/// 1,000 reads writes nothing and sends exactly one summary, all naming the worker's pane.
-#[test]
-fn osc52_batch_keeps_each_write_and_sends_one_summary() {
-    use base64::Engine as _;
-    let encode = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
-    let two = format!("\x1b]52;c;{}\x07\x1b]52;c;{}\x07", encode("one"), encode("two"));
-    let accepted = ClipAttempts { total: 2, accepted: 2, refused: 0, latest: None };
-    assert_eq!(
-        osc52_batch(two.as_bytes()),
-        [
-            UserEvent::ClipboardWrite { pane_id: 7, text: "one".into() },
-            UserEvent::ClipboardWrite { pane_id: 7, text: "two".into() },
-            UserEvent::ClipboardAttempts { pane_id: 7, attempts: accepted },
-        ]
-    );
-    let reads = "\x1b]52;c;?\x07".repeat(1_000);
-    let refused = ClipAttempts {
-        total: 1_000,
-        accepted: 0,
-        refused: 1_000,
-        latest: Some(Osc52Refusal::Read),
-    };
-    assert_eq!(
-        osc52_batch(reads.as_bytes()),
-        [UserEvent::ClipboardAttempts { pane_id: 7, attempts: refused }]
-    );
-    assert!(osc52_batch(b"plain output").is_empty(), "no OSC 52, no summary");
-}
-
-/// The output counter adds each received chunk's length only while `out` turned counting on.
-#[test]
-fn output_bytes_count_only_while_counting_is_on() {
-    use std::sync::atomic::Ordering;
-    let parser = sonicterm_vt::vt::Parser::new(sonicterm_grid::grid::Grid::new(10, 2));
-    let pane = PaneState::new(Arc::new(Mutex::new(parser)), None);
-    let worker = PaneVtHandles::from_pane_state(&pane);
-    worker.count_output(100);
-    assert_eq!(pane.output_bytes.load(Ordering::Relaxed), 0);
-    pane.output_counting.store(true, Ordering::Relaxed);
-    worker.count_output(100);
-    worker.count_output(23);
-    assert_eq!(pane.output_bytes.load(Ordering::Relaxed), 123);
-}
-
 /// The events one batch of `bytes` emits through `handles`.
-fn program_batch(handles: &PaneVtHandles, bytes: &str) -> Vec<UserEvent> {
+pub(super) fn program_batch(handles: &PaneVtHandles, bytes: &str) -> Vec<UserEvent> {
     let mut emitted = Vec::new();
     process_pane_vt_batch_with(
         handles,
@@ -2337,7 +379,9 @@ fn program_batch(handles: &PaneVtHandles, bytes: &str) -> Vec<UserEvent> {
 }
 
 /// The progress reports `events` carry, in order.
-fn progress_reports(events: &[UserEvent]) -> Vec<Option<sonicterm_vt::vt::ProgressReport>> {
+pub(super) fn progress_reports(
+    events: &[UserEvent],
+) -> Vec<Option<sonicterm_vt::vt::ProgressReport>> {
     events
         .iter()
         .filter_map(|event| match event {
@@ -2347,50 +391,13 @@ fn progress_reports(events: &[UserEvent]) -> Vec<Option<sonicterm_vt::vt::Progre
         .collect()
 }
 
-#[test]
-fn a_batch_reports_its_last_progress_and_clears_only_what_it_showed() {
-    // A batch sends its latest progress once; a command end or RIS clears it only when this pane
-    // showed progress, so ordinary commands send nothing.
-    let (_pane, handles) = pane_and_worker_handles();
-    let normal = |percent| {
-        Some(sonicterm_vt::vt::ProgressReport {
-            state: sonicterm_vt::vt::ProgressState::Normal,
-            percent,
-        })
-    };
-    let first = program_batch(&handles, "\x1b]9;4;1;10\x07\x1b]9;4;1;20\x07");
-    assert_eq!(progress_reports(&first), vec![normal(20)], "only the batch's last value");
-    let ended = program_batch(&handles, "\x1b]133;D;0\x07");
-    assert_eq!(progress_reports(&ended), vec![None], "a finished command clears the bar");
-    assert!(progress_reports(&program_batch(&handles, "\x1b]133;D;0\x07")).is_empty());
-    program_batch(&handles, "\x1b]9;4;3\x07");
-    assert_eq!(progress_reports(&program_batch(&handles, "\x1bc")), vec![None], "RIS clears it");
-}
-
-#[test]
-fn a_batch_of_notifications_is_one_event_with_a_count() {
-    // A burst in one batch reaches the App as its first notification and how many followed.
-    let (_pane, handles) = pane_and_worker_handles();
-    let events = program_batch(&handles, "\x1b]9;one\x07\x1b]9;two\x07\x1b]777;notify;T;three\x07");
-    let notices: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            UserEvent::ProgramNotify { title, body, more, .. } => {
-                Some((title.clone(), body.clone(), *more))
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(notices, vec![(None, "one".to_owned(), 2)]);
-}
-
 /// Names the test whose re-run, as a ConPTY child, writes program-state OSCs instead of testing.
 #[cfg(windows)]
-const PROGRAM_OSC_CHILD: &str = "SONICTERM_PROGRAM_OSC_CHILD";
+pub(super) const PROGRAM_OSC_CHILD: &str = "SONICTERM_PROGRAM_OSC_CHILD";
 
 /// Turn VT output on for this process's console, so the OSC bytes reach ConPTY as sequences.
 #[cfg(windows)]
-fn enable_vt_output() {
+pub(super) fn enable_vt_output() {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Console::{
@@ -2411,7 +418,7 @@ fn enable_vt_output() {
 /// Write an `OSC 9;4` set, an OSC 9 and an OSC 777 notification, then the clear, 300 ms apart so
 /// each change is its own read.
 #[cfg(windows)]
-fn write_program_oscs() {
+pub(super) fn write_program_oscs() {
     use std::io::Write;
     #[cfg(windows)]
     enable_vt_output();
@@ -2426,93 +433,4 @@ fn write_program_oscs() {
         let _ = stdout.flush();
         std::thread::sleep(Duration::from_millis(300));
     }
-}
-
-/// OSC 9;4 progress and OSC 9 / OSC 777 notifications a real ConPTY child writes reach the pane as
-/// typed events: ConPTY forwards them, and the worker turns them into the App's events. The child is
-/// this test binary re-run under a marker; the read is bounded by a 30 s deadline.
-#[cfg(windows)]
-#[test]
-fn conpty_child_program_oscs_reach_the_pane() {
-    use crate::app::pty_test_support::isolated;
-    use sonicterm_io::pty::{CommandSpawn, PtyHandle, ShellSpawnOpts};
-    use sonicterm_vt::vt::{ProgressReport, ProgressState};
-    let name = std::thread::current().name().expect("named unit test").to_owned();
-    if std::env::var(PROGRAM_OSC_CHILD).is_ok_and(|value| value == name) {
-        // This process is the ConPTY child: it writes the sequences and ends.
-        write_program_oscs();
-        return;
-    }
-    if isolated() {
-        return;
-    }
-    // Only this isolated process runs, so setting its environment races no other test.
-    std::env::set_var(PROGRAM_OSC_CHILD, &name);
-    let spawn = CommandSpawn {
-        program: std::env::current_exe().expect("test binary path").into_os_string(),
-        args: [name.as_str(), "--exact", "--nocapture", "--test-threads=1"]
-            .map(std::ffi::OsString::from)
-            .into(),
-        cwd: std::env::temp_dir(),
-    };
-    let pty = PtyHandle::spawn_command(&spawn, 120, 40, &ShellSpawnOpts::default())
-        .expect("spawn the ConPTY child");
-    let (_pane, handles) = pane_and_worker_handles();
-    let replies = pty.reply_sender();
-    let mut latch = SyncLatch::default();
-    let mut progress = Vec::new();
-    let mut notices = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    // The clear is written last, so once it arrives every notification has too.
-    while progress.len() < 2 {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let Ok(chunk) = pty.out_rx.recv_timeout(remaining) else {
-            panic!("no clear within 30 s: progress {progress:?}, notifications {notices:?}");
-        };
-        process_pane_vt_batch_with(
-            &handles,
-            &chunk,
-            None,
-            &mut None,
-            &mut latch,
-            |_| None,
-            |event| match event {
-                UserEvent::ProgramProgress { report, .. } => progress.push(report),
-                UserEvent::ProgramNotify { title, body, more, .. } => {
-                    notices.push((title, body, more));
-                }
-                // Output and other host events are not what this test waits for.
-                _ => {}
-            },
-            Instant::now,
-            |reply| {
-                let _ = replies.send(reply);
-            },
-        );
-    }
-    let set = Some(ProgressReport { state: ProgressState::Normal, percent: 40 });
-    assert_eq!(progress, vec![set, None]);
-    let total: u32 = notices.iter().map(|(_, _, more)| more + 1).sum();
-    assert_eq!(total, 2, "both notifications arrived: {notices:?}");
-    assert_eq!(notices.first().map(|notice| notice.1.as_str()), Some("build done"));
-    let ci_seen = notices.iter().any(|(title, ..)| title.as_deref() == Some("CI"));
-    assert!(
-        ci_seen || notices.len() == 1,
-        "the OSC 777 title arrives unless coalesced: {notices:?}"
-    );
-}
-
-/// A batch's first notification is the first one with text left after sanitizing: a zero-width
-/// OSC 9 before `hello` must not hide `hello`, and a blank one is never counted.
-#[test]
-fn a_batch_keeps_the_first_notification_that_sanitizes_to_text() {
-    let mut notices = ProgramNotices::default();
-    notices.push(None, "\u{200B}".to_owned());
-    notices.push(Some("\u{1b}".to_owned()), " \u{2028} ".to_owned());
-    notices.push(None, "hello".to_owned());
-    notices.push(None, "again".to_owned());
-    assert_eq!(notices.into_parts(), Some((None, "hello".to_owned(), 1)));
-    let mut blank = ProgramNotices::default();
-    blank.push(None, "\u{200B}".to_owned());
-    assert_eq!(blank.into_parts(), None, "a batch of blank notifications sends no event");
 }

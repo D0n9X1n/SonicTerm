@@ -160,7 +160,16 @@ fn commit_resets_the_device_inventory_and_keeps_renderer_state() {
 #[test]
 fn cleared_frame_key_forces_a_full_first_frame() {
     assert!(method("reset_after_rebind").contains("self.last_frame_key = None"));
-    let plan = include_str!("frame_plan.rs").replace("\r\n", "\n");
+    let plan = concat!(
+        include_str!("frame_plan.rs"),
+        "\n",
+        include_str!("frame_plan_damage.rs"),
+        "\n",
+        include_str!("frame_plan_identity.rs"),
+        "\n",
+        include_str!("frame_plan_rows.rs")
+    )
+    .replace("\r\n", "\n");
     assert!(plan.contains("let first_frame = previous.is_none();"));
 }
 

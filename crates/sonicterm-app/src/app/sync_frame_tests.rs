@@ -497,7 +497,13 @@ fn the_recheck_under_the_guards_abandons_a_newly_held_frame() {
         let receipts = source.find("reconcile_and_apply_receipts(").expect("applies receipts");
         assert!(collect < recheck && recheck < receipts);
     };
-    scan(include_str!("window_event.rs"));
+    scan(concat!(
+        include_str!("window_event.rs"),
+        "\n",
+        include_str!("window_event_pointer.rs"),
+        "\n",
+        include_str!("window_event_redraw.rs")
+    ));
     scan(include_str!("child_window_redraw.rs"));
 }
 
@@ -520,7 +526,16 @@ fn only_a_changed_resize_forces_a_frame_through_a_hold() {
             attempt(&mut app, main, RedrawCause::Expose, base, FrameSettlement::Presented);
         assert_eq!(admitted, forced, "{outcome:?}");
     }
-    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+    for source in [
+        concat!(
+            include_str!("window_event.rs"),
+            "\n",
+            include_str!("window_event_pointer.rs"),
+            "\n",
+            include_str!("window_event_redraw.rs")
+        ),
+        include_str!("child_window.rs"),
+    ] {
         let source = source.replace("\r\n", "\n");
         let classify = source.find("try_resize_outcome(").expect("the handler classifies");
         let note = source.find("redraw.note_resize(").expect("the handler notes the outcome");
@@ -810,7 +825,16 @@ fn the_recheck_abandons_a_held_frame_on_both_roles_without_touching_state() {
         assert_eq!(defer_sync(&app, owner), 1, "child={child_owner}");
         assert_eq!(app.windows[&owner].redraw.deferred_rule, Some(DeferRule::Sync));
     }
-    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
+    for source in [
+        concat!(
+            include_str!("window_event.rs"),
+            "\n",
+            include_str!("window_event_pointer.rs"),
+            "\n",
+            include_str!("window_event_redraw.rs")
+        ),
+        include_str!("child_window_redraw.rs"),
+    ] {
         let source = source.replace("\r\n", "\n");
         let recheck = source.find("abandon_synchronized_frame(").expect("the adapter rechecks");
         let branch = &source[recheck..recheck + source[recheck..].find("return;").unwrap()];

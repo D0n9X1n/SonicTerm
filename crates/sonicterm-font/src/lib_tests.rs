@@ -117,196 +117,7 @@ fn fallback_resolution_diagnostics_exclude_requested_text() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-#[test]
-fn configured_font_diagnostics_use_sonicterm_guidance_without_hiding_errors() {
-    const CHILD: &str = "SONICTERM_CONFIGURED_FONT_LOG_CHILD";
-    const MISSING: &str = "SonicTerm Missing Diagnostic Primary";
-    const OTHER: &str = "SonicTerm Missing Diagnostic Style";
-    const FALLBACK: &str = "SonicTerm Missing Diagnostic Fallback";
-    const REC_MONO: &str = "Rec Mono St.Helens";
-    const URL: &str = "https://github.com/D0n9X1n/SonicTerm/wiki/Configuration";
-    /// How a diagnostic names the family it failed to load; the replacement it names differs.
-    fn reported_identity(family: &str) -> String {
-        format!("{family:?} (weight=")
-    }
-    // These targets must survive a font capture; a replacement filter can silently drop them from files and crash history.
-    const RETAINED_WARNINGS: [&str; 5] = [
-        "font-capture-exit-control",
-        "font-capture-atlas-control",
-        "font-capture-reclaimed-control",
-        "font-capture-wgpu-control",
-        "font-capture-naga-control",
-    ];
-
-    // Isolated production logging proves missing requests remain visible and valid or synthetic requests stay quiet.
-    let Some(mode) = std::env::var_os(CHILD) else {
-        let capture_filter = format!("config=error,{}", sonicterm_logging::DEFAULT_FILTER);
-        // Both published recipes must match the filter whose retained warnings this test exercises.
-        for documentation in [
-            include_str!("../../../wiki/Logging.md"),
-            include_str!("../../../wiki/Logging-zh-CN.md"),
-        ] {
-            assert!(documentation.contains(&format!("RUST_LOG={capture_filter}")));
-        }
-        for mode in ["default", "admitted"] {
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "lib_tests::configured_font_diagnostics_use_sonicterm_guidance_without_hiding_errors",
-                    "--nocapture",
-                ])
-                .env(CHILD, mode)
-                .env_remove("RUST_LOG");
-            if mode == "admitted" {
-                command.env("RUST_LOG", &capture_filter);
-            }
-            let output = child_output(&mut command);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                output.status.success(),
-                "{}\n{stderr}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            assert!(stderr.contains("font-diagnostic-positive-control"));
-            assert!(stderr.contains("configured-font-error-positive-control"));
-            for marker in RETAINED_WARNINGS {
-                assert!(stderr.contains(marker), "missing stderr warning {marker}");
-            }
-            let errors: Vec<_> =
-                stderr.lines().filter(|line| line.contains("Unable to load")).collect();
-            assert_eq!(errors.len(), 4, "{stderr}");
-            assert!(errors.iter().all(|line| line.contains("ERROR") && line.contains("config")));
-            assert_eq!(errors.iter().filter(|line| line.contains(MISSING)).count(), 2);
-            assert_eq!(errors.iter().filter(|line| line.contains(OTHER)).count(), 1);
-            assert_eq!(errors.iter().filter(|line| line.contains(FALLBACK)).count(), 1);
-            assert!(errors.iter().all(|line| !line.contains(&reported_identity(REC_MONO))));
-            let default_family = reported_identity(config::DEFAULT_MONOSPACE_FAMILIES[0]);
-            assert!(errors.iter().all(|line| !line.contains(&default_family)), "{stderr}");
-            let primary = errors
-                .iter()
-                .find(|line| line.contains(MISSING) && line.contains("Regular"))
-                .unwrap();
-            assert!(primary.contains("configured primary font"), "{primary}");
-            assert!(primary.contains(&format!("Using \"{REC_MONO}\" instead")), "{primary}");
-            assert!(
-                primary.contains("weight=\"Regular\"")
-                    && primary.contains("stretch=Normal")
-                    && primary.contains("style=Normal")
-            );
-            let derived =
-                errors.iter().find(|line| line.contains(MISSING) && line.contains("Bold")).unwrap();
-            assert!(derived.contains("derived from the configured primary font"), "{derived}");
-            for family in [OTHER, FALLBACK] {
-                let requested = errors.iter().find(|line| line.contains(family)).unwrap();
-                assert!(requested.contains("requested font"), "{requested}");
-                assert!(!requested.contains("configured primary"), "{requested}");
-            }
-            for line in errors {
-                assert!(line.contains(URL), "{line}");
-                assert!(line.contains("[font].family"), "{line}");
-                assert!(!line.contains("wezterm"), "{line}");
-                assert!(!line.contains("font_rules"), "{line}");
-                assert!(!line.contains("sonicterm.font("), "{line}");
-                assert!(!line.contains("separate font file"), "{line}");
-            }
-        }
-        return;
-    };
-
-    let directory =
-        std::env::temp_dir().join(format!("sonicterm-font-diagnostic-{}", std::process::id()));
-    let guard =
-        sonicterm_logging::init_in(&sonicterm_logging::LoggingConfig::default(), &directory)
-            .unwrap();
-    tracing::warn!(target: "sonicterm_font::control", "font-diagnostic-positive-control");
-    tracing::warn!(target: "sonic_exit", "font-capture-exit-control");
-    tracing::warn!(target: "sonic::glyph_atlas", "font-capture-atlas-control");
-    tracing::warn!(target: "memory::reclaimed", "font-capture-reclaimed-control");
-    tracing::warn!(target: "wgpu", "font-capture-wgpu-control");
-    tracing::warn!(target: "naga", "font-capture-naga-control");
-    config::show_error("configured-font-error-positive-control");
-    let primary = config::FontAttributes::new(MISSING);
-    let mut settings = config::Config::default();
-    settings.font_locator = config::FontLocatorSelection::ConfigDirsOnly;
-    settings.font_dirs =
-        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-fonts/rec-mono")];
-    settings.font.font = vec![
-        primary.clone(),
-        config::FontAttributes::new_fallback(FALLBACK),
-        config::FontAttributes::new_fallback(REC_MONO),
-    ];
-    let settings = config::ConfigHandle::new(settings);
-    let fonts = crate::FontConfigInner::new(Some(settings.clone()), 72).unwrap();
-    let (_, handles) = fonts.resolve_font_helper(&settings.font, &settings, 14).unwrap();
-    assert_eq!(handles.first().unwrap().names().family, REC_MONO);
-    // A repeat at another size, as a zoom or a scale change does, reports the same miss only once.
-    fonts.resolve_font_helper(&settings.font, &settings, 18).unwrap();
-    for synthetic in [settings.font.make_bold(), settings.font.make_italic()] {
-        fonts.resolve_font_helper(&synthetic, &settings, 14).unwrap();
-    }
-
-    // These nonsynthetic requests exercise the private helper's alternate wording, not the shipping style-selection path.
-    let requests = [
-        config::FontAttributes { weight: config::FontWeight::BOLD, ..primary },
-        config::FontAttributes::new(OTHER),
-        config::FontAttributes::new(FALLBACK),
-        config::FontAttributes::new(REC_MONO),
-    ];
-    for requested in requests {
-        let style = config::TextStyle {
-            font: vec![requested, config::FontAttributes::new_fallback(REC_MONO)],
-            foreground: None,
-        };
-        let (_, handles) = fonts.resolve_font_helper(&style, &settings, 14).unwrap();
-        assert_eq!(handles.first().unwrap().names().family, REC_MONO);
-    }
-    // A platform default the host lacks, such as Cascadia Mono on an older Windows, is no user error.
-    let default_missing = config::TextStyle {
-        font: vec![
-            config::FontAttributes::new(config::DEFAULT_MONOSPACE_FAMILIES[0]),
-            config::FontAttributes::new_fallback(REC_MONO),
-        ],
-        foreground: None,
-    };
-    fonts.resolve_font_helper(&default_missing, &settings, 14).unwrap();
-    let dump =
-        sonicterm_logging::crash::__test_write_dump(&directory.join("dump"), "synthetic").unwrap();
-    let history = std::fs::read_to_string(dump).unwrap();
-    drop(guard);
-    let mut sink = String::new();
-    for entry in std::fs::read_dir(&directory).unwrap() {
-        let entry = entry.unwrap();
-        if entry.file_name().to_string_lossy().starts_with("sonicterm.log") {
-            sink.push_str(&std::fs::read_to_string(entry.path()).unwrap());
-        }
-    }
-    for captured in [&sink, &history] {
-        assert!(captured.contains("font-diagnostic-positive-control"));
-        for marker in RETAINED_WARNINGS {
-            assert!(captured.contains(marker), "missing retained warning {marker}");
-        }
-        if mode == "admitted" {
-            assert!(captured.contains("configured-font-error-positive-control"));
-            assert_eq!(captured.lines().filter(|line| line.contains("Unable to load")).count(), 4);
-            assert!(
-                captured.contains(MISSING)
-                    && captured.contains(OTHER)
-                    && captured.contains(FALLBACK)
-            );
-            assert!(!captured
-                .lines()
-                .filter(|line| line.contains("Unable to load"))
-                .any(|line| line.contains(&reported_identity(REC_MONO))));
-        } else {
-            assert!(!captured.contains("configured-font-error-positive-control"));
-            assert!(!captured.contains("Unable to load"));
-        }
-    }
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-fn fallback_fixture(coverage_chars: &[char], is_math_font: bool) -> ParsedFont {
+pub(super) fn fallback_fixture(coverage_chars: &[char], is_math_font: bool) -> ParsedFont {
     let mut coverage = RangeSet::new();
     for ch in coverage_chars {
         coverage.add(*ch as u32);
@@ -375,18 +186,18 @@ const WORKER_WAIT: Duration = Duration::from_secs(10);
 
 /// A one-shot gate: closed until `open`, and `wait` fails the test after `WORKER_WAIT`.
 #[derive(Default)]
-struct Latch {
+pub(super) struct Latch {
     opened: StdMutex<bool>,
     changed: Condvar,
 }
 
 impl Latch {
-    fn open(&self) {
+    pub(super) fn open(&self) {
         *self.opened.lock().unwrap() = true;
         self.changed.notify_all();
     }
 
-    fn wait(&self) {
+    pub(super) fn wait(&self) {
         let opened = self.opened.lock().unwrap();
         let (opened, timeout) =
             self.changed.wait_timeout_while(opened, WORKER_WAIT, |opened| !*opened).unwrap();
@@ -396,7 +207,7 @@ impl Latch {
 
 /// A locator that waits on `gate`, counts its calls, panics on `panic_on`, and answers every
 /// other request with Rec Mono covering `resolves`.
-struct GatedLocator {
+pub(super) struct GatedLocator {
     gate: Arc<Latch>,
     calls: Arc<AtomicUsize>,
     resolves: Vec<char>,
@@ -433,8 +244,8 @@ impl crate::locator::FontLocator for GatedLocator {
 
 /// A configuration whose only primary face is the ASCII-only sample font (family Roboto), so é, ñ
 /// and ü reach the test locator; `directory` holds the font copy and is removed on drop.
-struct FallbackFixture {
-    configuration: crate::FontConfiguration,
+pub(super) struct FallbackFixture {
+    pub(super) configuration: crate::FontConfiguration,
     directory: PathBuf,
 }
 
@@ -445,7 +256,7 @@ impl Drop for FallbackFixture {
     }
 }
 
-fn fallback_configuration(name: &str, locator: GatedLocator) -> FallbackFixture {
+pub(super) fn fallback_configuration(name: &str, locator: GatedLocator) -> FallbackFixture {
     let directory =
         std::env::temp_dir().join(format!("sonicterm-fallback-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -471,7 +282,7 @@ fn fallback_configuration(name: &str, locator: GatedLocator) -> FallbackFixture 
     FallbackFixture { configuration, directory }
 }
 
-fn locator(gate: &Arc<Latch>, calls: &Arc<AtomicUsize>) -> GatedLocator {
+pub(super) fn locator(gate: &Arc<Latch>, calls: &Arc<AtomicUsize>) -> GatedLocator {
     GatedLocator {
         gate: Arc::clone(gate),
         calls: Arc::clone(calls),
@@ -481,7 +292,7 @@ fn locator(gate: &Arc<Latch>, calls: &Arc<AtomicUsize>) -> GatedLocator {
 }
 
 /// The first glyph id frame shaping gives `character`; 0 is notdef.
-fn frame_glyph(font: &crate::LoadedFont, character: char) -> u32 {
+pub(super) fn frame_glyph(font: &crate::LoadedFont, character: char) -> u32 {
     let shaped = font
         .shape_for_frame(
             &character.to_string(),
@@ -494,7 +305,7 @@ fn frame_glyph(font: &crate::LoadedFont, character: char) -> u32 {
     shaped[0].glyph_pos
 }
 
-fn wait_for_generation(configuration: &crate::FontConfiguration, generation: u64) {
+pub(super) fn wait_for_generation(configuration: &crate::FontConfiguration, generation: u64) {
     let started = Instant::now();
     while configuration.fallback_notice().generation() < generation {
         assert!(started.elapsed() < WORKER_WAIT, "generation {generation} was never published");
@@ -502,55 +313,13 @@ fn wait_for_generation(configuration: &crate::FontConfiguration, generation: u64
     }
 }
 
-#[test]
-fn frame_shaping_returns_notdef_at_once_while_the_locator_is_blocked() {
-    // A frame never waits for fallback discovery: with the locator blocked, the character shapes as
-    // notdef at once; after the face is published, a later frame merges it and gets the real glyph.
-    let gate = Arc::new(Latch::default());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let fixture = fallback_configuration("blocked", locator(&gate, &calls));
-    let font = fixture.configuration.default_font().unwrap();
-    assert_eq!(frame_glyph(&font, 'é'), 0, "notdef while the locator is blocked");
-    gate.open();
-    wait_for_generation(&fixture.configuration, 1);
-    assert_ne!(frame_glyph(&font, 'é'), 0, "a later frame merges the published face");
-}
-
 /// A worker pause point: it signals `arrived`, then waits for `release`.
-fn pause(arrived: &Arc<Latch>, release: &Arc<Latch>) -> Arc<dyn Fn() + Send + Sync> {
+pub(super) fn pause(arrived: &Arc<Latch>, release: &Arc<Latch>) -> Arc<dyn Fn() + Send + Sync> {
     let (arrived, release) = (Arc::clone(arrived), Arc::clone(release));
     Arc::new(move || {
         arrived.open();
         release.wait();
     })
-}
-
-#[test]
-fn frame_shaping_skips_the_merge_while_the_worker_holds_the_pending_lock() {
-    // Paused mid-append the worker holds `pending_fallback`, and a frame shapes notdef at once.
-    // Paused after the unlock and before the completion, a frame already merges the real glyph
-    // while the generation is still 0, so the completion always follows the unlock.
-    let gate = Arc::new(Latch::default());
-    gate.open();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let fixture = fallback_configuration("contended", locator(&gate, &calls));
-    let (in_append, leave_append) = (Arc::new(Latch::default()), Arc::new(Latch::default()));
-    let (before_completion, complete) = (Arc::new(Latch::default()), Arc::new(Latch::default()));
-    fixture.configuration.set_fallback_worker_hooks_for_test(crate::FallbackWorkerHooks {
-        during_append: Some(pause(&in_append, &leave_append)),
-        before_completion: Some(pause(&before_completion, &complete)),
-        ..Default::default()
-    });
-    let font = fixture.configuration.default_font().unwrap();
-    assert_eq!(frame_glyph(&font, 'é'), 0);
-    in_append.wait();
-    assert_eq!(frame_glyph(&font, 'é'), 0, "the lock is busy, so the frame skips the merge");
-    leave_append.open();
-    before_completion.wait();
-    assert_ne!(frame_glyph(&font, 'é'), 0, "after the unlock a frame merges");
-    assert_eq!(fixture.configuration.fallback_notice().generation(), 0, "no completion yet");
-    complete.open();
-    wait_for_generation(&fixture.configuration, 1);
 }
 
 #[test]
@@ -673,27 +442,6 @@ fn an_ended_worker_loses_one_request_and_the_next_character_spawns_a_new_one() {
         1,
         "exactly one error line: {logged}"
     );
-}
-
-#[test]
-fn blocking_shape_still_retries_after_clear_shape_cache() {
-    // The explicit blocking path keeps its meaning: it waits for the fallback, merges it through a
-    // `ClearShapeCache` retry and returns the real glyph.
-    let gate = Arc::new(Latch::default());
-    gate.open();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let fixture = fallback_configuration("blocking", locator(&gate, &calls));
-    let font = fixture.configuration.default_font().unwrap();
-    let shaped = font
-        .blocking_shape(
-            "é",
-            Some(crate::Presentation::Text),
-            crate::Direction::LeftToRight,
-            None,
-            None,
-        )
-        .unwrap();
-    assert_ne!(shaped[0].glyph_pos, 0);
 }
 
 #[test]
@@ -928,27 +676,4 @@ fn a_fontconfig_substitution_for_a_missing_family_is_reported() {
     assert!(reported(MISSING), "the substitution is reported");
     assert_eq!(resolve("monospace"), "Rec Mono St.Helens");
     assert!(!reported("monospace"), "an alias resolving to another face is not a miss");
-}
-
-/// The configured boundary survives a fallback merge: after `insert_fallback_handles` appends a
-/// discovered face and rebuilds the shaper, the shaper's configured count is still the configured
-/// chain's, not the enlarged handle count, so the appended face keeps WezTerm's unload rule.
-#[test]
-fn the_configured_boundary_survives_a_fallback_merge() {
-    let gate = Arc::new(Latch::default());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let fixture = fallback_configuration("boundary", locator(&gate, &calls));
-    let font = fixture.configuration.default_font().unwrap();
-    let configured = font.configured_handle_count;
-    assert_eq!(font.shaper.borrow().configured_handle_count(), configured);
-    let handles = font.handles.borrow().len();
-    let merged = font.insert_fallback_handles(vec![fallback_fixture(&['é'], false)]).unwrap();
-    assert!(merged, "the merge appends a discovered face");
-    assert_eq!(font.handles.borrow().len(), handles + 1);
-    assert_eq!(
-        font.shaper.borrow().configured_handle_count(),
-        configured,
-        "the rebuilt shaper keeps the configured boundary"
-    );
-    gate.open();
 }

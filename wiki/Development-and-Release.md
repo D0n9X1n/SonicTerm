@@ -29,6 +29,7 @@ python3 scripts/local-gate.py
 | Step | Command | Local hosts | Class | Needs | CI jobs |
 | --- | --- | --- | --- | --- | --- |
 | `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-runtime`, `linux-core` |
+| `source-size` | `python3 scripts/check-source-size.py` | macOS, Windows, Linux | `local` | `python` | `tooling` |
 | `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
@@ -87,6 +88,7 @@ Local hosts are the hosts where the runner selects a step. CI jobs are where CI 
 
 Needs:
 
+- `python`: Python 3 on `PATH`.
 - `actionlint`: `actionlint` at the version `scripts/pinned-tools.json` pins.
 - `rust`: the Rust toolchain from `rust-toolchain.toml`, with rustfmt and clippy.
 - `native`: the platform's native build libraries: Cairo and pkg-config on macOS (`brew install cairo pkg-config`), Cairo from `scripts/setup-windows-cairo.ps1` on Windows, and the packages the `linux-core` job installs on Linux.
@@ -215,7 +217,7 @@ Each run's verdicts are kept as `guard-correlation-join.json`.
 
 The harness also calls App and renderer methods that older trees lack. Each
 such call sits behind a harness API cfg, one entry of `HARNESS_API_CFGS` in
-`scripts/local-gate.py`. There are seven entries: `perf_atlas_retry_api`, for the
+`scripts/gate_harness.py`. There are seven entries: `perf_atlas_retry_api`, for the
 four methods S1/atlas-retry's driver needs; `perf_s10_attribution_api`, for
 the App's two S10 attribution watch methods (`arm_s10_attribution` and
 `disarm_s10_attribution`); `perf_completeness_api`, for the renderer's

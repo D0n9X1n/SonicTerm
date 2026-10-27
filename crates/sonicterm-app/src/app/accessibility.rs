@@ -158,56 +158,12 @@ const KIND_ABOUT_ROW: u64 = 5 << 32;
 const KIND_ABOUT_COPY: u64 = 6 << 32;
 /// The About window's Copy button.
 pub(crate) const ABOUT_COPY_NODE: NodeId = NodeId(TERMINAL_WINDOW | KIND_ABOUT_COPY);
-
-/// The About window's row `index`, counted from the version row.
-pub(crate) fn about_row_node(index: usize) -> NodeId {
-    NodeId(TERMINAL_WINDOW | KIND_ABOUT_ROW | index as u64)
-}
 /// The window node.
 pub(crate) const ROOT_NODE: NodeId = NodeId(TERMINAL_WINDOW | KIND_ROOT);
 /// The status line group.
 pub(crate) const STRIP_NODE: NodeId = NodeId(TERMINAL_WINDOW | KIND_STRIP);
 /// The announcement node, present in every tree.
 pub(crate) const ANNOUNCEMENT_NODE: NodeId = NodeId(TERMINAL_WINDOW | KIND_ANNOUNCEMENT);
-
-/// A fixed code per segment, written out rather than taken from the enum's order, so a node id
-/// never changes when the catalog is reordered. Exhaustive: a new segment does not compile
-/// without a code.
-fn segment_code(id: StatusSegmentId) -> u64 {
-    match id {
-        StatusSegmentId::Alerts => 1,
-        StatusSegmentId::Health => 2,
-        StatusSegmentId::Mem => 3,
-        StatusSegmentId::Mode => 4,
-        StatusSegmentId::Input => 5,
-        StatusSegmentId::Clip => 6,
-        StatusSegmentId::PathCheck => 7,
-        StatusSegmentId::Link => 8,
-        StatusSegmentId::Paste => 9,
-        StatusSegmentId::Sel => 10,
-        StatusSegmentId::Ime => 11,
-        StatusSegmentId::Scroll => 12,
-        StatusSegmentId::Cpu => 13,
-        StatusSegmentId::Frame => 14,
-        StatusSegmentId::Out => 15,
-        StatusSegmentId::TabMem => 16,
-        StatusSegmentId::Glyphs => 17,
-        StatusSegmentId::History => 18,
-        StatusSegmentId::Font => 19,
-        StatusSegmentId::Zoom => 20,
-        StatusSegmentId::Size => 21,
-    }
-}
-
-/// The node of segment `id`: the same in every tree, whatever the segment's position.
-pub(crate) fn segment_node(id: StatusSegmentId) -> NodeId {
-    NodeId(TERMINAL_WINDOW | KIND_SEGMENT | segment_code(id))
-}
-
-/// The segment a node id names, if it names one.
-fn segment_for_node(node: u64) -> Option<StatusSegmentId> {
-    StatusSegmentId::ALL.into_iter().find(|id| segment_node(*id).0 == node)
-}
 
 /// The announcement node's text and urgency.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -489,16 +445,6 @@ impl WindowAccessibility {
     }
 }
 
-/// A rect in raster px.
-fn rect(left: f32, top: f32, width: f32, height: f32) -> Rect {
-    Rect {
-        x0: f64::from(left),
-        y0: f64::from(top),
-        x1: f64::from(left + width),
-        y1: f64::from(top + height),
-    }
-}
-
 /// Everything a window's tree is built from.
 pub(crate) struct TreeInputs<'strip> {
     /// The window's native title, the root's name.
@@ -515,148 +461,6 @@ pub(crate) struct TreeInputs<'strip> {
     pub(crate) announcement: Option<Announcement>,
     /// The segment with focus.
     pub(crate) focus: Option<StatusSegmentId>,
-}
-
-/// Build a full tree: the window, the status line group with its segments (all live off), and
-/// the announcement node, which is never hidden and never removed.
-pub(crate) fn build_tree(inputs: &TreeInputs<'_>) -> TreeUpdate {
-    let mut nodes = Vec::new();
-    let mut children = Vec::new();
-    if let Some((band, strip)) = inputs.strip {
-        let mut group = Node::new(Role::Group);
-        group.set_label(inputs.strip_label.clone());
-        group.set_live(Live::Off);
-        group.set_bounds(band);
-        let mut segments = Vec::with_capacity(strip.segments.len());
-        for segment in &strip.segments {
-            let role =
-                if segment.role == AccessibleRole::Button { Role::Button } else { Role::Label };
-            let mut node = Node::new(role);
-            node.set_label(segment.name.clone());
-            node.set_live(Live::Off);
-            node.set_bounds(rect(
-                segment.left_px,
-                band.y0 as f32,
-                segment.width,
-                (band.y1 - band.y0) as f32,
-            ));
-            node.add_action(AccessAction::Focus);
-            if segment.role == AccessibleRole::Button {
-                node.add_action(AccessAction::Click);
-            }
-            segments.push(segment_node(segment.id));
-            nodes.push((segment_node(segment.id), node));
-        }
-        group.set_children(segments);
-        nodes.push((STRIP_NODE, group));
-        children.push(STRIP_NODE);
-    }
-    let mut announcement = Node::new(Role::Label);
-    announcement.set_label(
-        inputs.announcement.as_ref().map(|announced| announced.text.clone()).unwrap_or_default(),
-    );
-    announcement.set_description(inputs.announcements_label.clone());
-    let assertive = inputs.announcement.as_ref().is_some_and(|announced| announced.assertive);
-    announcement.set_live(if assertive { Live::Assertive } else { Live::Polite });
-    announcement.set_bounds(inputs.announcement_bounds);
-    nodes.push((ANNOUNCEMENT_NODE, announcement));
-    children.push(ANNOUNCEMENT_NODE);
-    let mut root = Node::new(Role::Window);
-    root.set_label(inputs.title.clone());
-    root.set_children(children);
-    nodes.push((ROOT_NODE, root));
-    let shown = |id: StatusSegmentId| {
-        inputs.strip.is_some_and(|(_, strip)| strip.segments.iter().any(|segment| segment.id == id))
-    };
-    let focus = inputs.focus.filter(|id| shown(*id)).map_or(ROOT_NODE, segment_node);
-    TreeUpdate {
-        nodes,
-        tree: Some(TreeInfo {
-            toolkit_name: Some("SonicTerm".to_owned()),
-            ..TreeInfo::new(ROOT_NODE)
-        }),
-        tree_id: TreeId::ROOT,
-        focus,
-    }
-}
-
-/// Build the About window's tree: the window titled `title`, one label node per report row in
-/// order, read as `label: value`, then the Copy button labelled from `copy`, which can be pressed.
-pub(crate) fn build_about_tree(title: &str, rows: &[(String, String)], copy: &str) -> TreeUpdate {
-    let mut nodes = Vec::with_capacity(rows.len() + 2);
-    let mut children = Vec::with_capacity(rows.len() + 1);
-    for (index, (label, value)) in rows.iter().enumerate() {
-        let mut node = Node::new(Role::Label);
-        node.set_label(format!("{label}: {value}"));
-        node.set_value(value.clone());
-        node.add_action(AccessAction::Focus);
-        children.push(about_row_node(index));
-        nodes.push((about_row_node(index), node));
-    }
-    let mut button = Node::new(Role::Button);
-    // The drawn label is bracketed, `[ Copy ]`; a screen reader says only the word.
-    button.set_label(copy.trim().trim_start_matches('[').trim_end_matches(']').trim().to_owned());
-    button.add_action(AccessAction::Focus);
-    button.add_action(AccessAction::Click);
-    children.push(ABOUT_COPY_NODE);
-    nodes.push((ABOUT_COPY_NODE, button));
-    let mut root = Node::new(Role::Window);
-    root.set_label(title.to_owned());
-    root.set_children(children);
-    nodes.push((ROOT_NODE, root));
-    TreeUpdate {
-        nodes,
-        tree: Some(TreeInfo {
-            toolkit_name: Some("SonicTerm".to_owned()),
-            ..TreeInfo::new(ROOT_NODE)
-        }),
-        tree_id: TreeId::ROOT,
-        focus: ROOT_NODE,
-    }
-}
-
-/// The health segment's severity in `view`, from its tones.
-pub(crate) fn health_severity(view: &StatusLineView) -> Severity {
-    let Some(health) = view.segments.iter().find(|segment| segment.id == StatusSegmentId::Health)
-    else {
-        // When: the view has no `Health` segment, nothing is wrong that it shows.
-        return Severity::None;
-    };
-    let tones = || health.parts.iter().map(|part| part.tone);
-    if tones().any(|tone| tone == StatusTone::Error) {
-        Severity::Error
-    } else if tones().any(|tone| matches!(tone, StatusTone::Warn | StatusTone::ChipWarn)) {
-        // When: `tones` has a warning part but no error part, the segment warns.
-        Severity::Warn
-    } else {
-        // When: `tones` has no warning or error part, the segment reports nothing wrong.
-        Severity::None
-    }
-}
-
-/// Health's severity in `view` and its spoken name with any warning cue; `None` while nothing is
-/// wrong.
-fn health_state(
-    view: &StatusLineView,
-    i18n: &sonicterm_ui::i18n::I18n,
-) -> (Severity, Option<String>) {
-    let severity = health_severity(view);
-    if severity == Severity::None {
-        // When: `severity` is None, nothing is wrong and there is nothing to say.
-        return (Severity::None, None);
-    }
-    let health = [CommittedSegment {
-        id: StatusSegmentId::Health,
-        left_px: 0.0,
-        width: 1.0,
-        clickable: false,
-    }];
-    let text = accessible_strip(&health, view, false, i18n)
-        .segments
-        .into_iter()
-        .next()
-        .map(|segment| segment.name);
-    (severity, text)
 }
 
 impl App {
@@ -983,37 +787,6 @@ impl App {
         wake
     }
 
-    /// The words for `kind` newly marked on tab `tab` of `window_id`; `None` once the tab closed.
-    fn mark_phrase(&self, window_id: WindowId, tab: TabId, kind: MarkKind) -> Option<String> {
-        let tabs = &self.windows.get(&window_id)?.tabs;
-        let index = tabs.index_of(tab)?;
-        Some(self.alert_phrase(index + 1, kind))
-    }
-
-    /// The words for a new `kind` mark on tab number `tab`; a finish says the duration its mark
-    /// recorded, which a visit to the tab since does not clear.
-    fn alert_phrase(&self, tab: usize, kind: MarkKind) -> String {
-        let i18n = &self.i18n;
-        let source = match kind {
-            MarkKind::Bell => i18n.translate("status-spoken-alert-bell"),
-            MarkKind::Notify => i18n.translate("status-spoken-alert-notify"),
-            MarkKind::Finished(secs) => {
-                // Say how long the command ran.
-                let duration = format_duration(secs);
-                i18n.t_args(
-                    "status-spoken-alert-finished",
-                    Some(&[("duration", duration.as_str())]),
-                )
-            }
-        };
-        let tab_text = tab.to_string();
-        let phrase = i18n.t_args(
-            "status-spoken-alert-tab",
-            Some(&[("tab", tab_text.as_str()), ("sources", source.as_str())]),
-        );
-        format!("{} {phrase}", i18n.translate("status-spoken-alerts"))
-    }
-
     /// Charge `window_id`'s retained model to the window's owner in the governor.
     fn charge_accessibility(&mut self, window_id: WindowId) {
         let Self { windows, accessibility, governor, .. } = self;
@@ -1038,35 +811,20 @@ impl App {
             [(ResourceClass::AccessibilityTree, amount)],
         );
     }
+}
 
-    /// The segment `node` names when the target its request resolved is still what the window
-    /// exposes: an assistive technology is connected, and the committed layout has the same
-    /// segment, pane, action, settings and resize epoch, with a click action for a click.
-    fn request_current(
-        &self,
-        window_id: WindowId,
-        node: u64,
-        target: Option<RequestTarget>,
-        click: bool,
-    ) -> Option<StatusSegmentId> {
-        self.accessibility.get(&window_id).filter(|state| state.active)?;
-        let id = segment_for_node(node)?;
-        let target = target.filter(|target| target.id == id)?;
-        let structure = self.exposed_structure(window_id);
-        let exposed = structure.segments.iter().find(|exposed| exposed.id == id)?;
-        let current = target_of(&structure, exposed);
-        (current == target && (!click || current.action.is_some())).then_some(id)
-    }
+#[cfg(test)]
+#[path = "accessibility_tests.rs"]
+mod accessibility_tests;
 
-    /// Health's severity and text and the tab bar's new-mark count of `window_id` now: an
-    /// assistive technology's baseline.
-    fn accessible_baseline(&self, window_id: WindowId) -> Option<(Severity, Option<String>, u64)> {
-        let inputs = self.accessible_inputs(window_id)?;
-        let view = self.accessible_view(&[StatusSegmentId::Health], &inputs);
-        let (severity, text) = health_state(&view, &self.i18n);
-        Some((severity, text, self.windows.get(&window_id)?.tabs.last_mark().0))
-    }
+#[path = "accessibility_tree.rs"]
+mod tree;
+pub(crate) use tree::{build_about_tree, build_tree, segment_node};
+use tree::{health_state, rect, segment_for_node};
+#[path = "accessibility_actions.rs"]
+mod actions;
 
+impl App {
     /// Act on what an assistive technology asked of `window_id`'s adapter.
     pub(super) fn handle_accessibility_request(
         &mut self,
@@ -1145,235 +903,4 @@ impl App {
             }
         }
     }
-
-    /// Move strip focus in `window_id` to presented segment `id`. The strip takes the window's keys,
-    /// so an active IME composition ends with its preedit; the ring is drawn on the next frame.
-    pub(super) fn set_status_focus(&mut self, window_id: WindowId, id: StatusSegmentId) {
-        let Self { windows, accessibility, .. } = self;
-        let Some(window) = windows.get_mut(&window_id) else {
-            // When: `windows` has no `window_id`, there is no strip to focus.
-            return;
-        };
-        let presented = window
-            .status_strip
-            .as_ref()
-            .is_some_and(|strip| strip.segments.iter().any(|segment| segment.id == id));
-        let Some(state) = accessibility.get_mut(&window_id).filter(|_| presented) else {
-            // When: the window has no accessibility or `presented` is false, focus cannot move there.
-            return;
-        };
-        if state.focus.is_none() {
-            // Taking the keys from the terminal ends a composition in progress.
-            window.ime.cancel();
-        }
-        state.focus = Some(id);
-        state.focus_tab = window.tabs.active().map(|tab| tab.id);
-        self.apply_focus_ring(window_id);
-    }
-
-    /// Draw `window_id`'s ring for its strip focus with the current `strong_focus`, and ask for a
-    /// frame through the dispatch record when the ring changed.
-    fn apply_focus_ring(&mut self, window_id: WindowId) {
-        let strong = self.config.accessibility.strong_focus;
-        let Self { windows, accessibility, .. } = self;
-        let Some(state) = accessibility.get_mut(&window_id) else {
-            // When: `accessibility` has no entry, the window draws no ring.
-            return;
-        };
-        let ring = state.focus.map(|id| (id, strong));
-        if state.ring == ring {
-            // When: `ring` is unchanged, nothing is redrawn.
-            return;
-        }
-        state.ring = ring;
-        let Some(window) = windows.get_mut(&window_id) else {
-            // When: `windows` has no `window_id`, there is no frame to draw it in.
-            return;
-        };
-        if let Some(renderer) = window.renderer.as_mut() {
-            renderer.set_status_line_focus(ring);
-        }
-        window.mark_redraw(RedrawCause::StatusLine);
-        self.request_redraw_once(window_id);
-    }
-
-    /// Redraw every focused segment's ring with the current `strong_focus`, after a reload.
-    pub(super) fn refresh_status_focus_rings(&mut self) {
-        let focused: Vec<WindowId> = self
-            .accessibility
-            .iter()
-            .filter(|(_, state)| state.focus.is_some())
-            .map(|(window_id, _)| *window_id)
-            .collect();
-        for window_id in focused {
-            self.apply_focus_ring(window_id);
-        }
-    }
-
-    /// End strip focus in `window_id`, so keys go to the terminal again.
-    pub(super) fn end_status_focus(&mut self, window_id: WindowId) {
-        let Some(state) = self.accessibility.get_mut(&window_id) else {
-            // When: `accessibility` has no entry, the window never had strip focus.
-            return;
-        };
-        if state.focus.take().is_none() {
-            // When: `focus` was already `None`, there is nothing to end.
-            return;
-        }
-        state.focus_tab = None;
-        self.apply_focus_ring(window_id);
-    }
-
-    /// End `window_id`'s strip focus for a pointer press outside the strip, before any other press
-    /// handling sees it.
-    pub(super) fn end_status_focus_outside(&mut self, window_id: WindowId) {
-        let inside = self.windows.get(&window_id).is_some_and(|window| {
-            let pointer_y = window.cursor_pos.1 as f32;
-            window.status_strip.as_ref().is_some_and(|strip| strip.contains(pointer_y))
-        });
-        if !inside {
-            self.end_status_focus(window_id);
-        }
-    }
-
-    /// `focus_status_line`: focus the first presented clickable segment of `window_id`'s strip,
-    /// or its first segment when none is clickable. With the strip off or empty it does nothing.
-    pub(super) fn focus_status_line(&mut self, window_id: WindowId) {
-        if !self.status_line_shown() {
-            // When: `status_line_shown` is false, there is no strip to focus.
-            return;
-        }
-        let Some(window) = self.windows.get(&window_id) else {
-            // When: `windows` has no `window_id`, there is no strip to focus.
-            return;
-        };
-        let mut segments: Vec<_> =
-            window.status_strip.iter().flat_map(|strip| &strip.segments).collect();
-        segments.sort_by(|left, right| left.x.total_cmp(&right.x));
-        let target = segments
-            .iter()
-            .find(|segment| segment.click.is_some())
-            .or(segments.first())
-            .map(|segment| segment.id);
-        if let Some(target) = target {
-            self.set_status_focus(window_id, target);
-        }
-    }
-
-    /// Handle a pressed key while `window_id`'s strip has focus. Returns `true` when the strip
-    /// consumed it, so it never reaches the terminal: arrows, Home and End move, Enter and Space
-    /// click, Escape and Tab return focus, and any other key returns focus too. A held key's
-    /// repeat moves focus for a navigation key and is otherwise consumed with no effect.
-    pub(super) fn status_focus_key(
-        &mut self,
-        window_id: WindowId,
-        key: &Key,
-        repeat: bool,
-    ) -> bool {
-        let Some(window) = self.windows.get(&window_id) else {
-            // When: `windows` has no `window_id`, no strip owns the key.
-            return false;
-        };
-        let Some(state) = self.accessibility.get(&window_id) else {
-            // When: `accessibility` is `None`, no strip owns the key.
-            return false;
-        };
-        let Some(focus) = state.focus else {
-            // When: `focus` is `None`, the strip does not own keyboard focus.
-            return false;
-        };
-        let tab_changed = state.focus_tab != window.tabs.active().map(|tab| tab.id);
-        let ordered = self.committed_ids(window_id);
-        let Some(position) = ordered.iter().position(|id| *id == focus).filter(|_| !tab_changed)
-        else {
-            // When: the focused segment is gone or the tab changed, focus ends and the key goes
-            // to the terminal as usual.
-            self.end_status_focus(window_id);
-            return false;
-        };
-        let navigation = matches!(
-            key,
-            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Home | NamedKey::End)
-        );
-        if repeat && !navigation {
-            // When: `repeat` of a key that is not `navigation`, the repeat is consumed and changes
-            // nothing, so a held key never reaches the terminal while the strip has focus.
-            return true;
-        }
-        let last = ordered.len() - 1;
-        let move_to = |index: usize| Some(ordered[index]);
-        let target = match key {
-            Key::Named(NamedKey::ArrowLeft) => move_to(position.saturating_sub(1)),
-            Key::Named(NamedKey::ArrowRight) => move_to((position + 1).min(last)),
-            Key::Named(NamedKey::Home) => move_to(0),
-            Key::Named(NamedKey::End) => move_to(last),
-            Key::Named(NamedKey::Enter | NamedKey::Space) => {
-                self.click_status_segment(window_id, focus);
-                None
-            }
-            Key::Character(text) if text.as_str() == " " => {
-                self.click_status_segment(window_id, focus);
-                None
-            }
-            Key::Named(
-                NamedKey::Shift
-                | NamedKey::Control
-                | NamedKey::Alt
-                | NamedKey::Super
-                | NamedKey::Meta
-                | NamedKey::CapsLock
-                | NamedKey::Fn,
-            ) => {
-                // A modifier alone keeps focus, so a chord can follow.
-                None
-            }
-            _ => {
-                // Escape, Tab and every other key return focus without reaching the terminal.
-                self.end_status_focus(window_id);
-                None
-            }
-        };
-        if let Some(target) = target {
-            self.set_status_focus(window_id, target);
-        }
-        true
-    }
-
-    /// Handle an IME event while `window_id`'s strip has focus. Returns `true` when the strip
-    /// consumed it: preedit is suppressed, and a commit is discarded and returns focus, so a
-    /// commit never reaches the terminal while the strip owns focus.
-    pub(super) fn status_focus_ime(&mut self, window_id: WindowId, ime: &Ime) -> bool {
-        let focused = self.accessibility.get(&window_id).is_some_and(|state| state.focus.is_some());
-        if !focused {
-            // When: `focused` is false, the IME event goes to its usual owner.
-            return false;
-        }
-        match ime {
-            Ime::Preedit(..) => true,
-            Ime::Commit(_) => {
-                self.end_status_focus(window_id);
-                true
-            }
-            Ime::Enabled | Ime::Disabled => false,
-        }
-    }
-
-    /// Click presented segment `id` of `window_id` through the same dispatcher as a mouse click,
-    /// so READONLY and routing apply exactly as they do there. An inert or absent segment does
-    /// nothing.
-    pub(super) fn click_status_segment(&mut self, window_id: WindowId, id: StatusSegmentId) {
-        let click: Option<SegmentClick> = self
-            .windows
-            .get(&window_id)
-            .and_then(|window| window.status_strip.as_ref())
-            .and_then(|strip| strip.segments.iter().find(|segment| segment.id == id))
-            .and_then(|segment| segment.click.clone());
-        if let Some(click) = click {
-            self.run_status_click(window_id, click);
-        }
-    }
 }
-
-#[cfg(test)]
-#[path = "accessibility_tests.rs"]
-mod accessibility_tests;

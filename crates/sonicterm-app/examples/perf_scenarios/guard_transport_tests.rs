@@ -407,12 +407,37 @@ fn the_real_adapter_streams_the_apps_buffers_without_copying() {
 /// endpoints are latched, and the transport time is assigned only to its own field.
 #[test]
 fn every_route_transports_after_its_endpoints() {
-    let probe = include_str!("probe.rs").replace("\r\n", "\n");
+    let probe = concat!(
+        include_str!("probe.rs"),
+        "\n",
+        include_str!("probe_api.rs"),
+        "\n",
+        include_str!("probe_atlas.rs"),
+        "\n",
+        include_str!("probe_bootstrap.rs"),
+        "\n",
+        include_str!("probe_callbacks.rs"),
+        "\n",
+        include_str!("probe_checkpoint.rs"),
+        "\n",
+        include_str!("probe_input.rs"),
+        "\n",
+        include_str!("probe_occlusion.rs"),
+        "\n",
+        include_str!("probe_phases.rs"),
+        "\n",
+        include_str!("probe_sampling.rs"),
+        "\n",
+        include_str!("probe_scan.rs")
+    )
+    .replace("\r\n", "\n");
     // Each body is found by its full signature head, so PhaseMeter's own `finish` is never taken for it.
     let body = |head: &str| {
-        let start = probe.find(&format!("    fn {head}")).expect(head);
-        let end =
-            probe[start + 1..].find("\n    fn ").map_or(probe.len(), |offset| start + 1 + offset);
+        let start = probe.find(&format!("fn {head}")).expect(head);
+        let end = probe[start..]
+            .find("\n    }\n")
+            .map(|offset| start + offset + "\n    }".len())
+            .expect("method closing brace");
         probe[start..end].to_owned()
     };
     let order = |text: &str, marks: &[&str]| {

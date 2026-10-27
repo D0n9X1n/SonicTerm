@@ -102,88 +102,11 @@ impl ParserAcquire for TimedParserAcquire {
     }
 }
 
-/// Take one visible parser under the collection's single absolute `deadline`, or None for a miss.
-///
-/// The deadline is checked before the probe, again after a failed probe, and after either path
-/// succeeds; a guard obtained after the deadline is dropped and counts as a miss.
-fn acquire_parser<'a>(
-    acquire: &impl ParserAcquire,
-    pane_id: u64,
-    parser: &'a Mutex<Parser>,
-    deadline: Instant,
-) -> Option<MutexGuard<'a, Parser>> {
-    if acquire.now() >= deadline {
-        // When: the deadline passed on an earlier pane's wait, no further acquisition is attempted.
-        return None;
-    }
-    let guard = match acquire.probe(pane_id, parser) {
-        Some(guard) => guard,
-        None => {
-            // When: the probe found the parser busy, the collection queues on it until the deadline.
-            acquire.after_failed_probe(pane_id);
-            if acquire.now() >= deadline {
-                // When: the deadline passed after the failed probe, the timed wait is not entered.
-                return None;
-            }
-            acquire.wait_until(pane_id, parser, deadline)?
-        }
-    };
-    if acquire.now() >= deadline {
-        // When: the guard arrived after the deadline, it is released and reported as contention.
-        drop(guard);
-        return None;
-    }
-    Some(guard)
-}
-
 /// Validated layout order and the active pane's actual position within it.
 #[derive(Debug)]
 struct VisibleLayout {
     rects: Vec<(u64, Rect)>,
     active_pos: usize,
-}
-
-/// Validate live topology using ids only; hidden parser and image state is never read.
-fn validate_layout(
-    leaves: &[u64],
-    rects: Vec<(u64, Rect)>,
-    active: u64,
-    zoom: Option<u64>,
-    exists: impl Fn(u64) -> bool,
-) -> Result<VisibleLayout, LayoutInvalid> {
-    let mut unique = HashSet::with_capacity(leaves.len());
-    for &id in leaves {
-        if !unique.insert(id) {
-            // When: `unique` already contains `id`, two leaves claim the same pane.
-            return Err(LayoutInvalid::DuplicatePane(id));
-        }
-        if !exists(id) {
-            // When: `exists` rejects a leaf, presenting a subset would conceal broken topology.
-            return Err(LayoutInvalid::MissingPane(id));
-        }
-    }
-    if !unique.contains(&active) {
-        // When: `active` is not a leaf, no coherent active parser index can be supplied.
-        return Err(LayoutInvalid::ActiveNotLeaf(active));
-    }
-    if let Some(zoom) = zoom {
-        // When: `zoom` is set, its owner must also be the active live leaf.
-        if zoom != active || !unique.contains(&zoom) {
-            // When: `zoom` does not identify the active live leaf, do not guess another pane.
-            return Err(LayoutInvalid::ZoomDisagrees(zoom));
-        }
-    }
-    let expected = zoom.map_or_else(|| leaves.to_vec(), |id| vec![id]);
-    let actual: Vec<_> = rects.iter().map(|(id, _)| *id).collect();
-    if actual != expected {
-        // When: `actual` differs from tree order, the renderer cannot receive a coherent layout.
-        return Err(LayoutInvalid::VisibleDisagrees);
-    }
-    let Some(active_pos) = actual.iter().position(|id| *id == active) else {
-        // When: `active_pos` is absent, even a nonempty layout cannot supply the active grid.
-        return Err(LayoutInvalid::ActiveNotLeaf(active));
-    };
-    Ok(VisibleLayout { rects, active_pos })
 }
 
 /// Immutable owned handles and event-loop viewport metadata for one visible pane.
@@ -403,65 +326,6 @@ pub(crate) struct AckTicket {
     parser: std::sync::Weak<Mutex<Parser>>,
 }
 
-impl VisibleFrameSources {
-    /// Bind a presented frame's receipts to the panes this collection held, by index; a receipt whose
-    /// index or pane id disagrees with the layout is dropped.
-    pub(super) fn bind(&self, receipts: Vec<AckReceipt>) -> Vec<AckTicket> {
-        receipts
-            .into_iter()
-            .filter_map(|receipt| {
-                let entry =
-                    self.entries.get(receipt.index).filter(|entry| entry.id == receipt.pane_id)?;
-                Some(AckTicket { receipt, parser: Arc::downgrade(&entry.parser) })
-            })
-            .collect()
-    }
-
-    /// Store a frame's receipts as the window's pending set. Receipts are non-empty only for a
-    /// presented frame, which replaces the set; any other outcome leaves the set unchanged.
-    pub(super) fn store_presented(&self, pending: &mut Vec<AckTicket>, receipts: Vec<AckReceipt>) {
-        if receipts.is_empty() {
-            // When: `receipts` is empty the frame did not present, so the pending set stays as it was.
-            return;
-        }
-        *pending = self.bind(receipts);
-    }
-
-    /// Reconcile the viewports, then, only when that succeeds, apply `window`'s pending receipts to
-    /// the held grids and empty the set. A failed reconciliation returns before any receipt is
-    /// touched, so the set and every grid's dirt stay for the next successful collection.
-    pub(super) fn reconcile_and_apply_receipts(
-        &self,
-        window: &mut WindowState,
-        guards: &mut ParserGuards<'_>,
-    ) -> Result<FrameViewports, FrameUnavailable> {
-        let viewports = self.reconcile_viewports(&mut window.panes, guards)?;
-        let pending = std::mem::take(&mut window.pending_receipts);
-        let dropped = pending.iter().filter(|ticket| !apply_ticket(ticket, guards)).count();
-        if dropped > 0 {
-            if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
-                counters.dirt_ack_dropped += dropped as u64;
-            }
-        }
-        Ok(viewports)
-    }
-}
-
-/// Apply one pending ticket through the guard the collection already holds; returns whether it
-/// cleared. It is live only when a guard holds its pane and that guard's parser is the ticket's.
-pub(super) fn apply_ticket(ticket: &AckTicket, guards: &mut ParserGuards<'_>) -> bool {
-    let Some((_, parser, _)) = guards.iter_mut().find(|(id, _, _)| *id == ticket.receipt.pane_id)
-    else {
-        // When: no held guard has the receipt's `pane_id` (switched away, removed or moved), its dirt stays.
-        return false;
-    };
-    if !std::ptr::eq(MutexGuard::mutex(parser), ticket.parser.as_ptr()) {
-        // When: the id now names another parser, the receipt describes a pane that no longer exists.
-        return false;
-    }
-    ticket.receipt.try_apply(parser.grid_mut())
-}
-
 /// The frame source the App lends to the renderer: it owns the visible parser guards and media
 /// snapshots, so they are released when `lend` returns, before the frame is presented.
 pub(super) struct HeldFrameSource<'guard, 'window> {
@@ -628,3 +492,13 @@ impl App {
 #[cfg(test)]
 #[path = "visible_frame_tests.rs"]
 mod visible_frame_tests;
+
+#[path = "visible_frame_acquire.rs"]
+mod acquire;
+use acquire::acquire_parser;
+#[path = "visible_frame_receipts.rs"]
+mod receipts;
+
+#[path = "visible_frame_layout.rs"]
+mod layout;
+use layout::validate_layout;

@@ -523,7 +523,17 @@ fn copy_before_redraw_rejects_a_selected_primary_row_rewritten_then_scrolled() {
 #[test]
 fn both_redraw_paths_invalidate_before_rendering() {
     for (name, source, selection_arg) in [
-        ("main", include_str!("window_event.rs"), "&mut main.selection"),
+        (
+            "main",
+            concat!(
+                include_str!("window_event.rs"),
+                "\n",
+                include_str!("window_event_pointer.rs"),
+                "\n",
+                include_str!("window_event_redraw.rs")
+            ),
+            "&mut main.selection",
+        ),
         ("child", include_str!("child_window_redraw.rs"), "&mut child.selection"),
     ] {
         let call = source

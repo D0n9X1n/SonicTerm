@@ -150,7 +150,13 @@ fn assert_never_gated(source: &str, method: &str, module_line: &str, mod_source:
 /// that has them compiles and both sides build the same feature set. Every enclosing gate counts.
 #[test]
 fn the_prerequisite_methods_are_never_cfg_gated() {
-    let mod_source = include_str!("mod.rs");
+    let mod_source = concat!(
+        include_str!("mod.rs"),
+        "\n",
+        include_str!("application_handler.rs"),
+        "\n",
+        include_str!("user_event.rs")
+    );
     assert_never_gated(
         include_str!("perf_control.rs"),
         "pub fn perf_control_phase(",
@@ -158,7 +164,13 @@ fn the_prerequisite_methods_are_never_cfg_gated() {
         mod_source,
     );
     assert_never_gated(
-        include_str!("echo_timeline.rs"),
+        concat!(
+            include_str!("echo_timeline.rs"),
+            "\n",
+            include_str!("echo_timeline_window.rs"),
+            "\n",
+            include_str!("echo_timeline_wire.rs")
+        ),
         "pub fn take_echo_timeline_v1(",
         "mod echo_timeline;",
         mod_source,
@@ -178,7 +190,13 @@ fn the_prerequisite_methods_are_never_cfg_gated() {
 #[test]
 fn the_gate_check_reads_a_crlf_checkout_as_an_lf_one() {
     let crlf = |source: &str| source.replace("\r\n", "\n").replace('\n', "\r\n");
-    let mod_source = crlf(include_str!("mod.rs"));
+    let mod_source = crlf(concat!(
+        include_str!("mod.rs"),
+        "\n",
+        include_str!("application_handler.rs"),
+        "\n",
+        include_str!("user_event.rs")
+    ));
     assert_never_gated(
         &crlf(include_str!("perf_control.rs")),
         "pub fn perf_control_phase(",
@@ -186,7 +204,13 @@ fn the_gate_check_reads_a_crlf_checkout_as_an_lf_one() {
         &mod_source,
     );
     assert_never_gated(
-        &crlf(include_str!("echo_timeline.rs")),
+        &crlf(concat!(
+            include_str!("echo_timeline.rs"),
+            "\n",
+            include_str!("echo_timeline_window.rs"),
+            "\n",
+            include_str!("echo_timeline_wire.rs")
+        )),
         "pub fn take_echo_timeline_v1(",
         "mod echo_timeline;",
         &mod_source,

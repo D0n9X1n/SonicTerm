@@ -195,9 +195,9 @@ fn unwinding_after_assembly_or_during_presentation_restores_the_scratch() {
 fn assembled_layers_carry_the_lease_itself() {
     // The renderer's assembled layers hold the pass's lease, not raw scratch taken out of it, so
     // nothing between assembly and the end of presentation can drop the scratch unguarded.
-    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     assert!(
-        core.contains("    scratch: frame_scratch::ScratchLease,"),
+        core.contains("    pub(super) scratch: frame_scratch::ScratchLease,"),
         "the layers hold the lease"
     );
     assert!(!core.contains("into_scratch("), "no raw scratch leaves the lease");

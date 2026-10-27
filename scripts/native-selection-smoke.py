@@ -35,15 +35,9 @@ EXPECTED_CASES = {(child, topology) for child in ("false", "true")
 
 
 def load_gate():
-    """Reuse the canonical launcher, including its POSIX post-exit group check."""
-    spec = importlib.util.spec_from_file_location(
-        "selection_local_gate", ROOT / "scripts" / "local-gate.py"
-    )
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    """Return the canonical gate module and its single process-custody/catalog identity."""
+    import local_gate
+    return local_gate
 
 
 def probe_environment(base: Mapping[str, str]) -> dict[str, str]:

@@ -22,6 +22,13 @@ import runpy
 import sys
 
 inventory = runpy.run_path(sys.argv[1])
+# Restricted visibility is still a runnable test; neither ignore nor a comment may satisfy a sentinel.
+implemented = inventory["implemented_sentinels"]
+for visibility in ("", "pub ", "pub(crate) ", "pub(super) ", "pub(in crate::module) "):
+    body = "#[test]\n" + visibility + "fn v120_fixture_contract() {}\n"
+    assert implemented(body) == {"v120_fixture_contract"}, visibility
+    assert not implemented(body.replace("#[test]", "#[test]\n#[ignore]")), visibility
+    assert not implemented("\n".join("// " + line for line in body.splitlines())), visibility
 validate = inventory["validate_rows"]
 root = inventory["repository_root"]()
 for column, value in ((3, "WP-INVENTED owner"), (11, "WP-INVENTED")):

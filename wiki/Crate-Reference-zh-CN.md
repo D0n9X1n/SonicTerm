@@ -205,6 +205,10 @@ grant 可以接纳。接纳关闭后，不再走这条正常重试路径。
 **阅读：** `src/{config,theme,keymap,assets,url_scan,url_open,launch_url,dimension}.rs`。
 `launch_url.rs` 把 `ssh:` 和 `x-man-page:` 链接校验为固定客户端的 argv。
 
+`config.rs` 保留配置结构与加载 API；私有同级文件 `config_persist.rs`、
+`config_status_save.rs` 和 `config_template.rs` 分别负责原子保存、保留注释的状态栏列表编辑
+和初始配置模板。公开配置路径保持不变。
+
 ### `sonicterm-ui`
 
 **职责：** 与渲染器无关的界面状态和布局，包括标签页、窗格、命令面板、搜索、
@@ -256,6 +260,10 @@ macOS 文本编辑通过 AppKit attributed-string 纯字符串单词边界 API �
 
 **阅读：** `src/{tabs,pane,command_palette,command_label,search,selection,copy_mode,ime,overlays,i18n}.rs`。
 
+`command_palette.rs` 保留状态所有者及公开路径。私有同级文件 `command_palette_modes.rs`、
+`command_palette_presentation.rs` 和 `command_palette_actions.rs` 分别负责类型化模式、
+缓存短语和规范动作目录。
+
 ### `sonicterm-render-model`
 
 **职责：** 与具体渲染器无关的窗格、几何、覆盖层和输入数据。它通过
@@ -277,6 +285,9 @@ macOS 文本编辑通过 AppKit attributed-string 纯字符串单词边界 API �
 **第一方依赖：** `sonicterm-types`。
 
 **阅读：** `src/{glyph_atlas,row_glyph_cache,shape,lib}.rs`。
+
+`start_size_inputs.rs` 负责图集尺寸策略和光栅拒绝计数；私有同级文件
+`start_size_inputs_recorded.rs` 保存原样的测量记录及来源校验。
 
 ### `sonicterm-font-config`
 
@@ -328,6 +339,11 @@ Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
 **阅读：** `src/db.rs`、`src/locator/`、`src/shaper/`、`src/rasterizer/`、
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`。
 
+`loaded_font.rs` 负责已加载字体操作，`font_resolution.rs` 负责配置字体链解析。
+FreeType 名称、尺寸与库/流操作放在私有 `ftwrap_*` 同级文件中；`hbwrap_paint.rs`
+负责绘制回调，`rasterizer/freetype_surface.rs` 负责 COLR 边界和 Cairo 重放。
+原有公开路径及原生资源所有权保持不变。
+
 ### `sonicterm-engine`
 
 **职责：** 小型字体引擎边界。`FontStack` 把塑形与光栅结果转换为单元格尺寸和
@@ -337,6 +353,10 @@ Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
 `sonicterm-font`、`sonicterm-text`、`sonicterm-types`。
 
 **阅读：** `src/fontstack.rs`。
+
+`fontstack_weight.rs` 私有地管理带边界检查的单色覆盖率变换。字体栈保留原生字体所有权
+及原有公开路径；带闸门的帧塑形夹具仅在测试文件 `fontstack_frame_fixture_tests.rs` 中保存一份，
+帧塑形契约测试也位于该文件。
 
 ### `sonicterm-block-glyph`
 
@@ -367,6 +387,12 @@ Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
 
 **阅读：** `src/{core,present,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_frame,software_windows}.rs`。
 
+`core.rs` 保留渲染器所有者与公开路径。私有 `core_*` 同级文件负责构造、surface 策略、
+设置、帧生命周期和行发射。`core_assemble.rs` 保留暂存租约、计划、计时边界、界面缺字作用域、
+重试出口和回执；`core_assemble_*` 辅助方法借用几何与暂存数据，按原有绘制顺序发射。
+仅测试使用的 `core_source.rs` 汇集每个拆出的渲染阶段，因此源代码守卫及其变异测试
+仍覆盖设备门控可达性。
+
 ### `sonicterm-app-core`
 
 **职责：** 不依赖后端的 `AppIntent`、`AppEffect`、`AppState`、reducer、稳定的
@@ -377,6 +403,13 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 **阅读：** `src/{app_state,intent,effect,reducer,state_machine}.rs`。
 
 ### `sonicterm-app`
+
+`app/user_event.rs` 保存类型化事件，`app/application_handler.rs` 转发原生回调；
+`app/mod.rs` 保留 App 所有权与注册入口。`app/event_loop_wait.rs` 负责到期待办及等待服务。
+性能工作负载把确定性夹具与原生角色执行分别放在 `workload_fixtures.rs` 和 `workload_native.rs`；
+仅测试使用的工作集与渲染器夹具仍属于原来的 harness 可执行文件。`tests/support/` 中的原生集成
+用例模块保留原有测试目标、分配器及事件循环所有者。
+
 
 **职责：** 跨平台 winit 编排，管理窗口、渲染器、标签页、窗格、PTY/解析器、
 输入、配置重载、重绘、覆盖层、标签页转移、有界目标探测和原生直接打开。一个

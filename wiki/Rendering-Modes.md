@@ -344,7 +344,8 @@ bridge borrows the validated frame and presents it to the HWND with GDI
 presentation policy.
 
 CPU composition contains no native-window or GDI imports and forbids unsafe code.
-It compiles for Windows production and every host's unit tests. The flat sibling
+Frame composition compiles for Windows production and every host's unit tests; its shared
+color encoder and source-over function also serve GPU upload and outline inspection on every host. The flat sibling
 `software_frame_tests.rs` keeps the pixel assertions; its existing GPU-parity
 cases also require a headless wgpu adapter. `cargo test -p sonicterm-gpu` runs
 these tests on macOS, Windows, and Linux. Native GDI capability, selection

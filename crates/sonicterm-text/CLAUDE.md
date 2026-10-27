@@ -12,6 +12,8 @@ It holds no shape-result cache.
 - `face_content.rs` - a face's content identity: the namespaced SHA-256 of the bytes it was loaded from.
 - `recording_image.rs` - the runner image each platform's helper rows were recorded on, and
   the drift policy for a host on another image.
+- `start_size_inputs.rs` - atlas sizing policy and raster-refusal accounting;
+  `start_size_inputs_recorded.rs` holds the unchanged working-set rows and provenance checks.
 - `lib.rs` - public exports.
 
 ## Local gate

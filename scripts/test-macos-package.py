@@ -23,10 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("smoke_runner", ROOT / "scripts/native-smoke-runner.py")
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
-GATE_SPEC = importlib.util.spec_from_file_location("package_attachment_gate", ROOT / "scripts/local-gate.py")
-GATE = importlib.util.module_from_spec(GATE_SPEC)
-sys.modules[GATE_SPEC.name] = GATE
-GATE_SPEC.loader.exec_module(GATE)
+import local_gate as GATE
 # Bundled font files and their PostScript names; the text face comes from macOS itself.
 FONTS = {"SymbolsNerdFontMono-Regular.ttf": "SymbolsNFM"}
 FONT_LICENSE = "LICENSE-SymbolsNerdFont.txt"

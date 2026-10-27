@@ -204,7 +204,8 @@ fn recovery_watchdog_before_first_probe_tick_keeps_recovery_boundary() {
     let log = capture_timeout(|| state.fail_from_watchdog(Instant::now()));
     assert_eq!(state.outcome(), Some(Err(RuntimeSmokeFailure::GpuDeviceRecovery)));
     assert!(log.contains("cause=\"watchdog\""));
-    assert!(include_str!("event_loop.rs").contains("smoke.fail_from_watchdog(Instant::now())"));
+    assert!(concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"))
+        .contains("smoke.fail_from_watchdog(Instant::now())"));
 }
 
 /// Same-text shell commands must add a marker row, not merely rediscover a prior output row.
@@ -345,7 +346,8 @@ fn post_stop_marker_wait_keeps_original_frame_counters() {
 /// stopped device, and starts quiet timing only after the queue accepts it.
 #[test]
 fn frame_marker_resend_follows_confirmed_stop_in_production() {
-    let source = include_str!("runtime_smoke.rs");
+    let source =
+        concat!(include_str!("runtime_smoke.rs"), "\n", include_str!("runtime_smoke_app.rs"));
     let inject = source.find("renderer.__inject_gpu_fault(kind)").unwrap();
     let observe = source[inject..].find("smoke.observe_fault(&snapshot").unwrap() + inject;
     assert!(source[inject..observe].contains(
@@ -459,14 +461,20 @@ fn frame_scenario_skips_warm_phases_and_uses_real_render_attempts() {
     assert!(smoke.observe_presented_frame(1));
     assert_eq!(smoke.next_fault(), Some(GpuFaultKind::FrameValidation));
     assert!(!smoke.should_maintain_warm_pool());
-    let main = include_str!("window_event.rs");
+    let main = concat!(
+        include_str!("window_event.rs"),
+        "\n",
+        include_str!("window_event_pointer.rs"),
+        "\n",
+        include_str!("window_event_redraw.rs")
+    );
     let begin = main.find("r.render_releasing(").unwrap();
     // The render lap is found by its label, so the timer binding's name is free to change.
     assert!(
         main[begin..].find("smoke.note_render_attempt()").unwrap()
             < main[begin..].find(".lap(\"render\")").unwrap()
     );
-    let idle = include_str!("event_loop.rs");
+    let idle = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     assert!(idle.contains("self.new_tab(\"runtime smoke warm child\")"));
     assert!(idle.contains("self.drive_gpu_fault_smoke(Instant::now())"));
     let shell = include_str!("../shell.rs");
@@ -516,7 +524,16 @@ fn fault_polling_is_default_disabled_and_uses_a_fixed_deadline() {
 /// classification and before render timing, including failed or suspended frames.
 #[test]
 fn typed_redraws_preserve_both_smoke_attempt_observations() {
-    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
+    for source in [
+        concat!(
+            include_str!("window_event.rs"),
+            "\n",
+            include_str!("window_event_pointer.rs"),
+            "\n",
+            include_str!("window_event_redraw.rs")
+        ),
+        include_str!("child_window_redraw.rs"),
+    ] {
         let call = source.find("r.render_releasing(").unwrap();
         let result = source[call..].find("outcome.into_render_result()").unwrap() + call;
         let observed = source[call..].find("smoke.note_render_attempt()").unwrap() + call;
@@ -652,9 +669,17 @@ fn frame_validation_refusals_alone_cannot_exercise_the_armed_frame() {
 /// Refusal observation precedes one-time report extraction and every parked/hidden return, without pretending to render.
 #[test]
 fn production_stopped_redraw_records_first_and_silent_refusals_separately() {
-    let source = include_str!("redraw.rs");
-    let start = source.find("pub(super) fn begin_window_redraw(").unwrap();
-    let end = source[start..].find("pub(super) fn snapshot_window_redraw(").unwrap() + start;
+    let source = concat!(
+        include_str!("redraw.rs"),
+        "\n",
+        include_str!("redraw_admission.rs"),
+        "\n",
+        include_str!("redraw_state.rs"),
+        "\n",
+        include_str!("redraw_window.rs")
+    );
+    let start = source.find("fn begin_window_redraw(").unwrap();
+    let end = source[start..].find("fn snapshot_window_redraw(").unwrap() + start;
     let entry = &source[start..end];
     let refuse = entry.find("!renderer.device_accepts_gpu_work()").unwrap();
     let record = entry
@@ -665,7 +690,8 @@ fn production_stopped_redraw_records_first_and_silent_refusals_separately() {
     assert!(refuse < record && record < report && report < parked);
     assert!(!entry.contains("note_render_attempt"));
     assert!(!entry.contains("request_redraw("));
-    let smoke = include_str!("runtime_smoke.rs");
+    let smoke =
+        concat!(include_str!("runtime_smoke.rs"), "\n", include_str!("runtime_smoke_app.rs"));
     let capture = smoke.find("let baseline = smoke.capture_fault_baseline(").unwrap();
     let arm = smoke[capture..].find("smoke.begin_fault(kind, baseline, now)").unwrap() + capture;
     let inject = smoke[arm..].find("renderer.__inject_gpu_fault(kind)").unwrap() + arm;

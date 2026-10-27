@@ -477,7 +477,18 @@ fn coverage_reports_named_fractions_and_unavailability() {
 #[test]
 fn every_take_and_discard_drains_the_timeline() {
     assert_eq!(API_ENABLED, cfg!(all(feature = "perf-echo-trace", perf_echo_timeline_api)));
-    let source = include_str!("record.rs").replace("\r\n", "\n");
+    let source = concat!(
+        include_str!("record.rs"),
+        "\n",
+        include_str!("record_grid.rs"),
+        "\n",
+        include_str!("record_latency.rs"),
+        "\n",
+        include_str!("record_result.rs"),
+        "\n",
+        include_str!("record_slow_dispatch.rs")
+    )
+    .replace("\r\n", "\n");
     let take = &source[source.find("pub(crate) fn take(\n        app: &mut App,").expect("take")..];
     let take = &take[..take.find("\n    }\n").expect("take end")];
     assert!(take.contains("crate::timeline::adapter::drain(app, pane, token, armed_at)"), "{take}");

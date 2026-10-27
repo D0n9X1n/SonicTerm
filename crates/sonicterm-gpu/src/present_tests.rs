@@ -149,7 +149,7 @@ fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 /// Noop keeps dirt; an invalidated atlas retries before a presenter can see stale UVs.
 #[test]
 fn noop_and_atlas_retry_are_wired_to_unacknowledged_exits() {
-    let core = compact(include_str!("core.rs"));
+    let core = compact(crate::core::CORE_SOURCE);
     // Assembly decides Noop and hands the key out; after release the key is stored and nothing finishes.
     let noop = source_between(&core, "ifplan.mode==RenderMode::Noop{", "letinline_media_changed=");
     assert!(noop.contains("returnOk(Assembled::Noop(Box::new(plan.key)));"));
@@ -338,7 +338,7 @@ fn cached_reblit_checkpoint_order_and_stopped_early_exit_are_preserved() {
     assert!(source
         .contains("fnreblit_software_frame(&mutself,before:DeviceGate,reblit_scope:GpuWorkScope,"));
     assert!(source.contains("self.reblit_software_frame(before,reblit_scope)"));
-    let core = compact(include_str!("core.rs"));
+    let core = compact(crate::core::CORE_SOURCE);
     // Assembly only decides the unchanged key; the reblit runs after the source is released.
     let decided = source_between(&core, "ifplan.unchanged{", "ifplan.mode==RenderMode::Noop{");
     assert!(
@@ -379,7 +379,7 @@ fn legacy_adapter_restores_only_timeout_and_occluded_retry_ownership() {
     ] {
         assert!(!outcome.requires_legacy_redraw());
     }
-    let core = compact(include_str!("core.rs"));
+    let core = compact(crate::core::CORE_SOURCE);
     let adapter = source_between(&core, "pubfnrender(", "pubfnrender_with_outcome(");
     assert!(adapter.contains("letoutcome=self.render_with_outcome(&fonts,"));
     // The compatibility adapter prepares its frame's fonts before drawing it.
@@ -454,14 +454,10 @@ fn surface_probe_native_calls_and_retained_key_invalidation_stay_inside_the_gate
     ] {
         assert!(!probe.contains(forbidden), "probe performed {forbidden}");
     }
-    let core = compact(include_str!("core.rs"));
-    let invalidate = source_between(
-        &core,
-        "pubfninvalidate_retained_frame(",
-        "pubfn__occlude_next_surface_acquire(",
-    );
-    assert!(invalidate
-        .starts_with("pubfninvalidate_retained_frame(&mutself){self.last_frame_key=None;}"));
+    let core = compact(crate::core::CORE_SOURCE);
+    let invalidate = core.split_once("pubfninvalidate_retained_frame(").unwrap().1;
+    let invalidate = &invalidate[..invalidate.find('}').expect("method body ends") + 1];
+    assert!(invalidate.starts_with("&mutself){self.last_frame_key=None;}"));
     assert!(
         !invalidate.contains("self.device")
             && !invalidate.contains("self.queue")
@@ -472,7 +468,7 @@ fn surface_probe_native_calls_and_retained_key_invalidation_stay_inside_the_gate
 /// A backend-occlusion fault uses the production retry exit after device admission and before upload/acquire.
 #[test]
 fn backend_occlusion_fault_seam_cannot_bypass_device_gate_or_touch_native_surface() {
-    let core = compact(include_str!("core.rs"));
+    let core = compact(crate::core::CORE_SOURCE);
     let hook =
         source_between(&core, "pubfn__occlude_next_surface_acquire(", "pubfndevice_error_state(");
     assert!(hook.contains("self.fault_surface_occluded=true;self.invalidate_retained_frame();"));

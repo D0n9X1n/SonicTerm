@@ -85,7 +85,13 @@ fn recovery_marker_proof_is_bound_to_each_present_callback() {
     // verdict is applied with the call's outcome before compatibility conversion. Windows CI checks
     // sources out with CRLF line ends, so the scan runs on a CRLF copy too.
     scan_marker_proof_in_both_line_ends([
-        include_str!("window_event.rs"),
+        concat!(
+            include_str!("window_event.rs"),
+            "\n",
+            include_str!("window_event_pointer.rs"),
+            "\n",
+            include_str!("window_event_redraw.rs")
+        ),
         include_str!("child_window_redraw.rs"),
         include_str!("gpu_recovery_smoke.rs"),
     ]);
@@ -105,7 +111,13 @@ fn marker_proof_scan_accepts_a_checkout_that_is_already_crlf() {
     // Building the CRLF variant from CRLF text would yield `\r\r\n`, which one normalization
     // leaves as `\r\n`, so every LF delimiter lookup in the scan would miss.
     let crlf = [
-        include_str!("window_event.rs"),
+        concat!(
+            include_str!("window_event.rs"),
+            "\n",
+            include_str!("window_event_pointer.rs"),
+            "\n",
+            include_str!("window_event_redraw.rs")
+        ),
         include_str!("child_window_redraw.rs"),
         include_str!("gpu_recovery_smoke.rs"),
     ]
@@ -168,7 +180,7 @@ fn recovery_release_rechecks_identity_and_uses_production_pool_shrink() {
     assert!(release.contains("renderer.device_generation() != snapshot.committed"));
     assert!(source.contains("self.warm_window_pool_maintain(event_loop)"));
     assert!(!source.contains("self.warm_window_pool.clear()"));
-    let event = include_str!("event_loop.rs");
+    let event = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     let tagged =
         event.split_once("UserEvent::GpuDeviceGenerationChanged { generation } => {").unwrap().1;
     let tagged = tagged.split_once("UserEvent::GpuRecoveryReady").unwrap().0;
@@ -200,8 +212,8 @@ fn process_watchdog_reports_the_probe_stage_before_its_own_deadline() {
 /// Production recovery runs before smoke observation, while its dedicated timer is included in the event-loop deadline.
 #[test]
 fn native_recovery_smoke_runs_after_the_production_recovery_service() {
-    let source = include_str!("event_loop.rs");
-    let wait = source.split_once("pub(super) fn do_about_to_wait(").unwrap().1;
+    let source = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
+    let wait = source.split_once("pub(in crate::app) fn do_about_to_wait(").unwrap().1;
     let production = wait.find("self.service_gpu_recovery(event_loop, Instant::now())").unwrap();
     let warm = wait.find("self.warm_window_pool_maintain(event_loop)").unwrap();
     let smoke = wait.find("self.drive_gpu_recovery_smoke(event_loop, Instant::now())").unwrap();

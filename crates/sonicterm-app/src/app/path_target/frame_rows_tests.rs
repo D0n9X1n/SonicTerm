@@ -68,11 +68,23 @@ fn observer_records_reads_inside_and_outside_the_frame() {
 /// source check covers each and can tell when a new module joins the directory unlisted.
 const DETECTION_SOURCES: &[(&str, &str)] = &[
     ("path_target.rs", include_str!("../path_target.rs")),
+    ("../path_target_activate.rs", include_str!("../path_target_activate.rs")),
+    ("../path_target_detect.rs", include_str!("../path_target_detect.rs")),
+    ("../path_target_hardwrap_paths.rs", include_str!("../path_target_hardwrap_paths.rs")),
+    ("../path_target_hardwrap_uri.rs", include_str!("../path_target_hardwrap_uri.rs")),
+    ("../path_target_hover.rs", include_str!("../path_target_hover.rs")),
+    ("../path_target_logical.rs", include_str!("../path_target_logical.rs")),
+    ("../path_target_osc8.rs", include_str!("../path_target_osc8.rs")),
+    ("../path_target_pane_spans.rs", include_str!("../path_target_pane_spans.rs")),
+    ("../path_target_probe_state.rs", include_str!("../path_target_probe_state.rs")),
+    ("../path_target_probe_worker.rs", include_str!("../path_target_probe_worker.rs")),
+    ("../path_target_resolve.rs", include_str!("../path_target_resolve.rs")),
     ("hover_cache.rs", include_str!("hover_cache.rs")),
     ("linux.rs", include_str!("linux.rs")),
     ("macos.rs", include_str!("macos.rs")),
     ("unix.rs", include_str!("unix.rs")),
     ("windows.rs", include_str!("windows.rs")),
+    ("windows_reparse.rs", include_str!("windows_reparse.rs")),
 ];
 
 /// The tokens of `code` with their byte offsets, skipping whitespace: a word (identifier or
@@ -233,7 +245,17 @@ fn the_frame_reader_source_check_covers_every_detection_module() {
         .filter(|name| name != "path_target.rs")
         .collect::<Vec<_>>();
     listed.sort();
-    assert_eq!(listed, production_modules_under(&directory));
+    let mut found = production_modules_under(&directory);
+    // Each flat extraction stays in the same checked corpus as the native child directory.
+    for entry in std::fs::read_dir(directory.parent().unwrap()).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if name.starts_with("path_target_") && name.ends_with(".rs") && !name.ends_with("_tests.rs")
+        {
+            found.push(format!("../{name}"));
+        }
+    }
+    found.sort();
+    assert_eq!(listed, found);
 }
 
 /// A nested module such as `helper/mod.rs` is found by its relative path, so it cannot escape the

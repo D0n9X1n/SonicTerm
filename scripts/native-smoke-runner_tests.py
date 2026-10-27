@@ -330,18 +330,36 @@ stop_display() { :; }
 
 class ProgressTests(unittest.TestCase):
     def test_python_test_entry_points_default_to_verbose_unittest_reporting(self):
-        # Keep the shared Python progress policy beside the smoke runner's redirected-stream contract.
-        for path in sorted(_HERE.glob("*_tests.py")):
-            with self.subTest(script=path.name):
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-                mains = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-                         and isinstance(node.func, ast.Attribute) and node.func.attr == "main"
-                         and isinstance(node.func.value, ast.Name)
-                         and node.func.value.id == "unittest"]
+        # CLI test runners stay verbose; extracted suites must have every local test class imported by one runner.
+        trees = {path.stem: ast.parse(path.read_text(encoding="utf-8"))
+                 for path in sorted(_HERE.glob("*_tests.py"))}
+        aggregate_imports = {}
+        for name, tree in trees.items():
+            mains = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and node.func.attr == "main"
+                     and isinstance(node.func.value, ast.Name) and node.func.value.id == "unittest"]
+            if not mains:
+                continue
+            with self.subTest(script=name):
                 self.assertEqual(len(mains), 1)
                 self.assertTrue(any(keyword.arg == "verbosity"
                                     and isinstance(keyword.value, ast.Constant)
                                     and keyword.value.value == 2 for keyword in mains[0].keywords))
+            aggregate_imports[name] = {(node.module, alias.name) for node in tree.body
+                                       if isinstance(node, ast.ImportFrom) for alias in node.names}
+        self.assertTrue(aggregate_imports, "no CLI test runners found")
+        for name, tree in trees.items():
+            if name in aggregate_imports:
+                continue
+            with self.subTest(suite=name):
+                classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)
+                           and any(isinstance(method, ast.FunctionDef) and method.name.startswith("test_")
+                                   for method in node.body)]
+                self.assertTrue(classes, "a non-entry suite must contain test contracts")
+                for class_name in classes:
+                    runners = [runner for runner, imports in aggregate_imports.items()
+                               if (name, class_name) in imports]
+                    self.assertEqual(len(runners), 1, (name, class_name, runners))
 
     def test_start_is_explicitly_flushed_before_child_invocation(self):
         # TextIOWrapper supplies .buffer for child bytes; snapshots distinguish flush from line buffering.

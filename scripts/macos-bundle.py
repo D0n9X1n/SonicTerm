@@ -30,11 +30,7 @@ class BundleError(RuntimeError):
     """An incomplete or unsafe bundle cannot be released."""
 
 
-_DMG_SPEC = importlib.util.spec_from_file_location(
-    "sonicterm_dmg_local_gate", Path(__file__).with_name("local-gate.py"))
-DMG_RUNNER = importlib.util.module_from_spec(_DMG_SPEC)
-sys.modules[_DMG_SPEC.name] = DMG_RUNNER
-_DMG_SPEC.loader.exec_module(DMG_RUNNER)
+import local_gate as DMG_RUNNER
 DMG_BUDGET_SECONDS = 300
 DMG_COMMAND_TIMEOUT_SECONDS = 120
 # Process-group inspection, reaping and pipe draining can outlast a command's own deadline.

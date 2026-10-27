@@ -65,7 +65,7 @@ fn check_settlement_boundaries(lifecycle: &str, core: &str) {
 fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
     // Rejection invalidates UVs before requesting redraw; only acknowledged presentation settles retry.
     // Windows CI checks sources out with CRLF line ends, so the scan runs on a CRLF copy too.
-    scan_settlement_in_both_line_ends(include_str!("atlas_lifecycle.rs"), include_str!("core.rs"));
+    scan_settlement_in_both_line_ends(include_str!("atlas_lifecycle.rs"), crate::core::CORE_SOURCE);
 }
 
 /// Run the settlement scan over the checkout as given and over its CRLF form, built from the
@@ -81,7 +81,7 @@ fn settlement_scan_accepts_a_checkout_that_is_already_crlf() {
     // A Windows checkout hands include_str! CRLF text; building the CRLF variant from it must not
     // produce `\r\r\n`, which one normalization leaves as `\r\n` and LF delimiters then miss.
     let lifecycle = include_str!("atlas_lifecycle.rs").replace("\r\n", "\n").replace('\n', "\r\n");
-    let core = include_str!("core.rs").replace("\r\n", "\n").replace('\n', "\r\n");
+    let core = crate::core::CORE_SOURCE.replace("\r\n", "\n").replace('\n', "\r\n");
     scan_settlement_in_both_line_ends(&lifecycle, &core);
 }
 

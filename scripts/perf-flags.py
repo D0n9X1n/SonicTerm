@@ -18,11 +18,7 @@ import re
 import sys
 from types import SimpleNamespace
 
-SPEC = importlib.util.spec_from_file_location("perf_compare_for_flags", Path(__file__).resolve().with_name(
-    "perf-compare.py"))
-compare = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = compare
-SPEC.loader.exec_module(compare)
+import perf_compare as compare
 
 FLAG_METRICS_VERSION = compare.FLAG_METRICS_VERSION
 # The flag-metric definitions this script implements; a run declaring any other version cannot be read by its rules.

@@ -118,6 +118,7 @@ python3 scripts/local-gate.py
 | Step | Command | Local hosts | Class | Needs | CI jobs |
 | --- | --- | --- | --- | --- | --- |
 | `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-runtime`, `linux-core` |
+| `source-size` | `python3 scripts/check-source-size.py` | macOS, Windows, Linux | `local` | `python` | `tooling` |
 | `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
@@ -176,6 +177,7 @@ Local hosts are the hosts where the runner selects a step. CI jobs are where CI 
 
 Needs:
 
+- `python`: Python 3 on `PATH`.
 - `actionlint`: `actionlint` at the version `scripts/pinned-tools.json` pins.
 - `rust`: the Rust toolchain from `rust-toolchain.toml`, with rustfmt and clippy.
 - `native`: the platform's native build libraries: Cairo and pkg-config on macOS (`brew install cairo pkg-config`), Cairo from `scripts/setup-windows-cairo.ps1` on Windows, and the packages the `linux-core` job installs on Linux.
@@ -204,7 +206,7 @@ adds the host's `release` steps, `--with-optional` adds its `optional` steps,
 each step's timeout, prerequisites, and CI jobs. A slow machine or a cold build
 can report `TIMEOUT` for a step that would pass; rerun it with `--step ID` once
 the build is warm. To change a gate step, change the table in
-`scripts/local-gate.py` first, then paste the rendered blocks: `--render en` into
+`scripts/gate_catalog.py` first, then paste the rendered blocks: `--render en` into
 this file and `wiki/Development-and-Release.md`, and `--render zh-CN` into
 `wiki/Development-and-Release-zh-CN.md`. `scripts/local-gate_tests.py` fails when
 the table, `ci.yml`, and those blocks disagree.

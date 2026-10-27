@@ -9,10 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 
-SPEC = importlib.util.spec_from_file_location("target_gate", Path(__file__).with_name("local-gate.py"))
-gate = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = gate
-SPEC.loader.exec_module(gate)
+import local_gate as gate
 
 
 def canonical_step(command, cfgs):

@@ -224,6 +224,10 @@ asset lookup, typed URI/path detection, and safe URI-open policy.
 **Read:** `src/{config,theme,keymap,assets,url_scan,url_open,launch_url,dimension}.rs`.
 `launch_url.rs` validates `ssh:` and `x-man-page:` links into fixed client argv.
 
+`config.rs` keeps the schema and loading API; private siblings `config_persist.rs`,
+`config_status_save.rs`, and `config_template.rs` own atomic persistence,
+comment-preserving status-list edits, and the starter template. Public config paths stay unchanged.
+
 ### `sonicterm-ui`
 
 **Role:** renderer-independent UI state and layout for tabs, panes, command
@@ -296,6 +300,10 @@ The palette separates metadata, presentation, and execution:
 
 **Read:** `src/{tabs,pane,command_palette,command_label,search,selection,copy_mode,ime,overlays,i18n}.rs`.
 
+`command_palette.rs` retains its state owner and public paths. Private siblings
+`command_palette_modes.rs`, `command_palette_presentation.rs`, and
+`command_palette_actions.rs` hold typed modes, cached phrases, and canonical actions.
+
 ### `sonicterm-render-model`
 
 **Role:** renderer-neutral pane, geometry, overlay, and input bundles. It
@@ -317,6 +325,9 @@ the GPU crate has one declared model boundary.
 **First-party dependencies:** `sonicterm-types`.
 
 **Read:** `src/{glyph_atlas,row_glyph_cache,shape,lib}.rs`.
+
+`start_size_inputs.rs` owns atlas sizing policy and raster-refusal accounting; its private
+`start_size_inputs_recorded.rs` sibling holds the unchanged measured rows and provenance checks.
 
 ### `sonicterm-font-config`
 
@@ -373,6 +384,11 @@ Android and non-macOS Unix builds also use `sonicterm-fontconfig` as
 **Read:** `src/db.rs`, `src/locator/`, `src/shaper/`, `src/rasterizer/`,
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`.
 
+`loaded_font.rs` owns loaded-face operations; `font_resolution.rs` owns configured-chain
+resolution. FreeType names, metrics and library/stream operations are private `ftwrap_*`
+siblings; `hbwrap_paint.rs` owns paint callbacks and `rasterizer/freetype_surface.rs` owns
+COLR bounds and Cairo replay. The original public paths and native ownership remain unchanged.
+
 ### `sonicterm-engine`
 
 **Role:** small font-facing engine seam. `FontStack` turns shaping and raster
@@ -382,6 +398,10 @@ results into cell metrics and atlas `RasterTile`s.
 `sonicterm-font`, `sonicterm-text`, `sonicterm-types`.
 
 **Read:** `src/fontstack.rs`.
+
+`fontstack_weight.rs` privately owns checked monochrome coverage transforms. The stack
+retains native face ownership and the original public paths; gated frame-shaping fixtures
+live once in test-only `fontstack_frame_fixture_tests.rs` alongside its frame-shaping contracts.
 
 ### `sonicterm-block-glyph`
 
@@ -418,6 +438,13 @@ maps it back to its `Result<()>`.
 
 **Read:** `src/{core,present,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_frame,software_windows}.rs`.
 
+`core.rs` retains the renderer owner and public paths. Private `core_*` siblings own
+constructors, surface policy, settings, frame lifecycle and row emission. `core_assemble.rs`
+keeps the scratch lease, plan, timing boundaries, missing-chrome scope, retry exits and receipts;
+its `core_assemble_*` helpers borrow geometry and scratch and emit in the existing painter order.
+The test-only `core_source.rs` corpus includes every extracted renderer phase so source guards
+and their mutation controls still cover device-gate reachability.
+
 ### `sonicterm-app-core`
 
 **Role:** backend-free `AppIntent`, `AppEffect`, `AppState`, reducer, stable
@@ -429,6 +456,14 @@ effect ordering, and state machine. Live window/tab/pane topology remains in
 **Read:** `src/{app_state,intent,effect,reducer,state_machine}.rs`.
 
 ### `sonicterm-app`
+
+`app/user_event.rs` holds typed events and `app/application_handler.rs` forwards native callbacks;
+`app/mod.rs` retains App ownership and registration. `app/event_loop_wait.rs` owns due-work and
+wait servicing. The perf workload keeps deterministic fixtures and native role execution in
+`workload_fixtures.rs` and `workload_native.rs`; test-only working-set/renderer fixtures stay
+in the original harness executable. Native integration case modules under `tests/support/`
+retain their original test target, allocator and event-loop owner.
+
 
 **Role:** cross-platform winit orchestration for windows, renderers, tabs,
 panes, PTYs/parsers, input, config reload, redraw, overlays, tab transfer,
