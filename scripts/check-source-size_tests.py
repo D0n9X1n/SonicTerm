@@ -137,5 +137,296 @@ class SourceSizeTests(unittest.TestCase):
             self.assertNotRegex("crates/" + path, expression)
 
 
+class RustTestOwnershipTests(unittest.TestCase):
+    def problems(self, files, manifests=None):
+        """Check real Rust declarations without depending on this host's active cfgs."""
+        from rust_test_ownership import ownership_problems
+        return ownership_problems(files, manifests)
+
+    def test_exact_and_topic_suites_preserve_module_aliases(self):
+        # Filenames express physical ownership; module aliases may remain stable for subprocess filters.
+        files = {
+            "src/foo.rs": '#[cfg(test)] #[path = "foo_tests.rs"] mod old_name;\n'
+                          '#[cfg(all(test, windows))] #[path = "foo_native_tests.rs"] pub(crate) mod native;\n',
+            "src/foo_tests.rs": '#[cfg(test)] #[path = "foo_tests_fixture_tests.rs"] mod fixture;\n',
+            "src/foo_native_tests.rs": "",
+            "src/foo_tests_fixture_tests.rs": "",
+        }
+        self.assertEqual(self.problems(files), [])
+
+    def test_source_scan_is_crlf_safe_and_accepts_raw_path_strings(self):
+        # The same token stream declares the same file under either checkout newline convention.
+        source = '#[cfg(test)]\n#[path = r#"foo_topic_tests.rs"#]\nmod topic;\n'
+        for content in [source, source.replace("\n", "\r\n")]:
+            self.assertEqual(self.problems({"foo.rs": content, "foo_topic_tests.rs": ""}), [])
+
+    def test_wrong_owner_and_ambiguous_prefix_fail(self):
+        # A broader foo owner cannot steal foo_bar's exact or topical suite.
+        for name in ["bar_tests.rs", "foo_bar_tests.rs", "foo_bar_topic_tests.rs"]:
+            with self.subTest(name=name):
+                files = {"foo.rs": f'#[cfg(test)] #[path = "{name}"] mod cases;\n',
+                         "foo_bar.rs": "", name: ""}
+                self.assertTrue(self.problems(files))
+
+    def test_missing_duplicate_untracked_and_nonflat_declarations_fail(self):
+        # A name alone is not enough: a suite must be present and have one real sibling declaration.
+        cases = [
+            {"foo.rs": "", "foo_tests.rs": ""},
+            {"foo.rs": '#[cfg(test)] #[path = "foo_tests.rs"] mod one;\n'
+                       '#[cfg(test)] #[path = "foo_tests.rs"] mod two;', "foo_tests.rs": ""},
+            {"foo.rs": '#[cfg(test)] #[path = "foo_tests.rs"] mod cases;'},
+            {"foo.rs": '#[cfg(test)] mod foo_tests;', "foo_tests.rs": ""},
+            {"foo.rs": '#[cfg(test)] #[path = "sub/foo_tests.rs"] mod cases;', "sub/foo_tests.rs": ""},
+            {"foo.rs": '#[cfg(test)] #[path = "../foo_tests.rs"] mod cases;', "foo_tests.rs": ""},
+        ]
+        for files in cases:
+            with self.subTest(files=files):
+                self.assertTrue(self.problems(files))
+
+    def test_implicit_generic_test_file_is_rejected(self):
+        # A cfg(test) declaration must not bypass owner naming by relying on Rust's default filename.
+        files = {"lib.rs": "#[cfg(test)] mod tests;", "tests.rs": ""}
+        self.assertTrue(self.problems(files))
+
+    def test_explicit_generic_test_file_is_rejected(self):
+        # An explicit path to generic tests.rs is still not an owner-named sibling suite.
+        files = {"foo.rs": '#[cfg(test)] #[path = "tests.rs"] mod cases;', "tests.rs": ""}
+        self.assertTrue(self.problems(files))
+
+    def test_explicit_singular_test_file_is_rejected(self):
+        # A singular suffix cannot escape the owner-named plural suite convention.
+        files = {"foo.rs": '#[cfg(test)] #[path = "foo_test.rs"] mod cases;', "foo_test.rs": ""}
+        self.assertTrue(self.problems(files))
+
+    def test_test_gated_suites_cannot_hide_behind_arbitrary_names(self):
+        # Resolve both Rust default layouts and explicit paths, including platform gates and CRLF.
+        for declaration, target in [
+            ('#[cfg(test)] mod cases;', 'cases.rs'),
+            ('#[cfg(test)] mod cases;', 'cases/mod.rs'),
+            ('#[cfg(all(test, windows))] #[path = "cases.rs"] mod cases;', 'cases.rs'),
+        ]:
+            for newline in ["\n", "\r\n"]:
+                files = {"lib.rs": declaration + newline,
+                         target: "#[test]" + newline + "fn contract() {}" + newline}
+                with self.subTest(declaration=declaration, target=target, newline=newline):
+                    self.assertTrue(self.problems(files))
+        files = {"foo.rs": "#[cfg(test)] mod cases;",
+                 "foo/cases.rs": "#[test] fn contract() {}"}
+        self.assertTrue(self.problems(files))
+
+    def test_loaded_suites_require_test_gate_regardless_of_filename(self):
+        # Real test functions identify a suite even under a production-admitting cfg or no cfg.
+        for gate in ['', '#[cfg(any(test, feature = "fixtures"))]']:
+            for declaration in ['mod helper;', '#[path = "helper.rs"] mod helper;']:
+                files = {"lib.rs": gate + declaration, "helper.rs": "#[test] fn contract() {}"}
+                with self.subTest(gate=gate, declaration=declaration):
+                    problems = self.problems(files)
+                    self.assertTrue(any("test declaration must require cfg(test)" in item for item in problems), problems)
+
+    def test_ungated_suite_loaded_from_test_file_requires_its_own_gate(self):
+        # Inherited test context does not replace the explicit gate required on every suite declaration.
+        files = {"foo.rs": '#[cfg(test)] #[path = "foo_tests.rs"] mod suite;',
+                 "foo_tests.rs": '#[path = "helper.rs"] mod helper;',
+                 "helper.rs": "#[test] fn contract() {}"}
+        problems = self.problems(files)
+        self.assertTrue(any("foo_tests.rs:1: test declaration must require cfg(test)" in item
+                            for item in problems), problems)
+
+    def test_inline_test_gated_suites_are_rejected(self):
+        # Renaming the inline module or adding platform conditions cannot evade the flat-sibling rule.
+        for declaration in ['#[cfg(test)] mod tests', '#[cfg(test)] mod cases',
+                            '#[cfg(all(test, windows))] pub(crate) mod cases']:
+            for newline in ["\n", "\r\n"]:
+                source = declaration + " {" + newline + "#[test] fn contract() {}" + newline + "}"
+                with self.subTest(declaration=declaration, newline=newline):
+                    problems = self.problems({"foo.rs": source})
+                    self.assertTrue(any("inline test suite" in item for item in problems), problems)
+
+    def test_crate_roots_cannot_hold_inline_or_bare_tests(self):
+        # Nothing declares a crate root, so its own text is the only place an ungated suite could hide.
+        manifest = {"crates/foo/Cargo.toml": '[package]\nname = "foo"\n'}
+        for root in ["crates/foo/src/lib.rs", "crates/foo/src/main.rs", "crates/foo/examples/demo.rs",
+                     "crates/foo/examples/tests/main.rs", "crates/foo/src/bin/tests/main.rs"]:
+            for body in ["mod tests { #[test] fn contract() {} }",
+                         "#[cfg(test)] mod tests { #[test] fn contract() {} }",
+                         "#[test] fn contract() {}"]:
+                with self.subTest(root=root, body=body):
+                    problems = self.problems({root: body}, manifest)
+                    self.assertTrue(any("test" in item and root in item for item in problems), problems)
+
+    def test_cargo_test_and_bench_targets_may_hold_tests(self):
+        # Cargo's auto-discovered tests/ and benches/ targets, and explicit [[test]]/[[bench]] paths,
+        # are their own test crates; their #[test] functions are the suite.
+        manifest = {"crates/foo/Cargo.toml":
+                    '[package]\nname = "foo"\n[[test]]\nname = "probe"\npath = "probes/probe.rs"\n'
+                    '[[bench]]\nname = "speed"\npath = "perf/speed.rs"\n'}
+        for root in ["crates/foo/tests/contract.rs", "crates/foo/tests/suite/main.rs",
+                     "crates/foo/benches/speed.rs", "crates/foo/benches/group/main.rs",
+                     "crates/foo/probes/probe.rs", "crates/foo/perf/speed.rs"]:
+            with self.subTest(root=root):
+                self.assertEqual(self.problems({root: "#[test] fn contract() {}"}, manifest), [])
+
+    def test_explicit_test_target_named_like_a_suite_is_not_an_orphan(self):
+        # A [[test]] target is its own crate; a `_tests.rs` name does not make it an undeclared unit suite.
+        manifest = {"crates/foo/Cargo.toml":
+                    '[package]\nname = "foo"\n[[test]]\nname = "probe"\npath = "probes/probe_tests.rs"\n'}
+        self.assertEqual(self.problems({"crates/foo/probes/probe_tests.rs": "#[test] fn contract() {}"}, manifest), [])
+
+    def test_default_test_target_path_follows_its_name(self):
+        # A [[test]] without a path builds tests/<name>.rs, so that file is a target even with autotests off.
+        manifest = {"crates/foo/Cargo.toml":
+                    '[package]\nname = "foo"\nautotests = false\n[[test]]\nname = "probe"\n'}
+        self.assertEqual(self.problems({"crates/foo/tests/probe.rs": "#[test] fn contract() {}"}, manifest), [])
+
+    def test_explicit_targets_outside_their_package_directory_are_targets(self):
+        # Cargo resolves [[test]]/[[bench]] paths relative to the manifest, even outside the package folder.
+        manifest = {"crates/foo/Cargo.toml":
+                    '[package]\nname = "foo"\n[[test]]\nname = "contract"\npath = "../shared/contract.rs"\n'}
+        self.assertEqual(self.problems({"crates/shared/contract.rs": "#[test] fn contract() {}"}, manifest), [])
+
+    def test_disabled_auto_discovery_does_not_exempt_tests_or_benches_files(self):
+        # With autotests/autobenches off, tests/ and benches/ files are targets only when listed as such;
+        # a bin or example placed there is an ordinary crate root and may not hold tests.
+        for manifest_text, root in [
+            ('[package]\nname = "foo"\nautotests = false\n[[bin]]\nname = "check"\npath = "tests/check.rs"\n',
+             "crates/foo/tests/check.rs"),
+            ('[package]\nname = "foo"\nautobenches = false\n[[bin]]\nname = "check"\npath = "benches/check.rs"\n',
+             "crates/foo/benches/check.rs"),
+            ('[package]\nname = "foo"\n[[bin]]\nname = "check"\npath = "tests/check.rs"\n',
+             "crates/foo/tests/check.rs"),
+        ]:
+            with self.subTest(manifest=manifest_text):
+                problems = self.problems({root: "#[test] fn contract() {}"}, {"crates/foo/Cargo.toml": manifest_text})
+                self.assertTrue(any("crate root holds tests" in item for item in problems), problems)
+
+    def test_inline_helpers_and_literal_test_text_do_not_hide_following_suites(self):
+        # Inspecting an inline body must ignore fake test attributes and resume at the next file-scope item.
+        for body in [
+            "pub fn helper() {}",
+            "/* #[test] fn hidden() {} */",
+            'const TEXT: &str = r#"#[test] fn hidden() {}"#;',
+            "macro_rules! example { () => { #[test] fn hidden() {} }; }",
+            "opaque! { #[test] fn hidden() {} }",
+        ]:
+            source = '#[cfg(test)] mod helper { ' + body + ' }\n' \
+                     '#[cfg(test)] #[path = "foo_tests.rs"] mod suite;'
+            with self.subTest(body=body):
+                self.assertEqual(self.problems({"foo.rs": source, "foo_tests.rs": ""}), [])
+
+    def test_undeclared_files_reached_by_expansion_or_nesting_are_caught(self):
+        # cfg_attr paths, include! and nested declarations leave the file holding #[test] undeclared,
+        # so the crate-root rule rejects it even though the scanner does not expand those forms.
+        cases = [
+            {"lib.rs": '#[cfg(test)] #[cfg_attr(test, path = "alternate.rs")] mod helper;',
+             "alternate.rs": "#[test] fn contract() {}"},
+            {"lib.rs": '#[cfg(test)] mod helper;', "helper.rs": 'include!("alternate.rs");',
+             "alternate.rs": "#[test] fn contract() {}"},
+            {"lib.rs": '#[cfg(test)] mod outer { #[path = "helper.rs"] mod helper; }',
+             "helper.rs": "#[test] fn contract() {}"},
+        ]
+        for files in cases:
+            with self.subTest(files=files):
+                problems = self.problems(files)
+                self.assertTrue(any("crate root holds tests" in item for item in problems), problems)
+
+    def test_documented_macro_generated_test_limit(self):
+        # This source scanner is not rustc: tests produced by macro_rules! expansion need review.
+        files = {"lib.rs": '#[cfg(test)] mod helper;',
+                 "helper.rs": 'macro_rules! suite { () => { #[test] fn contract() {} }; } suite!();'}
+        self.assertEqual(self.problems(files), [])
+
+    def test_helper_imports_are_not_mistaken_for_test_suites(self):
+        # Build-code test imports and source-scanner fixtures have no test functions of their own.
+        for fixture in [
+            "pub fn helper() {}",
+            "// #[test] fn hidden() {}",
+            'const TEXT: &str = "#[test] fn hidden() {}";',
+            'const TEXT: &str = r#"#[test] fn hidden() {}"#;',
+            "macro_rules! example { () => { #[test] fn hidden() {} }; }",
+            "opaque! { #[test] fn hidden() {} }",
+        ]:
+            files = {"lib.rs": '#[cfg(test)] #[path = "helper.rs"] mod helper;', "helper.rs": fixture}
+            with self.subTest(fixture=fixture):
+                self.assertEqual(self.problems(files), [])
+        files = {"src/lib.rs": '#[cfg(test)] #[path = "../build_config.rs"] mod build_config;',
+                 "build_config.rs": "pub fn configure() {}"}
+        self.assertEqual(self.problems(files), [])
+
+    def test_invalid_suite_names_fail_without_owning_declarations(self):
+        # Renaming an orphan to a generic or singular test filename must not remove it from the inventory.
+        for name in ["tests.rs", "test.rs", "foo_test.rs"]:
+            with self.subTest(name=name):
+                self.assertTrue(self.problems({"foo.rs": "", name: ""}))
+
+    def test_comments_strings_macros_and_unrelated_attributes_cannot_declare_tests(self):
+        # Fake declarations must not turn a missing suite owner into a green scan.
+        declaration = '#[cfg(test)] #[path = "foo_tests.rs"] mod cases;'
+        for source in [
+            "// " + declaration,
+            "/* " + declaration + " */",
+            'const TEXT: &str = r#"' + declaration + '"#;',
+            "opaque! { " + declaration + " }",
+            "macro_rules! example { () => { " + declaration + " }; }",
+            '#[cfg(test)] #[path = "foo_tests.rs"] fn unrelated() {} mod cases;',
+            '#[cfg(test)] mod nested { #[path = "foo_tests.rs"] mod cases; }',
+        ]:
+            with self.subTest(source=source):
+                self.assertTrue(self.problems({"foo.rs": source, "foo_tests.rs": ""}))
+
+    def test_cfg_requires_tests_in_every_alternative(self):
+        # cfg(any(test, windows)) admits production Windows builds, unlike all(test, windows).
+        for expression, valid in [("test", True), ("all(test, windows)", True),
+                                  ("any(all(test, windows), all(test, unix))", True),
+                                  ("any(test, windows)", False), ("not(test)", False),
+                                  ("windows", False), ('feature = "test"', False)]:
+            source = f'#[cfg({expression})] #[path = "foo_tests.rs"] mod cases;'
+            with self.subTest(expression=expression):
+                self.assertEqual(not self.problems({"foo.rs": source, "foo_tests.rs": ""}), valid)
+        self.assertTrue(self.problems({"foo.rs": '#[path = "foo_tests.rs"] mod cases;', "foo_tests.rs": ""}))
+
+    def test_generated_owners_resolve_and_native_roots_stay_excluded(self):
+        # Generated lib.rs still owns authored tests; upstream test layouts are outside this first-party policy.
+        from rust_test_ownership import inspect_test_ownership
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {"src/lib.rs": '#[cfg(test)] #[path = "lib_tests.rs"] mod suite;',
+                     "src/lib_tests.rs": "", "native/upstream/orphan_tests.rs": ""}
+            for name, source in files.items():
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(source, encoding="utf-8")
+            self.assertEqual(inspect_test_ownership(root, list(files), ("native/upstream/",)), [])
+            self.assertTrue(inspect_test_ownership(root, [*files, "missing.rs"], ("native/upstream/",)))
+
+    def test_ownership_violation_fails_the_source_size_cli(self):
+        # The naming check is part of the enforced CLI, not an unused helper with green unit tests.
+        import contextlib
+        import io
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            (root / "scripts/native-dependencies.json").write_text(json.dumps({"libraries": []}), encoding="utf-8")
+            cases = [
+                {"foo_tests.rs": "// orphan\n"},
+                {"lib.rs": "#[cfg(test)] mod tests;", "tests.rs": ""},
+                {"foo.rs": '#[cfg(test)] #[path = "tests.rs"] mod cases;', "tests.rs": ""},
+                {"foo.rs": '#[cfg(test)] #[path = "foo_test.rs"] mod cases;', "foo_test.rs": ""},
+                {"lib.rs": 'mod helper;', "helper.rs": "#[test] fn contract() {}"},
+                {"lib.rs": '#[cfg(any(test, feature = "fixtures"))] mod helper;',
+                 "helper.rs": "#[test] fn contract() {}"},
+                {"foo.rs": '#[cfg(test)] mod cases { #[test] fn contract() {} }'},
+            ]
+            for files in cases:
+                for name, source in files.items():
+                    (root / name).write_text(source, encoding="utf-8")
+                with self.subTest(files=files), \
+                        mock.patch.object(source_size, "native_roots", return_value=()), \
+                        mock.patch.object(source_size, "tracked_paths", return_value=list(files)), \
+                        mock.patch.object(source_size, "EXACT_EXCEPTIONS", {}), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(source_size.main(["--root", str(root)]), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

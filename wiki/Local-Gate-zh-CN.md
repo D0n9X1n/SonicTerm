@@ -475,6 +475,14 @@ bless 运行会重写该表、以十六进制打印每个变化的栅格，并�
 
 ## 源文件大小与工具模块
 
+`source-size` 还检查 Rust 测试文件是否按所有者命名，并具有受测试条件约束的 `#[path]` 声明。
+文件作用域的外部模块只要含有 `#[test]`/`#[bench]`，无论文件名或声明条件如何都会检查；
+文件作用域内受测试条件约束的内联套件则会被拒绝。
+完整的命名与超长套件拆分规则见[仓库与工具链](Repository-and-Toolchain-zh-CN)。
+crate 根文件（`lib.rs`、`main.rs`、bin 或示例根文件）本身不得包含测试；只有 Cargo 的集成测试
+和 bench 目标可以。通过 `cfg_attr(test, path = …)`、`include!` 或嵌套声明引入的文件，只有在没有
+其他声明指向它时才会被拦住；`macro_rules!` 生成的测试不会被看到。这些需要人工审查，gate 通过并不能证明其所有权。
+
 `source-size` 运行 `python3 scripts/check-source-size.py`：先运行契约测试，
 再读取 `git ls-files -z` 所列路径在工作树中的字节。每个源文件最多 1,000 个物理行；
 LF 边界及末尾没有换行的行均计数，包括注释、空行和内嵌源码。CRLF 只计一次。

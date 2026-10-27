@@ -190,5 +190,5 @@ impl App {
 mod frame_pacing_tests;
 
 #[cfg(test)]
-#[path = "redraw_coalescing_tests.rs"]
+#[path = "frame_pacing_coalescing_tests.rs"]
 mod redraw_coalescing_tests;

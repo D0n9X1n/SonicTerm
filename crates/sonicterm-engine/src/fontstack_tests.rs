@@ -345,7 +345,7 @@ fn bold_counters_survive_weight_two_at_current_raster_size() {
 }
 
 #[cfg(test)]
-#[path = "fontstack_frame_fixture_tests.rs"]
+#[path = "fontstack_tests_frame_fixture_tests.rs"]
 mod frame_fallback;
 
 /// The diagnostic face resolution mirrors the rasterizer: a character key (glyph id 0) and the

@@ -8,6 +8,17 @@ repository metadata. `sonicterm-app` is the default workspace member. The
 shipping binaries are `sonicterm-mac`, `sonicterm-windows`, and
 `sonicterm-linux`; the Linux executable is named `sonicterm`.
 
+## Test ownership checks
+
+Crate unit-test files follow the owner-named sibling rule in
+[Repository and Toolchain](Repository-and-Toolchain). The `source-size` gate checks
+file-scope external suites regardless of their filename or declaration gate, and rejects
+file-scope test-gated inline suites containing `#[test]`/`#[bench]`.
+It also rejects tests written directly in a crate root other than Cargo's integration-test and
+bench targets. Files reached through `cfg_attr(test, path = …)`, `include!` or a nested
+declaration are caught only when nothing else declares them, and `macro_rules!`-generated tests
+are not seen; those need manual review, and a green scan does not establish their ownership.
+
 ## Dependency overview
 
 ```mermaid
@@ -401,7 +412,7 @@ results into cell metrics and atlas `RasterTile`s.
 
 `fontstack_weight.rs` privately owns checked monochrome coverage transforms. The stack
 retains native face ownership and the original public paths; gated frame-shaping fixtures
-live once in test-only `fontstack_frame_fixture_tests.rs` alongside its frame-shaping contracts.
+live once in test-only `fontstack_tests_frame_fixture_tests.rs` alongside its frame-shaping contracts.
 
 ### `sonicterm-block-glyph`
 

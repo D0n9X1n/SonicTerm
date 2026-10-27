@@ -398,5 +398,5 @@ const RECOVERY_RENDERER_SOURCES: [&str; 5] = [
 ];
 
 #[cfg(test)]
-#[path = "device_error_source_scan_support_tests.rs"]
+#[path = "device_errors_tests_source_scan_support_tests.rs"]
 mod device_error_source_scan;

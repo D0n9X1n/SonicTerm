@@ -7,6 +7,15 @@
 是 `sonicterm-app`。发布的二进制 crate 是 `sonicterm-mac`、
 `sonicterm-windows` 和 `sonicterm-linux`；Linux 可执行文件名为 `sonicterm`。
 
+## 测试所有权检查
+
+Crate 单元测试文件遵循[仓库与工具链](Repository-and-Toolchain-zh-CN)中的所有者命名同级文件规则。
+`source-size` gate 检查文件作用域的外部套件，不以文件名或声明条件为前提，
+并拒绝文件作用域内受测试条件约束、含有 `#[test]`/`#[bench]` 的内联套件。
+它还拒绝直接写在 crate 根文件中的测试（Cargo 的集成测试和 bench 目标除外）。
+通过 `cfg_attr(test, path = …)`、`include!` 或嵌套声明引入的文件，只有在没有其他声明指向它时
+才会被拦住；`macro_rules!` 生成的测试不会被看到。这些需要人工审查，扫描通过并不能证明其所有权。
+
 ## 依赖概览
 
 ```mermaid
@@ -355,7 +364,7 @@ FreeType 名称、尺寸与库/流操作放在私有 `ftwrap_*` 同级文件中�
 **阅读：** `src/fontstack.rs`。
 
 `fontstack_weight.rs` 私有地管理带边界检查的单色覆盖率变换。字体栈保留原生字体所有权
-及原有公开路径；带闸门的帧塑形夹具仅在测试文件 `fontstack_frame_fixture_tests.rs` 中保存一份，
+及原有公开路径；带闸门的帧塑形夹具仅在测试文件 `fontstack_tests_frame_fixture_tests.rs` 中保存一份，
 帧塑形契约测试也位于该文件。
 
 ### `sonicterm-block-glyph`

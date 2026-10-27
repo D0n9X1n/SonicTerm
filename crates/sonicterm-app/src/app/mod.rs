@@ -917,7 +917,7 @@ impl App {
 }
 
 #[cfg(test)]
-#[path = "native_window_title_tests.rs"]
+#[path = "mod_native_window_title_tests.rs"]
 mod native_window_title_tests;
 
 #[cfg(all(test, any(windows, unix)))]
@@ -927,7 +927,7 @@ mod pty_test_support;
 mod source_scan_support;
 
 #[cfg(all(test, any(windows, unix)))]
-#[path = "close_baseline_tests.rs"]
+#[path = "mod_close_baseline_tests.rs"]
 mod close_baseline_tests;
 
 #[cfg(test)]

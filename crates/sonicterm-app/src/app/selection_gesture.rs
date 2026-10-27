@@ -587,5 +587,5 @@ impl WindowState {
 mod selection_gesture_tests;
 
 #[cfg(test)]
-#[path = "click_count_tests.rs"]
+#[path = "selection_gesture_click_count_tests.rs"]
 mod click_count_tests;

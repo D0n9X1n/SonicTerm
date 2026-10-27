@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 
+from rust_test_ownership import inspect_test_ownership
+
 LIMIT = 1000
 EXTENSIONS = frozenset({".rs", ".py", ".sh", ".ps1", ".c", ".h", ".cc", ".cpp", ".hpp", ".m", ".mm", ".wgsl"})
 NATIVE_NAMES = frozenset({"freetype", "harfbuzz", "libpng", "zlib", "winit"})
@@ -82,7 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = json.loads((args.root / "scripts/native-dependencies.json").read_text(encoding="utf-8"))
         roots = native_roots(manifest)
-        measured, problems = inspect_sources(args.root, tracked_paths(args.root), roots)
+        paths = tracked_paths(args.root)
+        measured, problems = inspect_sources(args.root, paths, roots)
+        problems.extend(inspect_test_ownership(args.root, paths, roots))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(f"source-size: cannot inspect sources: {error}", file=sys.stderr)
         return 2

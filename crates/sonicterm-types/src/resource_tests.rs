@@ -468,3 +468,57 @@ fn frame_scratch_and_chrome_cache_are_uncharged_renderer_retention() {
         assert_eq!(class.pane_seam_term(), PaneSeamTerm::NotChargedInProduction, "{class:?}");
     }
 }
+
+/// `ResourceSnapshot::new` copies each owner and process view field into its own snapshot field;
+/// distinct values per field catch any swapped or dropped assignment.
+#[test]
+fn snapshot_new_keeps_every_owner_and_process_field_in_place() {
+    let owner_id = ResourceOwnerId::new(7).expect("nonzero owner id");
+    let parent_id = ResourceOwnerId::new(3).expect("nonzero parent id");
+    let mut owner_class_bytes = EnumMap::default();
+    owner_class_bytes[ResourceClass::GridVisible] = 11;
+    let mut owner_class_items = EnumMap::default();
+    owner_class_items[ResourceClass::GridHistory] = 13;
+    let mut process_class_bytes = EnumMap::default();
+    process_class_bytes[ResourceClass::Surface] = 17;
+    let mut process_class_items = EnumMap::default();
+    process_class_items[ResourceClass::FontFace] = 19;
+    let mut class_epochs = EnumMap::default();
+    class_epochs[ResourceClass::GlyphRaster] = 23;
+    let owner = OwnerView {
+        owner: owner_id,
+        kind: OwnerKind::SharedFont,
+        state: OwnerState::Open,
+        parent: Some(parent_id),
+        amount: ResourceAmount { bytes: 29, items: 31 },
+        bytes_limit: 37,
+        class_bytes: owner_class_bytes,
+        class_items: owner_class_items,
+        epoch: 41,
+    };
+    let process = ProcessView {
+        amount: ResourceAmount { bytes: 43, items: 47 },
+        class_bytes: process_class_bytes,
+        class_items: process_class_items,
+        class_epochs,
+        registry_epoch: 53,
+        release_failures: 59,
+    };
+    let snapshot = ResourceSnapshot::new(ProcessKind::Mux, owner, process);
+    assert_eq!(snapshot.process_kind, ProcessKind::Mux);
+    assert_eq!(snapshot.owner, owner_id);
+    assert_eq!(snapshot.owner_kind, OwnerKind::SharedFont);
+    assert_eq!(snapshot.owner_state, OwnerState::Open);
+    assert_eq!(snapshot.parent, Some(parent_id));
+    assert_eq!(snapshot.owner_amount, ResourceAmount { bytes: 29, items: 31 });
+    assert_eq!(snapshot.owner_bytes_limit, 37);
+    assert_eq!(snapshot.owner_class_bytes[ResourceClass::GridVisible], 11);
+    assert_eq!(snapshot.owner_class_items[ResourceClass::GridHistory], 13);
+    assert_eq!(snapshot.process_amount, ResourceAmount { bytes: 43, items: 47 });
+    assert_eq!(snapshot.process_class_bytes[ResourceClass::Surface], 17);
+    assert_eq!(snapshot.process_class_items[ResourceClass::FontFace], 19);
+    assert_eq!(snapshot.owner_epoch, 41);
+    assert_eq!(snapshot.class_epochs[ResourceClass::GlyphRaster], 23);
+    assert_eq!(snapshot.registry_epoch, 53);
+    assert_eq!(snapshot.release_failures, 59);
+}

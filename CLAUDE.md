@@ -433,15 +433,33 @@ a reproduction.
   explaining any non-obvious setup or assertion. Passing the comment checker is
   only the minimum; its test exclusions are not permission to leave tests
   undocumented. Do not add comments that merely restate syntax.
-- **Unit tests use the exact flat `file_tests.rs` sibling pattern, never inline.**
-  For every source file `foo.rs`, put its unit tests beside it in
-  `foo_tests.rs` and declare them from `foo.rs` with
-  `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;`. Crate-root tests use
-  `lib_tests.rs` (or `main_tests.rs` for a binary) with the same declaration
-  pattern. Do not use `#[cfg(test)] mod tests { … }`, a generic `tests.rs`, or a
-  `<module>/tests.rs` subdirectory. Tests stay in-crate for private-item access
-  via `use super::*;`; Rust does not discover sibling files automatically, so
-  every `file_tests.rs` requires its source-module declaration.
+- **Unit-test files are flat siblings named after their declaring source.**
+  For `foo.rs`, use `foo_tests.rs`; a suite split by topic to keep files below
+  1,000 lines may use `foo_<topic>_tests.rs`. Each file is declared from `foo.rs`
+  with `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;` (substitute the
+  topical filename as needed). Additional platform cfgs must still require
+  `test`. `lib.rs`, `main.rs` and `mod.rs` follow the same stem rule.
+  A test-only source that declares another test file is also an owner: use its
+  entire stem, e.g. `foo_tests.rs` declares `foo_tests_fixture_tests.rs`.
+  Keep module identifiers stable when renaming physical files so subprocess
+  filters and `use super::*` access do not change. Every file has one declaring
+  owner; when source stems overlap, the longest matching sibling stem wins.
+  Do not use inline `#[cfg(test)] mod tests { … }`, generic `tests.rs`, or a
+  `<module>/tests.rs` subdirectory. `source-size` verifies real `#[path]`
+  declarations and test gates across the tracked first-party Rust tree, including
+  generated crate roots that declare authored tests; native upstream trees are excluded.
+  Files with real `#[test]`/`#[bench]` attributes are suites regardless of their
+  filename or declaration gate; a missing or production-admitting gate fails.
+  File-scope test-gated inline modules containing such attributes also fail.
+  A crate root (`lib.rs`, `main.rs`, a bin or example root) may not hold tests
+  itself, inline or bare; only Cargo's integration-test and bench targets may
+  (`tests/`, `benches/`, or an explicit `[[test]]`/`[[bench]]` path), read from
+  each `Cargo.toml` including `autotests`/`autobenches`. This is a
+  source scan, not Rust expansion: a file reached through
+  `cfg_attr(test, path = …)`, `include!` or a declaration nested inside an
+  inline module is caught only when nothing else declares it, and
+  `macro_rules!`-generated tests are not seen. Those forms need manual review;
+  a green check does not prove their ownership.
 - **`tests/` is for cross-crate integration only.** Reserve each crate's
   `tests/` directory for genuine integration tests that exercise the crate
   through its public API or across crate boundaries. Do not put trivial

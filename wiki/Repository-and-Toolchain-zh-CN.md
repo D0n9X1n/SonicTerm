@@ -27,13 +27,35 @@ cargo run -p sonicterm-windows   # Windows
 cargo run -p sonicterm-linux     # Linux；可执行文件名为 sonicterm
 ```
 
-每个第一方 workspace crate 都有本地 `CLAUDE.md`。单元测试采用扁平 sibling 形式 `foo.rs` +
-`foo_tests.rs`，并由 `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;` 声明。
-Crate root 使用 `lib_tests.rs` 或 `main_tests.rs`；`tests/` 只用于通过 public API 或跨
-crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` 的 crate-root
-测试会清点每个直接源码模块，并要求它具有准确的 sibling 声明或一条非空的显式豁免说明。
-已声明的 sibling 文件必须存在且包含 `#[test]`；源码目录模块会使这项扁平清单失败。模块一旦
-获得自己的 sibling suite，对应豁免就会立即变为过期并使测试失败。
+每个第一方 workspace crate 都有本地 `CLAUDE.md`。单元测试文件是按声明它的源文件命名的扁平同级文件：
+`foo.rs` 拥有 `foo_tests.rs`；需要按主题拆分以保持每个文件少于 1,000 行时，可使用
+`foo_<topic>_tests.rs`。每个文件都通过 `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;`
+显式声明，主题文件替换为对应文件名。平台条件仍必须要求 `test`。
+`lib.rs`、`main.rs` 和 `mod.rs` 各自遵循其文件名主干。测试专用源文件也可按完整主干声明另一个套件：
+`foo_tests.rs` 声明 `foo_tests_fixture_tests.rs`。重命名物理文件时不必改变模块标识符，
+因此子进程过滤器和 `use super::*` 访问保持不变。每个测试文件只有一个声明所有者；
+主干重叠时，以最长的同级源文件主干为准。不使用内联单元测试模块、通用 `tests.rs` 或嵌套测试目录。
+`tests/` 仍只用于 public API 或跨 crate 集成测试。
+
+`source-size` gate 根据实际受测试条件约束的 `#[path]` 声明验证名称，
+不把注释、字符串或宏中的文本当作声明。通用 `test.rs`/`tests.rs` 与单数后缀
+`*_test.rs` 文件即使没有声明所有者也会失败。它还按显式路径或 Rust 默认路径解析文件作用域的外部模块，
+不以声明是否受测试条件约束为前提。含有 `#[test]` 或 `#[bench]` 的文件无论叫什么名字都视为测试套件；
+其声明必须要求 `test`，所以没有条件约束或使用 `cfg(any(test, feature = "fixtures"))` 都会失败。
+文件作用域内受测试条件约束、且含有这些属性的内联模块也会失败。
+纯辅助模块及为测试而导入的构建代码，如果自身没有这些属性，则保留实现文件名。
+
+crate 根文件（`lib.rs`、`main.rs`、bin 或示例根文件）本身不得包含测试，无论内联还是裸写；
+只有 Cargo 的集成测试和 bench 目标可以（`tests/`、`benches/`，或显式的 `[[test]]`/`[[bench]]` 路径），
+依据各 `Cargo.toml` 读取，包括 `autotests`/`autobenches`。
+这是源码扫描而非 Rust 展开：通过 `cfg_attr(test, path = …)`、`include!` 或内联模块内嵌套声明
+引入的文件，只有在没有其他声明指向它时才会被拦住；`macro_rules!` 生成的测试不会被看到。
+这些形式需要人工审查；检查通过既不能证明其所有权，也不豁免命名规则。
+它读取全部受跟踪的第一方 Rust，
+包括声明自行编写测试的生成 crate root，但排除原生上游源码树。
+`sonicterm-ui` 和 `sonicterm-render-model` 的 crate-root 套件还要求每个直接源模块
+具有准确的主测试同级声明，或一条非空的显式豁免。该同级文件必须存在且包含 `#[test]`；
+源目录模块会使扁平清单失败。模块获得主测试同级套件后，其豁免即过期。
 
 对捕获到的 tracing 输出做断言的测试使用 `sonicterm_logging::test_capture`。
 它的 `with_default` 包装保留每个测试自己的 subscriber、filter 和 sink，同时用一个不记录事件的

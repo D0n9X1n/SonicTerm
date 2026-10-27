@@ -240,5 +240,5 @@ pub mod test_capture;
 pub mod snapshot_format;
 
 #[cfg(test)]
-#[path = "redaction_tests.rs"]
+#[path = "lib_redaction_tests.rs"]
 mod redaction_tests;
