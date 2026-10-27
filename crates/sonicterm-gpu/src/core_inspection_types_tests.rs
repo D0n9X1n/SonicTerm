@@ -102,7 +102,7 @@ fn presented_damage_recording_and_glyph_injection_are_opt_in() {
     let assembly =
         source.split_once("    pub(super) fn assemble_frame(").expect("assemble_frame exists").1;
     assert!(assembly.contains("self.assemble_backgrounds("));
-    let background = include_str!("core_assemble_backgrounds.rs");
+    let background = include_str!("core_assemble_backgrounds.rs").replace("\r\n", "\n");
     let guard = background.find("if self.injected_test_glyph.is_some() {").expect("Option guard");
     let call = background.find("self.push_injected_test_glyph(").expect("seam call");
     assert!(guard < call, "the seam is reached only when a glyph is injected");

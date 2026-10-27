@@ -3,9 +3,9 @@
 /// Live LCD policy changes invalidate presentation without rebuilding font or atlas state.
 #[test]
 fn subpixel_aa_setter_does_not_rebuild_fonts_or_atlases() {
-    const SOURCE: &str = crate::core::CORE_SOURCE;
-    let start = SOURCE.find("pub fn set_subpixel_aa_mode").expect("LCD setter");
-    let body = &SOURCE[start..SOURCE[start..].find("\n    /// Requested LCD").unwrap() + start];
+    let source = crate::core::CORE_SOURCE.replace("\r\n", "\n");
+    let start = source.find("pub fn set_subpixel_aa_mode").expect("LCD setter");
+    let body = &source[start..source[start..].find("\n    /// Requested LCD").unwrap() + start];
 
     assert!(body.contains("self.last_frame_key = None"));
     assert!(body.contains("self.request_window_redraw()"));

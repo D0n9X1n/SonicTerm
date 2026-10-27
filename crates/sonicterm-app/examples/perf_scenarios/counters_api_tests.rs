@@ -318,7 +318,7 @@ fn every_atlas_retry_api_call_in_the_harness_is_behind_its_cfg() {
             continue;
         }
         scanned += 1;
-        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
         if source.starts_with("#![cfg(test)]") {
             continue;
         }
@@ -390,7 +390,7 @@ fn every_attribution_api_call_in_the_harness_is_behind_its_cfg() {
             continue;
         }
         scanned += 1;
-        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
         if source.starts_with("#![cfg(test)]") {
             continue;
         }
@@ -423,7 +423,7 @@ fn every_completeness_api_call_in_the_harness_is_behind_its_cfg() {
             continue;
         }
         scanned += 1;
-        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
         if source.starts_with("#![cfg(test)]") {
             continue;
         }
@@ -454,7 +454,7 @@ fn every_dispatch_timeline_api_call_in_the_harness_is_behind_its_cfg() {
             continue;
         }
         scanned += 1;
-        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
         if source.starts_with("#![cfg(test)]") {
             continue;
         }
@@ -485,7 +485,7 @@ fn every_echo_timeline_api_call_in_the_harness_is_behind_its_cfg() {
             continue;
         }
         scanned += 1;
-        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
         if source.starts_with("#![cfg(test)]") {
             continue;
         }
@@ -516,7 +516,7 @@ fn every_guard_spans_api_call_in_the_harness_is_behind_its_cfg() {
             continue;
         }
         scanned += 1;
-        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
         if source.starts_with("#![cfg(test)]") {
             continue;
         }

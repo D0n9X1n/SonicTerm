@@ -127,7 +127,7 @@ fn ink_records_and_partial_frames_commit_only_on_a_presented_frame() {
     assert!(unpresented < guard && guard < finish_call, "only a presented frame finishes");
     let assemble = method_body(&source, "    pub(super) fn assemble_frame(");
     assert!(assemble.contains("self.assemble_glyph_rows("));
-    let glyph_phase = include_str!("core_assemble_glyph_rows.rs");
+    let glyph_phase = include_str!("core_assemble_glyph_rows.rs").replace("\r\n", "\n");
     let begin = glyph_phase.find("begin_glyph_pass(").expect("a fresh stage per assembly");
     let pass_start = source.split_once("pub(crate) fn begin_glyph_pass<").expect("helper").1;
     let pass_start = &pass_start[..pass_start.find("\n}\n").expect("helper end")];

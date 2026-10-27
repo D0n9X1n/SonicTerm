@@ -179,25 +179,28 @@ pub(super) fn growth_stamp(allocation: u64, identity: u64, growths: u64) -> Glyp
 }
 
 /// The source of `name`'s body in `source`, from its signature to the next top-level item.
-pub(super) fn function_body<'source>(source: &'source str, signature: &str) -> &'source str {
+pub(super) fn function_body(source: &str, signature: &str) -> String {
+    let source = source.replace("\r\n", "\n");
     let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
     let end = source[start + signature.len()..]
         .find("\n    pub fn ")
         .map_or(source.len(), |offset| start + signature.len() + offset);
-    &source[start..end]
+    source[start..end].to_owned()
 }
 
 /// The body of the method whose signature starts at `signature`, through its closing brace at
 /// method indentation.
-pub(super) fn method_body<'source>(source: &'source str, signature: &str) -> &'source str {
+pub(super) fn method_body(source: &str, signature: &str) -> String {
+    let source = source.replace("\r\n", "\n");
     let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
     let end = source[start..].find("\n    }\n").map_or(source.len(), |offset| start + offset);
-    &source[start..end]
+    source[start..end].to_owned()
 }
 
 /// The body of the item whose signature is `signature` in `source`: from the signature to the
 /// closing brace at the signature's own indentation, so a method ends at its own `}`.
-pub(super) fn item_body<'source>(source: &'source str, signature: &str) -> &'source str {
+pub(super) fn item_body(source: &str, signature: &str) -> String {
+    let source = source.replace("\r\n", "\n");
     let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
     let line_start = source[..start].rfind('\n').map_or(0, |newline| newline + 1);
     let indent = &source[line_start..start];
@@ -205,7 +208,7 @@ pub(super) fn item_body<'source>(source: &'source str, signature: &str) -> &'sou
     let close = format!("\n{indent}}}\n");
     let body = &source[start..];
     let end = body.find(&close).map_or(body.len(), |offset| offset + close.len());
-    &body[..end]
+    body[..end].to_owned()
 }
 
 #[path = "core_raster_fixture.rs"]
@@ -238,4 +241,17 @@ fn inline_image_module_is_available_without_debug_assertions() {
     let declaration = "#[path = \"core_inline_images.rs\"]\nmod inline_images;";
     assert!(source.contains(declaration));
     assert!(!source.contains(&format!("#[cfg(debug_assertions)]\n{declaration}")));
+}
+
+/// All shared source selectors return the same bounded body from LF and Windows CRLF checkouts.
+#[test]
+fn source_body_selectors_normalize_checkout_line_endings() {
+    let source = "impl Renderer {\n    pub fn first() {\n        draw();\n    }\n    pub fn second() {\n        present();\n    }\n}\n";
+    let windows = source.replace('\n', "\r\n");
+    for select in [function_body, method_body, item_body] {
+        let expected = select(source, "pub fn first(");
+        assert!(expected.contains("draw();"));
+        assert!(!expected.contains("present();"));
+        assert_eq!(select(&windows, "pub fn first("), expected);
+    }
 }

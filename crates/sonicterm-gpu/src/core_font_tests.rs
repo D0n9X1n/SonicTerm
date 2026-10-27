@@ -6,13 +6,13 @@ use super::*;
 #[test]
 fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
     // Contract: chrome roles share font configuration but retain distinct native size identities.
-    const CORE_SRC: &str = crate::core::CORE_SOURCE;
-    let helper_start = CORE_SRC.find("fn renderer_font_stacks(").expect("stack builder");
-    let helper_end = CORE_SRC[helper_start..]
+    let core_src = crate::core::CORE_SOURCE.replace("\r\n", "\n");
+    let helper_start = core_src.find("fn renderer_font_stacks(").expect("stack builder");
+    let helper_end = core_src[helper_start..]
         .find("fn software_block_glyph_target_rect(")
         .map(|offset| helper_start + offset)
         .expect("stack builder end");
-    let helper = &CORE_SRC[helper_start..helper_end];
+    let helper = &core_src[helper_start..helper_end];
     assert_eq!(helper.matches("try_new_full_with_weight_and_font_dirs(").count(), 1);
     assert!(helper.contains("font_dirs"));
     // Tab title, palette footer and status line are sibling views of the one body stack.
@@ -34,12 +34,12 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
     assert!(title_metrics.cell_h > body_metrics.cell_h);
     assert!(footer_metrics.cell_h < body_metrics.cell_h);
 
-    let set_font_start = CORE_SRC.find("    pub fn set_font(").expect("set_font exists");
-    let set_font_end = CORE_SRC[set_font_start..]
+    let set_font_start = core_src.find("    pub fn set_font(").expect("set_font exists");
+    let set_font_end = core_src[set_font_start..]
         .find("\n    pub fn set_scale_factor(")
         .map(|offset| set_font_start + offset)
         .expect("set_font has a bounded body");
-    let set_font = &CORE_SRC[set_font_start..set_font_end];
+    let set_font = &core_src[set_font_start..set_font_end];
     assert!(
         set_font.contains("renderer_font_stacks(family, size, dpi, weight_scale, &self.font_dirs)")
     );
@@ -58,19 +58,19 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
         assert!(set_font.contains(assignment), "missing stack replacement: {assignment}");
     }
     // The scale rebuild rescales the tab-title font through the same device-free state.
-    assert!(CORE_SRC.contains("self.tab_title_font.set_scale_factor(sf, fs_dpi);"));
+    assert!(core_src.contains("self.tab_title_font.set_scale_factor(sf, fs_dpi);"));
 }
 
 #[test]
 fn title_size_helper_is_used_only_for_title_stack_and_title_rendering() {
     // Protect title sizing from body/footer leaks while keeping vector privilege chrome font-independent.
-    const CORE_SRC: &str = crate::core::CORE_SOURCE;
-    assert_eq!(CORE_SRC.matches("tab_title_font_size(").count(), 1);
+    let core_src = crate::core::CORE_SOURCE.replace("\r\n", "\n");
+    assert_eq!(core_src.matches("tab_title_font_size(").count(), 1);
     // The tab-title font sizes the stack it measures and draws with.
     assert_eq!(include_str!("tab_title_font.rs").matches("tab_title_font_size(").count(), 1);
-    assert!(CORE_SRC.contains("self.tab_title_font.stack(), tab_rasterizer.as_mut()"));
-    assert!(CORE_SRC.contains("} else if show_privilege_badge {"));
-    assert!(CORE_SRC.contains("GlyphRasterVariant::TabTitle"));
+    assert!(core_src.contains("self.tab_title_font.stack(), tab_rasterizer.as_mut()"));
+    assert!(core_src.contains("} else if show_privilege_badge {"));
+    assert!(core_src.contains("GlyphRasterVariant::TabTitle"));
 }
 
 #[test]

@@ -59,7 +59,7 @@ fn the_injected_glyph_precedes_every_cursor_recolor_and_damage_is_read_beside_th
     let source = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let assembly =
         source.split_once("    pub(super) fn assemble_frame(").expect("assemble_frame exists").1;
-    let backgrounds = include_str!("core_assemble_backgrounds.rs");
+    let backgrounds = include_str!("core_assemble_backgrounds.rs").replace("\r\n", "\n");
     let scrollbar = backgrounds.find("emit_pane_scrollbar(").expect("scrollbar emit");
     let inject = backgrounds.find("self.push_injected_test_glyph(").expect("the seam is called");
     let selection = assembly.find("self.assemble_selection(").expect("selection phase");
@@ -86,7 +86,7 @@ fn tab_title_ink_is_measured_widened_and_kept_only_by_a_presented_frame() {
     let source = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let assembly =
         source.split_once("    pub(super) fn assemble_frame(").expect("assemble_frame exists").1;
-    let tabs = include_str!("core_assemble_tabs.rs");
+    let tabs = include_str!("core_assemble_tabs.rs").replace("\r\n", "\n");
     let start = tabs.find("let tab_glyph_start = glyph_instances.len();").expect("start");
     let bar = tabs.find("        if self.tab_bar_visible {\n").expect("tab bar block");
     let measure = tabs.find("glyph_ink_bounds(&glyph_instances[tab_glyph_start..]").expect("ink");
@@ -251,7 +251,7 @@ fn plans_ignore_the_glyph_cache() {
     assert_eq!(before.mode, after.mode);
     assert_eq!(before.damage, after.damage);
     assert_eq!(before.panes[0].emit_rows, after.panes[0].emit_rows);
-    let planner = include_str!("frame_plan.rs");
+    let planner = include_str!("frame_plan.rs").replace("\r\n", "\n");
     assert!(!planner.contains("row_glyph_cache") && !planner.contains("RowGlyphCache"));
 }
 

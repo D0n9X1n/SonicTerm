@@ -40,7 +40,7 @@ fn planned_acknowledgement_rejects_newer_grid_and_replacement() {
 /// Production retry exits precede plan acknowledgement and both presenters finish only after their success boundary.
 #[test]
 fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
-    let assembly = include_str!("core_assemble.rs");
+    let assembly = include_str!("core_assemble.rs").replace("\r\n", "\n");
     let render = concat!(
         include_str!("core_render.rs"),
         include_str!("core_assemble.rs"),
@@ -218,7 +218,7 @@ fn render_releasing_lends_once_and_presents_after_release() {
     ] {
         assert!(call.find(after).is_some_and(|at| at > lend), "{after} runs after release");
     }
-    let assemble = include_str!("core_assemble.rs");
+    let assemble = include_str!("core_assemble.rs").replace("\r\n", "\n");
     assert!(call.contains("lend_and_assemble(source, accepts_gpu_work,"), "exits decided first");
     assert!(
         !assemble.contains("Assembled::NoPanes") && !assemble.contains("Assembled::Unavailable")

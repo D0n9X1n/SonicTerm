@@ -61,7 +61,7 @@ fn atlas_frame_detector_production_capture_and_retry_precede_presentation() {
             < assembly.find("Ok(Assembled::Layers(").unwrap()
     );
     assert!(source.contains("let atlas_evictions_at_frame_start = self.glyph_atlas.evictions();"));
-    let lifecycle = include_str!("atlas_lifecycle.rs");
+    let lifecycle = include_str!("atlas_lifecycle.rs").replace("\r\n", "\n");
     let capture = lifecycle.split_once("fn glyph_atlas_stamp(&self)").unwrap().1;
     let capture = capture.split_once("fn mark_glyph_atlas_replaced").unwrap().0;
     assert!(capture.contains("self.device_errors.generation()"));

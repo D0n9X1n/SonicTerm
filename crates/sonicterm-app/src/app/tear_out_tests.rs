@@ -587,10 +587,21 @@ pub(super) fn enclosing_function(bare: &str, at: usize) -> &str {
 }
 
 /// Select one inherent method through its own closing brace, regardless of its source file order.
-pub(super) fn source_method<'source>(source: &'source str, name: &str) -> &'source str {
+pub(super) fn source_method(source: &str, name: &str) -> String {
+    let source = source.replace("\r\n", "\n");
     let signature = format!("fn {name}(");
     let start = source.find(&signature).unwrap_or_else(|| panic!("missing {signature}"));
     let body = &source[start..];
     let end = body.find("\n    }\n").expect("method closing brace") + "\n    }".len();
-    &body[..end]
+    body[..end].to_owned()
+}
+
+/// Method selection ignores checkout line endings and stops before the next method's body.
+#[test]
+fn source_method_is_identical_for_lf_and_crlf() {
+    let source = "impl App {\n    fn first() {\n        prepare();\n    }\n    fn second() {\n        commit();\n    }\n}\n";
+    let expected = source_method(source, "first");
+    assert!(expected.contains("prepare();"));
+    assert!(!expected.contains("commit();"));
+    assert_eq!(source_method(&source.replace('\n', "\r\n"), "first"), expected);
 }
