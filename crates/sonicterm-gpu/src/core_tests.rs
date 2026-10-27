@@ -216,7 +216,7 @@ mod core_raster_fixture;
 pub(super) use core_raster_fixture::*;
 
 #[cfg(test)]
-#[path = "core_parity_fixture_tests.rs"]
+#[path = "core_tests_parity_fixture_tests.rs"]
 mod core_parity_fixture;
 pub(super) use core_parity_fixture::*;
 

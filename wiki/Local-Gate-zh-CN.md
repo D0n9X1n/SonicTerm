@@ -475,6 +475,10 @@ bless 运行会重写该表、以十六进制打印每个变化的栅格，并�
 
 ## 源文件大小与工具模块
 
+`source-size` 还检查 Rust 测试文件是否按所有者命名，并具有受测试条件约束的 `#[path]` 声明。
+完整的命名与超长套件拆分规则见[仓库与工具链](Repository-and-Toolchain-zh-CN)。
+
+
 `source-size` 运行 `python3 scripts/check-source-size.py`：先运行契约测试，
 再读取 `git ls-files -z` 所列路径在工作树中的字节。每个源文件最多 1,000 个物理行；
 LF 边界及末尾没有换行的行均计数，包括注释、空行和内嵌源码。CRLF 只计一次。

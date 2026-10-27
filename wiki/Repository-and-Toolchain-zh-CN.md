@@ -27,13 +27,22 @@ cargo run -p sonicterm-windows   # Windows
 cargo run -p sonicterm-linux     # Linux；可执行文件名为 sonicterm
 ```
 
-每个第一方 workspace crate 都有本地 `CLAUDE.md`。单元测试采用扁平 sibling 形式 `foo.rs` +
-`foo_tests.rs`，并由 `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;` 声明。
-Crate root 使用 `lib_tests.rs` 或 `main_tests.rs`；`tests/` 只用于通过 public API 或跨
-crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` 的 crate-root
-测试会清点每个直接源码模块，并要求它具有准确的 sibling 声明或一条非空的显式豁免说明。
-已声明的 sibling 文件必须存在且包含 `#[test]`；源码目录模块会使这项扁平清单失败。模块一旦
-获得自己的 sibling suite，对应豁免就会立即变为过期并使测试失败。
+每个第一方 workspace crate 都有本地 `CLAUDE.md`。单元测试文件是按声明它的源文件命名的扁平同级文件：
+`foo.rs` 拥有 `foo_tests.rs`；需要按主题拆分以保持每个文件少于 1,000 行时，可使用
+`foo_<topic>_tests.rs`。每个文件都通过 `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;`
+显式声明，主题文件替换为对应文件名。平台条件仍必须要求 `test`。
+`lib.rs`、`main.rs` 和 `mod.rs` 各自遵循其文件名主干。测试专用源文件也可按完整主干声明另一个套件：
+`foo_tests.rs` 声明 `foo_tests_fixture_tests.rs`。重命名物理文件时不必改变模块标识符，
+因此子进程过滤器和 `use super::*` 访问保持不变。每个测试文件只有一个声明所有者；
+主干重叠时，以最长的同级源文件主干为准。不使用内联单元测试模块、通用 `tests.rs` 或嵌套测试目录。
+`tests/` 仍只用于 public API 或跨 crate 集成测试。
+
+`source-size` gate 根据实际受测试条件约束的 `#[path]` 声明验证名称，
+不把注释、字符串或宏中的文本当作声明。它读取全部受跟踪的第一方 Rust，
+包括声明自行编写测试的生成 crate root，但排除原生上游源码树。
+`sonicterm-ui` 和 `sonicterm-render-model` 的 crate-root 套件还要求每个直接源模块
+具有准确的主测试同级声明，或一条非空的显式豁免。该同级文件必须存在且包含 `#[test]`；
+源目录模块会使扁平清单失败。模块获得主测试同级套件后，其豁免即过期。
 
 对捕获到的 tracing 输出做断言的测试使用 `sonicterm_logging::test_capture`。
 它的 `with_default` 包装保留每个测试自己的 subscriber、filter 和 sink，同时用一个不记录事件的

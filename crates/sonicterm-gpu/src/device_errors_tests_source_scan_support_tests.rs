@@ -765,5 +765,5 @@ pub(super) fn assembly_device_work(sources: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[path = "device_error_source_scan_tests.rs"]
+#[path = "device_errors_tests_source_scan_support_tests_contract_tests.rs"]
 mod device_error_source_scan_tests;

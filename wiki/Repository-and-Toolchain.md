@@ -28,15 +28,25 @@ cargo run -p sonicterm-windows   # Windows
 cargo run -p sonicterm-linux     # Linux; executable name: sonicterm
 ```
 
-Every first-party workspace crate has a local `CLAUDE.md`. Unit tests use the flat sibling pattern
-`foo.rs` + `foo_tests.rs`, declared with `#[cfg(test)] #[path =
-"foo_tests.rs"] mod foo_tests;`. Crate roots use `lib_tests.rs` or
-`main_tests.rs`; `tests/` is reserved for integration tests through public or
-cross-crate behavior. The `sonicterm-ui` and `sonicterm-render-model` crate-root
-suites inventory every direct source module and require either that exact sibling
-declaration or a non-empty explicit exemption. A declared sibling file must
-exist and contain a `#[test]`; source-directory modules fail the flat inventory.
-An exemption becomes stale as soon as the module gains its own sibling suite.
+Every first-party workspace crate has a local `CLAUDE.md`. Unit-test files are flat siblings
+named after the source that declares them: `foo.rs` owns `foo_tests.rs`, or
+`foo_<topic>_tests.rs` when a suite needs topical splits to stay below 1,000 lines. Each is
+explicitly declared with `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;`, substituting
+the topical filename when needed. Platform conditions must still require `test`.
+`lib.rs`, `main.rs` and `mod.rs` follow their own stems. A test-only source can own another
+suite under its full stem: `foo_tests.rs` declares `foo_tests_fixture_tests.rs`. Module
+identifiers need not change with filenames, preserving subprocess filters and `use super::*`.
+Each test file has one declaring owner; overlapping names resolve to the longest matching
+sibling source stem. Inline unit-test modules, generic `tests.rs`, and nested test folders
+are not used. `tests/` remains reserved for public-API or cross-crate integration.
+
+The `source-size` gate validates these names against actual test-gated `#[path]` declarations,
+not text inside comments, strings or macros. It reads all tracked first-party Rust, including
+generated crate roots that declare authored tests, but excludes native upstream trees.
+The `sonicterm-ui` and `sonicterm-render-model` crate-root suites also require each direct
+source module to have an exact primary sibling declaration or a non-empty explicit exemption.
+That sibling must exist and contain a `#[test]`; source-directory modules fail their flat
+inventory. An exemption becomes stale when the module gains its primary sibling suite.
 
 Tests that assert on captured tracing output use `sonicterm_logging::test_capture`.
 Its `with_default` wrapper keeps each test's subscriber, filter, and sink while a

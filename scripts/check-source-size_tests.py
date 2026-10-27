@@ -137,5 +137,108 @@ class SourceSizeTests(unittest.TestCase):
             self.assertNotRegex("crates/" + path, expression)
 
 
+class RustTestOwnershipTests(unittest.TestCase):
+    def problems(self, files):
+        """Check real Rust declarations without depending on this host's active cfgs."""
+        from rust_test_ownership import ownership_problems
+        return ownership_problems(files)
+
+    def test_exact_and_topic_suites_preserve_module_aliases(self):
+        # Filenames express physical ownership; module aliases may remain stable for subprocess filters.
+        files = {
+            "src/foo.rs": '#[cfg(test)] #[path = "foo_tests.rs"] mod old_name;\n'
+                          '#[cfg(all(test, windows))] #[path = "foo_native_tests.rs"] pub(crate) mod native;\n',
+            "src/foo_tests.rs": '#[cfg(test)] #[path = "foo_tests_fixture_tests.rs"] mod fixture;\n',
+            "src/foo_native_tests.rs": "",
+            "src/foo_tests_fixture_tests.rs": "",
+        }
+        self.assertEqual(self.problems(files), [])
+
+    def test_source_scan_is_crlf_safe_and_accepts_raw_path_strings(self):
+        # The same token stream declares the same file under either checkout newline convention.
+        source = '#[cfg(test)]\n#[path = r#"foo_topic_tests.rs"#]\nmod topic;\n'
+        for content in [source, source.replace("\n", "\r\n")]:
+            self.assertEqual(self.problems({"foo.rs": content, "foo_topic_tests.rs": ""}), [])
+
+    def test_wrong_owner_and_ambiguous_prefix_fail(self):
+        # A broader foo owner cannot steal foo_bar's exact or topical suite.
+        for name in ["bar_tests.rs", "foo_bar_tests.rs", "foo_bar_topic_tests.rs"]:
+            with self.subTest(name=name):
+                files = {"foo.rs": f'#[cfg(test)] #[path = "{name}"] mod cases;\n',
+                         "foo_bar.rs": "", name: ""}
+                self.assertTrue(self.problems(files))
+
+    def test_missing_duplicate_untracked_and_nonflat_declarations_fail(self):
+        # A name alone is not enough: a suite must be present and have one real sibling declaration.
+        cases = [
+            {"foo.rs": "", "foo_tests.rs": ""},
+            {"foo.rs": '#[cfg(test)] #[path = "foo_tests.rs"] mod one;\n'
+                       '#[cfg(test)] #[path = "foo_tests.rs"] mod two;', "foo_tests.rs": ""},
+            {"foo.rs": '#[cfg(test)] #[path = "foo_tests.rs"] mod cases;'},
+            {"foo.rs": '#[cfg(test)] mod foo_tests;', "foo_tests.rs": ""},
+            {"foo.rs": '#[cfg(test)] #[path = "sub/foo_tests.rs"] mod cases;', "sub/foo_tests.rs": ""},
+            {"foo.rs": '#[cfg(test)] #[path = "../foo_tests.rs"] mod cases;', "foo_tests.rs": ""},
+        ]
+        for files in cases:
+            with self.subTest(files=files):
+                self.assertTrue(self.problems(files))
+
+    def test_comments_strings_macros_and_unrelated_attributes_cannot_declare_tests(self):
+        # Fake declarations must not turn a missing suite owner into a green scan.
+        declaration = '#[cfg(test)] #[path = "foo_tests.rs"] mod cases;'
+        for source in [
+            "// " + declaration,
+            "/* " + declaration + " */",
+            'const TEXT: &str = r#"' + declaration + '"#;',
+            "opaque! { " + declaration + " }",
+            "macro_rules! example { () => { " + declaration + " }; }",
+            '#[cfg(test)] #[path = "foo_tests.rs"] fn unrelated() {} mod cases;',
+            '#[cfg(test)] mod nested { #[path = "foo_tests.rs"] mod cases; }',
+        ]:
+            with self.subTest(source=source):
+                self.assertTrue(self.problems({"foo.rs": source, "foo_tests.rs": ""}))
+
+    def test_cfg_requires_tests_in_every_alternative(self):
+        # cfg(any(test, windows)) admits production Windows builds, unlike all(test, windows).
+        for expression, valid in [("test", True), ("all(test, windows)", True),
+                                  ("any(all(test, windows), all(test, unix))", True),
+                                  ("any(test, windows)", False), ("not(test)", False),
+                                  ("windows", False), ('feature = "test"', False)]:
+            source = f'#[cfg({expression})] #[path = "foo_tests.rs"] mod cases;'
+            with self.subTest(expression=expression):
+                self.assertEqual(not self.problems({"foo.rs": source, "foo_tests.rs": ""}), valid)
+        self.assertTrue(self.problems({"foo.rs": '#[path = "foo_tests.rs"] mod cases;', "foo_tests.rs": ""}))
+
+    def test_generated_owners_resolve_and_native_roots_stay_excluded(self):
+        # Generated lib.rs still owns authored tests; upstream test layouts are outside this first-party policy.
+        from rust_test_ownership import inspect_test_ownership
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {"src/lib.rs": '#[cfg(test)] #[path = "lib_tests.rs"] mod suite;',
+                     "src/lib_tests.rs": "", "native/upstream/orphan_tests.rs": ""}
+            for name, source in files.items():
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(source, encoding="utf-8")
+            self.assertEqual(inspect_test_ownership(root, list(files), ("native/upstream/",)), [])
+            self.assertTrue(inspect_test_ownership(root, [*files, "missing.rs"], ("native/upstream/",)))
+
+    def test_ownership_violation_fails_the_source_size_cli(self):
+        # The naming check is part of the enforced CLI, not an unused helper with green unit tests.
+        import contextlib
+        import io
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            (root / "scripts/native-dependencies.json").write_text(json.dumps({"libraries": []}), encoding="utf-8")
+            (root / "foo_tests.rs").write_text("// orphan\n", encoding="utf-8")
+            with mock.patch.object(source_size, "native_roots", return_value=()), \
+                    mock.patch.object(source_size, "tracked_paths", return_value=["foo_tests.rs"]), \
+                    mock.patch.object(source_size, "EXACT_EXCEPTIONS", {}), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(source_size.main(["--root", str(root)]), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

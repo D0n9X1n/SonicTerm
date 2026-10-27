@@ -680,6 +680,10 @@ documented tolerance or per-platform tables.
 
 ## Source size and tooling modules
 
+`source-size` also enforces owner-named Rust test files and their test-gated `#[path]` declarations.
+The full naming and overflow rule is in [Repository and Toolchain](Repository-and-Toolchain).
+
+
 `source-size` runs `python3 scripts/check-source-size.py`: its contract tests run first,
 then it reads working-tree bytes for paths from `git ls-files -z`. A source may have at most
 1,000 physical lines; LF boundaries and a final unterminated line count, including comments,

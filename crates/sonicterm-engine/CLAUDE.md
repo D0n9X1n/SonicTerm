@@ -13,7 +13,7 @@ Terminal parsing and grid state live in `sonicterm-vt` and
   bold/italic faces until the shared configuration's `face_epoch` moves; clones and
   `with_font_size` views keep their own memo against that one epoch.
 - `fontstack_weight.rs` - checked monochrome weight coverage transforms, privately re-used by the stack.
-- `fontstack_frame_fixture_tests.rs` - test-only gated fallback fixtures and frame-shaping tests.
+- `fontstack_tests_frame_fixture_tests.rs` - test-only gated fallback fixtures and frame-shaping tests.
 - `lib.rs` - public re-exports.
 
 ## Local gate
