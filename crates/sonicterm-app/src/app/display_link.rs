@@ -519,3 +519,7 @@ impl DisplayLinkSource for FakeLink {
 #[cfg(test)]
 #[path = "display_link_tests.rs"]
 mod display_link_tests;
+
+#[cfg(test)]
+#[path = "display_link_source.rs"]
+mod source;

@@ -1,4 +1,9 @@
-"""Rust comment cli."""
+"""Enforce comments on authored Rust API and non-obvious runtime contracts.
+
+The checker deliberately uses a small Rust-aware lexer instead of text grep.
+It must distinguish source syntax from comments, attributes, macro token trees,
+and shader/source strings before it can make useful claims about documentation.
+"""
 
 from __future__ import annotations
 import argparse
