@@ -420,3 +420,6 @@ Dependabot's `github-actions` ecosystem is deliberately unfiltered, unlike the
 absorbing upstream fixes, so a pin Dependabot may not advance is a pin that
 rots and never receives the security patch it is holding back. Dependabot
 rewrites both the SHA and its trailing version comment.
+
+The required `tooling` job also runs `source-size`, enforcing the tracked first-party
+1,000-line ceiling after its contract tests. See [Local Gate](Local-Gate) for exact scope and exclusions.

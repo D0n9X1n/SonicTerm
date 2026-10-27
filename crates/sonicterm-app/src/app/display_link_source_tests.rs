@@ -97,4 +97,3 @@ fn the_assignment_scan_tells_a_write_from_a_comparison() {
     assert!(!assigns("if self.redraw.pacing == Some(mode) {", "pacing"));
     assert!(!assigns("self.link_pacing = None;", "pacing"));
 }
-

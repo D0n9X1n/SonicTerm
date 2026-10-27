@@ -524,12 +524,12 @@ pub(super) fn run_fixture_case(case: &FixtureCase) -> (serde_json::Value, Vec<St
 /// The message marker `parse_memory_line` looks for, read from the comparison script itself, so a
 /// rename on either side changes what the fixture test compares.
 pub(super) fn memory_marker() -> String {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/perf-compare.py");
-    let source = std::fs::read_to_string(&script).expect("perf-compare.py").replace("\r\n", "\n");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/perf_memory.py");
+    let source = std::fs::read_to_string(&script).expect("perf_memory.py").replace("\r\n", "\n");
     let line = source
         .lines()
         .find(|line| line.starts_with("MEMORY_MARKER = \""))
-        .expect("perf-compare.py defines MEMORY_MARKER");
+        .expect("perf_memory.py defines MEMORY_MARKER");
     line.trim_start_matches("MEMORY_MARKER = \"").trim_end_matches('"').to_owned()
 }
 

@@ -472,3 +472,22 @@ bless 运行会重写该表、以十六进制打印每个变化的栅格，并�
 它还固定实心块不透明度、阴影级别、线条居中与粗细、框线连接、盲文点位置以及 Powerline
 覆盖面积。如果不同 host 在抗锯齿 texel 上不一致，请报告逐 texel
 差异；由维护者选择有文档记录的容差或按平台分开的表。
+
+## 源文件大小与工具模块
+
+`source-size` 运行 `python3 scripts/check-source-size.py`：先运行契约测试，
+再读取 `git ls-files -z` 所列路径在工作树中的字节。每个源文件最多 1,000 个物理行；
+LF 边界及末尾没有换行的行均计数，包括注释、空行和内嵌源码。CRLF 只计一次。
+无法读取的源码及已失效的排除项都会失败。检查扩展名为 `.rs`、`.py`、`.sh`、`.ps1`、
+`.c`、`.h`、`.cc`、`.cpp`、`.hpp`、`.m`、`.mm` 和 `.wgsl`。
+FreeType、libpng、zlib、HarfBuzz 和 winit 的精确上游目录来自
+`scripts/native-dependencies.json`。生成文件例外仅为 FreeType 的 `src/lib.rs`、
+`src/types.rs` 及 HarfBuzz 的 `src/lib.rs`；Fontconfig 的 `src/lib.rs` 是独立的
+手写原始 ABI 声明例外。保留上游署名的 `customglyph` 代码和测试夹具仍在检查范围内。
+
+CLI 仍为 `scripts/local-gate.py`；`gate_catalog.py` 拥有 `STEPS`，
+`gate_model.py` 拥有唯一的 `Step` 类型，`local_gate.py` 是规范导入入口。
+进程托管、准备、工作流解析和报告位于扁平的 `gate_*` 同级模块。
+性能对比、覆盖率及 Rust 注释检查 CLI 同样保留原名，实现分别位于 `perf_*`、
+`coverage_*` 和 `rust_comment_*` 模块。既有 `*_tests.py` 入口命令
+只导入每个原有测试类一次；按类名选择 unittest 测试的方式不变。

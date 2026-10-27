@@ -444,7 +444,6 @@ pub(crate) fn program_session_json(role: usize, program_pid: u32) -> String {
     serde_json::json!({ "role": role, "program_pid": program_pid, "tty": "none" }).to_string()
 }
 
-
 /// The three row-run workloads' screens: a fixed bold title on row 1, 68 patterned body rows
 /// (rows 2-69) and a fixed normal footer on row 70, redrawn whole by every update.
 ///
@@ -560,10 +559,10 @@ mod native;
 use fixtures::*;
 pub(crate) use fixtures::{fixtures, FixtureBody, FixtureFile, SeededRng};
 #[cfg(windows)]
-pub(crate) use native::{connect_go, run_program};
+pub(crate) use native::run_steps;
 #[cfg(any(windows, test))]
 pub(crate) use native::ProgramHost;
 #[cfg(windows)]
-pub(crate) use native::run_steps;
+pub(crate) use native::{connect_go, run_program};
 
 use fixtures::fixture_file_name;

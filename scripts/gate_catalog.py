@@ -36,6 +36,9 @@ STEPS = (
          ("cargo", "test", "-p", "sonicterm-app", "--lib", "pty_close_baseline", "--", "--ignored", "--nocapture"),
          gate_model.HOSTS, 1200, "local", ("rust", "native"), ("macos-core", _WINDOWS_RUNTIME, "linux-core"),
          windows_preparations=(gate_model.Preparation(),)),
+    # Physical source size is platform independent; contract tests run before the tracked-tree scan.
+    gate_model.Step("source-size", ("python3", "scripts/check-source-size.py"), gate_model.HOSTS, 120,
+         "local", ("python",), ("tooling",)),
     gate_model.Step("fmt", ("cargo", "fmt", "--all", "--check"), gate_model.HOSTS, 300, "local",
          ("rust",), _CORE_CHECKS),
     gate_model.Step("clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"),

@@ -59,6 +59,7 @@ PRE_EXISTING_LIMIT = 40
 
 # Each prerequisite key maps to its (English, Chinese) legend text.
 PREREQUISITES = {
+    "python": ("Python 3 on `PATH`.", "`PATH` 中的 Python 3。"),
     "actionlint": ("`actionlint` at the version `scripts/pinned-tools.json` pins.",
                    "`scripts/pinned-tools.json` 固定版本的 `actionlint`。"),
     "rust": (

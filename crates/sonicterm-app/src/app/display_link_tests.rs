@@ -871,4 +871,3 @@ fn an_early_wake_keeps_a_held_window_off_the_link() {
         assert_eq!(link_counts(&app, owner).0, 0, "child={child_owner}: no tick counted");
     }
 }
-

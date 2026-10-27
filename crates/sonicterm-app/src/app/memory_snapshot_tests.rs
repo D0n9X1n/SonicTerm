@@ -907,10 +907,10 @@ pub(super) fn the_renderer_entry_names_its_trim_fields_apart_from_the_checkpoint
     summary.trimmed = true;
     summary.gpu_released_requested_bytes = 8_388_608;
     assert_eq!(summary.render(), TRIMMED_RENDERER_ENTRY);
-    let python_tests = include_str!("../../../../scripts/perf-compare_tests.py");
+    let python_tests = include_str!("../../../../scripts/perf_trim_tests.py");
     assert!(
         python_tests.contains(TRIMMED_RENDERER_ENTRY),
-        "perf-compare_tests.py builds its renderer entries from this exact text"
+        "perf_trim_tests.py builds its renderer entries from this exact text"
     );
 }
 

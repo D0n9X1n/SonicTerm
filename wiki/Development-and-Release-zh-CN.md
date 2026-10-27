@@ -27,6 +27,7 @@ python3 scripts/local-gate.py
 | 步骤 | 命令 | 本地主机 | 类别 | 前置条件 | CI job |
 | --- | --- | --- | --- | --- | --- |
 | `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-runtime`、`linux-core` |
+| `source-size` | `python3 scripts/check-source-size.py` | macOS、Windows、Linux | `local` | `python` | `tooling` |
 | `fmt` | `cargo fmt --all --check` | macOS、Windows、Linux | `local` | `rust` | `macos-core`、`windows-checks`、`linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
@@ -85,6 +86,7 @@ python3 scripts/local-gate.py
 
 前置条件：
 
+- `python`：`PATH` 中的 Python 3。
 - `actionlint`：`scripts/pinned-tools.json` 固定版本的 `actionlint`。
 - `rust`：`rust-toolchain.toml` 指定的 Rust 工具链，包含 rustfmt 与 clippy。
 - `native`：平台原生构建库：macOS 上的 Cairo 与 pkg-config（`brew install cairo pkg-config`），Windows 上由 `scripts/setup-windows-cairo.ps1` 安装的 Cairo，以及 Linux 上 `linux-core` job 安装的软件包。
@@ -174,7 +176,7 @@ start ≤ end ≤ `taken_at_ns`；提取时间必须已知且递增；被延续�
 `guard-correlation-join.json`。
 
 harness 还会调用较旧的树所没有的 App 与渲染器方法。每个这样的调用都位于一个 harness API cfg 之后，即
-`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项。共有七项：`perf_atlas_retry_api`，对应 S1/atlas-retry
+`scripts/gate_harness.py` 中 `HARNESS_API_CFGS` 的一项。共有七项：`perf_atlas_retry_api`，对应 S1/atlas-retry
 驱动所需的四个方法；`perf_s10_attribution_api`，对应 App 的两个 S10 归属监视方法（`arm_s10_attribution` 与
 `disarm_s10_attribution`）；`perf_completeness_api`，对应渲染器的 `completeness_checkpoint`，S9 与 S12 的 `end` 检查点读取它；`perf_dispatch_timeline_api`，对应 App 的逐样本调度时间线方法（`arm_dispatch_timeline_v1` 与 `take_dispatch_timeline_v1`）；`perf_echo_timeline_api`，对应 App 的一次性 `take_echo_timeline_v1`，harness 只在同时以 `perf-echo-trace` 构建时才调用它；`perf_guard_spans_api`，对应 App 的原始守卫关联提取（`take_guard_correlation_v1`）、其记录类型与共享的 `clock_epoch`；以及 `perf_taskbar_progress_api`，对应 App 的计数进度显示位置（`__install_counting_taskbar_progress` 与 `__take_taskbar_progress_deliveries`），S12/status-line 的 `program` 阶段安装并读取它。调度时间线在前置 PR 中的实现不记录任何内容。S2 在每次输入注入时、读取注入时刻之前装备时间线，并在样本的每一种关闭路径上取回。`result.json` 中每个 S2 样本以 `dispatch_timeline` 记录其时间线的结果：没有该 cfg 时为 `unavailable`，存根返回 `gate-off` 或 `not-recorded`。harness 的记录缓冲区只为已装备的样本分配，并在样本之间复用。关卡在两个由该表生成的步骤 `perf-scenarios-harness-api-clippy` 与
 `perf-scenarios-harness-api-tests` 中，一次开启**全部**项来检查与测试 harness；

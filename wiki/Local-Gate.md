@@ -677,3 +677,22 @@ full-block opacity, shade levels, line centering and thickness, box joins,
 Braille dot positions, and Powerline coverage. If hosts disagree on
 anti-aliased texels, report the per-texel deltas; the maintainer chooses a
 documented tolerance or per-platform tables.
+
+## Source size and tooling modules
+
+`source-size` runs `python3 scripts/check-source-size.py`: its contract tests run first,
+then it reads working-tree bytes for paths from `git ls-files -z`. A source may have at most
+1,000 physical lines; LF boundaries and a final unterminated line count, including comments,
+blank lines and embedded source. CRLF counts once. Unreadable sources and stale exclusions fail.
+The checked extensions are `.rs`, `.py`, `.sh`, `.ps1`, `.c`, `.h`, `.cc`, `.cpp`, `.hpp`,
+`.m`, `.mm` and `.wgsl`. The exact FreeType, libpng, zlib, HarfBuzz and winit roots come from
+`scripts/native-dependencies.json`. Exact generated exceptions are FreeType `src/lib.rs`
+and `src/types.rs`, and HarfBuzz `src/lib.rs`; Fontconfig `src/lib.rs` is a separate
+hand-written raw-ABI exception. Attributed `customglyph` code and test fixtures remain in scope.
+
+The CLI remains `scripts/local-gate.py`; `gate_catalog.py` owns `STEPS`, `gate_model.py`
+owns the single `Step` type, and `local_gate.py` is the canonical import surface. Process custody,
+preparation, workflow parsing and reporting live in flat `gate_*` siblings. The performance,
+coverage and Rust-comment CLIs likewise retain their original names, with `perf_*`, `coverage_*`
+and `rust_comment_*` implementation modules. Existing `*_tests.py` entry commands
+import each original test class once; named unittest class selectors remain available.
