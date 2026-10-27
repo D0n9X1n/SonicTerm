@@ -183,6 +183,60 @@ class RustTestOwnershipTests(unittest.TestCase):
             with self.subTest(files=files):
                 self.assertTrue(self.problems(files))
 
+    def test_implicit_generic_test_file_is_rejected(self):
+        # A cfg(test) declaration must not bypass owner naming by relying on Rust's default filename.
+        files = {"lib.rs": "#[cfg(test)] mod tests;", "tests.rs": ""}
+        self.assertTrue(self.problems(files))
+
+    def test_explicit_generic_test_file_is_rejected(self):
+        # An explicit path to generic tests.rs is still not an owner-named sibling suite.
+        files = {"foo.rs": '#[cfg(test)] #[path = "tests.rs"] mod cases;', "tests.rs": ""}
+        self.assertTrue(self.problems(files))
+
+    def test_explicit_singular_test_file_is_rejected(self):
+        # A singular suffix cannot escape the owner-named plural suite convention.
+        files = {"foo.rs": '#[cfg(test)] #[path = "foo_test.rs"] mod cases;', "foo_test.rs": ""}
+        self.assertTrue(self.problems(files))
+
+    def test_test_gated_suites_cannot_hide_behind_arbitrary_names(self):
+        # Resolve both Rust default layouts and explicit paths, including platform gates and CRLF.
+        for declaration, target in [
+            ('#[cfg(test)] mod cases;', 'cases.rs'),
+            ('#[cfg(test)] mod cases;', 'cases/mod.rs'),
+            ('#[cfg(all(test, windows))] #[path = "cases.rs"] mod cases;', 'cases.rs'),
+        ]:
+            for newline in ["\n", "\r\n"]:
+                files = {"lib.rs": declaration + newline,
+                         target: "#[test]" + newline + "fn contract() {}" + newline}
+                with self.subTest(declaration=declaration, target=target, newline=newline):
+                    self.assertTrue(self.problems(files))
+        files = {"foo.rs": "#[cfg(test)] mod cases;",
+                 "foo/cases.rs": "#[test] fn contract() {}"}
+        self.assertTrue(self.problems(files))
+
+    def test_helper_imports_are_not_mistaken_for_test_suites(self):
+        # Build-code test imports and source-scanner fixtures have no test functions of their own.
+        for fixture in [
+            "pub fn helper() {}",
+            "// #[test] fn hidden() {}",
+            'const TEXT: &str = "#[test] fn hidden() {}";',
+            'const TEXT: &str = r#"#[test] fn hidden() {}"#;',
+            "macro_rules! example { () => { #[test] fn hidden() {} }; }",
+            "opaque! { #[test] fn hidden() {} }",
+        ]:
+            files = {"lib.rs": '#[cfg(test)] #[path = "helper.rs"] mod helper;', "helper.rs": fixture}
+            with self.subTest(fixture=fixture):
+                self.assertEqual(self.problems(files), [])
+        files = {"src/lib.rs": '#[cfg(test)] #[path = "../build_config.rs"] mod build_config;',
+                 "build_config.rs": "pub fn configure() {}"}
+        self.assertEqual(self.problems(files), [])
+
+    def test_invalid_suite_names_fail_without_owning_declarations(self):
+        # Renaming an orphan to a generic or singular test filename must not remove it from the inventory.
+        for name in ["tests.rs", "test.rs", "foo_test.rs"]:
+            with self.subTest(name=name):
+                self.assertTrue(self.problems({"foo.rs": "", name: ""}))
+
     def test_comments_strings_macros_and_unrelated_attributes_cannot_declare_tests(self):
         # Fake declarations must not turn a missing suite owner into a green scan.
         declaration = '#[cfg(test)] #[path = "foo_tests.rs"] mod cases;'
@@ -232,12 +286,21 @@ class RustTestOwnershipTests(unittest.TestCase):
             root = Path(directory)
             (root / "scripts").mkdir()
             (root / "scripts/native-dependencies.json").write_text(json.dumps({"libraries": []}), encoding="utf-8")
-            (root / "foo_tests.rs").write_text("// orphan\n", encoding="utf-8")
-            with mock.patch.object(source_size, "native_roots", return_value=()), \
-                    mock.patch.object(source_size, "tracked_paths", return_value=["foo_tests.rs"]), \
-                    mock.patch.object(source_size, "EXACT_EXCEPTIONS", {}), \
-                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(source_size.main(["--root", str(root)]), 1)
+            cases = [
+                {"foo_tests.rs": "// orphan\n"},
+                {"lib.rs": "#[cfg(test)] mod tests;", "tests.rs": ""},
+                {"foo.rs": '#[cfg(test)] #[path = "tests.rs"] mod cases;', "tests.rs": ""},
+                {"foo.rs": '#[cfg(test)] #[path = "foo_test.rs"] mod cases;', "foo_test.rs": ""},
+            ]
+            for files in cases:
+                for name, source in files.items():
+                    (root / name).write_text(source, encoding="utf-8")
+                with self.subTest(files=files), \
+                        mock.patch.object(source_size, "native_roots", return_value=()), \
+                        mock.patch.object(source_size, "tracked_paths", return_value=list(files)), \
+                        mock.patch.object(source_size, "EXACT_EXCEPTIONS", {}), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(source_size.main(["--root", str(root)]), 1)
 
 
 if __name__ == "__main__":

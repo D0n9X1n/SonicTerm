@@ -38,7 +38,11 @@ cargo run -p sonicterm-linux     # Linux；可执行文件名为 sonicterm
 `tests/` 仍只用于 public API 或跨 crate 集成测试。
 
 `source-size` gate 根据实际受测试条件约束的 `#[path]` 声明验证名称，
-不把注释、字符串或宏中的文本当作声明。它读取全部受跟踪的第一方 Rust，
+不把注释、字符串或宏中的文本当作声明。通用 `test.rs`/`tests.rs` 与单数后缀
+`*_test.rs` 文件即使没有声明所有者也会失败。它还按显式路径或 Rust 默认路径解析受测试条件约束的外部模块，
+因此任意文件名也无法隐藏含有 `#[test]` 或 `#[bench]` 的文件。
+纯辅助模块及为测试而导入的构建代码，如果自身没有这些属性，则保留实现文件名。
+它读取全部受跟踪的第一方 Rust，
 包括声明自行编写测试的生成 crate root，但排除原生上游源码树。
 `sonicterm-ui` 和 `sonicterm-render-model` 的 crate-root 套件还要求每个直接源模块
 具有准确的主测试同级声明，或一条非空的显式豁免。该同级文件必须存在且包含 `#[test]`；

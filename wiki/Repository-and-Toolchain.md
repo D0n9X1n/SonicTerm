@@ -41,7 +41,12 @@ sibling source stem. Inline unit-test modules, generic `tests.rs`, and nested te
 are not used. `tests/` remains reserved for public-API or cross-crate integration.
 
 The `source-size` gate validates these names against actual test-gated `#[path]` declarations,
-not text inside comments, strings or macros. It reads all tracked first-party Rust, including
+not text inside comments, strings or macros. Generic `test.rs`/`tests.rs` and singular
+`*_test.rs` files fail even when orphaned. It also resolves test-gated external modules by
+explicit or default Rust paths, so an arbitrary filename cannot hide a file containing
+`#[test]` or `#[bench]`. Helper-only modules and build code imported for testing, with no
+such attributes of their own, keep their implementation filenames.
+It reads all tracked first-party Rust, including
 generated crate roots that declare authored tests, but excludes native upstream trees.
 The `sonicterm-ui` and `sonicterm-render-model` crate-root suites also require each direct
 source module to have an exact primary sibling declaration or a non-empty explicit exemption.

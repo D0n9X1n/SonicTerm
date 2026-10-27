@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 
 from rust_comment_lexer import _delimiter_pairs, lex_rust
@@ -106,9 +107,39 @@ def declared_modules(source: str) -> list[TestModule]:
     return modules
 
 
+def _test_filename(name: str) -> bool:
+    """Recognize suite names even when they violate the required owner/plural spelling."""
+    return name in ("tests.rs", "test.rs") or name.endswith(("_tests.rs", "_test.rs"))
+
+
+def _module_targets(owner: PurePosixPath, module: TestModule) -> list[str]:
+    """Resolve explicit and default external paths without consulting the host's active cfgs."""
+    if module.path is not None:
+        return [posixpath.normpath((owner.parent / module.path).as_posix())]
+    directory = owner.parent if owner.name in ("lib.rs", "main.rs", "mod.rs") else owner.parent / owner.stem
+    return [(directory / (module.name + ".rs")).as_posix(), (directory / module.name / "mod.rs").as_posix()]
+
+
+def _contains_test_attribute(source: str) -> bool:
+    """Find real test/bench attributes, not source-scanner fixtures inside comments or literals."""
+    tokens = lex_rust(source.replace("\r\n", "\n")).tokens
+    pairs = _delimiter_pairs(tokens)
+    index = 0
+    while index < len(tokens):
+        words = [token.text for token in tokens[index:index + 4]]
+        # The lexer removes macro invocations; definitions have a name between ! and their body.
+        if words[:2] == ["macro_rules", "!"] and len(words) == 4 and words[3] == "{" and index + 3 in pairs:
+            index = pairs[index + 3] + 1
+            continue
+        if words in (["#", "[", "test", "]"], ["#", "[", "bench", "]"]):
+            return True
+        index += 1
+    return False
+
+
 def ownership_problems(sources: dict[str, str]) -> list[str]:
     """Require every tracked test file to have one sibling declaration from its named owner."""
-    test_paths = {path for path in sources if path.endswith("_tests.rs")}
+    test_paths = {path for path in sources if _test_filename(PurePosixPath(path).name)}
     declarations = {path: [] for path in test_paths}
     problems = []
     for owner, source in sorted(sources.items()):
@@ -119,13 +150,23 @@ def ownership_problems(sources: dict[str, str]) -> list[str]:
             problems.append(f"{owner}: cannot inspect module declarations: {error}")
             continue
         for module in modules:
-            if module.path is None:
-                if module.name.endswith("_tests"):
-                    problems.append(f"{owner}:{module.line}: test module {module.name} requires an explicit #[path]")
-                continue
-            if not module.path.endswith("_tests.rs"):
+            targets = _module_targets(owner_path, module)
+            named_suite = (_test_filename(module.name + ".rs") or
+                           any(_test_filename(PurePosixPath(target).name) for target in targets))
+            # Test-gated build helpers and source scanners are not suites. Inspect their code so an
+            # arbitrarily named file with real tests cannot use that distinction to escape naming.
+            loaded_suite = module.test_only and any(
+                target in sources and _contains_test_attribute(sources[target]) for target in targets)
+            if not named_suite and not loaded_suite:
                 continue
             prefix = f"{owner}:{module.line}"
+            if module.path is None:
+                problems.append(f"{prefix}: test module {module.name} requires an explicit #[path]")
+                continue
+            if not module.path.endswith("_tests.rs"):
+                problems.append(f"{prefix}: test file {module.path} must be {owner_path.stem}_tests.rs "
+                                f"or {owner_path.stem}_<topic>_tests.rs")
+                continue
             if "/" in module.path or "\\" in module.path or PurePosixPath(module.path).name != module.path:
                 problems.append(f"{prefix}: test path must name a flat sibling: {module.path}")
                 continue
