@@ -2,6 +2,13 @@
 
 use super::super::scenarios_tests::*;
 use super::*;
+use crate::scenarios::{
+    accessibility_phase_presents, plan, program_phase_progress, status_line_posix_progress,
+    status_line_progress, CommitText, Delivered, Endpoint, ACCESSIBILITY_PRESENT_SLACK,
+    PRESENTS_PER_STEP, SEL_CELLS_PER_COUNT, STARTUP_ENDPOINT, STARTUP_KIND,
+    STATUS_LINE_INTERVAL_MS,
+};
+use crate::scenarios::{ProgramDeltas, StatusLineDeltas};
 
 /// A status line variant requests the same grid as its default variant, and that grid plus the
 /// strip fits below the macOS runner's 43-row screen clamp, so the ref without the strip and the

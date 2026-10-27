@@ -1,6 +1,15 @@
 //! Deterministic host-specific scenario plans and their phase endpoints.
 
-use super::*;
+#[cfg(test)]
+use super::SCENARIOS;
+#[cfg(any(target_os = "macos", windows, test))]
+use super::{
+    driven, entered, find, timed, Act, Driver, Fixture, FreshAfter, Host, PhaseEnd, PhaseKind,
+    PhaseSpec, Plan, Presentation, SetupAction, Step, Workload, GLYPHS_POSIX_STEPS,
+    GLYPHS_WINDOWS_STEPS, HELD_POSIX_STEPS, HELD_WINDOWS_STEPS, PROGRAM_POSIX_STEPS,
+    PROGRAM_SETTLE_MS, PROGRAM_WINDOWS_STEPS, REST_PATH_ROW, REST_TAIL_ROW, SETTLE_MS,
+    STRIP_SAFE_ROWS, TRIM_EXPERIMENT,
+};
 
 /// The plan for `id` and `variant` on `host`, or `None` when the catalog does not list them.
 #[cfg(any(target_os = "macos", windows, test))]

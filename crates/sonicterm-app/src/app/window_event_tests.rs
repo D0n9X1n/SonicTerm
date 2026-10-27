@@ -1,6 +1,8 @@
+#[cfg(windows)]
+use super::pointer::pointer_report_bytes;
 pub(super) use super::{is_quit_chord, PointerCell};
 #[cfg(windows)]
-use super::{pointer_report_bytes, wheel_report_bytes, PointerReportKind};
+use super::{wheel_report_bytes, PointerReportKind};
 #[cfg(windows)]
 use crate::app::PointerGestureOwner;
 pub(super) use crate::app::{child_window::child_no_button_motion_report, hovered_url::HoveredUrl};

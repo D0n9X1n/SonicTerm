@@ -980,12 +980,12 @@ pub(crate) use result::{
 #[path = "record_slow_dispatch.rs"]
 mod slow_dispatch;
 
-#[cfg(test)]
+#[cfg(any(windows, test))]
 pub(crate) use grid::foreground_lock_note;
 
 #[cfg(all(test, any(target_os = "macos", windows)))]
 pub(crate) use result::checkpoint_memory_support;
-#[cfg(test)]
+#[cfg(any(windows, test))]
 pub(crate) use result::filetime_seconds;
 
 use slow_dispatch::ByDuration;

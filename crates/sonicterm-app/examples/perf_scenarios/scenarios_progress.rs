@@ -1,6 +1,10 @@
 //! Scenario progress requirements for status, program and parked input.
 
-use super::*;
+#[cfg(any(target_os = "macos", windows, test))]
+use super::{
+    Delivered, ParkEvidence, ProgramDeltas, StatusLineDeltas, ACCESSIBILITY_PRESENT_SLACK,
+    DELIVERY_INTERVAL_MIN_MS, PRESENTS_PER_STEP, SEL_CELLS_PER_COUNT, STATUS_LINE_INTERVAL_MS,
+};
 
 /// Whether a `status-line` phase kept the strip's idle contract, or why not.
 ///

@@ -397,5 +397,6 @@ const RECOVERY_RENDERER_SOURCES: [&str; 5] = [
     include_str!("atlas_lifecycle.rs"),
 ];
 
-#[path = "device_error_source_scan.rs"]
+#[cfg(test)]
+#[path = "device_error_source_scan_support_tests.rs"]
 mod device_error_source_scan;

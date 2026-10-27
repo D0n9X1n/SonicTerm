@@ -40,3 +40,18 @@ fn pressure_outcomes_preserve_caller_owned_values() {
             if value == "payload" && id == owner
     ));
 }
+
+/// Every admission reason keeps its exact diagnostic code, independently of downstream callers.
+#[test]
+fn admission_rejection_codes_match_their_stable_diagnostics() {
+    for (reason, expected) in [
+        (AdmissionRejection::ItemTooLarge, "item_too_large"),
+        (AdmissionRejection::PerOwnerBudget, "per_owner_budget"),
+        (AdmissionRejection::ProcessBudget, "process_budget"),
+        (AdmissionRejection::ItemCountLimit, "item_count_limit"),
+        (AdmissionRejection::Cancelled, "cancelled"),
+    ] {
+        // Keep the mapping observable in this crate instead of relying on optimized cross-crate constant calls.
+        assert_eq!(std::hint::black_box(reason).code(), expected);
+    }
+}

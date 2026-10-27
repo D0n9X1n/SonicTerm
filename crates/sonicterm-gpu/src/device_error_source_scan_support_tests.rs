@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Test-only renderer device-gate reachability and source inventory parsing.
 
 use super::*;

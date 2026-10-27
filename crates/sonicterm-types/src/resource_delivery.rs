@@ -1,3 +1,5 @@
+//! Delivery receipts, retry scheduling and typed admission outcomes shared across resource owners.
+
 use super::BudgetError;
 use std::time::Instant;
 

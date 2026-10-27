@@ -212,7 +212,8 @@ pub(super) fn item_body<'source>(source: &'source str, signature: &str) -> &'sou
 mod core_raster_fixture;
 pub(super) use core_raster_fixture::*;
 
-#[path = "core_parity_fixture.rs"]
+#[cfg(test)]
+#[path = "core_parity_fixture_tests.rs"]
 mod core_parity_fixture;
 pub(super) use core_parity_fixture::*;
 

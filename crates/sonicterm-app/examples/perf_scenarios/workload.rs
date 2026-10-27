@@ -558,10 +558,8 @@ mod native;
 #[cfg(test)]
 use fixtures::*;
 pub(crate) use fixtures::{fixtures, FixtureBody, FixtureFile, SeededRng};
-#[cfg(windows)]
-pub(crate) use native::run_steps;
-#[cfg(any(windows, test))]
-pub(crate) use native::ProgramHost;
+#[cfg(test)]
+use native::ProgramHost;
 #[cfg(windows)]
 pub(crate) use native::{connect_go, run_program};
 

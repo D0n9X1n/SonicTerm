@@ -401,7 +401,7 @@ results into cell metrics and atlas `RasterTile`s.
 
 `fontstack_weight.rs` privately owns checked monochrome coverage transforms. The stack
 retains native face ownership and the original public paths; gated frame-shaping fixtures
-live once in test-only `fontstack_frame_fixture.rs` with a flat test sibling.
+live once in test-only `fontstack_frame_fixture_tests.rs` alongside its frame-shaping contracts.
 
 ### `sonicterm-block-glyph`
 

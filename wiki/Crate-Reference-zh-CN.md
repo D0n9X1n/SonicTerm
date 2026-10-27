@@ -355,8 +355,8 @@ FreeType 名称、尺寸与库/流操作放在私有 `ftwrap_*` 同级文件中�
 **阅读：** `src/fontstack.rs`。
 
 `fontstack_weight.rs` 私有地管理带边界检查的单色覆盖率变换。字体栈保留原生字体所有权
-及原有公开路径；带闸门的帧塑形夹具仅在测试文件 `fontstack_frame_fixture.rs` 中保存一份，
-测试位于平铺的同级文件。
+及原有公开路径；带闸门的帧塑形夹具仅在测试文件 `fontstack_frame_fixture_tests.rs` 中保存一份，
+帧塑形契约测试也位于该文件。
 
 ### `sonicterm-block-glyph`
 

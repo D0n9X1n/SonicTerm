@@ -680,7 +680,6 @@ use cases::teardown_rename_tab;
 use cases::teardown_rename_window;
 #[path = "support/windows_field_clipboard_lifecycle.rs"]
 mod lifecycle;
-use lifecycle::assert_swallowed;
 use lifecycle::cancel_by_ime;
 use lifecycle::cancel_by_key;
 use lifecycle::cancel_by_resize;

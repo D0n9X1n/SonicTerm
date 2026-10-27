@@ -2,6 +2,12 @@
 
 use super::super::scenarios_tests::*;
 use super::*;
+use crate::scenarios::{
+    all_plans, all_plans_on, find, list_json, plan, plan_for, Act, Driver, Fixture, Host, PhaseEnd,
+    SetupAction, Step, Workload, BUILD_HOST, REST_PATH_ROW, REST_REGION_TOP, REST_TAIL_ROW,
+    SCENARIOS, SETTLE_MS,
+};
+use crate::scenarios::{FreshAfter, HoverDeltas};
 
 /// S6/rest prints its fixture, then rests the pointer on the path row while rows below it stream,
 /// then on a streaming row; each hold shortens to 5 s under `--short` except the 1 s warm-up.
