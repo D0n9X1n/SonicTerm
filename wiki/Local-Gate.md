@@ -687,8 +687,8 @@ blank lines and embedded source. CRLF counts once. Unreadable sources and stale 
 The checked extensions are `.rs`, `.py`, `.sh`, `.ps1`, `.c`, `.h`, `.cc`, `.cpp`, `.hpp`,
 `.m`, `.mm` and `.wgsl`. The exact FreeType, libpng, zlib, HarfBuzz and winit roots come from
 `scripts/native-dependencies.json`. Exact generated exceptions are FreeType `src/lib.rs`
-and `src/types.rs`, and HarfBuzz `src/lib.rs`; Fontconfig `src/lib.rs` is a separate
-hand-written raw-ABI exception. Attributed `customglyph` code and test fixtures remain in scope.
+and `src/types.rs`, and HarfBuzz `src/lib.rs`. Hand-written code, including Fontconfig's raw
+ABI declarations in `src/lib.rs`, is always measured. Attributed `customglyph` code and test fixtures remain in scope.
 
 The CLI remains `scripts/local-gate.py`; `gate_catalog.py` owns `STEPS`, `gate_model.py`
 owns the single `Step` type, and `local_gate.py` is the canonical import surface. Process custody,

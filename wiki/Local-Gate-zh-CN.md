@@ -482,8 +482,8 @@ LF 边界及末尾没有换行的行均计数，包括注释、空行和内嵌�
 `.c`、`.h`、`.cc`、`.cpp`、`.hpp`、`.m`、`.mm` 和 `.wgsl`。
 FreeType、libpng、zlib、HarfBuzz 和 winit 的精确上游目录来自
 `scripts/native-dependencies.json`。生成文件例外仅为 FreeType 的 `src/lib.rs`、
-`src/types.rs` 及 HarfBuzz 的 `src/lib.rs`；Fontconfig 的 `src/lib.rs` 是独立的
-手写原始 ABI 声明例外。保留上游署名的 `customglyph` 代码和测试夹具仍在检查范围内。
+`src/types.rs` 及 HarfBuzz 的 `src/lib.rs`。手写代码始终计入检查，
+包括 Fontconfig 在 `src/lib.rs` 中的原始 ABI 声明。保留上游署名的 `customglyph` 代码和测试夹具仍在检查范围内。
 
 CLI 仍为 `scripts/local-gate.py`；`gate_catalog.py` 拥有 `STEPS`，
 `gate_model.py` 拥有唯一的 `Step` 类型，`local_gate.py` 是规范导入入口。
