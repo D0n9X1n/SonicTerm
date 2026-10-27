@@ -453,7 +453,8 @@ a reproduction.
   File-scope test-gated inline modules containing such attributes also fail.
   A crate root (`lib.rs`, `main.rs`, a bin or example root) may not hold tests
   itself, inline or bare; only Cargo's integration-test and bench targets may
-  (`tests/`, `benches/`, or an explicit `[[test]]`/`[[bench]]` path). This is a
+  (`tests/`, `benches/`, or an explicit `[[test]]`/`[[bench]]` path), read from
+  each `Cargo.toml` including `autotests`/`autobenches`. This is a
   source scan, not Rust expansion: a file reached through
   `cfg_attr(test, path = …)`, `include!` or a declaration nested inside an
   inline module is caught only when nothing else declares it, and

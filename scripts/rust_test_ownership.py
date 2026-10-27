@@ -153,7 +153,10 @@ def _contains_test_attribute(source: str) -> bool:
 
 def ownership_problems(sources: dict[str, str], manifests: dict[str, str] | None = None) -> list[str]:
     """Require every tracked test file to have one sibling declaration from its named owner."""
-    test_paths = {path for path in sources if _test_filename(PurePosixPath(path).name)}
+    packages = _cargo_packages(manifests or {})
+    # Cargo test and bench targets are their own crates, never undeclared unit-test files.
+    test_paths = {path for path in sources if _test_filename(PurePosixPath(path).name)
+                  and not _is_test_target(path, packages)}
     declarations = {path: [] for path in test_paths}
     problems = []
     for owner, source in sorted(sources.items()):
@@ -218,41 +221,75 @@ def ownership_problems(sources: dict[str, str], manifests: dict[str, str] | None
     return problems
 
 
-def _test_target_roots(manifests: dict[str, str]) -> tuple[set[str], list[str]]:
-    """Explicit [[test]]/[[bench]] target files, and the package directories the manifests define."""
-    roots, packages = set(), []
+@dataclass
+class _Package:
+    """One Cargo package: its directory and the target files its manifest lists or disables."""
+    root: str
+    autotests: bool = True
+    autobenches: bool = True
+    test_targets: set[str] | None = None
+    other_targets: set[str] | None = None
+
+
+def _cargo_packages(manifests: dict[str, str]) -> list[_Package]:
+    """Model Cargo's target rules from each `Cargo.toml`: explicit targets and auto-discovery flags.
+
+    A `[[test]]`/`[[bench]]` without a path builds `tests/<name>.rs` or `benches/<name>.rs`.
+    `[[bin]]`/`[[example]]`/`[lib]` paths are ordinary crate roots even under `tests/` or `benches/`.
+    """
+    packages = []
     for manifest, text in manifests.items():
-        package = PurePosixPath(manifest).parent
         try:
             document = tomllib.loads(text)
         except tomllib.TOMLDecodeError:
             continue
-        if "package" in document:
-            packages.append(package.as_posix())
-        for section in ("test", "bench"):
-            for target in document.get(section, []):
+        section = document.get("package")
+        if not isinstance(section, dict):
+            continue
+        root = PurePosixPath(manifest).parent
+        package = _Package(root.as_posix(), section.get("autotests", True) is not False,
+                           section.get("autobenches", True) is not False, set(), set())
+        for kind, folder in (("test", "tests"), ("bench", "benches")):
+            for target in document.get(kind, []):
+                if not isinstance(target, dict):
+                    continue
+                if isinstance(target.get("path"), str):
+                    package.test_targets.add(posixpath.normpath((root / target["path"]).as_posix()))
+                elif isinstance(target.get("name"), str):
+                    package.test_targets.add((root / folder / (target["name"] + ".rs")).as_posix())
+                    package.test_targets.add((root / folder / target["name"] / "main.rs").as_posix())
+        for kind in ("bin", "example"):
+            for target in document.get(kind, []):
                 if isinstance(target, dict) and isinstance(target.get("path"), str):
-                    roots.add(posixpath.normpath((package / target["path"]).as_posix()))
-    return roots, packages
+                    package.other_targets.add(posixpath.normpath((root / target["path"]).as_posix()))
+        library = document.get("lib")
+        if isinstance(library, dict) and isinstance(library.get("path"), str):
+            package.other_targets.add(posixpath.normpath((root / library["path"]).as_posix()))
+        packages.append(package)
+    return packages
 
 
-def _is_test_target(path: str, explicit: set[str], packages: list[str]) -> bool:
-    """Whether Cargo builds `path` as an integration test or bench target of its own package.
-
-    Cargo auto-discovers `tests/*.rs`, `tests/*/main.rs`, `benches/*.rs` and `benches/*/main.rs`
-    directly under the package root; anything else counts only through an explicit target path.
-    """
-    if path in explicit:
-        return True
-    owners = [package for package in packages if path.startswith(package.rstrip("/") + "/") or package in ("", ".")]
+def _is_test_target(path: str, packages: list[_Package]) -> bool:
+    """Whether Cargo builds `path` as an integration-test or bench target of its own package."""
+    owners = [package for package in packages
+              if package.root in ("", ".") or path.startswith(package.root.rstrip("/") + "/")]
     if not owners:
         return False
-    package = max(owners, key=len)
-    relative = PurePosixPath(path).relative_to(package) if package not in ("", ".") else PurePosixPath(path)
-    parts = relative.parts
-    if len(parts) == 2 and parts[0] in ("tests", "benches") and parts[1].endswith(".rs"):
+    package = max(owners, key=lambda candidate: len(candidate.root))
+    if path in package.test_targets:
         return True
-    return len(parts) == 3 and parts[0] in ("tests", "benches") and parts[2] == "main.rs"
+    if path in package.other_targets:
+        # When: the manifest names this file as a bin, example or library root, Cargo never tests it as its own crate.
+        return False
+    relative = PurePosixPath(path) if package.root in ("", ".") else PurePosixPath(path).relative_to(package.root)
+    parts = relative.parts
+    folder = parts[0] if parts else ""
+    if folder == "tests" and not package.autotests or folder == "benches" and not package.autobenches:
+        # When: auto-discovery is off for this folder, only explicitly listed files are targets.
+        return False
+    if len(parts) == 2 and folder in ("tests", "benches") and parts[1].endswith(".rs"):
+        return True
+    return len(parts) == 3 and folder in ("tests", "benches") and parts[2] == "main.rs"
 
 
 def _crate_root_problems(sources: dict[str, str], manifests: dict[str, str]) -> list[str]:
@@ -270,10 +307,10 @@ def _crate_root_problems(sources: dict[str, str], manifests: dict[str, str]) -> 
             continue
         for module in modules:
             declared.update(_module_targets(PurePosixPath(owner), module))
-    explicit, packages = _test_target_roots(manifests)
+    packages = _cargo_packages(manifests)
     problems = []
     for path, source in sorted(sources.items()):
-        if path in declared or _is_test_target(path, explicit, packages):
+        if path in declared or _is_test_target(path, packages):
             continue
         if _contains_test_attribute(source):
             problems.append(f"{path}: crate root holds tests; move them to an owner-named sibling "

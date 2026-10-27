@@ -266,6 +266,33 @@ class RustTestOwnershipTests(unittest.TestCase):
             with self.subTest(root=root):
                 self.assertEqual(self.problems({root: "#[test] fn contract() {}"}, manifest), [])
 
+    def test_explicit_test_target_named_like_a_suite_is_not_an_orphan(self):
+        # A [[test]] target is its own crate; a `_tests.rs` name does not make it an undeclared unit suite.
+        manifest = {"crates/foo/Cargo.toml":
+                    '[package]\nname = "foo"\n[[test]]\nname = "probe"\npath = "probes/probe_tests.rs"\n'}
+        self.assertEqual(self.problems({"crates/foo/probes/probe_tests.rs": "#[test] fn contract() {}"}, manifest), [])
+
+    def test_default_test_target_path_follows_its_name(self):
+        # A [[test]] without a path builds tests/<name>.rs, so that file is a target even with autotests off.
+        manifest = {"crates/foo/Cargo.toml":
+                    '[package]\nname = "foo"\nautotests = false\n[[test]]\nname = "probe"\n'}
+        self.assertEqual(self.problems({"crates/foo/tests/probe.rs": "#[test] fn contract() {}"}, manifest), [])
+
+    def test_disabled_auto_discovery_does_not_exempt_tests_or_benches_files(self):
+        # With autotests/autobenches off, tests/ and benches/ files are targets only when listed as such;
+        # a bin or example placed there is an ordinary crate root and may not hold tests.
+        for manifest_text, root in [
+            ('[package]\nname = "foo"\nautotests = false\n[[bin]]\nname = "check"\npath = "tests/check.rs"\n',
+             "crates/foo/tests/check.rs"),
+            ('[package]\nname = "foo"\nautobenches = false\n[[bin]]\nname = "check"\npath = "benches/check.rs"\n',
+             "crates/foo/benches/check.rs"),
+            ('[package]\nname = "foo"\n[[bin]]\nname = "check"\npath = "tests/check.rs"\n',
+             "crates/foo/tests/check.rs"),
+        ]:
+            with self.subTest(manifest=manifest_text):
+                problems = self.problems({root: "#[test] fn contract() {}"}, {"crates/foo/Cargo.toml": manifest_text})
+                self.assertTrue(any("crate root holds tests" in item for item in problems), problems)
+
     def test_inline_helpers_and_literal_test_text_do_not_hide_following_suites(self):
         # Inspecting an inline body must ignore fake test attributes and resume at the next file-scope item.
         for body in [

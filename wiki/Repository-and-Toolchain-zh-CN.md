@@ -46,7 +46,8 @@ cargo run -p sonicterm-linux     # Linux；可执行文件名为 sonicterm
 纯辅助模块及为测试而导入的构建代码，如果自身没有这些属性，则保留实现文件名。
 
 crate 根文件（`lib.rs`、`main.rs`、bin 或示例根文件）本身不得包含测试，无论内联还是裸写；
-只有 Cargo 的集成测试和 bench 目标可以（`tests/`、`benches/`，或显式的 `[[test]]`/`[[bench]]` 路径）。
+只有 Cargo 的集成测试和 bench 目标可以（`tests/`、`benches/`，或显式的 `[[test]]`/`[[bench]]` 路径），
+依据各 `Cargo.toml` 读取，包括 `autotests`/`autobenches`。
 这是源码扫描而非 Rust 展开：通过 `cfg_attr(test, path = …)`、`include!` 或内联模块内嵌套声明
 引入的文件，只有在没有其他声明指向它时才会被拦住；`macro_rules!` 生成的测试不会被看到。
 这些形式需要人工审查；检查通过既不能证明其所有权，也不豁免命名规则。

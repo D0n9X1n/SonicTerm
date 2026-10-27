@@ -51,7 +51,8 @@ imported for testing, with no such attributes of their own, keep their implement
 
 A crate root (`lib.rs`, `main.rs`, a bin or example root) may not hold tests itself, inline or
 bare; only Cargo's integration-test and bench targets may (`tests/`, `benches/`, or an explicit
-`[[test]]`/`[[bench]]` path). This is a source scan, not Rust expansion: a file reached through
+`[[test]]`/`[[bench]]` path), read from each `Cargo.toml` including `autotests`/`autobenches`.
+This is a source scan, not Rust expansion: a file reached through
 `cfg_attr(test, path = …)`, `include!` or a declaration nested inside an inline module is caught
 only when nothing else declares it, and `macro_rules!`-generated tests are not seen. Those forms
 need manual review; a green check does not establish their ownership or exempt them from the rule.
