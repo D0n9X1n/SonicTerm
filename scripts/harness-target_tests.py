@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Target-only API cfg tests, including real Cargo dependency reuse on a tiny fixture."""
 import importlib.util
+import gate_catalog
 import json
 import os
 from pathlib import Path
@@ -51,7 +52,7 @@ class TargetTests(unittest.TestCase):
                 environment.pop("CARGO_ENCODED_RUSTFLAGS", None)
                 if enabled:
                     environment["RUSTFLAGS"] = "--cfg perf_atlas_retry_api"
-                with patch.object(gate, "STEPS", (step,)):
+                with patch.object(gate_catalog, "STEPS", (step,)):
                     result = gate.run_step(step, int(enabled), root, root, environment)
                 text = result.log_path.read_text(encoding="utf-8")
                 self.assertTrue(result.accepted, text)
@@ -85,14 +86,14 @@ class TargetTests(unittest.TestCase):
             environment = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
             for name in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WORKSPACE_WRAPPER"):
                 environment.pop(name, None)
-            with patch.object(gate, "STEPS", (step,)):
+            with patch.object(gate_catalog, "STEPS", (step,)):
                 result = gate.run_step(step, 1, root, root, environment)
             text = result.log_path.read_text(encoding="utf-8")
             self.assertFalse(result.accepted, text)
             self.assertIn("equality checks against true are unnecessary", text)
             self.assertNotIn("error: cfg leaked", text)
             example.write_text(example.read_text(encoding="utf-8").replace("value == true", "value"), encoding="utf-8")
-            with patch.object(gate, "STEPS", (step,)):
+            with patch.object(gate_catalog, "STEPS", (step,)):
                 result = gate.run_step(step, 2, root, root, environment)
             self.assertTrue(result.accepted, result.log_path.read_text(encoding="utf-8"))
 
@@ -113,7 +114,7 @@ class TargetTests(unittest.TestCase):
             environment = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
             for name in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WORKSPACE_WRAPPER"):
                 environment.pop(name, None)
-            with patch.object(gate, "STEPS", (step,)):
+            with patch.object(gate_catalog, "STEPS", (step,)):
                 result = gate.run_step(step, 1, root, root, environment)
             self.assertFalse(result.accepted, result.log_path.read_text(encoding="utf-8"))
             self.assertIn("equality checks against true are unnecessary", result.log_path.read_text(encoding="utf-8"))
