@@ -448,6 +448,13 @@ a reproduction.
   `<module>/tests.rs` subdirectory. `source-size` verifies real `#[path]`
   declarations and test gates across the tracked first-party Rust tree, including
   generated crate roots that declare authored tests; native upstream trees are excluded.
+  Files with real `#[test]`/`#[bench]` attributes are suites regardless of their
+  filename or declaration gate; a missing or production-admitting gate fails.
+  File-scope test-gated inline modules containing such attributes also fail.
+  This is a source scan, not Rust expansion: it does not resolve
+  `cfg_attr(test, path = …)`, `include!`, declarations nested inside an inline
+  module, or `macro_rules!`-generated tests. Those forms need manual review;
+  a green check does not prove their ownership or permit bypassing this rule.
 - **`tests/` is for cross-crate integration only.** Reserve each crate's
   `tests/` directory for genuine integration tests that exercise the crate
   through its public API or across crate boundaries. Do not put trivial

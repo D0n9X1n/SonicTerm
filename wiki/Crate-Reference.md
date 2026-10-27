@@ -8,6 +8,16 @@ repository metadata. `sonicterm-app` is the default workspace member. The
 shipping binaries are `sonicterm-mac`, `sonicterm-windows`, and
 `sonicterm-linux`; the Linux executable is named `sonicterm`.
 
+## Test ownership checks
+
+Crate unit-test files follow the owner-named sibling rule in
+[Repository and Toolchain](Repository-and-Toolchain). The `source-size` gate checks
+file-scope external suites regardless of their filename or declaration gate, and rejects
+file-scope test-gated inline suites containing `#[test]`/`#[bench]`.
+It does not expand `cfg_attr(test, path = …)`, `include!`, or `macro_rules!`-generated tests,
+or resolve declarations nested inside an inline module. These forms need manual review;
+a green scan does not establish their ownership or exempt them from the rule.
+
 ## Dependency overview
 
 ```mermaid

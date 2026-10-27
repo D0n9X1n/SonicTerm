@@ -681,8 +681,12 @@ documented tolerance or per-platform tables.
 ## Source size and tooling modules
 
 `source-size` also enforces owner-named Rust test files and their test-gated `#[path]` declarations.
+File-scope external modules containing `#[test]`/`#[bench]` are checked regardless of their
+filename or declaration gate; file-scope test-gated inline suites are rejected.
 The full naming and overflow rule is in [Repository and Toolchain](Repository-and-Toolchain).
-
+This source scan does not expand `cfg_attr(test, path = …)`, `include!`, or
+`macro_rules!`-generated tests, and does not resolve declarations nested inside an inline
+module. Those forms need manual review; a green gate does not prove their ownership.
 
 `source-size` runs `python3 scripts/check-source-size.py`: its contract tests run first,
 then it reads working-tree bytes for paths from `git ls-files -z`. A source may have at most

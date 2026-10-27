@@ -42,10 +42,16 @@ are not used. `tests/` remains reserved for public-API or cross-crate integratio
 
 The `source-size` gate validates these names against actual test-gated `#[path]` declarations,
 not text inside comments, strings or macros. Generic `test.rs`/`tests.rs` and singular
-`*_test.rs` files fail even when orphaned. It also resolves test-gated external modules by
-explicit or default Rust paths, so an arbitrary filename cannot hide a file containing
-`#[test]` or `#[bench]`. Helper-only modules and build code imported for testing, with no
-such attributes of their own, keep their implementation filenames.
+`*_test.rs` files fail even when orphaned. It also resolves file-scope external modules by
+explicit or default Rust paths, regardless of their gate. A file containing `#[test]` or
+`#[bench]` is a suite even under an arbitrary filename; its declaration must require `test`,
+so an absent gate or `cfg(any(test, feature = "fixtures"))` fails. A file-scope test-gated
+inline module containing these attributes also fails. Helper-only modules and build code
+imported for testing, with no such attributes of their own, keep their implementation filenames.
+
+This source scan does not expand `cfg_attr(test, path = …)` or `include!`, resolve declarations
+nested inside an inline module, or expand `macro_rules!`-generated tests. Those forms need
+manual review; a green check does not establish their ownership or exempt them from the rule.
 It reads all tracked first-party Rust, including
 generated crate roots that declare authored tests, but excludes native upstream trees.
 The `sonicterm-ui` and `sonicterm-render-model` crate-root suites also require each direct

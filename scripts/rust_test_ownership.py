@@ -13,12 +13,13 @@ from rust_comment_lexer import _delimiter_pairs, lex_rust
 
 @dataclass(frozen=True)
 class TestModule:
-    """One external module declaration and the attributes attached to that item."""
+    """One external module declaration or a test-gated inline suite at file scope."""
 
     name: str
     path: str | None
     test_only: bool
     line: int
+    inline_suite: bool = False
 
 
 def _string_value(literal: str) -> str:
@@ -62,8 +63,9 @@ def _requires_test(tokens) -> bool:
 
 
 def declared_modules(source: str) -> list[TestModule]:
-    """Read top-level declarations, ignoring comments, strings, macros and nested item bodies."""
-    tokens = lex_rust(source.replace("\r\n", "\n")).tokens
+    """Read file-scope modules and detect inline suites without resolving nested declarations."""
+    source = source.replace("\r\n", "\n")
+    tokens = lex_rust(source).tokens
     pairs = _delimiter_pairs(tokens)
     attributes = []
     modules = []
@@ -83,7 +85,8 @@ def declared_modules(source: str) -> list[TestModule]:
             if cursor < len(tokens) and tokens[cursor].text == "(":
                 cursor = pairs.get(cursor, cursor) + 1
         if cursor + 2 < len(tokens) and tokens[cursor].text == "mod" and tokens[cursor + 1].kind == "IDENT":
-            if tokens[cursor + 2].text == ";":
+            boundary = tokens[cursor + 2].text
+            if boundary in (";", "{"):
                 paths = []
                 test_only = False
                 for attribute in attributes:
@@ -94,10 +97,20 @@ def declared_modules(source: str) -> list[TestModule]:
                         test_only |= _requires_test(attribute[2:-1])
                 if len(paths) > 1:
                     raise ValueError(f"multiple path attributes at line {token.line}")
-                modules.append(TestModule(tokens[cursor + 1].text.removeprefix("r#"),
-                                          paths[0] if paths else None, test_only, token.line))
+                name = tokens[cursor + 1].text.removeprefix("r#")
+                if boundary == ";":
+                    modules.append(TestModule(name, paths[0] if paths else None, test_only, token.line))
+                    index = cursor + 3
+                else:
+                    closing = pairs.get(cursor + 2)
+                    if closing is None:
+                        raise ValueError(f"unterminated inline module at line {token.line}")
+                    # Inspect the body for real test attributes, but do not resolve declarations inside it.
+                    body = source[tokens[cursor + 2].end:tokens[closing].start]
+                    if test_only and _contains_test_attribute(body):
+                        modules.append(TestModule(name, None, test_only, token.line, inline_suite=True))
+                    index = closing + 1
                 attributes = []
-                index = cursor + 3
                 continue
         attributes = []
         if token.text in ("{", "(", "[") and index in pairs:
@@ -150,16 +163,21 @@ def ownership_problems(sources: dict[str, str]) -> list[str]:
             problems.append(f"{owner}: cannot inspect module declarations: {error}")
             continue
         for module in modules:
+            prefix = f"{owner}:{module.line}"
+            if module.inline_suite:
+                problems.append(f"{prefix}: inline test suite {module.name} must use an owner-named sibling file")
+                continue
             targets = _module_targets(owner_path, module)
             named_suite = (_test_filename(module.name + ".rs") or
                            any(_test_filename(PurePosixPath(target).name) for target in targets))
-            # Test-gated build helpers and source scanners are not suites. Inspect their code so an
-            # arbitrarily named file with real tests cannot use that distinction to escape naming.
-            loaded_suite = module.test_only and any(
+            # Build helpers and source scanners are not suites. Inspect code regardless of the gate
+            # so an arbitrarily named file with real tests cannot escape naming or cfg(test).
+            loaded_suite = any(
                 target in sources and _contains_test_attribute(sources[target]) for target in targets)
             if not named_suite and not loaded_suite:
                 continue
-            prefix = f"{owner}:{module.line}"
+            if not module.test_only:
+                problems.append(f"{prefix}: test declaration must require cfg(test): {module.path or module.name}")
             if module.path is None:
                 problems.append(f"{prefix}: test module {module.name} requires an explicit #[path]")
                 continue
@@ -190,8 +208,6 @@ def ownership_problems(sources: dict[str, str]) -> list[str]:
                 closest = max(implied, key=lambda candidate: len(candidate.stem))
                 if closest != owner_path:
                     problems.append(f"{prefix}: {module.path} names owner {closest.name}, not {owner_path.name}")
-            if not module.test_only:
-                problems.append(f"{prefix}: test declaration must require cfg(test): {module.path}")
     for path, owners in sorted(declarations.items()):
         if not owners:
             problems.append(f"{path}: no owning #[path] declaration")

@@ -214,6 +214,64 @@ class RustTestOwnershipTests(unittest.TestCase):
                  "foo/cases.rs": "#[test] fn contract() {}"}
         self.assertTrue(self.problems(files))
 
+    def test_loaded_suites_require_test_gate_regardless_of_filename(self):
+        # Real test functions identify a suite even under a production-admitting cfg or no cfg.
+        for gate in ['', '#[cfg(any(test, feature = "fixtures"))]']:
+            for declaration in ['mod helper;', '#[path = "helper.rs"] mod helper;']:
+                files = {"lib.rs": gate + declaration, "helper.rs": "#[test] fn contract() {}"}
+                with self.subTest(gate=gate, declaration=declaration):
+                    problems = self.problems(files)
+                    self.assertTrue(any("test declaration must require cfg(test)" in item for item in problems), problems)
+
+    def test_ungated_suite_loaded_from_test_file_requires_its_own_gate(self):
+        # Inherited test context does not replace the explicit gate required on every suite declaration.
+        files = {"foo.rs": '#[cfg(test)] #[path = "foo_tests.rs"] mod suite;',
+                 "foo_tests.rs": '#[path = "helper.rs"] mod helper;',
+                 "helper.rs": "#[test] fn contract() {}"}
+        problems = self.problems(files)
+        self.assertTrue(any("foo_tests.rs:1: test declaration must require cfg(test)" in item
+                            for item in problems), problems)
+
+    def test_inline_test_gated_suites_are_rejected(self):
+        # Renaming the inline module or adding platform conditions cannot evade the flat-sibling rule.
+        for declaration in ['#[cfg(test)] mod tests', '#[cfg(test)] mod cases',
+                            '#[cfg(all(test, windows))] pub(crate) mod cases']:
+            for newline in ["\n", "\r\n"]:
+                source = declaration + " {" + newline + "#[test] fn contract() {}" + newline + "}"
+                with self.subTest(declaration=declaration, newline=newline):
+                    problems = self.problems({"foo.rs": source})
+                    self.assertTrue(any("inline test suite" in item for item in problems), problems)
+
+    def test_inline_helpers_and_literal_test_text_do_not_hide_following_suites(self):
+        # Inspecting an inline body must ignore fake test attributes and resume at the next file-scope item.
+        for body in [
+            "pub fn helper() {}",
+            "/* #[test] fn hidden() {} */",
+            'const TEXT: &str = r#"#[test] fn hidden() {}"#;',
+            "macro_rules! example { () => { #[test] fn hidden() {} }; }",
+            "opaque! { #[test] fn hidden() {} }",
+        ]:
+            source = '#[cfg(test)] mod helper { ' + body + ' }\n' \
+                     '#[cfg(test)] #[path = "foo_tests.rs"] mod suite;'
+            with self.subTest(body=body):
+                self.assertEqual(self.problems({"foo.rs": source, "foo_tests.rs": ""}), [])
+
+    def test_documented_expansion_and_nested_declaration_limits(self):
+        # This source scanner is not rustc: these forms need review, not a claim that the gate expands them.
+        cases = [
+            {"lib.rs": '#[cfg(test)] #[cfg_attr(test, path = "alternate.rs")] mod helper;',
+             "alternate.rs": "#[test] fn contract() {}"},
+            {"lib.rs": '#[cfg(test)] mod helper;', "helper.rs": 'include!("alternate.rs");',
+             "alternate.rs": "#[test] fn contract() {}"},
+            {"lib.rs": '#[cfg(test)] mod outer { #[path = "helper.rs"] mod helper; }',
+             "helper.rs": "#[test] fn contract() {}"},
+            {"lib.rs": '#[cfg(test)] mod helper;',
+             "helper.rs": 'macro_rules! suite { () => { #[test] fn contract() {} }; } suite!();'},
+        ]
+        for files in cases:
+            with self.subTest(files=files):
+                self.assertEqual(self.problems(files), [])
+
     def test_helper_imports_are_not_mistaken_for_test_suites(self):
         # Build-code test imports and source-scanner fixtures have no test functions of their own.
         for fixture in [
@@ -291,6 +349,10 @@ class RustTestOwnershipTests(unittest.TestCase):
                 {"lib.rs": "#[cfg(test)] mod tests;", "tests.rs": ""},
                 {"foo.rs": '#[cfg(test)] #[path = "tests.rs"] mod cases;', "tests.rs": ""},
                 {"foo.rs": '#[cfg(test)] #[path = "foo_test.rs"] mod cases;', "foo_test.rs": ""},
+                {"lib.rs": 'mod helper;', "helper.rs": "#[test] fn contract() {}"},
+                {"lib.rs": '#[cfg(any(test, feature = "fixtures"))] mod helper;',
+                 "helper.rs": "#[test] fn contract() {}"},
+                {"foo.rs": '#[cfg(test)] mod cases { #[test] fn contract() {} }'},
             ]
             for files in cases:
                 for name, source in files.items():
