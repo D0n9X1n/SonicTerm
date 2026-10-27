@@ -15,7 +15,6 @@ EXACT_EXCEPTIONS = {
     "crates/sonicterm-freetype/src/lib.rs": "generated FreeType bindings",
     "crates/sonicterm-freetype/src/types.rs": "generated FreeType types",
     "crates/sonicterm-harfbuzz/src/lib.rs": "generated HarfBuzz bindings",
-    "crates/sonicterm-fontconfig/src/lib.rs": "hand-written raw Fontconfig ABI declarations",
 }
 
 

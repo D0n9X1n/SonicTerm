@@ -77,6 +77,17 @@ class SourceSizeTests(unittest.TestCase):
             self.assertTrue(any("stale exact exception" in problem for problem in problems))
             self.assertTrue(any("stale native root" in problem for problem in problems))
 
+    def test_exact_exceptions_are_only_generated_bindings(self):
+        # Hand-written first-party code is always measured; only the regenerated FreeType and HarfBuzz bindings are exempt.
+        self.assertEqual(
+            set(source_size.EXACT_EXCEPTIONS),
+            {
+                "crates/sonicterm-freetype/src/lib.rs",
+                "crates/sonicterm-freetype/src/types.rs",
+                "crates/sonicterm-harfbuzz/src/lib.rs",
+            },
+        )
+
     def test_manifest_supplies_only_reviewed_native_roots(self):
         # Native roots come from the pin manifest, and cannot broaden into an entire owned crate.
         root = Path(__file__).resolve().parent.parent
