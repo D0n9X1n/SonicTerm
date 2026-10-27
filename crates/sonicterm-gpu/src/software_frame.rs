@@ -1,27 +1,29 @@
 //! Platform-neutral CPU frame composition, sampling, and color conversion.
 //!
-//! Windows production and every host's unit tests compile this module. Native
-//! window handles and GDI presentation live exclusively in `software_windows`;
-//! compiling the compositor for tests does not add a non-Windows presenter.
+//! The shared color encoder is platform-neutral. Frame composition is compiled for Windows
+//! and unit tests; native window handles and GDI presentation stay in `software_windows`.
+//! Pixel loops and their sampling, blending and encoding helpers share this codegen module.
 
 #![forbid(unsafe_code)]
 
+use crate::color::{srgb_channel_to_linear, srgb_u8_to_linear_lut};
+#[cfg(any(target_os = "windows", test))]
 use crate::{
-    color::{
-        blend_premul_linear_over_srgb_bgra, grayscale_coverage, linear_channel_to_srgb_u8,
-        srgb_channel_to_linear, srgb_u8_to_linear_lut, LinearOverSrgbBgraLut,
-    },
     core::{validated_surface_size, MAX_SURFACE_DIMENSION},
     quad::QuadInstance,
     wezterm_pipeline::{ndc_rect_to_pixels, ImageInstance},
 };
+#[cfg(any(target_os = "windows", test))]
 use sonicterm_render_model::boundary::cfg::config::SubpixelAaMode;
+#[cfg(any(target_os = "windows", test))]
 use sonicterm_text::{glyph_atlas::GlyphAtlas, GlyphInstance};
 
 /// Conservative bounded area that amortizes one constant-source blend table.
+#[cfg(any(target_os = "windows", test))]
 const LINEAR_BLEND_LUT_MIN_PIXELS: usize = 32 * 32;
 
 /// Platform-neutral CPU compositor with a bounded, retained BGRA pixel buffer.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) struct SoftwareFrame {
     width: u32,
     height: u32,
@@ -52,6 +54,7 @@ impl BgraFrame<'_> {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 impl SoftwareFrame {
     /// Allocate a validated CPU frame and paint its initial background.
     pub(crate) fn new(width: u32, height: u32, clear: [f32; 4]) -> anyhow::Result<Self> {
@@ -175,8 +178,9 @@ impl SoftwareFrame {
 
     fn clear(&mut self, color: [f32; 4]) {
         let px = linear_rgba_to_bgra(color);
+        // A fixed-size store keeps clearing vectorizable without a cross-codegen-unit slice-copy helper.
         for p in self.pixels.as_chunks_mut::<4>().0 {
-            p.copy_from_slice(&px);
+            *p = px;
         }
     }
 
@@ -583,16 +587,257 @@ impl SoftwareFrame {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn linear_rgba_to_bgra(color: [f32; 4]) -> [u8; 4] {
+    let a = color[3].clamp(0.0, 1.0);
+    [
+        to_u8(linear_to_srgb(color[2].clamp(0.0, 1.0))),
+        to_u8(linear_to_srgb(color[1].clamp(0.0, 1.0))),
+        to_u8(linear_to_srgb(color[0].clamp(0.0, 1.0))),
+        to_u8(a),
+    ]
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn bgra8_to_unorm(px: [u8; 4]) -> [f32; 4] {
+    [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3] as f32 / 255.0]
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn premultiplied_srgb_bgra_to_linear_rgba(px: [u8; 4]) -> [f32; 4] {
+    let alpha = px[3];
+    if alpha == 0 {
+        // When: alpha is zero, match GPU upload by discarding invalid encoded RGB before filtering.
+        return [0.0; 4];
+    }
+
+    [
+        premultiplied_srgb_channel_to_linear(px[2], alpha),
+        premultiplied_srgb_channel_to_linear(px[1], alpha),
+        premultiplied_srgb_channel_to_linear(px[0], alpha),
+        alpha as f32 / 255.0,
+    ]
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn premultiplied_srgb_channel_to_linear(encoded_premul: u8, alpha: u8) -> f32 {
+    // The fixed 64 KiB table avoids transfer-curve evaluation for every bilinear tap.
+    static STAGED_CHANNELS: std::sync::OnceLock<[u8; 256 * 256]> = std::sync::OnceLock::new();
+    let staged = STAGED_CHANNELS.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let alpha = (index >> 8) as u8;
+            if alpha == 0 {
+                // When: alpha is zero, the staged channel must use canonical transparent black.
+                return 0;
+            }
+            let encoded_premul = index as u8;
+            let straight_srgb = (encoded_premul as f64 / alpha as f64).clamp(0.0, 1.0);
+            let alpha_linear = alpha as f64 / 255.0;
+            let premul_linear = srgb_channel_to_linear(straight_srgb) * alpha_linear;
+            linear_channel_to_srgb_u8(premul_linear as f32)
+        })
+    })[(usize::from(alpha) << 8) | usize::from(encoded_premul)];
+    srgb_u8_to_linear_lut()[staged as usize]
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn stabilize_half_pixel_origin(value: f32) -> f32 {
+    // NDC reconstruction can place one shared half-pixel edge on opposite sides
+    // of `round` for different glyph heights; recover only that numerical noise.
+    let nearest_half = (value * 2.0).round() * 0.5;
+    if (value - nearest_half).abs() <= 0.001 {
+        nearest_half
+    } else {
+        // When: value differs materially from nearest_half, preserve the intended fraction.
+        value
+    }
+}
+
+#[cfg(test)]
+fn sample_atlas_bilinear(pixels: &[u8], width: u32, height: u32, x: f32, y: f32) -> [f32; 4] {
+    sample_color_atlas_bilinear_in_rect(pixels, width, height, x, y, (0, 0, width, height))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn sample_color_atlas_bilinear_in_rect(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    rect: (u32, u32, u32, u32),
+) -> [f32; 4] {
+    let (min_x, min_y, max_x, max_y) = rect;
+    let max_x = max_x.min(width);
+    let max_y = max_y.min(height);
+    if width == 0 || height == 0 || pixels.is_empty() || min_x >= max_x || min_y >= max_y {
+        // When: the rect collapsed or pixels is empty there is no texel inside this
+        // glyph's own tile, and the (max_x - 1) clamp below would underflow.
+        return [0.0; 4];
+    }
+    // Atlas tiles are packed without padding, so both bilinear taps must stay
+    // inside this glyph's rectangle instead of borrowing a neighboring tile.
+    let x = (x - 0.5).clamp(min_x as f32, (max_x - 1) as f32);
+    let y = (y - 0.5).clamp(min_y as f32, (max_y - 1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(max_x - 1);
+    let y1 = (y0 + 1).min(max_y - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let c00 = premultiplied_srgb_bgra_to_linear_rgba(bgra_pixel_at(pixels, width, x0, y0));
+    let c10 = premultiplied_srgb_bgra_to_linear_rgba(bgra_pixel_at(pixels, width, x1, y0));
+    let c01 = premultiplied_srgb_bgra_to_linear_rgba(bgra_pixel_at(pixels, width, x0, y1));
+    let c11 = premultiplied_srgb_bgra_to_linear_rgba(bgra_pixel_at(pixels, width, x1, y1));
+    let mut out = [0.0; 4];
+    for i in 0..4 {
+        let top = c00[i] * (1.0 - fx) + c10[i] * fx;
+        let bottom = c01[i] * (1.0 - fx) + c11[i] * fx;
+        out[i] = top * (1.0 - fy) + bottom * fy;
+    }
+    out
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn bgra_pixel_at(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+    let off = ((y * width + x) * 4) as usize;
+    if off + 4 > pixels.len() {
+        // When: off runs past pixels the coordinate lies outside the atlas upload, so a
+        // transparent texel is returned rather than panicking on the slice.
+        return [0; 4];
+    }
+    [pixels[off], pixels[off + 1], pixels[off + 2], pixels[off + 3]]
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn blend_subpixel_bgra(dst: &mut [u8], coverage_rgba: [f32; 4], foreground: [f32; 4]) {
+    let alpha = foreground[3].clamp(0.0, 1.0);
+    let weights = [
+        (coverage_rgba[0] * alpha).clamp(0.0, 1.0),
+        (coverage_rgba[1] * alpha).clamp(0.0, 1.0),
+        (coverage_rgba[2] * alpha).clamp(0.0, 1.0),
+    ];
+    let decode = srgb_u8_to_linear_lut();
+    let out_r = foreground[0] * coverage_rgba[0] + decode[dst[2] as usize] * (1.0 - weights[0]);
+    let out_g = foreground[1] * coverage_rgba[1] + decode[dst[1] as usize] * (1.0 - weights[1]);
+    let out_b = foreground[2] * coverage_rgba[2] + decode[dst[0] as usize] * (1.0 - weights[2]);
+    dst[0] = linear_channel_to_srgb_u8(out_b);
+    dst[1] = linear_channel_to_srgb_u8(out_g);
+    dst[2] = linear_channel_to_srgb_u8(out_r);
+    let source_alpha = weights.into_iter().fold(0.0_f32, f32::max);
+    let destination_alpha = dst[3] as f32 / 255.0;
+    dst[3] = to_u8(source_alpha + destination_alpha * (1.0 - source_alpha));
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn linear_to_srgb(v: f32) -> f32 {
+    if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        // When: v is above the linear toe the sRGB transfer curve switches to its gamma
+        // segment, which the two pieces are chosen to meet continuously at that value.
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn to_u8(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn distance_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let vx = bx - ax;
+    let vy = by - ay;
+    let wx = px - ax;
+    let wy = py - ay;
+    let denom = vx * vx + vy * vy;
+    let t = if denom <= f32::EPSILON {
+        0.0
+    } else {
+        // When: denom exceeds EPSILON the segment has length, so the projection is
+        // clamped to it and the distance measures the segment, not its infinite line.
+        ((wx * vx + wy * vy) / denom).clamp(0.0, 1.0)
+    };
+    let cx = ax + t * vx;
+    let cy = ay + t * vy;
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn grayscale_coverage(coverage: [f32; 4]) -> f32 {
+    coverage[2] * 0.2126 + coverage[1] * 0.7152 + coverage[0] * 0.0722
+}
+
+/// Blend premultiplied linear RGBA over retained BGRA8 framebuffer bytes.
+///
+/// Destination RGB is sRGB-encoded and destination alpha is linear UNORM. The
+/// output decodes RGB, applies source-over once in linear light, re-encodes RGB,
+/// and source-overs alpha without applying an sRGB transfer to it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn blend_premul_linear_over_srgb_bgra(dst: &mut [u8], src: [f32; 4]) {
+    let src_alpha = src[3].clamp(0.0, 1.0);
+    let inverse_alpha = 1.0 - src_alpha;
+    let decode = srgb_u8_to_linear_lut();
+
+    dst[0] = linear_channel_to_srgb_u8(src[2] + decode[dst[0] as usize] * inverse_alpha);
+    dst[1] = linear_channel_to_srgb_u8(src[1] + decode[dst[1] as usize] * inverse_alpha);
+    dst[2] = linear_channel_to_srgb_u8(src[0] + decode[dst[2] as usize] * inverse_alpha);
+    let dst_alpha = dst[3] as f32 / 255.0;
+    dst[3] = ((src_alpha + dst_alpha * inverse_alpha) * 255.0).round() as u8;
+}
+
+/// Precomputed exact source-over results for one constant premultiplied linear source.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) struct LinearOverSrgbBgraLut {
+    channels: [[u8; 256]; 4],
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl LinearOverSrgbBgraLut {
+    pub(crate) fn new(src: [f32; 4]) -> Self {
+        let mut channels = [[0; 256]; 4];
+        for value in 0..=u8::MAX {
+            let mut dst = [value; 4];
+            blend_premul_linear_over_srgb_bgra(&mut dst, src);
+            for channel in 0..4 {
+                channels[channel][value as usize] = dst[channel];
+            }
+        }
+        Self { channels }
+    }
+
+    pub(crate) fn blend(&self, dst: &mut [u8]) {
+        dst[0] = self.channels[0][dst[0] as usize];
+        dst[1] = self.channels[1][dst[1] as usize];
+        dst[2] = self.channels[2][dst[2] as usize];
+        dst[3] = self.channels[3][dst[3] as usize];
+    }
+}
+
+pub(crate) fn linear_channel_to_srgb_u8(channel: f32) -> u8 {
+    static THRESHOLDS: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
+    let thresholds = THRESHOLDS.get_or_init(|| {
+        std::array::from_fn(|index| srgb_channel_to_linear((index as f64 + 0.5) / 255.0) as f32)
+    });
+    // Keep this fixed-table search in the pixel module: a shared slice generic can become a per-channel call without LTO.
+    let channel = channel.clamp(0.0, 1.0);
+    let mut span = thresholds.len();
+    let mut base = 0;
+    while span > 1 {
+        let half = span / 2;
+        let middle = base + half;
+        // A fixed number of probes keeps the color-dependent choice selectable rather than changing loop length.
+        base = if channel >= thresholds[middle] { middle } else { base };
+        span -= half;
+    }
+    (base + usize::from(channel >= thresholds[base])) as u8
+}
+
 #[cfg(test)]
 #[path = "software_frame_tests.rs"]
 mod software_frame_tests;
 
-#[path = "software_frame_pixels.rs"]
-mod pixels;
 #[cfg(test)]
-use pixels::sample_atlas_bilinear;
-use pixels::{
-    bgra8_to_unorm, bgra_pixel_at, blend_subpixel_bgra, distance_to_segment, linear_rgba_to_bgra,
-    premultiplied_srgb_bgra_to_linear_rgba, sample_color_atlas_bilinear_in_rect,
-    stabilize_half_pixel_origin,
-};
+#[path = "software_frame_pixels_tests.rs"]
+mod software_frame_pixels_tests;

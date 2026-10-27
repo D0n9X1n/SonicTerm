@@ -759,10 +759,12 @@ advances past hidden source rows/columns. Sharp, rounded, and line quads all use
 finite premultiplied linear RGBA (`0 ≤ RGB ≤ alpha ≤ 1`); opacity or mask
 coverage scales RGB and alpha together.
 
-The CPU compositor keeps per-pixel sampling, color conversion and LCD blending helpers
-inline across module/codegen-unit boundaries, including builds with LTO disabled. This
-preserves the pixel operations without adding a function call for each sample; the retained
-frame buffer and assembly scratch remain owned and reused by their existing frame owners.
+The CPU compositor keeps its pixel loops, sampling, LCD blending, source-over lookup and
+color encoder together in `software_frame.rs`. Clearing uses fixed-size pixel stores, and
+the encoder searches its fixed threshold table locally rather than calling a shared slice
+generic per channel. This keeps the hot operations in one codegen module when LTO is disabled.
+`color` re-exports the shared blend and encoder, preserving one lookup-table owner. The
+retained frame buffer and assembly scratch remain with their existing owners and are reused.
 
 ### Windows LCD subpixel policy
 

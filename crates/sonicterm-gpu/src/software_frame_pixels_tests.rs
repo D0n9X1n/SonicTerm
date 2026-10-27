@@ -1,6 +1,6 @@
 //! Software pixel sampling, origin stabilization and color blend contracts.
 
-use super::super::software_frame_tests::*;
+use super::software_frame_tests::*;
 use super::*;
 
 /// Native-size sampling depends on source and destination sizes, not their origins.
@@ -762,10 +762,11 @@ pub(super) fn grayscale_ramp_matches_hardware_blending_at_supported_scales() {
     }
 }
 
-/// The software loops cross this module boundary per pixel, including in non-LTO builds.
+/// Pixel loops and their sampling/blending helpers share one module even without link-time optimization.
 #[test]
-fn pixel_loop_helpers_remain_available_for_cross_unit_inlining() {
-    let source = include_str!("software_frame_pixels.rs").replace("\r\n", "\n");
+fn pixel_loop_helpers_stay_in_the_compositor_module() {
+    let source = include_str!("software_frame.rs").replace("\r\n", "\n");
+    assert!(!source.contains("mod pixels;"));
     for name in [
         "linear_rgba_to_bgra",
         "bgra8_to_unorm",
@@ -778,7 +779,29 @@ fn pixel_loop_helpers_remain_available_for_cross_unit_inlining() {
         "linear_to_srgb",
         "to_u8",
         "distance_to_segment",
+        "linear_channel_to_srgb_u8",
+        "blend_premul_linear_over_srgb_bgra",
     ] {
-        assert!(source.contains(&format!("#[inline]\npub(super) fn {name}(")), "{name}");
+        assert!(source.contains(&format!("fn {name}(")), "{name}");
+    }
+}
+
+/// The local fixed-table search preserves partition_point at every threshold and adjacent float, including NaN.
+#[test]
+fn local_color_encoder_matches_partition_search_boundaries() {
+    let thresholds: [f32; 255] =
+        std::array::from_fn(|index| srgb_channel_to_linear((index as f64 + 0.5) / 255.0) as f32);
+    let check = |channel: f32| {
+        let expected =
+            thresholds.partition_point(|threshold| channel.clamp(0.0, 1.0) >= *threshold) as u8;
+        assert_eq!(linear_channel_to_srgb_u8(channel), expected, "{channel:?}");
+    };
+    for threshold in thresholds {
+        check(f32::from_bits(threshold.to_bits() - 1));
+        check(threshold);
+        check(f32::from_bits(threshold.to_bits() + 1));
+    }
+    for channel in [f32::NEG_INFINITY, -1.0, -0.0, 0.0, 1.0, 2.0, f32::INFINITY, f32::NAN] {
+        check(channel);
     }
 }

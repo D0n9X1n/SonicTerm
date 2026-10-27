@@ -250,8 +250,8 @@ Windows 上启用降级时，`software_frame::SoftwareFrame` 把同一套上游�
 `software_windows` 桥接层借用经过尺寸验证的帧，再用 GDI `SetDIBitsToDevice` 呈现到 HWND。
 软件路径总是呈现完整帧，不把保留式 GPU 损伤规则再当作第二套软件呈现策略。
 
-CPU 合成代码不导入原生窗口或 GDI，也禁止 unsafe 代码；它在 Windows 生产构建和所有主机的
-单元测试中编译。同级 `software_frame_tests.rs` 保留像素断言，其中已有的 GPU 对照用例还需要
+CPU 合成代码不导入原生窗口或 GDI，也禁止 unsafe 代码；帧合成在 Windows 生产构建和所有主机的
+单元测试中编译，共享颜色编码器与 source-over 函数还在每个主机上服务 GPU 上传和轮廓检查。同级 `software_frame_tests.rs` 保留像素断言，其中已有的 GPU 对照用例还需要
 无窗口的 wgpu 适配器。`cargo test -p sonicterm-gpu` 会在 macOS、Windows 和 Linux 上运行
 这些测试。原生 GDI 能力、选区呈现及冒烟检查仍只在 Windows 运行。为测试编译 CPU 合成器
 不会给 macOS 或 Linux 新增软件呈现器。

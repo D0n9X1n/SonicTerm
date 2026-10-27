@@ -261,65 +261,12 @@ pub fn dim_toward(fg: ChromeColor, bg: ChromeColor, t: f32) -> ChromeColor {
     ChromeColor::rgba(mix(fg.r(), bg.r()), mix(fg.g(), bg.g()), mix(fg.b(), bg.b()), fg.a())
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn grayscale_coverage(coverage: [f32; 4]) -> f32 {
-    coverage[2] * 0.2126 + coverage[1] * 0.7152 + coverage[0] * 0.0722
-}
-
-/// Blend premultiplied linear RGBA over retained BGRA8 framebuffer bytes.
-///
-/// Destination RGB is sRGB-encoded and destination alpha is linear UNORM. The
-/// output decodes RGB, applies source-over once in linear light, re-encodes RGB,
-/// and source-overs alpha without applying an sRGB transfer to it.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn blend_premul_linear_over_srgb_bgra(dst: &mut [u8], src: [f32; 4]) {
-    let src_alpha = src[3].clamp(0.0, 1.0);
-    let inverse_alpha = 1.0 - src_alpha;
-    let decode = srgb_u8_to_linear_lut();
-
-    dst[0] = linear_channel_to_srgb_u8(src[2] + decode[dst[0] as usize] * inverse_alpha);
-    dst[1] = linear_channel_to_srgb_u8(src[1] + decode[dst[1] as usize] * inverse_alpha);
-    dst[2] = linear_channel_to_srgb_u8(src[0] + decode[dst[2] as usize] * inverse_alpha);
-    let dst_alpha = dst[3] as f32 / 255.0;
-    dst[3] = ((src_alpha + dst_alpha * inverse_alpha) * 255.0).round() as u8;
-}
-
-/// Precomputed exact source-over results for one constant premultiplied linear source.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) struct LinearOverSrgbBgraLut {
-    channels: [[u8; 256]; 4],
-}
-
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-impl LinearOverSrgbBgraLut {
-    pub(crate) fn new(src: [f32; 4]) -> Self {
-        let mut channels = [[0; 256]; 4];
-        for value in 0..=u8::MAX {
-            let mut dst = [value; 4];
-            blend_premul_linear_over_srgb_bgra(&mut dst, src);
-            for channel in 0..4 {
-                channels[channel][value as usize] = dst[channel];
-            }
-        }
-        Self { channels }
-    }
-
-    #[inline]
-    pub(crate) fn blend(&self, dst: &mut [u8]) {
-        dst[0] = self.channels[0][dst[0] as usize];
-        dst[1] = self.channels[1][dst[1] as usize];
-        dst[2] = self.channels[2][dst[2] as usize];
-        dst[3] = self.channels[3][dst[3] as usize];
-    }
-}
-
-pub(crate) fn linear_channel_to_srgb_u8(channel: f32) -> u8 {
-    static THRESHOLDS: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
-    let thresholds = THRESHOLDS.get_or_init(|| {
-        std::array::from_fn(|index| srgb_channel_to_linear((index as f64 + 0.5) / 255.0) as f32)
-    });
-    thresholds.partition_point(|threshold| channel.clamp(0.0, 1.0) >= *threshold) as u8
-}
+// Keep the shared color API while its hot implementations live beside the CPU pixel loops.
+pub(crate) use crate::software_frame::{
+    blend_premul_linear_over_srgb_bgra, linear_channel_to_srgb_u8,
+};
+#[cfg(test)]
+use crate::software_frame::{grayscale_coverage, LinearOverSrgbBgraLut};
 
 #[cfg(test)]
 #[path = "color_tests.rs"]
