@@ -684,10 +684,11 @@ documented tolerance or per-platform tables.
 File-scope external modules containing `#[test]`/`#[bench]` are checked regardless of their
 filename or declaration gate; file-scope test-gated inline suites are rejected.
 The full naming and overflow rule is in [Repository and Toolchain](Repository-and-Toolchain).
-A crate root (`lib.rs`, `main.rs`, an example root) may not hold tests itself; only `tests/`
-and `benches/` targets may, which also catches files reached through `cfg_attr(test, path = …)`,
-`include!` or a nested declaration. This source scan does not expand `macro_rules!`-generated
-tests; those need manual review, and a green gate does not prove their ownership.
+A crate root (`lib.rs`, `main.rs`, a bin or example root) may not hold tests itself; only
+Cargo's integration-test and bench targets may. Files reached through `cfg_attr(test, path = …)`,
+`include!` or a nested declaration are caught only when nothing else declares them, and
+`macro_rules!`-generated tests are not seen; those need manual review, and a green gate does not
+prove their ownership.
 
 `source-size` runs `python3 scripts/check-source-size.py`: its contract tests run first,
 then it reads working-tree bytes for paths from `git ls-files -z`. A source may have at most

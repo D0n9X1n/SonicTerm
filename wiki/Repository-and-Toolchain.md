@@ -49,11 +49,12 @@ so an absent gate or `cfg(any(test, feature = "fixtures"))` fails. A file-scope 
 inline module containing these attributes also fails. Helper-only modules and build code
 imported for testing, with no such attributes of their own, keep their implementation filenames.
 
-A crate root (`lib.rs`, `main.rs`, an example root) may not hold tests itself, inline or bare;
-only `tests/` and `benches/` targets may. That rule also catches files reached through
-`cfg_attr(test, path = …)`, `include!` or a declaration nested inside an inline module, since
-nothing declares them. This source scan does not expand `macro_rules!`-generated tests; those
-need manual review, and a green check does not establish their ownership or exempt them from the rule.
+A crate root (`lib.rs`, `main.rs`, a bin or example root) may not hold tests itself, inline or
+bare; only Cargo's integration-test and bench targets may (`tests/`, `benches/`, or an explicit
+`[[test]]`/`[[bench]]` path). This is a source scan, not Rust expansion: a file reached through
+`cfg_attr(test, path = …)`, `include!` or a declaration nested inside an inline module is caught
+only when nothing else declares it, and `macro_rules!`-generated tests are not seen. Those forms
+need manual review; a green check does not establish their ownership or exempt them from the rule.
 It reads all tracked first-party Rust, including
 generated crate roots that declare authored tests, but excludes native upstream trees.
 The `sonicterm-ui` and `sonicterm-render-model` crate-root suites also require each direct

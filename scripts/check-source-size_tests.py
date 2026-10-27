@@ -138,10 +138,10 @@ class SourceSizeTests(unittest.TestCase):
 
 
 class RustTestOwnershipTests(unittest.TestCase):
-    def problems(self, files):
+    def problems(self, files, manifests=None):
         """Check real Rust declarations without depending on this host's active cfgs."""
         from rust_test_ownership import ownership_problems
-        return ownership_problems(files)
+        return ownership_problems(files, manifests)
 
     def test_exact_and_topic_suites_preserve_module_aliases(self):
         # Filenames express physical ownership; module aliases may remain stable for subprocess filters.
@@ -244,19 +244,27 @@ class RustTestOwnershipTests(unittest.TestCase):
 
     def test_crate_roots_cannot_hold_inline_or_bare_tests(self):
         # Nothing declares a crate root, so its own text is the only place an ungated suite could hide.
-        for root in ["crates/foo/src/lib.rs", "crates/foo/src/main.rs", "crates/foo/examples/demo.rs"]:
+        manifest = {"crates/foo/Cargo.toml": '[package]\nname = "foo"\n'}
+        for root in ["crates/foo/src/lib.rs", "crates/foo/src/main.rs", "crates/foo/examples/demo.rs",
+                     "crates/foo/examples/tests/main.rs", "crates/foo/src/bin/tests/main.rs"]:
             for body in ["mod tests { #[test] fn contract() {} }",
                          "#[cfg(test)] mod tests { #[test] fn contract() {} }",
                          "#[test] fn contract() {}"]:
                 with self.subTest(root=root, body=body):
-                    problems = self.problems({root: body})
+                    problems = self.problems({root: body}, manifest)
                     self.assertTrue(any("test" in item and root in item for item in problems), problems)
 
-    def test_integration_and_bench_roots_may_hold_tests(self):
-        # tests/ and benches/ targets are their own crates; their #[test] functions are the suite.
-        for root in ["crates/foo/tests/contract.rs", "crates/foo/tests/suite/main.rs", "crates/foo/benches/speed.rs"]:
+    def test_cargo_test_and_bench_targets_may_hold_tests(self):
+        # Cargo's auto-discovered tests/ and benches/ targets, and explicit [[test]]/[[bench]] paths,
+        # are their own test crates; their #[test] functions are the suite.
+        manifest = {"crates/foo/Cargo.toml":
+                    '[package]\nname = "foo"\n[[test]]\nname = "probe"\npath = "probes/probe.rs"\n'
+                    '[[bench]]\nname = "speed"\npath = "perf/speed.rs"\n'}
+        for root in ["crates/foo/tests/contract.rs", "crates/foo/tests/suite/main.rs",
+                     "crates/foo/benches/speed.rs", "crates/foo/benches/group/main.rs",
+                     "crates/foo/probes/probe.rs", "crates/foo/perf/speed.rs"]:
             with self.subTest(root=root):
-                self.assertEqual(self.problems({root: "#[test] fn contract() {}"}), [])
+                self.assertEqual(self.problems({root: "#[test] fn contract() {}"}, manifest), [])
 
     def test_inline_helpers_and_literal_test_text_do_not_hide_following_suites(self):
         # Inspecting an inline body must ignore fake test attributes and resume at the next file-scope item.

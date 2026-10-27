@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import tomllib
 from pathlib import Path, PurePosixPath
 import posixpath
 import re
@@ -150,7 +151,7 @@ def _contains_test_attribute(source: str) -> bool:
     return False
 
 
-def ownership_problems(sources: dict[str, str]) -> list[str]:
+def ownership_problems(sources: dict[str, str], manifests: dict[str, str] | None = None) -> list[str]:
     """Require every tracked test file to have one sibling declaration from its named owner."""
     test_paths = {path for path in sources if _test_filename(PurePosixPath(path).name)}
     declarations = {path: [] for path in test_paths}
@@ -213,15 +214,53 @@ def ownership_problems(sources: dict[str, str]) -> list[str]:
             problems.append(f"{path}: no owning #[path] declaration")
         elif len(owners) != 1:
             problems.append(f"{path}: expected one owner declaration, found {len(owners)}: {', '.join(owners)}")
-    problems.extend(_crate_root_problems(sources))
+    problems.extend(_crate_root_problems(sources, manifests or {}))
     return problems
 
 
-def _crate_root_problems(sources: dict[str, str]) -> list[str]:
+def _test_target_roots(manifests: dict[str, str]) -> tuple[set[str], list[str]]:
+    """Explicit [[test]]/[[bench]] target files, and the package directories the manifests define."""
+    roots, packages = set(), []
+    for manifest, text in manifests.items():
+        package = PurePosixPath(manifest).parent
+        try:
+            document = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            continue
+        if "package" in document:
+            packages.append(package.as_posix())
+        for section in ("test", "bench"):
+            for target in document.get(section, []):
+                if isinstance(target, dict) and isinstance(target.get("path"), str):
+                    roots.add(posixpath.normpath((package / target["path"]).as_posix()))
+    return roots, packages
+
+
+def _is_test_target(path: str, explicit: set[str], packages: list[str]) -> bool:
+    """Whether Cargo builds `path` as an integration test or bench target of its own package.
+
+    Cargo auto-discovers `tests/*.rs`, `tests/*/main.rs`, `benches/*.rs` and `benches/*/main.rs`
+    directly under the package root; anything else counts only through an explicit target path.
+    """
+    if path in explicit:
+        return True
+    owners = [package for package in packages if path.startswith(package.rstrip("/") + "/") or package in ("", ".")]
+    if not owners:
+        return False
+    package = max(owners, key=len)
+    relative = PurePosixPath(path).relative_to(package) if package not in ("", ".") else PurePosixPath(path)
+    parts = relative.parts
+    if len(parts) == 2 and parts[0] in ("tests", "benches") and parts[1].endswith(".rs"):
+        return True
+    return len(parts) == 3 and parts[0] in ("tests", "benches") and parts[2] == "main.rs"
+
+
+def _crate_root_problems(sources: dict[str, str], manifests: dict[str, str]) -> list[str]:
     """Reject tests written directly in a crate root, which no parent declaration can gate.
 
-    A `tests/` or `benches/` target is its own test crate, so its `#[test]` functions are the suite.
-    Every other undeclared file (`lib.rs`, `main.rs`, an example root) keeps tests in a sibling file.
+    Cargo's integration-test and bench targets are their own test crates, so their `#[test]` functions
+    are the suite. Every other undeclared file (`lib.rs`, `main.rs`, a bin or example root) keeps tests
+    in an owner-named sibling file.
     """
     declared = set()
     for owner, source in sources.items():
@@ -231,10 +270,10 @@ def _crate_root_problems(sources: dict[str, str]) -> list[str]:
             continue
         for module in modules:
             declared.update(_module_targets(PurePosixPath(owner), module))
+    explicit, packages = _test_target_roots(manifests)
     problems = []
     for path, source in sorted(sources.items()):
-        parts = PurePosixPath(path).parts
-        if path in declared or "tests" in parts or "benches" in parts:
+        if path in declared or _is_test_target(path, explicit, packages):
             continue
         if _contains_test_attribute(source):
             problems.append(f"{path}: crate root holds tests; move them to an owner-named sibling "
@@ -253,4 +292,12 @@ def inspect_test_ownership(root: Path, paths: list[str], excluded_roots: tuple[s
             sources[path] = (root / path).read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
             problems.append(f"cannot read Rust source {path}: {error}")
-    return problems + ownership_problems(sources)
+    manifests = {}
+    for path in paths:
+        if PurePosixPath(path).name != "Cargo.toml" or path.startswith(excluded_roots):
+            continue
+        try:
+            manifests[path] = (root / path).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            problems.append(f"cannot read Cargo manifest {path}: {error}")
+    return problems + ownership_problems(sources, manifests)

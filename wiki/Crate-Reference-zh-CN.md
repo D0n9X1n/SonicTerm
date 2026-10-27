@@ -12,10 +12,9 @@
 Crate 单元测试文件遵循[仓库与工具链](Repository-and-Toolchain-zh-CN)中的所有者命名同级文件规则。
 `source-size` gate 检查文件作用域的外部套件，不以文件名或声明条件为前提，
 并拒绝文件作用域内受测试条件约束、含有 `#[test]`/`#[bench]` 的内联套件。
-它还拒绝直接写在 crate 根文件中的测试（`tests/` 和 `benches/` 目标除外），
-这也会拦住通过 `cfg_attr(test, path = …)`、`include!` 或嵌套声明引入的文件。
-它不会展开 `macro_rules!` 生成的测试；这类测试需要人工审查，
-扫描通过既不能证明其所有权，也不豁免命名规则。
+它还拒绝直接写在 crate 根文件中的测试（Cargo 的集成测试和 bench 目标除外）。
+通过 `cfg_attr(test, path = …)`、`include!` 或嵌套声明引入的文件，只有在没有其他声明指向它时
+才会被拦住；`macro_rules!` 生成的测试不会被看到。这些需要人工审查，扫描通过并不能证明其所有权。
 
 ## 依赖概览
 
