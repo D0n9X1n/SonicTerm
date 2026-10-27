@@ -1,7 +1,11 @@
 //! Software-presenter color conversion, subpixel blending and bounded atlas sampling.
+//!
+//! Pixel-loop helpers stay inline candidates across codegen units: non-LTO builds must not
+//! pay an out-of-line call for each sample or LCD blend after crossing this module boundary.
 
 use super::*;
 
+#[inline]
 pub(super) fn linear_rgba_to_bgra(color: [f32; 4]) -> [u8; 4] {
     let a = color[3].clamp(0.0, 1.0);
     [
@@ -12,10 +16,12 @@ pub(super) fn linear_rgba_to_bgra(color: [f32; 4]) -> [u8; 4] {
     ]
 }
 
+#[inline]
 pub(super) fn bgra8_to_unorm(px: [u8; 4]) -> [f32; 4] {
     [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3] as f32 / 255.0]
 }
 
+#[inline]
 pub(super) fn premultiplied_srgb_bgra_to_linear_rgba(px: [u8; 4]) -> [f32; 4] {
     let alpha = px[3];
     if alpha == 0 {
@@ -52,6 +58,7 @@ pub(super) fn premultiplied_srgb_channel_to_linear(encoded_premul: u8, alpha: u8
     srgb_u8_to_linear_lut()[staged as usize]
 }
 
+#[inline]
 pub(super) fn stabilize_half_pixel_origin(value: f32) -> f32 {
     // NDC reconstruction can place one shared half-pixel edge on opposite sides
     // of `round` for different glyph heights; recover only that numerical noise.
@@ -75,6 +82,7 @@ pub(super) fn sample_atlas_bilinear(
     sample_color_atlas_bilinear_in_rect(pixels, width, height, x, y, (0, 0, width, height))
 }
 
+#[inline]
 pub(super) fn sample_color_atlas_bilinear_in_rect(
     pixels: &[u8],
     width: u32,
@@ -114,6 +122,7 @@ pub(super) fn sample_color_atlas_bilinear_in_rect(
     out
 }
 
+#[inline]
 pub(super) fn bgra_pixel_at(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     let off = ((y * width + x) * 4) as usize;
     if off + 4 > pixels.len() {
@@ -124,6 +133,7 @@ pub(super) fn bgra_pixel_at(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4
     [pixels[off], pixels[off + 1], pixels[off + 2], pixels[off + 3]]
 }
 
+#[inline]
 pub(super) fn blend_subpixel_bgra(dst: &mut [u8], coverage_rgba: [f32; 4], foreground: [f32; 4]) {
     let alpha = foreground[3].clamp(0.0, 1.0);
     let weights = [
@@ -143,6 +153,7 @@ pub(super) fn blend_subpixel_bgra(dst: &mut [u8], coverage_rgba: [f32; 4], foreg
     dst[3] = to_u8(source_alpha + destination_alpha * (1.0 - source_alpha));
 }
 
+#[inline]
 pub(super) fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.003_130_8 {
         v * 12.92
@@ -153,10 +164,12 @@ pub(super) fn linear_to_srgb(v: f32) -> f32 {
     }
 }
 
+#[inline]
 pub(super) fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+#[inline]
 pub(super) fn distance_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     let vx = bx - ax;
     let vy = by - ay;

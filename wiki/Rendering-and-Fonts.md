@@ -759,6 +759,11 @@ advances past hidden source rows/columns. Sharp, rounded, and line quads all use
 finite premultiplied linear RGBA (`0 ≤ RGB ≤ alpha ≤ 1`); opacity or mask
 coverage scales RGB and alpha together.
 
+The CPU compositor keeps per-pixel sampling, color conversion and LCD blending helpers
+inline across module/codegen-unit boundaries, including builds with LTO disabled. This
+preserves the pixel operations without adding a function call for each sample; the retained
+frame buffer and assembly scratch remain owned and reused by their existing frame owners.
+
 ### Windows LCD subpixel policy
 
 `[font].subpixel_aa` accepts `off`, `rgb`, and `bgr`; the default is `off`.

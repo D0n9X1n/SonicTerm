@@ -761,3 +761,24 @@ pub(super) fn grayscale_ramp_matches_hardware_blending_at_supported_scales() {
         }
     }
 }
+
+/// The software loops cross this module boundary per pixel, including in non-LTO builds.
+#[test]
+fn pixel_loop_helpers_remain_available_for_cross_unit_inlining() {
+    let source = include_str!("software_frame_pixels.rs").replace("\r\n", "\n");
+    for name in [
+        "linear_rgba_to_bgra",
+        "bgra8_to_unorm",
+        "premultiplied_srgb_bgra_to_linear_rgba",
+        "premultiplied_srgb_channel_to_linear",
+        "stabilize_half_pixel_origin",
+        "sample_color_atlas_bilinear_in_rect",
+        "bgra_pixel_at",
+        "blend_subpixel_bgra",
+        "linear_to_srgb",
+        "to_u8",
+        "distance_to_segment",
+    ] {
+        assert!(source.contains(&format!("#[inline]\npub(super) fn {name}(")), "{name}");
+    }
+}
