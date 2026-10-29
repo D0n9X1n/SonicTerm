@@ -308,6 +308,8 @@ impl App {
         // growth + per-keystroke overhead over a long session).
         if self.pty_write_log_enabled {
             self.test_pty_writes.lock().push((pane_id, bytes.clone()));
+            #[cfg(test)]
+            self.record_test_write_source(pane_id, source);
         }
         let Some(pane) =
             self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
@@ -327,6 +329,12 @@ impl App {
             self.arm_foreground_probe_after_input(Instant::now());
         }
         queued
+    }
+
+    /// Unit-test ledger of each logged write's producer source, kept apart from the shared byte log.
+    #[cfg(test)]
+    fn record_test_write_source(&self, pane_id: u64, source: PtyInputSource) {
+        self.test_pty_write_sources.borrow_mut().push((pane_id, source));
     }
 
     /// Deliver an explicitly targeted PTY effect through the same bounded queue as native input.

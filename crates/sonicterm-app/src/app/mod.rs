@@ -450,6 +450,11 @@ pub struct App {
     /// and writes use this buffer instead.
     #[doc(hidden)]
     pub(super) test_clipboard_text: Option<String>,
+    /// Test-only copied-file list standing in for the native clipboard's file
+    /// list. Installing either test override keeps every read off the desktop
+    /// clipboard; `None` here then means no files are on the clipboard.
+    #[doc(hidden)]
+    pub(super) test_clipboard_files: Option<Vec<std::path::PathBuf>>,
     /// Test-only clipboard write rejection injected at the production write
     /// boundary. Disabled in every constructor so ordinary runs retain the real
     /// clipboard behavior and the in-memory success seam remains opt-in.
@@ -463,6 +468,9 @@ pub struct App {
     /// Unit-test observation of actual PTY spawn inputs; absent from production builds.
     #[cfg(test)]
     test_pane_launches: std::cell::RefCell<Vec<(u64, pane_launch::PaneLaunch)>>,
+    /// Unit-test record of each logged PTY write's pane and producer source, so tests can check attribution.
+    #[cfg(test)]
+    test_pty_write_sources: std::cell::RefCell<Vec<(u64, PtyInputSource)>>,
     /// Whether the PTY write ledger above is actually recorded. `false` in
     /// production so `dispatch_pty_write_effect` does no lock/clone/push per
     /// write (the ledger would otherwise grow unbounded for the whole

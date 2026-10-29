@@ -76,21 +76,48 @@ impl App {
             // When: test_clipboard_text is installed, it stands in for the native clipboard.
             return Some(text);
         }
+        if self.test_clipboard_files.is_some() {
+            // When: test_clipboard_files is the only override, the test clipboard holds no text and the desktop one is never read.
+            return None;
+        }
         self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok())
     }
 
-    /// Paste clipboard text into the source search field or encode it independently for each terminal destination.
+    /// Read the paths of files copied to the clipboard (Explorer, Finder, a Linux file manager).
+    ///
+    /// Returns an empty list when the clipboard holds no files or the native read fails, so callers fall back to text.
+    pub(in crate::app) fn read_clipboard_files(&mut self) -> Vec<std::path::PathBuf> {
+        if self.test_clipboard_text.is_some() || self.test_clipboard_files.is_some() {
+            // When: test_clipboard_text or test_clipboard_files is installed, the test clipboard holds only test_clipboard_files.
+            return self.test_clipboard_files.clone().unwrap_or_default();
+        }
+        self.clipboard
+            .as_mut()
+            .and_then(|clipboard| clipboard.get().file_list().ok())
+            .unwrap_or_default()
+    }
+
+    /// Paste clipboard text into the source search field, or paste copied files or text into each terminal destination.
     pub(in crate::app) fn paste_clipboard_for_kind(&mut self, kind: FrontmostKind) {
+        if let Some(id) = self.search_paste_window_for_kind(kind) {
+            // When: id owns an open search, its query takes text only; a failed commit must not reach terminal or broadcast input.
+            if let Some(text) = self.read_clipboard_text() {
+                // When: read_clipboard_text yields text, it becomes the search query; copied files are not offered to search.
+                let _ = self.search_handle_ime_commit(id, &text);
+            }
+            return;
+        }
+        let files = self.read_clipboard_files();
+        if !files.is_empty() {
+            // When: files is non-empty, paste the quoted paths like a drop; a file copy's text form is only a bare name.
+            self.paste_paths_with_source(kind, files, super::super::PtyInputSource::Paste);
+            return;
+        }
         let Some(text) = self.read_clipboard_text() else {
             // When: text is None; neither the test override nor the system
             // clipboard yielded anything, so there is nothing to paste.
             return;
         };
-        if let Some(id) = self.search_paste_window_for_kind(kind) {
-            // When: id owns an open search, a failed commit must not turn clipboard text into terminal or broadcast input.
-            let _ = self.search_handle_ime_commit(id, &text);
-            return;
-        }
         let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
             // When: active_pane_id_for_kind finds no pane for this kind; there is
             // no PTY to paste into, so the clipboard text is dropped.
@@ -104,9 +131,21 @@ impl App {
         self.show_paste_refusals(kind, destinations, &refusals);
     }
 
-    /// Paste one native path list using each admitted destination's shell syntax and paste protocol.
+    /// Paste one dropped native path list using each admitted destination's shell syntax and paste protocol.
     pub(in crate::app) fn paste_file_paths_for_kind<I>(&mut self, kind: FrontmostKind, paths: I)
     where
+        I: IntoIterator<Item = std::path::PathBuf>,
+    {
+        self.paste_paths_with_source(kind, paths, super::super::PtyInputSource::FileDrop);
+    }
+
+    /// Quote `paths` for each destination and attribute the input to `source` (a drop or a clipboard paste).
+    fn paste_paths_with_source<I>(
+        &mut self,
+        kind: FrontmostKind,
+        paths: I,
+        source: super::super::PtyInputSource,
+    ) where
         I: IntoIterator<Item = std::path::PathBuf>,
     {
         let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
@@ -123,11 +162,8 @@ impl App {
             // When: paths is empty, the drop has no arguments or paste guards to deliver.
             return;
         }
-        let (destinations, refusals) = self.paste_payload_to_destinations(
-            pane_id,
-            &UserPayload::Paths(paths),
-            super::super::PtyInputSource::FileDrop,
-        );
+        let (destinations, refusals) =
+            self.paste_payload_to_destinations(pane_id, &UserPayload::Paths(paths), source);
         self.show_paste_refusals(kind, destinations, &refusals);
     }
 
@@ -178,3 +214,7 @@ impl App {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "misc_clipboard_tests.rs"]
+mod misc_clipboard_tests;
