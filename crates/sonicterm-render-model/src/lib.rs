@@ -10,6 +10,8 @@
 pub mod geometry;
 /// Per-frame, renderer-facing snapshot of the UI (panes, tabs, overlays).
 pub mod inputs;
+/// Kitty Unicode-placeholder decoding and the geometry of a placeholder run's image slice.
+pub mod kitty_placeholder;
 /// Small backend-agnostic drawing command trait. The production GPU renderer
 /// currently consumes frame snapshots directly rather than implementing it.
 pub mod painter;

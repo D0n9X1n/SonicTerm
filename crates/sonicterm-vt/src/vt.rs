@@ -35,6 +35,12 @@ pub use staging::{
 /// followed by the crate's release version, which the workspace sets.
 pub const SONIC_VERSION: &str = concat!("SonicTerm ", env!("CARGO_PKG_VERSION"));
 
+/// The XTVERSION reply text: `kitty` followed by [`SONIC_VERSION`].
+///
+/// Clients such as Claude Code send kitty graphics only when the reply is `kitty` or starts with
+/// `kitty `. The word names the graphics protocol SonicTerm answers; no kitty version is claimed.
+pub const XTVERSION_REPLY: &str = concat!("kitty SonicTerm ", env!("CARGO_PKG_VERSION"));
+
 /// Current DEC mouse tracking mode selected by the terminal application.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum MouseTracking {
@@ -281,6 +287,12 @@ pub struct Parser {
     inner: vte::Parser,
     performer: Performer,
     apc_capture: Option<MediaCapture>,
+    /// An APC opened while a kitty transfer is open; its header is read without staging.
+    apc_scratch: Option<Box<vt_kitty_stream::ApcScratch>>,
+    /// A chunked kitty transfer spanning APCs, holding the parser's one staging reservation.
+    kitty_transfer: Option<vt_kitty_stream::KittyTransfer>,
+    /// Set when a kitty event needs the host's reply, ending the advance prefix after it.
+    kitty_yield: bool,
     pending_esc: bool,
     raw_osc: Option<RawOsc>,
     iterm2_metadata: [u8; MAX_ITERM2_METADATA_BYTES],
@@ -370,6 +382,9 @@ impl Parser {
             inner: vte::Parser::new(),
             performer,
             apc_capture: None,
+            apc_scratch: None,
+            kitty_transfer: None,
+            kitty_yield: false,
             pending_esc: false,
             raw_osc: None,
             iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
@@ -631,6 +646,13 @@ mod vt_performer;
 
 #[path = "vt_raw_osc.rs"]
 mod vt_raw_osc;
+
+#[path = "vt_kitty.rs"]
+mod vt_kitty;
+
+#[path = "vt_kitty_stream.rs"]
+mod vt_kitty_stream;
+pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
 
 use vt_capture::parse_iterm2_file_event;
 pub use vt_osc::{parse_osc7_cwd, parse_osc7_cwd_snapshot};

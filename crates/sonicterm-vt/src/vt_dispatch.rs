@@ -79,10 +79,10 @@ impl Perform for Performer {
                     self.reply(b"\x1b[>1;0;0c");
                 }
                 'q' => {
-                    // XTVERSION: DCS > | SonicTerm <version> ST
-                    let mut buf = Vec::with_capacity(SONIC_VERSION.len() + 6);
+                    // XTVERSION: DCS > | kitty SonicTerm <version> ST
+                    let mut buf = Vec::with_capacity(XTVERSION_REPLY.len() + 6);
                     buf.extend_from_slice(b"\x1bP>|");
-                    buf.extend_from_slice(SONIC_VERSION.as_bytes());
+                    buf.extend_from_slice(XTVERSION_REPLY.as_bytes());
                     buf.extend_from_slice(b"\x1b\\");
                     self.reply(&buf);
                 }
