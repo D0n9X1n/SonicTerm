@@ -120,6 +120,31 @@ class TableTests(unittest.TestCase):
                 cargo = [command for command in commands if command.startswith("cargo ")]
                 self.assertEqual(cargo[0], gate_harness.command_text(step), job)
 
+    def test_macos_clipboard_acceptance_is_explicit_and_serialized(self):
+        # The general pasteboard is touched only by one exact ignored test outside the parallel workspace invocation.
+        name = "app::misc::clipboard::misc_clipboard_native_macos_tests::native_pasteboard_paste_action_reaches_real_pty"
+        command = f"cargo test --locked -p sonicterm-app --lib {name} -- --exact --ignored --nocapture"
+        step = next(step for step in gate_catalog.STEPS if step.id == "macos-clipboard-paste")
+        self.assertEqual(gate_harness.command_text(step), command)
+        self.assertEqual(step.hosts, ("macos",))
+        self.assertEqual(step.evidence, "local")
+        self.assertEqual(step.ci_jobs, ("macos-core",))
+        self.assertEqual(step.timeout_s, 900)
+        self.assertIn(step, gate_cli.select_steps("macos"))
+        self.assertNotIn(step, gate_cli.select_steps("windows"))
+        commands = [command for _label, command in gate_workflow.ci_job_commands(gate_test_fixture.WORKFLOW)["macos-core"]]
+        self.assertEqual(commands.count(command), 1)
+        self.assertGreater(commands.index(command), commands.index("cargo test --workspace --doc --no-fail-fast"))
+        app = gate_test_fixture.ROOT / "crates/sonicterm-app/src/app"
+        self.assertRegex((app / "mod.rs").read_text(encoding="utf-8"), r"(?m)^mod misc;$")
+        self.assertIn('#[path = "misc_clipboard.rs"]\nmod clipboard;',
+                      (app / "misc.rs").read_text(encoding="utf-8"))
+        self.assertIn('#[cfg(all(test, target_os = "macos"))]\n#[path = "misc_clipboard_native_macos_tests.rs"]\nmod misc_clipboard_native_macos_tests;',
+                      (app / "misc_clipboard.rs").read_text(encoding="utf-8"))
+        native_test = (app / "misc_clipboard_native_macos_tests.rs").read_text(encoding="utf-8")
+        self.assertRegex(native_test,
+                         r'(?m)^#\[test\]\n#\[ignore(?: = "[^"\n]*")?\]\nfn native_pasteboard_paste_action_reaches_real_pty\(\)')
+
     def test_native_selection_is_required_locally_on_macos(self):
         # The opt-in example must actually run; compilation and Windows execution are insufficient.
         by_id = {step.id: step for step in gate_catalog.STEPS}

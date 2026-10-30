@@ -36,6 +36,19 @@ settlement 达到四秒上限后记录截尾样本 `>4000.000`，每条汇总写
 测试不因耗时而失败，只因设置或观察失败而失败。close 本身不返回时，由隔离子进程期限终止运行并
 保留最后阶段，不会声称已得到完整样本。原生场景设置成功不代表历史 teardown 卡顿已复现。
 
+## 原生剪贴板验收
+
+Windows 原生剪贴板测试在按完整测试名启动的子进程中使用独立的窗口站和桌面，
+通过配置中的粘贴动作检查原生文件列表进入真实 PTY 的提交，不接触交互桌面的剪贴板。
+
+macOS 的 `macos-clipboard-paste` 单独执行一个被忽略的测试，不与 workspace 测试并行。
+它使用通用粘贴板，因此要求 GitHub 托管的 Actions runner（`GITHUB_ACTIONS=true` 且
+`RUNNER_ENVIRONMENT=github-hosted`），或通过 `SONICTERM_NATIVE_CLIPBOARD_TEST=1`
+明确允许本地运行。两种条件都不满足时，测试会在访问原生剪贴板之前失败，不能把未执行
+原生检查当作通过。本地允许运行会覆盖剪贴板内容，请先保存仍需保留的内容。
+按完整测试名启动的子进程期限为 60 秒；gate 的 900 秒预算还包含编译。
+`NATIVE_PASTEBOARD EXERCISED` 表示原生断言已运行，而不只是测试二进制编译成功。
+
 ## 步骤选择与进程组
 
 runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with-release` 加入当前主机的

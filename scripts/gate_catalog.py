@@ -149,6 +149,12 @@ STEPS = (
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace"),
          gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_API_TESTS, harness_cfgs=gate_harness.HARNESS_API_CFG_NAMES),
+    # The ignored test runs alone: the general macOS pasteboard needs a hosted runner or explicit local opt-in.
+    gate_model.Step("macos-clipboard-paste",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--lib",
+          "app::misc::clipboard::misc_clipboard_native_macos_tests::native_pasteboard_paste_action_reaches_real_pty",
+          "--", "--exact", "--ignored", "--nocapture"),
+         ("macos",), 900, "local", ("rust", "native"), ("macos-core",)),
     gate_model.Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), gate_model.HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", _WINDOWS_WORKSPACE),
          windows_preparations=(gate_model.Preparation(gate_model._FEASIBILITY_BUILD),)),

@@ -33,10 +33,11 @@ impl App {
             // boundary without changing the in-memory or system clipboard.
             return false;
         }
-        if self.test_clipboard_text.is_some() {
-            // When: test_clipboard_text is set; the suite captures the copy here
-            // so no real system clipboard is touched by a test run.
+        if self.test_clipboard_text.is_some() || self.test_clipboard_files.is_some() {
+            // When: test_clipboard_text or test_clipboard_files is set, keep the copy off the system clipboard;
+            // like a native copy, the text replaces any copied file list.
             self.test_clipboard_text = Some(text.clone());
+            self.test_clipboard_files = None;
             return true;
         }
         let Some(clipboard) = self.clipboard.as_mut() else {
@@ -229,3 +230,11 @@ impl App {
 #[cfg(test)]
 #[path = "misc_clipboard_tests.rs"]
 mod misc_clipboard_tests;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "misc_clipboard_native_windows_tests.rs"]
+mod misc_clipboard_native_windows_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "misc_clipboard_native_macos_tests.rs"]
+mod misc_clipboard_native_macos_tests;

@@ -56,7 +56,9 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 
 macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行 Rust 检查、严格 Rustdoc、
 一次性 workspace 测试 gate、workspace doctest、host probe、macOS 专属进程组监管测试与真实
-resource baseline 采集。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版本、raw-exit、window-owner、
+resource baseline 采集。它还在 scenario-harness 测试之后，单独运行被忽略的原生文件复制粘贴测试，
+不与 workspace 测试同时访问通用粘贴板。这个原生测试必须实际运行，不能跳过；本地运行的明确
+许可方式见[本地 Gate](Local-Gate-zh-CN)。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版本、raw-exit、window-owner、
 工作流供应链、注释与脚本标识符检查，以及发布说明、Wiki 发布、资源清单、soak 和资源基线脚本测试。
 这些命令仍是各支持主机的本地 gate；既有 macOS 汇总要求 tooling 成功，因此没有检查变为可选。
 tooling job 还会安装 runner 镜像自带的 Cairo 与 Fontconfig，并针对它们运行 COLR 绘制测试（`colr-tests`）：

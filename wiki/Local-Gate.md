@@ -52,6 +52,23 @@ isolated child deadline ends the run and retains the last phase, rather than
 claiming a completed sample. Native scenario setup is not proof that the
 historical stalled teardown reproduced.
 
+## Native clipboard acceptance
+
+On Windows, the native clipboard test runs in an exact-name child using its own
+window station and desktop. It checks the native file list through the configured
+paste action and real PTY submission without touching the interactive clipboard.
+
+On macOS, `macos-clipboard-paste` invokes one ignored test separately from the
+workspace suite. It uses the general pasteboard, so it requires either a
+GitHub-hosted Actions runner (`GITHUB_ACTIONS=true` and
+`RUNNER_ENVIRONMENT=github-hosted`) or explicit local opt-in with
+`SONICTERM_NATIVE_CLIPBOARD_TEST=1`. The test fails before native clipboard access
+when neither condition holds; an unexercised check is not a pass. Local opt-in
+overwrites clipboard contents, so save anything needed before running it.
+The exact-name child has a 60-second deadline; the gate's 900-second budget also
+allows compilation. `NATIVE_PASTEBOARD EXERCISED` confirms that native assertions
+ran, not just that the test binary compiled.
+
 ## Step selection and process groups
 
 The runner selects the host's `local` steps and runs them in table order.

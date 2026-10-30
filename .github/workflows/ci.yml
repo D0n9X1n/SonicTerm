@@ -202,6 +202,9 @@ jobs:
         shell: bash
         run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
 
+      - name: Verify native copied-file paste on macOS
+        run: cargo test --locked -p sonicterm-app --lib app::misc::clipboard::misc_clipboard_native_macos_tests::native_pasteboard_paste_action_reaches_real_pty -- --exact --ignored --nocapture
+
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
 

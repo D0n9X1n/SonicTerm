@@ -90,7 +90,10 @@ required check.
 The macOS core shard first measures the real PTY close baseline after Cargo
 restore, then runs Rust checks, strict Rustdoc, the one-pass workspace test gate,
 workspace doctests, host probes, the macOS-only process-group custody test, and real
-resource-baseline capture. The required `tooling` job runs on Ubuntu: Rust-version,
+resource-baseline capture. It also runs the ignored native copied-file paste test
+alone on the hosted runner, after scenario-harness tests; the general pasteboard
+is not exercised concurrently with workspace tests. The exact native test must
+run rather than skip; local opt-in is described in [Local Gate](Local-Gate). The required `tooling` job runs on Ubuntu: Rust-version,
 raw-exit, window-owner, workflow supply-chain, authored-comment and script-identifier
 checks, plus release-note, wiki-publish, resource-inventory, soak and resource-baseline
 script tests. These commands remain local gates on every supported host; the existing

@@ -98,7 +98,20 @@ pollster.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 # The close baseline identifies only its own console hosts and shell descendants from a native snapshot.
-windows = { workspace = true, features = ["Win32_System_Console", "Win32_System_Diagnostics_ToolHelp"] }
+# The native clipboard acceptance test seeds a private window station's clipboard, never the user's.
+windows = { workspace = true, features = [
+    "Win32_System_Console",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The native pasteboard acceptance test publishes file URLs beside competing text in one item.
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem"] }
 
 [features]
 # Marks that this tree's App has the frame-counter API; only the perf_scenarios example reads
