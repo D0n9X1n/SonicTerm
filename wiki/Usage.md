@@ -274,6 +274,12 @@ quoting and the same refusals described below. It never sends the files'
 contents, and it ignores the bare file name such a copy also offers as text.
 On Linux a paste still sends only clipboard text. Search still takes only text.
 
+On Windows, a file dragged from Explorer onto SonicTerm running as administrator
+never arrives: Windows blocks drag and drop from a program running without
+administrator rights, such as Explorer, into one running with them. Copy the
+file in Explorer and paste instead; clipboard contents cross that boundary, so
+the paste sends the quoted path in an administrator window too.
+
 Files dropped together become one line of quoted paths, separated by spaces.
 SonicTerm adds no Enter, so you can check the line before you run it. Each pane
 quotes the paths for the shell it was started with:
