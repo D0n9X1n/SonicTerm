@@ -184,7 +184,7 @@ and fails on overflow. Console output remains step progress and log tails.
 `native-smoke-runner.py` and direct CI/Release invocations retain their existing
 behavior; this local custody policy does not apply to those callers. Windows
 custody regressions run through `local-gate_tests.py` with a cleanup-inclusive
-60-second group budget; the complete local supply-chain step retains its 120-second budget.
+60-second group budget; the complete local supply-chain step has a 300-second budget.
 
 Per-step logs, `summary.txt`, and `summary.json` go to a new temporary
 directory, or to `--log-dir`, which cannot be the repository root or an

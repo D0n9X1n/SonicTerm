@@ -92,7 +92,7 @@ STEPS = (
          ("rust", "bash"), _SCRIPT_CHECKS),
     gate_model.Step("window-owner", ("bash", "scripts/check-window-owner-registration.sh"), gate_model.HOSTS, 120,
          "local", ("bash",), _SCRIPT_CHECKS),
-    gate_model.Step("workflow-supply-chain", ("bash", "scripts/check-workflow-supply-chain.sh"), gate_model.HOSTS, 120,
+    gate_model.Step("workflow-supply-chain", ("bash", "scripts/check-workflow-supply-chain.sh"), gate_model.HOSTS, 300,
          "local", ("rust", "bash"), _SCRIPT_CHECKS),
     # Keep the one macOS-only custody regression on macOS when the portable suite moves to Ubuntu.
     gate_model.Step("macos-gate-custody", ("python3", "scripts/local-gate_tests.py",

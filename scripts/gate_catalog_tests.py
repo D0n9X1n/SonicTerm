@@ -180,6 +180,13 @@ class TableTests(unittest.TestCase):
              ".\\scripts\\validate-windows-msi_tests.ps1"),
         )
 
+    def test_supply_chain_combined_suite_keeps_a_bounded_tooling_deadline(self):
+        # The combined suites exceed the old deadline on Windows; retain all tests within the documented tooling cap.
+        step = next(step for step in gate_catalog.STEPS if step.id == "workflow-supply-chain")
+        self.assertEqual(step.timeout_s, 300)
+        self.assertEqual(step.argv, ("bash", "scripts/check-workflow-supply-chain.sh"))
+        self.assertEqual(step.windows_policy, gate_model.WindowsPolicy.STRICT)
+
     def test_host_detection(self):
         # Protect step selection on each desktop host, including Git Bash's MSYS Python.
         for system, host in (
