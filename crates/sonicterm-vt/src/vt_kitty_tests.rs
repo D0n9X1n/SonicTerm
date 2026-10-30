@@ -93,3 +93,11 @@ fn only_transmits_and_queries_carry_image_data() {
     assert!(!KittyCommand::parse(b"a=p,i=1").expect("valid").carries_image());
     assert!(!KittyCommand::parse(b"a=d").expect("valid").carries_image());
 }
+
+#[test]
+fn flag_values_outside_their_domain_are_invalid() {
+    // m and U are 0 or 1 and q is 0 to 2; any other value is a malformed command, not a default.
+    for control in [&b"m=2"[..], b"q=3", b"U=2"] {
+        assert_eq!(KittyCommand::parse(control), Err(KittyCommandError::Invalid), "{control:?}");
+    }
+}

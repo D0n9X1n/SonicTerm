@@ -147,7 +147,7 @@ fn natural_size_derives_the_cell_box_from_source_pixels() {
 #[test]
 fn the_image_is_fitted_into_its_box_preserving_aspect_and_centred() {
     // A 2:1 image in a 4x4-cell box of 10x10 px cells fills the width and is centred vertically.
-    let fit = fit_in_box(4, 4, 200, 100, 10.0, 10.0);
+    let fit = fit_in_box(4, 4, 200, 100, 10.0, 10.0, false);
     assert_eq!((fit.x_px, fit.y_px, fit.width_px, fit.height_px), (0.0, 10.0, 40.0, 20.0));
 }
 
@@ -155,7 +155,7 @@ fn the_image_is_fitted_into_its_box_preserving_aspect_and_centred() {
 fn a_run_maps_to_its_slice_of_the_fitted_image() {
     // Box 4x4 cells (10 px), fitted image at y 10..30. Row 1 cells 1..3 cover x 10..30, y 10..20:
     // half of the image's height and the middle half of its width.
-    let fit = fit_in_box(4, 4, 200, 100, 10.0, 10.0);
+    let fit = fit_in_box(4, 4, 200, 100, 10.0, 10.0, false);
     let slice = run_slice(&fit, 1, 1, 2, 10.0, 10.0).expect("row 1 overlaps the image");
     assert_eq!((slice.dest_x, slice.dest_y, slice.dest_w, slice.dest_h), (0.0, 0.0, 20.0, 10.0));
     assert_eq!(slice.source_uv, [0.25, 0.0, 0.75, 0.5]);
@@ -164,7 +164,7 @@ fn a_run_maps_to_its_slice_of_the_fitted_image() {
 #[test]
 fn letterbox_rows_draw_nothing_and_partial_cells_are_clipped() {
     // Row 0 is entirely letterbox; row 3 likewise. Row 2 is clipped at the image's bottom edge.
-    let fit = fit_in_box(4, 4, 200, 100, 10.0, 10.0);
+    let fit = fit_in_box(4, 4, 200, 100, 10.0, 10.0, false);
     assert!(run_slice(&fit, 0, 0, 4, 10.0, 10.0).is_none());
     assert!(run_slice(&fit, 3, 0, 4, 10.0, 10.0).is_none());
     let bottom = run_slice(&fit, 2, 0, 4, 10.0, 10.0).expect("row 2 overlaps");
@@ -175,7 +175,41 @@ fn letterbox_rows_draw_nothing_and_partial_cells_are_clipped() {
 #[test]
 fn cells_outside_the_box_draw_nothing() {
     // Encoded rows or columns past the placement box are ignored rather than stretched.
-    let fit = fit_in_box(4, 4, 200, 100, 10.0, 10.0);
+    let fit = fit_in_box(4, 4, 200, 100, 10.0, 10.0, false);
     assert!(run_slice(&fit, 9, 0, 1, 10.0, 10.0).is_none());
     assert!(run_slice(&fit, 1, 9, 1, 10.0, 10.0).is_none());
+}
+
+#[test]
+fn a_natural_box_draws_the_image_unscaled_at_its_corner() {
+    // An 11x11 image in 10 px cells rounds up to a 2x2 box but is drawn 11x11 from the corner.
+    let fit = fit_in_box(2, 2, 11, 11, 10.0, 10.0, true);
+    assert_eq!((fit.x_px, fit.y_px, fit.width_px, fit.height_px), (0.0, 0.0, 11.0, 11.0));
+}
+
+#[test]
+fn a_default_coloured_cell_names_image_zero_and_tiny_cells_box_to_one() {
+    // The default foreground carries no id; a non-positive cell size falls back to a one-cell box.
+    let mut cell = placeholder((0, 0, 0), &[mark(0), mark(0)]);
+    cell.fg = Color::Default;
+    assert_eq!(decode_row([(0, &cell)])[0].image_id, 0);
+    assert_eq!(placement_box(None, None, 30, 30, 0.0, 0.0), (1, 1));
+}
+
+#[test]
+fn explicit_row_and_column_continue_a_run_and_its_high_byte() {
+    // Two marks that follow the left cell's row and next column, with no third mark, keep its high byte.
+    let first = placeholder((0, 0, 7), &[mark(1), mark(3), mark(2)]);
+    let next = placeholder((0, 0, 7), &[mark(1), mark(4)]);
+    let runs = decode_row([(0, &first), (1, &next)]);
+    assert_eq!(runs.len(), 1);
+    assert_eq!((runs[0].image_id, runs[0].cell_count), (0x0200_0007, 2));
+}
+
+#[test]
+fn an_empty_image_fits_to_nothing() {
+    // A zero-sized image has no scale and no slice to draw.
+    let fit = fit_in_box(2, 2, 0, 0, 10.0, 10.0, false);
+    assert_eq!((fit.width_px, fit.height_px), (0.0, 0.0));
+    assert!(run_slice(&fit, 0, 0, 1, 10.0, 10.0).is_none());
 }

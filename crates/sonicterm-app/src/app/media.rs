@@ -524,14 +524,19 @@ pub(super) fn retained_inline_media(images: &[InlineImage]) -> ResourceAmount {
     }
 }
 
-/// Each distinct pixel buffer as `(id, bytes)`, in order of first appearance.
+/// Each distinct pixel buffer as `(id, bytes)`, oldest first.
+///
+/// Ids come from one increasing counter at decode, so ordering by id is ordering by pixel age.
+/// Entry order is not: re-placing an older kitty image moves its entry to the end of the vector.
 fn unique_pixel_buffers(images: &[InlineImage]) -> Vec<(u64, usize)> {
     let mut seen = std::collections::HashSet::with_capacity(images.len());
-    images
+    let mut buffers: Vec<(u64, usize)> = images
         .iter()
         .filter(|image| seen.insert(image.id))
         .map(|image| (image.id, image.bgra.len()))
-        .collect()
+        .collect();
+    buffers.sort_unstable_by_key(|(id, _)| *id);
+    buffers
 }
 
 fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
@@ -703,7 +708,7 @@ fn percent_to_u8(percent: u32) -> u8 {
 
 #[path = "media_kitty.rs"]
 mod media_kitty;
-pub(super) use media_kitty::{apply_kitty, KittyOp};
+pub(super) use media_kitty::{apply_kitty, kitty_source_size, KittyOp};
 
 #[cfg(test)]
 #[path = "media_tests.rs"]

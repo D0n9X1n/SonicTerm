@@ -225,6 +225,11 @@ impl Parser {
             self.feed_vte_byte(bytes[offset]);
             offset += 1;
         }
+        // A Sixel or iTerm2 capture opened by this read's last byte ends an open kitty upload now,
+        // not at the next read, so the parser never holds two captures between reads.
+        if self.kitty_transfer.is_some() {
+            self.yield_kitty_transfer_to_other_media();
+        }
         (offset, std::mem::take(&mut self.performer.events))
     }
 
@@ -354,6 +359,7 @@ impl Parser {
     pub(super) fn consume_apc_byte(&mut self, byte: u8) {
         if matches!(byte, 0x18 | 0x1a) {
             // When: byte matches CAN or SUB, cancel APC staging before aborted Kitty data can become media.
+            self.abort_staged_first_chunk();
             self.reset_cancelled_escape();
             return;
         }

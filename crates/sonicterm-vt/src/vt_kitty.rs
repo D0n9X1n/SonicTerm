@@ -59,6 +59,8 @@ pub struct KittyCommand {
     pub more: bool,
     /// Reply suppression: 0 all replies, 1 errors only, 2 none.
     pub quiet: u8,
+    /// Whether `q` was given, so a later chunk's explicit `q=0` can restore replies.
+    pub quiet_set: bool,
     /// Client image id (`i=`); 0 when absent.
     pub image_id: u32,
     /// Placement id (`p=`); 0 when absent.
@@ -109,6 +111,12 @@ fn number(value: &[u8]) -> Result<u32, KittyCommandError> {
         .ok()
         .and_then(|digits| digits.parse().ok())
         .ok_or(KittyCommandError::Invalid)
+}
+
+/// The value of a small enumerated key, `0..=max`, or an invalid-command error.
+fn flag(value: &[u8], max: u8) -> Result<u8, KittyCommandError> {
+    let parsed = number(value)?;
+    u8::try_from(parsed).ok().filter(|flag| *flag <= max).ok_or(KittyCommandError::Invalid)
 }
 
 impl KittyCommand {
@@ -168,8 +176,12 @@ impl KittyCommand {
                     // When: key is o, the payload is compressed, which this subset cannot inflate.
                     return Err(KittyCommandError::Unsupported);
                 }
-                b"m" => command.more = number(value)? == 1,
-                b"q" => command.quiet = number(value)?.min(2) as u8,
+                b"m" => command.more = flag(value, 1)? == 1,
+                b"q" => {
+                    // The value is recorded and marked explicit, so chunk merging can tell q=0 from no q.
+                    command.quiet = flag(value, 2)?;
+                    command.quiet_set = true;
+                }
                 b"i" => command.image_id = number(value)?,
                 b"I" => {
                     // When: key is I, the client asks for an image number, which is refused rather than aliased to i.
@@ -180,7 +192,7 @@ impl KittyCommand {
                 b"v" => command.height_px = number(value)?,
                 b"c" => command.cols = number(value)?,
                 b"r" => command.rows = number(value)?,
-                b"U" => command.virtual_placement = number(value)? == 1,
+                b"U" => command.virtual_placement = flag(value, 1)? == 1,
                 b"d" => {
                     command.delete = Some(match value {
                         b"i" => KittyDelete::ById,
@@ -204,6 +216,23 @@ impl KittyCommand {
             self.action,
             KittyAction::Transmit | KittyAction::TransmitAndDisplay | KittyAction::Query
         )
+    }
+
+    /// A command carrying only the image id and quiet level a malformed control section names,
+    /// so the client can still be told it was rejected. Keys that do not parse are skipped.
+    #[must_use]
+    pub fn reply_target(control: &[u8]) -> Self {
+        let mut target = Self::default();
+        for pair in control.split(|byte| *byte == b',') {
+            match super::split_once_byte(pair, b'=') {
+                Some((b"i", value)) => target.image_id = number(value).unwrap_or(0),
+                Some((b"q", value)) => target.quiet = flag(value, 2).unwrap_or(0),
+                _ => {
+                    // When: the pair is any other key or malformed, it does not address the reply.
+                }
+            }
+        }
+        target
     }
 
     /// The reply to `message` for this command, or `None` when quiet mode or a missing image id

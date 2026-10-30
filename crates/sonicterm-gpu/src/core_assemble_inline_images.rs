@@ -25,36 +25,18 @@ impl GpuRenderer {
         // feed the same atlas promotion, newest-first residency and painter order as anchored images.
         let mut inline_image_placements: Vec<InlineImagePlacement<'_>> = Vec::new();
         for pv in pane_views {
-            for image in pv.inline_images.iter().filter(|image| image.draws_at_anchor()) {
-                inline_image_placements.push(InlineImagePlacement {
-                    image,
-                    origin_x: pv.origin_x,
-                    origin_y: pv.origin_y,
-                    content_clip: pv.planned.content_clip,
-                    painter_order: inline_image_placements.len(),
-                    slice: None,
-                });
-            }
-            if !kitty_placeholders::has_virtual_placement(pv.inline_images) {
-                // When: has_virtual_placement is false, no row can hold a drawable placeholder, so none is scanned.
-                continue;
-            }
-            for (image, slice) in kitty_placeholders::placeholder_slices(
-                pv.grid,
-                pv.planned,
+            let rows = pv
+                .planned
+                .rows()
+                .filter_map(|(slot, abs_row)| Some((slot, pv.grid.row_at_abs(abs_row)?)));
+            kitty_placeholders::push_pane_placements(
+                &mut inline_image_placements,
                 pv.inline_images,
+                rows,
                 (pv.origin_x, pv.origin_y),
+                pv.planned.content_clip,
                 (cell_w, cell_h),
-            ) {
-                inline_image_placements.push(InlineImagePlacement {
-                    image,
-                    origin_x: pv.origin_x,
-                    origin_y: pv.origin_y,
-                    content_clip: pv.planned.content_clip,
-                    painter_order: inline_image_placements.len(),
-                    slice: Some(slice),
-                });
-            }
+            );
         }
         let has_renderable_inline_media = inline_image_placements
             .iter()

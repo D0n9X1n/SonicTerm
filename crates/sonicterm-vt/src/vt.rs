@@ -212,6 +212,24 @@ struct MediaCapture {
     /// This capture's claim on its parser's staging pool, released when the
     /// capture is dropped or destructured into an event.
     reservation: StagingReservation,
+    /// A kitty APC's control section (after `G`, before `;`), kept outside the reservation.
+    ///
+    /// Bounded at [`vt_kitty_stream::MAX_KITTY_HEADER_BYTES`], so a header-only command such as a
+    /// delete still dispatches, and a refused transfer can still be tracked, when the staging
+    /// pool has no room for a payload.
+    kitty_header: Option<KittyHeader>,
+}
+
+/// The control section of a kitty APC as it arrives.
+#[derive(Debug, Default)]
+struct KittyHeader {
+    bytes: Vec<u8>,
+    /// Set at the first `;`, or when the section outgrew its bound; later bytes are payload.
+    complete: bool,
+    /// Whether the APC began with `G`, so the section is a graphics command at all.
+    graphics: bool,
+    /// Whether the first byte has been read.
+    started: bool,
 }
 
 /// Inline-media escape protocol.

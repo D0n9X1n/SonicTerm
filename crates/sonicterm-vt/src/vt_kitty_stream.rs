@@ -8,8 +8,8 @@
 
 use super::*;
 
-/// Longest control section a continuation chunk may carry before it is treated as a new command.
-const MAX_KITTY_HEADER_BYTES: usize = 512;
+/// Longest control section kept outside staging; a longer one is not a command this subset reads.
+pub(super) const MAX_KITTY_HEADER_BYTES: usize = 512;
 
 /// A chunked kitty transfer spanning several APCs.
 #[derive(Debug)]
@@ -27,6 +27,8 @@ pub(super) enum KittyTransfer {
     Aborted {
         /// The first chunk's command, used for the final error reply.
         command: KittyCommand,
+        /// Whether the client was already told why, so the final chunk adds no second error.
+        reported: bool,
     },
 }
 
@@ -62,12 +64,6 @@ impl ApcScratch {
             chunk: None,
         }
     }
-}
-
-/// The control section of a staged capture: the bytes after `G` up to `;` or the end.
-fn staged_header(capture: &MediaCapture) -> Option<&[u8]> {
-    let body = capture.data.strip_prefix(b"G")?;
-    Some(body.iter().position(|byte| *byte == b';').map_or(body, |end| &body[..end]))
 }
 
 impl Parser {
@@ -138,8 +134,24 @@ impl Parser {
                 scratch.header_len += 1;
             }
             ScratchPhase::Continue => {
-                if let Some(KittyTransfer::Loading { capture, .. }) = self.kitty_transfer.as_mut() {
-                    capture.append_byte(byte);
+                // When: phase is Continue, the byte is payload for the open transfer's one reservation.
+                let Some(KittyTransfer::Loading { capture, .. }) = self.kitty_transfer.as_mut()
+                else {
+                    // When: kitty_transfer is no longer Loading, the chunk's payload has no owner.
+                    return;
+                };
+                capture.append_byte(byte);
+                // Past the payload cap, the transfer's staging is released now and the rest swallowed.
+                if capture.truncated {
+                    if let Some(KittyTransfer::Loading { command, .. }) = self.kitty_transfer.take()
+                    {
+                        self.reply_kitty_error(&command, "ENOMEM:image too large");
+                        self.kitty_transfer =
+                            Some(KittyTransfer::Aborted { command, reported: true });
+                    }
+                    if let Some(scratch) = self.apc_scratch.as_mut() {
+                        scratch.phase = ScratchPhase::Swallow;
+                    }
                 }
             }
             ScratchPhase::Swallow => {
@@ -159,6 +171,15 @@ impl Parser {
         match (parsed, self.kitty_transfer.as_ref()) {
             (Some(Ok(chunk)), Some(KittyTransfer::Loading { .. })) if chunk.continuation_only => {
                 scratch.phase = ScratchPhase::Continue;
+                // A middle chunk's explicit q governs the transfer's later replies.
+                if chunk.quiet_set {
+                    if let Some(KittyTransfer::Loading { command, metadata, .. }) =
+                        self.kitty_transfer.as_mut()
+                    {
+                        command.quiet = chunk.quiet;
+                        metadata.push_str(&format!(",q={}", chunk.quiet));
+                    }
+                }
                 scratch.chunk = Some(chunk);
             }
             (Some(Ok(chunk)), Some(KittyTransfer::Aborted { .. })) if chunk.continuation_only => {
@@ -242,8 +263,8 @@ impl Parser {
         }
         match self.kitty_transfer.take() {
             Some(KittyTransfer::Loading { mut metadata, mut command, capture }) => {
-                // A final chunk that sets q applies it to the whole transfer's reply, as kitty does.
-                if chunk.quiet != 0 {
+                // A final chunk that sets q, even q=0, applies it to the whole transfer's reply.
+                if chunk.quiet_set {
                     command.quiet = chunk.quiet;
                     metadata.push_str(&format!(",q={}", chunk.quiet));
                 }
@@ -254,8 +275,15 @@ impl Parser {
                     None => self.reply_kitty_error(&command, "ENOMEM:image too large"),
                 }
             }
-            Some(KittyTransfer::Aborted { command }) => {
-                self.reply_kitty_error(&command, "ECANCELED:transfer aborted");
+            Some(KittyTransfer::Aborted { mut command, reported }) => {
+                // The final chunk's explicit q governs the cancellation reply, which is sent only if
+                // the client was never told why the transfer ended.
+                if chunk.quiet_set {
+                    command.quiet = chunk.quiet;
+                }
+                if !reported {
+                    self.reply_kitty_error(&command, "ECANCELED:transfer aborted");
+                }
             }
             None => {
                 // When: kitty_transfer is None, the chunk's transfer was already ended by another command.
@@ -265,6 +293,10 @@ impl Parser {
     }
 
     /// Finish an APC that staged its header and payload in one capture.
+    ///
+    /// The control section was kept outside staging, so it is read even when the pool refused
+    /// the payload: a delete or placement still dispatches, and a refused chunked transfer is
+    /// remembered so its later chunks are swallowed.
     pub(super) fn finish_staged_apc(&mut self) {
         let Some(mut capture) = self.apc_capture.take() else {
             // When: apc_capture vanished, there is nothing to dispatch.
@@ -272,60 +304,84 @@ impl Parser {
         };
         let row = self.performer.grid.cursor.row;
         let col = self.performer.grid.cursor.col;
-        let parsed = staged_header(&capture).map(KittyCommand::parse);
-        match parsed {
+        match capture.kitty_command() {
+            Some(Ok(command)) if command.continuation_only => {
+                // When: command is a continuation with no open transfer, it is an orphan chunk and is swallowed.
+            }
             Some(Ok(command)) if command.medium == KittyMedium::Refused => {
                 // The payload names a file, temporary file or shm object, so it is refused unread.
                 self.reply_kitty_error(
                     &command,
                     "ENOTSUPPORTED:only direct transmission is supported",
                 );
-                // Later chunks of a refused transfer are swallowed through m=0.
+                // Later chunks of a refused transfer are swallowed through m=0, without a second error.
                 if command.more {
-                    self.kitty_transfer = Some(KittyTransfer::Aborted { command });
+                    self.kitty_transfer = Some(KittyTransfer::Aborted { command, reported: true });
                 }
             }
+            // An image whose payload could not be staged whole is refused rather than drawn in part.
+            Some(Ok(command)) if command.carries_image() && !capture.whole() => {
+                self.reply_kitty_error(&command, "ENOMEM:image too large");
+                // Later chunks are swallowed through m=0 without a second error.
+                if command.more {
+                    self.kitty_transfer = Some(KittyTransfer::Aborted { command, reported: true });
+                }
+            }
+            // A whole first chunk that declares more opens the transfer, holding its payload only.
             Some(Ok(command)) if command.carries_image() && command.more => {
-                if !capture.admitted() || capture.truncated {
-                    self.kitty_transfer = Some(KittyTransfer::Aborted { command });
-                } else {
-                    // When: capture is admitted and not truncated, the first chunk opens the transfer without its header.
-                    let header_len = capture
-                        .data
-                        .iter()
-                        .position(|byte| *byte == b';')
-                        .map_or(capture.data.len(), |end| end + 1);
-                    let metadata = String::from_utf8_lossy(&capture.data[1..header_len.max(1)])
-                        .trim_end_matches(';')
-                        .to_owned();
-                    capture.data.drain(..header_len);
-                    self.kitty_transfer =
-                        Some(KittyTransfer::Loading { metadata, command, capture });
-                }
+                let metadata = String::from_utf8_lossy(capture.kitty_header_bytes()).into_owned();
+                let header_len = capture
+                    .data
+                    .iter()
+                    .position(|byte| *byte == b';')
+                    .map_or(capture.data.len(), |end| end + 1);
+                capture.data.drain(..header_len);
+                self.kitty_transfer = Some(KittyTransfer::Loading { metadata, command, capture });
             }
+            // A complete single-chunk transmit, query, place or delete dispatches now.
             Some(Ok(command)) => {
-                if let Some(event) = capture.into_kitty_command_event(row, col) {
+                let metadata = String::from_utf8_lossy(capture.kitty_header_bytes()).into_owned();
+                let data = if command.carries_image() {
+                    capture.into_kitty_command_event(row, col).map(|event| event.data)
+                } else {
+                    // When: carries_image is false, a place or delete ignores any payload bytes.
+                    Some(Vec::new())
+                };
+                if let Some(data) = data {
+                    let event =
+                        MediaEvent { protocol: MediaProtocol::Kitty, row, col, metadata, data };
                     self.dispatch_kitty_event(event, &command);
-                } else if command.carries_image() {
-                    // When: a whole-payload command could not be staged, kitty reports it rather than drawing a fragment.
-                    self.reply_kitty_error(&command, "ENOMEM:image too large");
                 }
             }
             Some(Err(error)) => {
-                // Malformed or unsupported: the legacy event keeps today's untyped dispatch, and the
-                // host's decode refuses it. No reply is possible without a parsed image id.
+                // A graphics command that does not parse is refused: answered when it names an image,
+                // never handed to the host to draw.
                 tracing::debug!(?error, "kitty graphics command not accepted");
-                if let Some(event) = capture.into_kitty_event(row, col) {
-                    self.performer.events.push(VtEvent::Media(event));
-                }
+                let target = KittyCommand::reply_target(capture.kitty_header_bytes());
+                self.reply_kitty_error(&target, error.reply_message());
             }
             None => {
-                if let Some(event) = capture.into_kitty_event(row, col) {
-                    self.performer.events.push(VtEvent::Media(event));
-                }
+                // When: kitty_command is None, the APC is not a graphics command; it is consumed silently.
             }
         }
         self.finish_escape();
+    }
+
+    /// Remember an in-flight first chunk as an aborted transfer when it declared more chunks.
+    ///
+    /// Called when CAN/SUB or a host cancel ends a staged APC, so the transfer's later chunks are
+    /// swallowed instead of starting a new image.
+    pub(super) fn abort_staged_first_chunk(&mut self) {
+        let Some(capture) = self.apc_capture.as_ref() else {
+            // When: apc_capture is None, no first chunk is in flight.
+            return;
+        };
+        if let Some(Ok(command)) = capture.kitty_command() {
+            // An in-flight first chunk of a chunked transfer leaves its tail to be swallowed.
+            if command.carries_image() && command.more && !command.continuation_only {
+                self.kitty_transfer = Some(KittyTransfer::Aborted { command, reported: false });
+            }
+        }
     }
 
     /// Push a kitty event and, when the host owes a reply, end the advance prefix after it.
@@ -354,7 +410,7 @@ impl Parser {
     /// Abort an open transfer whose remaining chunks must still be swallowed.
     pub(super) fn abort_kitty_transfer(&mut self) {
         if let Some(KittyTransfer::Loading { command, .. }) = self.kitty_transfer.take() {
-            self.kitty_transfer = Some(KittyTransfer::Aborted { command });
+            self.kitty_transfer = Some(KittyTransfer::Aborted { command, reported: false });
         }
     }
 

@@ -572,12 +572,19 @@ fn png_of_side(side: u32) -> Vec<u8> {
     encoded
 }
 
+/// A base64 PNG event for `protocol`; a kitty one declares `f=100`, as the protocol requires.
 fn base64_media_event(protocol: MediaProtocol, png: &[u8]) -> MediaEvent {
+    let metadata = if protocol == MediaProtocol::Kitty {
+        // When: protocol is Kitty, a PNG payload is declared with f=100 or it is not decoded.
+        "f=100".to_owned()
+    } else {
+        String::new()
+    };
     MediaEvent {
         protocol,
         row: 0,
         col: 0,
-        metadata: String::new(),
+        metadata,
         data: base64::engine::general_purpose::STANDARD.encode(png).into_bytes(),
     }
 }

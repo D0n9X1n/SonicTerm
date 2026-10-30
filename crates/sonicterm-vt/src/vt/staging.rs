@@ -178,7 +178,7 @@ fn reserve_from(pool: &AtomicUsize, capacity: usize, want: usize) -> bool {
 /// One capture's claim on its parser's staging pool.
 ///
 /// A separate guard rather than `impl Drop for MediaCapture` because
-/// `into_event`/`into_kitty_event` move fields out of the capture, which a
+/// `into_event`/`into_kitty_command_event` move fields out of the capture, which a
 /// `Drop` impl on the capture itself would forbid. As a field, it is dropped
 /// by those destructurings exactly as it is by an explicit `= None`, so every
 /// release path returns its bytes without any of them naming the pool.

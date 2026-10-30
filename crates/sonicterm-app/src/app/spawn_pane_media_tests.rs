@@ -120,3 +120,29 @@ fn the_pane_charge_counts_kitty_pixels_once() {
     let retained = super::super::super::media::retained_inline_media(&images);
     assert_eq!(retained.bytes, 4 * 2 * 4);
 }
+
+/// A kitty transmit with a second placement, then an anchored image, on one pane: the pool charge
+/// and `measure_pane` both report the pane's two pixel buffers once each, never the shared kitty
+/// buffer twice. The idle-pane pass trims the same store and leaves the charge equal to what
+/// remains.
+#[test]
+fn kitty_and_anchored_images_share_one_charge_measure_and_trim() {
+    let (pane, handles) = pane_and_worker_handles();
+    run(&handles, &claude_code_transmit(8, 4096));
+    run(&handles, b"\x1b_Ga=p,U=1,i=8,p=2,q=2\x1b\\");
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    run(&handles, format!("\x1b_Ga=T,f=100,i=9,q=2;{payload}\x1b\\").as_bytes());
+    let pool = Arc::clone(handles.inline_media_charge.lock().pool());
+    let expected = 2 * (4 * 2 * 4);
+    assert_eq!(pane.inline_images.lock().len(), 3, "two kitty placements and one anchored image");
+    assert_eq!(pool.bytes(), expected, "the charge counts each pixel buffer once");
+    let measured = super::super::super::retention::measure_pane(&pane).expect("uncontended");
+    assert_eq!(measured.inline_media.bytes, expected);
+    assert_eq!(measured.inline_media.items, 2);
+    let reclaimed = super::super::super::retention::trim_panes_over_pool_ceiling(&pool, [&pane]);
+    assert_eq!(reclaimed, 0, "under the ceiling, the idle pass leaves both buffers");
+    assert_eq!(
+        pool.bytes(),
+        super::super::super::media::retained_inline_media(&pane.inline_images.lock()).bytes
+    );
+}

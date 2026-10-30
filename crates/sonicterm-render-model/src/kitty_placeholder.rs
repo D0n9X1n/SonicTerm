@@ -188,6 +188,10 @@ pub struct FitRect {
 
 /// Fit an image of `image_w` x `image_h` pixels into a `box_cols` x `box_rows` cell box,
 /// preserving its aspect ratio and centring it, as kitty does for virtual placements.
+///
+/// `natural` is set when neither `c` nor `r` was given: the box is the image's own size rounded
+/// up to whole cells, so the image is drawn at 1:1 from the box's top-left rather than enlarged
+/// into the rounding.
 #[must_use]
 pub fn fit_in_box(
     box_cols: u32,
@@ -196,9 +200,21 @@ pub fn fit_in_box(
     image_h: u32,
     cell_width_px: f32,
     cell_height_px: f32,
+    natural: bool,
 ) -> FitRect {
     let box_w = box_cols as f32 * cell_width_px;
     let box_h = box_rows as f32 * cell_height_px;
+    if natural {
+        // When: natural is set, the box only rounds the image up to whole cells; it is drawn unscaled at the origin.
+        return FitRect {
+            x_px: 0.0,
+            y_px: 0.0,
+            width_px: image_w as f32,
+            height_px: image_h as f32,
+            box_cols,
+            box_rows,
+        };
+    }
     let scale = if image_w == 0 || image_h == 0 {
         0.0
     } else {

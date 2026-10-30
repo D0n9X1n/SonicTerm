@@ -321,7 +321,7 @@ fn concurrent_captures_contend_for_the_same_pools() {
 /// Ending a capture must return its share to everyone else.
 ///
 /// This is what fails if the charge is taken but never released — including if
-/// `into_kitty_event`/`into_event` stopped dropping the guard when they move
+/// `into_kitty_command_event`/`into_event` stopped dropping the guard when they move
 /// the payload out. A leak there is invisible in any single-capture test: the
 /// budget only misbehaves once the phantom count accumulates.
 ///

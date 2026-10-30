@@ -50,6 +50,7 @@ fn virtual_image(id: u64, image_id: u32, placement_id: u32) -> InlineImage {
             image_id,
             placement_id,
             show: KittyShow::Virtual { cols: 4, rows: 2 },
+            source_px: (40, 20),
         }),
     }
 }
@@ -98,9 +99,19 @@ fn uploads_anchored_and_deleted_images_draw_no_placeholder() {
     // Only virtual placements are drawn through placeholders; anything else, or nothing, draws blank.
     let grid = placeholder_grid(7, 0, 0, 2);
     let mut upload = virtual_image(1, 7, 0);
-    upload.kitty = Some(KittyTag { image_id: 7, placement_id: 0, show: KittyShow::Upload });
+    upload.kitty = Some(KittyTag {
+        image_id: 7,
+        placement_id: 0,
+        show: KittyShow::Upload,
+        source_px: (40, 20),
+    });
     let mut anchored = virtual_image(2, 7, 0);
-    anchored.kitty = Some(KittyTag { image_id: 7, placement_id: 0, show: KittyShow::Anchored });
+    anchored.kitty = Some(KittyTag {
+        image_id: 7,
+        placement_id: 0,
+        show: KittyShow::Anchored,
+        source_px: (40, 20),
+    });
     assert!(slices(&grid, &[upload, anchored]).is_empty());
     assert!(slices(&grid, &[]).is_empty());
     assert!(!has_virtual_placement(&[]));
@@ -141,4 +152,86 @@ fn a_slice_samples_its_part_of_the_atlas_tile() {
     for (got, want) in instance.uv.iter().zip(expect) {
         assert!((got - want).abs() < 1e-6, "uv {:?} != {expect:?}", instance.uv);
     }
+}
+
+/// A pane whose only image is a virtual placement still yields a visible placement where its
+/// placeholders are, so the atlas promotion decision sees renderable media on that frame.
+#[test]
+fn a_placeholder_only_pane_has_renderable_media() {
+    let grid = placeholder_grid(7, 0, 0, 4);
+    let images = [virtual_image(1, 7, 0)];
+    let mut placements = Vec::new();
+    push_pane_placements(
+        &mut placements,
+        &images,
+        std::iter::once((0, grid.row(0))),
+        (0.0, 0.0),
+        PaneRect::new(0.0, 0.0, 200.0, 100.0),
+        (10.0, 10.0),
+    );
+    assert_eq!(placements.len(), 1, "drawn only through its placeholder run, never at its anchor");
+    let renderable = placements
+        .iter()
+        .any(|placement| placement.visible_rect(10.0, 10.0, 200.0, 100.0).is_some());
+    assert!(renderable);
+    assert!(image_atlas_promotion_required(&GlyphAtlas::new(1, 1), renderable));
+}
+
+/// A pane without virtual placements adds only its anchored images and never reads its rows.
+#[test]
+fn a_pane_without_virtual_placements_is_not_scanned() {
+    let images = [InlineImage { kitty: None, ..virtual_image(1, 7, 0) }];
+    let mut placements = Vec::new();
+    let rows = std::iter::from_fn(
+        || -> Option<(u16, &sonicterm_render_model::boundary::grid::line::Line)> {
+            panic!("rows must not be read for a pane without virtual placements")
+        },
+    );
+    push_pane_placements(
+        &mut placements,
+        &images,
+        rows,
+        (0.0, 0.0),
+        PaneRect::new(0.0, 0.0, 9.0, 9.0),
+        (1.0, 1.0),
+    );
+    assert_eq!(placements.len(), 1);
+    assert!(placements[0].slice.is_none());
+}
+
+/// A change to a placement alone — its box, or its deletion — changes the frame's media identity.
+#[test]
+fn placement_only_changes_change_the_media_hash() {
+    let base = [virtual_image(1, 7, 0)];
+    let hash_of = |images: &[InlineImage]| inline_media_hash(std::iter::once((3, images)));
+    let mut resized = base.clone();
+    resized[0].kitty =
+        Some(KittyTag { show: KittyShow::Virtual { cols: 8, rows: 2 }, ..base[0].kitty.unwrap() });
+    let mut uploaded = base.clone();
+    uploaded[0].kitty = Some(KittyTag { show: KittyShow::Upload, ..base[0].kitty.unwrap() });
+    assert_eq!(hash_of(&base), hash_of(&base.clone()));
+    assert_ne!(hash_of(&base), hash_of(&resized));
+    assert_ne!(hash_of(&base), hash_of(&uploaded));
+}
+
+/// Without `c`/`r`, the box comes from the transmitted size: an image downscaled for retention
+/// still covers its natural cells, and is drawn 1:1 from the box's corner, not enlarged.
+#[test]
+fn natural_size_uses_the_transmitted_size() {
+    let grid = placeholder_grid(7, 0, 0, 4);
+    let mut image = virtual_image(1, 7, 0);
+    image.kitty = Some(KittyTag {
+        image_id: 7,
+        placement_id: 0,
+        show: KittyShow::Virtual { cols: 0, rows: 0 },
+        source_px: (80, 40),
+    });
+    let images = [image];
+    let found = slices(&grid, &images);
+    assert_eq!(
+        found[0].1.dest,
+        PaneRect::new(100.0, 50.0, 40.0, 10.0),
+        "row 0 of an 8x4-cell box, first 4 cells"
+    );
+    assert_eq!(found[0].1.source_uv, [0.0, 0.0, 0.5, 0.25]);
 }

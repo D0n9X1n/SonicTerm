@@ -83,7 +83,8 @@ fn f100_refuses_a_payload_that_is_not_png() {
 fn an_upload_is_stored_but_not_drawn() {
     // a=t keeps the pixels for a later placement without drawing them anywhere.
     let mut images = Vec::new();
-    let (reply, _) = apply_kitty(&mut images, KittyOp::Transmit(command("a=t,i=5"), pixels(1, 4)));
+    let (reply, _) =
+        apply_kitty(&mut images, KittyOp::Transmit(command("a=t,i=5"), pixels(1, 4), None));
     assert_eq!(reply, Some("OK"));
     assert_eq!(tags(&images)[0].show, KittyShow::Upload);
     assert!(!images[0].draws_at_anchor());
@@ -93,10 +94,10 @@ fn an_upload_is_stored_but_not_drawn() {
 fn retransmitting_an_id_replaces_every_entry_of_it() {
     // A new transmit under the same id drops the old pixels and their placements.
     let mut images = Vec::new();
-    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5"), pixels(1, 4)));
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5"), pixels(1, 4), None));
     let _ = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5,p=2"), 0, 0));
     let (_, removed) =
-        apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5"), pixels(2, 4)));
+        apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5"), pixels(2, 4), None));
     assert_eq!(removed.len(), 2);
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].id, 2, "the new pixels have a fresh buffer id");
@@ -115,7 +116,7 @@ fn placing_an_unknown_id_replies_enoent() {
 fn anonymous_placements_accumulate_and_named_ones_replace() {
     // p=0 adds another placement each time; a repeated nonzero p replaces its own placement.
     let mut images = Vec::new();
-    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=t,i=5"), pixels(1, 4)));
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=t,i=5"), pixels(1, 4), None));
     let _ = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5"), 0, 0));
     let _ = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5"), 0, 0));
     assert_eq!(images.len(), 2, "the upload became the first placement; the second was added");
@@ -127,7 +128,8 @@ fn anonymous_placements_accumulate_and_named_ones_replace() {
         vec![KittyTag {
             image_id: 5,
             placement_id: 7,
-            show: KittyShow::Virtual { cols: 4, rows: 0 }
+            show: KittyShow::Virtual { cols: 4, rows: 0 },
+            source_px: (1, 1),
         }]
     );
 }
@@ -136,11 +138,11 @@ fn anonymous_placements_accumulate_and_named_ones_replace() {
 fn lowercase_delete_keeps_the_data_and_uppercase_frees_it() {
     // d=i removes placements and leaves an upload that can be placed again; d=I removes everything.
     let mut images = Vec::new();
-    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5"), pixels(1, 4)));
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5"), pixels(1, 4), None));
     let _ = apply_kitty(&mut images, KittyOp::Delete(command("a=d,d=i,i=5")));
     assert_eq!(
         tags(&images),
-        vec![KittyTag { image_id: 5, placement_id: 0, show: KittyShow::Upload }]
+        vec![KittyTag { image_id: 5, placement_id: 0, show: KittyShow::Upload, source_px: (1, 1) }]
     );
     let (reply, _) = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5"), 0, 0));
     assert_eq!(reply, Some("OK"), "the kept data can be placed again");
@@ -152,7 +154,8 @@ fn lowercase_delete_keeps_the_data_and_uppercase_frees_it() {
 fn deleting_one_placement_keeps_the_others_and_their_pixels() {
     // d=I,p=N removes only that placement; the pixels stay while another placement uses them.
     let mut images = Vec::new();
-    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5,p=1"), pixels(1, 4)));
+    let _ =
+        apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5,p=1"), pixels(1, 4), None));
     let _ = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5,p=2"), 0, 0));
     let _ = apply_kitty(&mut images, KittyOp::Delete(command("a=d,d=I,i=5,p=1")));
     assert_eq!(tags(&images).iter().map(|tag| tag.placement_id).collect::<Vec<_>>(), vec![2]);
@@ -168,7 +171,7 @@ fn deleting_one_placement_keeps_the_others_and_their_pixels() {
 fn unsupported_delete_selectors_change_nothing() {
     // d=a/A depend on what is visible, which this subset does not decide; they are ignored.
     let mut images = Vec::new();
-    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=T,i=5"), pixels(1, 4)));
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=T,i=5"), pixels(1, 4), None));
     let _ = apply_kitty(&mut images, KittyOp::Delete(command("a=d,d=A")));
     let _ = apply_kitty(&mut images, KittyOp::Delete(command("a=d")));
     assert_eq!(images.len(), 1);
@@ -188,7 +191,8 @@ fn untagged_images_are_never_named_by_kitty_commands() {
 fn placements_sharing_pixels_are_retained_once() {
     // Two placements of one image hold one buffer; retention and eviction count it once.
     let mut images = Vec::new();
-    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5"), pixels(1, 1000)));
+    let _ =
+        apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=5"), pixels(1, 1000), None));
     let _ = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5"), 0, 0));
     images.push(pixels(2, 500));
     let retained = super::super::retained_inline_media(&images);
@@ -197,4 +201,69 @@ fn placements_sharing_pixels_are_retained_once() {
     assert_eq!(evicted.len(), 2, "both placements of the oldest buffer go together");
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].id, 2);
+}
+
+#[test]
+fn an_upload_with_u1_stays_an_upload() {
+    // a=t never displays, even with U=1; only a later a=p (or a=T) shows it.
+    let mut images = Vec::new();
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=t,U=1,i=5"), pixels(1, 4), None));
+    assert_eq!(tags(&images)[0].show, KittyShow::Upload);
+}
+
+#[test]
+fn uppercase_delete_frees_an_unplaced_upload() {
+    // d=I on an image that was only uploaded frees its pixels; an upload is not a placement.
+    let mut images = Vec::new();
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=t,i=5"), pixels(1, 4), None));
+    let (_, removed) = apply_kitty(&mut images, KittyOp::Delete(command("a=d,d=I,i=5")));
+    assert!(images.is_empty());
+    assert_eq!(removed.len(), 1);
+}
+
+#[test]
+fn placements_are_capped_per_pane() {
+    // Repeated anonymous placements stop at the per-pane cap with ENOSPC instead of growing without bound.
+    let mut images = Vec::new();
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=t,i=5"), pixels(1, 4), None));
+    for _ in 0..MAX_KITTY_PLACEMENTS {
+        let (reply, _) = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5"), 0, 0));
+        assert_eq!(reply, Some("OK"));
+    }
+    let (reply, _) = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5"), 0, 0));
+    assert_eq!(reply, Some("ENOSPC:too many placements"));
+    assert_eq!(images.len(), MAX_KITTY_PLACEMENTS);
+}
+
+#[test]
+fn eviction_follows_pixel_age_not_entry_order() {
+    // Re-placing an older image moves its entry to the end of the vector, but it is still the
+    // older buffer, so trimming evicts it before the newer one.
+    let mut images = Vec::new();
+    let _ = apply_kitty(
+        &mut images,
+        KittyOp::Transmit(command("a=T,U=1,i=5,p=1"), pixels(1, 1000), None),
+    );
+    images.push(pixels(2, 1000));
+    let _ = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5,p=1"), 0, 0));
+    assert_eq!(
+        images.last().map(|image| image.id),
+        Some(1),
+        "the re-placed entry moved to the end"
+    );
+    let evicted = super::super::take_trimmed_inline_images(&mut images, 1500);
+    assert!(evicted.iter().all(|image| image.id == 1), "the older buffer is evicted");
+    assert_eq!(images.iter().map(|image| image.id).collect::<Vec<_>>(), vec![2]);
+}
+
+#[test]
+fn the_source_size_is_kept_for_natural_sizing() {
+    // A transmit records the image's pixel size before downscaling, for placeholder boxes without c/r.
+    let mut images = Vec::new();
+    let mut image = pixels(1, 4);
+    image.width = 1024;
+    image.height = 512;
+    let command = command("a=T,U=1,i=5");
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command, image, None));
+    assert_eq!(tags(&images)[0].source_px, (1024, 512), "defaults to the decoded size");
 }

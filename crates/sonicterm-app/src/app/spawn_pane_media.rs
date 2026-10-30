@@ -3,7 +3,7 @@
 
 use sonicterm_vt::vt::{KittyAction, KittyCommand, MediaProtocol};
 
-use super::super::media::{apply_kitty, KittyOp};
+use super::super::media::{apply_kitty, kitty_source_size, KittyOp};
 use super::*;
 
 /// Decode and store one batch's media events, returning the kitty replies they owe.
@@ -53,7 +53,7 @@ where
                     push_reply(&mut replies, &command, "EBADPNG:cannot decode");
                     continue;
                 };
-                KittyOp::Transmit(command.clone(), image)
+                KittyOp::Transmit(command.clone(), image, kitty_source_size(&media))
             }
             KittyAction::Place => KittyOp::Place(command.clone(), media.row, media.col),
             KittyAction::Delete => KittyOp::Delete(command.clone()),

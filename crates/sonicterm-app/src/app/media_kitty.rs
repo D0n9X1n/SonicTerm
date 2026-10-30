@@ -13,22 +13,16 @@ use super::{decode_encoded_image, inline_image_decode_dimensions_allowed, rgba_t
 
 /// Decode a kitty transmit's pixels by its declared format.
 ///
-/// `f=100` must be PNG; `f=24`/`f=32` with `s` and `v` are raw RGB/RGBA whose size must match the
-/// data exactly. A raw format without a size, or a control section that does not parse, falls back
-/// to a guessed encoded format, which is how kitty payloads decoded before typed commands existed.
+/// `f=100` must be PNG; `f=24`/`f=32` (32 is the default) are raw RGB/RGBA whose size `s`x`v` must
+/// match the data exactly. Nothing is guessed: a raw format without its size, or a control
+/// section that does not parse, decodes to nothing, so a malformed query never answers `OK`.
 pub(super) fn decode_kitty_pixels(event: &MediaEvent) -> Option<(u32, u32, Vec<u8>)> {
-    let Ok(command) = KittyCommand::parse(event.metadata.as_bytes()) else {
-        // When: parse fails, the payload keeps the untyped decode with a guessed format.
-        return decode_encoded_image(&event.data, None);
-    };
-    match command.format {
-        24 | 32 if command.width_px != 0 && command.height_px != 0 => {
-            decode_raw(&event.data, &command)
-        }
-        100 => decode_encoded_image(&event.data, Some(image::ImageFormat::Png)),
-        // A raw format without s and v is an encoded image sent without f=100; its format is guessed.
-        _ => decode_encoded_image(&event.data, None),
+    let command = KittyCommand::parse(event.metadata.as_bytes()).ok()?;
+    if command.format == 100 {
+        // When: format is 100, the payload must be a PNG and nothing else.
+        return decode_encoded_image(&event.data, Some(image::ImageFormat::Png));
     }
+    decode_raw(&event.data, &command)
 }
 
 /// Decode raw RGB or RGBA after checking the declared size against the data, before allocating.
@@ -55,10 +49,33 @@ fn decode_raw(encoded: &[u8], command: &KittyCommand) -> Option<(u32, u32, Vec<u
     rgba_to_retained_bgra(image)
 }
 
+/// Most kitty placements one pane may hold. Each is a cheap entry sharing its image's buffer, but
+/// a client repeating `a=p` must not grow the store without bound.
+pub(in crate::app) const MAX_KITTY_PLACEMENTS: usize = 1024;
+
+/// The pixel size a kitty transmit declares before any downscale: `s`x`v` for raw data, the PNG
+/// header for `f=100`. `None` when neither is readable, and the decoded size is used instead.
+pub(in crate::app) fn kitty_source_size(event: &MediaEvent) -> Option<(u32, u32)> {
+    use base64::Engine;
+    let command = KittyCommand::parse(event.metadata.as_bytes()).ok()?;
+    if command.format != 100 {
+        // When: format is raw RGB or RGBA, the control keys s and v carry the size.
+        return (command.width_px != 0 && command.height_px != 0)
+            .then_some((command.width_px, command.height_px));
+    }
+    // A PNG's size is in its IHDR chunk, bytes 16..24; 32 base64 characters decode 24 bytes.
+    let prefix = event.data.get(..32)?;
+    let header = base64::engine::general_purpose::STANDARD.decode(prefix).ok()?;
+    let width = u32::from_be_bytes(header.get(16..20)?.try_into().ok()?);
+    let height = u32::from_be_bytes(header.get(20..24)?.try_into().ok()?);
+    (width != 0 && height != 0).then_some((width, height))
+}
+
 /// What the worker does with one kitty event once its pixels, if any, are decoded.
 pub(in crate::app) enum KittyOp {
-    /// Store `image` under the command's id and show it as the command asks.
-    Transmit(KittyCommand, InlineImage),
+    /// Store `image` under the command's id and show it as the command asks; the size is the
+    /// transmitted one, or `None` to use the decoded size.
+    Transmit(KittyCommand, InlineImage, Option<(u32, u32)>),
     /// Add a placement of an existing image at the event's cursor.
     Place(KittyCommand, u16, u16),
     /// Remove placements and possibly data.
@@ -67,15 +84,24 @@ pub(in crate::app) enum KittyOp {
 
 /// How a transmit or place command shows its image.
 fn show_for(command: &KittyCommand) -> KittyShow {
-    if command.virtual_placement {
-        KittyShow::Virtual { cols: command.cols, rows: command.rows }
-    } else if command.action == KittyAction::Transmit {
-        // When: action is Transmit without virtual_placement, a=t stores the image without showing it.
+    // a=t stores the image without showing it, even with U=1.
+    if command.action == KittyAction::Transmit {
         KittyShow::Upload
+    } else if command.virtual_placement {
+        // When: virtual_placement is set on a=T or a=p, the image draws only through placeholder cells.
+        KittyShow::Virtual { cols: command.cols, rows: command.rows }
     } else {
-        // When: neither virtual_placement nor a Transmit action applies, a=T draws at the capture cursor.
+        // When: neither a Transmit action nor virtual_placement applies, a=T draws at the capture cursor.
         KittyShow::Anchored
     }
+}
+
+/// Kitty placements (entries that are not plain uploads) in `images`.
+fn placement_count(images: &[InlineImage]) -> usize {
+    images
+        .iter()
+        .filter(|entry| matches!(entry.kitty, Some(tag) if tag.show != KittyShow::Upload))
+        .count()
 }
 
 /// Apply one kitty operation to a pane's images, returning the reply message and the entries
@@ -85,7 +111,7 @@ pub(in crate::app) fn apply_kitty(
     operation: KittyOp,
 ) -> (Option<&'static str>, Vec<InlineImage>) {
     match operation {
-        KittyOp::Transmit(command, mut image) => {
+        KittyOp::Transmit(command, mut image, source_px) => {
             // When: operation is Transmit, the image replaces every entry of its id before it is tagged and stored.
             let show = show_for(&command);
             let removed = if command.image_id == 0 {
@@ -103,6 +129,7 @@ pub(in crate::app) fn apply_kitty(
                 image_id: command.image_id,
                 placement_id: command.placement_id,
                 show,
+                source_px: source_px.unwrap_or((image.width, image.height)),
             });
             images.push(image);
             (Some("OK"), removed)
@@ -116,12 +143,24 @@ pub(in crate::app) fn apply_kitty(
                 // When: no stored entry has image_id, kitty answers ENOENT and places nothing.
                 return (Some("ENOENT:no such image"), Vec::new());
             };
+            let source_px = tag_of(source).source_px;
             let mut placed = source.clone();
+            let replaces = |entry: &InlineImage| {
+                let tag = tag_of(entry);
+                tag.image_id == command.image_id
+                    && (tag.show == KittyShow::Upload
+                        || (command.placement_id != 0 && tag.placement_id == command.placement_id))
+            };
+            if !images.iter().any(replaces) && placement_count(images) >= MAX_KITTY_PLACEMENTS {
+                // When: the pane already holds MAX_KITTY_PLACEMENTS and this one replaces none, it is refused.
+                return (Some("ENOSPC:too many placements"), Vec::new());
+            }
             placed.row = row;
             placed.col = col;
             placed.kitty = Some(KittyTag {
                 image_id: command.image_id,
                 placement_id: command.placement_id,
+                source_px,
                 show: if command.virtual_placement {
                     KittyShow::Virtual { cols: command.cols, rows: command.rows }
                 } else {
@@ -129,12 +168,7 @@ pub(in crate::app) fn apply_kitty(
                     KittyShow::Anchored
                 },
             });
-            let mut removed = take_where(images, |entry| {
-                let tag = tag_of(entry);
-                tag.image_id == command.image_id
-                    && (tag.show == KittyShow::Upload
-                        || (command.placement_id != 0 && tag.placement_id == command.placement_id))
-            });
+            let mut removed = take_where(images, replaces);
             images.push(placed);
             // An upload or a replaced placement shares the placed entry's buffer; dropping it frees nothing.
             removed.retain(|entry| {
@@ -167,14 +201,24 @@ fn delete(images: &mut Vec<InlineImage>, command: &KittyCommand) -> Vec<InlineIm
             && tag.show != KittyShow::Upload
             && (command.placement_id == 0 || tag.placement_id == command.placement_id)
     });
-    let still_placed = images.iter().any(|entry| tag_of(entry).image_id == id);
+    let still_placed = images.iter().any(|entry| {
+        let tag = tag_of(entry);
+        tag.image_id == id && tag.show != KittyShow::Upload
+    });
     // With free set and no placement of id left, the stored upload is freed too; without free, it is kept.
     if free && !still_placed {
         removed.extend(take_where(images, |entry| tag_of(entry).image_id == id));
     } else if !still_placed {
         // When: still_placed is false without free, the data stays as an unshown upload.
-        if let Some(mut kept) = removed.pop() {
-            kept.kitty = Some(KittyTag { image_id: id, placement_id: 0, show: KittyShow::Upload });
+        let has_upload = images.iter().any(|entry| tag_of(entry).image_id == id);
+        if let (false, Some(mut kept)) = (has_upload, removed.pop()) {
+            let source_px = tag_of(&kept).source_px;
+            kept.kitty = Some(KittyTag {
+                image_id: id,
+                placement_id: 0,
+                show: KittyShow::Upload,
+                source_px,
+            });
             images.push(kept);
         }
     }
@@ -183,7 +227,12 @@ fn delete(images: &mut Vec<InlineImage>, command: &KittyCommand) -> Vec<InlineIm
 
 /// The kitty tag of `entry`, or an id-0 tag for untagged images, which no kitty command names.
 fn tag_of(entry: &InlineImage) -> KittyTag {
-    entry.kitty.unwrap_or(KittyTag { image_id: 0, placement_id: 0, show: KittyShow::Anchored })
+    entry.kitty.unwrap_or(KittyTag {
+        image_id: 0,
+        placement_id: 0,
+        show: KittyShow::Anchored,
+        source_px: (entry.width, entry.height),
+    })
 }
 
 /// Move every entry matching `predicate` out of `images`, preserving the order of the rest.

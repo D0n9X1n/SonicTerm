@@ -51,20 +51,9 @@ impl GpuRenderer {
                 .fold(0usize, |total, image| total.saturating_add(image.bgra.len()))
         };
         self.retained_inline_media_bytes = retained_inline_media_bytes;
-        let inline_media_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hash = std::collections::hash_map::DefaultHasher::new();
-            for pane in panes.iter() {
-                pane.id.hash(&mut hash);
-                pane.inline_images.len().hash(&mut hash);
-                for image in &pane.inline_images {
-                    (image.id, image.row, image.col, image.width, image.height).hash(&mut hash);
-                    // A placement-only change (new box, deleted placement) must not read as an unchanged frame.
-                    image.kitty.hash(&mut hash);
-                }
-            }
-            hash.finish()
-        };
+        let inline_media_hash = kitty_placeholders::inline_media_hash(
+            panes.iter().map(|pane| (pane.id, pane.inline_images.as_slice())),
+        );
 
         // Advance the atlas frame counter so LRU eviction can
         // distinguish glyphs touched this frame from cold ones. Cheap

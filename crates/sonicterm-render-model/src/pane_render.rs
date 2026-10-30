@@ -60,6 +60,9 @@ pub struct KittyTag {
     pub placement_id: u32,
     /// How this entry is shown.
     pub show: KittyShow,
+    /// The image's pixel size as transmitted, before any downscale to the rendered cap; a
+    /// placeholder box without `c`/`r` is sized from it, as kitty sizes it.
+    pub source_px: (u32, u32),
 }
 
 impl InlineImage {

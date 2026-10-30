@@ -15,7 +15,43 @@ impl MediaCapture {
             seen: 0,
             growth_exhausted: false,
             reservation: StagingReservation::admit(pool),
+            kitty_header: (protocol == MediaProtocol::Kitty).then(KittyHeader::default),
         }
+    }
+
+    /// Record `byte` in the kitty control section while it is still open.
+    fn note_kitty_header(&mut self, byte: u8) {
+        let Some(header) = self.kitty_header.as_mut() else {
+            // When: kitty_header is None, this is a Sixel or iTerm2 capture with no control section.
+            return;
+        };
+        if header.complete {
+            // When: the header is complete, the byte is payload.
+            return;
+        }
+        if !header.started {
+            // When: started is false, this is the APC's first byte, which names the command family.
+            header.started = true;
+            header.graphics = byte == b'G';
+            return;
+        }
+        if byte == b';' || header.bytes.len() == vt_kitty_stream::MAX_KITTY_HEADER_BYTES {
+            // When: byte ends the section or the section reached its bound, later bytes are payload.
+            header.complete = true;
+            return;
+        }
+        header.bytes.push(byte);
+    }
+
+    /// The parsed control section of a kitty graphics APC, or `None` for any other capture.
+    pub(super) fn kitty_command(&self) -> Option<Result<KittyCommand, KittyCommandError>> {
+        let header = self.kitty_header.as_ref()?;
+        header.graphics.then(|| KittyCommand::parse(&header.bytes))
+    }
+
+    /// The control section's raw bytes, for answering a command that did not parse.
+    pub(super) fn kitty_header_bytes(&self) -> &[u8] {
+        self.kitty_header.as_ref().map_or(&[], |header| header.bytes.as_slice())
     }
 
     /// Bytes this capture is holding, counting reserved capacity.
@@ -23,12 +59,16 @@ impl MediaCapture {
     /// Capacity rather than length because that is what the allocator is
     /// actually holding: a capture that grew and was truncated still owns the
     /// larger buffer.
+    ///
+    /// A kitty control section copy is not counted: it is bounded at 512 bytes per capture and is
+    /// kept outside the staging budget on purpose, so a refused capture can still be answered.
     pub(super) fn retained_bytes(&self) -> usize {
         self.data.capacity().saturating_add(self.metadata.capacity())
     }
 
     pub(super) fn append_byte(&mut self, byte: u8) {
         self.seen = self.seen.saturating_add(1);
+        self.note_kitty_header(byte);
 
         if self.data.len() < self.reservation.budget() {
             // When: data still fits its reservation budget, so keeping byte preserves a complete payload without exceeding the pool.
@@ -68,7 +108,7 @@ impl MediaCapture {
     }
 
     /// Whether this capture holds the whole payload it was offered.
-    fn whole(&self) -> bool {
+    pub(super) fn whole(&self) -> bool {
         self.admitted() && !self.truncated
     }
 
@@ -121,36 +161,9 @@ impl MediaCapture {
         })
     }
 
-    pub(super) fn into_kitty_event(mut self, row: u16, col: u16) -> Option<MediaEvent> {
-        if !self.admitted() {
-            // When: admitted is false, so the process pool refused this capture and no payload bytes are safe to dispatch.
-            return None;
-        }
-        if self.pending_esc {
-            self.append_byte(0x1b);
-            self.pending_esc = false;
-        }
-        if !self.whole() {
-            // When: whole is false after restoring pending ESC, so decoding would consume an incomplete Kitty payload.
-            return None;
-        }
-        if self.data.first().copied() != Some(b'G') {
-            // When: data lacks Kitty's G introducer, so treating the remaining bytes as graphics would misclassify an APC sequence.
-            return None;
-        }
-        let payload = &self.data[1..];
-        let (metadata, data) = split_once_byte(payload, b';')
-            .map(|(metadata_bytes, data_bytes)| {
-                (String::from_utf8_lossy(metadata_bytes).into_owned(), data_bytes.to_vec())
-            })
-            .unwrap_or_else(|| (String::new(), payload.to_vec()));
-        Some(MediaEvent { protocol: MediaProtocol::Kitty, row, col, metadata, data })
-    }
-
     /// Dispatch a kitty command whose control section parsed, splitting at the first `;`.
     ///
-    /// Unlike [`Self::into_kitty_event`], an APC without `;` is all control section and no
-    /// payload, which is what a payload-less `a=p` or `a=d` is.
+    /// An APC without `;` is all control section and no payload.
     pub(super) fn into_kitty_command_event(mut self, row: u16, col: u16) -> Option<MediaEvent> {
         if !self.whole() || self.data.first().copied() != Some(b'G') {
             // When: the capture is not whole or lacks G, it cannot be a parsed kitty command.
@@ -312,6 +325,7 @@ impl Parser {
             // When: released and live_capture_count show no capture, keep ground unchanged rather than swallowing ordinary output.
             return 0;
         }
+        self.abort_staged_first_chunk();
         let in_sequence = self.apc_capture.is_some()
             || self.apc_scratch.is_some()
             || self.performer.dcs_capture.is_some()

@@ -150,3 +150,24 @@ fn kitty_placeholder_cells_are_not_shaped() {
     let columns: Vec<u16> = visible_cells(&row).iter().map(|(col, _)| *col).collect();
     assert_eq!(columns, [0, 3]);
 }
+
+/// A placeholder between two characters splits the run, so `-` and `>` on either side of an image
+/// are shaped apart and never form the `->` ligature across it.
+#[test]
+fn a_placeholder_gap_splits_the_shaping_run() {
+    let mut placeholder = cell(
+        sonicterm_render_model::kitty_placeholder::PLACEHOLDER,
+        CellFlags::empty(),
+        Color::Rgb(0, 0, 7),
+    );
+    placeholder.set_extras(Some("\u{0305}\u{0305}".into()));
+    let row = Row::from_flat(vec![
+        cell('-', CellFlags::empty(), Color::Default),
+        placeholder,
+        cell('>', CellFlags::empty(), Color::Default),
+    ]);
+    let cells = visible_cells(&row);
+    let runs: Vec<Vec<u16>> =
+        row_shape_runs(&cells).map(|run| run.cells.iter().map(|(col, _)| *col).collect()).collect();
+    assert_eq!(runs, vec![vec![0], vec![2]]);
+}
