@@ -449,6 +449,8 @@ try {
 finally {
     Remove-Item -LiteralPath $processRoot -Recurse -Force
 }
+# The rejected children above leave a nonzero $LASTEXITCODE; GitHub's pwsh step exits with it unless reset.
+$global:LASTEXITCODE = 0
 
 # Administrative extraction is quiet, bounded, and directed to scratch rather than an application install.
 $originalExtractionCommand = ${function:Invoke-MsiExtractionCommand}
