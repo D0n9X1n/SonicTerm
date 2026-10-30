@@ -20,11 +20,16 @@ pub(crate) struct ShapeRun<'row, 'cells> {
 }
 
 /// The row's visible cells with their original column indices: every cell except a wide
-/// character's continuation, which belongs to the cell before it.
+/// character's continuation, which belongs to the cell before it, and a kitty placeholder cell,
+/// whose picture the image phase draws. A placeholder is an unassigned private-use codepoint, so
+/// shaping it would only search every fallback font and draw tofu over the image.
 pub(crate) fn visible_cells(row: &Row) -> Vec<(u16, &Cell)> {
     row.iter()
         .enumerate()
-        .filter(|(_, cell)| !cell.flags.contains(CellFlags::WIDE_CONT))
+        .filter(|(_, cell)| {
+            !cell.flags.contains(CellFlags::WIDE_CONT)
+                && !sonicterm_render_model::kitty_placeholder::is_placeholder(cell)
+        })
         .map(|(col, cell)| (col as u16, cell))
         .collect()
 }

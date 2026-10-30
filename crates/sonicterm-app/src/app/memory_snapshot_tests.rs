@@ -693,6 +693,7 @@ pub(super) fn decode_image(pane: &super::super::PaneState, id: u64, bytes: usize
             width: 1,
             height: 1,
             bgra: Arc::from(vec![0u8; bytes]),
+            kitty: None,
         });
         crate::app::media::trim_inline_images_charged(&mut images, &pane.inline_media_charge)
     };

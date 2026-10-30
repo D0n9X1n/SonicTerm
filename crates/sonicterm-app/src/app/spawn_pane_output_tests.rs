@@ -493,6 +493,7 @@ fn release_is_sent_after_the_batch_generation_is_published() {
             width: 1,
             height: 1,
             bgra: Arc::from([1, 2, 3, 255]),
+            kitty: None,
         })
     };
     let mut queued = Vec::new();

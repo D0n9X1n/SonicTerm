@@ -41,10 +41,15 @@ impl GpuRenderer {
         let now = Instant::now();
         let broadcast_participant_ids: Vec<u64> =
             panes.iter().filter(|pane| pane.is_broadcast_participant).map(|pane| pane.id).collect();
-        let retained_inline_media_bytes = panes
-            .iter()
-            .flat_map(|pane| &pane.inline_images)
-            .fold(0usize, |total, image| total.saturating_add(image.bgra.len()));
+        // Kitty placements share a pixel buffer and `id`; each buffer is counted once.
+        let retained_inline_media_bytes = {
+            let mut seen = std::collections::HashSet::new();
+            panes
+                .iter()
+                .flat_map(|pane| &pane.inline_images)
+                .filter(|image| seen.insert(image.id))
+                .fold(0usize, |total, image| total.saturating_add(image.bgra.len()))
+        };
         self.retained_inline_media_bytes = retained_inline_media_bytes;
         let inline_media_hash = {
             use std::hash::{Hash, Hasher};
@@ -54,6 +59,8 @@ impl GpuRenderer {
                 pane.inline_images.len().hash(&mut hash);
                 for image in &pane.inline_images {
                     (image.id, image.row, image.col, image.width, image.height).hash(&mut hash);
+                    // A placement-only change (new box, deleted placement) must not read as an unchanged frame.
+                    image.kitty.hash(&mut hash);
                 }
             }
             hash.finish()

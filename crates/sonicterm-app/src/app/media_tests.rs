@@ -1,7 +1,15 @@
 use super::*;
 
 fn image(id: u64, bytes: usize) -> InlineImage {
-    InlineImage { id, row: 0, col: 0, width: 1, height: 1, bgra: Arc::from(vec![0; bytes]) }
+    InlineImage {
+        id,
+        row: 0,
+        col: 0,
+        width: 1,
+        height: 1,
+        bgra: Arc::from(vec![0; bytes]),
+        kitty: None,
+    }
 }
 
 #[test]

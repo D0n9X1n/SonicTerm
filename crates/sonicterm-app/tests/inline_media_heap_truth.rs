@@ -220,6 +220,7 @@ fn reported_bytes_track_real_heap() {
                         width: 1,
                         height: 1,
                         bgra,
+                        kitty: None,
                     });
                 }
             }
@@ -390,6 +391,7 @@ fn releasing_media_returns_what_the_figure_reported() {
                     width: 1,
                     height: 1,
                     bgra: Arc::from(vec![0u8; IMAGE_BYTES]),
+                    kitty: None,
                 });
             }
         }

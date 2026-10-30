@@ -36,7 +36,8 @@ pub use geometry::*;
 pub use inputs::*;
 pub use painter::*;
 pub use pane_render::{
-    AckReceipt, AckRows, BorrowedSource, CursorStyle, FrameSource, InlineImage, PaneId, PaneRender,
+    AckReceipt, AckRows, BorrowedSource, CursorStyle, FrameSource, InlineImage, KittyShow,
+    KittyTag, PaneId, PaneRender,
 };
 
 #[cfg(test)]

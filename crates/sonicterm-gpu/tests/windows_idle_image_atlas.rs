@@ -168,6 +168,7 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
                 width: IMAGE_SIDE_PX,
                 height: IMAGE_SIDE_PX,
                 bgra: Arc::from(IMAGE_BGRA.repeat((IMAGE_SIDE_PX * IMAGE_SIDE_PX) as usize)),
+                kitty: None,
             }]
         } else {
             Vec::new()

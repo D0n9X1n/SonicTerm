@@ -26,6 +26,7 @@ fn measured_inline_media_mixed_transitions_update_existing_charges() {
                     width: (*size / 4) as u32,
                     height: 1,
                     bgra: Arc::from(vec![0; *size]),
+                    kitty: None,
                 })
                 .collect();
         }

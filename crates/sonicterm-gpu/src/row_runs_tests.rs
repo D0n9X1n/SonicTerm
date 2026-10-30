@@ -129,3 +129,24 @@ fn the_inspector_reports_texts_styles_and_ascii_fast_flags() {
         [("x".to_owned(), false, true, true), ("-> ".to_owned(), false, false, false)]
     );
 }
+
+/// Kitty placeholder cells (U+10EEEE with row/column marks) are not text: they leave the shaped
+/// cells, so no fallback search or tofu is drawn over the image, and the cells around them keep
+/// their columns.
+#[test]
+fn kitty_placeholder_cells_are_not_shaped() {
+    let mut placeholder = cell(
+        sonicterm_render_model::kitty_placeholder::PLACEHOLDER,
+        CellFlags::empty(),
+        Color::Rgb(0, 0, 7),
+    );
+    placeholder.set_extras(Some("\u{0305}\u{0305}".into()));
+    let row = Row::from_flat(vec![
+        cell('a', CellFlags::empty(), Color::Default),
+        placeholder.clone(),
+        placeholder,
+        cell('b', CellFlags::empty(), Color::Default),
+    ]);
+    let columns: Vec<u16> = visible_cells(&row).iter().map(|(col, _)| *col).collect();
+    assert_eq!(columns, [0, 3]);
+}

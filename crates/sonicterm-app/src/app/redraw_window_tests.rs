@@ -51,6 +51,7 @@ pub(super) fn an_image_atlas_release_leaves_the_pane_media_charge_unchanged() {
         width: 32,
         height: 32,
         bgra: Arc::from(vec![0; 32 * 32 * 4]),
+        kitty: None,
     };
     assert!(app.__test_set_pane_inline_images(main, pane_id, vec![image]));
     app.reconcile_pane_owners();
