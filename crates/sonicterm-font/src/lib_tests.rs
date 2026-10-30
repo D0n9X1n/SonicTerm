@@ -677,3 +677,44 @@ fn a_fontconfig_substitution_for_a_missing_family_is_reported() {
     assert_eq!(resolve("monospace"), "Rec Mono St.Helens");
     assert!(!reported("monospace"), "an alias resolving to another face is not a miss");
 }
+
+#[test]
+fn every_scheduled_fallback_request_reports_its_end_including_a_cancelled_one() {
+    // `on_schedule` counts a request when it is queued and `after_request` when the worker ends it,
+    // so a test can wait until both counts match. A request cancelled by a reload mid-lookup still
+    // ends; a later request in the new configuration ends too.
+    let gate = Arc::new(Latch::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = fallback_configuration("request-ends", locator(&gate, &calls));
+    let (scheduled, ended) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (counted_schedule, counted_end) = (Arc::clone(&scheduled), Arc::clone(&ended));
+    fixture.configuration.set_fallback_worker_hooks_for_test(crate::FallbackWorkerHooks {
+        on_schedule: Some(Arc::new(move || {
+            counted_schedule.fetch_add(1, AtomicOrdering::SeqCst);
+        })),
+        after_request: Some(Arc::new(move || {
+            counted_end.fetch_add(1, AtomicOrdering::SeqCst);
+        })),
+        ..Default::default()
+    });
+    let wait_for_end = |count: usize| {
+        let started = Instant::now();
+        while ended.load(AtomicOrdering::SeqCst) < count {
+            assert!(started.elapsed() < WORKER_WAIT, "request {count} never reported its end");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let font = fixture.configuration.default_font().unwrap();
+    assert_eq!(frame_glyph(&font, 'é'), 0);
+    // Counting happens on the scheduling thread, before the worker can start the lookup.
+    assert_eq!(scheduled.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(ended.load(AtomicOrdering::SeqCst), 0);
+    fixture.configuration.config_changed(&fixture.configuration.config()).unwrap();
+    gate.open();
+    wait_for_end(1);
+    let reloaded = fixture.configuration.default_font().unwrap();
+    assert_eq!(frame_glyph(&reloaded, 'ñ'), 0);
+    assert_eq!(scheduled.load(AtomicOrdering::SeqCst), 2);
+    wait_for_end(2);
+    assert_eq!(ended.load(AtomicOrdering::SeqCst), 2);
+}

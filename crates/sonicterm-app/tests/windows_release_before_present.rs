@@ -12,7 +12,10 @@ use sonicterm_cfg::{
 };
 use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use winit::{
@@ -58,6 +61,21 @@ struct Fixture {
     app: App,
     id: WindowId,
     pane: u64,
+    fallback: FallbackRequests,
+}
+
+/// Fallback requests the renderer has queued and its worker has ended.
+#[derive(Clone, Default)]
+struct FallbackRequests {
+    scheduled: Arc<AtomicU64>,
+    ended: Arc<AtomicU64>,
+}
+
+impl FallbackRequests {
+    /// `(scheduled, ended)` now.
+    fn counts(&self) -> (u64, u64) {
+        (self.scheduled.load(Ordering::SeqCst), self.ended.load(Ordering::SeqCst))
+    }
 }
 
 /// Whether this host enumerates no wgpu adapter at all, established apart from renderer
@@ -83,6 +101,17 @@ fn wgpu_construction_failure(error: impl std::fmt::Display) -> String {
 /// A wgpu renderer is skipped as `HOST_INCAPABLE: ...` only when the host enumerates no adapter;
 /// any other construction error fails. The presenter each fixture resolved is checked.
 fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixture, String> {
+    fixture_with_fallback_delay(active, role, software, None)
+}
+
+/// [`fixture`], with each fallback request held on the worker until `delay` after construction
+/// when given, so a request can end after the first frames as it does on a slow font scan.
+fn fixture_with_fallback_delay(
+    active: &ActiveEventLoop,
+    role: Role,
+    software: bool,
+    delay: Option<Duration>,
+) -> Result<Fixture, String> {
     let window = Arc::new(
         active
             .create_window(
@@ -133,6 +162,20 @@ fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixtu
         Err(error) => return Err(error.to_string()),
     };
     renderer.set_cursor_blink(false);
+    let fallback = FallbackRequests::default();
+    let (scheduled, ended) = (Arc::clone(&fallback.scheduled), Arc::clone(&fallback.ended));
+    let release_at = delay.map(|delay| Instant::now() + delay);
+    renderer.__test_set_fallback_request_hooks(
+        Arc::new(move || {
+            scheduled.fetch_add(1, Ordering::SeqCst);
+        }),
+        Arc::new(move || {
+            while release_at.is_some_and(|release_at| Instant::now() < release_at) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            ended.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
     let mut app = App::new(theme, config, Keymap::default());
     app.__test_set_software_render_degrade(software);
     let main_pane = app.__test_seed_tab("main");
@@ -149,7 +192,43 @@ fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixtu
     let degraded =
         app.__test_window_renderer_mut(id).map(|renderer| renderer.is_software_render_degraded());
     check(degraded == Some(software), &format!("the renderer presents through GDI={software}"))?;
-    Ok(Fixture { app, id, pane })
+    let mut fixture = Fixture { app, id, pane, fallback };
+    settle_fallback(&mut fixture, active)?;
+    // Settling consumed the first frame; every row is dirty again, as on a fresh window.
+    let parser =
+        fixture.app.__test_child_pane_parser(fixture.id, fixture.pane).ok_or("no pane parser")?;
+    parser.lock().grid_mut().mark_all_dirty();
+    Ok(fixture)
+}
+
+/// Draw until every fallback request the frames queued has ended and no frame has presented for a
+/// second, within twenty seconds. A request is counted when it is queued, before any font scan,
+/// so a lookup still running keeps the counts apart. A request that ends later applies a newer
+/// font generation, which presents a frame on its own and would add an unrequested receipt inside
+/// a case.
+fn settle_fallback(fixture: &mut Fixture, active: &ActiveEventLoop) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut observed = None;
+    let mut quiet_since = Instant::now();
+    loop {
+        dispatch(fixture, active, Instant::now());
+        let (scheduled, ended) = fixture.fallback.counts();
+        let frames = fixture.app.__test_window_successful_frames(fixture.id).unwrap_or(0);
+        let state = (scheduled, ended, frames);
+        if observed != Some(state) {
+            // When: a request was queued or ended, or a frame presented, the quiet second restarts.
+            observed = Some(state);
+            quiet_since = Instant::now();
+        }
+        if scheduled == ended && quiet_since.elapsed() >= Duration::from_secs(1) {
+            return Ok(());
+        }
+        check(
+            Instant::now() < deadline,
+            &format!("the font fallback settles: {scheduled} queued, {ended} ended"),
+        )?;
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Dispatch the real `RedrawRequested` until the renderer counts one more presented frame.
@@ -370,9 +449,31 @@ fn ime_area_is_the_drawn_cursor(active: &ActiveEventLoop, role: Role) -> Result<
     )
 }
 
+/// Test 9: a fixture whose fallback request ends late is settled before any case starts, so the
+/// request cannot present an extra frame inside a case. Each request is held six seconds on the
+/// worker, longer than any quiet window, so only waiting for the request's end can pass.
+fn late_fallback_lands_before_cases(active: &ActiveEventLoop, role: Role) -> Result<(), String> {
+    let mut fixture =
+        fixture_with_fallback_delay(active, role, true, Some(Duration::from_secs(6)))?;
+    dispatch(&mut fixture, active, Instant::now());
+    let (scheduled, ended) = fixture.fallback.counts();
+    if scheduled == 0 {
+        // When: no frame queued a fallback request, this host cannot exercise the late-request path.
+        println!(
+            "capability=HOST_INCAPABLE case={role:?}-late-fallback reason=no fallback request"
+        );
+        return Ok(());
+    }
+    check(
+        scheduled == ended,
+        &format!("every fallback request ended: {scheduled} queued, {ended} ended"),
+    )
+}
+
 fn run(active: &ActiveEventLoop) -> Result<(), String> {
     for role in [Role::Main, Role::Child] {
         let named = |error: String| format!("{role:?}: {error}");
+        late_fallback_lands_before_cases(active, role).map_err(named)?;
         for software in [true, false] {
             match parse_during_present_is_drawn_then_acknowledged(active, role, software) {
                 Err(reason) if !software && reason.starts_with("HOST_INCAPABLE") => {
