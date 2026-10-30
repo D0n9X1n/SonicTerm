@@ -271,9 +271,15 @@ Which image sequences reach the parser therefore depends on the console
 runtime. The system ConPTY in Windows 11 build 26300.9457 (`conhost.exe`
 10.0.26100.9444) forwards iTerm2 `OSC 1337;File=` sequences unchanged (checked
 with 4-byte, 48 KiB and 1 MiB payloads) and drops Sixel DCS and kitty APC
-sequences. The packaged runtime also forwards Sixel DCS sequences and single and
-chunked kitty APC sequences, so a kitty PNG image that a program writes in a
-Windows pane displays with GDI and with wgpu on its software adapter. Other
+sequences. The packaged runtime also forwards Sixel DCS sequences, single and
+chunked kitty APC sequences, and kitty Unicode placeholder cells (U+10EEEE with
+their combining row and column marks and the truecolor foreground that names the
+image) unchanged, so a kitty PNG image that a program writes in a Windows pane
+displays with GDI and with wgpu on its software adapter, and a virtual placement
+drawn through placeholder cells displays with GDI. Resizing the pseudoconsole
+wider or narrower makes the runtime send no repaint, so placeholder cells already
+on screen are not rewritten. The `windows_kitty_images` test feeds each form, as
+the runtime forwards it, through a pane and checks the presented GDI frame. Other
 Windows builds and payloads, and output relayed through programs such as
 `ssh.exe` or `wsl.exe`, have not been checked.
 
@@ -463,8 +469,9 @@ with a file-path query (`t=f`), which is refused, and then sends the image
 directly (`t=d`). Inside tmux or
 screen it does not ask, because tmux answers XTVERSION itself; set
 `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` there, and enable `allow-passthrough on`
-(tmux 3.3 or later) so the graphics reach SonicTerm. Windows is not covered:
-system ConPTY drops kitty APC sequences.
+(tmux 3.3 or later) so the graphics reach SonicTerm. On Windows, images need
+the packaged console runtime: the system ConPTY, which a source build uses
+without a staged `conpty` folder, drops kitty APC sequences.
 
 ### Keyboard protocol reference
 
