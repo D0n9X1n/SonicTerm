@@ -110,6 +110,13 @@ _PREPARATION_SCRIPTS = {
 }
 
 
+# Only these canonical test steps may derive a compile-only phase from their unchanged Cargo selection.
+_DERIVED_TEST_PREPARATIONS = frozenset((
+    "pty-close-baseline", "windows-warp-allocator", "perf-scenarios-tests",
+    "perf-scenarios-counters-tests", "perf-scenarios-frame-texture-tests", "perf-scenarios-echo-trace-tests",
+))
+
+
 def _no_run(argv: tuple[str, ...]) -> tuple[str, ...]:
     boundary = argv.index("--") if "--" in argv else len(argv)
     return argv[:boundary] + ("--no-run",) + argv[boundary:]
@@ -186,11 +193,11 @@ def windows_preparations(step: gate_model.Step, root: Path, env: Mapping[str, st
     """Verify reviewed sources and resolve compilation phases before any Windows launch."""
     # Resolve this runtime-only dependency after module initialization.
     import gate_catalog
-    if not step.windows_preparations and step.id not in (*_PREPARATION_SCRIPTS, "pty-close-baseline", "windows-warp-allocator"):
+    if not step.windows_preparations and step.id not in _PREPARATION_SCRIPTS and step.id not in _DERIVED_TEST_PREPARATIONS:
         return ()
     if not any(step is canonical for canonical in gate_catalog.STEPS):
         raise ValueError("preparation parity: synthetic step cannot authorize compilation cleanup")
-    if step.id in ("pty-close-baseline", "windows-warp-allocator"):
+    if step.id in _DERIVED_TEST_PREPARATIONS:
         if step.windows_preparations != (gate_model.Preparation(),):
             raise ValueError("preparation parity: derived test record changed")
         return (gate_model.Preparation(_no_run(step.argv)),)

@@ -81,8 +81,11 @@ Windows 策略默认为严格模式：混合测试、doctest、workspace 脚本�
 步骤时运行退出码为 0，但只要发生清理，总 verdict 仍为 `CLEANED_NOT_NATURAL`。
 混合冷构建步骤仍可能失败，不使用进程名豁免改变这一边界。
 
-Windows 上，`pty-close-baseline` 和 `windows-warp-allocator` 先在 `--` 前插入
-`--no-run`，编译原命令选中的测试。`pty-feasibility` 先构建证据示例但不运行它。
+Windows 上，`pty-close-baseline`、`windows-warp-allocator`、`perf-scenarios-tests`、
+`perf-scenarios-counters-tests`、`perf-scenarios-frame-texture-tests` 和
+`perf-scenarios-echo-trace-tests` 先在 `--` 前插入 `--no-run`（没有 `--` 时追加到末尾），
+编译原命令选中的测试，保留原有 feature 参数。Harness-API 测试步骤仍走单独的目标级编译路径，
+不使用这种推导。`pty-feasibility` 先构建证据示例但不运行它。
 `workspace-crates` 按顺序准备固定版本 winit 的测试、文档和 workspace 测试。
 每个准备阶段使用独立的自有 job，允许编译清理；之后原步骤命令不变，在新的严格模式 job 中执行。
 Cargo 仍自行选择测试并提供运行环境。准备成功不证明 Cargo 会复用缓存。

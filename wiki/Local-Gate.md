@@ -118,9 +118,13 @@ A run containing only `PASS` and permitted `CLEANED_NOT_NATURAL` steps exits 0,
 but its overall verdict remains `CLEANED_NOT_NATURAL` if any step required cleanup.
 Mixed cold steps can still fail; no process-name exemption changes that boundary.
 
-On Windows, `pty-close-baseline` and `windows-warp-allocator` first compile the
-same selected tests with `--no-run` inserted before `--`. `pty-feasibility` first
-builds its evidence example without running it. `workspace-crates` first prepares
+On Windows, `pty-close-baseline`, `windows-warp-allocator`,
+`perf-scenarios-tests`, `perf-scenarios-counters-tests`,
+`perf-scenarios-frame-texture-tests`, and `perf-scenarios-echo-trace-tests` first
+compile the same selected tests with `--no-run` inserted before `--`, or appended
+when there is no `--`. Feature arguments remain unchanged. The harness-API test
+steps keep their separate target-only compilation path; they do not use this
+derivation. `pty-feasibility` first builds its evidence example without running it. `workspace-crates` first prepares
 the pinned winit tests, its documentation, and the workspace tests, in that order.
 Each preparation uses a separate owned job with compile-only cleanup; the original
 step command then runs unchanged in a new strict job. Cargo still selects and runs
