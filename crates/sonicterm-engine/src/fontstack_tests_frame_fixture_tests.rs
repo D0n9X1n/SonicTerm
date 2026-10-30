@@ -345,3 +345,36 @@ fn memoized_face_shapes_a_merged_fallback() {
     let memoized = fixture.stack.font_for_style(false, false).unwrap();
     assert!(std::rc::Rc::ptr_eq(&warm, &memoized), "the merge kept the same face");
 }
+
+#[test]
+fn request_hooks_count_a_fallback_request_from_queue_to_end() {
+    // `set_fallback_request_hooks_for_test` counts a request when the stack queues it, before the
+    // locator runs, and again when the worker ends it, so a caller can wait until none is in flight.
+    let fixture = gated_stack("request-hooks");
+    let scheduled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ended = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (counted_schedule, counted_end) = (Arc::clone(&scheduled), Arc::clone(&ended));
+    fixture.stack.set_fallback_request_hooks_for_test(
+        Arc::new(move || {
+            counted_schedule.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+        Arc::new(move || {
+            counted_end.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    );
+    assert_eq!(shaped_e(&fixture.stack).0, 0, "é is notdef before the locator answers");
+    assert_eq!(scheduled.load(std::sync::atomic::Ordering::SeqCst), 1, "counted when queued");
+    assert_eq!(
+        ended.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the gated lookup has not ended"
+    );
+    open(&fixture.gate);
+    let started = Instant::now();
+    while ended.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+        assert!(started.elapsed() < WORKER_WAIT, "the request never reported its end");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    wait_for_generation(&fixture.stack, 1);
+    assert_eq!(scheduled.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

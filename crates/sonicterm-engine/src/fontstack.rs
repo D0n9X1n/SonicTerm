@@ -237,6 +237,21 @@ impl FontStack {
         });
     }
 
+    /// Test seam: run `scheduled` when this stack queues a fallback request and `ended` on the
+    /// worker when that request ends on any path, so a test can wait until none is in flight.
+    #[doc(hidden)]
+    pub fn set_fallback_request_hooks_for_test(
+        &self,
+        scheduled: std::sync::Arc<dyn Fn() + Send + Sync>,
+        ended: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) {
+        self.set_fallback_worker_hooks_for_test(sonicterm_font::FallbackWorkerHooks {
+            on_schedule: Some(scheduled),
+            after_request: Some(ended),
+            ..Default::default()
+        });
+    }
+
     /// The fallback notice of this stack's configuration, shared by every `with_font_size` view.
     #[must_use]
     pub fn fallback_notice(&self) -> std::sync::Arc<sonicterm_font::FallbackNotice> {
