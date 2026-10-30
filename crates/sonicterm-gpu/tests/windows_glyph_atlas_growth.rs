@@ -89,7 +89,8 @@ fn wgpu_construction_failure(error: impl std::fmt::Display) -> String {
 
 /// A visible window of `size` and a counting renderer on it whose glyph atlas starts at the 256
 /// floor, presenting through GDI (`software`, `Force`) or wgpu (`Off`, which never degrades). The
-/// shipped face keeps glyph sizes the same on every host. A wgpu renderer is skipped as
+/// shipped face, rasterized at `font_px` raster pixels whatever the window's scale, keeps glyph
+/// sizes the same on every host. A wgpu renderer is skipped as
 /// `HOST_INCAPABLE: ...` only when the host enumerates no adapter.
 fn counting_renderer(
     active: &ActiveEventLoop,
@@ -111,10 +112,12 @@ fn counting_renderer(
     let font_dirs =
         [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono")];
     let mode = if software { SoftwareRenderMode::Force } else { SoftwareRenderMode::Off };
+    // The renderer rasterizes `font_size * scale_factor`; dividing by the window's scale keeps
+    // every tile `font_px` raster pixels on any host DPI, so the 256 atlas fills at the same key.
     let settings = RendererSettings {
         font_family: "Rec Mono St.Helens",
         font_dirs: &font_dirs,
-        font_size: font_px,
+        font_size: logical_font_size(font_px, window.scale_factor()),
         line_height_mult: 1.0,
         font_weight_scale: 1.0,
         subpixel_aa: Default::default(),
@@ -146,6 +149,11 @@ fn counting_renderer(
     renderer.set_cursor_blink(false);
     renderer.set_frame_counting(true);
     Ok((window, renderer))
+}
+
+/// The logical font size a window at `scale_factor` rasterizes at `raster_px` pixels.
+fn logical_font_size(raster_px: f32, scale_factor: f64) -> f32 {
+    raster_px / scale_factor as f32
 }
 
 /// The `index`th distinct ASCII fast-path key: a printable character in one of four style faces.
@@ -759,6 +767,22 @@ fn the_colour_face_probe_finds_the_pinned_system_face() {
     } else {
         // When: the face file is absent, the probe reports the host incapable and why.
         assert!(probe.is_err());
+    }
+}
+
+/// The fixtures' raster size does not follow the host DPI: at every common Windows scale the
+/// logical size handed to the renderer rasterizes back at the requested pixel size, so the 256
+/// atlas fills at the same key on a 100% runner and a 175% workstation.
+#[test]
+fn fixture_fonts_rasterize_at_their_pixel_size_on_every_scale() {
+    for scale_factor in [1.0, 1.25, 1.5, 1.75, 2.0] {
+        for raster_px in [SLIDING_FONT_PX, LARGE_FONT_PX] {
+            let rasterized = logical_font_size(raster_px, scale_factor) * scale_factor as f32;
+            assert!(
+                (rasterized - raster_px).abs() < 1e-3,
+                "{raster_px}px at scale {scale_factor} rasterizes at {rasterized}px"
+            );
+        }
     }
 }
 
