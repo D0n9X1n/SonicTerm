@@ -1155,7 +1155,13 @@ jobs:
       - name: Build Windows release binary for runtime smoke
         run: cargo build --release -p sonicterm-windows
 
+      - name: Stage pinned Windows console runtime
+        run: python scripts/setup-windows-conpty.py --destination target/release
+
       - name: Require Windows native runtime smoke
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
+          RUST_LOG: warn,sonicterm_io::conpty_runtime=info
         shell: pwsh
         run: |
           python scripts/native-smoke-runner.py `
@@ -1164,7 +1170,13 @@ jobs:
             --log-file "$env:RUNNER_TEMP\sonicterm-windows-smoke.log" `
             -- ./target/release/sonicterm-windows.exe --runtime-smoke
 
+      - name: Verify packaged Windows console runtime
+        shell: pwsh
+        run: python scripts/verify-windows-conpty.py --runtime-dir target/release/conpty --logs "$env:RUNNER_TEMP\sonicterm-windows-smoke\logs"
+
       - name: Require Windows GPU frame-validation smoke
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
         shell: pwsh
         run: |
           python scripts/native-smoke-runner.py `
@@ -1174,6 +1186,8 @@ jobs:
             -- ./target/release/sonicterm-windows.exe --runtime-smoke
 
       - name: Require Windows GPU device-recovery smoke
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
         shell: pwsh
         run: |
           python scripts/native-smoke-runner.py `

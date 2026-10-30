@@ -181,6 +181,7 @@ choco install wixtoolset --version 3.14.1.20250415 --no-progress -y
 
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
+python scripts/setup-windows-conpty.py --destination target/x86_64-pc-windows-msvc/release
 $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
     Where-Object name -eq sonicterm-windows | Select-Object -ExpandProperty version
 $numericVersion = ($version -split '[-+]')[0]
@@ -201,7 +202,8 @@ $msi = Get-ChildItem .\dist\*.msi -ErrorAction Stop
 这表示没有执行 ICE validation，本身不改变 MSI 内容。独立 COM 验证器仍会检查 MSI 的
 Property、Component、Feature、FeatureComponents 和 SummaryInformation 数据。它要求
 ProductVersion 等于数字 SemVer 核心、UpgradeCode 稳定、ProductCode 非空、template 为
-`x64;1033`，且 `Binaries` 精确引用十个 64 位 component。预发布/构建后缀仍属于 tag
+`x64;1033`，且 `Binaries` 精确引用十一个 64 位 component，其中包括 key path 为
+`conpty\conpty.dll` 的 `conpty_runtime`。预发布/构建后缀仍属于 tag
 来源证明，但不能进入 MSI ProductVersion。
 
 CI 与 Release 会在 MSI artifact 继续流转前运行刚构建的
@@ -223,12 +225,25 @@ marker、呈现和预热渲染器生命周期契约。
 SonicTerm/
 ├── sonicterm-windows.exe
 ├── LICENSE-winit-Apache-2.0
+├── conpty/
+│   ├── conpty.dll
+│   ├── OpenConsole.exe
+│   ├── LICENSE
+│   └── NOTICE.md
 └── assets/
     ├── themes/*.toml
     ├── keymaps/*.toml
     ├── fonts/*.ttf
     └── icons/exports/{sonic.ico,sonic.icns}
 ```
+
+`scripts/setup-windows-conpty.py` 从 `scripts/windows-conpty.json` 以 URL、大小和
+SHA-256 固定的微软 `Microsoft.Windows.Console.ConPTY` 包中放置 `conpty.dll` 和
+`OpenConsole.exe`，并从仓库中的 `scripts/LICENSE-conpty` 放置 `LICENSE`，同一清单固定
+其大小和 SHA-256。写入前校验压缩包、每个成员和许可证文件，遇到不完整或不同的
+`conpty` 文件夹时拒绝而不覆盖。MSI 从 `scripts/NOTICE-conpty.md` 取得 `NOTICE.md`，
+其验证器固定该文件的大小和 SHA-256。
+运行时的选择规则见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。
 
 它创建开始菜单快捷方式，并把 `INSTALLDESKTOPSHORTCUT` property 的默认值设为 `1`。
 它为 `.ps1`、`.cmd`、`.bat` 和 `.sh` 注册 SonicTerm ProgID、Default Apps capabilities

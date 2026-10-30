@@ -56,6 +56,14 @@
                             Source='..\..\crates\sonicterm-winit\LICENSE'/>
                     </Component>
 
+                    <Directory Id='ConptyDir' Name='conpty'>
+                        <Component Id='conpty_runtime' Guid='E4352FB5-77F4-4B4C-8451-07E3BE3B83E9' Win64='yes'>
+                            <File Id='conpty_dll' Name='conpty.dll' DiskId='1' Source='..\..\target\x86_64-pc-windows-msvc\release\conpty\conpty.dll' KeyPath='yes'/>
+                            <File Id='conpty_host' Name='OpenConsole.exe' DiskId='1' Source='..\..\target\x86_64-pc-windows-msvc\release\conpty\OpenConsole.exe'/>
+                            <File Id='conpty_license' Name='LICENSE' DiskId='1' Source='..\..\target\x86_64-pc-windows-msvc\release\conpty\LICENSE'/>
+                            <File Id='conpty_notice' Name='NOTICE.md' DiskId='1' Source='..\..\scripts\NOTICE-conpty.md'/>
+                        </Component>
+                    </Directory>
 
                     <Component Id='script_progids' Guid='C1A21A01-0000-0000-0000-000000000105' Win64='yes'>
                         <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.ps1' Type='string' Value='PowerShell Script' KeyPath='yes'/>
@@ -182,6 +190,7 @@
             Display='expand'
             Absent='disallow'>
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='conpty_runtime'/>
             <ComponentRef Id='script_progids'/>
             <ComponentRef Id='script_capabilities'/>
             <ComponentRef Id='script_open_with'/>

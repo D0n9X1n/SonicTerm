@@ -15,3 +15,7 @@ crates/sonicterm-winit/**             linguist-vendored -text
 
 # Terminal recordings replayed by tests: keep every byte, including CR, on every platform.
 crates/sonicterm-app/test-fixtures/** -text
+
+# Pinned third-party notices: their SHA-256 pins cover the upstream CRLF bytes on every platform.
+scripts/LICENSE-conpty -text
+scripts/NOTICE-conpty.md -text

@@ -113,6 +113,10 @@ Windows 测试分为五个并行 shard，每个都重复 checkout、Rust、Cairo
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
 另有带原生进程期限的独立步骤，要求其 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
+运行 smoke 之前，它把固定版本的 ConPTY 运行时放到二进制旁边；每个 smoke 都设置
+`SONICTERM_REQUIRE_CONPTY=1`，随后 `scripts/verify-windows-conpty.py` 要求已放置文件的字节正确，
+且第一个 smoke 的日志中恰有一条 `kind="packaged"` 选择记录，因此退回系统 ConPTY 的构建会失败
+（[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）。
 
 `workflow-syntax` 使用固定版本 actionlint 检查 CI 与 perf 工作流，包括 GitHub 表达式上下文
 可用性及语法。tooling job 安装摘要固定的 Linux 二进制；本地主机在 PATH 中安装相同版本。

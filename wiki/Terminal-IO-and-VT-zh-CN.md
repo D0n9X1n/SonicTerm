@@ -190,13 +190,28 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
 
 在 Windows 上，窗格中的程序写入 ConPTY 伪控制台。ConPTY 先解释这些输出，
 再把它自己生成的版本交给 SonicTerm，所以解析器只能收到 ConPTY 转发的内容。
-SonicTerm 不自带 `conpty.dll`，因此除非 DLL 搜索路径上有 `conpty.dll`，
-portable-pty 使用系统自带的 ConPTY。
-Windows 11 build 26300.9457 的系统 ConPTY（`conhost.exe` 10.0.26100.9444）
-原样转发了程序写入其控制台的 iTerm2 `OSC 1337;File=` 序列（负载为 4 字节、48 KiB
-和 1 MiB），但没有转发以同样方式写入的一个 Sixel DCS 序列和一个 kitty APC 序列。
-因此不能指望 Windows 窗格中程序写出的 Sixel 与 kitty 图像能够显示。
-其它版本和负载，以及经 `ssh.exe`、`wsl.exe` 等程序中继的输出，尚未检查。
+
+Windows 发行版在 `sonicterm-windows.exe` 旁边的 `conpty` 文件夹中附带微软
+`Microsoft.Windows.Console.ConPTY` 1.25.260930003 包的运行时 `conpty.dll` 和
+`OpenConsole.exe`，以及其 `LICENSE` 与 `NOTICE.md`。打开第一个窗格之前，
+SonicTerm 按固定值核对这两个文件的大小和 SHA-256 摘要，在进程运行期间保持该文件夹
+和两个文件处于打开状态，使它们无法被替换或删除，并从该绝对路径加载 `conpty.dll`。
+`conpty` 文件夹存在但无效时，窗格启动失败，绝不退回系统 ConPTY。文件夹不存在时
+（例如源码构建），除非 DLL 搜索路径上有 `conpty.dll`，portable-pty 使用系统自带的
+ConPTY。日志以 `Windows console runtime selected` 记录所选结果：`kind="packaged"`
+及版本，或 `kind="development-discovery"`。`SONICTERM_REQUIRE_CONPTY=1` 使文件夹
+缺失成为错误；Windows CI 与发布冒烟测试设置该变量，用
+`RUST_LOG=warn,sonicterm_io::conpty_runtime=info` 启用该记录（默认 `warn` 级别会隐藏它），
+并要求出现 `packaged` 记录。
+源码构建可用 `python scripts/setup-windows-conpty.py --destination target/debug`
+放置同样的文件。
+
+因此，哪些图像序列能到达解析器取决于控制台运行时。Windows 11 build 26300.9457 的
+系统 ConPTY（`conhost.exe` 10.0.26100.9444）原样转发 iTerm2 `OSC 1337;File=` 序列
+（以 4 字节、48 KiB 和 1 MiB 负载检查），并丢弃 Sixel DCS 与 kitty APC 序列。附带的
+运行时还会转发 Sixel DCS 序列以及单段和分段的 kitty APC 序列，因此程序在 Windows
+窗格中写出的 kitty PNG 图像在 GDI 和使用软件适配器的 wgpu 下都能显示。其它 Windows
+版本和负载，以及经 `ssh.exe`、`wsl.exe` 等程序中继的输出，尚未检查。
 
 XTVERSION（`CSI > q`）回复 `DCS > | SonicTerm <version> ST`，其中 `<version>` 是当前运行的版本，
 与默认情况下 `TERM_PROGRAM_VERSION` 公布的值相同。即使设置 `term_program = "WezTerm"`，

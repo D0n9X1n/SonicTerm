@@ -180,7 +180,12 @@ checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longe
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
 `windows-smoke` shard builds the shipping release binary and
 requires its bounded native smoke plus `frame-validation` and `device-recovery`
-scenario smokes in separate steps with native process deadlines.
+scenario smokes in separate steps with native process deadlines. Before the smokes
+it stages the pinned ConPTY runtime next to the binary, every smoke runs with
+`SONICTERM_REQUIRE_CONPTY=1`, and `scripts/verify-windows-conpty.py` then requires
+the staged bytes and exactly one `kind="packaged"` selection record from the first
+smoke's log, so a build that falls back to the system ConPTY fails
+([Terminal IO and VT](Terminal-IO-and-VT)).
 
 `workflow-syntax` runs pinned actionlint against CI and perf workflows, checking GitHub
 expression-context availability as well as syntax. The tooling job installs its digest-pinned

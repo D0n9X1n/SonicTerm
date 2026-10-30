@@ -248,15 +248,34 @@ hold acts only on brackets that reach the parser.
 
 On Windows, a pane's program writes to a ConPTY pseudoconsole. ConPTY
 interprets that output and passes its own rendition to SonicTerm, so the
-parser receives only what ConPTY forwards. SonicTerm ships no `conpty.dll`, so
-portable-pty uses the system ConPTY unless a `conpty.dll` is on the DLL search
-path. The system ConPTY in Windows 11 build 26300.9457 (`conhost.exe`
-10.0.26100.9444) forwarded unchanged the iTerm2 `OSC 1337;File=` sequences with
-4-byte, 48 KiB and 1 MiB payloads that a program wrote to its console, and did
-not forward a Sixel DCS sequence or a kitty APC sequence written the same way.
-Sixel and kitty images from a program in a Windows pane therefore cannot be
-relied on to display. Other builds and payloads, and output relayed through
-programs such as `ssh.exe` or `wsl.exe`, have not been checked.
+parser receives only what ConPTY forwards.
+
+The Windows release ships Microsoft's `Microsoft.Windows.Console.ConPTY`
+1.25.260930003 package runtime, `conpty.dll` and `OpenConsole.exe`, in a
+`conpty` folder next to `sonicterm-windows.exe`, with its `LICENSE` and
+`NOTICE.md`. Before the first pane opens, SonicTerm checks both files' sizes and
+SHA-256 digests against pinned values, keeps the folder and both files open so
+they cannot be replaced or removed while the process runs, and loads
+`conpty.dll` from that absolute path. A `conpty` folder that is present but
+invalid fails pane startup; it never falls back to the system ConPTY. When the
+folder is absent, as in a source build, portable-pty uses the system ConPTY
+unless a `conpty.dll` is on the DLL search path. The log records the choice as
+`Windows console runtime selected` with `kind="packaged"` and the version, or
+`kind="development-discovery"`. `SONICTERM_REQUIRE_CONPTY=1` makes an absent
+folder an error; the Windows CI and release smokes set it, enable the record with
+`RUST_LOG=warn,sonicterm_io::conpty_runtime=info` (the default `warn` level hides
+it), and then require the `packaged` record. A source build stages the same files with
+`python scripts/setup-windows-conpty.py --destination target/debug`.
+
+Which image sequences reach the parser therefore depends on the console
+runtime. The system ConPTY in Windows 11 build 26300.9457 (`conhost.exe`
+10.0.26100.9444) forwards iTerm2 `OSC 1337;File=` sequences unchanged (checked
+with 4-byte, 48 KiB and 1 MiB payloads) and drops Sixel DCS and kitty APC
+sequences. The packaged runtime also forwards Sixel DCS sequences and single and
+chunked kitty APC sequences, so a kitty PNG image that a program writes in a
+Windows pane displays with GDI and with wgpu on its software adapter. Other
+Windows builds and payloads, and output relayed through programs such as
+`ssh.exe` or `wsl.exe`, have not been checked.
 
 XTVERSION (`CSI > q`) replies `DCS > | SonicTerm <version> ST`, where
 `<version>` is the running release, the same value `TERM_PROGRAM_VERSION`

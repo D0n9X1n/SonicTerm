@@ -114,6 +114,8 @@ impl PtyHandle {
         rows: u16,
         diagnostic_timestamps: bool,
     ) -> Result<Self> {
+        #[cfg(windows)]
+        crate::conpty_runtime::ensure_ready()?;
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
 
