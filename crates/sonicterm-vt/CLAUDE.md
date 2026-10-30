@@ -38,6 +38,12 @@ cargo test -p sonicterm-vt
 - DEC 2026 is stored, not acted on: `Parser::synchronized_output()` reports the mode,
   an epoch that moves only on reset-to-set, and a monotonic reset count (RIS counts
   too; `?1049l` clears no mode). DECRQM is answered for mode 2026 only.
+- Every kitty APC reads its control section (at most 512 bytes) into `ApcScratch` first and
+  reserves no staging; only a new transmit or query then reserves, for its payload. A
+  continuation streams into its transfer's one reservation. An overlong section is refused,
+  never cut and run. Keep `live_capture_count` at most one, count the APC and the open
+  transfer in `retained_amount` and `capture_progress`, end an open upload before a Sixel or
+  iTerm2 capture reserves, and never read a file, temporary file or shared-memory medium.
 - `cancel_capture` is called by the host on a stalled transfer, and the
   sender is never told. It must leave the parser swallowing the remaining
   payload rather than returning to ground — a payload is printable ASCII

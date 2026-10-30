@@ -70,7 +70,7 @@ fn drive_session<W: Copy>(
         // A media capture opened and abandoned without its terminator — the
         // shape a killed transfer leaves. Staging must not survive the cycle.
         let mut capture = Vec::with_capacity(64 * 1024 + 3);
-        capture.extend_from_slice(b"\x1b_G");
+        capture.extend_from_slice(b"\x1b_Gf=100;");
         capture.resize(64 * 1024, b'A');
         advance(app, window, pane_id, &capture);
         // Cancel it the way a stream does, so the next cycle starts clean.

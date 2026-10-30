@@ -7,6 +7,10 @@ const TEST_OWNERSHIP_EXEMPTIONS: &[(&str, &str)] = &[
         "painter",
         "source-compatibility trait with no production implementation; implementability is covered below",
     ),
+    (
+        "kitty_placeholder_table",
+        "constant data owned by kitty_placeholder; its size, order and inversion are pinned in kitty_placeholder_tests",
+    ),
 ];
 
 fn validate_test_ownership(

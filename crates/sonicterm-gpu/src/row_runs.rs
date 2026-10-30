@@ -20,17 +20,24 @@ pub(crate) struct ShapeRun<'row, 'cells> {
 }
 
 /// The row's visible cells with their original column indices: every cell except a wide
-/// character's continuation, which belongs to the cell before it.
+/// character's continuation, which belongs to the cell before it, and a kitty placeholder cell,
+/// whose picture the image phase draws. A placeholder is an unassigned private-use codepoint, so
+/// shaping it would only search every fallback font and draw tofu over the image.
 pub(crate) fn visible_cells(row: &Row) -> Vec<(u16, &Cell)> {
     row.iter()
         .enumerate()
-        .filter(|(_, cell)| !cell.flags.contains(CellFlags::WIDE_CONT))
+        .filter(|(_, cell)| {
+            !cell.flags.contains(CellFlags::WIDE_CONT)
+                && !sonicterm_render_model::kitty_placeholder::is_placeholder(cell)
+        })
         .map(|(col, cell)| (col as u16, cell))
         .collect()
 }
 
 /// Cut `cells` into style runs, in order. Each run extends while bold and italic hold and ends at
 /// the first cell of another style; foreground, background and other attributes do not split it.
+/// A column gap also ends a run: the cells between were left out (a kitty placeholder), and text on
+/// either side of them must not shape together into a ligature across the image.
 /// Every cell lands in exactly one run, and no run is empty.
 pub(crate) fn row_shape_runs<'row, 'cells>(
     cells: &'cells [(u16, &'row Cell)],
@@ -40,9 +47,16 @@ pub(crate) fn row_shape_runs<'row, 'cells>(
         let first = cells.get(run_start)?;
         let style = RunStyle::from_cell(first.1);
         let run_end = cells[run_start..]
-            .iter()
-            .position(|(_, cell)| RunStyle::from_cell(cell) != style)
-            .map_or(cells.len(), |offset| run_start + offset);
+            .windows(2)
+            .position(|pair| {
+                let [(prev_col, prev), (col, cell)] = pair else {
+                    // When: windows(2) yields a pair, so this arm is unreachable; it ends the run defensively.
+                    return true;
+                };
+                let width = if prev.flags.contains(CellFlags::WIDE) { 2 } else { 1 };
+                RunStyle::from_cell(cell) != style || *col != prev_col.saturating_add(width)
+            })
+            .map_or(cells.len(), |offset| run_start + offset + 1);
         let run = ShapeRun { cells: &cells[run_start..run_end], style };
         run_start = run_end;
         Some(run)

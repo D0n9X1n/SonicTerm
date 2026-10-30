@@ -846,6 +846,8 @@ use row_shaping::cell_fg;
 use row_shaping::color_to_chrome;
 #[path = "core_inline_images.rs"]
 mod inline_images;
+#[path = "core_kitty_placeholders.rs"]
+mod kitty_placeholders;
 use inline_images::emit_inline_image_instances;
 use inline_images::report_inline_image_pressure;
 use inline_images::InlineImagePlacement;

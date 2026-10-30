@@ -118,15 +118,28 @@ impl Parser {
                 // When: captured_replies is nonempty, yield before another byte can grow staging or overtake delivery.
                 break;
             }
+            if std::mem::take(&mut self.kitty_yield)
+                && self.performer.captured_replies.borrow().is_some()
+            {
+                // When: kitty_yield is set and captured_replies collects per prefix, yield so the host's reply comes first.
+                break;
+            }
             if self.discarding_oversized_escape {
                 // When: discarding_oversized_escape owns this byte, so feeding vte could print a cancelled payload into the grid.
                 self.consume_discarded_escape_byte(bytes[offset]);
                 offset += 1;
                 continue;
             }
-            if self.apc_capture.is_some() {
-                // When: apc_capture is active, so bytes belong to Kitty payload staging rather than ordinary terminal text.
-                self.consume_apc_byte(bytes[offset]);
+            if self.apc_scratch.is_some() {
+                // When: apc_scratch is active, the byte belongs to a chunk of the open kitty transfer.
+                // CAN or SUB aborts the whole transfer, not just this APC.
+                if matches!(bytes[offset], 0x18 | 0x1a) {
+                    self.abort_in_flight_apc();
+                    self.reset_cancelled_escape();
+                } else {
+                    // When: matches finds neither CAN nor SUB in bytes, offset's byte feeds the scratch state machine.
+                    self.consume_apc_scratch_byte(bytes[offset]);
+                }
                 offset += 1;
                 continue;
             }
@@ -151,13 +164,7 @@ impl Parser {
                 // When: escape_family is Esc, pending_esc is set, and bytes[offset] is underscore, reset vte before Kitty takes ownership.
                 self.inner = vte::Parser::new();
                 self.pending_esc = false;
-                self.apc_capture = Some(MediaCapture::new(
-                    &self.performer.staging_pool,
-                    MediaProtocol::Kitty,
-                    String::new(),
-                ));
-                self.escape_family = EscapeFamily::String;
-                self.performer.fast_path_ready = false;
+                self.begin_apc();
                 offset += 1;
                 continue;
             }
@@ -166,13 +173,7 @@ impl Parser {
                 && bytes[offset..].starts_with(b"\x1b_")
             {
                 // When: escape_family is Ground and ESC underscore is contiguous, Kitty capture owns the sequence before vte can swallow it.
-                self.apc_capture = Some(MediaCapture::new(
-                    &self.performer.staging_pool,
-                    MediaProtocol::Kitty,
-                    String::new(),
-                ));
-                self.escape_family = EscapeFamily::String;
-                self.performer.fast_path_ready = false;
+                self.begin_apc();
                 offset += 2;
                 continue;
             }
@@ -181,13 +182,7 @@ impl Parser {
                 && bytes[offset] == 0x9f
             {
                 // When: escape_family is Ground and byte is C1 APC, Kitty capture owns the sequence exactly like ESC underscore.
-                self.apc_capture = Some(MediaCapture::new(
-                    &self.performer.staging_pool,
-                    MediaProtocol::Kitty,
-                    String::new(),
-                ));
-                self.escape_family = EscapeFamily::String;
-                self.performer.fast_path_ready = false;
+                self.begin_apc();
                 offset += 1;
                 continue;
             }
@@ -268,7 +263,7 @@ impl Parser {
         self.raw_osc = None;
         self.iterm2_metadata_len = 0;
         self.pending_esc = false;
-        self.apc_capture = None;
+        self.apc_scratch = None;
         self.performer.dcs_capture = None;
         self.performer.clear_decrqss();
         self.escape_bytes_in_flight = 0;
@@ -343,48 +338,6 @@ impl Parser {
             return;
         }
         self.discard_escape_pending_esc = byte == 0x1b;
-    }
-
-    fn consume_apc_byte(&mut self, byte: u8) {
-        if matches!(byte, 0x18 | 0x1a) {
-            // When: byte matches CAN or SUB, cancel APC staging before aborted Kitty data can become media.
-            self.reset_cancelled_escape();
-            return;
-        }
-        let Some(capture) = self.apc_capture.as_mut() else {
-            // When: apc_capture vanished, ignore this byte rather than treating payload continuation as a new sequence.
-            return;
-        };
-        if capture.pending_esc {
-            // When: capture has a pending_esc, resolve whether byte completes ST before committing either byte to the payload.
-            capture.pending_esc = false;
-            if byte == b'\\' {
-                // When: byte completes ST, dispatch the capture only after its whole-payload checks succeed.
-                let capture = self.apc_capture.take().expect("capture present");
-                let row = self.performer.grid.cursor.row;
-                let col = self.performer.grid.cursor.col;
-                if let Some(event) = capture.into_kitty_event(row, col) {
-                    self.performer.events.push(VtEvent::Media(event));
-                }
-                self.finish_escape();
-                return;
-            }
-            capture.append_byte(0x1b);
-        }
-        // When: byte selects C1 ST, ESC, or payload handling for this APC byte.
-        if byte == 0x9c {
-            let capture = self.apc_capture.take().expect("capture present");
-            let row = self.performer.grid.cursor.row;
-            let col = self.performer.grid.cursor.col;
-            if let Some(event) = capture.into_kitty_event(row, col) {
-                self.performer.events.push(VtEvent::Media(event));
-            }
-            self.finish_escape();
-        } else if byte == 0x1b {
-            capture.pending_esc = true;
-        } else {
-            capture.append_byte(byte);
-        }
     }
 
     pub(super) fn finish_escape(&mut self) {

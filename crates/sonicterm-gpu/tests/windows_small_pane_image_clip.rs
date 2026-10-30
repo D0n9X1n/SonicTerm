@@ -192,6 +192,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
             width: 32,
             height: 32,
             bgra: Arc::from([0, 0, 255, 255].repeat(32 * 32)),
+            kitty: None,
         });
         render(&mut renderer, &mut panes, &theme)?;
         if renderer.successful_frame_count() != frame_count + 1 {

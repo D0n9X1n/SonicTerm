@@ -364,6 +364,7 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
                 width: 1,
                 height: 1,
                 bgra: Arc::from([1, 2, 3, 255]),
+                kitty: None,
             })
         },
         |event| emitted.push(event),

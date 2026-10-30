@@ -131,6 +131,7 @@ fn fixture(
         width: 32,
         height: 32,
         bgra: Arc::from([0, 0, 255, 255].repeat(32 * 32)),
+        kitty: None,
     };
     check(app.__test_set_pane_inline_images(id, image_pane, vec![image]), "image seeded")?;
     let mut fixture = Fixture { app, window, id, image_pane };

@@ -38,7 +38,8 @@ pub(super) const MAX_RETAINED_INLINE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 // ids and publishes no other data.
 pub(super) fn decode_inline_image(event: &MediaEvent) -> Option<InlineImage> {
     let (width, height, bgra) = match event.protocol {
-        MediaProtocol::Iterm2File | MediaProtocol::Kitty => decode_base64_image(&event.data)?,
+        MediaProtocol::Iterm2File => decode_base64_image(&event.data)?,
+        MediaProtocol::Kitty => media_kitty::decode_kitty_pixels(event)?,
         MediaProtocol::Sixel => decode_sixel(&event.data)?,
     };
 
@@ -49,14 +50,29 @@ pub(super) fn decode_inline_image(event: &MediaEvent) -> Option<InlineImage> {
         width,
         height,
         bgra: Arc::from(bgra),
+        kitty: None,
     })
 }
 
 fn decode_base64_image(encoded: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    decode_encoded_image(encoded, None)
+}
+
+/// Decode a base64 image, guessing its format unless `format` names it.
+///
+/// Kitty's `f=100` names PNG, so a payload that is not PNG is refused rather than decoded as
+/// whatever format its bytes happen to resemble.
+fn decode_encoded_image(
+    encoded: &[u8],
+    format: Option<image::ImageFormat>,
+) -> Option<(u32, u32, Vec<u8>)> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes.as_slice()))
-        .with_guessed_format()
-        .ok()?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes.as_slice()));
+    // A named format is set; otherwise the protocol names none and the decoder guesses from the bytes.
+    match format {
+        Some(format) => reader.set_format(format),
+        None => reader = reader.with_guessed_format().ok()?,
+    }
     let (encoded_width, encoded_height) = reader.into_dimensions().ok()?;
     if !inline_image_decode_dimensions_allowed(encoded_width, encoded_height) {
         // When: inline_image_decode_dimensions_allowed refuses encoded_width by
@@ -68,7 +84,19 @@ fn decode_base64_image(encoded: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         );
         return None;
     }
-    let mut image = image::load_from_memory(&bytes).ok()?;
+    // Without a named format, the same guess the dimension read made decodes the pixels.
+    let image = match format {
+        Some(format) => image::load_from_memory_with_format(&bytes, format).ok()?,
+        None => image::load_from_memory(&bytes).ok()?,
+    };
+    rgba_to_retained_bgra(image)
+}
+
+/// Downscale `image` to the rendered cap and convert it to premultiplied BGRA.
+///
+/// Every decoder that produces an [`image::DynamicImage`] ends here, so each one is held to
+/// [`MAX_INLINE_IMAGE_RENDER_SIDE`] and the single-image retention bound it implies.
+fn rgba_to_retained_bgra(mut image: image::DynamicImage) -> Option<(u32, u32, Vec<u8>)> {
     if image.width() > MAX_INLINE_IMAGE_RENDER_SIDE || image.height() > MAX_INLINE_IMAGE_RENDER_SIDE
     {
         image = image.resize(
@@ -446,19 +474,28 @@ fn take_trimmed_inline_images(
     images: &mut Vec<InlineImage>,
     byte_budget: usize,
 ) -> Vec<InlineImage> {
+    // Kitty placements share their image's pixel buffer and `id`, so eviction works per pixel
+    // buffer: oldest first by first appearance, and every entry of an evicted buffer goes with it.
+    let buffers = unique_pixel_buffers(images);
     let mut retained_bytes =
-        images.iter().fold(0usize, |total, image| total.saturating_add(image.bgra.len()));
+        buffers.iter().fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes));
     let mut evict = 0usize;
-    while images.len() - evict > MAX_RETAINED_INLINE_IMAGES
-        || (retained_bytes > byte_budget && images.len() - evict > 1)
+    while buffers.len() - evict > MAX_RETAINED_INLINE_IMAGES
+        || (retained_bytes > byte_budget && buffers.len() - evict > 1)
     {
-        retained_bytes = retained_bytes.saturating_sub(images[evict].bgra.len());
+        retained_bytes = retained_bytes.saturating_sub(buffers[evict].1);
         evict += 1;
     }
-    // One `drain` rather than repeated `remove(0)`: the shuffle is cheap
-    // either way, but this keeps the evicted images together so they can be
-    // carried out of the critical section in one move.
-    images.drain(0..evict).collect()
+    if evict == 0 {
+        // When: evict is 0, everything fits, so no entry moves.
+        return Vec::new();
+    }
+    let evicted_ids: std::collections::HashSet<u64> =
+        buffers[..evict].iter().map(|(id, _)| *id).collect();
+    let (evicted, kept): (Vec<InlineImage>, Vec<InlineImage>) =
+        std::mem::take(images).into_iter().partition(|image| evicted_ids.contains(&image.id));
+    *images = kept;
+    evicted
 }
 
 fn trim_inline_images_to(images: &mut Vec<InlineImage>, byte_budget: usize) {
@@ -475,12 +512,31 @@ fn trim_inline_images_to(images: &mut Vec<InlineImage>, byte_budget: usize) {
 /// `Arc<[u8]>` shared with the renderer, so this is the *allocation* size, not
 /// a per-holder copy: an owner that also counted the renderer's clone of the
 /// same image would charge one buffer twice.
+///
+/// A kitty image with several placements has several entries sharing one `id` and one buffer;
+/// it is counted once, as one item.
 #[must_use]
 pub(super) fn retained_inline_media(images: &[InlineImage]) -> ResourceAmount {
+    let buffers = unique_pixel_buffers(images);
     ResourceAmount {
-        bytes: images.iter().fold(0usize, |total, image| total.saturating_add(image.bgra.len())),
-        items: images.len(),
+        bytes: buffers.iter().fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes)),
+        items: buffers.len(),
     }
+}
+
+/// Each distinct pixel buffer as `(id, bytes)`, oldest first.
+///
+/// Ids come from one increasing counter at decode, so ordering by id is ordering by pixel age.
+/// Entry order is not: re-placing an older kitty image moves its entry to the end of the vector.
+fn unique_pixel_buffers(images: &[InlineImage]) -> Vec<(u64, usize)> {
+    let mut seen = std::collections::HashSet::with_capacity(images.len());
+    let mut buffers: Vec<(u64, usize)> = images
+        .iter()
+        .filter(|image| seen.insert(image.id))
+        .map(|image| (image.id, image.bgra.len()))
+        .collect();
+    buffers.sort_unstable_by_key(|(id, _)| *id);
+    buffers
 }
 
 fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
@@ -649,6 +705,10 @@ fn parse_sixel_number(data: &[u8], position: &mut usize) -> Option<u32> {
 fn percent_to_u8(percent: u32) -> u8 {
     ((percent.min(100) * 255 + 50) / 100) as u8
 }
+
+#[path = "media_kitty.rs"]
+mod media_kitty;
+pub(super) use media_kitty::{apply_kitty, kitty_source_size, KittyOp};
 
 #[cfg(test)]
 #[path = "media_tests.rs"]

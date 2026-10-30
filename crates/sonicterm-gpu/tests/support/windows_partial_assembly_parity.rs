@@ -112,6 +112,7 @@ pub(super) fn parity_cases(
         width,
         height,
         bgra: Arc::from(vec![200u8; (width * height * 4) as usize]),
+        kitty: None,
     });
     let image_rect = outward((
         layout.col_left(image_col),

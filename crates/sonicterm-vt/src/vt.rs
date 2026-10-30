@@ -35,6 +35,12 @@ pub use staging::{
 /// followed by the crate's release version, which the workspace sets.
 pub const SONIC_VERSION: &str = concat!("SonicTerm ", env!("CARGO_PKG_VERSION"));
 
+/// The XTVERSION reply text: `kitty` followed by [`SONIC_VERSION`].
+///
+/// Clients such as Claude Code send kitty graphics only when the reply is `kitty` or starts with
+/// `kitty `. The word names the graphics protocol SonicTerm answers; no kitty version is claimed.
+pub const XTVERSION_REPLY: &str = concat!("kitty SonicTerm ", env!("CARGO_PKG_VERSION"));
+
 /// Current DEC mouse tracking mode selected by the terminal application.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum MouseTracking {
@@ -192,7 +198,6 @@ struct MediaCapture {
     metadata: String,
     data: Vec<u8>,
     truncated: bool,
-    pending_esc: bool,
     /// Every byte offered to this capture, including those refused after the
     /// budget was reached.
     ///
@@ -280,7 +285,10 @@ pub struct SyncState {
 pub struct Parser {
     inner: vte::Parser,
     performer: Performer,
-    apc_capture: Option<MediaCapture>,
+    /// The kitty APC in flight: its bounded control section and, for an image, its payload.
+    apc_scratch: Option<Box<vt_kitty_stream::ApcScratch>>,
+    /// Set when a kitty event needs the host's reply, ending the advance prefix after it.
+    kitty_yield: bool,
     pending_esc: bool,
     raw_osc: Option<RawOsc>,
     iterm2_metadata: [u8; MAX_ITERM2_METADATA_BYTES],
@@ -369,7 +377,8 @@ impl Parser {
         Self {
             inner: vte::Parser::new(),
             performer,
-            apc_capture: None,
+            apc_scratch: None,
+            kitty_yield: false,
             pending_esc: false,
             raw_osc: None,
             iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
@@ -587,6 +596,10 @@ struct Performer {
     dcs_capture: Option<MediaCapture>,
     /// Pool this parser's media captures stage in.
     staging_pool: Arc<CaptureStagingPool>,
+    /// A chunked kitty transfer spanning APCs, holding the parser's one staging reservation.
+    ///
+    /// Owned here rather than by the parser so the Sixel hook can end it before reserving.
+    kitty_transfer: Option<vt_kitty_stream::KittyTransfer>,
     /// Query selectors never retain terminal-controlled payload bytes.
     decrqss: Option<DecrqssRequest>,
     /// vte unhooks at ESC, before the following byte proves an ST terminator.
@@ -631,6 +644,13 @@ mod vt_performer;
 
 #[path = "vt_raw_osc.rs"]
 mod vt_raw_osc;
+
+#[path = "vt_kitty.rs"]
+mod vt_kitty;
+
+#[path = "vt_kitty_stream.rs"]
+mod vt_kitty_stream;
+pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
 
 use vt_capture::parse_iterm2_file_event;
 pub use vt_osc::{parse_osc7_cwd, parse_osc7_cwd_snapshot};
