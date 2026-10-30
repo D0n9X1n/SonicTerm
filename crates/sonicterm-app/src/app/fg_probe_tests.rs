@@ -85,6 +85,12 @@ fn probes(sampler: Sampler, spawner: Spawner, observed: &Observed) -> Foreground
     })
 }
 
+/// End the worker by unwinding without running the panic hook, so its death never waits for the
+/// hook's backtrace printing, which on a slow host took longer than the five-second death wait.
+fn injected_death() -> ! {
+    std::panic::resume_unwind(Box::new("injected worker death"))
+}
+
 /// Run one worker batch on the test thread.
 fn drive(probes: &ForegroundProbes) -> bool {
     probe_batch(&probes.shared, &probes.sampler, probes.stats(), &probes.clock)
@@ -299,7 +305,10 @@ fn death_with_an_undelivered_event_posts_nothing_more_and_one_drain_applies_then
         let calls = Arc::clone(&calls);
         // Ordering: calls adds Relaxed; it only numbers this test sampler's batches.
         Arc::new(move |identities, _stop| {
-            assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0, "injected worker death");
+            if calls.fetch_add(1, Ordering::Relaxed) > 0 {
+                // When: the sampler runs a second time, end the worker as a crash would.
+                injected_death();
+            }
             identities.iter().map(|_| process("vim", false)).collect()
         })
     };
@@ -336,7 +345,10 @@ fn death_after_a_drain_posts_exactly_one_event_then_stops() {
         let calls = Arc::clone(&calls);
         // Ordering: calls adds Relaxed; it only numbers this test sampler's batches.
         Arc::new(move |identities, _stop| {
-            assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0, "injected worker death");
+            if calls.fetch_add(1, Ordering::Relaxed) > 0 {
+                // When: the sampler runs a second time, end the worker as a crash would.
+                injected_death();
+            }
             identities.iter().map(|_| process("vim", false)).collect()
         })
     };
@@ -915,4 +927,62 @@ fn frame_demand_keeps_sampling_the_foreground_every_ttl_while_frames_continue() 
             "sampling stalled: {gap:?}"
         );
     }
+}
+
+/// Restores the panic hook a test replaced, even when the test fails.
+struct RestoreHook(Option<Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>>);
+
+// Lifecycle: dropping RestoreHook reinstates the hook that was active before the test; a failing
+// test keeps the replacement, because the hook cannot be changed from a panicking thread.
+impl Drop for RestoreHook {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(previous) = self.0.take() {
+            std::panic::set_hook(Box::new(move |info| previous(info)));
+        }
+    }
+}
+
+/// The injected death must end the worker without waiting for the panic hook: on a slow host the
+/// hook's backtrace printing outlasted the five-second death wait. A hook that sleeps six seconds,
+/// only on this test's worker thread, must not delay the live count reaching zero.
+#[test]
+fn injected_death_does_not_wait_for_a_slow_panic_hook() {
+    let previous: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync> =
+        Arc::from(std::panic::take_hook());
+    let chained = Arc::clone(&previous);
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some("fg-probe-slow-hook") {
+            std::thread::sleep(Duration::from_secs(6));
+        }
+        chained(info);
+    }));
+    let _restore = RestoreHook(Some(previous));
+    let spawner: Spawner = Box::new(|job| {
+        std::thread::Builder::new().name("fg-probe-slow-hook".into()).spawn(job).map(drop)
+    });
+    let observed = Observed::default();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let sampler: Sampler = {
+        let calls = Arc::clone(&calls);
+        // Ordering: calls adds Relaxed; it only numbers this test sampler's batches.
+        Arc::new(move |identities, _stop| {
+            if calls.fetch_add(1, Ordering::Relaxed) > 0 {
+                // When: the sampler runs a second time, end the worker as a crash would.
+                injected_death();
+            }
+            identities.iter().map(|_| process("vim", false)).collect()
+        })
+    };
+    let (mut app, main, pane_id, _) =
+        app_with(probes(sampler, spawner, &observed), identity(10, 1));
+    assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
+    app.fg_probes.wake();
+    wait_until("the first ready event", || observed.notified() == 1);
+    app.drain_foreground_probe_results(Instant::now());
+    assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
+    app.fg_probes.wake();
+    wait_until("the worker to die", || observed.live() == 0);
 }
