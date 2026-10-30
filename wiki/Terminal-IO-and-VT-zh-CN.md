@@ -209,8 +209,12 @@ ConPTY。日志以 `Windows console runtime selected` 记录所选结果：`kind
 因此，哪些图像序列能到达解析器取决于控制台运行时。Windows 11 build 26300.9457 的
 系统 ConPTY（`conhost.exe` 10.0.26100.9444）原样转发 iTerm2 `OSC 1337;File=` 序列
 （以 4 字节、48 KiB 和 1 MiB 负载检查），并丢弃 Sixel DCS 与 kitty APC 序列。附带的
-运行时还会转发 Sixel DCS 序列以及单段和分段的 kitty APC 序列，因此程序在 Windows
-窗格中写出的 kitty PNG 图像在 GDI 和使用软件适配器的 wgpu 下都能显示。其它 Windows
+运行时还会原样转发 Sixel DCS 序列、单段和分段的 kitty APC 序列，以及 kitty Unicode
+占位符单元格（U+10EEEE 及其表示行和列的组合附加符号，和指明图像的真彩色前景色），
+因此程序在 Windows 窗格中写出的 kitty PNG 图像在 GDI 和使用软件适配器的 wgpu 下都能
+显示，通过占位符单元格绘制的虚拟放置在 GDI 下也能显示。把伪控制台调宽或调窄时，
+该运行时不发送重绘，因此屏幕上已有的占位符单元格不会被改写。`windows_kitty_images`
+测试把每种形式按运行时转发的样子送入窗格，并检查 GDI 呈现的帧。其它 Windows
 版本和负载，以及经 `ssh.exe`、`wsl.exe` 等程序中继的输出，尚未检查。
 
 XTVERSION（`CSI > q`）回复 `DCS > | kitty SonicTerm <version> ST`，其中 `<version>` 是当前运行的版本，
@@ -349,8 +353,9 @@ Kitty 图像与 Sixel、iTerm2 图像共用窗格的内联图像存储、锁、�
 XTVERSION 以 `kitty` 开头时，Claude Code 会发送图像。它可能先用文件路径查询（`t=f`）探测，
 该查询会被拒绝，随后直接发送图像（`t=d`）。在 tmux 或 screen 中它不会询问，
 因为 tmux 自己回答 XTVERSION；在其中请设置 `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1`，
-并开启 `allow-passthrough on`（tmux 3.3 或更高版本），让图形到达 SonicTerm。Windows 不在
-范围内：系统 ConPTY 会丢弃 kitty APC 序列。
+并开启 `allow-passthrough on`（tmux 3.3 或更高版本），让图形到达 SonicTerm。在 Windows
+上，图像需要附带的控制台运行时：源码构建在未放置 `conpty` 文件夹时使用系统 ConPTY，
+而它会丢弃 kitty APC 序列。
 
 ### 键盘协议参考
 
