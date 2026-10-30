@@ -125,6 +125,7 @@ fn fixture(
         check(app.__test_advance_pane_parser(pane, b"\x1b[?25l"), "cursor hidden")?;
     }
     let image = InlineImage {
+        scroll_mark: 0,
         id: 1,
         row: 0,
         col: 0,

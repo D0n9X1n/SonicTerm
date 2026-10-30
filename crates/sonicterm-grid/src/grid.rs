@@ -254,6 +254,12 @@ pub struct Grid {
     /// I last looked" from "the grid has moved on". Never decremented, so a
     /// missed bump costs eagerness, never correctness.
     scrollback_evicted: u64,
+    /// Rows scrolled off the top of the full screen over this grid's lifetime; see
+    /// [`Grid::lines_scrolled`].
+    lines_scrolled: u64,
+    /// The last alternate screen's final scroll count, so the next one starts past it; see
+    /// [`Grid::lines_scrolled`].
+    alt_scroll_floor: u64,
     /// Rows dropped only because retained bytes passed the grid's byte budget; see
     /// [`Grid::budget_trimmed_rows`].
     budget_trimmed_rows: u64,
@@ -304,6 +310,8 @@ impl Grid {
             size_generation: 0,
             row_content_seq: vec![0; rows as usize].into(),
             scrollback_evicted: 0,
+            lines_scrolled: 0,
+            alt_scroll_floor: 0,
             budget_trimmed_rows: 0,
             budget_trimmed_cleared: 0,
             row_storage_allocs: 0,
@@ -390,6 +398,38 @@ impl Grid {
     /// and found nothing" from "the grid has moved on since I looked".
     pub fn scrollback_evicted(&self) -> u64 {
         self.scrollback_evicted
+    }
+
+    /// Rows scrolled off the top of the full screen over this grid's lifetime.
+    ///
+    /// It counts every full-screen scroll whether the row entered scrollback or was dropped, so an
+    /// inline image anchored at a viewport row moves up by the difference between this value and
+    /// the one at its capture. A scroll of a proper sub-region (DECSTBM margins) does not count.
+    /// Each screen keeps its own count: an alternate screen counts from at least
+    /// `ALT_SCREEN_SCROLL_GAP` past the primary's and every earlier alternate screen's, and leaving
+    /// it restores the primary's count. An image anchored on one screen is therefore far above the
+    /// other screen's view, or, with a mark past the count, is not drawn there at all.
+    pub fn lines_scrolled(&self) -> u64 {
+        self.lines_scrolled
+    }
+
+    /// How far an alternate screen's scroll count starts past every count used before it, so an
+    /// image anchored on one screen is never drawn on the other.
+    const ALT_SCREEN_SCROLL_GAP: u64 = 1 << 40;
+
+    /// Scroll the full screen up by `row_count` rows, as that many line feeds at the bottom would.
+    /// Rows past what the screen and history can hold are counted without being stored, since
+    /// storing them would only evict them again; every row that stays in history is stored, so
+    /// [`Grid::lines_scrolled`] keeps matching it.
+    pub fn scroll_up_counting(&mut self, row_count: u64, fill: Cell) {
+        let held = u64::from(self.rows).saturating_add(self.scrollback_limit as u64);
+        let mut stored = row_count.min(held);
+        while stored > 0 {
+            let step = u16::try_from(stored.min(u64::from(self.rows.max(1)))).unwrap_or(1);
+            self.scroll_up_with(step, fill.clone());
+            stored -= u64::from(step);
+        }
+        self.lines_scrolled = self.lines_scrolled.saturating_add(row_count - row_count.min(held));
     }
 
     /// Scrollback rows dropped because the grid's retained bytes passed its byte budget, over this

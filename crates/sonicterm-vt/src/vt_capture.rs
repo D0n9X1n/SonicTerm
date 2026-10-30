@@ -96,6 +96,7 @@ impl MediaCapture {
             col,
             metadata: self.metadata,
             data: self.data,
+            scroll_mark: 0,
         })
     }
 
@@ -117,6 +118,7 @@ impl MediaCapture {
             col,
             metadata: String::from_utf8_lossy(metadata).into_owned(),
             data,
+            scroll_mark: 0,
         })
     }
 
@@ -134,7 +136,14 @@ impl MediaCapture {
             // When: whole is false, some chunk was refused or cut, so the image would be a fragment.
             return None;
         }
-        Some(MediaEvent { protocol: MediaProtocol::Kitty, row, col, metadata, data: self.data })
+        Some(MediaEvent {
+            protocol: MediaProtocol::Kitty,
+            row,
+            col,
+            metadata,
+            data: self.data,
+            scroll_mark: 0,
+        })
     }
 }
 
@@ -165,6 +174,7 @@ pub(super) fn parse_iterm2_file_event(payload: &[u8], row: u16, col: u16) -> Opt
         col,
         metadata: String::from_utf8_lossy(metadata).into_owned(),
         data: data.to_vec(),
+        scroll_mark: 0,
     })
 }
 

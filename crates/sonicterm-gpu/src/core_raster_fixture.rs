@@ -319,6 +319,7 @@ pub(in crate::core) fn striped_inline_image(
         }
     }
     sonicterm_render_model::InlineImage {
+        scroll_mark: 0,
         id: 71,
         row: 0,
         col: 0,

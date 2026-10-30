@@ -75,6 +75,8 @@ pub struct KittyCommand {
     pub rows: u32,
     /// Virtual placement drawn through Unicode placeholders (`U=1`).
     pub virtual_placement: bool,
+    /// Leave the cursor where it is after displaying the image (`C=1`).
+    pub no_cursor_move: bool,
     /// Delete selector, for `a=d`. `None` defaults to kitty's `a`, which is unsupported here.
     pub delete: Option<KittyDelete>,
     /// Whether the command carried only `m` and `q` keys, so it can continue an open transfer.
@@ -193,6 +195,7 @@ impl KittyCommand {
                 b"c" => command.cols = number(value)?,
                 b"r" => command.rows = number(value)?,
                 b"U" => command.virtual_placement = flag(value, 1)? == 1,
+                b"C" => command.no_cursor_move = flag(value, 1)? == 1,
                 b"d" => {
                     command.delete = Some(match value {
                         b"i" => KittyDelete::ById,
@@ -235,6 +238,10 @@ impl KittyCommand {
             u8::from(self.virtual_placement),
             self.quiet,
         );
+        // C=1 is written only when set, so every other command's text is unchanged.
+        if self.no_cursor_move {
+            text.push_str(",C=1");
+        }
         // A delete selector is written back so the host reads the same deletion.
         if let Some(delete) = self.delete {
             text.push_str(match delete {

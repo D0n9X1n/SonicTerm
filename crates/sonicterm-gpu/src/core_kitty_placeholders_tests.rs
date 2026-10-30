@@ -40,6 +40,7 @@ fn placeholder_grid(image_id: u32, placement_id: u32, image_row: u32, cols: u16)
 /// A 40x20 px image entry tagged as a virtual placement of `image_id`/`placement_id` in a 4x2 box.
 fn virtual_image(id: u64, image_id: u32, placement_id: u32) -> InlineImage {
     InlineImage {
+        scroll_mark: 0,
         id,
         row: 0,
         col: 0,
@@ -109,7 +110,7 @@ fn uploads_anchored_and_deleted_images_draw_no_placeholder() {
     anchored.kitty = Some(KittyTag {
         image_id: 7,
         placement_id: 0,
-        show: KittyShow::Anchored,
+        show: KittyShow::Anchored { cols: 0, rows: 0 },
         source_px: (40, 20),
     });
     assert!(slices(&grid, &[upload, anchored]).is_empty());
@@ -168,6 +169,7 @@ fn a_placeholder_only_pane_has_renderable_media() {
         (0.0, 0.0),
         PaneRect::new(0.0, 0.0, 200.0, 100.0),
         (10.0, 10.0),
+        AnchorScroll::default(),
     );
     assert_eq!(placements.len(), 1, "drawn only through its placeholder run, never at its anchor");
     let renderable = placements
@@ -194,9 +196,12 @@ fn a_pane_without_virtual_placements_is_not_scanned() {
         (0.0, 0.0),
         PaneRect::new(0.0, 0.0, 9.0, 9.0),
         (1.0, 1.0),
+        AnchorScroll::default(),
     );
     assert_eq!(placements.len(), 1);
-    assert!(placements[0].slice.is_none());
+    // An untagged image draws at its anchor cell and decoded pixel size.
+    let dest = placements[0].slice.expect("anchored images carry their drawn rect").dest;
+    assert_eq!((dest.x, dest.y, dest.w, dest.h), (0.0, 0.0, 40.0, 20.0));
 }
 
 /// A change to a placement alone — its box, or its deletion — changes the frame's media identity.
@@ -252,4 +257,60 @@ fn an_unchanged_frame_returns_before_any_placeholder_scan() {
     let hash_fn = source.find("pub(super) fn inline_media_hash<").expect("hash fn");
     let hash_body = &source[hash_fn..hash_fn + source[hash_fn..].find("\n}\n").expect("hash end")];
     assert!(!hash_body.contains("decode_row"), "the hash never decodes rows");
+}
+
+/// The rect an anchored image of `show` at row 3, column 2 draws, with 10x20 px cells at origin
+/// (100, 50) and `scroll`.
+fn anchored_rect(show: KittyShow, scroll_mark: u64, scroll: AnchorScroll) -> (f32, f32, f32, f32) {
+    let mut image = virtual_image(1, 7, 0);
+    image.row = 3;
+    image.col = 2;
+    image.scroll_mark = scroll_mark;
+    image.kitty = Some(KittyTag { image_id: 7, placement_id: 0, show, source_px: (40, 20) });
+    let mut placements = Vec::new();
+    push_pane_placements(
+        &mut placements,
+        std::slice::from_ref(&image),
+        std::iter::empty(),
+        (100.0, 50.0),
+        PaneRect::new(0.0, 0.0, 1000.0, 1000.0),
+        (10.0, 20.0),
+        scroll,
+    );
+    let dest = placements[0].slice.expect("anchored rect").dest;
+    (dest.x, dest.y, dest.w, dest.h)
+}
+
+/// A direct kitty placement draws at its anchor cell in its `c` x `r` box, as kitty sizes it: both
+/// sides stretch, one side keeps the 2:1 aspect ratio, neither draws the 40x20 source pixels.
+#[test]
+fn an_anchored_kitty_image_draws_in_its_cell_box() {
+    let at =
+        |cols, rows| anchored_rect(KittyShow::Anchored { cols, rows }, 0, AnchorScroll::default());
+    assert_eq!(at(8, 3), (120.0, 110.0, 80.0, 60.0), "8x3 cells of 10x20 px from cell (3, 2)");
+    assert_eq!(at(0, 2), (120.0, 110.0, 80.0, 40.0), "r=2 is 40 px tall, so 80 px wide");
+    assert_eq!(at(6, 0), (120.0, 110.0, 60.0, 30.0), "c=6 is 60 px wide, so 30 px tall");
+    assert_eq!(at(0, 0), (120.0, 110.0, 40.0, 20.0), "no box draws the source size");
+}
+
+/// An anchored image moves up by the rows its pane scrolled since it was anchored, and down by the
+/// rows the viewport is scrolled back, so it stays beside the text it was drawn with.
+#[test]
+fn an_anchored_image_follows_scrolled_text() {
+    let show = KittyShow::Anchored { cols: 8, rows: 3 };
+    let scrolled = AnchorScroll { lines_scrolled: 5, rows_back: 0 };
+    assert_eq!(anchored_rect(show, 3, scrolled).1, 50.0 + 1.0 * 20.0, "two rows scrolled: row 1");
+    assert_eq!(anchored_rect(show, 0, scrolled).1, 50.0 - 2.0 * 20.0, "partly above the pane");
+    let back = AnchorScroll { lines_scrolled: 5, rows_back: 4 };
+    assert_eq!(anchored_rect(show, 3, back).1, 50.0 + 5.0 * 20.0, "viewport four rows back");
+}
+
+/// An image whose scroll mark is past the pane's count was anchored on an alternate screen that is
+/// no longer shown, so it draws nothing on the primary screen.
+#[test]
+fn an_image_from_another_screen_is_not_drawn() {
+    let show = KittyShow::Anchored { cols: 8, rows: 3 };
+    let primary = AnchorScroll { lines_scrolled: 5, rows_back: 0 };
+    let rect = anchored_rect(show, 1 << 40, primary);
+    assert_eq!((rect.2, rect.3), (0.0, 0.0), "an alternate-screen image is not drawn");
 }

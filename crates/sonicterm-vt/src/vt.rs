@@ -245,6 +245,9 @@ pub struct MediaEvent {
     /// [`Parser::cancel_capture`] for why a fragment is worse than nothing —
     /// so a consumer never has to ask whether what it received is complete.
     pub data: Vec<u8>,
+    /// The grid's [`Grid::lines_scrolled`] when the sequence completed, so the host can move an
+    /// image anchored at `row` up with the text it was drawn beside as the screen scrolls.
+    pub scroll_mark: u64,
 }
 
 /// Command lifecycle events surfaced from OSC 133 shell-integration markers.
@@ -308,6 +311,9 @@ pub struct Parser {
     /// belong to the user rather than to the abandoned transfer.
     discard_exits_on_newline: bool,
     escape_family: EscapeFamily,
+    /// The cell size in pixels the host last reported, which sizes a kitty placement given without
+    /// `c` or `r`; `None` until the host reports one.
+    cell_px: Option<(f32, f32)>,
 }
 
 /// SonicTerm-side OSC capture for sequences that vte cannot retain under the
@@ -388,6 +394,19 @@ impl Parser {
             discard_escape_pending_esc: false,
             discard_exits_on_newline: false,
             escape_family: EscapeFamily::Ground,
+            cell_px: None,
+        }
+    }
+
+    /// Tell the parser the pane's cell size in pixels, which sizes a kitty placement that gives no
+    /// `c` or `r` and so decides how far it moves the cursor. Non-positive sizes are ignored.
+    pub fn set_cell_pixel_size(&mut self, cell_width_px: f32, cell_height_px: f32) {
+        if cell_width_px.is_finite()
+            && cell_height_px.is_finite()
+            && cell_width_px > 0.0
+            && cell_height_px > 0.0
+        {
+            self.cell_px = Some((cell_width_px, cell_height_px));
         }
     }
 
@@ -650,6 +669,9 @@ mod vt_kitty;
 
 #[path = "vt_kitty_stream.rs"]
 mod vt_kitty_stream;
+
+#[path = "vt_kitty_cursor.rs"]
+mod vt_kitty_cursor;
 pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
 
 use vt_capture::parse_iterm2_file_event;

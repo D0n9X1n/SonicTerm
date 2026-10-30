@@ -426,8 +426,14 @@ impl Parser {
         let metadata = self.apc_metadata_of(&command);
         let Some(capture) = payload else {
             // When: payload is None, a place or delete carries no image and dispatches with no data.
-            let event =
-                MediaEvent { protocol: MediaProtocol::Kitty, row, col, metadata, data: Vec::new() };
+            let event = MediaEvent {
+                protocol: MediaProtocol::Kitty,
+                row,
+                col,
+                metadata,
+                data: Vec::new(),
+                scroll_mark: 0,
+            };
             self.dispatch_kitty_event(event, &command);
             return;
         };
@@ -475,8 +481,8 @@ impl Parser {
     ///
     /// Ending the prefix lets the host decode outside the parser lock and append its reply before
     /// any later query is parsed, so replies stay in stream order.
-    fn dispatch_kitty_event(&mut self, event: MediaEvent, command: &KittyCommand) {
-        self.performer.events.push(VtEvent::Media(event));
+    pub(super) fn dispatch_kitty_event(&mut self, event: MediaEvent, command: &KittyCommand) {
+        self.performer.push_media(event);
         let host_replies = matches!(
             command.action,
             KittyAction::Transmit
@@ -485,7 +491,9 @@ impl Parser {
                 | KittyAction::Place
         ) && command.image_id != 0
             && command.quiet < 2;
-        self.kitty_yield |= host_replies;
+        // A placement that moves the cursor also ends the prefix, so the host moves the cursor once
+        // the image is held, before the text after it is parsed.
+        self.kitty_yield |= host_replies || command.moves_cursor();
     }
 
     fn reply_kitty_error(&self, command: &KittyCommand, message: &str) {

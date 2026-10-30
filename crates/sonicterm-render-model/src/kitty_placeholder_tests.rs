@@ -213,3 +213,16 @@ fn an_empty_image_fits_to_nothing() {
     assert_eq!((fit.width_px, fit.height_px), (0.0, 0.0));
     assert!(run_slice(&fit, 0, 0, 1, 10.0, 10.0).is_none());
 }
+
+/// A direct placement's box follows kitty: both sides stretch, one side keeps the aspect ratio,
+/// neither draws the source pixels; a side never covers more than 65,535 cells.
+#[test]
+fn an_anchored_box_follows_kitty_and_is_capped() {
+    assert_eq!(anchored_size_px(8, 3, 64, 32, 10.0, 20.0), (80.0, 60.0));
+    assert_eq!(anchored_size_px(0, 2, 64, 32, 10.0, 20.0), (80.0, 40.0));
+    assert_eq!(anchored_size_px(6, 0, 64, 32, 10.0, 20.0), (60.0, 30.0));
+    assert_eq!(anchored_size_px(0, 0, 64, 32, 10.0, 20.0), (64.0, 32.0));
+    let (_, height) = anchored_size_px(u32::MAX, 0, 1, 2048, 10.0, 20.0);
+    assert_eq!(height, MAX_ANCHORED_BOX_CELLS as f32 * 20.0, "a side is capped");
+    assert_eq!(anchored_size_px(4, 2, 0, 32, 10.0, 20.0), (0.0, 0.0), "no pixels, no box");
+}

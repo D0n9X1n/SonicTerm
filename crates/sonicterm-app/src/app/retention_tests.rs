@@ -150,6 +150,7 @@ pub(super) fn decode_into(pane: &PaneState, id: &mut u64, count: usize, image_by
         let evicted = {
             let mut images = pane.inline_images.lock();
             images.push(sonicterm_render_model::InlineImage {
+                scroll_mark: 0,
                 id: *id,
                 row: 0,
                 col: 0,

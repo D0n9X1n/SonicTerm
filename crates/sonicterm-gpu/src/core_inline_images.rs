@@ -10,7 +10,8 @@ pub(super) struct InlineImagePlacement<'a> {
     pub(super) origin_y: f32,
     pub(super) content_clip: PaneRect,
     pub(super) painter_order: usize,
-    /// A kitty placeholder run's part of the image; `None` draws the whole image at its anchor.
+    /// The drawn rect and image part: a placeholder run's slice, or an anchored image's box moved
+    /// with the scrolled text; `None` draws the whole image at its anchor and pixel size.
     pub(super) slice: Option<super::kitty_placeholders::PlaceholderSlice>,
 }
 

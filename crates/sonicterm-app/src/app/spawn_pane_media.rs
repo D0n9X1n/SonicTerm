@@ -6,7 +6,20 @@ use sonicterm_vt::vt::{KittyAction, KittyCommand, MediaProtocol};
 use super::super::media::{apply_kitty, kitty_source_size, KittyOp};
 use super::*;
 
-/// Decode and store one batch's media events, returning the kitty replies they owe.
+/// A cursor move the host owes the parser after a kitty image was stored or placed: the
+/// placement's box in cells, 0 for a side not given, and the image's transmitted pixel size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct KittyCursorMove {
+    /// Placement box width in cells (`c`), or 0.
+    pub(super) cols: u32,
+    /// Placement box height in cells (`r`), or 0.
+    pub(super) rows: u32,
+    /// The image's transmitted pixel size.
+    pub(super) source_px: (u32, u32),
+}
+
+/// Decode and store one batch's media events, returning the kitty replies they owe and the cursor
+/// moves owed for direct placements that were stored or placed.
 ///
 /// Ordinary images (Sixel, iTerm2, untyped kitty) are staged and merged once, trimmed to the
 /// pane's budget as they are today. A kitty command is applied in order after any staged images
@@ -17,11 +30,12 @@ pub(super) fn apply_batch_media<Decode>(
     handles: &PaneVtHandles,
     media_events: Vec<MediaEvent>,
     decode_media: &mut Decode,
-) -> Vec<u8>
+) -> (Vec<u8>, Vec<KittyCursorMove>)
 where
     Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
 {
     let mut replies = Vec::new();
+    let mut moves = Vec::new();
     let mut staged = Vec::new();
     for media in media_events {
         let command = (media.protocol == MediaProtocol::Kitty)
@@ -55,13 +69,25 @@ where
                 };
                 KittyOp::Transmit(command.clone(), image, kitty_source_size(&media))
             }
-            KittyAction::Place => KittyOp::Place(command.clone(), media.row, media.col),
+            KittyAction::Place => {
+                KittyOp::Place(command.clone(), media.row, media.col, media.scroll_mark)
+            }
             KittyAction::Delete => KittyOp::Delete(command.clone()),
         };
         merge_staged(handles, &mut staged);
         let (message, removed) = {
             let mut images = handles.inline_images.lock();
             let (message, mut removed) = apply_kitty(&mut images, operation);
+            // Only a stored or placed image moves the cursor; a refusal leaves it where it is. The
+            // held entry is the newest, read before the trim may drop it.
+            let held = message == Some("OK") && command.moves_cursor();
+            if let Some(tag) = images.last().and_then(|entry| entry.kitty).filter(|_| held) {
+                moves.push(KittyCursorMove {
+                    cols: command.cols,
+                    rows: command.rows,
+                    source_px: tag.source_px,
+                });
+            }
             removed.extend(super::super::media::trim_inline_images_charged(
                 &mut images,
                 &handles.inline_media_charge,
@@ -74,7 +100,7 @@ where
         }
     }
     merge_staged(handles, &mut staged);
-    replies
+    (replies, moves)
 }
 
 /// Merge staged ordinary images into the pane's store, dropping evicted buffers after the lock.

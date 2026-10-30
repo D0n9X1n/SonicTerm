@@ -931,8 +931,16 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             emit_event(UserEvent::ClipboardAttempts { pane_id: handles.pane_id, attempts });
         }
 
-        let kitty_replies =
+        let (kitty_replies, cursor_moves) =
             media_batch::apply_batch_media(handles, media_events, &mut decode_media);
+        if !cursor_moves.is_empty() {
+            // The image lock is released, so the parser is locked alone, before the next prefix is
+            // parsed, so text after an image starts below it.
+            let mut parser = handles.parser.lock();
+            for owed in cursor_moves {
+                parser.move_cursor_past_kitty_image(owed.cols, owed.rows, owed.source_px);
+            }
+        }
 
         if !command_side_effects.is_empty() {
             super::append_bounded_command_events(

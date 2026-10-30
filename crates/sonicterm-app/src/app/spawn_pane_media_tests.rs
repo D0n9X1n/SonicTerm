@@ -166,6 +166,7 @@ fn the_idle_pass_trims_mixed_kitty_and_anchored_media_over_the_ceiling() {
     };
     // One full-size pixel buffer with a fresh id, as a decode produces.
     let buffer = |id: u64| InlineImage {
+        scroll_mark: 0,
         id,
         row: 0,
         col: 0,
@@ -193,7 +194,7 @@ fn the_idle_pass_trims_mixed_kitty_and_anchored_media_over_the_ceiling() {
     let pane = pane_on(&pool);
     let early: Vec<PaneState> = (0..3).map(|_| pane_on(&pool)).collect();
     merge(&pane, KittyOp::Transmit(command("a=T,U=1,i=8,p=1"), buffer(1), None));
-    merge(&pane, KittyOp::Place(command("a=p,U=1,i=8,p=2"), 0, 0));
+    merge(&pane, KittyOp::Place(command("a=p,U=1,i=8,p=2"), 0, 0, 0));
     {
         let evicted = {
             let mut images = pane.inline_images.lock();
@@ -247,4 +248,72 @@ fn the_idle_pass_trims_mixed_kitty_and_anchored_media_over_the_ceiling() {
     let survivors: Vec<_> =
         images.iter().map(|image| (image.id, image.kitty.map(|tag| tag.image_id))).collect();
     assert_eq!(survivors, vec![(3, Some(9))], "only the newest buffer, image 9, survives");
+}
+
+/// The text of `pane`'s visible row `row`, trailing blanks trimmed.
+fn row_text(pane: &PaneState, row: u16) -> String {
+    let parser = pane.parser.lock();
+    parser.grid().row(row).iter().map(|cell| cell.ch).collect::<String>().trim_end().to_owned()
+}
+
+/// Through the worker, a direct kitty PNG is anchored at the cursor cell in its `c` x `r` box, and
+/// the text written after it lands on the row below the image instead of on it.
+#[test]
+fn a_direct_png_is_anchored_at_the_cursor_and_text_follows_below_it() {
+    let (pane, handles) = pane_and_worker_handles();
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    run(&handles, format!("ab\x1b_Ga=T,f=100,q=2,c=8,r=3;{payload}\x1b\\\r\nX").as_bytes());
+    let images = pane.inline_images.lock();
+    assert_eq!(images.len(), 1);
+    let tag = images[0].kitty.expect("tagged");
+    assert_eq!((images[0].row, images[0].col), (0, 2), "anchored where the APC ended");
+    assert_eq!(tag.show, KittyShow::Anchored { cols: 8, rows: 3 });
+    drop(images);
+    assert_eq!(row_text(&pane, 0), "ab");
+    assert_eq!(row_text(&pane, 3), "X", "rows 0..=2 belong to the image; text starts on row 3");
+}
+
+/// An image placed near the bottom scrolls the screen; with its scroll mark it is drawn on the rows
+/// it occupies after the scroll, and the following text lands on the row after its last row.
+#[test]
+fn an_image_at_the_bottom_scrolls_with_its_text() {
+    let (pane, handles) = pane_and_worker_handles();
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    run(
+        &handles,
+        format!("\x1b[23;1H\x1b_Ga=T,f=100,q=2,c=8,r=3;{payload}\x1b\\\r\nend").as_bytes(),
+    );
+    let lines_scrolled = pane.parser.lock().grid().lines_scrolled();
+    let images = pane.inline_images.lock();
+    let image = &images[0];
+    assert_eq!((image.row, image.scroll_mark), (22, 0), "anchored on row 22 before any scroll");
+    assert_eq!(lines_scrolled, 2, "one scroll for the image's third row, one for the newline");
+    let drawn_top = u64::from(image.row) - (lines_scrolled - image.scroll_mark);
+    drop(images);
+    assert_eq!(drawn_top, 20, "the image now covers rows 20..=22");
+    assert_eq!(row_text(&pane, 23), "end", "the text follows the image's last row");
+}
+
+/// Only an image the pane actually holds moves the cursor: a transmit that does not decode, and a
+/// placement of an image that is not stored, are refused and leave the text where it was written.
+#[test]
+fn a_refused_image_leaves_the_cursor_still() {
+    for stream in
+        ["ab\x1b_Ga=T,f=100,q=2,i=5,c=8,r=3;AAAA\x1b\\X", "ab\x1b_Ga=p,q=2,i=9,c=8,r=3\x1b\\X"]
+    {
+        let (pane, handles) = pane_and_worker_handles();
+        run(&handles, stream.as_bytes());
+        assert!(pane.inline_images.lock().is_empty(), "nothing is held for {stream:?}");
+        assert_eq!(row_text(&pane, 0), "abX", "the cursor stayed for {stream:?}");
+    }
+}
+
+/// A placement of a stored image moves the cursor by its box once it is placed.
+#[test]
+fn a_placement_of_a_stored_image_moves_the_cursor() {
+    let (pane, handles) = pane_and_worker_handles();
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    run(&handles, format!("\x1b_Ga=t,f=100,q=2,i=5;{payload}\x1b\\").as_bytes());
+    run(&handles, b"ab\x1b_Ga=p,q=2,i=5,c=4,r=2\x1b\\\r\nX");
+    assert_eq!(row_text(&pane, 2), "X", "rows 0..=1 belong to the placement");
 }

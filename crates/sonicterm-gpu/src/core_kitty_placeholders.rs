@@ -5,7 +5,9 @@
 //! This phase runs only for panes holding a virtual placement and only when assembly proceeds, so
 //! panes without kitty images, and unchanged frames, pay nothing.
 
-use sonicterm_render_model::kitty_placeholder::{decode_row, fit_in_box, placement_box, run_slice};
+use sonicterm_render_model::kitty_placeholder::{
+    anchored_size_px, decode_row, fit_in_box, placement_box, run_slice,
+};
 use sonicterm_render_model::{InlineImage, KittyShow};
 
 use super::*;
@@ -29,7 +31,7 @@ fn find_virtual<'img>(
     let virtual_of = |image: &'img InlineImage| match image.kitty {
         Some(tag) if tag.image_id == image_id => match tag.show {
             KittyShow::Virtual { .. } => Some((image, tag)),
-            KittyShow::Upload | KittyShow::Anchored => None,
+            KittyShow::Upload | KittyShow::Anchored { .. } => None,
         },
         _ => None,
     };
@@ -49,6 +51,55 @@ pub(super) fn has_virtual_placement(images: &[InlineImage]) -> bool {
     )
 }
 
+/// How far a pane's text has moved since its images were anchored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct AnchorScroll {
+    /// The grid's `lines_scrolled` now; an image moves up by this minus its `scroll_mark`.
+    pub(super) lines_scrolled: u64,
+    /// Rows the viewport shows above the live screen when scrolled back; images move down by it.
+    pub(super) rows_back: u64,
+}
+
+/// Where an image anchored at the cursor draws: its anchor cell, moved with the text scrolled
+/// since, and its kitty box or, untagged, its decoded pixel size.
+fn anchored_dest(
+    image: &InlineImage,
+    origin: (f32, f32),
+    cell_size: (f32, f32),
+    scroll: AnchorScroll,
+) -> PaneRect {
+    if image.scroll_mark > scroll.lines_scrolled {
+        // When: scroll_mark is past lines_scrolled, the image was anchored on an alternate screen
+        // that is no longer shown, so it is not drawn.
+        return PaneRect::new(0.0, 0.0, 0.0, 0.0);
+    }
+    let (cell_w, cell_h) = cell_size;
+    let scrolled = scroll.lines_scrolled - image.scroll_mark;
+    let row = f64::from(image.row) - scrolled as f64 + scroll.rows_back as f64;
+    let (width, height) = match image.kitty {
+        Some(tag) => {
+            // When: the image is a kitty placement, its box and transmitted size decide its size.
+            let KittyShow::Anchored { cols, rows } = tag.show else {
+                // When: the tag is not an anchored show, draws_at_anchor already excluded it.
+                return PaneRect::new(0.0, 0.0, 0.0, 0.0);
+            };
+            // The transmitted size, before any downscale for retention, is the size kitty draws.
+            let (source_w, source_h) = match tag.source_px {
+                (0, _) | (_, 0) => (image.width, image.height),
+                size => size,
+            };
+            anchored_size_px(cols, rows, source_w, source_h, cell_w, cell_h)
+        }
+        None => (image.width as f32, image.height as f32),
+    };
+    PaneRect::new(
+        origin.0 + f32::from(image.col) * cell_w,
+        origin.1 + (row * f64::from(cell_h)) as f32,
+        width,
+        height,
+    )
+}
+
 /// Append one pane's image placements to `out`, in painter order: images drawn at their anchor
 /// first, then one placement per placeholder run in `rows`.
 ///
@@ -61,15 +112,17 @@ pub(super) fn push_pane_placements<'img, 'grid>(
     origin: (f32, f32),
     content_clip: PaneRect,
     cell_size: (f32, f32),
+    scroll: AnchorScroll,
 ) {
     for image in images.iter().filter(|image| image.draws_at_anchor()) {
+        let dest = anchored_dest(image, origin, cell_size, scroll);
         out.push(InlineImagePlacement {
             image,
             origin_x: origin.0,
             origin_y: origin.1,
             content_clip,
             painter_order: out.len(),
-            slice: None,
+            slice: Some(PlaceholderSlice { dest, source_uv: [0.0, 0.0, 1.0, 1.0] }),
         });
     }
     if !has_virtual_placement(images) {
@@ -159,7 +212,8 @@ pub(super) fn inline_media_hash<'img>(
         pane_id.hash(&mut hash);
         images.len().hash(&mut hash);
         for image in images {
-            (image.id, image.row, image.col, image.width, image.height).hash(&mut hash);
+            (image.id, image.row, image.col, image.scroll_mark, image.width, image.height)
+                .hash(&mut hash);
             image.kitty.hash(&mut hash);
         }
     }

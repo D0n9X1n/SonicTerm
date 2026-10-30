@@ -279,7 +279,9 @@ displays with GDI and with wgpu on its software adapter, and a virtual placement
 drawn through placeholder cells displays with GDI. Resizing the pseudoconsole
 wider or narrower makes the runtime send no repaint, so placeholder cells already
 on screen are not rewritten. The `windows_kitty_images` test feeds each form, as
-the runtime forwards it, through a pane and checks the presented GDI frame. Other
+the runtime forwards it, through a pane and checks, in the presented GDI frame,
+that each image is drawn on its cells, that the text after it lands below it,
+and that it moves up with its text when the screen scrolls. Other
 Windows builds and payloads, and output relayed through programs such as
 `ssh.exe` or `wsl.exe`, have not been checked.
 
@@ -400,6 +402,7 @@ that Claude Code uses to draw inline images, on macOS and Linux:
 | Formats | `f=100` PNG; `f=24` RGB and `f=32` RGBA (the default) with `s`/`v` matching the data; nothing else is guessed |
 | Chunking | `m=1` … `m=0`; text between chunks prints normally |
 | Placement | at the cursor, or virtual (`U=1`) through U+10EEEE placeholder cells, in a `c` x `r` cell box; at most 1,024 placements per pane (`ENOSPC` past it) |
+| Cursor | moves past a direct placement, as in kitty; `C=1` keeps it still |
 | Deletion | `d=i` removes placements and keeps the data; `d=I` also frees the data once nothing places it |
 | Replies | `ESC _ G i=<id>[,p=<p>];OK ESC \`, or an `ECODE:…` error in place of `OK`, only when `i` is set; `q=1` drops `OK`, `q=2` drops all |
 
@@ -463,6 +466,30 @@ on either side of them is shaped separately, so no ligature forms across an
 image. Eviction can remove an
 image whose placeholders are still in scrollback; they then show as blank
 cells, as in kitty.
+
+A direct placement (`a=T`, or `a=p` without `U=1`) is drawn at the cursor cell
+where its APC ended. With both `c` and `r` the image is stretched to that box;
+with one of them, that side comes from the cells and the other keeps the image's
+aspect ratio; with neither, the image is drawn at its transmitted pixel size.
+The cursor then moves `c` columns right and `r - 1` rows down, as in kitty, so
+the next line of text starts below the image. Past the right edge it wraps to
+the next row, and past the bottom margin the region scrolls. `C=1` keeps the
+cursor still, and a virtual placement, a store (`a=t`) and a query never move
+it. A placement without `c` or `r` takes its cells from the image's pixel size
+and the pane's cell size, and before the pane has been laid out the cursor
+stays; one side of a box is at most 65,535 cells. The parser stops after a
+command that moves the cursor, and the pane's worker moves it only once the
+image is stored or placed, before the text after it is parsed, so an image that
+fails to decode and a refused placement (`ENOENT`, `ENOSPC`) leave the cursor
+still.
+
+Every inline image drawn at its anchor (kitty, Sixel or iTerm2) moves up with
+the text as the full screen scrolls, and down when the viewport is scrolled
+back. A scroll inside DECSTBM margins does not move it. An image is shown only
+on the screen it was drawn on: the primary screen's images are hidden while the
+alternate screen is active, and the alternate screen's images are not shown after
+leaving it. Sixel and iTerm2 images
+do not move the cursor.
 
 Claude Code sends images when XTVERSION starts with `kitty`. It may first probe
 with a file-path query (`t=f`), which is refused, and then sends the image

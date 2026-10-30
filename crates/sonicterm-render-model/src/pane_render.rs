@@ -21,6 +21,9 @@ pub struct InlineImage {
     pub row: u16,
     /// Grid column where the image's top-left corner anchors.
     pub col: u16,
+    /// The grid's `lines_scrolled` when the image was anchored; the renderer moves the image up by
+    /// the rows scrolled since, so it stays beside the text it was drawn with.
+    pub scroll_mark: u64,
     /// Image width in pixels.
     pub width: u32,
     /// Image height in pixels.
@@ -39,8 +42,14 @@ pub struct InlineImage {
 pub enum KittyShow {
     /// Stored by `a=t` (or left after its placements were deleted) and not drawn.
     Upload,
-    /// Drawn at its `row`/`col` anchor, like any inline image.
-    Anchored,
+    /// Drawn at its `row`/`col` anchor in a box of `cols` x `rows` cells; 0 means the side is not
+    /// given and comes from the image's pixels, as kitty sizes it.
+    Anchored {
+        /// Placement box width in cells.
+        cols: u32,
+        /// Placement box height in cells.
+        rows: u32,
+    },
     /// Drawn only through Unicode placeholder cells, in a box of `cols` x `rows` cells;
     /// 0 means the image's natural size on that axis.
     Virtual {
@@ -69,7 +78,7 @@ impl InlineImage {
     /// Whether the renderer draws this entry at its `row`/`col` anchor.
     #[must_use]
     pub fn draws_at_anchor(&self) -> bool {
-        matches!(self.kitty, None | Some(KittyTag { show: KittyShow::Anchored, .. }))
+        matches!(self.kitty, None | Some(KittyTag { show: KittyShow::Anchored { .. }, .. }))
     }
 }
 
