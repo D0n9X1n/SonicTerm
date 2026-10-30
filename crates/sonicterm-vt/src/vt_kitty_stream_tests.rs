@@ -481,3 +481,28 @@ fn a_header_only_middle_chunk_sets_quiet() {
     let (_, replies) = feed_with_replies(&mut parser, b"\x1b_Gm=0;\x1b\\");
     assert!(replies.is_empty(), "q=2 silences the cancellation reply");
 }
+
+#[test]
+fn can_in_a_continuation_header_aborts_the_upload() {
+    // CAN while a continuation's control section is still arriving cancels the whole transfer:
+    // the final chunk dispatches nothing and the upload's staging is released.
+    let (mut parser, pool) = parser();
+    parser.advance(b"\x1b_Ga=T,f=24,s=1,v=1,i=7,q=2,m=1;AAAA\x1b\\");
+    parser.advance(b"\x1b_Gm=\x18");
+    assert_eq!(pool.live_captures(), 0, "the cancelled upload's reservation is released");
+    let events = parser.advance(b"\x1b_Gm=0;\x1b\\");
+    assert!(kitty_events(events).is_empty(), "the original pixels never render");
+}
+
+#[test]
+fn payload_free_chunks_still_advance_progress() {
+    // A transfer receiving only empty `m=1` chunks is alive: its progress moves between samples.
+    let (mut parser, _pool) = parser();
+    parser.advance(b"\x1b_Ga=T,f=100,i=7,q=2,m=1;AAAA\x1b\\");
+    let first = parser.capture_progress();
+    parser.advance(b"\x1b_Gm=1,q=2;\x1b\\");
+    let second = parser.capture_progress();
+    assert!(second > first, "a completed empty chunk still counts as arriving bytes");
+    parser.advance(b"\x1b_Gm=1,q=2;\x1b\\");
+    assert!(parser.capture_progress() > second);
+}

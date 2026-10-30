@@ -232,7 +232,11 @@ impl Parser {
             .chain(self.kitty_transfer_capture())
             .map(|capture| capture.seen)
             .sum::<usize>()
-            .saturating_add(self.apc_scratch.as_ref().map_or(0, |scratch| scratch.seen));
+            .saturating_add(self.apc_scratch.as_ref().map_or(0, |scratch| scratch.seen))
+            .saturating_add(match &self.performer.kitty_transfer {
+                Some(vt_kitty_stream::KittyTransfer::Loading { chunk_seen, .. }) => *chunk_seen,
+                Some(vt_kitty_stream::KittyTransfer::Aborted { .. }) | None => 0,
+            });
         let osc = match &self.raw_osc {
             Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
             Some(RawOsc::Probe { .. })

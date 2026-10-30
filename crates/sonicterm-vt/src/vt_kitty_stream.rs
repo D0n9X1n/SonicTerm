@@ -24,6 +24,9 @@ pub(super) enum KittyTransfer {
         command: KittyCommand,
         /// The transfer's single staging reservation and payload.
         capture: MediaCapture,
+        /// Bytes of every finished chunk, headers and terminators included, so a transfer whose
+        /// chunks carry no payload still reads as progressing between a host's samples.
+        chunk_seen: usize,
     },
     /// The transfer was refused or cancelled; later chunks are swallowed through `m=0`.
     Aborted {
@@ -364,7 +367,13 @@ impl Parser {
             // When: apc_scratch vanished, there is no APC to finish.
             return;
         };
-        let ApcScratch { phase, command, payload, .. } = *scratch;
+        let ApcScratch { phase, command, payload, seen, .. } = *scratch;
+        // A finished chunk's bytes stay counted on its open transfer.
+        if let Some(KittyTransfer::Loading { chunk_seen, .. }) =
+            self.performer.kitty_transfer.as_mut()
+        {
+            *chunk_seen = chunk_seen.saturating_add(seen);
+        }
         let row = self.performer.grid.cursor.row;
         let col = self.performer.grid.cursor.col;
         match (phase, command) {
@@ -385,7 +394,7 @@ impl Parser {
     /// Complete the transfer a final chunk ended.
     fn finish_transfer(&mut self, row: u16, col: u16) {
         match self.performer.kitty_transfer.take() {
-            Some(KittyTransfer::Loading { mut metadata, command, capture }) => {
+            Some(KittyTransfer::Loading { mut metadata, command, capture, .. }) => {
                 // The transfer's current quiet level, which later chunks may have changed, is the one the host replies with.
                 metadata.push_str(&format!(",q={}", command.quiet));
                 match capture.into_kitty_payload_event(metadata, row, col) {
@@ -425,7 +434,7 @@ impl Parser {
         if command.more {
             // When: more chunks follow, the first chunk opens the transfer holding its payload only.
             self.performer.kitty_transfer =
-                Some(KittyTransfer::Loading { metadata, command, capture });
+                Some(KittyTransfer::Loading { metadata, command, capture, chunk_seen: 0 });
             return;
         }
         match capture.into_kitty_payload_event(metadata, row, col) {
@@ -452,9 +461,12 @@ impl Parser {
                 self.performer.kitty_transfer =
                     Some(KittyTransfer::Aborted { command, reported: false });
             }
-            (ScratchPhase::Continue, _) => self.performer.abort_kitty_transfer(),
+            // A chunk cancelled while its header or payload arrives ends the open upload with it.
+            (ScratchPhase::Header | ScratchPhase::Continue, _) => {
+                self.performer.abort_kitty_transfer()
+            }
             _ => {
-                // When: the APC is a header, an ignored tail or a single command, no transfer is affected.
+                // When: the APC is an ignored tail or a single command, no open transfer is affected.
             }
         }
     }
