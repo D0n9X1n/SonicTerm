@@ -121,7 +121,7 @@ fn a_refused_chunked_transfer_swallows_its_tail() {
     let events = parser.advance(b"\x1b_Ga=T,t=f,i=9,q=2,m=1;AAAA\x1b\\\x1b_Gm=0;BBBB\x1b\\ok");
     assert!(kitty_events(events).is_empty());
     assert!(row_text(&parser, 0).starts_with("ok"));
-    assert!(parser.kitty_transfer.is_none(), "m=0 ends the aborted transfer");
+    assert!(parser.performer.kitty_transfer.is_none(), "m=0 ends the aborted transfer");
 }
 
 #[test]
@@ -377,4 +377,107 @@ fn an_orphan_continuation_is_swallowed() {
     // A continuation with no open transfer is not a new default transmit.
     let (mut parser, _pool) = parser();
     assert!(kitty_events(parser.advance(b"\x1b_Gm=0;AAAA\x1b\\")).is_empty());
+}
+
+#[test]
+fn many_empty_chunks_keep_the_transfer_bounded() {
+    // Thousands of payload-free `m=1,q=2;` chunks add nothing to what the transfer holds.
+    let (mut parser, _pool) = parser();
+    parser.advance(b"\x1b_Ga=T,f=100,i=7,m=1;AAAA\x1b\\");
+    let before = parser.retained_amount().bytes;
+    for _ in 0..5_000 {
+        parser.advance(b"\x1b_Gm=1,q=2;\x1b\\");
+    }
+    assert_eq!(parser.retained_amount().bytes, before);
+    let media = only_media(parser.advance(b"\x1b_Gm=0;BBBB\x1b\\"));
+    assert!(media.metadata.len() < 128, "metadata stays one control section: {}", media.metadata);
+}
+
+#[test]
+fn an_overlong_control_section_is_refused_not_cut_and_run() {
+    // A valid delete padded past the bound, then an invalid key, must not delete anything.
+    let (mut parser, _pool) = parser();
+    let mut header = b"\x1b_Ga=d,d=I,i=7,".to_vec();
+    while header.len() < MAX_KITTY_HEADER_BYTES + 3 {
+        header.extend_from_slice(b"z=1,");
+    }
+    header.extend_from_slice(b"q=3\x1b\\");
+    let (events, replies) = feed_with_replies(&mut parser, &header);
+    assert!(kitty_events(events).is_empty(), "nothing is dispatched");
+    assert!(String::from_utf8_lossy(&replies).contains("i=7;EINVAL"));
+}
+
+#[test]
+fn unfinished_control_sections_reserve_no_staging() {
+    // More open headers than the pool guarantees: none reserves, so a real image still stages.
+    let pool = CaptureStagingPool::new();
+    let mut headers: Vec<Parser> = (0..GUARANTEED_CONCURRENT_CAPTURES + 4)
+        .map(|_| Parser::new_with_staging_pool(Grid::new(4, 2), None, pool.clone()))
+        .collect();
+    for parser in &mut headers {
+        parser.advance(b"\x1b_Ga=T,f=100,i=7");
+        assert_eq!(parser.live_capture_count(), 1, "the open APC is live for stall detection");
+    }
+    assert_eq!(pool.live_captures(), 0);
+    let mut image = Parser::new_with_staging_pool(Grid::new(4, 2), None, pool.clone());
+    assert_eq!(only_media(image.advance(b"\x1b_Ga=T,f=100,i=8,q=2;AAAA\x1b\\")).data, b"AAAA");
+}
+
+#[test]
+fn an_over_cap_first_chunk_releases_staging_before_its_terminator() {
+    // The first APC passing the payload cap is refused at once; nothing waits for ST.
+    let (mut parser, pool) = parser();
+    let mut chunk = b"\x1b_Ga=T,f=100,i=7;".to_vec();
+    chunk.extend(std::iter::repeat_n(b'A', MAX_MEDIA_PAYLOAD_BYTES + 8));
+    let (_, replies) = feed_with_replies(&mut parser, &chunk);
+    assert_eq!(pool.live_captures(), 0);
+    assert_eq!(parser.retained_amount().bytes, 0);
+    assert!(String::from_utf8_lossy(&replies).contains("i=7;ENOMEM"));
+}
+
+#[test]
+fn sixel_reserves_only_after_an_upload_released_its_own() {
+    // With every other floor reservation held, a Sixel after an open upload still stages,
+    // because the upload gives its reservation back first.
+    let pool = CaptureStagingPool::new();
+    let mut holders: Vec<Parser> = (0..GUARANTEED_CONCURRENT_CAPTURES - 1)
+        .map(|_| Parser::new_with_staging_pool(Grid::new(4, 2), None, pool.clone()))
+        .collect();
+    for holder in &mut holders {
+        holder.advance(b"\x1bPq#");
+    }
+    let mut parser = Parser::new_with_staging_pool(Grid::new(40, 10), None, pool.clone());
+    parser.advance(b"\x1b_Ga=T,f=100,i=7,q=2,m=1;AAAA\x1b\\");
+    let events = parser.advance(b"\x1bPq#0;2;100;0;0#0~\x1b\\");
+    assert!(
+        events.iter().any(
+            |event| matches!(event, VtEvent::Media(media) if media.protocol == MediaProtocol::Sixel)
+        ),
+        "the Sixel is admitted, not refused"
+    );
+}
+
+#[test]
+fn cancelling_a_first_chunk_keeps_its_aborted_state() {
+    // The cancel records the aborted transfer and does not erase it, so the tail reserves nothing.
+    let (mut parser, pool) = parser();
+    parser.advance(b"\x1b_Ga=T,f=100,i=7,m=1;AAAA");
+    assert!(parser.cancel_capture() > 0);
+    parser.advance(b"\x1b\\\x1b_Gm=1;BBBB");
+    assert_eq!(pool.live_captures(), 0, "the tail is swallowed, not staged");
+    let (_, replies) = feed_with_replies(&mut parser, b"\x1b\\\x1b_Gm=0;\x1b\\");
+    assert!(
+        String::from_utf8_lossy(&replies).contains("i=7;ECANCELED"),
+        "the client hears it once"
+    );
+}
+
+#[test]
+fn a_header_only_middle_chunk_sets_quiet() {
+    // `m=1,q=2` with no `;` still silences the rest of the transfer, including its cancellation.
+    let (mut parser, _pool) = parser();
+    parser.advance(b"\x1b_Ga=T,f=100,i=7,m=1;AAAA\x1b\\\x1b_Gm=1,q=2\x1b\\");
+    parser.cancel_capture();
+    let (_, replies) = feed_with_replies(&mut parser, b"\x1b_Gm=0;\x1b\\");
+    assert!(replies.is_empty(), "q=2 silences the cancellation reply");
 }

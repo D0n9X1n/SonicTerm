@@ -209,6 +209,43 @@ impl KittyCommand {
         Ok(command)
     }
 
+    /// This command as canonical control text, which [`Self::parse`] reads back to an equal
+    /// command (apart from `m`, which is the stream's business, and `continuation_only`).
+    ///
+    /// The stream hands the host this text rather than the raw section, so its size is fixed
+    /// however many chunks a transfer had.
+    #[must_use]
+    pub fn control_text(&self) -> String {
+        let action = match self.action {
+            KittyAction::Transmit => 't',
+            KittyAction::TransmitAndDisplay => 'T',
+            KittyAction::Query => 'q',
+            KittyAction::Place => 'p',
+            KittyAction::Delete => 'd',
+        };
+        let mut text = format!(
+            "a={action},f={},i={},p={},s={},v={},c={},r={},U={},q={}",
+            self.format,
+            self.image_id,
+            self.placement_id,
+            self.width_px,
+            self.height_px,
+            self.cols,
+            self.rows,
+            u8::from(self.virtual_placement),
+            self.quiet,
+        );
+        // A delete selector is written back so the host reads the same deletion.
+        if let Some(delete) = self.delete {
+            text.push_str(match delete {
+                KittyDelete::ById => ",d=i",
+                KittyDelete::ByIdFree => ",d=I",
+                KittyDelete::Unsupported => ",d=x",
+            });
+        }
+        text
+    }
+
     /// Whether this command's payload is image data the stream must stage.
     #[must_use]
     pub fn carries_image(&self) -> bool {

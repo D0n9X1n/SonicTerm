@@ -267,3 +267,20 @@ fn the_source_size_is_kept_for_natural_sizing() {
     let _ = apply_kitty(&mut images, KittyOp::Transmit(command, image, None));
     assert_eq!(tags(&images)[0].source_px, (1024, 512), "defaults to the decoded size");
 }
+
+#[test]
+fn the_placement_cap_holds_for_transmits_and_placed_uploads() {
+    // At the cap, a new displayed transmit and the first placement of an upload are refused too.
+    let mut images = Vec::new();
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=t,i=5"), pixels(1, 4), None));
+    for _ in 0..MAX_KITTY_PLACEMENTS {
+        let _ = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=5"), 0, 0));
+    }
+    let (reply, _) =
+        apply_kitty(&mut images, KittyOp::Transmit(command("a=T,U=1,i=6"), pixels(2, 4), None));
+    assert_eq!(reply, Some("ENOSPC:too many placements"));
+    let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=t,i=7"), pixels(3, 4), None));
+    let (reply, _) = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=7"), 0, 0));
+    assert_eq!(reply, Some("ENOSPC:too many placements"));
+    assert!(placement_count(&images) <= MAX_KITTY_PLACEMENTS);
+}

@@ -235,3 +235,21 @@ fn natural_size_uses_the_transmitted_size() {
     );
     assert_eq!(found[0].1.source_uv, [0.0, 0.0, 0.5, 0.25]);
 }
+
+/// An unchanged frame returns before the image phase, so no placeholder row is decoded for it:
+/// placeholder runs are scanned only when assembly proceeds. The media hash, computed before
+/// planning, reads only image metadata.
+#[test]
+fn an_unchanged_frame_returns_before_any_placeholder_scan() {
+    let source = crate::core::CORE_SOURCE.replace("\r\n", "\n");
+    let unchanged = source.find("return Ok(Assembled::Unchanged {").expect("unchanged fast path");
+    let image_phase = source.find("self.assemble_inline_images(").expect("image phase call");
+    let hash = source.find("kitty_placeholders::inline_media_hash(").expect("media hash");
+    assert!(hash < unchanged && unchanged < image_phase);
+    let phase = source.find("pub(super) fn assemble_inline_images(").expect("image phase");
+    let phase_body = &source[phase..phase + source[phase..].find("\n    }\n").expect("phase end")];
+    assert!(phase_body.contains("push_pane_placements("), "runs are decoded only in the phase");
+    let hash_fn = source.find("pub(super) fn inline_media_hash<").expect("hash fn");
+    let hash_body = &source[hash_fn..hash_fn + source[hash_fn..].find("\n}\n").expect("hash end")];
+    assert!(!hash_body.contains("decode_row"), "the hash never decodes rows");
+}

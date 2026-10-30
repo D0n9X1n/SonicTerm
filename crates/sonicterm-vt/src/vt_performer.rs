@@ -78,6 +78,7 @@ impl Performer {
             last_printed_char: None,
             dcs_capture: None,
             staging_pool,
+            kitty_transfer: None,
             decrqss: None,
             decrqss_awaiting_backslash: false,
             kitty_kbd_flags: [Vec::new(), Vec::new()],

@@ -134,7 +134,7 @@ impl Parser {
                 // When: apc_scratch is active, the byte belongs to a chunk of the open kitty transfer.
                 // CAN or SUB aborts the whole transfer, not just this APC.
                 if matches!(bytes[offset], 0x18 | 0x1a) {
-                    self.abort_kitty_transfer();
+                    self.abort_in_flight_apc();
                     self.reset_cancelled_escape();
                 } else {
                     // When: matches finds neither CAN nor SUB in bytes, offset's byte feeds the scratch state machine.
@@ -142,16 +142,6 @@ impl Parser {
                 }
                 offset += 1;
                 continue;
-            }
-            if self.apc_capture.is_some() {
-                // When: apc_capture is active, so bytes belong to Kitty payload staging rather than ordinary terminal text.
-                self.consume_apc_byte(bytes[offset]);
-                offset += 1;
-                continue;
-            }
-            // An open kitty upload ends when a Sixel or iTerm2 capture begins between its chunks.
-            if self.kitty_transfer.is_some() {
-                self.yield_kitty_transfer_to_other_media();
             }
             if self.performer.dcs_capture.is_some() && matches!(bytes[offset], 0x18 | 0x1a) {
                 // When: dcs_capture receives CAN or SUB, abort the sequence before its remaining bytes can become image data.
@@ -225,11 +215,6 @@ impl Parser {
             self.feed_vte_byte(bytes[offset]);
             offset += 1;
         }
-        // A Sixel or iTerm2 capture opened by this read's last byte ends an open kitty upload now,
-        // not at the next read, so the parser never holds two captures between reads.
-        if self.kitty_transfer.is_some() {
-            self.yield_kitty_transfer_to_other_media();
-        }
         (offset, std::mem::take(&mut self.performer.events))
     }
 
@@ -278,7 +263,6 @@ impl Parser {
         self.raw_osc = None;
         self.iterm2_metadata_len = 0;
         self.pending_esc = false;
-        self.apc_capture = None;
         self.apc_scratch = None;
         self.performer.dcs_capture = None;
         self.performer.clear_decrqss();
@@ -354,37 +338,6 @@ impl Parser {
             return;
         }
         self.discard_escape_pending_esc = byte == 0x1b;
-    }
-
-    pub(super) fn consume_apc_byte(&mut self, byte: u8) {
-        if matches!(byte, 0x18 | 0x1a) {
-            // When: byte matches CAN or SUB, cancel APC staging before aborted Kitty data can become media.
-            self.abort_staged_first_chunk();
-            self.reset_cancelled_escape();
-            return;
-        }
-        let Some(capture) = self.apc_capture.as_mut() else {
-            // When: apc_capture vanished, ignore this byte rather than treating payload continuation as a new sequence.
-            return;
-        };
-        if capture.pending_esc {
-            // When: capture has a pending_esc, resolve whether byte completes ST before committing either byte to the payload.
-            capture.pending_esc = false;
-            if byte == b'\\' {
-                // When: byte completes ST, dispatch the capture only after its whole-payload checks succeed.
-                self.finish_staged_apc();
-                return;
-            }
-            capture.append_byte(0x1b);
-        }
-        // When: byte selects C1 ST, ESC, or payload handling for this APC byte.
-        if byte == 0x9c {
-            self.finish_staged_apc();
-        } else if byte == 0x1b {
-            capture.pending_esc = true;
-        } else {
-            capture.append_byte(byte);
-        }
     }
 
     pub(super) fn finish_escape(&mut self) {

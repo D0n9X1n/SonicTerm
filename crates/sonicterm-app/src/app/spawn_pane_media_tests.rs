@@ -146,3 +146,82 @@ fn kitty_and_anchored_images_share_one_charge_measure_and_trim() {
         super::super::super::media::retained_inline_media(&pane.inline_images.lock()).bytes
     );
 }
+
+/// Over the process ceiling, the idle-pane pass trims a pane holding kitty placements and an
+/// anchored image as one store: whole pixel buffers go, oldest first, every placement of an
+/// evicted kitty image with it, and the charge still equals what remains.
+#[test]
+fn the_idle_pass_trims_mixed_kitty_and_anchored_media_over_the_ceiling() {
+    let pool = crate::app::media::InlineMediaPool::new();
+    let pane_on = |pool: &Arc<crate::app::media::InlineMediaPool>| {
+        let parser = sonicterm_vt::vt::Parser::new_with_staging_pool(
+            sonicterm_grid::grid::Grid::new(80, 24),
+            None,
+            sonicterm_vt::vt::CaptureStagingPool::new(),
+        );
+        let pane = PaneState::new_with_media_pool(Arc::new(Mutex::new(parser)), None, pool);
+        let handles = PaneVtHandles::from_pane_state(&pane);
+        (pane, handles)
+    };
+    let (pane, handles) = pane_on(&pool);
+    run(&handles, &claude_code_transmit(8, 4096));
+    run(&handles, b"\x1b_Ga=p,U=1,i=8,p=2,q=2\x1b\\");
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    run(&handles, format!("\x1b_Ga=T,f=100,i=9,q=2;{payload}\x1b\\").as_bytes());
+    // Siblings created early keep the larger share they were admitted under, so filling them and
+    // then adding more panes pushes the pool past its ceiling, as the retention tests do.
+    let fill = |pane: &PaneState, first_id: u64, count: u64| {
+        for id in first_id..first_id + count {
+            // Each image is merged and trimmed under the sibling's charge, as its worker would.
+            let evicted = {
+                let mut images = pane.inline_images.lock();
+                images.push(InlineImage {
+                    id,
+                    row: 0,
+                    col: 0,
+                    width: 1,
+                    height: 1,
+                    bgra: Arc::from(vec![0u8; 4 * 1024 * 1024]),
+                    kitty: None,
+                });
+                super::super::super::media::trim_inline_images_charged(
+                    &mut images,
+                    &pane.inline_media_charge,
+                )
+            };
+            drop(evicted);
+        }
+    };
+    let early: Vec<_> = (0..3).map(|_| pane_on(&pool)).collect();
+    for (index, (sibling, _)) in early.iter().enumerate() {
+        fill(sibling, 1_000_000 + 1_000 * index as u64, 32);
+    }
+    let mut crowd = Vec::new();
+    while pool.bytes() <= super::super::super::media::MAX_PROCESS_INLINE_MEDIA_BYTES
+        && crowd.len() < 64
+    {
+        let (late, late_handles) = pane_on(&pool);
+        fill(&late, 2_000_000 + 1_000 * crowd.len() as u64, 4);
+        crowd.push((late, late_handles));
+    }
+    assert!(pool.bytes() > super::super::super::media::MAX_PROCESS_INLINE_MEDIA_BYTES);
+    let before = super::super::super::media::retained_inline_media(&pane.inline_images.lock());
+    super::super::super::retention::trim_panes_over_pool_ceiling(&pool, [&pane]);
+    let images = pane.inline_images.lock();
+    let after = super::super::super::media::retained_inline_media(&images);
+    assert!(after.items <= before.items);
+    assert_eq!(
+        images.last().map(|image| image.kitty.map(|tag| tag.image_id)),
+        Some(Some(9)),
+        "the newest buffer stays"
+    );
+    let kitty_eight =
+        images.iter().filter(|image| image.kitty.is_some_and(|tag| tag.image_id == 8)).count();
+    assert!(kitty_eight == 0 || kitty_eight == 2, "a kitty image's placements stay or go together");
+    drop(images);
+    assert_eq!(
+        handles.inline_media_charge.lock().pool().bytes(),
+        pool.bytes(),
+        "the pane's charge is part of the pool total it reports"
+    );
+}

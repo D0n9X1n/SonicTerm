@@ -408,10 +408,13 @@ or shared-memory object.
 A chunked transfer holds one staging reservation from its first chunk to its
 last. A later chunk reads its control keys into bounded scratch and streams its
 payload into that reservation, so the open transfer counts as the parser's one
-live capture, and its progress advances with every chunk. Every APC's control
-section (at most 512 bytes) is also kept outside staging, so a delete or
-placement still runs, and a refused transfer is still tracked, when the staging
-pool has no room for a payload. A transfer that passes the payload cap releases
+live capture, and its progress advances with every chunk. Every APC reads its
+control section (at most 512 bytes) before reserving anything, and only a new
+transmit or query then reserves staging, for its payload: open headers cannot
+exhaust the pools, and a delete or placement still runs, and a refused transfer
+is still tracked, when the pools have no room. A longer control section is
+refused, never cut and run. A Sixel or iTerm2 capture that starts between
+chunks ends the upload before it reserves. A transfer that passes the payload cap releases
 its staging at once and is refused with one error; a refused or cancelled
 transfer reports one error in all, and its later chunks are swallowed. A later
 chunk's `q` (including `q=0`) applies to the rest of the transfer. A delete ends an open

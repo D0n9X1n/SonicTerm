@@ -59,7 +59,7 @@ pub(super) fn a_stalled_capture_is_still_reclaimed_across_the_stall_threshold() 
         .expect("the window has a pane");
 
     let mut chunk = Vec::with_capacity(512 * 1024 + 3);
-    chunk.extend_from_slice(b"\x1b_G");
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
     chunk.resize(512 * 1024, b'A');
     {
         let pane = seeded_pane(&app, window, pane_id);
@@ -108,7 +108,7 @@ pub(super) fn bytes_arriving_reset_the_stall_count() {
         .expect("the window has a pane");
 
     let mut chunk = Vec::with_capacity(512 * 1024 + 3);
-    chunk.extend_from_slice(b"\x1b_G");
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
     chunk.resize(512 * 1024, b'A');
     {
         let pane = seeded_pane(&app, window, pane_id);
@@ -544,7 +544,7 @@ pub(super) fn seeded_panes_stage_captures_in_the_apps_pool() {
         .into_iter()
         .chain(child_panes.iter().copied().map(|pane_id| (child, pane_id)));
     for (window, pane_id) in panes {
-        seeded_pane(&app, window, pane_id).parser.lock().advance(b"\x1b_GAAAA");
+        seeded_pane(&app, window, pane_id).parser.lock().advance(b"\x1b_Gf=100;AAAA");
     }
     assert_eq!(pool.live_captures(), 4, "seeded and split panes all stage in the injected pool");
 

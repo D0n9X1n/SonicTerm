@@ -198,7 +198,6 @@ struct MediaCapture {
     metadata: String,
     data: Vec<u8>,
     truncated: bool,
-    pending_esc: bool,
     /// Every byte offered to this capture, including those refused after the
     /// budget was reached.
     ///
@@ -212,24 +211,6 @@ struct MediaCapture {
     /// This capture's claim on its parser's staging pool, released when the
     /// capture is dropped or destructured into an event.
     reservation: StagingReservation,
-    /// A kitty APC's control section (after `G`, before `;`), kept outside the reservation.
-    ///
-    /// Bounded at [`vt_kitty_stream::MAX_KITTY_HEADER_BYTES`], so a header-only command such as a
-    /// delete still dispatches, and a refused transfer can still be tracked, when the staging
-    /// pool has no room for a payload.
-    kitty_header: Option<KittyHeader>,
-}
-
-/// The control section of a kitty APC as it arrives.
-#[derive(Debug, Default)]
-struct KittyHeader {
-    bytes: Vec<u8>,
-    /// Set at the first `;`, or when the section outgrew its bound; later bytes are payload.
-    complete: bool,
-    /// Whether the APC began with `G`, so the section is a graphics command at all.
-    graphics: bool,
-    /// Whether the first byte has been read.
-    started: bool,
 }
 
 /// Inline-media escape protocol.
@@ -304,11 +285,8 @@ pub struct SyncState {
 pub struct Parser {
     inner: vte::Parser,
     performer: Performer,
-    apc_capture: Option<MediaCapture>,
-    /// An APC opened while a kitty transfer is open; its header is read without staging.
+    /// The kitty APC in flight: its bounded control section and, for an image, its payload.
     apc_scratch: Option<Box<vt_kitty_stream::ApcScratch>>,
-    /// A chunked kitty transfer spanning APCs, holding the parser's one staging reservation.
-    kitty_transfer: Option<vt_kitty_stream::KittyTransfer>,
     /// Set when a kitty event needs the host's reply, ending the advance prefix after it.
     kitty_yield: bool,
     pending_esc: bool,
@@ -399,9 +377,7 @@ impl Parser {
         Self {
             inner: vte::Parser::new(),
             performer,
-            apc_capture: None,
             apc_scratch: None,
-            kitty_transfer: None,
             kitty_yield: false,
             pending_esc: false,
             raw_osc: None,
@@ -620,6 +596,10 @@ struct Performer {
     dcs_capture: Option<MediaCapture>,
     /// Pool this parser's media captures stage in.
     staging_pool: Arc<CaptureStagingPool>,
+    /// A chunked kitty transfer spanning APCs, holding the parser's one staging reservation.
+    ///
+    /// Owned here rather than by the parser so the Sixel hook can end it before reserving.
+    kitty_transfer: Option<vt_kitty_stream::KittyTransfer>,
     /// Query selectors never retain terminal-controlled payload bytes.
     decrqss: Option<DecrqssRequest>,
     /// vte unhooks at ESC, before the following byte proves an ST terminator.

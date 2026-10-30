@@ -780,7 +780,7 @@ fn a_slow_capture_survives_the_wakes_inside_one_interval() {
     // An APC introducer with payload and no terminator: a transfer still in
     // flight. Nothing here says whether it is slow or dead.
     let mut chunk = Vec::with_capacity(512 * 1024 + 3);
-    chunk.extend_from_slice(b"\x1b_G");
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
     chunk.resize(512 * 1024, b'A');
     {
         let pane = seeded_pane(&app, window, pane_id);

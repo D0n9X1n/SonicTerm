@@ -162,7 +162,8 @@ fn mixed_media_protocols_share_the_process_staging_pool() {
     for (index, parser) in parsers.iter_mut().enumerate() {
         match index % 3 {
             0 => {
-                parser.advance(b"\x1b_GA");
+                // A kitty image payload; a bare control section would reserve nothing.
+                parser.advance(b"\x1b_Gf=100;A");
             }
             1 => {
                 parser.advance(b"\x1bPq?");

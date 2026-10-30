@@ -416,9 +416,10 @@ fn a_stalled_capture_is_visible_as_progress_and_releasable_by_cancel() {
     let pool = CaptureStagingPool::new();
     let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
 
-    let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 3);
-    chunk.extend_from_slice(b"\x1b_G");
-    chunk.resize(MAX_MEDIA_PAYLOAD_BYTES + 3, b'A');
+    // A kitty image payload: its control section ends at `;`, so the payload reserves staging.
+    let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES / 2);
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
+    chunk.resize(MAX_MEDIA_PAYLOAD_BYTES / 2, b'A');
     parser.advance(&chunk);
 
     assert_eq!(parser.live_capture_count(), 1, "precondition: a capture is in flight");
@@ -800,7 +801,8 @@ fn live_capture_count_is_per_parser_while_the_pool_counts_all_sharers() {
     let mut kitty = Parser::new_with_staging_pool(Grid::new(8, 2), None, pool.clone());
 
     sixel.advance(b"\x1bPq#");
-    kitty.advance(b"\x1b_GA");
+    // An image payload, not a bare header: only a payload reserves staging.
+    kitty.advance(b"\x1b_Gf=100;A");
     assert_eq!((sixel.live_capture_count(), kitty.live_capture_count()), (1, 1));
     assert_eq!(pool.live_captures(), 2, "the pool counts both parsers' captures");
 

@@ -517,7 +517,7 @@ fn a_stalled_capture_is_reclaimed_by_the_sampling_pass() {
     // An APC introducer plus payload, with no terminator: the shape a killed
     // `imgcat` leaves behind.
     let mut chunk = Vec::with_capacity(2 * 1024 * 1024 + 3);
-    chunk.extend_from_slice(b"\x1b_G");
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
     chunk.resize(2 * 1024 * 1024, b'A');
     app.__test_advance_child_pane_parser(child, pane_id, &chunk);
 
@@ -557,7 +557,7 @@ fn a_slow_but_live_transfer_is_never_cancelled() {
     let child = app.__test_seed_child_window(&["one"]);
     let pane_id = *app.__test_child_pane_ids(child).expect("child").first().expect("pane");
 
-    app.__test_advance_child_pane_parser(child, pane_id, b"\x1b_G");
+    app.__test_advance_child_pane_parser(child, pane_id, b"\x1b_Gf=100;");
 
     // Ten sampling rounds, each with a trickle of bytes in between — far more
     // than the two that would condemn a stalled one.
@@ -583,7 +583,7 @@ fn reclaiming_a_stalled_capture_leaves_the_pane_usable() {
 
     app.__test_advance_child_pane_parser(child, pane_id, b"before the transfer\r\n");
     let mut chunk = Vec::with_capacity(1024 * 1024 + 3);
-    chunk.extend_from_slice(b"\x1b_G");
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
     chunk.resize(1024 * 1024, b'A');
     app.__test_advance_child_pane_parser(child, pane_id, &chunk);
     assert_eq!(

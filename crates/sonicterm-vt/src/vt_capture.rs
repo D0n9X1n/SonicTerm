@@ -11,47 +11,10 @@ impl MediaCapture {
             metadata,
             data: Vec::new(),
             truncated: false,
-            pending_esc: false,
             seen: 0,
             growth_exhausted: false,
             reservation: StagingReservation::admit(pool),
-            kitty_header: (protocol == MediaProtocol::Kitty).then(KittyHeader::default),
         }
-    }
-
-    /// Record `byte` in the kitty control section while it is still open.
-    fn note_kitty_header(&mut self, byte: u8) {
-        let Some(header) = self.kitty_header.as_mut() else {
-            // When: kitty_header is None, this is a Sixel or iTerm2 capture with no control section.
-            return;
-        };
-        if header.complete {
-            // When: the header is complete, the byte is payload.
-            return;
-        }
-        if !header.started {
-            // When: started is false, this is the APC's first byte, which names the command family.
-            header.started = true;
-            header.graphics = byte == b'G';
-            return;
-        }
-        if byte == b';' || header.bytes.len() == vt_kitty_stream::MAX_KITTY_HEADER_BYTES {
-            // When: byte ends the section or the section reached its bound, later bytes are payload.
-            header.complete = true;
-            return;
-        }
-        header.bytes.push(byte);
-    }
-
-    /// The parsed control section of a kitty graphics APC, or `None` for any other capture.
-    pub(super) fn kitty_command(&self) -> Option<Result<KittyCommand, KittyCommandError>> {
-        let header = self.kitty_header.as_ref()?;
-        header.graphics.then(|| KittyCommand::parse(&header.bytes))
-    }
-
-    /// The control section's raw bytes, for answering a command that did not parse.
-    pub(super) fn kitty_header_bytes(&self) -> &[u8] {
-        self.kitty_header.as_ref().map_or(&[], |header| header.bytes.as_slice())
     }
 
     /// Bytes this capture is holding, counting reserved capacity.
@@ -59,16 +22,12 @@ impl MediaCapture {
     /// Capacity rather than length because that is what the allocator is
     /// actually holding: a capture that grew and was truncated still owns the
     /// larger buffer.
-    ///
-    /// A kitty control section copy is not counted: it is bounded at 512 bytes per capture and is
-    /// kept outside the staging budget on purpose, so a refused capture can still be answered.
     pub(super) fn retained_bytes(&self) -> usize {
         self.data.capacity().saturating_add(self.metadata.capacity())
     }
 
     pub(super) fn append_byte(&mut self, byte: u8) {
         self.seen = self.seen.saturating_add(1);
-        self.note_kitty_header(byte);
 
         if self.data.len() < self.reservation.budget() {
             // When: data still fits its reservation budget, so keeping byte preserves a complete payload without exceeding the pool.
@@ -161,22 +120,7 @@ impl MediaCapture {
         })
     }
 
-    /// Dispatch a kitty command whose control section parsed, splitting at the first `;`.
-    ///
-    /// An APC without `;` is all control section and no payload.
-    pub(super) fn into_kitty_command_event(mut self, row: u16, col: u16) -> Option<MediaEvent> {
-        if !self.whole() || self.data.first().copied() != Some(b'G') {
-            // When: the capture is not whole or lacks G, it cannot be a parsed kitty command.
-            return None;
-        }
-        let header_end = self.data.iter().position(|byte| *byte == b';');
-        let metadata_end = header_end.unwrap_or(self.data.len());
-        let metadata = String::from_utf8_lossy(&self.data[1..metadata_end]).into_owned();
-        self.data.drain(..header_end.map_or(self.data.len(), |end| end + 1));
-        Some(MediaEvent { protocol: MediaProtocol::Kitty, row, col, metadata, data: self.data })
-    }
-
-    /// Dispatch a reassembled kitty transfer whose payload holds no headers.
+    /// Dispatch a kitty payload, which holds no control section.
     ///
     /// `None` when any chunk could not be staged whole, for the same reason a single capture is
     /// never dispatched in part.
@@ -225,9 +169,14 @@ pub(super) fn parse_iterm2_file_event(payload: &[u8], row: u16, col: u16) -> Opt
 }
 
 impl Parser {
+    /// The payload capture of the kitty APC in flight, if it reserved one.
+    fn apc_payload(&self) -> Option<&MediaCapture> {
+        self.apc_scratch.as_ref().and_then(|scratch| scratch.payload.as_ref())
+    }
+
     /// The capture an open kitty transfer holds between chunks, if any.
     fn kitty_transfer_capture(&self) -> Option<&MediaCapture> {
-        match &self.kitty_transfer {
+        match &self.performer.kitty_transfer {
             Some(vt_kitty_stream::KittyTransfer::Loading { capture, .. }) => Some(capture),
             Some(vt_kitty_stream::KittyTransfer::Aborted { .. }) | None => None,
         }
@@ -245,8 +194,8 @@ impl Parser {
     #[must_use]
     pub fn retained_amount(&self) -> ResourceAmount {
         let capture_bytes = self
-            .apc_capture
-            .iter()
+            .apc_payload()
+            .into_iter()
             .chain(self.performer.dcs_capture.iter())
             .chain(self.kitty_transfer_capture())
             .map(MediaCapture::retained_bytes)
@@ -277,12 +226,13 @@ impl Parser {
     #[must_use]
     pub fn capture_progress(&self) -> usize {
         let direct = self
-            .apc_capture
+            .performer
+            .dcs_capture
             .iter()
-            .chain(self.performer.dcs_capture.iter())
             .chain(self.kitty_transfer_capture())
             .map(|capture| capture.seen)
-            .sum::<usize>();
+            .sum::<usize>()
+            .saturating_add(self.apc_scratch.as_ref().map_or(0, |scratch| scratch.seen));
         let osc = match &self.raw_osc {
             Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
             Some(RawOsc::Probe { .. })
@@ -325,9 +275,8 @@ impl Parser {
             // When: released and live_capture_count show no capture, keep ground unchanged rather than swallowing ordinary output.
             return 0;
         }
-        self.abort_staged_first_chunk();
-        let in_sequence = self.apc_capture.is_some()
-            || self.apc_scratch.is_some()
+        self.abort_in_flight_apc();
+        let in_sequence = self.apc_scratch.is_some()
             || self.performer.dcs_capture.is_some()
             || self.raw_osc.is_some();
         self.abort_kitty_transfer();
@@ -367,8 +316,8 @@ impl Parser {
     /// and a staged APC are never both live.
     #[must_use]
     pub fn live_capture_count(&self) -> usize {
-        usize::from(self.apc_capture.is_some())
-            + usize::from(self.kitty_transfer_capture().is_some())
+        // A kitty APC in flight is the open transfer's chunk or its own capture, never both.
+        usize::from(self.apc_scratch.is_some() || self.kitty_transfer_capture().is_some())
             + usize::from(self.performer.dcs_capture.is_some())
             + usize::from(matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })))
     }

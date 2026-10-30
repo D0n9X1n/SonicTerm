@@ -114,6 +114,22 @@ pub(in crate::app) fn apply_kitty(
         KittyOp::Transmit(command, mut image, source_px) => {
             // When: operation is Transmit, the image replaces every entry of its id before it is tagged and stored.
             let show = show_for(&command);
+            // A displayed transmit adds a placement; at the cap it is refused unless it replaces one of its own.
+            let replaced_placements = images
+                .iter()
+                .filter(|entry| {
+                    let tag = tag_of(entry);
+                    command.image_id != 0
+                        && tag.image_id == command.image_id
+                        && tag.show != KittyShow::Upload
+                })
+                .count();
+            if show != KittyShow::Upload
+                && placement_count(images) - replaced_placements >= MAX_KITTY_PLACEMENTS
+            {
+                // When: show adds a placement and placement_count minus replaced_placements is at the cap, it is refused.
+                return (Some("ENOSPC:too many placements"), vec![image]);
+            }
             let removed = if command.image_id == 0 {
                 // When: image_id is 0 the image is anonymous: nothing to replace, and an unshown upload is unreachable.
                 if show == KittyShow::Upload {
@@ -151,8 +167,12 @@ pub(in crate::app) fn apply_kitty(
                     && (tag.show == KittyShow::Upload
                         || (command.placement_id != 0 && tag.placement_id == command.placement_id))
             };
-            if !images.iter().any(replaces) && placement_count(images) >= MAX_KITTY_PLACEMENTS {
-                // When: the pane already holds MAX_KITTY_PLACEMENTS and this one replaces none, it is refused.
+            // Only replacing an existing placement keeps the count; placing an upload adds one.
+            let replaces_placement = images
+                .iter()
+                .any(|entry| replaces(entry) && tag_of(entry).show != KittyShow::Upload);
+            if !replaces_placement && placement_count(images) >= MAX_KITTY_PLACEMENTS {
+                // When: replaces_placement is false and placement_count is at the cap, the new placement is refused.
                 return (Some("ENOSPC:too many placements"), Vec::new());
             }
             placed.row = row;
