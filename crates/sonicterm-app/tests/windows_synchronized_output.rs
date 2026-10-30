@@ -16,7 +16,7 @@ use std::{
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalSize,
+    dpi::LogicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
     platform::windows::EventLoopBuilderExtWindows,
@@ -133,11 +133,13 @@ fn row_write(row: usize, rows: u16) -> Vec<u8> {
 /// A child window with a GDI renderer and two tabs: 0 is the subject, 1 the reference that
 /// receives the same bytes without brackets.
 fn run(active: &ActiveEventLoop) -> Result<(), String> {
+    // Logical size: the renderer rasterizes the logical font at the window's scale, so a fixed
+    // physical size would hold fewer than the 20 written rows on a high-DPI host.
     let window = Arc::new(
         active
             .create_window(
                 Window::default_attributes()
-                    .with_inner_size(PhysicalSize::new(800, 600))
+                    .with_inner_size(LogicalSize::new(800.0, 600.0))
                     .with_visible(true)
                     .with_title("SonicTerm synchronized output"),
             )

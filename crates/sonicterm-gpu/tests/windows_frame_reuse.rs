@@ -40,7 +40,7 @@ use sonicterm_render_model::{
 use sonicterm_types::{ClassCoverage, ResourceClass};
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalSize,
+    dpi::LogicalSize,
     event::WindowEvent,
     event_loop::ActiveEventLoop,
     window::{Window, WindowId},
@@ -128,20 +128,23 @@ fn host_has_no_adapter() -> bool {
     pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
 }
 
-/// A visible `width_px` by `height_px` window and a counting renderer on it in `mode`, built with
-/// `theme`, with the tab bar shown when `tab_bar`; `Err` names a host with no adapter.
+/// A visible window `logical_size` logical pixels wide and tall and a counting renderer on it in
+/// `mode`, built with `theme`, with the tab bar shown when `tab_bar`; `Err` names a host with no
+/// adapter. The size is logical because the font, tab bar and tab widths all scale with the
+/// window's DPI, so each scene keeps one layout on every host scale: at a fixed physical size a
+/// high-DPI host crowds the tab bar into an overflow segment that draws fewer titles.
 fn renderer(
     active: &ActiveEventLoop,
     mode: SoftwareRenderMode,
     theme: &Theme,
-    size_px: (u32, u32),
+    logical_size: (u32, u32),
     tab_bar: bool,
 ) -> Result<(Arc<Window>, GpuRenderer), String> {
     let window = Arc::new(
         active
             .create_window(
                 Window::default_attributes()
-                    .with_inner_size(PhysicalSize::new(size_px.0, size_px.1))
+                    .with_inner_size(LogicalSize::new(logical_size.0, logical_size.1))
                     .with_visible(true)
                     .with_title("frame-reuse"),
             )
@@ -520,6 +523,34 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     } else {
         Err(failures.join("\n"))
     }
+}
+
+/// The title scene's tab bar draws all three titles at every common Windows scale when its window
+/// is sized in logical pixels, while the same physical width at 175% crowds into an overflow
+/// segment: the bar height and tab minimum scale with DPI, so only a logical size keeps the scene.
+#[test]
+fn title_scene_keeps_three_tabs_at_every_scale() {
+    use sonicterm_render_model::boundary::ui::tabbar_view::{tab_bar_height, TabBarLayout};
+    let long = "a very long tab title that cannot fit its tab and must be cut short";
+    let mut tabs = TabBar::new();
+    for title in ["shell", "logs", long] {
+        tabs.push(Tab::new(title));
+    }
+    // The fixture body font (16) sizes the bar; production multiplies it by the scale.
+    let layout_at = |width_px: f32, scale_factor: f32| {
+        TabBarLayout::compute_with_height(&tabs, width_px, tab_bar_height(16.0) * scale_factor)
+    };
+    for scale_factor in [1.0, 1.25, 1.5, 1.75, 2.0] {
+        let layout = layout_at(640.0 * scale_factor, scale_factor);
+        assert!(
+            layout.overflow.is_none() && layout.tabs.len() == 3,
+            "640 logical px at scale {scale_factor} shows {} tabs, overflow {:?}",
+            layout.tabs.len(),
+            layout.overflow
+        );
+    }
+    let fixed_physical = layout_at(640.0, 1.75);
+    assert!(fixed_physical.overflow.is_some() && fixed_physical.tabs.len() < 3);
 }
 
 /// Frame-scratch, title, palette and search-run reuse on a real renderer, on WARP and GDI.

@@ -307,7 +307,9 @@ impl App {
     /// same `set_clipboard_text` / `paste_clipboard` dispatch paths.
     #[doc(hidden)]
     pub fn __test_set_memory_clipboard(&mut self, text: &str) {
+        // Installed text replaces any copied-file override, as a native text copy would.
         self.test_clipboard_text = Some(text.to_string());
+        self.test_clipboard_files = None;
     }
 
     /// Test-only: read the in-memory clipboard buffer if installed.

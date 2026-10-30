@@ -90,7 +90,10 @@ required check.
 The macOS core shard first measures the real PTY close baseline after Cargo
 restore, then runs Rust checks, strict Rustdoc, the one-pass workspace test gate,
 workspace doctests, host probes, the macOS-only process-group custody test, and real
-resource-baseline capture. The required `tooling` job runs on Ubuntu: Rust-version,
+resource-baseline capture. It also runs the ignored native copied-file paste test
+alone on the hosted runner, after scenario-harness tests; the general pasteboard
+is not exercised concurrently with workspace tests. The exact native test must
+run rather than skip; local opt-in is described in [Local Gate](Local-Gate). The required `tooling` job runs on Ubuntu: Rust-version,
 raw-exit, window-owner, workflow supply-chain, authored-comment and script-identifier
 checks, plus release-note, wiki-publish, resource-inventory, soak and resource-baseline
 script tests. These commands remain local gates on every supported host; the existing
@@ -177,7 +180,12 @@ checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longe
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
 `windows-smoke` shard builds the shipping release binary and
 requires its bounded native smoke plus `frame-validation` and `device-recovery`
-scenario smokes in separate steps with native process deadlines.
+scenario smokes in separate steps with native process deadlines. Before the smokes
+it stages the pinned ConPTY runtime next to the binary, every smoke runs with
+`SONICTERM_REQUIRE_CONPTY=1`, and `scripts/verify-windows-conpty.py` then requires
+the staged bytes and exactly one `kind="packaged"` selection record from the first
+smoke's log, so a build that falls back to the system ConPTY fails
+([Terminal IO and VT](Terminal-IO-and-VT)).
 
 `workflow-syntax` runs pinned actionlint against CI and perf workflows, checking GitHub
 expression-context availability as well as syntax. The tooling job installs its digest-pinned

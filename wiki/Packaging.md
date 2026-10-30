@@ -224,6 +224,7 @@ choco install wixtoolset --version 3.14.1.20250415 --no-progress -y
 
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
+python scripts/setup-windows-conpty.py --destination target/x86_64-pc-windows-msvc/release
 $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
     Where-Object name -eq sonicterm-windows | Select-Object -ExpandProperty version
 $numericVersion = ($version -split '[-+]')[0]
@@ -246,7 +247,8 @@ policy`. That warning means ICE validation did not run; it does not by itself
 change the MSI contents. The independent COM validator still checks the MSI
 Property, Component, Feature, FeatureComponents, and SummaryInformation data. It
 requires the numeric SemVer core as ProductVersion, stable UpgradeCode, nonempty
-ProductCode, `x64;1033` template, and the exact ten 64-bit `Binaries` components.
+ProductCode, `x64;1033` template, and the exact eleven 64-bit `Binaries` components,
+including `conpty_runtime`, whose key path is `conpty\conpty.dll`.
 Prerelease/build suffixes remain part of tag provenance but cannot enter MSI
 ProductVersion.
 
@@ -271,12 +273,27 @@ MSI installs this core layout under `Program Files\SonicTerm`:
 SonicTerm/
 ├── sonicterm-windows.exe
 ├── LICENSE-winit-Apache-2.0
+├── conpty/
+│   ├── conpty.dll
+│   ├── OpenConsole.exe
+│   ├── LICENSE
+│   └── NOTICE.md
 └── assets/
     ├── themes/*.toml
     ├── keymaps/*.toml
     ├── fonts/*.ttf
     └── icons/exports/{sonic.ico,sonic.icns}
 ```
+
+`scripts/setup-windows-conpty.py` stages `conpty.dll` and `OpenConsole.exe` from
+the Microsoft `Microsoft.Windows.Console.ConPTY` package that
+`scripts/windows-conpty.json` pins by URL, size and SHA-256, and `LICENSE` from the
+repository's `scripts/LICENSE-conpty`, whose size and SHA-256 the same manifest
+pins. It verifies the archive, each member and the license before writing, and
+refuses a partial or different `conpty` folder rather than overwriting it. The MSI
+takes `NOTICE.md` from `scripts/NOTICE-conpty.md`, and its validator pins that
+file's size and SHA-256. The runtime's selection rules are on
+[Terminal IO and VT](Terminal-IO-and-VT).
 
 It creates a Start-menu shortcut and sets the `INSTALLDESKTOPSHORTCUT` property
 to `1` by default. It registers SonicTerm ProgIDs, Default Apps capabilities, and

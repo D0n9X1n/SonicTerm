@@ -19,11 +19,13 @@ pub(super) fn renderer_in_mode(
     active: &ActiveEventLoop,
     mode: SoftwareRenderMode,
 ) -> Result<(Arc<Window>, GpuRenderer), String> {
+    // Logical size: the 16 pt font rasterizes at the window's scale, so the pane keeps the same
+    // row count (at least the 20 the cases need) on every host DPI.
     let window = Arc::new(
         active
             .create_window(
                 Window::default_attributes()
-                    .with_inner_size(PhysicalSize::new(640, 480))
+                    .with_inner_size(LogicalSize::new(640.0, 480.0))
                     .with_visible(true)
                     .with_title("partial-assembly"),
             )

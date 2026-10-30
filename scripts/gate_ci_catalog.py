@@ -38,6 +38,11 @@ CI_ONLY = (
            ("windows-native", "windows-checks", gate_catalog._WINDOWS_WORKSPACE, gate_catalog._WINDOWS_HARNESS, gate_catalog._WINDOWS_HARNESS_FEATURES,
             gate_catalog._WINDOWS_HARNESS_API, gate_catalog._WINDOWS_RUNTIME, "windows-smoke", "windows-glyph-oracle"),
            "installs the vcpkg Cairo that the native prerequisite names; it checks nothing"),
+    CiOnly("setup", "python scripts/setup-windows-conpty.py --destination target/release", ("windows-smoke",),
+           "stages the pinned Windows console runtime before native smoke; its offline tests run in workflow-supply-chain"),
+    CiOnly("runtime-evidence", "python scripts/verify-windows-conpty.py --runtime-dir target/release/conpty "
+           "--logs \"$env:RUNNER_TEMP\\sonicterm-windows-smoke\\logs\"", ("windows-smoke",),
+           "requires pinned runtime bytes and positive packaged selection from the preceding smoke"),
     CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-llvm-cov", ("macos-core", "linux-coverage"),
            "installs the pinned cargo-llvm-cov that the llvm-cov prerequisite names; it checks nothing"),
     CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-deny", ("linux-core",),

@@ -165,10 +165,13 @@ impl App {
             #[cfg(target_os = "windows")]
             pending_osc52_reassert: None,
             test_clipboard_text: None,
+            test_clipboard_files: None,
             test_clipboard_write_failure: false,
             test_pty_writes: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             test_pane_launches: std::cell::RefCell::new(Vec::new()),
+            #[cfg(test)]
+            test_pty_write_sources: std::cell::RefCell::new(Vec::new()),
             // No event-loop proxy ⇒ headless/test construction ⇒ record PTY
             // writes for assertions. Production always passes `Some(proxy)`,
             // so the ledger stays disabled and adds no per-write cost.

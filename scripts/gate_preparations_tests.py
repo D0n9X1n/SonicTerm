@@ -65,6 +65,50 @@ class WindowsPreparationTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(result.accepted)
 
+    def test_scenario_variants_prepare_exact_selection_then_run_strictly(self):
+        # Each plain harness variant prepares its exact feature set; execution keeps the original command and shared deadline.
+        selections = {
+            "perf-scenarios-tests": (),
+            "perf-scenarios-counters-tests": ("--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim"),
+            "perf-scenarios-frame-texture-tests": ("--features", "perf-frame-texture"),
+            "perf-scenarios-echo-trace-tests": ("--features", "perf-echo-trace"),
+        }
+        for name, features in selections.items():
+            with self.subTest(step=name):
+                original = ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios", *features)
+                step = next(item for item in gate_catalog.STEPS if item.id == name)
+                self.assertEqual(step.argv, original)
+                self.assertEqual(gate_preparations.windows_preparations(step, self.root, {}),
+                                 (gate_model.Preparation((*original, "--no-run")),))
+                self.calls.clear()
+                result = self.run_step(name, [self.outcome(cleaned=True), self.outcome()])
+                self.assertEqual([call[0] for call in self.calls], [(*original, "--no-run"), original])
+                self.assertEqual(result.status, gate_model.CLEANED_NOT_NATURAL)
+                self.assertTrue(result.accepted)
+                self.assertEqual([phase.policy for phase in result.phases],
+                                 [gate_model.WindowsPolicy.COMPILE_ONLY, gate_model.WindowsPolicy.STRICT])
+                self.assertEqual(self.calls[0][1]["deadline"], self.calls[1][1]["deadline"])
+                self.calls.clear()
+                result = self.run_step(name, [self.outcome(), self.outcome(cleaned=True)])
+                self.assertEqual(result.status, gate_model.FAIL)
+                self.assertFalse(result.accepted)
+
+    def test_scenario_preparation_rejects_copies_changed_records_and_unlisted_steps(self):
+        # Authorization belongs to each canonical derived-test record, never a matching name or altered preparation.
+        original = next(step for step in gate_catalog.STEPS if step.id == "perf-scenarios-tests")
+        with self.assertRaisesRegex(ValueError, "synthetic"):
+            gate_preparations.windows_preparations(dataclasses.replace(original), self.root, {})
+        for changed in (dataclasses.replace(original, windows_preparations=()),
+                        dataclasses.replace(original, windows_preparations=(gate_model.Preparation(("cargo", "check")),)),
+                        dataclasses.replace(original, id="unreviewed-scenario", windows_preparations=(gate_model.Preparation(),))):
+            with self.subTest(step=changed.id, preparations=changed.windows_preparations):
+                with mock.patch.object(gate_catalog, "STEPS", (changed,)):
+                    with self.assertRaisesRegex(ValueError, "changed|unreviewed"):
+                        gate_preparations.windows_preparations(changed, self.root, {})
+        for name in ("perf-scenarios-harness-api-tests", "perf-scenarios-harness-api-echo-trace-tests", "doctests"):
+            step = next(item for item in gate_catalog.STEPS if item.id == name)
+            self.assertEqual(gate_preparations.windows_preparations(step, self.root, {}), ())
+
     def test_script_feature_drift_refuses_all_launches(self):
         # A changed script selection must not execute stale preparation records or the original script.
         path = self.root / "scripts/check-workspace-crates.sh"

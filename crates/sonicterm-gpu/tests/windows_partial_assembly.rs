@@ -47,7 +47,7 @@ use sonicterm_render_model::{
 use sonicterm_types::{ClassCoverage, ResourceClass};
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalSize,
+    dpi::LogicalSize,
     event::WindowEvent,
     event_loop::ActiveEventLoop,
     window::{Window, WindowId},
