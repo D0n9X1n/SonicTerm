@@ -126,40 +126,55 @@ impl KittyCommand {
                 return Err(KittyCommandError::Invalid);
             };
             saw_key = true;
+            // Any key other than m or q means this chunk starts a command rather than continuing one.
             if !matches!(key, b"m" | b"q") {
-                // When: any key other than m or q appears, this chunk starts a command rather than continuing one.
                 command.continuation_only = false;
             }
             match key {
                 b"a" => {
+                    // When: key is a, value selects the action; animation and composition actions are refused.
                     command.action = match value {
                         b"t" => KittyAction::Transmit,
                         b"T" => KittyAction::TransmitAndDisplay,
                         b"q" => KittyAction::Query,
                         b"p" => KittyAction::Place,
                         b"d" => KittyAction::Delete,
-                        _ => return Err(KittyCommandError::Unsupported),
+                        _ => {
+                            // When: value names an animation or composition action, this subset does not implement it.
+                            return Err(KittyCommandError::Unsupported);
+                        }
                     }
                 }
                 b"t" => {
+                    // When: key is t, value selects the medium; only direct data is ever read.
                     command.medium = match value {
                         b"d" => KittyMedium::Direct,
                         b"f" | b"t" | b"s" => KittyMedium::Refused,
-                        _ => return Err(KittyCommandError::Invalid),
+                        _ => {
+                            // When: value is no medium kitty defines, the command is malformed.
+                            return Err(KittyCommandError::Invalid);
+                        }
                     }
                 }
                 b"f" => {
+                    // When: key is f, value must name RGB (24), RGBA (32) or PNG (100).
                     command.format = number(value)?;
                     if !matches!(command.format, 24 | 32 | 100) {
-                        // When: format is not RGB, RGBA or PNG, nothing here can decode it.
+                        // When: the format number matches none of 24, 32 or 100, nothing here can decode it.
                         return Err(KittyCommandError::Invalid);
                     }
                 }
-                b"o" => return Err(KittyCommandError::Unsupported),
+                b"o" => {
+                    // When: key is o, the payload is compressed, which this subset cannot inflate.
+                    return Err(KittyCommandError::Unsupported);
+                }
                 b"m" => command.more = number(value)? == 1,
                 b"q" => command.quiet = number(value)?.min(2) as u8,
                 b"i" => command.image_id = number(value)?,
-                b"I" => return Err(KittyCommandError::Invalid),
+                b"I" => {
+                    // When: key is I, the client asks for an image number, which is refused rather than aliased to i.
+                    return Err(KittyCommandError::Invalid);
+                }
                 b"p" => command.placement_id = number(value)?,
                 b"s" => command.width_px = number(value)?,
                 b"v" => command.height_px = number(value)?,
@@ -200,12 +215,12 @@ impl KittyCommand {
     pub fn reply(&self, message: &str) -> Option<Vec<u8>> {
         let is_ok = message == "OK";
         if self.image_id == 0 || self.quiet >= 2 || (self.quiet == 1 && is_ok) {
-            // When: no image id, q=2, or q=1 with a success, kitty sends nothing.
+            // When: image_id is 0, quiet is 2, or quiet is 1 and is_ok, kitty sends nothing back.
             return None;
         }
         let mut reply = format!("\x1b_Gi={}", self.image_id);
+        // A set placement id is echoed so the client can match the reply.
         if self.placement_id != 0 {
-            // When: placement_id is set, kitty echoes it so the client can match the reply.
             reply.push_str(&format!(",p={}", self.placement_id));
         }
         reply.push(';');

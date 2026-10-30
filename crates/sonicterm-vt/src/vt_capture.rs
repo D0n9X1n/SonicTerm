@@ -318,7 +318,7 @@ impl Parser {
             || self.raw_osc.is_some();
         self.abort_kitty_transfer();
         if !in_sequence {
-            // When: only a kitty transfer is open between chunks, the parser is at ground; later chunks are swallowed as aborted.
+            // When: in_sequence is false, only a kitty transfer was open between chunks; ground stays, later chunks are swallowed.
             return released;
         }
         let escape_family =

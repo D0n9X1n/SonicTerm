@@ -121,8 +121,7 @@ impl Parser {
             if std::mem::take(&mut self.kitty_yield)
                 && self.performer.captured_replies.borrow().is_some()
             {
-                // When: a kitty event awaits the host's decode reply and the caller collects replies per prefix,
-                // yield so that reply precedes later replies. Plain `advance` has no such boundary and keeps going.
+                // When: kitty_yield is set and captured_replies collects per prefix, yield so the host's reply comes first.
                 break;
             }
             if self.discarding_oversized_escape {
@@ -133,11 +132,12 @@ impl Parser {
             }
             if self.apc_scratch.is_some() {
                 // When: apc_scratch is active, the byte belongs to a chunk of the open kitty transfer.
+                // CAN or SUB aborts the whole transfer, not just this APC.
                 if matches!(bytes[offset], 0x18 | 0x1a) {
-                    // When: CAN or SUB cancels a chunk, the whole transfer is aborted, not just this APC.
                     self.abort_kitty_transfer();
                     self.reset_cancelled_escape();
                 } else {
+                    // When: matches finds neither CAN nor SUB in bytes, offset's byte feeds the scratch state machine.
                     self.consume_apc_scratch_byte(bytes[offset]);
                 }
                 offset += 1;
@@ -149,8 +149,8 @@ impl Parser {
                 offset += 1;
                 continue;
             }
+            // An open kitty upload ends when a Sixel or iTerm2 capture begins between its chunks.
             if self.kitty_transfer.is_some() {
-                // When: a kitty upload is open between chunks, a Sixel or iTerm2 capture that began ends it.
                 self.yield_kitty_transfer_to_other_media();
             }
             if self.performer.dcs_capture.is_some() && matches!(bytes[offset], 0x18 | 0x1a) {

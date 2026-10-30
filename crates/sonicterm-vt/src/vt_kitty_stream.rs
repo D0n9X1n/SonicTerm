@@ -73,10 +73,11 @@ fn staged_header(capture: &MediaCapture) -> Option<&[u8]> {
 impl Parser {
     /// Open an APC: scratch while a transfer is open, otherwise one staging reservation.
     pub(super) fn begin_apc(&mut self) {
+        // While a transfer is open this APC may be its continuation, so it must not claim a second reservation.
         if self.kitty_transfer.is_some() {
-            // When: a transfer is open, this APC may be its continuation, so it must not claim a second reservation.
             self.apc_scratch = Some(Box::new(ApcScratch::new()));
         } else {
+            // When: kitty_transfer is None, this APC stages its header and payload in one new reservation.
             self.apc_capture = Some(MediaCapture::new(
                 &self.performer.staging_pool,
                 MediaProtocol::Kitty,
@@ -94,7 +95,7 @@ impl Parser {
             return;
         };
         if scratch.pending_esc {
-            // When: an ESC is pending, this byte either completes ST or both are payload.
+            // When: scratch has pending_esc, this byte either completes ST or both bytes are payload.
             scratch.pending_esc = false;
             if byte == b'\\' {
                 // When: byte completes ST, the chunk ends here.
@@ -121,6 +122,7 @@ impl Parser {
         };
         match scratch.phase {
             ScratchPhase::Header => {
+                // When: phase is Header, the byte belongs to the control section until `;` ends it.
                 if byte == b';' {
                     // When: byte ends the control section, decide whether the chunk continues the transfer.
                     self.end_scratch_header();
@@ -141,7 +143,7 @@ impl Parser {
                 }
             }
             ScratchPhase::Swallow => {
-                // When: the transfer is aborted, its payload is discarded without staging.
+                // When: phase is Swallow, the transfer is aborted and its payload is discarded without staging.
             }
         }
     }
@@ -196,8 +198,8 @@ impl Parser {
     /// End an open transfer because a different command arrived.
     fn end_transfer_for_new_command(&mut self, silent: bool) {
         if let Some(KittyTransfer::Loading { command, .. }) = self.kitty_transfer.take() {
+            // A non-delete command interrupting an upload reports the abandoned upload.
             if !silent {
-                // When: a non-delete command interrupts an upload, kitty reports the abandoned upload.
                 if let Some(reply) = command.reply(KittyCommandError::Invalid.reply_message()) {
                     self.performer.reply(&reply);
                 }
@@ -212,12 +214,12 @@ impl Parser {
             return;
         };
         if scratch.phase == ScratchPhase::Header {
-            // When: the APC ended without `;`, its whole body is the control section.
+            // When: phase is still Header at ST, the APC had no `;`, so its whole body is the control section.
             let header = &scratch.header[..scratch.header_len];
             let parsed = header.strip_prefix(b"G").map(KittyCommand::parse);
             let continues = matches!(&parsed, Some(Ok(chunk)) if chunk.continuation_only);
             if !continues {
-                // When: the payload-less APC is a new command, stage it so it dispatches normally.
+                // When: continues is false, the payload-less APC is a new command; stage it so it dispatches normally.
                 let silent =
                     matches!(&parsed, Some(Ok(command)) if command.action == KittyAction::Delete);
                 self.promote_scratch_to_staged(Some(silent));
@@ -240,8 +242,8 @@ impl Parser {
         }
         match self.kitty_transfer.take() {
             Some(KittyTransfer::Loading { mut metadata, mut command, capture }) => {
+                // A final chunk that sets q applies it to the whole transfer's reply, as kitty does.
                 if chunk.quiet != 0 {
-                    // When: the final chunk sets q, kitty applies it to the whole transfer's reply.
                     command.quiet = chunk.quiet;
                     metadata.push_str(&format!(",q={}", chunk.quiet));
                 }
@@ -255,7 +257,9 @@ impl Parser {
             Some(KittyTransfer::Aborted { command }) => {
                 self.reply_kitty_error(&command, "ECANCELED:transfer aborted");
             }
-            None => {}
+            None => {
+                // When: kitty_transfer is None, the chunk's transfer was already ended by another command.
+            }
         }
         self.finish_escape();
     }
@@ -271,21 +275,21 @@ impl Parser {
         let parsed = staged_header(&capture).map(KittyCommand::parse);
         match parsed {
             Some(Ok(command)) if command.medium == KittyMedium::Refused => {
-                // When: the payload names a file, temporary file or shared memory, it is refused unread.
+                // The payload names a file, temporary file or shm object, so it is refused unread.
                 self.reply_kitty_error(
                     &command,
                     "ENOTSUPPORTED:only direct transmission is supported",
                 );
+                // Later chunks of a refused transfer are swallowed through m=0.
                 if command.more {
-                    // When: more chunks follow, swallow them through m=0.
                     self.kitty_transfer = Some(KittyTransfer::Aborted { command });
                 }
             }
             Some(Ok(command)) if command.carries_image() && command.more => {
                 if !capture.admitted() || capture.truncated {
-                    // When: the first chunk could not be staged whole, the transfer is refused and its tail swallowed.
                     self.kitty_transfer = Some(KittyTransfer::Aborted { command });
                 } else {
+                    // When: capture is admitted and not truncated, the first chunk opens the transfer without its header.
                     let header_len = capture
                         .data
                         .iter()
@@ -361,8 +365,8 @@ impl Parser {
     pub(super) fn yield_kitty_transfer_to_other_media(&mut self) {
         let other_media = self.performer.dcs_capture.is_some()
             || matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. }));
+        // Another family's capture live while an upload is open makes the upload yield its reservation.
         if other_media && matches!(self.kitty_transfer, Some(KittyTransfer::Loading { .. })) {
-            // When: another family's capture is live while an upload is open, the upload yields.
             self.abort_kitty_transfer();
         }
     }
