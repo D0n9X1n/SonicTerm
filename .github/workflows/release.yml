@@ -174,7 +174,7 @@ jobs:
 
   build-mac-aarch64:
     name: Build macOS aarch64 binary
-    runs-on: macos-14
+    runs-on: macos-15
     needs: [validate-release-tag]
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -187,8 +187,14 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-darwin
 
+      # Homebrew's current Cairo bottles for this macOS 15 runner declare 15.0; the pinned macOS 14
+      # bottles keep the Apple Silicon package within its declared 14.0 floor.
       - name: Install native dependencies
-        run: brew install cairo pkg-config
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install pkg-config
+          python3 scripts/setup-macos-native.py --work-dir "$RUNNER_TEMP"
 
       - name: Build aarch64
         run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
@@ -279,7 +285,7 @@ jobs:
 
   package-mac:
     name: Package macOS dmg
-    runs-on: macos-14
+    runs-on: macos-15
     needs: [build-mac-x86_64, build-mac-aarch64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

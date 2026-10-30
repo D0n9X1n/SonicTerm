@@ -17,9 +17,16 @@ fn core_foundation_ownership_rules_match_api_families() {
 
 /// One fallback request computes each candidate face's coverage once, not once per codepoint that
 /// the face covers, so a run of Han characters costs one cmap walk per face.
+///
+/// A request first warms the process-wide generic fallback list: a host whose CoreText face for
+/// Han text cannot be parsed falls through to that list, and the first request to reach it would
+/// otherwise count the list's one-time coverage as its own.
 #[test]
 fn fallback_computes_each_face_coverage_once_per_request() {
     use crate::locator::FontLocator;
+    super::CoreTextFontLocator {}
+        .locate_fallback_for_codepoints(&['漢', '字'])
+        .expect("CoreText fallback");
     let computed = |codepoints: &[char]| {
         crate::parser::COVERAGE_COMPUTED.with(|count| count.set(0));
         let fonts = super::CoreTextFontLocator {}

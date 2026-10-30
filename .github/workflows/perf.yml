@@ -62,7 +62,7 @@ jobs:
       github.event_name == 'push' ||
       (contains(github.event.pull_request.labels.*.name, 'perf') &&
       (github.event.action != 'labeled' || github.event.label.name == 'perf'))
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         shell: bash
@@ -215,17 +215,17 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            runner: macos-14
+            runner: macos-15
             shard: S7-S4
             scenarios: S7 S4 S1/atlas-retry S12/status-line S3 S8 S6/selection-drag
             laps: ""
           - platform: macOS
-            runner: macos-14
+            runner: macos-15
             shard: S9-S10sync
             scenarios: S10/sync S9 S11 S6 S1 S5 S6/rest S1/status-line S12
             laps: S9
           - platform: macOS
-            runner: macos-14
+            runner: macos-15
             shard: S10-S11release
             scenarios: S10 S11/release S2 S2/flood S6/flood
             laps: ""

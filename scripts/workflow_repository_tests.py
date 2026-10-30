@@ -80,7 +80,7 @@ class RepositoryTests(unittest.TestCase):
         )
         contracts = {
             "macos": (
-                "macos-14 / unit tests",
+                "macos-15 / unit tests",
                 ("macos-core", "macos-smoke", "tooling"),
             ),
             "windows": (
@@ -355,7 +355,7 @@ jobs:
         main = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
         intel = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.runner == 'macos-15-intel' }}"
         contracts = {
-            "macos-core": ("unit-macos-14", main),
+            "macos-core": ("unit-macos-15", main),
             "linux-coverage": ("instrumented-ubuntu-22.04", main),
             "macos-smoke": ("unit-${{ matrix.runner }}", intel),
             "windows-checks": ("check-windows-latest", main),
@@ -391,7 +391,7 @@ jobs:
         for bad in ("false", main, intel.replace("&&", "||", 1),
                     intel.replace("'push'", "'pull_request'"),
                     intel.replace("'refs/heads/main'", "'refs/heads/other'"),
-                    intel.replace("'macos-15-intel'", "'macos-14'")):
+                    intel.replace("'macos-15-intel'", "'macos-15'")):
             with self.subTest(invalid_policy=bad), self.assertRaises(AssertionError):
                 verify(block.replace(intel, bad), contracts["macos-smoke"][0], intel)
 

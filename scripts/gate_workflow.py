@@ -259,7 +259,7 @@ _MACOS_SMOKE_GATES = (
     "python3 scripts/perf-compare.py --smoke",
 )
 _MACOS_RELEASE_BUILD = "cargo build --release -p sonicterm-mac"
-# macos-core runs the Apple Silicon smoke on its macos-14 runner; macos-smoke runs the Intel one.
+# macos-core runs the Apple Silicon smoke on its macos-15 runner; macos-smoke runs the Intel one.
 _MACOS_SMOKE_JOBS = ("macos-core", "macos-smoke")
 
 

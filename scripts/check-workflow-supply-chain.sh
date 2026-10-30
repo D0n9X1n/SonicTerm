@@ -37,7 +37,7 @@ fi
   "$ROOT/scripts/perf-flags_tests.py" \
   "$ROOT/scripts/install-pinned-tool_tests.py" \
   "$ROOT/scripts/setup-windows-conpty.py" \
-  "$ROOT/scripts/setup-windows-conpty_tests.py" \
+  "$ROOT/scripts/setup-windows-conpty_tests.py"   "$ROOT/scripts/setup-macos-native.py"   "$ROOT/scripts/setup-macos-native_tests.py" \
   "$ROOT/scripts/verify-windows-conpty.py" \
   "$ROOT/scripts/verify-windows-conpty_tests.py" \
   "$ROOT/scripts/windows_conpty_contract_tests.py"
@@ -54,6 +54,7 @@ fi
   "$PY" perf-flags_tests.py
   "$PY" install-pinned-tool_tests.py
   "$PY" -I setup-windows-conpty_tests.py
+  "$PY" -I setup-macos-native_tests.py
   "$PY" -I verify-windows-conpty_tests.py
   "$PY" -I windows_conpty_contract_tests.py
 )
