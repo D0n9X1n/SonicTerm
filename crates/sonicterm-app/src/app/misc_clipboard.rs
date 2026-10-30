@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// Whether paste trusts the native clipboard's copied-file list: Windows reads `CF_HDROP` and
+/// macOS reads file URLs. The Linux backend decodes `text/uri-list` lossily, dropping entries it
+/// cannot decode and misreading a `localhost` authority, so Linux keeps pasting clipboard text.
+pub(in crate::app) const NATIVE_CLIPBOARD_FILE_LIST: bool =
+    cfg!(any(target_os = "windows", target_os = "macos"));
+
 impl App {
     #[cfg(target_os = "windows")]
     pub(in crate::app) fn clipboard_text_for_reassert(&mut self) -> Option<String> {
@@ -83,13 +89,18 @@ impl App {
         self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok())
     }
 
-    /// Read the paths of files copied to the clipboard (Explorer, Finder, a Linux file manager).
+    /// Read the paths of files copied to the clipboard (Explorer on Windows, Finder on macOS).
     ///
-    /// Returns an empty list when the clipboard holds no files or the native read fails, so callers fall back to text.
+    /// Returns an empty list when the clipboard holds no files, the native read fails, or the
+    /// platform's file list is not trusted, so callers fall back to text.
     pub(in crate::app) fn read_clipboard_files(&mut self) -> Vec<std::path::PathBuf> {
         if self.test_clipboard_text.is_some() || self.test_clipboard_files.is_some() {
             // When: test_clipboard_text or test_clipboard_files is installed, the test clipboard holds only test_clipboard_files.
             return self.test_clipboard_files.clone().unwrap_or_default();
+        }
+        if !NATIVE_CLIPBOARD_FILE_LIST {
+            // When: NATIVE_CLIPBOARD_FILE_LIST is false, the backend's file list can drop or misread entries, so keep text paste.
+            return Vec::new();
         }
         self.clipboard
             .as_mut()

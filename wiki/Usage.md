@@ -268,11 +268,11 @@ the paste separately for each pane that receives it.
 Pasted text is sent unchanged. A pane whose program has turned on bracketed
 paste gets the text inside bracketed-paste markers; other panes get plain text.
 
-When the clipboard holds files copied in Explorer, Finder, or a Linux file
-manager, a paste sends their paths as a drop of those files would: the same
+On Windows and macOS, when the clipboard holds files copied in Explorer or
+Finder, a paste sends their paths as a drop of those files would: the same
 quoting and the same refusals described below. It never sends the files'
 contents, and it ignores the bare file name such a copy also offers as text.
-Search still takes only text.
+On Linux a paste still sends only clipboard text. Search still takes only text.
 
 Files dropped together become one line of quoted paths, separated by spaces.
 SonicTerm adds no Enter, so you can check the line before you run it. Each pane
