@@ -43,6 +43,9 @@ CI_ONLY = (
     CiOnly("runtime-evidence", "python scripts/verify-windows-conpty.py --runtime-dir target/release/conpty "
            "--logs \"$env:RUNNER_TEMP\\sonicterm-windows-smoke\\logs\"", ("windows-smoke",),
            "requires pinned runtime bytes and positive packaged selection from the preceding smoke"),
+    CiOnly("setup", "python3 scripts/setup-macos-native.py --work-dir \"$RUNNER_TEMP\"", ("macos-core",),
+           "installs the pinned macOS 14 Cairo bottles the native prerequisite names on Apple Silicon; its offline tests "
+           "run in workflow-supply-chain"),
     CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-llvm-cov", ("macos-core", "linux-coverage"),
            "installs the pinned cargo-llvm-cov that the llvm-cov prerequisite names; it checks nothing"),
     CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-deny", ("linux-core",),
@@ -72,8 +75,8 @@ CI_ONLY = (
            "requires the hosted runner's unique capability=EXERCISED verdict; workspace-crates "
            "runs the same test, which accepts HOST_INCAPABLE"),
     CiOnly("runtime-evidence",
-           "python3 scripts/resource-baseline-evidence.py --runner-label macos-14 "
-           "--output-dir target/v1.2.0-baseline/evidence-macos-14",
+           "python3 scripts/resource-baseline-evidence.py --runner-label macos-15 "
+           "--output-dir target/v1.2.0-baseline/evidence-macos-15",
            ("macos-core",),
            "captures real resource evidence under the hosted runner label for upload; "
            "resource-baseline-tests covers the collector"),

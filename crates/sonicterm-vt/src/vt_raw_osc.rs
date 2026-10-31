@@ -182,7 +182,7 @@ impl Parser {
                             self.performer.grid.cursor.col,
                             &self.iterm2_metadata[..self.iterm2_metadata_len],
                         ) {
-                            self.performer.events.push(VtEvent::Media(event));
+                            self.performer.push_media(event);
                         }
                     }
                     self.finish_escape();

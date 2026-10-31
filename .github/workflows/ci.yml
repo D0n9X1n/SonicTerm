@@ -101,7 +101,7 @@ jobs:
 
   macos-core:
     name: macOS core gates
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # The previous-release check resolves the last release tag, so it needs every tag and commit.
@@ -117,7 +117,7 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-15
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -223,23 +223,28 @@ jobs:
         shell: bash
         run: |
           python3 scripts/resource-baseline-evidence.py \
-            --runner-label macos-14 \
-            --output-dir target/v1.2.0-baseline/evidence-macos-14
+            --runner-label macos-15 \
+            --output-dir target/v1.2.0-baseline/evidence-macos-15
 
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: resource-baseline-evidence-macos-14
-          path: target/v1.2.0-baseline/evidence-macos-14
+          name: resource-baseline-evidence-macos-15
+          path: target/v1.2.0-baseline/evidence-macos-15
           if-no-files-found: error
 
       # The Apple Silicon native smoke runs here rather than in its own job: the repository has five
       # concurrent macOS slots, and a separate leg would hold one the perf comparison's shards wait for.
       # The Intel smoke stays in macos-smoke on its own image. 14.0 is the declared Apple Silicon
-      # deployment floor, asserted as a ceiling, as in macos-smoke's matrix.
+      # deployment floor, asserted as a ceiling, as in macos-smoke's matrix. This macOS 15 runner's
+      # current Cairo bottles declare 15.0, so the pinned macOS 14 bottles are installed instead.
       - name: Install native dependencies
-        run: brew install cairo pkg-config
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install pkg-config
+          python3 scripts/setup-macos-native.py --work-dir "$RUNNER_TEMP"
 
       - name: Build macOS native selection fixture
         run: cargo build --locked -p sonicterm-app --example native_split_selection
@@ -491,7 +496,7 @@ jobs:
           if-no-files-found: ignore
 
   macos:
-    name: macos-14 / unit tests
+    name: macos-15 / unit tests
     runs-on: ubuntu-latest
     needs: [macos-core, macos-smoke, tooling]
     if: always()

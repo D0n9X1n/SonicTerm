@@ -87,6 +87,7 @@ fn a_receipt_from_another_size_or_screen_clears_nothing() {
 fn only_untagged_and_anchored_kitty_images_draw_at_their_anchor() {
     // Uploads and virtual placements are never drawn at row/col; virtual ones draw through placeholders.
     let image = |show: Option<KittyShow>| InlineImage {
+        scroll_mark: 0,
         id: 1,
         row: 0,
         col: 0,
@@ -96,7 +97,7 @@ fn only_untagged_and_anchored_kitty_images_draw_at_their_anchor() {
         kitty: show.map(|show| KittyTag { image_id: 1, placement_id: 0, show, source_px: (1, 1) }),
     };
     assert!(image(None).draws_at_anchor());
-    assert!(image(Some(KittyShow::Anchored)).draws_at_anchor());
+    assert!(image(Some(KittyShow::Anchored { cols: 0, rows: 0 })).draws_at_anchor());
     assert!(!image(Some(KittyShow::Upload)).draws_at_anchor());
     assert!(!image(Some(KittyShow::Virtual { cols: 1, rows: 1 })).draws_at_anchor());
 }

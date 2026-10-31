@@ -45,6 +45,7 @@ pub(super) fn an_image_atlas_release_leaves_the_pane_media_charge_unchanged() {
     let (mut app, main) = idle_release_owner(now);
     let pane_id = *app.windows[&main].panes.keys().next().unwrap();
     let image = sonicterm_render_model::InlineImage {
+        scroll_mark: 0,
         id: 1,
         row: 0,
         col: 0,

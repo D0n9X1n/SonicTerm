@@ -76,8 +76,8 @@ pub(in crate::app) enum KittyOp {
     /// Store `image` under the command's id and show it as the command asks; the size is the
     /// transmitted one, or `None` to use the decoded size.
     Transmit(KittyCommand, InlineImage, Option<(u32, u32)>),
-    /// Add a placement of an existing image at the event's cursor.
-    Place(KittyCommand, u16, u16),
+    /// Add a placement of an existing image at the event's cursor: its row, column and scroll mark.
+    Place(KittyCommand, u16, u16, u64),
     /// Remove placements and possibly data.
     Delete(KittyCommand),
 }
@@ -92,7 +92,7 @@ fn show_for(command: &KittyCommand) -> KittyShow {
         KittyShow::Virtual { cols: command.cols, rows: command.rows }
     } else {
         // When: neither a Transmit action nor virtual_placement applies, a=T draws at the capture cursor.
-        KittyShow::Anchored
+        KittyShow::Anchored { cols: command.cols, rows: command.rows }
     }
 }
 
@@ -150,7 +150,7 @@ pub(in crate::app) fn apply_kitty(
             images.push(image);
             (Some("OK"), removed)
         }
-        KittyOp::Place(command, row, col) => {
+        KittyOp::Place(command, row, col, scroll_mark) => {
             // When: operation is Place, a stored entry of the id is cloned into a new placement.
             let Some(source) = images
                 .iter()
@@ -177,6 +177,7 @@ pub(in crate::app) fn apply_kitty(
             }
             placed.row = row;
             placed.col = col;
+            placed.scroll_mark = scroll_mark;
             placed.kitty = Some(KittyTag {
                 image_id: command.image_id,
                 placement_id: command.placement_id,
@@ -185,7 +186,7 @@ pub(in crate::app) fn apply_kitty(
                     KittyShow::Virtual { cols: command.cols, rows: command.rows }
                 } else {
                     // When: virtual_placement is clear, a=p draws at the cursor like a=T.
-                    KittyShow::Anchored
+                    KittyShow::Anchored { cols: command.cols, rows: command.rows }
                 },
             });
             let mut removed = take_where(images, replaces);
@@ -250,7 +251,7 @@ fn tag_of(entry: &InlineImage) -> KittyTag {
     entry.kitty.unwrap_or(KittyTag {
         image_id: 0,
         placement_id: 0,
-        show: KittyShow::Anchored,
+        show: KittyShow::Anchored { cols: 0, rows: 0 },
         source_px: (entry.width, entry.height),
     })
 }

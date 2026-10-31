@@ -96,6 +96,13 @@ impl Performer {
         (top, bot)
     }
 
+    /// Queue a media event stamped with the grid's scroll count, so the host can keep an image
+    /// anchored at the event's row beside the text it was drawn with as the screen scrolls.
+    pub(super) fn push_media(&mut self, mut event: MediaEvent) {
+        event.scroll_mark = self.grid.lines_scrolled();
+        self.events.push(VtEvent::Media(event));
+    }
+
     pub(super) fn physical_cursor_col(&self) -> u16 {
         self.grid.cursor.col.min(self.grid.cols.saturating_sub(1))
     }

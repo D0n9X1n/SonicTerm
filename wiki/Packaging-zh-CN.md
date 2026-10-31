@@ -35,7 +35,15 @@ Release tag 会增加 `v` 前缀。`scripts/prepare-release-assets.py check-vers
 Bundle 的最低 macOS 版本取 14.0、可执行文件及全部内嵌 dylib 的部署目标中的最大值。
 正式 Apple Silicon 安装包支持 macOS 14+，Intel 安装包支持 macOS 15+；CI 强制检查
 这些显式上限，依赖要求更新系统时打包失败。请检查 `LSMinimumSystemVersion` 和
-`Resources/native-libraries.json` 获取产物的实际要求。正式发布包由对应架构的 CI runner 组装。Rust 构建需要 Cairo/pkg-config，打包需要
+`Resources/native-libraries.json` 获取产物的实际要求。正式发布包由对应架构的 CI runner 组装。
+Apple Silicon 的 CI 和发布 job 运行在 macOS 15 上，其当前 Homebrew Cairo bottle 声明 macOS 15.0，
+因此它们运行 `scripts/setup-macos-native.py` 而不是 `brew install cairo`。该脚本下载
+`scripts/macos-native-bottles.json` 中固定的 Cairo 1.18.4 及其运行时库的 macOS 14（`arm64_sonoma`）
+bottle，检查每个下载的大小和 SHA-256，并把它们解压到 runner 临时目录下的私有前缀中，布局与 Homebrew 的
+`Cellar/<formula>/<version>` 和 `opt/<formula>` 相同。它从不运行 Homebrew，因此任何已安装的 formula 及其
+依赖都不会改变。它把 bottle 中的 Homebrew 路径改写为该前缀，重新签名每个改写过的 dylib，拒绝最低 macOS
+高于 14.0 或加载前缀与系统以外库的 dylib，并让 `PKG_CONFIG_PATH` 指向该前缀供构建使用。Rust 构建需要
+Cairo/pkg-config，打包需要
 `create-dmg` 和 ImageMagick：
 
 ```bash

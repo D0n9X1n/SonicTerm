@@ -88,6 +88,119 @@ fn check_helper(
     }
 }
 
+/// One helper measurement judged as the working-set gate judges it.
+struct HelperJudgement {
+    /// Required glyphs the measurement could not draw, after reviewed raster exceptions.
+    incomplete_glyphs: usize,
+    /// The measurement's raster failures, split by the reviewed exceptions.
+    raster: sonicterm_text::start_size_inputs::NormalizedFailures,
+    /// Drift notes that do not fail on this host.
+    advisories: Vec<String>,
+    /// Every check that failed.
+    failures: Vec<String>,
+}
+
+/// Judge one helper measurement of fixture `name` at `scale` on `platform` as the working-set gate
+/// does: count its undrawable glyphs, refuse an incomplete measurement a recorded row or a start
+/// below the maximum (`constant`) depends on, and judge drift from the recorded row under `policy`.
+fn judge_helper(
+    set: &sonicterm_gpu::glyph_working_set::GlyphWorkingSet,
+    platform: &str,
+    name: &str,
+    scale: u32,
+    constant: u32,
+    policy: &sonicterm_text::recording_image::DriftPolicy,
+) -> HelperJudgement {
+    use sonicterm_text::recording_image::DriftVerdict;
+    use sonicterm_text::start_size_inputs::{
+        normalize_raster_failures, InputSource, RASTER_EXCEPTIONS, START_SIZE_INPUTS,
+    };
+    // Reviewed exceptions apply here, where each failure still names its face; unresolved
+    // characters and oversize required tiles always count.
+    let raster = normalize_raster_failures(platform, &set.raster_failed, RASTER_EXCEPTIONS);
+    let incomplete_glyphs = sonicterm_text::start_size_inputs::incomplete_glyphs(
+        set.unresolved_chars.len(),
+        set.oversize_required.len(),
+        &raster,
+    );
+    let recorded = START_SIZE_INPUTS.iter().find(|row| {
+        row.platform == platform
+            && row.scale == scale
+            && row.fixture == name
+            && row.source == InputSource::Helper
+    });
+    // An incomplete measurement is refused before the drift check, with the failed face,
+    // glyph, style and strike of every unapproved raster failure; it never passes.
+    let evidence = format!(
+        "unresolved={:?} oversize_required={:?} unapproved={:?}",
+        set.unresolved_chars, set.oversize_required, raster.unapproved
+    );
+    let check = check_helper(
+        recorded.map(|row| (row.outcome, row.max_tile, row.incomplete_glyphs)),
+        (set.fit_outcome, set.max_tile_dims, incomplete_glyphs),
+        constant < sonicterm_text::glyph_atlas::ATLAS_DIM,
+        &evidence,
+    );
+    let provenance = recorded.map_or_else(|| "none".to_owned(), |row| row.provenance.describe());
+    let mut advisories = Vec::new();
+    let mut failures = Vec::new();
+    // A refusal fails on every host; only a dimension drift depends on the host image.
+    let drift = match check {
+        HelperCheck::Matches | HelperCheck::MaximumOnly => None,
+        HelperCheck::Drifted(reason) => Some(format!(
+            "{name} at {scale}x drifted from its recorded helper row ({provenance}): {reason}"
+        )),
+        HelperCheck::Refused(reason) => {
+            failures.push(format!(
+                "glyph_atlas_working_set refused: {platform} {name} at {scale}x (recorded row: \
+                 {provenance}): {reason}"
+            ));
+            None
+        }
+    };
+    match policy.judge(drift.as_deref()) {
+        DriftVerdict::Holds => {}
+        DriftVerdict::Advisory(advisory) => advisories.push(advisory),
+        DriftVerdict::Fails(failure) => failures.push(failure),
+    }
+    HelperJudgement { incomplete_glyphs, raster, advisories, failures }
+}
+
+/// Check a helper a suite measured itself, because the oracle producer ran on another runner
+/// image, as the producer checks its own before publishing: the shared judgement, then the start
+/// constant for `scale` must hold this measurement's need. Returns the drift advisories to print.
+///
+/// # Errors
+///
+/// Names every failed check.
+fn validate_local_helper(
+    set: &sonicterm_gpu::glyph_working_set::GlyphWorkingSet,
+    platform: &str,
+    name: &str,
+    scale: u32,
+    policy: &sonicterm_text::recording_image::DriftPolicy,
+) -> Result<Vec<String>, String> {
+    use sonicterm_text::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    use sonicterm_text::start_size_inputs::{start_rule, RuleInput};
+    let constant = if scale == 1 { START_ATLAS_DIM_1X } else { START_ATLAS_DIM_2X };
+    let judgement = judge_helper(set, platform, name, scale, constant, policy);
+    if !judgement.failures.is_empty() {
+        // When: failures is not empty the measurement fails a check the producer would refuse.
+        return Err(format!("the local helper fails its gate: {:?}", judgement.failures));
+    }
+    let need = start_rule(&[RuleInput {
+        label: format!("{platform} {scale}x {name} local helper"),
+        outcome: set.fit_outcome,
+        max_tile: set.max_tile_dims,
+        incomplete_glyphs: judgement.incomplete_glyphs,
+    }])?;
+    if constant < need.dim {
+        // When: constant is below need.dim the shipped start cannot hold this working set.
+        return Err(format!("the local helper needs {} but starts at {constant}", need.dim));
+    }
+    Ok(judgement.advisories)
+}
+
 /// Whether fallback is complete: the frame presented, and neither its terminal rows nor its
 /// chrome (tab titles, palette, footer) drew a character as tofu.
 fn fallback_settled(presented: bool, terminal_missing: &[char], chrome_missing: &[char]) -> bool {

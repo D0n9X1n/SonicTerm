@@ -224,12 +224,15 @@ fn a_query_ends_the_prefix_so_its_reply_precedes_later_replies() {
 
 #[test]
 fn quiet_transmits_do_not_yield() {
-    // q=2 needs no host reply, so parsing continues through later sequences in one prefix.
-    let (mut parser, _pool) = parser();
-    let stream = b"\x1b_Ga=T,f=100,i=7,q=2;AAAA\x1b\\next";
-    let (consumed, events, _) = parser.advance_with_replies(stream);
-    assert_eq!(consumed, stream.len());
-    assert_eq!(kitty_events(events).len(), 1);
+    // q=2 needs no host reply, and a virtual (U=1) or C=1 transmit moves no cursor, so parsing
+    // continues through later sequences in one prefix. A quiet direct a=T yields for its cursor move.
+    for control in ["a=T,U=1", "a=T,C=1", "a=t"] {
+        let (mut parser, _pool) = parser();
+        let stream = format!("\x1b_G{control},f=100,i=7,q=2;AAAA\x1b\\next");
+        let (consumed, events, _) = parser.advance_with_replies(stream.as_bytes());
+        assert_eq!(consumed, stream.len(), "{control} does not yield");
+        assert_eq!(kitty_events(events).len(), 1);
+    }
 }
 
 #[test]

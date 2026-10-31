@@ -59,7 +59,9 @@ padding 不变。受资源限制而行数较少的网格不吸收整行的未使
 
 平台字体发现隐藏在 `FontLocator` 之后：
 
-- macOS 使用 CoreText 回退与字体 URL；
+- macOS 使用 CoreText 回退与字体 URL。CoreText 选出的字体无法打开或不包含某个字符时，改用一份通用列表：
+  Menlo、按用户语言排列的系统级联字体、Apple Symbols，以及用于简体中文的 Hiragino Sans GB、
+  Songti SC 和 Arial Unicode MS；macOS 15 上 CoreText 为简体中文选择的字体是 FreeType 无法打开的 HVF 字体集；
 - Windows 使用 DirectWrite/GDI 描述信息并提取原始字体；
 - 其它 Unix 系统使用 Fontconfig，并把候选限制为等宽、双宽或字符单元字体。
 

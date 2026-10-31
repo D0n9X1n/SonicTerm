@@ -169,6 +169,48 @@ pub fn placement_box(
     )
 }
 
+/// The drawn size, in pixels, of an image placed at the cursor in a box of `cols` x `rows` cells,
+/// where 0 means the side is not given. As in kitty: both sides stretch the image to the box; one
+/// side takes that side from the cells and the other from the image's aspect ratio; neither draws
+/// the image at its source pixel size.
+#[must_use]
+pub fn anchored_size_px(
+    cols: u32,
+    rows: u32,
+    source_width_px: u32,
+    source_height_px: u32,
+    cell_width_px: f32,
+    cell_height_px: f32,
+) -> (f32, f32) {
+    let source_width = source_width_px as f32;
+    let source_height = source_height_px as f32;
+    if source_width <= 0.0 || source_height <= 0.0 {
+        // When: source_width or source_height is not positive, the image has no aspect ratio
+        // and nothing is drawn.
+        return (0.0, 0.0);
+    }
+    // One given side takes its length from the cells; the other keeps the image's aspect ratio.
+    let (width, height) = match (cols, rows) {
+        (0, 0) => (source_width, source_height),
+        (0, rows) => {
+            let height = rows as f32 * cell_height_px;
+            (height * source_width / source_height, height)
+        }
+        (cols, 0) => {
+            let width = cols as f32 * cell_width_px;
+            (width, width * source_height / source_width)
+        }
+        (cols, rows) => (cols as f32 * cell_width_px, rows as f32 * cell_height_px),
+    };
+    // A side covers at most `MAX_ANCHORED_BOX_CELLS`, as the parser's cursor move does, so no box
+    // reaches past what a grid could hold.
+    let max_cells = MAX_ANCHORED_BOX_CELLS as f32;
+    (width.min(max_cells * cell_width_px), height.min(max_cells * cell_height_px))
+}
+
+/// The most cells one side of an anchored image box covers: a grid never has more rows or columns.
+pub const MAX_ANCHORED_BOX_CELLS: u32 = u16::MAX as u32;
+
 /// Where the image sits inside its placement box, in pixels relative to the box's top-left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FitRect {

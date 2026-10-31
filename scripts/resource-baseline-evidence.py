@@ -18,7 +18,7 @@ import time
 SCHEMA_VERSION = "resource-baseline-evidence/1"
 SUBJECT = "harness-process"
 CLAIM_SCOPE = "baseline-capture-capability"
-RUNNER_LABELS = ("macos-14", "windows-latest")
+RUNNER_LABELS = ("macos-15", "windows-latest")
 _CURRENT_WINDOWS_BUILD = 26100
 
 
@@ -49,9 +49,9 @@ def classify_platform(runner_label: str, facts: dict) -> dict:
 
     profile = dict(facts)
     system = facts.get("system")
-    if runner_label == "macos-14":
+    if runner_label == "macos-15":
         if system != "Darwin":
-            raise EvidenceError("macos-14 requires a Darwin runtime")
+            raise EvidenceError("macos-15 requires a Darwin runtime")
         profile.update({"family": "macos", "lane": "macos", "windows_build": None})
         return profile
 

@@ -487,6 +487,7 @@ fn release_is_sent_after_the_batch_generation_is_published() {
     let base = test_base();
     let decode = |media: &MediaEvent| {
         Some(InlineImage {
+            scroll_mark: 0,
             id: 1,
             row: media.row,
             col: media.col,

@@ -42,7 +42,19 @@ bundled dylib. Official Apple Silicon packages support macOS 14+, and Intel
 packages support macOS 15+; CI enforces those explicit ceilings and refuses newer
 dependency floors. Check `LSMinimumSystemVersion` and
 `Resources/native-libraries.json` for the artifact's actual requirement. Official
-release packages are assembled on their architecture-specific CI runners. Install Cairo/pkg-config
+release packages are assembled on their architecture-specific CI runners. The
+Apple Silicon CI and release jobs run on macOS 15, whose current Homebrew Cairo
+bottles declare macOS 15.0, so they run `scripts/setup-macos-native.py` instead
+of `brew install cairo`. It downloads the macOS 14 (`arm64_sonoma`) bottles of
+Cairo 1.18.4 and its runtime libraries pinned in
+`scripts/macos-native-bottles.json`, checks each download's size and SHA-256,
+and unpacks them into a private prefix under the runner's temporary directory,
+laid out like Homebrew's `Cellar/<formula>/<version>` and `opt/<formula>`. It
+never runs Homebrew, so no installed formula or its dependents change. It
+rewrites the bottles' Homebrew paths to the prefix, signs each rewritten dylib
+again, refuses any dylib whose minimum macOS is newer than 14.0 or that loads a
+library outside the prefix and the system, and points `PKG_CONFIG_PATH` at the
+prefix for the build. Install Cairo/pkg-config
 for the Rust build and `create-dmg` plus ImageMagick for packaging:
 
 ```bash

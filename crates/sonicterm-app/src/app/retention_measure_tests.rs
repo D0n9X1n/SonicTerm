@@ -20,6 +20,7 @@ fn measured_inline_media_mixed_transitions_update_existing_charges() {
                 .iter()
                 .enumerate()
                 .map(|(index, size)| sonicterm_render_model::InlineImage {
+                    scroll_mark: 0,
                     id: index as u64,
                     row: 0,
                     col: 0,

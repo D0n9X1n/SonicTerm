@@ -44,9 +44,9 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 的干净、未锁定 worktree，并且只删除已合并且未被保留 worktree 使用的本地分支。绝不能强制移除或
 丢弃 dirty、未合并、已锁定的 worktree，也不能丢弃任何 stash。
 
-### macOS 14 与 Windows latest
+### macOS 15 与 Windows latest
 
-稳定的必需检查是 fail-closed 汇总 job：`macos-14 / unit tests` 同时依赖 `macos-core`、
+稳定的必需检查是 fail-closed 汇总 job：`macos-15 / unit tests` 同时依赖 `macos-core`、
 `macos-smoke` 与 `tooling`，而 `windows-latest / unit tests` 同时依赖
 `windows-native`、`windows-glyph-oracle`、`windows-checks`、五个 Windows 测试 shard（`windows-tests-workspace`、
 `windows-tests-harness`、`windows-tests-harness-features`、`windows-tests-harness-api` 与
@@ -79,7 +79,7 @@ macOS 专用逻辑（`sonicterm-ui` 的 `text_edit.rs` 中的 AppKit 单词边�
 `scripts/macos-logic-coverage.sh`，按 baseline 的 `macos` 段以同样 1 pp 容差检查每个文件，并在成功和失败后
 上传报告与 provenance 记录；只有经过验证的该记录才能修改该段。文件下限能发现超过容差的损失：失去 AppKit 边界的覆盖（`text_edit.rs` 160 行中的 7 行）会使该文件下降约 4 pp，而
 `command_label.rs` 的单个 macOS 分支不到该文件的 1 pp，无法被发现。
-原生运行时 smoke 分别在 macOS 14 Apple Silicon（作为 `macos-core` 末尾的步骤）和 macOS 15
+原生运行时 smoke 分别在 macOS 15 Apple Silicon（作为 `macos-core` 末尾的步骤）和 macOS 15
 Intel（单分支的 `macos-smoke` 矩阵）上构建 release 二进制，使用不同依赖缓存键。Intel lane
 仅在推送到 `main` 时可保存依赖；Apple Silicon lane 共用 `macos-core` 的缓存条目。它不单独占用
 job，是因为本仓库同时最多运行五个 macOS job，单独的分支会占用一个性能对比分片等待的槽位。这些
@@ -130,7 +130,9 @@ Windows cfg-on 测试在进程树监管下直接运行 Cargo 报告的精确 lib
 `windows-glyph-oracle` 只运行一次原有的 ignored 工作集 gate。只有全部完整性、精确漂移和
 起始尺寸检查通过后，才发布 S9/S12 在 72/144 DPI 下的四组 helper tile。清单绑定全部受跟踪
 源码字节（含打包字体）、系统及用户字体字节和 GDI 注册表映射、runner 镜像、Rust/Cargo 版本、检出 SHA、run ID
-与生产者 attempt。消费者在测试前验证输出摘要及全部绑定。失败 job 重跑使用成功生产者的
+与生产者 attempt。消费者在测试前验证输出摘要及全部绑定。GitHub 可能给同一次 run 的 Windows job
+分配不同的 runner 镜像，因此仅在 runner 镜像、字体、字体注册或 Rust/Cargo 版本上不同的消费者会自行测量
+helper（`SONICTERM_GLYPH_ORACLE_MODE=local`）；其他任何差异、payload 变化或摘要错误仍会失败。失败 job 重跑使用成功生产者的
 attempt，而非自己的 attempt；缺失或过期 artifact 会失败。本地未指定 artifact 时仍直接测量 helper。
 Workspace、普通/计数器、frame-texture/echo 和 API-cfg 套件各自绘制真实 renderer，保留全部
 完整性及代表字形检查，并将每个驻留身份与实际尺寸同 helper 比较。字体内容摘要替代机器路径；
@@ -240,7 +242,7 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
   已验证证据，通过经过评审的 diff 调整，见 [Coverage 证据与重新建立基线](Development-and-Release-zh-CN#coverage-证据与重新建立基线)。
 - `macos-core` 中的 `scripts/macos-logic-coverage.sh` 按 baseline 的 `macos` 段，为 80% 子集中的 macOS
   专用逻辑（`sonicterm-ui` 的 `text_edit.rs` 中的 AppKit 单词边界，以及 `command_label.rs` 的 macOS 分支）
-  设置逐文件下限。CI 只在 macOS 14 arm64 runner 上强制执行这些下限，且只能根据经过验证的 `macos-core`
+  设置逐文件下限。CI 只在 macOS 15 arm64 runner 上强制执行这些下限，且只能根据经过验证的 `macos-core`
   记录修改。该运行只对 `sonicterm-ui` 插桩，因此其它 crate 中的 macOS 专用代码没有下限；文件下限也无法发现
   小于 1.0 个百分点容差的损失，例如 `command_label.rs` 的单个 macOS 分支。
 - `cargo deny --locked check` 在 `linux-core` job 与本地 gate 中，对所有 target 执行 `deny.toml`

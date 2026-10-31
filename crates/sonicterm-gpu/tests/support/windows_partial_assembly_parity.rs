@@ -106,6 +106,7 @@ pub(super) fn parity_cases(
     let (image_row, image_col) = (EDIT_ROW + 1, 6);
     let (width, height) = ((3.0 * layout.cell_w) as u32, (3.0 * layout.cell_h) as u32);
     image.panes[0].images.push(InlineImage {
+        scroll_mark: 0,
         id: 1,
         row: image_row,
         col: image_col,

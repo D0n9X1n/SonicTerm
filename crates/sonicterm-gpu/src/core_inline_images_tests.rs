@@ -29,6 +29,7 @@ fn windows_software_presenter_uses_placeholder_gpu_atlases() {
 #[test]
 fn inline_image_atlas_skips_older_images_without_eviction() {
     let older = sonicterm_render_model::InlineImage {
+        scroll_mark: 0,
         id: 1,
         row: 0,
         col: 0,
@@ -38,6 +39,7 @@ fn inline_image_atlas_skips_older_images_without_eviction() {
         kitty: None,
     };
     let newer = sonicterm_render_model::InlineImage {
+        scroll_mark: 0,
         id: 2,
         row: 0,
         col: 0,

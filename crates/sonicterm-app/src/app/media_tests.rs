@@ -2,6 +2,7 @@ use super::*;
 
 fn image(id: u64, bytes: usize) -> InlineImage {
     InlineImage {
+        scroll_mark: 0,
         id,
         row: 0,
         col: 0,
@@ -581,6 +582,7 @@ fn base64_media_event(protocol: MediaProtocol, png: &[u8]) -> MediaEvent {
         String::new()
     };
     MediaEvent {
+        scroll_mark: 0,
         protocol,
         row: 0,
         col: 0,
@@ -598,7 +600,14 @@ fn sixel_covering(width: usize, height: usize) -> MediaEvent {
         // `~` is 0x7E: all six rows of the band set.
         data.extend_from_slice(b"~-");
     }
-    MediaEvent { protocol: MediaProtocol::Sixel, row: 0, col: 0, metadata: String::new(), data }
+    MediaEvent {
+        scroll_mark: 0,
+        protocol: MediaProtocol::Sixel,
+        row: 0,
+        col: 0,
+        metadata: String::new(),
+        data,
+    }
 }
 
 /// The single-image bound must equal what the decoders actually produce.

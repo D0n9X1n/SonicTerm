@@ -214,6 +214,7 @@ fn reported_bytes_track_real_heap() {
                     // agree with a wrong figure.
                     let bgra: Arc<[u8]> = Arc::from(vec![0u8; image_bytes]);
                     images.push(InlineImage {
+                        scroll_mark: 0,
                         id: id as u64,
                         row: 0,
                         col: 0,
@@ -385,6 +386,7 @@ fn releasing_media_returns_what_the_figure_reported() {
             images.reserve_exact(COUNT);
             for id in 0..COUNT {
                 images.push(InlineImage {
+                    scroll_mark: 0,
                     id: id as u64,
                     row: 0,
                     col: 0,

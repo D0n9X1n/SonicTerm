@@ -1092,7 +1092,7 @@ flowchart LR
   windows --> result
 ```
 
-- `perf-build-macos` (`macos-14`) resolves the refs and builds both once
+- `perf-build-macos` (`macos-15`) resolves the refs and builds both once
   through the gate's reviewed build steps with `--require-base --build-only`.
   It recomputes the manifest's sha256 from the file, fails if that differs
   from the digest the script printed, and uploads the binaries as a tarball,
@@ -1256,7 +1256,7 @@ rules.
 ## Coverage evidence and rebaselining
 
 The per-crate floor is enforced only in the `linux-coverage` job's x86_64 Linux
-container, and the macOS-only floor only on the macOS 14 arm64 runner. CI tracks
+container, and the macOS-only floor only on the macOS 15 arm64 runner. CI tracks
 the stable Rust channel, so a new stable release, runner image or container
 image can move measured coverage with no source change. Each coverage run therefore
 keeps its evidence, and a floor changes only from a retained run's verified

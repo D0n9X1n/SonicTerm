@@ -47,6 +47,7 @@ pub(super) fn decode_inline_image(event: &MediaEvent) -> Option<InlineImage> {
         id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed),
         row: event.row,
         col: event.col,
+        scroll_mark: event.scroll_mark,
         width,
         height,
         bgra: Arc::from(bgra),

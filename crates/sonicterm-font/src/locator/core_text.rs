@@ -326,23 +326,27 @@ fn build_fallback_list_impl() -> anyhow::Result<Vec<ParsedFont>> {
     // disk, and that we can't open.
     // In particular, `.AppleSymbolsFB` is one such font.  Let's try
     // a nearby approximation.
-    let symbols = FontAttributes {
-        family: "Apple Symbols".to_string(),
-        weight: FontWeight::REGULAR,
-        stretch: FontStretch::Normal,
-        style: FontStyle::Normal,
-        is_fallback: true,
-        is_synthetic: true,
-        harfbuzz_features: None,
-        freetype_load_target: None,
-        freetype_render_target: None,
-        freetype_load_flags: None,
-        scale: None,
-        assume_emoji_presentation: None,
-    };
-    if let Ok(descriptors) = descriptor_from_attr(&symbols) {
-        for descriptor in descriptors.iter() {
-            fonts.append(&mut handles_from_descriptor(&descriptor));
+    // Simplified Chinese families follow: on macOS 15 the cascade's Chinese face (PingFang) is an
+    // HVF collection FreeType cannot open, so without them simplified-only characters have no face.
+    for family in ["Apple Symbols", "Hiragino Sans GB", "Songti SC", "Arial Unicode MS"] {
+        let attributes = FontAttributes {
+            family: family.to_string(),
+            weight: FontWeight::REGULAR,
+            stretch: FontStretch::Normal,
+            style: FontStyle::Normal,
+            is_fallback: true,
+            is_synthetic: true,
+            harfbuzz_features: None,
+            freetype_load_target: None,
+            freetype_render_target: None,
+            freetype_load_flags: None,
+            scale: None,
+            assume_emoji_presentation: None,
+        };
+        if let Ok(descriptors) = descriptor_from_attr(&attributes) {
+            for descriptor in descriptors.iter() {
+                fonts.append(&mut handles_from_descriptor(&descriptor));
+            }
         }
     }
 

@@ -3,8 +3,11 @@
 //! the same PNG chunked, and a virtual placement drawn through U+10EEEE placeholder cells. Each
 //! stream is shaped as the bundled console runtime forwards it (its start-up queries, `\r\r\n` line
 //! ends, the APCs and placeholder cells unchanged), fed through the pane worker's decode path, and
-//! presented by the GDI presenter, whose frame pixels are read back. A text-only stream is the
-//! control: its frame holds neither image colour.
+//! presented by the GDI presenter, whose frame pixels are read back. Each image must be drawn on
+//! its cells (a direct placement filling its `c` x `r` box, a placeholder image fitted inside it),
+//! the text written after it must land on the row below it, and an image must move up with its
+//! text when the screen scrolls. A text-only stream is the control: its frame holds neither image
+//! colour.
 
 use base64::Engine;
 use sonicterm_app::app::App;
@@ -211,7 +214,8 @@ impl Fixture {
         self.app.__test_window_successful_frames(self.id).ok_or_else(|| String::from("no renderer"))
     }
 
-    /// Count frame pixels near each image half's colour, and the leftmost x of each.
+    /// Count frame pixels near each image half's colour, the leftmost x of each, and the bounding
+    /// box of both.
     fn image_pixels(&self) -> Result<ImagePixels, String> {
         let size = self.window.inner_size();
         let mut found = ImagePixels::default();
@@ -232,10 +236,27 @@ impl Fixture {
                 } else if near(RIGHT_RGB) {
                     found.right += 1;
                     found.right_min_x = found.right_min_x.min(pixel_x);
+                } else {
+                    // When: the pixel is neither image colour, it is text or background.
+                    continue;
                 }
+                found.max_x = found.max_x.max(pixel_x);
+                found.min_y = found.min_y.min(pixel_y);
+                found.max_y = found.max_y.max(pixel_y);
             }
         }
         Ok(found)
+    }
+
+    /// The text of the pane's visible row `row`, trailing blanks trimmed.
+    fn row_text(&self, row: u16) -> Result<String, String> {
+        let parser = self
+            .app
+            .__test_child_pane_parser(self.id, self.pane)
+            .ok_or("the pane has no parser")?;
+        let parser = parser.lock();
+        let text: String = parser.grid().row(row).iter().map(|cell| cell.ch).collect();
+        Ok(text.trim_end().to_owned())
     }
 }
 
@@ -245,11 +266,22 @@ struct ImagePixels {
     right: usize,
     left_min_x: u32,
     right_min_x: u32,
+    max_x: u32,
+    min_y: u32,
+    max_y: u32,
 }
 
 impl Default for ImagePixels {
     fn default() -> Self {
-        Self { left: 0, right: 0, left_min_x: u32::MAX, right_min_x: u32::MAX }
+        Self {
+            left: 0,
+            right: 0,
+            left_min_x: u32::MAX,
+            right_min_x: u32::MAX,
+            max_x: 0,
+            min_y: u32::MAX,
+            max_y: 0,
+        }
     }
 }
 
@@ -259,14 +291,40 @@ fn text_only_stream() -> Vec<u8> {
     b"direct:\r\r\n\r\r\nplaceholder:\r\r\n\r\r\nend\r\r\n".to_vec()
 }
 
+/// A direct 8x2 placement on row 4, then `end`, then two rows of scrolling (`CSI 2 S`): the image
+/// must move up with the text to rows 2..=3, with `end` below it on row 4.
+fn scrolled_stream() -> Vec<u8> {
+    format!("\x1b[5;1H\x1b_Ga=T,f=100,t=d,q=2,c=8,r=2;{}\x1b\\\r\r\nend\x1b[2S", payload())
+        .into_bytes()
+}
+
+/// Where a case's image must be drawn, in cells.
+#[derive(Clone, Copy)]
+struct ImageCells {
+    /// First image row.
+    top: u16,
+    /// Rows in the placement box.
+    rows: u16,
+    /// Columns in the placement box.
+    cols: u16,
+    /// Whether the image fills the box exactly, as a direct placement stretches it; otherwise it
+    /// is fitted inside the box with its aspect ratio kept, as a placeholder placement is.
+    fills_box: bool,
+}
+
+/// How far, in pixels, a drawn image edge may sit from its cell edge: bilinear scaling softens
+/// the outermost pixel row and column past the colour tolerance.
+const EDGE_TOLERANCE_PX: f32 = 3.0;
+
 /// Feed `stream` after the runtime's prefix through the pane worker and present. With `image`,
-/// require both image halves on screen, the left half drawn left of the right half; without it,
-/// require neither colour anywhere in the frame.
+/// require both image halves drawn in order inside the expected cells; without it, require
+/// neither colour anywhere in the frame. Either way, `end` must be on row `end_row`.
 fn presents(
     active: &ActiveEventLoop,
     role: &'static str,
     stream: Vec<u8>,
-    image: bool,
+    image: Option<ImageCells>,
+    end_row: u16,
 ) -> Result<(), String> {
     let mut fixture = fixture(active, role)?;
     fixture.present(active)?;
@@ -275,15 +333,47 @@ fn presents(
     fixture.app.__test_publish_pane_output(fixture.id, fixture.pane, &bytes);
     fixture.present(active)?;
     let found = fixture.image_pixels()?;
-    if image {
-        // When: the stream carries an image, both halves must be drawn in order.
-        check(
-            found.left > 0 && found.right > 0 && found.left_min_x < found.right_min_x,
-            &format!("both image halves are drawn in order: {found:?}"),
-        )
+    let end_text = fixture.row_text(end_row)?;
+    check(end_text == "end", &format!("`end` is on row {end_row}, found {end_text:?}"))?;
+    let Some(cells) = image else {
+        // When: the stream carries no image, no image colour may be drawn.
+        return check(
+            found.left == 0 && found.right == 0,
+            &format!("no image colour is drawn: {found:?}"),
+        );
+    };
+    check(
+        found.left > 0 && found.right > 0 && found.left_min_x < found.right_min_x,
+        &format!("both image halves are drawn in order: {found:?}"),
+    )?;
+    let (cell_w, cell_h, origin_y) = fixture
+        .app
+        .__test_window_cell_geometry(fixture.id)
+        .ok_or("the window has no cell geometry")?;
+    let box_top = origin_y + f32::from(cells.top) * cell_h;
+    let box_bottom = box_top + f32::from(cells.rows) * cell_h;
+    let box_width = f32::from(cells.cols) * cell_w;
+    let drawn_top = found.min_y as f32;
+    let drawn_bottom = found.max_y as f32 + 1.0;
+    let drawn_width = (found.max_x - found.left_min_x.min(found.right_min_x)) as f32 + 1.0;
+    let near = |have: f32, want: f32| (have - want).abs() <= EDGE_TOLERANCE_PX;
+    let placed = if cells.fills_box {
+        // When: the placement stretches the image, its edges are the box's edges.
+        near(drawn_top, box_top) && near(drawn_bottom, box_bottom) && near(drawn_width, box_width)
     } else {
-        check(found.left == 0 && found.right == 0, &format!("no image colour is drawn: {found:?}"))
-    }
+        drawn_top >= box_top - EDGE_TOLERANCE_PX
+            && drawn_bottom <= box_bottom + EDGE_TOLERANCE_PX
+            && drawn_width <= box_width + EDGE_TOLERANCE_PX
+    };
+    check(
+        placed,
+        &format!(
+            "image drawn at y {drawn_top}..{drawn_bottom}, {drawn_width} px wide; expected rows \
+             {}..{} at y {box_top}..{box_bottom}, {box_width} px wide ({cell_w}x{cell_h} px cells)",
+            cells.top,
+            cells.top + cells.rows,
+        ),
+    )
 }
 
 #[test]
@@ -296,14 +386,19 @@ fn windows_kitty_images_through_the_app() {
 }
 
 fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
+    // Each image stream writes a label on row 0, the image from row 1, and `end` after it.
+    let stretched = ImageCells { top: 1, rows: 2, cols: 8, fills_box: true };
+    let fitted = ImageCells { fills_box: false, ..stretched };
+    let scrolled = ImageCells { top: 2, ..stretched };
     let mut failures = Vec::new();
-    for (name, role, stream, image) in [
-        ("text only", "kitty-control", text_only_stream(), false),
-        ("direct", "kitty-direct", direct_stream(), true),
-        ("chunked", "kitty-chunked", chunked_stream(), true),
-        ("placeholder", "kitty-placeholder", placeholder_stream(), true),
+    for (name, role, stream, image, end_row) in [
+        ("text only", "kitty-control", text_only_stream(), None, 4),
+        ("direct", "kitty-direct", direct_stream(), Some(stretched), 3),
+        ("chunked", "kitty-chunked", chunked_stream(), Some(stretched), 3),
+        ("placeholder", "kitty-placeholder", placeholder_stream(), Some(fitted), 3),
+        ("scrolled", "kitty-scrolled", scrolled_stream(), Some(scrolled), 4),
     ] {
-        if let Err(error) = presents(active, role, stream, image) {
+        if let Err(error) = presents(active, role, stream, image, end_row) {
             failures.push(format!("{name}: {error}"));
         }
     }

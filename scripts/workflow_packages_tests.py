@@ -16,7 +16,7 @@ class MacPackageGateTests(unittest.TestCase):
     def test_ci_smoke_covers_both_mac_architectures_with_isolated_caches(self):
         # One architecture's bundle cannot stand in for the other's: Intel and
         # Apple Silicon resolve different Cairo and font binaries. Apple Silicon
-        # runs in macos-core on macos-14 and Intel in macos-smoke's one leg, and
+        # runs in macos-core on macos-15 and Intel in macos-smoke's one leg, and
         # their distinct cache keys keep either from restoring the other's target.
         job = workflow_test_fixture.job_block("ci.yml", "macos-smoke")
         self.assertIn("name: macOS native runtime smoke (${{ matrix.arch }})", job)
@@ -27,10 +27,10 @@ class MacPackageGateTests(unittest.TestCase):
         self.assertIn(
             "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-${{ matrix.runner }}", job
         )
-        self.assertNotIn("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14", job)
+        self.assertNotIn("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-15", job)
         core = workflow_test_fixture.job_block("ci.yml", "macos-core")
-        self.assertIn("runs-on: macos-14", core)
-        self.assertIn("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14", core)
+        self.assertIn("runs-on: macos-15", core)
+        self.assertIn("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-15", core)
         # Each job's smoke evidence names its architecture, so the two jobs'
         # artifacts never collide and each says which bundle it describes.
         for job_name, arch in (("macos-core", "aarch64"), ("macos-smoke", "${{ matrix.arch }}")):
@@ -48,10 +48,14 @@ class MacPackageGateTests(unittest.TestCase):
         # The raw smoke proves the build tree runs where Homebrew's Cairo is on
         # the loader path; only the relocated, signed .dmg proves what ships.
         # Each architecture's job packages and validates its own bundle.
+        # Apple Silicon installs the pinned macOS 14 bottles, since the runner's current Cairo bottles
+        # declare a newer floor than the package's 14.0; the Intel job keeps Homebrew's Cairo.
+        installs = {"macos-core": "python3 scripts/setup-macos-native.py", "macos-smoke": "brew install cairo pkg-config"}
         for job_name, arch in (("macos-core", "aarch64"), ("macos-smoke", "${{ matrix.arch }}")):
             with self.subTest(job=job_name):
                 job = workflow_test_fixture.job_block("ci.yml", job_name)
-                self.assertIn("brew install cairo pkg-config", job)
+                self.assertIn(installs[job_name], job)
+                self.assertLess(job.index(installs[job_name]), job.index("cargo build --release -p sonicterm-mac"))
                 self.assertIn("-- target/release/sonicterm-mac --runtime-smoke", job)
                 self.assertIn(
                     f"bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-{arch}",
@@ -179,6 +183,16 @@ class MacPackageGateTests(unittest.TestCase):
                 self.assertIn(
                     f'--max-minimum-macos "{ceiling}"', workflow_test_fixture.shell_commands(job)
                 )
+        # The Apple Silicon release links the pinned macOS 14 bottles, installed before it builds, so
+        # its 14.0 ceiling holds on a macOS 15 runner.
+        release = workflow_test_fixture.job_block("release.yml", "build-mac-aarch64")
+        self.assertIn("python3 scripts/setup-macos-native.py", release)
+        self.assertNotIn("brew install cairo", release)
+        self.assertLess(release.index("setup-macos-native.py"), release.index("cargo build --release"))
+        # The pins live in a private prefix, so the setup never runs Homebrew, and packaging tools
+        # Homebrew installs afterwards cannot replace a pinned library.
+        setup_source = (workflow_test_fixture._HERE / "setup-macos-native.py").read_text(encoding="utf-8")
+        self.assertNotIn('"brew"', setup_source)
 
     def test_every_shipping_mac_gate_checks_the_package_not_only_the_binary(self):
         # The regression this pins: a green `--runtime-smoke` on the build tree

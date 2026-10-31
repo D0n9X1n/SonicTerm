@@ -38,6 +38,7 @@ pub(super) fn fixture(child: bool, zoom: bool) -> (App, WindowId, u64, u64, u64)
     }
     for id in [left, right, inactive] {
         state.panes[&id].inline_images.lock().push(InlineImage {
+            scroll_mark: 0,
             id,
             row: 0,
             col: 0,

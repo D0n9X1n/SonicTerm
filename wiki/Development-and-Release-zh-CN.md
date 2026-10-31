@@ -725,7 +725,7 @@ flowchart LR
   windows --> result
 ```
 
-- `perf-build-macos`（`macos-14`）解析 ref，并以 `--require-base --build-only` 通过 gate 已审核的构建步骤把两个 ref
+- `perf-build-macos`（`macos-15`）解析 ref，并以 `--require-base --build-only` 通过 gate 已审核的构建步骤把两个 ref
   各构建一次。它从文件重新计算 manifest 的 sha256，与脚本打印的摘要不一致时失败，然后把二进制打成 tarball（保留可执行位）上传，
   名为 `perf-binaries-macOS-<run id>-<attempt>`，保留一天。它的构建日志作为证据上传。
 - 每个 `compare-macos` 分片需要 producer 成功。它自行解析 ref，与 producer 的不一致时失败；解析出 base 而 producer 没有发布
@@ -817,7 +817,7 @@ smoke 的失败规则见[本地 gate](Local-Gate-zh-CN#性能场景-smoke)。
 
 ## Coverage 证据与重新建立基线
 
-per-crate 下限只在 `linux-coverage` job 的 x86_64 Linux 容器中强制执行，macOS 专用下限只在 macOS 14
+per-crate 下限只在 `linux-coverage` job 的 x86_64 Linux 容器中强制执行，macOS 专用下限只在 macOS 15
 arm64 runner 上强制执行。CI 跟随 stable Rust channel，因此新的 stable 版本、runner 镜像或容器镜像可能在
 源码不变时改变测量覆盖率。所以每次 coverage 运行都会保留
 证据，下限只能根据已保留运行的已验证证据调整。

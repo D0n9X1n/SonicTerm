@@ -631,7 +631,7 @@ impl Perform for Performer {
                 let row = self.grid.cursor.row;
                 let col = self.grid.cursor.col;
                 if let Some(event) = parse_iterm2_file_event(payload.as_bytes(), row, col) {
-                    self.events.push(VtEvent::Media(event));
+                    self.push_media(event);
                 }
             }
             Some(133) => {
@@ -730,7 +730,7 @@ impl Perform for Performer {
         self.fast_path_ready = false;
         if let Some(capture) = self.dcs_capture.take() {
             if let Some(event) = capture.into_event(self.grid.cursor.row, self.grid.cursor.col) {
-                self.events.push(VtEvent::Media(event));
+                self.push_media(event);
             }
         }
     }

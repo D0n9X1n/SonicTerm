@@ -23,7 +23,7 @@ class RepositoryContractTests(unittest.TestCase):
         # The macOS-only floor covers the subset files whose AppKit and macOS branches compile only on macOS.
         committed = coverage_test_fixture.floor.load_baseline(str(coverage_test_fixture._HERE / "coverage-baseline.json"))
         self.assertIsNotNone(committed.macos)
-        self.assertEqual((committed.macos.target, committed.macos.runner), ("aarch64-apple-darwin", "macos14/ARM64"))
+        self.assertEqual((committed.macos.target, committed.macos.runner), ("aarch64-apple-darwin", "macos15/ARM64"))
         self.assertEqual(set(committed.macos.files), {"crates/sonicterm-ui/src/text_edit.rs",
                                                       "crates/sonicterm-ui/src/command_label.rs"})
         for file_path in committed.macos.files:

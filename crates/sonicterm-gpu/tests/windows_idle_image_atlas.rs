@@ -162,6 +162,7 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
         scrollbar_alpha: 0.0,
         inline_images: if image {
             vec![InlineImage {
+                scroll_mark: 0,
                 id: 1,
                 row: 0,
                 col: 0,
