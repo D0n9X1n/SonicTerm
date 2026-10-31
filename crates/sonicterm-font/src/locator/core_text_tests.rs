@@ -39,3 +39,19 @@ fn fallback_computes_each_face_coverage_once_per_request() {
     let many = computed(&['漢', '字', '中', '文', '東', '京', '語', '本']);
     assert_eq!(many, pair, "coverage is computed per face, not per codepoint");
 }
+
+/// A simplified-only character gets a fallback face that covers it. On macOS 15 CoreText's own
+/// choice, PingFang, cannot be opened, so this holds only through the generic fallback list.
+#[test]
+fn simplified_chinese_has_a_fallback_face() {
+    use crate::locator::FontLocator;
+    let mut wanted = crate::rangeset::RangeSet::new();
+    wanted.add('测' as u32);
+    let fonts = super::CoreTextFontLocator {}
+        .locate_fallback_for_codepoints(&['测'])
+        .expect("CoreText fallback");
+    let covering = fonts
+        .iter()
+        .find(|font| font.coverage_intersection(&wanted).is_ok_and(|cov| !cov.is_empty()));
+    assert!(covering.is_some(), "no fallback face covers 测: {fonts:?}");
+}

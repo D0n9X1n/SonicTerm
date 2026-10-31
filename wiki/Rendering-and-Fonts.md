@@ -71,7 +71,11 @@ base OS/2 weight and width instead of aborting.
 
 Platform discovery stays behind `FontLocator`:
 
-- macOS uses CoreText fallback and font URLs;
+- macOS uses CoreText fallback and font URLs. When CoreText's face cannot be
+  opened or does not cover a character, a generic list takes over: Menlo, the
+  system cascade for the user's languages, Apple Symbols, and Hiragino Sans GB,
+  Songti SC and Arial Unicode MS for simplified Chinese, whose CoreText face on
+  macOS 15 is an HVF collection FreeType cannot open;
 - Windows uses DirectWrite/GDI descriptors and raw font extraction;
 - other Unix systems use Fontconfig and restrict candidates to monospaced,
   dual-width, or character-cell faces.
