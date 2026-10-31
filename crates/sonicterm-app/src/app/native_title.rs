@@ -15,9 +15,10 @@ use winit::window::WindowId;
 
 use super::{App, NATIVE_WINDOW_TITLE};
 
-/// Longest name or tab body shown in a native title, in Unicode scalar values; the same limit a
-/// window name has, so a program's OSC title cannot make a title longer than a user could.
-pub(super) const MAX_NATIVE_TITLE_SCALARS: usize = 128;
+/// Longest name or tab body shown in a native title, in Unicode scalar values: the window-name
+/// limit, so a program's OSC title cannot make a title longer than a user could.
+pub(super) const MAX_NATIVE_TITLE_SCALARS: usize =
+    sonicterm_ui::command_palette::MAX_WINDOW_NAME_SCALARS;
 
 /// Shortest time between two native title writes for one window. A program that rewrites its
 /// OSC title on every update (a progress bar, a prompt clock) would otherwise make a native call
@@ -70,22 +71,22 @@ impl NativeTitleState {
     }
 }
 
-/// The part of a tab's title a window title shows, borrowed: the custom title verbatim when the
-/// user set one, otherwise the body after the formatter's `#<digits> <icon> ` prefix, or the
-/// whole title when it does not have exactly that shape (a `shell 1` placeholder, a `-T` title).
+/// The part of a tab's title a window title shows, borrowed: the custom title as typed when the
+/// user set one, otherwise the body after the formatter's `#<digits> <icon> ` prefix (empty when
+/// that body is blank), or the whole title when it does not have exactly that shape (a `shell 1`
+/// placeholder, a `-T` title). Blank text falls back to the application name in the title.
 pub(super) fn tab_display_body(tab: &Tab) -> &str {
     if let Some(custom) = tab.custom_title.as_deref() {
         // When: the user named the tab, that name is shown as typed, never re-parsed.
-        return custom.trim();
+        return custom;
     }
-    let title = tab.title.trim();
-    formatted_body(title).unwrap_or(title)
+    formatted_body(&tab.title).unwrap_or(&tab.title)
 }
 
 /// The body of a title the tab formatter produced, `#<digits> <icon> <body>`, where the icon is
-/// one the formatter can emit; `None` for any other shape.
+/// one the formatter can emit; `""` when that body is blank, `None` for any other shape.
 fn formatted_body(title: &str) -> Option<&str> {
-    let rest = title.strip_prefix('#')?;
+    let rest = title.trim_start().strip_prefix('#')?;
     let digits = rest.find(|character: char| !character.is_ascii_digit())?;
     if digits == 0 {
         // When: digits is zero, no digit follows `#` and the title only looks like a numbered one.
@@ -97,15 +98,20 @@ fn formatted_body(title: &str) -> Option<&str> {
         // When: icon is not a formatter glyph, the text after `#N` is a user's own words.
         return None;
     }
-    let body = after_index.as_str().strip_prefix(' ')?.trim();
-    (!body.is_empty()).then_some(body)
+    let after_icon = after_index.as_str();
+    if after_icon.trim().is_empty() {
+        // When: after_icon is blank, the formatted title has no body, so nothing names the tab.
+        return Some("");
+    }
+    after_icon.strip_prefix(' ')
 }
 
 /// `text` safe and short enough for a native title: each control character replaced by U+FFFD
-/// (a NUL would panic X11) and at most [`MAX_NATIVE_TITLE_SCALARS`] scalars.
+/// (a NUL would panic X11) before surrounding spaces are trimmed, so a tab or newline at either
+/// end is shown rather than silently dropped, then at most [`MAX_NATIVE_TITLE_SCALARS`] scalars.
 fn title_part(text: &str) -> String {
-    let capped: String = text.chars().take(MAX_NATIVE_TITLE_SCALARS).collect();
-    sonicterm_types::replace_control_characters(&capped)
+    let replaced = sonicterm_types::replace_control_characters(text);
+    replaced.trim().chars().take(MAX_NATIVE_TITLE_SCALARS).collect()
 }
 
 /// The native title of terminal window number `number`: its `name` when set, otherwise its
@@ -114,9 +120,9 @@ pub(super) fn window_title_text(number: u64, name: &str, body: Option<&str>) -> 
     let shown = [Some(name), body]
         .into_iter()
         .flatten()
-        .map(str::trim)
+        .map(title_part)
         .find(|part| !part.is_empty())
-        .map_or_else(|| NATIVE_WINDOW_TITLE.to_owned(), title_part);
+        .unwrap_or_else(|| NATIVE_WINDOW_TITLE.to_owned());
     format!("#{number} {shown}")
 }
 
@@ -131,10 +137,13 @@ impl App {
     }
 
     /// Bring every terminal window's native title up to date; returns when a throttled title is
-    /// next due, so the event loop wakes to deliver it.
+    /// next due, so the event loop wakes to deliver it. Each window keeps its own interval.
     pub(super) fn sync_native_titles(&mut self, now: Instant) -> Option<Instant> {
-        let ids: Vec<WindowId> = self.windows.keys().copied().collect();
-        ids.into_iter().filter_map(|id| self.sync_native_title(id, now, false)).min()
+        let Self { window_keys, windows, .. } = self;
+        windows
+            .iter_mut()
+            .filter_map(|(id, window)| sync_window(window_keys.get(*id)?, window, now, false))
+            .min()
     }
 
     /// Bring window `id`'s native title up to date. `immediate` writes a changed title now, for
@@ -147,22 +156,39 @@ impl App {
         immediate: bool,
     ) -> Option<Instant> {
         let key = self.window_keys.get(id)?;
-        let window = self.windows.get_mut(&id)?;
-        if window.role.is_report() {
-            // When: a report window shows its fixed name, which its creation already set.
-            return None;
+        sync_window(key, self.windows.get_mut(&id)?, now, immediate)
+    }
+}
+
+/// Bring one terminal window's native title up to date; see [`App::sync_native_title`].
+fn sync_window(
+    key: sonicterm_types::WindowKey,
+    window: &mut super::WindowState,
+    now: Instant,
+    immediate: bool,
+) -> Option<Instant> {
+    if window.role.is_report() {
+        // When: a report window shows its fixed name, which its creation already set.
+        return None;
+    }
+    let tab = window.tabs.active();
+    let state = &mut window.native_title;
+    // A new active tab or name is the user's own action and is written at once; only a retitle of
+    // the same tab, which a program can repeat every frame, waits out the interval.
+    let title = if state.applied.is_some() && state.composed_from(&window.custom_window_name, tab) {
+        // When: applied and composed_from hold, the inputs are unchanged and nothing is recomposed;
+        // only a pending title can be written, and only once its deadline passes.
+        let due = state.pending_deadline().filter(|deadline| now < *deadline && !immediate);
+        match state.pending.take() {
+            Some(pending) if due.is_none() => pending,
+            pending => {
+                // When: pending is None, or due is Some because it is not yet due, nothing is written.
+                state.pending = pending;
+                return due;
+            }
         }
-        let tab = window.tabs.active();
-        let state = &mut window.native_title;
-        if state.applied.is_some()
-            && state.pending.is_none()
-            && state.composed_from(&window.custom_window_name, tab)
-        {
-            // When: nothing the title reads changed since it was applied, there is nothing to do.
-            return None;
-        }
-        // A different active tab or window name is the user's own action and is shown at once;
-        // only a retitle of the same tab, which a program can repeat every frame, is throttled.
+    } else {
+        // When: not applied or not composed_from these inputs, the title is composed again.
         let user_change =
             state.tab_id != tab.map(|tab| tab.id) || state.name != window.custom_window_name;
         state.remember_inputs(&window.custom_window_name, tab);
@@ -179,18 +205,19 @@ impl App {
             state.pending = Some(title);
             return state.pending_deadline();
         }
-        if let Some(native) = window.window.as_ref() {
-            native.set_title(&title);
-        }
-        state.applied = Some(title);
-        state.written_at = Some(now);
-        state.pending = None;
-        #[cfg(test)]
-        {
-            state.writes += 1;
-        }
-        None
+        title
+    };
+    if let Some(native) = window.window.as_ref() {
+        native.set_title(&title);
     }
+    state.applied = Some(title);
+    state.written_at = Some(now);
+    state.pending = None;
+    #[cfg(test)]
+    {
+        state.writes += 1;
+    }
+    None
 }
 
 #[cfg(test)]
