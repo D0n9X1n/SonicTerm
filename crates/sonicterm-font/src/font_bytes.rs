@@ -1,20 +1,22 @@
-//! One shared, immutable heap buffer per colour font file generation.
+//! One shared, immutable heap buffer per generation of a font file whose faces keep tables whole.
 //!
 //! A FreeType face opened on a callback stream copies every frame it extracts:
 //! `FT_Stream_EnterFrame` allocates and reads when the stream has a `read`
 //! callback. Most tables are read in small frames and dropped, but
 //! `tt_face_load_svg` and `tt_face_load_colr` extract the whole `SVG `, `COLR`
 //! and `CPAL` tables and keep them for the face's life, so each face on a colour
-//! font held its own copy (18.55 MiB of `SVG ` for NotoColorEmoji). A memory
-//! stream (`read: None`) makes the same call point into `base` instead.
+//! font held its own copy (18.55 MiB of `SVG ` for NotoColorEmoji). FreeType's
+//! HVF driver does the same with the `hvgl` outline table, which every face of
+//! Apple's `PingFangUI.ttc` shares (58.7 MB, so one 32-face traversal would copy
+//! 1.75 GiB). A memory stream (`read: None`) makes the same call point into
+//! `base` instead.
 //!
-//! Only a face whose table directory lists `SVG ` or `COLR` is opened on this
-//! cache's shared buffer, by FreeType and HarfBuzz alike. Every other font keeps
-//! the callback stream and the per-blob read: holding every font file whole,
-//! system collections such as a 75 MiB PingFang.ttc included, cost more than the
-//! colour tables it saved. The directory is read with a bounded read of the
-//! header and table records; a malformed or unreadable one counts as no colour
-//! table.
+//! Only a face whose table directory lists `SVG `, `COLR` or `hvgl` is opened on
+//! this cache's shared buffer, by FreeType and HarfBuzz alike. Every other font
+//! keeps the callback stream and the per-blob read: holding every font file
+//! whole, ordinary CJK collections included, cost more than the tables it saved.
+//! The directory is read with a bounded read of the header and table records; a
+//! malformed or unreadable one counts as no whole-kept table.
 //!
 //! The cache holds only `Weak` references, so the buffer lives exactly as long
 //! as some face or blob uses it. Faces are not shared; only bytes are.
@@ -183,8 +185,9 @@ fn prune(map: &mut HashMap<FileKey, Slot>) {
 /// Largest colour font any wrapper shares; each wrapper checks its own narrower limit too.
 const ANY_LIBRARY_MAX_LEN: usize = u32::MAX as usize;
 
-/// Tables FreeType extracts whole and keeps for the face's life (`CPAL` loads with `COLR`).
-const WHOLE_COLOUR_TABLE_TAGS: [[u8; 4]; 2] = [*b"SVG ", *b"COLR"];
+/// Tables FreeType extracts whole and keeps for the face's life: the colour tables (`CPAL` loads
+/// with `COLR`) and the HVF driver's `hvgl` outlines, which every face of a collection shares.
+const WHOLE_KEPT_TABLE_TAGS: [[u8; 4]; 3] = [*b"SVG ", *b"COLR", *b"hvgl"];
 
 /// Most table records read from one face's directory; real fonts list a few dozen.
 const MAX_TABLE_RECORDS: u16 = 256;
@@ -192,17 +195,17 @@ const MAX_TABLE_RECORDS: u16 = 256;
 /// `sfntVersion` values of a single TrueType, CFF, Apple TrueType or Type 1 sfnt face.
 const SFNT_VERSIONS: [[u8; 4]; 4] = [[0, 1, 0, 0], *b"OTTO", *b"true", *b"typ1"];
 
-/// Whether face `face_index` of the sfnt font in `reader` lists an `SVG ` or `COLR` table.
+/// Whether face `face_index` of the sfnt font in `reader` lists an `SVG `, `COLR` or `hvgl` table.
 ///
 /// Reads only the collection header (for a `ttcf` file), the 12-byte offset table and at most
 /// [`MAX_TABLE_RECORDS`] 16-byte table records. Any read failure, an unknown `sfntVersion`, a
 /// face index outside the collection or a non-zero index into a single face yields `false`.
-fn face_lists_whole_colour_table(reader: &mut (impl Read + Seek), face_index: u32) -> bool {
-    directory_lists_whole_colour_table(reader, face_index).unwrap_or(false)
+fn face_lists_whole_kept_table(reader: &mut (impl Read + Seek), face_index: u32) -> bool {
+    directory_lists_whole_kept_table(reader, face_index).unwrap_or(false)
 }
 
-/// [`face_lists_whole_colour_table`] with read failures as `Err`, so `?` keeps it flat.
-fn directory_lists_whole_colour_table(
+/// [`face_lists_whole_kept_table`] with read failures as `Err`, so `?` keeps it flat.
+fn directory_lists_whole_kept_table(
     reader: &mut (impl Read + Seek),
     face_index: u32,
 ) -> std::io::Result<bool> {
@@ -248,36 +251,39 @@ fn directory_lists_whole_colour_table(
     reader.read_exact(&mut records)?;
     // Each 16-byte record starts with its 4-byte tag; `read_exact` filled whole records only.
     let (records, _) = records.as_chunks::<16>();
-    Ok(records.iter().any(|record| {
-        WHOLE_COLOUR_TABLE_TAGS.iter().any(|colour_tag| record[..4] == colour_tag[..])
-    }))
+    Ok(records
+        .iter()
+        .any(|record| WHOLE_KEPT_TABLE_TAGS.iter().any(|colour_tag| record[..4] == colour_tag[..])))
 }
 
-/// Whether face `face_index` of the font file at `path` lists an `SVG ` or `COLR` table.
+/// Whether face `face_index` of the font file at `path` lists an `SVG `, `COLR` or `hvgl` table.
 ///
 /// An unreadable file or malformed directory counts as `false`: the caller then opens the face
 /// exactly as it would any other font, and that open reports the real error.
-fn file_face_lists_whole_colour_table(path: &Path, face_index: u32) -> bool {
-    File::open(path).is_ok_and(|mut file| face_lists_whole_colour_table(&mut file, face_index))
+fn file_face_lists_whole_kept_table(path: &Path, face_index: u32) -> bool {
+    File::open(path).is_ok_and(|mut file| face_lists_whole_kept_table(&mut file, face_index))
 }
 
-/// The source to open face `face_index` of `source` from: a colour face's shared bytes, else
-/// `source` itself.
+/// The source to open face `face_index` of `source` from: the shared bytes of a face that keeps a
+/// table whole, else `source` itself.
 ///
-/// An on-disk face that lists an `SVG ` or `COLR` table becomes a `Memory` source over the file's
-/// shared buffer, so every FreeType face and HarfBuzz blob on it shares one copy of its colour
+/// An on-disk face that lists an `SVG `, `COLR` or `hvgl` table becomes a `Memory` source over the
+/// file's shared buffer, so every FreeType face and HarfBuzz blob on it shares one copy of those
 /// tables, and anything built later from the result reads the same generation even when the file
 /// is replaced or deleted on disk. `face_index` holds the face in its low 16 bits, as FreeType and
 /// HarfBuzz pack it; the named-instance bits above are ignored. Every other source, every other
-/// face, and a colour face whose shared read fails are returned unchanged, so they stream from
+/// face, and a whole-table face whose shared read fails are returned unchanged, so they stream from
 /// disk exactly as before and any error surfaces from that open.
-pub(crate) fn pin_colour_face(source: &FontDataSource, face_index: u32) -> Cow<'_, FontDataSource> {
+pub(crate) fn pin_whole_table_face(
+    source: &FontDataSource,
+    face_index: u32,
+) -> Cow<'_, FontDataSource> {
     let FontDataSource::OnDisk(path) = source else {
         // When: `source` is not `OnDisk`, its bytes are already in memory.
         return Cow::Borrowed(source);
     };
-    if !file_face_lists_whole_colour_table(path, face_index & 0xFFFF) {
-        // When: `file_face_lists_whole_colour_table` is false, keep streaming from disk.
+    if !file_face_lists_whole_kept_table(path, face_index & 0xFFFF) {
+        // When: `file_face_lists_whole_kept_table` is false, keep streaming from disk.
         return Cow::Borrowed(source);
     }
     match shared_file_bytes(path, ANY_LIBRARY_MAX_LEN, "the font stack") {
@@ -286,7 +292,7 @@ pub(crate) fn pin_colour_face(source: &FontDataSource, face_index: u32) -> Cow<'
         }
         Err(err) => {
             // A failed shared read falls back to the stream, whose open reports its own error.
-            log::debug!("not sharing colour font {}: {err:#}", path.display());
+            log::debug!("not sharing font {}: {err:#}", path.display());
             Cow::Borrowed(source)
         }
     }

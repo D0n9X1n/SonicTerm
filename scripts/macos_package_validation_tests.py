@@ -68,6 +68,18 @@ class PackageTests(unittest.TestCase):
         seal_index = commands.index('codesign --force --sign - "$APP"')
         self.assertLess(copy_index, seal_index)
 
+    def test_packaging_declares_and_asserts_the_macos_15_floor(self):
+        # The app's declared floor and the default ceiling both match the 15.0 deployment target.
+        script = Path(__file__).with_name("make-macos-dmg.sh").read_text(encoding="utf-8")
+        self.assertIn('MAX_MINIMUM="${SONICTERM_MAX_MACOS_MINIMUM:-15.0}"', script)
+        self.assertIn("<key>LSMinimumSystemVersion</key>   <string>15.0</string>", script)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(macos_package_test_fixture.tool, "validate") as validate, \
+                patch.object(sys, "argv", ["test-macos-package.py", "--app", directory,
+                                           "--state-dir", str(Path(directory) / "state")]):
+            macos_package_test_fixture.tool.main()
+        self.assertEqual(validate.call_args.args[3], "15.0")
+
     def test_font_probe_accepts_completed_report_when_open_wait_loses_process(self):
         # A fast successful app can exit before open registers its kevent process wait.
         diagnostic = b"Unable to block on applications (initial call to kevent() failed: No such process)\n"

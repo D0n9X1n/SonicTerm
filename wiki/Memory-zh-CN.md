@@ -240,9 +240,10 @@ worker 线程最多一个，以 `live_fg_probe_workers` 报告。
 `retained_amounts().image_atlas` 立即从 16 MiB 降到 4 B；聚合的 `renderer_total_bytes` 在下一次
 内存采样（每 30 秒一次）时显示这一下降，每个窗格的 `InlineMediaRetained` 计费保持不变。
 
-字体文件不是被统计的类别。普通字体从磁盘流式读取，不会被整份保留。带有 `SVG ` 或 `COLR`
-表的字体，在仍有 FreeType face 或 HarfBuzz blob 使用时，会整份保存一次在共享堆缓冲区中；
-其上的 face 与 blob 共享这块缓冲区，而不是由 FreeType 为每个 face 复制彩色表。详见
+字体文件不是被统计的类别。普通字体从磁盘流式读取，不会被整份保留。带有 `SVG `、`COLR` 或
+`hvgl` 表的字体，在仍有 FreeType face 或 HarfBuzz blob 使用时，会整份保存一次在共享堆缓冲区中；
+其上的 face 与 blob 共享这块缓冲区，而不是由 FreeType 为每个 face 复制这些表。与其它字体字节一样，
+这块缓冲区计入 `DIFFERENCE`。详见
 [渲染与字体](Rendering-and-Fonts-zh-CN)。
 
 ### 图形内存

@@ -105,7 +105,7 @@ def _reviewed_step(step: gate_model.Step) -> bool:
 
 
 _PREPARATION_SCRIPTS = {
-    "workspace-crates": ("check-workspace-crates.sh", "01ea549949d24c6205cc5e72f9c5ac0f3aed20baac3873cb04681fa280a4dece"),
+    "workspace-crates": ("check-workspace-crates.sh", "c7b95cd104ad26f4c58bad75bc78e16490d08145e8ea70c401881bfee6c2a37e"),
     "pty-feasibility": ("pty-backend-feasibility.sh", "46c57646081f8faa6b61f85572b49d5ea88e1e5e9ce1aae7596ffef705200256"),
 }
 

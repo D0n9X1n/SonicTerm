@@ -36,23 +36,28 @@ Every package includes the pinned, statically linked winit dependency's
 ### Requirements and command
 
 Build and package on the target macOS architecture, on the same host whose
-Homebrew libraries linked the executable. The bundle's minimum macOS version is
-the maximum of 14.0 and the deployment targets of its executable and every
-bundled dylib. Official Apple Silicon packages support macOS 14+, and Intel
-packages support macOS 15+; CI enforces those explicit ceilings and refuses newer
-dependency floors. Check `LSMinimumSystemVersion` and
+Homebrew libraries linked the executable. `.cargo/config.toml` sets
+`MACOSX_DEPLOYMENT_TARGET = "15.0"` for rustc and every `cc`-built C library on
+macOS builds. The bundle's minimum macOS version is the maximum of 15.0 and the
+deployment targets of its executable and every bundled dylib. Official Apple
+Silicon and Intel packages both support macOS 15+; CI enforces that explicit
+ceiling and refuses newer dependency floors. The packaged executable loads the
+system `/usr/lib/libhvf.dylib`, which FreeType uses for PingFang, as a weak
+dylib, so macOS 15.0 to 15.3, which lack its renderer, still launch;
+`scripts/check-macos-weak-hvf.py` fails CI and release packaging when that load
+is strong or missing. Check `LSMinimumSystemVersion` and
 `Resources/native-libraries.json` for the artifact's actual requirement. Official
 release packages are assembled on their architecture-specific CI runners. The
-Apple Silicon CI and release jobs run on macOS 15, whose current Homebrew Cairo
-bottles declare macOS 15.0, so they run `scripts/setup-macos-native.py` instead
-of `brew install cairo`. It downloads the macOS 14 (`arm64_sonoma`) bottles of
+Apple Silicon CI and release jobs run `scripts/setup-macos-native.py` instead
+of `brew install cairo`, so the linked Cairo stays within the 15.0 floor whatever
+Homebrew's current bottles declare. It downloads the macOS 14 (`arm64_sonoma`) bottles of
 Cairo 1.18.4 and its runtime libraries pinned in
 `scripts/macos-native-bottles.json`, checks each download's size and SHA-256,
 and unpacks them into a private prefix under the runner's temporary directory,
 laid out like Homebrew's `Cellar/<formula>/<version>` and `opt/<formula>`. It
 never runs Homebrew, so no installed formula or its dependents change. It
 rewrites the bottles' Homebrew paths to the prefix, signs each rewritten dylib
-again, refuses any dylib whose minimum macOS is newer than 14.0 or that loads a
+again, refuses any dylib whose minimum macOS is newer than 15.0 or that loads a
 library outside the prefix and the system, and points `PKG_CONFIG_PATH` at the
 prefix for the build. Install Cairo/pkg-config
 for the Rust build and `create-dmg` plus ImageMagick for packaging:
@@ -214,8 +219,8 @@ that an escaped helper cannot attach later.
 
 `SONICTERM_PACKAGE_DIR` chooses an isolated output directory. The optional fourth
 argument `--bundle-only` assembles and verifies the app without creating a DMG.
-`SONICTERM_MAX_MACOS_MINIMUM` defaults to `14.0`; use `15.0` for the official Intel
-policy. A local developer may explicitly choose a higher ceiling for experiments
+`SONICTERM_MAX_MACOS_MINIMUM` defaults to `15.0`, the official policy for both
+architectures. A local developer may explicitly choose a higher ceiling for experiments
 with newer Homebrew bottles, but that artifact is not a supported release. Pass
 the same ceiling to the validator with `--max-minimum-macos`; it never rewrites
 Mach-O deployment targets to pretend compatibility.

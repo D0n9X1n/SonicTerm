@@ -2,7 +2,7 @@
   "schema_version": 1,
   "architecture": "arm64",
   "bottle_tag": "arm64_sonoma",
-  "max_minimum_macos": "14.0",
+  "max_minimum_macos": "15.0",
   "registry": "https://ghcr.io/v2/homebrew/core",
   "formulae": [
     {

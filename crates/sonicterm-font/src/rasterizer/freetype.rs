@@ -39,7 +39,7 @@ pub struct FreeTypeRasterizer {
     display_pixel_geometry: DisplayPixelGeometry,
     scale: f64,
     /// The font this rasterizer was opened from, kept to build `hb_raster` on demand. An on-disk
-    /// colour face (one listing `SVG ` or `COLR`) is replaced by the shared bytes the FreeType
+    /// face listing `SVG `, `COLR` or `hvgl` is replaced by the shared bytes the FreeType
     /// face opened, so its painter reads exactly those bytes even if the file is replaced or
     /// deleted on disk afterwards. Any other font keeps its path; its painter is never needed.
     parsed: ParsedFont,
@@ -450,7 +450,7 @@ impl FreeTypeRasterizer {
         log::trace!("Rasterizier wants {:?}", parsed);
         let mut pinned = parsed.clone();
         pinned.handle.source =
-            crate::font_bytes::pin_colour_face(&parsed.handle.source, parsed.handle.index)
+            crate::font_bytes::pin_whole_table_face(&parsed.handle.source, parsed.handle.index)
                 .into_owned();
         let lib = ftwrap::Library::new()?;
         let mut face = lib.face_from_locator(&pinned.handle)?;

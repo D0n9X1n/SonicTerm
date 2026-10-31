@@ -383,7 +383,7 @@ def attribution(source):
                 upstream_sources=upstream), keg, licenses, metadata
 
 
-def bundle_app(app, expected_arch=None, max_minimum="14.0"):
+def bundle_app(app, expected_arch=None, max_minimum="15.0"):
     app, exe, frameworks, resources = app_paths(app)
     if frameworks.exists() and any(frameworks.iterdir()):
         raise BundleError(f"Frameworks must be empty; stage a fresh app: {frameworks}")
@@ -440,7 +440,7 @@ def bundle_app(app, expected_arch=None, max_minimum="14.0"):
     verify_app(app, expected_arch, max_minimum)
 
 
-def verify_app(app, expected_arch=None, max_minimum="14.0"):
+def verify_app(app, expected_arch=None, max_minimum="15.0"):
     app, exe, frameworks, resources = app_paths(app)
     manifest = read_json(checked_path(app, "Contents/Resources/native-libraries.json"))
     if manifest["schema_version"] != 1:
@@ -512,7 +512,7 @@ def main(argv=None):
     parser.add_argument("command", choices=("bundle", "verify", "dmg"))
     parser.add_argument("app", type=Path)
     parser.add_argument("--expected-arch", choices=("arm64", "x86_64"))
-    parser.add_argument("--max-minimum-macos", default="14.0")
+    parser.add_argument("--max-minimum-macos", default="15.0")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--volume-name")
     args = parser.parse_args(argv)

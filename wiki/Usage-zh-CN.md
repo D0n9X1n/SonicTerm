@@ -14,8 +14,7 @@
 
 macOS 上打开 DMG，把 `SonicTerm.app` 移到 Applications。发布构建使用 ad-hoc
 签名，但没有 Apple Developer ID 签名，也没有 notarize。如果首次启动被 macOS
-阻止，请在 Finder 右键菜单中选择 **Open**。Apple Silicon 安装包要求 macOS 14.0+，
-Intel 安装包要求 macOS 15.0+。Cairo 及其原生依赖已随包提供，用户无需安装 Homebrew。
+阻止，请在 Finder 右键菜单中选择 **Open**。Apple Silicon 与 Intel 安装包均要求 macOS 15.0+。Cairo 及其原生依赖已随包提供，用户无需安装 Homebrew。
 
 Windows 上运行 MSI。它会按机器安装到 Program Files，并添加开始菜单快捷方式。
 安装程序还会把 SonicTerm 注册为支持脚本文件的可选 handler，但不会修改当前默认应用。

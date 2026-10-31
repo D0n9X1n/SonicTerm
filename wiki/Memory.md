@@ -326,9 +326,10 @@ memory sample, every 30 s, and each pane's `InlineMediaRetained` charge is
 unchanged.
 
 Font files are not a counted class. Ordinary fonts stream from disk and are not
-held whole. A font with an `SVG ` or `COLR` table is held whole once, in a shared
-heap buffer, while any FreeType face or HarfBuzz blob uses it; faces and blobs on
-it share that buffer instead of FreeType copying the colour table per face. See
+held whole. A font with an `SVG `, `COLR` or `hvgl` table is held whole once, in a
+shared heap buffer, while any FreeType face or HarfBuzz blob uses it; faces and
+blobs on it share that buffer instead of FreeType copying those tables per face.
+Like any font bytes, the buffer lands in `DIFFERENCE`. See
 [Rendering and Fonts](Rendering-and-Fonts).
 
 ### Graphics memory
