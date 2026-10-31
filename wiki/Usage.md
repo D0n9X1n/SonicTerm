@@ -183,7 +183,8 @@ switch, close, move or retitle tabs, and falls back to `#1 SonicTerm` when the
 window has no titled tab. Control characters in a program's title are replaced
 with U+FFFD, the tab part is cut to 128 Unicode scalar values, and a title that
 changes rapidly, such as a progress display in an OSC title, is written at most
-four times a second, always ending on its latest text. A hidden or covered
+four times a second, always ending on its latest text. Switching, closing or
+dragging out a tab, and renaming the window, update the title at once. A hidden or covered
 window refreshes its tab's working-directory or OSC title when it is next shown.
 Use **Rename Window** in the command palette to set a custom name, for example
 `#2 Work`, which replaces the tab part. Edit only the name: Enter trims surrounding whitespace
