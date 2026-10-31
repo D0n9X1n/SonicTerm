@@ -16,6 +16,11 @@ fn status_kib(pid: &str, field: &str) -> MemoryMetric {
         // When: the status file is unreadable, the process is gone or hidden.
         return MemoryMetric::Unsupported;
     };
+    status_field(&status, field)
+}
+
+/// One `kB` field of `/proc/<pid>/status` text, in bytes.
+fn status_field(status: &str, field: &str) -> MemoryMetric {
     status
         .lines()
         .find_map(|line| line.strip_prefix(field))
@@ -107,14 +112,24 @@ pub(super) fn table(cancel: &AtomicBool) -> Option<Table<'_>> {
     std::path::Path::new("/proc").is_dir().then_some(Table { cancel })
 }
 
-/// Resident set and its high-water mark.
+/// Resident set and its high-water mark, both from one read of `/proc/self/status`.
 pub(super) fn footprint() -> ProcessFootprint {
-    ProcessFootprint {
-        current: status_kib("self", "VmRSS:"),
-        current_label: "resident (RSS)",
-        peak: status_kib("self", "VmHWM:"),
-        peak_label: "peak RSS",
-    }
+    footprint_from_status(std::fs::read_to_string("/proc/self/status").ok().as_deref())
+}
+
+/// The footprint in `status` text, `None` when it could not be read. Both figures come from the
+/// same text, and the peak is never reported below the resident set: the kernel folds per-thread
+/// RSS counters into `VmHWM` lazily, so one read can show it a few pages under `VmRSS`.
+fn footprint_from_status(status: Option<&str>) -> ProcessFootprint {
+    let field = |name| status.map_or(MemoryMetric::Unsupported, |text| status_field(text, name));
+    let current = field("VmRSS:");
+    let peak = match (field("VmHWM:"), &current) {
+        (MemoryMetric::Bytes(peak), MemoryMetric::Bytes(resident)) => {
+            MemoryMetric::Bytes(peak.max(*resident))
+        }
+        (peak, _) => peak,
+    };
+    ProcessFootprint { current, current_label: "resident (RSS)", peak, peak_label: "peak RSS" }
 }
 
 /// Seconds since this process started, from its start ticks and the system uptime.
@@ -175,3 +190,7 @@ pub(super) fn threads(cancel: &AtomicBool) -> ThreadSummary {
     }
     ThreadSummary { total: Some(names.len()), names: group_thread_names(names) }
 }
+
+#[cfg(test)]
+#[path = "process_report_linux_tests.rs"]
+mod process_report_linux_tests;
