@@ -196,3 +196,84 @@ fn dragging_a_tab_out_retitles_the_source_window_after_its_next_tab() {
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 left"));
     assert_eq!(state(&app, child).applied.as_deref(), Some("#2 dragged"));
 }
+
+#[test]
+fn the_formatter_parser_handles_its_edge_cases() {
+    // Multi-digit positions, trailing spaces and a blank body all parse; a missing separator after
+    // the icon is not the formatter's shape and is shown whole.
+    let icon = sonicterm_ui::tab_title::PROGRAM_ICONS[3];
+    assert_eq!(tab_display_body(&tab(&format!("#128 {icon} logs  "))), "logs  ");
+    assert_eq!(tab_display_body(&tab(&format!("#12 {icon} "))), "");
+    assert_eq!(tab_display_body(&tab(&format!("#12 {icon}"))), "");
+    assert_eq!(tab_display_body(&tab(&format!("#2 {icon}logs"))), format!("#2 {icon}logs"));
+    // A blank formatted body names nothing, so the window falls back to the application name.
+    assert_eq!(
+        window_title_text(1, "", Some(tab_display_body(&tab(&format!("#12 {icon} "))))),
+        "#1 SonicTerm"
+    );
+}
+
+#[test]
+fn controls_are_replaced_before_spaces_are_trimmed() {
+    // A tab or newline at either end is shown as U+FFFD, never silently trimmed away; spaces trim.
+    assert_eq!(window_title_text(1, "", Some("work\t")), "#1 work\u{FFFD}");
+    assert_eq!(window_title_text(1, "", Some("  work  ")), "#1 work");
+    assert_eq!(window_title_text(1, "", Some(" \n ")), "#1 \u{FFFD}");
+}
+
+#[test]
+fn a_launch_title_beats_the_tab_like_a_rename() {
+    // `-T TITLE` names the main window; that name wins over the active tab until it is cleared.
+    let (mut app, main) = app_with_tabs(&["shell"]);
+    app.set_main_window_name("Build box");
+    assert_eq!(state(&app, main).applied.as_deref(), Some("#1 Build box"));
+    app.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
+    let _ = app.sync_native_titles(Instant::now() + Duration::from_secs(1));
+    assert_eq!(state(&app, main).applied.as_deref(), Some("#1 Build box"));
+}
+
+#[test]
+fn each_window_keeps_its_own_interval() {
+    // One window's throttled retitle neither delays nor is delayed by another window's write.
+    let (mut app, main) = app_with_tabs(&["shell"]);
+    let child = app.__test_seed_child_window(&["other"]);
+    let start = Instant::now();
+    let _ = app.sync_native_titles(start);
+    app.windows.get_mut(&main).unwrap().tabs.set_active_title("main retitled");
+    let main_due = app.sync_native_titles(start + Duration::from_millis(100));
+    assert_eq!(main_due, Some(start + NATIVE_TITLE_MIN_INTERVAL));
+    let child_at = start + Duration::from_millis(400);
+    app.windows.get_mut(&child).unwrap().tabs.set_active_title("child retitled");
+    assert_eq!(app.sync_native_titles(child_at), None, "both are now due or free");
+    assert_eq!(state(&app, main).applied.as_deref(), Some("#1 main retitled"));
+    assert_eq!(state(&app, child).applied.as_deref(), Some("#2 child retitled"));
+}
+
+#[test]
+fn a_waiting_title_is_not_composed_again_before_its_deadline() {
+    // Passes before the deadline only report it; the pending title is written once, when due.
+    let (mut app, main) = app_with_tabs(&["shell"]);
+    let start = Instant::now();
+    let _ = app.sync_native_title(main, start, false);
+    app.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
+    let due = app.sync_native_title(main, start + Duration::from_millis(10), false);
+    for step in 2..10 {
+        let at = start + Duration::from_millis(10 * step);
+        assert_eq!(app.sync_native_title(main, at, false), due);
+    }
+    assert_eq!(state(&app, main).writes, 1);
+    let _ = app.sync_native_title(main, due.unwrap(), false);
+    assert_eq!(state(&app, main).applied.as_deref(), Some("#1 vim"));
+    assert_eq!(state(&app, main).writes, 2);
+}
+
+#[test]
+fn the_event_loop_wakes_for_a_waiting_title_before_building_accessibility() {
+    // The trailing-edge write depends on about-to-wait running the sync each pass, arming a
+    // `NativeTitle` wake for a waiting title, and doing so before the accessibility tree reads it.
+    let source = include_str!("event_loop_wait.rs");
+    let sync = source.find("self.sync_native_titles(now)").expect("sync each pass");
+    let wake = source[sync..].find("DueCause::NativeTitle").expect("wake armed") + sync;
+    let accessibility = source.find("self.flush_accessibility(now)").expect("accessibility");
+    assert!(sync < wake && wake < accessibility);
+}

@@ -383,7 +383,7 @@ impl App {
     }
 
     /// Name the main window, as the rename command does, and update its native title.
-    fn set_main_window_name(&mut self, name: &str) {
+    pub(super) fn set_main_window_name(&mut self, name: &str) {
         let Some(id) = self.main_window_id else {
             // When: `main_window_id` is unset there is no window to name.
             return;

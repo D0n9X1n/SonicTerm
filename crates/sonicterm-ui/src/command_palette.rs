@@ -32,6 +32,10 @@ use std::hash::{Hash, Hasher};
 
 const NO_SELECTION: usize = usize::MAX;
 
+/// Longest custom window name, in Unicode scalar values after trimming; native titles cap a tab's
+/// title to the same length.
+pub const MAX_WINDOW_NAME_SCALARS: usize = 128;
+
 /// Rejection reason for a custom native window name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WindowNameError {
@@ -51,7 +55,7 @@ pub fn validate_window_name(name: &str) -> Result<&str, WindowNameError> {
         return Err(WindowNameError::ControlCharacter);
     }
     let name = name.trim();
-    if name.chars().count() > 128 {
+    if name.chars().count() > MAX_WINDOW_NAME_SCALARS {
         // When: trimmed name exceeds 128 scalars, reject rather than truncate a user's chosen identity.
         return Err(WindowNameError::TooLong);
     }
