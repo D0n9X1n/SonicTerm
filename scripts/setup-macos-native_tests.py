@@ -63,11 +63,12 @@ class ManifestTests(unittest.TestCase):
         return path
 
     def test_the_checked_in_manifest_pins_cairo_after_its_dependencies(self):
-        # Every runtime library of Cairo 1.18.4 is pinned to an arm64_sonoma bottle, dependencies first.
+        # Every runtime library of Cairo 1.18.4 is pinned to an arm64_sonoma bottle, dependencies first;
+        # the ceiling is the Apple Silicon package floor, macOS 15.0.
         manifest = SETUP.load_manifest()
         names = [record["formula"] for record in manifest["formulae"]]
         self.assertEqual(names[-1], "cairo")
-        self.assertEqual(manifest["max_minimum_macos"], "14.0")
+        self.assertEqual(manifest["max_minimum_macos"], "15.0")
         self.assertEqual(len(names), len(set(names)))
         self.assertTrue({"libpng", "freetype", "fontconfig", "glib", "pixman"} <= set(names))
 

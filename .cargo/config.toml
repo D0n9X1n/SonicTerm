@@ -1,0 +1,5 @@
+# macOS deployment floor for rustc, every cc-built C/C++ dependency and the linker.
+# Below 15.4 FreeType's HVF renderer stays behind a runtime availability check and the
+# system libhvf loads weakly. Other targets never read this variable.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "15.0"

@@ -10,6 +10,7 @@ python3 scripts/native-dependencies_tests.py || status=1
 python3 scripts/native-dependencies.py check || status=1
 python3 scripts/macos-bundle_tests.py || status=1
 python3 scripts/test-macos-package_tests.py || status=1
+python3 scripts/check-macos-weak-hvf_tests.py || status=1
 
 # The preserved dependency is excluded from workspace formatting; its authored tests are not.
 rustfmt --check --config-path "$repo_root/rustfmt.toml" \

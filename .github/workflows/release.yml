@@ -73,6 +73,8 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      # A release FreeType without HVF cannot open PingFang; fail the build instead.
+      SONICTERM_REQUIRE_HVF: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -127,14 +129,15 @@ jobs:
 
       - name: Build, validate, and register x86_64 dmg
         env:
-          # Declared floor for Intel, asserted as a ceiling. It is 15.0 because
-          # the Intel runner is macOS 15; raising it is a policy decision, so a
+          # Declared floor for Intel, asserted as a ceiling. It is 15.0, the
+          # workspace deployment target; raising it is a policy decision, so a
           # bottle that pushes LC_BUILD_VERSION higher must fail rather than
           # silently narrow the supported host set.
           SONICTERM_MAX_MACOS_MINIMUM: "15.0"
         run: |
           bash scripts/make-macos-dmg.sh target/x86_64-apple-darwin/release/sonicterm-mac \
             "${{ github.ref_name }}" mac-x86_64
+          python3 scripts/check-macos-weak-hvf.py dist/SonicTerm.app/Contents/MacOS/sonicterm-mac
           python3 scripts/test-macos-package.py \
             --dmg "dist/SonicTerm-${{ github.ref_name }}-mac-x86_64.dmg" \
             --state-dir "$RUNNER_TEMP/sonicterm-release-package-x86_64" \
@@ -179,6 +182,8 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      # A release FreeType without HVF cannot open PingFang; fail the build instead.
+      SONICTERM_REQUIRE_HVF: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -187,8 +192,8 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-darwin
 
-      # Homebrew's current Cairo bottles for this macOS 15 runner declare 15.0; the pinned macOS 14
-      # bottles keep the Apple Silicon package within its declared 14.0 floor.
+      # The pinned macOS 14 Cairo bottles keep the Apple Silicon package within its declared 15.0 floor
+      # whatever Homebrew's current bottles declare.
       - name: Install native dependencies
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -241,15 +246,16 @@ jobs:
         env:
           # Declared floor for Apple Silicon, asserted as a ceiling: a bottle or
           # SDK that raises LC_BUILD_VERSION fails here instead of quietly
-          # shipping a build that excludes macOS 14 hosts.
-          SONICTERM_MAX_MACOS_MINIMUM: "14.0"
+          # shipping a build that excludes macOS 15.0 hosts.
+          SONICTERM_MAX_MACOS_MINIMUM: "15.0"
         run: |
           bash scripts/make-macos-dmg.sh target/aarch64-apple-darwin/release/sonicterm-mac \
             "${{ github.ref_name }}" mac-aarch64
+          python3 scripts/check-macos-weak-hvf.py dist/SonicTerm.app/Contents/MacOS/sonicterm-mac
           python3 scripts/test-macos-package.py \
             --dmg "dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg" \
             --state-dir "$RUNNER_TEMP/sonicterm-release-package-aarch64" \
-            --max-minimum-macos "14.0"
+            --max-minimum-macos "15.0"
           python3 scripts/prepare-release-assets.py fragment \
             --tag "${{ github.ref_name }}" \
             --asset "dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg" \

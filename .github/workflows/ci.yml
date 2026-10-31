@@ -102,6 +102,9 @@ jobs:
   macos-core:
     name: macOS core gates
     runs-on: macos-15
+    env:
+      # Fail instead of building FreeType without HVF, and fail the PingFang render test instead of skipping.
+      SONICTERM_REQUIRE_HVF: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # The previous-release check resolves the last release tag, so it needs every tag and commit.
@@ -236,9 +239,9 @@ jobs:
 
       # The Apple Silicon native smoke runs here rather than in its own job: the repository has five
       # concurrent macOS slots, and a separate leg would hold one the perf comparison's shards wait for.
-      # The Intel smoke stays in macos-smoke on its own image. 14.0 is the declared Apple Silicon
-      # deployment floor, asserted as a ceiling, as in macos-smoke's matrix. This macOS 15 runner's
-      # current Cairo bottles declare 15.0, so the pinned macOS 14 bottles are installed instead.
+      # The Intel smoke stays in macos-smoke on its own image. 15.0 is the declared Apple Silicon
+      # deployment floor, asserted as a ceiling, as in macos-smoke's matrix. The pinned macOS 14 Cairo
+      # bottles keep the linked libraries within it whatever Homebrew's current bottles declare.
       - name: Install native dependencies
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -286,15 +289,20 @@ jobs:
       # hdiutil and the tracked icon.
       - name: Package macOS dmg for validation
         env:
-          SONICTERM_MAX_MACOS_MINIMUM: "14.0"
+          SONICTERM_MAX_MACOS_MINIMUM: "15.0"
         run: bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-aarch64
+
+      # FreeType renders PingFang through the system libhvf, present only on macOS 15.4+; the packaged
+      # executable must load it weakly so macOS 15.0-15.3 still launch.
+      - name: Require a weak libhvf load in the packaged executable
+        run: python3 scripts/check-macos-weak-hvf.py dist/SonicTerm.app/Contents/MacOS/sonicterm-mac
 
       - name: Validate packaged macOS dmg
         run: |
           python3 scripts/test-macos-package.py \
             --dmg "dist/SonicTerm-ci-mac-aarch64.dmg" \
             --state-dir "$RUNNER_TEMP/sonicterm-macos-package-aarch64" \
-            --max-minimum-macos "14.0"
+            --max-minimum-macos "15.0"
 
       - name: Upload macOS package evidence
         if: ${{ !cancelled() }}
@@ -364,6 +372,9 @@ jobs:
   macos-smoke:
     name: macOS native runtime smoke (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    env:
+      # Fail instead of building FreeType without HVF.
+      SONICTERM_REQUIRE_HVF: "1"
     strategy:
       # The Intel leg only: Apple Silicon runs the same steps in macos-core.
       # Intel and Apple Silicon resolve different Cairo and font binaries, so
@@ -444,6 +455,11 @@ jobs:
         env:
           SONICTERM_MAX_MACOS_MINIMUM: ${{ matrix.minimum }}
         run: bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-${{ matrix.arch }}
+
+      # FreeType renders PingFang through the system libhvf, present only on macOS 15.4+; the packaged
+      # executable must load it weakly so macOS 15.0-15.3 still launch.
+      - name: Require a weak libhvf load in the packaged executable
+        run: python3 scripts/check-macos-weak-hvf.py dist/SonicTerm.app/Contents/MacOS/sonicterm-mac
 
       - name: Validate packaged macOS dmg
         run: |

@@ -16,8 +16,7 @@ Download the package for your platform from
 On macOS, open the DMG and move `SonicTerm.app` to Applications. Release builds
 are ad-hoc signed but do not have an Apple Developer ID signature or
 notarization. If macOS blocks the first launch, use Finder’s **Open** context-menu
-action. Apple Silicon packages require macOS 14.0+, and Intel packages require
-macOS 15.0+. Cairo and its native libraries are included; Homebrew is not required.
+action. Apple Silicon and Intel packages both require macOS 15.0+. Cairo and its native libraries are included; Homebrew is not required.
 
 On Windows, run the MSI. It installs SonicTerm per machine under Program Files
 and adds a Start-menu shortcut. It also registers SonicTerm as an available

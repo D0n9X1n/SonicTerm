@@ -18,8 +18,8 @@ keys. New font behavior should land here instead of depending on
   metrics and library/stream operations live in private `ftwrap_names.rs`,
   `ftwrap_metrics.rs` and `ftwrap_library.rs`; `hbwrap_paint.rs` owns paint callbacks.
 - `rasterizer/freetype_surface.rs` - COLR recording bounds, clip boxes and Cairo replay.
-- `font_bytes.rs` - one shared, immutable buffer per generation of an on-disk colour font (a
-  face listing `SVG ` or `COLR`); its FreeType memory streams and HarfBuzz blobs hold it.
+- `font_bytes.rs` - one shared, immutable buffer per generation of an on-disk font whose face
+  lists `SVG `, `COLR` or `hvgl`; its FreeType memory streams and HarfBuzz blobs hold it.
   Ordinary fonts keep the callback stream. Share bytes, never faces.
 
 ## Local gate

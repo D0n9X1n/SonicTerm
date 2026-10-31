@@ -168,9 +168,13 @@ CI_ONLY = (
            "python3 scripts/test-macos-package.py "
            "--dmg \"dist/SonicTerm-ci-mac-aarch64.dmg\" "
            "--state-dir \"$RUNNER_TEMP/sonicterm-macos-package-aarch64\" "
-           "--max-minimum-macos \"14.0\"",
+           "--max-minimum-macos \"15.0\"",
            ("macos-core",),
            "validates the Apple Silicon packaged DMG; workspace-crates runs test-macos-package_tests.py"),
+    CiOnly("package-evidence",
+           "python3 scripts/check-macos-weak-hvf.py dist/SonicTerm.app/Contents/MacOS/sonicterm-mac",
+           ("macos-core", "macos-smoke"),
+           "reads the packaged executable's load commands; workspace-crates runs check-macos-weak-hvf_tests.py"),
     CiOnly("package-evidence",
            "python3 scripts/prepare-release-assets.py check-version --tag \"$tag\"",
            ("linux-packages",),

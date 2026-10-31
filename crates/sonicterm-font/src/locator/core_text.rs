@@ -326,8 +326,8 @@ fn build_fallback_list_impl() -> anyhow::Result<Vec<ParsedFont>> {
     // disk, and that we can't open.
     // In particular, `.AppleSymbolsFB` is one such font.  Let's try
     // a nearby approximation.
-    // Simplified Chinese families follow: on macOS 15 the cascade's Chinese face (PingFang) is an
-    // HVF collection FreeType cannot open, so without them simplified-only characters have no face.
+    // Simplified Chinese families follow: the cascade's Chinese face (PingFang) is an `hvgl`
+    // collection FreeType opens only through HVF on macOS 15.4+, so below that they serve Chinese.
     for family in ["Apple Symbols", "Hiragino Sans GB", "Songti SC", "Arial Unicode MS"] {
         let attributes = FontAttributes {
             family: family.to_string(),

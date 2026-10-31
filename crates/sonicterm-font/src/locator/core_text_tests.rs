@@ -40,8 +40,8 @@ fn fallback_computes_each_face_coverage_once_per_request() {
     assert_eq!(many, pair, "coverage is computed per face, not per codepoint");
 }
 
-/// A simplified-only character gets a fallback face that covers it. On macOS 15 CoreText's own
-/// choice, PingFang, cannot be opened, so this holds only through the generic fallback list.
+/// A simplified-only character gets a fallback face that covers it, whether CoreText's own choice,
+/// PingFang, opens through HVF (macOS 15.4+) or fails and leaves it to the generic fallback list.
 #[test]
 fn simplified_chinese_has_a_fallback_face() {
     use crate::locator::FontLocator;

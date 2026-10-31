@@ -343,6 +343,15 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(bundle.BundleError, "minimum|deployment"):
             bundle.verify_app(self.app, max_minimum="15.2")
 
+    def test_default_package_ceiling_is_the_macos_15_floor(self):
+        # Both architectures ship for macOS 15.0+, so bundle, verify and the CLI default to that ceiling.
+        import inspect
+        for function in (bundle.bundle_app, bundle.verify_app):
+            self.assertEqual(inspect.signature(function).parameters["max_minimum"].default, "15.0")
+        with patch.object(bundle, "verify_app") as verify:
+            bundle.main(["verify", str(self.app)])
+        self.assertEqual(verify.call_args.args[2], "15.0")
+
     def test_verifier_rejects_changed_declared_minimum(self):
         # Manifest and Info.plist must agree, even if somebody lowers the floor after bundling.
         bundle.bundle_app(self.app)

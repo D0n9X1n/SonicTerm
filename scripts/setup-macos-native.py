@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Unpack the pinned macOS 14 Homebrew bottles of Cairo and its runtime libraries on Apple Silicon.
 
-Homebrew's current Cairo bottles for macOS 15 declare a macOS 15.0 deployment floor, which the
-Apple Silicon package refuses, since it supports macOS 14. On a macOS 15 runner this unpacks the
-`arm64_sonoma` bottles pinned in `macos-native-bottles.json` into a private prefix laid out like
+The Apple Silicon package supports macOS 15.0. The pinned `arm64_sonoma` bottles declare older
+floors, so they stay within that ceiling whatever Homebrew's current bottles declare. On a macOS 15
+runner this unpacks the `arm64_sonoma` bottles pinned in `macos-native-bottles.json` into a private prefix laid out like
 Homebrew's (`Cellar/<formula>/<version>` and `opt/<formula>`), never into Homebrew itself, so no
 installed formula or its dependents change. Each download is checked against its pinned size and
 SHA-256; the bottles' Homebrew paths are rewritten to the prefix, each rewritten dylib is signed
