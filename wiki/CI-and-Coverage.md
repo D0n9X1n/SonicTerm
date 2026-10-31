@@ -202,7 +202,11 @@ therefore retain their DLL lookup path too.
 completeness, exact drift and start-size check passes does it publish the four S9/S12,
 72/144-DPI helper tile sets. The manifest binds all tracked source bytes (including bundled
 fonts), system/user font bytes and GDI registry mappings, runner image, Rust/Cargo versions, checkout SHA, run ID and
-producer attempt. Consumers verify its output digest and all bindings before testing.
+producer attempt. Consumers verify its output digest and all bindings before testing. GitHub
+can give one run's Windows jobs different runner images, so a consumer whose only differences
+are the runner image, fonts, font registrations or Rust/Cargo versions measures the helper
+itself (`SONICTERM_GLYPH_ORACLE_MODE=local`); any other difference, a changed payload or a
+wrong digest still fails.
 Failed-job reruns name the successful producer's attempt, not their own. Missing or stale
 artifacts fail; local runs without an artifact still measure the helper directly.
 Workspace, ordinary/counters, frame-texture/echo and API-cfg suites each draw their own real

@@ -130,7 +130,9 @@ Windows cfg-on 测试在进程树监管下直接运行 Cargo 报告的精确 lib
 `windows-glyph-oracle` 只运行一次原有的 ignored 工作集 gate。只有全部完整性、精确漂移和
 起始尺寸检查通过后，才发布 S9/S12 在 72/144 DPI 下的四组 helper tile。清单绑定全部受跟踪
 源码字节（含打包字体）、系统及用户字体字节和 GDI 注册表映射、runner 镜像、Rust/Cargo 版本、检出 SHA、run ID
-与生产者 attempt。消费者在测试前验证输出摘要及全部绑定。失败 job 重跑使用成功生产者的
+与生产者 attempt。消费者在测试前验证输出摘要及全部绑定。GitHub 可能给同一次 run 的 Windows job
+分配不同的 runner 镜像，因此仅在 runner 镜像、字体、字体注册或 Rust/Cargo 版本上不同的消费者会自行测量
+helper（`SONICTERM_GLYPH_ORACLE_MODE=local`）；其他任何差异、payload 变化或摘要错误仍会失败。失败 job 重跑使用成功生产者的
 attempt，而非自己的 attempt；缺失或过期 artifact 会失败。本地未指定 artifact 时仍直接测量 helper。
 Workspace、普通/计数器、frame-texture/echo 和 API-cfg 套件各自绘制真实 renderer，保留全部
 完整性及代表字形检查，并将每个驻留身份与实际尺寸同 helper 比较。字体内容摘要替代机器路径；

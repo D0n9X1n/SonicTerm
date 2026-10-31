@@ -13,11 +13,11 @@ use super::*;
 #[ignore = "measures with the real font stack; CI runs it in its own step"]
 fn glyph_atlas_working_set() {
     use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
-    use sonicterm_text::glyph_atlas::{ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
-    use sonicterm_text::recording_image::{drift_policy, DriftVerdict, HostImage};
+    use sonicterm_text::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    use sonicterm_text::recording_image::{drift_policy, HostImage};
     use sonicterm_text::start_size_inputs::{
-        normalize_raster_failures, ruled_start, start_rule, validate_table_start, InputSource,
-        RuleInput, RASTER_EXCEPTIONS, SIZING_ORACLE_COMPLETE, START_SIZE_INPUTS,
+        ruled_start, start_rule, validate_table_start, RuleInput, SIZING_ORACLE_COMPLETE,
+        START_SIZE_INPUTS,
     };
     let font_dirs =
         vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
@@ -87,14 +87,10 @@ fn glyph_atlas_working_set() {
                     continue;
                 }
             };
-            // Reviewed exceptions apply here, where each failure still names its face; unresolved
-            // characters and oversize required tiles always count.
-            let raster = normalize_raster_failures(platform, &set.raster_failed, RASTER_EXCEPTIONS);
-            let incomplete_glyphs = sonicterm_text::start_size_inputs::incomplete_glyphs(
-                set.unresolved_chars.len(),
-                set.oversize_required.len(),
-                &raster,
-            );
+            // The shared judgement: the same checks a CI job measuring the helper itself applies.
+            let judgement = judge_helper(&set, platform, name, scale, constant, &policy);
+            let incomplete_glyphs = judgement.incomplete_glyphs;
+            let raster = &judgement.raster;
             println!(
                 "{}",
                 working_set_row(
@@ -112,9 +108,7 @@ fn glyph_atlas_working_set() {
                 // When: a required tile is tofu on this host, say which, apart from the row: the raw
                 // raster failures, those a reviewed exception approved with its reason, and the rest.
                 println!(
-                    "glyph_atlas_working_set_tofu platform={platform} scale={scale} fixture={name} \
-                     unresolved={:?} oversize_required={:?} raster_failed={} matched={:?} \
-                     unapproved={:?}",
+                    "glyph_atlas_working_set_tofu platform={platform} scale={scale} fixture={name} \n                     unresolved={:?} oversize_required={:?} raster_failed={} matched={:?} \n                     unapproved={:?}",
                     set.unresolved_chars,
                     set.oversize_required,
                     raster.raw.len(),
@@ -122,47 +116,10 @@ fn glyph_atlas_working_set() {
                     raster.unapproved
                 );
             }
-            let recorded = START_SIZE_INPUTS.iter().find(|row| {
-                row.platform == platform
-                    && row.scale == scale
-                    && row.fixture == name
-                    && row.source == InputSource::Helper
-            });
-            // An incomplete measurement is refused before the drift check, with the failed face,
-            // glyph, style and strike of every unapproved raster failure; it never passes.
-            let evidence = format!(
-                "unresolved={:?} oversize_required={:?} unapproved={:?}",
-                set.unresolved_chars, set.oversize_required, raster.unapproved
-            );
-            let check = check_helper(
-                recorded.map(|row| (row.outcome, row.max_tile, row.incomplete_glyphs)),
-                (set.fit_outcome, set.max_tile_dims, incomplete_glyphs),
-                constant < ATLAS_DIM,
-                &evidence,
-            );
-            let provenance =
-                recorded.map_or_else(|| "none".to_owned(), |row| row.provenance.describe());
-            // A refusal fails on every host; only a dimension drift depends on the host image.
-            let drift = match check {
-                HelperCheck::Matches | HelperCheck::MaximumOnly => None,
-                HelperCheck::Drifted(reason) => Some(format!(
-                    "{name} at {scale}x drifted from its recorded helper row ({provenance}): {reason}"
-                )),
-                HelperCheck::Refused(reason) => {
-                    failures.push(format!(
-                        "glyph_atlas_working_set refused: {platform} {name} at {scale}x (recorded row: \
-                         {provenance}): {reason}"
-                    ));
-                    None
-                }
-            };
-            match policy.judge(drift.as_deref()) {
-                DriftVerdict::Holds => {}
-                DriftVerdict::Advisory(advisory) => {
-                    println!("glyph_atlas_working_set advisory: {advisory}")
-                }
-                DriftVerdict::Fails(failure) => failures.push(failure),
+            for advisory in &judgement.advisories {
+                println!("glyph_atlas_working_set advisory: {advisory}");
             }
+            failures.extend(judgement.failures);
             // CI seals these rows only after this test returns successfully, including every drift check.
             if let Err(error) = crate::workload::glyph_oracle::export(name, dpi, &set) {
                 failures.push(format!("{name}@{scale}: oracle export: {error}"));
@@ -378,4 +335,79 @@ fn the_coverage_setup_opens_the_palette_on_the_main_frame() {
     open_palette_on_main_frame(&mut app).expect("the palette opens on the main frame");
     assert!(app.__test_palette_open());
     assert_eq!(app.__test_palette_attached_window(), None);
+}
+
+/// A helper measurement for the local-helper checks: complete, fitting `fit`, with `max_tile`.
+fn local_helper(
+    fit: sonicterm_text::glyph_atlas::FitOutcome,
+    max_tile: [u32; 2],
+) -> sonicterm_gpu::glyph_working_set::GlyphWorkingSet {
+    sonicterm_gpu::glyph_working_set::GlyphWorkingSet {
+        fit_outcome: fit,
+        max_tile_dims: max_tile,
+        packed_pixels: 0,
+        tile_keys: Default::default(),
+        tile_sizes: Default::default(),
+        tile_identities: Default::default(),
+        variant_sizes: Vec::new(),
+        unresolved_chars: Vec::new(),
+        raster_failed: Vec::new(),
+        oversize_required: Vec::new(),
+    }
+}
+
+/// A helper a CI job measured itself, because the oracle ran on another runner image, is refused
+/// for what the producer refuses before publishing: a glyph it could not draw, a raster failure no
+/// reviewed exception approves (even for a glyph the frame never requests), drift from the recorded
+/// row on an exact host, and a working set the shipped start cannot hold. The recorded Windows 1x
+/// S9 row is `Fits(1024)` with a 16x15 tile; "nowhere" has no recorded rows.
+#[test]
+fn a_locally_measured_helper_gets_the_producers_checks() {
+    use sonicterm_text::glyph_atlas::FitOutcome;
+    use sonicterm_text::recording_image::DriftPolicy;
+    use sonicterm_text::start_size_inputs::RasterFailure;
+    use sonicterm_types::GlyphRasterVariant;
+    let exact = DriftPolicy::Exact;
+    let recorded = local_helper(FitOutcome::Fits(1024), [16, 15]);
+    assert_eq!(validate_local_helper(&recorded, "windows", "S9", 1, &exact), Ok(Vec::new()));
+
+    let mut unresolved = recorded.clone();
+    unresolved.unresolved_chars.push('测');
+    let error = validate_local_helper(&unresolved, "windows", "S9", 1, &exact).unwrap_err();
+    assert!(error.contains("refused"), "{error}");
+
+    let mut unapproved = recorded.clone();
+    unapproved.raster_failed.push(RasterFailure {
+        codepoint: 'x',
+        role: GlyphRasterVariant::Normal,
+        bold: false,
+        italic: true,
+        face: None,
+    });
+    let error = validate_local_helper(&unapproved, "windows", "S9", 1, &exact).unwrap_err();
+    assert!(error.contains("refused"), "{error}");
+
+    let drifted = local_helper(FitOutcome::Fits(1024), [17, 15]);
+    let error = validate_local_helper(&drifted, "windows", "S9", 1, &exact).unwrap_err();
+    assert!(error.contains("drifted from its recorded helper row"), "{error}");
+
+    // With no recorded row, only the start size can refuse a complete measurement.
+    let oversized = local_helper(FitOutcome::Fits(2048), [40, 40]);
+    let error = validate_local_helper(&oversized, "nowhere", "S9", 1, &exact).unwrap_err();
+    assert!(error.contains("needs 2048 but starts at 1024"), "{error}");
+    assert_eq!(validate_local_helper(&oversized, "nowhere", "S9", 2, &exact), Ok(Vec::new()));
+}
+
+/// The renderer fixture's local fallback runs those checks before it uses the measured tiles; a
+/// fallback that skipped them would let an unchecked helper stand in for the oracle.
+#[test]
+fn the_renderer_fixture_checks_a_helper_it_measures_itself() {
+    let source = include_str!("workload_renderer_fixture.rs").replace("\r\n", "\n");
+    let fallback = source
+        .split("crate::workload::glyph_oracle::load(name, dpi)?")
+        .nth(1)
+        .expect("the fixture loads the oracle");
+    let checked = fallback.find("super::validate_local_helper(").expect("the fallback checks");
+    let used = fallback.find("identities(&measured.tile_identities)").expect("the fallback uses");
+    assert!(checked < used, "the fallback uses the measured tiles before checking them");
 }

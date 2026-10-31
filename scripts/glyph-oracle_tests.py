@@ -35,12 +35,33 @@ class OracleTests(unittest.TestCase):
             manifest = directory / "manifest.json"
             manifest.write_bytes(raw)
             digest = hashlib.sha256(raw).hexdigest()
-            oracle.verify(directory, identity, digest, "Consolas")
+            self.assertTrue(oracle.verify(directory, identity, digest, "Consolas"))
+            # Runner bindings differ between runner images; the consumer then measures for itself.
+            # Every other binding still refuses the artifact.
             for key in identity:
                 changed = copy.deepcopy(identity)
                 changed[key] = "different"
-                with self.subTest(binding=key), self.assertRaises(ValueError):
-                    oracle.verify(directory, changed, digest, "Consolas")
+                with self.subTest(binding=key):
+                    if key in oracle.RUNNER_BINDINGS:
+                        self.assertFalse(oracle.verify(directory, changed, digest, "Consolas"))
+                    else:
+                        with self.assertRaises(ValueError):
+                            oracle.verify(directory, changed, digest, "Consolas")
+            for name in identity["environment"]:
+                changed = copy.deepcopy(identity)
+                changed["environment"][name] = "different"
+                with self.subTest(environment=name):
+                    if name in oracle.RUNNER_ENVIRONMENT:
+                        self.assertFalse(oracle.verify(directory, changed, digest, "Consolas"))
+                    else:
+                        with self.assertRaises(ValueError):
+                            oracle.verify(directory, changed, digest, "Consolas")
+            # A runner difference never excuses a changed run binding at the same time.
+            changed = copy.deepcopy(identity)
+            changed["environment"]["ImageVersion"] = "other image"
+            changed["producer_attempt"] = "2"
+            with self.assertRaises(ValueError):
+                oracle.verify(directory, changed, digest, "Consolas")
             with self.assertRaises(ValueError):
                 oracle.verify(directory, identity, "wrong digest", "Consolas")
             manifest.write_bytes(raw + b" ")
