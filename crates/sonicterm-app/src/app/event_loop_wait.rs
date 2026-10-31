@@ -96,7 +96,7 @@ impl App {
             let native = self.windows.get(&child).and_then(|window| window.window.clone());
             if native
                 .as_ref()
-                .is_none_or(|native| !self.smoke_check_native_title(native, "#3 SonicTerm"))
+                .is_none_or(|native| !self.smoke_check_native_title(native, "#3 shell 1"))
                 || !self.smoke_exercise_window_name(child)
             {
                 // When: native title readback or smoke_exercise_window_name fails, preserve its display-boundary error.
@@ -162,10 +162,9 @@ impl App {
                         return;
                     }
                     let native = self.windows.get(&child).and_then(|state| state.window.clone());
-                    if native
-                        .as_ref()
-                        .is_none_or(|native| !self.smoke_check_native_title(native, "#2 SonicTerm"))
-                        || !self.smoke_exercise_window_name(child)
+                    if native.as_ref().is_none_or(|native| {
+                        !self.smoke_check_native_title(native, "#2 runtime smoke warm child")
+                    }) || !self.smoke_exercise_window_name(child)
                     {
                         // When: native child title or its rename/reset fails, do not credit warm adoption.
                         event_loop.exit();
@@ -226,6 +225,15 @@ impl App {
         // A font, reload or DPI change resized the About pane without a frame yet: lay it out again,
         // so its rows and its accessibility tree both follow the new width.
         self.relayout_about_if_resized();
+        // Native titles follow tab and name changes before the accessibility tree reads them.
+        if let Some(deadline) = self.sync_native_titles(now) {
+            // A changed title waits out its write interval; wake to write it.
+            due.push(super::super::redraw::DueWork {
+                owner: None,
+                cause: super::super::redraw::DueCause::NativeTitle,
+                deadline,
+            });
+        }
         // Accessibility trees are built here, once per dispatch after its redraws, never in one.
         if let Some(deadline) = self.flush_accessibility(now) {
             // A queued announcement becomes ready; wake to deliver it.

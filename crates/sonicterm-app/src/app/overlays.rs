@@ -176,12 +176,6 @@ impl App {
         self.request_redraw_for_overlay(self.palette_attached_window);
     }
 
-    pub(super) fn native_window_title(&self, id: WindowId) -> Option<String> {
-        let key = self.window_keys.get(id)?;
-        let window = self.windows.get(&id)?;
-        Some(super::compose_window_title(key, &window.custom_window_name))
-    }
-
     pub(crate) fn draw_command_palette_overlay(&self) {
         if !self.command_palette.is_open() {
             // When: command_palette is closed there is no query or selection
