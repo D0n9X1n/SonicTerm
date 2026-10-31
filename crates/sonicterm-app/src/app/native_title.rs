@@ -4,12 +4,13 @@
 //! One writer, [`App::sync_native_titles`], runs once per event-loop pass for every terminal
 //! window, independent of rendering, so a tab switch, close, transfer or tear-out reaches the
 //! title even when no frame follows. Unchanged inputs are compared borrowed, with no allocation
-//! and no native call; a changed title is written at most once per [`NATIVE_TITLE_MIN_INTERVAL`],
-//! and a later change inside that interval is delivered on its trailing edge.
+//! and no native call. A different active tab (a switch, a close, a drag out) or a rename is
+//! written at once; a retitle of the same tab is written at most once per
+//! [`NATIVE_TITLE_MIN_INTERVAL`], and a later one inside that interval lands on its trailing edge.
 
 use std::time::{Duration, Instant};
 
-use sonicterm_ui::tabs::Tab;
+use sonicterm_ui::tabs::{Tab, TabId};
 use winit::window::WindowId;
 
 use super::{App, NATIVE_WINDOW_TITLE};
@@ -28,6 +29,8 @@ pub(super) const NATIVE_TITLE_MIN_INTERVAL: Duration = Duration::from_millis(250
 pub(crate) struct NativeTitleState {
     /// The window name the applied title was composed from.
     name: String,
+    /// The active tab the applied title was composed from; `None` without a tab.
+    tab_id: Option<TabId>,
     /// The active tab's displayed title the applied title was composed from; `None` without a tab.
     tab_title: Option<String>,
     /// The active tab's custom title the applied title was composed from.
@@ -47,6 +50,7 @@ impl NativeTitleState {
     /// Whether the title was composed from exactly these inputs, compared without allocating.
     fn composed_from(&self, name: &str, tab: Option<&Tab>) -> bool {
         self.name == name
+            && self.tab_id == tab.map(|tab| tab.id)
             && self.tab_title.as_deref() == tab.map(|tab| tab.title.as_str())
             && self.custom_title.as_deref() == tab.and_then(|tab| tab.custom_title.as_deref())
     }
@@ -54,6 +58,7 @@ impl NativeTitleState {
     /// Record the inputs a title is now composed from.
     fn remember_inputs(&mut self, name: &str, tab: Option<&Tab>) {
         name.clone_into(&mut self.name);
+        self.tab_id = tab.map(|tab| tab.id);
         self.tab_title = tab.map(|tab| tab.title.clone());
         self.custom_title = tab.and_then(|tab| tab.custom_title.clone());
     }
@@ -156,6 +161,10 @@ impl App {
             // When: nothing the title reads changed since it was applied, there is nothing to do.
             return None;
         }
+        // A different active tab or window name is the user's own action and is shown at once;
+        // only a retitle of the same tab, which a program can repeat every frame, is throttled.
+        let user_change =
+            state.tab_id != tab.map(|tab| tab.id) || state.name != window.custom_window_name;
         state.remember_inputs(&window.custom_window_name, tab);
         let title =
             window_title_text(key.raw(), &window.custom_window_name, tab.map(tab_display_body));
@@ -165,8 +174,8 @@ impl App {
             return None;
         }
         let throttled = state.written_at.is_some_and(|at| now < at + NATIVE_TITLE_MIN_INTERVAL);
-        if throttled && !immediate {
-            // When: throttled and not immediate, the last write was inside the interval and this title waits.
+        if throttled && !immediate && !user_change {
+            // When: throttled, not immediate and no user_change, a program's retitle inside the interval waits.
             state.pending = Some(title);
             return state.pending_deadline();
         }

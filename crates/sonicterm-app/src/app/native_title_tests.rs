@@ -164,3 +164,35 @@ fn report_and_unnumbered_windows_are_left_alone() {
     assert_eq!(unnumbered.sync_native_title(id, Instant::now(), true), None);
     assert_eq!(state(&unnumbered, id).writes, 0);
 }
+
+#[test]
+fn switching_tabs_retitles_the_window_at_once_even_inside_the_interval() {
+    // A tab switch is the user's own action: it is written immediately, never held behind the
+    // write interval a program's rapid retitling is subject to.
+    let (mut app, main) = app_with_tabs(&["first", "second", "third"]);
+    let now = Instant::now();
+    let _ = app.sync_native_title(main, now, false);
+    assert_eq!(state(&app, main).applied.as_deref(), Some("#1 third"));
+    for (index, expected) in [(0, "#1 first"), (1, "#1 second"), (2, "#1 third")] {
+        assert!(app.__test_invoke_activate_main_tab(index));
+        assert_eq!(app.sync_native_titles(now + Duration::from_millis(1)), None, "nothing waits");
+        assert_eq!(state(&app, main).applied.as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn dragging_a_tab_out_retitles_the_source_window_after_its_next_tab() {
+    // The window a tab leaves takes its new active tab's title at once; the window the tab
+    // joins takes that tab's title.
+    let (mut app, main) = app_with_tabs(&["left", "dragged"]);
+    let child = app.__test_seed_child_window(&["other"]);
+    let now = Instant::now();
+    let _ = app.sync_native_titles(now);
+    assert_eq!(state(&app, main).applied.as_deref(), Some("#1 dragged"));
+    app.windows.get_mut(&child).unwrap().test_pane_viewport =
+        Some((sonicterm_ui::pane::Rect { x: 0.0, y: 0.0, w: 800.0, h: 500.0 }, 10.0, 20.0));
+    app.transfer_tab(None, 1, Some(child), 1).unwrap();
+    assert_eq!(app.sync_native_titles(now + Duration::from_millis(1)), None);
+    assert_eq!(state(&app, main).applied.as_deref(), Some("#1 left"));
+    assert_eq!(state(&app, child).applied.as_deref(), Some("#2 dragged"));
+}
