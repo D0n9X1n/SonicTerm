@@ -55,3 +55,25 @@ fn simplified_chinese_has_a_fallback_face() {
         .find(|font| font.coverage_intersection(&wanted).is_ok_and(|cov| !cov.is_empty()));
     assert!(covering.is_some(), "no fallback face covers 测: {fonts:?}");
 }
+
+/// The generic fallback list parses each font file once: CoreText's cascade names a collection
+/// once per face it lists (PingFang eight times), the named families can name a file the cascade
+/// already listed, and every parse opens all of the file's faces.
+#[test]
+fn the_fallback_list_parses_each_cascade_file_once() {
+    let menlo = super::new_from_name("Menlo", 0.0).expect("Menlo");
+    let languages = super::objc_compat::apple_languages().expect("languages");
+    let cascade: Vec<_> = super::cascade_list_for_languages(&menlo, &languages)
+        .iter()
+        .filter_map(|descriptor| descriptor.font_path())
+        .collect();
+    let distinct: std::collections::HashSet<_> = cascade.iter().collect();
+    assert!(cascade.len() > distinct.len(), "the cascade repeats a file, so the test can tell");
+    super::FILES_PARSED.with(|parsed| parsed.borrow_mut().clear());
+    let _ = super::build_fallback_list();
+    let parsed = super::FILES_PARSED.with(|parsed| parsed.take());
+    let mut seen = std::collections::HashSet::new();
+    for file in &parsed {
+        assert!(seen.insert(file), "{} parsed more than once", file.display());
+    }
+}
