@@ -171,7 +171,7 @@ impl App {
                         "dispatch_effects: WindowMove (record-only)"
                     );
                 }
-                // WindowSetTitle is observational; only explicit window naming may change native titles.
+                // WindowSetTitle is observational; native titles are written only by `App::sync_native_titles`.
                 AppEffect::WindowSetTitle { window, title } => {
                     tracing::debug!(
                         target: "state_machine",

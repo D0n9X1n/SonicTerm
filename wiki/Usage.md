@@ -175,10 +175,19 @@ are never part of the selectable query.
 
 ### Window names and numbers
 
-Terminal windows receive process-local numbers starting at 1: `#1 SonicTerm`.
+Terminal windows receive process-local numbers starting at 1. A window without
+a custom name is titled after its active tab, for example `#1 code/sonicterm`:
+the text the tab bar shows for that tab, without the tab's own `#N` and icon,
+or the tab's custom title when it has one. It follows the active tab as you
+switch, close, move or retitle tabs, and falls back to `#1 SonicTerm` when the
+window has no titled tab. Control characters in a program's title are replaced
+with U+FFFD, the tab part is cut to 128 Unicode scalar values, and a title that
+changes rapidly, such as a progress display in an OSC title, is written at most
+four times a second, always ending on its latest text. A hidden or covered
+window refreshes its tab's working-directory or OSC title when it is next shown.
 Use **Rename Window** in the command palette to set a custom name, for example
-`#2 Work`. Edit only the name: Enter trims surrounding whitespace
-and saves, blank input resets the numbered default, and Escape cancels. Names
+`#2 Work`, which replaces the tab part. Edit only the name: Enter trims surrounding whitespace
+and saves, blank input returns the title to the active tab, and Escape cancels. Names
 support Unicode and IME, with at most 128 Unicode scalar values after trimming;
 control characters, line breaks, and overlong input are rejected with feedback.
 The configured paste shortcut replaces selected name text, or inserts at the caret,
@@ -196,7 +205,8 @@ tabs get fresh numbers and blank names; moving tabs into an existing window or
 hiding/restoring a retained window preserves its identity. Warm helper windows
 remain unnumbered until adopted. Names and numbers are not saved across restarts;
 separate processes may each start at 1. Tab names, shell commands, OSC titles,
-working directories, focus changes, and config reload do not rename windows.
+working directories, focus changes, and config reload never change a window's
+custom name; without one, they change only the tab part of its title.
 The editor targets the window where it opened and cancels when that window closes.
 Rename Window and the command palette remain available in READONLY mode; terminal
 input and unsafe commands remain blocked.
