@@ -165,7 +165,28 @@ fn configure_hvf(cfg: &mut cc::Build) -> bool {
     cfg.define("HVF_RUNTIME_AVAILABLE", Some("1"));
     // A link-lib, unlike a link-arg, reaches every binary that links this crate.
     println!("cargo:rustc-link-lib=dylib=hvf");
+    link_platform_version_check(cfg);
     true
+}
+
+/// Links clang's `libclang_rt.osx.a`, which defines `__isPlatformVersionAtLeast`, the function
+/// `__builtin_available` compiles to. Rust links with `-nodefaultlibs`, so the compiler runtime is
+/// not linked by default, and a release binary dead-strips any copy another crate happened to pull in.
+fn link_platform_version_check(cfg: &cc::Build) {
+    let compiler = cfg.get_compiler();
+    let output = compiler
+        .to_command()
+        .arg("-print-file-name=libclang_rt.osx.a")
+        .output()
+        .unwrap_or_else(|error| panic!("FreeType HVF: cannot run the C compiler: {}", error));
+    let runtime = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let Some(directory) = runtime.parent().filter(|_| runtime.is_absolute() && runtime.is_file())
+    else {
+        // When: the compiler names no runtime file, `__builtin_available` would leave an undefined symbol at link time.
+        panic!("FreeType HVF: the C compiler has no libclang_rt.osx.a for __builtin_available");
+    };
+    println!("cargo:rustc-link-search=native={}", directory.display());
+    println!("cargo:rustc-link-lib=static=clang_rt.osx");
 }
 
 fn freetype() {
