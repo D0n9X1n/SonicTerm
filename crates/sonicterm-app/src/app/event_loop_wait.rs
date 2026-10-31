@@ -226,14 +226,8 @@ impl App {
         // so its rows and its accessibility tree both follow the new width.
         self.relayout_about_if_resized();
         // Native titles follow tab and name changes before the accessibility tree reads them.
-        if let Some(deadline) = self.sync_native_titles(now) {
-            // A changed title waits out its write interval; wake to write it.
-            due.push(super::super::redraw::DueWork {
-                owner: None,
-                cause: super::super::redraw::DueCause::NativeTitle,
-                deadline,
-            });
-        }
+        // A changed title that waits out its write interval arms a wake to write it.
+        due.extend(self.native_title_wake(now));
         // Accessibility trees are built here, once per dispatch after its redraws, never in one.
         if let Some(deadline) = self.flush_accessibility(now) {
             // A queued announcement becomes ready; wake to deliver it.

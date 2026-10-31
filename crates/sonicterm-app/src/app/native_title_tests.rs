@@ -199,18 +199,19 @@ fn dragging_a_tab_out_retitles_the_source_window_after_its_next_tab() {
 
 #[test]
 fn the_formatter_parser_handles_its_edge_cases() {
-    // Multi-digit positions, trailing spaces and a blank body all parse; a missing separator after
-    // the icon is not the formatter's shape and is shown whole.
+    // Multi-digit positions and trailing spaces parse; an icon with no separator after it is not
+    // the formatter's shape and is shown whole.
     let icon = sonicterm_ui::tab_title::PROGRAM_ICONS[3];
     assert_eq!(tab_display_body(&tab(&format!("#128 {icon} logs  "))), "logs  ");
     assert_eq!(tab_display_body(&tab(&format!("#12 {icon} "))), "");
-    assert_eq!(tab_display_body(&tab(&format!("#12 {icon}"))), "");
+    let no_separator = format!("#12 {icon}");
+    assert_eq!(tab_display_body(&tab(&no_separator)), no_separator, "not the exact shape");
     assert_eq!(tab_display_body(&tab(&format!("#2 {icon}logs"))), format!("#2 {icon}logs"));
-    // A blank formatted body names nothing, so the window falls back to the application name.
-    assert_eq!(
-        window_title_text(1, "", Some(tab_display_body(&tab(&format!("#12 {icon} "))))),
-        "#1 SonicTerm"
-    );
+    // A blank formatted body names nothing, so the window falls back to the application name;
+    // a body that is only a control is shown as U+FFFD, never discarded.
+    let title_of = |raw: &str| window_title_text(1, "", Some(tab_display_body(&tab(raw))));
+    assert_eq!(title_of(&format!("#12 {icon} ")), "#1 SonicTerm");
+    assert_eq!(title_of(&format!("#12 {icon} \t")), "#1 \u{FFFD}");
 }
 
 #[test]
@@ -268,12 +269,28 @@ fn a_waiting_title_is_not_composed_again_before_its_deadline() {
 }
 
 #[test]
-fn the_event_loop_wakes_for_a_waiting_title_before_building_accessibility() {
-    // The trailing-edge write depends on about-to-wait running the sync each pass, arming a
-    // `NativeTitle` wake for a waiting title, and doing so before the accessibility tree reads it.
+fn a_waiting_title_arms_a_wake_that_delivers_it_without_a_frame() {
+    // A throttled retitle arms a `NativeTitle` wake at its deadline; servicing that wake requests
+    // no frame, and the about-to-wait pass the wake causes writes the title.
+    let (mut app, main) = app_with_tabs(&["shell"]);
+    let start = Instant::now();
+    assert!(app.native_title_wake(start).is_none());
+    app.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
+    let wake = app.native_title_wake(start + Duration::from_millis(5)).expect("a wake is armed");
+    assert_eq!(wake.cause, crate::app::redraw::DueCause::NativeTitle);
+    assert_eq!(wake.deadline, start + NATIVE_TITLE_MIN_INTERVAL);
+    app.redraw_due = vec![wake];
+    app.service_redraw_due(wake.deadline);
+    assert!(!app.windows[&main].redraw.request_in_flight, "a title wake is never a frame");
+    assert!(app.native_title_wake(wake.deadline).is_none());
+    assert_eq!(state(&app, main).applied.as_deref(), Some("#1 vim"));
+}
+
+#[test]
+fn about_to_wait_arms_the_title_wake_before_building_accessibility() {
+    // The pass that arms the wake runs before the accessibility tree reads the native title.
     let source = include_str!("event_loop_wait.rs");
-    let sync = source.find("self.sync_native_titles(now)").expect("sync each pass");
-    let wake = source[sync..].find("DueCause::NativeTitle").expect("wake armed") + sync;
+    let wake = source.find("self.native_title_wake(now)").expect("wake armed each pass");
     let accessibility = source.find("self.flush_accessibility(now)").expect("accessibility");
-    assert!(sync < wake && wake < accessibility);
+    assert!(wake < accessibility);
 }

@@ -547,11 +547,11 @@ fn tear_out_retitles_the_source_and_rollback_restores_it() {
     app.window_keys.intern(window);
     let now = Instant::now();
     let _ = app.sync_native_titles(now);
-    assert_eq!(app.native_window_title(window).as_deref(), Some("#1 torn"));
+    assert_eq!(app.applied_native_title(window), Some("#1 torn"));
     let mut source_title_while_detached = None;
     assert!(app.tear_out_tab_with_installer(1, |app, transaction, _, _| {
         let _ = app.sync_native_titles(now + Duration::from_millis(1));
-        source_title_while_detached = app.native_window_title(window);
+        source_title_while_detached = app.applied_native_title(window).map(str::to_owned);
         app.tear_out_with_destination(transaction, |_app| {
             Err(DestinationFailure::probe(
                 TearOutStage::CreateWindow,
@@ -562,5 +562,5 @@ fn tear_out_retitles_the_source_and_rollback_restores_it() {
     }));
     assert_eq!(source_title_while_detached.as_deref(), Some("#1 left"));
     assert_eq!(app.sync_native_titles(now + Duration::from_millis(2)), None);
-    assert_eq!(app.native_window_title(window).as_deref(), Some("#1 torn"));
+    assert_eq!(app.applied_native_title(window), Some("#1 torn"), "the write itself is restored");
 }
