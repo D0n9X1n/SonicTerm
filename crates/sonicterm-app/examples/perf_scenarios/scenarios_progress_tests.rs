@@ -30,9 +30,11 @@ fn rest_plan_parks_on_the_path_row_then_on_the_streaming_tail() {
         );
         assert_eq!(phase(&rest, "tail").end, PhaseEnd::Hold(hold_ms));
     }
-    // The fixture rows sit above the 1-based region top, and the tail row is inside the region.
+    // The fixture rows sit above the 1-based region top, and the tail row is inside the region and
+    // inside the smallest runner grid, whose last row is `SMALLEST_RUNNER_ROWS - 1`.
     const { assert!(REST_PATH_ROW + 4 < REST_REGION_TOP) };
     const { assert!(REST_TAIL_ROW >= REST_REGION_TOP) };
+    const { assert!(REST_TAIL_ROW < crate::scenarios::SMALLEST_RUNNER_ROWS) };
 }
 
 /// A parked phase is valid only when frames presented, streamed rows advanced, and its screen and
