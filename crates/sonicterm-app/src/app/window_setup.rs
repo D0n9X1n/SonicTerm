@@ -106,11 +106,6 @@ pub fn with_backdrop_transparency(
     }
 }
 
-pub(super) fn compose_window_title(key: sonicterm_types::WindowKey, name: &str) -> String {
-    let title = if name.is_empty() { NATIVE_WINDOW_TITLE } else { name };
-    format!("#{} {title}", key.raw())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WindowRequest {
     pub(super) inner_size: winit::dpi::LogicalSize<f64>,

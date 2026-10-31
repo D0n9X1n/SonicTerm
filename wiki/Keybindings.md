@@ -168,7 +168,8 @@ on that control open the selector instead of starting a tab drag.
 
 `rename_window` opens **Rename Window** in the current window; it has no default
 shortcut. Edit only the custom name, then Enter trims and saves, blank resets,
-and Escape cancels. The title is `#N SonicTerm` or `#N Name`.
+and Escape cancels. The title is `#N Name`; without a name it is `#N` and the
+active tab's title, or `#N SonicTerm` when the window has no titled tab.
 Unicode/IME and the configured paste shortcut are supported; controls, line breaks,
 and names longer than 128 trimmed Unicode scalar values show rejection feedback.
 On macOS, **Edit > Paste** and Cmd+V also insert into the receiving window's rename

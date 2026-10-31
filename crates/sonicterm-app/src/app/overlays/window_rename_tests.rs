@@ -19,6 +19,6 @@ fn window_name_paste_is_atomic_and_never_reaches_broadcast() {
     assert_eq!(app.command_palette.query(), "工作");
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
     assert!(app.command_palette.is_open());
-    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 SonicTerm"));
+    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 main"));
     assert!(app.__test_drain_pty_writes().is_empty());
 }
