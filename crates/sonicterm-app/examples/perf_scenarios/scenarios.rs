@@ -385,9 +385,13 @@ pub(crate) const REST_PATH_ROW: u16 = 1;
 /// 0 to 4 (the fixture, a blank row and the sentinel) stay fixed above it.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) const REST_REGION_TOP: u16 = 6;
-/// The grid row S6/rest's `tail` phase rests on, inside the streaming region.
+/// The grid row S6/rest's `tail` phase rests on, inside the streaming region and inside the
+/// smallest runner grid ([`SMALLEST_RUNNER_ROWS`]).
 #[cfg(any(target_os = "macos", windows, test))]
-pub(crate) const REST_TAIL_ROW: u16 = 40;
+pub(crate) const REST_TAIL_ROW: u16 = 20;
+/// Rows of the smallest grid a perf runner opens: the macOS 15 runner's harness window is 30 rows.
+#[cfg(test)]
+pub(crate) const SMALLEST_RUNNER_ROWS: u16 = 30;
 
 /// The hover counter deltas over one parked phase, read only while counters are on.
 #[cfg(any(target_os = "macos", windows, test))]
