@@ -50,6 +50,8 @@ pub(crate) struct PaneFocusChange {
 pub struct WindowState {
     /// Session-local user name; terminal-generated titles never write this field.
     pub(crate) custom_window_name: String,
+    /// What the native title was last composed from and set to; see [`super::native_title`].
+    pub(crate) native_title: super::native_title::NativeTitleState,
     /// Window classification — see [`WindowRole`].
     pub role: WindowRole,
     /// promoted from `Arc<Window>` to

@@ -383,7 +383,7 @@ impl App {
     }
 
     /// Name the main window, as the rename command does, and update its native title.
-    fn set_main_window_name(&mut self, name: &str) {
+    pub(super) fn set_main_window_name(&mut self, name: &str) {
         let Some(id) = self.main_window_id else {
             // When: `main_window_id` is unset there is no window to name.
             return;
@@ -393,10 +393,7 @@ impl App {
             return;
         };
         window.custom_window_name = name.to_string();
-        let title = self.native_window_title(id);
-        if let (Some(native), Some(title)) = (self.windows[&id].window.as_ref(), title) {
-            native.set_title(&title);
-        }
+        let _ = self.sync_native_title(id, Instant::now(), true);
     }
 
     pub(super) fn seed_initial_tabs(&mut self) {
@@ -657,6 +654,7 @@ impl App {
             pending_receipts: Vec::new(),
             role: super::WindowRole::Terminal,
             custom_window_name: String::new(),
+            native_title: Default::default(),
             window: Some(window.clone()),
             renderer: Some(renderer),
             tabs: sonicterm_ui::tabs::TabBar::new(),
@@ -721,8 +719,10 @@ impl App {
         let spawn_started = std::time::Instant::now();
         self.seed_initial_tabs();
         self.note_startup(spawn_started, |spans| &mut spans.pane_spawn_ns);
+        // The first tab now names the window, before it is shown or a smoke reads it back.
+        let _ = self.sync_native_title(main_id, Instant::now(), true);
         if self.runtime_smoke.is_some()
-            && (!self.smoke_check_native_title(&window, "#1 SonicTerm")
+            && (!self.smoke_check_native_title(&window, "#1 shell")
                 || !self.smoke_exercise_window_name(main_id))
         {
             // When: runtime_smoke cannot verify admission, rename, and reset before reveal, fail the display boundary.
