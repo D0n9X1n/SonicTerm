@@ -124,7 +124,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-15
           add-job-id-key: false
@@ -404,7 +404,7 @@ jobs:
           toolchain: stable
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Keyed by runner: the x86_64 leg restoring macos-core's aarch64 target
           # directory would rebuild anyway, and would poison the shared entry.
@@ -609,7 +609,7 @@ jobs:
         run: .\scripts\setup-windows-cairo.ps1
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-check-windows-latest
           add-job-id-key: false
@@ -732,7 +732,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py verify
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -843,7 +843,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py verify
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -895,7 +895,7 @@ jobs:
         run: .\scripts\setup-windows-cairo.ps1
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -968,7 +968,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py verify
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -1030,7 +1030,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py verify
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -1080,7 +1080,7 @@ jobs:
         run: .\scripts\setup-windows-cairo.ps1
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -1172,7 +1172,7 @@ jobs:
         run: .\scripts\setup-windows-cairo.ps1
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-release-windows-latest
           add-job-id-key: false
@@ -1296,7 +1296,7 @@ jobs:
           toolchain: stable
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-instrumented-ubuntu-22.04
           add-job-id-key: false
@@ -1358,7 +1358,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-linux-ubuntu-22.04
           add-job-id-key: false
@@ -1481,7 +1481,7 @@ jobs:
           toolchain: stable
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-linux-ubuntu-22.04
           add-job-id-key: false
