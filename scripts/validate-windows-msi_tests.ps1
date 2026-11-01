@@ -431,6 +431,9 @@ finally {
 }
 
 # The real process adapter must reject nonzero exits, deadlines, and surviving descendants without running an MSI.
+# Its custody is a Windows job object (windows-process-job.py loads kernel32 and msvcrt), so it runs only on
+# Windows; the release workflow also runs these tests under pwsh on Linux, where the adapter cannot exist.
+if ($IsWindows) {
 $processRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sonicterm-msi-process-" + [guid]::NewGuid().ToString("N"))
 [void][System.IO.Directory]::CreateDirectory($processRoot)
 try {
@@ -449,10 +452,13 @@ try {
 finally {
     Remove-Item -LiteralPath $processRoot -Recurse -Force
 }
+}
 # The rejected children above leave a nonzero $LASTEXITCODE; GitHub's pwsh step exits with it unless reset.
 $global:LASTEXITCODE = 0
 
 # Administrative extraction is quiet, bounded, and directed to scratch rather than an application install.
+# The command names %SystemRoot%'s msiexec and Windows path joins, so the contract is checked on Windows only.
+if ($IsWindows) {
 $originalExtractionCommand = ${function:Invoke-MsiExtractionCommand}
 try {
     function Invoke-MsiExtractionCommand {
@@ -470,6 +476,7 @@ try {
 }
 finally {
     ${function:Invoke-MsiExtractionCommand} = $originalExtractionCommand
+}
 }
 
 # The extraction boundary must verify the returned bytes and remove only its own temporary tree on either result.

@@ -167,7 +167,7 @@ STEPS = (
     gate_model.Step("linux-packages-tests", ("bash", "scripts/test-linux-packages.sh"), gate_model.HOSTS, 300, "local",
          ("bash",), ("linux-core",)),
     gate_model.Step("release-assets-tests", ("bash", "scripts/test-release-assets.sh"), gate_model.HOSTS, 300, "local",
-         ("rust", "bash"), ("linux-core",)),
+         ("rust", "bash"), ("tooling", "linux-core")),
     gate_model.Step("release-notes-tests", ("bash", "scripts/test-release-notes.sh"), gate_model.HOSTS, 300, "local",
          ("bash",), _SCRIPT_TESTS),
     gate_model.Step("wiki-publish-tests", ("bash", "scripts/test-wiki-publish.sh"), gate_model.HOSTS, 300, "local",

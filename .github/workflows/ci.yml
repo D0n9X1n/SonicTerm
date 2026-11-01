@@ -99,6 +99,12 @@ jobs:
         shell: bash
         run: bash scripts/test-resource-baseline-evidence.sh
 
+      # The release workflow runs this on ubuntu-latest, whose image has pwsh, so the MSI validator's tests
+      # run under PowerShell on Linux there; the linux-core container has no pwsh and skips them.
+      - name: Test release asset tooling under PowerShell on Linux
+        shell: bash
+        run: bash scripts/test-release-assets.sh
+
   macos-core:
     name: macOS core gates
     runs-on: macos-15
