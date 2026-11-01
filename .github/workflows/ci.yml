@@ -237,7 +237,7 @@ jobs:
 
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: resource-baseline-evidence-macos-15
           path: target/v1.2.0-baseline/evidence-macos-15
@@ -312,7 +312,7 @@ jobs:
 
       - name: Upload macOS package evidence
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Evidence and logs only; the validated .dmg is a CI-local build, not a release asset.
           name: sonicterm-macos-package-evidence-aarch64-${{ github.sha }}
@@ -321,7 +321,7 @@ jobs:
 
       - name: Upload macOS native selection evidence
         if: ${{ failure() && env.SONICTERM_SELECTION_LOG_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-selection-aarch64-${{ github.sha }}
           path: ${{ env.SONICTERM_SELECTION_LOG_DIR }}
@@ -329,7 +329,7 @@ jobs:
 
       - name: Upload macOS perf scenario smoke evidence
         if: ${{ failure() && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-perf-smoke-aarch64-${{ github.sha }}
           path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
@@ -337,7 +337,7 @@ jobs:
 
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-smoke-logs-aarch64-${{ github.sha }}
           path: |
@@ -368,7 +368,7 @@ jobs:
       # change the macos section. A run that stopped before measuring leaves nothing to upload.
       - name: Upload macOS-only coverage evidence
         if: ${{ !cancelled() && steps.macos_coverage.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/macos-logic-coverage-evidence
@@ -476,7 +476,7 @@ jobs:
 
       - name: Upload macOS package evidence
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Evidence and logs only. The validated .dmg is a CI-local build, not
           # a release asset, and publishing it would invite use as one.
@@ -486,7 +486,7 @@ jobs:
 
       - name: Upload macOS native selection evidence
         if: ${{ failure() && env.SONICTERM_SELECTION_LOG_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-selection-${{ matrix.arch }}-${{ github.sha }}
           path: ${{ env.SONICTERM_SELECTION_LOG_DIR }}
@@ -494,7 +494,7 @@ jobs:
 
       - name: Upload macOS perf scenario smoke evidence
         if: ${{ failure() && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-perf-smoke-${{ matrix.arch }}-${{ github.sha }}
           path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
@@ -502,7 +502,7 @@ jobs:
 
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-smoke-logs-${{ matrix.arch }}-${{ github.sha }}
           path: |
@@ -788,7 +788,7 @@ jobs:
 
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: resource-baseline-evidence-windows-latest
           path: target/v1.2.0-baseline/evidence-windows-latest
@@ -913,7 +913,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py seal
 
       - name: Publish the helper oracle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_EXPORT }}
@@ -1111,7 +1111,7 @@ jobs:
 
       - name: Upload Windows GDI probe log
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-windows-gdi-log-${{ github.sha }}
           path: ${{ runner.temp }}/sonicterm-windows-gdi.log
@@ -1131,7 +1131,7 @@ jobs:
 
       - name: Upload Windows perf scenario smoke evidence
         if: ${{ (failure() || env.SONICTERM_PERF_REPLAY_RETRIED == '1') && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-windows-perf-smoke-${{ github.sha }}
           path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
@@ -1225,7 +1225,7 @@ jobs:
 
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-windows-smoke-logs-${{ github.sha }}
           path: |
@@ -1322,7 +1322,7 @@ jobs:
       # coverage step leaves no artifact; its job log is the only diagnostic.
       - name: Upload coverage evidence
         if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/rust-logic-coverage-evidence
@@ -1536,14 +1536,14 @@ jobs:
 
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-linux-smoke-logs-${{ github.sha }}
           path: sonicterm-*-smoke.log
           if-no-files-found: ignore
 
       - name: Upload Linux packages
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-linux-packages-${{ github.sha }}
           path: |
