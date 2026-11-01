@@ -78,7 +78,7 @@ def validate_harness_leader(table, pid: int | None, launch_unix_s: float,
                             expected_command: str = perf_settings.HARNESS_EXAMPLE, expected_start: str | None = None) -> str | None:
     """Check that a pid is this run's harness: alive, leading its session and group, started after
     launch, running the binary this script launched and, given `expected_start`, still the accepted process."""
-    if table is None or pid is None or pid <= 1 or pid == os.getpid():
+    if table is None or pid is None or pid <= 1 or pid == perf_sessions.own_pid():
         return f"harness pid {pid} cannot be validated"
     try:
         info = table.read(pid)
@@ -102,7 +102,7 @@ def validate_windows_harness(table, pid: int | None, launch_unix_s: float, expec
                              expected_start: str | None) -> str | None:
     """Check that a pid is still this run's accepted harness on Windows: alive, the same creation time,
     created after launch and running the launched image. Windows has no session or group to check."""
-    if table is None or pid is None or pid <= 0 or pid == os.getpid() or expected_start is None:
+    if table is None or pid is None or pid <= 0 or pid == perf_sessions.own_pid() or expected_start is None:
         return f"harness pid {pid} cannot be validated"
     try:
         info = table.read(pid)

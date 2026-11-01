@@ -22,6 +22,14 @@ ANCHOR_EXIT_BOUND_S = 5.0
 START_TOLERANCE_S = 1.0
 
 
+def own_pid() -> int:
+    """This script's own process id, which no kill or validation may target.
+
+    Every guard reads it here, so tests can pin it away from the made-up process ids they use.
+    """
+    return os.getpid()
+
+
 class ProcessUnreadable(Exception):
     """A live process whose identity cannot be read, so it can be neither signalled nor ignored."""
 
@@ -171,7 +179,7 @@ def validate_program(record: ProgramRecord, table, harness_pid: int | None, laun
     """
     label = f"program {record.role}"
     pid = record.program_pid
-    if table is None or harness_pid is None or pid in (harness_pid, os.getpid()):
+    if table is None or harness_pid is None or pid in (harness_pid, own_pid()):
         return None, f"{label}: pid {pid} cannot be validated as a role program of harness {harness_pid}"
     try:
         info = table.read(pid)

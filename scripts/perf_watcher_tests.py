@@ -9,10 +9,12 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import perf_build_tests
 import perf_focus
 import perf_focus_tests
+import perf_own_pid_fixture
 import perf_processes_tests
 import perf_scenarios
 import perf_sessions
@@ -269,6 +271,17 @@ class RunWatcherTests(unittest.TestCase):
         self.assertTrue(perf_watcher.validate_harness_leader(table, HARNESS_PID, perf_processes_tests.LAUNCH_UNIX_S, "perf_scenarios_other"))
         self.assertTrue(perf_watcher.validate_harness_leader(perf_processes_tests.FakeTable(harness_process(command="perf")), HARNESS_PID,
                                                      perf_processes_tests.LAUNCH_UNIX_S, "perf_scenarios"))
+
+    def test_the_own_pid_guard_reads_only_the_pinned_own_pid(self):
+        # A fixture harness pid passes whatever pid the OS gives this test process, and is refused only when it
+        # equals the pinned own pid, so a test process that happens to get pid 900 no longer fails the suite.
+        table = perf_processes_tests.FakeTable(harness_process())
+        with mock.patch("os.getpid", return_value=HARNESS_PID):
+            self.assertIsNone(perf_watcher.validate_harness_leader(table, HARNESS_PID, perf_processes_tests.LAUNCH_UNIX_S))
+        with mock.patch.object(perf_sessions, "own_pid", return_value=HARNESS_PID):
+            self.assertIn("cannot be validated",
+                          perf_watcher.validate_harness_leader(table, HARNESS_PID, perf_processes_tests.LAUNCH_UNIX_S))
+        self.assertEqual(perf_sessions.own_pid(), perf_own_pid_fixture.PINNED_OWN_PID)
 
     def test_deadline_kill_rechecks_the_accepted_harness_identity(self):
         # The accepted pid and start token are rechecked just before the signal; a pid that now names another
