@@ -359,7 +359,7 @@ class WindowsProcessTable:
 
         Returns `sent`, `gone`, `stale` (the pid now names another process) or `refused`.
         """
-        if pid <= 0 or pid == os.getpid():
+        if pid <= 0 or pid == perf_sessions.own_pid():
             raise ValueError(f"refusing to terminate {pid}")
         try:
             handle = self.api.open_process(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, pid)

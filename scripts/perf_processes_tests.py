@@ -8,6 +8,8 @@ import unittest
 
 import perf_processes
 import perf_sessions
+# Imported for its effect: pins perf_sessions.own_pid so no fixture pid can equal this process's pid.
+import perf_own_pid_fixture  # noqa: F401
 
 
 class FakeProcess:

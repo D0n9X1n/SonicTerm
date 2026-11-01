@@ -4,21 +4,31 @@
 //! A host without an adapter fails these tests rather than skipping them.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use sonicterm_gpu::device_errors::{
     destroy_and_await_loss, install_device_error_handlers, run_isolated_validation,
     DeviceErrorKind, DeviceErrorState, DeviceState,
 };
 
+/// Serializes each test's device life, from creation to drop. Every new device builds wgpu's
+/// indirect-validation compute pipeline, and on Windows D3D12 converts its shader through
+/// `dxilconv.dll`, which can fault while another device in the same process is created or dropped.
+static DEVICE_LIFETIME: Mutex<()> = Mutex::new(());
+
 struct Harness {
     device: wgpu::Device,
     queue: wgpu::Queue,
     state: Arc<DeviceErrorState>,
     wakes: Arc<AtomicUsize>,
+    // Declared last, so the lock is released only after `device` and `queue` have dropped.
+    _device_lifetime: MutexGuard<'static, ()>,
 }
 
 fn harness() -> Harness {
+    // A test that panicked while holding the lock had already dropped its device,
+    // so a poisoned lock is safe to take.
+    let device_lifetime = DEVICE_LIFETIME.lock().unwrap_or_else(PoisonError::into_inner);
     #[cfg(target_os = "windows")]
     let (descriptor, force_fallback_adapter) = (
         wgpu::InstanceDescriptor {
@@ -48,7 +58,7 @@ fn harness() -> Harness {
     assert!(state.set_waker(Arc::new(move || {
         counter.fetch_add(1, Ordering::SeqCst);
     })));
-    Harness { device, queue, state, wakes }
+    Harness { device, queue, state, wakes, _device_lifetime: device_lifetime }
 }
 
 fn invalid_buffer(device: &wgpu::Device) -> wgpu::Buffer {

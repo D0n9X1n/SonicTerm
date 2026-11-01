@@ -172,7 +172,7 @@ def other_instance_alive(table, harness_pid: int | None) -> bool:
     if pids is None:
         return False
     for pid in pids:
-        if pid in (harness_pid, os.getpid()):
+        if pid in (harness_pid, perf_sessions.own_pid()):
             continue
         try:
             info = table.read(pid)
