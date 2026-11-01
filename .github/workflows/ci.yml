@@ -32,7 +32,7 @@ jobs:
         run: python3 scripts/check-source-size.py
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: clippy, rustfmt
@@ -118,13 +118,13 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: clippy, rustfmt
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-15
           add-job-id-key: false
@@ -237,7 +237,7 @@ jobs:
 
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: resource-baseline-evidence-macos-15
           path: target/v1.2.0-baseline/evidence-macos-15
@@ -312,7 +312,7 @@ jobs:
 
       - name: Upload macOS package evidence
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Evidence and logs only; the validated .dmg is a CI-local build, not a release asset.
           name: sonicterm-macos-package-evidence-aarch64-${{ github.sha }}
@@ -321,7 +321,7 @@ jobs:
 
       - name: Upload macOS native selection evidence
         if: ${{ failure() && env.SONICTERM_SELECTION_LOG_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-selection-aarch64-${{ github.sha }}
           path: ${{ env.SONICTERM_SELECTION_LOG_DIR }}
@@ -329,7 +329,7 @@ jobs:
 
       - name: Upload macOS perf scenario smoke evidence
         if: ${{ failure() && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-perf-smoke-aarch64-${{ github.sha }}
           path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
@@ -337,7 +337,7 @@ jobs:
 
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-smoke-logs-aarch64-${{ github.sha }}
           path: |
@@ -368,7 +368,7 @@ jobs:
       # change the macos section. A run that stopped before measuring leaves nothing to upload.
       - name: Upload macOS-only coverage evidence
         if: ${{ !cancelled() && steps.macos_coverage.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/macos-logic-coverage-evidence
@@ -399,12 +399,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Keyed by runner: the x86_64 leg restoring macos-core's aarch64 target
           # directory would rebuild anyway, and would poison the shared entry.
@@ -476,7 +476,7 @@ jobs:
 
       - name: Upload macOS package evidence
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Evidence and logs only. The validated .dmg is a CI-local build, not
           # a release asset, and publishing it would invite use as one.
@@ -486,7 +486,7 @@ jobs:
 
       - name: Upload macOS native selection evidence
         if: ${{ failure() && env.SONICTERM_SELECTION_LOG_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-selection-${{ matrix.arch }}-${{ github.sha }}
           path: ${{ env.SONICTERM_SELECTION_LOG_DIR }}
@@ -494,7 +494,7 @@ jobs:
 
       - name: Upload macOS perf scenario smoke evidence
         if: ${{ failure() && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-perf-smoke-${{ matrix.arch }}-${{ github.sha }}
           path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
@@ -502,7 +502,7 @@ jobs:
 
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-macos-smoke-logs-${{ matrix.arch }}-${{ github.sha }}
           path: |
@@ -583,7 +583,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: clippy, rustfmt
@@ -609,7 +609,7 @@ jobs:
         run: .\scripts\setup-windows-cairo.ps1
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-check-windows-latest
           add-job-id-key: false
@@ -694,7 +694,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -720,7 +720,7 @@ jobs:
 
       # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
       - name: Download the exact-run helper oracle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
@@ -732,7 +732,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py verify
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -788,7 +788,7 @@ jobs:
 
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: resource-baseline-evidence-windows-latest
           path: target/v1.2.0-baseline/evidence-windows-latest
@@ -805,7 +805,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -831,7 +831,7 @@ jobs:
 
       # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
       - name: Download the exact-run helper oracle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
@@ -843,7 +843,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py verify
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -870,7 +870,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -895,7 +895,7 @@ jobs:
         run: .\scripts\setup-windows-cairo.ps1
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -913,7 +913,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py seal
 
       - name: Publish the helper oracle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_EXPORT }}
@@ -930,7 +930,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -956,7 +956,7 @@ jobs:
 
       # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
       - name: Download the exact-run helper oracle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
@@ -968,7 +968,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py verify
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -992,7 +992,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -1018,7 +1018,7 @@ jobs:
 
       # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
       - name: Download the exact-run helper oracle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
@@ -1030,7 +1030,7 @@ jobs:
         run: python3 scripts/glyph-oracle.py verify
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -1055,7 +1055,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -1080,7 +1080,7 @@ jobs:
         run: .\scripts\setup-windows-cairo.ps1
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-test-windows-latest
           add-job-id-key: false
@@ -1111,7 +1111,7 @@ jobs:
 
       - name: Upload Windows GDI probe log
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-windows-gdi-log-${{ github.sha }}
           path: ${{ runner.temp }}/sonicterm-windows-gdi.log
@@ -1131,7 +1131,7 @@ jobs:
 
       - name: Upload Windows perf scenario smoke evidence
         if: ${{ (failure() || env.SONICTERM_PERF_REPLAY_RETRIED == '1') && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-windows-perf-smoke-${{ github.sha }}
           path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
@@ -1147,7 +1147,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -1172,7 +1172,7 @@ jobs:
         run: .\scripts\setup-windows-cairo.ps1
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-release-windows-latest
           add-job-id-key: false
@@ -1225,7 +1225,7 @@ jobs:
 
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-windows-smoke-logs-${{ github.sha }}
           path: |
@@ -1291,12 +1291,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-instrumented-ubuntu-22.04
           add-job-id-key: false
@@ -1322,7 +1322,7 @@ jobs:
       # coverage step leaves no artifact; its job log is the only diagnostic.
       - name: Upload coverage evidence
         if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/rust-logic-coverage-evidence
@@ -1352,13 +1352,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: clippy, rustfmt
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-linux-ubuntu-22.04
           add-job-id-key: false
@@ -1476,12 +1476,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
       - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-linux-ubuntu-22.04
           add-job-id-key: false
@@ -1536,14 +1536,14 @@ jobs:
 
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-linux-smoke-logs-${{ github.sha }}
           path: sonicterm-*-smoke.log
           if-no-files-found: ignore
 
       - name: Upload Linux packages
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonicterm-linux-packages-${{ github.sha }}
           path: |

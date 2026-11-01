@@ -26,7 +26,7 @@ class CoverageWorkflowTests(unittest.TestCase):
         self.assertIn("COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}", gate)
         self.assertNotIn("${{", re.search(r"(?m)^        run: (.*)$", gate).group(1))
         self.assertIn("if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}", upload)
-        self.assertIn("uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", upload)
+        self.assertIn("uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2", upload)
         self.assertIn(f"name: {coverage_test_fixture.floor.EVIDENCE_ARTIFACT_PREFIX}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}",
                       upload)
         self.assertIn(f"path: {coverage_test_fixture.floor.EVIDENCE_DIRECTORY}\n", upload)
