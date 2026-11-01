@@ -720,7 +720,7 @@ jobs:
 
       # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
       - name: Download the exact-run helper oracle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
@@ -831,7 +831,7 @@ jobs:
 
       # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
       - name: Download the exact-run helper oracle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
@@ -956,7 +956,7 @@ jobs:
 
       # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
       - name: Download the exact-run helper oracle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
@@ -1018,7 +1018,7 @@ jobs:
 
       # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
       - name: Download the exact-run helper oracle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
           path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
