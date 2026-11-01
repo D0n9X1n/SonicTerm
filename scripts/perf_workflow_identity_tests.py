@@ -178,7 +178,7 @@ class PrebuiltDownloadTests(unittest.TestCase):
         workflow = perf_workflow_fixture.load_perf_workflow()
         context = comparison_context("compare-macos", "short", attempt="2")
         download = perf_expression_fixture.job_step(workflow, "compare-macos", perf_workflow_fixture.DOWNLOAD_STEP)
-        self.assertEqual(download["uses"], "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c")
+        self.assertEqual(download["uses"], "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333")
         self.assertEqual(perf_expression_fixture.substitute(download["with"]["name"], context), "perf-binaries-macOS-7-2")
         upload = perf_expression_fixture.job_step(workflow, "perf-build-macos", perf_workflow_fixture.UPLOAD_BINARIES_STEP)
         producer = {"github": {"run_id": "7", "run_attempt": "2"}, "runner": {"temp": "/t"}}

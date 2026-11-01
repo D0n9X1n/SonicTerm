@@ -83,7 +83,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -170,7 +170,7 @@ jobs:
 
       - name: Upload the binaries
         if: steps.refs.outputs.base != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: perf-binaries-macOS-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/perf-binaries.tar
@@ -179,7 +179,7 @@ jobs:
 
       - name: Upload the build evidence
         if: always() && steps.refs.outputs.base != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: perf-build-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event.pull_request.head.sha || github.sha }}-macOS-${{ github.run_attempt }}
           path: |
@@ -238,7 +238,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -318,7 +318,7 @@ jobs:
       # The producer's attempt, not this job's: a rerun of failed shards reuses the producer that succeeded.
       - name: Download the binaries
         if: steps.plan.outputs.prebuilt == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: perf-binaries-macOS-${{ github.run_id }}-${{ needs.perf-build-macos.outputs.attempt }}
           path: ${{ runner.temp }}/perf-binaries-download
@@ -375,7 +375,7 @@ jobs:
       # workload fixtures out. The attempt in the name keeps a rerun's evidence apart from the first attempt's.
       - name: Upload the comparison evidence
         if: always() && steps.plan.outputs.prebuilt == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.platform }}-${{ matrix.shard }}-${{ github.run_attempt }}
           path: |
@@ -450,7 +450,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
@@ -570,7 +570,7 @@ jobs:
       # workload fixtures out. The attempt in the name keeps a rerun's evidence apart from the first attempt's.
       - name: Upload the comparison evidence
         if: always() && steps.refs.outputs.base != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.platform }}-${{ matrix.shard }}-${{ github.run_attempt }}
           path: |

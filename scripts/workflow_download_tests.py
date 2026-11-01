@@ -11,7 +11,7 @@ RELEASE_WORKFLOW = (workflow_test_fixture._HERE.parent / ".github" / "workflows"
 CI_WORKFLOW = (workflow_test_fixture._HERE.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 DENY_URL = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.7/cargo-deny.tar.gz"
 DIGEST = "c59ad86eb8b545c4b7b9833c074094fce4a99886f741e4286adec15870c0a726"
-PINNED_DOWNLOAD_ARTIFACT = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1"
+PINNED_DOWNLOAD_ARTIFACT = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2"
 
 
 def run_workflow(*commands: str, env: dict[str, str] | None = None) -> str:
