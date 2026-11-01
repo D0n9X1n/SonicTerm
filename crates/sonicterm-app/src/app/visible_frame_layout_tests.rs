@@ -66,6 +66,37 @@ fn hidden_parser_and_image_barriers_do_not_block_visible_assembly_in_either_role
     }
 }
 
+/// Production acquisition, except that the parser of `pane_id` is never waited for: its probe
+/// fails and the wait gives up, so a contended pane is reported without spending the budget.
+struct GiveUpOn {
+    pane_id: u64,
+}
+
+impl ParserAcquire for GiveUpOn {
+    fn now(&self) -> Instant {
+        TimedParserAcquire.now()
+    }
+
+    fn probe<'a>(&self, pane_id: u64, parser: &'a Mutex<Parser>) -> Option<MutexGuard<'a, Parser>> {
+        TimedParserAcquire.probe(pane_id, parser)
+    }
+
+    fn after_failed_probe(&self, _pane_id: u64) {}
+
+    fn wait_until<'a>(
+        &self,
+        pane_id: u64,
+        parser: &'a Mutex<Parser>,
+        deadline: Instant,
+    ) -> Option<MutexGuard<'a, Parser>> {
+        if pane_id == self.pane_id {
+            // When: pane_id is the held pane, waiting could only time out, so it gives up at once.
+            return None;
+        }
+        TimedParserAcquire.wait_until(pane_id, parser, deadline)
+    }
+}
+
 /// Any visible parser/media miss aborts the whole frame and releases earlier locks and media clones.
 #[test]
 fn visible_parser_and_image_barriers_release_everything_before_retry_in_either_role() {
@@ -107,7 +138,10 @@ fn visible_parser_and_image_barriers_release_everything_before_retry_in_either_r
                     }
                 });
                 ready.wait();
-                let outcome = sources.try_collect(|| {});
+                // The free parsers wait as production does, under a watchdog budget, so a loaded
+                // test host never makes them miss the 2 ms deadline; the held one gives up at once.
+                let acquire = GiveUpOn { pane_id: blocked };
+                let outcome = sources.try_collect_with(&acquire, Duration::from_secs(5), || {});
                 let wrong_success = outcome.is_ok();
                 let why = outcome.err();
                 release.wait();
