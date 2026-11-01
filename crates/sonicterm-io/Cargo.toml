@@ -28,7 +28,12 @@ tempfile = "3"
 libproc = "0.14"
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Security"] }
+windows = { workspace = true, features = [
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+] }
 
 [target.'cfg(unix)'.dependencies]
 # Needed by `PtyHandle::Drop` to send an explicit SIGKILL to the child

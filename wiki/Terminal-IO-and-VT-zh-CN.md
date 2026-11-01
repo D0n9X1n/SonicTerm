@@ -176,7 +176,7 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
 - OSC 0/2 标题、带主机校验的 OSC 7 工作目录、OSC 8 超链接、OSC 52 剪贴板事件、
   OSC 4/10/11/12 颜色查询、OSC 133 提示符标记、OSC 9;4 进度，以及 OSC 9 / OSC 777 通知；
 - DSR、DA、XTVERSION、DECRQSS SGR、针对模式 2026 的 DECRQM、调色板和 kitty 键盘回复；
-- iTerm2、kitty 与 Sixel 媒体事件；
+- iTerm2 与 Sixel 媒体事件，以及带 Unicode 占位符的 kitty 图形协议子集；
 - 同步输出（DEC 2026）。
 
 同步输出：`CSI ? 2026 h` 开始一次更新，`CSI ? 2026 l` 结束它。RIS 也会结束更新；
@@ -190,17 +190,39 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
 
 在 Windows 上，窗格中的程序写入 ConPTY 伪控制台。ConPTY 先解释这些输出，
 再把它自己生成的版本交给 SonicTerm，所以解析器只能收到 ConPTY 转发的内容。
-SonicTerm 不自带 `conpty.dll`，因此除非 DLL 搜索路径上有 `conpty.dll`，
-portable-pty 使用系统自带的 ConPTY。
-Windows 11 build 26300.9457 的系统 ConPTY（`conhost.exe` 10.0.26100.9444）
-原样转发了程序写入其控制台的 iTerm2 `OSC 1337;File=` 序列（负载为 4 字节、48 KiB
-和 1 MiB），但没有转发以同样方式写入的一个 Sixel DCS 序列和一个 kitty APC 序列。
-因此不能指望 Windows 窗格中程序写出的 Sixel 与 kitty 图像能够显示。
-其它版本和负载，以及经 `ssh.exe`、`wsl.exe` 等程序中继的输出，尚未检查。
 
-XTVERSION（`CSI > q`）回复 `DCS > | SonicTerm <version> ST`，其中 `<version>` 是当前运行的版本，
-与默认情况下 `TERM_PROGRAM_VERSION` 公布的值相同。即使设置 `term_program = "WezTerm"`，
-回复仍使用 `SonicTerm` 名称；该设置只改变子进程环境。
+Windows 发行版在 `sonicterm-windows.exe` 旁边的 `conpty` 文件夹中附带微软
+`Microsoft.Windows.Console.ConPTY` 1.25.260930003 包的运行时 `conpty.dll` 和
+`OpenConsole.exe`，以及其 `LICENSE` 与 `NOTICE.md`。打开第一个窗格之前，
+SonicTerm 按固定值核对这两个文件的大小和 SHA-256 摘要，在进程运行期间保持该文件夹
+和两个文件处于打开状态，使它们无法被替换或删除，并从该绝对路径加载 `conpty.dll`。
+`conpty` 文件夹存在但无效时，窗格启动失败，绝不退回系统 ConPTY。文件夹不存在时
+（例如源码构建），除非 DLL 搜索路径上有 `conpty.dll`，portable-pty 使用系统自带的
+ConPTY。日志以 `Windows console runtime selected` 记录所选结果：`kind="packaged"`
+及版本，或 `kind="development-discovery"`。`SONICTERM_REQUIRE_CONPTY=1` 使文件夹
+缺失成为错误；Windows CI 与发布冒烟测试设置该变量，用
+`RUST_LOG=warn,sonicterm_io::conpty_runtime=info` 启用该记录（默认 `warn` 级别会隐藏它），
+并要求出现 `packaged` 记录。
+源码构建可用 `python scripts/setup-windows-conpty.py --destination target/debug`
+放置同样的文件。
+
+因此，哪些图像序列能到达解析器取决于控制台运行时。Windows 11 build 26300.9457 的
+系统 ConPTY（`conhost.exe` 10.0.26100.9444）原样转发 iTerm2 `OSC 1337;File=` 序列
+（以 4 字节、48 KiB 和 1 MiB 负载检查），并丢弃 Sixel DCS 与 kitty APC 序列。附带的
+运行时还会原样转发 Sixel DCS 序列、单段和分段的 kitty APC 序列，以及 kitty Unicode
+占位符单元格（U+10EEEE 及其表示行和列的组合附加符号，和指明图像的真彩色前景色），
+因此程序在 Windows 窗格中写出的 kitty PNG 图像在 GDI 和使用软件适配器的 wgpu 下都能
+显示，通过占位符单元格绘制的虚拟放置在 GDI 下也能显示。把伪控制台调宽或调窄时，
+该运行时不发送重绘，因此屏幕上已有的占位符单元格不会被改写。`windows_kitty_images`
+测试把每种形式按运行时转发的样子送入窗格，并在 GDI 呈现的帧中检查每个图像画在其单元格上、
+其后的文本落在图像下方，以及屏幕滚动时图像随文本上移。其它 Windows
+版本和负载，以及经 `ssh.exe`、`wsl.exe` 等程序中继的输出，尚未检查。
+
+XTVERSION（`CSI > q`）回复 `DCS > | kitty SonicTerm <version> ST`，其中 `<version>` 是当前运行的版本，
+与默认情况下 `TERM_PROGRAM_VERSION` 公布的值相同。开头的 `kitty` 是 Claude Code 等客户端在发送
+kitty 图形前检查的词；它不声明任何 kitty 版本，回复仍注明 SonicTerm。回复不随 `term_program`
+改变，该设置只改变子进程环境。把 `kitty` 理解为完整 kitty 支持的工具，可能尝试下文子集以外的
+图形功能；这些请求会被拒绝或忽略，绝不会被打印出来。
 
 DECRQSS `DCS $ q m ST` 通过终端回复队列报告当前 SGR 样式。回复保留扩展下划线子参数，
 包括波浪下划线的 `4:3`，以及前景、背景和下划线的索引色/RGB 颜色。
@@ -268,6 +290,86 @@ OSC 8 驻留 URI 仍限 8 KiB、客户端 id 限 1 KiB。
 13 个并发捕获都获得该下限。无法预留暂存空间时会拒绝整个捕获，不显示任何内容。超大、
 已取消或截断的媒体都不会局部显示；取消后，解析器仍会吞掉该负载直到终止符。连续两次
 30 s 采样都没有进度时取消捕获，因此声明的停滞时间是一分钟。
+
+#### Kitty 图形
+
+SonicTerm 在 macOS 和 Linux 上实现了
+[kitty 图形协议](https://sw.kovidgoyal.net/kitty/graphics-protocol/)中 Claude Code 用来绘制
+内联图像的部分：
+
+| 功能 | 支持范围 |
+| --- | --- |
+| 动作 | `a=t` 存储、`a=T` 存储并显示、`a=q` 查询、`a=p` 放置、`a=d` 删除 |
+| 传输方式 | 仅 `t=d` 直接数据；`t=f`、`t=t`、`t=s` 回复 `ENOTSUPPORTED`，不读取任何内容 |
+| 格式 | `f=100` PNG；`f=24` RGB 与 `f=32` RGBA（默认），其 `s`/`v` 必须与数据一致；其他格式一律不猜测 |
+| 分块 | `m=1` … `m=0`；分块之间的文本照常打印 |
+| 放置 | 在光标处，或通过 U+10EEEE 占位符单元格虚拟放置（`U=1`），占用 `c` x `r` 单元格的框；每个窗格最多 1,024 个放置（超出回复 `ENOSPC`） |
+| 光标 | 与 kitty 一样，直接放置后移到图像之后；`C=1` 保持不动 |
+| 删除 | `d=i` 删除放置但保留数据；`d=I` 在没有任何放置引用时同时释放数据 |
+| 回复 | `ESC _ G i=<id>[,p=<p>];OK ESC \`，出错时以 `ECODE:…` 代替 `OK`，仅在设置 `i` 时发送；`q=1` 不发 `OK`，`q=2` 全部不发 |
+
+不支持图像编号（`I=`）、压缩（`o=`）、动画与合成动作，以及其他所有删除选择器（包括按可见性
+判断的 `a`/`A`）。无法解析的控制段，或取值超出范围的键（`m=2`、`q=3`、`U=2`），在指明图像时
+以 `EINVAL` 拒绝，且绝不绘制。拒绝 `t=f`、`t=t`、`t=s` 是有意为之：窗格中的程序（包括远程主机上的程序）
+绝不能让终端读取本地文件或共享内存对象。
+
+分块传输从第一块到最后一块只占用一个暂存预留。后续分块把控制键读入有界的临时缓冲，
+并把负载流式写入该预留，因此打开的传输算作解析器唯一的活动捕获，其进度随每一块推进。
+每个 APC 先读取控制段（最多 512 字节），在此之前不预留任何空间；之后只有新的传输或查询命令
+才为其负载预留暂存：未完成的控制段无法耗尽暂存池，且即使暂存池没有空间，删除或放置命令仍会
+执行，被拒绝的传输仍会被跟踪。更长的控制段会被拒绝，绝不会截断后执行。在分块之间开始的
+Sixel 或 iTerm2 捕获会先结束上传，再预留空间。超过负载上限的传输会立即释放暂存，并以一次错误
+拒绝；被拒绝或取消的传输总共只报告一次错误，其后续分块会被吞掉。后续分块的 `q`（包括
+`q=0`）作用于传输的剩余部分。
+删除命令会静默结束打开的上传；其他命令以 `EINVAL` 结束它；CAN/SUB、停滞取消、被拒绝的
+第一块，或在分块之间开始的 Sixel 或 iTerm2 捕获都会中止它，剩余分块会一直被吞掉到 `m=0`。
+分块之间的文本仍会打印。需要解码结果的事件会结束解析器的回复前缀，因此工作线程在解析器锁
+之外解码，并在回复任何后续输入之前发送该回复。
+
+```mermaid
+flowchart TD
+    apc["APC G 控制键 ; 负载"] --> open{"有打开的传输？"}
+    open -- 否 --> staged["暂存到一个新预留"]
+    open -- 是 --> scratch["把控制键读入临时缓冲"]
+    scratch --> cont{"只有 m 和 q 键？"}
+    cont -- 是 --> append["把负载追加到打开的传输"]
+    cont -- 否 --> abort["结束该传输，再暂存这条命令"]
+    abort --> staged
+    staged --> more{"m=1？"}
+    more -- 是 --> keep["保留为打开的传输"]
+    more -- 否 --> dispatch["派发给 VT 工作线程"]
+    append --> last{"m=0？"}
+    last -- 是 --> dispatch
+    dispatch --> decode["在解析器锁外解码、存储并回复"]
+```
+
+Kitty 图像与 Sixel、iTerm2 图像共用窗格的内联图像存储、锁、预算和裁剪，因此 256 MiB 进程
+目标和内存报告都覆盖它们。无论多少个放置共享同一像素缓冲，它都只计算一次。虚拟放置只在
+占位符单元格指向它的位置绘制：每段单元格显示图像中对应的一片，图像按原始宽高比适配并居中
+于框内，因此图像随文本滚动、清除并进入回滚历史。指向不存在放置的单元格不绘制任何内容；
+指向放置 0 的单元格使用该图像的任一虚拟放置。未给出 `c` 和 `r` 时，框为传输时的图像尺寸向上
+取整到整格，图像从框角按 1:1 绘制，即使为保留而缩小过也是如此。占位符单元格从不作为文本整形，
+其两侧的文本分开整形，因此不会跨越图像形成连字。淘汰可能移除
+占位符仍在回滚历史中的图像，此时这些单元格显示为空白，与 kitty 相同。
+
+直接放置（`a=T`，或不带 `U=1` 的 `a=p`）在其 APC 结束时的光标单元格处绘制。同时给出 `c` 和
+`r` 时，图像拉伸到该框；只给出其一时，该边取自单元格，另一边保持图像的宽高比；两者都未给出
+时，按传输的像素尺寸绘制。之后光标与 kitty 一样右移 `c` 列、下移 `r - 1` 行，使下一行文本从
+图像下方开始。越过右边缘时换到下一行，越过底部边距时滚动区域。`C=1` 使光标不动，虚拟放置、
+仅存储（`a=t`）和查询从不移动光标。未给出 `c` 或 `r` 的放置按图像像素尺寸和窗格单元格尺寸
+计算所占单元格，窗格尚未布局时光标不动；框的每一边最多 65,535 个单元格。解析器在会移动光标
+的命令之后停下，窗格的工作线程只在图像已存储或已放置后、解析其后的文本之前移动光标，因此
+解码失败的图像和被拒绝的放置（`ENOENT`、`ENOSPC`）都不会移动光标。
+
+所有在锚点处绘制的内联图像（kitty、Sixel 或 iTerm2）在整个屏幕滚动时随文本上移，在视口回滚
+时下移。DECSTBM 边距内的滚动不会移动它。图像只在绘制它的屏幕上显示：备用屏幕激活时隐藏主屏幕的图像，离开备用屏幕后不再显示备用屏幕的图像。Sixel 和 iTerm2 图像不移动光标。
+
+XTVERSION 以 `kitty` 开头时，Claude Code 会发送图像。它可能先用文件路径查询（`t=f`）探测，
+该查询会被拒绝，随后直接发送图像（`t=d`）。在 tmux 或 screen 中它不会询问，
+因为 tmux 自己回答 XTVERSION；在其中请设置 `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1`，
+并开启 `allow-passthrough on`（tmux 3.3 或更高版本），让图形到达 SonicTerm。在 Windows
+上，图像需要附带的控制台运行时：源码构建在未放置 `conpty` 文件夹时使用系统 ConPTY，
+而它会丢弃 kitty APC 序列。
 
 ### 键盘协议参考
 

@@ -57,6 +57,7 @@ python3 scripts/local-gate.py
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features`, `linux-core` |
 | `perf-scenarios-harness-api-tests` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
 | `perf-scenarios-harness-api-echo-trace-tests` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
+| `macos-clipboard-paste` | `cargo test --locked -p sonicterm-app --lib app::misc::clipboard::misc_clipboard_native_macos_tests::native_pasteboard_paste_action_reaches_real_pty -- --exact --ignored --nocapture` | macOS | `local` | `rust`, `native` | `macos-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests-workspace` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace` |
@@ -1091,7 +1092,7 @@ flowchart LR
   windows --> result
 ```
 
-- `perf-build-macos` (`macos-14`) resolves the refs and builds both once
+- `perf-build-macos` (`macos-15`) resolves the refs and builds both once
   through the gate's reviewed build steps with `--require-base --build-only`.
   It recomputes the manifest's sha256 from the file, fails if that differs
   from the digest the script printed, and uploads the binaries as a tarball,
@@ -1255,7 +1256,7 @@ rules.
 ## Coverage evidence and rebaselining
 
 The per-crate floor is enforced only in the `linux-coverage` job's x86_64 Linux
-container, and the macOS-only floor only on the macOS 14 arm64 runner. CI tracks
+container, and the macOS-only floor only on the macOS 15 arm64 runner. CI tracks
 the stable Rust channel, so a new stable release, runner image or container
 image can move measured coverage with no source change. Each coverage run therefore
 keeps its evidence, and a floor changes only from a retained run's verified

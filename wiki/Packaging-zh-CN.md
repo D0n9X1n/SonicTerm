@@ -32,10 +32,21 @@ Release tag 会增加 `v` 前缀。`scripts/prepare-release-assets.py check-vers
 ### 要求与命令
 
 请在目标 macOS 架构上构建和打包，并使用链接该程序时提供 Homebrew 库的同一主机。
-Bundle 的最低 macOS 版本取 14.0、可执行文件及全部内嵌 dylib 的部署目标中的最大值。
-正式 Apple Silicon 安装包支持 macOS 14+，Intel 安装包支持 macOS 15+；CI 强制检查
-这些显式上限，依赖要求更新系统时打包失败。请检查 `LSMinimumSystemVersion` 和
-`Resources/native-libraries.json` 获取产物的实际要求。正式发布包由对应架构的 CI runner 组装。Rust 构建需要 Cairo/pkg-config，打包需要
+`.cargo/config.toml` 为 macOS 构建中的 rustc 和每个由 `cc` 构建的 C 库设置
+`MACOSX_DEPLOYMENT_TARGET = "15.0"`。Bundle 的最低 macOS 版本取 15.0、可执行文件及全部内嵌
+dylib 的部署目标中的最大值。正式 Apple Silicon 与 Intel 安装包均支持 macOS 15+；CI 强制检查
+这一显式上限，依赖要求更新系统时打包失败。打包后的可执行文件以弱 dylib 方式加载系统
+`/usr/lib/libhvf.dylib`（FreeType 用它渲染苹方），因此缺少其渲染器的 macOS 15.0 至 15.3 仍能启动；
+该加载为强加载或缺失时，`scripts/check-macos-weak-hvf.py` 会让 CI 和发布打包失败。请检查 `LSMinimumSystemVersion` 和
+`Resources/native-libraries.json` 获取产物的实际要求。正式发布包由对应架构的 CI runner 组装。
+Apple Silicon 的 CI 和发布 job 运行 `scripts/setup-macos-native.py` 而不是 `brew install cairo`，
+因此无论 Homebrew 当前 bottle 声明什么版本，链接的 Cairo 都不超过 15.0 下限。该脚本下载
+`scripts/macos-native-bottles.json` 中固定的 Cairo 1.18.4 及其运行时库的 macOS 14（`arm64_sonoma`）
+bottle，检查每个下载的大小和 SHA-256，并把它们解压到 runner 临时目录下的私有前缀中，布局与 Homebrew 的
+`Cellar/<formula>/<version>` 和 `opt/<formula>` 相同。它从不运行 Homebrew，因此任何已安装的 formula 及其
+依赖都不会改变。它把 bottle 中的 Homebrew 路径改写为该前缀，重新签名每个改写过的 dylib，拒绝最低 macOS
+高于 15.0 或加载前缀与系统以外库的 dylib，并让 `PKG_CONFIG_PATH` 指向该前缀供构建使用。Rust 构建需要
+Cairo/pkg-config，打包需要
 `create-dmg` 和 ImageMagick：
 
 ```bash
@@ -160,8 +171,8 @@ Windows 执行阶段。阶段元数据保留在原始日志中，子进程字节
 清理完毕。进程组结束和有限次清单观察不能证明逃离进程组的辅助进程以后不会完成挂载。
 
 `SONICTERM_PACKAGE_DIR` 可选择独立输出目录。第四个可选参数 `--bundle-only` 只组装和
-验证 app，不生成 DMG。`SONICTERM_MAX_MACOS_MINIMUM` 默认为 `14.0`，正式 Intel 策略
-使用 `15.0`。开发者可为使用较新 Homebrew bottle 的本地实验显式指定更高上限，但该产物
+验证 app，不生成 DMG。`SONICTERM_MAX_MACOS_MINIMUM` 默认为 `15.0`，
+即两种架构的正式策略。开发者可为使用较新 Homebrew bottle 的本地实验显式指定更高上限，但该产物
 不是受支持的正式发布包。验证器通过 `--max-minimum-macos` 接收相同上限，不会修改 Mach-O
 部署目标来伪装兼容性。
 
@@ -181,6 +192,7 @@ choco install wixtoolset --version 3.14.1.20250415 --no-progress -y
 
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
+python scripts/setup-windows-conpty.py --destination target/x86_64-pc-windows-msvc/release
 $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
     Where-Object name -eq sonicterm-windows | Select-Object -ExpandProperty version
 $numericVersion = ($version -split '[-+]')[0]
@@ -201,7 +213,8 @@ $msi = Get-ChildItem .\dist\*.msi -ErrorAction Stop
 这表示没有执行 ICE validation，本身不改变 MSI 内容。独立 COM 验证器仍会检查 MSI 的
 Property、Component、Feature、FeatureComponents 和 SummaryInformation 数据。它要求
 ProductVersion 等于数字 SemVer 核心、UpgradeCode 稳定、ProductCode 非空、template 为
-`x64;1033`，且 `Binaries` 精确引用十个 64 位 component。预发布/构建后缀仍属于 tag
+`x64;1033`，且 `Binaries` 精确引用十一个 64 位 component，其中包括 key path 为
+`conpty\conpty.dll` 的 `conpty_runtime`。预发布/构建后缀仍属于 tag
 来源证明，但不能进入 MSI ProductVersion。
 
 CI 与 Release 会在 MSI artifact 继续流转前运行刚构建的
@@ -223,12 +236,25 @@ marker、呈现和预热渲染器生命周期契约。
 SonicTerm/
 ├── sonicterm-windows.exe
 ├── LICENSE-winit-Apache-2.0
+├── conpty/
+│   ├── conpty.dll
+│   ├── OpenConsole.exe
+│   ├── LICENSE
+│   └── NOTICE.md
 └── assets/
     ├── themes/*.toml
     ├── keymaps/*.toml
     ├── fonts/*.ttf
     └── icons/exports/{sonic.ico,sonic.icns}
 ```
+
+`scripts/setup-windows-conpty.py` 从 `scripts/windows-conpty.json` 以 URL、大小和
+SHA-256 固定的微软 `Microsoft.Windows.Console.ConPTY` 包中放置 `conpty.dll` 和
+`OpenConsole.exe`，并从仓库中的 `scripts/LICENSE-conpty` 放置 `LICENSE`，同一清单固定
+其大小和 SHA-256。写入前校验压缩包、每个成员和许可证文件，遇到不完整或不同的
+`conpty` 文件夹时拒绝而不覆盖。MSI 从 `scripts/NOTICE-conpty.md` 取得 `NOTICE.md`，
+其验证器固定该文件的大小和 SHA-256。
+运行时的选择规则见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。
 
 它创建开始菜单快捷方式，并把 `INSTALLDESKTOPSHORTCUT` property 的默认值设为 `1`。
 它为 `.ps1`、`.cmd`、`.bat` 和 `.sh` 注册 SonicTerm ProgID、Default Apps capabilities

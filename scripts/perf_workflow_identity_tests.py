@@ -411,7 +411,7 @@ class WindowsComparisonLegTests(unittest.TestCase):
     def test_every_scenario_runs_once_per_platform(self):
         # Each platform's shards partition the common scenario sets plus its own S11 variants. macOS runs three
         # shards, one per macOS slot that reaches perf beside CI's two macOS jobs; Windows keeps five.
-        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-14", (3,)),
+        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-15", (3,)),
                                                        ("compare-windows", "Windows", "windows-latest", (5,))):
             with self.subTest(job=job_id):
                 entries = self.matrix(job_id)

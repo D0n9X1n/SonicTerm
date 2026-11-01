@@ -94,11 +94,11 @@ impl Library {
     fn new_face(&self, source: &FontDataSource, face_index: FT_Long) -> anyhow::Result<FT_Face> {
         let mut face = ptr::null_mut();
 
-        // A face that lists an `SVG ` or `COLR` table opens on the file's shared bytes, so
+        // A face that lists an `SVG `, `COLR` or `hvgl` table opens on the file's shared bytes, so
         // FreeType's whole-table extraction points into them instead of copying per face. A
-        // negative `face_index` only counts faces and loads no colour table.
+        // negative `face_index` only counts faces and loads no such table.
         let source = match u32::try_from(face_index) {
-            Ok(index) => crate::font_bytes::pin_colour_face(source, index),
+            Ok(index) => crate::font_bytes::pin_whole_table_face(source, index),
             Err(_) => std::borrow::Cow::Borrowed(source),
         };
 
@@ -312,3 +312,7 @@ impl FreeTypeStream {
 #[cfg(test)]
 #[path = "ftwrap_library_tests.rs"]
 mod ftwrap_library_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "ftwrap_library_hvf_tests.rs"]
+mod ftwrap_library_hvf_tests;

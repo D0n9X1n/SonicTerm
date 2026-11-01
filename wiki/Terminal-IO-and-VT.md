@@ -229,7 +229,7 @@ Current protocol support includes:
   clipboard events, OSC 4/10/11/12 color queries, OSC 133 prompt markers, OSC 9;4
   progress, and OSC 9 / OSC 777 notifications;
 - DSR, DA, XTVERSION, DECRQSS SGR, DECRQM for mode 2026, palette, and kitty keyboard replies;
-- iTerm2, kitty, and Sixel media events;
+- iTerm2 and Sixel media events, and a kitty graphics subset with Unicode placeholders;
 - synchronized output (DEC 2026).
 
 Synchronized output: `CSI ? 2026 h` opens an update and `CSI ? 2026 l` ends it.
@@ -248,20 +248,51 @@ hold acts only on brackets that reach the parser.
 
 On Windows, a pane's program writes to a ConPTY pseudoconsole. ConPTY
 interprets that output and passes its own rendition to SonicTerm, so the
-parser receives only what ConPTY forwards. SonicTerm ships no `conpty.dll`, so
-portable-pty uses the system ConPTY unless a `conpty.dll` is on the DLL search
-path. The system ConPTY in Windows 11 build 26300.9457 (`conhost.exe`
-10.0.26100.9444) forwarded unchanged the iTerm2 `OSC 1337;File=` sequences with
-4-byte, 48 KiB and 1 MiB payloads that a program wrote to its console, and did
-not forward a Sixel DCS sequence or a kitty APC sequence written the same way.
-Sixel and kitty images from a program in a Windows pane therefore cannot be
-relied on to display. Other builds and payloads, and output relayed through
-programs such as `ssh.exe` or `wsl.exe`, have not been checked.
+parser receives only what ConPTY forwards.
 
-XTVERSION (`CSI > q`) replies `DCS > | SonicTerm <version> ST`, where
+The Windows release ships Microsoft's `Microsoft.Windows.Console.ConPTY`
+1.25.260930003 package runtime, `conpty.dll` and `OpenConsole.exe`, in a
+`conpty` folder next to `sonicterm-windows.exe`, with its `LICENSE` and
+`NOTICE.md`. Before the first pane opens, SonicTerm checks both files' sizes and
+SHA-256 digests against pinned values, keeps the folder and both files open so
+they cannot be replaced or removed while the process runs, and loads
+`conpty.dll` from that absolute path. A `conpty` folder that is present but
+invalid fails pane startup; it never falls back to the system ConPTY. When the
+folder is absent, as in a source build, portable-pty uses the system ConPTY
+unless a `conpty.dll` is on the DLL search path. The log records the choice as
+`Windows console runtime selected` with `kind="packaged"` and the version, or
+`kind="development-discovery"`. `SONICTERM_REQUIRE_CONPTY=1` makes an absent
+folder an error; the Windows CI and release smokes set it, enable the record with
+`RUST_LOG=warn,sonicterm_io::conpty_runtime=info` (the default `warn` level hides
+it), and then require the `packaged` record. A source build stages the same files with
+`python scripts/setup-windows-conpty.py --destination target/debug`.
+
+Which image sequences reach the parser therefore depends on the console
+runtime. The system ConPTY in Windows 11 build 26300.9457 (`conhost.exe`
+10.0.26100.9444) forwards iTerm2 `OSC 1337;File=` sequences unchanged (checked
+with 4-byte, 48 KiB and 1 MiB payloads) and drops Sixel DCS and kitty APC
+sequences. The packaged runtime also forwards Sixel DCS sequences, single and
+chunked kitty APC sequences, and kitty Unicode placeholder cells (U+10EEEE with
+their combining row and column marks and the truecolor foreground that names the
+image) unchanged, so a kitty PNG image that a program writes in a Windows pane
+displays with GDI and with wgpu on its software adapter, and a virtual placement
+drawn through placeholder cells displays with GDI. Resizing the pseudoconsole
+wider or narrower makes the runtime send no repaint, so placeholder cells already
+on screen are not rewritten. The `windows_kitty_images` test feeds each form, as
+the runtime forwards it, through a pane and checks, in the presented GDI frame,
+that each image is drawn on its cells, that the text after it lands below it,
+and that it moves up with its text when the screen scrolls. Other
+Windows builds and payloads, and output relayed through programs such as
+`ssh.exe` or `wsl.exe`, have not been checked.
+
+XTVERSION (`CSI > q`) replies `DCS > | kitty SonicTerm <version> ST`, where
 `<version>` is the running release, the same value `TERM_PROGRAM_VERSION`
-advertises by default. The reply keeps the `SonicTerm` name even when
-`term_program = "WezTerm"`, which changes only the child environment.
+advertises by default. The leading `kitty` word is what Claude Code and similar
+clients test before sending kitty graphics; it claims no kitty version, and the
+reply still names SonicTerm. It does not change with `term_program`, which sets
+only the child environment. A tool that reads `kitty` as full kitty support may
+try graphics features outside the subset below; those are refused or ignored,
+never printed.
 
 DECRQSS `DCS $ q m ST` reports the current SGR rendition through the terminal
 reply queue. The response preserves extended underline subparameters, including
@@ -357,6 +388,117 @@ Oversized, cancelled, or truncated media is not partially rendered; after
 cancellation the parser continues swallowing that payload until its terminator.
 Two unchanged 30 s progress samples cancel a stalled capture, so the stated
 stall interval is one minute.
+
+#### Kitty graphics
+
+SonicTerm implements the part of the
+[kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/)
+that Claude Code uses to draw inline images, on macOS and Linux:
+
+| Feature | Supported |
+| --- | --- |
+| Actions | `a=t` store, `a=T` store and show, `a=q` query, `a=p` place, `a=d` delete |
+| Medium | `t=d` direct data only; `t=f`, `t=t` and `t=s` reply `ENOTSUPPORTED` and nothing is read |
+| Formats | `f=100` PNG; `f=24` RGB and `f=32` RGBA (the default) with `s`/`v` matching the data; nothing else is guessed |
+| Chunking | `m=1` … `m=0`; text between chunks prints normally |
+| Placement | at the cursor, or virtual (`U=1`) through U+10EEEE placeholder cells, in a `c` x `r` cell box; at most 1,024 placements per pane (`ENOSPC` past it) |
+| Cursor | moves past a direct placement, as in kitty; `C=1` keeps it still |
+| Deletion | `d=i` removes placements and keeps the data; `d=I` also frees the data once nothing places it |
+| Replies | `ESC _ G i=<id>[,p=<p>];OK ESC \`, or an `ECODE:…` error in place of `OK`, only when `i` is set; `q=1` drops `OK`, `q=2` drops all |
+
+Image numbers (`I=`), compression (`o=`), animation and composition actions, and
+every other delete selector (including the visibility-based `a`/`A`) are not
+supported. A control section that does not parse, or a key outside its domain
+(`m=2`, `q=3`, `U=2`), is refused with `EINVAL` when it names an image and is
+never drawn. Refusing `t=f`, `t=t` and `t=s` is deliberate: a program in a pane,
+including one on a remote host, must never make the terminal read a local file
+or shared-memory object.
+
+A chunked transfer holds one staging reservation from its first chunk to its
+last. A later chunk reads its control keys into bounded scratch and streams its
+payload into that reservation, so the open transfer counts as the parser's one
+live capture, and its progress advances with every chunk. Every APC reads its
+control section (at most 512 bytes) before reserving anything, and only a new
+transmit or query then reserves staging, for its payload: open headers cannot
+exhaust the pools, and a delete or placement still runs, and a refused transfer
+is still tracked, when the pools have no room. A longer control section is
+refused, never cut and run. A Sixel or iTerm2 capture that starts between
+chunks ends the upload before it reserves. A transfer that passes the payload cap releases
+its staging at once and is refused with one error; a refused or cancelled
+transfer reports one error in all, and its later chunks are swallowed. A later
+chunk's `q` (including `q=0`) applies to the rest of the transfer. A delete ends an open
+upload silently; any other command ends it with `EINVAL`; CAN/SUB, a stall
+cancellation, a refused first chunk, or a Sixel or iTerm2 capture starting
+between chunks aborts it, and its remaining chunks are swallowed through `m=0`.
+Text between chunks still prints. An event that needs a decode result ends the
+parser's reply prefix, so the worker decodes outside the parser lock and sends
+that reply before any reply to later input.
+
+```mermaid
+flowchart TD
+    apc["APC G control ; payload"] --> open{"transfer open?"}
+    open -- no --> staged["stage in one new reservation"]
+    open -- yes --> scratch["read control keys into scratch"]
+    scratch --> cont{"only m and q keys?"}
+    cont -- yes --> append["append payload to the open transfer"]
+    cont -- no --> abort["end the transfer, then stage this command"]
+    abort --> staged
+    staged --> more{"m=1?"}
+    more -- yes --> keep["keep as the open transfer"]
+    more -- no --> dispatch["dispatch to the VT worker"]
+    append --> last{"m=0?"}
+    last -- yes --> dispatch
+    dispatch --> decode["decode outside the parser lock, store, reply"]
+```
+
+Kitty images live in the pane's inline-image store under the same lock, budget
+and trim as Sixel and iTerm2 images, so the 256 MiB process target and the
+memory report cover them. Each pixel buffer is counted once however many
+placements share it. A virtual placement is drawn only where placeholder cells
+name it: each run of cells shows its slice of the image, fitted into the box
+with its aspect ratio kept and centred, so the picture scrolls, clears and
+enters scrollback with the text. A cell naming a placement that does not exist
+draws nothing; a cell naming placement 0 uses any virtual placement of its
+image. Without `c` and `r`, the box is the transmitted image size rounded up to
+whole cells, and the image is drawn 1:1 from its corner, even when it was
+downscaled for retention. Placeholder cells are never shaped as text, and text
+on either side of them is shaped separately, so no ligature forms across an
+image. Eviction can remove an
+image whose placeholders are still in scrollback; they then show as blank
+cells, as in kitty.
+
+A direct placement (`a=T`, or `a=p` without `U=1`) is drawn at the cursor cell
+where its APC ended. With both `c` and `r` the image is stretched to that box;
+with one of them, that side comes from the cells and the other keeps the image's
+aspect ratio; with neither, the image is drawn at its transmitted pixel size.
+The cursor then moves `c` columns right and `r - 1` rows down, as in kitty, so
+the next line of text starts below the image. Past the right edge it wraps to
+the next row, and past the bottom margin the region scrolls. `C=1` keeps the
+cursor still, and a virtual placement, a store (`a=t`) and a query never move
+it. A placement without `c` or `r` takes its cells from the image's pixel size
+and the pane's cell size, and before the pane has been laid out the cursor
+stays; one side of a box is at most 65,535 cells. The parser stops after a
+command that moves the cursor, and the pane's worker moves it only once the
+image is stored or placed, before the text after it is parsed, so an image that
+fails to decode and a refused placement (`ENOENT`, `ENOSPC`) leave the cursor
+still.
+
+Every inline image drawn at its anchor (kitty, Sixel or iTerm2) moves up with
+the text as the full screen scrolls, and down when the viewport is scrolled
+back. A scroll inside DECSTBM margins does not move it. An image is shown only
+on the screen it was drawn on: the primary screen's images are hidden while the
+alternate screen is active, and the alternate screen's images are not shown after
+leaving it. Sixel and iTerm2 images
+do not move the cursor.
+
+Claude Code sends images when XTVERSION starts with `kitty`. It may first probe
+with a file-path query (`t=f`), which is refused, and then sends the image
+directly (`t=d`). Inside tmux or
+screen it does not ask, because tmux answers XTVERSION itself; set
+`CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` there, and enable `allow-passthrough on`
+(tmux 3.3 or later) so the graphics reach SonicTerm. On Windows, images need
+the packaged console runtime: the system ConPTY, which a source build uses
+without a staged `conpty` folder, drops kitty APC sequences.
 
 ### Keyboard protocol reference
 

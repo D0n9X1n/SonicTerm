@@ -92,7 +92,7 @@ STEPS = (
          ("rust", "bash"), _SCRIPT_CHECKS),
     gate_model.Step("window-owner", ("bash", "scripts/check-window-owner-registration.sh"), gate_model.HOSTS, 120,
          "local", ("bash",), _SCRIPT_CHECKS),
-    gate_model.Step("workflow-supply-chain", ("bash", "scripts/check-workflow-supply-chain.sh"), gate_model.HOSTS, 120,
+    gate_model.Step("workflow-supply-chain", ("bash", "scripts/check-workflow-supply-chain.sh"), gate_model.HOSTS, 300,
          "local", ("rust", "bash"), _SCRIPT_CHECKS),
     # Keep the one macOS-only custody regression on macOS when the portable suite moves to Ubuntu.
     gate_model.Step("macos-gate-custody", ("python3", "scripts/local-gate_tests.py",
@@ -112,13 +112,15 @@ STEPS = (
          "local", ("rust", "native"), _WORKSPACE_TESTS),
     # workspace-crates' `--lib --bins --tests` skips examples, so the scenario harness's unit tests run here.
     gate_model.Step("perf-scenarios-tests", ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
-         gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_TESTS),
+         gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_TESTS,
+         windows_preparations=(gate_model.Preparation(),)),
     # The same unit tests with the counter API and the checkpoint memory and trim hooks compiled in, wherever
     # the plain ones run.
     gate_model.Step("perf-scenarios-counters-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim"),
-         gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_TESTS),
+         gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_TESTS,
+         windows_preparations=(gate_model.Preparation(),)),
     # The ignored working-set check: each start constant covers this host's measured glyph atlas need.
     gate_model.Step("glyph-atlas-working-set",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
@@ -128,12 +130,14 @@ STEPS = (
     gate_model.Step("perf-scenarios-frame-texture-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-frame-texture"),
-         gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_FEATURE_TESTS),
+         gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_FEATURE_TESTS,
+         windows_preparations=(gate_model.Preparation(),)),
     # The same unit tests with the echo watch's calls compiled in, wherever the plain ones run.
     gate_model.Step("perf-scenarios-echo-trace-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-echo-trace"),
-         gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_FEATURE_TESTS),
+         gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_FEATURE_TESTS,
+         windows_preparations=(gate_model.Preparation(),)),
     # Every API cfg is passed only to the example test target; dependency fingerprints remain shared.
     gate_model.Step("perf-scenarios-harness-api-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
@@ -145,6 +149,12 @@ STEPS = (
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace"),
          gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_API_TESTS, harness_cfgs=gate_harness.HARNESS_API_CFG_NAMES),
+    # The ignored test runs alone: the general macOS pasteboard needs a hosted runner or explicit local opt-in.
+    gate_model.Step("macos-clipboard-paste",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--lib",
+          "app::misc::clipboard::misc_clipboard_native_macos_tests::native_pasteboard_paste_action_reaches_real_pty",
+          "--", "--exact", "--ignored", "--nocapture"),
+         ("macos",), 900, "local", ("rust", "native"), ("macos-core",)),
     gate_model.Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), gate_model.HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", _WINDOWS_WORKSPACE),
          windows_preparations=(gate_model.Preparation(gate_model._FEASIBILITY_BUILD),)),

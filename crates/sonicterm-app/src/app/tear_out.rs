@@ -782,6 +782,7 @@ impl App {
             pending_receipts: Vec::new(),
             role: crate::app::WindowRole::Terminal,
             custom_window_name: String::new(),
+            native_title: Default::default(),
             window: Some(destination.window.clone()),
             renderer: Some(destination.renderer),
             tabs: child_tabs,

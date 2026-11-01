@@ -135,6 +135,10 @@ pub struct FallbackWorkerHooks {
     pub before_completion: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Runs after selection and before the worker publishes its unresolved codepoints.
     pub before_unresolved_publish: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs on the scheduling thread once a request is queued for the worker.
+    pub on_schedule: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs on the worker after a request ends, on every return path including cancellation.
+    pub after_request: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 static FONT_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
@@ -233,7 +237,12 @@ pub(crate) fn fallback_error_identity(error: &anyhow::Error) -> &'static str {
 impl FallbackResolveInfo {
     fn process(mut self) {
         let request_timing = self.timing.take();
+        let after_request = self.hooks.after_request.clone();
         RequestTiming::run(request_timing, || self.process_inner());
+        // Every return path of `process_inner` reaches here, so a test can count each ended request.
+        if let Some(after_request) = after_request {
+            after_request();
+        }
     }
 
     /// Whether this request became obsolete; a cancelled request makes no native lookup.
@@ -541,6 +550,7 @@ impl FontConfigInner {
             return;
         }
 
+        let on_schedule = self.hooks.borrow().on_schedule.clone();
         let info = FallbackResolveInfo {
             timing: RequestTiming::capture_next(),
             completion: Box::new(completion),
@@ -578,6 +588,9 @@ impl FontConfigInner {
             tracing::error!("Failed to schedule font fallback resolve: {:#}", error);
             self.fallback_send_failures.set(self.fallback_send_failures.get() + 1);
             *fallback = None;
+        } else if let Some(on_schedule) = on_schedule {
+            // When: the worker accepted the request and a test installed `on_schedule`, count it.
+            on_schedule();
         }
     }
 

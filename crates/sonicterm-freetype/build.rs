@@ -1,7 +1,8 @@
 #![warn(clippy::min_ident_chars)]
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 mod build_config;
 
@@ -105,6 +106,89 @@ fn libpng() {
     cfg.compile("png");
 }
 
+/// The macOS SDK the C build compiles against: `SDKROOT` when set, else `xcrun`'s default SDK.
+fn apple_sdk_root() -> Option<PathBuf> {
+    if let Some(root) = env::var_os("SDKROOT").filter(|root| !root.is_empty()) {
+        // When: `SDKROOT` names an SDK, it decides for cc, rustc and the linker alike.
+        return Some(PathBuf::from(root));
+    }
+    let output =
+        Command::new("xcrun").args(["--sdk", "macosx", "--show-sdk-path"]).output().ok()?;
+    if !output.status.success() {
+        // When: `xcrun` fails there is no SDK to probe; the HVF decision treats it as absent.
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Whether `sdk` ships both the HVF header FreeType includes and the stub of the library it links.
+fn sdk_has_hvf(sdk: &Path) -> bool {
+    sdk.join("usr/include/hvf/Scaler.h").is_file() && sdk.join("usr/lib/libhvf.tbd").is_file()
+}
+
+/// Configures `cfg` for FreeType's HVF driver on macOS and reports whether it is enabled.
+///
+/// The driver calls the system `libhvf` only behind `__builtin_available(macOS 15.4, *)`, and the
+/// deployment target stays below 15.4, so the library is linked as a weak dylib and an older macOS
+/// still launches. Linux and Windows targets never enable it.
+fn configure_hvf(cfg: &mut cc::Build) -> bool {
+    for name in ["SDKROOT", "DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET", "SONICTERM_REQUIRE_HVF"] {
+        println!("cargo:rerun-if-env-changed={}", name);
+    }
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        // When: the target is not macOS, there is no `libhvf` to render with.
+        return false;
+    }
+    let sdk = apple_sdk_root();
+    for watched in ["SDKSettings.json", "usr/include/hvf/Scaler.h"] {
+        // A missing watched path would rerun the build script every time, so only existing ones.
+        if let Some(path) = sdk.as_ref().map(|sdk| sdk.join(watched)).filter(|path| path.exists()) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+    let require_hvf = env::var("SONICTERM_REQUIRE_HVF").as_deref() == Ok("1");
+    let deployment_target = env::var("MACOSX_DEPLOYMENT_TARGET").ok();
+    let has_hvf = sdk.as_deref().is_some_and(sdk_has_hvf);
+    let hvf = build_config::hvf_build_decision(has_hvf, deployment_target.as_deref(), require_hvf)
+        .unwrap_or_else(|error| panic!("FreeType HVF configuration: {}", error));
+    let Some(sdk) = sdk.filter(|_| hvf) else {
+        // When: the SDK lacks HVF and it is not required, keep upstream's stub driver.
+        println!(
+            "cargo:warning=macOS SDK has no hvf/Scaler.h; FreeType cannot open hvgl fonts such as PingFang"
+        );
+        return false;
+    };
+    // One SDK supplies both the header and the library stub; cc honours this over its own lookup.
+    cfg.env("SDKROOT", &sdk);
+    cfg.define("HVF_RUNTIME_AVAILABLE", Some("1"));
+    // A link-lib, unlike a link-arg, reaches every binary that links this crate.
+    println!("cargo:rustc-link-lib=dylib=hvf");
+    link_platform_version_check(cfg);
+    true
+}
+
+/// Links clang's `libclang_rt.osx.a`, which defines `__isPlatformVersionAtLeast`, the function
+/// `__builtin_available` compiles to. Rust links with `-nodefaultlibs`, so the compiler runtime is
+/// not linked by default, and a release binary dead-strips any copy another crate happened to pull in.
+fn link_platform_version_check(cfg: &cc::Build) {
+    let compiler = cfg.get_compiler();
+    let output = compiler
+        .to_command()
+        .arg("-print-file-name=libclang_rt.osx.a")
+        .output()
+        .unwrap_or_else(|error| panic!("FreeType HVF: cannot run the C compiler: {}", error));
+    let runtime = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let Some(directory) = runtime.parent().filter(|_| runtime.is_absolute() && runtime.is_file())
+    else {
+        // When: the compiler names no runtime file, `__builtin_available` would leave an undefined symbol at link time.
+        panic!("FreeType HVF: the C compiler has no libclang_rt.osx.a for __builtin_available");
+    };
+    println!("cargo:rustc-link-search=native={}", directory.display());
+    println!("cargo:rustc-link-lib=static=clang_rt.osx");
+}
+
 fn freetype() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
@@ -122,15 +206,16 @@ fn freetype() {
     cfg.define("FT2_BUILD_LIBRARY", None);
 
     let target = env::var("TARGET").unwrap();
+    let hvf = configure_hvf(&mut cfg);
 
     let upstream_options =
         std::fs::read_to_string("freetype2/include/freetype/config/ftoption.h").unwrap();
-    let options = build_config::configure_freetype(&upstream_options)
+    let options = build_config::configure_freetype(&upstream_options, hvf)
         .unwrap_or_else(|error| panic!("invalid FreeType configuration: {}", error));
     std::fs::write(build_dir.join("freetype2/include/freetype/config/ftoption.h"), options)
         .unwrap();
     let probe = build_dir.join("config_probe.c");
-    std::fs::write(&probe, build_config::configuration_probe()).unwrap();
+    std::fs::write(&probe, build_config::configuration_probe(hvf)).unwrap();
     cfg.file(probe);
 
     for source in [
@@ -160,7 +245,7 @@ fn freetype() {
         "cff/cff.c",
         "cid/type1cid.c",
         "gzip/ftgzip.c",
-        // ftmodule.h registers the HVF driver; with FT_CONFIG_OPTION_HVF off it is a stub that rejects every face.
+        // ftmodule.h registers the HVF driver; without FT_CONFIG_OPTION_HVF it is a stub that rejects every face.
         "hvf/hvf.c",
         "lzw/ftlzw.c",
         "pcf/pcf.c",
@@ -213,5 +298,4 @@ fn main() {
     freetype();
     let out_dir = env::var("OUT_DIR").unwrap();
     println!("cargo:outdir={}", out_dir);
-    println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=10.12");
 }

@@ -307,3 +307,54 @@ fn scrolling_takes_at_most_one_row_buffer_per_row() {
         }
     }
 }
+
+/// `lines_scrolled` counts every full-screen scroll, with or without history, and ignores a proper
+/// sub-region scroll. Each screen keeps its own count: an alternate screen counts from far past the
+/// primary's and every earlier alternate screen's, and leaving it restores the primary's, so an
+/// image anchored on one screen is never drawn on the other.
+#[test]
+fn lines_scrolled_counts_full_screen_scrolls_only() {
+    let mut grid = Grid::new(4, 3);
+    assert_eq!(grid.lines_scrolled(), 0);
+    grid.scroll_up(2);
+    assert_eq!(grid.lines_scrolled(), 2, "rows entering history count");
+    grid.set_scrollback_limit(0);
+    grid.scroll_up(1);
+    assert_eq!(grid.lines_scrolled(), 3, "rows dropped without history count");
+    // A region equal to the whole screen is a full-screen scroll; a smaller one is not.
+    grid.scroll_region_up(0, 2, 1);
+    assert_eq!(grid.lines_scrolled(), 4);
+    grid.scroll_region_up(1, 2, 1);
+    assert_eq!(grid.lines_scrolled(), 4, "a sub-region scroll does not move images");
+    grid.enter_alt_screen();
+    let first_alt = grid.lines_scrolled();
+    assert_eq!(first_alt, 4 + Grid::ALT_SCREEN_SCROLL_GAP, "the alternate screen counts apart");
+    grid.scroll_up(2);
+    let first_alt_end = grid.lines_scrolled();
+    grid.leave_alt_screen();
+    assert_eq!(grid.lines_scrolled(), 4, "the primary screen's count is restored unchanged");
+    assert!(
+        first_alt > grid.lines_scrolled(),
+        "alternate-screen images are past the primary count"
+    );
+    grid.enter_alt_screen();
+    assert!(
+        grid.lines_scrolled() >= first_alt_end + Grid::ALT_SCREEN_SCROLL_GAP,
+        "a later alternate screen starts past the earlier one's images"
+    );
+}
+
+/// A tall scroll stores every row history can hold and counts the rest, so `lines_scrolled` and
+/// history stay in step for earlier images.
+#[test]
+fn a_tall_scroll_stores_what_history_holds_and_counts_the_rest() {
+    let mut grid = Grid::new(4, 3);
+    grid.set_scrollback_limit(2);
+    grid.scroll_up_counting(10, Cell::default());
+    assert_eq!(grid.lines_scrolled(), 10);
+    assert_eq!(grid.scrollback_len(), 2, "history holds its limit");
+    let mut wide = Grid::new(4, 3);
+    wide.scroll_up_counting(10, Cell::default());
+    assert_eq!(wide.lines_scrolled(), 10);
+    assert_eq!(wide.scrollback_len(), 10, "every row enters history when it fits");
+}

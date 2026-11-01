@@ -14,8 +14,8 @@ fn terminal_window_numbers_survive_transfer_hide_and_never_reuse() {
     app.__test_seed_tab("remaining");
     let main = app.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["destination"]);
-    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 SonicTerm"));
-    assert_eq!(app.native_window_title(child).as_deref(), Some("#2 SonicTerm"));
+    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 remaining"));
+    assert_eq!(app.native_window_title(child).as_deref(), Some("#2 destination"));
     app.start_rename_window(child);
     app.command_palette.set_query(" Work ");
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
@@ -28,8 +28,8 @@ fn terminal_window_numbers_survive_transfer_hide_and_never_reuse() {
     app.windows.remove(&child);
     app.release_child_window_registries(child);
     let next = app.__test_seed_child_window(&["new"]);
-    assert_eq!(app.native_window_title(next).as_deref(), Some("#3 SonicTerm"));
-    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 SonicTerm"));
+    assert_eq!(app.native_window_title(next).as_deref(), Some("#3 new"));
+    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 remaining"));
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn window_rename_captures_main_and_child_despite_focus_changes() {
     app.start_rename_window(main);
     app.command_palette.set_query("   ");
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
-    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 SonicTerm"));
+    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 main"));
     assert!(app.__test_drain_pty_writes().is_empty());
 }
 
@@ -73,7 +73,7 @@ fn closed_rename_target_never_falls_back_to_replacement_main() {
     app.__test_seed_tab("replacement");
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
     assert!(!app.command_palette.is_open());
-    assert_eq!(app.native_window_title(main).as_deref(), Some("#2 SonicTerm"));
+    assert_eq!(app.native_window_title(main).as_deref(), Some("#2 replacement"));
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn window_rename_ime_and_readonly_remain_local_ui() {
         &winit::event::Ime::Preedit("工作".into(), Some((0, 6))),
     );
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
-    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 SonicTerm"));
+    assert_eq!(app.native_window_title(main).as_deref(), Some("#1 main"));
     app.command_palette_handle_ime_in_window(main, &winit::event::Ime::Commit("工作".into()));
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
     assert_eq!(app.native_window_title(main).as_deref(), Some("#1 工作"));
@@ -113,7 +113,7 @@ fn window_rename_rejects_invalid_commit_without_changing_title() {
         app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
         assert!(app.command_palette.is_open());
         assert!(app.command_palette.window_name_error().is_some());
-        assert_eq!(app.native_window_title(main).as_deref(), Some("#1 SonicTerm"));
+        assert_eq!(app.native_window_title(main).as_deref(), Some("#1 main"));
         app.__test_command_palette_handle_key(&Key::Named(NamedKey::Escape));
     }
 }
@@ -135,7 +135,7 @@ fn last_tab_transfer_retires_child_number_but_preserves_destination() {
     assert!(app.window_keys.get(child).is_none());
     assert_eq!(app.native_window_title(main).as_deref(), Some("#1 destination"));
     let next = app.__test_seed_child_window(&["new"]);
-    assert_eq!(app.native_window_title(next).as_deref(), Some("#3 SonicTerm"));
+    assert_eq!(app.native_window_title(next).as_deref(), Some("#3 new"));
 }
 
 #[test]

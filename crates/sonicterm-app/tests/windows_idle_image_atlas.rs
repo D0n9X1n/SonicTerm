@@ -125,12 +125,14 @@ fn fixture(
         check(app.__test_advance_pane_parser(pane, b"\x1b[?25l"), "cursor hidden")?;
     }
     let image = InlineImage {
+        scroll_mark: 0,
         id: 1,
         row: 0,
         col: 0,
         width: 32,
         height: 32,
         bgra: Arc::from([0, 0, 255, 255].repeat(32 * 32)),
+        kitty: None,
     };
     check(app.__test_set_pane_inline_images(id, image_pane, vec![image]), "image seeded")?;
     let mut fixture = Fixture { app, window, id, image_pane };

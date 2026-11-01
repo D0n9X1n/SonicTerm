@@ -106,10 +106,10 @@ impl Blob {
 
     /// Wrap the font bytes of face `face_index` of `source` as a read-only blob.
     ///
-    /// An on-disk face that lists an `SVG ` or `COLR` table wraps the file's shared buffer from
+    /// An on-disk face that lists an `SVG `, `COLR` or `hvgl` table wraps the file's shared buffer from
     /// [`crate::font_bytes`]; any other on-disk face reads the file into a blob of its own.
     pub fn from_source(source: &FontDataSource, face_index: u32) -> anyhow::Result<Self> {
-        let source = crate::font_bytes::pin_colour_face(source, face_index);
+        let source = crate::font_bytes::pin_whole_table_face(source, face_index);
         let blob = match source.as_ref() {
             FontDataSource::OnDisk(path) => {
                 // When: `source` is `OnDisk`, load the blob from the named font file.

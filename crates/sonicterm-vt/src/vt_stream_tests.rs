@@ -156,7 +156,10 @@ fn kitty_apc_dispatches_after_completed_escape_sequences() {
         let media = only_media(parser.advance(&sequence));
 
         assert_eq!(media.protocol, MediaProtocol::Kitty);
-        assert_eq!(media.metadata, "f=100");
+        assert_eq!(
+            KittyCommand::parse(media.metadata.as_bytes()).map(|command| command.format),
+            Ok(100)
+        );
         assert_eq!(media.data, b"AAAA");
     }
 
@@ -191,7 +194,11 @@ fn kitty_apc_supports_c1_and_every_buffer_split() {
 
             let media = only_media(events);
             assert_eq!(media.protocol, MediaProtocol::Kitty, "split {split}");
-            assert_eq!(media.metadata, "f=100", "split {split}");
+            assert_eq!(
+                KittyCommand::parse(media.metadata.as_bytes()).map(|command| command.format),
+                Ok(100),
+                "split {split}"
+            );
             assert_eq!(media.data, b"AAAA", "split {split}");
         }
     }

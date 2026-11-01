@@ -319,12 +319,14 @@ pub(in crate::core) fn striped_inline_image(
         }
     }
     sonicterm_render_model::InlineImage {
+        scroll_mark: 0,
         id: 71,
         row: 0,
         col: 0,
         width,
         height,
         bgra: std::sync::Arc::from(pixels),
+        kitty: None,
     }
 }
 
@@ -361,6 +363,7 @@ pub(in crate::core) fn packed_image_fixture(
         origin_y: origin[1],
         content_clip,
         painter_order: 0,
+        slice: None,
     };
     let mut instances = Vec::new();
     assert_eq!(

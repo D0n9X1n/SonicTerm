@@ -88,7 +88,15 @@ fn decode(bytes: &[u8], fixture: &str, dpi: usize) -> Result<BTreeMap<String, [u
     Ok(row.tiles)
 }
 
-/// Read the verified producer artifact, or measure locally when no artifact was requested.
+/// Whether the workflow's verify step chose local measurement: the producer ran on another runner
+/// image, so its helper tiles may not match this runner's fonts.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn measures_locally(mode: Option<&std::ffi::OsStr>) -> bool {
+    mode.is_some_and(|mode| mode == "local")
+}
+
+/// Read the verified producer artifact, or measure locally when no artifact was requested or the
+/// producer ran on another runner image.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn load(
     fixture: &str,
@@ -97,6 +105,10 @@ pub(crate) fn load(
     let Some(directory) = std::env::var_os("SONICTERM_GLYPH_ORACLE_DIR") else {
         return Ok(None);
     };
+    if measures_locally(std::env::var_os("SONICTERM_GLYPH_ORACLE_MODE").as_deref()) {
+        // When: measures_locally holds, the artifact is from another runner image and is not read.
+        return Ok(None);
+    }
     let expected =
         std::env::var("SONICTERM_GLYPH_ORACLE_DIGEST").map_err(|error| error.to_string())?;
     load_verified(Path::new(&directory), &expected, fixture, dpi).map(Some)

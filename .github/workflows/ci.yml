@@ -101,7 +101,10 @@ jobs:
 
   macos-core:
     name: macOS core gates
-    runs-on: macos-14
+    runs-on: macos-15
+    env:
+      # Fail instead of building FreeType without HVF, and fail the PingFang render test instead of skipping.
+      SONICTERM_REQUIRE_HVF: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # The previous-release check resolves the last release tag, so it needs every tag and commit.
@@ -117,7 +120,7 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-15
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -202,6 +205,9 @@ jobs:
         shell: bash
         run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
 
+      - name: Verify native copied-file paste on macOS
+        run: cargo test --locked -p sonicterm-app --lib app::misc::clipboard::misc_clipboard_native_macos_tests::native_pasteboard_paste_action_reaches_real_pty -- --exact --ignored --nocapture
+
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
 
@@ -220,23 +226,28 @@ jobs:
         shell: bash
         run: |
           python3 scripts/resource-baseline-evidence.py \
-            --runner-label macos-14 \
-            --output-dir target/v1.2.0-baseline/evidence-macos-14
+            --runner-label macos-15 \
+            --output-dir target/v1.2.0-baseline/evidence-macos-15
 
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: resource-baseline-evidence-macos-14
-          path: target/v1.2.0-baseline/evidence-macos-14
+          name: resource-baseline-evidence-macos-15
+          path: target/v1.2.0-baseline/evidence-macos-15
           if-no-files-found: error
 
       # The Apple Silicon native smoke runs here rather than in its own job: the repository has five
       # concurrent macOS slots, and a separate leg would hold one the perf comparison's shards wait for.
-      # The Intel smoke stays in macos-smoke on its own image. 14.0 is the declared Apple Silicon
-      # deployment floor, asserted as a ceiling, as in macos-smoke's matrix.
+      # The Intel smoke stays in macos-smoke on its own image. 15.0 is the declared Apple Silicon
+      # deployment floor, asserted as a ceiling, as in macos-smoke's matrix. The pinned macOS 14 Cairo
+      # bottles keep the linked libraries within it whatever Homebrew's current bottles declare.
       - name: Install native dependencies
-        run: brew install cairo pkg-config
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install pkg-config
+          python3 scripts/setup-macos-native.py --work-dir "$RUNNER_TEMP"
 
       - name: Build macOS native selection fixture
         run: cargo build --locked -p sonicterm-app --example native_split_selection
@@ -278,15 +289,20 @@ jobs:
       # hdiutil and the tracked icon.
       - name: Package macOS dmg for validation
         env:
-          SONICTERM_MAX_MACOS_MINIMUM: "14.0"
+          SONICTERM_MAX_MACOS_MINIMUM: "15.0"
         run: bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-aarch64
+
+      # FreeType renders PingFang through the system libhvf, present only on macOS 15.4+; the packaged
+      # executable must load it weakly so macOS 15.0-15.3 still launch.
+      - name: Require a weak libhvf load in the packaged executable
+        run: python3 scripts/check-macos-weak-hvf.py dist/SonicTerm.app/Contents/MacOS/sonicterm-mac
 
       - name: Validate packaged macOS dmg
         run: |
           python3 scripts/test-macos-package.py \
             --dmg "dist/SonicTerm-ci-mac-aarch64.dmg" \
             --state-dir "$RUNNER_TEMP/sonicterm-macos-package-aarch64" \
-            --max-minimum-macos "14.0"
+            --max-minimum-macos "15.0"
 
       - name: Upload macOS package evidence
         if: ${{ !cancelled() }}
@@ -356,6 +372,9 @@ jobs:
   macos-smoke:
     name: macOS native runtime smoke (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    env:
+      # Fail instead of building FreeType without HVF.
+      SONICTERM_REQUIRE_HVF: "1"
     strategy:
       # The Intel leg only: Apple Silicon runs the same steps in macos-core.
       # Intel and Apple Silicon resolve different Cairo and font binaries, so
@@ -437,6 +456,11 @@ jobs:
           SONICTERM_MAX_MACOS_MINIMUM: ${{ matrix.minimum }}
         run: bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-${{ matrix.arch }}
 
+      # FreeType renders PingFang through the system libhvf, present only on macOS 15.4+; the packaged
+      # executable must load it weakly so macOS 15.0-15.3 still launch.
+      - name: Require a weak libhvf load in the packaged executable
+        run: python3 scripts/check-macos-weak-hvf.py dist/SonicTerm.app/Contents/MacOS/sonicterm-mac
+
       - name: Validate packaged macOS dmg
         run: |
           python3 scripts/test-macos-package.py \
@@ -488,7 +512,7 @@ jobs:
           if-no-files-found: ignore
 
   macos:
-    name: macos-14 / unit tests
+    name: macos-15 / unit tests
     runs-on: ubuntu-latest
     needs: [macos-core, macos-smoke, tooling]
     if: always()
@@ -1152,7 +1176,13 @@ jobs:
       - name: Build Windows release binary for runtime smoke
         run: cargo build --release -p sonicterm-windows
 
+      - name: Stage pinned Windows console runtime
+        run: python scripts/setup-windows-conpty.py --destination target/release
+
       - name: Require Windows native runtime smoke
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
+          RUST_LOG: warn,sonicterm_io::conpty_runtime=info
         shell: pwsh
         run: |
           python scripts/native-smoke-runner.py `
@@ -1161,7 +1191,13 @@ jobs:
             --log-file "$env:RUNNER_TEMP\sonicterm-windows-smoke.log" `
             -- ./target/release/sonicterm-windows.exe --runtime-smoke
 
+      - name: Verify packaged Windows console runtime
+        shell: pwsh
+        run: python scripts/verify-windows-conpty.py --runtime-dir target/release/conpty --logs "$env:RUNNER_TEMP\sonicterm-windows-smoke\logs"
+
       - name: Require Windows GPU frame-validation smoke
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
         shell: pwsh
         run: |
           python scripts/native-smoke-runner.py `
@@ -1171,6 +1207,8 @@ jobs:
             -- ./target/release/sonicterm-windows.exe --runtime-smoke
 
       - name: Require Windows GPU device-recovery smoke
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
         shell: pwsh
         run: |
           python scripts/native-smoke-runner.py `

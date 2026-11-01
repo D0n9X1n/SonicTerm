@@ -93,8 +93,12 @@ pub fn resize_renderer_and_panes_if_present(
         return false;
     }
     let (cols, rows) = renderer.cells();
+    let (cell_width, cell_height) = renderer.cell_size();
     for (pane_id, pane) in panes {
-        crate::app::frame_counters::lock_parser(&pane.parser).resize(cols, rows);
+        let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
+        parser.resize(cols, rows);
+        parser.set_cell_pixel_size(cell_width, cell_height);
+        drop(parser);
         pane.resize_pty(*pane_id, cols, rows);
     }
     true

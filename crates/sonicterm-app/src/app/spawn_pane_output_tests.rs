@@ -487,12 +487,14 @@ fn release_is_sent_after_the_batch_generation_is_published() {
     let base = test_base();
     let decode = |media: &MediaEvent| {
         Some(InlineImage {
+            scroll_mark: 0,
             id: 1,
             row: media.row,
             col: media.col,
             width: 1,
             height: 1,
             bgra: Arc::from([1, 2, 3, 255]),
+            kitty: None,
         })
     };
     let mut queued = Vec::new();

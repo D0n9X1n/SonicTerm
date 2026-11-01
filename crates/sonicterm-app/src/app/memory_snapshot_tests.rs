@@ -687,12 +687,14 @@ pub(super) fn decode_image(pane: &super::super::PaneState, id: u64, bytes: usize
     let evicted = {
         let mut images = pane.inline_images.lock();
         images.push(sonicterm_render_model::InlineImage {
+            scroll_mark: 0,
             id,
             row: 0,
             col: 0,
             width: 1,
             height: 1,
             bgra: Arc::from(vec![0u8; bytes]),
+            kitty: None,
         });
         crate::app::media::trim_inline_images_charged(&mut images, &pane.inline_media_charge)
     };
@@ -721,7 +723,7 @@ pub(super) fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
 
     // A capture still open, with stall evidence one sample short of cancellation.
     let mut chunk = Vec::with_capacity(512 * 1024);
-    chunk.extend_from_slice(b"\x1b_G");
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
     chunk.resize(512 * 1024, b'A');
     {
         let pane = app

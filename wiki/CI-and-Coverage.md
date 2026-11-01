@@ -75,9 +75,9 @@ merged there, and delete only merged local branches not attached to a preserved
 worktree. Never force removal or discard dirty, unmerged, or locked worktrees or
 any stash.
 
-### macOS 14 and Windows latest
+### macOS 15 and Windows latest
 
-The stable required checks are fail-closed aggregate jobs: `macos-14 / unit
+The stable required checks are fail-closed aggregate jobs: `macos-15 / unit
 tests` requires `macos-core`, `macos-smoke`, and `tooling`, while
 `windows-latest / unit tests` requires `windows-native`, `windows-glyph-oracle`, `windows-checks`, the
 five Windows test shards (`windows-tests-workspace`, `windows-tests-harness`,
@@ -90,7 +90,10 @@ required check.
 The macOS core shard first measures the real PTY close baseline after Cargo
 restore, then runs Rust checks, strict Rustdoc, the one-pass workspace test gate,
 workspace doctests, host probes, the macOS-only process-group custody test, and real
-resource-baseline capture. The required `tooling` job runs on Ubuntu: Rust-version,
+resource-baseline capture. It also runs the ignored native copied-file paste test
+alone on the hosted runner, after scenario-harness tests; the general pasteboard
+is not exercised concurrently with workspace tests. The exact native test must
+run rather than skip; local opt-in is described in [Local Gate](Local-Gate). The required `tooling` job runs on Ubuntu: Rust-version,
 raw-exit, window-owner, workflow supply-chain, authored-comment and script-identifier
 checks, plus release-note, wiki-publish, resource-inventory, soak and resource-baseline
 script tests. These commands remain local gates on every supported host; the existing
@@ -128,7 +131,7 @@ catches a loss larger than the tolerance: losing the AppKit boundary's coverage,
 of that file and is not caught.
 
 The
-native runtime smoke builds shipping release binaries on macOS 14 Apple Silicon,
+native runtime smoke builds shipping release binaries on macOS 15 Apple Silicon,
 as steps at the end of `macos-core`, and on macOS 15 Intel, in the one-leg
 `macos-smoke` matrix, with distinct dependency-cache keys. The Intel lane may save
 dependencies only on a push to `main`; the Apple Silicon lane shares `macos-core`'s
@@ -177,7 +180,12 @@ checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longe
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
 `windows-smoke` shard builds the shipping release binary and
 requires its bounded native smoke plus `frame-validation` and `device-recovery`
-scenario smokes in separate steps with native process deadlines.
+scenario smokes in separate steps with native process deadlines. Before the smokes
+it stages the pinned ConPTY runtime next to the binary, every smoke runs with
+`SONICTERM_REQUIRE_CONPTY=1`, and `scripts/verify-windows-conpty.py` then requires
+the staged bytes and exactly one `kind="packaged"` selection record from the first
+smoke's log, so a build that falls back to the system ConPTY fails
+([Terminal IO and VT](Terminal-IO-and-VT)).
 
 `workflow-syntax` runs pinned actionlint against CI and perf workflows, checking GitHub
 expression-context availability as well as syntax. The tooling job installs its digest-pinned
@@ -194,7 +202,11 @@ therefore retain their DLL lookup path too.
 completeness, exact drift and start-size check passes does it publish the four S9/S12,
 72/144-DPI helper tile sets. The manifest binds all tracked source bytes (including bundled
 fonts), system/user font bytes and GDI registry mappings, runner image, Rust/Cargo versions, checkout SHA, run ID and
-producer attempt. Consumers verify its output digest and all bindings before testing.
+producer attempt. Consumers verify its output digest and all bindings before testing. GitHub
+can give one run's Windows jobs different runner images, so a consumer whose only differences
+are the runner image, fonts, font registrations or Rust/Cargo versions measures the helper
+itself (`SONICTERM_GLYPH_ORACLE_MODE=local`); any other difference, a changed payload or a
+wrong digest still fails.
 Failed-job reruns name the successful producer's attempt, not their own. Missing or stale
 artifacts fail; local runs without an artifact still measure the helper directly.
 Workspace, ordinary/counters, frame-texture/echo and API-cfg suites each draw their own real
@@ -341,7 +353,7 @@ gestures. See [Platform Integration](Platform-Integration).
 - `scripts/macos-logic-coverage.sh` in `macos-core` holds the macOS-only logic in
   the 80% subset, the AppKit word boundary in `sonicterm-ui`'s `text_edit.rs` and
   the macOS arms of `command_label.rs`, to per-file floors in the baseline's
-  `macos` section. CI enforces them only on the macOS 14 arm64 runner, and they
+  `macos` section. CI enforces them only on the macOS 15 arm64 runner, and they
   change only from a verified `macos-core` record. The run instruments
   `sonicterm-ui` alone, so macOS-only code in other crates has no floor, and a
   file floor misses a loss smaller than the 1.0 percentage point tolerance, such

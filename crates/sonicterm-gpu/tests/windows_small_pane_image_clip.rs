@@ -186,12 +186,14 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
         let baseline_hwnd = hwnd_pixel(&window, sample_x, sample_y)?;
         let frame_count = renderer.successful_frame_count();
         panes[0].inline_images.push(InlineImage {
+            scroll_mark: 0,
             id: 1,
             row: 0,
             col: 0,
             width: 32,
             height: 32,
             bgra: Arc::from([0, 0, 255, 255].repeat(32 * 32)),
+            kitty: None,
         });
         render(&mut renderer, &mut panes, &theme)?;
         if renderer.successful_frame_count() != frame_count + 1 {

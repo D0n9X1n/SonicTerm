@@ -262,6 +262,19 @@ fn covered(
                     .map_err(|error| {
                         format!("{case}: the helper measurement is incomplete: {error}")
                     })?;
+            // A helper measured here gets the checks the oracle producer applies before it
+            // publishes: completeness, drift from the recorded row, and the start size.
+            let platform = super::platform_name();
+            let policy = sonicterm_text::recording_image::drift_policy(
+                platform,
+                &sonicterm_text::recording_image::HostImage::from_env(),
+            );
+            let advisories =
+                super::validate_local_helper(&measured, platform, name, scale as u32, &policy)
+                    .map_err(|error| format!("{case}: {error}"))?;
+            for advisory in &advisories {
+                println!("glyph_atlas_working_set advisory: {advisory}");
+            }
             crate::workload::glyph_oracle::identities(&measured.tile_identities)?
         }
     };

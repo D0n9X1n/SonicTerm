@@ -58,8 +58,15 @@ impl super::super::App {
             self.start_rename_window(id);
             self.command_palette.set_query(name);
             self.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
+            // A name shows as `#N name`; a cleared one gives the title back to the active tab.
+            let number = self.window_keys.get(id).unwrap().raw();
+            let body = self
+                .windows
+                .get(&id)
+                .and_then(|state| state.tabs.active())
+                .map(|tab| super::super::native_title::tab_display_body(tab).to_owned());
             let expected =
-                super::super::compose_window_title(self.window_keys.get(id).unwrap(), name);
+                super::super::native_title::window_title_text(number, name, body.as_deref());
             if !self.smoke_check_native_title(&native, &expected) {
                 // When: smoke_check_native_title fails after a real editor commit, stop before claiming presentation success.
                 return false;

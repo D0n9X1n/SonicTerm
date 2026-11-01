@@ -370,6 +370,20 @@ impl GpuRenderer {
             stack.set_fallback_append_hook_for_test(hook);
         }
     }
+
+    /// Test seam: run `scheduled` when this renderer queues a fallback request and `ended` when
+    /// the worker ends it, so a test can wait until no request is in flight. The tab-title and
+    /// footer stacks share the body configuration, so one installation covers all three.
+    #[doc(hidden)]
+    pub fn __test_set_fallback_request_hooks(
+        &self,
+        scheduled: std::sync::Arc<dyn Fn() + Send + Sync>,
+        ended: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) {
+        if let Some(stack) = self.font_stack.as_ref() {
+            stack.set_fallback_request_hooks_for_test(scheduled, ended);
+        }
+    }
 }
 
 impl GpuRenderer {

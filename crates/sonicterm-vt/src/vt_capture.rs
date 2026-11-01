@@ -11,7 +11,6 @@ impl MediaCapture {
             metadata,
             data: Vec::new(),
             truncated: false,
-            pending_esc: false,
             seen: 0,
             growth_exhausted: false,
             reservation: StagingReservation::admit(pool),
@@ -68,7 +67,7 @@ impl MediaCapture {
     }
 
     /// Whether this capture holds the whole payload it was offered.
-    fn whole(&self) -> bool {
+    pub(super) fn whole(&self) -> bool {
         self.admitted() && !self.truncated
     }
 
@@ -97,6 +96,7 @@ impl MediaCapture {
             col,
             metadata: self.metadata,
             data: self.data,
+            scroll_mark: 0,
         })
     }
 
@@ -118,33 +118,32 @@ impl MediaCapture {
             col,
             metadata: String::from_utf8_lossy(metadata).into_owned(),
             data,
+            scroll_mark: 0,
         })
     }
 
-    pub(super) fn into_kitty_event(mut self, row: u16, col: u16) -> Option<MediaEvent> {
-        if !self.admitted() {
-            // When: admitted is false, so the process pool refused this capture and no payload bytes are safe to dispatch.
-            return None;
-        }
-        if self.pending_esc {
-            self.append_byte(0x1b);
-            self.pending_esc = false;
-        }
+    /// Dispatch a kitty payload, which holds no control section.
+    ///
+    /// `None` when any chunk could not be staged whole, for the same reason a single capture is
+    /// never dispatched in part.
+    pub(super) fn into_kitty_payload_event(
+        self,
+        metadata: String,
+        row: u16,
+        col: u16,
+    ) -> Option<MediaEvent> {
         if !self.whole() {
-            // When: whole is false after restoring pending ESC, so decoding would consume an incomplete Kitty payload.
+            // When: whole is false, some chunk was refused or cut, so the image would be a fragment.
             return None;
         }
-        if self.data.first().copied() != Some(b'G') {
-            // When: data lacks Kitty's G introducer, so treating the remaining bytes as graphics would misclassify an APC sequence.
-            return None;
-        }
-        let payload = &self.data[1..];
-        let (metadata, data) = split_once_byte(payload, b';')
-            .map(|(metadata_bytes, data_bytes)| {
-                (String::from_utf8_lossy(metadata_bytes).into_owned(), data_bytes.to_vec())
-            })
-            .unwrap_or_else(|| (String::new(), payload.to_vec()));
-        Some(MediaEvent { protocol: MediaProtocol::Kitty, row, col, metadata, data })
+        Some(MediaEvent {
+            protocol: MediaProtocol::Kitty,
+            row,
+            col,
+            metadata,
+            data: self.data,
+            scroll_mark: 0,
+        })
     }
 }
 
@@ -175,10 +174,24 @@ pub(super) fn parse_iterm2_file_event(payload: &[u8], row: u16, col: u16) -> Opt
         col,
         metadata: String::from_utf8_lossy(metadata).into_owned(),
         data: data.to_vec(),
+        scroll_mark: 0,
     })
 }
 
 impl Parser {
+    /// The payload capture of the kitty APC in flight, if it reserved one.
+    fn apc_payload(&self) -> Option<&MediaCapture> {
+        self.apc_scratch.as_ref().and_then(|scratch| scratch.payload.as_ref())
+    }
+
+    /// The capture an open kitty transfer holds between chunks, if any.
+    fn kitty_transfer_capture(&self) -> Option<&MediaCapture> {
+        match &self.performer.kitty_transfer {
+            Some(vt_kitty_stream::KittyTransfer::Loading { capture, .. }) => Some(capture),
+            Some(vt_kitty_stream::KittyTransfer::Aborted { .. }) | None => None,
+        }
+    }
+
     /// Bytes and buffers this parser is holding mid-sequence.
     ///
     /// Covers the in-flight media capture, the raw OSC palette accumulator, and
@@ -191,9 +204,10 @@ impl Parser {
     #[must_use]
     pub fn retained_amount(&self) -> ResourceAmount {
         let capture_bytes = self
-            .apc_capture
-            .iter()
+            .apc_payload()
+            .into_iter()
             .chain(self.performer.dcs_capture.iter())
+            .chain(self.kitty_transfer_capture())
             .map(MediaCapture::retained_bytes)
             .sum::<usize>();
         let osc_bytes = match &self.raw_osc {
@@ -222,11 +236,17 @@ impl Parser {
     #[must_use]
     pub fn capture_progress(&self) -> usize {
         let direct = self
-            .apc_capture
+            .performer
+            .dcs_capture
             .iter()
-            .chain(self.performer.dcs_capture.iter())
+            .chain(self.kitty_transfer_capture())
             .map(|capture| capture.seen)
-            .sum::<usize>();
+            .sum::<usize>()
+            .saturating_add(self.apc_scratch.as_ref().map_or(0, |scratch| scratch.seen))
+            .saturating_add(match &self.performer.kitty_transfer {
+                Some(vt_kitty_stream::KittyTransfer::Loading { chunk_seen, .. }) => *chunk_seen,
+                Some(vt_kitty_stream::KittyTransfer::Aborted { .. }) | None => 0,
+            });
         let osc = match &self.raw_osc {
             Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
             Some(RawOsc::Probe { .. })
@@ -269,6 +289,15 @@ impl Parser {
             // When: released and live_capture_count show no capture, keep ground unchanged rather than swallowing ordinary output.
             return 0;
         }
+        self.abort_in_flight_apc();
+        let in_sequence = self.apc_scratch.is_some()
+            || self.performer.dcs_capture.is_some()
+            || self.raw_osc.is_some();
+        self.abort_kitty_transfer();
+        if !in_sequence {
+            // When: in_sequence is false, only a kitty transfer was open between chunks; ground stays, later chunks are swallowed.
+            return released;
+        }
         let escape_family =
             if matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. } | RawOsc::Semantic { .. })) {
                 EscapeFamily::Osc
@@ -295,9 +324,14 @@ impl Parser {
     /// flight, so APC, DCS, and iTerm2 OSC slots are alternatives rather than
     /// addends. That exclusivity is what needs holding, so it is exposed for
     /// assertion rather than left as an emergent property.
+    ///
+    /// An open kitty transfer counts as the parser's capture between its chunks: its later chunks
+    /// read their headers into scratch and stream into the transfer's reservation, so the transfer
+    /// and a staged APC are never both live.
     #[must_use]
     pub fn live_capture_count(&self) -> usize {
-        usize::from(self.apc_capture.is_some())
+        // A kitty APC in flight is the open transfer's chunk or its own capture, never both.
+        usize::from(self.apc_scratch.is_some() || self.kitty_transfer_capture().is_some())
             + usize::from(self.performer.dcs_capture.is_some())
             + usize::from(matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })))
     }

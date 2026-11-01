@@ -41,23 +41,19 @@ impl GpuRenderer {
         let now = Instant::now();
         let broadcast_participant_ids: Vec<u64> =
             panes.iter().filter(|pane| pane.is_broadcast_participant).map(|pane| pane.id).collect();
-        let retained_inline_media_bytes = panes
-            .iter()
-            .flat_map(|pane| &pane.inline_images)
-            .fold(0usize, |total, image| total.saturating_add(image.bgra.len()));
-        self.retained_inline_media_bytes = retained_inline_media_bytes;
-        let inline_media_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hash = std::collections::hash_map::DefaultHasher::new();
-            for pane in panes.iter() {
-                pane.id.hash(&mut hash);
-                pane.inline_images.len().hash(&mut hash);
-                for image in &pane.inline_images {
-                    (image.id, image.row, image.col, image.width, image.height).hash(&mut hash);
-                }
-            }
-            hash.finish()
+        // Kitty placements share a pixel buffer and `id`; each buffer is counted once.
+        let retained_inline_media_bytes = {
+            let mut seen = std::collections::HashSet::new();
+            panes
+                .iter()
+                .flat_map(|pane| &pane.inline_images)
+                .filter(|image| seen.insert(image.id))
+                .fold(0usize, |total, image| total.saturating_add(image.bgra.len()))
         };
+        self.retained_inline_media_bytes = retained_inline_media_bytes;
+        let inline_media_hash = kitty_placeholders::inline_media_hash(
+            panes.iter().map(|pane| (pane.id, pane.inline_images.as_slice())),
+        );
 
         // Advance the atlas frame counter so LRU eviction can
         // distinguish glyphs touched this frame from cold ones. Cheap

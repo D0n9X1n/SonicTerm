@@ -10,6 +10,9 @@ pub(super) struct InlineImagePlacement<'a> {
     pub(super) origin_y: f32,
     pub(super) content_clip: PaneRect,
     pub(super) painter_order: usize,
+    /// The drawn rect and image part: a placeholder run's slice, or an anchored image's box moved
+    /// with the scrolled text; `None` draws the whole image at its anchor and pixel size.
+    pub(super) slice: Option<super::kitty_placeholders::PlaceholderSlice>,
 }
 
 pub(super) fn report_inline_image_pressure(changed: bool, skipped: usize, atlas: &GlyphAtlas) {
@@ -39,18 +42,34 @@ impl InlineImagePlacement<'_> {
             // When: `image` has no decoded pixels, neither residency nor emission can use its rectangle.
             return None;
         }
-        let x = self.origin_x + image.col as f32 * cell_w;
-        let y = self.origin_y + image.row as f32 * cell_h;
-        let left = x.max(self.content_clip.x).max(0.0);
-        let top = y.max(self.content_clip.y).max(0.0);
-        let right = (x + image.width as f32).min(self.content_clip.x + self.content_clip.w).min(sw);
-        let bottom =
-            (y + image.height as f32).min(self.content_clip.y + self.content_clip.h).min(sh);
+        let drawn = self.drawn_rect(cell_w, cell_h);
+        let left = drawn.x.max(self.content_clip.x).max(0.0);
+        let top = drawn.y.max(self.content_clip.y).max(0.0);
+        let right = (drawn.x + drawn.w).min(self.content_clip.x + self.content_clip.w).min(sw);
+        let bottom = (drawn.y + drawn.h).min(self.content_clip.y + self.content_clip.h).min(sh);
         if right <= left || bottom <= top {
             // When: `right <= left` or `bottom <= top`, the clipped image is empty and needs no atlas allocation.
             return None;
         }
         Some(PaneRect::new(left, top, right - left, bottom - top))
+    }
+
+    /// The unclipped rect this placement draws: the slice's part, or the whole image at its anchor.
+    fn drawn_rect(&self, cell_w: f32, cell_h: f32) -> PaneRect {
+        match self.slice {
+            Some(slice) => slice.dest,
+            None => PaneRect::new(
+                self.origin_x + self.image.col as f32 * cell_w,
+                self.origin_y + self.image.row as f32 * cell_h,
+                self.image.width as f32,
+                self.image.height as f32,
+            ),
+        }
+    }
+
+    /// The normalised image rect `drawn_rect` shows.
+    fn drawn_uv(&self) -> [f32; 4] {
+        self.slice.map_or([0.0, 0.0, 1.0, 1.0], |slice| slice.source_uv)
     }
 }
 
@@ -75,8 +94,8 @@ pub(super) fn emit_inline_image_instances(
             // When: `visible_rect` is absent, this image cannot contribute pixels or need an atlas tile.
             continue;
         };
-        let x = placement.origin_x + image.col as f32 * cell_w;
-        let y = placement.origin_y + image.row as f32 * cell_h;
+        let drawn = placement.drawn_rect(cell_w, cell_h);
+        let [image_u0, image_v0, image_u1, image_v1] = placement.drawn_uv();
         let key = sonicterm_types::glyph_key::GlyphKey {
             ch: '\u{fffc}',
             font_slot: 0xFE,
@@ -105,17 +124,20 @@ pub(super) fn emit_inline_image_instances(
             continue;
         };
         let [u0, v0, u1, v1] = info.uv;
-        let du = (u1 - u0) / image.width as f32;
-        let dv = (v1 - v0) / image.height as f32;
+        // Atlas uv per drawn pixel: the drawn rect spans image_u0..image_u1 of the image's tile.
+        let du = (u1 - u0) * (image_u1 - image_u0) / drawn.w;
+        let dv = (v1 - v0) * (image_v1 - image_v0) / drawn.h;
+        let tile_u = u0 + (u1 - u0) * image_u0;
+        let tile_v = v0 + (v1 - v0) * image_v0;
         emitted.push((
             placement.painter_order,
             ImageInstance {
                 rect_px: [visible.x, visible.y, visible.w, visible.h],
                 uv: [
-                    u0 + (visible.x - x) * du,
-                    v0 + (visible.y - y) * dv,
-                    u0 + (visible.x + visible.w - x) * du,
-                    v0 + (visible.y + visible.h - y) * dv,
+                    tile_u + (visible.x - drawn.x) * du,
+                    tile_v + (visible.y - drawn.y) * dv,
+                    tile_u + (visible.x + visible.w - drawn.x) * du,
+                    tile_v + (visible.y + visible.h - drawn.y) * dv,
                 ],
                 sample_uv: info.uv,
             },

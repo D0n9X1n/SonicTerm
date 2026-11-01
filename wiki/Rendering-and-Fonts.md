@@ -71,7 +71,13 @@ base OS/2 weight and width instead of aborting.
 
 Platform discovery stays behind `FontLocator`:
 
-- macOS uses CoreText fallback and font URLs;
+- macOS uses CoreText fallback and font URLs. When CoreText's face cannot be
+  opened or does not cover a character, a generic list takes over: Menlo, the
+  system cascade for the user's languages, Apple Symbols, and Hiragino Sans GB,
+  Songti SC and Arial Unicode MS for simplified Chinese. CoreText's Chinese face
+  on macOS 15, PingFang, is an `hvgl` collection that FreeType opens through HVF
+  only on macOS 15.4 and later; below that it fails to open and those families
+  serve Chinese;
 - Windows uses DirectWrite/GDI descriptors and raw font extraction;
 - other Unix systems use Fontconfig and restrict candidates to monospaced,
   dual-width, or character-cell faces.
@@ -425,10 +431,11 @@ rectangle is used by GPU and Windows software presentation.
 
 Ordinary fonts stream from disk: a FreeType face opens on a callback stream that
 reads only the frames FreeType asks for, and a HarfBuzz blob reads the file
-into its own buffer. A font face whose table directory lists an `SVG ` or `COLR`
-table is different, because FreeType extracts those tables (and `CPAL`) whole and
-keeps them for the face's life; on a callback stream every face held its own
-copy, 18.55 MiB of `SVG ` for a colour emoji font. Such a file is read once,
+into its own buffer. A font face whose table directory lists an `SVG `, `COLR`
+or `hvgl` table is different, because FreeType extracts those tables (and
+`CPAL`) whole and keeps them for the face's life; on a callback stream every face
+held its own copy, 18.55 MiB of `SVG ` for a colour emoji font, and 58.7 MB of
+`hvgl` for each of the 32 faces of Apple's `PingFangUI.ttc`. Such a file is read once,
 whole, into one shared, immutable heap buffer per file generation (canonical
 path, length, modification time and, on Unix, device and inode; Windows uses
 path, length and modification time). Every FreeType face on it opens as a memory
@@ -439,12 +446,12 @@ file is replaced or deleted on disk afterwards.
 
 The decision is made per face from a bounded read of the sfnt table directory
 (the `ttcf` header and the requested face's offset for a collection, then at most
-256 table records). A malformed or unreadable directory counts as no colour
-table and keeps the callback stream. The cache holds only weak references: the
+256 table records). A malformed or unreadable directory counts as none of those
+tables and keeps the callback stream. The cache holds only weak references: the
 buffer is freed when the last face and blob using it close, and a file changed on
 disk is a new generation with a fresh buffer. Faces themselves are not shared.
 Ordinary fonts are not shared because holding every font file whole, a 75 MiB CJK
-`.ttc` included, cost more memory than the colour tables it saved.
+`.ttc` included, cost more memory than the whole-kept tables it saved.
 
 ### Native source versions and configuration
 
@@ -462,8 +469,20 @@ this inventory does not pin Cairo or imply a self-contained macOS bundle.
 FreeType configuration is generated outside the vendored tree. It enables error
 strings, external zlib, PNG glyphs, long PCF family names, subpixel rendering,
 and the supported boolean subpixel-hinting option. Upstream defaults stay in
-effect for the other options; the experimental HVF driver is compiled as
-upstream's disabled stub, which rejects every face. Missing, repeated, or
+effect for the other options. FreeType's HVF driver renders `hvgl` fonts such
+as PingFang through Apple's `libhvf`, so it is macOS-only. On a macOS target
+whose SDK (`SDKROOT`, else `xcrun --sdk macosx --show-sdk-path`) ships
+`usr/include/hvf/Scaler.h` and `usr/lib/libhvf.tbd`, the build enables
+`FT_CONFIG_OPTION_HVF`, defines `HVF_RUNTIME_AVAILABLE`, and links the system
+`libhvf`. The driver calls it only behind `__builtin_available(macOS 15.4, *)`,
+and the deployment target is 15.0, so the library is a weak dylib: on macOS 15.0
+to 15.3 the app launches and `hvgl` faces fail to open. The build stops when HVF
+is available but `MACOSX_DEPLOYMENT_TARGET` is unset or at least 15.4, because
+the check would fold away and the load would become strong. An SDK without the
+header keeps upstream's disabled stub, which rejects every face, with a Cargo
+warning; `SONICTERM_REQUIRE_HVF=1`, set in the macOS CI and release jobs, makes
+that a build failure and makes the PingFang render test fail instead of skipping.
+Linux and Windows always compile the stub. Missing, repeated, or
 unexpectedly valued definitions fail the build; a C compilation probe also
 checks that preprocessing leaves each option enabled. The removed historical
 numeric hinting transformation is not restored. Cargo watches the native source
@@ -1099,7 +1118,7 @@ The adapted WezTerm implementation is attributed in
 | Renderer font adapter | `crates/sonicterm-engine/src/fontstack.rs` |
 | Discovery and matching | `crates/sonicterm-font/src/db.rs`, `crates/sonicterm-font/src/locator/` |
 | HarfBuzz shaping | `crates/sonicterm-font/src/shaper/harfbuzz.rs` |
-| Shared colour font buffers | `crates/sonicterm-font/src/font_bytes.rs` |
+| Shared colour and `hvgl` font buffers | `crates/sonicterm-font/src/font_bytes.rs` |
 | Rasterization and native wrappers | `crates/sonicterm-font/src/rasterizer/`, `crates/sonicterm-font/src/{ftwrap,hbwrap,fcwrap}.rs` |
 | CPU atlas and row cache | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache,shape}.rs` |
 | Atlas upload and image atlas | `crates/sonicterm-gpu/src/{core,atlas_upload}.rs` |

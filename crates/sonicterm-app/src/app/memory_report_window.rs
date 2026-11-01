@@ -867,6 +867,7 @@ fn report_window_state(
         pending_receipts: Vec::new(),
         role,
         custom_window_name: title,
+        native_title: Default::default(),
         window,
         renderer,
         tabs,

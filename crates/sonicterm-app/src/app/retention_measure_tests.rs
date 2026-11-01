@@ -20,12 +20,14 @@ fn measured_inline_media_mixed_transitions_update_existing_charges() {
                 .iter()
                 .enumerate()
                 .map(|(index, size)| sonicterm_render_model::InlineImage {
+                    scroll_mark: 0,
                     id: index as u64,
                     row: 0,
                     col: 0,
                     width: (*size / 4) as u32,
                     height: 1,
                     bgra: Arc::from(vec![0; *size]),
+                    kitty: None,
                 })
                 .collect();
         }
@@ -779,7 +781,7 @@ fn a_slow_capture_survives_the_wakes_inside_one_interval() {
     // An APC introducer with payload and no terminator: a transfer still in
     // flight. Nothing here says whether it is slow or dead.
     let mut chunk = Vec::with_capacity(512 * 1024 + 3);
-    chunk.extend_from_slice(b"\x1b_G");
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
     chunk.resize(512 * 1024, b'A');
     {
         let pane = seeded_pane(&app, window, pane_id);

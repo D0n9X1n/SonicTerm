@@ -178,7 +178,10 @@ fn an_ordinary_font_streams_from_disk_and_leaves_no_cache_entry() {
     assert!(has_read, "an ordinary font must keep the callback stream");
     let _blob = crate::hbwrap::Blob::from_source(&handle.source, 0).unwrap();
     assert!(!test_has_slot(&key), "an ordinary font must not enter the shared cache");
-    assert!(matches!(pin_colour_face(&handle.source, 0), Cow::Borrowed(FontDataSource::OnDisk(_))));
+    assert!(matches!(
+        pin_whole_table_face(&handle.source, 0),
+        Cow::Borrowed(FontDataSource::OnDisk(_))
+    ));
 }
 
 /// Builds a single-face sfnt offset table at `face_offset` listing `tags`, with zeroed records.
@@ -219,9 +222,8 @@ fn a_malformed_directory_counts_as_no_colour_table() {
     let colr = sfnt_directory(&[b"cmap", b"COLR", b"glyf"]);
     let svg = sfnt_directory(&[b"SVG ", b"head"]);
     let plain = sfnt_directory(&[b"cmap", b"glyf", b"head"]);
-    let scan = |bytes: &[u8], index| {
-        face_lists_whole_colour_table(&mut std::io::Cursor::new(bytes), index)
-    };
+    let scan =
+        |bytes: &[u8], index| face_lists_whole_kept_table(&mut std::io::Cursor::new(bytes), index);
     assert!(scan(&colr, 0));
     assert!(scan(&svg, 0));
     assert!(!scan(&plain, 0));
@@ -239,7 +241,7 @@ fn a_malformed_directory_counts_as_no_colour_table() {
     let truncated = TempFont::new();
     std::fs::write(&truncated.0, &colr[..20]).unwrap();
     assert!(matches!(
-        pin_colour_face(&truncated.handle().source, 0),
+        pin_whole_table_face(&truncated.handle().source, 0),
         Cow::Borrowed(FontDataSource::OnDisk(_))
     ));
     assert!(!test_has_slot(&test_key(&truncated.0)), "a malformed file is never read whole");
@@ -251,9 +253,8 @@ fn a_malformed_directory_counts_as_no_colour_table() {
 #[test]
 fn a_collection_face_index_selects_its_own_directory() {
     let bytes = collection(&[&[b"cmap", b"glyf"], &[b"cmap", b"COLR", b"CPAL"]]);
-    let scan = |bytes: &[u8], index| {
-        face_lists_whole_colour_table(&mut std::io::Cursor::new(bytes), index)
-    };
+    let scan =
+        |bytes: &[u8], index| face_lists_whole_kept_table(&mut std::io::Cursor::new(bytes), index);
     assert!(!scan(&bytes, 0), "face 0 lists no colour table");
     assert!(scan(&bytes, 1), "face 1 lists COLR");
     assert!(!scan(&bytes, 2), "the collection has two faces");
@@ -262,11 +263,11 @@ fn a_collection_face_index_selects_its_own_directory() {
     let font = TempFont::new();
     std::fs::write(&font.0, &bytes).unwrap();
     let source = font.handle().source;
-    assert!(matches!(pin_colour_face(&source, 0), Cow::Borrowed(_)), "face 0 streams");
-    assert!(matches!(pin_colour_face(&source, 1), Cow::Owned(FontDataSource::Memory { .. })));
+    assert!(matches!(pin_whole_table_face(&source, 0), Cow::Borrowed(_)), "face 0 streams");
+    assert!(matches!(pin_whole_table_face(&source, 1), Cow::Owned(FontDataSource::Memory { .. })));
     assert!(
         matches!(
-            pin_colour_face(&source, 1 | (3 << 16)),
+            pin_whole_table_face(&source, 1 | (3 << 16)),
             Cow::Owned(FontDataSource::Memory { .. })
         ),
         "named-instance bits do not change the face"
@@ -324,4 +325,22 @@ fn a_file_that_grows_past_the_limit_during_the_read_is_too_large() {
         "{error:#}"
     );
     assert!(!test_is_live(&test_key(&font.0)));
+}
+
+/// Contract: a face listing `hvgl` opens on the shared buffer like a colour face, because FreeType's
+/// HVF driver extracts that table whole and keeps it for the face's life; on a callback stream every
+/// face of a 32-face collection would copy the same 58.7 MB table. A face without it still streams.
+#[test]
+fn an_hvgl_face_is_shared_like_a_colour_face() {
+    let bytes = collection(&[&[b"cmap", b"glyf"], &[b"cmap", b"hvgl", b"hvpm"]]);
+    let scan =
+        |bytes: &[u8], index| face_lists_whole_kept_table(&mut std::io::Cursor::new(bytes), index);
+    assert!(!scan(&bytes, 0), "face 0 lists no whole-kept table");
+    assert!(scan(&bytes, 1), "face 1 lists hvgl");
+
+    let font = TempFont::new();
+    std::fs::write(&font.0, &bytes).unwrap();
+    let source = font.handle().source;
+    assert!(matches!(pin_whole_table_face(&source, 0), Cow::Borrowed(_)), "face 0 streams");
+    assert!(matches!(pin_whole_table_face(&source, 1), Cow::Owned(FontDataSource::Memory { .. })));
 }

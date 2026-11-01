@@ -36,6 +36,19 @@ settlement 达到四秒上限后记录截尾样本 `>4000.000`，每条汇总写
 测试不因耗时而失败，只因设置或观察失败而失败。close 本身不返回时，由隔离子进程期限终止运行并
 保留最后阶段，不会声称已得到完整样本。原生场景设置成功不代表历史 teardown 卡顿已复现。
 
+## 原生剪贴板验收
+
+Windows 原生剪贴板测试在按完整测试名启动的子进程中使用独立的窗口站和桌面，
+通过配置中的粘贴动作检查原生文件列表进入真实 PTY 的提交，不接触交互桌面的剪贴板。
+
+macOS 的 `macos-clipboard-paste` 单独执行一个被忽略的测试，不与 workspace 测试并行。
+它使用通用粘贴板，因此要求 GitHub 托管的 Actions runner（`GITHUB_ACTIONS=true` 且
+`RUNNER_ENVIRONMENT=github-hosted`），或通过 `SONICTERM_NATIVE_CLIPBOARD_TEST=1`
+明确允许本地运行。两种条件都不满足时，测试会在访问原生剪贴板之前失败，不能把未执行
+原生检查当作通过。本地允许运行会覆盖剪贴板内容，请先保存仍需保留的内容。
+按完整测试名启动的子进程期限为 60 秒；gate 的 900 秒预算还包含编译。
+`NATIVE_PASTEBOARD EXERCISED` 表示原生断言已运行，而不只是测试二进制编译成功。
+
 ## 步骤选择与进程组
 
 runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with-release` 加入当前主机的
@@ -81,8 +94,11 @@ Windows 策略默认为严格模式：混合测试、doctest、workspace 脚本�
 步骤时运行退出码为 0，但只要发生清理，总 verdict 仍为 `CLEANED_NOT_NATURAL`。
 混合冷构建步骤仍可能失败，不使用进程名豁免改变这一边界。
 
-Windows 上，`pty-close-baseline` 和 `windows-warp-allocator` 先在 `--` 前插入
-`--no-run`，编译原命令选中的测试。`pty-feasibility` 先构建证据示例但不运行它。
+Windows 上，`pty-close-baseline`、`windows-warp-allocator`、`perf-scenarios-tests`、
+`perf-scenarios-counters-tests`、`perf-scenarios-frame-texture-tests` 和
+`perf-scenarios-echo-trace-tests` 先在 `--` 前插入 `--no-run`（没有 `--` 时追加到末尾），
+编译原命令选中的测试，保留原有 feature 参数。Harness-API 测试步骤仍走单独的目标级编译路径，
+不使用这种推导。`pty-feasibility` 先构建证据示例但不运行它。
 `workspace-crates` 按顺序准备固定版本 winit 的测试、文档和 workspace 测试。
 每个准备阶段使用独立的自有 job，允许编译清理；之后原步骤命令不变，在新的严格模式 job 中执行。
 Cargo 仍自行选择测试并提供运行环境。准备成功不证明 Cargo 会复用缓存。
@@ -110,7 +126,7 @@ Cargo 仍自行选择测试并提供运行环境。准备成功不证明 Cargo �
 持续排空超出部分，并因溢出而失败。控制台仍只显示步骤进度和日志尾部。
 `native-smoke-runner.py` 及 CI/Release 的直接调用保留既有行为，本地进程约束策略不适用于这些调用。
 Windows 进程约束回归测试通过 `local-gate_tests.py` 运行，该测试组包含清理在内的预算为 60 秒；
-完整本地 supply-chain 步骤仍保留 120 秒预算。
+完整本地 supply-chain 步骤使用 300 秒预算。
 
 每步日志、`summary.txt` 与 `summary.json` 写入新的临时目录或 `--log-dir`，后者不能是仓库根目录或
 其祖先目录（退出码 2）；任一步骤失败时退出码非零。步骤日志保留每个步骤输出的原始字节；控制台无法编码的

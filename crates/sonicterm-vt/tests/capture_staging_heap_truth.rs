@@ -81,9 +81,11 @@ const SLACK_BYTES: usize = 2 * 1024 * 1024;
 /// The stalled-transfer shape: the capture opens, bytes accumulate, and the
 /// terminator never arrives, so nothing releases the buffer.
 fn stalled_capture_chunk(payload_len: usize) -> Vec<u8> {
-    let mut chunk = Vec::with_capacity(payload_len + 3);
-    chunk.extend_from_slice(b"\x1b_G");
-    chunk.resize(payload_len + 3, b'A');
+    // The control section ends at `;`: only an image payload reserves staging, and exactly
+    // `payload_len` bytes follow it, so a cap-sized payload fills its capture without passing it.
+    let mut chunk = Vec::with_capacity(payload_len + 10);
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
+    chunk.resize(chunk.len() + payload_len, b'A');
     chunk
 }
 
@@ -163,14 +165,16 @@ fn real_heap_stops_below_the_process_ceiling_at_many_panes() {
     }
     let truth = held().saturating_sub(before);
 
-    // Every parser must still be mid-capture, or a small total would be small
-    // for the wrong reason.
+    // Every parser must still be mid-sequence, or a small total would be small
+    // for the wrong reason. A kitty payload the pools cannot hold whole is
+    // refused and its staging released at once, so only the admitted ones are
+    // still counted by the shared pool, and at least one must be.
     let live: usize = parsers.iter().map(Parser::live_capture_count).sum();
-    assert_eq!(live, PANES, "precondition: every pane must still hold its capture");
-    assert_eq!(
-        CaptureStagingPool::process_default().live_captures(),
-        PANES,
-        "default parsers must all stage in the one process-default pool"
+    assert_eq!(live, PANES, "precondition: every pane must still be inside its sequence");
+    let pooled = CaptureStagingPool::process_default().live_captures();
+    assert!(
+        (1..=PANES).contains(&pooled),
+        "default parsers must stage in the one process-default pool; it counts {pooled}"
     );
 
     assert!(
@@ -320,7 +324,7 @@ fn interleaved_captures_hold_the_ceiling() {
 
     let before = held();
     for parser in parsers.iter_mut() {
-        parser.advance(b"\x1b_G");
+        parser.advance(b"\x1b_Gf=100;");
     }
     for _ in 0..(MAX_MEDIA_PAYLOAD_BYTES / BLOCK) {
         for parser in parsers.iter_mut() {
@@ -406,7 +410,7 @@ fn every_guaranteed_pane_completes_an_ordinary_image() {
     let mut parsers: Vec<Parser> =
         (0..guaranteed).map(|_| Parser::new(Grid::new(80, 24))).collect();
     for parser in parsers.iter_mut() {
-        parser.advance(b"\x1b_G");
+        parser.advance(b"\x1b_Gf=100;");
     }
     let live: usize = parsers.iter().map(Parser::live_capture_count).sum();
     assert_eq!(live, guaranteed, "precondition: every capture is open at once");
@@ -447,7 +451,7 @@ fn a_refused_capture_dispatches_no_broken_picture() {
     let mut holders: Vec<Parser> =
         (0..GUARANTEED_CONCURRENT_CAPTURES).map(|_| Parser::new(Grid::new(80, 24))).collect();
     for parser in holders.iter_mut() {
-        parser.advance(b"\x1b_G");
+        parser.advance(b"\x1b_Gf=100;");
     }
 
     // One more pane than the pools can guarantee.

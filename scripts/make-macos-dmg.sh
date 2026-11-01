@@ -10,7 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="${SONICTERM_PACKAGE_DIR:-$ROOT/dist}"
 APP="$DIST/SonicTerm.app"
 MODE="${4:-}"
-MAX_MINIMUM="${SONICTERM_MAX_MACOS_MINIMUM:-14.0}"
+MAX_MINIMUM="${SONICTERM_MAX_MACOS_MINIMUM:-15.0}"
 if [ -n "$MODE" ] && [ "$MODE" != "--bundle-only" ]; then
     printf 'unsupported packaging mode: %s\n' "$MODE" >&2
     exit 2
@@ -82,7 +82,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
             </array>
         </dict>
     </array>
-    <key>LSMinimumSystemVersion</key>   <string>14.0</string>
+    <key>LSMinimumSystemVersion</key>   <string>15.0</string>
     <key>ATSApplicationFontsPath</key>  <string>assets/fonts</string>
     <key>NSHighResolutionCapable</key>  <true/>
     <key>NSPrincipalClass</key>         <string>NSApplication</string>

@@ -115,7 +115,7 @@ def _successful_executor(soak_result: dict):
 def _collect(
     output: Path,
     *,
-    runner_label: str = "macos-14",
+    runner_label: str = "macos-15",
     platform_facts: dict | None = None,
     soak_result: dict | None = None,
     executor=None,
@@ -162,7 +162,7 @@ class SchemaContractTests(unittest.TestCase):
     def test_only_expected_runner_labels_are_supported(self):
         self.assertEqual(
             evidence.RUNNER_LABELS,
-            ("macos-14", "windows-latest"),
+            ("macos-15", "windows-latest"),
         )
 
 
@@ -194,13 +194,13 @@ class EnvironmentProvenanceTests(unittest.TestCase):
 
 class PlatformClassificationTests(unittest.TestCase):
     def test_macos_label_requires_a_real_macos_runtime(self):
-        profile = evidence.classify_platform("macos-14", _macos_facts())
+        profile = evidence.classify_platform("macos-15", _macos_facts())
         self.assertEqual(profile["family"], "macos")
         self.assertEqual(profile["lane"], "macos")
         self.assertIsNone(profile["windows_build"])
 
         with self.assertRaises(evidence.EvidenceError):
-            evidence.classify_platform("macos-14", _windows_facts(20348))
+            evidence.classify_platform("macos-15", _windows_facts(20348))
 
     def test_retired_runner_labels_are_rejected(self):
         with self.assertRaises(evidence.EvidenceError):
@@ -240,7 +240,7 @@ class CommandContractTests(unittest.TestCase):
                     self.assertEqual(len(re.findall(r"(?m)^fn " + re.escape(name) + r"\(", body)), 1)
 
     def test_macos_runs_exact_real_pty_cleanup_and_harness_commands(self):
-        profile = evidence.classify_platform("macos-14", _macos_facts())
+        profile = evidence.classify_platform("macos-15", _macos_facts())
         specs = evidence.command_specs(profile, "python3")
         self.assertEqual(
             [(spec.name, spec.argv) for spec in specs],
@@ -314,7 +314,7 @@ class CommandContractTests(unittest.TestCase):
 
 class FocusedTestValidationTests(unittest.TestCase):
     def setUp(self):
-        profile = evidence.classify_platform("macos-14", _macos_facts())
+        profile = evidence.classify_platform("macos-15", _macos_facts())
         self.spec = evidence.command_specs(profile, "python3")[0]
 
     def test_exact_expected_test_and_single_pass_summary_are_required(self):
@@ -389,7 +389,7 @@ class FocusedTestValidationTests(unittest.TestCase):
 
 class LiveResultValidationTests(unittest.TestCase):
     def test_macos_requires_each_real_signal_and_rejects_private_bytes_claim(self):
-        profile = evidence.classify_platform("macos-14", _macos_facts())
+        profile = evidence.classify_platform("macos-15", _macos_facts())
         capabilities = {
             "rss_bytes": True,
             "private_bytes": False,
@@ -437,7 +437,7 @@ class LiveResultValidationTests(unittest.TestCase):
                 )
 
     def test_synthetic_or_failed_result_is_rejected(self):
-        profile = evidence.classify_platform("macos-14", _macos_facts())
+        profile = evidence.classify_platform("macos-15", _macos_facts())
         result = _live_soak(
             {
                 "rss_bytes": True,
@@ -456,7 +456,7 @@ class LiveResultValidationTests(unittest.TestCase):
         self.assertIn("soak result status must be ok", errors)
 
     def test_malformed_result_returns_validation_errors(self):
-        profile = evidence.classify_platform("macos-14", _macos_facts())
+        profile = evidence.classify_platform("macos-15", _macos_facts())
         errors = evidence.validate_live_result(profile, {"schema_version": "unknown"})
         self.assertIn("soak schema must be soak-harness/1", errors)
         self.assertTrue(any("capabilities" in error for error in errors))
@@ -555,7 +555,7 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(document["claim_scope"], "baseline-capture-capability")
             provenance = document["provenance"]
             self.assertEqual(provenance["source_sha"], "a" * 40)
-            self.assertEqual(provenance["runner_label"], "macos-14")
+            self.assertEqual(provenance["runner_label"], "macos-15")
             self.assertEqual(provenance["github_run_id"], "12345")
             self.assertEqual(provenance["github_run_attempt"], "2")
             self.assertEqual(provenance["github_job"], "unit-tests")
@@ -647,7 +647,7 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual((output / "pty-child-exit.stdout.log").read_bytes(), b"partial\n")
             self.assertEqual((output / "pty-child-exit.stderr.log").read_bytes(), b"failed\n")
             macos_specs = evidence.command_specs(
-                evidence.classify_platform("macos-14", _macos_facts()),
+                evidence.classify_platform("macos-15", _macos_facts()),
                 "python3",
             )
             self.assertEqual(
@@ -767,7 +767,7 @@ class CliContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "evidence"
             code = evidence.main(
-                ["--runner-label", "macos-14", "--output-dir", str(output)],
+                ["--runner-label", "macos-15", "--output-dir", str(output)],
                 repo_root=_HERE.parent,
                 source_sha="a" * 40,
                 environ={
@@ -806,7 +806,7 @@ class CliContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "evidence"
             code = evidence.main(
-                ["--runner-label", "macos-14", "--output-dir", str(output)],
+                ["--runner-label", "macos-15", "--output-dir", str(output)],
                 repo_root=_HERE.parent,
                 source_sha="a" * 40,
                 environ={

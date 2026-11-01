@@ -501,7 +501,7 @@ def main() -> None:
     source.add_argument("--app", type=Path)
     source.add_argument("--dmg", type=Path)
     parser.add_argument("--state-dir", type=Path, required=True)
-    parser.add_argument("--max-minimum-macos", default="14.0")
+    parser.add_argument("--max-minimum-macos", default="15.0")
     args = parser.parse_args()
     state = args.state_dir.resolve()
     state.mkdir(parents=True, exist_ok=False)

@@ -358,12 +358,14 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
             decoder_unlocked = Some(parser.try_lock().is_some());
             assert_eq!(media.protocol, MediaProtocol::Kitty);
             Some(InlineImage {
+                scroll_mark: 0,
                 id: 1,
                 row: media.row,
                 col: media.col,
                 width: 1,
                 height: 1,
                 bgra: Arc::from([1, 2, 3, 255]),
+                kitty: None,
             })
         },
         |event| emitted.push(event),

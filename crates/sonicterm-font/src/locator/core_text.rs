@@ -65,6 +65,12 @@ fn descriptor_from_attr(attr: &FontAttributes) -> anyhow::Result<CFArray<CTFontD
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Font files parsed for fallback on this thread, in order, so a test can find repeats.
+    static FILES_PARSED: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Given a descriptor, return a handle that can be used to open it.
 /// The descriptor may not refer to an on-disk font and thus may
 /// not have a path.
@@ -75,6 +81,8 @@ fn handles_from_descriptor(descriptor: &CTFontDescriptor) -> Vec<ParsedFont> {
     let mut result = vec![];
     if let Some(path) = descriptor.font_path() {
         // When: `descriptor.font_path()` is `Some`, parse every face in that file or collection.
+        #[cfg(test)]
+        FILES_PARSED.with(|parsed| parsed.borrow_mut().push(path.clone()));
         let source = FontDataSource::OnDisk(path);
         let _ =
             crate::parser::parse_and_collect_font_info(&source, &mut result, FontOrigin::CoreText);
@@ -318,31 +326,46 @@ fn build_fallback_list_impl() -> anyhow::Result<Vec<ParsedFont>> {
     let mut fonts = vec![];
     // Explicitly include Menlo itself, as it appears to be the only
     // font on macOS that contains U+2718.
-    fonts.append(&mut handles_from_descriptor(&menlo.copy_descriptor()));
+    // The cascade names one collection once per face it lists (PingFang eight times), and the
+    // named families below can name a file the cascade already listed. Each parse opens every face
+    // in the file, so each file is parsed once.
+    let mut parsed_files = HashSet::new();
+    let mut parse_once = |descriptor: &CTFontDescriptor, fonts: &mut Vec<ParsedFont>| {
+        if descriptor.font_path().is_some_and(|path| !parsed_files.insert(path)) {
+            // When: font_path names a file in parsed_files, its faces are already in `fonts`.
+            return;
+        }
+        fonts.append(&mut handles_from_descriptor(descriptor));
+    };
+    parse_once(&menlo.copy_descriptor(), &mut fonts);
     for descriptor in &cascade {
-        fonts.append(&mut handles_from_descriptor(&descriptor));
+        parse_once(&descriptor, &mut fonts);
     }
     // Some of the fallback fonts are special fonts that don't exist on
     // disk, and that we can't open.
     // In particular, `.AppleSymbolsFB` is one such font.  Let's try
     // a nearby approximation.
-    let symbols = FontAttributes {
-        family: "Apple Symbols".to_string(),
-        weight: FontWeight::REGULAR,
-        stretch: FontStretch::Normal,
-        style: FontStyle::Normal,
-        is_fallback: true,
-        is_synthetic: true,
-        harfbuzz_features: None,
-        freetype_load_target: None,
-        freetype_render_target: None,
-        freetype_load_flags: None,
-        scale: None,
-        assume_emoji_presentation: None,
-    };
-    if let Ok(descriptors) = descriptor_from_attr(&symbols) {
-        for descriptor in descriptors.iter() {
-            fonts.append(&mut handles_from_descriptor(&descriptor));
+    // Simplified Chinese families follow: the cascade's Chinese face (PingFang) is an `hvgl`
+    // collection FreeType opens only through HVF on macOS 15.4+, so below that they serve Chinese.
+    for family in ["Apple Symbols", "Hiragino Sans GB", "Songti SC", "Arial Unicode MS"] {
+        let attributes = FontAttributes {
+            family: family.to_string(),
+            weight: FontWeight::REGULAR,
+            stretch: FontStretch::Normal,
+            style: FontStyle::Normal,
+            is_fallback: true,
+            is_synthetic: true,
+            harfbuzz_features: None,
+            freetype_load_target: None,
+            freetype_render_target: None,
+            freetype_load_flags: None,
+            scale: None,
+            assume_emoji_presentation: None,
+        };
+        if let Ok(descriptors) = descriptor_from_attr(&attributes) {
+            for descriptor in descriptors.iter() {
+                parse_once(&descriptor, &mut fonts);
+            }
         }
     }
 

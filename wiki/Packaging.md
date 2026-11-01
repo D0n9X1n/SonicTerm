@@ -36,13 +36,30 @@ Every package includes the pinned, statically linked winit dependency's
 ### Requirements and command
 
 Build and package on the target macOS architecture, on the same host whose
-Homebrew libraries linked the executable. The bundle's minimum macOS version is
-the maximum of 14.0 and the deployment targets of its executable and every
-bundled dylib. Official Apple Silicon packages support macOS 14+, and Intel
-packages support macOS 15+; CI enforces those explicit ceilings and refuses newer
-dependency floors. Check `LSMinimumSystemVersion` and
+Homebrew libraries linked the executable. `.cargo/config.toml` sets
+`MACOSX_DEPLOYMENT_TARGET = "15.0"` for rustc and every `cc`-built C library on
+macOS builds. The bundle's minimum macOS version is the maximum of 15.0 and the
+deployment targets of its executable and every bundled dylib. Official Apple
+Silicon and Intel packages both support macOS 15+; CI enforces that explicit
+ceiling and refuses newer dependency floors. The packaged executable loads the
+system `/usr/lib/libhvf.dylib`, which FreeType uses for PingFang, as a weak
+dylib, so macOS 15.0 to 15.3, which lack its renderer, still launch;
+`scripts/check-macos-weak-hvf.py` fails CI and release packaging when that load
+is strong or missing. Check `LSMinimumSystemVersion` and
 `Resources/native-libraries.json` for the artifact's actual requirement. Official
-release packages are assembled on their architecture-specific CI runners. Install Cairo/pkg-config
+release packages are assembled on their architecture-specific CI runners. The
+Apple Silicon CI and release jobs run `scripts/setup-macos-native.py` instead
+of `brew install cairo`, so the linked Cairo stays within the 15.0 floor whatever
+Homebrew's current bottles declare. It downloads the macOS 14 (`arm64_sonoma`) bottles of
+Cairo 1.18.4 and its runtime libraries pinned in
+`scripts/macos-native-bottles.json`, checks each download's size and SHA-256,
+and unpacks them into a private prefix under the runner's temporary directory,
+laid out like Homebrew's `Cellar/<formula>/<version>` and `opt/<formula>`. It
+never runs Homebrew, so no installed formula or its dependents change. It
+rewrites the bottles' Homebrew paths to the prefix, signs each rewritten dylib
+again, refuses any dylib whose minimum macOS is newer than 15.0 or that loads a
+library outside the prefix and the system, and points `PKG_CONFIG_PATH` at the
+prefix for the build. Install Cairo/pkg-config
 for the Rust build and `create-dmg` plus ImageMagick for packaging:
 
 ```bash
@@ -202,8 +219,8 @@ that an escaped helper cannot attach later.
 
 `SONICTERM_PACKAGE_DIR` chooses an isolated output directory. The optional fourth
 argument `--bundle-only` assembles and verifies the app without creating a DMG.
-`SONICTERM_MAX_MACOS_MINIMUM` defaults to `14.0`; use `15.0` for the official Intel
-policy. A local developer may explicitly choose a higher ceiling for experiments
+`SONICTERM_MAX_MACOS_MINIMUM` defaults to `15.0`, the official policy for both
+architectures. A local developer may explicitly choose a higher ceiling for experiments
 with newer Homebrew bottles, but that artifact is not a supported release. Pass
 the same ceiling to the validator with `--max-minimum-macos`; it never rewrites
 Mach-O deployment targets to pretend compatibility.
@@ -224,6 +241,7 @@ choco install wixtoolset --version 3.14.1.20250415 --no-progress -y
 
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
+python scripts/setup-windows-conpty.py --destination target/x86_64-pc-windows-msvc/release
 $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
     Where-Object name -eq sonicterm-windows | Select-Object -ExpandProperty version
 $numericVersion = ($version -split '[-+]')[0]
@@ -246,7 +264,8 @@ policy`. That warning means ICE validation did not run; it does not by itself
 change the MSI contents. The independent COM validator still checks the MSI
 Property, Component, Feature, FeatureComponents, and SummaryInformation data. It
 requires the numeric SemVer core as ProductVersion, stable UpgradeCode, nonempty
-ProductCode, `x64;1033` template, and the exact ten 64-bit `Binaries` components.
+ProductCode, `x64;1033` template, and the exact eleven 64-bit `Binaries` components,
+including `conpty_runtime`, whose key path is `conpty\conpty.dll`.
 Prerelease/build suffixes remain part of tag provenance but cannot enter MSI
 ProductVersion.
 
@@ -271,12 +290,27 @@ MSI installs this core layout under `Program Files\SonicTerm`:
 SonicTerm/
 ├── sonicterm-windows.exe
 ├── LICENSE-winit-Apache-2.0
+├── conpty/
+│   ├── conpty.dll
+│   ├── OpenConsole.exe
+│   ├── LICENSE
+│   └── NOTICE.md
 └── assets/
     ├── themes/*.toml
     ├── keymaps/*.toml
     ├── fonts/*.ttf
     └── icons/exports/{sonic.ico,sonic.icns}
 ```
+
+`scripts/setup-windows-conpty.py` stages `conpty.dll` and `OpenConsole.exe` from
+the Microsoft `Microsoft.Windows.Console.ConPTY` package that
+`scripts/windows-conpty.json` pins by URL, size and SHA-256, and `LICENSE` from the
+repository's `scripts/LICENSE-conpty`, whose size and SHA-256 the same manifest
+pins. It verifies the archive, each member and the license before writing, and
+refuses a partial or different `conpty` folder rather than overwriting it. The MSI
+takes `NOTICE.md` from `scripts/NOTICE-conpty.md`, and its validator pins that
+file's size and SHA-256. The runtime's selection rules are on
+[Terminal IO and VT](Terminal-IO-and-VT).
 
 It creates a Start-menu shortcut and sets the `INSTALLDESKTOPSHORTCUT` property
 to `1` by default. It registers SonicTerm ProgIDs, Default Apps capabilities, and

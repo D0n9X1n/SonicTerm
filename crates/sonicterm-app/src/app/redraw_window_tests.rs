@@ -45,12 +45,14 @@ pub(super) fn an_image_atlas_release_leaves_the_pane_media_charge_unchanged() {
     let (mut app, main) = idle_release_owner(now);
     let pane_id = *app.windows[&main].panes.keys().next().unwrap();
     let image = sonicterm_render_model::InlineImage {
+        scroll_mark: 0,
         id: 1,
         row: 0,
         col: 0,
         width: 32,
         height: 32,
         bgra: Arc::from(vec![0; 32 * 32 * 4]),
+        kitty: None,
     };
     assert!(app.__test_set_pane_inline_images(main, pane_id, vec![image]));
     app.reconcile_pane_owners();

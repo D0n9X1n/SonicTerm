@@ -73,6 +73,8 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      # A release FreeType without HVF cannot open PingFang; fail the build instead.
+      SONICTERM_REQUIRE_HVF: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -127,14 +129,15 @@ jobs:
 
       - name: Build, validate, and register x86_64 dmg
         env:
-          # Declared floor for Intel, asserted as a ceiling. It is 15.0 because
-          # the Intel runner is macOS 15; raising it is a policy decision, so a
+          # Declared floor for Intel, asserted as a ceiling. It is 15.0, the
+          # workspace deployment target; raising it is a policy decision, so a
           # bottle that pushes LC_BUILD_VERSION higher must fail rather than
           # silently narrow the supported host set.
           SONICTERM_MAX_MACOS_MINIMUM: "15.0"
         run: |
           bash scripts/make-macos-dmg.sh target/x86_64-apple-darwin/release/sonicterm-mac \
             "${{ github.ref_name }}" mac-x86_64
+          python3 scripts/check-macos-weak-hvf.py dist/SonicTerm.app/Contents/MacOS/sonicterm-mac
           python3 scripts/test-macos-package.py \
             --dmg "dist/SonicTerm-${{ github.ref_name }}-mac-x86_64.dmg" \
             --state-dir "$RUNNER_TEMP/sonicterm-release-package-x86_64" \
@@ -174,11 +177,13 @@ jobs:
 
   build-mac-aarch64:
     name: Build macOS aarch64 binary
-    runs-on: macos-14
+    runs-on: macos-15
     needs: [validate-release-tag]
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      # A release FreeType without HVF cannot open PingFang; fail the build instead.
+      SONICTERM_REQUIRE_HVF: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -187,8 +192,14 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-darwin
 
+      # The pinned macOS 14 Cairo bottles keep the Apple Silicon package within its declared 15.0 floor
+      # whatever Homebrew's current bottles declare.
       - name: Install native dependencies
-        run: brew install cairo pkg-config
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install pkg-config
+          python3 scripts/setup-macos-native.py --work-dir "$RUNNER_TEMP"
 
       - name: Build aarch64
         run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
@@ -235,15 +246,16 @@ jobs:
         env:
           # Declared floor for Apple Silicon, asserted as a ceiling: a bottle or
           # SDK that raises LC_BUILD_VERSION fails here instead of quietly
-          # shipping a build that excludes macOS 14 hosts.
-          SONICTERM_MAX_MACOS_MINIMUM: "14.0"
+          # shipping a build that excludes macOS 15.0 hosts.
+          SONICTERM_MAX_MACOS_MINIMUM: "15.0"
         run: |
           bash scripts/make-macos-dmg.sh target/aarch64-apple-darwin/release/sonicterm-mac \
             "${{ github.ref_name }}" mac-aarch64
+          python3 scripts/check-macos-weak-hvf.py dist/SonicTerm.app/Contents/MacOS/sonicterm-mac
           python3 scripts/test-macos-package.py \
             --dmg "dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg" \
             --state-dir "$RUNNER_TEMP/sonicterm-release-package-aarch64" \
-            --max-minimum-macos "14.0"
+            --max-minimum-macos "15.0"
           python3 scripts/prepare-release-assets.py fragment \
             --tag "${{ github.ref_name }}" \
             --asset "dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg" \
@@ -279,7 +291,7 @@ jobs:
 
   package-mac:
     name: Package macOS dmg
-    runs-on: macos-14
+    runs-on: macos-15
     needs: [build-mac-x86_64, build-mac-aarch64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -370,7 +382,13 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 
+      - name: Stage pinned Windows console runtime
+        run: python scripts/setup-windows-conpty.py --destination target/x86_64-pc-windows-msvc/release
+
       - name: Require Windows native runtime smoke
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
+          RUST_LOG: warn,sonicterm_io::conpty_runtime=info
         shell: pwsh
         run: |
           python scripts/native-smoke-runner.py `
@@ -379,7 +397,13 @@ jobs:
             --log-file "$env:RUNNER_TEMP\sonicterm-release-windows-smoke.log" `
             -- ./target/x86_64-pc-windows-msvc/release/sonicterm-windows.exe --runtime-smoke
 
+      - name: Verify packaged Windows console runtime
+        shell: pwsh
+        run: python scripts/verify-windows-conpty.py --runtime-dir target/x86_64-pc-windows-msvc/release/conpty --logs "$env:RUNNER_TEMP\sonicterm-release-windows-smoke\logs"
+
       - name: Require Windows GPU frame-validation smoke
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
         shell: pwsh
         run: |
           python scripts/native-smoke-runner.py `
@@ -389,6 +413,8 @@ jobs:
             -- ./target/x86_64-pc-windows-msvc/release/sonicterm-windows.exe --runtime-smoke
 
       - name: Require Windows GPU device-recovery smoke
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
         shell: pwsh
         run: |
           python scripts/native-smoke-runner.py `

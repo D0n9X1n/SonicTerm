@@ -35,6 +35,12 @@ pub use staging::{
 /// followed by the crate's release version, which the workspace sets.
 pub const SONIC_VERSION: &str = concat!("SonicTerm ", env!("CARGO_PKG_VERSION"));
 
+/// The XTVERSION reply text: `kitty` followed by [`SONIC_VERSION`].
+///
+/// Clients such as Claude Code send kitty graphics only when the reply is `kitty` or starts with
+/// `kitty `. The word names the graphics protocol SonicTerm answers; no kitty version is claimed.
+pub const XTVERSION_REPLY: &str = concat!("kitty SonicTerm ", env!("CARGO_PKG_VERSION"));
+
 /// Current DEC mouse tracking mode selected by the terminal application.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum MouseTracking {
@@ -192,7 +198,6 @@ struct MediaCapture {
     metadata: String,
     data: Vec<u8>,
     truncated: bool,
-    pending_esc: bool,
     /// Every byte offered to this capture, including those refused after the
     /// budget was reached.
     ///
@@ -240,6 +245,9 @@ pub struct MediaEvent {
     /// [`Parser::cancel_capture`] for why a fragment is worse than nothing —
     /// so a consumer never has to ask whether what it received is complete.
     pub data: Vec<u8>,
+    /// The grid's [`Grid::lines_scrolled`] when the sequence completed, so the host can move an
+    /// image anchored at `row` up with the text it was drawn beside as the screen scrolls.
+    pub scroll_mark: u64,
 }
 
 /// Command lifecycle events surfaced from OSC 133 shell-integration markers.
@@ -280,7 +288,10 @@ pub struct SyncState {
 pub struct Parser {
     inner: vte::Parser,
     performer: Performer,
-    apc_capture: Option<MediaCapture>,
+    /// The kitty APC in flight: its bounded control section and, for an image, its payload.
+    apc_scratch: Option<Box<vt_kitty_stream::ApcScratch>>,
+    /// Set when a kitty event needs the host's reply, ending the advance prefix after it.
+    kitty_yield: bool,
     pending_esc: bool,
     raw_osc: Option<RawOsc>,
     iterm2_metadata: [u8; MAX_ITERM2_METADATA_BYTES],
@@ -300,6 +311,9 @@ pub struct Parser {
     /// belong to the user rather than to the abandoned transfer.
     discard_exits_on_newline: bool,
     escape_family: EscapeFamily,
+    /// The cell size in pixels the host last reported, which sizes a kitty placement given without
+    /// `c` or `r`; `None` until the host reports one.
+    cell_px: Option<(f32, f32)>,
 }
 
 /// SonicTerm-side OSC capture for sequences that vte cannot retain under the
@@ -369,7 +383,8 @@ impl Parser {
         Self {
             inner: vte::Parser::new(),
             performer,
-            apc_capture: None,
+            apc_scratch: None,
+            kitty_yield: false,
             pending_esc: false,
             raw_osc: None,
             iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
@@ -379,6 +394,19 @@ impl Parser {
             discard_escape_pending_esc: false,
             discard_exits_on_newline: false,
             escape_family: EscapeFamily::Ground,
+            cell_px: None,
+        }
+    }
+
+    /// Tell the parser the pane's cell size in pixels, which sizes a kitty placement that gives no
+    /// `c` or `r` and so decides how far it moves the cursor. Non-positive sizes are ignored.
+    pub fn set_cell_pixel_size(&mut self, cell_width_px: f32, cell_height_px: f32) {
+        if cell_width_px.is_finite()
+            && cell_height_px.is_finite()
+            && cell_width_px > 0.0
+            && cell_height_px > 0.0
+        {
+            self.cell_px = Some((cell_width_px, cell_height_px));
         }
     }
 
@@ -587,6 +615,10 @@ struct Performer {
     dcs_capture: Option<MediaCapture>,
     /// Pool this parser's media captures stage in.
     staging_pool: Arc<CaptureStagingPool>,
+    /// A chunked kitty transfer spanning APCs, holding the parser's one staging reservation.
+    ///
+    /// Owned here rather than by the parser so the Sixel hook can end it before reserving.
+    kitty_transfer: Option<vt_kitty_stream::KittyTransfer>,
     /// Query selectors never retain terminal-controlled payload bytes.
     decrqss: Option<DecrqssRequest>,
     /// vte unhooks at ESC, before the following byte proves an ST terminator.
@@ -631,6 +663,16 @@ mod vt_performer;
 
 #[path = "vt_raw_osc.rs"]
 mod vt_raw_osc;
+
+#[path = "vt_kitty.rs"]
+mod vt_kitty;
+
+#[path = "vt_kitty_stream.rs"]
+mod vt_kitty_stream;
+
+#[path = "vt_kitty_cursor.rs"]
+mod vt_kitty_cursor;
+pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
 
 use vt_capture::parse_iterm2_file_event;
 pub use vt_osc::{parse_osc7_cwd, parse_osc7_cwd_snapshot};

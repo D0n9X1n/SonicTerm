@@ -1,0 +1,319 @@
+//! Pins the VT worker's kitty path end to end: Claude Code's chunked virtual PNG is stored for
+//! placeholders, its delete removes it, a failed decode is reported, and a query's reply precedes
+//! the replies of sequences after it.
+
+use std::sync::Arc;
+
+use base64::Engine;
+use sonicterm_render_model::KittyShow;
+
+use super::super::spawn_pane_tests::pane_and_worker_handles;
+use super::*;
+
+/// A small real PNG.
+fn png() -> Vec<u8> {
+    let mut encoded = Vec::new();
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        4,
+        2,
+        image::Rgba([9, 8, 7, 255]),
+    ))
+    .write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
+    .expect("encoding a PNG in memory cannot fail");
+    encoded
+}
+
+/// Run `bytes` through the production worker path, returning every reply it sent, in order.
+fn run(handles: &PaneVtHandles, bytes: &[u8]) -> Vec<u8> {
+    let mut sent = Vec::new();
+    process_pane_vt_batch_with(
+        handles,
+        bytes,
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        super::super::super::media::decode_inline_image,
+        |_| {},
+        Instant::now,
+        |reply| sent.extend(reply),
+    );
+    sent
+}
+
+/// Claude Code's transmit: the PNG chunked at `chunk` base64 characters, quiet, virtual.
+fn claude_code_transmit(image_id: u32, chunk: usize) -> Vec<u8> {
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    let pieces: Vec<&str> =
+        payload.as_bytes().chunks(chunk).map(|piece| std::str::from_utf8(piece).unwrap()).collect();
+    let mut stream = String::new();
+    for (index, piece) in pieces.iter().enumerate() {
+        let more = u8::from(index + 1 < pieces.len());
+        if index == 0 {
+            // When: index is 0, the first chunk carries the whole control section.
+            stream.push_str(&format!(
+                "\x1b_Ga=T,t=d,f=100,q=2,U=1,i={image_id},c=4,r=2,m={more};{piece}\x1b\\"
+            ));
+        } else {
+            stream.push_str(&format!("\x1b_Gm={more};{piece}\x1b\\"));
+        }
+    }
+    stream.into_bytes()
+}
+
+#[test]
+fn a_chunked_virtual_png_is_stored_for_placeholders_and_deleted() {
+    // The image is kept, tagged virtual with its box, not drawn at the cursor, and a=d,d=I frees it.
+    let (pane, handles) = pane_and_worker_handles();
+    let replies = run(&handles, &claude_code_transmit(77, 16));
+    assert!(replies.is_empty(), "q=2 sends nothing");
+    {
+        let images = pane.inline_images.lock();
+        assert_eq!(images.len(), 1);
+        let tag = images[0].kitty.expect("tagged");
+        assert_eq!((tag.image_id, tag.show), (77, KittyShow::Virtual { cols: 4, rows: 2 }));
+        assert!(!images[0].draws_at_anchor());
+        assert_eq!((images[0].width, images[0].height), (4, 2));
+    }
+    run(&handles, b"\x1b_Ga=d,d=I,i=77,q=2\x1b\\");
+    assert!(pane.inline_images.lock().is_empty());
+}
+
+#[test]
+fn a_query_is_answered_before_a_later_device_attributes_reply() {
+    // Claude Code's probe followed by DA: the kitty OK must arrive first.
+    let (_pane, handles) = pane_and_worker_handles();
+    let replies = run(&handles, b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c");
+    let text = String::from_utf8_lossy(&replies);
+    let ok = text.find("\x1b_Gi=31;OK\x1b\\").expect("the probe is answered OK");
+    let device_attributes = text.find("\x1b[?").expect("DA is answered");
+    assert!(ok < device_attributes, "replies out of order: {text:?}");
+}
+
+#[test]
+fn a_transmit_that_does_not_decode_is_reported() {
+    // A loud transmit of bytes that are not PNG stores nothing and replies with an error.
+    let (pane, handles) = pane_and_worker_handles();
+    let replies = run(&handles, b"\x1b_Ga=T,f=100,i=5;AAAA\x1b\\");
+    assert!(String::from_utf8_lossy(&replies).contains("i=5;EBADPNG"));
+    assert!(pane.inline_images.lock().is_empty());
+}
+
+#[test]
+fn a_loud_transmit_is_acknowledged_after_storing() {
+    // Without q, a successful transmit replies OK once the image is stored.
+    let (pane, handles) = pane_and_worker_handles();
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    let replies = run(&handles, format!("\x1b_Ga=t,f=100,i=6;{payload}\x1b\\").as_bytes());
+    assert_eq!(replies, b"\x1b_Gi=6;OK\x1b\\".to_vec());
+    assert_eq!(pane.inline_images.lock().len(), 1);
+}
+
+#[test]
+fn the_pane_charge_counts_kitty_pixels_once() {
+    // Two placements of one image charge the pane for one pixel buffer.
+    let (pane, handles) = pane_and_worker_handles();
+    run(&handles, &claude_code_transmit(8, 4096));
+    run(&handles, b"\x1b_Ga=p,U=1,i=8,p=2,q=2\x1b\\");
+    let images = pane.inline_images.lock();
+    assert_eq!(images.len(), 2);
+    assert!(Arc::ptr_eq(&images[0].bgra, &images[1].bgra), "placements share the buffer");
+    let retained = super::super::super::media::retained_inline_media(&images);
+    assert_eq!(retained.bytes, 4 * 2 * 4);
+}
+
+/// A kitty transmit with a second placement, then an anchored image, on one pane: the pool charge
+/// and `measure_pane` both report the pane's two pixel buffers once each, never the shared kitty
+/// buffer twice. The idle-pane pass trims the same store and leaves the charge equal to what
+/// remains.
+#[test]
+fn kitty_and_anchored_images_share_one_charge_measure_and_trim() {
+    let (pane, handles) = pane_and_worker_handles();
+    run(&handles, &claude_code_transmit(8, 4096));
+    run(&handles, b"\x1b_Ga=p,U=1,i=8,p=2,q=2\x1b\\");
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    run(&handles, format!("\x1b_Ga=T,f=100,i=9,q=2;{payload}\x1b\\").as_bytes());
+    let pool = Arc::clone(handles.inline_media_charge.lock().pool());
+    let expected = 2 * (4 * 2 * 4);
+    assert_eq!(pane.inline_images.lock().len(), 3, "two kitty placements and one anchored image");
+    assert_eq!(pool.bytes(), expected, "the charge counts each pixel buffer once");
+    let measured = super::super::super::retention::measure_pane(&pane).expect("uncontended");
+    assert_eq!(measured.inline_media.bytes, expected);
+    assert_eq!(measured.inline_media.items, 2);
+    let reclaimed = super::super::super::retention::trim_panes_over_pool_ceiling(&pool, [&pane]);
+    assert_eq!(reclaimed, 0, "under the ceiling, the idle pass leaves both buffers");
+    assert_eq!(
+        pool.bytes(),
+        super::super::super::media::retained_inline_media(&pane.inline_images.lock()).bytes
+    );
+}
+
+/// Over the process ceiling, the idle-pane pass trims a pane holding kitty placements and an
+/// anchored image as one store: whole pixel buffers go, oldest first, every placement of an evicted
+/// kitty image with it, the newest buffer stays, and the pane's charge falls by exactly what went.
+#[test]
+fn the_idle_pass_trims_mixed_kitty_and_anchored_media_over_the_ceiling() {
+    use super::super::super::media::{apply_kitty, KittyOp, MAX_SINGLE_INLINE_IMAGE_BYTES};
+    use sonicterm_vt::vt::KittyCommand;
+
+    let pool = crate::app::media::InlineMediaPool::new();
+    let pane_on = |pool: &Arc<crate::app::media::InlineMediaPool>| {
+        let parser = sonicterm_vt::vt::Parser::new_with_staging_pool(
+            sonicterm_grid::grid::Grid::new(80, 24),
+            None,
+            sonicterm_vt::vt::CaptureStagingPool::new(),
+        );
+        PaneState::new_with_media_pool(Arc::new(Mutex::new(parser)), None, pool)
+    };
+    // One full-size pixel buffer with a fresh id, as a decode produces.
+    let buffer = |id: u64| InlineImage {
+        scroll_mark: 0,
+        id,
+        row: 0,
+        col: 0,
+        width: 1024,
+        height: 1024,
+        bgra: Arc::from(vec![0u8; MAX_SINGLE_INLINE_IMAGE_BYTES]),
+        kitty: None,
+    };
+    // Merge one operation's result under the pane's charge, as the VT worker does.
+    let merge = |pane: &PaneState, operation: KittyOp| {
+        let evicted = {
+            let mut images = pane.inline_images.lock();
+            let (_, mut removed) = apply_kitty(&mut images, operation);
+            removed.extend(super::super::super::media::trim_inline_images_charged(
+                &mut images,
+                &pane.inline_media_charge,
+            ));
+            removed
+        };
+        drop(evicted);
+    };
+    let command = |control: &str| KittyCommand::parse(control.as_bytes()).expect("valid");
+
+    // The target pane: kitty image 8 with two placements, an anchored image, then kitty image 9.
+    let pane = pane_on(&pool);
+    let early: Vec<PaneState> = (0..3).map(|_| pane_on(&pool)).collect();
+    merge(&pane, KittyOp::Transmit(command("a=T,U=1,i=8,p=1"), buffer(1), None));
+    merge(&pane, KittyOp::Place(command("a=p,U=1,i=8,p=2"), 0, 0, 0));
+    {
+        let evicted = {
+            let mut images = pane.inline_images.lock();
+            images.push(buffer(2));
+            super::super::super::media::trim_inline_images_charged(
+                &mut images,
+                &pane.inline_media_charge,
+            )
+        };
+        drop(evicted);
+    }
+    merge(&pane, KittyOp::Transmit(command("a=T,U=1,i=9"), buffer(3), None));
+    assert_eq!(
+        pane.inline_images.lock().len(),
+        4,
+        "two placements of 8, the anchored image, and 9"
+    );
+
+    // Siblings push the pool past its ceiling, as the retention tests do.
+    let fill = |sibling: &PaneState, first_id: u64, count: u64| {
+        for id in first_id..first_id + count {
+            let evicted = {
+                let mut images = sibling.inline_images.lock();
+                images.push(buffer(id));
+                super::super::super::media::trim_inline_images_charged(
+                    &mut images,
+                    &sibling.inline_media_charge,
+                )
+            };
+            drop(evicted);
+        }
+    };
+    for (index, sibling) in early.iter().enumerate() {
+        fill(sibling, 1_000_000 + 1_000 * index as u64, 16);
+    }
+    let mut crowd = Vec::new();
+    while pool.bytes() <= super::super::super::media::MAX_PROCESS_INLINE_MEDIA_BYTES
+        && crowd.len() < 64
+    {
+        let late = pane_on(&pool);
+        fill(&late, 2_000_000 + 1_000 * crowd.len() as u64, 4);
+        crowd.push(late);
+    }
+    assert!(pool.bytes() > super::super::super::media::MAX_PROCESS_INLINE_MEDIA_BYTES);
+
+    let pool_before = pool.bytes();
+    let reclaimed = super::super::super::retention::trim_panes_over_pool_ceiling(&pool, [&pane]);
+    assert_eq!(reclaimed, 2 * MAX_SINGLE_INLINE_IMAGE_BYTES, "image 8 and the anchored image go");
+    assert_eq!(pool_before - pool.bytes(), reclaimed, "the charge falls by exactly what went");
+    let images = pane.inline_images.lock();
+    let survivors: Vec<_> =
+        images.iter().map(|image| (image.id, image.kitty.map(|tag| tag.image_id))).collect();
+    assert_eq!(survivors, vec![(3, Some(9))], "only the newest buffer, image 9, survives");
+}
+
+/// The text of `pane`'s visible row `row`, trailing blanks trimmed.
+fn row_text(pane: &PaneState, row: u16) -> String {
+    let parser = pane.parser.lock();
+    parser.grid().row(row).iter().map(|cell| cell.ch).collect::<String>().trim_end().to_owned()
+}
+
+/// Through the worker, a direct kitty PNG is anchored at the cursor cell in its `c` x `r` box, and
+/// the text written after it lands on the row below the image instead of on it.
+#[test]
+fn a_direct_png_is_anchored_at_the_cursor_and_text_follows_below_it() {
+    let (pane, handles) = pane_and_worker_handles();
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    run(&handles, format!("ab\x1b_Ga=T,f=100,q=2,c=8,r=3;{payload}\x1b\\\r\nX").as_bytes());
+    let images = pane.inline_images.lock();
+    assert_eq!(images.len(), 1);
+    let tag = images[0].kitty.expect("tagged");
+    assert_eq!((images[0].row, images[0].col), (0, 2), "anchored where the APC ended");
+    assert_eq!(tag.show, KittyShow::Anchored { cols: 8, rows: 3 });
+    drop(images);
+    assert_eq!(row_text(&pane, 0), "ab");
+    assert_eq!(row_text(&pane, 3), "X", "rows 0..=2 belong to the image; text starts on row 3");
+}
+
+/// An image placed near the bottom scrolls the screen; with its scroll mark it is drawn on the rows
+/// it occupies after the scroll, and the following text lands on the row after its last row.
+#[test]
+fn an_image_at_the_bottom_scrolls_with_its_text() {
+    let (pane, handles) = pane_and_worker_handles();
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    run(
+        &handles,
+        format!("\x1b[23;1H\x1b_Ga=T,f=100,q=2,c=8,r=3;{payload}\x1b\\\r\nend").as_bytes(),
+    );
+    let lines_scrolled = pane.parser.lock().grid().lines_scrolled();
+    let images = pane.inline_images.lock();
+    let image = &images[0];
+    assert_eq!((image.row, image.scroll_mark), (22, 0), "anchored on row 22 before any scroll");
+    assert_eq!(lines_scrolled, 2, "one scroll for the image's third row, one for the newline");
+    let drawn_top = u64::from(image.row) - (lines_scrolled - image.scroll_mark);
+    drop(images);
+    assert_eq!(drawn_top, 20, "the image now covers rows 20..=22");
+    assert_eq!(row_text(&pane, 23), "end", "the text follows the image's last row");
+}
+
+/// Only an image the pane actually holds moves the cursor: a transmit that does not decode, and a
+/// placement of an image that is not stored, are refused and leave the text where it was written.
+#[test]
+fn a_refused_image_leaves_the_cursor_still() {
+    for stream in
+        ["ab\x1b_Ga=T,f=100,q=2,i=5,c=8,r=3;AAAA\x1b\\X", "ab\x1b_Ga=p,q=2,i=9,c=8,r=3\x1b\\X"]
+    {
+        let (pane, handles) = pane_and_worker_handles();
+        run(&handles, stream.as_bytes());
+        assert!(pane.inline_images.lock().is_empty(), "nothing is held for {stream:?}");
+        assert_eq!(row_text(&pane, 0), "abX", "the cursor stayed for {stream:?}");
+    }
+}
+
+/// A placement of a stored image moves the cursor by its box once it is placed.
+#[test]
+fn a_placement_of_a_stored_image_moves_the_cursor() {
+    let (pane, handles) = pane_and_worker_handles();
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    run(&handles, format!("\x1b_Ga=t,f=100,q=2,i=5;{payload}\x1b\\").as_bytes());
+    run(&handles, b"ab\x1b_Ga=p,q=2,i=5,c=4,r=2\x1b\\\r\nX");
+    assert_eq!(row_text(&pane, 2), "X", "rows 0..=1 belong to the placement");
+}

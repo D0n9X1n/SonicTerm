@@ -244,6 +244,8 @@ pub(super) enum DueCause {
     StatusLine,
     /// A taskbar, Dock or launcher progress value waits for its trailing edge; never a frame.
     TaskbarProgress,
+    /// A changed native window title waits out its write interval; never a frame.
+    NativeTitle,
 }
 
 /// A headless window's stand-in for the renderer's interval release: its deadline and how often it ran.
@@ -684,6 +686,7 @@ impl App {
                 DueCause::Memory
                 | DueCause::StatusLine
                 | DueCause::TaskbarProgress
+                | DueCause::NativeTitle
                 | DueCause::PointerMotion
                 | DueCause::GpuRecovery
                 | DueCause::Smoke => {

@@ -73,3 +73,12 @@ fn portable_font_sources_hash_files_and_preserve_bound_gdi_names() {
     assert_eq!(portable_source("memory:Segoe UI Emoji").unwrap(), "memory:Segoe UI Emoji");
     assert_eq!(portable_source("builtin:Symbols").unwrap(), "builtin:Symbols");
 }
+
+// Only the verify step's exact `local` marker skips the artifact; an unset or other value still reads it.
+#[test]
+fn only_the_local_marker_skips_the_artifact() {
+    assert!(measures_locally(Some(std::ffi::OsStr::new("local"))));
+    assert!(!measures_locally(None));
+    assert!(!measures_locally(Some(std::ffi::OsStr::new(""))));
+    assert!(!measures_locally(Some(std::ffi::OsStr::new("Local"))));
+}

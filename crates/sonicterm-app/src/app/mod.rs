@@ -238,6 +238,7 @@ mod memory_report;
 mod memory_report_window;
 pub mod memory_snapshot;
 mod misc;
+mod native_title;
 pub mod os_drag;
 mod overlays;
 mod owners;
@@ -353,7 +354,7 @@ pub use window_setup::{
 };
 use window_setup::{
     apply_window_dpi_transition, apply_window_request, apply_window_state_minimum,
-    compose_window_title, configured_window_size, inherited_window_size, WindowRequest,
+    configured_window_size, inherited_window_size, WindowRequest,
 };
 #[cfg(test)]
 use window_setup::{dpi_transition_inner_size, dpi_transition_size_scale};
@@ -450,6 +451,11 @@ pub struct App {
     /// and writes use this buffer instead.
     #[doc(hidden)]
     pub(super) test_clipboard_text: Option<String>,
+    /// Test-only copied-file list standing in for the native clipboard's file
+    /// list. Installing either test override keeps every read off the desktop
+    /// clipboard; `None` here then means no files are on the clipboard.
+    #[doc(hidden)]
+    pub(super) test_clipboard_files: Option<Vec<std::path::PathBuf>>,
     /// Test-only clipboard write rejection injected at the production write
     /// boundary. Disabled in every constructor so ordinary runs retain the real
     /// clipboard behavior and the in-memory success seam remains opt-in.
@@ -463,6 +469,9 @@ pub struct App {
     /// Unit-test observation of actual PTY spawn inputs; absent from production builds.
     #[cfg(test)]
     test_pane_launches: std::cell::RefCell<Vec<(u64, pane_launch::PaneLaunch)>>,
+    /// Unit-test record of each logged PTY write's pane and producer source, so tests can check attribution.
+    #[cfg(test)]
+    test_pty_write_sources: std::cell::RefCell<Vec<(u64, PtyInputSource)>>,
     /// Whether the PTY write ledger above is actually recorded. `false` in
     /// production so `dispatch_pty_write_effect` does no lock/clone/push per
     /// write (the ledger would otherwise grow unbounded for the whole
@@ -841,13 +850,11 @@ impl App {
                 native.set_title(&window.custom_window_name);
             }
         } else {
-            // When: `window.role` is not a report, intern a window number and compose the numbered title.
-            let key = self.window_keys.intern(id);
-            if let Some(native) = &window.window {
-                native.set_title(&compose_window_title(key, &window.custom_window_name));
-            }
+            // When: `window.role` is not a report, intern a window number; its title is written below.
+            self.window_keys.intern(id);
         }
         self.windows.insert(id, window);
+        let _ = self.sync_native_title(id, Instant::now(), true);
         // The link takes the period the refresh above just read; only macOS installs one.
         self.install_native_display_link(id);
         if !owner_prepared {

@@ -78,6 +78,7 @@ impl Performer {
             last_printed_char: None,
             dcs_capture: None,
             staging_pool,
+            kitty_transfer: None,
             decrqss: None,
             decrqss_awaiting_backslash: false,
             kitty_kbd_flags: [Vec::new(), Vec::new()],
@@ -93,6 +94,13 @@ impl Performer {
         let top = self.scroll_top.unwrap_or(0);
         let bot = self.scroll_bottom.unwrap_or(rows.saturating_sub(1));
         (top, bot)
+    }
+
+    /// Queue a media event stamped with the grid's scroll count, so the host can keep an image
+    /// anchored at the event's row beside the text it was drawn with as the screen scrolls.
+    pub(super) fn push_media(&mut self, mut event: MediaEvent) {
+        event.scroll_mark = self.grid.lines_scrolled();
+        self.events.push(VtEvent::Media(event));
     }
 
     pub(super) fn physical_cursor_col(&self) -> u16 {

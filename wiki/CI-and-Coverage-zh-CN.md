@@ -44,9 +44,9 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 的干净、未锁定 worktree，并且只删除已合并且未被保留 worktree 使用的本地分支。绝不能强制移除或
 丢弃 dirty、未合并、已锁定的 worktree，也不能丢弃任何 stash。
 
-### macOS 14 与 Windows latest
+### macOS 15 与 Windows latest
 
-稳定的必需检查是 fail-closed 汇总 job：`macos-14 / unit tests` 同时依赖 `macos-core`、
+稳定的必需检查是 fail-closed 汇总 job：`macos-15 / unit tests` 同时依赖 `macos-core`、
 `macos-smoke` 与 `tooling`，而 `windows-latest / unit tests` 同时依赖
 `windows-native`、`windows-glyph-oracle`、`windows-checks`、五个 Windows 测试 shard（`windows-tests-workspace`、
 `windows-tests-harness`、`windows-tests-harness-features`、`windows-tests-harness-api` 与
@@ -56,7 +56,9 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 
 macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行 Rust 检查、严格 Rustdoc、
 一次性 workspace 测试 gate、workspace doctest、host probe、macOS 专属进程组监管测试与真实
-resource baseline 采集。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版本、raw-exit、window-owner、
+resource baseline 采集。它还在 scenario-harness 测试之后，单独运行被忽略的原生文件复制粘贴测试，
+不与 workspace 测试同时访问通用粘贴板。这个原生测试必须实际运行，不能跳过；本地运行的明确
+许可方式见[本地 Gate](Local-Gate-zh-CN)。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版本、raw-exit、window-owner、
 工作流供应链、注释与脚本标识符检查，以及发布说明、Wiki 发布、资源清单、soak 和资源基线脚本测试。
 这些命令仍是各支持主机的本地 gate；既有 macOS 汇总要求 tooling 成功，因此没有检查变为可选。
 tooling job 还会安装 runner 镜像自带的 Cairo 与 Fontconfig，并针对它们运行 COLR 绘制测试（`colr-tests`）：
@@ -77,7 +79,7 @@ macOS 专用逻辑（`sonicterm-ui` 的 `text_edit.rs` 中的 AppKit 单词边�
 `scripts/macos-logic-coverage.sh`，按 baseline 的 `macos` 段以同样 1 pp 容差检查每个文件，并在成功和失败后
 上传报告与 provenance 记录；只有经过验证的该记录才能修改该段。文件下限能发现超过容差的损失：失去 AppKit 边界的覆盖（`text_edit.rs` 160 行中的 7 行）会使该文件下降约 4 pp，而
 `command_label.rs` 的单个 macOS 分支不到该文件的 1 pp，无法被发现。
-原生运行时 smoke 分别在 macOS 14 Apple Silicon（作为 `macos-core` 末尾的步骤）和 macOS 15
+原生运行时 smoke 分别在 macOS 15 Apple Silicon（作为 `macos-core` 末尾的步骤）和 macOS 15
 Intel（单分支的 `macos-smoke` 矩阵）上构建 release 二进制，使用不同依赖缓存键。Intel lane
 仅在推送到 `main` 时可保存依赖；Apple Silicon lane 共用 `macos-core` 的缓存条目。它不单独占用
 job，是因为本仓库同时最多运行五个 macOS job，单独的分支会占用一个性能对比分片等待的槽位。这些
@@ -111,6 +113,10 @@ Windows 测试分为五个并行 shard，每个都重复 checkout、Rust、Cairo
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
 另有带原生进程期限的独立步骤，要求其 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
+运行 smoke 之前，它把固定版本的 ConPTY 运行时放到二进制旁边；每个 smoke 都设置
+`SONICTERM_REQUIRE_CONPTY=1`，随后 `scripts/verify-windows-conpty.py` 要求已放置文件的字节正确，
+且第一个 smoke 的日志中恰有一条 `kind="packaged"` 选择记录，因此退回系统 ConPTY 的构建会失败
+（[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）。
 
 `workflow-syntax` 使用固定版本 actionlint 检查 CI 与 perf 工作流，包括 GitHub 表达式上下文
 可用性及语法。tooling job 安装摘要固定的 Linux 二进制；本地主机在 PATH 中安装相同版本。
@@ -124,7 +130,9 @@ Windows cfg-on 测试在进程树监管下直接运行 Cargo 报告的精确 lib
 `windows-glyph-oracle` 只运行一次原有的 ignored 工作集 gate。只有全部完整性、精确漂移和
 起始尺寸检查通过后，才发布 S9/S12 在 72/144 DPI 下的四组 helper tile。清单绑定全部受跟踪
 源码字节（含打包字体）、系统及用户字体字节和 GDI 注册表映射、runner 镜像、Rust/Cargo 版本、检出 SHA、run ID
-与生产者 attempt。消费者在测试前验证输出摘要及全部绑定。失败 job 重跑使用成功生产者的
+与生产者 attempt。消费者在测试前验证输出摘要及全部绑定。GitHub 可能给同一次 run 的 Windows job
+分配不同的 runner 镜像，因此仅在 runner 镜像、字体、字体注册或 Rust/Cargo 版本上不同的消费者会自行测量
+helper（`SONICTERM_GLYPH_ORACLE_MODE=local`）；其他任何差异、payload 变化或摘要错误仍会失败。失败 job 重跑使用成功生产者的
 attempt，而非自己的 attempt；缺失或过期 artifact 会失败。本地未指定 artifact 时仍直接测量 helper。
 Workspace、普通/计数器、frame-texture/echo 和 API-cfg 套件各自绘制真实 renderer，保留全部
 完整性及代表字形检查，并将每个驻留身份与实际尺寸同 helper 比较。字体内容摘要替代机器路径；
@@ -234,7 +242,7 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
   已验证证据，通过经过评审的 diff 调整，见 [Coverage 证据与重新建立基线](Development-and-Release-zh-CN#coverage-证据与重新建立基线)。
 - `macos-core` 中的 `scripts/macos-logic-coverage.sh` 按 baseline 的 `macos` 段，为 80% 子集中的 macOS
   专用逻辑（`sonicterm-ui` 的 `text_edit.rs` 中的 AppKit 单词边界，以及 `command_label.rs` 的 macOS 分支）
-  设置逐文件下限。CI 只在 macOS 14 arm64 runner 上强制执行这些下限，且只能根据经过验证的 `macos-core`
+  设置逐文件下限。CI 只在 macOS 15 arm64 runner 上强制执行这些下限，且只能根据经过验证的 `macos-core`
   记录修改。该运行只对 `sonicterm-ui` 插桩，因此其它 crate 中的 macOS 专用代码没有下限；文件下限也无法发现
   小于 1.0 个百分点容差的损失，例如 `command_label.rs` 的单个 macOS 分支。
 - `cargo deny --locked check` 在 `linux-core` job 与本地 gate 中，对所有 target 执行 `deny.toml`

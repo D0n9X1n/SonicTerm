@@ -43,6 +43,8 @@ impl Grid {
                 vec![self.content_seq; rows as usize].into(),
             ),
             scrollback_evicted: 0,
+            lines_scrolled: self.lines_scrolled,
+            alt_scroll_floor: 0,
             budget_trimmed_rows: 0,
             budget_trimmed_cleared: 0,
             row_storage_allocs: 0,
@@ -55,6 +57,12 @@ impl Grid {
             pending_wrap: false,
         };
         self.alt_screen = Some(Box::new(saved));
+        // The alternate screen counts from past the primary's count and every earlier alternate
+        // screen's, so neither screen's images are drawn on the other.
+        self.lines_scrolled = self
+            .lines_scrolled
+            .max(self.alt_scroll_floor)
+            .saturating_add(Self::ALT_SCREEN_SCROLL_GAP);
         self.screen_epoch = self.screen_epoch.saturating_add(1);
         self.scrollback_limit = 0;
         self.enforce_alt_memory_budget();
@@ -82,6 +90,10 @@ impl Grid {
         self.visible = saved.visible;
         self.scrollback = saved.scrollback;
         self.prompts = saved.prompts;
+        // The primary screen's scroll count returns, so its images stay beside its text; the
+        // alternate screen's last count is kept so the next one starts past it.
+        self.alt_scroll_floor = self.lines_scrolled;
+        self.lines_scrolled = saved.lines_scrolled;
         self.row_content_seq = saved.row_content_seq;
         self.content_seq = content_seq;
         self.scrollback_requested_limit = saved.scrollback_requested_limit;

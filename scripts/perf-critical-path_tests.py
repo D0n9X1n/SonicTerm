@@ -62,7 +62,7 @@ def job(name, created, started, completed, attempt=1, steps=None, conclusion="su
     return {"id": job.next_id, "name": name, "run_attempt": attempt, "created_at": stamp(created),
             "started_at": stamp(started), "completed_at": stamp(completed), "conclusion": conclusion,
             "status": "completed", "runner_id": runner if runner is not None else job.next_id,
-            "labels": ["macos-14"] if "macOS" in name else ["windows-latest"],
+            "labels": ["macos-15"] if "macOS" in name else ["windows-latest"],
             "steps": quiet_steps(started, completed) if steps is None else steps}
 
 
@@ -642,7 +642,7 @@ class CommandLineTests(unittest.TestCase):
         # Across the perf and CI runs, the timeline shows how many macOS jobs ran at once.
         rows = [job("macOS before/after comparison (S7)", 0, 0, 100), job("macos-core", 0, 50, 150),
                 job("Windows before/after comparison (S7)", 0, 0, 200)]
-        rows[1]["labels"] = ["macos-14"]
+        rows[1]["labels"] = ["macos-15"]
         record = synthetic(rows, 201)
         timeline = accounting.macos_timeline([record])
         self.assertEqual(max(count for _time, count, _event in timeline), 2)

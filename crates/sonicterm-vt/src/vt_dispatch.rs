@@ -79,10 +79,10 @@ impl Perform for Performer {
                     self.reply(b"\x1b[>1;0;0c");
                 }
                 'q' => {
-                    // XTVERSION: DCS > | SonicTerm <version> ST
-                    let mut buf = Vec::with_capacity(SONIC_VERSION.len() + 6);
+                    // XTVERSION: DCS > | kitty SonicTerm <version> ST
+                    let mut buf = Vec::with_capacity(XTVERSION_REPLY.len() + 6);
                     buf.extend_from_slice(b"\x1bP>|");
-                    buf.extend_from_slice(SONIC_VERSION.as_bytes());
+                    buf.extend_from_slice(XTVERSION_REPLY.as_bytes());
                     buf.extend_from_slice(b"\x1b\\");
                     self.reply(&buf);
                 }
@@ -631,7 +631,7 @@ impl Perform for Performer {
                 let row = self.grid.cursor.row;
                 let col = self.grid.cursor.col;
                 if let Some(event) = parse_iterm2_file_event(payload.as_bytes(), row, col) {
-                    self.events.push(VtEvent::Media(event));
+                    self.push_media(event);
                 }
             }
             Some(133) => {
@@ -704,7 +704,13 @@ impl Perform for Performer {
         // intermediate limits, so what arrives is a truncated view of
         // something longer. Capturing that as an image would decode bytes the
         // sender never meant as pixel data.
-        self.dcs_capture = (action == 'q' && intermediates.is_empty() && !ignore)
+        let sixel = action == 'q' && intermediates.is_empty() && !ignore;
+        // An open kitty upload releases its reservation before the Sixel capture asks for one,
+        // so one parser never holds two and the Sixel is not refused for the upload's sake.
+        if sixel {
+            self.abort_kitty_transfer_for_other_media();
+        }
+        self.dcs_capture = sixel
             .then(|| MediaCapture::new(&self.staging_pool, MediaProtocol::Sixel, String::new()));
     }
     fn put(&mut self, byte: u8) {
@@ -724,7 +730,7 @@ impl Perform for Performer {
         self.fast_path_ready = false;
         if let Some(capture) = self.dcs_capture.take() {
             if let Some(event) = capture.into_event(self.grid.cursor.row, self.grid.cursor.col) {
-                self.events.push(VtEvent::Media(event));
+                self.push_media(event);
             }
         }
     }

@@ -1,7 +1,16 @@
 use super::*;
 
 fn image(id: u64, bytes: usize) -> InlineImage {
-    InlineImage { id, row: 0, col: 0, width: 1, height: 1, bgra: Arc::from(vec![0; bytes]) }
+    InlineImage {
+        scroll_mark: 0,
+        id,
+        row: 0,
+        col: 0,
+        width: 1,
+        height: 1,
+        bgra: Arc::from(vec![0; bytes]),
+        kitty: None,
+    }
 }
 
 #[test]
@@ -564,12 +573,20 @@ fn png_of_side(side: u32) -> Vec<u8> {
     encoded
 }
 
+/// A base64 PNG event for `protocol`; a kitty one declares `f=100`, as the protocol requires.
 fn base64_media_event(protocol: MediaProtocol, png: &[u8]) -> MediaEvent {
+    let metadata = if protocol == MediaProtocol::Kitty {
+        // When: protocol is Kitty, a PNG payload is declared with f=100 or it is not decoded.
+        "f=100".to_owned()
+    } else {
+        String::new()
+    };
     MediaEvent {
+        scroll_mark: 0,
         protocol,
         row: 0,
         col: 0,
-        metadata: String::new(),
+        metadata,
         data: base64::engine::general_purpose::STANDARD.encode(png).into_bytes(),
     }
 }
@@ -583,7 +600,14 @@ fn sixel_covering(width: usize, height: usize) -> MediaEvent {
         // `~` is 0x7E: all six rows of the band set.
         data.extend_from_slice(b"~-");
     }
-    MediaEvent { protocol: MediaProtocol::Sixel, row: 0, col: 0, metadata: String::new(), data }
+    MediaEvent {
+        scroll_mark: 0,
+        protocol: MediaProtocol::Sixel,
+        row: 0,
+        col: 0,
+        metadata: String::new(),
+        data,
+    }
 }
 
 /// The single-image bound must equal what the decoders actually produce.

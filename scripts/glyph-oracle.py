@@ -112,14 +112,45 @@ def validate_rows(directory, family):
     return files
 
 
+# Bindings that describe the runner rather than the checkout and run: GitHub can assign one run's
+# Windows jobs different runner images, which differ in exactly these.
+RUNNER_BINDINGS = frozenset({"fonts", "font_registrations", "rustc", "cargo"})
+RUNNER_ENVIRONMENT = frozenset({"ImageOS", "ImageVersion"})
+
+
+def differs_only_by_runner(sealed, expected):
+    """Whether two identities agree on everything but the runner image, fonts and toolchain."""
+    if not isinstance(sealed, dict) or set(sealed) != set(expected):
+        return False
+    for key in expected:
+        if key in RUNNER_BINDINGS or sealed[key] == expected[key]:
+            continue
+        if key != "environment" or not isinstance(sealed[key], dict) or not isinstance(expected[key], dict):
+            return False
+        if set(sealed[key]) != set(expected[key]) or any(
+                sealed[key][name] != expected[key][name] for name in expected[key] if name not in RUNNER_ENVIRONMENT):
+            return False
+    return True
+
+
 def verify(directory, expected_identity, expected_digest, family):
-    """Verify the out-of-band manifest digest, exact provenance and every payload hash."""
+    """Verify the manifest digest, provenance and every payload hash; return whether this runner may use it.
+
+    True when every binding matches. False when only the runner image, fonts or toolchain differ: the
+    payload is intact and from this checkout and run, but measured on another runner, so the consumer
+    measures the helper itself. Any other difference raises.
+    """
     raw = (directory / "manifest.json").read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected_digest:
         raise ValueError("oracle manifest digest mismatch")
     manifest = json.loads(raw)
-    if manifest != {"identity": expected_identity, "files": validate_rows(directory, family)}:
-        raise ValueError("oracle source/font/image/toolchain/run/attempt or payload mismatch")
+    files = validate_rows(directory, family)
+    if manifest == {"identity": expected_identity, "files": files}:
+        return True
+    if isinstance(manifest, dict) and set(manifest) == {"identity", "files"} and manifest["files"] == files \
+            and differs_only_by_runner(manifest["identity"], expected_identity):
+        return False
+    raise ValueError("oracle source/font/image/toolchain/run/attempt or payload mismatch")
 
 
 def main():
@@ -146,9 +177,13 @@ def main():
                 output.write(f"digest={hashlib.sha256(raw).hexdigest()}\nattempt={attempt}\n")
         else:
             digest = os.environ["ORACLE_DIGEST"]
-            verify(directory, bound, digest, family)
+            usable = verify(directory, bound, digest, family)
             with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
-                output.write(f"SONICTERM_GLYPH_ORACLE_DIGEST={digest}\n")
+                # A helper measured on another runner image is not used; the suite measures its own.
+                output.write(f"SONICTERM_GLYPH_ORACLE_DIGEST={digest}\n" if usable
+                             else "SONICTERM_GLYPH_ORACLE_MODE=local\n")
+            if not usable:
+                print("glyph-oracle: the producer ran on another runner image; this job measures the helper itself")
     except (ValueError, OSError, KeyError) as error:
         print(f"glyph-oracle: {error}", file=sys.stderr)
         return 1

@@ -106,7 +106,11 @@ pub fn resize_panes_to_rects(
             (content_w / cell_w).floor() as u64,
             (content_h / cell_h).floor() as u64,
         );
-        crate::app::frame_counters::lock_parser(&pane.parser).resize(cols, rows);
+        let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
+        parser.resize(cols, rows);
+        // The cell size sizes a kitty image placed without `c` or `r`, and so its cursor move.
+        parser.set_cell_pixel_size(cell_w, cell_h);
+        drop(parser);
         pane.resize_pty(*id, cols, rows);
     }
 }

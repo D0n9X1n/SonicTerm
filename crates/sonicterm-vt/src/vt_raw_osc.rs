@@ -89,6 +89,8 @@ impl Parser {
                     self.raw_osc = Some(RawOsc::Palette { content: Vec::new() });
                 } else if prefix == ITERM2_OSC_PREFIX {
                     self.inner = vte::Parser::new();
+                    // An open kitty upload releases its reservation before this capture asks for one.
+                    self.performer.abort_kitty_transfer_for_other_media();
                     let mut capture = MediaCapture::new(
                         &self.performer.staging_pool,
                         MediaProtocol::Iterm2File,
@@ -180,7 +182,7 @@ impl Parser {
                             self.performer.grid.cursor.col,
                             &self.iterm2_metadata[..self.iterm2_metadata_len],
                         ) {
-                            self.performer.events.push(VtEvent::Media(event));
+                            self.performer.push_media(event);
                         }
                     }
                     self.finish_escape();

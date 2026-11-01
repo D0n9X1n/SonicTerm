@@ -29,20 +29,24 @@ fn windows_software_presenter_uses_placeholder_gpu_atlases() {
 #[test]
 fn inline_image_atlas_skips_older_images_without_eviction() {
     let older = sonicterm_render_model::InlineImage {
+        scroll_mark: 0,
         id: 1,
         row: 0,
         col: 0,
         width: 1,
         height: 1,
         bgra: std::sync::Arc::from(vec![0, 0, 255, 255]),
+        kitty: None,
     };
     let newer = sonicterm_render_model::InlineImage {
+        scroll_mark: 0,
         id: 2,
         row: 0,
         col: 0,
         width: 1,
         height: 1,
         bgra: std::sync::Arc::from(vec![0, 255, 0, 255]),
+        kitty: None,
     };
     let mut atlas = GlyphAtlas::new(1, 1);
     let mut instances = Vec::new();
@@ -53,6 +57,7 @@ fn inline_image_atlas_skips_older_images_without_eviction() {
             origin_y: 0.0,
             content_clip: PaneRect::new(0.0, 0.0, 10.0, 10.0),
             painter_order: 0,
+            slice: None,
         },
         InlineImagePlacement {
             image: &newer,
@@ -60,6 +65,7 @@ fn inline_image_atlas_skips_older_images_without_eviction() {
             origin_y: 0.0,
             content_clip: PaneRect::new(0.0, 0.0, 10.0, 10.0),
             painter_order: 1,
+            slice: None,
         },
     ];
 
@@ -95,6 +101,7 @@ fn inline_image_clips_512_pixels_to_400_pixel_pane() {
         origin_y: 0.0,
         content_clip: PaneRect::new(0.0, 0.0, 400.0, 2.0),
         painter_order: 0,
+        slice: None,
     };
     assert_eq!(
         emit_inline_image_instances(&mut atlas, &mut instances, &[placement], 1.0, 1.0, 520.0, 2.0),
@@ -138,6 +145,7 @@ fn inline_image_visibility_matches_empty_emission_and_residency() {
         origin_y: 0.0,
         content_clip: PaneRect::new(0.0, 0.0, 10.0, 4.0),
         painter_order: 0,
+        slice: None,
     };
     let mut instances = Vec::new();
     let visible = placement.visible_rect(1.0, 1.0, 40.0, 4.0).is_some();
@@ -173,6 +181,7 @@ fn inline_image_visible_rect_intersects_all_edges() {
             origin_y: 0.0,
             content_clip,
             painter_order: 0,
+            slice: None,
         };
         assert_eq!(placement.visible_rect(1.0, 1.0, 20.0, 20.0), Some(expected));
     }
@@ -182,6 +191,7 @@ fn inline_image_visible_rect_intersects_all_edges() {
         origin_y: -1.5,
         content_clip: PaneRect::new(-4.0, -3.0, 30.0, 30.0),
         painter_order: 0,
+        slice: None,
     };
     assert_eq!(surface.visible_rect(1.0, 1.0, 6.0, 5.0), Some(PaneRect::new(0.0, 0.0, 6.0, 5.0)));
 }
@@ -276,6 +286,7 @@ fn inline_image_clipping_preserves_painter_order() {
             origin_y: 0.0,
             content_clip: clip,
             painter_order: 0,
+            slice: None,
         },
         InlineImagePlacement {
             image: &newer,
@@ -283,6 +294,7 @@ fn inline_image_clipping_preserves_painter_order() {
             origin_y: 0.0,
             content_clip: clip,
             painter_order: 1,
+            slice: None,
         },
     ];
     let mut atlas = GlyphAtlas::new(8, 2);

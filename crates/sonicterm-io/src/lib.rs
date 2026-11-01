@@ -7,6 +7,8 @@
 
 pub mod command_resolve;
 #[cfg(windows)]
+mod conpty_runtime;
+#[cfg(windows)]
 pub mod foreground_proc;
 pub mod proc_info;
 // The PTY backend and its tests keep their current identifier names.

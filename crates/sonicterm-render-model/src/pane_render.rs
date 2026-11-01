@@ -21,12 +21,65 @@ pub struct InlineImage {
     pub row: u16,
     /// Grid column where the image's top-left corner anchors.
     pub col: u16,
+    /// The grid's `lines_scrolled` when the image was anchored; the renderer moves the image up by
+    /// the rows scrolled since, so it stays beside the text it was drawn with.
+    pub scroll_mark: u64,
     /// Image width in pixels.
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
     /// Premultiplied sRGB-encoded BGRA8 pixels, row-major.
     pub bgra: Arc<[u8]>,
+    /// The kitty graphics identity of this entry; `None` for Sixel, iTerm2 and untagged images.
+    ///
+    /// Several entries may share one `id` and one pixel buffer when a kitty image has more than
+    /// one placement; retention counts each pixel buffer once.
+    pub kitty: Option<KittyTag>,
+}
+
+/// How a kitty graphics image entry is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KittyShow {
+    /// Stored by `a=t` (or left after its placements were deleted) and not drawn.
+    Upload,
+    /// Drawn at its `row`/`col` anchor in a box of `cols` x `rows` cells; 0 means the side is not
+    /// given and comes from the image's pixels, as kitty sizes it.
+    Anchored {
+        /// Placement box width in cells.
+        cols: u32,
+        /// Placement box height in cells.
+        rows: u32,
+    },
+    /// Drawn only through Unicode placeholder cells, in a box of `cols` x `rows` cells;
+    /// 0 means the image's natural size on that axis.
+    Virtual {
+        /// Placement box width in cells.
+        cols: u32,
+        /// Placement box height in cells.
+        rows: u32,
+    },
+}
+
+/// A kitty graphics image entry's client ids and how it is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct KittyTag {
+    /// The client image id (`i=`); 0 for an anonymous image.
+    pub image_id: u32,
+    /// The placement id (`p=`); 0 for an anonymous placement.
+    pub placement_id: u32,
+    /// How this entry is shown.
+    pub show: KittyShow,
+    /// The image's pixel size as transmitted, before any downscale to the rendered cap; a
+    /// placeholder box without `c`/`r` is sized from it, as kitty sizes it.
+    pub source_px: (u32, u32),
+}
+
+impl InlineImage {
+    /// Whether the renderer draws this entry at its `row`/`col` anchor.
+    #[must_use]
+    pub fn draws_at_anchor(&self) -> bool {
+        matches!(self.kitty, None | Some(KittyTag { show: KittyShow::Anchored { .. }, .. }))
+    }
 }
 
 /// One pane's contribution to a frame. The renderer owns the iteration; the

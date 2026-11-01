@@ -757,6 +757,9 @@ pub(in crate::app) use vt::{process_pane_vt_batch_and_publish, publish_pane_vt_b
 #[path = "spawn_pane_commands.rs"]
 mod commands;
 
+#[path = "spawn_pane_media.rs"]
+mod media_batch;
+
 // Lock order: parser -> echo slot (pre_read, post_read); inline_images -> inline_media_charge after parser releases,
 // command_events after both.
 // Ordering: cursor_visible, keyboard_input, pointer_input, bells, output_generation load are Relaxed;
@@ -928,23 +931,15 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             emit_event(UserEvent::ClipboardAttempts { pane_id: handles.pane_id, attempts });
         }
 
-        let mut decoded_images = Vec::new();
-        for media in media_events {
-            if let Some(image) = decode_media(&media) {
-                decoded_images.push(image);
-                super::media::trim_staged_inline_images(
-                    &mut decoded_images,
-                    &handles.inline_media_charge,
-                );
+        let (kitty_replies, cursor_moves) =
+            media_batch::apply_batch_media(handles, media_events, &mut decode_media);
+        if !cursor_moves.is_empty() {
+            // The image lock is released, so the parser is locked alone, before the next prefix is
+            // parsed, so text after an image starts below it.
+            let mut parser = handles.parser.lock();
+            for owed in cursor_moves {
+                parser.move_cursor_past_kitty_image(owed.cols, owed.rows, owed.source_px);
             }
-        }
-        if !decoded_images.is_empty() {
-            let evicted = {
-                let mut images = handles.inline_images.lock();
-                images.extend(decoded_images);
-                super::media::trim_inline_images_charged(&mut images, &handles.inline_media_charge)
-            };
-            drop(evicted);
         }
 
         if !command_side_effects.is_empty() {
@@ -953,11 +948,13 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 command_side_effects,
             );
         }
-        if reply_batch.len() + replies.len() > 32 * 1024 {
+        if reply_batch.len() + replies.len() + kitty_replies.len() > 32 * 1024 {
             // Flush before appending a complete dispatch that would exceed the batch bound; never split a reply.
             send_reply(std::mem::take(&mut reply_batch));
         }
         reply_batch.extend(replies);
+        // A kitty reply ends its advance prefix, so it follows every VT reply of that prefix.
+        reply_batch.extend(kitty_replies);
         if remaining.is_empty() {
             // When: remaining is empty, publish trailing replies without waiting for more child output.
             if !reply_batch.is_empty() {

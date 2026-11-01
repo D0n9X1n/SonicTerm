@@ -29,6 +29,7 @@ impl Grid {
                 // When: the visible deque pop returns `None`, stop rather than inventing rows.
                 break;
             };
+            self.lines_scrolled = self.lines_scrolled.saturating_add(1);
             // A line assigned through `row_mut` can carry an older stamp than its position;
             // keep the newer one so history still reports the change once the row leaves.
             if let Some(stamp) = self.row_content_seq.pop_front() {

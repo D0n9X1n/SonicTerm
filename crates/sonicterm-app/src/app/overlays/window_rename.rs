@@ -50,9 +50,8 @@ impl App {
             return;
         };
         self.windows.get_mut(&id).unwrap().custom_window_name = name;
-        if let Some(native) = &self.windows[&id].window {
-            native.set_title(&self.native_window_title(id).unwrap());
-        }
+        // A user's own rename shows at once, never on a throttled trailing edge.
+        let _ = self.sync_native_title(id, std::time::Instant::now(), true);
         self.command_palette.close();
         self.window_rename_target = None;
         self.palette_attached_window = None;

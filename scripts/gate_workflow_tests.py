@@ -92,7 +92,7 @@ class CiParityTests(unittest.TestCase):
             gate_test_fixture.WORKFLOW.replace("arch: x86_64", "arch: omitted", 1),
             gate_test_fixture.WORKFLOW.replace("ci mac-aarch64\n", "ci mac-omitted\n", 1),
             gate_test_fixture.WORKFLOW.replace("          - runner: macos-15-intel\n",
-                             "          - runner: macos-14\n            arch: aarch64\n"
+                             "          - runner: macos-15\n            arch: aarch64\n"
                              "          - runner: macos-15-intel\n", 1),
         ):
             self.assertNotEqual(mutated, gate_test_fixture.WORKFLOW)
@@ -315,7 +315,7 @@ class CiParityTests(unittest.TestCase):
                 name: Fixture
                 jobs:
                   macos-core:
-                    runs-on: macos-14
+                    runs-on: macos-15
                     timeout-minutes: 5
                     steps:
                       - name: Run workspace unit and integration tests

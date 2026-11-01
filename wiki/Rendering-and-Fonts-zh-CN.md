@@ -59,7 +59,10 @@ padding 不变。受资源限制而行数较少的网格不吸收整行的未使
 
 平台字体发现隐藏在 `FontLocator` 之后：
 
-- macOS 使用 CoreText 回退与字体 URL；
+- macOS 使用 CoreText 回退与字体 URL。CoreText 选出的字体无法打开或不包含某个字符时，改用一份通用列表：
+  Menlo、按用户语言排列的系统级联字体、Apple Symbols，以及用于简体中文的 Hiragino Sans GB、
+  Songti SC 和 Arial Unicode MS。macOS 15 上 CoreText 为中文选择的苹方是 `hvgl` 字体集，FreeType 只在
+  macOS 15.4 及更高版本上通过 HVF 打开它；低于该版本时无法打开，由这些字体族显示中文；
 - Windows 使用 DirectWrite/GDI 描述信息并提取原始字体；
 - 其它 Unix 系统使用 Fontconfig，并把候选限制为等宽、双宽或字符单元字体。
 
@@ -321,9 +324,10 @@ BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和
 ### 字体文件字节
 
 普通字体从磁盘流式读取：FreeType face 以回调流打开，只读取 FreeType 请求的数据帧；
-HarfBuzz blob 把文件读入自己的缓冲区。表目录中列出 `SVG ` 或 `COLR` 表的字体 face 则不同：
-FreeType 会整份提取这些表（以及 `CPAL`），并在 face 存续期间一直保留；在回调流上每个 face
-都持有自己的副本，彩色 emoji 字体的 `SVG ` 表就有 18.55 MiB。这样的文件按文件版本（规范
+HarfBuzz blob 把文件读入自己的缓冲区。表目录中列出 `SVG `、`COLR` 或 `hvgl` 表的字体 face
+则不同：FreeType 会整份提取这些表（以及 `CPAL`），并在 face 存续期间一直保留；在回调流上每个
+face 都持有自己的副本，彩色 emoji 字体的 `SVG ` 表就有 18.55 MiB，Apple `PingFangUI.ttc` 的
+32 个 face 每个都要复制 58.7 MB 的 `hvgl`。这样的文件按文件版本（规范
 路径、长度、修改时间，在 Unix 上还有设备号与 inode；Windows 使用路径、长度与修改时间）
 整份读入一个共享的只读堆缓冲区，只读一次。该文件上的每个 FreeType face 都以内存流打开，
 彩色表直接指向这块缓冲区而不被复制；每个 HarfBuzz blob（包括延迟构建的 SVG/COLRv1
@@ -331,10 +335,10 @@ FreeType 会整份提取这些表（以及 `CPAL`），并在 face 存续期间�
 的文件被替换或删除。
 
 是否共享按 face 决定，依据是对 sfnt 表目录的有界读取（字体集先读 `ttcf` 头和所请求 face
-的偏移，然后最多读取 256 条表记录）。格式错误或无法读取的表目录视为没有彩色表，继续使用
+的偏移，然后最多读取 256 条表记录）。格式错误或无法读取的表目录视为不含这些表，继续使用
 回调流。缓存只保存弱引用：最后一个使用它的 face 与 blob 关闭时缓冲区即被释放；磁盘上被
 修改的文件属于新版本，会得到新的缓冲区。face 本身不共享。普通字体不共享，是因为把每个
-字体文件（包括 75 MiB 的 CJK `.ttc`）整份保留所占的内存，多于它节省的彩色表。
+字体文件（包括 75 MiB 的 CJK `.ttc`）整份保留所占的内存，多于它节省的整份保留表。
 
 ### 原生源码版本与配置
 
@@ -347,8 +351,16 @@ FreeType、HarfBuzz 和 libpng 均为未经修改的上游发布；仓库内的 
 表示 macOS 应用包已自包含其运行依赖。
 
 FreeType 配置在第三方源码树之外生成，启用错误字符串、外部 zlib、PNG 字形、长 PCF
-族名、次像素光栅化和受支持的布尔次像素 hinting 选项。其他选项保持上游默认值；实验性
-HVF 驱动按上游的禁用桩编译，会拒绝所有字体。定义缺失、重复或出现意外值会
+族名、次像素光栅化和受支持的布尔次像素 hinting 选项。其他选项保持上游默认值。FreeType 的
+HVF 驱动通过 Apple 的 `libhvf` 渲染苹方等 `hvgl` 字体，因此只用于 macOS。目标为 macOS 且其 SDK
+（`SDKROOT`，否则 `xcrun --sdk macosx --show-sdk-path`）提供 `usr/include/hvf/Scaler.h` 和
+`usr/lib/libhvf.tbd` 时，构建启用 `FT_CONFIG_OPTION_HVF`、定义 `HVF_RUNTIME_AVAILABLE` 并链接系统
+`libhvf`。驱动只在 `__builtin_available(macOS 15.4, *)` 之后调用它，而部署目标为 15.0，因此该库是
+弱 dylib：在 macOS 15.0 至 15.3 上应用照常启动，`hvgl` face 无法打开。HVF 可用但
+`MACOSX_DEPLOYMENT_TARGET` 未设置或不低于 15.4 时构建停止，因为该检查会被折叠，加载会变为强加载。
+SDK 没有该头文件时保持上游的禁用桩（拒绝所有字体）并给出 Cargo 警告；macOS CI 与发布 job 设置的
+`SONICTERM_REQUIRE_HVF=1` 会让这种情况构建失败，并让苹方渲染测试失败而不是跳过。Linux 和 Windows
+始终编译禁用桩。定义缺失、重复或出现意外值会
 使构建失败；C 编译探针还会检查预处理后这些选项仍然启用。不会恢复已淘汰的数值型
 hinting 转换。Cargo 监视原生源码和配置输入；构建既不下载源码，也不初始化子模块。
 
@@ -790,7 +802,7 @@ Result 适配器只为 Timeout/Occluded 恢复原生重试，不对其它原因�
 | 渲染器字体适配 | `crates/sonicterm-engine/src/fontstack.rs` |
 | 发现与匹配 | `crates/sonicterm-font/src/db.rs`、`crates/sonicterm-font/src/locator/` |
 | HarfBuzz 塑形 | `crates/sonicterm-font/src/shaper/harfbuzz.rs` |
-| 共享彩色字体缓冲区 | `crates/sonicterm-font/src/font_bytes.rs` |
+| 共享彩色与 `hvgl` 字体缓冲区 | `crates/sonicterm-font/src/font_bytes.rs` |
 | 光栅化与原生包装 | `crates/sonicterm-font/src/rasterizer/`、`crates/sonicterm-font/src/{ftwrap,hbwrap,fcwrap}.rs` |
 | CPU 图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache,shape}.rs` |
 | 图集上传与图像图集 | `crates/sonicterm-gpu/src/{core,atlas_upload}.rs` |
