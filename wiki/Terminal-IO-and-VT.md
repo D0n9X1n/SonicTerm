@@ -393,7 +393,8 @@ stall interval is one minute.
 
 SonicTerm implements the part of the
 [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/)
-that Claude Code uses to draw inline images, on macOS and Linux:
+that Claude Code uses to draw inline images, on macOS, Linux and Windows (Windows needs the
+packaged console runtime; see [Local PTY contract](#local-pty-contract)):
 
 | Feature | Supported |
 | --- | --- |

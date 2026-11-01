@@ -293,9 +293,9 @@ OSC 8 驻留 URI 仍限 8 KiB、客户端 id 限 1 KiB。
 
 #### Kitty 图形
 
-SonicTerm 在 macOS 和 Linux 上实现了
+SonicTerm 在 macOS、Linux 和 Windows 上实现了
 [kitty 图形协议](https://sw.kovidgoyal.net/kitty/graphics-protocol/)中 Claude Code 用来绘制
-内联图像的部分：
+内联图像的部分（Windows 需要打包的控制台运行时，见[本地 PTY 契约](#本地-pty-契约)）：
 
 | 功能 | 支持范围 |
 | --- | --- |

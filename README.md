@@ -119,6 +119,10 @@ back when the context belongs with the original session again.
   copyable report of process, renderer, graphics and per-pane memory. See
   [Memory](wiki/Memory.md) for process targets, residual bounds, and accounting
   exclusions.
+- **Inline images** — kitty graphics (direct placement and Unicode placeholders,
+  as Claude Code draws them), Sixel and iTerm2 images, on macOS, Linux and
+  Windows. Mermaid diagrams from the mermaid-tty plugin show as pictures. See
+  [Terminal IO and VT](wiki/Terminal-IO-and-VT.md#kitty-graphics).
 - **Real pane workflow** — split panes, close/resize behavior, per-pane PTYs,
   pane focus, READ ONLY mode for safe scrollback navigation, quick-select URL
   hints, and search.
