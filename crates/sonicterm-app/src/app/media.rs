@@ -9,17 +9,24 @@ use sonicterm_vt::vt::{MediaEvent, MediaProtocol};
 
 static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Largest side a *source* image may declare before any pixels are decoded.
+/// Side of the largest square *source* image the decoder will start on.
 ///
-/// A preflight rejection bound, not a retention bound. It is read from the
-/// encoded header and bounds the work the decoder is willing to start; what
-/// survives decode is bounded by [`MAX_INLINE_IMAGE_RENDER_SIDE`] below, which
-/// is smaller. The two are separate limits and the distance between them is
-/// deliberate: a source larger than the rendered cap is downscaled rather than
-/// refused, so an oversized image still renders.
-const MAX_INLINE_IMAGE_DECODE_SIDE: u32 = 2048;
+/// A preflight rejection bound, not a retention bound. Its square is the pixel
+/// budget read from the encoded header, which bounds the decode allocation
+/// (16 MiB of RGBA); what survives decode is bounded by
+/// [`MAX_INLINE_IMAGE_RENDER_SIDE`] below, which is smaller. The distance
+/// between them is deliberate: a source larger than the rendered cap is
+/// downscaled rather than refused, so an oversized image still renders.
+const MAX_INLINE_IMAGE_DECODE_BUDGET_SIDE: u32 = 2048;
 const MAX_INLINE_IMAGE_DECODE_PIXELS: u64 =
-    MAX_INLINE_IMAGE_DECODE_SIDE as u64 * MAX_INLINE_IMAGE_DECODE_SIDE as u64;
+    MAX_INLINE_IMAGE_DECODE_BUDGET_SIDE as u64 * MAX_INLINE_IMAGE_DECODE_BUDGET_SIDE as u64;
+
+/// Largest single side a source image may declare.
+///
+/// Only stops degenerate shapes: the pixel budget above is the memory bound,
+/// so a tall diagram or screenshot inside the budget decodes and is downscaled
+/// with its aspect ratio kept.
+const MAX_INLINE_IMAGE_DECODE_SIDE: u32 = 8192;
 
 /// Largest side an image can occupy *after* decode, and so the side that
 /// bounds every retained buffer.
@@ -163,7 +170,7 @@ pub(super) const MAX_PROCESS_INLINE_MEDIA_BYTES: usize = 256 * 1024 * 1024;
 /// resize that runs before anything reaches retention, and overstated the
 /// figure by the square of the ratio between the two sides.
 ///
-/// Measured rather than asserted: driving a 2048x2048 PNG through the Kitty
+/// Measured rather than asserted: driving a budget-sized PNG through the Kitty
 /// and iTerm2 paths, and a Sixel payload addressing 4096x4096, each retains
 /// exactly this many bytes.
 pub(super) const MAX_SINGLE_INLINE_IMAGE_BYTES: usize =
