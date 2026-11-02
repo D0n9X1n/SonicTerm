@@ -1,20 +1,21 @@
 <div align="center">
 
-<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm logo" width="150" height="150"/>
+<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm logo" width="128" height="128"/>
 
 # SonicTerm
 
-**A fast, native, GPU-accelerated terminal for people who live in the shell.**
+**A fast, native, GPU-accelerated terminal for people who live in the shell — and the agents that work there with them.**
 
 [![CI](https://github.com/D0n9X1n/SonicTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/D0n9X1n/SonicTerm/actions/workflows/ci.yml)
-[![Release](https://github.com/D0n9X1n/SonicTerm/actions/workflows/release.yml/badge.svg)](https://github.com/D0n9X1n/SonicTerm/actions/workflows/release.yml)
-[![Version](https://img.shields.io/github/v/tag/D0n9X1n/SonicTerm?sort=semver&label=version)](https://github.com/D0n9X1n/SonicTerm/tags)
+[![Version](https://img.shields.io/github/v/tag/D0n9X1n/SonicTerm?sort=semver&label=version)](https://github.com/D0n9X1n/SonicTerm/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/D0n9X1n/SonicTerm/total?label=downloads)](https://github.com/D0n9X1n/SonicTerm/releases)
-[![Stars](https://img.shields.io/github/stars/D0n9X1n/SonicTerm?style=flat&label=stars)](https://github.com/D0n9X1n/SonicTerm/stargazers)
-[![Issues](https://img.shields.io/github/issues/D0n9X1n/SonicTerm?label=issues)](https://github.com/D0n9X1n/SonicTerm/issues)
-[![Pull Requests](https://img.shields.io/github/issues-pr/D0n9X1n/SonicTerm?label=prs)](https://github.com/D0n9X1n/SonicTerm/pulls)
-[![Last Commit](https://img.shields.io/github/last-commit/D0n9X1n/SonicTerm?label=last%20commit)](https://github.com/D0n9X1n/SonicTerm/commits/main)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/D0n9X1n/SonicTerm?style=flat&label=stars)](https://github.com/D0n9X1n/SonicTerm/stargazers)
+
+**[Download](https://github.com/D0n9X1n/SonicTerm/releases/latest)** ·
+**[Documentation](wiki/Home.md)** · [简体中文文档](wiki/Home-zh-CN.md)
+
+<sub>macOS 15+ (Apple Silicon and Intel) · Windows x64 · Linux x86_64 (.deb, .tar.gz)</sub>
 
 </div>
 
@@ -30,44 +31,23 @@
   Claude test-writer work in the panes beside it — one SonicTerm window, inside tmux.
 </p>
 
-<p align="center">
-  <a href="https://github.com/D0n9X1n/mermaid-tty">mermaid-tty</a> ·
-  <a href="https://github.com/D0n9X1n/mux-agents">mux-agents</a> ·
-  <a href="wiki/Terminal-IO-and-VT.md#kitty-graphics">kitty graphics</a> ·
-  <a href="https://github.com/D0n9X1n/SonicTerm/releases/latest">Download</a>
-</p>
+SonicTerm is a native terminal for macOS, Windows, and Linux. It draws every cell,
+glyph, and overlay as GPU quads, shows real images inline, and gives you the
+comforts of a modern editor — a command palette, split panes, tabs you can drag
+between windows, and plain TOML config. There is no Electron shell, no web runtime,
+and no preferences pane: everything SonicTerm keeps lives under `~/.sonicterm`.
 
-SonicTerm is a native macOS, Windows, and Linux terminal with the quality-of-life
-features you expect from a modern editor: searchable commands, split panes,
-draggable tabs, editable TOML config, bundled Nerd-Font-patched typography, and
-a renderer that is designed around GPU quads instead of CPU blits.
-
-It aims to feel small, sharp, and quiet: no Electron shell, no heavyweight
-runtime, no required GUI preferences pane, and no global dotfile sprawl. User
-state lives under one directory: `~/.sonicterm`.
-
-macOS packages include their native libraries and require macOS 15+ on both
-Apple Silicon and Intel. See [Packaging](wiki/Packaging.md) for local-build
-compatibility and signing details.
-
-Need installation, configuration, keybindings, or theme authoring docs? Read the
-[English](wiki/Home.md) or [简体中文](wiki/Home-zh-CN.md) documentation in the
-repository-tracked [`wiki/`](wiki/) directory. Each language has its own files. The
-README is only the product overview: why SonicTerm exists, what it feels like,
-and why you might want to use it.
-
-## Screenshots
+## Highlights
 
 ### Agents in panes, diagrams as pictures
 
-The capture at the top is one SonicTerm window running tmux. On the left, Claude
-Code answers with a Mermaid sequence diagram that
+The capture above is one SonicTerm window running tmux. On the left, Claude Code
+answers with a Mermaid sequence diagram that
 [mermaid-tty](https://github.com/D0n9X1n/mermaid-tty) renders through kitty
 graphics, so the picture sits in the chat instead of a wall of box-drawing text.
 On the right, [mux-agents](https://github.com/D0n9X1n/mux-agents) runs a Copilot
 reviewer and a Claude test-writer in their own panes, with a sidebar showing which
-agent is working and what each is doing. SonicTerm's status line sits above it all,
-showing the mouse-capture mode and SonicTerm's own memory.
+agent is working and what each is doing.
 
 ```sh
 claude plugin marketplace add D0n9X1n/mermaid-tty
@@ -79,143 +59,128 @@ npm i -g @mermaid-js/mermaid-cli   # pictures; without it diagrams draw as text
 Outside a multiplexer, pictures need nothing more. Inside tmux, add
 `set -g allow-passthrough on` and start Claude Code with mermaid-tty's
 `bin/claude-tmux.py` launcher, which forwards its images through tmux to SonicTerm.
-The mermaid-tty and mux-agents READMEs cover the rest.
 
-### Command palette + editable config
+### Images, inline
 
-The command palette is the center of the UI: search commands, see the active
-keymap shortcut, open config/keymaps, rename tabs, split panes, toggle chrome,
-and reload settings without leaving the terminal.
+Kitty graphics — direct placement and the Unicode placeholders Claude Code uses —
+plus Sixel and iTerm2 images, on every platform. Logos, plots, and heatmaps render
+at full resolution right in the scrollback, next to the command that made them.
+See [kitty graphics](wiki/Terminal-IO-and-VT.md#kitty-graphics).
 
-![SonicTerm command palette editing config](assets/screenshots/command-palette-config.png)
+![SonicTerm showing the SonicTerm logo, a heatmap, a histogram and a line chart as inline kitty images](assets/screenshots/inline-images.png)
 
-### Status line
+### Split panes for AI CLIs and real terminal apps
 
-An optional strip at the top of each window, or at the bottom, shows what only
-SonicTerm knows: mode chips such as `MOUSE` while a program captures the mouse,
-SonicTerm's own CPU, frame time and memory, scrollback position, the selection
-size, clipboard writes, refused input and missing glyphs. Segments hide until
-they have something to say. Turn it on with `[status_line] enabled = true` or
-**Toggle Status Line**, and move it, resize its text or choose segments from the
-command palette. See [status line settings](wiki/Configuration.md#status_line).
+Every pane owns its own PTY. Run an agent, a reviewer, and a system monitor side by
+side, with Nerd Font icons, Powerline glyphs, emoji, CJK, and full-screen TUIs drawn
+crisply. Split with `Cmd+D` / `Cmd+Shift+D` (`Alt+D` / `Alt+Shift+D` on Windows and
+Linux), zoom a pane, or broadcast input across them.
+
+![SonicTerm with Claude Code, a Copilot review and btop in three split panes](assets/screenshots/split-panes.png)
+
+### A command palette for everything
+
+`Cmd+Shift+P` (`Alt+Shift+P`) searches every action and shows the shortcut your
+current keymap binds to it: split and zoom panes, rename tabs and windows, switch
+themes, open config or keymaps, toggle chrome, and reload settings — all without
+leaving the terminal.
+
+![SonicTerm command palette filtered to pane commands over a split-pane session](assets/screenshots/command-palette.png)
+
+### Nine themes, switched live
+
+Tokyo Night, Catppuccin Mocha, Gruvbox Dark Hard, Nord, Dracula, One Dark,
+Monokai Pro, Solarized Dark, and WezTerm ship in the box. Pick one with
+**Apply Theme** in the palette and every window repaints at once; themes are
+plain TOML you can copy and edit. See [Themes](wiki/Themes.md).
+
+![The same Rust source in SonicTerm under Tokyo Night, Catppuccin Mocha, Gruvbox Dark Hard and Nord](assets/screenshots/themes.png)
+
+### A status line that knows the terminal
+
+An optional strip at the top or bottom of each window shows what only SonicTerm
+knows: mode chips such as `MOUSE` while a program captures the mouse, SonicTerm's
+own CPU, frame time and memory, scrollback position, selection size, clipboard
+writes, refused input, and missing glyphs. Segments stay hidden until they have
+something to say. Turn it on with **Toggle Status Line** or
+[`[status_line] enabled = true`](wiki/Configuration.md#status_line).
 
 ![SonicTerm status line above tmux panes](assets/screenshots/status-line.png)
 
-### Split panes built for AI CLIs and real terminal apps
-
-SonicTerm supports multiple panes, per-pane PTYs, tab titles, Nerd Font icons,
-Powerline glyphs, emoji, CJK, and terminal apps that draw their own UI.
-
-![SonicTerm split panes running AI CLIs](assets/screenshots/split-panes-ai-cli.png)
-
-### File references in terminal messages
-
-Hold Cmd on macOS or Ctrl on Windows/Linux to preview a detected local file,
-then click to reveal it in its folder—not execute it or launch an editor.
-Relative references use the current pane's trusted shell working directory.
-See [local targets](wiki/Usage.md#open-urls-and-local-targets).
-
-![SonicTerm detecting an underlined file path and previewing its resolved absolute path](assets/screenshots/file-detection.png)
-
-*User-provided capture showing a detected file path and its resolved absolute-path
-preview. Click/reveal behavior was verified separately in the native app.*
-
-### READONLY mode for safe navigation
-
-READONLY mode blocks terminal input while keeping search, tab switching, and
-pane focus available. It is built for safely inspecting scrollback, config, or
-long-running output without accidentally typing into the active shell.
-
-![SonicTerm READONLY mode with search](assets/screenshots/read-only-search.png)
-
-### Broadcast input across panes
-
-Broadcast mode sends the same keyboard input to every pane in the current tab,
-which is useful for mirrored shell commands, paired AI CLI sessions, and quick
-multi-pane setup work.
-
-![SonicTerm broadcast input demo](assets/screenshots/broadcast-input.gif)
-
 ### Drag tabs between windows
 
-This is SonicTerm's most important workflow feature: tabs are not trapped in one
-window. Drag a busy terminal out into its own window, work there, then drag it
-back when the context belongs with the original session again.
+Tabs are not trapped in one window. Drag a busy terminal out into its own window,
+work there, then drag it back. The pane and its process move with the tab; the
+shell never restarts.
 
 ![SonicTerm tab drag demo](assets/screenshots/tab-drag-demo.gif)
 
-## Why try it?
+### Broadcast input across panes
 
-- **Native macOS, Windows, and Linux app** — small binaries, no Electron, no web runtime.
-- **GPU renderer** — wgpu on Metal, D3D12, and Vulkan, with atlas-backed text and batched
-  quads for cells, chrome, selection, cursor, search, and overlays. Glyphs
-  rasterize with DirectWrite on Windows (FreeType elsewhere and as fallback).
-  Detects the no-GPU case (RDP / VM software rasterizer) and degrades gracefully
-  to stay responsive, with a deterministic full-screen software path on Windows.
-- **Memory limits and retention reports** — grids, parser captures, PTY queues,
-  and image storage enforce their own limits. These per-pane and per-renderer
-  limits are not a hard process-wide quota: total memory can grow with the
-  number of panes and windows. Stalled image transfers and reclaimed older
-  images are reported at the default log level; optional retention reports
-  show sampled subsystem usage. The **Memory Usage** palette command opens a
-  copyable report of process, renderer, graphics and per-pane memory. See
-  [Memory](wiki/Memory.md) for process targets, residual bounds, and accounting
-  exclusions.
-- **Inline images** — kitty graphics (direct placement and Unicode placeholders,
-  as Claude Code draws them), Sixel and iTerm2 images, on macOS, Linux and
-  Windows. Mermaid diagrams from the mermaid-tty plugin show as pictures. See
-  [Terminal IO and VT](wiki/Terminal-IO-and-VT.md#kitty-graphics).
-- **Real pane workflow** — split panes, close/resize behavior, per-pane PTYs,
-  pane focus, READ ONLY mode for safe scrollback navigation, quick-select URL
-  hints, and search.
-- **File references in terminal messages** — hold Cmd on macOS or Ctrl on
-  Windows/Linux to preview a detected local path, then click to reveal the file
-  in its folder. Source references keep line numbers out of the filename;
-  relative paths use that pane's trusted shell working directory, except on the
-  alternate screen of full-screen programs such as tmux. See
-  [local targets](wiki/Usage.md#open-urls-and-local-targets).
-- **Default terminal and file handler** — launchers can run a command directly
-  (`sonicterm -e htop`, xdg-terminal-exec, KDE); macOS can open Unix executables
-  and `ssh:`/`x-man-page:` links in SonicTerm; double-clicked scripts are still
-  typed at the prompt, not run. Installing changes no default: the
-  **Set SonicTerm as Default…** palette command does, after confirmation. See
-  [Run a command from a launcher](wiki/Usage.md#run-a-command-from-a-launcher) and
-  [Choose SonicTerm as the default](wiki/Usage.md#choose-sonicterm-as-the-default).
-- **Command palette first** — commands are searchable and display shortcuts from
-  your current keymap config. **About SonicTerm** opens a window with the version,
-  build commit and date, OS, renderer, font, theme, keymap, config and log paths,
-  and a Copy button.
-- **Config is just files** — `~/.sonicterm/sonicterm.toml`, plus editable
-  `themes/` and `keymaps/` examples seeded on first launch.
-- **System typography, bundled icons** — text uses the platform's own monospace
-  face (Menlo, Cascadia Mono or Consolas, or fontconfig's `monospace`), and the
-  bundled Symbols Nerd Font Mono supplies Powerline and Nerd Font icons out of the box.
-- **WezTerm-inspired behavior** — terminal, font, keymap, and rendering details
-  follow WezTerm-proven semantics where SonicTerm has absorbed them.
+Type once, run everywhere: broadcast mirrors your keystrokes to every pane in the
+tab (`Cmd+Shift+B` / `Alt+Shift+B`) — handy for mirrored shell commands, paired
+agent sessions, and multi-host setup.
 
-## Documentation lives in `wiki/`
+![SonicTerm broadcast input demo](assets/screenshots/broadcast-input.gif)
 
-The README intentionally avoids operational details. If you want to install it,
-change preferences, edit keybindings, author a theme, inspect logs, or build from
-source, use the repository-tracked [English](wiki/Home.md) or
-[简体中文](wiki/Home-zh-CN.md) documentation:
+### READONLY mode for safe reading
 
-| Topic | Documentation page |
+`Cmd+[` (`Alt+[`) blocks terminal input while search, tab switching, and pane
+focus keep working, so you can dig through scrollback or a long-running log
+without typing into the live shell.
+
+![SonicTerm in READONLY mode, searching a source file with highlighted matches](assets/screenshots/read-only-search.png)
+
+### Click file references
+
+Hold `Cmd` (`Ctrl` on Windows and Linux) to preview a detected local path, then
+click to reveal it in its folder — never to execute it. Line numbers stay out of
+the filename, and relative paths resolve against that pane's own working
+directory. See [local targets](wiki/Usage.md#open-urls-and-local-targets).
+
+![SonicTerm detecting an underlined file path and previewing its resolved absolute path](assets/screenshots/file-detection.png)
+
+## Why SonicTerm?
+
+- **Native and small** — one app per platform, no Electron, no web runtime.
+- **GPU first** — wgpu on Metal, D3D12, and Vulkan with an atlas-backed glyph cache.
+  Without a GPU (RDP, VMs) it degrades gracefully, with a full software path on Windows.
+- **Bounded memory** — grids, captures, PTY queues, and images each enforce their own
+  limits, and the **Memory Usage** command opens a copyable report.
+  See [Memory](wiki/Memory.md).
+- **Config is just files** — `~/.sonicterm/sonicterm.toml`, plus editable `themes/`
+  and `keymaps/` examples seeded on first launch.
+- **Typography that works out of the box** — the platform's own monospace face, with
+  the bundled Symbols Nerd Font Mono for Powerline and Nerd Font icons.
+- **A good default terminal** — run commands from launchers (`sonicterm -e htop`),
+  and on macOS open executables and `ssh:` links. Nothing changes your defaults until
+  you confirm **Set SonicTerm as Default…**.
+  See [Choose SonicTerm as the default](wiki/Usage.md#choose-sonicterm-as-the-default).
+- **WezTerm-proven behavior** — terminal, font, keymap, and rendering semantics follow
+  WezTerm where SonicTerm has absorbed them.
+
+## Documentation
+
+Everything operational lives in the repository's [`wiki/`](wiki/), in
+[English](wiki/Home.md) and [简体中文](wiki/Home-zh-CN.md):
+
+| Topic | Page |
 | --- | --- |
-| Usage and installation | [Usage](wiki/Usage.md) |
+| Install and everyday use | [Usage](wiki/Usage.md) |
 | Preferences and `sonicterm.toml` | [Configuration](wiki/Configuration.md) |
-| Keymap editing | [Keybindings](wiki/Keybindings.md) |
+| Keymaps | [Keybindings](wiki/Keybindings.md) |
 | Theme authoring | [Themes](wiki/Themes.md) |
+| tmux and other multiplexers | [Terminal Multiplexers](wiki/Terminal-Multiplexers.md) |
 | Logs and diagnostics | [Logging](wiki/Logging.md) |
+| Building packages | [Packaging](wiki/Packaging.md) |
 
 ## Thanks, WezTerm
 
-SonicTerm owes a lot to [WezTerm](https://github.com/wezterm/wezterm). WezTerm
-is the reference for terminal semantics, font behavior, keymap conventions, and
-many rendering edge cases. SonicTerm has absorbed WezTerm-proven ideas into
-Sonic-owned crates:
+SonicTerm owes a lot to [WezTerm](https://github.com/wezterm/wezterm), its
+reference for terminal semantics, font behavior, keymap conventions, and many
+rendering edge cases. WezTerm-proven ideas live on in Sonic-owned crates:
 
-- VT/grid behavior in `sonicterm-vt` and `sonicterm-grid`.
+- VT and grid behavior in `sonicterm-vt` and `sonicterm-grid`.
 - Font fallback, shaping, and rasterization in `sonicterm-font`.
 - Box drawing, block glyph, Powerline, Braille, sextant, and octant geometry in
   `sonicterm-block-glyph`.
