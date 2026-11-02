@@ -106,3 +106,52 @@ fn preedit_caret_advance_nonzero_for_real_composition() {
         "non-boundary caret byte falls back to full width"
     );
 }
+
+/// The top-right overlay stack starts below the top chrome: a top status line's band and the
+/// titlebar inset. A bottom status line, or none, reserves nothing above the panes, so the stack
+/// keeps its window-top placement.
+#[test]
+fn the_overlay_stack_starts_below_a_top_status_line() {
+    use crate::status_strip::strip_placement;
+    use sonicterm_render_model::boundary::cfg::status_line::StatusPosition;
+    let (surface_h, strip_h) = (800.0, 36.0);
+    let top = strip_placement(StatusPosition::Top, surface_h, 0.0, 40.0, strip_h);
+    let bottom = strip_placement(StatusPosition::Bottom, surface_h, 0.0, 40.0, strip_h);
+    assert_eq!(overlay_stack_top(0.0, top), strip_h);
+    assert_eq!(overlay_stack_top(0.0, bottom), 0.0);
+    assert_eq!(overlay_stack_top(28.0, top), 28.0 + strip_h, "the titlebar band is chrome too");
+}
+
+/// With a top strip, the READONLY badge, the search bar under it and a notification under both
+/// all start below the strip and keep their order; without one their rects are unchanged.
+#[test]
+fn the_badge_search_bar_and_notification_clear_a_top_status_line() {
+    let (surface_w, surface_h, scale, strip_h) = (1200.0, 800.0, 2.0, 36.0);
+    let badge = read_only_badge_rect(surface_w, surface_h, scale, 100.0, strip_h);
+    let search = search_bar_layout_below(surface_w, surface_h, 120.0, 1, scale, strip_h);
+    let notice = notification_layout_below(
+        NotificationBubbleLayout::compute_text(
+            surface_w,
+            surface_h - strip_h,
+            "hi",
+            26.0,
+            2,
+            scale,
+            |text| text.len() as f32 * 10.0,
+        ),
+        strip_h,
+    );
+    assert!(badge.1 >= strip_h, "the badge starts at {} inside the strip", badge.1);
+    assert!(search.border.y >= badge.1 + badge.3, "the search bar sits under the badge");
+    assert!(notice.geometry.border.y >= search.border.y + search.border.h);
+    assert_eq!(notice.geometry.close.y, notice.geometry.border.y, "close hit area moves too");
+    assert_eq!(
+        read_only_badge_rect(surface_w, surface_h, scale, 100.0, 0.0).1,
+        READ_ONLY_BADGE_MARGIN,
+        "no top chrome: the badge keeps its window-top margin"
+    );
+    assert_eq!(
+        search_bar_layout_below(surface_w, surface_h, 120.0, 1, scale, 0.0),
+        SearchBarLayout::compute_at_row(surface_w, surface_h, 120.0, 1, scale)
+    );
+}

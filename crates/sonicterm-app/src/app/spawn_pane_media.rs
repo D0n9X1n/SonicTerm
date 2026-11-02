@@ -6,20 +6,65 @@ use sonicterm_vt::vt::{KittyAction, KittyCommand, MediaProtocol};
 use super::super::media::{apply_kitty, kitty_source_size, KittyOp};
 use super::*;
 
-/// A cursor move the host owes the parser after a kitty image was stored or placed: the
-/// placement's box in cells, 0 for a side not given, and the image's transmitted pixel size.
+/// A cursor move the host owes the parser after an image it now holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct KittyCursorMove {
-    /// Placement box width in cells (`c`), or 0.
-    pub(super) cols: u32,
-    /// Placement box height in cells (`r`), or 0.
-    pub(super) rows: u32,
-    /// The image's transmitted pixel size.
-    pub(super) source_px: (u32, u32),
+pub(super) enum ImageCursorMove {
+    /// A kitty direct placement that was stored or placed.
+    Kitty {
+        /// Placement box width in cells (`c`), or 0.
+        cols: u32,
+        /// Placement box height in cells (`r`), or 0.
+        rows: u32,
+        /// The image's transmitted pixel size.
+        source_px: (u32, u32),
+    },
+    /// A Sixel image of this decoded pixel size.
+    Sixel {
+        /// The decoded image's width and height in pixels.
+        image_px: (u32, u32),
+    },
+    /// An iTerm2 image of this decoded pixel size, sent without `doNotMoveCursor=1`.
+    Iterm2 {
+        /// The decoded image's width and height in pixels.
+        image_px: (u32, u32),
+    },
 }
 
-/// Decode and store one batch's media events, returning the kitty replies they owe and the cursor
-/// moves owed for direct placements that were stored or placed.
+impl ImageCursorMove {
+    /// Move `parser`'s cursor past the image this move is owed for.
+    pub(super) fn apply(self, parser: &mut Parser) {
+        match self {
+            Self::Kitty { cols, rows, source_px } => {
+                parser.move_cursor_past_kitty_image(cols, rows, source_px);
+            }
+            Self::Sixel { image_px } => parser.move_cursor_past_sixel_image(image_px),
+            Self::Iterm2 { image_px } => parser.move_cursor_past_iterm2_image(image_px),
+        }
+    }
+}
+
+/// Whether an iTerm2 `File=` attribute section asks the cursor to stay put (`doNotMoveCursor=1`).
+fn iterm2_keeps_cursor(metadata: &str) -> bool {
+    let attributes = metadata.strip_prefix("File=").unwrap_or(metadata);
+    attributes.split(';').any(|attribute| attribute == "doNotMoveCursor=1")
+}
+
+/// The cursor move owed for an ordinary `media` event decoded to `image`, if any: a Sixel image,
+/// or an iTerm2 image without `doNotMoveCursor=1`. An untyped kitty payload moves nothing.
+fn ordinary_image_move(media: &MediaEvent, image: &InlineImage) -> Option<ImageCursorMove> {
+    let image_px = (image.width, image.height);
+    match media.protocol {
+        MediaProtocol::Sixel => Some(ImageCursorMove::Sixel { image_px }),
+        MediaProtocol::Iterm2File if !iterm2_keeps_cursor(&media.metadata) => {
+            Some(ImageCursorMove::Iterm2 { image_px })
+        }
+        MediaProtocol::Iterm2File | MediaProtocol::Kitty => None,
+    }
+}
+
+/// Decode and store one batch's media events, returning the kitty replies they owe and, in stream
+/// order, the cursor moves owed for the Sixel and iTerm2 images held and for kitty direct
+/// placements that were stored or placed.
 ///
 /// Ordinary images (Sixel, iTerm2, untyped kitty) are staged and merged once, trimmed to the
 /// pane's budget as they are today. A kitty command is applied in order after any staged images
@@ -30,7 +75,7 @@ pub(super) fn apply_batch_media<Decode>(
     handles: &PaneVtHandles,
     media_events: Vec<MediaEvent>,
     decode_media: &mut Decode,
-) -> (Vec<u8>, Vec<KittyCursorMove>)
+) -> (Vec<u8>, Vec<ImageCursorMove>)
 where
     Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
 {
@@ -44,6 +89,8 @@ where
         let Some(command) = command else {
             // When: command is None, the event is Sixel, iTerm2 or an untyped kitty payload, drawn at its cursor.
             if let Some(image) = decode_media(&media) {
+                // Staged trimming always keeps the newest image, so this one is held.
+                moves.extend(ordinary_image_move(&media, &image));
                 staged.push(image);
                 super::super::media::trim_staged_inline_images(
                     &mut staged,
@@ -82,7 +129,7 @@ where
             // held entry is the newest, read before the trim may drop it.
             let held = message == Some("OK") && command.moves_cursor();
             if let Some(tag) = images.last().and_then(|entry| entry.kitty).filter(|_| held) {
-                moves.push(KittyCursorMove {
+                moves.push(ImageCursorMove::Kitty {
                     cols: command.cols,
                     rows: command.rows,
                     source_px: tag.source_px,

@@ -489,8 +489,19 @@ the text as the full screen scrolls, and down when the viewport is scrolled
 back. A scroll inside DECSTBM margins does not move it. An image is shown only
 on the screen it was drawn on: the primary screen's images are hidden while the
 alternate screen is active, and the alternate screen's images are not shown after
-leaving it. Sixel and iTerm2 images
-do not move the cursor.
+leaving it.
+
+A Sixel or iTerm2 image is drawn at its decoded pixel size and covers the cells
+those pixels span on the pane's cell size. After a Sixel image the cursor stays
+in the image's left column and moves to the image's last cell row, as in xterm
+with sixel scrolling and in WezTerm, so the line feed that usually follows the
+image starts the next text below it. After an iTerm2 image the cursor moves to
+just right of the image's bottom-right cell, or to the last column when that
+is past the right edge, as in iTerm2 and WezTerm; WezTerm's `doNotMoveCursor=1`
+keeps it where the image started. Both moves scroll the region at the bottom
+margin, as a kitty placement's move does. The parser stops after the image, and the pane's worker moves the
+cursor only once the image has decoded, so an image that fails to decode, or
+one that arrives before the pane has been laid out, leaves the cursor still.
 
 Claude Code sends images when XTVERSION starts with `kitty`. It may first probe
 with a file-path query (`t=f`), which is refused, and then sends the image

@@ -82,6 +82,7 @@ impl Performer {
             decrqss: None,
             decrqss_awaiting_backslash: false,
             kitty_kbd_flags: [Vec::new(), Vec::new()],
+            image_yield: false,
         }
     }
 
@@ -100,6 +101,9 @@ impl Performer {
     /// anchored at the event's row beside the text it was drawn with as the screen scrolls.
     pub(super) fn push_media(&mut self, mut event: MediaEvent) {
         event.scroll_mark = self.grid.lines_scrolled();
+        // A Sixel or iTerm2 image ends the prefix; a kitty command decides that itself.
+        self.image_yield |=
+            matches!(event.protocol, MediaProtocol::Sixel | MediaProtocol::Iterm2File);
         self.events.push(VtEvent::Media(event));
     }
 
