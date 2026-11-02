@@ -168,25 +168,77 @@ pub(super) fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
     hex_to_premultiplied_rgba(fg, derived_alpha)
 }
 
+/// The READONLY badge, first in the top-right overlay stack, starting `stack_top` px down: the
+/// top chrome [`overlay_stack_top`] measures, so the badge never covers a top status line.
 pub(super) fn read_only_badge_rect(
     sw: f32,
     sh: f32,
     scale: f32,
     content_w: f32,
+    stack_top: f32,
 ) -> (f32, f32, f32, f32) {
     // Badge width hugs its content (icon + "READONLY") instead of a fixed
     // constant, so it never looks over-long. `content_w` is already in raster
     // px (estimated from the DPI-scaled badge font); add scaled paddings. The
     // edge MARGIN is a window-anchored position and stays in window space.
     let s = scale.max(0.01);
+    let stack_top = stack_top.clamp(0.0, sh.max(0.0));
+    let below_h = sh - stack_top;
     let pad = (SEARCH_BAR_PAD_LEFT + SEARCH_BAR_PAD_RIGHT) * s;
     let w = (content_w + pad)
         .max(READ_ONLY_BADGE_W * 0.4 * s) // small floor so it never collapses
         .min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
-    let h = (READ_ONLY_BADGE_H * s).min((sh - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
+    let h = (READ_ONLY_BADGE_H * s).min((below_h - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
     let x = (sw - w - READ_ONLY_BADGE_MARGIN).max(0.0);
-    let y = READ_ONLY_BADGE_MARGIN.min((sh - h).max(0.0));
+    let y = stack_top + READ_ONLY_BADGE_MARGIN.min((below_h - h).max(0.0));
     (x, y, w, h)
+}
+
+/// Raster px from the window top to where the top-right overlay stack (READONLY badge, search
+/// bar, notifications) may start: the titlebar band and, when the status line sits at the top,
+/// its band. Mirrors the panes' own top inset without the padding.
+pub(super) fn overlay_stack_top(
+    titlebar_px: f32,
+    strip: crate::status_strip::StripPlacement,
+) -> f32 {
+    titlebar_px + strip.reserved_top
+}
+
+/// [`SearchBarLayout::compute_at_row`] laid out in the window area below `stack_top`.
+pub(super) fn search_bar_layout_below(
+    sw: f32,
+    sh: f32,
+    content_w: f32,
+    row: u8,
+    scale: f32,
+    stack_top: f32,
+) -> SearchBarLayout {
+    let stack_top = stack_top.clamp(0.0, sh.max(0.0));
+    let mut layout = SearchBarLayout::compute_at_row(sw, sh - stack_top, content_w, row, scale);
+    layout.bg.y += stack_top;
+    layout.border.y += stack_top;
+    layout
+}
+
+/// A notification laid out in the window area below `stack_top`, moved down by it, so painting
+/// and close hit-testing share one placement under the top chrome.
+pub(super) fn notification_layout_below(
+    mut layout: sonicterm_render_model::boundary::ui::overlays::NotificationTextLayout,
+    stack_top: f32,
+) -> sonicterm_render_model::boundary::ui::overlays::NotificationTextLayout {
+    let geometry = &mut layout.geometry;
+    for rect in [&mut geometry.bg, &mut geometry.border, &mut geometry.close] {
+        rect.y += stack_top;
+    }
+    layout
+}
+
+impl GpuRenderer {
+    /// Raster px from the window top to where the top-right overlay stack may start; see
+    /// [`overlay_stack_top`].
+    pub(super) fn overlay_stack_top_px(&self) -> f32 {
+        overlay_stack_top(self.titlebar_inset * self.scale_factor, self.status_line_placement())
+    }
 }
 
 impl GpuRenderer {

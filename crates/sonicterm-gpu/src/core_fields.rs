@@ -149,9 +149,12 @@ impl GpuRenderer {
     ) -> sonicterm_render_model::boundary::ui::overlays::NotificationTextLayout {
         let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         let font_size = self.raster_px(self.font_size.max(1.0));
-        NotificationBubbleLayout::compute_text(
+        // Laid out below the top chrome and moved down by it, so the bubble never covers a top
+        // status line and dismissal hit-tests the drawn rect.
+        let stack_top = self.overlay_stack_top_px().clamp(0.0, window.1.max(0.0));
+        let layout = NotificationBubbleLayout::compute_text(
             window.0,
-            window.1,
+            window.1 - stack_top,
             message,
             font_size,
             row,
@@ -167,7 +170,8 @@ impl GpuRenderer {
                     })
                     .unwrap_or_else(|| estimate_badge_text_width(text, font_size))
             },
-        )
+        );
+        notification_layout_below(layout, stack_top)
     }
 }
 

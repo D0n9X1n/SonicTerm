@@ -124,6 +124,8 @@ impl GpuRenderer {
         // distinct from the legacy full-width status bar above. It shows
         // whenever search state exists, so the user has a persistent
         // affordance while typing.
+        // The corner stack starts below the top chrome, so it never covers a top status line.
+        let stack_top = self.overlay_stack_top_px();
         let read_only_badge = read_only_mode.then(|| {
             // Content width = icon + gap + "READONLY", in the badge's own
             // (DPI-scaled) font, so the badge hugs its text.
@@ -131,7 +133,7 @@ impl GpuRenderer {
             let content_w = estimate_badge_text_width(READ_ONLY_BADGE_ICON, badge_font)
                 + self.chrome_px(SEARCH_BAR_ICON_GAP)
                 + estimate_badge_text_width(READ_ONLY_BADGE_LABEL, badge_font);
-            read_only_badge_rect(sw, sh, self.scale_factor, content_w)
+            read_only_badge_rect(sw, sh, self.scale_factor, content_w, stack_top)
         });
         // Field geometry planned this frame; it replaces the presented record only
         // after a `Presented` outcome, so retries and failures never bless it.
@@ -173,13 +175,9 @@ impl GpuRenderer {
             )
         });
         let search_bar_layout = search_content_width.map(|content_w| {
-            if read_only_badge.is_some() {
-                SearchBarLayout::compute_at_row(sw, sh, content_w, 1, self.scale_factor)
-            } else {
-                // When: `read_only_badge` is None — no badge occupies row 0, so
-                // the search bar takes the default top row.
-                SearchBarLayout::compute(sw, sh, content_w, self.scale_factor)
-            }
+            // The search bar sits under the badge when one occupies row 0, else on row 0.
+            let row = u8::from(read_only_badge.is_some());
+            search_bar_layout_below(sw, sh, content_w, row, self.scale_factor, stack_top)
         });
         // When search is active the inline IME preedit must anchor to the
         // current search-box caret, not the terminal cursor.
