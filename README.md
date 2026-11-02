@@ -18,6 +18,25 @@
 
 </div>
 
+<p align="center">
+  <a href="assets/screenshots/agents-hero.png">
+    <img src="assets/screenshots/agents-hero.png" alt="SonicTerm running Claude Code with a rendered Mermaid sequence diagram, beside two mux-agents helper panes and their live sidebar" width="100%"/>
+  </a>
+</p>
+
+<p align="center">
+  <b>Your agents, side by side, drawing real pictures.</b><br/>
+  Claude Code answers with a rendered Mermaid diagram while a Copilot reviewer and a
+  Claude test-writer work in the panes beside it — one SonicTerm window, inside tmux.
+</p>
+
+<p align="center">
+  <a href="https://github.com/D0n9X1n/mermaid-tty">mermaid-tty</a> ·
+  <a href="https://github.com/D0n9X1n/mux-agents">mux-agents</a> ·
+  <a href="wiki/Terminal-IO-and-VT.md#kitty-graphics">kitty graphics</a> ·
+  <a href="https://github.com/D0n9X1n/SonicTerm/releases/latest">Download</a>
+</p>
+
 SonicTerm is a native macOS, Windows, and Linux terminal with the quality-of-life
 features you expect from a modern editor: searchable commands, split panes,
 draggable tabs, editable TOML config, bundled Nerd-Font-patched typography, and
@@ -38,6 +57,29 @@ README is only the product overview: why SonicTerm exists, what it feels like,
 and why you might want to use it.
 
 ## Screenshots
+
+### Agents in panes, diagrams as pictures
+
+The capture at the top is one SonicTerm window running tmux. On the left, Claude
+Code answers with a Mermaid sequence diagram that
+[mermaid-tty](https://github.com/D0n9X1n/mermaid-tty) renders through kitty
+graphics, so the picture sits in the chat instead of a wall of box-drawing text.
+On the right, [mux-agents](https://github.com/D0n9X1n/mux-agents) runs a Copilot
+reviewer and a Claude test-writer in their own panes, with a sidebar showing which
+agent is working and what each is doing. SonicTerm's status line sits above it all,
+showing the mouse-capture mode and SonicTerm's own memory.
+
+```sh
+claude plugin marketplace add D0n9X1n/mermaid-tty
+claude plugin install mermaid-tty@mermaid-tty --config theme=default
+claude plugin marketplace add D0n9X1n/mux-agents && claude plugin install mux-agents@mux-agents
+npm i -g @mermaid-js/mermaid-cli   # pictures; without it diagrams draw as text
+```
+
+Outside a multiplexer, pictures need nothing more. Inside tmux, add
+`set -g allow-passthrough on` and start Claude Code with mermaid-tty's
+`bin/claude-tmux.py` launcher, which forwards its images through tmux to SonicTerm.
+The mermaid-tty and mux-agents READMEs cover the rest.
 
 ### Command palette + editable config
 
