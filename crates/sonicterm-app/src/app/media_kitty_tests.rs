@@ -60,7 +60,16 @@ fn raw_data_must_match_its_declared_size() {
     // A short or long buffer, or a side past the decode limit, is refused before allocation.
     assert!(decode_kitty_pixels(&event("f=24,s=2,v=1", &[1, 2, 3])).is_none());
     assert!(decode_kitty_pixels(&event("f=32,s=1,v=1", &[1, 2, 3, 4, 5])).is_none());
-    assert!(decode_kitty_pixels(&event("f=24,s=4096,v=1", &[0; 3])).is_none());
+    assert!(decode_kitty_pixels(&event("f=24,s=8193,v=1", &[0; 3])).is_none());
+}
+
+#[test]
+fn a_tall_raw_image_inside_the_pixel_budget_decodes() {
+    // A 1x4096 raw strip is far under the pixel budget, so its height alone does not refuse it.
+    let data = vec![255u8; 4096 * 4];
+    let (width, height, _) =
+        decode_kitty_pixels(&event("f=32,s=1,v=4096", &data)).expect("decodes");
+    assert_eq!((width, height), (1, 1024));
 }
 
 #[test]

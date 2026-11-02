@@ -15,10 +15,30 @@ fn image(id: u64, bytes: usize) -> InlineImage {
 
 #[test]
 fn decode_dimensions_reject_image_bombs() {
+    // The pixel budget bounds the decode allocation; the side cap only stops
+    // degenerate shapes, so a tall image inside the budget is admitted.
     assert!(inline_image_decode_dimensions_allowed(2048, 2048));
-    assert!(!inline_image_decode_dimensions_allowed(2049, 1));
-    assert!(!inline_image_decode_dimensions_allowed(1, 2049));
+    assert!(inline_image_decode_dimensions_allowed(1040, 2804));
+    assert!(inline_image_decode_dimensions_allowed(512, 8192));
+    assert!(!inline_image_decode_dimensions_allowed(2048, 2049));
+    assert!(!inline_image_decode_dimensions_allowed(8193, 1));
+    assert!(!inline_image_decode_dimensions_allowed(1, 8193));
+    assert!(!inline_image_decode_dimensions_allowed(0, 1));
     assert!(!inline_image_decode_dimensions_allowed(u32::MAX, u32::MAX));
+}
+
+#[test]
+fn a_tall_image_inside_the_pixel_budget_decodes_and_keeps_its_aspect() {
+    // A tall diagram (1040x2804, 70 % of the pixel budget) is downscaled to the
+    // rendered cap on both base64 paths instead of being refused for its height.
+    let tall = png_of_size(1040, 2804);
+    for protocol in [MediaProtocol::Kitty, MediaProtocol::Iterm2File] {
+        let decoded = decode_inline_image(&base64_media_event(protocol, &tall))
+            .unwrap_or_else(|| panic!("{protocol:?} must decode a tall image inside the budget"));
+        assert_eq!(decoded.height, MAX_INLINE_IMAGE_RENDER_SIDE, "{protocol:?} fits the long side");
+        // 1040 * 1024 / 2804 = 379.8; the resize rounds the short side to the nearest pixel.
+        assert_eq!(decoded.width, 380, "{protocol:?} keeps the aspect ratio");
+    }
 }
 
 #[test]
@@ -557,7 +577,12 @@ fn eviction_returns_the_images_so_they_can_be_freed_outside_the_lock() {
 /// A `side`x`side` PNG with incompressible pixels, so the encoded payload is a
 /// realistic size rather than a solid-colour degenerate case.
 fn png_of_side(side: u32) -> Vec<u8> {
-    let mut buffer = image::RgbaImage::new(side, side);
+    png_of_size(side, side)
+}
+
+/// A `width_px`x`height_px` PNG with the same incompressible pixels as [`png_of_side`].
+fn png_of_size(width_px: u32, height_px: u32) -> Vec<u8> {
+    let mut buffer = image::RgbaImage::new(width_px, height_px);
     for (pixel_x, pixel_y, pixel) in buffer.enumerate_pixels_mut() {
         *pixel = image::Rgba([
             (pixel_x % 251) as u8,
@@ -643,8 +668,8 @@ fn no_decoder_can_emit_an_image_larger_than_the_single_image_bound() {
         decoded.bgra.len()
     };
 
-    // A source at the largest side the preflight gate admits: resized down.
-    let at_preflight_cap = png_of_side(MAX_INLINE_IMAGE_DECODE_SIDE);
+    // The largest square source the preflight pixel budget admits: resized down.
+    let at_preflight_cap = png_of_side(MAX_INLINE_IMAGE_DECODE_BUDGET_SIDE);
     let kitty = largest(
         "Kitty at the preflight cap",
         &base64_media_event(MediaProtocol::Kitty, &at_preflight_cap),
@@ -685,16 +710,19 @@ fn no_decoder_can_emit_an_image_larger_than_the_single_image_bound() {
         MAX_SINGLE_INLINE_IMAGE_BYTES / 1048576
     );
 
-    // A source beyond the preflight gate is refused outright rather than
-    // clamped, which is what keeps the gate a separate limit from the cap
+    // A source beyond the preflight pixel budget is refused outright rather
+    // than clamped, which is what keeps the gate a separate limit from the cap
     // above: it decides whether decoding starts, not what survives it.
     assert!(
         decode_inline_image(&base64_media_event(
             MediaProtocol::Kitty,
-            &png_of_side(MAX_INLINE_IMAGE_DECODE_SIDE + 1)
+            &png_of_size(
+                MAX_INLINE_IMAGE_DECODE_BUDGET_SIDE + 1,
+                MAX_INLINE_IMAGE_DECODE_BUDGET_SIDE
+            )
         ))
         .is_none(),
-        "a source past the preflight cap must be rejected before any pixels are decoded"
+        "a source past the preflight pixel budget must be rejected before any pixels are decoded"
     );
 }
 

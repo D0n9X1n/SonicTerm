@@ -8,6 +8,7 @@ use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 use sonicterm_ui::tabs::Tab;
 
 use super::*;
+use crate::app::native_title_font::title_font_draws;
 use crate::app::App;
 
 /// A tab whose displayed title is `title` and which carries no custom title.
@@ -293,4 +294,71 @@ fn about_to_wait_arms_the_title_wake_before_building_accessibility() {
     let wake = source.find("self.native_title_wake(now)").expect("wake armed each pass");
     let accessibility = source.find("self.flush_accessibility(now)").expect("accessibility");
     assert!(wake < accessibility);
+}
+
+/// A title font with no private-use glyph but the Apple logo, as the macOS title font has.
+fn apple_logo_only(character: char) -> bool {
+    character == '\u{F8FF}'
+}
+
+#[test]
+fn icons_the_title_font_cannot_draw_are_left_out() {
+    // A Nerd Font icon would draw as an empty box in the platform's title font, so it is dropped
+    // and the spaces it leaves collapse into one.
+    let shown =
+        window_title_text_with(1, "", Some("\u{F489} build \u{E0B0} main"), apple_logo_only);
+    assert_eq!(shown, "#1 build main");
+}
+
+#[test]
+fn a_part_made_only_of_icons_falls_through_to_the_next_source() {
+    // An icon-only body shows the application name; an icon-only window name shows the tab.
+    assert_eq!(
+        window_title_text_with(1, "", Some("\u{F489} \u{E0B0}"), apple_logo_only),
+        "#1 SonicTerm"
+    );
+    assert_eq!(window_title_text_with(1, "\u{F489}", Some("vim"), apple_logo_only), "#1 vim");
+}
+
+#[test]
+fn only_private_use_scalars_the_font_lacks_are_dropped() {
+    // Every private-use plane boundary is checked, a glyph the font maps (U+F8FF) stays, and
+    // the scalars just outside private use (U+D7FF, U+F900) and CJK and emoji text survive.
+    let none = |_: char| false;
+    for private_use in
+        ['\u{E000}', '\u{F8FF}', '\u{F0000}', '\u{FFFFD}', '\u{100000}', '\u{10FFFD}']
+    {
+        assert_eq!(window_title_text_with(1, "", Some(&format!("a{private_use}b")), none), "#1 ab");
+    }
+    assert_eq!(window_title_text_with(1, "", Some("a\u{F8FF}b"), apple_logo_only), "#1 a\u{F8FF}b");
+    let kept = "\u{D7FF}\u{F900} 日本語 🚀 👩\u{200D}💻 ✔\u{FE0F}";
+    assert_eq!(window_title_text_with(1, "", Some(kept), none), format!("#1 {kept}"));
+}
+
+#[test]
+fn controls_next_to_an_icon_still_show_as_replacement_characters() {
+    // Controls are replaced before icons are filtered, so a tab beside an icon is never lost.
+    assert_eq!(
+        window_title_text_with(1, "", Some("\u{F489}\twork"), apple_logo_only),
+        "#1 \u{FFFD}work"
+    );
+}
+
+#[test]
+fn the_length_cap_counts_only_the_scalars_that_remain() {
+    // Leading icons must not use up the cap and cut the words a user can read.
+    let icons = "\u{F489}".repeat(MAX_NATIVE_TITLE_SCALARS);
+    let words = "x".repeat(MAX_NATIVE_TITLE_SCALARS);
+    let shown = window_title_text_with(1, "", Some(&format!("{icons}{words}")), apple_logo_only);
+    assert_eq!(shown, format!("#1 {words}"));
+}
+
+#[test]
+fn the_platform_title_font_keeps_ordinary_text_and_drops_a_nerd_icon() {
+    // The real oracle on this host: text outside private use is never filtered (the platform's
+    // font cascade draws CJK the title font lacks), and a Nerd Font icon no title font carries is.
+    assert!(title_font_draws('a'));
+    assert!(title_font_draws('日'));
+    assert!(!title_font_draws('\u{F489}'));
+    assert!(!title_font_draws('\u{F0001}'));
 }

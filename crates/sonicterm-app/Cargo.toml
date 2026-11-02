@@ -61,6 +61,8 @@ libc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
+# The native window title asks the window-title font which icon glyphs it can draw.
+core-text = "=22.0.0"
 # The per-window display link: NSView.displayLink (macOS 14+) and its tick target.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSRunLoop", "NSString"] }

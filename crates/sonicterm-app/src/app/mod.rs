@@ -239,6 +239,7 @@ mod memory_report_window;
 pub mod memory_snapshot;
 mod misc;
 mod native_title;
+mod native_title_font;
 pub mod os_drag;
 mod overlays;
 mod owners;

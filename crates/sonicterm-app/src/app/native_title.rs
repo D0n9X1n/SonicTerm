@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use sonicterm_ui::tabs::{Tab, TabId};
 use winit::window::WindowId;
 
+use super::native_title_font;
 use super::{App, NATIVE_WINDOW_TITLE};
 
 /// Longest name or tab body shown in a native title, in Unicode scalar values: the window-name
@@ -104,20 +105,55 @@ fn formatted_body(title: &str) -> Option<&str> {
 }
 
 /// `text` safe and short enough for a native title: each control character replaced by U+FFFD
-/// (a NUL would panic X11) before surrounding spaces are trimmed, so a tab or newline at either
-/// end is shown rather than silently dropped, then at most [`MAX_NATIVE_TITLE_SCALARS`] scalars.
-fn title_part(text: &str) -> String {
+/// (a NUL would panic X11), then every private-use glyph `draws` rejects left out, the spaces it
+/// leaves collapsed, the ends trimmed, and at most [`MAX_NATIVE_TITLE_SCALARS`] scalars kept.
+/// Replacing first keeps a tab or newline beside an icon visible; capping last keeps a run of
+/// dropped icons from using up the cap.
+fn title_part(text: &str, draws: impl Fn(char) -> bool) -> String {
     let replaced = sonicterm_types::replace_control_characters(text);
-    replaced.trim().chars().take(MAX_NATIVE_TITLE_SCALARS).collect()
+    let mut part = String::with_capacity(replaced.len());
+    let mut dropped_since_space = false;
+    for character in replaced.chars() {
+        if is_private_use(character) && !draws(character) {
+            // When: is_private_use(character) and draws(character) is false, the glyph would draw as a box.
+            dropped_since_space = true;
+            continue;
+        }
+        if character == ' ' && dropped_since_space && part.ends_with(' ') {
+            // When: character is a space, dropped_since_space and part ends with one, that space already separates.
+            continue;
+        }
+        if character == ' ' {
+            dropped_since_space = false;
+        }
+        part.push(character);
+    }
+    part.trim().chars().take(MAX_NATIVE_TITLE_SCALARS).collect()
+}
+
+/// Whether `character` is in a Unicode private-use area, where Nerd Font icons live.
+pub(super) fn is_private_use(character: char) -> bool {
+    matches!(character, '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}')
 }
 
 /// The native title of terminal window number `number`: its `name` when set, otherwise its
-/// active tab's `body`, otherwise the application name.
+/// active tab's `body`, otherwise the application name. Icons the platform's title font cannot
+/// draw are left out; the tab bar, which draws with SonicTerm's own fonts, keeps them.
 pub(super) fn window_title_text(number: u64, name: &str, body: Option<&str>) -> String {
+    window_title_text_with(number, name, body, native_title_font::title_font_draws)
+}
+
+/// [`window_title_text`] with the title font's coverage given by `draws`.
+fn window_title_text_with(
+    number: u64,
+    name: &str,
+    body: Option<&str>,
+    draws: impl Fn(char) -> bool + Copy,
+) -> String {
     let shown = [Some(name), body]
         .into_iter()
         .flatten()
-        .map(title_part)
+        .map(|text| title_part(text, draws))
         .find(|part| !part.is_empty())
         .unwrap_or_else(|| NATIVE_WINDOW_TITLE.to_owned());
     format!("#{number} {shown}")

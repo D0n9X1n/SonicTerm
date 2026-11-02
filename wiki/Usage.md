@@ -180,7 +180,10 @@ the text the tab bar shows for that tab, without the tab's own `#N` and icon,
 or the tab's custom title when it has one. It follows the active tab as you
 switch, close, move or retitle tabs, and falls back to `#1 SonicTerm` when the
 window has no titled tab. Control characters in a program's title are replaced
-with U+FFFD, the tab part is cut to 128 Unicode scalar values, and a title that
+with U+FFFD. Icon glyphs the system's title font cannot draw, such as Nerd Font
+icons, are left out of the window title (the tab bar still shows them), and a name
+or tab title made only of such icons falls through to the next source. The tab part
+is cut to 128 Unicode scalar values, and a title that
 changes rapidly, such as a progress display in an OSC title, is written at most
 four times a second, always ending on its latest text. Switching, closing or
 dragging out a tab, and renaming the window, update the title at once. A hidden or covered
