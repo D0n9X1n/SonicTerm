@@ -97,3 +97,36 @@ fn no_cell_size_or_no_pixels_leaves_the_cursor_still() {
     parser.move_cursor_past_iterm2_image((35, 0));
     assert_eq!(cursor(&parser), (0, 2), "no pixels");
 }
+
+/// An iTerm2 image near the bottom scrolls the screen rather than stopping on the last row, so its
+/// cursor still ends on the image's last row.
+#[test]
+fn an_iterm2_image_at_the_bottom_scrolls() {
+    let (mut parser, _pool) = new_parser(40, 10);
+    parser.set_cell_pixel_size(10.0, 20.0);
+    parser.advance(b"\x1b[9;1H");
+    parser.move_cursor_past_iterm2_image((20, 60));
+    assert_eq!(parser.grid().lines_scrolled(), 1, "rows 8..=10 scroll the screen once");
+    assert_eq!(cursor(&parser), (9, 2));
+}
+
+/// Inside DECSTBM margins 2..=5 (rows 1..=4), an image near the bottom margin scrolls only that
+/// region: text above and below it stays, nothing enters history, and the cursor ends on the
+/// bottom margin.
+#[test]
+fn an_image_inside_the_margins_scrolls_only_the_region() {
+    for iterm2 in [false, true] {
+        let (mut parser, _pool) = new_parser(40, 10);
+        parser.set_cell_pixel_size(10.0, 20.0);
+        parser.advance(b"top\x1b[8;1Hbelow\x1b[2;5r\x1b[4;1H");
+        if iterm2 {
+            parser.move_cursor_past_iterm2_image((20, 60));
+        } else {
+            parser.move_cursor_past_sixel_image((20, 60));
+        }
+        assert_eq!(parser.grid().scrollback_len(), 0, "iterm2={iterm2}: no row enters history");
+        assert_eq!(row_text(&parser, 0), "top", "iterm2={iterm2}: the row above stays");
+        assert_eq!(row_text(&parser, 7), "below", "iterm2={iterm2}: the row below stays");
+        assert_eq!(cursor(&parser).0, 4, "iterm2={iterm2}: the cursor ends on the bottom margin");
+    }
+}

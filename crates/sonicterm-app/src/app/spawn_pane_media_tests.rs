@@ -374,3 +374,36 @@ fn only_do_not_move_cursor_1_keeps_the_cursor() {
         assert!(!iterm2_keeps_cursor(metadata), "{metadata:?} moves the cursor");
     }
 }
+
+/// An untyped kitty payload, one whose control section does not parse, is drawn at its cursor
+/// like an ordinary image but owes no cursor move; Sixel and iTerm2 images do.
+#[test]
+fn an_untyped_kitty_payload_owes_no_cursor_move() {
+    let image = |protocol, metadata: &str| {
+        let media = MediaEvent {
+            protocol,
+            row: 0,
+            col: 0,
+            metadata: metadata.to_owned(),
+            data: Vec::new(),
+            scroll_mark: 0,
+        };
+        let decoded = InlineImage {
+            id: 1,
+            row: 0,
+            col: 0,
+            scroll_mark: 0,
+            width: 4,
+            height: 2,
+            bgra: Arc::from(vec![0u8; 32]),
+            kitty: None,
+        };
+        ordinary_image_move(&media, &decoded)
+    };
+    assert_eq!(image(MediaProtocol::Kitty, "not a control section"), None);
+    assert_eq!(image(MediaProtocol::Sixel, ""), Some(ImageCursorMove::Sixel { image_px: (4, 2) }));
+    assert_eq!(
+        image(MediaProtocol::Iterm2File, "File=inline=1"),
+        Some(ImageCursorMove::Iterm2 { image_px: (4, 2) })
+    );
+}
