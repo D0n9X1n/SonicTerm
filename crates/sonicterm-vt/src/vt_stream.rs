@@ -124,6 +124,13 @@ impl Parser {
                 // When: kitty_yield is set and captured_replies collects per prefix, yield so the host's reply comes first.
                 break;
             }
+            if std::mem::take(&mut self.performer.image_yield)
+                && self.performer.captured_replies.borrow().is_some()
+            {
+                // When: image_yield is set and captured_replies collects per prefix, yield so the
+                // host moves the cursor past the image before the text after it is parsed.
+                break;
+            }
             if self.discarding_oversized_escape {
                 // When: discarding_oversized_escape owns this byte, so feeding vte could print a cancelled payload into the grid.
                 self.consume_discarded_escape_byte(bytes[offset]);

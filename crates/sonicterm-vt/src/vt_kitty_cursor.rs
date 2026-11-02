@@ -18,7 +18,7 @@ const MAX_BOX_CELLS: u32 = u16::MAX as u32;
 /// The cells a placement covers: `c` and `r` when given; otherwise from the image's pixel size,
 /// keeping its aspect ratio when one of them is given. `None` when a missing side needs a cell
 /// size that is not known. Each side is at most [`MAX_BOX_CELLS`].
-fn placement_cells(
+pub(super) fn placement_cells(
     cols: u32,
     rows: u32,
     source_px: (u32, u32),
@@ -67,24 +67,28 @@ impl Parser {
     /// still.
     pub fn move_cursor_past_kitty_image(&mut self, cols: u32, rows: u32, source_px: (u32, u32)) {
         if let Some((cols, rows)) = placement_cells(cols, rows, source_px, self.cell_px) {
-            self.move_cursor_by_box(cols, rows);
+            self.move_cursor_by_box(cols, rows, true);
         }
     }
 
-    /// Move the cursor `cols` right and `rows - 1` down; wrap past the right edge and, when the
-    /// cursor started inside the margins, scroll the region as it passes the bottom margin.
+    /// Move the cursor `cols` right and `rows - 1` down; past the right edge wrap to the next row
+    /// when `wrap` is set, else stop in the last column, and, when the cursor started inside the
+    /// margins, scroll the region as it passes the bottom margin.
     ///
     /// A cursor below the margins moves down within the screen, as a line feed there does.
-    fn move_cursor_by_box(&mut self, cols: u32, rows: u32) {
+    pub(super) fn move_cursor_by_box(&mut self, cols: u32, rows: u32, wrap: bool) {
         let performer = &mut self.performer;
         let grid_cols = u32::from(performer.grid.cols);
         let start_row = u32::from(performer.grid.cursor.row);
         let mut col = u32::from(performer.physical_cursor_col()).saturating_add(cols);
         let mut row = start_row.saturating_add(rows.saturating_sub(1));
-        if col >= grid_cols {
+        if col >= grid_cols && wrap {
             // The move passes the right edge, so the cursor wraps to the next row's start.
             col = 0;
             row = row.saturating_add(1);
+        } else if col >= grid_cols {
+            // When: col passes grid_cols without wrap, the cursor stops in the last column, as iTerm2 does.
+            col = grid_cols.saturating_sub(1);
         }
         let (top, bottom) = performer.effective_scroll_region();
         let in_margins = (u32::from(top)..=u32::from(bottom)).contains(&start_row);

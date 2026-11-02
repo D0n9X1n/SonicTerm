@@ -938,7 +938,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             // parsed, so text after an image starts below it.
             let mut parser = handles.parser.lock();
             for owed in cursor_moves {
-                parser.move_cursor_past_kitty_image(owed.cols, owed.rows, owed.source_px);
+                owed.apply(&mut parser);
             }
         }
 

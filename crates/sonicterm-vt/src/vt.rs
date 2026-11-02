@@ -399,7 +399,8 @@ impl Parser {
     }
 
     /// Tell the parser the pane's cell size in pixels, which sizes a kitty placement that gives no
-    /// `c` or `r` and so decides how far it moves the cursor. Non-positive sizes are ignored.
+    /// `c` or `r`, and every Sixel and iTerm2 image, and so decides how far each moves the cursor.
+    /// Non-positive sizes are ignored.
     pub fn set_cell_pixel_size(&mut self, cell_width_px: f32, cell_height_px: f32) {
         if cell_width_px.is_finite()
             && cell_height_px.is_finite()
@@ -628,6 +629,9 @@ struct Performer {
     /// Each screen owns independent progressive-enhancement state, as required
     /// by the protocol. Empty stack means flags 0 and legacy encoding.
     kitty_kbd_flags: [Vec<u8>; 2],
+    /// Set when a Sixel or iTerm2 image is queued, ending the advance prefix after it so the host
+    /// moves the cursor past the image before the text after it is parsed.
+    image_yield: bool,
 }
 
 /// Maximum depth of the kitty keyboard flag stack. The protocol allows nested
@@ -672,6 +676,9 @@ mod vt_kitty_stream;
 
 #[path = "vt_kitty_cursor.rs"]
 mod vt_kitty_cursor;
+
+#[path = "vt_image_cursor.rs"]
+mod vt_image_cursor;
 pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
 
 use vt_capture::parse_iterm2_file_event;

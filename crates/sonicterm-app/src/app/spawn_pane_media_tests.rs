@@ -317,3 +317,60 @@ fn a_placement_of_a_stored_image_moves_the_cursor() {
     run(&handles, b"ab\x1b_Ga=p,q=2,i=5,c=4,r=2\x1b\\\r\nX");
     assert_eq!(row_text(&pane, 2), "X", "rows 0..=1 belong to the placement");
 }
+
+/// A 2 x 12 px Sixel: two columns of two six-pixel bands.
+const SIXEL_TWO_BANDS: &str = "\x1bPq#1~~-~~\x1b\\";
+
+/// Through the worker, text after a Sixel image starts on the row below it: on 10 x 5 px cells a
+/// 12 px tall image covers rows 0..=2, so the cursor ends on row 2 in the image's column and the
+/// line feed after the image puts the text on row 3.
+#[test]
+fn text_after_a_sixel_image_starts_below_it() {
+    let (pane, handles) = pane_and_worker_handles();
+    pane.parser.lock().set_cell_pixel_size(10.0, 5.0);
+    run(&handles, format!("ab{SIXEL_TWO_BANDS}\r\nX").as_bytes());
+    assert_eq!(pane.inline_images.lock().len(), 1, "the image is held");
+    assert_eq!(row_text(&pane, 0), "ab");
+    assert_eq!(row_text(&pane, 3), "X", "rows 0..=2 belong to the image; text starts on row 3");
+}
+
+/// Through the worker, an iTerm2 image moves the cursor just right of its bottom-right cell, so
+/// the line feed after it starts the text below the image; `doNotMoveCursor=1` keeps the cursor
+/// where the image started.
+#[test]
+fn text_after_an_iterm2_image_starts_below_it_unless_told_not_to_move() {
+    let payload = base64::engine::general_purpose::STANDARD.encode(png());
+    for (attributes, text_row) in [("inline=1", 2), ("inline=1;doNotMoveCursor=1", 1)] {
+        let (pane, handles) = pane_and_worker_handles();
+        // The 4 x 2 px PNG covers 2 x 2 cells of 2 x 1 px.
+        pane.parser.lock().set_cell_pixel_size(2.0, 1.0);
+        run(&handles, format!("ab\x1b]1337;File={attributes}:{payload}\x07\r\nX").as_bytes());
+        assert_eq!(pane.inline_images.lock().len(), 1, "the image is held for {attributes}");
+        assert_eq!(row_text(&pane, text_row), "X", "text row for {attributes}");
+    }
+}
+
+/// A Sixel or iTerm2 image that does not decode is not held, so the cursor stays where the text
+/// left it.
+#[test]
+fn an_undecodable_sixel_or_iterm2_image_leaves_the_cursor_still() {
+    for stream in ["ab\x1bPq\x1b\\X", "ab\x1b]1337;File=inline=1:AAAA\x07X"] {
+        let (pane, handles) = pane_and_worker_handles();
+        pane.parser.lock().set_cell_pixel_size(2.0, 1.0);
+        run(&handles, stream.as_bytes());
+        assert!(pane.inline_images.lock().is_empty(), "nothing is held for {stream:?}");
+        assert_eq!(row_text(&pane, 0), "abX", "the cursor stayed for {stream:?}");
+    }
+}
+
+/// Only an exact `doNotMoveCursor=1` attribute keeps the cursor; other values and names move it.
+#[test]
+fn only_do_not_move_cursor_1_keeps_the_cursor() {
+    assert!(iterm2_keeps_cursor("File=inline=1;doNotMoveCursor=1"));
+    assert!(iterm2_keeps_cursor("File=doNotMoveCursor=1;inline=1"));
+    for metadata in
+        ["File=inline=1", "File=inline=1;doNotMoveCursor=0", "File=name=doNotMoveCursor=1"]
+    {
+        assert!(!iterm2_keeps_cursor(metadata), "{metadata:?} moves the cursor");
+    }
+}
