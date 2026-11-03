@@ -500,6 +500,9 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 | `read_pane` | `screen`（可见行）、`tail`（最新的行，软换行已合并）或 `last_command`（最近完成的 shell 命令的输出——从 OSC 133 C 所在行到 D 到达的位置——以及退出码，全屏程序运行时也能找到）。文本保留组合字符和软换行处的空格。受 `max_lines`（默认 120，至多 1,000）和 `max_bytes`（默认 16 KiB，至多 64 KiB）限制；`end_row` 是最后一行的标记。 |
 | `wait_for` | 等到 `regex` 匹配 `after_row` 之后的某行、输出在 `quiet_ms` 内保持安静，或进程退出，受 `timeout_ms`（默认 30 s，至多 120 s）限制。只有在 `after_row` 之后开始的行才计入，因此软换行追加到旧行上的文本不算。屏幕上已有的匹配会立即结束等待；来自另一个屏幕的标记以 `stale_row` 拒绝。 |
 
+控制类工具（`create_pane`、`send_text`、`send_keys`、`run_command`、`close_pane`）和
+`[mcp] control` 范围见 [用法](Usage-zh-CN)。每个工具在事件循环上执行时都会再次按范围检查。
+
 一次读取对窗格解析器只尝试一次、至多 5 ms，最多访问 32,768 个单元格（含空白行），复制到字节上限即停止；解析器被占用时直接返回
 `busy` 和 `truncated`，不会等待。每次工具调用都在服务器当前代次下被接受；返回前被撤销的调用以 `revoked`
 错误作答，不含任何窗格文本。`wait_for` 每 50 ms 无锁轮询窗格的输出计数和退出状态，只有输出变化时才读取。

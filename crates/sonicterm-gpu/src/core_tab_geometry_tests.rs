@@ -244,14 +244,18 @@ fn foreground_privilege_change_invalidates_tab_chrome() {
 #[test]
 fn privilege_badge_reserves_title_width_without_leaving_the_title_rect() {
     let rect = TabTitleRect { x: 20.0, y: 4.0, w: 180.0, h: 36.0 };
-    let reserve = privilege_marker_reserve_px(true, 1.0);
-    let ordinary_placement = tab_title_block_placement(rect, 92.0, false, 1.0);
-    let placement = tab_title_block_placement(rect, 92.0, true, 1.0);
+    let reserve = privilege_marker_reserve_px(TabMarkers { privileged: true, agent: false }, 1.0);
+    let ordinary_placement = tab_title_block_placement(rect, 92.0, TabMarkers::default(), 1.0);
+    let placement =
+        tab_title_block_placement(rect, 92.0, TabMarkers { privileged: true, agent: false }, 1.0);
     let badge = placement.badge_rect.expect("privileged title has a badge");
 
-    assert_eq!(privilege_marker_reserve_px(false, 1.0), 0.0);
+    assert_eq!(privilege_marker_reserve_px(TabMarkers::default(), 1.0), 0.0);
     assert_eq!(reserve, PRIVILEGE_BADGE_SIZE_PX + PRIVILEGE_BADGE_GAP_PX);
-    assert_eq!(privilege_marker_reserve_px(true, 2.0), reserve * 2.0);
+    assert_eq!(
+        privilege_marker_reserve_px(TabMarkers { privileged: true, agent: false }, 2.0),
+        reserve * 2.0
+    );
     assert_eq!(ordinary_placement.badge_rect, None);
     assert_eq!(ordinary_placement.text_x, 64.0);
     assert_eq!(ordinary_placement.text_clip, rect);
@@ -262,8 +266,52 @@ fn privilege_badge_reserves_title_width_without_leaving_the_title_rect() {
     assert!(placement.text_clip.x >= badge.x + badge.w);
     assert!(placement.text_clip.x + placement.text_clip.w <= rect.x + rect.w);
     // A title as wide as the rect less the reserve fits beside the marker unclipped.
-    let snug = tab_title_block_placement(rect, rect.w - reserve, true, 1.0);
+    let snug = tab_title_block_placement(
+        rect,
+        rect.w - reserve,
+        TabMarkers { privileged: true, agent: false },
+        1.0,
+    );
     assert!(snug.text_clip.w >= rect.w - reserve - 0.001);
+}
+
+/// The agent marker follows the lock badge, both inside the title rect and before the text, and
+/// each marker reserves one badge and one gap.
+#[test]
+fn the_agent_marker_follows_the_lock_badge_before_the_text() {
+    let rect = TabTitleRect { x: 20.0, y: 4.0, w: 220.0, h: 36.0 };
+    let both = TabMarkers { privileged: true, agent: true };
+    let agent_only = TabMarkers { privileged: false, agent: true };
+    let one = PRIVILEGE_BADGE_SIZE_PX + PRIVILEGE_BADGE_GAP_PX;
+    assert_eq!(privilege_marker_reserve_px(agent_only, 1.0), one);
+    assert_eq!(privilege_marker_reserve_px(both, 1.0), 2.0 * one);
+
+    let placement = tab_title_block_placement(rect, 80.0, both, 1.0);
+    let badge = placement.badge_rect.expect("the lock badge is drawn");
+    let agent = placement.agent_rect.expect("the agent marker is drawn");
+    assert!(agent.x >= badge.x + badge.w, "the agent marker sits after the lock");
+    assert!(placement.text_x >= agent.x + agent.w, "the text starts after both markers");
+    assert!(agent.x + agent.w <= rect.x + rect.w && agent.y + agent.h <= rect.y + rect.h);
+
+    let alone = tab_title_block_placement(rect, 80.0, agent_only, 1.0);
+    assert_eq!(alone.badge_rect, None);
+    assert!(alone.agent_rect.is_some());
+    // The agent marker is vector chrome: three rounded quads, none of them glyphs.
+    let mut quads = Vec::new();
+    emit_agent_marker_quads(&mut quads, agent, [0.5, 0.3, 0.9, 1.0], 1.0, (800.0, 600.0));
+    assert_eq!(quads.len(), 3);
+}
+
+/// Marking a tab as an agent's changes the tab-bar hash, so a held bar repaints with the marker.
+#[test]
+fn the_agent_marker_invalidates_the_tab_bar() {
+    let mut ordinary = TabBar::new();
+    ordinary.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("#1 shell"));
+    let mut agent = TabBar::new();
+    agent.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("#1 shell"));
+    assert!(agent.set_agent(0, true));
+    let now = Instant::now();
+    assert_ne!(tab_bar_hash(&ordinary, now), tab_bar_hash(&agent, now));
 }
 
 /// A tab's stored width is the marker reserve plus the drawn width of its badge and title, so
@@ -283,7 +331,7 @@ fn tab_content_width_is_the_marker_reserve_plus_the_drawn_badge_and_title() {
             let drawn = drawn_tab_title_px(&stack, &content.display_text(), 15.0);
             let measured = tab_content_width_px(Some(&stack), &content, 15.0, 1.0)
                 .expect("the tracked font shapes every title");
-            let reserve = privilege_marker_reserve_px(privileged, 1.0);
+            let reserve = privilege_marker_reserve_px(TabMarkers { privileged, agent: false }, 1.0);
             assert!(
                 (measured - reserve - drawn).abs() < 0.01,
                 "{:?}: measured {measured}, drawn {drawn}, reserve {reserve}",
@@ -306,7 +354,7 @@ fn tab_content_width_is_the_marker_reserve_plus_the_drawn_badge_and_title() {
     let no_font = TabContent { privileged: true, ..expired };
     assert_eq!(
         tab_content_width_px(None, &no_font, 15.0, 1.0),
-        Some(privilege_marker_reserve_px(true, 1.0))
+        Some(privilege_marker_reserve_px(TabMarkers { privileged: true, agent: false }, 1.0))
     );
 }
 
@@ -456,12 +504,20 @@ fn privilege_badge_uses_only_process_state_theme_danger_and_drag_alpha() {
     // The call stays outside tab-title color resolution so tab presentation cannot recolor the warning.
     const CORE: &str = crate::core::CORE_SOURCE;
     let start = CORE.find("if let Some(badge) = placement.badge_rect").expect("badge branch");
-    let call = &CORE[start..start + 500];
-
-    assert!(call.contains("ui_palette.danger"));
-    assert!(call.contains("badge_alpha"));
+    let call = &CORE[start..start + 200];
+    assert!(call.contains("palette.danger"));
     for excluded in ["active_panel_focused", "hovered", "custom_color"] {
         assert!(!call.contains(excluded), "badge unexpectedly depends on {excluded}");
+    }
+    // Every marker call site passes the drag alpha and nothing derived from tab presentation.
+    let sites: Vec<&str> =
+        CORE.match_indices("emit_tab_markers(&mut").map(|(at, _)| &CORE[at..at + 120]).collect();
+    assert!(!sites.is_empty(), "the tab bar draws its markers");
+    for site in sites {
+        assert!(site.contains("badge_alpha"), "{site}");
+        for excluded in ["active_panel_focused", "hovered", "custom_color"] {
+            assert!(!site.contains(excluded), "markers unexpectedly depend on {excluded}");
+        }
     }
 }
 

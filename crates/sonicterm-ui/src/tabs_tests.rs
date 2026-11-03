@@ -714,6 +714,45 @@ fn marked_tab_content_draws_a_dot() {
     assert!(!TabContent::of(&bar.tabs()[1], now, true, false).marked);
 }
 
+/// An agent tab carries the flag the renderer draws its vector marker from; the marker is not
+/// text, so neither the displayed text nor the tab's title changes.
+#[test]
+fn agent_tab_content_carries_the_marker_flag_not_text() {
+    let mut bar = marked_bar(2);
+    assert!(bar.set_agent(1, true));
+    assert!(!bar.set_agent(1, true), "an unchanged marker reports no change");
+    assert!(!bar.set_agent(9, true), "a missing tab has no marker");
+    let now = Instant::now();
+    let content = TabContent::of(&bar.tabs()[1], now, false, false);
+    assert!(content.agent);
+    assert_eq!(content.display_text(), "#2 tab");
+    bar.mark(1, |marks| marks.bell = true);
+    let both = TabContent::of(&bar.tabs()[1], now, false, false);
+    assert_eq!(both.display_text(), "\u{25CF} #2 tab");
+    assert_eq!(bar.tabs()[1].title, "#2 tab");
+}
+
+/// A measurer that reserves room for the marker widens the tab, and a marker that appears while
+/// the bar is held waits for release like any other content change.
+#[test]
+fn the_agent_marker_is_measured_and_held_like_other_content() {
+    // The renderer reserves one badge and one gap per marker; 24 px stands in for that here.
+    let column_width = |content: &TabContent<'_>| {
+        column_width(content).map(|width_px| width_px + if content.agent { 24.0 } else { 0.0 })
+    };
+    let now = Instant::now();
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("zsh"));
+    bar.refresh_content_widths(now, false, 1, false, column_width);
+    let plain = bar.tabs()[0].content_width_px().unwrap();
+    bar.set_agent(0, true);
+    let held = bar.refresh_content_widths(now, false, 1, true, column_width);
+    assert_eq!(held, ContentWidthRefresh { measured: 1, applied: 0, held: 1 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(plain), "a held bar keeps its width");
+    bar.refresh_content_widths(now, false, 1, false, column_width);
+    assert!(bar.tabs()[0].content_width_px().unwrap() > plain);
+}
+
 /// Each newly set mark is recorded where it is set, with its tab and kind and a sequence number, so
 /// a reader of the bar never compares remembered marks; a mark already set records nothing.
 #[test]

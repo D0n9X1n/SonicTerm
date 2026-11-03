@@ -22,6 +22,8 @@ use winit::event_loop::EventLoopProxy;
 
 use super::UserEvent;
 
+#[path = "mcp/control_loop.rs"]
+pub(crate) mod control_loop;
 #[cfg(unix)]
 #[path = "mcp/endpoint_unix.rs"]
 pub(crate) mod endpoint_unix;
@@ -30,10 +32,14 @@ pub(crate) mod endpoint_unix;
 pub(crate) mod endpoint_windows;
 #[path = "mcp/jsonrpc.rs"]
 pub(crate) mod jsonrpc;
+#[path = "mcp/keys.rs"]
+pub(crate) mod keys;
 #[path = "mcp/lifecycle.rs"]
 mod lifecycle;
 #[path = "mcp/read.rs"]
 pub(crate) mod read;
+#[path = "mcp/run.rs"]
+pub(crate) mod run;
 #[path = "mcp/tools_control.rs"]
 pub(crate) mod tools_control;
 #[path = "mcp/tools_read.rs"]
@@ -76,6 +82,43 @@ pub(crate) enum LoopCall {
         /// The sanitized, bounded message.
         text: String,
     },
+    /// Open a helper pane beside `anchor`.
+    CreatePane {
+        /// The pane the helper opens beside.
+        anchor: u64,
+        /// A split or a new tab.
+        placement: crate::app::pane_target::Placement,
+        /// What the helper runs.
+        launch: crate::app::pane_target::AgentLaunch,
+    },
+    /// Type `text` into a pane, then Enter when `submit` is set.
+    SendText {
+        /// The target pane.
+        pane_id: u64,
+        /// The text, at most 64 KiB.
+        text: String,
+        /// Whether to add `\r`.
+        submit: bool,
+    },
+    /// Send parsed keys to a pane.
+    SendKeys {
+        /// The target pane.
+        pane_id: u64,
+        /// The keys, already parsed.
+        keys: Vec<keys::KeySpec>,
+    },
+    /// Start a command at a pane's shell prompt.
+    RunStart {
+        /// The target pane.
+        pane_id: u64,
+        /// The command line, without control characters.
+        command: String,
+    },
+    /// Close one pane.
+    ClosePane {
+        /// The pane to close.
+        pane_id: u64,
+    },
 }
 
 /// A pane the loop resolved, with handles a connection thread reads without the loop.
@@ -99,6 +142,10 @@ pub(crate) struct PaneEntry {
     pub(crate) output_generation: Arc<AtomicU64>,
     /// The process's exit status once known.
     pub(crate) exit_status: Arc<OnceLock<sonicterm_types::PaneExitStatus>>,
+    /// The first typing stamp since an agent run reset it; 0 when none.
+    pub(crate) run_typed_at: Arc<AtomicU64>,
+    /// Set while an agent run owns the pane.
+    pub(crate) agent_run: Arc<AtomicBool>,
 }
 
 /// What the loop answered.
@@ -109,6 +156,14 @@ pub(crate) enum LoopReply {
     Pane(PaneEntry),
     /// The request was refused, with a stable code and a message.
     Refused(&'static str, String),
+    /// [`LoopCall::CreatePane`] opened this pane.
+    Created(crate::app::pane_target::CreatedPane),
+    /// A write queued this many bytes.
+    Written(usize),
+    /// [`LoopCall::RunStart`] started a run.
+    RunStarted(Box<run::RunStarted>),
+    /// [`LoopCall::ClosePane`] closed the pane.
+    Closed,
 }
 
 /// A request waiting in the inbox.
@@ -711,6 +766,8 @@ pub(crate) fn test_entry(cols: u16, rows: u16, scrollback: usize) -> PaneEntry {
         ))),
         output_generation: Arc::new(AtomicU64::new(0)),
         exit_status: Arc::new(OnceLock::new()),
+        run_typed_at: Arc::new(AtomicU64::new(0)),
+        agent_run: Arc::new(AtomicBool::new(false)),
     }
 }
 

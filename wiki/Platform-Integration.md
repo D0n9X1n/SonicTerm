@@ -645,6 +645,10 @@ the next start removes those whose process is gone.
 | `read_pane` | `screen` (visible rows), `tail` (newest lines, soft wraps joined) or `last_command` (the last finished shell command's output, from the OSC 133 C row up to where D arrived, and its exit code, found even while a full-screen program runs). Text keeps combining marks and the spaces at a soft wrap. Capped by `max_lines` (default 120, at most 1,000) and `max_bytes` (default 16 KiB, at most 64 KiB); `end_row` is the token of the last line returned. |
 | `wait_for` | Waits until a `regex` matches a row after `after_row`, output stays quiet for `quiet_ms`, or the process exits, bounded by `timeout_ms` (default 30 s, at most 120 s). Only lines that began after `after_row` count, so text a soft wrap appends to an older line does not. A match already on screen ends it at once; a token from the other screen is refused as `stale_row`. |
 
+The control tools (`create_pane`, `send_text`, `send_keys`, `run_command`,
+`close_pane`) and the `[mcp] control` scope are described in [Usage](Usage). Each
+is checked against the scope again on the event loop when it runs.
+
 A read takes the pane's parser for one attempt of at most 5 ms, visits at most
 32,768 cells (blank rows included) and stops copying at its byte cap; a held parser answers `busy` and
 `truncated` instead of waiting. Each tool call is admitted under the server's

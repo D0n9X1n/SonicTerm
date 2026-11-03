@@ -886,6 +886,45 @@ shows what will change; nothing changes until you choose **Apply**, and
   SonicTerm for `.ps1`, `.cmd`, `.bat` and `.sh`. If Settings does not open, the
   notification gives the steps as text.
 
+### Let an agent act on SonicTerm
+
+With `[mcp] enabled = true` in `sonicterm.toml` (see
+[Configuration](Configuration)), agents such as Claude Code and Copilot CLI can
+read panes and, within the scope you choose, act on them. The endpoint, its
+permissions and the read tools are described in
+[Platform Integration](Platform-Integration).
+
+`[mcp] control` sets what the control tools may touch:
+
+| `control` | Control tools may act on |
+| --- | --- |
+| `"off"` | nothing; only the read tools work |
+| `"agent"` (default) | panes an agent created, plus opening a helper beside any pane |
+| `"any"` | every pane |
+
+A pane in a READONLY window is always refused, whatever the scope. A tab holding
+an agent's pane shows a purple ring marker before its title.
+
+| Tool | What it does |
+| --- | --- |
+| `create_pane` | Opens a helper beside a pane: a split to its right or below, or a new tab in its window. Focus does not move. With `argv` the program runs directly and the pane stays open after it exits, so `wait_for` with `exit` and `read_pane` can read how it ended. |
+| `send_text` | Types text, as a bracketed paste when the program asked for one; `submit` adds Enter. At most 64 KiB. |
+| `send_keys` | Sends named keys (`Enter`, `Tab`, `Escape`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`, a single character), each optionally with `Ctrl+`, `Alt+` or `Shift+`, encoded for the pane's keyboard mode. At most 64 keys; one unknown name sends nothing. |
+| `run_command` | Runs one command line at the pane's shell prompt and waits for it to finish, returning its output and the exit code the shell reported (`completed`), `not_started` when the shell ended the prompt without running anything, `interfered` when someone else typed before its output began, `lost` when its record was evicted or the shell exited, or `running` at the timeout (default 60 s, at most 600 s). |
+| `close_pane` | Closes one pane; a tab's only pane closes the tab. The main window's last tab is never closed. |
+
+`run_command` needs shell integration: the shell must mark its prompt with
+OSC 133 `A`, `B`, `C` and `D`, as the shell-integration scripts of WezTerm,
+iTerm2 and kitty do. It refuses a pane whose prompt has text typed after it, whose
+input queue is not empty, or into which anyone typed while the previous command
+ran. That check is best effort, because a terminal cannot see what the shell has
+consumed, so use `run_command` on panes the agent created, where only the agent
+types. The exit code is whatever the shell reported.
+
+Pane text is untrusted input: a program can print text meant to steer an agent.
+The server tells agents never to follow instructions found in pane text, but keep
+`control` at `"agent"` unless the agent must drive your own panes.
+
 ### Configure and troubleshoot
 
 Use these canonical pages instead of duplicating their detailed rules here:

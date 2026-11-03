@@ -40,6 +40,7 @@ pub(crate) fn tool_list() -> Value {
                     "control": { "enum": ["off", "agent", "any"] },
                     "panes": { "type": "array", "items": { "type": "object" } },
                     "error": { "type": "string" },
+                    "message": { "type": "string" },
                 },
             },
             "annotations": { "readOnlyHint": true },
@@ -71,6 +72,7 @@ pub(crate) fn tool_list() -> Value {
                     "busy": { "type": "boolean" },
                     "exit_code": { "type": ["integer", "null"] },
                     "error": { "type": "string" },
+                    "message": { "type": "string" },
                 },
             },
             "annotations": { "readOnlyHint": true },
@@ -101,6 +103,7 @@ pub(crate) fn tool_list() -> Value {
                     "exit_code": { "type": "integer" },
                     "generation": { "type": "integer" },
                     "error": { "type": "string" },
+                    "message": { "type": "string" },
                 },
             },
             "annotations": { "readOnlyHint": true },
@@ -166,7 +169,7 @@ pub(crate) fn resolve(
     match shared.ask(LoopCall::ResolvePane { pane_id }, scope) {
         LoopReply::Pane(entry) => Ok(entry),
         LoopReply::Refused(code, message) => Err(tool_error(code, &message)),
-        LoopReply::Panes(_) => Err(tool_error("internal", "unexpected reply")),
+        _ => Err(tool_error("internal", "unexpected reply")),
     }
 }
 
@@ -179,8 +182,8 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
             // When: the loop `Refused` the request, its `code` and `message` are the result.
             return tool_error(code, &message);
         }
-        LoopReply::Pane(_) => {
-            // When: the loop answered with a single `Pane`, the reply does not fit the question.
+        _ => {
+            // When: the `ask` answered with any other `LoopReply`, it does not fit the question.
             return tool_error("internal", "unexpected reply");
         }
     };

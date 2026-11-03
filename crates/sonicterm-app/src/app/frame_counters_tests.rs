@@ -378,6 +378,8 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/pane_refresh.rs", 3),
     ("app/pane_state.rs", 1),
     ("app/pane_target.rs", 1),
+    ("app/mcp/control_loop.rs", 2),
+    ("app/mcp/run.rs", 2),
     ("app/scroll.rs", 1),
     ("app/search_handle.rs", 2),
     // The pane spawn, and the worker latch reading the parser once before its first batch.

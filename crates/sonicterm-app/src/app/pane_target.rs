@@ -5,9 +5,6 @@
 //! so nothing here ever falls back to the active or frontmost pane: a missing target fails and
 //! changes nothing.
 
-// The control server in the next change calls these; until then only the tests do.
-#![allow(dead_code)]
-
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -354,6 +351,7 @@ impl App {
         &mut self,
         pane_id: u64,
         bytes: Vec<u8>,
+        source: PtyInputSource,
     ) -> Result<usize, TargetError> {
         if self.locate_pane(pane_id).is_none() {
             // When: no live pane has `pane_id`, nothing is written anywhere.
@@ -364,7 +362,7 @@ impl App {
             return Err(TargetError::ReadOnly);
         }
         let len = bytes.len();
-        if self.write_to_pane(pane_id, bytes, PtyInputSource::Agent) {
+        if self.write_to_pane(pane_id, bytes, source) {
             Ok(len)
         } else {
             // When: the input queue refused the bytes, report it rather than claim a write.

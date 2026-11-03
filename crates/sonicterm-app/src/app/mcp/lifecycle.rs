@@ -159,6 +159,7 @@ impl App {
             // `deadline` passed, the request is dropped unrun.
             return LoopReply::Refused("revoked", "the request was dropped before it ran".into());
         }
+        let control = shared.control();
         match &request.call {
             LoopCall::ListPanes => LoopReply::Panes(self.mcp_pane_entries()),
             LoopCall::Notice { text } => {
@@ -169,6 +170,17 @@ impl App {
                 );
                 LoopReply::Panes(Vec::new())
             }
+            LoopCall::CreatePane { anchor, placement, launch } => {
+                self.mcp_create_pane(control, *anchor, *placement, launch.clone())
+            }
+            LoopCall::SendText { pane_id, text, submit } => {
+                self.mcp_send_text(control, *pane_id, text, *submit)
+            }
+            LoopCall::SendKeys { pane_id, keys } => self.mcp_send_keys(control, *pane_id, keys),
+            LoopCall::RunStart { pane_id, command } => {
+                self.mcp_run_start(control, *pane_id, command)
+            }
+            LoopCall::ClosePane { pane_id } => self.mcp_close_pane(control, *pane_id),
             LoopCall::ResolvePane { pane_id } => {
                 match self.mcp_pane_entries().into_iter().find(|entry| entry.pane_id == *pane_id) {
                     Some(entry) => LoopReply::Pane(entry),
@@ -179,7 +191,7 @@ impl App {
     }
 
     /// Every pane in every window, main first, then children in creation order.
-    fn mcp_pane_entries(&self) -> Vec<PaneEntry> {
+    pub(crate) fn mcp_pane_entries(&self) -> Vec<PaneEntry> {
         let mut windows: Vec<WindowId> = self.windows.keys().copied().collect();
         windows.sort_by_key(|id| {
             let is_main = Some(*id) == self.main_window_id;
@@ -210,6 +222,8 @@ impl App {
                         parser: Arc::clone(&pane.parser),
                         output_generation: Arc::clone(&pane.output_generation),
                         exit_status: Arc::clone(&pane.exit_status),
+                        run_typed_at: Arc::clone(&pane.run_typed_at),
+                        agent_run: Arc::clone(&pane.agent_run),
                     });
                 }
             }

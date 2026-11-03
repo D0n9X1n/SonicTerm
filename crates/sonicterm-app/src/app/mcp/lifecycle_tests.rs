@@ -65,7 +65,7 @@ fn request(
 fn refusal(reply: &LoopReply) -> Option<&'static str> {
     match reply {
         LoopReply::Refused(code, _) => Some(code),
-        LoopReply::Panes(_) | LoopReply::Pane(_) => None,
+        _ => None,
     }
 }
 

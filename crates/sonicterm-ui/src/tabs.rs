@@ -116,6 +116,8 @@ pub struct Tab {
     pub custom_color: Option<String>,
     /// Whether this tab's current Windows foreground process requires a privilege warning.
     pub foreground_privileged: bool,
+    /// Whether any pane in this tab was created by an agent; such a tab draws the agent marker.
+    pub agent: bool,
     pub command: CommandStatus,
     /// Why this tab needs the user; travels with the tab when it moves to another window.
     pub marks: TabMarks,
@@ -141,6 +143,7 @@ impl Tab {
             custom_title: None,
             custom_color: None,
             foreground_privileged: false,
+            agent: false,
             command: CommandStatus::default(),
             marks: TabMarks::default(),
             icon_hint: None,
@@ -188,6 +191,9 @@ pub struct TabContent<'a> {
     pub privileged: bool,
     /// Whether the tab carries an alert mark, drawn as `●` before the text.
     pub marked: bool,
+    /// Whether an agent created a pane in the tab; the renderer draws a vector marker before the
+    /// text and reserves its width, as for the privilege badge.
+    pub agent: bool,
 }
 
 impl<'a> TabContent<'a> {
@@ -200,6 +206,7 @@ impl<'a> TabContent<'a> {
             title: &tab.title,
             privileged: process_privileged || tab.foreground_privileged,
             marked: !is_active && tab.marks.is_marked(),
+            agent: tab.agent,
         }
     }
 
@@ -377,6 +384,17 @@ impl TabBar {
         }
         tab.foreground_privileged = privileged;
         true
+    }
+
+    /// Show or clear the agent marker on tab `index`; returns whether it changed.
+    pub fn set_agent(&mut self, index: usize, agent: bool) -> bool {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            // When: `index` addresses no tab, there is no marker to set.
+            return false;
+        };
+        let changed = tab.agent != agent;
+        tab.agent = agent;
+        changed
     }
 
     /// Update the active tab's foreground-process privilege warning state.

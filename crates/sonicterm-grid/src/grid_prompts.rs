@@ -33,6 +33,8 @@ pub struct PinnedRun {
     pub output_seen: bool,
     /// Where the command's output begins.
     pub output_start: Option<RowToken>,
+    /// When C arrived; typing admitted before it may have reached the command line.
+    pub output_at: Option<Instant>,
     /// Where the command ended.
     pub end: Option<RowToken>,
     /// The column on `end`'s row where D arrived.
@@ -118,9 +120,10 @@ impl Grid {
             // When: `back_mut` finds no region, or its `output_seen` is set, the first C stands.
             return;
         };
+        let now = Instant::now();
         last.output_seen = true;
         last.output_start_row = Some(row);
-        last.output_start_at = Some(Instant::now());
+        last.output_start_at = Some(now);
         let seq = last.seq;
         let is_alt = self.is_alt();
         if let Some(run) =
@@ -128,6 +131,7 @@ impl Grid {
         {
             run.output_seen = true;
             run.output_start = Some(token);
+            run.output_at = Some(now);
         }
     }
 
@@ -212,6 +216,7 @@ impl Grid {
             alt: self.is_alt(),
             output_seen: false,
             output_start: None,
+            output_at: None,
             end: None,
             end_col: 0,
             exit: None,

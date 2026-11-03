@@ -177,11 +177,18 @@ pub struct PaneState {
     pub(crate) exit_reported: bool,
     /// Whether an agent created this pane through the control server. It lives on the pane, so
     /// it survives tab transfer and tear-out; agents may control such panes by default.
-    #[allow(dead_code)] // Read by the control server's scope check in the next change.
     pub(crate) agent_owned: bool,
     /// The child process's exit status, set once when the exit is first handled, so a waiter on
     /// another thread reads it without the event loop.
     pub(crate) exit_status: Arc<std::sync::OnceLock<sonicterm_types::PaneExitStatus>>,
+    /// The first typing write the input queue admitted (keyboard, paste, IME, drop, broadcast,
+    /// agent text and keys, never terminal replies or focus and pointer reports) since an agent run
+    /// reset it to 0, as an `mcp::run::typing_stamp`. A run compares it with C.
+    pub(crate) run_typed_at: Arc<AtomicU64>,
+    /// When a typing write was last admitted; `None` before the first.
+    pub(crate) last_input_at: Option<Instant>,
+    /// Set while an agent's `run_command` owns the pane; every agent write checks it.
+    pub(crate) agent_run: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +368,9 @@ impl PaneState {
             exit_reported: false,
             agent_owned: false,
             exit_status: Arc::new(std::sync::OnceLock::new()),
+            run_typed_at: Arc::new(AtomicU64::new(0)),
+            last_input_at: None,
+            agent_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

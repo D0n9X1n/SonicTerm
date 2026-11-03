@@ -166,6 +166,14 @@ pub(crate) fn snapshot(grid: &Grid, mode: ReadMode, limits: ReadLimits) -> ReadS
     snapshot
 }
 
+/// The text of `span`, oldest first, soft wraps joined, within `limits` and the cell budget; also
+/// whether a limit cut it short. An agent run reads its command's output with it.
+pub(crate) fn collect_span(grid: &Grid, span: RowSpan, limits: ReadLimits) -> (Vec<String>, bool) {
+    let mut budget = Budget { cells: MAX_CELLS_PER_READ, bytes: limits.bytes, lines: limits.lines };
+    let lines = collect_rows(grid, span, true, false, &mut budget);
+    (lines.into_iter().map(|line| line.text).collect(), budget.exhausted())
+}
+
 /// What a read may still spend.
 struct Budget {
     /// Cells it may still visit.

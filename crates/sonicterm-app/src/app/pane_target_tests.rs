@@ -97,7 +97,10 @@ fn a_missing_anchor_changes_nothing() {
         Err(TargetError::PaneGone)
     );
     assert_eq!(app.main().expect("main").panes.len(), before);
-    assert_eq!(app.write_agent_input(anchor + 1_000, b"x".to_vec()), Err(TargetError::PaneGone));
+    assert_eq!(
+        app.write_agent_input(anchor + 1_000, b"x".to_vec(), PtyInputSource::Agent),
+        Err(TargetError::PaneGone)
+    );
 }
 
 /// READONLY in a window that is not frontmost refuses both agent input to its pane and a new
@@ -110,7 +113,10 @@ fn readonly_in_a_background_window_refuses_input_and_helpers() {
     app.windows.get_mut(&child).expect("child").copy_mode =
         Some(CopyModeState::read_only_at((0, 0)));
     app.pty_write_log_enabled = true;
-    assert_eq!(app.write_agent_input(child_pane, b"rm -rf\r".to_vec()), Err(TargetError::ReadOnly));
+    assert_eq!(
+        app.write_agent_input(child_pane, b"rm -rf\r".to_vec(), PtyInputSource::Agent),
+        Err(TargetError::ReadOnly)
+    );
     assert!(app.test_pty_writes.lock().is_empty(), "nothing was queued");
     assert_eq!(
         app.create_pane_at(child_pane, Placement::Right, AgentLaunch::default()),

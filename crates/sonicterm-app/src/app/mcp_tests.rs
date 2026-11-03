@@ -136,6 +136,11 @@ fn fake_loop(shared: &Arc<McpShared>, entry: PaneEntry) -> std::thread::JoinHand
                     }
                     // A notice wants no reply; the fake loop shows nothing.
                     LoopCall::Notice { .. } => continue,
+                    // The read-path tests never send control calls.
+                    _ => LoopReply::Refused(
+                        "unavailable",
+                        "the fake loop runs no control calls".into(),
+                    ),
                 };
                 let _ = request.reply.try_send(reply);
             }
