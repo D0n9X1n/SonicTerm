@@ -662,12 +662,21 @@ impl App {
         sonicterm_io::pty::ShellSpawnOpts {
             clean_e2e: self.runtime_smoke.is_some(),
             diagnostic_timestamps: frame_counters_on,
-            extra_env: vec![("SONICTERM_PANE_ID".to_owned(), pane_id.to_string())],
+            extra_env: self.pane_control_env(pane_id),
             ..launch.shell_spawn_opts(
                 self.config.terminal.term_program.clone(),
                 self.config.terminal.shell.clone(),
             )
         }
+    }
+
+    /// The variables a new pane's shell gets: its id, and the control endpoint while one runs.
+    pub(super) fn pane_control_env(&self, pane_id: u64) -> Vec<(String, String)> {
+        let mut env = vec![("SONICTERM_PANE_ID".to_owned(), pane_id.to_string())];
+        if let Some(endpoint) = self.mcp_endpoint() {
+            env.push(("SONICTERM_CONTROL".to_owned(), endpoint.to_owned()));
+        }
+        env
     }
 
     pub(super) fn spawn_pane(

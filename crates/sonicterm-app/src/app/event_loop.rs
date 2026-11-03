@@ -184,6 +184,7 @@ impl App {
                     diagnostics,
                 );
             }
+            UserEvent::McpRequest => self.drain_mcp_requests(),
             UserEvent::RuntimeSmokeTimeout => {
                 // When: `event` is `RuntimeSmokeTimeout`, classify the boundary before exiting.
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
@@ -425,6 +426,8 @@ impl App {
         if let Some(hook) = self.on_resumed.take() {
             hook();
         }
+        // The control server starts before the first pane, so its shell gets `SONICTERM_CONTROL`.
+        self.reconcile_mcp();
 
         let attrs = super::with_app_icon(super::with_backdrop_transparency(
             with_integrated_titlebar(

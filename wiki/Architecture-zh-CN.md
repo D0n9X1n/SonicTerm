@@ -147,6 +147,8 @@ AppKit 纯字符串单词边界 API 实现原生 Option 删除，不创建原生
 `Process → Window → AppPane`。各接缝负责主要内存上限。窗格所有者另有一个由接缝上限
 推导出的总账警戒线。进程和窗口所有者只统计合计，不设置聚合上限。
 
+agent 控制服务器运行期间，在进程根下另有一个 `Mcp` owner，按连接缓冲区计费。
+
 总账只包含实际计费的资源类别。渲染表面、字形图集和软件帧另行测量，不计入总账合计。
 具体记账和释放规则见 [内存](Memory-zh-CN) 与 [运行时生命周期](Runtime-Lifecycle-zh-CN)。
 
@@ -161,6 +163,9 @@ AppKit 纯字符串单词边界 API 实现原生 Option 删除，不创建原生
   附加提交前持续持有已移除状态；直接拖动合并也使用同一边界。目标设置、拓扑或计费准入
   被拒绝时，完整恢复源顺序、焦点、树/放大状态、存活 PTY、尺寸和计费。新窗口拆出先准备
   隐藏的原生产物，并在显示目标前转移记账；只有提交后才隐藏或回收源窗口。
+- agent 控制服务器的监听线程和连接线程从不触碰应用状态。需要应用状态的请求进入收件箱，并以
+  `UserEvent::McpRequest` 唤醒事件循环；事件循环在执行前重新检查连接、服务器代次和截止时间。
+  窗格读取、正则匹配和序列化在连接的工作线程上进行，只持有一次有时限的解析器锁。
 - 终端修改在同一帧标记损伤区域。字体、缩放、主题、表面、图集和拓扑变化会使对应缓存失效。
 
 完整安全条件见 [架构内部机制](Architecture-Internals-zh-CN)。
@@ -192,3 +197,4 @@ AppKit 纯字符串单词边界 API 实现原生 Option 删除，不创建原生
 | 字体适配器 | `crates/sonicterm-engine/src/fontstack.rs` |
 | 资源总账与应用计费 | `crates/sonicterm-resource/src/`、`crates/sonicterm-app/src/app/retention.rs` |
 | 平台入口 | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
+| agent 控制服务器 | `crates/sonicterm-app/src/app/mcp.rs`、`crates/sonicterm-app/src/app/mcp/` |

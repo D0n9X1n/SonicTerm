@@ -97,6 +97,7 @@ flowchart TD
     process["Process"] --> window["Window"]
     window --> pane["AppPane"]
     process --> retired["Retired PtyTransport"]
+    process --> mcp["Mcp"]
 ```
 
 Each retired PTY gets a unique process-root `PtyTransport` owner and one
@@ -199,6 +200,13 @@ hash tables through the shared table estimate; when the reader disconnects the
 model is freed and the charge ends, as it does when the window closes. accesskit's
 own mirror of the tree is third-party, outside the ledger, and bounded by the same
 node count.
+
+While the agent control server runs it has one `Mcp` owner below the process
+root. Each retention pass charges it, as `ControlConnection`, the bytes every
+connection holds at that moment (partial request lines, the running call's
+arguments and replies being written) with one item per live connection. Both are bounded: four connections,
+and a request line of at most 1 MiB. Stopping the server releases the charge and
+closes the owner. No pane carries this class.
 
 A `memory snapshot` line taken for a perf checkpoint carries the same fields plus
 four tags: `checkpoint_index`, `checkpoint_label`, `checkpoint_attempt`, and

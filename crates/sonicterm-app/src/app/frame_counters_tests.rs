@@ -335,6 +335,11 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/accessibility.rs", "targets", 4),
     // The event-loop proxy a default-handler completion posts its result through.
     ("app/default_handlers.rs", "proxy", 1),
+    // The control server's request inbox, wake-up proxy, per-connection caller and reply writer.
+    ("app/mcp.rs", "caller", 5),
+    ("app/mcp.rs", "inbox", 3),
+    ("app/mcp.rs", "proxy", 1),
+    ("app/mcp.rs", "writer", 1),
     ("app/os_drag.rs", "snapshots", 6),
     ("app/os_drag.rs", "moved", 2),
     ("app/os_drag.rs", "ended", 3),

@@ -82,6 +82,7 @@ flowchart TD
     process["Process"] --> window["Window"]
     window --> pane["AppPane"]
     process --> retired["已退役 PtyTransport"]
+    process --> mcp["Mcp"]
 ```
 
 每个退役 PTY 都有唯一的进程直属 `PtyTransport` 所有者和一个 `ReaperWork` 条目。
@@ -159,6 +160,11 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 的格式化副本，也不记录标签页标记：标签栏为每个新出现的标记计数，窗口只保留上次读到的计数。该模型按已分配
 存储以 `AccessibilityTree` 计入窗口的 owner，哈希表使用共享的表估算；阅读器断开时该模型被释放、计费结束，
 窗口关闭时同样如此。accesskit 自身的树镜像属于第三方，不在账本内，同样受节点数限制。
+
+agent 控制服务器运行期间，在进程根下有一个 `Mcp` owner。每次保留量采样把所有连接此刻持有的字节
+（未完成的请求行、正在运行的调用的参数和正在写出的回复）以 `ControlConnection` 计入该 owner，每个存活连接计一个 item。
+两者都有上限：最多四个连接，单个请求行至多 1 MiB。停止服务器会释放计费并关闭该 owner。没有窗格
+携带这一类别。
 
 为性能检查点采集的 `memory snapshot` 行包含同样字段，另加四个标注：`checkpoint_index`、
 `checkpoint_label`、`checkpoint_attempt` 与 `checkpoint_complete`（没有窗格被锁占用且每个窗格都已采样）。

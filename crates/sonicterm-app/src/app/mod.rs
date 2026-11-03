@@ -233,6 +233,7 @@ mod about_window;
 mod keymap_dispatch;
 mod live_font;
 mod locale;
+mod mcp;
 mod media;
 mod memory_report;
 mod memory_report_window;
@@ -678,6 +679,8 @@ pub struct App {
     pub(super) local_hostname: String,
     /// Hidden Linux package-smoke state; absent during ordinary application runs.
     pub(super) runtime_smoke: Option<runtime_smoke::RuntimeSmokeState>,
+    /// The local control server agents connect to, while `[mcp] enabled` is on.
+    pub(super) mcp_server: Option<mcp::McpServer>,
     /// Minimum interval between two successive frames. Defaults to 1/60s
     /// and is updated in `resumed` from the current monitor's reported
     /// refresh rate. Used by the RedrawRequested handler to skip an

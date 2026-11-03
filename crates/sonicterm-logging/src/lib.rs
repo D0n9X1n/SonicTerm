@@ -95,7 +95,16 @@ pub const CUSTOM_DEBUG_TARGETS: &[&str] = &[
     "frame_counters",
     "sonic::glyph_atlas",
     "sonic::render::glyph",
+    "mcp",
 ];
+
+/// The local control server's target: start and stop, agent connections, refused peers and
+/// tool calls.
+///
+/// Admitted at `warn` in every session, like [`MEMORY_RECLAIMED_TARGET`], because a refused
+/// peer or a listener that could not start is a security and availability event the user must be
+/// able to find. `info` adds connections and each tool call; `debug` adds everything.
+pub const MCP_TARGET: &str = "mcp";
 
 /// The target for reclamation that **destroys something the user can see**.
 ///
@@ -119,7 +128,7 @@ pub const MEMORY_RECLAIMED_TARGET: &str = "memory::reclaimed";
 /// reports data the user has already lost. This constant is also the
 /// parse-failure fallback, so a malformed `RUST_LOG` cannot silence it either.
 pub const DEFAULT_FILTER: &str = "sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,\
-     sonicterm_grid=warn,memory::reclaimed=warn,wgpu=warn,naga=warn";
+     sonicterm_grid=warn,memory::reclaimed=warn,mcp=warn,wgpu=warn,naga=warn";
 
 /// The `EnvFilter` directive string a configured log level produces.
 ///
@@ -140,7 +149,7 @@ pub fn filter_for_level(level: LogLevel) -> &'static str {
         // the session they wanted to explain.
         LogLevel::Info => {
             "sonic_exit=warn,sonic=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,\
-             memory=info,memory::reclaimed=warn,wgpu=warn,naga=warn"
+             memory=info,memory::reclaimed=warn,mcp=info,wgpu=warn,naga=warn"
         }
         // Every custom target is admitted here, not just the two that happened
         // to be added when they were introduced. `debug` is the level the
@@ -150,7 +159,7 @@ pub fn filter_for_level(level: LogLevel) -> &'static str {
             "sonic_exit=warn,sonic=debug,sonicterm=debug,sonicterm_vt=warn,sonicterm_grid=warn,\
              memory=debug,memory::reclaimed=debug,state_machine=debug,state_machine.log=debug,\
              render_timing=debug,render_policy=debug,tear_out_timing=debug,frame_counters=debug,\
-             wgpu=warn,naga=warn"
+             mcp=debug,wgpu=warn,naga=warn"
         }
     }
 }

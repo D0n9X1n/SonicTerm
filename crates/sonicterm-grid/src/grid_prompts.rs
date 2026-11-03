@@ -35,6 +35,8 @@ pub struct PinnedRun {
     pub output_start: Option<RowToken>,
     /// Where the command ended.
     pub end: Option<RowToken>,
+    /// The column on `end`'s row where D arrived.
+    pub end_col: u16,
     /// `Some(exit_code)` once D arrived for the region.
     pub exit: Option<Option<i32>>,
     /// A newer prompt opened before the run finished, so its completion can no longer arrive.
@@ -50,6 +52,8 @@ pub struct CommandSpan {
     pub output_start_row: Option<u64>,
     /// Absolute row where the command ended; `None` once it left history.
     pub end_row: Option<u64>,
+    /// The column on `end_row` where D arrived; output on that row ends before it.
+    pub end_col: u16,
     /// The exit code D reported.
     pub exit_code: Option<i32>,
     /// The output's first row already left history, so the span is incomplete.
@@ -89,6 +93,7 @@ impl Grid {
             output_start_at: None,
             output_seen: false,
             end_row: None,
+            end_col: 0,
             completed: false,
             exit_code: None,
         });
@@ -130,12 +135,14 @@ impl Grid {
     /// prompt region in place; a stray `D` without a prior `A` is ignored.
     pub fn record_prompt_end(&mut self, exit_code: Option<i32>) {
         let row = self.cursor_absolute_row();
+        let col = self.cursor.col;
         let token = self.row_token(row);
         let Some(last) = self.prompts.back_mut() else {
             // When: `back_mut` finds no region, the stray D names nothing.
             return;
         };
         last.end_row = Some(row);
+        last.end_col = col;
         last.completed = true;
         last.exit_code = exit_code;
         let seq = last.seq;
@@ -144,6 +151,7 @@ impl Grid {
             self.pinned_run.as_mut().filter(|run| run.seq == seq && run.alt == is_alt)
         {
             run.end = Some(token);
+            run.end_col = col;
             run.exit = Some(exit_code);
         }
     }
@@ -164,6 +172,12 @@ impl Grid {
         self.alt_screen.as_ref().map_or(&self.prompts, |saved| &saved.prompts)
     }
 
+    /// The primary screen: the live grid, or the saved one while the alternate screen is active.
+    /// Command spans index its rows.
+    pub fn primary_screen(&self) -> &Grid {
+        self.alt_screen.as_deref().unwrap_or(self)
+    }
+
     /// The newest primary-screen region that has both C and D, as a command output span.
     pub fn last_completed_command(&self) -> Option<CommandSpan> {
         let region = self
@@ -175,6 +189,7 @@ impl Grid {
             seq: region.seq,
             output_start_row: region.output_start_row,
             end_row: region.end_row,
+            end_col: region.end_col,
             exit_code: region.exit_code,
             output_truncated: region.output_start_row.is_none(),
         })
@@ -198,6 +213,7 @@ impl Grid {
             output_seen: false,
             output_start: None,
             end: None,
+            end_col: 0,
             exit: None,
             evicted: false,
         });

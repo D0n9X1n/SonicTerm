@@ -59,6 +59,7 @@ fn enabled_at(filter: &str, target: &str) -> bool {
             tracing::enabled!(target: "sonic::render::glyph", tracing::Level::DEBUG)
         }
         "frame_counters" => tracing::enabled!(target: "frame_counters", tracing::Level::DEBUG),
+        "mcp" => tracing::enabled!(target: "mcp", tracing::Level::DEBUG),
         "sonic_exit" => tracing::enabled!(target: "sonic_exit", tracing::Level::DEBUG),
         "sonicterm_font::shaper::harfbuzz" => {
             tracing::enabled!(target: "sonicterm_font::shaper::harfbuzz", tracing::Level::DEBUG)
@@ -67,6 +68,18 @@ fn enabled_at(filter: &str, target: &str) -> bool {
             "no probe arm for target {other:?}; add one so the reachability tests \
              cover every target the source emits"
         ),
+    })
+}
+
+/// Is an event on the control server's `mcp` target at `level` admitted by `filter`?
+fn mcp_enabled_at(filter: &str, level: tracing::Level) -> bool {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+    let subscriber = Registry::default().with(EnvFilter::try_new(filter).expect("valid filter"));
+    // `enabled!` needs a literal level, so each level is probed by its own arm.
+    tracing::subscriber::with_default(subscriber, || match level {
+        tracing::Level::WARN => tracing::enabled!(target: "mcp", tracing::Level::WARN),
+        tracing::Level::INFO => tracing::enabled!(target: "mcp", tracing::Level::INFO),
+        _ => tracing::enabled!(target: "mcp", tracing::Level::DEBUG),
     })
 }
 
@@ -285,7 +298,7 @@ fn every_listed_custom_target_is_admitted_by_the_debug_filter() {
 #[test]
 fn custom_targets_stay_off_at_the_default_level() {
     for target in CUSTOM_DEBUG_TARGETS {
-        if *target == crate::MEMORY_RECLAIMED_TARGET {
+        if *target == crate::MEMORY_RECLAIMED_TARGET || *target == crate::MCP_TARGET {
             continue;
         }
         assert!(
@@ -294,6 +307,18 @@ fn custom_targets_stay_off_at_the_default_level() {
         );
     }
     assert!(!enabled_at(filter_for_level(LogLevel::Info), "memory"), "and off at info");
+}
+
+/// The control server's warnings (a refused peer, a listener that could not start) reach a
+/// default session, its connections reach `info`, and its per-call detail stays below `info`.
+#[test]
+fn control_server_warnings_reach_a_default_session() {
+    assert_eq!(crate::MCP_TARGET, "mcp", "the probes below spell the target literally");
+    assert!(mcp_enabled_at(DEFAULT_FILTER, tracing::Level::WARN));
+    assert!(!mcp_enabled_at(DEFAULT_FILTER, tracing::Level::INFO));
+    let info = filter_for_level(LogLevel::Info);
+    assert!(mcp_enabled_at(info, tracing::Level::INFO));
+    assert!(!mcp_enabled_at(info, tracing::Level::DEBUG));
 }
 
 /// Reclamation that destroys user-visible data reaches a default session.

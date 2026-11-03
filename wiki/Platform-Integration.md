@@ -603,6 +603,58 @@ pending, never changed; a later result for that run is ignored.
   the Windows build and is unverified. The backend writes no registry value and
   never touches `UserChoice`.
 
+## Agent control server
+
+With `[mcp] enabled = true` (see [Configuration](Configuration)), SonicTerm runs a
+local [Model Context Protocol](https://modelcontextprotocol.io) server that
+agents such as Claude Code and Copilot CLI use to read panes. It speaks
+newline-delimited JSON-RPC 2.0, one message per line of at most 1 MiB, and
+serves at most four connections; each runs one tool call at a time and refuses a
+second call while one runs. There is no token: the endpoint is reachable only by
+the user who runs SonicTerm.
+
+```mermaid
+flowchart LR
+    agent["Agent"] -->|"JSON-RPC lines"| endpoint["Endpoint<br/>socket or named pipe"]
+    endpoint --> worker["Connection worker<br/>reads, regex, replies"]
+    worker -->|"resolve pane"| inbox["Inbox"]
+    inbox -->|"UserEvent::McpRequest"| loop["Event loop"]
+    loop -->|"pane handles"| worker
+    worker -->|"one bounded lock"| parser["Pane parser"]
+```
+
+| Platform | Endpoint | Who can connect |
+| --- | --- | --- |
+| macOS, Linux | Unix socket `<pid>.sock` in `$XDG_RUNTIME_DIR/sonicterm/`, else `$TMPDIR/sonicterm-<uid>/` | The directory must be owned by the user with mode exactly `0700`, opened without following a symlink, and every ancestor must be owned by the user or root and not group- or world-writable unless sticky; anything else is refused, not repaired. The socket is `0600`, and each peer's uid (`getpeereid` on macOS, `SO_PEERCRED` on Linux) must equal SonicTerm's. |
+| Windows | Named pipe `\\.\pipe\sonicterm-control-<pid>` | The pipe's owner is the user and its protected DACL has one entry, read and write for the user's SID. Remote clients are rejected, and the first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a process already holding the name makes start fail. The pipe name is also written to `%LOCALAPPDATA%\SonicTerm\control\<pid>`, in a directory created with an owner-only, inheritance-protected DACL and refused unless it has exactly that owner and DACL; records whose process is gone are removed at start. |
+
+Every pane's shell gets `SONICTERM_PANE_ID` and, while the server runs,
+`SONICTERM_CONTROL`, the endpoint's path or pipe name. A bridge may send a
+preamble line `{"sonicterm_bridge":1,"pane_id":…}` naming the pane the agent runs
+in; `list_panes` reports it as `self_pane_id`. It is a default, never an
+authorization. Connecting and disconnecting show SonicTerm's in-app
+notification, `Agent connected: <name>` with the name the client reported
+(control characters removed, at most 64 characters), once per connection; at
+most eight notices wait for the window at a time. Stopping the server removes
+the socket or discovery record; a SonicTerm that is killed leaves it behind, and
+the next start removes those whose process is gone.
+
+| Tool | What it does |
+| --- | --- |
+| `list_panes` | SonicTerm's process id as `instance_pid`, then every pane in every window, main window first: id, window and tab index, whether it is active, READONLY or agent-created, and, read with one bounded lock, its title, working directory, size, alternate-screen state, shell integration and whether its process exited. |
+| `read_pane` | `screen` (visible rows), `tail` (newest lines, soft wraps joined) or `last_command` (the last finished shell command's output, from the OSC 133 C row up to where D arrived, and its exit code, found even while a full-screen program runs). Text keeps combining marks and the spaces at a soft wrap. Capped by `max_lines` (default 120, at most 1,000) and `max_bytes` (default 16 KiB, at most 64 KiB); `end_row` is the token of the last line returned. |
+| `wait_for` | Waits until a `regex` matches a row after `after_row`, output stays quiet for `quiet_ms`, or the process exits, bounded by `timeout_ms` (default 30 s, at most 120 s). Only lines that began after `after_row` count, so text a soft wrap appends to an older line does not. A match already on screen ends it at once; a token from the other screen is refused as `stale_row`. |
+
+A read takes the pane's parser for one attempt of at most 5 ms, visits at most
+32,768 cells (blank rows included) and stops copying at its byte cap; a held parser answers `busy` and
+`truncated` instead of waiting. Each tool call is admitted under the server's
+current generation, and a call revoked before it returns answers with the
+`revoked` error and no pane text. `wait_for` polls the pane's output counter and exit status every 50 ms
+without a lock and reads only when output moved. Disabling the server, changing
+`control`, a disconnect or the 10 s deadline drops a queued request before the
+event loop acts on it, and ends a running wait as `revoked`. Pane text is
+untrusted input: the server tells agents never to follow instructions found in it.
+
 ## Platform matrix
 
 | Capability | macOS | Windows | Linux |
@@ -636,3 +688,4 @@ pending, never changed; a later result for that run is ignored.
 | Launcher grammar and launch queue | `crates/sonicterm-app/src/{launch_cli,launch_queue}.rs`, `crates/sonicterm-app/src/app/{pane_launch,pane_exit}.rs` |
 | Direct command spawn and program resolution | `crates/sonicterm-io/src/{pty,command_resolve}.rs` |
 | Asset lookup | `crates/sonicterm-cfg/src/assets.rs` |
+| Agent control server | `crates/sonicterm-app/src/app/mcp.rs`, `crates/sonicterm-app/src/app/mcp/{endpoint_unix,endpoint_windows,jsonrpc,lifecycle,read,tools_read}.rs` |

@@ -173,6 +173,9 @@ for native Option deletion; it creates no native views or presentation objects.
 caps. The pane owner has a derived governor backstop. The process and window
 owners track totals without aggregate limits.
 
+The agent control server adds one `Mcp` owner below the process root while it
+runs, charged for its connection buffers.
+
 The governor records only charged classes. Renderer surfaces, glyph atlases, and
 software frames are measured separately and are not in the governor total. See
 [Memory](Memory) and [Runtime Lifecycle](Runtime-Lifecycle) for the accounting
@@ -194,6 +197,11 @@ and release rules.
   tree/zoom, live PTYs, sizes, and charges. New-window tear-out prepares hidden
   native artifacts and transfers accounting before revealing the destination;
   source hiding or reaping happens only after commitment.
+- The agent control server's listener and connection threads never touch app
+  state. A request that needs it queues in an inbox and wakes the event loop
+  with `UserEvent::McpRequest`; the loop rechecks the connection, the server's
+  generation and the deadline before it acts. Pane reads, regex matching and
+  serialization run on the connection's worker with one bounded parser lock.
 - Terminal mutations mark damage in the same frame. Cache invalidation follows
   font, scale, theme, surface, atlas, and topology changes.
 
@@ -227,3 +235,4 @@ The exact safety conditions are in
 | Font adapter | `crates/sonicterm-engine/src/fontstack.rs` |
 | Resource governor and app charging | `crates/sonicterm-resource/src/`, `crates/sonicterm-app/src/app/retention.rs` |
 | Platform entry points | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
+| Agent control server | `crates/sonicterm-app/src/app/mcp.rs`, `crates/sonicterm-app/src/app/mcp/` |

@@ -45,3 +45,7 @@ impl From<u64> for WindowKey {
         Self(id)
     }
 }
+
+#[cfg(test)]
+#[path = "window_key_tests.rs"]
+mod window_key_tests;

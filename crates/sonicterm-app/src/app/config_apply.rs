@@ -612,6 +612,8 @@ impl App {
         }
 
         self.config = new_cfg;
+        // `[mcp]` changes start, stop or downgrade the control server at once.
+        self.reconcile_mcp();
         // A focused segment's ring follows a changed `strong_focus` at once.
         self.refresh_status_focus_rings();
         if let Some(window) = self.main_window() {

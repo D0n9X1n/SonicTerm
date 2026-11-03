@@ -3628,6 +3628,7 @@ dependencies = [
  "parking_lot",
  "pollster",
  "raw-window-handle",
+ "regex",
  "serde",
  "serde_json",
  "smallvec",

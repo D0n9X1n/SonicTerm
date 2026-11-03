@@ -142,6 +142,8 @@ pub struct PromptRegion {
     pub output_seen: bool,
     /// Absolute row where the command output ended (OSC 133 ; D), if any.
     pub end_row: Option<u64>,
+    /// The column on `end_row` where D arrived: output on that row ends there.
+    pub end_col: u16,
     /// Whether D was seen, kept apart from its row, which can leave history.
     pub completed: bool,
     /// Exit code reported by `OSC 133 ; D ; <code>`, if any.

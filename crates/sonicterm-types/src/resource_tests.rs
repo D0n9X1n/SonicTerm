@@ -1,7 +1,7 @@
 use super::*;
 use enum_map::enum_map;
 
-const ALL_CLASSES: [ResourceClass; 28] = [
+const ALL_CLASSES: [ResourceClass; 29] = [
     ResourceClass::GridVisible,
     ResourceClass::GridHistory,
     ResourceClass::GridAlternate,
@@ -30,6 +30,7 @@ const ALL_CLASSES: [ResourceClass; 28] = [
     ResourceClass::RegistryMetadata,
     ResourceClass::ReaperWork,
     ResourceClass::AccessibilityTree,
+    ResourceClass::ControlConnection,
 ];
 
 #[test]

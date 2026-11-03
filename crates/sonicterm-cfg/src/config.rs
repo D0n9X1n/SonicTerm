@@ -47,6 +47,9 @@ pub struct Config {
     /// Render-pipeline compatibility settings.
     #[serde(default)]
     pub render: RenderConfig,
+    /// The local agent control server; see [`McpConfig`].
+    #[serde(default)]
+    pub mcp: McpConfig,
     /// Deprecated compatibility key for the former tab close `×` button.
     /// The button is no longer drawn, so this value currently has no visual
     /// effect. It remains deserializable so older config files keep loading.
@@ -458,6 +461,7 @@ impl Default for Config {
             status_line: crate::status_line::StatusLineConfig::default(),
             appearance: AppearanceConfig::default(),
             render: RenderConfig::default(),
+            mcp: McpConfig::default(),
             tab_close_button_color: None,
             tab_min_width: default_tab_min_width(),
             tab_max_width: default_tab_max_width(),
@@ -804,6 +808,10 @@ mod persist;
 mod status_save;
 #[path = "config_template.rs"]
 mod template;
+
+#[path = "config_mcp.rs"]
+mod mcp;
+pub use mcp::{McpConfig, McpControl};
 
 pub use persist::FamilySave;
 #[cfg(test)]
