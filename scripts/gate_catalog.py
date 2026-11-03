@@ -209,6 +209,14 @@ STEPS = (
     # allowance plus 100 s for each of up to 12 harness runs.
     gate_model.Step("macos-perf-smoke", ("python3", "scripts/perf-compare.py", "--smoke"),
          ("macos",), 2700, "local", ("rust", "native"), ("macos-core", "macos-smoke")),
+    # The MCP end-to-end smoke: locally it builds the release app and bridge (a cold build of both fits inside the
+    # release steps' budgets); CI passes the packaged binaries through SONICTERM_SMOKE_APP and SONICTERM_SMOKE_BRIDGE,
+    # so the command stays this one. The protocol run is bounded at 120 s.
+    # macOS and Linux spell Python as python3 and Windows as python, so each spelling is its own step.
+    gate_model.Step("mcp-smoke", ("python3", "scripts/mcp-smoke.py"), ("macos", "linux"), 2400, "local",
+         ("rust", "native", "display"), ("macos-core", "linux-packages")),
+    gate_model.Step("windows-mcp-smoke", ("python", "scripts/mcp-smoke.py"), ("windows",), 2400, "local",
+         ("rust", "native", "display"), ("windows-smoke",)),
     # The head harness overlaid on the previous release tag, checked (not built) in an isolated target with
     # the features and harness cfgs a comparison would derive: a cold check of the workspace (3600 s) plus
     # the worktree and overlay. Ubuntu's example roots exclude the probe, so only macOS and Windows run it.

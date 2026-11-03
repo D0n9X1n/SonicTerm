@@ -147,7 +147,10 @@ either smoke fails, the job uploads its evidence. After the release build, both
 lanes require the bounded raw-binary smoke, then build and mount a DMG on that
 same architecture.
 Separate steps with native process deadlines also require the raw binary's
-`frame-validation` and `device-recovery` scenario smokes.
+`frame-validation` and `device-recovery` scenario smokes. On Apple Silicon only,
+`macos-core` also builds the release `sonicterm-mcp` bridge, packages it in the
+bundle, and after DMG validation runs the MCP end-to-end smoke on the bundled
+`SonicTerm.app` app and bridge ([Step notes](Local-Gate#step-notes)).
 The installed bundle passes relative-library closure, signature, deployment-floor,
 Homebrew-denied runtime/Cairo drawing, and exact bundled-font registration checks;
 a controlled same-binary image pair records compressed font savings. The macOS
@@ -185,7 +188,18 @@ it stages the pinned ConPTY runtime next to the binary, every smoke runs with
 `SONICTERM_REQUIRE_CONPTY=1`, and `scripts/verify-windows-conpty.py` then requires
 the staged bytes and exactly one `kind="packaged"` selection record from the first
 smoke's log, so a build that falls back to the system ConPTY fails
-([Terminal IO and VT](Terminal-IO-and-VT)).
+([Terminal IO and VT](Terminal-IO-and-VT)). The shard also builds the release
+`sonicterm-mcp` bridge and, after the scenario smokes, builds the MSI as the
+Release workflow does: it installs the pinned cargo-wix and WiX Toolset
+(`CARGO_WIX_VERSION` and `WIX_TOOLSET_VERSION`, which `test-release-tool-pins.py`
+keeps equal in both workflows), copies the host release build and the staged
+ConPTY into the target-triple directory `main.wxs` reads, and runs `cargo wix`.
+`validate-windows-msi.ps1 -ExtractTo` validates the MSI and keeps its
+administrative image, extracted through the validator's bounded, job-contained
+runner, and the MCP end-to-end smoke runs on the image's `sonicterm-windows.exe`
+and `sonicterm-mcp.exe`, with ConPTY where the installer puts it and
+`SONICTERM_REQUIRE_CONPTY=1`. The Release workflow's Windows job smokes its own MSI
+the same way ([Step notes](Local-Gate#step-notes)).
 
 `workflow-syntax` runs pinned actionlint against CI and perf workflows, checking GitHub
 expression-context availability as well as syntax. The tooling job installs its digest-pinned
@@ -276,13 +290,15 @@ release provenance.
 The independent package/runtime shard installs Mesa Vulkan/lavapipe, Xvfb,
 Weston, and Debian packaging tools, then:
 
-1. builds `sonicterm-linux` in release mode;
+1. builds `sonicterm-linux` and the `sonicterm-mcp` bridge in release mode;
 2. derives one workspace version from Cargo metadata;
 3. creates and validates the x86_64 `.tar.gz` and `.deb`;
 4. validates desktop/AppStream metadata and runs advisory `lintian`;
 5. runs both package layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe,
    in separate default, frame-validation and device-recovery steps;
-6. uploads the packages, or scenario-qualified smoke logs on failure.
+6. runs the MCP end-to-end smoke against the app and bridge extracted from the
+   built `.tar.gz`, on its own Xvfb with lavapipe ([Step notes](Local-Gate#step-notes));
+7. uploads the packages, or scenario-qualified smoke logs on failure.
 
 A default platform smoke cannot pass without a native window, renderer/device, a
 platform-shell PTY marker observed in the live grid, a later native frame
@@ -322,7 +338,7 @@ gestures. See [Platform Integration](Platform-Integration).
 
 ## Gate blind spots
 
-- The one-pass workspace gate includes integration tests for all 23 packages,
+- The one-pass workspace gate includes integration tests for all 24 packages,
   but it still exercises only targets that can compile and run on its host.
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
   deterministic subset. Its ignore regex excludes 9 whole crates, including

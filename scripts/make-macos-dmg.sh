@@ -23,6 +23,15 @@ mkdir -p "$APP/Contents/"{MacOS,Resources}
 cp "$BIN" "$APP/Contents/MacOS/sonicterm-mac"
 chmod +x "$APP/Contents/MacOS/sonicterm-mac"
 
+# The stdio MCP bridge agents start; it is built beside the app binary (`-p sonicterm-mcp`).
+BRIDGE="${SONICTERM_MCP_BIN:-$(dirname "$BIN")/sonicterm-mcp}"
+if [ ! -f "$BRIDGE" ]; then
+    printf 'missing MCP bridge %s; build it with cargo build -p sonicterm-mcp\n' "$BRIDGE" >&2
+    exit 1
+fi
+cp "$BRIDGE" "$APP/Contents/MacOS/sonicterm-mcp"
+chmod +x "$APP/Contents/MacOS/sonicterm-mcp"
+
 cp "$ROOT/assets/icons/exports/sonic.icns" "$APP/Contents/Resources/" 2>/dev/null || \
     echo "warning: icon not baked, continuing"
 
@@ -109,6 +118,9 @@ cp "$ROOT/crates/sonicterm-winit/LICENSE" "$APP/Contents/Resources/licenses/LICE
 # "unidentified developer" prompt (right-click → Open, or strip quarantine).
 # See the Packaging wiki page for packaging and trust details.
 echo "==> Ad-hoc signing $APP (no Developer ID; not notarized)"
+# The bundle seal needs every nested executable signed first, and an Intel linker leaves the bridge
+# unsigned; sign it after the native bundle step, which may rewrite load commands.
+codesign --force --sign - "$APP/Contents/MacOS/sonicterm-mcp"
 codesign --force --sign - "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 python3 "$ROOT/scripts/macos-bundle.py" verify "$APP" --max-minimum-macos "$MAX_MINIMUM"

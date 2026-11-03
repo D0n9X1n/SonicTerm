@@ -89,6 +89,9 @@ jobs:
       - name: Build x86_64
         run: cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
 
+      - name: Build MCP bridge (x86_64)
+        run: cargo build --release --target x86_64-apple-darwin -p sonicterm-mcp
+
       - name: Require macOS native runtime smoke
         run: |
           python3 scripts/native-smoke-runner.py \
@@ -203,6 +206,9 @@ jobs:
 
       - name: Build aarch64
         run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
+
+      - name: Build MCP bridge (aarch64)
+        run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mcp
 
       - name: Require macOS native runtime smoke
         run: |
@@ -382,6 +388,9 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 
+      - name: Build MCP bridge (Windows)
+        run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-mcp
+
       - name: Stage pinned Windows console runtime
         run: python scripts/setup-windows-conpty.py --destination target/x86_64-pc-windows-msvc/release
 
@@ -459,7 +468,18 @@ jobs:
         run: |
           .\scripts\validate-windows-msi.ps1 `
             -MsiPath "${{ steps.build-msi.outputs.path }}" `
-            -ExpectedVersion "v${{ steps.build-msi.outputs.version }}"
+            -ExpectedVersion "v${{ steps.build-msi.outputs.version }}" `
+            -ExtractTo "$env:RUNNER_TEMP\sonicterm-msi-image"
+
+      # The packaged bridge on Windows: the image validate-windows-msi.ps1 extracted through its bounded,
+      # job-contained runner and kept after validation, with ConPTY where the installer puts it.
+      - name: Require MCP end-to-end smoke on the MSI's files
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
+          SONICTERM_SMOKE_APP: ${{ runner.temp }}\sonicterm-msi-image\PFiles\SonicTerm\sonicterm-windows.exe
+          SONICTERM_SMOKE_BRIDGE: ${{ runner.temp }}\sonicterm-msi-image\PFiles\SonicTerm\sonicterm-mcp.exe
+        shell: pwsh
+        run: python scripts/mcp-smoke.py
 
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}
@@ -533,6 +553,9 @@ jobs:
 
       - name: Build Linux release binary
         run: cargo build --release -p sonicterm-linux
+
+      - name: Build MCP bridge (Linux)
+        run: cargo build --release -p sonicterm-mcp
 
       - name: Build, validate, and register Linux packages
         shell: bash

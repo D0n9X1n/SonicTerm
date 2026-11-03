@@ -29,7 +29,7 @@ Use the references below for a particular subsystem.
 - [Rendering and Fonts](Rendering-and-Fonts) — typography, atlases, GPU/CPU drawing, and damage
 - [Platform Integration](Platform-Integration) — AppKit, Win32, X11, and Wayland boundaries
 - [Architecture Internals](Architecture-Internals) — correctness, accounting, and lifetime invariants
-- [Crate Reference](Crate-Reference) — all 23 crates, their interfaces, and dependencies
+- [Crate Reference](Crate-Reference) — all 24 crates, their interfaces, and dependencies
 
 ### Build and contribute
 

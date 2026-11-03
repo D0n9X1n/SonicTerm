@@ -611,7 +611,8 @@ agents such as Claude Code and Copilot CLI use to read panes. It speaks
 newline-delimited JSON-RPC 2.0, one message per line of at most 1 MiB, and
 serves at most four connections; each runs one tool call at a time and refuses a
 second call while one runs. There is no token: the endpoint is reachable only by
-the user who runs SonicTerm.
+the user who runs SonicTerm. Agents reach it through the bundled `sonicterm-mcp`
+stdio bridge; [Usage](Usage) shows how to connect one.
 
 ```mermaid
 flowchart LR

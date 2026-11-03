@@ -108,6 +108,9 @@ class BundleTests(unittest.TestCase):
         self.native = FakeNative()
         self.native.add(self.exe, ["/usr/lib/libSystem.B.dylib"])
         self.exe.chmod(0o755)
+        # Every shipped bundle carries the MCP bridge beside the app, so the fixture does too.
+        self.bridge = self.native.add(self.app / "Contents/MacOS/sonicterm-mcp", ["/usr/lib/libSystem.B.dylib"])
+        self.bridge.chmod(0o755)
         (self.app / "Contents/Info.plist").write_bytes(plistlib.dumps({"LSMinimumSystemVersion": "14.0"}))
         self.addCleanup(patch.stopall)
         patch.object(bundle, "run", side_effect=self.native).start()
@@ -314,6 +317,38 @@ class BundleTests(unittest.TestCase):
         extra.unlink()
         extra = self.app / "Contents/Frameworks/fake.dylib"
         extra.write_text("not Mach-O")
+        with self.assertRaises(bundle.BundleError):
+            bundle.verify_app(self.app)
+
+    def test_missing_companion_bridge_fails_bundle_and_verify(self):
+        # A bundle without the MCP bridge cannot serve agents, so both packaging and verification refuse it.
+        self.bridge.unlink()
+        with self.assertRaisesRegex(bundle.BundleError, "missing companion executable.*sonicterm-mcp"):
+            bundle.bundle_app(self.app)
+        app = self.root / "Fresh.app"
+        exe = self.native.add(app / "Contents/MacOS/sonicterm-mac", ["/usr/lib/libSystem.B.dylib"])
+        exe.chmod(0o755)
+        (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"LSMinimumSystemVersion": "14.0"}))
+        bridge = self.native.add(app / "Contents/MacOS/sonicterm-mcp", ["/usr/lib/libSystem.B.dylib"])
+        bundle.bundle_app(app)
+        bridge.unlink()
+        with self.assertRaisesRegex(bundle.BundleError, "missing companion executable"):
+            bundle.verify_app(app)
+
+    def test_companion_bridge_is_verified_as_system_only(self):
+        # The MCP bridge ships beside the app; it may load only system libraries, with no rpaths.
+        bridge = self.bridge
+        bundle.bundle_app(self.app)
+        bundle.verify_app(self.app)
+        self.native.nodes[bridge]["loads"].append("/opt/homebrew/lib/libz.1.dylib")
+        with self.assertRaisesRegex(bundle.BundleError, "non-system"):
+            bundle.verify_app(self.app)
+        self.native.nodes[bridge]["loads"].pop()
+        self.native.nodes[bridge]["rpaths"] = ["/opt/homebrew/lib"]
+        with self.assertRaisesRegex(bundle.BundleError, "RPATH"):
+            bundle.verify_app(self.app)
+        self.native.nodes[bridge]["rpaths"] = []
+        self.native.nodes[bridge]["arch"] = "x86_64"
         with self.assertRaises(bundle.BundleError):
             bundle.verify_app(self.app)
 

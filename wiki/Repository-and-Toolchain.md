@@ -7,7 +7,7 @@ code conventions, and maintenance of the vendored native sources.
 
 ```text
 Cargo.toml     workspace members, shared package metadata, dependencies, profiles, lints
-crates/        23 first-party Rust crates
+crates/        24 first-party Rust crates
 assets/        fonts, themes, keymaps, icons, localization, screenshots
 wiki/          canonical bilingual documentation
 scripts/       flat first-party shell and PowerShell automation

@@ -894,6 +894,57 @@ read panes and, within the scope you choose, act on them. The endpoint, its
 permissions and the read tools are described in
 [Platform Integration](Platform-Integration).
 
+#### Connect an agent
+
+SonicTerm's own binaries are GUI programs, so agents start the bundled
+`sonicterm-mcp` bridge instead. It is a stdio MCP server: it speaks
+newline-delimited JSON-RPC on stdin and stdout and relays each line to and from
+the running SonicTerm's control server. stdout carries only what SonicTerm
+sends; diagnostics go to stderr.
+
+| Platform | `sonicterm-mcp` path |
+| --- | --- |
+| macOS | `/Applications/SonicTerm.app/Contents/MacOS/sonicterm-mcp` |
+| Linux | `sonicterm-mcp` (`/usr/bin` from the `.deb`), or next to `sonicterm` in the tarball |
+| Windows | `"C:\Program Files\SonicTerm\sonicterm-mcp.exe"` |
+
+Register it with Claude Code:
+
+```bash
+claude mcp add --transport stdio --scope user sonicterm -- /Applications/SonicTerm.app/Contents/MacOS/sonicterm-mcp
+```
+
+For Copilot CLI, add an `mcpServers` entry to `~/.copilot/mcp-config.json`:
+
+```json
+{ "mcpServers": { "sonicterm": { "type": "local", "command": "/Applications/SonicTerm.app/Contents/MacOS/sonicterm-mcp", "args": [], "tools": ["*"] } } }
+```
+
+The bridge picks its endpoint in this order:
+
+1. `--endpoint <path-or-pipe>`.
+2. `SONICTERM_CONTROL`, which SonicTerm sets in every pane while the server runs.
+3. The only live endpoint in the per-user endpoint directory. None, or more than
+   one, is an error that lists what it found; the bridge never guesses between
+   instances.
+
+An agent started inside a SonicTerm pane inherits `SONICTERM_CONTROL` and
+`SONICTERM_PANE_ID`, so it reaches that instance with no flags, and the bridge
+passes `SONICTERM_PANE_ID` as the default pane. A default pane is never
+authorization. Before sending any byte, the bridge checks that the server runs
+as the same user: the peer uid on macOS and Linux, the server process's token
+SID on Windows. It exits with 2 for a usage error, 1 when it finds no endpoint
+or cannot connect, and 0 when either side closes. After SonicTerm closes the
+connection the bridge exits once everything it sent has been written to stdout,
+or with 1 when stdout takes nothing for 2 s. While SonicTerm is connected, a
+client that leaves 4 MiB queued and reads nothing for 5 s ends the relay with 1.
+Progress is what the stdout pipe or socket accepts: on macOS any read the client
+makes counts. On Linux a pipe frees room a page at a time and a socket one 16 KiB
+write at a time, so a client must read at least that much per interval. A client that reads continuously, as MCP clients do,
+is never cut off. `--version` (`-V`) and `--help` (`-h`) print and exit.
+
+#### Control scope and tools
+
 `[mcp] control` sets what the control tools may touch:
 
 | `control` | Control tools may act on |

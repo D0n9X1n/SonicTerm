@@ -667,6 +667,49 @@ request 发送到当前运行的应用，并添加标签页。草稿绝不会被
 Claude Code、Copilot CLI 等 agent 可以读取窗格，并在你选择的范围内操作它们。端点、权限和
 读取类工具见 [平台集成](Platform-Integration-zh-CN)。
 
+#### 连接 agent
+
+SonicTerm 自身的二进制都是 GUI 程序，因此 agent 改为启动随附的 `sonicterm-mcp` 桥接程序。
+它是一个 stdio MCP 服务器：在 stdin 和 stdout 上使用按行分隔的 JSON-RPC，并把每一行在 agent 与
+正在运行的 SonicTerm 控制服务器之间双向转发。stdout 只承载 SonicTerm 发出的内容；诊断信息写到
+stderr。
+
+| 平台 | `sonicterm-mcp` 路径 |
+| --- | --- |
+| macOS | `/Applications/SonicTerm.app/Contents/MacOS/sonicterm-mcp` |
+| Linux | `sonicterm-mcp`（`.deb` 安装在 `/usr/bin`），或 tarball 中 `sonicterm` 旁边 |
+| Windows | `"C:\Program Files\SonicTerm\sonicterm-mcp.exe"` |
+
+在 Claude Code 中注册：
+
+```bash
+claude mcp add --transport stdio --scope user sonicterm -- /Applications/SonicTerm.app/Contents/MacOS/sonicterm-mcp
+```
+
+Copilot CLI 则在 `~/.copilot/mcp-config.json` 中添加一个 `mcpServers` 条目：
+
+```json
+{ "mcpServers": { "sonicterm": { "type": "local", "command": "/Applications/SonicTerm.app/Contents/MacOS/sonicterm-mcp", "args": [], "tools": ["*"] } } }
+```
+
+桥接程序按以下顺序选择端点：
+
+1. `--endpoint <path-or-pipe>`。
+2. `SONICTERM_CONTROL`；服务器运行期间，SonicTerm 会在每个窗格中设置它。
+3. 每用户端点目录中唯一存活的端点。没有或多于一个时报错，并列出找到的端点；桥接程序从不在多个
+   实例之间猜测。
+
+在 SonicTerm 窗格内启动的 agent 会继承 `SONICTERM_CONTROL` 和 `SONICTERM_PANE_ID`，因此无需任何
+参数即可连到该实例，桥接程序会把 `SONICTERM_PANE_ID` 作为默认窗格传递。默认窗格从不构成授权。
+发送任何字节之前，桥接程序会检查服务器以同一用户运行：macOS 和 Linux 上检查对端 uid，Windows 上
+检查服务器进程令牌的 SID。用法错误时以 2 退出，找不到端点或无法连接时以 1 退出，任一端关闭时以 0
+退出。SonicTerm 关闭连接后，桥接程序会在已发送的内容全部写入 stdout 之后再退出；若 stdout 2 s
+内未接收任何内容则以 1 退出。SonicTerm 连接期间，若已积压 4 MiB 且客户端
+5 s 内未读取任何内容，则以 1 结束转发。进度以 stdout 管道或套接字实际接收的字节计：macOS 上客户端的任何读取都算数；
+Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空间，客户端每个时段至少要读取相应的量。像 MCP 客户端那样持续读取的客户端永远不会被断开。`--version`（`-V`）和 `--help`（`-h`）打印后退出。
+
+#### 控制范围与工具
+
 `[mcp] control` 决定控制类工具可以作用于什么：
 
 | `control` | 控制类工具可作用于 |

@@ -98,6 +98,7 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-windows` | Windows binary/glue. |
 | `sonicterm-linux` | Linux binary/glue and package metadata. |
 | `sonicterm-logging` | Logs, panic hook, exit tracing. |
+| `sonicterm-mcp` | Stdio MCP bridge from an agent to a running SonicTerm's control server. |
 
 `crates/sonicterm-winit/` is the retained Windows/macOS/Linux source subset of
 upstream `winit` 0.30.13, not a first-party workspace package. It keeps its
@@ -165,6 +166,8 @@ python3 scripts/local-gate.py
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
+| `mcp-smoke` | `python3 scripts/mcp-smoke.py` | macOS, Linux | `local` | `rust`, `native`, `display` | `macos-core`, `linux-packages` |
+| `windows-mcp-smoke` | `python scripts/mcp-smoke.py` | Windows | `local` | `rust`, `native`, `display` | `windows-smoke` |
 | `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`, `native` | `macos-core` |
 | `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`, `native` | `windows-checks` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-core`, `macos-smoke` |
@@ -182,6 +185,7 @@ Needs:
 - `actionlint`: `actionlint` at the version `scripts/pinned-tools.json` pins.
 - `rust`: the Rust toolchain from `rust-toolchain.toml`, with rustfmt and clippy.
 - `native`: the platform's native build libraries: Cairo and pkg-config on macOS (`brew install cairo pkg-config`), Cairo from `scripts/setup-windows-cairo.ps1` on Windows, and the packages the `linux-core` job installs on Linux.
+- `display`: a graphical session for the release app: the desktop session on macOS and Windows, and on Linux a `DISPLAY` or `WAYLAND_DISPLAY`, or `Xvfb` on `PATH`, which `mcp-smoke.py` starts itself.
 - `bash`: `bash` on `PATH`; on Windows, run the gate from Git Bash so Git's `bash` is found first.
 - `pwsh`: PowerShell 7 (`pwsh`) on `PATH`.
 - `llvm-cov`: `cargo-llvm-cov` at the version `scripts/pinned-tools.json` pins.
@@ -256,7 +260,7 @@ force removal or discard dirty, unmerged, or locked worktrees or any stash.
 Before trusting a green run:
 
 - `rust-logic-coverage.sh` gates a deterministic-logic subset at 80% and skips
-  9 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`, so
+  9 of the 24 crates outright, including `sonicterm-app` and `sonicterm-gpu`, so
   a passing subset figure says nothing about code in those crates. The per-crate
   floor in `scripts/coverage-baseline.json` catches regressions, not low coverage.
   CI measures it on Linux (`linux-coverage`), so those floors do not measure

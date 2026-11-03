@@ -471,7 +471,7 @@ flowchart TD
 [Model Context Protocol](https://modelcontextprotocol.io) 服务器，供 Claude Code、Copilot CLI
 等 agent 读取窗格。它使用按行分隔的 JSON-RPC 2.0，每行一条消息，至多 1 MiB；最多服务四个连接，
 每个连接同一时间只运行一个工具调用，运行期间收到的第二个调用会被拒绝。没有令牌：只有运行 SonicTerm
-的用户能访问端点。
+的用户能访问端点。agent 通过随附的 stdio 桥接程序 `sonicterm-mcp` 连接它；连接方式见[用法](Usage-zh-CN)。
 
 ```mermaid
 flowchart LR

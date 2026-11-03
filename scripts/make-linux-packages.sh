@@ -29,6 +29,12 @@ deb="$dist/SonicTerm-${tag}-linux-x86_64.deb"
 version="${tag#v}"
 
 [[ -f "$binary" ]] || { printf 'binary not found: %s\n' "$binary" >&2; exit 1; }
+# The stdio MCP bridge agents start, built beside the app binary (`-p sonicterm-mcp`).
+bridge="${SONICTERM_MCP_BIN:-$(dirname "$binary")/sonicterm-mcp}"
+[[ -f "$bridge" ]] || {
+  printf 'MCP bridge not found: %s; build it with cargo build -p sonicterm-mcp\n' "$bridge" >&2
+  exit 1
+}
 [[ "$tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([+~.-][A-Za-z0-9.+~-]+)?$ ]] || {
   printf 'invalid release tag: %s\n' "$tag" >&2
   exit 1
@@ -47,6 +53,7 @@ mkdir -p "$payload/assets" \
   "$payload/share/metainfo" \
   "$payload/share/icons/hicolor/256x256/apps"
 install -m 0755 "$binary" "$payload/sonicterm"
+install -m 0755 "$bridge" "$payload/sonicterm-mcp"
 for directory in fonts themes keymaps icons i18n; do
   cp -R "$root/assets/$directory" "$payload/assets/"
 done
@@ -72,7 +79,8 @@ install -m 0644 \
 install -m 0644 "$root/crates/sonicterm-winit/LICENSE" "$payload/LICENSE-winit-Apache-2.0"
 install -m 0644 "$root/README.md" "$payload/README.md"
 find "$payload" -type d -exec chmod 0755 {} +
-find "$payload" -type f ! -path "$payload/sonicterm" -exec chmod 0644 {} +
+find "$payload" -type f ! -path "$payload/sonicterm" ! -path "$payload/sonicterm-mcp" \
+  -exec chmod 0644 {} +
 find "$payload" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || \
   find "$payload" -exec touch -h -t "$(date -u -r "$SOURCE_DATE_EPOCH" +%Y%m%d%H%M.%S)" {} +
 
@@ -138,6 +146,7 @@ mkdir -p \
   "$deb_root/usr/share/icons/hicolor/256x256/apps" \
   "$deb_root/usr/share/doc/sonicterm"
 install -m 0755 "$payload/sonicterm" "$deb_root/usr/bin/sonicterm"
+install -m 0755 "$payload/sonicterm-mcp" "$deb_root/usr/bin/sonicterm-mcp"
 cp -R "$payload/assets" "$deb_root/usr/share/sonicterm/"
 install -m 0644 "$payload/share/applications/$identity.desktop" \
   "$deb_root/usr/share/applications/$identity.desktop"
@@ -170,7 +179,7 @@ Description: Fast GPU-accelerated terminal emulator
 CONTROL
 (
   cd "$work"
-  dpkg-shlibdeps -O -e"$deb_root/usr/bin/sonicterm"
+  dpkg-shlibdeps -O -e"$deb_root/usr/bin/sonicterm" -e"$deb_root/usr/bin/sonicterm-mcp"
 ) > "$substvars"
 depends="$(perl -ne 'print $1 if /^shlibs:Depends=(.*)$/' "$substvars")"
 [[ -n "$depends" ]] || {
@@ -200,7 +209,8 @@ CONTROL
 # alternative, and the control file claims no virtual package. Users opt in explicitly.
 
 find "$deb_root" -type d -exec chmod 0755 {} +
-find "$deb_root" -type f ! -path "$deb_root/usr/bin/sonicterm" -exec chmod 0644 {} +
+find "$deb_root" -type f ! -path "$deb_root/usr/bin/sonicterm" \
+  ! -path "$deb_root/usr/bin/sonicterm-mcp" -exec chmod 0644 {} +
 find "$deb_root" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 
 dpkg-deb --root-owner-group --build "$deb_root" "$deb"

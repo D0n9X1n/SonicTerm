@@ -313,9 +313,12 @@ $runtimeContract = @{
 }
 function New-RuntimeRows {
     @{
-        Files = @($runtimeContract.Keys | ForEach-Object {
+        Files = @(@($runtimeContract.Keys | ForEach-Object {
             [pscustomobject]@{ Values = @($_, "conpty_runtime", $runtimeContract[$_].Name, [string]$runtimeContract[$_].Size) }
-        })
+        }) + @(
+            [pscustomobject]@{ Values = @("exe0", "binary0", "SONICT~1.EXE|sonicterm-windows.exe", "4096") }
+            [pscustomobject]@{ Values = @("mcp_bridge", "binary0", "SONICT~2.EXE|sonicterm-mcp.exe", "2048") }
+        ))
         Components = @([pscustomobject]@{ Values = @("conpty_runtime", "ConptyDir", "conpty_dll") })
         Directories = @(
             [pscustomobject]@{ Values = @("TARGETDIR", "", "SourceDir") }
@@ -507,6 +510,28 @@ $script:extractionMode = "failed"
 Assert-ThrowsLike { Test-MsiRuntimePackage "synthetic.msi" $payloadContract } "*Synthetic extraction failure*"
 if (Test-Path -LiteralPath $script:extractionRoot) { throw "Failed extraction left temporary files" }
 
+# -ExtractTo keeps only a validated image, at a new directory, and still removes the scratch tree.
+$keepParent = Join-Path ([System.IO.Path]::GetTempPath()) ("sonicterm-msi-keep-" + [guid]::NewGuid().ToString("N"))
+[void][System.IO.Directory]::CreateDirectory($keepParent)
+try {
+    $keepAt = Join-Path $keepParent "image"
+    $script:extractionMode = "valid"
+    Test-MsiRuntimePackage "synthetic.msi" $payloadContract $keepAt
+    if (-not (Test-Path -LiteralPath (Join-Path $keepAt "PFiles/SonicTerm/conpty/conpty.dll"))) {
+        throw "A validated image was not kept at -ExtractTo"
+    }
+    if (Test-Path -LiteralPath $script:extractionRoot) { throw "Keeping the image left the scratch tree" }
+    Assert-ThrowsLike { Test-MsiRuntimePackage "synthetic.msi" $payloadContract $keepAt } "*already exists*"
+    $tamperedAt = Join-Path $keepParent "tampered"
+    $script:extractionMode = "tampered"
+    Assert-ThrowsLike { Test-MsiRuntimePackage "synthetic.msi" $payloadContract $tamperedAt } "*runtime payload*SHA256*"
+    if (Test-Path -LiteralPath $tamperedAt) { throw "An invalid image was kept" }
+    if (Test-Path -LiteralPath $script:extractionRoot) { throw "Invalid kept payload left temporary files" }
+}
+finally {
+    Remove-Item -LiteralPath $keepParent -Recurse -Force
+}
+
 # Trusted source pins, rather than cabinet metadata or staged build files, supply every payload digest.
 $trustedContract = Get-MsiRuntimeContract
 foreach ($fileId in @("conpty_dll", "conpty_host", "conpty_license")) {
@@ -536,6 +561,24 @@ try {
 finally {
     Remove-Item Function:\Get-Item
     Remove-Item Function:\Get-FileHash
+}
+
+# The MSI must install the MCP bridge as a nonempty sonicterm-mcp.exe in binary0, beside the app.
+$binaryRows = New-RuntimeRows
+Test-MsiBinaryFiles $binaryRows.Files
+$missingBridge = @($binaryRows.Files | Where-Object { $_.Values[0] -cne "mcp_bridge" })
+Assert-ThrowsLike { Test-MsiBinaryFiles $missingBridge } "*missing 'sonicterm-mcp.exe'*"
+foreach ($field in @(1, 2, 3)) {
+    $changedRows = New-RuntimeRows
+    $bridge = $changedRows.Files | Where-Object { $_.Values[0] -ceq "mcp_bridge" }
+    $bridge.Values[$field] = $(if ($field -eq 3) { "0" } else { "unexpected" })
+    Assert-ThrowsLike { Test-MsiBinaryFiles $changedRows.Files } "*'sonicterm-mcp.exe' in binary0*"
+}
+# The WiX source keeps the bridge in binary0 under the File Id the validator reads.
+$wixBridge = @(([xml](Get-Content -LiteralPath "$PSScriptRoot\..\crates\sonicterm-windows\wix\main.wxs" -Raw)).SelectNodes(
+    "//*[local-name()='Component' and @Id='binary0']/*[local-name()='File' and @Id='mcp_bridge']"))
+if ($wixBridge.Count -ne 1 -or $wixBridge[0].GetAttribute("Name") -cne "sonicterm-mcp.exe") {
+    throw "main.wxs must install sonicterm-mcp.exe as mcp_bridge in binary0"
 }
 
 # The public validator must require runtime metadata and payload validation before reporting success.
@@ -578,14 +621,20 @@ try {
     }
     function Get-MsiRuntimeContract { $runtimeContract }
     function Test-MsiRuntimePackage {
-        param([string]$PackagePath, [hashtable]$Contract)
-        if ($PackagePath -cne $MsiPath -or $Contract -ne $runtimeContract) { throw "Wrong runtime validation inputs" }
+        param([string]$PackagePath, [hashtable]$Contract, [string]$KeepAt)
+        if ($PackagePath -cne $MsiPath -or $Contract -ne $runtimeContract -or $KeepAt -cne $ExtractTo) {
+            throw "Wrong runtime validation inputs"
+        }
         $script:validatedRuntimePackage = $true
     }
     $validationOutput = Invoke-MsiValidation
     if (-not $script:validatedRuntimePackage) { throw "Validator skipped actual runtime payload verification" }
     if ($validationOutput -notlike "Validated MSI *components=11*") { throw "Unexpected validator output" }
     $script:validatedRuntimePackage = $false
+    $script:validationRows = New-RuntimeRows
+    $script:validationRows.Files = @($script:validationRows.Files | Where-Object { $_.Values[0] -cne "mcp_bridge" })
+    Assert-ThrowsLike { Invoke-MsiValidation } "*missing 'sonicterm-mcp.exe'*"
+    if ($script:validatedRuntimePackage) { throw "An MSI without the MCP bridge reached extraction" }
     $script:validationRows.Files = @()
     Assert-ThrowsLike { Invoke-MsiValidation } "*runtime file set*"
     if ($script:validatedRuntimePackage) { throw "Invalid MSI metadata reached extraction" }

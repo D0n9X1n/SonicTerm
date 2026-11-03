@@ -117,6 +117,23 @@ def main() -> None:
     require_in_step(RELEASE, "Build and register msi asset", "--target x86_64-pc-windows-msvc")
     require_in_step(RELEASE, "Build and register msi asset", "--install-version $numericVersion")
     require_in_step(RELEASE, "Validate MSI metadata", "scripts\\validate-windows-msi.ps1")
+    # PR CI builds the MSI with the same pinned tools, so a pin change reaches both workflows at once.
+    require_top_level_env(CI_WORKFLOW, "CARGO_WIX_VERSION", PINS["CARGO_WIX_VERSION"])
+    require_top_level_env(CI_WORKFLOW, "WIX_TOOLSET_VERSION", PINS["WIX_TOOLSET_VERSION"])
+    forbid(CI_WORKFLOW, "cargo install cargo-wix --locked", "CI workflow")
+    forbid(CI_WORKFLOW, "choco install wixtoolset --no-progress -y", "CI workflow")
+    require_in_step(
+        CI_WORKFLOW,
+        "Install cargo-wix",
+        'cargo install cargo-wix --version "${{ env.CARGO_WIX_VERSION }}" --locked',
+    )
+    require_in_step(
+        CI_WORKFLOW,
+        "Install WiX Toolset",
+        'choco install wixtoolset --version "${{ env.WIX_TOOLSET_VERSION }}" --no-progress -y',
+    )
+    require_in_step(CI_WORKFLOW, "Build MSI for validation", "--target x86_64-pc-windows-msvc")
+    require_in_step(CI_WORKFLOW, "Validate and extract MSI", "scripts\\validate-windows-msi.ps1")
     require_in_step(CI_WORKFLOW, "Test MSI validator", "scripts\\validate-windows-msi_tests.ps1")
 
     # Both independently readable translations must describe the pinned release tools.

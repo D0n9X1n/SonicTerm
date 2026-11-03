@@ -5,7 +5,7 @@
     "runner": "ubuntu22-container/X64"
   },
   "tolerance_pp": 1.0,
-  "reason": "Host migration from aarch64-apple-darwin on macos14/ARM64 to x86_64-unknown-linux-gnu on ubuntu22-container/X64. Logic coverage moves from the macOS runner to the linux-coverage job's ubuntu:22.04 container, so every crate floor is re-recorded on Linux, where macOS-only code compiles out and Linux-only code is measured. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/40401978787 attempt 1, job linux-coverage, evidence artifact rust-logic-coverage-evidence-40401978787-1, on x86_64-unknown-linux-gnu on ubuntu22-container/X64 (image ubuntu:22.04) with rustc 1.99.1 (58cf8f9c3 2026-10-13) and cargo-llvm-cov 0.9.0, at commit 168892019bbf4b6438d936d409f713d8b8be3454, the test merge of pull-request head 858b2cdeda23a6e80e5774b34882565ca2ab3c96.",
+  "reason": "Host migration from aarch64-apple-darwin on macos14/ARM64 to x86_64-unknown-linux-gnu on ubuntu22-container/X64. Logic coverage moves from the macOS runner to the linux-coverage job's ubuntu:22.04 container, so every crate floor is re-recorded on Linux, where macOS-only code compiles out and Linux-only code is measured. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/40401978787 attempt 1, job linux-coverage, evidence artifact rust-logic-coverage-evidence-40401978787-1, on x86_64-unknown-linux-gnu on ubuntu22-container/X64 (image ubuntu:22.04) with rustc 1.99.1 (58cf8f9c3 2026-10-13) and cargo-llvm-cov 0.9.0, at commit 168892019bbf4b6438d936d409f713d8b8be3454, the test merge of pull-request head 858b2cdeda23a6e80e5774b34882565ca2ab3c96. sonicterm-mcp, the stdio bridge, enters at a provisional 207/295 (70.17%), below the 236/295 (80.00%) its tests reach on aarch64-apple-darwin, because its Unix connect module is measured here and its Windows one compiles out; replace it with this job's Linux measurement once one exists.",
   "crates": {
     "sonicterm-app": {
       "lines": 36754,
@@ -76,6 +76,11 @@
       "lines": 260,
       "covered": 166,
       "percent": 63.85
+    },
+    "sonicterm-mcp": {
+      "lines": 295,
+      "covered": 207,
+      "percent": 70.17
     },
     "sonicterm-render-model": {
       "lines": 217,

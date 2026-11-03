@@ -28,7 +28,7 @@ SonicTerm 是面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。
 - [渲染与字体](Rendering-and-Fonts-zh-CN) — 字体、图集、GPU/CPU 绘制与损伤区域
 - [平台集成](Platform-Integration-zh-CN) — AppKit、Win32、X11 与 Wayland 边界
 - [架构内部机制](Architecture-Internals-zh-CN) — 正确性、记账与生命周期不变量
-- [Crate 参考](Crate-Reference-zh-CN) — 全部 23 个 crate、接口与依赖
+- [Crate 参考](Crate-Reference-zh-CN) — 全部 24 个 crate、接口与依赖
 
 ### 构建与贡献
 

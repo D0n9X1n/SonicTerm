@@ -312,8 +312,8 @@ The optional `windows-target` step is a pre-push aid on macOS, never a CI gate.
 `scripts/check-windows-target.sh` fails when a workspace member is in neither of
 its two lists, then runs
 `cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`
-on the 13 members that need no Windows C toolchain: `sonicterm-types`, `-grid`,
-`-vt`, `-cfg`, `-logging`, `-resource`, `-text`, `-ui`, `-app-core`, `-io`
+on the 14 members that need no Windows C toolchain: `sonicterm-types`, `-grid`,
+`-vt`, `-cfg`, `-logging`, `-mcp`, `-resource`, `-text`, `-ui`, `-app-core`, `-io`
 (including its ConPTY code and Windows-gated tests), `-render-model`,
 `-block-glyph`, and `-font-config`. That scope is default features, all targets,
 and the target-specific dev and build closure, in a separate target directory. It
@@ -345,6 +345,92 @@ event-loop thread. Errors and completion release the renderer and verify the
 live-renderer baseline. A missing redraw fails at the 180-second test deadline.
 Native GDI pixel comparisons remain required, including when
 `SONICTERM_FONT_PROBE_DIR` enables dense readback and image evidence.
+
+The `mcp-smoke` step (`windows-mcp-smoke` on Windows, which spells Python
+`python`) proves the agent control path end to end. The app and bridge come from
+`--app` and `--bridge`, else from `SONICTERM_SMOKE_APP` and
+`SONICTERM_SMOKE_BRIDGE`, else from the release builds, which
+`scripts/mcp-smoke.py` first runs with `cargo build --release`, one package per
+command (`--no-build` skips that). CI passes the packaged binaries through those
+variables: the bundled `SonicTerm.app` after DMG validation in `macos-core`, and
+the extracted `.tar.gz` payload in `linux-packages`, and in `windows-smoke` the
+MSI's administrative image: that job builds the MSI with the Release workflow's
+pinned cargo-wix and WiX, and `validate-windows-msi.ps1 -ExtractTo` validates it,
+extracts it through its bounded, job-contained `msiexec /a` runner and keeps the
+image only once it validates. The Release workflow's Windows job smokes its own
+MSI the same way. It then launches the
+app normally (not `--runtime-smoke`) with scratch `SONICTERM_CONFIG_DIR` and
+`SONICTERM_LOG_DIR`, a `sonicterm.toml` holding only `[mcp] enabled = true`, and a
+scratch `0700` `XDG_RUNTIME_DIR` on macOS and Linux or a scratch `LOCALAPPDATA` on
+Windows, so the bridge can only discover this instance; `HOME` is unchanged and
+`NO_COLOR` is removed. Through the `sonicterm-mcp` bridge, with no
+`--endpoint`, it requires `initialize`, `list_panes`, a `create_pane` helper whose
+`wait_for` exit reports code 3 and whose `read_pane` tail holds `ready`, a sleeper
+whose `wait_for` exit, with `timeout_ms` 10000, reports `exited` within 10 s of the
+clock started before `send_keys ["Ctrl+C"]`, and `run_command` reporting
+`completed` with exit code 5 in a pane that runs a small Python shell emitting
+OSC 133 marks. While the bridge is still running, each helper pane, including
+ones held after their process exited, must close with a result naming that pane;
+then closing stdin must end the bridge with exit code 0. A second app run with
+`[mcp] enabled = false` is ready once the app has a child process (its first
+pane's shell), within a bound; no endpoint may then appear for 1 s, and the bridge
+must exit 1 with its "no running SonicTerm control server" message. The protocol
+run has a 120-second global deadline enforced by a watchdog, and every JSON-RPC
+read has its own timeout. `scripts/mcp_smoke_process.py` contains every process
+the smoke starts. Each launch gets its own random `SONICTERM_SMOKE_RUN` token,
+set only in that child's environment, so every descendant inherits it, including
+detached orphans and programs after `exec`. A process's identity is its pid with
+its start time only (`/proc/<pid>/stat` on Linux, `ps -o lstart=` on macOS), so
+`exec` keeps it and a reused pid does not match. On macOS and Linux, cleanup
+kills the union of three layers. First, a tracker thread walks the descendants
+of the app and of every still-matching tracked identity once at launch and every
+100 ms. Second, every same-user process with an environment entry exactly equal
+to this launch's marker. The environment is read structurally and argv never
+counts: Linux splits `/proc/<pid>/environ` into whole NUL-terminated entries, so
+this layer alone is race-free there; macOS parses `sysctl(KERN_PROCARGS2)`,
+skipping the exec path and argv. The macOS kernel refuses that read for Apple
+system binaries such as `/bin/zsh` and `/bin/sleep`, which therefore count as
+unmarked, not as an error. Third, every same-user process in a recorded session: the app
+leads its own session and each pane shell leads one, and a reparented child
+keeps its session unless it calls `setsid`; a session whose id now names a
+different process is dropped. Pane shells run outside the app's process group,
+and a child that ignores SIGHUP outlives the closed PTY. Cleanup freezes the tree
+with SIGSTOP, then SIGKILLs the app and its group with no grace period, so no
+termination handler runs, and SIGKILLs each attributed process whose current
+identity still matches, rescanning until none is left within 3 s; it reaps the
+app last, so its pid and session id cannot be reused meanwhile. Not covered, on
+macOS only: a descendant that runs a system binary, leaves its session with
+`setsid`, and is reparented to launchd before a tracker walk sees it under a
+tracked parent, such as `/bin/sleep` started with `start_new_session=True` by a
+root that exits at once. It cannot be attributed without private Apple
+interfaces, and cleanup neither kills nor reports it. Reporting such processes
+(new since launch, same user, parent launchd, leading their own session,
+unattributed) was measured and rejected: on an idle developer Mac it fired in 8 of
+20 five-second windows, every time on a user daemon that detaches the same way.
+The smoke's own app does not do this: its pane shells stay children of the live
+app until cleanup kills it.
+Readiness for the disabled run is a live child of the app from the tree walk,
+never the marker. On Windows each process starts
+suspended, joins a kill-on-close Job Object (the gate runner's
+`windows-process-job.py`), then resumes; cleanup calls `TerminateJobObject` and
+requires `ActiveProcesses` to reach 0. Cleanup fails closed: an unreadable process
+table, a survivor or a job that does not empty fails the run. One lock guards it,
+an entry leaves the registry only once its death is confirmed, and the watchdog
+runs the same cleanup, waiting for one already in progress, before it exits 124.
+On Linux with no
+`DISPLAY` or `WAYLAND_DISPLAY` it starts its own `Xvfb` and selects lavapipe when
+installed. A failure prints the step, the response, and the tails of the app
+output, bridge stderr and app log. `mcp-smoke_tests.py` covers its helpers with
+fixtures (a disabled app that never spawns a shell, a bridge that exits before
+step six, a late Ctrl+C exit), and `mcp_smoke_process_tests.py` covers the
+custody: a detached, SIGHUP-ignoring child of a root that exits at once, killed
+by a cleanup run immediately; an orphaned `/bin/sleep` killed through its
+session; a tracked child that execs `/bin/sleep`; unrelated processes, and one
+carrying another run's token, that survive; a reused pid and a reused session id
+that are never signalled; an unreadable table that fails cleanup; a survivor that
+stays registered; the watchdog firing during cleanup; and, on Windows, a job kill
+of a child tree. Both run inside `workflow-supply-chain`, which every platform's
+CI runs.
 
 Release preparation also builds the shipping platform binary:
 `python3 scripts/local-gate.py --with-release` adds the host's `release` step.

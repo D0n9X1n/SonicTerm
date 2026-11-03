@@ -211,9 +211,9 @@ DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低�
 
 可选的 `windows-target` 步骤是 macOS 上的 pre-push 辅助检查，绝不是 CI gate。
 `scripts/check-windows-target.sh` 在某个 workspace 成员不属于它的两个列表中任何一个时失败，
-随后对不需要 Windows C 工具链的 13 个成员运行
+随后对不需要 Windows C 工具链的 14 个成员运行
 `cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`：
-`sonicterm-types`、`-grid`、`-vt`、`-cfg`、`-logging`、`-resource`、`-text`、`-ui`、
+`sonicterm-types`、`-grid`、`-vt`、`-cfg`、`-logging`、`-mcp`、`-resource`、`-text`、`-ui`、
 `-app-core`、`-io`（包括其 ConPTY 代码与 Windows-gated 测试）、`-render-model`、
 `-block-glyph` 与 `-font-config`。检查范围是默认 feature、全部 target，以及该 target 专属的
 dev 与 build 依赖闭包，并使用独立的 target 目录。它还对固定版本的 winit 以 `serde` 运行
@@ -236,6 +236,56 @@ Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、�
 出错和完成时都释放 renderer，并验证存活 renderer 数量恢复到基线。缺失重绘会在测试的 180 秒
 截止时间到达时失败。原生 GDI 像素比较仍是必要条件，包括通过 `SONICTERM_FONT_PROBE_DIR`
 开启密集读回和图像记录时。
+
+`mcp-smoke` 步骤（Windows 上为 `windows-mcp-smoke`，Python 写作 `python`）端到端验证 agent 控制路径。
+应用与桥接程序依次取自 `--app` 与 `--bridge`、`SONICTERM_SMOKE_APP` 与 `SONICTERM_SMOKE_BRIDGE`，否则取
+release 构建：`scripts/mcp-smoke.py` 会先对平台应用与 `sonicterm-mcp` 各运行一次 `cargo build --release`
+（每条命令一个 package；`--no-build` 跳过构建）。CI 通过这两个变量传入打包后的二进制：`macos-core` 中
+DMG 校验之后的 bundle `SonicTerm.app`，`linux-packages` 中解压后的 `.tar.gz` payload，以及 `windows-smoke` 中
+MSI 的管理映像：该 job 用 Release 工作流固定版本的 cargo-wix 与 WiX 构建 MSI，`validate-windows-msi.ps1 -ExtractTo`
+对其进行校验，通过其有界、受 job 约束的 `msiexec /a` runner 解出，并且只在校验通过后保留映像。Release 工作流的
+Windows job 以同样方式 smoke 它自己的 MSI。随后它正常启动应用（不带 `--runtime-smoke`），使用临时的 `SONICTERM_CONFIG_DIR`
+与 `SONICTERM_LOG_DIR`、只含 `[mcp] enabled = true` 的 `sonicterm.toml`，并在 macOS 与 Linux 上使用临时的
+`0700` `XDG_RUNTIME_DIR`、在 Windows 上使用临时的 `LOCALAPPDATA`，使桥接程序只能发现这个实例；`HOME`
+保持不变，`NO_COLOR` 会被移除。它通过 `sonicterm-mcp` 桥接程序（不带 `--endpoint`）要求：
+`initialize`、`list_panes`、一个 `create_pane` 辅助窗格，其 `wait_for` exit 报告退出码 3 且 `read_pane`
+tail 含 `ready`；一个 sleeper，其 `wait_for` exit（`timeout_ms` 为 10000）须在 `send_keys ["Ctrl+C"]`
+之前开始计时后的 10 秒内报告 `exited`；以及在运行一个输出 OSC 133 标记的小型 Python shell 的窗格中，
+`run_command` 报告 `completed` 与退出码 5。桥接程序仍在运行时，每个辅助窗格（包括进程退出后仍被保留的
+窗格）都必须关闭，且结果须指明该窗格；随后关闭 stdin 必须使桥接程序以退出码 0 结束。第二次以
+`[mcp] enabled = false` 运行应用时，应用在限定时间内有了子进程（第一个窗格的 shell）即视为就绪；此后
+1 秒内不得出现任何 endpoint，且桥接程序必须以退出码 1 结束并给出 "no running SonicTerm control server"
+消息。协议运行有由 watchdog 执行的 120 秒全局期限，每次 JSON-RPC 读取都有自己的超时。
+`scripts/mcp_smoke_process.py` 约束 smoke 启动的每个进程。每次启动都有自己的随机 `SONICTERM_SMOKE_RUN` 令牌，
+只设置在该子进程的环境中，因此每个后代都会继承它，包括脱离的孤儿进程以及 `exec` 之后的程序。进程的身份只是
+pid 加启动时间（Linux 用 `/proc/<pid>/stat`，macOS 用 `ps -o lstart=`），因此 `exec` 不改变身份，被复用的
+pid 不会匹配。在 macOS 与 Linux 上，清理终止三层归属的并集。第一层，跟踪线程在启动时以及此后每 100 毫秒遍历
+应用及每个仍匹配的已跟踪身份的后代。第二层，某个环境条目恰好等于本次启动标记的每个同用户进程。环境以结构化
+方式读取，argv 从不计入：Linux 把 `/proc/<pid>/environ` 拆分为完整的以 NUL 结尾的条目，因此仅这一层在 Linux
+上就没有竞争；macOS 解析 `sysctl(KERN_PROCARGS2)`，跳过 exec 路径与 argv。macOS 内核拒绝为 `/bin/zsh`、
+`/bin/sleep` 等 Apple 系统二进制执行该读取，因此它们视为未标记，而不是错误。第三层，已记录 session 中的每个同用户进程：应用领导自己的 session，每个窗格 shell 领导一个
+session，被重新挂到其他父进程的子进程除非调用 `setsid`，否则保留其 session；若 session id 现在指向另一个进程，
+该 session 会被丢弃。窗格 shell 不在应用的进程组内，忽略 SIGHUP 的子进程会在 PTY 关闭后继续存活。清理时先用
+SIGSTOP 冻结进程树，然后不留宽限期地 SIGKILL 应用及其进程组，因此不会运行任何终止处理程序；再 SIGKILL 当前身份
+仍与记录一致的每个归属进程，并在 3 秒内反复扫描直到一个不剩；它最后才回收应用，使其 pid 与 session id 在此期间
+不会被复用。未覆盖的情形（仅 macOS）：运行系统二进制、用 `setsid` 离开其 session、并在跟踪遍历于已跟踪
+父进程之下看到它之前就被重新挂到 launchd 的后代，例如由立即退出的根进程以 `start_new_session=True` 启动的
+`/bin/sleep`。不借助 Apple 私有接口就无法归属它，清理既不会终止它，也不会报告它。报告这类进程（启动之后新出现、
+同一用户、父进程为 launchd、自身领导 session、未被归属）的方案经过测量后被否决：在空闲的开发机上，它在 20 个
+5 秒窗口中有 8 个触发，每次都是以同样方式脱离的用户守护进程。smoke 自己的应用不会这样做：它的窗格 shell 在
+清理终止应用之前一直是存活应用的子进程。禁用运行的就绪判定取自树遍历中应用的存活子进程，从不依赖标记。
+在 Windows 上，每个进程以挂起状态启动，加入一个 kill-on-close Job Object（gate runner 的
+`windows-process-job.py`）后再恢复；清理调用 `TerminateJobObject`，并要求 `ActiveProcesses` 降为 0。清理在
+失败时关闭：进程表无法读取、有进程存活或 job 未清空都会使运行失败。清理由同一把锁保护，条目只有在确认其进程
+已死后才离开登记表，watchdog 运行同一清理（等待正在进行的清理完成）之后才以 124 退出。在没有 `DISPLAY` 或 `WAYLAND_DISPLAY`
+的 Linux 上，它会自行启动 `Xvfb`，并在已安装 lavapipe 时选用它。失败时会打印步骤、响应，以及应用输出、
+桥接程序 stderr 与应用日志的末尾。`mcp-smoke_tests.py` 用 fixture 覆盖其辅助函数（从不启动 shell 的
+禁用应用、在第六步之前退出的桥接程序、迟到的 Ctrl+C 退出），`mcp_smoke_process_tests.py` 覆盖进程约束：
+立即退出的根进程所启动的、脱离且忽略 SIGHUP 的子进程被立即运行的清理终止；通过其 session 终止的孤儿
+`/bin/sleep`；exec 为 `/bin/sleep` 的已跟踪子进程；存活下来的无关进程，以及携带其他运行令牌的进程；绝不会
+收到信号的被复用 pid 与被复用 session id；使清理失败的不可读进程表；仍留在登记表中的存活进程；在清理过程中
+触发的 watchdog；以及在 Windows 上对子进程树的 job 终止。两者都在每个平台的
+CI 都会运行的 `workflow-supply-chain` 中运行。
 
 Release 准备还要构建发布平台二进制：`python3 scripts/local-gate.py --with-release` 会加入当前主机的
 `release` 步骤。

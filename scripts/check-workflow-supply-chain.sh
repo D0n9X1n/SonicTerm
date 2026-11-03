@@ -5,7 +5,7 @@
 # this script also checks the gate table against ci.yml, CLAUDE.md, and both
 # wiki files. The tests of the scripts that import local-gate.py's launcher, the
 # native selection smoke and the performance comparison, also run here, so they
-# run on macOS, Windows, and Linux, as do the critical-path accounting's tests and
+# run on macOS, Windows, and Linux, as do the MCP smoke's helper tests, the critical-path accounting's tests and
 # the pinned-tool installer's tests (which skip on Windows, where it never runs).
 
 set -euo pipefail
@@ -29,6 +29,10 @@ fi
   "$ROOT/scripts/windows-process-bootstrap.py" \
   "$ROOT/scripts/native-selection-smoke.py" \
   "$ROOT/scripts/native-selection-smoke_tests.py" \
+  "$ROOT/scripts/mcp-smoke.py" \
+  "$ROOT/scripts/mcp-smoke_tests.py" \
+  "$ROOT/scripts/mcp_smoke_process.py" \
+  "$ROOT/scripts/mcp_smoke_process_tests.py" \
   "$ROOT/scripts/perf-compare.py" \
   "$ROOT/scripts/perf-compare_tests.py" \
   "$ROOT/scripts/perf-critical-path.py" \
@@ -49,6 +53,8 @@ fi
   "$PY" glyph-oracle_tests.py
   "$PY" harness-target_tests.py
   "$PY" native-selection-smoke_tests.py
+  "$PY" mcp-smoke_tests.py
+  "$PY" mcp_smoke_process_tests.py
   "$PY" perf-compare_tests.py
   "$PY" perf-critical-path_tests.py
   "$PY" perf-flags_tests.py

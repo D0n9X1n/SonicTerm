@@ -2,11 +2,12 @@
 
 [简体中文](Crate-Reference-zh-CN)
 
-This is the canonical map of the 23 Rust crates in the Cargo workspace. The root
+This is the canonical map of the 24 Rust crates in the Cargo workspace. The root
 `Cargo.toml` supplies their version, edition, Rust version, authors, license, and
 repository metadata. `sonicterm-app` is the default workspace member. The
 shipping binaries are `sonicterm-mac`, `sonicterm-windows`, and
-`sonicterm-linux`; the Linux executable is named `sonicterm`.
+`sonicterm-linux`; the Linux executable is named `sonicterm`. `sonicterm-mcp` is
+the agent bridge binary that ships beside each of them.
 
 ## Test ownership checks
 
@@ -41,6 +42,7 @@ flowchart BT
     core["sonicterm-app-core"]
     app["sonicterm-app"]
     platforms["mac · windows · linux"]
+    mcp["sonicterm-mcp"]
 
     resource --> types
     grid --> types
@@ -117,6 +119,7 @@ Compatibility traits need not drive production, and this is not an unsafe-call a
 | `sonicterm-mac` | Binary startup retains logging/session guards, installs AppKit hooks, and hands event-loop ownership to `MacShell`. | `src/main.rs` and menu/open-document/drag modules; AppKit calls remain on the main thread, terminal behavior stays in shared app/IO crates. |
 | `sonicterm-windows` | Binary startup retains logging/session guards, installs Win32 menu/backdrop/OLE hooks, and runs `WindowsShell`. | `src/main.rs`, CLI and native GUI modules, and WiX assets; PTY/ConPTY process ownership remains in `sonicterm-io`. |
 | `sonicterm-linux` | Binary startup owns Linux capability normalization and packaged-font preflight, retains logging/session guards, then runs `LinuxShell`. | `src/main.rs` (launcher arguments through the shared `launch_cli` grammar) and package resources (terminal and open-script desktop entries, man page); the direct engine dependency serves font preflight, while X11/Wayland windows and terminal state remain app-owned. |
+| `sonicterm-mcp` | Each process owns one relay between its own stdio and one control-server connection; it holds no SonicTerm state and exits when either side closes. | Binary only: `--endpoint`, `--version`/`-V`, `--help`/`-h`, and the `SONICTERM_CONTROL`/`SONICTERM_PANE_ID` environment; a same-user peer check precedes any byte, and a default pane is never authorization. |
 
 ## Contracts and terminal core
 
@@ -540,6 +543,19 @@ metadata.
 `sonicterm-cfg`, `sonicterm-engine`, `sonicterm-logging`.
 
 **Read:** `src/main.rs`, `resources/`.
+
+### `sonicterm-mcp`
+
+**Role:** the `sonicterm-mcp` agent bridge (`sonicterm-mcp.exe` on Windows), a
+stdio MCP server that agents start as a console child process. It relays
+newline-delimited JSON-RPC between stdin/stdout and a running SonicTerm's control
+server, since SonicTerm's own binaries are GUI programs. Endpoint choice and
+registration are on [Usage](Usage).
+
+**First-party dependencies:** none. It uses `libc` on Unix and `windows` on
+Windows.
+
+**Read:** `src/{main,discovery,relay,connect_unix,connect_windows}.rs`.
 
 Every crate has a local `CLAUDE.md` with its guardrails and local gate. Package
 layouts belong on [Packaging](Packaging); CI behavior belongs on

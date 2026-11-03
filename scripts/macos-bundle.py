@@ -383,6 +383,36 @@ def attribution(source):
                 upstream_sources=upstream), keg, licenses, metadata
 
 
+# Executables shipped beside the app's own, each linking only system libraries.
+COMPANIONS = ("sonicterm-mcp",)
+
+
+def companion_paths(app):
+    """The required companion executables in Contents/MacOS, each a real single-link file."""
+    found = []
+    for name in COMPANIONS:
+        path = checked_path(app, f"Contents/MacOS/{name}")
+        if not path.exists():
+            # When: a companion is absent, agents could not start the bridge from this bundle.
+            raise BundleError(f"missing companion executable: {path}")
+        if not path.is_file() or path.stat().st_nlink != 1:
+            raise BundleError(f"companion executable must be a regular unlinked file: {path}")
+        found.append(path)
+    return found
+
+
+def check_companion(path, arch, declared):
+    """A companion loads only system libraries, carries no rpaths and fits the app's floor."""
+    info = inspect(path, arch, executable=True)
+    if macos_version(info["minimum_macos"]) > declared:
+        raise BundleError(f"Mach-O minimum deployment version exceeds Info.plist: {path}")
+    if info["rpaths"]:
+        raise BundleError(f"residual LC_RPATH in {path}")
+    for load in info["loads"]:
+        if not is_system(load["name"]):
+            raise BundleError(f"companion executable loads a non-system library {load['name']!r}: {path}")
+
+
 def bundle_app(app, expected_arch=None, max_minimum="15.0"):
     app, exe, frameworks, resources = app_paths(app)
     if frameworks.exists() and any(frameworks.iterdir()):
@@ -472,10 +502,13 @@ def verify_app(app, expected_arch=None, max_minimum="15.0"):
                 raise BundleError(f"license/metadata missing or hash mismatch: {target}")
     if set(frameworks.iterdir()) != registered - {exe}:
         raise BundleError("unregistered or missing Frameworks entry")
+    companions = companion_paths(app)
+    for companion in companions:
+        check_companion(companion, arch, declared)
     for directory, dirs, files in os.walk(app, followlinks=False):
         for name in dirs + files:
             path = checked_path(app, (Path(directory) / name).relative_to(app))
-            if path.is_file() and path not in registered:
+            if path.is_file() and path not in registered and path not in companions:
                 with path.open("rb") as handle:
                     if handle.read(4) in MACHO:
                         raise BundleError(f"unregistered Mach-O file: {path}")
