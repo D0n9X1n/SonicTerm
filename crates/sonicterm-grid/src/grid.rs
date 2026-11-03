@@ -120,13 +120,30 @@ pub fn bounded_scrollback_rows(cols: u16, visible_rows: u16, requested_rows: usi
 /// expressed in **scrollback-absolute coordinates** — `scrollback_len() +
 /// visible_row` at the time the marker was emitted — so the region remains
 /// addressable after content scrolls into history. Callers convert back to
-/// a visible row by subtracting the current `scrollback_len()`.
+/// a visible row by subtracting the current `scrollback_len()`. A coordinate
+/// whose row has left history is `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptRegion {
-    /// Absolute row of the prompt start (OSC 133 ; A).
-    pub start_row: u64,
+    /// Per-grid identity that only grows, so a waiter can name a region after
+    /// older ones were evicted and the deque shifted.
+    pub seq: u64,
+    /// Absolute row of the prompt start (OSC 133 ; A); `None` once that row
+    /// left history while the command had not yet finished.
+    pub start_row: Option<u64>,
+    /// Absolute row and column where the user's input begins (OSC 133 ; B).
+    pub input_start: Option<(u64, u16)>,
+    /// When the B marker was parsed.
+    pub input_start_at: Option<std::time::Instant>,
+    /// Absolute row where the command's output begins (OSC 133 ; C).
+    pub output_start_row: Option<u64>,
+    /// When the C marker was parsed.
+    pub output_start_at: Option<std::time::Instant>,
+    /// Whether C was seen, kept apart from its row, which can leave history.
+    pub output_seen: bool,
     /// Absolute row where the command output ended (OSC 133 ; D), if any.
     pub end_row: Option<u64>,
+    /// Whether D was seen, kept apart from its row, which can leave history.
+    pub completed: bool,
     /// Exit code reported by `OSC 133 ; D ; <code>`, if any.
     pub exit_code: Option<i32>,
 }
@@ -283,6 +300,12 @@ pub struct Grid {
     dirty_stamps: Vec<u64>,
     /// Prompt regions recorded from OSC 133. Oldest first.
     prompts: VecDeque<PromptRegion>,
+    /// The next prompt region's `seq`. Lives on the outer grid and never moves with the
+    /// alternate-screen swap, so identities keep growing across it.
+    prompt_seq_next: u64,
+    /// The one command run an agent is waiting on, kept apart from the evictable deque; see
+    /// [`Grid::pin_run`]. Never moves with the alternate-screen swap.
+    pinned_run: Option<PinnedRun>,
     autowrap: bool,
     pending_wrap: bool,
 }
@@ -323,6 +346,8 @@ impl Grid {
             dirty_generation: 0,
             dirty_stamps: vec![0; rows as usize],
             prompts: VecDeque::new(),
+            prompt_seq_next: 0,
+            pinned_run: None,
             autowrap: true,
             pending_wrap: false,
         }
@@ -504,69 +529,6 @@ impl Grid {
     pub fn cursor_absolute_row(&self) -> u64 {
         self.scrollback.len() as u64 + self.cursor.row as u64
     }
-
-    /// Record an OSC 133 `A` (prompt-start) marker at the cursor row.
-    /// Coalesces consecutive markers on the same row so a shell that emits
-    /// the marker more than once per prompt doesn't bloat the buffer.
-    pub fn record_prompt_start(&mut self) {
-        let row = self.cursor_absolute_row();
-        if matches!(self.prompts.back(), Some(prompt) if prompt.start_row == row && prompt.end_row.is_none())
-        {
-            // When: `matches!` finds an open prompt at `row`, coalesce the marker.
-            return;
-        }
-        if self.prompts.len() >= PROMPT_REGION_LIMIT {
-            self.prompts.pop_front();
-        }
-        self.prompts.push_back(PromptRegion { start_row: row, end_row: None, exit_code: None });
-    }
-
-    /// Record an OSC 133 `D` (command-end) marker. Updates the most recent
-    /// prompt region in place; a stray `D` without a prior `A` is ignored.
-    pub fn record_prompt_end(&mut self, exit_code: Option<i32>) {
-        let row = self.cursor_absolute_row();
-        if let Some(last) = self.prompts.back_mut() {
-            last.end_row = Some(row);
-            last.exit_code = exit_code;
-        }
-    }
-
-    /// All recorded prompt regions in chronological order.
-    pub fn prompts(&self) -> impl Iterator<Item = &PromptRegion> {
-        self.prompts.iter()
-    }
-
-    /// Number of recorded prompt regions.
-    pub fn prompts_len(&self) -> usize {
-        self.prompts.len()
-    }
-
-    /// Visible-region row of a prompt region, if it currently lies inside
-    /// the visible window. Used by the renderer to draw the gutter caret.
-    pub fn prompt_visible_row(&self, prompt: &PromptRegion) -> Option<u16> {
-        let scrollback = self.scrollback.len() as u64;
-        let rel = prompt.start_row.checked_sub(scrollback)?;
-        if rel < self.rows as u64 {
-            Some(rel as u16)
-        } else {
-            // When: `rel >= self.rows`, the prompt has no visible row.
-            None
-        }
-    }
-
-    /// Find the prompt whose absolute start row is the largest one strictly
-    /// less than `from_absolute_row`. Used by the "scroll to previous
-    /// prompt" action.
-    pub fn prompt_before(&self, from_absolute_row: u64) -> Option<&PromptRegion> {
-        self.prompts.iter().rev().find(|prompt| prompt.start_row < from_absolute_row)
-    }
-
-    /// Find the prompt whose absolute start row is the smallest one strictly
-    /// greater than `from_absolute_row`. Used by the "scroll to next
-    /// prompt" action.
-    pub fn prompt_after(&self, from_absolute_row: u64) -> Option<&PromptRegion> {
-        self.prompts.iter().find(|prompt| prompt.start_row > from_absolute_row)
-    }
 }
 
 fn compact_scrollback_capacity(scrollback: &mut VecDeque<Line>) {
@@ -600,6 +562,10 @@ mod grid_history;
 
 #[path = "grid_retention.rs"]
 mod grid_retention;
+
+#[path = "grid_prompts.rs"]
+mod grid_prompts;
+pub use grid_prompts::{CommandSpan, PinnedRun, RowToken};
 
 #[cfg(test)]
 #[path = "grid_test_support.rs"]

@@ -1,5 +1,10 @@
 use super::*;
 
+/// Each region's start row, end row and exit code, the fields these history tests pin.
+fn region_rows(grid: &Grid) -> Vec<(Option<u64>, Option<u64>, Option<i32>)> {
+    grid.prompts().map(|region| (region.start_row, region.end_row, region.exit_code)).collect()
+}
+
 #[test]
 fn history_prefix_removal_rebases_surviving_prompt_regions() {
     // Explicit limit reduction and ordinary FIFO eviction share prompt and eviction identity bookkeeping.
@@ -20,7 +25,7 @@ fn history_prefix_removal_rebases_surviving_prompt_regions() {
         }
         let prompts: Vec<_> = grid.prompts().cloned().collect();
         assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].start_row, 1);
+        assert_eq!(prompts[0].start_row, Some(1));
         assert_eq!(prompts[0].end_row, Some(1));
         assert_eq!(prompts[0].exit_code, Some(7));
         assert_eq!(grid.scrollback_evicted(), before + 1);
@@ -66,10 +71,7 @@ fn clear_scrollback_preserves_live_stamps_and_rebases_prompt_identity() {
     assert_eq!(grid.scrollback_requested_limit, 17);
     assert_eq!(grid.scrollback_limit, 17);
     assert_eq!(grid.rows_since_budget_check, 0);
-    assert_eq!(
-        grid.prompts().copied().collect::<Vec<_>>(),
-        vec![PromptRegion { start_row: 0, end_row: Some(1), exit_code: Some(3) }]
-    );
+    assert_eq!(region_rows(&grid), vec![(Some(0), Some(1), Some(3))]);
     grid.clear_dirty();
     let revision = grid.revision();
     grid.clear_scrollback();
@@ -112,13 +114,10 @@ fn saved_primary_prompt_regions_follow_history_prefix_removal() {
     grid.record_prompt_start();
     grid.set_scrollback_limit(0);
     assert_eq!(grid.scrollback_evicted(), evicted + 1);
-    assert_eq!(grid.prompts().next().unwrap().start_row, 0);
+    assert_eq!(grid.prompts().next().unwrap().start_row, Some(0));
     grid.leave_alt_screen();
     assert_eq!(grid.scrollback_evicted(), evicted + 1);
-    assert_eq!(
-        grid.prompts().copied().collect::<Vec<_>>(),
-        vec![PromptRegion { start_row: 1, end_row: Some(1), exit_code: Some(7) }]
-    );
+    assert_eq!(region_rows(&grid), vec![(Some(1), Some(1), Some(7))]);
 }
 
 #[test]
@@ -131,7 +130,7 @@ fn prompt_markers_track_scrollback_absolute_rows() {
 
     let prompts: Vec<_> = grid.prompts().collect();
     assert_eq!(prompts.len(), 1);
-    assert_eq!(prompts[0].start_row, 0);
+    assert_eq!(prompts[0].start_row, Some(0));
     assert_eq!(prompts[0].end_row, Some(1));
     assert_eq!(grid.prompt_visible_row(prompts[0]), None);
 }

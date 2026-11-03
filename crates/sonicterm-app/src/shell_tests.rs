@@ -154,8 +154,8 @@ fn runtime_smoke_uses_clean_shell_startup_without_replacing_home() {
         let helper_body = &main[helper..helper + end.unwrap_or(main.len() - helper)];
         assert!(helper_body.contains("clean_e2e: self.runtime_smoke.is_some()"), "{checkout}");
     }
-    assert!(MAIN.contains("self.pane_spawn_opts(launch, frame_counters.is_some())"));
-    assert!(CHILD.contains("self.pane_spawn_opts(launch, frame_counters.is_some())"));
+    assert!(MAIN.contains("self.pane_spawn_opts(pane_id, launch, frame_counters.is_some())"));
+    assert!(CHILD.contains("self.pane_spawn_opts(pane_id, launch, frame_counters.is_some())"));
     assert!(!MAIN.contains("set_var(\"HOME\""));
     assert!(!CHILD.contains("set_var(\"HOME\""));
 }

@@ -30,7 +30,8 @@ pub fn pick_prompt_target(
         // `current_top_abs` toward older scrollback instead of newer output.
         grid.prompt_before(current_top_abs)
     };
-    pick.map(|prompt| prompt.start_row)
+    // The picked region always has a start row: both searches skip regions whose start left history.
+    pick.and_then(|prompt| prompt.start_row)
 }
 
 #[derive(Debug)]
@@ -152,6 +153,8 @@ pub enum PtyInputSource {
     ScriptDraft,
     /// Input supplied directly through the backend-free intent API.
     StateMachine,
+    /// Text or keys an agent sent through the control server.
+    Agent,
 }
 
 fn pty_input_rejected_event(

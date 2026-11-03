@@ -432,8 +432,10 @@ fn pane_spawn_options_stamp_reads_only_with_the_frame_counter_gate() {
         ..Default::default()
     };
     for gate in [false, true] {
-        let opts = app.pane_spawn_opts(&launch, gate);
+        let opts = app.pane_spawn_opts(7, &launch, gate);
         assert_eq!(opts.diagnostic_timestamps, gate, "gate {gate}");
+        // The pane names itself to its child, so an agent inside it can find its pane.
+        assert_eq!(opts.extra_env, vec![("SONICTERM_PANE_ID".to_owned(), "7".to_owned())]);
         assert_eq!(opts.cwd, Some(std::path::PathBuf::from("/work")));
         assert_eq!(opts.term_program, app.config.terminal.term_program);
         assert!(!opts.clean_e2e, "no runtime smoke");
@@ -464,7 +466,7 @@ fn main_and_child_panes_take_the_read_stamp_flag_from_the_gate_before_spawning()
             .find("let frame_counters = self.pane_frame_counters();")
             .unwrap_or_else(|| panic!("{name} reads the gate"));
         let opts = source
-            .find("self.pane_spawn_opts(launch, frame_counters.is_some())")
+            .find("self.pane_spawn_opts(pane_id, launch, frame_counters.is_some())")
             .unwrap_or_else(|| panic!("{name} passes the gate to the spawn options"));
         let spawn = source[opts..]
             .find("self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts)")

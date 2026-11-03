@@ -438,6 +438,9 @@ pub struct ShellSpawnOpts {
     /// arguments, environment, working directory, geometry or teardown. Fixed for the reader's
     /// life; defaults to `false`.
     pub diagnostic_timestamps: bool,
+    /// Variables added to the child's environment after the terminal identity, on both the shell
+    /// and the direct-command path; a later entry overrides an earlier one. Empty by default.
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl ShellSpawnOpts {
@@ -453,6 +456,7 @@ impl Default for ShellSpawnOpts {
             shell: None,
             cwd: None,
             diagnostic_timestamps: false,
+            extra_env: Vec::new(),
         }
     }
 }
@@ -760,7 +764,7 @@ use pty_resize::resize_callback;
 #[cfg(unix)]
 use pty_session::terminate_unix_session;
 pub use pty_shell::{
-    apply_child_pty_env, default_lang_utf8_locale, default_lc_ctype_utf8_locale,
+    apply_child_pty_env, apply_extra_env, default_lang_utf8_locale, default_lc_ctype_utf8_locale,
     shell_startup_args, should_apply_utf8_locale_fallback,
 };
 use pty_shell::{apply_clean_e2e_environment, resolve_spawn_shell};

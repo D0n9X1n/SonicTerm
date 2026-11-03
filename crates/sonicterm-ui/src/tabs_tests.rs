@@ -730,3 +730,23 @@ fn each_new_mark_is_recorded_with_its_tab_and_kind() {
     bar.mark(0, |marks| marks.notify = true);
     assert_eq!(bar.last_mark().0, 2, "the active tab takes no mark");
 }
+
+/// A helper tab inserted without activation keeps the user's active tab (moving its index when
+/// the insert lands before it), leaves the activation counter alone, and renumbers every title.
+#[test]
+fn insert_inactive_keeps_the_active_tab_and_renumbers() {
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("#1 ~/a"));
+    let active = bar.push(Tab::new("#2 ~/b"));
+    let activation = bar.activation;
+    let helper = bar.insert_inactive(0, Tab::new("#9 helper"));
+    assert_eq!(bar.active_id(), Some(active), "the user's tab stays active");
+    assert_eq!(bar.active, 2, "its index moved right past the inserted tab");
+    assert_eq!(bar.activation, activation, "no activation was recorded");
+    let titles: Vec<_> = bar.tabs.iter().map(|tab| tab.title.clone()).collect();
+    assert_eq!(titles, vec!["#1 helper", "#2 ~/a", "#3 ~/b"]);
+    let tail = bar.insert_inactive(99, Tab::new("#9 tail"));
+    assert_eq!(bar.tabs.last().map(|tab| tab.id), Some(tail), "an index past the end appends");
+    assert_eq!((bar.active_id(), bar.active), (Some(active), 2), "appending moves nothing");
+    assert_eq!(bar.tabs[0].id, helper);
+}

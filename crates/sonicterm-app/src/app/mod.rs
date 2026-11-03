@@ -257,6 +257,7 @@ pub use pane_refresh::{
     resize_panes_to_rects, seed_parser_theme_colors,
 };
 mod pane_state;
+mod pane_target;
 mod perf_control;
 pub use perf_control::{
     PerfControlOutcomeV1, PerfControlPauseV1, PerfControlPhaseV1, PerfControlStopV1,

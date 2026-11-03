@@ -53,6 +53,9 @@ impl Grid {
             dirty_generation: 0,
             dirty_stamps: vec![0; rows as usize],
             prompts: std::mem::take(&mut self.prompts),
+            // The seq counter and pinned run stay on the outer grid; the saved screen holds none.
+            prompt_seq_next: 0,
+            pinned_run: None,
             autowrap: self.autowrap,
             pending_wrap: false,
         };
