@@ -6,7 +6,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
-use unicode_segmentation::UnicodeSegmentation;
 
 static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -117,6 +116,8 @@ pub struct Tab {
     pub custom_color: Option<String>,
     /// Whether this tab's current Windows foreground process requires a privilege warning.
     pub foreground_privileged: bool,
+    /// Whether any pane in this tab was created by an agent; such a tab draws the agent marker.
+    pub agent: bool,
     pub command: CommandStatus,
     /// Why this tab needs the user; travels with the tab when it moves to another window.
     pub marks: TabMarks,
@@ -142,6 +143,7 @@ impl Tab {
             custom_title: None,
             custom_color: None,
             foreground_privileged: false,
+            agent: false,
             command: CommandStatus::default(),
             marks: TabMarks::default(),
             icon_hint: None,
@@ -189,6 +191,9 @@ pub struct TabContent<'a> {
     pub privileged: bool,
     /// Whether the tab carries an alert mark, drawn as `●` before the text.
     pub marked: bool,
+    /// Whether an agent created a pane in the tab; the renderer draws a vector marker before the
+    /// text and reserves its width, as for the privilege badge.
+    pub agent: bool,
 }
 
 impl<'a> TabContent<'a> {
@@ -201,6 +206,7 @@ impl<'a> TabContent<'a> {
             title: &tab.title,
             privileged: process_privileged || tab.foreground_privileged,
             marked: !is_active && tab.marks.is_marked(),
+            agent: tab.agent,
         }
     }
 
@@ -378,6 +384,17 @@ impl TabBar {
         }
         tab.foreground_privileged = privileged;
         true
+    }
+
+    /// Show or clear the agent marker on tab `index`; returns whether it changed.
+    pub fn set_agent(&mut self, index: usize, agent: bool) -> bool {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            // When: `index` addresses no tab, there is no marker to set.
+            return false;
+        };
+        let changed = tab.agent != agent;
+        tab.agent = agent;
+        changed
     }
 
     /// Update the active tab's foreground-process privilege warning state.
@@ -715,6 +732,20 @@ impl TabBar {
         id
     }
 
+    /// Insert `tab` at `index`, clamping to `[0, len]`, without activating it: the active tab, the
+    /// activation history and attention marks are unchanged, and every `#N` prefix is renumbered.
+    /// An agent opens helper tabs this way so the user's focus never moves.
+    pub fn insert_inactive(&mut self, index: usize, tab: Tab) -> TabId {
+        let had_tabs = !self.tabs.is_empty();
+        let idx = index.min(self.tabs.len());
+        let id = tab.id;
+        self.tabs.insert(idx, tab);
+        // The active tab keeps its identity: an insert at or before its slot moves it right.
+        self.active += usize::from(had_tabs && idx <= self.active);
+        self.recompute_all_titles();
+        id
+    }
+
     /// Remove the tab carrying `id`, keep the user on the nearest sensible
     /// neighbour, and renumber the remaining `#N` prefixes. No-op when no tab
     /// has that id.
@@ -837,152 +868,12 @@ impl TabBar {
     }
 }
 
-/// Rebuild a tab title by keeping `template`'s `#N` index and any short
-/// symbolic icon token that follows it, while `body` replaces the rest. When
-/// `template` carries no such index prefix, `body` becomes the whole title.
-pub fn title_with_replaced_body(template: &str, body: &str) -> String {
-    let trimmed = template.trim();
-    let Some(rest) = trimmed.strip_prefix('#') else {
-        // When: trimmed opens with no '#', so there is no index to preserve and
-        // body stands alone as the title.
-        return body.to_string();
-    };
-    let Some(space) = rest.find(' ') else {
-        // When: rest holds no separator, so the template is a bare index with
-        // no body to keep and body replaces the whole title.
-        return body.to_string();
-    };
-    let index = &trimmed[..space + 1];
-    let after_index = trimmed[space + 1..].trim_start();
-    let mut parts = after_index.splitn(2, ' ');
-    let first = parts.next().unwrap_or_default();
-    let rest = parts.next();
-    let keep_icon = rest.is_some()
-        && first.chars().count() <= 2
-        && !first.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '/' || character == '~'
-        });
-    if keep_icon {
-        format!("{index} {first} {body}")
-    } else {
-        // When: keep_icon is false, so first was ordinary title text rather
-        // than an icon and only the index survives alongside body.
-        format!("{index} {body}")
-    }
-}
-
-/// Pixel slack allowed when a measured title is compared with its rect, so
-/// sub-pixel layout rounding never cuts a title that fits.
-pub const TITLE_FIT_TOLERANCE_PX: f32 = 0.5;
-
-/// A tab title fitted into the width its tab draws it in.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct FittedTitle {
-    /// The drawn text: the whole title, or a grapheme prefix followed by `…`.
-    pub text: String,
-    /// Drawn width of `text` in raster pixels.
-    pub width_px: f32,
-    /// Whether `text` was cut to fit.
-    pub cut: bool,
-}
-
-/// Fit `text` into `available_px` by measured width.
-///
-/// `advances` are the shaped pen advances of `text` as `(cluster byte offset,
-/// advance)` pairs in left-to-right order, and `ellipsis_px` is the measured
-/// width of `…`. Text that fits is returned whole. Otherwise the longest
-/// prefix that ends on a grapheme boundary and fits beside `…` is kept, so a
-/// CJK character, an emoji sequence or a combining mark is never split, and a
-/// leading `#N` index, process icon and command badge survive whenever they
-/// fit beside `…`. When even `…` does not fit, nothing is drawn.
-#[must_use]
-pub fn fit_title_to_width(
-    text: &str,
-    advances: &[(usize, f32)],
-    ellipsis_px: f32,
-    available_px: f32,
-) -> FittedTitle {
-    let whole_px: f32 = advances.iter().map(|(_, advance)| advance).sum();
-    if whole_px <= available_px + TITLE_FIT_TOLERANCE_PX {
-        // When: `whole_px` fits `available_px`, draw the whole title without an ellipsis.
-        return FittedTitle { text: text.to_string(), width_px: whole_px, cut: false };
-    }
-    let budget_px = available_px + TITLE_FIT_TOLERANCE_PX - ellipsis_px;
-    if budget_px < 0.0 {
-        // When: `budget_px` is negative, not even the ellipsis fits, so nothing is drawn.
-        return FittedTitle { text: String::new(), width_px: 0.0, cut: true };
-    }
-    let mut kept_end = 0;
-    let mut kept_px = 0.0;
-    let mut prefix_px = 0.0;
-    let mut cluster = 0;
-    for (start, grapheme) in text.grapheme_indices(true) {
-        let end = start + grapheme.len();
-        while cluster < advances.len() && advances[cluster].0 < end {
-            prefix_px += advances[cluster].1;
-            cluster += 1;
-        }
-        if prefix_px > budget_px {
-            // When: `prefix_px` passes `budget_px`, this grapheme no longer fits beside the
-            // ellipsis, so the cut lands on its start.
-            break;
-        }
-        kept_end = end;
-        kept_px = prefix_px;
-    }
-    let mut kept = String::with_capacity(kept_end + '…'.len_utf8());
-    kept.push_str(&text[..kept_end]);
-    kept.push('…');
-    FittedTitle { text: kept, width_px: kept_px + ellipsis_px, cut: true }
-}
-
-fn title_body(title: &str) -> &str {
-    let trimmed = title.trim();
-    let Some(rest) = trimmed.strip_prefix('#') else {
-        // When: trimmed opens with no '#', so nothing was prefixed and the
-        // whole title already is the body.
-        return trimmed;
-    };
-    let Some(space) = rest.find(' ') else {
-        // When: rest holds no separator, so no body was appended after the
-        // index and trimmed is returned unchanged.
-        return trimmed;
-    };
-    let after_index = trimmed[space + 1..].trim_start();
-    let mut parts = after_index.splitn(2, ' ');
-    let first = parts.next().unwrap_or_default();
-    let rest = parts.next();
-    let has_icon = rest.is_some()
-        && first.chars().count() <= 2
-        && !first.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '/' || character == '~'
-        });
-    if has_icon {
-        rest.unwrap_or_default().trim_start()
-    } else {
-        // When: has_icon is false, so no leading glyph was split off and the
-        // whole after_index span is the body.
-        after_index
-    }
-}
-
-/// Strip a leading `#<digits>` index prefix (if any) from a tab title,
-/// returning the remaining body. Used by `recompute_all_titles` so a tab
-/// can be re-prefixed with its current position without doubling up the
-/// `#N`. The new wezterm-parity format places the icon directly after
-/// the digits with no space (`#1{icon} body`), so we strip only the
-/// `#<digits>` portion; any space (legacy bare-title fallback) is left
-/// in the body verbatim.
-fn strip_index_prefix(title: &str) -> Option<&str> {
-    let rest = title.strip_prefix('#')?;
-    let digits_end = rest.find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len());
-    if digits_end == 0 {
-        // When: digits_end is zero, so no digit follows the '#' and the title
-        // carries no position number to strip.
-        return None;
-    }
-    Some(&rest[digits_end..])
-}
+#[path = "tabs_title.rs"]
+mod tabs_title;
+pub use tabs_title::{
+    fit_title_to_width, title_with_replaced_body, FittedTitle, TITLE_FIT_TOLERANCE_PX,
+};
+use tabs_title::{strip_index_prefix, title_body};
 
 #[cfg(test)]
 #[path = "tabs_tests.rs"]

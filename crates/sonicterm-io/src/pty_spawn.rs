@@ -68,12 +68,13 @@ impl PtyHandle {
         let home = std::env::var("HOME").ok();
         apply_child_cwd(&mut builder, opts.cwd.as_deref(), home.as_deref());
         apply_child_pty_env(&mut builder, &opts.term_program);
+        apply_extra_env(&mut builder, &opts.extra_env);
         Self::spawn_built(builder, cmd.to_string(), cols, rows, opts.diagnostic_timestamps)
     }
 
     /// Run a launcher's program directly in a new PTY, with no shell.
     ///
-    /// SonicTerm resolves `spawn.program` itself (see [`CommandSpawn`]) and
+    /// `opts.extra_env` applies too. SonicTerm resolves `spawn.program` itself (see [`CommandSpawn`]) and
     /// hands `portable-pty` an absolute path, so no later layer searches a
     /// path relative to the child's cwd. `spawn.cwd` must be an absolute,
     /// existing directory; the spawn never substitutes a home directory and
@@ -101,6 +102,7 @@ impl PtyHandle {
         }
         builder.cwd(&spawn.cwd);
         apply_child_pty_env(&mut builder, &opts.term_program);
+        apply_extra_env(&mut builder, &opts.extra_env);
         let program_path = resolved.to_string_lossy().into_owned();
         Self::spawn_built(builder, program_path, cols, rows, opts.diagnostic_timestamps)
             .map_err(|error| sanitize_spawn_error(&spawn.program, &error))

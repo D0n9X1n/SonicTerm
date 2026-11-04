@@ -445,6 +445,14 @@ fn term_program_version(term_program: &str) -> &'static str {
 /// with a DCS query instead of enabling the feature outright.
 const WEZTERM_ADVERTISED_VERSION: &str = "20230712-072601";
 
+/// Add `extra_env` to the child's environment, after the terminal identity so a caller's pane
+/// identity is never overwritten by it.
+pub fn apply_extra_env(builder: &mut CommandBuilder, extra_env: &[(String, String)]) {
+    for (name, value) in extra_env {
+        builder.env(name, value);
+    }
+}
+
 /// Applies terminal capability, identity, and locale variables to a child command.
 pub fn apply_child_pty_env(builder: &mut CommandBuilder, term_program: &str) {
     builder.env("TERM", "xterm-256color");

@@ -66,6 +66,12 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 | `info` | SonicTerm 常规信息和聚合 `memory snapshot` |
 | `debug` | 详细诊断、窗格/渲染器内存、状态机事件、`render_timing`、`tear_out_timing` 和 `frame_counters` |
 
+`mcp` target 属于 agent 控制服务器。它的 warning 在包括默认 `warn` 在内的所有会话中都会记录：
+监听器无法启动、拒绝其他用户的连接、连接数超限，以及控制服务器 owner 无法注册。`info` 级别另外记录
+`control server started`、`control server stopped`、`control level changed`、带客户端自报名称的
+`agent connected`、`agent disconnected`，以及每次调用一行的 `tool call`（含 `tool`、`pane`、`client`、`ok`、`in_bytes`、`out_bytes`
+和 `elapsed_ms`）。参数、窗格文本和正则表达式从不写入日志。
+
 配置过滤器始终把 `wgpu`、`naga`、`sonicterm-vt` 和 `sonicterm-grid` 保持在 warning
 级别。字体塑形热路径的海量输出位于 `trace`，任何配置级别都不会启用；只有专门排查该
 路径时才使用精确的 `RUST_LOG` 指令。
@@ -86,7 +92,7 @@ SonicTerm 会使用回退字体，因此窗口仍能运行并不能证明请求�
 过滤规则，并让三种输出都包含字体配置错误：
 
 ```text
-RUST_LOG=config=error,sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,sonicterm_grid=warn,memory::reclaimed=warn,wgpu=warn,naga=warn
+RUST_LOG=config=error,sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,sonicterm_grid=warn,memory::reclaimed=warn,mcp=warn,wgpu=warn,naga=warn
 ```
 
 若要保留已有的自定义过滤器，应在其完整值后追加 `config=error`。配置的 `error` 过滤器也会

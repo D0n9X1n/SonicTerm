@@ -30,7 +30,8 @@ pub fn pick_prompt_target(
         // `current_top_abs` toward older scrollback instead of newer output.
         grid.prompt_before(current_top_abs)
     };
-    pick.map(|prompt| prompt.start_row)
+    // The picked region always has a start row: both searches skip regions whose start left history.
+    pick.and_then(|prompt| prompt.start_row)
 }
 
 #[derive(Debug)]
@@ -152,6 +153,26 @@ pub enum PtyInputSource {
     ScriptDraft,
     /// Input supplied directly through the backend-free intent API.
     StateMachine,
+    /// Text or keys an agent sent through the control server.
+    Agent,
+    /// The command an agent's `run_command` writes; not counted as interfering typing.
+    AgentRun,
+}
+
+impl PtyInputSource {
+    /// Whether the source types into the pane, as a person or another agent would. Terminal
+    /// replies, focus and pointer reports, and an agent run's own command are not typing.
+    pub(crate) fn is_typing(self) -> bool {
+        !matches!(
+            self,
+            Self::PointerButton
+                | Self::PointerMotion
+                | Self::Wheel
+                | Self::FocusReport
+                | Self::TerminalReply
+                | Self::AgentRun
+        )
+    }
 }
 
 fn pty_input_rejected_event(
@@ -387,7 +408,12 @@ impl App {
             // An unknown profile at a discrete barrier supersedes motion rather than delaying the key or replaying stale bytes.
             pane.pending_pointer_motion.len = 0;
         }
-        match pane.pending_pointer_motion.send_ordered(bytes, |bytes| {
+        let typing = source.is_typing();
+        // Typing is stamped before the bytes can reach the shell, so a run never sees its C first;
+        // a refused write takes the stamp back.
+        let now = Instant::now();
+        let claimed = typing && crate::app::mcp::run::claim_typing_stamp(&pane.run_typed_at, now);
+        let sent = pane.pending_pointer_motion.send_ordered(bytes, |bytes| {
             #[cfg(test)]
             let submitted = mod_tests::submission_snapshot(&bytes);
             pty.send_input_nonblocking(bytes)?;
@@ -397,9 +423,21 @@ impl App {
                 mod_tests::record_submission(pane_id, bytes);
             }
             Ok(())
-        }) {
-            Ok(()) => true,
+        });
+        match sent {
+            Ok(()) => {
+                if typing {
+                    // Typing is recorded only once admitted, so a refused write leaves no trace.
+                    pane.last_input_at = Some(now);
+                }
+                true
+            }
             Err(error) => {
+                // A refused write takes back a stamp it claimed; a run that read the stamp
+                // meanwhile reports interference, which errs on the safe side.
+                if claimed {
+                    crate::app::mcp::run::release_typing_stamp(&pane.run_typed_at, now);
+                }
                 // Refused discrete input preserves attribution without retaining its payload.
                 Self::report_pty_input_rejection(
                     proxy,

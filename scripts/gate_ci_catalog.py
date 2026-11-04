@@ -40,6 +40,11 @@ CI_ONLY = (
            "installs the vcpkg Cairo that the native prerequisite names; it checks nothing"),
     CiOnly("setup", "python scripts/setup-windows-conpty.py --destination target/release", ("windows-smoke",),
            "stages the pinned Windows console runtime before native smoke; its offline tests run in workflow-supply-chain"),
+    CiOnly("package-evidence",
+           ".\\scripts\\validate-windows-msi.ps1 -MsiPath \"${{ steps.ci-msi.outputs.path }}\" "
+           "-ExpectedVersion \"v${{ steps.ci-msi.outputs.version }}\" -ExtractTo \"$env:RUNNER_TEMP\\sonicterm-msi-image\"",
+           ("windows-smoke",),
+           "validates the PR-built MSI and keeps its image for the MCP smoke; msi-validator-tests runs the script's tests"),
     CiOnly("runtime-evidence", "python scripts/verify-windows-conpty.py --runtime-dir target/release/conpty "
            "--logs \"$env:RUNNER_TEMP\\sonicterm-windows-smoke\\logs\"", ("windows-smoke",),
            "requires pinned runtime bytes and positive packaged selection from the preceding smoke"),

@@ -76,6 +76,8 @@ python3 scripts/local-gate.py
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
+| `mcp-smoke` | `python3 scripts/mcp-smoke.py` | macOS, Linux | `local` | `rust`, `native`, `display` | `macos-core`, `linux-packages` |
+| `windows-mcp-smoke` | `python scripts/mcp-smoke.py` | Windows | `local` | `rust`, `native`, `display` | `windows-smoke` |
 | `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`, `native` | `macos-core` |
 | `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`, `native` | `windows-checks` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-core`, `macos-smoke` |
@@ -93,6 +95,7 @@ Needs:
 - `actionlint`: `actionlint` at the version `scripts/pinned-tools.json` pins.
 - `rust`: the Rust toolchain from `rust-toolchain.toml`, with rustfmt and clippy.
 - `native`: the platform's native build libraries: Cairo and pkg-config on macOS (`brew install cairo pkg-config`), Cairo from `scripts/setup-windows-cairo.ps1` on Windows, and the packages the `linux-core` job installs on Linux.
+- `display`: a graphical session for the release app: the desktop session on macOS and Windows, and on Linux a `DISPLAY` or `WAYLAND_DISPLAY`, or `Xvfb` on `PATH`, which `mcp-smoke.py` starts itself.
 - `bash`: `bash` on `PATH`; on Windows, run the gate from Git Bash so Git's `bash` is found first.
 - `pwsh`: PowerShell 7 (`pwsh`) on `PATH`.
 - `llvm-cov`: `cargo-llvm-cov` at the version `scripts/pinned-tools.json` pins.

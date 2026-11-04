@@ -16,6 +16,7 @@ verified=(
     sonicterm-vt
     sonicterm-cfg
     sonicterm-logging
+    sonicterm-mcp
     sonicterm-resource
     sonicterm-text
     sonicterm-ui

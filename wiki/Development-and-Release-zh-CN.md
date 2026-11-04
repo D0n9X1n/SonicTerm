@@ -74,6 +74,8 @@ python3 scripts/local-gate.py
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`、`native` | `macos-core`、`macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`、`native` | `macos-core`、`macos-smoke` |
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`、`native` | `macos-core`、`macos-smoke` |
+| `mcp-smoke` | `python3 scripts/mcp-smoke.py` | macOS、Linux | `local` | `rust`、`native`、`display` | `macos-core`、`linux-packages` |
+| `windows-mcp-smoke` | `python scripts/mcp-smoke.py` | Windows | `local` | `rust`、`native`、`display` | `windows-smoke` |
 | `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`、`native` | `macos-core` |
 | `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`、`native` | `windows-checks` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-core`、`macos-smoke` |
@@ -91,6 +93,7 @@ python3 scripts/local-gate.py
 - `actionlint`：`scripts/pinned-tools.json` 固定版本的 `actionlint`。
 - `rust`：`rust-toolchain.toml` 指定的 Rust 工具链，包含 rustfmt 与 clippy。
 - `native`：平台原生构建库：macOS 上的 Cairo 与 pkg-config（`brew install cairo pkg-config`），Windows 上由 `scripts/setup-windows-cairo.ps1` 安装的 Cairo，以及 Linux 上 `linux-core` job 安装的软件包。
+- `display`：供 release 应用使用的图形会话：macOS 与 Windows 上的桌面会话；Linux 上的 `DISPLAY` 或 `WAYLAND_DISPLAY`，或 `PATH` 上的 `Xvfb`（由 `mcp-smoke.py` 自行启动）。
 - `bash`：`PATH` 上的 `bash`；在 Windows 上请从 Git Bash 运行 gate，使 Git 的 `bash` 优先被找到。
 - `pwsh`：`PATH` 上的 PowerShell 7（`pwsh`）。
 - `llvm-cov`：`scripts/pinned-tools.json` 固定版本的 `cargo-llvm-cov`。

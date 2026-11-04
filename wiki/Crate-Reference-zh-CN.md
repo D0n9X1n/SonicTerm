@@ -2,10 +2,11 @@
 
 [English](Crate-Reference)
 
-本页是 Cargo workspace 中 23 个 Rust crate 的规范映射。根 `Cargo.toml`
+本页是 Cargo workspace 中 24 个 Rust crate 的规范映射。根 `Cargo.toml`
 统一提供版本、edition、Rust 版本、作者、许可证和仓库信息。默认 workspace member
 是 `sonicterm-app`。发布的二进制 crate 是 `sonicterm-mac`、
 `sonicterm-windows` 和 `sonicterm-linux`；Linux 可执行文件名为 `sonicterm`。
+`sonicterm-mcp` 是随它们一同发布的 agent 桥接二进制。
 
 ## 测试所有权检查
 
@@ -38,6 +39,7 @@ flowchart BT
     core["sonicterm-app-core"]
     app["sonicterm-app"]
     platforms["mac · windows · linux"]
+    mcp["sonicterm-mcp"]
 
     resource --> types
     grid --> types
@@ -110,6 +112,7 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 | `sonicterm-mac` | 二进制启动保留 logging/session guard，安装 AppKit hook，并将事件循环交给 `MacShell`。 | `src/main.rs` 和 menu/open-document/drag 模块；AppKit 调用留在主线程，终端行为留在共享 app/IO crate。 |
 | `sonicterm-windows` | 二进制启动保留 logging/session guard，安装 Win32 menu/backdrop/OLE hook，并运行 `WindowsShell`。 | `src/main.rs`、CLI 和原生 GUI 模块，以及 WiX 资源；PTY/ConPTY 进程所有权保留在 `sonicterm-io`。 |
 | `sonicterm-linux` | 二进制启动拥有 Linux 能力归一化与打包字体预检，保留 logging/session guard，然后运行 `LinuxShell`。 | `src/main.rs`（通过共用的 `launch_cli` 语法解析启动器参数）与包资源（终端与 open-script 桌面条目、man page）；直接 engine 依赖用于字体预检，X11/Wayland 窗口和终端状态仍由 app 拥有。 |
+| `sonicterm-mcp` | 每个进程拥有自身 stdio 与一个控制服务器连接之间的一条转发；不持有任何 SonicTerm 状态，任一端关闭即退出。 | 仅为二进制：`--endpoint`、`--version`/`-V`、`--help`/`-h`，以及 `SONICTERM_CONTROL`/`SONICTERM_PANE_ID` 环境变量；发送任何字节前先检查对端为同一用户，默认窗格从不构成授权。 |
 
 ## 契约与终端核心
 
@@ -478,6 +481,17 @@ ConPTY 仍封装在 `sonicterm-io` 后。
 `sonicterm-engine`、`sonicterm-logging`。
 
 **阅读：** `src/main.rs`、`resources/`。
+
+### `sonicterm-mcp`
+
+**职责：** agent 桥接程序 `sonicterm-mcp`（Windows 上为 `sonicterm-mcp.exe`），一个由
+agent 作为控制台子进程启动的 stdio MCP 服务器。由于 SonicTerm 自身的二进制都是 GUI 程序，
+它在 stdin/stdout 与正在运行的 SonicTerm 控制服务器之间转发按行分隔的 JSON-RPC。端点选择
+与注册方式见[用法](Usage-zh-CN)。
+
+**第一方依赖：** 无。Unix 上使用 `libc`，Windows 上使用 `windows`。
+
+**阅读：** `src/{main,discovery,relay,connect_unix,connect_windows}.rs`。
 
 每个 crate 都有本地 `CLAUDE.md`，记录约束和本地 gate。安装包布局见[打包](Packaging-zh-CN)；
 CI 行为见[CI 与 Coverage](CI-and-Coverage-zh-CN)，发布行为见[发布流程](Release-Process-zh-CN)。

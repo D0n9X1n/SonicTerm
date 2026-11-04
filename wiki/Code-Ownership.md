@@ -19,6 +19,11 @@ Path and URL detection is shared: `crates/sonicterm-cfg/src/url_scan.rs` and
 `crates/sonicterm-app/src/app/path_target.rs`. Only `path_target/*.rs` and
 `url_open/*.rs` are per platform.
 
+The agent bridge, `crates/sonicterm-mcp/`, is shared. Its
+`src/connect_unix.rs` is compiled only for Unix and belongs to the Unix area, and
+`src/connect_windows.rs` is compiled only for Windows and belongs to the Windows
+area.
+
 ## Taking work
 
 - Any number of agents work at the same time.

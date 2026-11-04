@@ -28,6 +28,26 @@ pub(super) fn demand_frame_foreground(
     }
 }
 
+/// Show the agent marker on every tab holding a pane an agent created, and clear it elsewhere;
+/// returns whether any marker changed. Read from the panes each frame, so a split, a close or a
+/// transfer never leaves a stale marker.
+pub(super) fn refresh_window_agent_tabs(
+    tabs: &mut sonicterm_ui::tabs::TabBar,
+    tab_states: &[TabState],
+    panes: &HashMap<u64, PaneState>,
+) -> bool {
+    let mut changed = false;
+    for (tab_idx, tab_state) in tab_states.iter().enumerate() {
+        let agent = tab_state
+            .tree
+            .leaves()
+            .iter()
+            .any(|pane_id| panes.get(pane_id).is_some_and(|pane| pane.agent_owned));
+        changed |= tabs.set_agent(tab_idx, agent);
+    }
+    changed
+}
+
 /// Set frame demand for every tab's active pane and show each tab's cached warning.
 ///
 /// Windows shows per-tab warnings for background tabs too; `probes` is `None` on a burst
@@ -40,7 +60,7 @@ pub(super) fn refresh_window_tab_privileges(
     probes: Option<&fg_probe::ForegroundProbes>,
     now: Instant,
 ) -> bool {
-    let mut changed = false;
+    let mut changed = refresh_window_agent_tabs(tabs, tab_states, panes);
     let mut queued = false;
     for (tab_idx, tab_state) in tab_states.iter().enumerate() {
         let Some(pane) = panes.get_mut(&tab_state.active_pane) else {
@@ -67,7 +87,8 @@ pub(super) fn refresh_window_tab_privileges(
     changed
 }
 
-/// Background tabs carry no per-tab warning off Windows; the active tab is handled by the title refresh.
+/// Background tabs carry no per-tab warning off Windows; the active tab is handled by the title
+/// refresh. Agent markers are refreshed on every platform.
 #[cfg(not(windows))]
 pub(super) fn refresh_window_tab_privileges(
     tabs: &mut sonicterm_ui::tabs::TabBar,
@@ -76,8 +97,8 @@ pub(super) fn refresh_window_tab_privileges(
     probes: Option<&fg_probe::ForegroundProbes>,
     now: Instant,
 ) -> bool {
-    let _ = (tabs, tab_states, panes, probes, now);
-    false
+    let _ = (probes, now);
+    refresh_window_agent_tabs(tabs, tab_states, panes)
 }
 
 impl App {

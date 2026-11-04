@@ -114,6 +114,7 @@ impl Ledger {
                     // Retained model rule with no current producer: a client
                     // owns the connection it opens.
                     | OwnerKind::MuxConnection
+                    | OwnerKind::Mcp
             ) | (ProcessKind::Gui, OwnerKind::Window, OwnerKind::AppPane)
                 | (ProcessKind::Gui, OwnerKind::AppPane, OwnerKind::LocalPty)
                 | (ProcessKind::Gui, OwnerKind::MuxConnection, OwnerKind::Attachment)

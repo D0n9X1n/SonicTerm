@@ -39,6 +39,9 @@ trap 'rm -rf "$tmp"' EXIT
 fake_binary="$tmp/sonicterm"
 printf '#!/bin/sh\nexit 0\n' > "$fake_binary"
 chmod 755 "$fake_binary"
+fake_bridge="$tmp/sonicterm-mcp"
+printf '#!/bin/sh\nexit 0\n' > "$fake_bridge"
+chmod 755 "$fake_bridge"
 
 stage="$tmp/dist/.linux-package-work/SonicTerm-v9.8.7-linux-x86_64"
 stage_output="$({
@@ -49,6 +52,8 @@ stage_output="$({
   fail "relative output directory did not resolve to an absolute staged path"
 
 [[ -x "$stage/sonicterm" ]] || fail "portable binary is missing or not executable"
+[[ -x "$stage/sonicterm-mcp" ]] || fail "portable MCP bridge is missing or not executable"
+cmp -s "$fake_bridge" "$stage/sonicterm-mcp" || fail "portable MCP bridge differs from its build"
 for required in \
   assets/fonts/SymbolsNerdFontMono-Regular.ttf \
   assets/fonts/LICENSE-SymbolsNerdFont.txt \
@@ -153,6 +158,8 @@ portable_root="$(find "$portable" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 [[ -x "$portable_root/sonicterm" ]] || fail "tarball binary is missing"
 [[ -d "$portable_root/assets" ]] || fail "tarball adjacent assets are missing"
 [[ -x "$deb_root/usr/bin/sonicterm" ]] || fail "Debian binary is missing"
+[[ -x "$portable_root/sonicterm-mcp" ]] || fail "tarball MCP bridge is missing"
+[[ -x "$deb_root/usr/bin/sonicterm-mcp" ]] || fail "Debian MCP bridge is missing"
 [[ -d "$deb_root/usr/share/sonicterm/assets" ]] || fail "Debian assets are missing"
 for license in "$portable_root/LICENSE-winit-Apache-2.0" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"; do

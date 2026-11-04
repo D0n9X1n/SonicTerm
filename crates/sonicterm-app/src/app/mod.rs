@@ -233,6 +233,7 @@ mod about_window;
 mod keymap_dispatch;
 mod live_font;
 mod locale;
+mod mcp;
 mod media;
 mod memory_report;
 mod memory_report_window;
@@ -257,6 +258,7 @@ pub use pane_refresh::{
     resize_panes_to_rects, seed_parser_theme_colors,
 };
 mod pane_state;
+mod pane_target;
 mod perf_control;
 pub use perf_control::{
     PerfControlOutcomeV1, PerfControlPauseV1, PerfControlPhaseV1, PerfControlStopV1,
@@ -677,6 +679,8 @@ pub struct App {
     pub(super) local_hostname: String,
     /// Hidden Linux package-smoke state; absent during ordinary application runs.
     pub(super) runtime_smoke: Option<runtime_smoke::RuntimeSmokeState>,
+    /// The local control server agents connect to, while `[mcp] enabled` is on.
+    pub(super) mcp_server: Option<mcp::McpServer>,
     /// Minimum interval between two successive frames. Defaults to 1/60s
     /// and is updated in `resumed` from the current monitor's reported
     /// refresh rate. Used by the RedrawRequested handler to skip an

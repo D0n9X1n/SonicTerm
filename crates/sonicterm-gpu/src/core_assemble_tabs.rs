@@ -107,9 +107,9 @@ impl GpuRenderer {
                 let hovered = hover_tab_idx == t.idx as u32;
                 // The content the tab was measured with, so the drawn text matches its width.
                 let content = TabContent::of(tab, tab_now, active, process_privileged);
-                let show_privilege_badge = content.privileged;
-                let text_px = t.title_rect.w
-                    - privilege_marker_reserve_px(show_privilege_badge, self.scale_factor);
+                let markers = TabMarkers { privileged: content.privileged, agent: content.agent };
+                let text_px =
+                    t.title_rect.w - privilege_marker_reserve_px(markers, self.scale_factor);
                 let badge_alpha = if source_tab_idx == Some(t.idx) { source_alpha } else { 1.0 };
                 if let (Some(stack), Some(rasterizer)) =
                     (self.tab_title_font.stack(), tab_rasterizer.as_mut())
@@ -144,18 +144,10 @@ impl GpuRenderer {
                     let placement = tab_title_block_placement(
                         t.title_rect,
                         title.width_px,
-                        show_privilege_badge,
+                        markers,
                         self.scale_factor,
                     );
-                    if let Some(badge) = placement.badge_rect {
-                        emit_privilege_badge_quads(
-                            &mut *quads,
-                            badge,
-                            ui_palette.danger,
-                            badge_alpha,
-                            (sw, sh),
-                        );
-                    }
+                    emit_tab_markers(&mut *quads, &placement, &ui_palette, badge_alpha, (sw, sh));
                     let title_clip = Some(ChromeClip {
                         x: placement.text_clip.x,
                         y: placement.text_clip.y,
@@ -178,22 +170,31 @@ impl GpuRenderer {
                     );
                     glyph_instances.extend(final_layout.glyphs);
                     quads.extend(final_layout.missing_boxes);
-                } else if show_privilege_badge {
-                    // When: `show_privilege_badge` is true without a title font stack, paint the vector warning alone.
+                } else if markers != TabMarkers::default() {
+                    // When: the tab has `markers` but no title font stack, the vector markers paint alone.
                     let placement =
-                        tab_title_block_placement(t.title_rect, 0.0, true, self.scale_factor);
-                    if let Some(badge) = placement.badge_rect {
-                        emit_privilege_badge_quads(
-                            &mut *quads,
-                            badge,
-                            ui_palette.danger,
-                            badge_alpha,
-                            (sw, sh),
-                        );
-                    }
+                        tab_title_block_placement(t.title_rect, 0.0, markers, self.scale_factor);
+                    emit_tab_markers(&mut *quads, &placement, &ui_palette, badge_alpha, (sw, sh));
                 }
             }
         }
         crate::cursor::glyph_ink_bounds(&glyph_instances[tab_glyph_start..], sw, sh)
+    }
+}
+
+/// Draw whichever vector markers `placement` holds: the lock badge in the danger colour and the
+/// agent marker in the accent colour.
+fn emit_tab_markers(
+    quads: &mut Vec<QuadInstance>,
+    placement: &TabTitleBlockPlacement,
+    palette: &sonicterm_render_model::boundary::ui::ui_tokens::UiPalette,
+    alpha: f32,
+    surface: (f32, f32),
+) {
+    if let Some(badge) = placement.badge_rect {
+        emit_privilege_badge_quads(quads, badge, palette.danger, alpha, surface);
+    }
+    if let Some(marker) = placement.agent_rect {
+        emit_agent_marker_quads(quads, marker, palette.accent_purple, alpha, surface);
     }
 }

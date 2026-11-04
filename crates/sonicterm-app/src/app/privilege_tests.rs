@@ -200,3 +200,29 @@ fn main_and_child_render_paths_forward_the_same_process_privilege_snapshot() {
         assert!(tabs < privilege && privilege < search, "{name} render argument order drifted");
     }
 }
+
+/// A tab holding an agent's pane gets the marker on every platform, and loses it as soon as no
+/// agent pane remains in it, without touching its title.
+#[test]
+fn agent_markers_follow_the_panes_each_frame() {
+    let now = Instant::now();
+    let pane = || PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(80, 24)))), None);
+    let mut helper = pane();
+    helper.agent_owned = true;
+    let mut panes = HashMap::from([(10, pane()), (20, pane()), (21, helper)]);
+    let mut split = PaneTree::leaf(20);
+    assert!(split.split(20, sonicterm_cfg::keymap::Direction::Right, 21));
+    let tab_states = vec![TabState::new(PaneTree::leaf(10), 10), TabState::new(split, 20)];
+    let mut tabs = sonicterm_ui::tabs::TabBar::new();
+    tabs.push(sonicterm_ui::tabs::Tab::new("#1 user"));
+    tabs.push(sonicterm_ui::tabs::Tab::new("#2 user"));
+
+    assert!(refresh_window_tab_privileges(&mut tabs, &tab_states, &mut panes, None, now));
+    assert!(!tabs.tabs()[0].agent);
+    assert!(tabs.tabs()[1].agent, "a split holding the agent's pane marks its tab");
+    assert_eq!(tabs.tabs()[1].title, "#2 user");
+
+    panes.remove(&21);
+    assert!(refresh_window_tab_privileges(&mut tabs, &tab_states, &mut panes, None, now));
+    assert!(!tabs.tabs()[1].agent, "the marker goes with the last agent pane");
+}

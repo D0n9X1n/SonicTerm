@@ -32,6 +32,8 @@ pub(super) fn tab_bar_hash_with_limits(
         tab.content_width_px().map(f32::to_bits).hash(&mut hash);
         tab.custom_color.hash(&mut hash);
         tab.foreground_privileged.hash(&mut hash);
+        // The agent marker is drawn before the text, so it appearing or clearing repaints the bar.
+        tab.agent.hash(&mut hash);
         // A marked inactive tab draws `●`, so a mark appearing or clearing repaints the bar.
         (index != active_index && tab.marks.is_marked()).hash(&mut hash);
         command_status_hash(&tab.command, now, index == active_index).hash(&mut hash);
@@ -85,11 +87,31 @@ pub(super) const PRIVILEGE_BADGE_GAP_PX: f32 = 6.0;
 #[cfg(test)]
 pub(super) const PRIVILEGE_BADGE_QUAD_COUNT: usize = 5;
 
+/// Where a tab's leading markers and its text go.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct TabTitleBlockPlacement {
+    /// The privilege lock badge, when shown.
     pub(super) badge_rect: Option<TabTitleRect>,
+    /// The agent marker, when shown; it follows the lock badge.
+    pub(super) agent_rect: Option<TabTitleRect>,
     pub(super) text_x: f32,
     pub(super) text_clip: TabTitleRect,
+}
+
+/// Which vector markers a tab draws before its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct TabMarkers {
+    /// The privilege lock badge.
+    pub(super) privileged: bool,
+    /// The agent marker: a pane in the tab was created by an agent.
+    pub(super) agent: bool,
+}
+
+impl TabMarkers {
+    /// How many markers are drawn.
+    fn count(self) -> usize {
+        usize::from(self.privileged) + usize::from(self.agent)
+    }
 }
 
 pub(super) fn scaled_privilege_badge_metrics(scale: f32) -> (f32, f32) {
@@ -97,16 +119,11 @@ pub(super) fn scaled_privilege_badge_metrics(scale: f32) -> (f32, f32) {
     (PRIVILEGE_BADGE_SIZE_PX * scale, PRIVILEGE_BADGE_GAP_PX * scale)
 }
 
-/// Raster-pixel width reserved for the privilege marker and its gap before the
-/// title text, or zero when no marker is drawn.
-pub(super) fn privilege_marker_reserve_px(privileged: bool, scale: f32) -> f32 {
-    if privileged {
-        let (badge, gap) = scaled_privilege_badge_metrics(scale);
-        badge + gap
-    } else {
-        // When: `privileged` is false, no marker is drawn and the title keeps the whole rect.
-        0.0
-    }
+/// Raster-pixel width reserved for the tab's markers and their gaps before the title text, or
+/// zero when no marker is drawn. Each marker takes one badge and one gap.
+pub(super) fn privilege_marker_reserve_px(markers: TabMarkers, scale: f32) -> f32 {
+    let (badge, gap) = scaled_privilege_badge_metrics(scale);
+    markers.count() as f32 * (badge + gap)
 }
 
 /// Drawn width of one tab's content in raster pixels: the privilege-marker
@@ -119,7 +136,8 @@ pub(super) fn tab_content_width_px(
     font_size_px: f32,
     scale: f32,
 ) -> Option<f32> {
-    let reserve_px = privilege_marker_reserve_px(content.privileged, scale);
+    let markers = TabMarkers { privileged: content.privileged, agent: content.agent };
+    let reserve_px = privilege_marker_reserve_px(markers, scale);
     let Some(stack) = stack else {
         // When: `stack` is absent, no title text is drawn, so only the marker reserve counts.
         return Some(reserve_px);
@@ -155,27 +173,44 @@ pub(super) fn tab_font_key(
     hash.finish()
 }
 
+/// Place a tab's markers and text as one block centred in `rect`: the lock badge first, then the
+/// agent marker, each followed by a gap, then the text.
 pub(super) fn tab_title_block_placement(
     rect: TabTitleRect,
     measured_text_width: f32,
-    privileged: bool,
+    markers: TabMarkers,
     scale: f32,
 ) -> TabTitleBlockPlacement {
-    if !privileged {
-        // When: `!privileged`, center text in the unchanged historical title rectangle.
+    if markers.count() == 0 {
+        // When: `markers` holds none, center text in the unchanged historical title rectangle.
         let text_x = rect.x + ((rect.w - measured_text_width) * 0.5).max(0.0);
-        return TabTitleBlockPlacement { badge_rect: None, text_x, text_clip: rect };
+        return TabTitleBlockPlacement {
+            badge_rect: None,
+            agent_rect: None,
+            text_x,
+            text_clip: rect,
+        };
     }
     let (badge_size, gap) = scaled_privilege_badge_metrics(scale);
     let badge_size = badge_size.min(rect.h).min(rect.w.max(0.0));
-    let total_width = (badge_size + gap + measured_text_width).min(rect.w.max(0.0));
+    let leading = markers.count() as f32 * (badge_size + gap);
+    let total_width = (leading + measured_text_width).min(rect.w.max(0.0));
     let block_x = rect.x + ((rect.w - total_width) * 0.5).max(0.0);
     let badge_y = rect.y + ((rect.h - badge_size) * 0.5).max(0.0);
-    let badge_rect = TabTitleRect { x: block_x, y: badge_y, w: badge_size, h: badge_size };
-    let text_x = (badge_rect.x + badge_rect.w + gap).min(rect.x + rect.w);
+    let mut next_x = block_x;
+    let mut take = |shown: bool| {
+        shown.then(|| {
+            let marker = TabTitleRect { x: next_x, y: badge_y, w: badge_size, h: badge_size };
+            next_x += badge_size + gap;
+            marker
+        })
+    };
+    let badge_rect = take(markers.privileged);
+    let agent_rect = take(markers.agent);
+    let text_x = next_x.min(rect.x + rect.w);
     let text_clip =
         TabTitleRect { x: text_x, y: rect.y, w: (rect.x + rect.w - text_x).max(0.0), h: rect.h };
-    TabTitleBlockPlacement { badge_rect: Some(badge_rect), text_x, text_clip }
+    TabTitleBlockPlacement { badge_rect, agent_rect, text_x, text_clip }
 }
 
 pub(super) fn privilege_lock_color(danger: [f32; 4]) -> [f32; 4] {
@@ -241,6 +276,52 @@ pub(super) fn emit_privilege_badge_quads(
     for part in privilege_lock_rects(badge) {
         quads.push(QuadInstance::sharp(px_to_ndc(part.x, part.y, part.w, part.h, sw, sh), lock));
     }
+}
+
+/// Draw the agent marker in `marker`: a rounded square in `accent` holding a ring in the
+/// contrasting colour, so it reads apart from the lock badge without depending on a font.
+pub(super) fn emit_agent_marker_quads(
+    quads: &mut Vec<QuadInstance>,
+    marker: TabTitleRect,
+    accent: [f32; 4],
+    alpha: f32,
+    surface: (f32, f32),
+) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let scale = |mut color: [f32; 4]| {
+        for channel in &mut color {
+            *channel *= alpha;
+        }
+        color
+    };
+    let (sw, sh) = surface;
+    let ink = scale(privilege_lock_color(accent));
+    let fill = scale(accent);
+    quads.push(QuadInstance::rounded(
+        px_to_ndc(marker.x, marker.y, marker.w, marker.h, sw, sh),
+        fill,
+        [marker.w, marker.h],
+        marker.w.min(marker.h) * 0.25,
+    ));
+    // A ring: an ink disc with a smaller fill disc over it.
+    let ring = marker.w.min(marker.h) * 0.5;
+    let ring_x = marker.x + (marker.w - ring) * 0.5;
+    let ring_y = marker.y + (marker.h - ring) * 0.5;
+    quads.push(QuadInstance::rounded(
+        px_to_ndc(ring_x, ring_y, ring, ring, sw, sh),
+        ink,
+        [ring, ring],
+        ring * 0.5,
+    ));
+    let hole = ring * 0.5;
+    let hole_x = marker.x + (marker.w - hole) * 0.5;
+    let hole_y = marker.y + (marker.h - hole) * 0.5;
+    quads.push(QuadInstance::rounded(
+        px_to_ndc(hole_x, hole_y, hole, hole, sw, sh),
+        fill,
+        [hole, hole],
+        hole * 0.5,
+    ));
 }
 
 /// Opacity of the active tab's accent bar while the window holds keyboard

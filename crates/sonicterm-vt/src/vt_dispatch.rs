@@ -648,9 +648,11 @@ impl Perform for Performer {
                         self.events.push(VtEvent::Command(CommandEvent::PromptStart));
                     }
                     Some(b'B') => {
+                        self.grid.record_input_start();
                         self.events.push(VtEvent::Command(CommandEvent::PromptEnd));
                     }
                     Some(b'C') => {
+                        self.grid.record_output_start();
                         self.events.push(VtEvent::Command(CommandEvent::CmdStart));
                     }
                     Some(b'D') => {

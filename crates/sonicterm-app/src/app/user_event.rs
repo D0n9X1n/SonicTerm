@@ -181,6 +181,8 @@ pub enum UserEvent {
     },
     /// The bounded Linux package-smoke watchdog expired.
     RuntimeSmokeTimeout,
+    /// An agent connection queued work in the control server's inbox; the loop drains it.
+    McpRequest,
     /// A GPU device stopped accepting work or was lost.
     ///
     /// Posted by that device's error handler, at most once per transition. The

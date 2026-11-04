@@ -702,6 +702,7 @@ use row_geometry::terminal_vertical_ink_pad;
 
 #[path = "core_tab_geometry.rs"]
 mod tab_geometry;
+use tab_geometry::emit_agent_marker_quads;
 use tab_geometry::emit_privilege_badge_quads;
 pub use tab_geometry::emit_tab_bar_quads;
 pub(crate) use tab_geometry::hovered_tab_at;
@@ -713,6 +714,8 @@ use tab_geometry::tab_title_block_placement;
 use tab_geometry::tab_title_color;
 pub(crate) use tab_geometry::TabBarHoverGeometry;
 pub use tab_geometry::TabBarQuadParams;
+use tab_geometry::TabMarkers;
+use tab_geometry::TabTitleBlockPlacement;
 pub use tab_geometry::ACTIVE_PANEL_MARKER_ALPHA_FOCUSED;
 pub use tab_geometry::ACTIVE_PANEL_MARKER_ALPHA_UNFOCUSED;
 

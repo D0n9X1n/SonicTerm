@@ -203,6 +203,14 @@ icons = "unicode"
 hide_sensitive = false
 # Sampling interval of sampled segments such as memory, 500-60000 ms.
 update_interval_ms = 2000
+
+[mcp]
+# Local MCP server for agents such as Claude Code and Copilot CLI.
+# Nothing listens while this is off.
+enabled = false
+# Control tools act on: "off" (none), "agent" (panes an agent created),
+# or "any" (every pane). Read tools work on every pane when enabled.
+control = "agent"
 "#,
         config_dir = default_config_dir()
             .map(|dir| dir.display().to_string())

@@ -63,13 +63,13 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
 
 #[test]
 fn title_size_helper_is_used_only_for_title_stack_and_title_rendering() {
-    // Protect title sizing from body/footer leaks while keeping vector privilege chrome font-independent.
+    // Protect title sizing from body/footer leaks while keeping vector tab markers font-independent.
     let core_src = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     assert_eq!(core_src.matches("tab_title_font_size(").count(), 1);
     // The tab-title font sizes the stack it measures and draws with.
     assert_eq!(include_str!("tab_title_font.rs").matches("tab_title_font_size(").count(), 1);
     assert!(core_src.contains("self.tab_title_font.stack(), tab_rasterizer.as_mut()"));
-    assert!(core_src.contains("} else if show_privilege_badge {"));
+    assert!(core_src.contains("} else if markers != TabMarkers::default() {"));
     assert!(core_src.contains("GlyphRasterVariant::TabTitle"));
 }
 

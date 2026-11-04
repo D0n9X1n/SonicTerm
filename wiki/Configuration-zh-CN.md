@@ -248,6 +248,19 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 `level` 可选 `error`、`warn`、`info`、`debug`。Logging 在启动时初始化，
 所以修改这些值后需要重启。文件位置、清理规则和诊断方法见 [日志](Logging-zh-CN)。
 
+#### `[mcp]`
+
+供 Claude Code、Copilot CLI 等 agent 连接的本地控制服务器。默认关闭；关闭时不监听任何东西，
+也不存在任何端点。
+
+| Key | 默认值 | 行为 |
+| --- | --- | --- |
+| `enabled` | `false` | 启动服务器。保存为 `true` 并重载后立即启动；保存为 `false` 则停止服务器、结束所有连接并删除端点。 |
+| `control` | `"agent"` | 控制类工具可作用的窗格：`"off"`（不允许）、`"agent"`（agent 创建的窗格）或 `"any"`（所有窗格）。服务器运行时，读取类工具对所有窗格可用。重载时修改此值会丢弃所有已排队的请求。其他取值会导致加载失败。 |
+
+重载时若 `[mcp]` 未变，服务器和现有连接都保留，正在运行的 `wait_for` 会继续。端点、权限和
+工具见 [平台集成](Platform-Integration-zh-CN)。
+
 ### 编辑与重载
 
 在命令面板中执行 **Edit sonicterm.toml** 可以打开标准配置文件。SonicTerm

@@ -342,3 +342,22 @@ fn fills_lc_ctype_when_lang_is_present_but_not_utf8() {
 fn preserves_explicit_lc_all_override() {
     assert!(!should_apply_utf8_locale_fallback(Some("C"), None, None));
 }
+
+/// Extra variables (the pane identity an agent reads) are added after the terminal identity,
+/// so they reach the child, and a later entry for the same name wins.
+#[test]
+fn extra_env_reaches_the_child_after_the_terminal_identity() {
+    let mut builder = CommandBuilder::new("sh");
+    apply_child_pty_env(&mut builder, ShellSpawnOpts::DEFAULT_TERM_PROGRAM);
+    apply_extra_env(
+        &mut builder,
+        &[
+            ("SONICTERM_PANE_ID".to_owned(), "1".to_owned()),
+            ("SONICTERM_PANE_ID".to_owned(), "42".to_owned()),
+            ("TERM_PROGRAM".to_owned(), "Agent".to_owned()),
+        ],
+    );
+    assert_eq!(env_str(&builder, "SONICTERM_PANE_ID"), "42");
+    assert_eq!(env_str(&builder, "TERM_PROGRAM"), "Agent", "an explicit entry is applied last");
+    assert!(ShellSpawnOpts::default().extra_env.is_empty());
+}

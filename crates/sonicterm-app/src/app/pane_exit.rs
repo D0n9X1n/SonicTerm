@@ -52,8 +52,12 @@ impl App {
         if let Some(pane) =
             self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
         {
+            // When: the exited pane is still live, its phase resets and its first status is kept.
             // The shell is gone, so no prompt is confirmed; the last command is kept.
             pane.command_state.phase = super::CommandPhase::Unknown;
+            // Recorded before the repeat check below, so a waiter sees the first status and a
+            // repeated report cannot replace it.
+            let _ = pane.exit_status.set(status.clone());
         }
         let Some(hold) = self.mark_exit_reported(pane_id) else {
             // When: `mark_exit_reported` finds no live pane, or one already reported, nothing remains to do.

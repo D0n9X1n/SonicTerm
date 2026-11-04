@@ -669,7 +669,21 @@ rows, content sequence numbers, an optional boxed saved primary screen, and up
 to 256 OSC 133 prompt regions per screen in scrollback-absolute coordinates.
 Primary prompts stay with the saved primary while alternate mode is active, so
 alternate prompt navigation cannot reuse hidden primary markers. Any history
-prefix removal drops prompts whose starts were removed and rebases survivors.
+prefix removal rebases surviving coordinates. It drops a prompt whose start was removed,
+unless that prompt's command is still running (`C` seen, no `D`): such a region keeps
+`start_row = None` until its `D`, and prompt jumping and the gutter caret skip it.
+
+Each region also records where input began (`B`, row and column), where output began
+(`C`), and an identity `seq` that only grows, kept on the outer grid so it continues
+across the alternate-screen swap. A repeated `B` or `C` keeps the first position. One
+run per grid can be pinned (`Grid::pin_run`): its progress, including `C` and `D` as
+row tokens, is kept apart from the 256-region deque, so a long command's completion and
+exact output span survive eviction and an alternate-screen round trip. A newer prompt
+on the pinned screen before `D` marks the run evicted. Row tokens are
+`lines_scrolled - scrollback_len + absolute_row` plus the screen, so they keep growing
+with a full history or with scrollback disabled. These records back the agent control
+tools on [Usage](Usage). Every pane's child environment carries `SONICTERM_PANE_ID`, the
+pane's id, so a program inside it can name its own pane.
 Nonempty ED3 advances the eviction counter by the exact number removed and
 repaints all visible rows without changing their content stamps.
 

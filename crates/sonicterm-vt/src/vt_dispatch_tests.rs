@@ -567,3 +567,20 @@ fn wide_char_edit_dirties_only_its_row_same_frame() {
     assert!(row[0].flags.contains(CellFlags::WIDE), "lead cell is WIDE");
     assert!(row[1].flags.contains(CellFlags::WIDE_CONT), "trailing cell is WIDE_CONT");
 }
+
+/// A shell's OSC 133 A, B, C and D;3 record where input began, where output began and the exit
+/// code, so the last completed command spans exactly the command's output; a repeated C keeps
+/// the first row.
+#[test]
+fn osc_133_records_input_and_output_starts() {
+    let mut parser = Parser::new(Grid::new(20, 6));
+    parser.advance(
+        b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;C\x07more\r\n",
+    );
+    parser.advance(b"\x1b]133;D;3\x07");
+    let region = parser.grid().newest_prompt().copied().expect("region");
+    assert_eq!(region.input_start, Some((0, 2)), "input begins after the two-cell prompt");
+    assert_eq!(region.output_start_row, Some(1), "the second C keeps the first row");
+    let span = parser.grid().last_completed_command().expect("completed");
+    assert_eq!((span.output_start_row, span.end_row, span.exit_code), (Some(1), Some(3), Some(3)));
+}

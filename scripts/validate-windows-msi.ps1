@@ -4,7 +4,10 @@ param(
     [string]$MsiPath,
 
     [Parameter(Mandatory = $true)]
-    [string]$ExpectedVersion
+    [string]$ExpectedVersion,
+
+    # Keep the validated administrative image here (a new directory) for the MCP smoke; empty discards it.
+    [string]$ExtractTo = ""
 )
 
 Set-StrictMode -Version Latest
@@ -24,6 +27,11 @@ $ExpectedComponents = @(
     "start_menu_shortcut",
     "desktop_shortcut"
 )
+# The app and the stdio MCP bridge agents start install together in the binary0 component.
+$ExpectedBinaryFiles = @{
+    exe0 = "sonicterm-windows.exe"
+    mcp_bridge = "sonicterm-mcp.exe"
+}
 $ExpectedFeature = "Binaries"
 $ExpectedTemplate = "x64;1033"
 $Component64Bit = 256
@@ -230,6 +238,22 @@ function Test-MsiRuntimeMetadata {
     }
 }
 
+function Test-MsiBinaryFiles {
+    param([object[]]$Files)
+
+    foreach ($fileId in $ExpectedBinaryFiles.Keys) {
+        $file = @($Files | Where-Object { [string]$_.Values[0] -ceq $fileId })
+        if ($file.Count -ne 1) {
+            throw "MSI File table is missing '$($ExpectedBinaryFiles[$fileId])'"
+        }
+        if ([string]$file[0].Values[1] -cne "binary0" -or
+            ([string]$file[0].Values[2] -split '\|')[-1] -cne $ExpectedBinaryFiles[$fileId] -or
+            [long]$file[0].Values[3] -le 0) {
+            throw "MSI file '$fileId' must be a nonempty '$($ExpectedBinaryFiles[$fileId])' in binary0 beside the app"
+        }
+    }
+}
+
 function Test-MsiRuntimePayload {
     param([string]$ExtractionRoot, [hashtable]$Contract)
 
@@ -295,14 +319,22 @@ function Invoke-MsiAdminExtraction {
 }
 
 function Test-MsiRuntimePackage {
-    param([string]$PackagePath, [hashtable]$Contract)
+    param([string]$PackagePath, [hashtable]$Contract, [string]$KeepAt = "")
 
+    # When: the caller keeps the image, it must name a new directory, so nothing existing is merged or replaced.
+    if ($KeepAt -and (Test-Path -LiteralPath $KeepAt)) {
+        throw "MSI extraction destination '$KeepAt' already exists"
+    }
     $stateRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sonicterm-msi-" + [guid]::NewGuid().ToString("N"))
     [void][System.IO.Directory]::CreateDirectory($stateRoot)
     try {
         $extractionRoot = Join-Path $stateRoot "extracted"
         Invoke-MsiAdminExtraction $PackagePath $extractionRoot $stateRoot
         Test-MsiRuntimePayload $extractionRoot $Contract
+        # Only a validated image is kept: it moves out of the scratch tree before that tree is removed.
+        if ($KeepAt) {
+            Move-Item -LiteralPath $extractionRoot -Destination $KeepAt
+        }
     }
     finally {
         Remove-Item -LiteralPath $stateRoot -Recurse -Force
@@ -334,6 +366,7 @@ function Invoke-MsiValidation {
         $runtimeComponents = @(Read-MsiRows $database 'SELECT `Component`,`Directory_`,`KeyPath` FROM `Component`' 3)
         $directories = @(Read-MsiRows $database 'SELECT `Directory`,`Directory_Parent`,`DefaultDir` FROM `Directory`' 3)
         Test-MsiRuntimeMetadata $files $runtimeComponents $directories $runtimeContract
+        Test-MsiBinaryFiles $files
     }
     finally {
         foreach ($comObject in @($summary, $database, $installer)) {
@@ -342,8 +375,9 @@ function Invoke-MsiValidation {
             }
         }
     }
-    Test-MsiRuntimePackage $resolvedMsi $runtimeContract
-    Write-Output "Validated MSI ${resolvedMsi}: version=$numericVersion template=$template components=$($ExpectedComponents.Count)"
+    Test-MsiRuntimePackage $resolvedMsi $runtimeContract $ExtractTo
+    $kept = $(if ($ExtractTo) { " extracted=$ExtractTo" } else { "" })
+    Write-Output "Validated MSI ${resolvedMsi}: version=$numericVersion template=$template components=$($ExpectedComponents.Count)$kept"
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

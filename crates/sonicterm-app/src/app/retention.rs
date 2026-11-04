@@ -676,6 +676,7 @@ impl super::App {
         // Charge what each pane retains into its governor owner, so the
         // hierarchy reports real memory rather than only structure.
         self.charge_pane_owners();
+        self.charge_mcp_connections();
 
         // The aggregate snapshot, above the DEBUG gate and deliberately so.
         //

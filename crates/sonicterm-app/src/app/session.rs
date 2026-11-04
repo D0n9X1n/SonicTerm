@@ -221,6 +221,7 @@ impl App {
             runtime_config_path: None,
             local_hostname,
             runtime_smoke: None,
+            mcp_server: None,
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
@@ -263,6 +264,8 @@ impl App {
         }
         // A report walk still running must not outlive the session it describes.
         self.cancel_memory_report_sampling();
+        // Agents lose the endpoint before their panes go, so no request races the teardown.
+        self.mcp_server = None;
         let panes: Vec<_> = self
             .windows
             .values_mut()

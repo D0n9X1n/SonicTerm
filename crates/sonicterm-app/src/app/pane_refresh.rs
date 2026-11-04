@@ -197,32 +197,8 @@ impl App {
             // layout from and there is nothing to size panes against.
             return Vec::new();
         };
-        let tab_idx = main.tabs.active_index();
-        let Some(tab_state) = main.tab_states.get(tab_idx) else {
-            // When: `tab_idx` names no entry in `tab_states`, so no pane tree
-            // exists to lay out.
-            return Vec::new();
-        };
-        if let Some((outer, _, _)) = self.test_viewport_override {
-            // When: `test_viewport_override` supplies the outer rect directly, so
-            // layout runs without a live renderer to read metrics from.
-            return tab_state.tree.layout(outer);
-        }
-        let Some(renderer) = self.main_renderer() else {
-            // When: `main_renderer` is absent, so logical size and insets are
-            // unavailable and no rect can be computed.
-            return Vec::new();
-        };
-        let (width_px, height_px) = renderer.logical_size();
-        let top = (renderer.top_inset() - renderer.padding_top_px()).max(0.0);
-        let bottom = renderer.bottom_inset();
-        let outer = sonicterm_ui::pane::Rect::new(
-            0.0,
-            top,
-            width_px.max(0.0),
-            (height_px - top - bottom).max(0.0),
-        );
-        tab_state.tree.layout(outer)
+        let viewport = self.test_viewport_override.map(|(outer, _, _)| outer);
+        Self::compute_tab_pane_rects(main, main.tabs.active_index(), viewport, self.main_renderer())
     }
 
     /// Same as [`Self::compute_active_pane_rects`] but for a torn-out
@@ -230,20 +206,34 @@ impl App {
     pub(crate) fn compute_pane_rects_for(
         child: &WindowState,
     ) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
-        let tab_idx = child.tabs.active_index();
-        let Some(tab_state) = child.tab_states.get(tab_idx) else {
-            // When: `tab_idx` names no entry in the child's `tab_states`, so it
-            // carries no pane tree to lay out.
+        let viewport = child.test_pane_viewport.map(|(outer, _, _)| outer);
+        Self::compute_tab_pane_rects(
+            child,
+            child.tabs.active_index(),
+            viewport,
+            child.renderer.as_ref(),
+        )
+    }
+
+    /// Window-pixel rects for every pane of tab `tab_index` in `window`, visible or not, laid
+    /// out in the window's current surface. `viewport` is the headless test seam, used instead of
+    /// `renderer`; empty when neither exists or the tab does not.
+    pub(crate) fn compute_tab_pane_rects(
+        window: &WindowState,
+        tab_index: usize,
+        viewport: Option<sonicterm_ui::pane::Rect>,
+        renderer: Option<&GpuRenderer>,
+    ) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
+        let Some(tab_state) = window.tab_states.get(tab_index) else {
+            // When: `tab_index` names no entry in `tab_states`, so no pane tree exists to lay out.
             return Vec::new();
         };
-        if let Some((outer, _, _)) = child.test_pane_viewport {
-            // When: `test_pane_viewport` supplies the outer rect, so a headless
-            // child with no renderer still resolves its pane geometry.
+        if let Some(outer) = viewport {
+            // When: `viewport` supplies the outer rect, layout runs without a live renderer.
             return tab_state.tree.layout(outer);
         }
-        let Some(renderer) = child.renderer.as_ref() else {
-            // When: the child's `renderer` is absent, so logical size and insets
-            // are unavailable and no rect can be computed.
+        let Some(renderer) = renderer else {
+            // When: `renderer` is absent, logical size and insets are unavailable.
             return Vec::new();
         };
         let (width_px, height_px) = renderer.logical_size();

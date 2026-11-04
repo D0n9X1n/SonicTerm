@@ -651,14 +651,18 @@ impl App {
     /// The shell spawn options for a new pane, main or child: the launch's own options, clean
     /// startup under the runtime smoke, and output read timestamps exactly when the pane's frame
     /// counters are on. The gate is fixed by then, so the reader's flag is fixed for its life.
+    /// The child environment names the pane (`SONICTERM_PANE_ID`), so an agent inside it can find
+    /// itself.
     pub(super) fn pane_spawn_opts(
         &self,
+        pane_id: u64,
         launch: &super::pane_launch::PaneLaunch,
         frame_counters_on: bool,
     ) -> sonicterm_io::pty::ShellSpawnOpts {
         sonicterm_io::pty::ShellSpawnOpts {
             clean_e2e: self.runtime_smoke.is_some(),
             diagnostic_timestamps: frame_counters_on,
+            extra_env: self.pane_control_env(pane_id),
             ..launch.shell_spawn_opts(
                 self.config.terminal.term_program.clone(),
                 self.config.terminal.shell.clone(),
@@ -666,16 +670,37 @@ impl App {
         }
     }
 
-    // Lock order: test_pane_launches releases before parser; neither guard survives PTY or worker creation.
+    /// The variables a new pane's shell gets: its id, and the control endpoint while one runs.
+    pub(super) fn pane_control_env(&self, pane_id: u64) -> Vec<(String, String)> {
+        let mut env = vec![("SONICTERM_PANE_ID".to_owned(), pane_id.to_string())];
+        if let Some(endpoint) = self.mcp_endpoint() {
+            env.push(("SONICTERM_CONTROL".to_owned(), endpoint.to_owned()));
+        }
+        env
+    }
+
     pub(super) fn spawn_pane(
         &self,
         pane_id: u64,
         launch: &super::pane_launch::PaneLaunch,
     ) -> PaneState {
+        self.spawn_pane_sized(pane_id, launch, None)
+    }
+
+    /// Spawn a main-window pane at `size` cells, or the main renderer's whole-window size when
+    /// `size` is `None`; an agent's helper starts at the size its split will give it.
+    // Lock order: test_pane_launches releases before parser; neither guard survives PTY or worker creation.
+    pub(super) fn spawn_pane_sized(
+        &self,
+        pane_id: u64,
+        launch: &super::pane_launch::PaneLaunch,
+        size: Option<(u16, u16)>,
+    ) -> PaneState {
         #[cfg(test)]
         self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
-        let (cols, rows) =
-            self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((80, 24));
+        let (cols, rows) = size.unwrap_or_else(|| {
+            self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((80, 24))
+        });
         // Honour the user's configured scrollback depth instead of the
         // Grid's built-in 10k default.
         let mut grid = Grid::new(cols, rows);
@@ -697,7 +722,7 @@ impl App {
         let redraw_target = Arc::new(Mutex::new(self.main_window_id));
         // The gate is read before the PTY exists, so its reader stamps reads from the first one.
         let frame_counters = self.pane_frame_counters();
-        let shell_opts = self.pane_spawn_opts(launch, frame_counters.is_some());
+        let shell_opts = self.pane_spawn_opts(pane_id, launch, frame_counters.is_some());
         let pty = match self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts) {
             Ok(pty) => {
                 // When: spawn_launch_pty returns Ok(pty), stage any launch draft before the worker starts.

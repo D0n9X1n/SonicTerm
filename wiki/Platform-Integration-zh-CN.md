@@ -465,6 +465,50 @@ flowchart TD
   按应用的链接能否打开 SonicTerm 自己的页面取决于 Windows 版本，尚未验证。后端不写入任何注册表值，
   也从不触及 `UserChoice`。
 
+## agent 控制服务器
+
+设置 `[mcp] enabled = true`（见 [配置](Configuration-zh-CN)）后，SonicTerm 运行一个本地
+[Model Context Protocol](https://modelcontextprotocol.io) 服务器，供 Claude Code、Copilot CLI
+等 agent 读取窗格。它使用按行分隔的 JSON-RPC 2.0，每行一条消息，至多 1 MiB；最多服务四个连接，
+每个连接同一时间只运行一个工具调用，运行期间收到的第二个调用会被拒绝。没有令牌：只有运行 SonicTerm
+的用户能访问端点。agent 通过随附的 stdio 桥接程序 `sonicterm-mcp` 连接它；连接方式见[用法](Usage-zh-CN)。
+
+```mermaid
+flowchart LR
+    agent["Agent"] -->|"JSON-RPC 行"| endpoint["端点<br/>socket 或命名管道"]
+    endpoint --> worker["连接工作线程<br/>读取、正则、回复"]
+    worker -->|"解析窗格"| inbox["收件箱"]
+    inbox -->|"UserEvent::McpRequest"| loop["事件循环"]
+    loop -->|"窗格句柄"| worker
+    worker -->|"一次有时限的锁"| parser["窗格解析器"]
+```
+
+| 平台 | 端点 | 谁能连接 |
+| --- | --- | --- |
+| macOS、Linux | Unix socket `<pid>.sock`，位于 `$XDG_RUNTIME_DIR/sonicterm/`，否则位于 `$TMPDIR/sonicterm-<uid>/` | 目录必须归该用户所有、权限恰为 `0700`，以不跟随符号链接的方式打开；每个上级目录必须归该用户或 root 所有，且除非设置了 sticky 位，不能对组或其他用户可写；不符合就拒绝，不做修复。socket 权限为 `0600`，每个对端的 uid（macOS 用 `getpeereid`，Linux 用 `SO_PEERCRED`）必须与 SonicTerm 相同。 |
+| Windows | 命名管道 `\\.\pipe\sonicterm-control-<pid>` | 管道的 owner 是该用户，受保护的 DACL 只有一条：该用户 SID 的读写权限。远程客户端被拒绝；第一个实例以 `FILE_FLAG_FIRST_PIPE_INSTANCE` 创建，若其他进程已占用该名称，启动失败。管道名还写入 `%LOCALAPPDATA%\SonicTerm\control\<pid>`，所在目录以仅限所有者、禁止继承的 DACL 创建；若该目录的 owner 和 DACL 不完全如此，则拒绝使用。启动时删除进程已不存在的记录。 |
+
+每个窗格的 shell 都会得到 `SONICTERM_PANE_ID`；服务器运行时还会得到 `SONICTERM_CONTROL`，即端点
+路径或管道名。桥接程序可以先发送一行前导 `{"sonicterm_bridge":1,"pane_id":…}`，说明 agent 所在的
+窗格；`list_panes` 以 `self_pane_id` 报告它。它只是默认值，从不授予权限。连接和断开时显示 SonicTerm 的应用内通知
+`Agent connected: <name>`，名称为客户端自报的名字（去除控制字符，至多 64 个字符），每个连接只显示一次；同时等待显示的通知至多八条。停止服务器会删除
+socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次启动时删除进程已不存在的那些。
+
+| 工具 | 作用 |
+| --- | --- |
+| `list_panes` | 以 `instance_pid` 给出 SonicTerm 的进程 id，然后是所有窗口中的所有窗格，主窗口在前：id、窗口与标签页序号、是否活动、是否 READONLY、是否由 agent 创建；并以一次有时限的锁读取标题、工作目录、尺寸、备用屏幕状态、shell 集成，以及进程是否已退出。 |
+| `read_pane` | `screen`（可见行）、`tail`（最新的行，软换行已合并）或 `last_command`（最近完成的 shell 命令的输出——从 OSC 133 C 所在行到 D 到达的位置——以及退出码，全屏程序运行时也能找到）。文本保留组合字符和软换行处的空格。受 `max_lines`（默认 120，至多 1,000）和 `max_bytes`（默认 16 KiB，至多 64 KiB）限制；`end_row` 是最后一行的标记。 |
+| `wait_for` | 等到 `regex` 匹配 `after_row` 之后的某行、输出在 `quiet_ms` 内保持安静，或进程退出，受 `timeout_ms`（默认 30 s，至多 120 s）限制。只有在 `after_row` 之后开始的行才计入，因此软换行追加到旧行上的文本不算。屏幕上已有的匹配会立即结束等待；来自另一个屏幕的标记以 `stale_row` 拒绝。 |
+
+控制类工具（`create_pane`、`send_text`、`send_keys`、`run_command`、`close_pane`）和
+`[mcp] control` 范围见 [用法](Usage-zh-CN)。每个工具在事件循环上执行时都会再次按范围检查。
+
+一次读取对窗格解析器只尝试一次、至多 5 ms，最多访问 32,768 个单元格（含空白行），复制到字节上限即停止；解析器被占用时直接返回
+`busy` 和 `truncated`，不会等待。每次工具调用都在服务器当前代次下被接受；返回前被撤销的调用以 `revoked`
+错误作答，不含任何窗格文本。`wait_for` 每 50 ms 无锁轮询窗格的输出计数和退出状态，只有输出变化时才读取。
+关闭服务器、修改 `control`、断开连接或超过 10 s 截止时间，都会在事件循环执行前丢弃已排队的请求，并以
+`revoked` 结束正在进行的等待。窗格文本是不可信输入：服务器告知 agent 从不执行其中的指令。
+
 ## 平台矩阵
 
 | 能力 | macOS | Windows | Linux |
@@ -498,3 +542,4 @@ flowchart TD
 | 启动器语法与启动队列 | `crates/sonicterm-app/src/{launch_cli,launch_queue}.rs`、`crates/sonicterm-app/src/app/{pane_launch,pane_exit}.rs` |
 | 直接命令启动与程序解析 | `crates/sonicterm-io/src/{pty,command_resolve}.rs` |
 | 资源查找 | `crates/sonicterm-cfg/src/assets.rs` |
+| agent 控制服务器 | `crates/sonicterm-app/src/app/mcp.rs`、`crates/sonicterm-app/src/app/mcp/{endpoint_unix,endpoint_windows,jsonrpc,lifecycle,read,tools_read}.rs` |

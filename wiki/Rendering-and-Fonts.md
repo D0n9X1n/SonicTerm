@@ -159,6 +159,14 @@ separate warning wake samples every 500 ms until control returns to the regular
 shell; a child exit clears the name and warning at once. Unchanged samples do not
 repaint and idle tabs do not poll.
 
+A tab holding a pane an agent created through the control server draws an agent
+marker before its text: a rounded square in the theme's purple accent holding a
+ring, drawn from quads after the privilege badge when both show. Like the badge it
+reserves one badge width and one gap in the tab's measured width, so it widens the
+tab and, like any content change, waits while the bar is held under the pointer.
+It is read from the panes every frame, so a split, a close or a tab transfer never
+leaves it stale, and the tab's title is never changed.
+
 The badge is vector chrome built from quads, not a font glyph or title character.
 Its background uses the theme's ANSI danger red and its lock geometry selects
 black or white for linear-light contrast, so active, inactive, hovered,

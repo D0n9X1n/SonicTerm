@@ -52,6 +52,7 @@ Cairo/pkg-config，打包需要
 ```bash
 brew install cairo pkg-config create-dmg imagemagick
 cargo build --release -p sonicterm-mac
+cargo build --release -p sonicterm-mcp
 bash scripts/bake-icons.sh
 
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
@@ -98,6 +99,7 @@ DMG 内包含 `SonicTerm.app`：
 ```text
 SonicTerm.app/Contents/
 ├── MacOS/sonicterm-mac
+├── MacOS/sonicterm-mcp
 ├── Info.plist
 ├── Frameworks/*.dylib
 └── Resources/
@@ -122,6 +124,13 @@ Mono 及其 MIT 许可证仅保存一次，运行时和 AppKit/CoreText 共用�
 打包失败。系统库仍由 macOS 提供。各 dylib 先独立签名，再封装整个 app 的签名；验证器
 检查最终依赖集合和清单。这不改变源码固定的 FreeType/HarfBuzz 栈，也不要求用户安装
 Homebrew。
+
+`scripts/make-macos-dmg.sh` 从 app 二进制旁边或 `SONICTERM_MCP_BIN` 复制 agent 桥接程序
+`sonicterm-mcp`，缺失时失败。`scripts/macos-bundle.py` 要求它存在：缺少 `Contents/MacOS/sonicterm-mcp` 时
+`bundle` 与 `verify` 都会失败，并把它作为伴随可执行文件校验：只加载系统库、没有 rpath、架构与 app 一致，
+且所需的最低 macOS 不高于 app。由于 `test-macos-package.py` 对挂载的 DMG 运行该 `verify`，缺少桥接程序的
+DMG 会校验失败。桥接程序在原生 bundle 步骤之后、bundle 封签之前单独做 ad-hoc 签名：Intel 链接器产出的
+桥接程序未签名，而封签会拒绝未签名的嵌套可执行文件。
 
 原生依赖收集完成后，脚本将 `LICENSE-winit-Apache-2.0` 加入
 `Contents/Resources/licenses`。所有资源组装完成后，再施加并校验 ad-hoc 签名。
@@ -192,6 +201,7 @@ choco install wixtoolset --version 3.14.1.20250415 --no-progress -y
 
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
+cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-mcp
 python scripts/setup-windows-conpty.py --destination target/x86_64-pc-windows-msvc/release
 $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
     Where-Object name -eq sonicterm-windows | Select-Object -ExpandProperty version
@@ -235,6 +245,7 @@ marker、呈现和预热渲染器生命周期契约。
 ```text
 SonicTerm/
 ├── sonicterm-windows.exe
+├── sonicterm-mcp.exe
 ├── LICENSE-winit-Apache-2.0
 ├── conpty/
 │   ├── conpty.dll
@@ -256,6 +267,14 @@ SHA-256 固定的微软 `Microsoft.Windows.Console.ConPTY` 包中放置 `conpty.
 其验证器固定该文件的大小和 SHA-256。
 运行时的选择规则见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。
 
+agent 桥接程序 `sonicterm-mcp.exe` 与 `sonicterm-windows.exe` 安装在同一目录、同一个
+`binary0` component 中，因此默认路径为 `C:\Program Files\SonicTerm\sonicterm-mcp.exe`。
+若 MSI 的 File 表中 `binary0` 里没有非空的 `sonicterm-mcp.exe`，`validate-windows-msi.ps1` 会使其校验失败。
+使用 `-ExtractTo <新目录>` 时，它还会保留通过其有界、受 job 约束的 `msiexec /a` runner 解出的管理映像，且只在
+MSI 校验通过后保留。PR CI（`windows-smoke`）与 Release 工作流都用固定版本的 cargo-wix 与 WiX 构建 MSI，以这种
+方式校验，并对映像中的应用与桥接程序运行 `scripts/mcp-smoke.py`，因此发布的桥接程序在合并前和发布时都会被
+端到端验证。
+
 它创建开始菜单快捷方式，并把 `INSTALLDESKTOPSHORTCUT` property 的默认值设为 `1`。
 它为 `.ps1`、`.cmd`、`.bat` 和 `.sh` 注册 SonicTerm ProgID、Default Apps capabilities
 与 `OpenWithProgids`，并在安装
@@ -272,6 +291,7 @@ Ubuntu 22.04。本地完整打包需要 Rust/Cairo、Fontconfig、X11、Wayland 
 
 ```bash
 cargo build --release -p sonicterm-linux
+cargo build --release -p sonicterm-mcp
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
 import json, sys
 metadata = json.load(sys.stdin)
@@ -288,6 +308,8 @@ bash scripts/test-linux-packages.sh \
   "dist/SonicTerm-${tag}-linux-x86_64.deb"
 ```
 
+脚本从所给二进制旁边或 `SONICTERM_MCP_BIN` 取得 `sonicterm-mcp`，缺失时失败。
+
 非 Linux 主机可用 `scripts/make-linux-packages.sh --stage-only` 组装共同 payload，
 但不能生成或校验 ELF 安装包。
 
@@ -301,6 +323,7 @@ bash scripts/test-linux-packages.sh \
 ```text
 SonicTerm-<tag>-linux-x86_64/
 ├── sonicterm
+├── sonicterm-mcp
 ├── assets/{fonts,themes,keymaps,icons,i18n}/
 ├── share/applications/com.d0n9x1n.SonicTerm.desktop
 ├── share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
@@ -317,6 +340,7 @@ Debian package 为 `SonicTerm-<tag>-linux-x86_64.deb`，安装到：
 
 ```text
 /usr/bin/sonicterm
+/usr/bin/sonicterm-mcp
 /usr/share/sonicterm/assets/{fonts,themes,keymaps,icons,i18n}/
 /usr/share/applications/com.d0n9x1n.SonicTerm.desktop
 /usr/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
@@ -327,7 +351,7 @@ Debian package 为 `SonicTerm-<tag>-linux-x86_64.deb`，安装到：
 ```
 
 Builder 会检查 x86_64 ELF，并拒绝高于 2.35 的 GLIBC requirement。`dpkg-shlibdeps`
-推导已链接的 `Depends`；脚本还会加入 `libxkbcommon-x11-0`，因为 winit 在 X11 下动态
+从 `sonicterm` 和 `sonicterm-mcp` 推导已链接的 `Depends`；脚本还会加入 `libxkbcommon-x11-0`，因为 winit 在 X11 下动态
 加载它。便携归档的主机在使用 X11 时必须提供 `libxkbcommon-x11.so.0`。打包脚本会验证
 内置符号字体，以及主题、键位、图标、英文和简体中文 catalog。正文字体使用 fontconfig 的
 `monospace`，因此安装包不携带正文字体。

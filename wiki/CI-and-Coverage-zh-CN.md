@@ -89,6 +89,8 @@ job，是因为本仓库同时最多运行五个 macOS job，单独的分支会�
 任一 smoke 失败时，job 会上传其证据。release 构建之后，两个 lane 都要求原始二进制的有界 smoke 成功，
 然后在相同架构主机生成并挂载 DMG。
 另有带原生进程期限的独立步骤，要求原始二进制的 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
+仅在 Apple Silicon 上，`macos-core` 还会构建 release 版 `sonicterm-mcp` 桥接程序并把它打入 bundle，在 DMG
+校验之后对 bundle `SonicTerm.app` 中的应用与桥接程序运行 MCP 端到端 smoke（[步骤说明](Local-Gate-zh-CN#步骤说明)）。
 安装后的 bundle 验证相对动态库依赖、签名、部署下限、拒绝 Homebrew 读取时的应用/Cairo
 绘制，以及实际 bundle 字体注册；同一可执行文件的镜像对比记录压缩后字体节省量。
 macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架构打包，最终 macOS
@@ -116,7 +118,14 @@ Windows 测试分为五个并行 shard，每个都重复 checkout、Rust、Cairo
 运行 smoke 之前，它把固定版本的 ConPTY 运行时放到二进制旁边；每个 smoke 都设置
 `SONICTERM_REQUIRE_CONPTY=1`，随后 `scripts/verify-windows-conpty.py` 要求已放置文件的字节正确，
 且第一个 smoke 的日志中恰有一条 `kind="packaged"` 选择记录，因此退回系统 ConPTY 的构建会失败
-（[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）。
+（[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）。该 shard 还会构建 release 版 `sonicterm-mcp` 桥接程序，并在场景
+smoke 之后像 Release 工作流一样构建 MSI：安装固定版本的 cargo-wix 与 WiX Toolset（`CARGO_WIX_VERSION` 与
+`WIX_TOOLSET_VERSION`，由 `test-release-tool-pins.py` 保持两个工作流一致），把主机 release 构建与已放置的
+ConPTY 复制到 `main.wxs` 读取的目标三元组目录，再运行 `cargo wix`。`validate-windows-msi.ps1 -ExtractTo` 校验
+MSI 并保留其管理映像（通过校验器有界、受 job 约束的 runner 解出），MCP 端到端 smoke 随后对映像中的
+`sonicterm-windows.exe` 与 `sonicterm-mcp.exe` 运行，ConPTY 位于安装程序放置的位置，并设置
+`SONICTERM_REQUIRE_CONPTY=1`。Release 工作流的 Windows job 以同样方式 smoke 它自己的 MSI
+（[步骤说明](Local-Gate-zh-CN#步骤说明)）。
 
 `workflow-syntax` 使用固定版本 actionlint 检查 CI 与 perf 工作流，包括 GitHub 表达式上下文
 可用性及语法。tooling job 安装摘要固定的 Linux 二进制；本地主机在 PATH 中安装相同版本。
@@ -187,13 +196,15 @@ CI 和 Release 的 Ubuntu 依赖安装步骤均不设置工作流超时覆盖项
 package/runtime shard 安装 Mesa Vulkan/lavapipe、
 Xvfb、Weston 和 Debian 打包工具，随后：
 
-1. 以 release 模式构建 `sonicterm-linux`；
+1. 以 release 模式构建 `sonicterm-linux` 和 `sonicterm-mcp` 桥接程序；
 2. 从 Cargo metadata 推导唯一 workspace 版本；
 3. 生成并验证 x86_64 `.tar.gz` 与 `.deb`；
 4. 验证 desktop/AppStream metadata，并以 advisory 方式运行 `lintian`；
 5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout，以独立步骤
    分别执行默认、frame-validation 和 device-recovery 场景；
-6. 上传 package，失败时上传名称包含场景的 smoke log。
+6. 在其自行启动、使用 lavapipe 的 Xvfb 上，对从所构建 `.tar.gz` 解压出的应用与桥接程序运行 MCP 端到端
+   smoke（[步骤说明](Local-Gate-zh-CN#步骤说明)）；
+7. 上传 package，失败时上传名称包含场景的 smoke log。
 
 任何平台的默认 smoke 若没有原生窗口、渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、
 之后的原生 frame 呈现、默认预热渲染器的创建/报告/采用/子窗口呈现/释放并恢复进程渲染器计数，
@@ -221,7 +232,7 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
 
 ## Gate 盲区
 
-- 一次性 workspace gate 包含全部 23 个 package 的 integration test，但仍只能运行当前 host
+- 一次性 workspace gate 包含全部 24 个 package 的 integration test，但仍只能运行当前 host
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 9 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate

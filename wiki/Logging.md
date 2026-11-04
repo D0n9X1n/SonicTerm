@@ -78,6 +78,15 @@ artifact cleanup runs on a background thread.
 | `info` | normal SonicTerm information plus the aggregate `memory snapshot` |
 | `debug` | detailed SonicTerm diagnostics, pane/renderer memory lines, state-machine events, `render_timing`, `tear_out_timing`, and `frame_counters` |
 
+The `mcp` target belongs to the agent control server. Its warnings reach every
+session, including the default `warn`: a listener that could not start, a refused
+peer of another user, a connection over the limit, and a control server owner
+that could not register. At `info` it adds `control server started`, `control
+server stopped`, `control level changed`, `agent connected` with the client's
+self-reported name, `agent disconnected`, and one `tool call` line per call with
+`tool`, `pane`, `client`, `ok`, `in_bytes`, `out_bytes` and `elapsed_ms`. Arguments, pane text and regexes are
+never logged.
+
 `wgpu`, `naga`, `sonicterm-vt`, and `sonicterm-grid` remain warning-oriented in
 the configured filters. Very hot font-shaper dumps are `trace`; no configured
 level admits them. Use a targeted `RUST_LOG` directive only when investigating
@@ -103,7 +112,7 @@ filter rather than extending it. This capture recipe retains the default warning
 filters and adds font-configuration errors to all three outputs:
 
 ```text
-RUST_LOG=config=error,sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,sonicterm_grid=warn,memory::reclaimed=warn,wgpu=warn,naga=warn
+RUST_LOG=config=error,sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,sonicterm_grid=warn,memory::reclaimed=warn,mcp=warn,wgpu=warn,naga=warn
 ```
 
 To preserve an existing custom filter, append `config=error` to its complete

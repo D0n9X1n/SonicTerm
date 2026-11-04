@@ -68,6 +68,20 @@ class PackageTests(unittest.TestCase):
         seal_index = commands.index('codesign --force --sign - "$APP"')
         self.assertLess(copy_index, seal_index)
 
+    def test_mcp_bridge_is_signed_after_native_bundle_and_before_app_seal(self):
+        # An unsigned Intel bridge makes the bundle seal fail, and the native bundle step may rewrite it after signing.
+        script = Path(__file__).with_name("make-macos-dmg.sh").read_text(encoding="utf-8")
+        commands = [line.strip() for line in script.splitlines() if not line.lstrip().startswith("#")]
+        copy_index = commands.index('cp "$BRIDGE" "$APP/Contents/MacOS/sonicterm-mcp"')
+        bundle_index = commands.index('python3 "$ROOT/scripts/macos-bundle.py" bundle "$APP" --max-minimum-macos "$MAX_MINIMUM"')
+        sign_index = commands.index('codesign --force --sign - "$APP/Contents/MacOS/sonicterm-mcp"')
+        seal_index = commands.index('codesign --force --sign - "$APP"')
+        verify_index = commands.index('codesign --verify --deep --strict --verbose=2 "$APP"')
+        self.assertLess(copy_index, bundle_index)
+        self.assertLess(bundle_index, sign_index)
+        self.assertLess(sign_index, seal_index)
+        self.assertLess(seal_index, verify_index)
+
     def test_packaging_declares_and_asserts_the_macos_15_floor(self):
         # The app's declared floor and the default ceiling both match the 15.0 deployment target.
         script = Path(__file__).with_name("make-macos-dmg.sh").read_text(encoding="utf-8")

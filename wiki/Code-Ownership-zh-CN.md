@@ -17,6 +17,9 @@
 路径与 URL 检测为共享：`crates/sonicterm-cfg/src/url_scan.rs` 与
 `crates/sonicterm-app/src/app/path_target.rs`。只有 `path_target/*.rs` 与 `url_open/*.rs` 按平台区分。
 
+agent 桥接程序 `crates/sonicterm-mcp/` 为共享。其 `src/connect_unix.rs` 只为 Unix 编译，
+属于 Unix 区域；`src/connect_windows.rs` 只为 Windows 编译，属于 Windows 区域。
+
 ## 接手工作
 
 - 任意数量的 agent 可以同时工作。

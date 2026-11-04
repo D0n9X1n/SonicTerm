@@ -20,6 +20,9 @@ env:
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
   CI_CACHE_NAMESPACE: ci-v3
+  # The release workflow's MSI tool pins; test-release-tool-pins.py keeps the two workflows equal.
+  CARGO_WIX_VERSION: "0.3.9"
+  WIX_TOOLSET_VERSION: "3.14.1.20250415"
 
 jobs:
   tooling:
@@ -267,6 +270,9 @@ jobs:
       - name: Build macOS release binary for runtime smoke
         run: cargo build --release -p sonicterm-mac
 
+      - name: Build MCP bridge
+        run: cargo build --release -p sonicterm-mcp
+
       - name: Require macOS native runtime smoke
         run: |
           python3 scripts/native-smoke-runner.py \
@@ -309,6 +315,13 @@ jobs:
             --dmg "dist/SonicTerm-ci-mac-aarch64.dmg" \
             --state-dir "$RUNNER_TEMP/sonicterm-macos-package-aarch64" \
             --max-minimum-macos "15.0"
+
+      # Drives the packaged app's MCP control server through the bundled bridge, not the cargo outputs.
+      - name: Require MCP end-to-end smoke on the packaged app
+        env:
+          SONICTERM_SMOKE_APP: dist/SonicTerm.app/Contents/MacOS/sonicterm-mac
+          SONICTERM_SMOKE_BRIDGE: dist/SonicTerm.app/Contents/MacOS/sonicterm-mcp
+        run: python3 scripts/mcp-smoke.py
 
       - name: Upload macOS package evidence
         if: ${{ !cancelled() }}
@@ -427,6 +440,9 @@ jobs:
 
       - name: Build macOS release binary for runtime smoke
         run: cargo build --release -p sonicterm-mac
+
+      - name: Build MCP bridge
+        run: cargo build --release -p sonicterm-mcp
 
       - name: Require macOS native runtime smoke
         run: |
@@ -1182,6 +1198,9 @@ jobs:
       - name: Build Windows release binary for runtime smoke
         run: cargo build --release -p sonicterm-windows
 
+      - name: Build MCP bridge
+        run: cargo build --release -p sonicterm-mcp
+
       - name: Stage pinned Windows console runtime
         run: python scripts/setup-windows-conpty.py --destination target/release
 
@@ -1222,6 +1241,55 @@ jobs:
             --state-dir "$env:RUNNER_TEMP\sonicterm-windows-device-recovery-smoke" `
             --log-file "$env:RUNNER_TEMP\sonicterm-windows-device-recovery-smoke.log" `
             -- ./target/release/sonicterm-windows.exe --runtime-smoke
+
+      # The MSI is built here as the Release workflow builds it, so the PR smokes the packaged bridge.
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --version "${{ env.CARGO_WIX_VERSION }}" --locked
+
+      - name: Install WiX Toolset
+        run: |
+          choco install wixtoolset --version "${{ env.WIX_TOOLSET_VERSION }}" --no-progress -y
+          "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # main.wxs reads the target-triple directory the Release workflow builds into; on this x64 MSVC host the
+      # host build is the same binary, so the release outputs and staged ConPTY are copied there, not rebuilt.
+      - name: Build MSI for validation
+        id: ci-msi
+        shell: pwsh
+        run: |
+          $staged = "target\x86_64-pc-windows-msvc\release"
+          New-Item -ItemType Directory -Force -Path $staged | Out-Null
+          Copy-Item target\release\sonicterm-windows.exe, target\release\sonicterm-mcp.exe -Destination $staged
+          Copy-Item target\release\conpty -Destination $staged -Recurse
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq sonicterm-windows |
+            Select-Object -ExpandProperty version
+          $numericVersion = ($version -split '[-+]')[0]
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Push-Location crates\sonicterm-windows
+          cargo wix --package sonicterm-windows --target x86_64-pc-windows-msvc --install-version $numericVersion --no-build --nocapture --output ..\..\dist\
+          if ($LASTEXITCODE -ne 0) { throw "cargo wix exited $LASTEXITCODE" }
+          Pop-Location
+          $packages = @(Get-ChildItem dist -Filter *.msi)
+          if ($packages.Count -ne 1) {
+            throw "Expected one MSI from cargo-wix, found $($packages.Count)"
+          }
+          "path=$($packages[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # The validator's bounded, job-contained msiexec /a extraction; it keeps the image only once it validates.
+      - name: Validate and extract MSI
+        shell: pwsh
+        run: .\scripts\validate-windows-msi.ps1 -MsiPath "${{ steps.ci-msi.outputs.path }}" -ExpectedVersion "v${{ steps.ci-msi.outputs.version }}" -ExtractTo "$env:RUNNER_TEMP\sonicterm-msi-image"
+
+      # The packaged app and bridge from the MSI's image, with ConPTY where the installer puts it.
+      - name: Require MCP end-to-end smoke on the MSI's files
+        env:
+          SONICTERM_REQUIRE_CONPTY: "1"
+          SONICTERM_SMOKE_APP: ${{ runner.temp }}\sonicterm-msi-image\PFiles\SonicTerm\sonicterm-windows.exe
+          SONICTERM_SMOKE_BRIDGE: ${{ runner.temp }}\sonicterm-msi-image\PFiles\SonicTerm\sonicterm-mcp.exe
+        shell: pwsh
+        run: python scripts/mcp-smoke.py
 
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}
@@ -1491,6 +1559,9 @@ jobs:
       - name: Build Linux release binary
         run: cargo build --release -p sonicterm-linux
 
+      - name: Build MCP bridge
+        run: cargo build --release -p sonicterm-mcp
+
       - name: Build and validate Linux packages
         id: packages
         shell: bash
@@ -1533,6 +1604,16 @@ jobs:
 
       - name: Run packaged GPU device-recovery smokes
         run: bash scripts/smoke-linux-packages.sh "${{ steps.packages.outputs.tarball }}" "${{ steps.packages.outputs.deb }}" device-recovery
+
+      # The packaged tarball's app and bridge; the smoke starts its own Xvfb with lavapipe, as the package smokes do.
+      - name: Require MCP end-to-end smoke on the packaged payload
+        shell: bash
+        run: |
+          payload="$(mktemp -d)"
+          tar -xzf "${{ steps.packages.outputs.tarball }}" -C "$payload"
+          root="$(find "$payload" -mindepth 1 -maxdepth 1 -type d -name 'SonicTerm-*-linux-x86_64' -print)"
+          export SONICTERM_SMOKE_APP="$root/sonicterm" SONICTERM_SMOKE_BRIDGE="$root/sonicterm-mcp"
+          python3 scripts/mcp-smoke.py
 
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}

@@ -180,6 +180,11 @@ cargo build -p sonicterm-app
   `App::apply_tab_*` carries the result out; the handlers supply only the bar layout and,
   for a tear-out, the event loop.
 - Window-ready hooks fire once, immediately after winit creates the window.
+- Agent targeting (`pane_target.rs`) never falls back to the active or frontmost pane: a
+  missing pane id fails and changes nothing. `create_pane_at` keeps the user's focus (a new
+  tab goes in through `Tabs::insert_inactive`), sizes a pane in a hidden tab from that tab's
+  own layout (`compute_tab_pane_rects`), and marks the pane `agent_owned`. `write_agent_input`
+  refuses a pane whose window is in READONLY, frontmost or not.
 - A command launch runs through `PtyHandle::spawn_command` only: a failure writes its
   sanitized reason into the pane's own grid and notifies, and never starts a shell. Launch
   logs carry the kind, program file name, argument count and byte lengths, cwd source and

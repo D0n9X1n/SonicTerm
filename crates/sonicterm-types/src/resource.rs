@@ -128,6 +128,9 @@ pub enum ResourceClass {
     /// A terminal window's retained accessibility model: its exposed segments, announcement and
     /// announcement queue, bounded by the strip's segment count.
     AccessibilityTree,
+    /// The local control server's connection buffers: partial request lines and replies being
+    /// written, bounded by its line cap and connection limit.
+    ControlConnection,
 }
 
 /// Why each [`ResourceClass`] is or is not charged in production.
@@ -340,6 +343,8 @@ impl ResourceClass {
             Self::ReaperWork => ClassCoverage::Charged,
             // App::flush_accessibility charges each connected window's model to its window owner.
             Self::AccessibilityTree => ClassCoverage::Charged,
+            // App::charge_mcp_connections charges live connection buffers to the process-level Mcp owner.
+            Self::ControlConnection => ClassCoverage::Charged,
             // Owner records are the ledger's own storage. Charging them to a
             // ledger class would make the ledger account for itself, and the
             // recursion has no fixed point.
@@ -459,6 +464,9 @@ impl ResourceClass {
             // App::flush_accessibility charges this to the terminal window's owner, never a pane.
             Self::AccessibilityTree => PaneSeamTerm::ChargedToAnotherOwnerKind,
 
+            // Charged to the process-level Mcp owner; agents' connections belong to no pane.
+            Self::ControlConnection => PaneSeamTerm::ChargedToAnotherOwnerKind,
+
             // No subsystem charges these: subscriber owners are absent, registry storage is ledger-owned,
             // font faces have no shared owner, and GPU surface memory has no driver-reported size.
             Self::MuxSubscriber | Self::RegistryMetadata | Self::FontFace | Self::Surface => {
@@ -568,6 +576,8 @@ pub enum OwnerKind {
     MuxConnection,
     /// Connection attachment owner.
     Attachment,
+    /// The local control server agents connect to, below the GUI process root.
+    Mcp,
 }
 
 /// Admission state of a resource owner.

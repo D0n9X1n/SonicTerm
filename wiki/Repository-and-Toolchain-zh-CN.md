@@ -6,7 +6,7 @@
 
 ```text
 Cargo.toml     workspace member、共享 package metadata、依赖、profile、lint
-crates/        23 个第一方 Rust crate
+crates/        24 个第一方 Rust crate
 assets/        字体、主题、键位、图标、本地化、截图
 wiki/          规范双语文档
 scripts/       扁平的第一方 shell 与 PowerShell 自动化

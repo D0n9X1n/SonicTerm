@@ -184,6 +184,28 @@ pub fn encode_logical_with_modes(
     kitty_flags: u8,
     modes: KeyboardModes,
 ) -> Option<Vec<u8>> {
+    encode_logical_state(key, mods, kitty_flags, modes, ElementState::Pressed)
+}
+
+/// Encode the release of a synthetic logical key; `None` unless the Kitty flags ask for release
+/// events, since no other protocol represents a release.
+pub(crate) fn encode_logical_release(
+    key: &Key,
+    mods: ModifiersState,
+    kitty_flags: u8,
+    modes: KeyboardModes,
+) -> Option<Vec<u8>> {
+    encode_logical_state(key, mods, kitty_flags, modes, ElementState::Released)
+}
+
+/// A synthetic logical key in `state`, encoded with the pane's modes.
+fn encode_logical_state(
+    key: &Key,
+    mods: ModifiersState,
+    kitty_flags: u8,
+    modes: KeyboardModes,
+    state: ElementState,
+) -> Option<Vec<u8>> {
     let text = match key {
         Key::Character(text) => Some(text.as_str()),
         Key::Named(NamedKey::Space) => Some(" "),
@@ -197,7 +219,7 @@ pub fn encode_logical_with_modes(
             text,
             text_with_all_modifiers: text,
             location: KeyLocation::Standard,
-            state: ElementState::Pressed,
+            state,
             repeat: false,
         },
         mods,

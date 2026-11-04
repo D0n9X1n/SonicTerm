@@ -74,6 +74,12 @@ PREREQUISITES = {
         "Windows 上由 `scripts/setup-windows-cairo.ps1` 安装的 Cairo，以及 Linux 上 "
         "`linux-core` job 安装的软件包。",
     ),
+    "display": (
+        "a graphical session for the release app: the desktop session on macOS and Windows, and on Linux a "
+        "`DISPLAY` or `WAYLAND_DISPLAY`, or `Xvfb` on `PATH`, which `mcp-smoke.py` starts itself.",
+        "供 release 应用使用的图形会话：macOS 与 Windows 上的桌面会话；Linux 上的 `DISPLAY` 或 "
+        "`WAYLAND_DISPLAY`，或 `PATH` 上的 `Xvfb`（由 `mcp-smoke.py` 自行启动）。",
+    ),
     "bash": (
         "`bash` on `PATH`; on Windows, run the gate from Git Bash so Git's `bash` is found first.",
         "`PATH` 上的 `bash`；在 Windows 上请从 Git Bash 运行 gate，使 Git 的 `bash` 优先被找到。",

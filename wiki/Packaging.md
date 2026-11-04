@@ -65,6 +65,7 @@ for the Rust build and `create-dmg` plus ImageMagick for packaging:
 ```bash
 brew install cairo pkg-config create-dmg imagemagick
 cargo build --release -p sonicterm-mac
+cargo build --release -p sonicterm-mcp
 bash scripts/bake-icons.sh
 
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
@@ -119,6 +120,7 @@ The DMG contains `SonicTerm.app`:
 ```text
 SonicTerm.app/Contents/
 ├── MacOS/sonicterm-mac
+├── MacOS/sonicterm-mcp
 ├── Info.plist
 ├── Frameworks/*.dylib
 └── Resources/
@@ -147,6 +149,17 @@ remain supplied by macOS. Dylibs are individually signed before the final app
 seal, and the verifier checks the resulting closure and manifest. This does not
 change the source-pinned FreeType/HarfBuzz stack or require Homebrew on the user's
 Mac.
+
+`scripts/make-macos-dmg.sh` copies the `sonicterm-mcp` agent bridge from beside the
+app binary, or from `SONICTERM_MCP_BIN`, and fails when it is missing.
+`scripts/macos-bundle.py` requires it: `bundle` and `verify` fail when
+`Contents/MacOS/sonicterm-mcp` is missing, and verify it as a companion executable
+that loads only system libraries, has no rpaths, matches the app's architecture,
+and does not require a newer macOS than the app. Because `test-macos-package.py`
+runs that `verify` on the mounted DMG, a DMG without the bridge fails validation.
+The bridge is ad-hoc signed on its own after the native bundle step and before
+the bundle seal: an Intel linker leaves it unsigned, and the seal refuses an
+unsigned nested executable.
 
 After native dependency collection, the script adds `LICENSE-winit-Apache-2.0`
 to `Contents/Resources/licenses`. After assembling all resources, it applies and
@@ -241,6 +254,7 @@ choco install wixtoolset --version 3.14.1.20250415 --no-progress -y
 
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
+cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-mcp
 python scripts/setup-windows-conpty.py --destination target/x86_64-pc-windows-msvc/release
 $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
     Where-Object name -eq sonicterm-windows | Select-Object -ExpandProperty version
@@ -289,6 +303,7 @@ MSI installs this core layout under `Program Files\SonicTerm`:
 ```text
 SonicTerm/
 ├── sonicterm-windows.exe
+├── sonicterm-mcp.exe
 ├── LICENSE-winit-Apache-2.0
 ├── conpty/
 │   ├── conpty.dll
@@ -312,6 +327,17 @@ takes `NOTICE.md` from `scripts/NOTICE-conpty.md`, and its validator pins that
 file's size and SHA-256. The runtime's selection rules are on
 [Terminal IO and VT](Terminal-IO-and-VT).
 
+`sonicterm-mcp.exe`, the agent bridge, is installed beside `sonicterm-windows.exe`
+in the same `binary0` component, so the default path is
+`C:\Program Files\SonicTerm\sonicterm-mcp.exe`. `validate-windows-msi.ps1` fails
+an MSI whose File table lacks a nonempty `sonicterm-mcp.exe` in `binary0`. With
+`-ExtractTo <new directory>` it also keeps the administrative image it extracted
+through its bounded, job-contained `msiexec /a` runner, and only once the MSI
+validates. PR CI (`windows-smoke`) and the Release workflow both build the MSI
+with the pinned cargo-wix and WiX, validate it this way, and run
+`scripts/mcp-smoke.py` on the image's app and bridge, so the shipped bridge is
+exercised end to end before merge and again at release.
+
 It creates a Start-menu shortcut and sets the `INSTALLDESKTOPSHORTCUT` property
 to `1` by default. It registers SonicTerm ProgIDs, Default Apps capabilities, and
 `OpenWithProgids` for `.ps1`, `.cmd`, `.bat`, and `.sh`, then broadcasts
@@ -330,6 +356,7 @@ Fontconfig, X11, and Wayland development dependencies plus `tar`, `gzip`,
 
 ```bash
 cargo build --release -p sonicterm-linux
+cargo build --release -p sonicterm-mcp
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
 import json, sys
 metadata = json.load(sys.stdin)
@@ -346,6 +373,9 @@ bash scripts/test-linux-packages.sh \
   "dist/SonicTerm-${tag}-linux-x86_64.deb"
 ```
 
+The script takes `sonicterm-mcp` from beside the given binary, or from
+`SONICTERM_MCP_BIN`, and fails when it is missing.
+
 On a non-Linux host, `scripts/make-linux-packages.sh --stage-only` can assemble
 the common payload, but it cannot create or validate the ELF packages.
 
@@ -360,6 +390,7 @@ The relocatable archive is
 ```text
 SonicTerm-<tag>-linux-x86_64/
 ├── sonicterm
+├── sonicterm-mcp
 ├── assets/{fonts,themes,keymaps,icons,i18n}/
 ├── share/applications/com.d0n9x1n.SonicTerm.desktop
 ├── share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
@@ -376,6 +407,7 @@ The Debian package is `SonicTerm-<tag>-linux-x86_64.deb` and installs:
 
 ```text
 /usr/bin/sonicterm
+/usr/bin/sonicterm-mcp
 /usr/share/sonicterm/assets/{fonts,themes,keymaps,icons,i18n}/
 /usr/share/applications/com.d0n9x1n.SonicTerm.desktop
 /usr/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
@@ -386,7 +418,8 @@ The Debian package is `SonicTerm-<tag>-linux-x86_64.deb` and installs:
 ```
 
 The builder checks x86_64 ELF identity and rejects GLIBC requirements newer
-than 2.35. `dpkg-shlibdeps` derives linked `Depends`; the script also adds
+than 2.35. `dpkg-shlibdeps` derives linked `Depends` from both `sonicterm` and
+`sonicterm-mcp`; the script also adds
 `libxkbcommon-x11-0` because winit loads it dynamically for X11. The portable
 archive's host must provide `libxkbcommon-x11.so.0` when using X11. The package
 script verifies the bundled symbols font plus themes, keymaps, icons, and English

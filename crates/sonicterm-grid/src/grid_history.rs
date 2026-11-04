@@ -25,15 +25,7 @@ impl Grid {
     ) -> std::collections::vec_deque::Drain<'_, Line> {
         let removed = count as u64;
         self.scrollback_evicted = self.scrollback_evicted.saturating_add(removed);
-        self.prompts.retain_mut(|prompt| {
-            if prompt.start_row < removed {
-                // When: the prompt start was evicted, its remaining output cannot identify that prompt.
-                return false;
-            }
-            prompt.start_row -= removed;
-            prompt.end_row = prompt.end_row.map(|row| row.saturating_sub(removed));
-            true
-        });
+        self.rebase_prompts_after_drain(removed);
         // Returning the drain lets the scroll path reuse an evicted row without allocating a replacement.
         self.scrollback.drain(..count)
     }
