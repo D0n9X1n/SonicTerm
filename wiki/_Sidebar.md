@@ -1,8 +1,6 @@
 <details open>
 <summary><b>English</b></summary>
 
-- [Home](Home)
-
 **User guide**
 
 - [Usage](Usage)
@@ -36,13 +34,12 @@
 - [Release Process](Release-Process)
 - [Wiki Publication](Wiki-Publication)
 - [Code Ownership](Code-Ownership)
+- [Home](Home)
 
 </details>
 
 <details>
 <summary><b>简体中文</b></summary>
-
-- [首页](Home-zh-CN)
 
 **用户手册**
 
@@ -77,5 +74,6 @@
 - [发布流程](Release-Process-zh-CN)
 - [Wiki 发布](Wiki-Publication-zh-CN)
 - [代码所有权](Code-Ownership-zh-CN)
+- [首页](Home-zh-CN)
 
 </details>
