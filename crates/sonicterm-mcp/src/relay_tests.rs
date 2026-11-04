@@ -394,8 +394,10 @@ const QUICK: Limits =
 
 /// A drain several read gaps long, for the slow-reader tests: each read shows up as progress within
 /// the writer's 50 ms retry, so a late wake-up on a loaded CI runner cannot end the relay.
+#[cfg(unix)]
 const PACED: Limits = Limits { stall: Duration::from_secs(1), drain: Duration::from_secs(1) };
 /// The gap between a slow reader's reads, well inside [`PACED`]'s drain.
+#[cfg(unix)]
 const READ_EVERY: Duration = Duration::from_millis(150);
 
 /// One reply far longer to write than the drain, read at a pace whose every read frees more
