@@ -4,9 +4,10 @@
 
 SonicTerm runs tmux, rmux, GNU screen, Zellij and Byobu like any other program.
 The multiplexer decides which terminal features reach SonicTerm: links, the
-working directory, colors, keys, clipboard writes and mouse reports. This page
+working directory, colors, keys, clipboard writes, mouse reports and images. This page
 lists what each one passes through, the settings that make tmux and rmux pass
-the rest, and how links and paths behave inside panes.
+the rest, how links and paths behave inside panes, and what rmux on Windows
+needs to pass images.
 
 ```mermaid
 flowchart LR
@@ -344,6 +345,62 @@ Troubleshooting:
 See [Terminal IO and VT](Terminal-IO-and-VT) for protocol boundaries and the
 [RMUX clipboard guide](https://github.com/Helvesec/rmux/blob/dfd68c774ca0f4212139a21d37d09c90f75f8bd7/docs/human-friendly-config.md#copying-text)
 for its UTF-8 and clipboard-policy contract.
+
+## Images in rmux on Windows
+
+SonicTerm draws kitty images that reach it, but on Windows an rmux pane passes
+them only when rmux hosts that pane with OpenConsole's `conpty.dll`. rmux 0.10.0
+hosts each pane with the ConPTY built into Windows, which drops kitty APC
+sequences (see [Terminal IO and VT](Terminal-IO-and-VT)), so a program in a pane
+never gets an image to SonicTerm, even though rmux reports `kitty-graphics` for
+the SonicTerm client and forwards kitty commands it receives.
+
+```mermaid
+flowchart LR
+    program["Program in an rmux pane"] -->|"kitty APC"| host{"Pane's console host"}
+    host -->|"built-in ConPTY (conhost.exe)"| dropped["Dropped"]
+    host -->|"OpenConsole conpty.dll"| server["rmux server"]
+    server -->|"forwarded with allow-passthrough on"| sonic["SonicTerm draws the image"]
+```
+
+The rmux server process (`libexec\rmux\rmux.exe`) calls `CreatePseudoConsole`
+from `kernel32.dll`, a KnownDLL, so placing a `conpty.dll` beside it changes
+nothing. Images in panes need an rmux server built to load `conpty.dll` and
+`OpenConsole.exe` from a folder beside it, the way SonicTerm loads its packaged
+runtime. Copy those two files from SonicTerm's `conpty` folder, under
+`%ProgramFiles%\SonicTerm` for an installed build. rmux also forwards kitty
+commands only for a pane whose effective `allow-passthrough` is `on` or `all`:
+
+```tmux
+set -g allow-passthrough on
+```
+
+`allow-passthrough on` is a trust decision, as Mouse and clipboard explains: it
+also lets programs in panes send raw escape sequences to SonicTerm.
+
+A running server keeps the console runtime it started with, so restart the rmux
+server after changing it. To check which runtime hosts a server's panes, read its
+process id and list that process's children:
+
+```powershell
+$server = rmux display-message -p '#{pid}'
+Get-CimInstance Win32_Process -Filter "ParentProcessId=$server" | Select-Object Name
+```
+
+`OpenConsole.exe` children mean the panes can pass images; `conhost.exe` children
+mean the built-in ConPTY is in use and images are dropped.
+
+This was checked on Windows 11 build 26300 with rmux 0.10.0 and SonicTerm 1.4.3,
+whose packaged runtime is 1.25.260930003. In a server built that way, a kitty PNG
+written in a pane and Claude Code's mermaid-tty picture were drawn; the same
+server forced back to the built-in ConPTY drew neither. Programs decide on their
+own whether to send images inside a multiplexer: Claude Code with mermaid-tty
+needs `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` and `MERMAID_TTY_TMUX_IMAGES=1` in
+that pane. OpenConsole versions before 1.26 can misplace the cursor after an
+unknown APC sequence
+([microsoft/terminal#19926](https://github.com/microsoft/terminal/issues/19926)).
+Stock rmux releases, other Windows builds and other console runtimes have not
+been checked.
 
 ## Other multiplexers
 

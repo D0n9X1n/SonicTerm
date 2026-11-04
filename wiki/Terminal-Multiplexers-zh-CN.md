@@ -3,9 +3,9 @@
 [English](Terminal-Multiplexers)
 
 SonicTerm 像运行其它程序一样运行 tmux、rmux、GNU screen、Zellij 和 Byobu。哪些终端
-功能能到达 SonicTerm，由复用器决定：链接、工作目录、颜色、按键、剪贴板写入和鼠标报告。
-本页列出各复用器会转发什么、让 tmux 与 rmux 转发其余功能的设置，以及链接和路径在窗格中
-的行为。
+功能能到达 SonicTerm，由复用器决定：链接、工作目录、颜色、按键、剪贴板写入、鼠标报告和
+图片。本页列出各复用器会转发什么、让 tmux 与 rmux 转发其余功能的设置、链接和路径在窗格中
+的行为，以及 Windows 上的 rmux 传递图片需要什么。
 
 ```mermaid
 flowchart LR
@@ -276,6 +276,56 @@ OSC 52 与管道命令是独立效果，配置命令不会关闭 OSC 52。如果
 
 协议边界见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)，UTF-8 与剪贴板策略契约见
 [RMUX 剪贴板指南](https://github.com/Helvesec/rmux/blob/dfd68c774ca0f4212139a21d37d09c90f75f8bd7/docs/human-friendly-config.md#copying-text)。
+
+## Windows 上 rmux 中的图片
+
+SonicTerm 会绘制到达它的 kitty 图片，但在 Windows 上，只有当 rmux 用 OpenConsole 的
+`conpty.dll` 承载某个窗格时，该窗格才会传递图片。rmux 0.10.0 用 Windows 内置的 ConPTY
+承载每个窗格，而它会丢弃 kitty APC 序列（见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)），
+因此窗格中的程序永远无法把图片送到 SonicTerm——尽管 rmux 为 SonicTerm 客户端报告
+`kitty-graphics`，并且会转发它收到的 kitty 命令。
+
+```mermaid
+flowchart LR
+    program["rmux 窗格中的程序"] -->|"kitty APC"| host{"窗格的控制台宿主"}
+    host -->|"内置 ConPTY（conhost.exe）"| dropped["被丢弃"]
+    host -->|"OpenConsole conpty.dll"| server["rmux 服务器"]
+    server -->|"allow-passthrough on 时转发"| sonic["SonicTerm 绘制图片"]
+```
+
+rmux 服务器进程（`libexec\rmux\rmux.exe`）调用 `kernel32.dll` 中的
+`CreatePseudoConsole`，而它是 KnownDLL，所以在旁边放一个 `conpty.dll` 不会改变任何东西。
+窗格中的图片需要一个经过构建、会从其旁边的文件夹加载 `conpty.dll` 与 `OpenConsole.exe`
+的 rmux 服务器，就像 SonicTerm 加载它打包的运行时那样。这两个文件从 SonicTerm 的
+`conpty` 文件夹复制；已安装的版本位于 `%ProgramFiles%\SonicTerm` 下。rmux 也只为有效
+`allow-passthrough` 为 `on` 或 `all` 的窗格转发 kitty 命令：
+
+```tmux
+set -g allow-passthrough on
+```
+
+`allow-passthrough on` 是一个信任决定，正如鼠标与剪贴板一节所说：它也允许窗格中的程序
+向 SonicTerm 发送原始转义序列。
+
+正在运行的服务器保留它启动时的控制台运行时，因此更改后请重启 rmux 服务器。要查看哪个
+运行时承载某个服务器的窗格，请读取它的进程 ID 并列出该进程的子进程：
+
+```powershell
+$server = rmux display-message -p '#{pid}'
+Get-CimInstance Win32_Process -Filter "ParentProcessId=$server" | Select-Object Name
+```
+
+子进程是 `OpenConsole.exe` 表示窗格可以传递图片；是 `conhost.exe` 表示正在使用内置
+ConPTY，图片会被丢弃。
+
+以上在 Windows 11 build 26300、rmux 0.10.0 与 SonicTerm 1.4.3（其打包运行时为
+1.25.260930003）上检查过。在这样构建的服务器中，窗格里写出的 kitty PNG 与 Claude Code
+的 mermaid-tty 图片都被绘制出来；同一服务器强制改回内置 ConPTY 后两者都不显示。程序会
+自行决定在复用器中是否发送图片：Claude Code 配合 mermaid-tty 需要在该窗格中设置
+`CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` 与 `MERMAID_TTY_TMUX_IMAGES=1`。1.26 之前的
+OpenConsole 可能在未知 APC 序列之后放错光标位置
+（[microsoft/terminal#19926](https://github.com/microsoft/terminal/issues/19926)）。
+未经修改的 rmux 发行版、其它 Windows 版本与其它控制台运行时尚未检查。
 
 ## 其它复用器
 
