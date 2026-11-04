@@ -275,8 +275,9 @@ to. It is off by default; while it is off nothing listens and no endpoint exists
 | `control` | `"agent"` | Which panes control tools may act on: `"off"` (none), `"agent"` (panes an agent created) or `"any"` (every pane). Read tools work on every pane whenever the server runs. A reload that changes it drops every request already queued. Any other value fails the load. |
 
 A reload that leaves `[mcp]` unchanged keeps the server and its connections, so
-a running `wait_for` continues. The endpoints, their permissions and the tools
-are described in [Platform Integration](Platform-Integration).
+a running `wait_for` continues. [MCP Server](MCP-Server) shows how to connect
+an agent and what each tool does; the endpoints and their permissions are
+described in [Platform Integration](Platform-Integration).
 
 ### Editing and reloading
 

@@ -663,78 +663,10 @@ request 发送到当前运行的应用，并添加标签页。草稿绝不会被
 
 ### 让 agent 操作 SonicTerm
 
-在 `sonicterm.toml` 中设置 `[mcp] enabled = true`（见 [配置](Configuration-zh-CN)）后，
-Claude Code、Copilot CLI 等 agent 可以读取窗格，并在你选择的范围内操作它们。端点、权限和
-读取类工具见 [平台集成](Platform-Integration-zh-CN)。
-
-#### 连接 agent
-
-SonicTerm 自身的二进制都是 GUI 程序，因此 agent 改为启动随附的 `sonicterm-mcp` 桥接程序。
-它是一个 stdio MCP 服务器：在 stdin 和 stdout 上使用按行分隔的 JSON-RPC，并把每一行在 agent 与
-正在运行的 SonicTerm 控制服务器之间双向转发。stdout 只承载 SonicTerm 发出的内容；诊断信息写到
-stderr。
-
-| 平台 | `sonicterm-mcp` 路径 |
-| --- | --- |
-| macOS | `/Applications/SonicTerm.app/Contents/MacOS/sonicterm-mcp` |
-| Linux | `sonicterm-mcp`（`.deb` 安装在 `/usr/bin`），或 tarball 中 `sonicterm` 旁边 |
-| Windows | `"C:\Program Files\SonicTerm\sonicterm-mcp.exe"` |
-
-在 Claude Code 中注册：
-
-```bash
-claude mcp add --transport stdio --scope user sonicterm -- /Applications/SonicTerm.app/Contents/MacOS/sonicterm-mcp
-```
-
-Copilot CLI 则在 `~/.copilot/mcp-config.json` 中添加一个 `mcpServers` 条目：
-
-```json
-{ "mcpServers": { "sonicterm": { "type": "local", "command": "/Applications/SonicTerm.app/Contents/MacOS/sonicterm-mcp", "args": [], "tools": ["*"] } } }
-```
-
-桥接程序按以下顺序选择端点：
-
-1. `--endpoint <path-or-pipe>`。
-2. `SONICTERM_CONTROL`；服务器运行期间，SonicTerm 会在每个窗格中设置它。
-3. 每用户端点目录中唯一存活的端点。没有或多于一个时报错，并列出找到的端点；桥接程序从不在多个
-   实例之间猜测。
-
-在 SonicTerm 窗格内启动的 agent 会继承 `SONICTERM_CONTROL` 和 `SONICTERM_PANE_ID`，因此无需任何
-参数即可连到该实例，桥接程序会把 `SONICTERM_PANE_ID` 作为默认窗格传递。默认窗格从不构成授权。
-发送任何字节之前，桥接程序会检查服务器以同一用户运行：macOS 和 Linux 上检查对端 uid，Windows 上
-检查服务器进程令牌的 SID。用法错误时以 2 退出，找不到端点或无法连接时以 1 退出，任一端关闭时以 0
-退出。SonicTerm 关闭连接后，桥接程序会在已发送的内容全部写入 stdout 之后再退出；若 stdout 2 s
-内未接收任何内容则以 1 退出。SonicTerm 连接期间，若已积压 4 MiB 且客户端
-5 s 内未读取任何内容，则以 1 结束转发。进度以 stdout 管道或套接字实际接收的字节计：macOS 上客户端的任何读取都算数；
-Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空间，客户端每个时段至少要读取相应的量。像 MCP 客户端那样持续读取的客户端永远不会被断开。`--version`（`-V`）和 `--help`（`-h`）打印后退出。
-
-#### 控制范围与工具
-
-`[mcp] control` 决定控制类工具可以作用于什么：
-
-| `control` | 控制类工具可作用于 |
-| --- | --- |
-| `"off"` | 不允许；只有读取类工具可用 |
-| `"agent"`（默认） | agent 创建的窗格，以及在任意窗格旁打开辅助窗格 |
-| `"any"` | 所有窗格 |
-
-无论范围如何，READONLY 窗口中的窗格总被拒绝。含有 agent 窗格的标签页在标题前显示紫色圆环标记。
-
-| 工具 | 作用 |
-| --- | --- |
-| `create_pane` | 在某个窗格旁打开辅助窗格：向右或向下拆分，或在其窗口中新开标签页。焦点不移动。给出 `argv` 时直接运行该程序，程序退出后窗格保留，因此可用带 `exit` 的 `wait_for` 和 `read_pane` 读取其结束情况。 |
-| `send_text` | 输入文本；程序要求时以括号粘贴方式发送；`submit` 追加回车。至多 64 KiB。 |
-| `send_keys` | 发送具名按键（`Enter`、`Tab`、`Escape`、方向键、`Home`、`End`、`PageUp`、`PageDown`、`F1`–`F12`、单个字符），每个可加 `Ctrl+`、`Alt+` 或 `Shift+` 前缀，并按窗格的键盘模式编码。至多 64 个键；有一个未知名称则什么都不发送。 |
-| `run_command` | 在窗格的 shell 提示符处运行一条命令并等待结束，返回其输出和 shell 报告的退出码（`completed`）；若 shell 未运行任何命令就结束了该提示符则返回 `not_started`，若在其输出开始前有他人输入则返回 `interfered`，记录被淘汰或 shell 退出则返回 `lost`，超时（默认 60 s，至多 600 s）则返回 `running`。 |
-| `close_pane` | 关闭一个窗格；标签页的唯一窗格会关闭该标签页。主窗口的最后一个标签页永不关闭。 |
-
-`run_command` 需要 shell 集成：shell 必须用 OSC 133 `A`、`B`、`C`、`D` 标记提示符，WezTerm、
-iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有输入的文本、输入队列不为空，或上一条
-命令运行期间有人输入，它会拒绝。这项检查只能尽力而为，因为终端无法看到 shell 已读取了什么，所以
-请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。退出码是 shell 报告的值。
-
-窗格文本是不可信输入：程序可以打印意在操纵 agent 的文本。服务器告知 agent 从不执行窗格文本中的
-指令，但除非 agent 必须操作你自己的窗格，请将 `control` 保持为 `"agent"`。
+Claude Code、Copilot CLI 等 agent 可以通过 SonicTerm 的本地 MCP 服务器读取窗格，并在你选择的
+范围内操作它们。该服务器默认关闭。[MCP 服务器](MCP-Server-zh-CN) 说明如何用
+`[mcp] enabled = true` 开启它、通过随附的 `sonicterm-mcp` 桥接程序连接 agent，以及选择 agent
+可以控制什么。
 
 ### 配置与排障
 

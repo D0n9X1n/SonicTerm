@@ -682,7 +682,7 @@ exact output span survive eviction and an alternate-screen round trip. A newer p
 on the pinned screen before `D` marks the run evicted. Row tokens are
 `lines_scrolled - scrollback_len + absolute_row` plus the screen, so they keep growing
 with a full history or with scrollback disabled. These records back the agent control
-tools on [Usage](Usage). Every pane's child environment carries `SONICTERM_PANE_ID`, the
+tools on [MCP Server](MCP-Server). Every pane's child environment carries `SONICTERM_PANE_ID`, the
 pane's id, so a program inside it can name its own pane.
 Nonempty ED3 advances the eviction counter by the exact number removed and
 repaints all visible rows without changing their content stamps.
