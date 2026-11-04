@@ -53,6 +53,6 @@ The end-to-end path against a real app is `python3 scripts/mcp-smoke.py`
   `tools_control.rs`, endpoints in `endpoint_unix.rs` and `endpoint_windows.rs`).
 - Packaged by: `scripts/macos-bundle.py`, `scripts/make-linux-packages.sh`, and
   `crates/sonicterm-windows/wix/main.wxs`.
-- Wiki: [Usage](../../wiki/Usage.md) (connecting an agent),
+- Wiki: [MCP Server](../../wiki/MCP-Server.md) (enabling the server, connecting an agent, tools),
   [Platform Integration](../../wiki/Platform-Integration.md) (endpoints), and
   [Local Gate](../../wiki/Local-Gate.md) (the MCP smoke).

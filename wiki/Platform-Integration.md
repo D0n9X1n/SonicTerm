@@ -612,7 +612,7 @@ newline-delimited JSON-RPC 2.0, one message per line of at most 1 MiB, and
 serves at most four connections; each runs one tool call at a time and refuses a
 second call while one runs. There is no token: the endpoint is reachable only by
 the user who runs SonicTerm. Agents reach it through the bundled `sonicterm-mcp`
-stdio bridge; [Usage](Usage) shows how to connect one.
+stdio bridge; [MCP Server](MCP-Server) shows how to connect one.
 
 ```mermaid
 flowchart LR
@@ -647,7 +647,7 @@ the next start removes those whose process is gone.
 | `wait_for` | Waits until a `regex` matches a row after `after_row`, output stays quiet for `quiet_ms`, or the process exits, bounded by `timeout_ms` (default 30 s, at most 120 s). Only lines that began after `after_row` count, so text a soft wrap appends to an older line does not. A match already on screen ends it at once; a token from the other screen is refused as `stale_row`. |
 
 The control tools (`create_pane`, `send_text`, `send_keys`, `run_command`,
-`close_pane`) and the `[mcp] control` scope are described in [Usage](Usage). Each
+`close_pane`) and the `[mcp] control` scope are described in [MCP Server](MCP-Server). Each
 is checked against the scope again on the event loop when it runs.
 
 A read takes the pane's parser for one attempt of at most 5 ms, visits at most

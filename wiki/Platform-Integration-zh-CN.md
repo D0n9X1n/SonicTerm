@@ -471,7 +471,7 @@ flowchart TD
 [Model Context Protocol](https://modelcontextprotocol.io) 服务器，供 Claude Code、Copilot CLI
 等 agent 读取窗格。它使用按行分隔的 JSON-RPC 2.0，每行一条消息，至多 1 MiB；最多服务四个连接，
 每个连接同一时间只运行一个工具调用，运行期间收到的第二个调用会被拒绝。没有令牌：只有运行 SonicTerm
-的用户能访问端点。agent 通过随附的 stdio 桥接程序 `sonicterm-mcp` 连接它；连接方式见[用法](Usage-zh-CN)。
+的用户能访问端点。agent 通过随附的 stdio 桥接程序 `sonicterm-mcp` 连接它；连接方式见 [MCP 服务器](MCP-Server-zh-CN)。
 
 ```mermaid
 flowchart LR
@@ -501,7 +501,7 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 | `wait_for` | 等到 `regex` 匹配 `after_row` 之后的某行、输出在 `quiet_ms` 内保持安静，或进程退出，受 `timeout_ms`（默认 30 s，至多 120 s）限制。只有在 `after_row` 之后开始的行才计入，因此软换行追加到旧行上的文本不算。屏幕上已有的匹配会立即结束等待；来自另一个屏幕的标记以 `stale_row` 拒绝。 |
 
 控制类工具（`create_pane`、`send_text`、`send_keys`、`run_command`、`close_pane`）和
-`[mcp] control` 范围见 [用法](Usage-zh-CN)。每个工具在事件循环上执行时都会再次按范围检查。
+`[mcp] control` 范围见 [MCP 服务器](MCP-Server-zh-CN)。每个工具在事件循环上执行时都会再次按范围检查。
 
 一次读取对窗格解析器只尝试一次、至多 5 ms，最多访问 32,768 个单元格（含空白行），复制到字节上限即停止；解析器被占用时直接返回
 `busy` 和 `truncated`，不会等待。每次工具调用都在服务器当前代次下被接受；返回前被撤销的调用以 `revoked`

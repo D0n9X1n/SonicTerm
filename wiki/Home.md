@@ -14,6 +14,7 @@ SonicTerm is a native, GPU-accelerated terminal for macOS, Windows, and Linux.
 - [Themes](Themes) — choose or create a color palette
 - [Logging](Logging) — find logs, investigate a problem, and prepare a bug report
 - [Memory](Memory) — understand resource limits and retained-memory reports
+- [MCP Server](MCP-Server) — turn on the agent control server and connect Claude Code or Copilot CLI
 
 ### How SonicTerm works
 

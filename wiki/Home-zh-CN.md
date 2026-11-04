@@ -14,6 +14,7 @@ SonicTerm 是面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。
 - [主题](Themes-zh-CN) — 选择或创建配色
 - [日志](Logging-zh-CN) — 查找日志、排查问题和准备缺陷报告
 - [内存](Memory-zh-CN) — 理解资源上限与常驻内存报告
+- [MCP 服务器](MCP-Server-zh-CN) — 开启 agent 控制服务器，并连接 Claude Code 或 Copilot CLI
 
 ### SonicTerm 如何工作
 
