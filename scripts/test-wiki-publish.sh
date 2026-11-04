@@ -32,6 +32,7 @@ git -C "$wiki_repo" commit -q -m seed
 printf '# home\n' > "$source_dir/Home.md"
 printf '# 首页\n' > "$source_dir/Home-zh-CN.md"
 printf '# current\n' > "$source_dir/Keep.md"
+printf -- '- [Home](Home)\n' > "$source_dir/_Sidebar.md"
 printf 'not a wiki page\n' > "$source_dir/ignored.txt"
 
 first_output="$tmp/first-output"
@@ -41,6 +42,7 @@ GITHUB_OUTPUT="$first_output" "$publisher" "$source_dir" "$wiki_repo" 0123456789
 [[ "$(git -C "$wiki_repo" branch --show-current)" == "master" ]] || fail "publisher changed branch"
 [[ -f "$wiki_repo/Home.md" ]] || fail "publisher omitted a new page"
 [[ -f "$wiki_repo/Home-zh-CN.md" ]] || fail "publisher omitted the Chinese page"
+[[ -f "$wiki_repo/_Sidebar.md" ]] || fail "publisher omitted the shared sidebar"
 [[ "$(<"$wiki_repo/Keep.md")" == "# current" ]] || fail "publisher did not update a page"
 [[ ! -e "$wiki_repo/Stale.md" ]] || fail "publisher retained a deleted page"
 [[ ! -e "$wiki_repo/ignored.txt" ]] || fail "publisher copied a non-Markdown file"
@@ -230,6 +232,23 @@ mutate_missing_chinese_crate() {
   replace_fixture_text "$1" Crate-Reference-zh-CN sonicterm-types missing-chinese-crate
 }
 
+# The shared sidebar is the one bilingual file: it must exist and link every page of both languages.
+mutate_missing_sidebar() {
+  rm "$1/wiki/_Sidebar.md"
+}
+
+mutate_sidebar_missing_english_link() {
+  replace_fixture_text "$1" _Sidebar '](Configuration)' '](Usage)'
+}
+
+mutate_sidebar_missing_chinese_link() {
+  replace_fixture_text "$1" _Sidebar '](Configuration-zh-CN)' '](Usage-zh-CN)'
+}
+
+mutate_sidebar_unknown_link() {
+  replace_fixture_text "$1" _Sidebar '](Configuration)' '](Missing-Page)'
+}
+
 # Separate files are the context boundary; examples may still contain Unicode text.
 [[ -f "$checker_fixture/wiki/Usage-zh-CN.md" ]] || fail "Chinese documentation must have a separate file"
 (
@@ -255,6 +274,10 @@ assert_checker_rejects independent-file-fence-state 'cross-page link target does
 assert_checker_rejects external-home-english-link 'wiki/Home.md:' mutate_external_home_english_link
 assert_checker_rejects missing-home-english-link 'wiki/Home.md:' mutate_missing_home_english_link
 assert_checker_rejects missing-home-chinese-link 'wiki/Home-zh-CN.md:' mutate_missing_home_chinese_link
+assert_checker_rejects missing-sidebar 'wiki/_Sidebar.md: required page is missing' mutate_missing_sidebar
+assert_checker_rejects sidebar-missing-english-link 'wiki/_Sidebar.md: missing link to Configuration' mutate_sidebar_missing_english_link
+assert_checker_rejects sidebar-missing-chinese-link 'wiki/_Sidebar.md: missing link to Configuration-zh-CN' mutate_sidebar_missing_chinese_link
+assert_checker_rejects sidebar-unknown-link 'cross-page link target does not exist: Missing-Page' mutate_sidebar_unknown_link
 assert_checker_rejects missing-english-crate 'wiki/Crate-Reference.md:' mutate_missing_english_crate
 assert_checker_rejects missing-chinese-crate 'wiki/Crate-Reference-zh-CN.md:' mutate_missing_chinese_crate
 

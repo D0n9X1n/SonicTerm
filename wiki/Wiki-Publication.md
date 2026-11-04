@@ -17,7 +17,10 @@ Cross-page source links use bare page names and stay in the current language,
 except for reciprocal language-switch links. The checker requires both members
 of every pair, rejects legacy language headings, compares heading depths, and
 checks link targets. `Home` lists every English page; `Home-zh-CN` lists every
-Chinese page. Both Crate Reference files must name every Cargo workspace package.
+Chinese page. `_Sidebar.md` is the one file without a counterpart: GitHub shows
+the same sidebar on every page, so it holds an English section, open by default,
+and a folded Chinese section, and it must link every page of both languages.
+Both Crate Reference files must name every Cargo workspace package.
 The checker validates page destinations, not heading fragments; check affected
 anchor links in the rendered pages too:
 

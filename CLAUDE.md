@@ -29,6 +29,9 @@ heading structure and equivalent facts, updating both files in the same change.
 Use reciprocal language-switch links and otherwise stay in the current language.
 Pages link by bare page name — `[Logging](Logging)` or
 `[日志](Logging-zh-CN)`, not `.md` paths — for the published wiki.
+The one exception is `wiki/_Sidebar.md`, the navigation GitHub shows on every
+page: a single file with an English section and a folded Chinese section that
+links every page of both languages. Add each new page to it.
 
 **Load only the English files for routine agent context.** The Read first links
 above and crate `CLAUDE.md` files are the agent entry points. Read Chinese files
