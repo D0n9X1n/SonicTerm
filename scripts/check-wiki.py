@@ -11,6 +11,9 @@ import sys
 from urllib.parse import unquote, urlsplit
 
 CHINESE_SUFFIX = "-zh-CN"
+# GitHub wikis show one `_Sidebar` on every page, so it is the single bilingual file:
+# no counterpart, no switch link, and it must link every page of both languages.
+SIDEBAR_STEM = "_Sidebar"
 LEGACY_MARKERS = frozenset({"## English", "## 中文"})
 HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+")
 LINK_PATTERN = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
@@ -115,8 +118,12 @@ def validate_links(
     page_stems: set[str],
     errors: list[str],
     start_line: int = 1,
+    same_language: bool = True,
 ) -> None:
-    """Validate bare cross-page links while allowing local anchors and URLs."""
+    """Validate bare cross-page links while allowing local anchors and URLs.
+
+    `same_language` is false only for the shared sidebar, which links both languages.
+    """
     for line_number, raw_target in link_targets(lines, start_line):
         target = unquote(raw_target)
         if target.startswith("#"):
@@ -135,7 +142,8 @@ def validate_links(
                 f"{path}:{line_number}: cross-page link target does not exist: {raw_target}"
             )
         elif (
-            page_target != counterpart_stem(path.stem)
+            same_language
+            and page_target != counterpart_stem(path.stem)
             and page_target.endswith(CHINESE_SUFFIX) != path.stem.endswith(CHINESE_SUFFIX)
         ):
             errors.append(
@@ -222,13 +230,19 @@ def main() -> int:
     if not pages:
         errors.append("wiki: no tracked Markdown pages found")
 
-    page_stems = {path.stem for path in pages}
+    sidebar = PurePosixPath(f"wiki/{SIDEBAR_STEM}.md")
+    page_stems = {path.stem for path in pages if path != sidebar}
     lines_by_path: dict[PurePosixPath, list[str]] = {}
     for path in pages:
         if not (root / path).is_file():
             errors.append(f"{path}: tracked page is missing from the working tree")
             continue
         lines = (root / path).read_text(encoding="utf-8").splitlines()
+        if path == sidebar:
+            # When: the shared sidebar, check only its targets and that it reaches every page.
+            validate_links(path, lines, page_stems, errors, same_language=False)
+            validate_home_links(path, lines, page_stems, errors)
+            continue
         lines_by_path[path] = lines
         for marker in sorted(LEGACY_MARKERS.intersection(lines)):
             errors.append(f"{path}: legacy language marker {marker!r}; use separate files")
@@ -252,6 +266,9 @@ def main() -> int:
                 f"{path}: heading-depth sequences differ from {chinese_path}: "
                 f"English {english_depths}; Chinese {chinese_depths}"
             )
+
+    if sidebar not in pages:
+        errors.append(f"{sidebar}: required page is missing")
 
     package_names, metadata_error = workspace_package_names(root)
     if metadata_error is not None:
