@@ -352,9 +352,10 @@ fn a_read_revoked_after_resolution_returns_no_text() {
         std::thread::spawn(move || loop {
             let requests = shared.take_requests();
             if let Some(request) = requests.into_iter().next() {
-                // The loop answers, then the server stops before the worker reads.
-                let _ = request.reply.try_send(LoopReply::Pane(entry.clone()));
+                // The server stops while the loop holds the resolved pane, so the stop is in place
+                // before the worker can read; stopping after the reply raced the worker's recheck.
                 shared.stop();
+                let _ = request.reply.try_send(LoopReply::Pane(entry.clone()));
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
