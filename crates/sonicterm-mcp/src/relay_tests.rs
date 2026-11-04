@@ -392,6 +392,14 @@ fn a_real_pipe_read_slowly_receives_the_whole_reply() {
 const QUICK: Limits =
     Limits { stall: Duration::from_millis(300), drain: Duration::from_millis(300) };
 
+/// A drain several read gaps long, for the slow-reader tests: each read shows up as progress within
+/// the writer's 50 ms retry, so a late wake-up on a loaded CI runner cannot end the relay.
+#[cfg(unix)]
+const PACED: Limits = Limits { stall: Duration::from_secs(1), drain: Duration::from_secs(1) };
+/// The gap between a slow reader's reads, well inside [`PACED`]'s drain.
+#[cfg(unix)]
+const READ_EVERY: Duration = Duration::from_millis(150);
+
 /// One reply far longer to write than the drain, read at a pace whose every read frees more
 /// than a write: the relay never gives up, because each 512-byte write is progress.
 #[test]
@@ -483,10 +491,6 @@ fn a_full_queue_with_stdout_stuck_is_a_stall() {
 #[test]
 fn the_composed_writer_keeps_a_slow_small_reader() {
     use std::fs::File;
-    /// A drain several read gaps long, so a late wake-up on a busy runner cannot end the relay.
-    const PACED: Limits = Limits { stall: Duration::from_secs(1), drain: Duration::from_secs(1) };
-    /// The gap between the reader's small reads.
-    const READ_EVERY: Duration = Duration::from_millis(150);
     use std::os::unix::io::{AsRawFd, FromRawFd};
     // The smallest read that frees room in a full pipe: a whole page on Linux, any read elsewhere.
     let freeing_read = if cfg!(target_os = "linux") { 4096 } else { 256 };
@@ -533,7 +537,7 @@ fn the_composed_writer_keeps_a_slow_small_reader() {
 }
 
 /// The composed writer on a socket stdout, as Node's `child_process` gives an MCP server on
-/// macOS: a 900 KiB reply read 16 KiB every 100 ms, past the drain, arrives whole.
+/// macOS: a 900 KiB reply read in 16 KiB reads 150 ms apart for three drains arrives whole.
 #[cfg(unix)]
 #[test]
 fn the_composed_writer_keeps_a_slow_reader_on_a_socket() {
@@ -549,7 +553,7 @@ fn the_composed_writer_keeps_a_slow_reader_on_a_socket() {
     drop(server_out);
     let (finished, ended) = channel();
     let relay_thread = std::thread::spawn(move || {
-        let end = relay_with(QUICK, "{}\n", input, output, from_server, to_server);
+        let end = relay_with(PACED, "{}\n", input, output, from_server, to_server);
         // The socket stays open until the relay is done with it.
         drop(bridge_end);
         let _ = finished.send(end);
@@ -559,9 +563,9 @@ fn the_composed_writer_keeps_a_slow_reader_on_a_socket() {
     // two writes' worth, a margin over the documented floor; macOS frees room for any read.
     let read_size = if cfg!(target_os = "linux") { 32 * 1024 } else { 16 * 1024 };
     let mut chunk = vec![0u8; read_size];
-    // Slow phase: about 2 s of reads, each half the 300 ms drain apart.
-    for _ in 0..13 {
-        std::thread::sleep(QUICK.drain / 2);
+    // Slow phase: 3 s of reads, three drains long.
+    for _ in 0..20 {
+        std::thread::sleep(READ_EVERY);
         received += client_end.read(&mut chunk).unwrap();
         assert!(ended.try_recv().is_err(), "the relay gave up on a reader that kept reading");
     }

@@ -464,7 +464,8 @@ pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> 
 }
 
 /// The worker: run admitted tool calls one at a time and write each reply.
-// Ordering: in_flight Release frees the call slot only after the reply is written.
+// Ordering: in_flight Release frees the call slot before the reply is written, so a prompt next
+// call finds it free.
 fn run_calls(
     shared: &McpShared,
     call_queue: &Receiver<AdmittedCall>,
@@ -476,10 +477,13 @@ fn run_calls(
     for call in call_queue {
         let snapshot = caller.lock().clone();
         let result = tools_read::call(shared, &snapshot, &call.params, &call.scope);
-        write_line(shared, writer, &jsonrpc::response(&call.id, result), closed);
-        // The call's arguments stop being charged once its reply is written.
+        let reply = jsonrpc::response(&call.id, result);
+        // The call's arguments stop being charged once its result is formed.
         drop(call);
+        // The slot frees before the client can see the reply; freeing it after the write let a
+        // client's prompt next call find it still taken and be refused.
         in_flight.store(false, Ordering::Release);
+        write_line(shared, writer, &reply, closed);
     }
 }
 
@@ -535,7 +539,7 @@ impl Drop for AdmittedCall {
 struct CallSlot {
     /// Admitted calls, for the worker.
     queue: SyncSender<AdmittedCall>,
-    /// Set from admission until the worker has written the reply.
+    /// Set from admission until the worker has formed the result, just before it writes the reply.
     in_flight: Arc<AtomicBool>,
     /// The connection's close flag, which every admitted call carries.
     closed: Arc<AtomicBool>,

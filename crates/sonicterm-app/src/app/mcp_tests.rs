@@ -352,9 +352,10 @@ fn a_read_revoked_after_resolution_returns_no_text() {
         std::thread::spawn(move || loop {
             let requests = shared.take_requests();
             if let Some(request) = requests.into_iter().next() {
-                // The loop answers, then the server stops before the worker reads.
-                let _ = request.reply.try_send(LoopReply::Pane(entry.clone()));
+                // The server stops while the loop holds the resolved pane, so the stop is in place
+                // before the worker can read; stopping after the reply raced the worker's recheck.
                 shared.stop();
+                let _ = request.reply.try_send(LoopReply::Pane(entry.clone()));
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -400,4 +401,49 @@ fn notices_are_bounded() {
     }
     assert_eq!(shared.inbox.lock().len() as u64, MAX_PENDING_NOTICES);
     shared.stop();
+}
+
+/// A writer that records whether the call slot was still taken at each write.
+struct SlotWatchingWriter {
+    /// The connection's call slot flag.
+    in_flight: Arc<AtomicBool>,
+    /// One entry per write: the slot's state while the reply was going out.
+    taken_at_write: Arc<Mutex<Vec<bool>>>,
+}
+
+impl Write for SlotWatchingWriter {
+    // Ordering: in_flight Acquire pairs with the worker's Release store that frees the slot.
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.taken_at_write.lock().push(self.in_flight.load(Ordering::Acquire));
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The worker frees the call slot before any byte of the reply goes out, so a client that sends
+/// its next call as soon as it reads a reply is never refused with "one tool call at a time".
+// Ordering: in_flight Release marks the slot taken, as `CallSlot::claim` does at admission.
+#[test]
+fn the_call_slot_is_free_before_the_reply_is_written() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let closed = Arc::new(AtomicBool::new(false));
+    let in_flight = Arc::new(AtomicBool::new(true));
+    let taken_at_write = Arc::new(Mutex::new(Vec::new()));
+    let writer: Mutex<Box<dyn Write + Send>> = Mutex::new(Box::new(SlotWatchingWriter {
+        in_flight: Arc::clone(&in_flight),
+        taken_at_write: Arc::clone(&taken_at_write),
+    }));
+    let (queue, call_queue) = sync_channel(1);
+    // An unknown tool answers at once without the event loop, so only the slot order is tested.
+    let params = json!({ "name": "no_such_tool", "arguments": {} });
+    queue.send(AdmittedCall::admit(&shared, &closed, json!(1), params)).unwrap();
+    drop(queue);
+    run_calls(&shared, &call_queue, &writer, &Mutex::new(Caller::default()), &closed, &in_flight);
+    let writes = taken_at_write.lock().clone();
+    assert!(!writes.is_empty(), "the worker wrote the reply");
+    assert!(writes.iter().all(|taken| !taken), "the slot was still taken while the reply went out");
+    assert!(!in_flight.load(Ordering::Acquire));
 }

@@ -1260,6 +1260,8 @@ jobs:
           $staged = "target\x86_64-pc-windows-msvc\release"
           New-Item -ItemType Directory -Force -Path $staged | Out-Null
           Copy-Item target\release\sonicterm-windows.exe, target\release\sonicterm-mcp.exe -Destination $staged
+          # A restored target cache can already hold the staged ConPTY, which a recursive copy refuses to overwrite.
+          Remove-Item "$staged\conpty" -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item target\release\conpty -Destination $staged -Recurse
           $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
             Where-Object name -eq sonicterm-windows |
