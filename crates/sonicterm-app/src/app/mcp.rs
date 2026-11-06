@@ -40,6 +40,8 @@ mod lifecycle;
 pub(crate) mod read;
 #[path = "mcp/run.rs"]
 pub(crate) mod run;
+#[path = "mcp/scan.rs"]
+pub(crate) mod scan;
 #[path = "mcp/tools_control.rs"]
 pub(crate) mod tools_control;
 #[path = "mcp/tools_read.rs"]

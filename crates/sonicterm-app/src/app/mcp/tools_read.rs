@@ -81,7 +81,11 @@ pub(crate) fn tool_list() -> Value {
             "name": "wait_for",
             "description": "Wait until a pane's output matches a regex (only rows after \
                             after_row, a token from read_pane's end_row), stays quiet for \
-                            quiet_ms, or its process exits; bounded by timeout_ms.",
+                            quiet_ms, or its process exits; bounded by timeout_ms. The regex is \
+                            checked against every retained line written during the wait, not \
+                            only the newest; missed_output true means some left scrollback \
+                            unchecked, and truncated true means a line too long to check whole \
+                            was skipped, so a timeout does not prove no match.",
             "inputSchema": {
                 "type": "object",
                 "required": ["pane_id"],
@@ -102,6 +106,8 @@ pub(crate) fn tool_list() -> Value {
                     "row": { "type": "string" },
                     "exit_code": { "type": "integer" },
                     "generation": { "type": "integer" },
+                    "missed_output": { "type": "boolean" },
+                    "truncated": { "type": "boolean" },
                     "error": { "type": "string" },
                     "message": { "type": "string" },
                 },
@@ -366,6 +372,8 @@ fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
     let mut structured = json!({
         "reason": outcome.reason.as_str(),
         "generation": entry.output_generation.load(Ordering::Acquire),
+        "missed_output": outcome.missed_output,
+        "truncated": outcome.truncated,
     });
     if let Some((line, row)) = outcome.matched {
         structured["line"] = json!(line);
@@ -430,6 +438,12 @@ pub(crate) struct WaitOutcome {
     pub(crate) exit_code: Option<i64>,
     /// `after_row` named the other screen.
     pub(crate) stale_row: bool,
+    /// Rows written during the wait left the retained range before they were scanned, so a
+    /// timeout is not proof that none of them matched.
+    pub(crate) missed_output: bool,
+    /// A line was too long to inspect whole and was not matched, so a timeout is not proof that
+    /// it held no match.
+    pub(crate) truncated: bool,
 }
 
 /// Poll until `condition` holds, the client goes away, the server stops or changes since the
@@ -448,16 +462,27 @@ pub(crate) fn wait_until(
     let mut observed_generation = None;
     let mut inspected_generation = None;
     let mut last_change = started;
-    let outcome = |reason| WaitOutcome { reason, matched: None, exit_code: None, stale_row: false };
+    let mut scan_backlog = false;
+    // Where the forward scan resumes once the first inspection has read the tail.
+    let mut cursor: Option<super::scan::ScanCursor> = None;
+    let mut flags = ScanFlags::default();
+    let outcome = |reason, flags: ScanFlags| WaitOutcome {
+        reason,
+        matched: None,
+        exit_code: None,
+        stale_row: false,
+        missed_output: flags.missed,
+        truncated: flags.truncated,
+    };
     loop {
         if scope.revoked(shared) {
             // When: the call `scope` was `revoked` (closed, stopped or changed), the wait stops.
-            return outcome(WaitReason::Revoked);
+            return outcome(WaitReason::Revoked, flags);
         }
         let exit_status = entry.exit_status.get().filter(|_| condition.watch_exit);
         if let Some(status) = exit_status {
             // When: `watch_exit` is on and the `exit_status` cell is set, the process exited.
-            let mut done = outcome(WaitReason::Exited);
+            let mut done = outcome(WaitReason::Exited, flags);
             done.exit_code = match status {
                 sonicterm_types::PaneExitStatus::Code(code) => Some(i64::from(*code)),
                 _ => None,
@@ -469,12 +494,17 @@ pub(crate) fn wait_until(
             last_change = Instant::now();
         }
         observed_generation = Some(generation);
-        if inspected_generation != Some(generation) {
-            // When: `generation` was not yet `inspected_generation`, new output may match.
-            let checked =
-                condition.regex.as_ref().map(|regex| match_tail(entry, regex, condition.after));
-            if let Some(TailCheck::Done(done)) = checked {
-                // When: `match_tail` found a match or a stale token, the wait is `Done`.
+        // A scan that stopped at its budget continues on the next poll without new output.
+        let backlog = cursor.is_some() && scan_backlog;
+        if inspected_generation != Some(generation) || backlog {
+            // When: `generation` is new or a `backlog` remains, unscanned output may match.
+            let checked = condition.regex.as_ref().map(|regex| {
+                inspect(entry, regex, condition.after, &mut cursor, &mut scan_backlog, &mut flags)
+            });
+            if let Some(TailCheck::Done(mut done)) = checked {
+                // When: the inspection found a match or a stale token, the wait is `Done`.
+                done.missed_output |= flags.missed;
+                done.truncated |= flags.truncated;
                 return done;
             }
             // A busy parser leaves the generation uninspected, so the next poll reads again.
@@ -485,18 +515,18 @@ pub(crate) fn wait_until(
         let now = Instant::now();
         if condition.quiet.is_some_and(|quiet| now.duration_since(last_change) >= quiet) {
             // When: no output arrived for `quiet`, the pane is quiet.
-            return outcome(WaitReason::Quiet);
+            return outcome(WaitReason::Quiet, flags);
         }
         if now.duration_since(started) >= condition.timeout {
             // When: the `timeout` passed first, the wait ends without a match.
-            return outcome(WaitReason::Timeout);
+            return outcome(WaitReason::Timeout, flags);
         }
         std::thread::sleep(WAIT_POLL);
     }
 }
 
 /// What one read of the tail found.
-enum TailCheck {
+pub(crate) enum TailCheck {
     /// The wait ends with this outcome.
     Done(WaitOutcome),
     /// The parser was held; read again on the next poll.
@@ -505,31 +535,139 @@ enum TailCheck {
     NoMatch,
 }
 
-/// Read a bounded tail and look for `regex` on rows after `after`.
-fn match_tail(entry: &PaneEntry, regex: &regex::Regex, after: Option<RowToken>) -> TailCheck {
-    let snapshot = read_pane(&entry.parser, ReadMode::Tail, ReadLimits::clamped(None, None));
-    let ended = |reason| WaitOutcome { reason, matched: None, exit_code: None, stale_row: false };
-    if after.is_some_and(|after| snapshot.alt_screen != after.alt && !snapshot.busy) {
-        // When: `after` names the other screen than `alt_screen`, the token cannot apply.
+/// What a wait learned about rows it could not inspect; once set, a flag stays set.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ScanFlags {
+    /// Rows left the retained range before they were scanned.
+    pub(crate) missed: bool,
+    /// A line too long to inspect whole was skipped.
+    pub(crate) truncated: bool,
+}
+
+/// Inspect the pane once. The first look without `after` reads the bounded tail; with `after` the
+/// scan starts on the row after it. Later looks scan every row since `cursor`, which this
+/// advances. `backlog` reports that a scan stopped at its budget; `flags` gather what it could not
+/// inspect. Tests drive it a step at a time, so their output and inspections interleave exactly.
+pub(crate) fn inspect(
+    entry: &PaneEntry,
+    regex: &regex::Regex,
+    after: Option<RowToken>,
+    cursor: &mut Option<super::scan::ScanCursor>,
+    backlog: &mut bool,
+    flags: &mut ScanFlags,
+) -> TailCheck {
+    use super::scan::{newest_row, scan_from};
+    let ended = |reason| WaitOutcome {
+        reason,
+        matched: None,
+        exit_code: None,
+        stale_row: false,
+        missed_output: false,
+        truncated: false,
+    };
+    if cursor.is_none() && after.is_none() {
+        // When: no `cursor` and no `after`, the first look reads the tail, then starts the scan.
+        let (check, start) = match_tail(entry, regex, None);
+        *cursor = start;
+        return check;
+    }
+    let Some(guard) = entry.parser.try_lock_for(super::read::PARSER_WAIT) else {
+        // When: `try_lock_for` misses within `PARSER_WAIT`, the scan waits for the next poll.
+        return TailCheck::Busy;
+    };
+    let grid = guard.grid();
+    if after.is_some_and(|after| after.alt != grid.is_alt()) {
+        // When: the caller's `after` names the other screen, it cannot bound this screen's rows.
         let mut stale = ended(WaitReason::Timeout);
         stale.stale_row = true;
         return TailCheck::Done(stale);
     }
+    // An explicit `after` starts the scan on the next row, so every eligible retained row is read.
+    let start = cursor.unwrap_or_else(|| {
+        let after = after.expect("handled above when absent");
+        super::scan::ScanCursor::at(RowToken { line: after.line.saturating_add(1), alt: after.alt })
+    });
+    let step = scan_from(grid, start);
+    // Without an explicit `after`, a screen switch restarts on the new screen's newest row.
+    let restart = step.next.is_none().then(|| super::scan::ScanCursor::at(newest_row(grid)));
+    drop(guard);
+    *backlog = step.more;
+    *cursor = step.next.or(restart);
+    flags.missed |= step.missed;
+    // The regex runs after the parser is released, and never on a cut line.
+    let eligible = |line: &&super::scan::ScannedLine| {
+        after.is_none_or(|after| line.first_row.line > after.line)
+    };
+    for line in step.lines.iter().filter(eligible) {
+        if line.cut {
+            // When: the line is `cut`, its prefix cannot stand for it; it is reported, not matched,
+            // even when that prefix is blank.
+            flags.truncated = true;
+            continue;
+        }
+        if line.text.is_empty() {
+            // When: the line is blank, it is never matched, on this path or the tail's.
+            continue;
+        }
+        if regex.is_match(&line.text) {
+            // When: the line's text matched, the wait ends with it.
+            let mut done = ended(WaitReason::Matched);
+            done.matched = Some((line.text.clone(), line.row));
+            return TailCheck::Done(done);
+        }
+    }
+    TailCheck::NoMatch
+}
+
+/// Read a bounded tail and look for `regex` on rows after `after`; also where the forward scan
+/// starts: the first row of the tail's newest line, which output may still extend.
+fn match_tail(
+    entry: &PaneEntry,
+    regex: &regex::Regex,
+    after: Option<RowToken>,
+) -> (TailCheck, Option<super::scan::ScanCursor>) {
+    let snapshot = read_pane(&entry.parser, ReadMode::Tail, ReadLimits::clamped(None, None));
+    // The scan rereads the tail's newest line, which output may still extend; a pane with no text
+    // yet reads from its oldest row, so output written anywhere on the screen is scanned. Rows
+    // above the cursor were examined and can no longer change; the cursor's row and below may.
+    let resume = snapshot.lines.last().map(|line| line.first_row).or(snapshot.oldest_row);
+    let start = resume
+        .zip(snapshot.writable_row)
+        .map(|(resume, writable)| super::scan::ScanCursor { resume, frontier: writable.line });
+    let ended = |reason| WaitOutcome {
+        reason,
+        matched: None,
+        exit_code: None,
+        stale_row: false,
+        missed_output: false,
+        truncated: false,
+    };
+    if after.is_some_and(|after| snapshot.alt_screen != after.alt && !snapshot.busy) {
+        // When: `after` names the other screen than `alt_screen`, the token cannot apply.
+        let mut stale = ended(WaitReason::Timeout);
+        stale.stale_row = true;
+        return (TailCheck::Done(stale), start);
+    }
     // A line counts only when it began after `after`: text appended to an older wrapped line does
     // not make the old text new.
     let eligible = |line: &ReadLine| after.is_none_or(|after| line.first_row.line > after.line);
-    let found = snapshot.lines.iter().find(|line| eligible(line) && regex.is_match(&line.text));
+    // Blank lines are never matched, as on the forward scan, so `^$` cannot match a blank row.
+    let found = snapshot
+        .lines
+        .iter()
+        .find(|line| eligible(line) && !line.text.is_empty() && regex.is_match(&line.text));
     if let Some(line) = found {
         // When: an eligible line was `found`, the wait matched.
         let mut done = ended(WaitReason::Matched);
         done.matched = Some((line.text.clone(), line.row));
-        return TailCheck::Done(done);
+        return (TailCheck::Done(done), start);
     }
     if snapshot.busy {
-        TailCheck::Busy
+        // A busy read leaves no cursor, so the next poll reads the tail again.
+        (TailCheck::Busy, None)
     } else {
         // When: the read was not `busy` and nothing matched, the wait goes on.
-        TailCheck::NoMatch
+        (TailCheck::NoMatch, start)
     }
 }
 

@@ -644,7 +644,7 @@ the next start removes those whose process is gone.
 | --- | --- |
 | `list_panes` | SonicTerm's process id as `instance_pid`, then every pane in every window, main window first: id, window and tab index, whether it is active, READONLY or agent-created, and, read with one bounded lock, its title, working directory, size, alternate-screen state, shell integration and whether its process exited. |
 | `read_pane` | `screen` (visible rows), `tail` (newest lines, soft wraps joined) or `last_command` (the last finished shell command's output, from the OSC 133 C row up to where D arrived, and its exit code, found even while a full-screen program runs). Text keeps combining marks and the spaces at a soft wrap. Capped by `max_lines` (default 120, at most 1,000) and `max_bytes` (default 16 KiB, at most 64 KiB); `end_row` is the token of the last line returned. |
-| `wait_for` | Waits until a `regex` matches a row after `after_row`, output stays quiet for `quiet_ms`, or the process exits, bounded by `timeout_ms` (default 30 s, at most 120 s). Only lines that began after `after_row` count, so text a soft wrap appends to an older line does not. A match already on screen ends it at once; a token from the other screen is refused as `stale_row`. |
+| `wait_for` | Waits until a `regex` matches a row after `after_row`, output stays quiet for `quiet_ms`, or the process exits, bounded by `timeout_ms` (default 30 s, at most 120 s). Only lines that began after `after_row` count, so text a soft wrap appends to an older line does not. A match already on screen ends it at once; a token from the other screen is refused as `stale_row`. Every retained line written during the wait is checked; `missed_output` reports lines that left scrollback before they were, and `truncated` a line too long to check whole. |
 
 The control tools (`create_pane`, `send_text`, `send_keys`, `run_command`,
 `close_pane`) and the `[mcp] control` scope are described in [MCP Server](MCP-Server). Each
@@ -655,7 +655,26 @@ A read takes the pane's parser for one attempt of at most 5 ms, visits at most
 `truncated` instead of waiting. Each tool call is admitted under the server's
 current generation, and a call revoked before it returns answers with the
 `revoked` error and no pane text. `wait_for` polls the pane's output counter and exit status every 50 ms
-without a lock and reads only when output moved. Disabling the server, changing
+without a lock. Without `after_row` its first look reads the tail, as `read_pane` does; with `after_row` it
+starts on the row after that token. After that it scans forward from the next row it has not
+inspected, oldest first, so a matching line that more than a tail of output
+pushed past between two polls is still found. Each scan holds the parser within the same 5 ms and
+32,768-cell bounds, runs the regex after releasing it, and finishes a larger backlog on later polls.
+Each logical line is read whole from its own first row, so a soft-wrapped continuation is never
+matched as a line of its own, and rows of a line that began at or before `after_row` never count.
+The newest line is checked as it stands, so a prompt with no newline after it can match, and it
+is read again once output extends it. Blank lines are not matched. Output is written at the
+cursor, so a blank row at or below it is never counted as examined: `missed_output` errs toward
+reporting a loss, and is also set when blank rows below the cursor scroll away before a scan
+reaches them, even if nothing was written on them. Rows that left scrollback before they were scanned set `missed_output`. A logical line longer than
+one scan can copy (64 KiB of text, or more cells than one scan visits) is never matched by its
+prefix, because an anchor such as `$` could hold at the cut and not at the line's real end; it sets
+`truncated` instead. Either flag means a timeout does not claim those rows held no match. With an
+`after_row`, a token from the other screen, or a switch to the other screen during the wait, ends
+it as `stale_row`; without one, a screen switch restarts the scan on the new screen's newest row.
+It scans retained terminal content, not an output journal: text
+rewritten in place, erased, or lost across a resize or screen switch between polls can go unseen,
+and `missed_output: false` is not proof of completeness in those cases. Disabling the server, changing
 `control`, a disconnect or the 10 s deadline drops a queued request before the
 event loop acts on it, and ends a running wait as `revoked`. Pane text is
 untrusted input: the server tells agents never to follow instructions found in it.

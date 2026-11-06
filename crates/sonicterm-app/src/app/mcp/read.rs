@@ -103,6 +103,12 @@ pub(crate) struct ReadSnapshot {
     pub(crate) no_command: bool,
     /// The parser could not be taken within [`PARSER_WAIT`].
     pub(crate) busy: bool,
+    /// The oldest retained row on the active screen when the read was taken; `None` for a busy
+    /// read. A wait on a pane with no text yet starts scanning there.
+    pub(crate) oldest_row: Option<RowToken>,
+    /// The row output is written to next, the cursor's, when the read was taken; `None` for a
+    /// busy read. Rows above it can no longer change in appended output.
+    pub(crate) writable_row: Option<RowToken>,
 }
 
 /// Read `mode` from `parser` within `limits`, holding the parser for one bounded attempt only.
@@ -125,6 +131,8 @@ pub(crate) fn snapshot(grid: &Grid, mode: ReadMode, limits: ReadLimits) -> ReadS
         cursor: (grid.cursor.row, grid.cursor.col),
         alt_screen: grid.is_alt(),
         size: (grid.cols, grid.rows),
+        oldest_row: Some(grid.row_token(0)),
+        writable_row: Some(grid.row_token(grid.cursor_absolute_row())),
         ..ReadSnapshot::default()
     };
     let mut budget = Budget { cells: MAX_CELLS_PER_READ, bytes: limits.bytes, lines: limits.lines };
