@@ -523,8 +523,9 @@ coalesced flushes.
 | `fg_worker_probe` | µs histogram | each batch's duration |
 
 These come from the `sonicterm-fg-probe` worker thread; the event-loop thread never
-probes. On macOS a batch looks up each pane's process, re-reading its start token
-before and after; on Windows it takes one process-table snapshot. With the gate off
+probes. Each batch takes one process-table snapshot for all its panes. On macOS it
+reads each pane's start token before the snapshot and again after, and drops a pane
+whose token changed. With the gate off
 the worker reads the clock once per probed pane and records nothing. Linux and other
 platforms capture no process identity, start no worker, and report zeros.
 

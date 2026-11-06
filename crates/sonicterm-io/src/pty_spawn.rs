@@ -69,7 +69,7 @@ impl PtyHandle {
         apply_child_cwd(&mut builder, opts.cwd.as_deref(), home.as_deref());
         apply_child_pty_env(&mut builder, &opts.term_program);
         apply_extra_env(&mut builder, &opts.extra_env);
-        Self::spawn_built(builder, cmd.to_string(), cols, rows, opts.diagnostic_timestamps)
+        Self::spawn_built(builder, cmd.to_string(), cols, rows, &opts)
     }
 
     /// Run a launcher's program directly in a new PTY, with no shell.
@@ -79,7 +79,7 @@ impl PtyHandle {
     /// path relative to the child's cwd. `spawn.cwd` must be an absolute,
     /// existing directory; the spawn never substitutes a home directory and
     /// never falls back to a shell. Only `opts.term_program` and
-    /// `opts.diagnostic_timestamps` apply; the shell, cwd and clean-startup
+    /// `opts.diagnostic_timestamps` and `opts.input_seen` apply; the shell, cwd and clean-startup
     /// options describe shells and are ignored.
     ///
     /// Errors are [`CommandSpawnError`] values whose messages name only the
@@ -104,18 +104,20 @@ impl PtyHandle {
         apply_child_pty_env(&mut builder, &opts.term_program);
         apply_extra_env(&mut builder, &opts.extra_env);
         let program_path = resolved.to_string_lossy().into_owned();
-        Self::spawn_built(builder, program_path, cols, rows, opts.diagnostic_timestamps)
+        Self::spawn_built(builder, program_path, cols, rows, opts)
             .map_err(|error| sanitize_spawn_error(&spawn.program, &error))
     }
 
-    /// Open a PTY, start `builder` on it, and wire the reader, writer and teardown.
+    /// Open a PTY, start `builder` on it, and wire the reader, writer and teardown; of `opts`, only
+    /// `diagnostic_timestamps` and `input_seen` are read here.
     fn spawn_built(
         builder: CommandBuilder,
         program_path: String,
         cols: u16,
         rows: u16,
-        diagnostic_timestamps: bool,
+        opts: &ShellSpawnOpts,
     ) -> Result<Self> {
+        let diagnostic_timestamps = opts.diagnostic_timestamps;
         #[cfg(windows)]
         crate::conpty_runtime::ensure_ready()?;
         let pty_system = native_pty_system();
@@ -179,7 +181,7 @@ impl PtyHandle {
         );
         // Writer thread: in_rx -> pty.
         let queued_input_bytes = Arc::new(AtomicUsize::new(0));
-        let writer_progress = Arc::new(PtyWriterProgress::new());
+        let writer_progress = Arc::new(PtyWriterProgress::with_input_seen(opts.input_seen.clone()));
         let (replies, reply_reader) = reply_spool();
         let writer_thread = spawn_writer_thread(
             Box::new(writer),

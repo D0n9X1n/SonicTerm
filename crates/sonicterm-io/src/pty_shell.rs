@@ -445,9 +445,15 @@ fn term_program_version(term_program: &str) -> &'static str {
 /// with a DCS query instead of enabling the feature outright.
 const WEZTERM_ADVERTISED_VERSION: &str = "20230712-072601";
 
+/// The variable that carries a pane's OSC 133 shell token; only `extra_env` may set it.
+pub const SHELL_TOKEN_ENV: &str = "SONICTERM_SHELL_TOKEN";
+
 /// Add `extra_env` to the child's environment, after the terminal identity so a caller's pane
-/// identity is never overwritten by it.
+/// identity is never overwritten by it. A [`SHELL_TOKEN_ENV`] inherited from SonicTerm's own
+/// environment, as when SonicTerm was started from another pane, is removed first, so a child
+/// holds a token only when `extra_env` gives it its own pane's.
 pub fn apply_extra_env(builder: &mut CommandBuilder, extra_env: &[(String, String)]) {
+    builder.env_remove(SHELL_TOKEN_ENV);
     for (name, value) in extra_env {
         builder.env(name, value);
     }

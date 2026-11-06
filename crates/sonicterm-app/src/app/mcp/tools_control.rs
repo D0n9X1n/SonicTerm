@@ -91,8 +91,10 @@ pub(crate) fn control_tools() -> Vec<Value> {
                             Needs shell integration (OSC 133). Refused when text is typed at the \
                             prompt or anyone typed while the previous command ran; this check is \
                             best effort, so prefer panes this agent created. A timeout returns \
-                            state 'running', never success. exit_verified true means the exit code \
-                            came from SonicTerm's own shell integration; when false it was read \
+                            state 'running', never success. exit_verified true means markers \
+                            carrying the pane's secret vouched for the exit code: SonicTerm's \
+                            shell integration sends them, but so could a program the shell's \
+                            startup files ran before loading it. When false the code was read \
                             from terminal output that any program in the pane could have printed.",
             "inputSchema": {
                 "type": "object",

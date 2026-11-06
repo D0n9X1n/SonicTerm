@@ -10,7 +10,13 @@
 //! listed in the tracked `wiki/Terminal-IO-and-VT.md` page rather than
 //! restated here, so the list lives in one place.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use crossbeam_channel::Sender;
 use sonicterm_grid::{
@@ -456,6 +462,13 @@ impl Parser {
         self.performer.shell_token = token.filter(|token| !token.is_empty());
     }
 
+    /// Give the parser the pane's input flag, set once anyone types into the pane. A token first
+    /// seen after that is no longer the shell's own secret: whatever ran the input could have read
+    /// it, so its markers are admitted unauthenticated and never latch the pane.
+    pub fn set_shell_input_seen(&mut self, input_seen: Option<Arc<AtomicBool>>) {
+        self.performer.shell_input_seen = input_seen;
+    }
+
     /// Whether an OSC 133 marker carrying the pane's shell token has arrived.
     pub fn shell_markers_authenticated(&self) -> bool {
         self.performer.shell_authenticated
@@ -531,6 +544,8 @@ struct Performer {
     shell_token: Option<String>,
     /// A marker carried `shell_token`, so tokenless markers are dropped for the parser's life.
     shell_authenticated: bool,
+    /// Set once the pane took input; a token first seen after it never latches the pane.
+    shell_input_seen: Option<Arc<AtomicBool>>,
     fg: Color,
     bg: Color,
     flags: CellFlags,

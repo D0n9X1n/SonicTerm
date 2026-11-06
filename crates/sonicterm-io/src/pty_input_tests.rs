@@ -23,7 +23,7 @@ fn saturated_pty_input_queue_returns_the_rejected_bytes() {
     let rejected = vec![b'y'];
 
     assert!(matches!(
-        try_queue_pty_input(&tx, &queued, &PtyWriterProgress::new(), rejected.clone()),
+        try_queue_pty_input((&tx, &queued), &PtyWriterProgress::new(), rejected.clone(), true),
         Err(PtyInputError::QueueFull(bytes)) if bytes == rejected
     ));
     assert_eq!(
@@ -62,7 +62,12 @@ fn the_typed_send_refuses_a_full_queue_where_the_raw_channel_blocks() {
 
     assert!(
         matches!(
-            try_queue_pty_input(&tx, &AtomicUsize::new(0), &PtyWriterProgress::new(), vec![0u8; 8]),
+            try_queue_pty_input(
+                (&tx, &AtomicUsize::new(0)),
+                &PtyWriterProgress::new(),
+                vec![0u8; 8],
+                true
+            ),
             Err(PtyInputError::QueueFull(_))
         ),
         "the typed path must refuse a full queue and hand the bytes back"
@@ -94,7 +99,7 @@ fn the_typed_send_enforces_the_message_cap_the_raw_channel_ignores() {
 
     assert!(
         matches!(
-            try_queue_pty_input(&tx, &queued, &PtyWriterProgress::new(), oversized.clone()),
+            try_queue_pty_input((&tx, &queued), &PtyWriterProgress::new(), oversized.clone(), true),
             Err(PtyInputError::MessageTooLarge(_))
         ),
         "the typed path must refuse a message above the cap"
@@ -156,8 +161,8 @@ fn input_progress_names_the_oldest_outstanding_write() {
     let queued = AtomicUsize::new(0);
     assert_eq!(progress.input_progress(), PtyInputProgress::Idle);
     let before = Instant::now();
-    try_queue_pty_input(&tx, &queued, &progress, b"a".to_vec()).unwrap();
-    try_queue_pty_input(&tx, &queued, &progress, b"b".to_vec()).unwrap();
+    try_queue_pty_input((&tx, &queued), &progress, b"a".to_vec(), true).unwrap();
+    try_queue_pty_input((&tx, &queued), &progress, b"b".to_vec(), true).unwrap();
     let PtyInputProgress::Oldest { ordinal, admitted_at, on_reply } = progress.input_progress()
     else {
         panic!("two writes are outstanding");
@@ -182,9 +187,9 @@ fn refused_admission_rolls_back_and_a_stale_slot_is_raced() {
     let progress = PtyWriterProgress::new();
     let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(1);
     let queued = AtomicUsize::new(0);
-    try_queue_pty_input(&tx, &queued, &progress, b"a".to_vec()).unwrap();
+    try_queue_pty_input((&tx, &queued), &progress, b"a".to_vec(), true).unwrap();
     assert!(matches!(
-        try_queue_pty_input(&tx, &queued, &progress, b"b".to_vec()),
+        try_queue_pty_input((&tx, &queued), &progress, b"b".to_vec(), true),
         Err(PtyInputError::QueueFull(_))
     ));
     assert_eq!(progress.input_admitted.load(Ordering::Acquire), 1);
@@ -203,7 +208,7 @@ fn input_ordinals_wrap_onto_their_own_slot() {
         progress.input_admitted.store(start, Ordering::Release);
         progress.input_completed.store(start, Ordering::Release);
         let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
-        try_queue_pty_input(&tx, &AtomicUsize::new(0), &progress, b"a".to_vec()).unwrap();
+        try_queue_pty_input((&tx, &AtomicUsize::new(0)), &progress, b"a".to_vec(), true).unwrap();
         assert!(
             matches!(progress.input_progress(), PtyInputProgress::Oldest { ordinal: 0, .. }),
             "{start}"
@@ -238,4 +243,62 @@ fn concurrent_producers_get_ordinals_in_channel_order() {
     }
     let ordinals: Vec<u32> = rx.try_iter().collect();
     assert_eq!(ordinals, (1..=32).collect::<Vec<_>>());
+}
+
+#[test]
+fn admitted_input_marks_input_seen_and_a_draft_does_not() {
+    // The pane's parser trusts a shell token only while nobody has typed: every admitted input
+    // message sets the flag before it is queued, a script draft (typed without Enter) never does,
+    // and a refused message still sets it, since trust is withdrawn early rather than late.
+    let (tx, _rx) = pty_input_channel();
+    let queued = AtomicUsize::new(0);
+    let seen = Arc::new(AtomicBool::new(false));
+    let progress = PtyWriterProgress::with_input_seen(Some(seen.clone()));
+    try_queue_pty_input((&tx, &queued), &progress, b"echo draft".to_vec(), false).unwrap();
+    assert!(!seen.load(Ordering::SeqCst), "a draft runs nothing, so it keeps the token trusted");
+    try_queue_pty_input((&tx, &queued), &progress, b"\r".to_vec(), true).unwrap();
+    assert!(seen.load(Ordering::SeqCst), "typed input withdraws the trust");
+
+    let refused = Arc::new(AtomicBool::new(false));
+    let progress = PtyWriterProgress::with_input_seen(Some(refused.clone()));
+    let oversized = vec![0u8; MAX_PTY_INPUT_MESSAGE_BYTES + 1];
+    assert!(try_queue_pty_input((&tx, &queued), &progress, oversized, true).is_err());
+    assert!(!refused.load(Ordering::SeqCst), "a message over the cap never reached admission");
+    for _ in tx.len()..PTY_INPUT_QUEUE_CAPACITY {
+        tx.try_send(vec![b'x']).expect("fill bounded input queue");
+    }
+    assert!(try_queue_pty_input((&tx, &queued), &progress, vec![b'y'], true).is_err());
+    assert!(refused.load(Ordering::SeqCst), "a full queue refuses after admission marked it");
+}
+
+/// Through a real PTY: the parser's DA/DSR replies, which go through the reply spool, leave the
+/// pane's `input_seen` clear, so a shell integration can still latch after the terminal answered
+/// its startup queries; input through `send_input_nonblocking` or a `PtyInputSender` sets it.
+#[test]
+fn only_real_input_marks_a_live_pty_as_typed_into() {
+    #[cfg(windows)]
+    let _live_pty_guard = crate::pty::pty_test_support::lock_live_pty_test();
+    for through_sender in [false, true] {
+        let seen = Arc::new(AtomicBool::new(false));
+        let pty = PtyHandle::spawn_default_shell(
+            80,
+            24,
+            ShellSpawnOpts {
+                clean_e2e: true,
+                input_seen: Some(seen.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        pty.reply_sender().send(b"\x1b[?62;22c\x1b[1;1R".to_vec()).unwrap();
+        pty.send_draft_nonblocking(b"echo draft".to_vec()).unwrap();
+        assert!(!seen.load(Ordering::SeqCst), "replies and a draft are not typing");
+        if through_sender {
+            // When: `through_sender`, the cloneable sender the VT worker and dispatchers hold.
+            pty.input_sender().send(b"\r".to_vec()).unwrap();
+        } else {
+            pty.send_input_nonblocking(b"\r".to_vec()).unwrap();
+        }
+        assert!(seen.load(Ordering::SeqCst), "through_sender {through_sender}: input is typing");
+    }
 }

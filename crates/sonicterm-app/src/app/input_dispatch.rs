@@ -508,8 +508,15 @@ impl App {
     ) -> bool {
         #[cfg(test)]
         let submitted = mod_tests::submission_snapshot(&bytes);
-        if let Err(error) = pty.send_input_nonblocking(bytes) {
-            // When: `send_input_nonblocking` refuses input, report metadata rather than retaining or replaying the payload.
+        // A script draft is typed without Enter and runs nothing, so it alone keeps the pane's
+        // shell token trusted; every other source withdraws that trust.
+        let send = match source {
+            PtyInputSource::ScriptDraft => sonicterm_io::pty::PtyHandle::send_draft_nonblocking,
+            _ => sonicterm_io::pty::PtyHandle::send_input_nonblocking,
+        };
+        let queued = send(pty, bytes);
+        if let Err(error) = queued {
+            // When: `queued` holds an error, report metadata rather than retaining or replaying the payload.
             Self::report_pty_input_rejection(
                 proxy,
                 pane_id,

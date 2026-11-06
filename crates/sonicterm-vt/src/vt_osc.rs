@@ -118,7 +118,9 @@ impl Performer {
     /// Whether an OSC 133 marker with parameters `extra` (after its kind) is admitted, and if so
     /// whether it is authenticated. With no pane token every marker is admitted unauthenticated. A
     /// wrong token is refused; the right one latches the pane, after which tokenless markers are
-    /// refused too, so neither forged nor downgraded markers reach the grid or the events.
+    /// refused too, so neither forged nor downgraded markers reach the grid or the events. The
+    /// right token latches only before the pane took input: a shell with no integration leaves the
+    /// token in every command's environment, so after input it proves nothing.
     pub(super) fn admit_shell_marker(&mut self, extra: &[&[u8]]) -> Option<bool> {
         let Some(expected) = self.shell_token.as_deref() else {
             // When: the pane has no `shell_token`, markers keep their untrusted behavior.
@@ -127,6 +129,14 @@ impl Performer {
         let carried = extra.iter().find_map(|param| param.strip_prefix(SHELL_TOKEN_PARAM));
         match carried {
             Some(token) if constant_time_eq(token, expected.as_bytes()) => {
+                // When: the right `token` arrives it latches, unless input came first. The writer
+                // sets the flag before queuing input, so output that input caused finds it set.
+                let typed =
+                    self.shell_input_seen.as_ref().is_some_and(|seen| seen.load(Ordering::SeqCst));
+                if typed && !self.shell_authenticated {
+                    // When: input was `typed` before any latch, a command may hold the token.
+                    return Some(false);
+                }
                 self.shell_authenticated = true;
                 Some(true)
             }

@@ -420,8 +420,8 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `quick_select_rows_scanned` | 次数 | quick select 为查找 URL 扫描的行数 |
 | `fg_worker_probe` | 微秒直方图 | 每个批次的耗时 |
 
-这些数据来自 `sonicterm-fg-probe` worker 线程；事件循环线程从不探测。在 macOS 上，一个批次逐个
-查询窗格的进程，并在前后重新读取启动令牌；在 Windows 上做一次进程表快照。计数器关闭时，worker 每个
+这些数据来自 `sonicterm-fg-probe` worker 线程；事件循环线程从不探测。每个批次为其所有窗格做一次
+进程表快照。在 macOS 上，它在快照前后各读取一次每个窗格的启动令牌，令牌变化的窗格会被丢弃。计数器关闭时，worker 每个
 被探测的窗格只读一次时钟，不记录任何内容。Linux 与其它平台不捕获进程身份，不启动 worker，报告为零。
 
 ### VT 字段

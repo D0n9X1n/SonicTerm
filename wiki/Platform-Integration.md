@@ -644,7 +644,7 @@ the next start removes those whose process is gone.
 | --- | --- |
 | `list_panes` | SonicTerm's process id as `instance_pid`, then every pane in every window, main window first: id, window and tab index, whether it is active, READONLY or agent-created, and, read with one bounded lock, its title, working directory, size, alternate-screen state, shell integration and whether its process exited. |
 | `read_pane` | `screen` (visible rows), `tail` (newest lines, soft wraps joined) or `last_command` (the last finished shell command's output, from the OSC 133 C row up to where D arrived, and its exit code, found even while a full-screen program runs). Text keeps combining marks and the spaces at a soft wrap. Capped by `max_lines` (default 120, at most 1,000) and `max_bytes` (default 16 KiB, at most 64 KiB); `end_row` is the token of the last line returned. |
-| `wait_for` | Waits until a `regex` matches a row after `after_row`, output stays quiet for `quiet_ms`, or the process exits, bounded by `timeout_ms` (default 30 s, at most 120 s). Only lines that began after `after_row` count, so text a soft wrap appends to an older line does not. A match already on screen ends it at once; a token from the other screen is refused as `stale_row`. Every retained line written during the wait is checked; `missed_output` reports lines that left scrollback before they were, and `truncated` a line too long to check whole. |
+| `wait_for` | Waits until a `regex` matches a row after `after_row`, output stays quiet for `quiet_ms`, or the process exits, bounded by `timeout_ms` (default 30 s, at most 120 s). Only lines that began after `after_row` count, so text a soft wrap appends to an older line does not. A match already on screen ends it at once; a token from the other screen is refused as `stale_row`. Every retained line written during the wait is checked; `missed_output` reports lines that left scrollback before they were, `truncated` a line too long to check whole, `scan_complete: false` rows still unscanned when it ended, and `screen_changed` a switch between the primary and alternate screens. |
 
 The control tools (`create_pane`, `send_text`, `send_keys`, `run_command`,
 `close_pane`) and the `[mcp] control` scope are described in [MCP Server](MCP-Server). Each
@@ -671,7 +671,17 @@ one scan can copy (64 KiB of text, or more cells than one scan visits) is never 
 prefix, because an anchor such as `$` could hold at the cut and not at the line's real end; it sets
 `truncated` instead. Either flag means a timeout does not claim those rows held no match. With an
 `after_row`, a token from the other screen, or a switch to the other screen during the wait, ends
-it as `stale_row`; without one, a screen switch restarts the scan on the new screen's newest row.
+it as `stale_row`. Without one, each screen keeps its own scan cursor: a screen the wait first
+sees after a switch is scanned from its oldest retained row, returning to a screen resumes where its
+scan stopped, and the result sets `screen_changed`. Leaving the primary screen keeps it pending,
+since output just before the switch may not have been read; leaving the alternate screen discards
+it, so rows its scan had not reached set `missed_output` and are not waited for, and a later
+alternate screen is read from its start. A regex wait ends as quiet only once the scan
+has caught up with the output on both screens, and the newest output was inspected at least once
+(a busy parser defers that). Every result reports `scan_complete: false` while rows are still
+unscanned on either screen, including a match found before the rest of a backlog, a timeout, an
+exit and a revocation, and none of them claims those rows held no match. A line cut for its length
+is not read again on later polls.
 It scans retained terminal content, not an output journal: text
 rewritten in place, erased, or lost across a resize or screen switch between polls can go unseen,
 and `missed_output: false` is not proof of completeness in those cases. Disabling the server, changing

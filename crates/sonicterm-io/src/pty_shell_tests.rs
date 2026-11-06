@@ -361,3 +361,18 @@ fn extra_env_reaches_the_child_after_the_terminal_identity() {
     assert_eq!(env_str(&builder, "TERM_PROGRAM"), "Agent", "an explicit entry is applied last");
     assert!(ShellSpawnOpts::default().extra_env.is_empty());
 }
+
+/// A shell token SonicTerm inherited (started from another pane) never reaches a child: a direct
+/// command gets none, and a shell pane gets only its own.
+#[test]
+fn an_inherited_shell_token_never_reaches_the_child() {
+    let mut builder = CommandBuilder::new("sh");
+    builder.env(SHELL_TOKEN_ENV, "inherited");
+    apply_extra_env(&mut builder, &[]);
+    assert_eq!(builder.get_env(SHELL_TOKEN_ENV), None, "a direct command gets no token");
+
+    let mut builder = CommandBuilder::new("sh");
+    builder.env(SHELL_TOKEN_ENV, "inherited");
+    apply_extra_env(&mut builder, &[(SHELL_TOKEN_ENV.to_owned(), "own".to_owned())]);
+    assert_eq!(env_str(&builder, SHELL_TOKEN_ENV), "own");
+}
