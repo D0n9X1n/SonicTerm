@@ -214,16 +214,31 @@ fn connection_buffers_are_charged_to_the_mcp_owner() {
     assert!(app.governor.snapshot(owner).is_err(), "the owner outlived the server");
 }
 
-/// While a server runs, new panes are told where it listens; without one they are not.
+/// Every new pane gets its id and a fresh shell token; while a server runs it is also told where
+/// the server listens, and without one it is not.
 #[test]
 fn new_panes_get_the_endpoint_while_a_server_runs() {
     let mut app = test_app();
     let names = |app: &App| -> Vec<String> {
         app.pane_control_env(5).into_iter().map(|(name, _)| name).collect()
     };
-    assert_eq!(names(&app), vec!["SONICTERM_PANE_ID"]);
+    assert_eq!(names(&app), vec!["SONICTERM_PANE_ID", "SONICTERM_SHELL_TOKEN"]);
     install_server(&mut app, enabled(McpControl::Agent));
-    assert_eq!(names(&app), vec!["SONICTERM_PANE_ID", "SONICTERM_CONTROL"]);
+    assert_eq!(
+        names(&app),
+        vec!["SONICTERM_PANE_ID", "SONICTERM_SHELL_TOKEN", "SONICTERM_CONTROL"]
+    );
+    let token = |app: &App| {
+        app.pane_control_env(5)
+            .into_iter()
+            .find(|(name, _)| name == "SONICTERM_SHELL_TOKEN")
+            .map(|(_, value)| value)
+            .unwrap()
+    };
+    let first = token(&app);
+    assert_eq!(first.len(), 32);
+    assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_ne!(first, token(&app), "every pane gets its own token");
     assert!(app
         .pane_control_env(5)
         .contains(&("SONICTERM_CONTROL".to_owned(), "test-endpoint".to_owned())));

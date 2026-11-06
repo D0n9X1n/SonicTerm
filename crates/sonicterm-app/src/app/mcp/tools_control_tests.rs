@@ -89,7 +89,20 @@ fn bad_arguments_never_reach_the_loop() {
 /// A run started at `entry`'s newest prompt, as the loop hands one back: the region pinned, the
 /// pane reserved and its typing stamp reset.
 fn started(entry: PaneEntry) -> RunStarted {
-    entry.parser.lock().advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    started_with(entry, b"\x1b]133;A\x07$ \x1b]133;B\x07")
+}
+
+/// The shell token a tokened test pane's integration carries.
+const TEST_TOKEN: &str = "00112233445566778899aabbccddeeff";
+
+/// OSC 133 `kind` (with any `extra` parameter) carrying [`TEST_TOKEN`].
+fn tokened(kind: &str, extra: &str) -> Vec<u8> {
+    format!("\x1b]133;{kind}{extra};sonicterm_token={TEST_TOKEN}\x07").into_bytes()
+}
+
+/// A run started after the prompt marks `prompt`, as [`started`] does.
+fn started_with(entry: PaneEntry, prompt: &[u8]) -> RunStarted {
+    entry.parser.lock().advance(prompt);
     let seq = entry.parser.lock().grid().newest_prompt().unwrap().seq;
     assert!(entry.parser.lock().grid_mut().pin_run(seq));
     entry.agent_run.store(true, Ordering::Release);
@@ -97,8 +110,9 @@ fn started(entry: PaneEntry) -> RunStarted {
     RunStarted { entry, seq }
 }
 
-/// The shell's marks complete a pinned run: its output from C to D and its exit code are read,
-/// and the pin and the pane reservation are released.
+/// The shell's marks complete a pinned run once its next prompt (A) follows D: its output from C
+/// to D and its exit code are read, it is not verified (no shell token), and the pin and the pane
+/// reservation are released.
 #[test]
 fn a_run_completes_with_its_output_and_exit_code() {
     let shared = McpShared::new(McpControl::Agent, None);
@@ -107,23 +121,27 @@ fn a_run_completes_with_its_output_and_exit_code() {
     let parser = Arc::clone(&entry.parser);
     let shell = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(60));
-        parser.lock().advance(b"make\r\n\x1b]133;C\x07built\r\nok\r\n\x1b]133;D;3\x07$ ");
+        parser
+            .lock()
+            .advance(b"make\r\n\x1b]133;C\x07built\r\nok\r\n\x1b]133;D;3\x07\x1b]133;A\x07$ ");
     });
     let outcome = wait_run(&shared, run, Duration::from_secs(5), &scope(&shared));
     shell.join().unwrap();
     assert_eq!(outcome.state, RunState::Completed);
     assert_eq!(outcome.exit_code, Some(3));
+    assert!(!outcome.exit_verified, "tokenless markers never verify an exit code");
     assert_eq!(outcome.output, vec!["built", "ok"]);
     assert!(entry.parser.lock().grid().pinned_run().is_none(), "the pin is released");
     assert!(!entry.agent_run.load(Ordering::Acquire), "the pane is free again");
 }
 
-/// D without C reports `not_started` with the shell's code and no output.
+/// D without C, then the shell's next prompt, reports `not_started` with the shell's code and no
+/// output.
 #[test]
 fn a_prompt_ended_without_c_did_not_start() {
     let shared = McpShared::new(McpControl::Agent, None);
     let run = started(test_entry(30, 6, 100));
-    run.entry.parser.lock().advance(b"^C\r\n\x1b]133;D;130\x07");
+    run.entry.parser.lock().advance(b"^C\r\n\x1b]133;D;130\x07\x1b]133;A\x07");
     let outcome = wait_run(&shared, run, Duration::from_secs(5), &scope(&shared));
     assert_eq!(outcome.state, RunState::NotStarted);
     assert_eq!(outcome.exit_code, Some(130));
@@ -138,19 +156,77 @@ fn a_run_reads_its_output_from_the_screen_it_was_pinned_on() {
     let shared = McpShared::new(McpControl::Agent, None);
     let run = started(test_entry(30, 6, 100));
     run.entry.parser.lock().advance(
-        b"vim\r\n\x1b]133;C\x07before\r\n\x1b[?1049hFULLSCREEN\x1b[?1049l\x1b]133;D;0\x07",
+        b"vim\r\n\x1b]133;C\x07before\r\n\x1b[?1049hFULLSCREEN\x1b[?1049l\x1b]133;D;0\x07\x1b]133;A\x07",
     );
     let outcome = wait_run(&shared, run, Duration::from_secs(5), &scope(&shared));
     assert_eq!(outcome.state, RunState::Completed);
     assert_eq!(outcome.output, vec!["before"]);
 
-    let run = started(test_entry(30, 6, 100));
+    // A run that ended just before a program opened the alternate screen gets no next prompt on
+    // its screen, so only authenticated marks complete it; its output is read from the saved
+    // primary.
+    let entry = test_entry(30, 6, 100);
+    entry.parser.lock().set_shell_token(Some(TEST_TOKEN.to_owned()));
+    let run = started_with(entry, &[tokened("A", ""), b"$ ".to_vec(), tokened("B", "")].concat());
     let parser = Arc::clone(&run.entry.parser);
-    parser.lock().advance(b"ls\r\n\x1b]133;C\x07listed\r\n\x1b]133;D;0\x07\x1b[?1049h");
+    let output = [
+        b"ls\r\n".to_vec(),
+        tokened("C", ""),
+        b"listed\r\n".to_vec(),
+        tokened("D", ";0"),
+        b"\x1b[?1049h".to_vec(),
+    ];
+    parser.lock().advance(&output.concat());
     let outcome = wait_run(&shared, run, Duration::from_secs(5), &scope(&shared));
     assert_eq!(outcome.state, RunState::Completed);
+    assert!(outcome.exit_verified);
     assert_eq!(outcome.output, vec!["listed"]);
     assert!(parser.lock().grid().is_alt(), "the alternate screen is still up");
+}
+
+/// The reported forgery: a command prints a fake `D;0`, then keeps running and fails. The run must
+/// not report success at the fake D; it completes only at the shell's real D and next prompt,
+/// with the real exit code, and is never marked verified without the shell token.
+#[test]
+fn a_forged_d_from_command_output_does_not_complete_the_run() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let run = started(test_entry(40, 6, 100));
+    let parser = Arc::clone(&run.entry.parser);
+    let shell = std::thread::spawn(move || {
+        parser.lock().advance(b"cmd\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+        // The command is still running here; a run that ended at the forged D is already wrong.
+        std::thread::sleep(Duration::from_millis(300));
+        parser.lock().advance(b"\r\n\x1b]133;D;1\x07\x1b]133;A\x07$ ");
+    });
+    let started_at = std::time::Instant::now();
+    let outcome = wait_run(&shared, run, Duration::from_secs(5), &scope(&shared));
+    shell.join().unwrap();
+    assert!(started_at.elapsed() >= Duration::from_millis(250), "it ended at the forged D");
+    assert_eq!(outcome.state, RunState::Completed);
+    assert_eq!(outcome.exit_code, Some(1), "the shell's real exit code wins");
+    assert!(!outcome.exit_verified);
+}
+
+/// In a tokened pane whose shell proved itself, a forged tokenless D cannot complete the run at
+/// all: it is dropped, and the run completes, verified, at the shell's own D.
+#[test]
+fn a_tokened_pane_drops_a_forged_d_and_verifies_the_real_one() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let entry = test_entry(40, 6, 100);
+    entry.parser.lock().set_shell_token(Some(TEST_TOKEN.to_owned()));
+    let run = started_with(entry, &[tokened("A", ""), b"$ ".to_vec(), tokened("B", "")].concat());
+    let parser = Arc::clone(&run.entry.parser);
+    let shell = std::thread::spawn(move || {
+        parser.lock().advance(&[b"cmd\r\n".to_vec(), tokened("C", "")].concat());
+        parser.lock().advance(b"\x1b]133;D;0\x07\x1b]133;A\x07");
+        std::thread::sleep(Duration::from_millis(200));
+        parser.lock().advance(&tokened("D", ";7"));
+    });
+    let outcome = wait_run(&shared, run, Duration::from_secs(5), &scope(&shared));
+    shell.join().unwrap();
+    assert_eq!(outcome.state, RunState::Completed);
+    assert_eq!(outcome.exit_code, Some(7));
+    assert!(outcome.exit_verified);
 }
 
 /// Dropping a started run nobody waited on, as when its reply is never delivered, unpins its

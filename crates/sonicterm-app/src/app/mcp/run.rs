@@ -281,6 +281,8 @@ pub(crate) struct RunOutcome {
     pub(crate) truncated: bool,
     /// The C row already left history.
     pub(crate) output_truncated: bool,
+    /// The exit code came from authenticated shell markers; see [`exit_verified`].
+    pub(crate) exit_verified: bool,
 }
 
 /// Poll the pinned record until the run ends, then read its result. Runs on the connection's
@@ -340,8 +342,11 @@ pub(crate) fn run_state(
         // When: typing came `typed_first`, before C, the command may not be the agent's.
         return Some(RunState::Interfered);
     }
-    if run.exit.is_some() {
-        // When: the pinned record has an `exit`, D arrived; without C nothing ran.
+    // Command output can print D itself, so D ends a run only when the pane's token proves the
+    // shell sent the run's C and D, or once the shell's next prompt followed it.
+    if run.exit.is_some() && (exit_verified(&run) || run.prompt_after_end) {
+        // When: `run.exit` is set and `exit_verified` or `prompt_after_end` holds, D is trusted or
+        // closed by the shell's next prompt; without C nothing ran.
         return Some(if run.output_seen { RunState::Completed } else { RunState::NotStarted });
     }
     if run.evicted || exited {
@@ -349,6 +354,12 @@ pub(crate) fn run_state(
         return Some(RunState::Lost);
     }
     None
+}
+
+/// Whether `run`'s exit code is verified: its own C and latest D both carried the pane's shell
+/// token. Any other exit code was read from terminal output a program could have printed.
+pub(crate) fn exit_verified(run: &PinnedRun) -> bool {
+    run.output_authenticated && run.end_authenticated
 }
 
 /// Release the pin and, for a completed run, read its output from the C row to the D row. The
@@ -361,6 +372,7 @@ fn finish(started: &RunStarted, state: RunState) -> RunOutcome {
         output: Vec::new(),
         truncated: false,
         output_truncated: false,
+        exit_verified: false,
     };
     let Some(mut parser) = started.entry.parser.try_lock_for(FINISH_WAIT) else {
         // When: the parser stayed busy past `FINISH_WAIT`, the output cannot be read in time.
@@ -374,6 +386,7 @@ fn finish(started: &RunStarted, state: RunState) -> RunOutcome {
         return outcome;
     };
     outcome.exit_code = run.exit.flatten();
+    outcome.exit_verified = exit_verified(&run);
     if state != RunState::Completed {
         // When: the `state` is `NotStarted`, no command printed anything.
         return outcome;

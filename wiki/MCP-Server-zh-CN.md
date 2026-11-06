@@ -127,13 +127,40 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 | `create_pane` | 在某个窗格旁打开辅助窗格：向右或向下拆分，或在其窗口中新开标签页。焦点不移动。给出 `argv` 时直接运行该程序，程序退出后窗格保留，因此可用带 `exit` 的 `wait_for` 和 `read_pane` 读取其结束情况。 |
 | `send_text` | 输入文本；程序要求时以括号粘贴方式发送；`submit` 追加回车。至多 64 KiB。 |
 | `send_keys` | 发送具名按键（`Enter`、`Tab`、`Escape`、方向键、`Home`、`End`、`PageUp`、`PageDown`、`F1`–`F12`、单个字符），每个可加 `Ctrl+`、`Alt+` 或 `Shift+` 前缀，并按窗格的键盘模式编码。至多 64 个键；有一个未知名称则什么都不发送。 |
-| `run_command` | 在窗格的 shell 提示符处运行一条命令并等待结束，返回其输出和 shell 报告的退出码（`completed`）；若 shell 未运行任何命令就结束了该提示符则返回 `not_started`，若在其输出开始前有他人输入则返回 `interfered`，记录被淘汰或 shell 退出则返回 `lost`，超时（默认 60 s，至多 600 s）则返回 `running`。 |
+| `run_command` | 在窗格的 shell 提示符处运行一条命令并等待结束，返回其输出和 shell 报告的退出码（`completed`，`exit_verified` 表示 SonicTerm 自己的 shell 集成是否为其担保）；若 shell 未运行任何命令就结束了该提示符则返回 `not_started`，若在其输出开始前有他人输入则返回 `interfered`，记录被淘汰或 shell 退出则返回 `lost`，超时（默认 60 s，至多 600 s）则返回 `running`。 |
 | `close_pane` | 关闭一个窗格；标签页的唯一窗格会关闭该标签页。主窗口的最后一个标签页永不关闭。 |
 
 `run_command` 需要 shell 集成：shell 必须用 OSC 133 `A`、`B`、`C`、`D` 标记提示符，WezTerm、
 iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有输入的文本、输入队列不为空，或上一条
 命令运行期间有人输入，它会拒绝。这项检查只能尽力而为，因为终端无法看到 shell 已读取了什么，所以
-请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。退出码是 shell 报告的值。
+请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。
+
+### 信任退出码
+
+OSC 133 标记与命令自身的输出走同一条数据流，因此窗格中的任何程序都能打印它们。若不加防护，
+程序打印一个伪造的 `D;0`，就能让 `run_command` 在它仍在运行时报告成功。有两条规则防范这一点：
+
+- 没有 SonicTerm 自己的 shell 集成时，只有在 `D` 之后出现 shell 的下一个提示符，运行才算完成，
+  退出码取该运行最新的 `D`，因此 shell 的真实标记优先于伪造的标记。这只是加固，不是证明：
+  连提示符也一并伪造的程序仍能骗过它，所以结果带有 `exit_verified: false`。
+- 使用 SonicTerm 的 shell 集成时，每个窗格的 shell 都会在 `SONICTERM_SHELL_TOKEN` 中得到一个新的
+  128 位密钥。该集成只读取一次，再将其从环境中移除，使它运行的命令永远不会继承它，并在每个标记后附加
+  `sonicterm_token=<密钥>`。SonicTerm 丢弃密钥错误的标记；一旦收到一个正确的标记，便在该窗格的整个
+  生命周期内（包括 `RIS` 和切换屏幕之后）丢弃所有不带密钥的标记，因此输出既无法伪造也无法降级它们。
+  自身的 `C` 和最新的 `D` 都带有密钥的运行会报告 `exit_verified: true`。
+
+在 shell 的启动文件中加载该集成：
+
+```sh
+eval "$(sonicterm-mcp --shell-integration zsh)"    # zsh 5.3+，写入 ~/.zshrc
+eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+，写入 ~/.bashrc
+```
+
+它把自己的钩子加在已有钩子旁边，因此可以与其他 OSC 133 集成并存。但一旦加载，该窗格中嵌套 shell
+或 ssh 会话发出的标记都不带密钥，会被丢弃，所以 `run_command` 只能在窗格自己的 shell 中使用。
+PowerShell 目前还没有 SonicTerm 集成，因此在 Windows 上 `exit_verified` 始终为 `false`。该密钥用于防范
+来自文件、远程主机以及从未见过 shell 环境的程序的输出。以你的身份在窗格中运行、能读取 shell 内存的
+程序不在防范范围内：它本就拥有 agent 的权限。
 
 ## 确认是否生效
 

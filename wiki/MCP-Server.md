@@ -143,7 +143,7 @@ they run:
 | `create_pane` | Opens a helper beside a pane: a split to its right or below, or a new tab in its window. Focus does not move. With `argv` the program runs directly and the pane stays open after it exits, so `wait_for` with `exit` and `read_pane` can read how it ended. |
 | `send_text` | Types text, as a bracketed paste when the program asked for one; `submit` adds Enter. At most 64 KiB. |
 | `send_keys` | Sends named keys (`Enter`, `Tab`, `Escape`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`, a single character), each optionally with `Ctrl+`, `Alt+` or `Shift+`, encoded for the pane's keyboard mode. At most 64 keys; one unknown name sends nothing. |
-| `run_command` | Runs one command line at the pane's shell prompt and waits for it to finish, returning its output and the exit code the shell reported (`completed`), `not_started` when the shell ended the prompt without running anything, `interfered` when someone else typed before its output began, `lost` when its record was evicted or the shell exited, or `running` at the timeout (default 60 s, at most 600 s). |
+| `run_command` | Runs one command line at the pane's shell prompt and waits for it to finish, returning its output and the exit code the shell reported (`completed`, with `exit_verified` saying whether SonicTerm's own shell integration vouched for it), `not_started` when the shell ended the prompt without running anything, `interfered` when someone else typed before its output began, `lost` when its record was evicted or the shell exited, or `running` at the timeout (default 60 s, at most 600 s). |
 | `close_pane` | Closes one pane; a tab's only pane closes the tab. The main window's last tab is never closed. |
 
 `run_command` needs shell integration: the shell must mark its prompt with
@@ -152,7 +152,42 @@ iTerm2 and kitty do. It refuses a pane whose prompt has text typed after it, who
 input queue is not empty, or into which anyone typed while the previous command
 ran. That check is best effort, because a terminal cannot see what the shell has
 consumed, so use `run_command` on panes the agent created, where only the agent
-types. The exit code is whatever the shell reported.
+types.
+
+### Trusting the exit code
+
+OSC 133 markers travel in the same stream as the command's own output, so any program
+in the pane can print them. A program that printed a fake `D;0` could otherwise make
+`run_command` report success while it was still running. Two rules guard against this:
+
+- Without SonicTerm's shell integration, a run completes only once the shell's next
+  prompt follows its `D`, and the exit code is the run's latest `D`, so the shell's real
+  marker outranks a forged one. This is hardening, not proof: a program that forges a
+  prompt too still fools it, so the result carries `exit_verified: false`.
+- With SonicTerm's shell integration, every pane's shell gets a fresh 128-bit secret in
+  `SONICTERM_SHELL_TOKEN`. The integration reads it once, removes it from the
+  environment so the commands it runs never inherit it, and appends
+  `sonicterm_token=<secret>` to each marker. SonicTerm drops a marker with a wrong
+  token, and once one correct marker arrived it drops every tokenless marker for the
+  pane's life, through `RIS` and screen switches, so output can neither forge nor
+  downgrade them. A run whose own `C` and latest `D` both carried the token reports
+  `exit_verified: true`.
+
+Load the integration from your shell's startup file:
+
+```sh
+eval "$(sonicterm-mcp --shell-integration zsh)"    # zsh 5.3+, in ~/.zshrc
+eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+, in ~/.bashrc
+```
+
+It adds its hooks beside any existing ones, so it can stay alongside another
+OSC 133 integration. Once it is loaded, though, markers from a nested shell or
+an ssh session in that pane carry no token and are dropped, so `run_command`
+works only at the pane's own shell. PowerShell has no SonicTerm integration yet, so
+on Windows `exit_verified` stays `false`. The secret guards against output from
+files, remote hosts and programs that never saw the shell's environment. A program
+running in the pane as you, which could read the shell's memory, is out of scope:
+it already has the agent's powers.
 
 ## Check that it works
 

@@ -43,6 +43,13 @@ pub struct PinnedRun {
     pub exit: Option<Option<i32>>,
     /// A newer prompt opened before the run finished, so its completion can no longer arrive.
     pub evicted: bool,
+    /// A prompt opened on the run's screen after its D. The command's own output can print D, so
+    /// only a later prompt says the shell took control back; a forged D alone never ends a run.
+    pub prompt_after_end: bool,
+    /// The run's C came from an authenticated shell marker (one carrying the pane's token).
+    pub output_authenticated: bool,
+    /// The run's latest D came from an authenticated shell marker.
+    pub end_authenticated: bool,
 }
 
 /// A completed command's output span, for reading what the last command printed.
@@ -75,11 +82,15 @@ impl Grid {
             return;
         }
         let is_alt = self.is_alt();
-        // A newer prompt on the pinned screen before D means the run's completion cannot arrive.
-        if let Some(run) =
-            self.pinned_run.as_mut().filter(|run| run.alt == is_alt && run.exit.is_none())
-        {
-            run.evicted = true;
+        // On the pinned screen, a newer prompt after D closes the run; before D, it means the run's
+        // completion can no longer arrive. Both are decided before the deque changes.
+        if let Some(run) = self.pinned_run.as_mut().filter(|run| run.alt == is_alt) {
+            if run.exit.is_some() {
+                run.prompt_after_end = true;
+            } else {
+                // When: the pinned run has no `exit` yet, a newer prompt means its D cannot arrive.
+                run.evicted = true;
+            }
         }
         if self.prompts.len() >= PROMPT_REGION_LIMIT {
             self.prompts.pop_front();
@@ -114,6 +125,12 @@ impl Grid {
     /// Record an OSC 133 `C` (output-start) marker in the newest region; a duplicate keeps the
     /// first row. Updates the pinned run when that region is the one it waits on.
     pub fn record_output_start(&mut self) {
+        self.record_output_start_marked(false);
+    }
+
+    /// [`Self::record_output_start`], noting whether the marker was `authenticated` by the pane's
+    /// shell token; the pinned run keeps that for its own C.
+    pub fn record_output_start_marked(&mut self, authenticated: bool) {
         let row = self.cursor_absolute_row();
         let token = self.row_token(row);
         let Some(last) = self.prompts.back_mut().filter(|last| !last.output_seen) else {
@@ -132,12 +149,19 @@ impl Grid {
             run.output_seen = true;
             run.output_start = Some(token);
             run.output_at = Some(now);
+            run.output_authenticated = authenticated;
         }
     }
 
     /// Record an OSC 133 `D` (command-end) marker. Updates the most recent
     /// prompt region in place; a stray `D` without a prior `A` is ignored.
     pub fn record_prompt_end(&mut self, exit_code: Option<i32>) {
+        self.record_prompt_end_marked(exit_code, false);
+    }
+
+    /// [`Self::record_prompt_end`], noting whether the marker was `authenticated`. A later D
+    /// replaces an earlier one's exit and trust, so the shell's real D outranks a forged one.
+    pub fn record_prompt_end_marked(&mut self, exit_code: Option<i32>, authenticated: bool) {
         let row = self.cursor_absolute_row();
         let col = self.cursor.col;
         let token = self.row_token(row);
@@ -157,6 +181,7 @@ impl Grid {
             run.end = Some(token);
             run.end_col = col;
             run.exit = Some(exit_code);
+            run.end_authenticated = authenticated;
         }
     }
 
@@ -221,6 +246,9 @@ impl Grid {
             end_col: 0,
             exit: None,
             evicted: false,
+            prompt_after_end: false,
+            output_authenticated: false,
+            end_authenticated: false,
         });
         true
     }
@@ -315,3 +343,7 @@ impl Grid {
 #[cfg(test)]
 #[path = "grid_prompts_tests.rs"]
 mod grid_prompts_tests;
+
+#[cfg(test)]
+#[path = "grid_prompts_trust_tests.rs"]
+mod grid_prompts_trust_tests;

@@ -381,6 +381,8 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/mcp/control_loop.rs", 2),
     ("app/mcp/run.rs", 2),
     ("app/scroll.rs", 1),
+    // Handing a new pane's parser the shell token its shell was given.
+    ("app/shell_token.rs", 1),
     ("app/search_handle.rs", 2),
     // The pane spawn, and the worker latch reading the parser once before its first batch.
     ("app/spawn_pane.rs", 2),

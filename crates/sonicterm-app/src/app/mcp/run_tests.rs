@@ -62,11 +62,14 @@ fn pinned() -> PinnedRun {
         end_col: 0,
         exit: None,
         evicted: false,
+        prompt_after_end: false,
+        output_authenticated: false,
+        end_authenticated: false,
     }
 }
 
-/// C then D completes a run; D without C did not start one; eviction or an exited shell loses it;
-/// a revoked call ends it; nothing yet keeps waiting.
+/// C then D and the shell's next prompt complete a run; D without C did not start one; eviction
+/// or an exited shell loses it; a revoked call ends it; nothing yet keeps waiting.
 #[test]
 fn run_states_follow_the_pinned_record() {
     let waiting = pinned();
@@ -74,9 +77,9 @@ fn run_states_follow_the_pinned_record() {
     assert_eq!(run_state(Some(waiting), None, false, true), Some(RunState::Revoked));
     let output_at = Instant::now();
     let started = PinnedRun { output_seen: true, output_at: Some(output_at), ..waiting };
-    let done = PinnedRun { exit: Some(Some(5)), ..started };
+    let done = PinnedRun { exit: Some(Some(5)), prompt_after_end: true, ..started };
     assert_eq!(run_state(Some(done), None, false, false), Some(RunState::Completed));
-    let rejected = PinnedRun { exit: Some(Some(130)), ..waiting };
+    let rejected = PinnedRun { exit: Some(Some(130)), prompt_after_end: true, ..waiting };
     assert_eq!(
         run_state(Some(rejected), None, false, false),
         Some(RunState::NotStarted),
@@ -102,6 +105,7 @@ fn typing_is_ordered_against_c_not_against_the_poll() {
         output_seen: true,
         output_at: Some(output_at),
         exit: Some(Some(0)),
+        prompt_after_end: true,
         ..pinned()
     };
     assert_eq!(run_state(Some(done), Some(before), false, false), Some(RunState::Interfered));
@@ -132,4 +136,39 @@ fn control_characters_are_refused() {
         assert!(has_control_character(command), "{command:?}");
     }
     assert!(!has_control_character("echo 'hi there' | wc -c"));
+}
+
+/// A D alone never ends an unauthenticated run: the command's own output can print it, so the
+/// run waits for the shell's next prompt. That stops `printf '\e]133;D;0\a'; sleep 3; false`
+/// from reporting success while `sleep` still runs.
+#[test]
+fn a_lone_unauthenticated_d_keeps_the_run_waiting() {
+    let forged = PinnedRun {
+        output_seen: true,
+        output_at: Some(Instant::now()),
+        exit: Some(Some(0)),
+        ..pinned()
+    };
+    assert_eq!(run_state(Some(forged), None, false, false), None);
+    let closed = PinnedRun { prompt_after_end: true, exit: Some(Some(1)), ..forged };
+    assert_eq!(run_state(Some(closed), None, false, false), Some(RunState::Completed));
+}
+
+/// An authenticated C and D end the run at D: the pane's token proves the shell sent them, and
+/// only then is the exit code verified.
+#[test]
+fn an_authenticated_run_completes_at_d_and_is_verified() {
+    let verified = PinnedRun {
+        output_seen: true,
+        output_at: Some(Instant::now()),
+        exit: Some(Some(0)),
+        output_authenticated: true,
+        end_authenticated: true,
+        ..pinned()
+    };
+    assert_eq!(run_state(Some(verified), None, false, false), Some(RunState::Completed));
+    assert!(exit_verified(&verified));
+    let mixed = PinnedRun { output_authenticated: false, ..verified };
+    assert!(!exit_verified(&mixed), "a tokenless C with an authenticated D stays unverified");
+    assert_eq!(run_state(Some(mixed), None, false, false), None, "and waits for a prompt");
 }

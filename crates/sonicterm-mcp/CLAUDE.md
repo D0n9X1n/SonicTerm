@@ -9,8 +9,10 @@ caller's pane, and relays newline-delimited JSON-RPC both ways. The MCP server i
 lives in `sonicterm-app` (`src/app/mcp/`).
 
 ## Key files
-- `main.rs` - argument parsing (`--endpoint`, `--version`, `--help`), exit codes, and
-  the discover-connect-relay sequence.
+- `main.rs` - argument parsing (`--endpoint`, `--version`, `--help`,
+  `--shell-integration`), exit codes, and the discover-connect-relay sequence.
+- `shell_integration.rs` - the fixed zsh and bash OSC 133 snippets that read, unset and
+  append the pane's `SONICTERM_SHELL_TOKEN`; the snippet never contains a token.
 - `discovery.rs` - endpoint choice in fixed order: `--endpoint`, `SONICTERM_CONTROL`,
   then the only live entry in the per-user directory; the no-endpoint and
   several-instances errors.

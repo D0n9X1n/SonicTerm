@@ -17,6 +17,7 @@ mod connect;
 mod connect;
 mod discovery;
 mod relay;
+mod shell_integration;
 #[cfg(unix)]
 mod stdout_unix;
 
@@ -25,9 +26,14 @@ const USAGE: &str = "\
 sonicterm-mcp: connect an MCP client to a running SonicTerm
 
 Usage: sonicterm-mcp [--endpoint <path-or-pipe>]
+       sonicterm-mcp --shell-integration <zsh|bash>
 
 The endpoint is, in order: --endpoint, $SONICTERM_CONTROL (set in every SonicTerm pane), or the
 only running SonicTerm with [mcp] enabled = true. stdin and stdout carry MCP JSON-RPC lines.
+
+--shell-integration prints SonicTerm's own OSC 133 shell integration for zsh (5.3+) or bash (4.4+).
+Load it from your shell's startup file so run_command can verify exit codes:
+  eval \"$(sonicterm-mcp --shell-integration zsh)\"
 ";
 
 /// What the command line asked for.
@@ -39,6 +45,8 @@ enum Command {
     Version,
     /// Print usage.
     Help,
+    /// Print the OSC 133 shell integration for a shell.
+    ShellIntegration(shell_integration::Shell),
 }
 
 /// Parse the arguments after the program name.
@@ -50,6 +58,12 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             "--version" | "-V" => return Ok(Command::Version),
             "--help" | "-h" => return Ok(Command::Help),
             "--endpoint" => endpoint = Some(rest.next().ok_or("--endpoint needs a value")?.clone()),
+            "--shell-integration" => {
+                let name = rest.next().ok_or("--shell-integration needs zsh or bash")?;
+                let shell = shell_integration::Shell::from_name(name)
+                    .ok_or_else(|| format!("no shell integration for {name:?}; use zsh or bash"))?;
+                return Ok(Command::ShellIntegration(shell));
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -97,6 +111,10 @@ fn main() -> ExitCode {
         }
         Ok(Command::Help) => {
             print!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Command::ShellIntegration(shell)) => {
+            print!("{}", shell.snippet());
             return ExitCode::SUCCESS;
         }
         Ok(Command::Relay(endpoint)) => endpoint,
