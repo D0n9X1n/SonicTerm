@@ -142,6 +142,9 @@ fn unsupported_shell_pair_returns_a_typed_rejection() {
     assert_eq!(launch.draft_for_shell("pwsh.exe"), Err(DraftRejection::UnsupportedPair));
 }
 
+/// The draft reaches the shell through the real PTY without its Enter, and, since it runs
+/// nothing, it leaves the pane's shell token trusted: the fake shell's tokened prompt, printed
+/// after the draft was queued, still latches the pane.
 #[cfg(unix)]
 #[test]
 fn spawned_pane_sends_the_unterminated_draft_through_the_real_pty() {
@@ -158,7 +161,10 @@ fn spawned_pane_sends_the_unterminated_draft_through_the_real_pty() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let shell = dir.join("sh");
-    std::fs::write(&shell, "#!/bin/sh\nexec cat\n").unwrap();
+    let fake_shell = "#!/bin/sh\nsleep 0.3\n\
+                      printf '\\033]133;A;sonicterm_token=%s\\007' \"$SONICTERM_SHELL_TOKEN\"\n\
+                      exec cat\n";
+    std::fs::write(&shell, fake_shell).unwrap();
     let mut permissions = std::fs::metadata(&shell).unwrap().permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&shell, permissions).unwrap();
@@ -174,22 +180,26 @@ fn spawned_pane_sends_the_unterminated_draft_through_the_real_pty() {
     app.__test_synthetic_main();
     app.new_tab_with_launch("script", launch);
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(4);
     loop {
-        let text = {
+        let (text, authenticated) = {
             let window = app.main().unwrap();
             let pane_id = window.tab_states[0].active_pane;
             let parser = window.panes[&pane_id].parser.lock();
-            parser
+            let text = parser
                 .grid()
                 .rows_iter()
                 .flat_map(|row| row.iter().map(|cell| cell.ch))
-                .collect::<String>()
+                .collect::<String>();
+            (text, parser.shell_markers_authenticated())
         };
-        if text.contains(&expected) {
+        if text.contains(&expected) && authenticated {
             break;
         }
-        assert!(Instant::now() < deadline, "PTY never echoed draft {expected:?}; grid={text:?}");
+        assert!(
+            Instant::now() < deadline,
+            "PTY never echoed draft {expected:?} and latched (latched: {authenticated}); grid={text:?}"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 

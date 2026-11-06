@@ -670,13 +670,10 @@ impl App {
         }
     }
 
-    /// The variables a new pane's shell gets: its id, a fresh shell token for its OSC 133
-    /// markers, and the control endpoint while one runs.
+    /// The variables a new pane's process gets: its id, and the control endpoint while one runs.
+    /// The shell token is added by [`super::shell_token::arm_shell_token`].
     pub(super) fn pane_control_env(&self, pane_id: u64) -> Vec<(String, String)> {
         let mut env = vec![("SONICTERM_PANE_ID".to_owned(), pane_id.to_string())];
-        if let Some(token) = super::shell_token::new_shell_token() {
-            env.push((super::shell_token::SHELL_TOKEN_ENV.to_owned(), token));
-        }
         if let Some(endpoint) = self.mcp_endpoint() {
             env.push(("SONICTERM_CONTROL".to_owned(), endpoint.to_owned()));
         }
@@ -726,8 +723,8 @@ impl App {
         let redraw_target = Arc::new(Mutex::new(self.main_window_id));
         // The gate is read before the PTY exists, so its reader stamps reads from the first one.
         let frame_counters = self.pane_frame_counters();
-        let shell_opts = self.pane_spawn_opts(pane_id, launch, frame_counters.is_some());
-        super::shell_token::arm_shell_token(&parser, &shell_opts);
+        let mut shell_opts = self.pane_spawn_opts(pane_id, launch, frame_counters.is_some());
+        super::shell_token::arm_shell_token(&parser, &mut shell_opts, launch);
         let pty = match self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts) {
             Ok(pty) => {
                 // When: spawn_launch_pty returns Ok(pty), stage any launch draft before the worker starts.

@@ -124,3 +124,50 @@ fn before_the_latch_tokenless_markers_are_admitted_unverified() {
     assert_eq!(parser.grid().prompts_len(), 1);
     assert!(!parser.shell_markers_authenticated());
 }
+
+/// A tokened parser with an input flag, and the flag, as the app wires a shell pane.
+fn tokened_with_input() -> (Parser, Arc<AtomicBool>) {
+    let mut parser = tokened();
+    let input_seen = Arc::new(AtomicBool::new(false));
+    parser.set_shell_input_seen(Some(input_seen.clone()));
+    (parser, input_seen)
+}
+
+#[test]
+fn a_token_first_seen_after_input_never_latches() {
+    // A shell with no integration leaves the token in every command's environment, so a command
+    // the user ran can print it. Markers carrying it after input are admitted but never verified,
+    // never latch the pane, and tokenless markers keep working.
+    let (mut parser, input_seen) = tokened_with_input();
+    input_seen.store(true, Ordering::SeqCst);
+    let good = token_param(TOKEN);
+    parser.advance(&mark("A", &[&good]));
+    parser.advance(&mark("B", &[&good]));
+    assert!(!parser.shell_markers_authenticated(), "a token after input proves nothing");
+    let seq = parser.grid().prompts().last().unwrap().seq;
+    assert!(parser.grid_mut().pin_run(seq));
+    parser.advance(&[mark("C", &[&good]), mark("D", &["0", &good])].concat());
+    let run = parser.grid().pinned_run().unwrap();
+    assert_eq!(run.exit, Some(Some(0)), "the markers still record the run");
+    assert!(!run.output_authenticated && !run.end_authenticated);
+    let events = parser.advance(&mark("A", &[]));
+    assert!(has_command_event(&events), "an unlatched pane still admits tokenless markers");
+}
+
+#[test]
+fn input_after_the_latch_keeps_the_pane_verified() {
+    // A shell integration latches at its first prompt, before anyone types; the input that
+    // follows changes nothing, so its commands stay verified and forgeries stay dropped.
+    let (mut parser, input_seen) = tokened_with_input();
+    let good = token_param(TOKEN);
+    parser.advance(&mark("A", &[&good]));
+    input_seen.store(true, Ordering::SeqCst);
+    parser.advance(&mark("B", &[&good]));
+    let seq = parser.grid().prompts().last().unwrap().seq;
+    assert!(parser.grid_mut().pin_run(seq));
+    parser.advance(&[mark("C", &[&good]), mark("D", &["0", &good])].concat());
+    let run = parser.grid().pinned_run().unwrap();
+    assert!(run.output_authenticated && run.end_authenticated);
+    let events = parser.advance(&mark("A", &[]));
+    assert!(!has_command_event(&events), "the latch still drops tokenless markers");
+}

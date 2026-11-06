@@ -171,9 +171,27 @@ in the pane can print them. A program that printed a fake `D;0` could otherwise 
   token, and once one correct marker arrived it drops every tokenless marker for the
   pane's life, through `RIS` and screen switches, so output can neither forge nor
   downgrade them. A run whose own `C` and latest `D` both carried the token reports
-  `exit_verified: true`.
+  `exit_verified: true`: the exit code was vouched for by SonicTerm's shell
+  integration, which is weaker than proof that the command itself reported it.
+- The secret is trusted only if a correct marker arrives before anyone types into the
+  pane. A shell without the integration leaves the secret in the environment of every
+  command it runs, so once input reaches the pane a correct token no longer latches it;
+  its markers are admitted unverified, as without a token. The integration latches at its
+  first prompt, before you can type, so input typed while a slow startup file is still
+  loading leaves that pane unverified. A script opened in a new tab is typed without its
+  Enter and runs nothing, so it does not count as input.
+- SonicTerm removes any `SONICTERM_SHELL_TOKEN` it inherited, for example when started
+  from another SonicTerm pane, so a pane's process holds only its own secret.
+- A pane started with a program to run directly (`-e` or `--command`, a
+  link or an executable opened in SonicTerm) gets no secret: there is no shell integration to hide it from the
+  program, so its markers are never verified.
 
-Load the integration from your shell's startup file:
+Load the integration from your shell's startup file, **before any line that starts a
+program**. Until it runs, the secret is in the shell's environment, so a program the
+startup file runs first (a prompt tool, a version manager, a background agent or
+multiplexer) inherits it and could forge verified markers, now or later. SonicTerm cannot
+tell such a program from the shell, so `exit_verified` is only as trustworthy as the
+startup files that run before the integration:
 
 ```sh
 eval "$(sonicterm-mcp --shell-integration zsh)"    # zsh 5.3+, in ~/.zshrc

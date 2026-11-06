@@ -189,6 +189,8 @@ struct PtyWriterProgress {
     input_completed: AtomicU32,
     /// Per ordinal modulo [`INPUT_SLOTS`]: `(ordinal << 44) | admitted_ms`.
     admitted_at: [AtomicU64; INPUT_SLOTS],
+    /// [`ShellSpawnOpts::input_seen`], marked by every admitted input message except a draft.
+    input_seen: Option<Arc<AtomicBool>>,
     /// What the writer is writing, for the tooltip.
     writer_on: AtomicU8,
     /// Whether and how the writer stopped.
@@ -441,6 +443,10 @@ pub struct ShellSpawnOpts {
     /// Variables added to the child's environment after the terminal identity, on both the shell
     /// and the direct-command path; a later entry overrides an earlier one. Empty by default.
     pub extra_env: Vec<(String, String)>,
+    /// Set before the first input message is queued through [`PtyHandle::send_input_nonblocking`]
+    /// or a [`PtyInputSender`]; [`PtyHandle::send_draft_nonblocking`] and parser replies never set
+    /// it. The pane's parser reads it to stop trusting a shell token once anyone could have typed.
+    pub input_seen: Option<Arc<AtomicBool>>,
 }
 
 impl ShellSpawnOpts {
@@ -457,6 +463,7 @@ impl Default for ShellSpawnOpts {
             cwd: None,
             diagnostic_timestamps: false,
             extra_env: Vec::new(),
+            input_seen: None,
         }
     }
 }
@@ -555,7 +562,19 @@ impl PtyHandle {
     /// On failure, the error retains the rejected bytes so the caller can
     /// retry or notify the user instead of silently losing terminal input.
     pub fn send_input_nonblocking(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
-        try_queue_pty_input(&self.in_tx, &self.queued_input_bytes, &self.writer_progress, bytes)
+        let queue = (&self.in_tx, &*self.queued_input_bytes);
+        try_queue_pty_input(queue, &self.writer_progress, bytes, true)
+    }
+
+    /// As [`Self::send_input_nonblocking`], for a script draft typed without its Enter: it runs
+    /// nothing, so it leaves [`ShellSpawnOpts::input_seen`] unset.
+    ///
+    /// # Errors
+    ///
+    /// The same [`PtyInputError`] as [`Self::send_input_nonblocking`].
+    pub fn send_draft_nonblocking(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+        let queue = (&self.in_tx, &*self.queued_input_bytes);
+        try_queue_pty_input(queue, &self.writer_progress, bytes, false)
     }
 
     /// The oldest outstanding user-input write, or how the writer stopped; reads atomics only.
@@ -765,7 +784,7 @@ use pty_resize::resize_callback;
 use pty_session::terminate_unix_session;
 pub use pty_shell::{
     apply_child_pty_env, apply_extra_env, default_lang_utf8_locale, default_lc_ctype_utf8_locale,
-    shell_startup_args, should_apply_utf8_locale_fallback,
+    shell_startup_args, should_apply_utf8_locale_fallback, SHELL_TOKEN_ENV,
 };
 use pty_shell::{apply_clean_e2e_environment, resolve_spawn_shell};
 use pty_writer::spawn_writer_thread;

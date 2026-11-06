@@ -47,6 +47,10 @@ cargo build -p sonicterm-io
   descriptor is an error — never fall back to a writer that injects bytes.
   Windows keeps `take_writer`.
 - Never hold parser/grid locks while writing to the PTY.
+- `ShellSpawnOpts::input_seen` is set before any input message is admitted to the queue,
+  through `send_input_nonblocking` or a `PtyInputSender`; only `send_draft_nonblocking` (a
+  script draft typed without Enter) and the reply spool leave it clear. The parser stops
+  latching a shell token once it is set, so a new input path must mark it too.
 - PTY/ConPTY resize can fail, and the callback returns `anyhow::Result<()>` so
   the caller sees it. A zero column or row count is refused as an `InvalidInput`
   error before the native call. Only a successful native call caches the applied

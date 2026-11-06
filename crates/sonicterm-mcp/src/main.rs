@@ -32,7 +32,8 @@ The endpoint is, in order: --endpoint, $SONICTERM_CONTROL (set in every SonicTer
 only running SonicTerm with [mcp] enabled = true. stdin and stdout carry MCP JSON-RPC lines.
 
 --shell-integration prints SonicTerm's own OSC 133 shell integration for zsh (5.3+) or bash (4.4+).
-Load it from your shell's startup file so run_command can verify exit codes:
+Load it from your shell's startup file, before any line that starts a program, so run_command
+can verify exit codes:
   eval \"$(sonicterm-mcp --shell-integration zsh)\"
 ";
 

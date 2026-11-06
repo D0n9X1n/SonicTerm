@@ -434,10 +434,10 @@ fn pane_spawn_options_stamp_reads_only_with_the_frame_counter_gate() {
     for gate in [false, true] {
         let opts = app.pane_spawn_opts(7, &launch, gate);
         assert_eq!(opts.diagnostic_timestamps, gate, "gate {gate}");
-        // The pane names itself to its child, so an agent inside it can find its pane, and hands
-        // its shell a fresh OSC 133 token.
+        // The pane names itself to its child, so an agent inside it can find its pane; its OSC
+        // 133 token is added afterwards by `arm_shell_token`, and only for a shell.
         let names: Vec<&str> = opts.extra_env.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, vec!["SONICTERM_PANE_ID", "SONICTERM_SHELL_TOKEN"]);
+        assert_eq!(names, vec!["SONICTERM_PANE_ID"]);
         assert_eq!(opts.extra_env[0].1, "7");
         assert_eq!(opts.cwd, Some(std::path::PathBuf::from("/work")));
         assert_eq!(opts.term_program, app.config.terminal.term_program);

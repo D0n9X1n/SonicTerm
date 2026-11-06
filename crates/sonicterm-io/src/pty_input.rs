@@ -1,6 +1,11 @@
 use super::*;
 
 impl PtyWriterProgress {
+    /// Progress for a writer whose admitted input marks `input_seen`.
+    pub(super) fn with_input_seen(input_seen: Option<Arc<AtomicBool>>) -> Self {
+        Self { input_seen, ..Self::new() }
+    }
+
     pub(super) fn new() -> Self {
         Self {
             closing: std::sync::atomic::AtomicBool::new(false),
@@ -12,6 +17,7 @@ impl PtyWriterProgress {
             input_admitted: AtomicU32::new(0),
             input_completed: AtomicU32::new(0),
             admitted_at: std::array::from_fn(|_| AtomicU64::new(0)),
+            input_seen: None,
             writer_on: AtomicU8::new(WRITER_ON_IDLE),
             terminal: AtomicU8::new(TERMINAL_RUNNING),
         }
@@ -135,7 +141,7 @@ impl PtyInputSender {
     /// is full, or the writer has gone. The error retains the bytes so the
     /// caller can retry or report rather than losing them silently.
     pub fn send(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
-        try_queue_pty_input(&self.tx, &self.queued_bytes, &self.writer_progress, bytes)
+        try_queue_pty_input((&self.tx, &*self.queued_bytes), &self.writer_progress, bytes, true)
     }
 
     /// The oldest outstanding user-input write, or how the writer stopped.
@@ -173,13 +179,17 @@ pub(super) fn pty_input_channel() -> (Sender<Outgoing>, Receiver<Outgoing>) {
     crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
 }
 
-// Ordering: `queued_bytes` uses `Relaxed`; channel ownership supplies ordering, while the atomic tracks byte accounting only.
+/// Queue `bytes` on `queue`, the channel and its byte count; `mark` sets the progress's
+/// `input_seen` on admission, and is false only for a script draft.
+// Ordering: `queued_bytes` uses `Relaxed` for byte accounting only; `seen` uses `SeqCst`, read by
+// the parser's SeqCst load once the input's output arrives.
 pub(super) fn try_queue_pty_input(
-    tx: &Sender<Outgoing>,
-    queued_bytes: &AtomicUsize,
+    queue: (&Sender<Outgoing>, &AtomicUsize),
     progress: &PtyWriterProgress,
     bytes: Vec<u8>,
+    mark: bool,
 ) -> Result<(), PtyInputError> {
+    let (tx, queued_bytes) = queue;
     if !pty_input_message_allowed(bytes.len()) {
         // When: `bytes` exceeds the cap, reject it before charging or entering the bounded queue.
         return Err(PtyInputError::MessageTooLarge(bytes));
@@ -189,6 +199,11 @@ pub(super) fn try_queue_pty_input(
     // would decrement a counter that had never been incremented.
     let len = bytes.len();
     queued_bytes.fetch_add(len, Ordering::Relaxed);
+    // `input_seen` is set before the bytes can reach the shell, so a marker printed after them is
+    // never read with it clear; a refused send keeps it set, withdrawing trust early, never late.
+    if let Some(seen) = progress.input_seen.as_ref().filter(|_| mark) {
+        seen.store(true, Ordering::SeqCst);
+    }
     let admitted = progress.admit(|running| {
         if !running {
             // When: running is false, the writer has ended, so the bytes are handed back unsent.

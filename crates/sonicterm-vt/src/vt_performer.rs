@@ -37,6 +37,7 @@ impl Performer {
             grid,
             shell_token: None,
             shell_authenticated: false,
+            shell_input_seen: None,
             fg: Color::Default,
             bg: Color::Default,
             flags: CellFlags::empty(),
