@@ -52,6 +52,73 @@ impl ScanCursor {
     }
 }
 
+/// A wait's cursor on each screen. A screen switch leaves the other screen's cursor in place, so
+/// returning to that screen resumes where its scan stopped instead of skipping or rescanning it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ScanCursors {
+    /// The primary screen's cursor, once the wait has looked at it.
+    pub(crate) primary: Option<ScanCursor>,
+    /// The alternate screen's cursor, once the wait has looked at it.
+    pub(crate) alternate: Option<ScanCursor>,
+    /// The primary screen's last scan stopped at its budget, so rows there are still unscanned.
+    pub(crate) primary_backlog: bool,
+    /// The alternate screen's last scan stopped at its budget.
+    pub(crate) alternate_backlog: bool,
+}
+
+impl ScanCursors {
+    /// The cursor for the screen `alt` names.
+    pub(crate) fn get(&self, alt: bool) -> Option<ScanCursor> {
+        // When: `alt` names the alternate screen its cursor is returned, else the primary one.
+        if alt {
+            self.alternate
+        } else {
+            self.primary
+        }
+    }
+
+    /// Set the cursor for the screen `alt` names.
+    pub(crate) fn set(&mut self, alt: bool, cursor: Option<ScanCursor>) {
+        // When: `alt` names the alternate screen its cursor is replaced, else the primary one.
+        if alt {
+            self.alternate = cursor;
+        } else {
+            self.primary = cursor;
+        }
+    }
+
+    /// Record whether the last scan of the screen `alt` names stopped at its budget.
+    pub(crate) fn set_backlog(&mut self, alt: bool, backlog: bool) {
+        // When: `alt` names the alternate screen its flag is replaced, else the primary one.
+        if alt {
+            self.alternate_backlog = backlog;
+        } else {
+            self.primary_backlog = backlog;
+        }
+    }
+
+    /// Whether the screen `alt` names still has rows its scan has not reached.
+    pub(crate) fn backlog(&self, alt: bool) -> bool {
+        // When: `alt` names the alternate screen its flag is read, else the primary one.
+        if alt {
+            self.alternate_backlog
+        } else {
+            self.primary_backlog
+        }
+    }
+
+    /// Whether either screen still has rows its scan has not reached; a screen switch leaves the
+    /// other screen's backlog standing, so it still counts.
+    pub(crate) fn any_backlog(&self) -> bool {
+        self.primary_backlog || self.alternate_backlog
+    }
+
+    /// Whether the wait has looked at any screen yet.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.primary.is_none() && self.alternate.is_none()
+    }
+}
+
 /// What one scan found and where the next one starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScanStep {
@@ -83,6 +150,14 @@ pub(crate) fn writable_from(grid: &Grid) -> u64 {
 }
 
 pub(crate) fn scan_from(grid: &Grid, cursor: ScanCursor) -> ScanStep {
+    scan_within(grid, cursor, MAX_CELLS_PER_READ)
+}
+
+/// [`scan_from`] within a budget of `budget` cells. Every call makes progress: it advances its
+/// cursor, reaches the newest row, or reports a row it cannot fit as cut and moves past it, so a
+/// wait can never stall on one position. Tests pass a small budget to reach that case, which no
+/// grid within `MAX_GRID_AXIS` columns can otherwise reach.
+pub(crate) fn scan_within(grid: &Grid, cursor: ScanCursor, budget: usize) -> ScanStep {
     let mut step = ScanStep { lines: Vec::new(), next: None, missed: false, more: false };
     if cursor.resume.alt != grid.is_alt() {
         // When: the cursor names the other screen than `is_alt`, it no longer applies.
@@ -96,12 +171,15 @@ pub(crate) fn scan_from(grid: &Grid, cursor: ScanCursor) -> ScanStep {
     let start_line = cursor.resume.line.max(oldest);
     let at = |line| RowToken { line, alt: cursor.resume.alt };
     let mut resume = at(start_line);
-    let mut cells = MAX_CELLS_PER_READ;
+    let mut cells = budget;
     let mut pending: Option<Pending> = None;
     // The first row of the newest line that holds text. Rows below the output are blank screen
     // rows, each a line of its own; the cursor must not pass them, or text written onto the
     // still-open line is never read again.
     let mut last_text: Option<RowToken> = None;
+    // The row after the last row reported cut for being wider than a whole scan: no scan can read
+    // it, so a scan holding no text resumes past it rather than on it.
+    let mut past_cut: Option<u64> = None;
     // An empty range when `start_line` is past `newest`: nothing new was written yet.
     for line in start_line..=newest {
         let abs = line - oldest;
@@ -127,12 +205,37 @@ pub(crate) fn scan_from(grid: &Grid, cursor: ScanCursor) -> ScanStep {
             // A row that does not wrap from the one above starts a line and closes the pending one.
             if let Some(done) = pending.take() {
                 let done = done.close();
-                if !done.text.is_empty() || done.cut {
+                if done.cut {
+                    // A cut line is never matched, so rereading it cannot help; the next scan
+                    // resumes past its last row instead.
+                    past_cut = Some(done.row.line + 1);
+                } else if !done.text.is_empty() {
+                    // When: the closed line holds `text`, it is the newest reread point so far.
                     last_text = Some(done.first_row);
                 }
                 step.lines.push(done);
             }
             resume = at(line);
+        }
+        if row.len() > budget && pending.is_none() {
+            // When: one row is wider than a whole scan's `budget`, no scan can ever read it; it is
+            // reported cut and skipped with its continuation rows, so the scan still advances.
+            let token = grid.row_token(abs);
+            step.lines.push(ScannedLine {
+                text: String::new(),
+                first_row: token,
+                row: token,
+                cut: true,
+            });
+            resume = at(line + 1);
+            past_cut = Some(line + 1);
+            cells = cells.saturating_sub(1);
+            if cells == 0 {
+                // When: the `cells` budget ran out on cut rows, the next scan continues past them.
+                step.more = true;
+                break;
+            }
+            continue;
         }
         if row.len() > cells {
             // When: the row is wider than the `cells` left, this scan ends here.
@@ -161,14 +264,21 @@ pub(crate) fn scan_from(grid: &Grid, cursor: ScanCursor) -> ScanStep {
         if let Some(open) = pending {
             // The newest line is examined as it stands; output may still extend it.
             let open = open.close();
-            if !open.text.is_empty() || open.cut {
+            if open.cut {
+                // The open line is already cut, and more output cannot make it matchable, so the
+                // next scan resumes past its last row.
+                past_cut = Some(open.row.line + 1);
+            } else if !open.text.is_empty() {
+                // When: the open line holds `text`, output may still extend it: it is reread.
                 last_text = Some(open.first_row);
             }
             step.lines.push(open);
         }
         // The next scan starts on the newest line holding text, which output may still extend,
-        // and covers the blank rows after it; with no text yet, it starts where this one did.
-        resume = last_text.unwrap_or(at(start_line));
+        // and covers the blank rows after it, where output is written; with no text yet, it starts
+        // where this one did. It never starts on or before a cut line, which no scan can match.
+        let floor = past_cut.unwrap_or(start_line).max(start_line);
+        resume = last_text.filter(|text| text.line >= floor).unwrap_or_else(|| at(floor));
         // Every row through `newest` was examined; those above the cursor can no longer change.
         let frontier = cursor.frontier.max(writable_from(grid));
         step.next = Some(ScanCursor { resume, frontier });
@@ -246,3 +356,7 @@ impl Pending {
 #[cfg(test)]
 #[path = "scan_tests.rs"]
 mod scan_tests;
+
+#[cfg(test)]
+#[path = "scan_wait_tests.rs"]
+mod scan_wait_tests;

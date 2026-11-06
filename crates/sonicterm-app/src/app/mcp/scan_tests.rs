@@ -11,7 +11,7 @@ use regex::Regex;
 use sonicterm_cfg::config::McpControl;
 use sonicterm_grid::grid::RowToken;
 
-use super::{scan_from, ScanCursor};
+use super::{scan_from, ScanCursor, ScanCursors};
 use crate::app::mcp::read::{read_pane, ReadLimits, ReadMode};
 use crate::app::mcp::tools_read::{
     inspect, wait_until, ScanFlags, TailCheck, WaitCondition, WaitOutcome, WaitReason,
@@ -19,18 +19,18 @@ use crate::app::mcp::tools_read::{
 use crate::app::mcp::{test_entry, CallScope, McpShared, PaneEntry};
 
 /// A call admitted now on `shared`, for a connection that stays open.
-fn scope(shared: &McpShared) -> CallScope {
+pub(super) fn scope(shared: &McpShared) -> CallScope {
     CallScope::admit(shared, &Arc::new(AtomicBool::new(false)))
 }
 
 /// Feed `bytes` to the pane and publish a new output generation, as the VT worker does.
-fn emit(entry: &PaneEntry, bytes: &[u8]) {
+pub(super) fn emit(entry: &PaneEntry, bytes: &[u8]) {
     entry.parser.lock().advance(bytes);
     entry.output_generation.fetch_add(1, Ordering::Release);
 }
 
 /// A wait on `pattern` for lines after `after`, bounded by `timeout_ms`.
-fn regex_wait(pattern: &str, after: Option<RowToken>, timeout_ms: u64) -> WaitCondition {
+pub(super) fn regex_wait(pattern: &str, after: Option<RowToken>, timeout_ms: u64) -> WaitCondition {
     WaitCondition {
         regex: Some(Regex::new(pattern).unwrap()),
         after,
@@ -41,53 +41,43 @@ fn regex_wait(pattern: &str, after: Option<RowToken>, timeout_ms: u64) -> WaitCo
 }
 
 /// `count` numbered noise lines, CRLF-terminated.
-fn noise(count: usize) -> Vec<u8> {
+pub(super) fn noise(count: usize) -> Vec<u8> {
     (0..count).flat_map(|index| format!("log line {index}\r\n").into_bytes()).collect()
 }
 
 /// The last row holding text: the `end_row` an agent passes back as `after_row`.
-fn end_row(entry: &PaneEntry) -> RowToken {
+pub(super) fn end_row(entry: &PaneEntry) -> RowToken {
     let snapshot = read_pane(&entry.parser, ReadMode::Tail, ReadLimits::clamped(None, None));
     snapshot.lines.last().expect("the pane has text").row
 }
 
 /// A wait driven one inspection at a time, as `wait_until`'s loop drives it, so a test decides
 /// exactly what output each inspection sees instead of racing a polling thread.
-struct Steps {
+pub(super) struct Steps {
     /// The pattern.
-    regex: Regex,
+    pub(super) regex: Regex,
     /// The caller's `after_row`.
-    after: Option<RowToken>,
-    /// Where the next forward scan starts.
-    cursor: Option<ScanCursor>,
-    /// The last scan stopped at its budget.
-    backlog: bool,
+    pub(super) after: Option<RowToken>,
+    /// Where the next forward scan starts, and whether it stopped at its budget, on each screen.
+    pub(super) cursor: ScanCursors,
     /// What the wait could not inspect.
-    flags: ScanFlags,
+    pub(super) flags: ScanFlags,
 }
 
 impl Steps {
     /// A wait on `pattern` for lines after `after`.
-    fn new(pattern: &str, after: Option<RowToken>) -> Self {
+    pub(super) fn new(pattern: &str, after: Option<RowToken>) -> Self {
         Self {
             regex: Regex::new(pattern).unwrap(),
             after,
-            cursor: None,
-            backlog: false,
+            cursor: ScanCursors::default(),
             flags: ScanFlags::default(),
         }
     }
 
     /// One inspection of `entry`; the outcome if it ended the wait.
-    fn step(&mut self, entry: &PaneEntry) -> Option<WaitOutcome> {
-        let check = inspect(
-            entry,
-            &self.regex,
-            self.after,
-            &mut self.cursor,
-            &mut self.backlog,
-            &mut self.flags,
-        );
+    pub(super) fn step(&mut self, entry: &PaneEntry) -> Option<WaitOutcome> {
+        let check = inspect(entry, &self.regex, self.after, &mut self.cursor, &mut self.flags);
         match check {
             TailCheck::Done(outcome) => Some(outcome),
             TailCheck::Busy | TailCheck::NoMatch => None,
@@ -95,14 +85,18 @@ impl Steps {
     }
 
     /// Inspect until the wait ends or `limit` inspections pass with no match.
-    fn run(&mut self, entry: &PaneEntry, limit: usize) -> Option<WaitOutcome> {
+    pub(super) fn run(&mut self, entry: &PaneEntry, limit: usize) -> Option<WaitOutcome> {
         (0..limit).find_map(|_| self.step(entry))
     }
 }
 
 /// Inspect once, then emit `bytes`, then inspect until done: the first inspection certainly
 /// happens before the output, which `wait_until` on a thread cannot promise.
-fn step_then_emit(entry: &PaneEntry, steps: &mut Steps, bytes: &[u8]) -> Option<WaitOutcome> {
+pub(super) fn step_then_emit(
+    entry: &PaneEntry,
+    steps: &mut Steps,
+    bytes: &[u8],
+) -> Option<WaitOutcome> {
     assert!(steps.step(entry).is_none(), "the first inspection matched before the output");
     emit(entry, bytes);
     steps.run(entry, 20)
@@ -137,7 +131,7 @@ fn a_backlog_larger_than_one_scan_is_finished_without_new_output() {
     emit(&entry, &burst);
     // The first scan after the output stops at its budget before the match.
     assert!(steps.step(&entry).is_none(), "one scan reached a match past its budget");
-    assert!(steps.backlog, "the scan stopped at its budget");
+    assert!(steps.cursor.any_backlog(), "the scan stopped at its budget");
     // Later inspections continue with no new output and find it.
     let outcome = steps.run(&entry, 10).expect("the backlog was finished");
     assert_eq!(outcome.reason, WaitReason::Matched);
@@ -454,10 +448,13 @@ fn a_budget_stop_keeps_coverage_already_established() {
     emit(&entry, &[b"x".to_vec(), b"\r\n".repeat(250)].concat());
     let mut steps = Steps::new("ABSENT", None);
     assert!(steps.step(&entry).is_none(), "the tail look");
-    let settled = steps.cursor.expect("a cursor").frontier;
+    let settled = steps.cursor.primary.expect("a cursor").frontier;
     assert!(steps.step(&entry).is_none(), "a rescan that stops at its budget");
-    assert!(steps.backlog, "the rescan stopped at its budget");
-    assert!(steps.cursor.expect("a cursor").frontier >= settled, "a budget stop lowered coverage");
+    assert!(steps.cursor.any_backlog(), "the rescan stopped at its budget");
+    assert!(
+        steps.cursor.primary.expect("a cursor").frontier >= settled,
+        "a budget stop lowered coverage"
+    );
     // 49 linefeeds reach the bottom row; 171 more scroll rows 0-170 away, all already covered.
     emit(&entry, &b"\n".repeat(220));
     assert!(steps.step(&entry).is_none());
