@@ -46,6 +46,18 @@ pub fn foreground_process_info(pid: u32) -> Option<ForegroundProcess> {
     macos::foreground_process(pid).map(|name| ForegroundProcess { name, privileged: false })
 }
 
+/// Best-effort foreground processes for several macOS pty shell pids.
+///
+/// One process-table snapshot serves every input pid; results keep input order, and a pid
+/// that left or cannot be read yields `None` on its own.
+#[cfg(target_os = "macos")]
+pub fn foreground_processes_info(pids: &[u32]) -> Vec<Option<ForegroundProcess>> {
+    macos::foreground_processes(pids)
+        .into_iter()
+        .map(|name| name.map(|name| ForegroundProcess { name, privileged: false }))
+        .collect()
+}
+
 /// Best-effort foreground process for the deepest Windows shell descendant.
 #[cfg(windows)]
 pub fn foreground_process_info(pid: u32) -> Option<ForegroundProcess> {
@@ -98,17 +110,20 @@ mod macos {
     use libproc::libproc::proc_pid::{pidinfo, pidpath};
     use libproc::processes::{pids_by_type, ProcFilter};
 
-    use super::{deepest_descendant, normalize_proc_name};
+    use super::normalize_proc_name;
 
     pub fn foreground_process(pid: u32) -> Option<String> {
-        // Walk the process table once and find the deepest descendant of
-        // `pid`. This is O(N) in total processes which on macOS is ~600 —
-        // negligible (sub-millisecond) and we only call it from the tab-
-        // title refresh path (≤ once per render).
-        let all = pids_by_type(ProcFilter::All).ok()?;
+        foreground_processes(&[pid]).pop().flatten()
+    }
 
-        // Build a (child_pid, parent_pid) list, skipping ourselves and
-        // entries we can't introspect (kernel, restricted, gone).
+    /// The deepest descendant's name for each of `pids`, from one process-table snapshot: one
+    /// `pidinfo` per process however many panes ask, then one indexed walk per pid.
+    pub fn foreground_processes(pids: &[u32]) -> Vec<Option<String>> {
+        let Ok(all) = pids_by_type(ProcFilter::All) else {
+            // When: `pids_by_type` fails, no pane can be resolved from this batch.
+            return pids.iter().map(|_| None).collect();
+        };
+        // `(child_pid, parent_pid)` pairs, skipping entries we can't introspect (restricted, gone).
         let mut entries: Vec<(u32, u32)> = Vec::with_capacity(all.len());
         for candidate_pid in all {
             if candidate_pid == 0 {
@@ -119,27 +134,62 @@ mod macos {
                 entries.push((candidate_pid, info.pbi_ppid));
             }
         }
-
-        let deepest = deepest_descendant(pid, &entries);
-        let path = pidpath(deepest as i32).ok()?;
-        Some(normalize_proc_name(&path))
+        let children = super::children_by_parent(&entries);
+        pids.iter()
+            .map(|&pid| {
+                let deepest = super::deepest_in(pid, &children);
+                let path = pidpath(deepest as i32).ok()?;
+                Some(normalize_proc_name(&path))
+            })
+            .collect()
     }
 }
 
 /// The deepest descendant of `root` in `links`, a list of `(child, parent)` pid pairs, or `root`
 /// itself when it has none. A process snapshot is not atomic, so pid reuse can link pids in a
 /// cycle; each pid is visited at most once, which bounds the walk by the number of links.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn deepest_descendant(root: u32, links: &[(u32, u32)]) -> u32 {
+    deepest_in(root, &children_by_parent(links))
+}
+
+/// Each parent's children from `(child, parent)` pairs, in the order `links` lists them, so a
+/// walk over the index visits children exactly as a scan of `links` would.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn children_by_parent(links: &[(u32, u32)]) -> std::collections::HashMap<u32, Vec<u32>> {
+    let mut children: std::collections::HashMap<u32, Vec<u32>> =
+        std::collections::HashMap::with_capacity(links.len());
+    for &(child, parent) in links {
+        children.entry(parent).or_default().push(child);
+    }
+    children
+}
+
+/// [`deepest_descendant`] over a [`children_by_parent`] index: the walk is linear in the links
+/// it reaches, and the first child to reach a new depth wins, as in the unindexed walk.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn deepest_in(root: u32, children: &std::collections::HashMap<u32, Vec<u32>>) -> u32 {
+    deepest_counting(root, children, &mut 0)
+}
+
+/// [`deepest_in`], adding to `examined` one per child link the walk reads, so tests can hold the
+/// walk to a linear bound in the links it reaches.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn deepest_counting(
+    root: u32,
+    children: &std::collections::HashMap<u32, Vec<u32>>,
+    examined: &mut usize,
+) -> u32 {
     let mut deepest = root;
     let mut deepest_depth = 0usize;
-    let mut visited = std::collections::HashSet::with_capacity(links.len() + 1);
+    let mut visited = std::collections::HashSet::new();
     visited.insert(root);
     let mut frontier: Vec<(u32, usize)> = vec![(root, 0)];
     while let Some((current, depth)) = frontier.pop() {
-        for &(child, parent) in links {
-            if parent != current || !visited.insert(child) {
-                // When: `child` is not under `current`, or was already `visited` (a cycle), skip it.
+        for &child in children.get(&current).map_or(&[][..], Vec::as_slice) {
+            *examined += 1;
+            if !visited.insert(child) {
+                // When: `child` was already `visited` (a cycle or a repeated link), skip it.
                 continue;
             }
             let next = depth + 1;

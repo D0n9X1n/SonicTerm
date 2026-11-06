@@ -849,8 +849,9 @@ a peek.
 Foreground processes are sampled off the event-loop thread. Frames and the Windows
 timer only set demand and read each pane's cache. One `sonicterm-fg-probe` thread
 per App, started at first demand, samples the panes that want a sample and stores
-the newest result per pane in a shared map. On macOS it re-reads each pid's start
-token before and after the walk; on Windows one snapshot serves the batch. The
+the newest result per pane in a shared map. One process-table snapshot serves the
+batch, and each walk follows a parent-to-children index built from it once. On macOS
+it reads every pid's start token before the snapshot and again after. The
 event loop drains the map on `ForegroundProbeReady` and accepts a result only for
 a live pane registered with the same start token whose child has not published
 exit. A failed spawn or a dead worker enters `Unavailable` once, with one warning;

@@ -576,25 +576,46 @@ fn probe_batch(
     !post || stop() || (shared.notify)()
 }
 
-/// macOS: probe each pid once, re-reading its start token before and after so a pid reused
-/// during the walk yields no observation.
+/// macOS: one process-table snapshot for the whole batch, with each pid's start token read
+/// before the snapshot and again after, so a pid reused meanwhile yields no observation.
 #[cfg(target_os = "macos")]
 fn sample_platform(
     identities: &[ProcessIdentity],
     stop: &dyn Fn() -> bool,
 ) -> Vec<Option<ForegroundProcess>> {
-    use sonicterm_io::proc_info::{foreground_process_info, process_start_token};
-    let mut observations = Vec::with_capacity(identities.len());
+    use sonicterm_io::proc_info::{foreground_processes_info, process_start_token};
+    sample_batch(identities, stop, &process_start_token, &foreground_processes_info)
+}
+
+/// Sample `identities` with one `snapshot` call: every pid's `token` is read before it and again
+/// after it, and only a pid whose token matched its identity both times keeps its observation.
+/// Results keep input order; a mismatch rejects only that pid. `stop()` before the snapshot
+/// returns an empty batch, which the caller discards.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn sample_batch(
+    identities: &[ProcessIdentity],
+    stop: &dyn Fn() -> bool,
+    token: &dyn Fn(u32) -> Option<u64>,
+    snapshot: &dyn Fn(&[u32]) -> Vec<Option<ForegroundProcess>>,
+) -> Vec<Option<ForegroundProcess>> {
+    let mut before = Vec::with_capacity(identities.len());
     for identity in identities {
         if stop() {
             // When: `stop()`, the App is dropping; the caller discards the partial batch.
-            break;
+            return Vec::new();
         }
-        let before = process_start_token(identity.pid);
-        let observation = foreground_process_info(identity.pid);
-        let after = process_start_token(identity.pid);
-        let unchanged = before == Some(identity.start) && after == Some(identity.start);
-        observations.push(observation.filter(|_| unchanged));
+        before.push(token(identity.pid));
+    }
+    let pids: Vec<u32> = identities.iter().map(|identity| identity.pid).collect();
+    let mut observations = snapshot(&pids);
+    observations.resize(identities.len(), None);
+    for ((identity, before), observation) in identities.iter().zip(before).zip(&mut observations) {
+        let unchanged =
+            before == Some(identity.start) && token(identity.pid) == Some(identity.start);
+        // A token that changed or vanished means the pid may name another process.
+        if !unchanged {
+            *observation = None;
+        }
     }
     observations
 }
@@ -895,3 +916,7 @@ impl ForegroundSchedule {
 #[cfg(test)]
 #[path = "fg_probe_tests.rs"]
 mod fg_probe_tests;
+
+#[cfg(test)]
+#[path = "fg_probe_batch_tests.rs"]
+mod fg_probe_batch_tests;
