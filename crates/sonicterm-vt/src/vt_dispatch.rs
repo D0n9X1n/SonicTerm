@@ -642,6 +642,13 @@ impl Perform for Performer {
                 //   C → command output start
                 //   D [; exit_code] → command finished
                 let kind = params.get(1).and_then(|param| param.first().copied());
+                let Some(authenticated) = self.admit_shell_marker(params.get(2..).unwrap_or(&[]))
+                else {
+                    // When: `admit_shell_marker` refused the marker (a wrong token, or tokenless
+                    // after the pane authenticated), it changes neither the grid nor the events.
+                    tracing::debug!(target: "vt", "dropped an unauthenticated OSC 133 marker");
+                    return;
+                };
                 match kind {
                     Some(b'A') => {
                         self.grid.record_prompt_start();
@@ -652,7 +659,7 @@ impl Perform for Performer {
                         self.events.push(VtEvent::Command(CommandEvent::PromptEnd));
                     }
                     Some(b'C') => {
-                        self.grid.record_output_start();
+                        self.grid.record_output_start_marked(authenticated);
                         self.events.push(VtEvent::Command(CommandEvent::CmdStart));
                     }
                     Some(b'D') => {
@@ -660,7 +667,7 @@ impl Perform for Performer {
                             .get(2)
                             .and_then(|param| std::str::from_utf8(param).ok())
                             .and_then(|text| text.parse::<i32>().ok());
-                        self.grid.record_prompt_end(exit_i32);
+                        self.grid.record_prompt_end_marked(exit_i32, authenticated);
                         let exit = exit_i32.and_then(|status| u8::try_from(status).ok());
                         self.events.push(VtEvent::Command(CommandEvent::CmdEnd(exit)));
                     }
@@ -803,3 +810,7 @@ fn join_osc_params(params: &[&[u8]]) -> String {
 #[cfg(test)]
 #[path = "vt_dispatch_tests.rs"]
 mod vt_dispatch_tests;
+
+#[cfg(test)]
+#[path = "vt_dispatch_shell_token_tests.rs"]
+mod vt_dispatch_shell_token_tests;

@@ -272,3 +272,24 @@ fn budget_trimmed_rows_counts_only_byte_budget_trims() {
         "a clear with no history left still marks"
     );
 }
+
+/// Byte-budget trimming moves the oldest retained row token past every row it dropped, as row-limit
+/// eviction and clearing history do, so a reader holding a row token sees the loss.
+#[test]
+fn byte_budget_trimming_advances_the_oldest_row_token() {
+    let mut grid = Grid::new(10, 3);
+    grid.set_scrollback_limit(1_000);
+    for _ in 0..50 {
+        grid.linefeed();
+    }
+    let oldest_before = grid.row_token(0).line;
+    let dropped = grid.scrollback_len() as u64;
+    grid.trim_scrollback_to_reported_budget(0);
+    assert_eq!(grid.row_token(0).line, oldest_before + dropped);
+    let oldest_after_trim = grid.row_token(0).line;
+    for _ in 0..20 {
+        grid.linefeed();
+    }
+    grid.clear_scrollback();
+    assert!(grid.row_token(0).line > oldest_after_trim, "clearing history moves it too");
+}

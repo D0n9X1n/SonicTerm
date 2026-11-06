@@ -449,6 +449,18 @@ impl Parser {
         self.performer.focus_reporting
     }
 
+    /// Give the pane's shell `token`: OSC 133 markers carrying `sonicterm_token=<token>` are then
+    /// authenticated, a wrong token is dropped, and once one authenticated marker arrived every
+    /// tokenless marker is dropped too, so command output cannot forge or downgrade them.
+    pub fn set_shell_token(&mut self, token: Option<String>) {
+        self.performer.shell_token = token.filter(|token| !token.is_empty());
+    }
+
+    /// Whether an OSC 133 marker carrying the pane's shell token has arrived.
+    pub fn shell_markers_authenticated(&self) -> bool {
+        self.performer.shell_authenticated
+    }
+
     /// Borrow the underlying [`Grid`] — used by the renderer to read cells.
     pub fn grid(&self) -> &Grid {
         &self.performer.grid
@@ -514,6 +526,11 @@ enum DecrqssRequest {
 
 struct Performer {
     grid: Grid,
+    /// The pane's shell token: OSC 133 markers carrying it are the shell's own. Kept across RIS,
+    /// because output controls RIS.
+    shell_token: Option<String>,
+    /// A marker carried `shell_token`, so tokenless markers are dropped for the parser's life.
+    shell_authenticated: bool,
     fg: Color,
     bg: Color,
     flags: CellFlags,

@@ -101,7 +101,42 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
+/// The OSC 133 parameter a SonicTerm shell integration appends to every marker.
+const SHELL_TOKEN_PARAM: &[u8] = b"sonicterm_token=";
+
+/// Compare two byte strings in time that depends only on their lengths, so a program probing the
+/// token cannot learn it a byte at a time from how long a marker takes.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        // When: `left.len()` and `right.len()` differ, they cannot match; lengths are not secret.
+        return false;
+    }
+    left.iter().zip(right).fold(0u8, |diff, (one, two)| diff | (one ^ two)) == 0
+}
+
 impl Performer {
+    /// Whether an OSC 133 marker with parameters `extra` (after its kind) is admitted, and if so
+    /// whether it is authenticated. With no pane token every marker is admitted unauthenticated. A
+    /// wrong token is refused; the right one latches the pane, after which tokenless markers are
+    /// refused too, so neither forged nor downgraded markers reach the grid or the events.
+    pub(super) fn admit_shell_marker(&mut self, extra: &[&[u8]]) -> Option<bool> {
+        let Some(expected) = self.shell_token.as_deref() else {
+            // When: the pane has no `shell_token`, markers keep their untrusted behavior.
+            return Some(false);
+        };
+        let carried = extra.iter().find_map(|param| param.strip_prefix(SHELL_TOKEN_PARAM));
+        match carried {
+            Some(token) if constant_time_eq(token, expected.as_bytes()) => {
+                self.shell_authenticated = true;
+                Some(true)
+            }
+            // A marker carrying a wrong token is a forgery, and once the pane is authenticated a
+            // tokenless one is a downgrade; both are refused.
+            Some(_) => None,
+            None if self.shell_authenticated => None,
+            None => Some(false),
+        }
+    }
     /// Surface one parsed program-state OSC as a host event.
     fn push_program_osc(&mut self, program: program::ProgramOsc) {
         match program {

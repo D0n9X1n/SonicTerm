@@ -98,7 +98,7 @@ mod macos {
     use libproc::libproc::proc_pid::{pidinfo, pidpath};
     use libproc::processes::{pids_by_type, ProcFilter};
 
-    use super::normalize_proc_name;
+    use super::{deepest_descendant, normalize_proc_name};
 
     pub fn foreground_process(pid: u32) -> Option<String> {
         // Walk the process table once and find the deepest descendant of
@@ -120,26 +120,37 @@ mod macos {
             }
         }
 
-        // BFS from `pid` downward; track the deepest pid found.
-        let mut deepest = pid;
-        let mut deepest_depth = 0usize;
-        let mut frontier: Vec<(u32, usize)> = vec![(pid, 0)];
-        while let Some((cur, depth)) = frontier.pop() {
-            for (child, parent) in entries.iter() {
-                if *parent == cur {
-                    let next = depth + 1;
-                    if next > deepest_depth {
-                        deepest_depth = next;
-                        deepest = *child;
-                    }
-                    frontier.push((*child, next));
-                }
-            }
-        }
-
+        let deepest = deepest_descendant(pid, &entries);
         let path = pidpath(deepest as i32).ok()?;
         Some(normalize_proc_name(&path))
     }
+}
+
+/// The deepest descendant of `root` in `links`, a list of `(child, parent)` pid pairs, or `root`
+/// itself when it has none. A process snapshot is not atomic, so pid reuse can link pids in a
+/// cycle; each pid is visited at most once, which bounds the walk by the number of links.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn deepest_descendant(root: u32, links: &[(u32, u32)]) -> u32 {
+    let mut deepest = root;
+    let mut deepest_depth = 0usize;
+    let mut visited = std::collections::HashSet::with_capacity(links.len() + 1);
+    visited.insert(root);
+    let mut frontier: Vec<(u32, usize)> = vec![(root, 0)];
+    while let Some((current, depth)) = frontier.pop() {
+        for &(child, parent) in links {
+            if parent != current || !visited.insert(child) {
+                // When: `child` is not under `current`, or was already `visited` (a cycle), skip it.
+                continue;
+            }
+            let next = depth + 1;
+            if next > deepest_depth {
+                deepest_depth = next;
+                deepest = child;
+            }
+            frontier.push((child, next));
+        }
+    }
+    deepest
 }
 
 #[cfg(test)]

@@ -104,3 +104,80 @@ fn a_spawned_pty_stamps_its_output_only_with_the_diagnostic_option() {
         drop(pty);
     }
 }
+
+/// A reader that answers its first `interruptions` reads with `Interrupted`, then returns `chunk`
+/// once, then EOF.
+struct InterruptingReader {
+    interruptions: usize,
+    chunk: Option<&'static [u8]>,
+}
+
+impl Read for InterruptingReader {
+    fn read(&mut self, destination: &mut [u8]) -> std::io::Result<usize> {
+        if self.interruptions > 0 {
+            self.interruptions -= 1;
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        let Some(chunk) = self.chunk.take() else {
+            return Ok(0);
+        };
+        destination[..chunk.len()].copy_from_slice(chunk);
+        Ok(chunk.len())
+    }
+}
+
+/// Pump `reader` to EOF and return every byte the pump published, in order.
+fn pumped_bytes(reader: impl Read + Send + 'static) -> Vec<u8> {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let (_cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let meter = Arc::new(QueuedOutputMeter::default());
+    let mut thread = spawn_reader_thread(Box::new(reader), tx, cancel_rx, meter, false);
+    let chunks: Vec<PtyOutputChunk> = rx.iter().collect();
+    thread.handle.take().expect("reader handle").join().expect("reader thread");
+    chunks.iter().flat_map(|chunk| chunk.bytes().to_vec()).collect()
+}
+
+/// `Interrupted` means "read again", not the end of the pane's output: the pump retries and
+/// publishes exactly the bytes that follow, with no zeroed filler from the interrupted read.
+#[test]
+fn an_interrupted_read_is_retried_and_the_output_still_arrives() {
+    let delivered = pumped_bytes(InterruptingReader { interruptions: 1, chunk: Some(b"ready") });
+    assert_eq!(delivered, b"ready");
+}
+
+/// Many interruptions in a row still publish exactly the following bytes: each retry restores the
+/// buffer, so no zeroed region accumulates or reaches the output.
+#[test]
+fn repeated_interruptions_publish_only_the_real_bytes() {
+    let delivered = pumped_bytes(InterruptingReader { interruptions: 50, chunk: Some(b"ready") });
+    assert_eq!(delivered, b"ready");
+}
+
+/// A reader that is interrupted forever: the pump keeps retrying until the pane is cancelled.
+struct AlwaysInterrupted;
+
+impl Read for AlwaysInterrupted {
+    fn read(&mut self, _destination: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(Duration::from_millis(1));
+        Err(std::io::ErrorKind::Interrupted.into())
+    }
+}
+
+/// Cancelling a pane whose reads keep being interrupted ends the pump, and it published nothing.
+#[test]
+fn cancellation_ends_a_pump_that_keeps_being_interrupted() {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let meter = Arc::new(QueuedOutputMeter::default());
+    let mut thread = spawn_reader_thread(Box::new(AlwaysInterrupted), tx, cancel_rx, meter, false);
+    std::thread::sleep(Duration::from_millis(20));
+    cancel_tx.send(()).expect("the pump is still running");
+    let handle = thread.handle.take().expect("reader handle");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !handle.is_finished() {
+        assert!(Instant::now() < deadline, "the pump ignored cancellation while interrupted");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    handle.join().expect("reader thread");
+    assert_eq!(rx.try_iter().count(), 0, "an interrupted read published a chunk");
+}

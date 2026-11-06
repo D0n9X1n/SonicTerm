@@ -229,17 +229,47 @@ impl<'a> ProcessIndex<'a> {
         None
     }
 
+    /// Whether `child` is a real child of `parent`: not itself, not pid 0, and not created before
+    /// its parent, which marks a recycled pid whose parent link is stale.
+    fn admits_child(&self, parent: u32, parent_ctime: Option<i64>, child: u32) -> bool {
+        if child == parent || child == 0 {
+            // When: `child` names `parent` itself or pid 0, the edge cannot be a descendant.
+            return false;
+        }
+        let child_ctime = self.by_pid.get(&child).map(|entry| entry.create_time);
+        !matches!(
+            (parent_ctime, child_ctime),
+            (Some(parent_ctime), Some(child_ctime)) if child_ctime < parent_ctime
+        )
+    }
+
     fn pick_deepest_leaf(&self, root: u32) -> Option<u32> {
         let mut chosen = root;
         let mut chosen_depth = 0usize;
         let mut chosen_ctime = self.by_pid.get(&root).map(|entry| entry.create_time).unwrap_or(0);
 
         let mut frontier = vec![(root, 0usize)];
+        // A racing snapshot can link pids in a cycle, so each pid is visited once and the walk
+        // visits at most as many nodes as the snapshot holds.
+        let mut visited = std::collections::HashSet::with_capacity(self.by_pid.len() + 1);
+        visited.insert(root);
+        let node_limit = self.by_pid.len() + 1;
         while let Some((current, depth)) = frontier.pop() {
+            let parent_ctime = self.by_pid.get(&current).map(|entry| entry.create_time);
             let children = self.children.get(&current).map(Vec::as_slice).unwrap_or(&[]);
-            if children.is_empty() {
-                let create_time =
-                    self.by_pid.get(&current).map(|entry| entry.create_time).unwrap_or(0);
+            // Only admissible edges count: a node whose every listed child was filtered out is
+            // itself a leaf, so a stale link cannot hide the real deepest process.
+            let mut descended = false;
+            for &child in children {
+                if !self.admits_child(current, parent_ctime, child) || !visited.insert(child) {
+                    // When: the edge is inadmissible or `child` was already `visited` (a cycle).
+                    continue;
+                }
+                descended = true;
+                frontier.push((child, depth + 1));
+            }
+            if !descended {
+                let create_time = parent_ctime.unwrap_or(0);
                 let better = depth > chosen_depth
                     || (depth == chosen_depth && create_time > chosen_ctime && current != root);
                 if better {
@@ -247,15 +277,10 @@ impl<'a> ProcessIndex<'a> {
                     chosen_depth = depth;
                     chosen_ctime = create_time;
                 }
-            } else {
-                // When: `children` is nonempty, `current` cannot be the selected leaf.
-                for &child in children {
-                    if child == current || child == 0 {
-                        // When: `child` equal to `current` would cycle; pid 0 is never runnable.
-                        continue;
-                    }
-                    frontier.push((child, depth + 1));
-                }
+            }
+            if visited.len() > node_limit {
+                // When: more nodes were reached than `node_limit` allows, the index is corrupt; stop.
+                break;
             }
         }
 

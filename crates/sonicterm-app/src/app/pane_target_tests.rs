@@ -144,8 +144,8 @@ fn an_agent_launch_is_held_and_names_its_pane() {
     assert!(recorded.command.is_some() && recorded.hold);
     let opts = app.pane_spawn_opts(created.pane_id, recorded, false);
     assert_eq!(
-        opts.extra_env,
-        vec![("SONICTERM_PANE_ID".to_owned(), created.pane_id.to_string())],
+        opts.extra_env.first(),
+        Some(&("SONICTERM_PANE_ID".to_owned(), created.pane_id.to_string())),
         "the spawn options handed to the PTY carry the pane id"
     );
 }

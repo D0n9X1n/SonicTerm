@@ -112,7 +112,7 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 | `sonicterm-mac` | 二进制启动保留 logging/session guard，安装 AppKit hook，并将事件循环交给 `MacShell`。 | `src/main.rs` 和 menu/open-document/drag 模块；AppKit 调用留在主线程，终端行为留在共享 app/IO crate。 |
 | `sonicterm-windows` | 二进制启动保留 logging/session guard，安装 Win32 menu/backdrop/OLE hook，并运行 `WindowsShell`。 | `src/main.rs`、CLI 和原生 GUI 模块，以及 WiX 资源；PTY/ConPTY 进程所有权保留在 `sonicterm-io`。 |
 | `sonicterm-linux` | 二进制启动拥有 Linux 能力归一化与打包字体预检，保留 logging/session guard，然后运行 `LinuxShell`。 | `src/main.rs`（通过共用的 `launch_cli` 语法解析启动器参数）与包资源（终端与 open-script 桌面条目、man page）；直接 engine 依赖用于字体预检，X11/Wayland 窗口和终端状态仍由 app 拥有。 |
-| `sonicterm-mcp` | 每个进程拥有自身 stdio 与一个控制服务器连接之间的一条转发；不持有任何 SonicTerm 状态，任一端关闭即退出。 | 仅为二进制：`--endpoint`、`--version`/`-V`、`--help`/`-h`，以及 `SONICTERM_CONTROL`/`SONICTERM_PANE_ID` 环境变量；发送任何字节前先检查对端为同一用户，默认窗格从不构成授权。 |
+| `sonicterm-mcp` | 每个进程拥有自身 stdio 与一个控制服务器连接之间的一条转发；不持有任何 SonicTerm 状态，任一端关闭即退出。 | 仅为二进制：`--endpoint`、`--version`/`-V`、`--help`/`-h`、`--shell-integration zsh|bash`（打印带密钥的 OSC 133 集成），以及 `SONICTERM_CONTROL`/`SONICTERM_PANE_ID` 环境变量；发送任何字节前先检查对端为同一用户，默认窗格从不构成授权。 |
 
 ## 契约与终端核心
 

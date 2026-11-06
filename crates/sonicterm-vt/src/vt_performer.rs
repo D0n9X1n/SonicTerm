@@ -35,6 +35,8 @@ impl Performer {
     ) -> Self {
         Self {
             grid,
+            shell_token: None,
+            shell_authenticated: false,
             fg: Color::Default,
             bg: Color::Default,
             flags: CellFlags::empty(),

@@ -155,6 +155,7 @@ impl App {
         // The gate is read before the PTY exists, so its reader stamps reads from the first one.
         let frame_counters = self.pane_frame_counters();
         let shell_opts = self.pane_spawn_opts(pane_id, launch, frame_counters.is_some());
+        super::shell_token::arm_shell_token(&parser, &shell_opts);
         let pty = self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts).ok();
         let mut pane_state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         pane_state.hold_on_exit = launch.hold;

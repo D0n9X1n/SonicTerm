@@ -90,8 +90,10 @@ pub(crate) fn control_tools() -> Vec<Value> {
             "description": "Run one command line at a pane's shell prompt and wait for it to finish. \
                             Needs shell integration (OSC 133). Refused when text is typed at the \
                             prompt or anyone typed while the previous command ran; this check is \
-                            best effort, so prefer panes this agent created. The exit code is what \
-                            the shell reported. A timeout returns state 'running', never success.",
+                            best effort, so prefer panes this agent created. A timeout returns \
+                            state 'running', never success. exit_verified true means the exit code \
+                            came from SonicTerm's own shell integration; when false it was read \
+                            from terminal output that any program in the pane could have printed.",
             "inputSchema": {
                 "type": "object",
                 "required": ["pane_id", "command"],
@@ -106,6 +108,7 @@ pub(crate) fn control_tools() -> Vec<Value> {
                     "enum": ["completed", "not_started", "interfered", "lost", "running", "revoked"],
                 },
                 "exit_code": { "type": ["integer", "null"] },
+                "exit_verified": { "type": "boolean" },
                 "generation": { "type": "integer" },
                 "output": {
                     "type": "object",
@@ -312,6 +315,7 @@ fn run_command(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Valu
         json!({
             "state": outcome.state.as_str(),
             "exit_code": outcome.exit_code,
+            "exit_verified": outcome.exit_verified,
             "generation": generation,
             "output": {
                 "lines": outcome.output,

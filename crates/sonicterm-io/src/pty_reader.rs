@@ -111,6 +111,15 @@ fn spawn_reader_thread_with(
                             break;
                         }
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        // A signal `Interrupted` the read before it published anything: drop the
+                        // zeroed spare region, or the retry would read into no room and look like EOF.
+                        buf.truncate(initial_len);
+                        if cancel.try_recv().is_ok() {
+                            // When: `cancel` fired, the pane is being torn down, so no retry.
+                            break;
+                        }
+                    }
                     Err(e) => {
                         if cancel.try_recv().is_err() {
                             tracing::warn!("pty read error: {e}");
