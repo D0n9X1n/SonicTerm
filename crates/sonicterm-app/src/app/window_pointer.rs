@@ -109,16 +109,8 @@ impl App {
         if let Some(window) = self.main_mut() {
             window.cursor_pos = (position.x, position.y);
         }
-        // Notify the reducer so its compatibility state tracks the
-        // cursor. Its effects are discarded, so hover repaints come from
-        // the app's own checks below.
-        self.observe_intent(sonicterm_app_core::AppIntent::MouseMove {
-            window: sonicterm_types::WindowKey::new(0),
-            pos: sonicterm_app_core::LogicalPos {
-                pixel_x: cursor_x as f64,
-                pixel_y: cursor_y as f64,
-            },
-        });
+        // The compatibility reducer is not told about cursor motion: nothing reads its cursor
+        // state, and this runs on every move. Hover repaints come from the app's checks below.
         let mut hover_redraw = false;
         if let Some(window) = self.main_mut() {
             if let Some(renderer) = window.renderer.as_mut() {

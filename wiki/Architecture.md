@@ -85,8 +85,12 @@ status. Each `PaneState` owns its parser, optional `PtyHandle`, redraw target,
 terminal-mode atomics, inline images, and resource charges.
 
 `AppStateMachine` holds backend-free compatibility observations, not live GUI
-topology. `App::observe_intent` updates them and discards their effects;
-`App::dispatch_intent` handles supported explicit-target work separately.
+topology: it is a compatibility and test model, and only tests read its state.
+`App::observe_intent` updates it with structural intents (tabs, panes, windows,
+focus) and discards their effects; high-frequency input such as cursor motion is
+not reported, because nothing reads it. Making the reducer authoritative would
+be a separate behavioral migration. `App::dispatch_intent` handles supported
+explicit-target work separately.
 Missing, removed, or zero window keys never select main or frontmost. Native
 input goes to its source window's active pane through the bounded PTY queue.
 See [Runtime Lifecycle](Runtime-Lifecycle) for the state/intent/effect inventory

@@ -159,3 +159,27 @@ fn owner_cleanup_returns_success_and_governor_refusals() {
     );
     drop(reservation);
 }
+
+/// Main-window cursor motion is live behavior only: it never reaches the compatibility reducer,
+/// whose cursor state nothing reads, while structural intents still do. The live hover path is
+/// untouched, so the cursor position the App tracks still follows the pointer.
+#[test]
+fn cursor_motion_skips_the_compatibility_reducer() {
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    app.__test_seed_tab("main");
+    for step in 0..20 {
+        let position = winit::dpi::PhysicalPosition::new(10.0 + f64::from(step), 15.0);
+        app.handle_main_cursor_moved(position);
+    }
+    assert_eq!(app.machine.state().last_mouse_pos, None, "cursor motion reached the reducer");
+    assert_eq!(app.main().unwrap().cursor_pos, (29.0, 15.0), "the live cursor still follows");
+    app.observe_intent(sonicterm_app_core::AppIntent::MouseMove {
+        window: sonicterm_types::WindowKey::new(0),
+        pos: sonicterm_app_core::LogicalPos { pixel_x: 1.0, pixel_y: 2.0 },
+    });
+    assert!(app.machine.state().last_mouse_pos.is_some(), "the reducer still observes when told");
+}

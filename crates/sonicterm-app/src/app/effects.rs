@@ -256,6 +256,12 @@ impl App {
         true
     }
 
+    /// Tell the compatibility reducer about `intent` and discard its effects.
+    ///
+    /// The reducer (`sonicterm_app_core::AppStateMachine`) is a compatibility and test model, not
+    /// the source of live behavior: the App's own handlers do the real work, and the reducer's
+    /// state is read only by tests. So only structural intents (tabs, panes, windows, focus) are
+    /// observed; high-frequency input such as cursor motion is not, because nothing reads it.
     pub(super) fn observe_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
         // Compatibility reducer state is observational; its synthetic effects never mutate live topology.
         let _ = self.machine.handle(intent);
