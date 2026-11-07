@@ -644,7 +644,7 @@ the next start removes those whose process is gone.
 | --- | --- |
 | `list_panes` | SonicTerm's process id as `instance_pid`, then every pane in every window, main window first: id, window and tab index, whether it is active, READONLY or agent-created, and, read with one bounded lock, its title, working directory, size, alternate-screen state, shell integration and whether its process exited. |
 | `read_pane` | `screen` (visible rows), `tail` (newest lines, soft wraps joined) or `last_command` (the last finished shell command's output, from the OSC 133 C row up to where D arrived, and its exit code, found even while a full-screen program runs). Text keeps combining marks and the spaces at a soft wrap. Capped by `max_lines` (default 120, at most 1,000) and `max_bytes` (default 16 KiB, at most 64 KiB); `end_row` is the token of the last line returned. |
-| `wait_for` | Waits until a `regex` matches a row after `after_row`, output stays quiet for `quiet_ms`, or the process exits, bounded by `timeout_ms` (default 30 s, at most 120 s). Only lines that began after `after_row` count, so text a soft wrap appends to an older line does not. A match already on screen ends it at once; a token from the other screen is refused as `stale_row`. Every retained line written during the wait is checked; `missed_output` reports lines that left scrollback before they were, `truncated` a line too long to check whole, `scan_complete: false` rows still unscanned when it ended, and `screen_changed` a switch between the primary and alternate screens. |
+| `wait_for` | Waits until a `regex` matches a row after `after_row`, output stays quiet for `quiet_ms`, or the process exits, bounded by `timeout_ms` (default 30 s, at most 120 s); a closed pane ends it with `pane_closed`. Only lines that began after `after_row` count, so text a soft wrap appends to an older line does not. A match already on screen ends it at once; a token from the other screen is refused as `stale_row`. Every retained line written during the wait is checked; `missed_output` reports lines that left scrollback before they were, `truncated` a line too long to check whole, `scan_complete: false` rows still unscanned when it ended, and `screen_changed` a switch between the primary and alternate screens. |
 
 The control tools (`create_pane`, `send_text`, `send_keys`, `run_command`,
 `close_pane`) and the `[mcp] control` scope are described in [MCP Server](MCP-Server). Each
@@ -656,12 +656,27 @@ A read takes the pane's parser for one attempt of at most 5 ms, visits at most
 current generation, and a call revoked before it returns answers with the
 `revoked` error and no pane text. `wait_for` reads the pane's output counter and exit status
 without a lock, then sleeps on the pane's change signal: the VT worker announces it after each
-batch's output counter is published (with the parser released), and the event loop after it
-records the exit status, so either wakes every waiting call on that pane at once. The wait reads
-the signal before each check and sleeps only while it is unchanged, so a change during the
-check is not slept through. An idle wait still checks at least every 250 ms, so a closed
-client or a stopped or changed server ends it; a busy parser or an unfinished scan is retried
-after 50 ms, since nothing announces work on the wait's own side. Without `after_row` its first look reads the tail, as `read_pane` does; with `after_row` it
+batch's output counter is published (with the parser released), the event loop after it
+records the exit status and after it writes a held pane's exit status line (whose output counter
+it publishes the same way), and pane retirement closes the signal, so any of them wakes every
+waiting call on that pane at once. A closed pane ends a wait with `pane_closed` once the output
+published before the close was scanned without a match; a busy parser or a scan backlog gets at
+most 1 s more (`CLOSE_DRAIN`), after which the wait ends with `scan_complete: false`. The server also wakes every sleeping
+wait when a connection closes, the server stops, or `control` or `read` changes, so a revoked
+wait ends at once. The wait reads the signal before each check and sleeps only while it is
+unchanged, so a change during the check is not slept through. An idle wait still checks at least
+every 250 ms as a backstop; a busy parser or an unfinished scan is retried after 50 ms, since
+nothing announces work on the wait's own side. `run_command` waits the same way: the shell's
+markers arrive as published output, so a finished command is reported without polling, a closed
+pane ends the run with `pane_closed` (after at most the same 1 s for a busy parser), and only a
+busy parser is retried on a 50 ms poll. Typing into the pane announces nothing until the program
+echoes it, so typing a program does not echo is seen as `interfered` at the next 250 ms recheck.
+`read_pane` and `wait_for` report `generation`, a sample of the output counter, and
+`current_generation`, the counter when they answered. `read_pane` samples it before reading, so
+its lines include at least the text published up to it, unless the read was `busy` (no lines).
+`wait_for` reports the counter its last completed regex inspection started from, or `null` when it
+inspected nothing (no regex, or the parser stayed busy); when `scan_complete` is `false`, rows up to
+that counter may still be unscanned. Neither number proves complete coverage on its own. Without `after_row` its first look reads the tail, as `read_pane` does; with `after_row` it
 starts on the row after that token. After that it scans forward from the next row it has not
 inspected, oldest first, so a matching line that more than a tail of output
 pushed past between two checks is still found. Each scan holds the parser within the same 5 ms and

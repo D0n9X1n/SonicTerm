@@ -19,6 +19,10 @@ use super::{child_window, App};
 ///
 /// Control characters are replaced first, so a program name or signal name
 /// cannot drive the terminal. The line starts on a fresh row with default attributes.
+/// Callers whose pane is already published must call
+/// [`publish_grid_change`](super::spawn_pane::publish_grid_change) afterwards, as
+/// [`App::write_exit_status_line`] does; only a pane still being built, which no reader can name
+/// yet, writes without publishing.
 pub(super) fn write_local_line(parser: &Arc<Mutex<Parser>>, text: &str) {
     let printable = sonicterm_types::replace_control_characters(text);
     let bytes = format!("\x1b[0m\r\n{printable}\r\n").into_bytes();
@@ -132,7 +136,11 @@ impl App {
             // When: no window holds `pane_id`, it closed after its exit was marked.
             return;
         };
-        write_local_line(&window.panes[&pane_id].parser, &status.status_line());
+        let pane = &window.panes[&pane_id];
+        write_local_line(&pane.parser, &status.status_line());
+        // Published after the parser guard is released, so a `wait_for` sleeping on this pane
+        // scans the status line instead of skipping a generation that never moved.
+        super::spawn_pane::publish_grid_change(&pane.output_generation, &pane.change_signal);
         window.request_window_redraw();
     }
 

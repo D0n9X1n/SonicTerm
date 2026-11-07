@@ -780,7 +780,9 @@ pub(in crate::app) use output::send_output_redraw;
 use output::{publish_sync_output, send_pane_output};
 #[path = "spawn_pane_vt.rs"]
 mod vt;
-pub(in crate::app) use vt::{process_pane_vt_batch_and_publish, publish_pane_vt_batch_with};
+pub(in crate::app) use vt::{
+    process_pane_vt_batch_and_publish, publish_grid_change, publish_pane_vt_batch_with,
+};
 
 #[path = "spawn_pane_commands.rs"]
 mod commands;
@@ -839,7 +841,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 (counters, echo_before, parsed_at)
             {
                 // the watch was armed at the pre-read, so this section's facts are derived now.
-                // The worker is output_generation's sole writer, so the batch publishes this load plus one.
+                // The worker is output_generation's sole writer while it runs (the app writes only after
+                // the worker reported the exit and stopped), so the batch publishes this load plus one.
                 let section = super::echo_watch::SectionFacts {
                     consumed: result.0,
                     parsed_at,

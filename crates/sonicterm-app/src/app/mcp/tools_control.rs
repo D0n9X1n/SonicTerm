@@ -107,7 +107,7 @@ pub(crate) fn control_tools() -> Vec<Value> {
             },
             "outputSchema": output(json!({
                 "state": {
-                    "enum": ["completed", "not_started", "interfered", "lost", "running", "revoked"],
+                    "enum": ["completed", "not_started", "interfered", "lost", "running", "revoked", "pane_closed"],
                 },
                 "exit_code": { "type": ["integer", "null"] },
                 "exit_verified": { "type": "boolean" },

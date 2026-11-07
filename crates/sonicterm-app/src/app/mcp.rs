@@ -11,7 +11,7 @@
 use std::io::{BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -207,6 +207,33 @@ pub(crate) struct McpShared {
     /// Bytes every connection holds right now: partial request lines and replies being written.
     /// The loop charges this figure to the governor's `Mcp` owner.
     pub(crate) buffered_bytes: AtomicU64,
+    /// The change signals of panes a wait is sleeping on, so a revocation wakes the wait at once
+    /// rather than at its next recheck. Entries are weak: a closed pane's signal is not kept.
+    waiters: Mutex<Vec<Weak<crate::app::PaneSignal>>>,
+    /// A test's replacement for `wait_for`'s recheck interval, so an end-to-end test can prove a
+    /// wake came from a signal and not from the recheck.
+    #[cfg(test)]
+    pub(crate) recheck_override: Mutex<Option<Duration>>,
+}
+
+/// A wait's registration in [`McpShared`]'s waiter list; dropping it removes the entry.
+pub(crate) struct WaiterGuard<'shared> {
+    /// Where the entry lives.
+    shared: &'shared McpShared,
+    /// The registered signal, compared by address on removal.
+    signal: Weak<crate::app::PaneSignal>,
+}
+
+// Lifecycle: WaiterGuard removes its signal from the waiter list when the wait ends, however it ends.
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        let mut waiters = self.shared.waiters.lock();
+        // Only this registration goes: another wait on the same pane keeps its own entry.
+        if let Some(index) = waiters.iter().position(|entry| entry.ptr_eq(&self.signal)) {
+            waiters.swap_remove(index);
+        }
+        waiters.retain(|entry| entry.strong_count() > 0);
+    }
 }
 
 impl McpShared {
@@ -223,7 +250,31 @@ impl McpShared {
             connections: AtomicU64::new(0),
             pending_notices: AtomicU64::new(0),
             buffered_bytes: AtomicU64::new(0),
+            waiters: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            recheck_override: Mutex::new(None),
         })
+    }
+
+    /// Register a wait sleeping on `signal` until the returned guard drops, so a revocation wakes it.
+    pub(crate) fn register_waiter(&self, signal: &Arc<crate::app::PaneSignal>) -> WaiterGuard<'_> {
+        let signal = Arc::downgrade(signal);
+        self.waiters.lock().push(signal.clone());
+        WaiterGuard { shared: self, signal }
+    }
+
+    /// How many waits are registered right now, so a test knows a wait reached its sleep loop.
+    #[cfg(test)]
+    pub(crate) fn waiter_count(&self) -> usize {
+        self.waiters.lock().len()
+    }
+
+    /// Wake every registered wait so it rechecks its revocation now.
+    pub(crate) fn wake_waiters(&self) {
+        let signals: Vec<_> = self.waiters.lock().iter().filter_map(Weak::upgrade).collect();
+        for signal in signals {
+            signal.notify();
+        }
     }
 
     /// The current control level.
@@ -248,6 +299,7 @@ impl McpShared {
     pub(crate) fn set_read(&self, read: McpRead) {
         self.read_agent_only.store(read == McpRead::Agent, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake_waiters();
     }
 
     /// Change the control level and revoke every queued request.
@@ -255,6 +307,7 @@ impl McpShared {
     pub(crate) fn set_control(&self, control: McpControl) {
         self.control.store(control_code(control), Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake_waiters();
     }
 
     /// Stop the listener and every connection, and revoke every queued request.
@@ -262,6 +315,7 @@ impl McpShared {
     pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake_waiters();
     }
 
     /// Whether the server was stopped.
@@ -458,7 +512,6 @@ pub(crate) struct Caller {
 /// Serve one connection until it closes or the server stops: a reader thread parses lines and
 /// answers what needs no app state, and a worker thread runs tool calls one at a time. Returns the
 /// name the client gave in `initialize`, if it did.
-// Ordering: closed Release publishes the close to every waiter that Acquires it.
 pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> Option<String> {
     let closed = Arc::new(AtomicBool::new(false));
     let writer = Arc::new(Mutex::new(transport.writer));
@@ -483,7 +536,7 @@ pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> 
     }
     let calls = CallSlot { queue: calls, in_flight, closed: Arc::clone(&closed) };
     read_loop(&shared, transport.reader, &writer, &caller, &calls, &closed);
-    closed.store(true, Ordering::Release);
+    close_connection(&shared, &closed);
     let client = caller.lock().client.clone();
     client
 }
@@ -700,7 +753,6 @@ fn answer_request(
 }
 
 /// Write one line to the client; a failed or timed-out write marks the connection closed.
-// Ordering: closed Release publishes the close to the reader and every waiter.
 fn write_line(
     shared: &McpShared,
     writer: &Mutex<Box<dyn Write + Send>>,
@@ -717,8 +769,18 @@ fn write_line(
         .and_then(|()| writer.flush());
     // A failed or timed-out write means the client stopped reading; it is dropped.
     if written.is_err() {
-        closed.store(true, Ordering::Release);
+        drop(writer);
+        close_connection(shared, closed);
     }
+}
+
+/// Mark a connection closed and wake every sleeping wait, so this connection's running call sees
+/// the close at once; the other waits find nothing changed and sleep again. Every path that ends a
+/// connection goes through here.
+// Ordering: closed Release publishes the close to the reader and every waiter that Acquires it.
+pub(crate) fn close_connection(shared: &McpShared, closed: &AtomicBool) {
+    closed.store(true, Ordering::Release);
+    shared.wake_waiters();
 }
 
 /// Run `serve_connection` on a new thread, counting it against [`MAX_CONNECTIONS`]; a connection

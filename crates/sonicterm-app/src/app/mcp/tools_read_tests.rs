@@ -266,3 +266,68 @@ fn pane_ids_are_read_from_strings_or_numbers() {
     assert_eq!(pane_id_arg(&json!({ "pane_id": "x" })), None);
     assert_eq!(pane_id_arg(&json!({})), None);
 }
+
+/// `read_pane`'s `generation` is loaded before the read, so a batch published between the load
+/// and the read shows in the lines and in `current_generation`, never as a `generation` the
+/// snapshot does not contain.
+#[test]
+fn a_read_reports_the_generation_it_contains_at_least() {
+    let entry = test_entry(20, 4, 100);
+    entry.parser.lock().advance(b"before\r\n");
+    entry.output_generation.fetch_add(1, Ordering::Release);
+    let racing = entry.clone();
+    READ_HOOK.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move || {
+            racing.parser.lock().advance(b"during\r\n");
+            racing.output_generation.fetch_add(1, Ordering::Release);
+        }));
+    });
+    let (snapshot, structured) =
+        read_with_generation(&entry, ReadMode::Tail, ReadLimits::clamped(None, None));
+    READ_HOOK.with_borrow_mut(|hook| *hook = None);
+    assert_eq!(structured["generation"], 1);
+    assert_eq!(structured["current_generation"], 2);
+    assert!(
+        snapshot.lines.iter().any(|line| line.text == "during"),
+        "at least: later text may show"
+    );
+}
+
+/// `wait_for` reports the generation its last inspection covered, not whatever was current when it
+/// answered: a batch published after that inspection, whose own inspection found the parser busy
+/// until the timeout, leaves `generation` behind `current_generation`.
+#[test]
+fn a_wait_reports_the_generation_it_inspected() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let entry = test_entry(20, 4, 100);
+    entry.parser.lock().advance(b"x\r\n");
+    entry.output_generation.fetch_add(1, Ordering::Release);
+    let later = entry.clone();
+    let condition = WaitCondition {
+        regex: Some(Regex::new("never").unwrap()),
+        after: None,
+        quiet: None,
+        watch_exit: false,
+        timeout: Duration::from_millis(100),
+        recheck: Duration::from_secs(10),
+    };
+    let scope = CallScope::admit(&shared, &Arc::new(AtomicBool::new(false)));
+    let mut holder = None;
+    let outcome = wait_until_observed(&shared, &entry, &condition, &scope, || {
+        // After the first inspection: a new batch is published while another thread holds the
+        // parser past the timeout, so every later inspection is busy.
+        later.output_generation.fetch_add(1, Ordering::Release);
+        let (held, ready) = std::sync::mpsc::channel();
+        let parser = Arc::clone(&later.parser);
+        holder = Some(std::thread::spawn(move || {
+            let _guard = parser.lock();
+            held.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+        }));
+        ready.recv().unwrap();
+    });
+    holder.unwrap().join().unwrap();
+    assert_eq!(outcome.reason, WaitReason::Timeout);
+    assert_eq!(outcome.inspected_generation, Some(1));
+    assert_eq!(entry.output_generation.load(Ordering::Acquire), 2);
+}

@@ -142,6 +142,11 @@ cargo build -p sonicterm-app
   only first frame, Visibility, DeviceRecovered, `resize_pending` and
   `surface_recovery_pending` force a frame. Both adapters recheck under the guards
   before receipts and abandon a held frame unsettled; the display link never runs for it.
+- Every text write into a pane's parser publishes through `publish_grid_change` (generation, then
+  the pane's `PaneSignal`): the VT worker after each complete batch, the app after a held pane's
+  exit status line. A pane still being built (launch failure) writes before anyone can read it.
+  `retire_pane` closes the signal first; transfers never do. MCP waits register on `McpShared`, which
+  wakes them on stop, `control`/`read` changes and every connection close (`close_connection`).
 - Pane output generations publish after complete batches; the collector Acquire-loads
   identities before locking. Frame completion settles only captured owner generations.
   `last_render` is the attempt clock. On hardware, streaming is paced from `stream_clock`,

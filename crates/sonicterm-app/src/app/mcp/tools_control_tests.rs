@@ -9,7 +9,7 @@ use std::time::Duration;
 use sonicterm_cfg::config::McpControl;
 
 use super::*;
-use crate::app::mcp::run::{wait_run, RunStarted, RunState};
+use crate::app::mcp::run::{wait_run, wait_run_every, RunStarted, RunState, RUN_CHECKS};
 use crate::app::mcp::{test_entry, PaneEntry};
 
 /// A call admitted now on `shared` for a connection that stays open.
@@ -269,4 +269,169 @@ fn interference_and_timeouts_end_a_run_honestly() {
     assert_eq!(outcome.state, RunState::Running);
     assert_eq!(outcome.exit_code, None);
     assert!(!entry.agent_run.load(Ordering::Acquire));
+}
+
+/// A recheck no run wake in these tests may rely on.
+const LONG_RUN_RECHECK: Duration = Duration::from_secs(10);
+/// The bound a signalled run wake meets with room to spare on a loaded runner.
+const RUN_WAKE_BOUND: Duration = Duration::from_secs(5);
+
+/// A run wait on its own thread with a 10 s recheck; `parked` fires each time it is about to sleep
+/// on the pane's signal, with the signal's mutex held, so the test acts only once it sleeps.
+struct ParkedRun {
+    handle: std::thread::JoinHandle<(RunState, Duration, u64)>,
+    parked: std::sync::mpsc::Receiver<()>,
+}
+
+impl ParkedRun {
+    /// Start waiting on `run` for `shared`.
+    fn start(shared: &Arc<McpShared>, run: RunStarted) -> Self {
+        let shared = Arc::clone(shared);
+        let (sender, parked) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            crate::app::pane_signal::PARK_HOOK.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    let _ = sender.send(());
+                }));
+            });
+            RUN_CHECKS.with(|checks| checks.set(0));
+            let begun = std::time::Instant::now();
+            let call = scope(&shared);
+            let outcome =
+                wait_run_every(&shared, run, Duration::from_secs(20), &call, LONG_RUN_RECHECK);
+            (outcome.state, begun.elapsed(), RUN_CHECKS.with(std::cell::Cell::get))
+        });
+        Self { handle, parked }
+    }
+
+    /// Block until the wait is asleep on the signal.
+    fn until_parked(&self) {
+        self.parked.recv_timeout(RUN_WAKE_BOUND).expect("the run wait parked");
+    }
+
+    /// The run's state, how long the wait ran, and how many checks it made.
+    fn join(self) -> (RunState, Duration, u64) {
+        self.handle.join().unwrap()
+    }
+}
+
+/// Publish `bytes` to `entry` as the VT worker does: parse, bump the generation, announce.
+fn publish_to(entry: &PaneEntry, bytes: &[u8]) {
+    entry.parser.lock().advance(bytes);
+    crate::app::spawn_pane::publish_grid_change(&entry.output_generation, &entry.change_signal);
+}
+
+/// The shell's C, D and next prompt, published while the run wait sleeps, end it at once on the
+/// unverified path (`prompt_after_end`): the wait sleeps on the signal rather than polling.
+#[test]
+fn published_markers_wake_a_sleeping_run_wait() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let run = started(test_entry(30, 6, 100));
+    let entry = run.entry.clone();
+    let waiter = ParkedRun::start(&shared, run);
+    waiter.until_parked();
+    publish_to(&entry, b"ls\r\n\x1b]133;C\x07a\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    let (state, elapsed, checks) = waiter.join();
+    assert_eq!(state, RunState::Completed);
+    assert!(elapsed < RUN_WAKE_BOUND, "the run woke after {elapsed:?}");
+    // One look before the markers and one after; a 50 ms poll would have looked many times.
+    assert!(checks <= 3, "the run wait checked {checks} times");
+}
+
+/// Tokened C and D, published while the run wait sleeps, end it at once on the verified path.
+#[test]
+fn verified_markers_wake_a_sleeping_run_wait() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let entry = test_entry(30, 6, 100);
+    entry.parser.lock().set_shell_token(Some(TEST_TOKEN.to_owned()));
+    let mut prompt = tokened("A", "");
+    prompt.extend_from_slice(b"$ ");
+    prompt.extend(tokened("B", ""));
+    let run = started_with(entry, &prompt);
+    let entry = run.entry.clone();
+    let waiter = ParkedRun::start(&shared, run);
+    waiter.until_parked();
+    let mut markers = b"ls\r\n".to_vec();
+    markers.extend(tokened("C", ""));
+    markers.extend_from_slice(b"a\r\n");
+    markers.extend(tokened("D", ";0"));
+    publish_to(&entry, &markers);
+    let (state, elapsed, _) = waiter.join();
+    assert_eq!(state, RunState::Completed);
+    assert!(elapsed < RUN_WAKE_BOUND, "the verified run woke after {elapsed:?}");
+}
+
+/// Retiring the pane ends a sleeping run wait with `pane_closed` at once.
+#[test]
+fn closing_the_pane_ends_a_run_wait() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let run = started(test_entry(30, 6, 100));
+    let entry = run.entry.clone();
+    let waiter = ParkedRun::start(&shared, run);
+    waiter.until_parked();
+    entry.change_signal.close();
+    let (state, elapsed, _) = waiter.join();
+    assert_eq!(state, RunState::PaneClosed);
+    assert!(elapsed < RUN_WAKE_BOUND, "the run ended after {elapsed:?}");
+    assert!(!entry.agent_run.load(Ordering::Acquire));
+}
+
+/// Stopping the server wakes a sleeping run wait at once with `revoked`.
+#[test]
+fn stopping_the_server_wakes_a_run_wait() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let run = started(test_entry(30, 6, 100));
+    let waiter = ParkedRun::start(&shared, run);
+    waiter.until_parked();
+    shared.stop();
+    let (state, elapsed, _) = waiter.join();
+    assert_eq!(state, RunState::Revoked);
+    assert!(elapsed < RUN_WAKE_BOUND, "the run ended after {elapsed:?}");
+}
+
+/// Typing into a pane whose program echoes nothing announces no change, so the run wait sees the
+/// interference at its next recheck (250 ms in production) rather than on a 50 ms poll.
+#[test]
+fn silent_typing_is_seen_at_the_recheck() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let run = started(test_entry(30, 6, 100));
+    let entry = run.entry.clone();
+    let typist = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let typed = crate::app::mcp::run::typing_stamp(std::time::Instant::now());
+        entry.run_typed_at.store(typed, Ordering::SeqCst);
+    });
+    let begun = std::time::Instant::now();
+    let outcome = wait_run(&shared, run, Duration::from_secs(5), &scope(&shared));
+    typist.join().unwrap();
+    assert_eq!(outcome.state, RunState::Interfered);
+    // Seen at the first recheck after the typing, never at the 5 s timeout.
+    assert!(begun.elapsed() < Duration::from_secs(1), "seen after {:?}", begun.elapsed());
+}
+
+/// A closed pane's run returns within the one close drain even while its parser stays held, the
+/// output read included, and frees the pane's run reservation.
+#[test]
+fn a_closed_pane_with_a_held_parser_ends_its_run_within_the_drain() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let run = started(test_entry(30, 6, 100));
+    let entry = run.entry.clone();
+    entry.change_signal.close();
+    let held = Arc::clone(&entry.parser);
+    let (locked, ready) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = held.lock();
+        locked.send(()).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+    });
+    ready.recv().unwrap();
+    let begun = std::time::Instant::now();
+    let outcome =
+        wait_run_every(&shared, run, Duration::from_secs(20), &scope(&shared), LONG_RUN_RECHECK);
+    let elapsed = begun.elapsed();
+    assert_eq!(outcome.state, RunState::PaneClosed);
+    let drain = crate::app::mcp::tools_read::CLOSE_DRAIN;
+    assert!(elapsed < drain + Duration::from_millis(200), "the run returned after {elapsed:?}");
+    assert!(!entry.agent_run.load(Ordering::Acquire), "the reservation outlived the run");
+    holder.join().unwrap();
 }

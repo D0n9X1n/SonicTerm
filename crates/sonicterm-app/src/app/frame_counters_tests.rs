@@ -340,6 +340,10 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/mcp.rs", "inbox", 3),
     ("app/mcp.rs", "proxy", 1),
     ("app/mcp.rs", "writer", 1),
+    // The MCP server's list of sleeping waits' pane signals: weak pointers, never a parser.
+    ("app/mcp.rs", "waiters", 4),
+    // A test's replacement recheck interval, read once per `wait_for`.
+    ("app/mcp/tools_read.rs", "recheck_override", 1),
     ("app/os_drag.rs", "snapshots", 6),
     ("app/os_drag.rs", "moved", 2),
     ("app/os_drag.rs", "ended", 3),
@@ -357,8 +361,10 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/spawn_pane_media.rs", "inline_images", 2),
     // The image store's own lock and snapshot: its mutex guards image entries, never a parser.
     ("app/media_store.rs", "images", 1),
-    // A pane's change signal: its mutex guards one counter, never a parser.
-    ("app/pane_signal.rs", "sequence", 3),
+    // A pane's change signal: its mutex guards a counter and the closed flag, never a parser.
+    ("app/pane_signal.rs", "state", 5),
+    // A test's per-signal park notifier, read while a wait parks; never a parser.
+    ("app/pane_signal.rs", "park_notifier", 1),
     ("app/guard_correlation.rs", "state", 5),
     ("bin/pty_multi_round_helper.rs", "stdin", 1),
     ("bin/pty_multi_round_helper.rs", "stdout", 1),

@@ -326,6 +326,8 @@ impl App {
     }
 
     pub(super) fn retire_pane(&mut self, mut pane: PaneState) {
+        // Closed first, so an MCP wait on this pane ends with `pane_closed` instead of its timeout.
+        pane.change_signal.close();
         *pane.redraw_target.lock() = None;
         // The pane already left its window; the next status line sync prunes its records.
         self.status_line.panes_retired = true;
