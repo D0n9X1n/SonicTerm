@@ -47,6 +47,10 @@ cargo build -p sonicterm-io
   descriptor is an error — never fall back to a writer that injects bytes.
   Windows keeps `take_writer`.
 - Never hold parser/grid locks while writing to the PTY.
+- The writer flushes after every message. That costs nothing on either platform: the Unix
+  writer is a `std::fs::File`, whose `flush` is a no-op, and the pinned Windows writer
+  (`filedescriptor` 0.8.3, `windows.rs`) returns `Ok(())` without a call. The flush only marks a
+  user-input message complete (`input_completed`), so keep it per message.
 - The reply spool caps live spilled bytes at `SPILL_BUDGET_BYTES` (16 MiB). A reply past it fails
   with a `ReplyBudgetExceeded` error (`is_budget_refusal`), is dropped alone and counted (`PtyReplySender::stats`), and
   must not latch failure; every other spool error still latches. Compaction keeps the file below

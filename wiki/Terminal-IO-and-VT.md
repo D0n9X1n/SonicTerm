@@ -46,7 +46,9 @@ report their length; refused input is never retried.
 
 Each accepted user-input message gets an ordinal (modulo 2^20) under a short
 admission lock around the non-blocking send, so ordinal order is channel order.
-The writer counts a user-input message complete only after its flush succeeds;
+The writer counts a user-input message complete only after its flush succeeds
+(a no-op on both platforms: the Unix writer is a plain file, and the pinned Windows
+writer's `flush` returns at once, so flushing each message adds no system call);
 parser replies never touch the ordinals. Each ordinal's admission time sits in
 one of eight slots. `PtyHandle::input_progress()` reads these atomics, with no
 lock, and returns `Idle`, the oldest outstanding write (`Oldest`, with its
