@@ -565,6 +565,10 @@ pub(crate) fn wait_until_observed(
                 return done;
             }
             // A busy parser leaves the generation uninspected, so the next check reads again.
+            #[cfg(test)]
+            if matches!(checked, Some(TailCheck::Busy)) {
+                observe_wait(WaitEvent::Busy);
+            }
             if !matches!(checked, Some(TailCheck::Busy)) {
                 inspected_generation = Some(generation);
                 if let Some(observer) = after_first_look.take() {
@@ -600,6 +604,10 @@ pub(crate) fn wait_until_observed(
             .flatten()
             .min()
             .unwrap_or(timeout_at);
+        // Announced only once the sequence is read and every check is done, so a test that publishes
+        // after this event exercises the sleep, not the first inspection.
+        #[cfg(test)]
+        observe_wait(WaitEvent::Parked);
         entry.change_signal.wait_past(seen, wake_at);
     }
 }
@@ -608,6 +616,30 @@ pub(crate) fn wait_until_observed(
 thread_local! {
     /// How many checks this thread's waits ran, so a test counts an idle wait's wakeups.
     pub(crate) static WAIT_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Where this thread's waits report their events, so a test synchronizes on them, not sleeps.
+    pub(crate) static WAIT_OBSERVER: std::cell::RefCell<Option<std::sync::mpsc::Sender<WaitEvent>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// What a wait reports to its test observer.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitEvent {
+    /// A check found the parser held and left the generation uninspected.
+    Busy,
+    /// The wait is about to sleep on the pane's change signal with nothing pending.
+    Parked,
+}
+
+/// Send `event` to this thread's observer, if a test installed one.
+#[cfg(test)]
+fn observe_wait(event: WaitEvent) {
+    WAIT_OBSERVER.with_borrow(|observer| {
+        if let Some(sender) = observer {
+            // When: a test installed a `sender`; one that stopped listening only loses later events.
+            let _ = sender.send(event);
+        }
+    });
 }
 
 /// Whether a wait still has rows to check: it has a regex and either a screen's scan stopped at

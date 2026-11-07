@@ -70,17 +70,40 @@ fn worker(app: &App, pane_id: u64) -> crate::app::spawn_pane::PaneVtHandles {
     .with_pane_id(pane_id)
 }
 
-/// Run `condition` on another thread and report its outcome and how long it took.
-fn spawn_wait(
-    entry: &PaneEntry,
-    condition: WaitCondition,
-) -> std::thread::JoinHandle<(WaitReason, Duration)> {
+/// A wait running on its own thread: its result, and the events it reports as it runs.
+struct SpawnedWait {
+    handle: std::thread::JoinHandle<(WaitReason, Duration)>,
+    events: std::sync::mpsc::Receiver<WaitEvent>,
+}
+
+impl SpawnedWait {
+    /// Block until the wait reports `event`, so the test acts only once the wait is in that state.
+    fn until(&self, event: WaitEvent) {
+        loop {
+            let seen = self.events.recv_timeout(WAKE_BOUND).expect("the wait reported its state");
+            if seen == event {
+                return;
+            }
+        }
+    }
+
+    /// The wait's reason and how long it ran from its first check.
+    fn join(self) -> (WaitReason, Duration) {
+        self.handle.join().unwrap()
+    }
+}
+
+/// Run `condition` on another thread, reporting its `WaitEvent`s to the returned handle.
+fn spawn_wait(entry: &PaneEntry, condition: WaitCondition) -> SpawnedWait {
     let (shared, entry) = (McpShared::new(McpControl::Agent, None), entry.clone());
-    std::thread::spawn(move || {
+    let (sender, events) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        WAIT_OBSERVER.with_borrow_mut(|observer| *observer = Some(sender));
         let started = Instant::now();
         let outcome = wait_until(&shared, &entry, &condition, &scope(&shared));
         (outcome.reason, started.elapsed())
-    })
+    });
+    SpawnedWait { handle, events }
 }
 
 /// An idle 1 s wait sleeps on the signal: it checks about once per 250 ms recheck, not once
@@ -104,9 +127,10 @@ fn an_idle_wait_checks_at_most_every_recheck() {
 fn published_output_wakes_a_sleeping_wait() {
     let (app, pane_id, entry) = app_pane();
     let waiter = spawn_wait(&entry, regex_wait("READY", LONG_RECHECK));
-    std::thread::sleep(Duration::from_millis(100));
+    // Published only once the wait has inspected and is sleeping, so only the signal can wake it.
+    waiter.until(WaitEvent::Parked);
     publish(&worker(&app, pane_id), b"READY\r\n");
-    let (reason, elapsed) = waiter.join().unwrap();
+    let (reason, elapsed) = waiter.join();
     assert_eq!(reason, WaitReason::Matched);
     assert!(elapsed < WAKE_BOUND, "the wait woke after {elapsed:?}");
 }
@@ -137,9 +161,9 @@ fn a_silent_exit_wakes_a_sleeping_wait() {
     condition.regex = None;
     condition.watch_exit = true;
     let waiter = spawn_wait(&entry, condition);
-    std::thread::sleep(Duration::from_millis(100));
+    waiter.until(WaitEvent::Parked);
     app.handle_pane_process_exited(pane_id, PaneExitStatus::Code(3));
-    let (reason, elapsed) = waiter.join().unwrap();
+    let (reason, elapsed) = waiter.join();
     assert_eq!(reason, WaitReason::Exited);
     assert!(elapsed < WAKE_BOUND, "the wait woke after {elapsed:?}");
 }
@@ -150,10 +174,13 @@ fn every_wait_on_a_pane_wakes() {
     let (app, pane_id, entry) = app_pane();
     let waiters: Vec<_> =
         (0..3).map(|_| spawn_wait(&entry, regex_wait("READY", LONG_RECHECK))).collect();
-    std::thread::sleep(Duration::from_millis(100));
+    // Every wait is asleep before the one publication that must wake them all.
+    for waiter in &waiters {
+        waiter.until(WaitEvent::Parked);
+    }
     publish(&worker(&app, pane_id), b"READY\r\n");
     for waiter in waiters {
-        let (reason, elapsed) = waiter.join().unwrap();
+        let (reason, elapsed) = waiter.join();
         assert_eq!(reason, WaitReason::Matched);
         assert!(elapsed < WAKE_BOUND, "a wait woke after {elapsed:?}");
     }
@@ -170,10 +197,10 @@ fn a_busy_parser_is_retried_on_the_short_poll() {
     entry.output_generation.fetch_add(1, Ordering::Release);
     entry.change_signal.notify();
     let waiter = spawn_wait(&entry, regex_wait("READY", LONG_RECHECK));
-    // The wait's first look meets the held parser and leaves the generation uninspected.
-    std::thread::sleep(Duration::from_millis(200));
+    // Released only once a check met the held parser, so the retry, not a first look, matches.
+    waiter.until(WaitEvent::Busy);
     drop(guard);
-    let (reason, elapsed) = waiter.join().unwrap();
+    let (reason, elapsed) = waiter.join();
     assert_eq!(reason, WaitReason::Matched);
     assert!(elapsed < WAKE_BOUND, "the busy wait recovered after {elapsed:?}");
 }
