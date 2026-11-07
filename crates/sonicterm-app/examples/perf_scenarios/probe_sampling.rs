@@ -237,6 +237,8 @@ impl Probe {
             trim_pending: false,
             trim_seq_after_hook: None,
             atlas_recovery: None,
+            flood_watch: None,
+            role_grids: Vec::new(),
             timeline_storage: TimelineStorage::default(),
             running_outer: None,
             first_present_bound: FirstPresentBound::default(),

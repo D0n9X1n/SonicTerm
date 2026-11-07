@@ -13,6 +13,15 @@ use super::{
 #[cfg(any(target_os = "macos", windows, test))]
 use sonicterm_cfg::keymap::Direction;
 
+/// Columns each S13 pane requests; the window is one (`default`) or two (`sustained-4`) panes wide.
+/// A window has a minimum width (about 84 columns on a macOS host), so the one-column layout's panes
+/// can come out wider; the comparison checks the panes' actual grids.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const S13_PANE_COLS: u16 = 75;
+/// Rows of every S13 window: two panes tall, below the macOS runner's 43-row screen clamp.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const S13_WINDOW_ROWS: u16 = 40;
+
 /// The plan for `id` and `variant` on `host`, or `None` when the catalog does not list them.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Option<Plan> {
@@ -318,7 +327,8 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 end,
             ],
         ),
-        // The flood starts at GO and never ends; typing lands in the idle top-right pane. `sustained-4`
+        // The flood starts at GO and never ends; typing lands in idle role 1 (below the flood in `default`, at
+        // the top right in `sustained-4`). `sustained-4`
         // splits the right column, then the left one, so all four panes have the same size, and refocuses
         // the top-right pane. The
         // `tail` hold after typing shows the flood still running at the end of sampling; `idle` then
@@ -343,8 +353,8 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                     ],
                 )
             } else {
-                // When: the `default` variant runs, one flooding and one idle pane sit side by side.
-                (vec![Workload::SustainedFlood, Workload::IdleShell], vec![SetupAction::SplitRight])
+                // When: the `default` variant runs, one flooding pane sits above one idle pane.
+                (vec![Workload::SustainedFlood, Workload::IdleShell], vec![SetupAction::SplitDown])
             };
             let chars = if short { 300 } else { 600 };
             let typing = Driver::Typing { role: 1, chars, per_second: 10, settle_ms: 2_000 };
@@ -424,8 +434,19 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         // S1 and S12 carry the status line comparisons; every variant of theirs but atlas-retry,
         // whose fixture fills 70 rows, requests a grid below the macOS runner's screen clamp with
         // the strip on, so both refs measure the same grid and the presenter variants stay alike.
-        window_rows: (matches!(spec.id, "S1" | "S12") && variant != "atlas-retry")
-            .then_some(STRIP_SAFE_ROWS),
+        window_rows: match spec.id {
+            "S1" | "S12" if variant != "atlas-retry" => Some(STRIP_SAFE_ROWS),
+            // Both S13 layouts are two panes tall: every pane is half the window's height.
+            "S13" => Some(S13_WINDOW_ROWS),
+            _ => None,
+        },
+        // S13/default is one column of two panes and sustained-4 two columns, so the default
+        // window is half as wide and every pane in both variants has the same grid.
+        window_cols: (spec.id == "S13").then_some(if variant == "sustained-4" {
+            2 * S13_PANE_COLS
+        } else {
+            S13_PANE_COLS
+        }),
         focused: true,
         roles,
         setup,

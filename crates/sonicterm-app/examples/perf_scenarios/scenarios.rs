@@ -662,6 +662,8 @@ pub(crate) struct Plan {
     pub(crate) scrollback_rows: usize,
     /// `[window].rows` the scratch config requests; `None` keeps the harness default.
     pub(crate) window_rows: Option<u16>,
+    /// `[window].cols` the scratch config requests; `None` keeps the harness default.
+    pub(crate) window_cols: Option<u16>,
     /// Whether the window gets a synthetic `Focused(true)` before setup.
     pub(crate) focused: bool,
     /// Each role's workload, in role order; role 0 is the first tab's shell.

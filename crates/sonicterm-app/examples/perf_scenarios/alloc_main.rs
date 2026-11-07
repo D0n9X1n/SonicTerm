@@ -15,6 +15,8 @@ mod atlas_retry;
 mod attribution;
 mod cli;
 #[cfg(any(target_os = "macos", windows, test))]
+mod contention;
+#[cfg(any(target_os = "macos", windows, test))]
 mod counters;
 #[cfg(any(windows, test))]
 mod delivery;

@@ -143,6 +143,10 @@ impl RunResult {
             // When: the run recorded recovery episodes; every other result omits the key.
             put("atlas_recovery", recovery.clone());
         }
+        if let Some(contention) = &self.contention {
+            // When: the run is S13, its contention evidence is recorded; every other result omits it.
+            put("contention", contention.clone());
+        }
         // The measurement fields come from the serializer progress.json streams, so both
         // documents record them identically. Every field converts; a non-finite float is null.
         let measured =

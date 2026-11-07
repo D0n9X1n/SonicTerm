@@ -822,6 +822,8 @@ pub(crate) struct RunResult {
     pub(crate) trim_seq_after_hook: Option<u64>,
     /// S1/atlas-retry's recovery episodes, as `result.json`'s `atlas_recovery`; absent elsewhere.
     pub(crate) atlas_recovery: Option<Value>,
+    /// S13's role grids and flood progress, as `result.json`'s `contention`; absent elsewhere.
+    pub(crate) contention: Option<Value>,
     /// Native `Focused` events the probe recorded and dropped.
     pub(crate) native_focus_events_dropped: u64,
     /// Windows: native `CursorMoved` events dropped because the pointer rested where the window

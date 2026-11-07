@@ -218,6 +218,7 @@ impl Probe {
                     if self.stage == Stage::Done {
                         return;
                     }
+                    self.observe_flood(phase);
                     if self.image.present.take_redraw_request() {
                         self.request_image_redraw(event_loop);
                     }
@@ -385,6 +386,17 @@ impl Probe {
     /// per-phase results, then transport it and write progress. A delivery problem returns before the
     /// transport, so the caller's finish transports the phase exactly once.
     pub(super) fn finalize_phase(&mut self, phase: &PhaseSpec) -> Option<String> {
+        if self.plan.scenario == "S13" && phase.name == "typing" {
+            // When: S13's typing ends, every role pane's grid is read for the geometry check.
+            self.role_grids = (0..self.plan.roles.len())
+                .map(|role| {
+                    self.role_pane(role).map(|pane| {
+                        let parser = pane.parser.lock();
+                        (parser.grid().cols, parser.grid().rows)
+                    })
+                })
+                .collect();
+        }
         self.close_sample(UnattributedReason::NoCandidate);
         self.driver = DriverState::None;
         self.end_attribution();
@@ -675,3 +687,35 @@ impl Probe {
 #[cfg(test)]
 #[path = "probe_phases_tests.rs"]
 mod probe_phases_tests;
+
+impl Probe {
+    /// S13: look at the flooding pane (role 0) at most every [`crate::contention::OBSERVE_EVERY_MS`]
+    /// while `typing` or `tail` runs. The read waits at most [`crate::contention::OBSERVE_WAIT`],
+    /// the same in both variants; a parser still busy then is recorded as busy, not as a stall.
+    pub(super) fn observe_flood(&mut self, phase: &PhaseSpec) {
+        if self.plan.scenario != "S13" || !matches!(phase.name, "typing" | "tail") {
+            return;
+        }
+        let now = Instant::now();
+        let interval = Duration::from_millis(crate::contention::OBSERVE_EVERY_MS);
+        let watch = self
+            .flood_watch
+            .get_or_insert_with(|| (now, now - interval, crate::contention::FloodWatch::default()));
+        if now.duration_since(watch.1) < interval {
+            // When: the last observation is under an interval old, this wake records nothing.
+            return;
+        }
+        watch.1 = now;
+        let elapsed_ms = u64::try_from(now.duration_since(watch.0).as_millis()).unwrap_or(u64::MAX);
+        // A flooding parser is almost always held, so the read queues for it briefly, as a frame
+        // collection does, and is handed the lock by the worker's fair release.
+        let lines = self.role_pane(0).and_then(|pane| {
+            pane.parser
+                .try_lock_for(crate::contention::OBSERVE_WAIT)
+                .map(|parser| parser.grid().lines_scrolled())
+        });
+        if let Some((_, _, watch)) = self.flood_watch.as_mut() {
+            watch.observe(elapsed_ms, lines);
+        }
+    }
+}

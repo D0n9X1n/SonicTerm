@@ -260,9 +260,20 @@ impl VisibleFrameSources {
         // One absolute deadline for every visible parser: a later pane gets only what remains.
         let started = acquire.now();
         let deadline = started + budget;
+        // The parser wait and the note are diagnostics: measured only while the App counts, so a
+        // counters-off collection reads the clock exactly as the deadline needs and no more.
+        let measuring = self.counted.is_some();
         let waited_us = || {
-            u64::try_from(acquire.now().saturating_duration_since(started).as_micros())
-                .unwrap_or(u64::MAX)
+            measuring.then(|| {
+                u64::try_from(acquire.now().saturating_duration_since(started).as_micros())
+                    .unwrap_or(u64::MAX)
+            })
+        };
+        let note = |parser_wait_us: Option<u64>, miss: Option<(usize, MissKind)>| {
+            // Only a counting App measured `parser_wait_us`, so only it leaves a note.
+            if let Some(parser_wait_us) = parser_wait_us {
+                self.note.set(Some(CollectionNote { parser_wait_us, miss }));
+            }
         };
         // The span collection's identity is issued before the first acquisition, with no lock taken; declared
         // first, so it drops last, after every guard and the custody that closes it.
@@ -276,18 +287,15 @@ impl VisibleFrameSources {
         )> = None;
         let mut guards = Vec::with_capacity(self.entries.len());
         for (index, entry) in self.entries.iter().enumerate() {
-            // Checked before the attempt, so a pane the deadline left no time for is told apart.
-            let expired = acquire.now() >= deadline;
-            let Some(parser) = acquire_parser(acquire, entry.id, &entry.parser, deadline) else {
-                // When: a parser is contended, the earlier guards are released, then their custody closes.
-                drop(guards);
-                drop(timing);
-                let kind = if expired { MissKind::BudgetExpired } else { MissKind::Parser };
-                self.note.set(Some(CollectionNote {
-                    parser_wait_us: waited_us(),
-                    miss: Some((index, kind)),
-                }));
-                return Err(FrameUnavailable::Contended { pane_id: entry.id, images: false });
+            let parser = match acquire_parser(acquire, entry.id, &entry.parser, deadline) {
+                Ok(parser) => parser,
+                Err(kind) => {
+                    // When: a parser is contended, the earlier guards are released, then their custody closes.
+                    drop(guards);
+                    drop(timing);
+                    note(waited_us(), Some((index, kind)));
+                    return Err(FrameUnavailable::Contended { pane_id: entry.id, images: false });
+                }
             };
             if timing.is_none() {
                 timing = self.counted.as_ref().map(|totals| {
@@ -310,8 +318,7 @@ impl VisibleFrameSources {
                 drop(images);
                 drop(guards);
                 drop(timing);
-                let miss = Some((index, MissKind::Images));
-                self.note.set(Some(CollectionNote { parser_wait_us, miss }));
+                note(parser_wait_us, Some((index, MissKind::Images)));
                 return Err(FrameUnavailable::Contended { pane_id: entry.id, images: true });
             };
             #[cfg(test)]
@@ -319,7 +326,7 @@ impl VisibleFrameSources {
             images.push(store);
         }
         let (custody, dispatch) = timing.unzip();
-        self.note.set(Some(CollectionNote { parser_wait_us, miss: None }));
+        note(parser_wait_us, None);
         Ok(HeldVisibleFrame { snapshot, guards, custody, dispatch, images })
     }
 
