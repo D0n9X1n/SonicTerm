@@ -159,6 +159,27 @@ iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有�
 命令运行期间有人输入，它会拒绝。这项检查只能尽力而为，因为终端无法看到 shell 已读取了什么，所以
 请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。
 
+### 等待如何结束
+
+`wait_for` 报告一个 `reason`，`run_command` 报告一个 `state`。下表列出所有取值；客户端遇到未知取值时应按 `timeout`/`running` 处理。
+
+| 取值 | 工具 | 含义 |
+| --- | --- | --- |
+| `matched` | `wait_for` | 正则匹配了符合条件的行。 |
+| `quiet` | `wait_for` | 输出在 `quiet_ms` 内保持安静，且所有行都已扫描。 |
+| `exited` | `wait_for` | 窗格的进程已退出（使用 `exit` 时）。 |
+| `timeout` | `wait_for` | 先到达超时。 |
+| `completed` | `run_command` | 命令已运行并结束；见 `exit_code` 与 `exit_verified`。 |
+| `not_started` | `run_command` | shell 未运行任何命令就结束了提示符。 |
+| `interfered` | `run_command` | 在命令输出开始前有他人输入。 |
+| `lost` | `run_command` | 运行记录先被淘汰，或 shell 先退出。 |
+| `running` | `run_command` | 已超时；命令可能仍在运行。 |
+| `revoked` | 两者 | 客户端离开，或服务器停止、或 `control`、`read` 发生变化。 |
+| `pane_closed` | 两者 | 窗格先被关闭。 |
+
+两个工具还会报告 `output_incomplete`：对 `wait_for` 为 `missed_output || truncated || !scan_complete`（等待期间写入的部分输出未被检查，因此超时不能证明什么）；
+对 `run_command` 为 `truncated || output_truncated`（返回的行可能缺少命令的部分输出）。
+
 ### 信任退出码
 
 OSC 133 标记与命令自身的输出走同一条数据流，因此窗格中的任何程序都能打印它们。若不加防护，

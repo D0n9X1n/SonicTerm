@@ -112,6 +112,7 @@ pub(crate) fn control_tools() -> Vec<Value> {
                 "exit_code": { "type": ["integer", "null"] },
                 "exit_verified": { "type": "boolean" },
                 "generation": { "type": "integer" },
+                "output_incomplete": { "type": "boolean" },
                 "output": {
                     "type": "object",
                     "properties": {
@@ -319,6 +320,8 @@ fn run_command(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Valu
             "exit_code": outcome.exit_code,
             "exit_verified": outcome.exit_verified,
             "generation": generation,
+            // The returned lines may be missing some of the command's output.
+            "output_incomplete": outcome.truncated || outcome.output_truncated,
             "output": {
                 "lines": outcome.output,
                 "truncated": outcome.truncated,

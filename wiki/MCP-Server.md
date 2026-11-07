@@ -183,6 +183,31 @@ ran. That check is best effort, because a terminal cannot see what the shell has
 consumed, so use `run_command` on panes the agent created, where only the agent
 types.
 
+### How a wait ends
+
+`wait_for` reports one `reason` and `run_command` one `state`. Every value is listed
+here; a client should treat an unknown value as `timeout`/`running`.
+
+| Value | Tool | Meaning |
+| --- | --- | --- |
+| `matched` | `wait_for` | The regex matched an eligible row. |
+| `quiet` | `wait_for` | Output stayed quiet for `quiet_ms` and every row was scanned. |
+| `exited` | `wait_for` | The pane's process exited (with `exit`). |
+| `timeout` | `wait_for` | The timeout passed first. |
+| `completed` | `run_command` | The command ran and ended; see `exit_code` and `exit_verified`. |
+| `not_started` | `run_command` | The shell ended the prompt without running anything. |
+| `interfered` | `run_command` | Someone else typed before the command's output began. |
+| `lost` | `run_command` | The run's record was evicted, or the shell exited, first. |
+| `running` | `run_command` | The timeout passed; the command may still be running. |
+| `revoked` | both | The client went away, or the server stopped or changed `control` or `read`. |
+| `pane_closed` | both | The pane was closed first. |
+
+Both tools also report `output_incomplete`: for `wait_for` it is
+`missed_output || truncated || !scan_complete` (some output written during the wait
+was not checked, so a timeout proves nothing); for `run_command` it is
+`truncated || output_truncated` (the returned lines may be missing some of the
+command's output).
+
 ### Trusting the exit code
 
 OSC 133 markers travel in the same stream as the command's own output, so any program

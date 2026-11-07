@@ -123,6 +123,7 @@ pub(crate) fn tool_list() -> Value {
                     "truncated": { "type": "boolean" },
                     "screen_changed": { "type": "boolean" },
                     "scan_complete": { "type": "boolean" },
+                    "output_incomplete": { "type": "boolean" },
                     "error": { "type": "string" },
                     "message": { "type": "string" },
                 },
@@ -365,8 +366,13 @@ pub(crate) enum WaitReason {
 }
 
 impl WaitReason {
+    /// Every reason, for the documentation check.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 6] =
+        [Self::Matched, Self::Quiet, Self::Exited, Self::Timeout, Self::Revoked, Self::PaneClosed];
+
     /// The reason's spelling in results.
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Matched => "matched",
             Self::Quiet => "quiet",
@@ -429,6 +435,8 @@ fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
         "truncated": outcome.truncated,
         "screen_changed": outcome.screen_changed,
         "scan_complete": outcome.scan_complete,
+        // Some output written during the wait was not checked, so a non-match proves nothing.
+        "output_incomplete": outcome.missed_output || outcome.truncated || !outcome.scan_complete,
     });
     if let Some((line, row)) = outcome.matched {
         structured["line"] = json!(line);

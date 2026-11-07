@@ -435,3 +435,30 @@ fn a_closed_pane_with_a_held_parser_ends_its_run_within_the_drain() {
     assert!(!entry.agent_run.load(Ordering::Acquire), "the reservation outlived the run");
     holder.join().unwrap();
 }
+
+/// The end-reason table on the MCP Server page, English and Chinese, lists exactly the values
+/// `wait_for` and `run_command` can report, so a new reason cannot ship undocumented.
+#[test]
+fn the_documented_end_reasons_match_the_code() {
+    let mut expected: Vec<&str> = crate::app::mcp::tools_read::WaitReason::ALL
+        .iter()
+        .map(|reason| reason.as_str())
+        .chain(RunState::ALL.iter().map(|state| state.as_str()))
+        .collect();
+    expected.sort_unstable();
+    expected.dedup();
+    let wiki = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../wiki");
+    for (page, heading) in
+        [("MCP-Server.md", "### How a wait ends"), ("MCP-Server-zh-CN.md", "### 等待如何结束")]
+    {
+        let text = std::fs::read_to_string(wiki.join(page)).unwrap();
+        let section = text.split(heading).nth(1).expect(page).split("\n### ").next().unwrap();
+        let mut documented: Vec<&str> = section
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `"))
+            .filter_map(|rest| rest.split('`').next())
+            .collect();
+        documented.sort_unstable();
+        assert_eq!(documented, expected, "{page}");
+    }
+}

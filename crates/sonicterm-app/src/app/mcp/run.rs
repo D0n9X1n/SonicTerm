@@ -257,6 +257,18 @@ pub(crate) enum RunState {
 }
 
 impl RunState {
+    /// Every state, for the documentation check.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Completed,
+        Self::NotStarted,
+        Self::Interfered,
+        Self::Lost,
+        Self::Running,
+        Self::Revoked,
+        Self::PaneClosed,
+    ];
+
     /// The state's spelling in results.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
