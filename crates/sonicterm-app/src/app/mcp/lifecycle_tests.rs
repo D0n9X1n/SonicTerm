@@ -471,3 +471,20 @@ fn resolving_one_pane_orders_no_windows() {
     assert_eq!(WINDOW_ORDERS.with(std::cell::Cell::get), 0, "resolving ordered the windows");
     assert!(app.mcp_pane_entries().iter().all(|entry| entry.metadata.is_some()));
 }
+
+/// A reload that changes only `max_connections` sets the limit for new connections and revokes
+/// nothing: the generation a running wait was admitted under stays current.
+#[test]
+fn a_connection_limit_reload_revokes_nothing() {
+    let mut app = test_app();
+    let shared = install_server(&mut app, enabled(McpControl::Agent));
+    let before = shared.generation.load(std::sync::atomic::Ordering::Acquire);
+    app.config.mcp.max_connections = 9;
+    app.reconcile_mcp();
+    assert_eq!(shared.generation.load(std::sync::atomic::Ordering::Acquire), before);
+    assert_eq!(shared.connection_limit.load(std::sync::atomic::Ordering::Acquire), 9);
+    // A control change still revokes.
+    app.config.mcp.control = McpControl::Any;
+    app.reconcile_mcp();
+    assert_ne!(shared.generation.load(std::sync::atomic::Ordering::Acquire), before);
+}

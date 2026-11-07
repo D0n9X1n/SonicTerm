@@ -515,3 +515,23 @@ fn a_writer_failure_wakes_the_running_wait() {
     shared.stop();
     looper.join().unwrap();
 }
+
+/// A configured limit replaces the default: with `max_connections = 2` the third connection is
+/// closed at once.
+#[test]
+fn a_configured_connection_limit_is_enforced() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    shared.set_connection_limit(2);
+    let mut clients = Vec::new();
+    for _ in 0..2 {
+        let (client, transport) = connection();
+        spawn_connection(&shared, transport);
+        clients.push(client);
+    }
+    assert!(wait_for_connections(&shared, 2));
+    let (mut refused, transport) = connection();
+    spawn_connection(&shared, transport);
+    assert!(refused.sees_eof());
+    assert_eq!(shared.connections.load(Ordering::Acquire), 2);
+    shared.stop();
+}

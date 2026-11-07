@@ -68,10 +68,17 @@ impl App {
             return;
         }
         if let Some(server) = self.services.mcp_server.as_mut() {
-            // When: a `server` runs and only the control level or read scope changed, queued
-            // requests and running waits are revoked.
-            server.shared.set_control(wanted.control);
-            server.shared.set_read(wanted.read());
+            // When: a `server` runs and some `[mcp]` value changed; only `control` or `read`
+            // revokes requests, and the connection limit applies to new connections alone.
+            let previous = server.config;
+            server.shared.set_connection_limit(wanted.max_connections());
+            // The scope in force, with the default resolved: an unset key and an explicit
+            // "agent" read the same panes, so switching between them revokes nothing.
+            let scope = McpConfig::read;
+            if previous.control != wanted.control || scope(&previous) != scope(&wanted) {
+                server.shared.set_control(wanted.control);
+                server.shared.set_read(wanted.read());
+            }
             server.config = wanted;
             tracing::info!(
                 target: "mcp",
@@ -83,6 +90,7 @@ impl App {
         }
         let shared = McpShared::new(wanted.control, self.event_loop_proxy.clone());
         shared.set_read(wanted.read());
+        shared.set_connection_limit(wanted.max_connections());
         match super::start_listener(&shared) {
             Ok((endpoint, guard)) => {
                 tracing::info!(target: "mcp", control = wanted.control.as_str(), "control server started");

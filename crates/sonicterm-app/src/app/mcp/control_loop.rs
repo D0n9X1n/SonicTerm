@@ -215,7 +215,16 @@ impl App {
     /// Queue `bytes` as agent typing and report how many were written.
     fn mcp_write(&mut self, pane_id: u64, bytes: Vec<u8>) -> LoopReply {
         match self.write_agent_input(pane_id, bytes, PtyInputSource::Agent) {
-            Ok(written) => LoopReply::Written(written),
+            Ok(written) => {
+                // This thread's own admission ordinal, so another producer's later write cannot
+                // stand in for this one.
+                let receipt =
+                    self.registry.pane(pane_id).and_then(|pane| pane.pty.as_ref()).map(|pty| {
+                        let probe = pty.delivery_probe();
+                        (sonicterm_io::pty::last_admitted_ticket(), probe)
+                    });
+                LoopReply::Written(written, receipt)
+            }
             Err(error) => Refusal::from(error).reply(),
         }
     }

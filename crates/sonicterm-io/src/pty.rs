@@ -8,7 +8,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
     thread,
@@ -183,10 +183,11 @@ struct PtyWriterProgress {
     /// Held only around one admission and once at writer exit, so ordinal order is channel order
     /// and no admission succeeds after the writer recorded its end.
     admission: Mutex<()>,
-    /// User-input writes admitted, wrapping; compared modulo 2^20.
-    input_admitted: AtomicU32,
-    /// User-input writes completed (flushed), wrapping; parser replies never count.
-    input_completed: AtomicU32,
+    /// User-input writes admitted since the PTY started; never wraps in practice. Progress
+    /// diagnostics compare it modulo 2^20; delivery receipts compare it whole.
+    input_admitted: AtomicU64,
+    /// User-input writes completed (flushed) since the PTY started; parser replies never count.
+    input_completed: AtomicU64,
     /// Per ordinal modulo [`INPUT_SLOTS`]: `(ordinal << 44) | admitted_ms`.
     admitted_at: [AtomicU64; INPUT_SLOTS],
     /// [`ShellSpawnOpts::input_seen`], marked by every admitted input message except a draft.
@@ -195,6 +196,63 @@ struct PtyWriterProgress {
     writer_on: AtomicU8,
     /// Whether and how the writer stopped.
     terminal: AtomicU8,
+}
+
+/// Where an admitted user-input message stands, from [`PtyDeliveryProbe::status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyDelivery {
+    /// The writer wrote and flushed it to the PTY master. Nothing says the program read it.
+    Written,
+    /// It is still queued or being written.
+    Queued,
+    /// The writer stopped before writing it; it will never be written.
+    Failed,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's action between `status`'s two loads, to pin the interleaving with the writer.
+    pub(crate) static BETWEEN_STATUS_LOADS: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Reads a pane's input receipts without the event loop: cloneable, atomics only.
+#[derive(Debug, Clone)]
+pub struct PtyDeliveryProbe {
+    progress: Arc<PtyWriterProgress>,
+}
+
+impl PtyDeliveryProbe {
+    /// A probe over `progress`, for unit tests that drive the counters directly.
+    #[cfg(test)]
+    fn for_tests(progress: Arc<PtyWriterProgress>) -> Self {
+        Self { progress }
+    }
+
+    /// Whether input up to `ticket` (from [`last_admitted_ticket`] on the admitting thread) was
+    /// written, is still pending, or never will be. The writer's end is read before its completion
+    /// count: every completion is published before the end is recorded, so a stopped writer's
+    /// count is final and a write that completed as it stopped is still `Written`.
+    // Ordering: terminal Acquire, then input_completed Acquire; the writer stores completion Release
+    // before record_terminal's Release store of terminal.
+    #[must_use]
+    pub fn status(&self, ticket: u64) -> PtyDelivery {
+        let running = self.progress.terminal.load(Ordering::Acquire) == TERMINAL_RUNNING;
+        #[cfg(test)]
+        BETWEEN_STATUS_LOADS.with_borrow(|hook| hook.as_ref().map(|hook| hook()));
+        if self.progress.input_completed.load(Ordering::Acquire) >= ticket {
+            // When: `input_completed` reached the `ticket`, every message up to it was flushed.
+            return PtyDelivery::Written;
+        }
+        if running {
+            // The writer still runs, so the rest may yet be written.
+            PtyDelivery::Queued
+        } else {
+            // When: not `running`, the writer stopped first; admission had already refused anything
+            // newer.
+            PtyDelivery::Failed
+        }
+    }
 }
 
 /// Owned, cloneable sender for a child process's input channel.
@@ -583,6 +641,12 @@ impl PtyHandle {
         self.writer_progress.input_progress()
     }
 
+    /// A handle another thread can hold to learn whether input it was admitted reached the PTY.
+    #[must_use]
+    pub fn delivery_probe(&self) -> PtyDeliveryProbe {
+        PtyDeliveryProbe { progress: Arc::clone(&self.writer_progress) }
+    }
+
     /// Bytes waiting in this pane's PTY input channel.
     ///
     /// The exact figure, not a slot count times an assumed message size. A
@@ -767,7 +831,7 @@ mod pty_shell;
 #[cfg(all(test, unix))]
 use pty_child::unix_child_exit_pending;
 use pty_child::{publish_exit, terminate_child_for_platform, terminate_child_without_reap};
-pub use pty_input::{max_pty_queued_input_bytes, pty_input_message_allowed};
+pub use pty_input::{last_admitted_ticket, max_pty_queued_input_bytes, pty_input_message_allowed};
 use pty_input::{pty_input_channel, try_queue_pty_input};
 #[cfg(windows)]
 use pty_native::{cancel_io_within, cancel_owned_target};

@@ -237,13 +237,15 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
 /// `budget_ends` and never longer than [`PARSER_WAIT`]; a pane reached after the budget is listed
 /// with `"details": "skipped"` and no live fields.
 fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
-    let metadata = entry.metadata.expect("list_panes entries carry their position");
+    // The loop always fills the position for `list_panes`; an entry without one lists nulls
+    // rather than failing the whole call.
+    let metadata = entry.metadata;
     let mut pane = json!({
         "pane_id": entry.pane_id.to_string(),
-        "window_index": metadata.window_index,
-        "tab_index": metadata.tab_index,
-        "active": metadata.active,
-        "readonly": metadata.readonly,
+        "window_index": metadata.map(|position| position.window_index),
+        "tab_index": metadata.map(|position| position.tab_index),
+        "active": metadata.map(|position| position.active),
+        "readonly": metadata.map(|position| position.readonly),
         "agent_owned": entry.agent_owned,
     });
     let wait = budget_ends.saturating_duration_since(Instant::now()).min(PARSER_WAIT);

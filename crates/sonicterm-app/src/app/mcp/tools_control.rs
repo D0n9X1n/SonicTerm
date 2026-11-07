@@ -27,7 +27,10 @@ pub(crate) fn control_tools() -> Vec<Value> {
         properties["message"] = json!({ "type": "string" });
         json!({ "type": "object", "properties": properties })
     };
-    let written = output(json!({ "bytes": { "type": "integer", "minimum": 0 } }));
+    let written = output(json!({
+        "bytes": { "type": "integer", "minimum": 0 },
+        "delivery": { "enum": ["written", "queued", "failed"] },
+    }));
     vec![
         json!({
             "name": "create_pane",
@@ -277,13 +280,46 @@ fn send_keys(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value 
     written(shared.ask(LoopCall::SendKeys { pane_id, keys }, scope))
 }
 
-/// A write's reply as a tool result.
+/// How long a write waits for the pane's writer to write what it queued.
+const DELIVERY_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+/// How often that wait checks.
+const DELIVERY_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// A write's reply as a tool result, with `delivery`: `"written"` once the pane's writer wrote and
+/// flushed it to the PTY (never proof the program read it), `"queued"` if it was still waiting
+/// after [`DELIVERY_WAIT`], or `"failed"` if the writer stopped first.
 fn written(reply: LoopReply) -> Value {
     match reply {
-        LoopReply::Written(bytes) => {
-            tool_result(&format!("{bytes} bytes"), json!({ "bytes": bytes }))
+        LoopReply::Written(bytes, receipt) => {
+            let delivery = receipt.map_or("queued", |(ticket, probe)| delivery_of(&probe, ticket));
+            tool_result(
+                &format!("{bytes} bytes, {delivery}"),
+                json!({ "bytes": bytes, "delivery": delivery }),
+            )
         }
         other => reply_error(other),
+    }
+}
+
+/// Wait up to [`DELIVERY_WAIT`] for `ticket` to be written, on the connection's worker.
+fn delivery_of(probe: &sonicterm_io::pty::PtyDeliveryProbe, ticket: u64) -> &'static str {
+    use sonicterm_io::pty::PtyDelivery;
+    let deadline = std::time::Instant::now() + DELIVERY_WAIT;
+    loop {
+        let status = probe.status(ticket);
+        if status == PtyDelivery::Written {
+            // When: the `status` is Written, the writer flushed everything up to the ticket.
+            return "written";
+        }
+        if status == PtyDelivery::Failed {
+            // When: the `status` is Failed, the writer stopped before reaching the ticket.
+            return "failed";
+        }
+        if std::time::Instant::now() >= deadline {
+            // When: still queued at the `deadline`, the write is reported as still waiting.
+            return "queued";
+        }
+        std::thread::sleep(DELIVERY_POLL);
     }
 }
 

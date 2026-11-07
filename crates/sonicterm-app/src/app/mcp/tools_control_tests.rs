@@ -462,3 +462,24 @@ fn the_documented_end_reasons_match_the_code() {
         assert_eq!(documented, expected, "{page}");
     }
 }
+
+/// A write reports where its bytes stand: `written` once the pane's writer flushed them, `queued`
+/// when the writer is still busy after the wait, `failed` when it stopped first. A pane without a
+/// PTY reports `queued`, never a delivery it cannot see.
+#[test]
+fn a_write_reports_its_delivery() {
+    let without_pty = written(LoopReply::Written(2, None));
+    assert_eq!(without_pty["structuredContent"]["delivery"], "queued");
+    // A real PTY whose child reads its input, so the writer flushes: `cat` on Unix, `cmd` on Windows.
+    #[cfg(unix)]
+    let (program, args) = ("/bin/cat", Vec::new());
+    #[cfg(windows)]
+    let (program, args) = ("cmd.exe", vec!["/D".into(), "/Q".into()]);
+    let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(program, &args, 80, 24).unwrap();
+    let probe = pty.delivery_probe();
+    pty.send_input_nonblocking(b"ok".to_vec()).unwrap();
+    let ticket = sonicterm_io::pty::last_admitted_ticket();
+    let reply = written(LoopReply::Written(2, Some((ticket, probe.clone()))));
+    assert_eq!(reply["structuredContent"]["delivery"], "written");
+    assert_eq!(reply["structuredContent"]["bytes"], 2);
+}

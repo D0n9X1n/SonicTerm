@@ -30,7 +30,7 @@ fn app_with_client_under(
     let user = app.__test_seed_tab("user");
     let agent = app.__test_seed_tab("agent");
     app.main_mut().unwrap().panes.get_mut(&agent).unwrap().agent_owned = true;
-    app.config.mcp = McpConfig { enabled: true, control, read: Some(read) };
+    app.config.mcp = McpConfig { enabled: true, control, read: Some(read), ..McpConfig::default() };
     let shared = McpShared::new(control, None);
     shared.set_read(read);
     let owner = app.register_mcp_owner();

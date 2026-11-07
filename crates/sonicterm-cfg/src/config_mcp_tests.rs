@@ -69,3 +69,15 @@ fn the_new_config_template_reads_agent_panes_only() {
     assert_eq!(parsed.mcp.read, Some(McpRead::Agent));
     assert!(!parsed.mcp.enabled, "the server stays off by default");
 }
+
+/// `max_connections` defaults to 4, parses, and is clamped to 1..=16 when read.
+#[test]
+fn max_connections_defaults_and_clamps() {
+    assert_eq!(McpConfig::default().max_connections(), 4);
+    let parsed: Config = toml::from_str("[mcp]\nmax_connections = 9\n").unwrap();
+    assert_eq!(parsed.mcp.max_connections(), 9);
+    let zero: Config = toml::from_str("[mcp]\nmax_connections = 0\n").unwrap();
+    assert_eq!(zero.mcp.max_connections(), 1);
+    let many: Config = toml::from_str("[mcp]\nmax_connections = 200\n").unwrap();
+    assert_eq!(many.mcp.max_connections(), 16);
+}

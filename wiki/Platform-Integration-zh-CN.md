@@ -469,8 +469,9 @@ flowchart TD
 
 设置 `[mcp] enabled = true`（见 [配置](Configuration-zh-CN)）后，SonicTerm 运行一个本地
 [Model Context Protocol](https://modelcontextprotocol.io) 服务器，供 Claude Code、Copilot CLI
-等 agent 读取窗格。它使用按行分隔的 JSON-RPC 2.0，每行一条消息，至多 1 MiB；最多服务四个连接，
-每个连接同一时间只运行一个工具调用，运行期间收到的第二个调用会被拒绝。没有令牌：只有运行 SonicTerm
+等 agent 读取窗格。它使用按行分隔的 JSON-RPC 2.0，每行一条消息，至多 1 MiB；最多服务 `[mcp] max_connections` 个连接（默认 4，范围 1 到 16），
+每个连接同一时间只运行一个工具调用，运行期间收到的第二个调用会被拒绝，因此一个较长的 `wait_for` 会占用它的连接。
+只修改上限的重载只作用于新连接，不撤销任何调用。没有令牌：只有运行 SonicTerm
 的用户能访问端点。agent 通过随附的 stdio 桥接程序 `sonicterm-mcp` 连接它；连接方式见 [MCP 服务器](MCP-Server-zh-CN)。
 
 ```mermaid

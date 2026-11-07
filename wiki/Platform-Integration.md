@@ -609,8 +609,10 @@ With `[mcp] enabled = true` (see [Configuration](Configuration)), SonicTerm runs
 local [Model Context Protocol](https://modelcontextprotocol.io) server that
 agents such as Claude Code and Copilot CLI use to read panes. It speaks
 newline-delimited JSON-RPC 2.0, one message per line of at most 1 MiB, and
-serves at most four connections; each runs one tool call at a time and refuses a
-second call while one runs. There is no token: the endpoint is reachable only by
+serves at most `[mcp] max_connections` connections (4 by default, 1 to 16); each
+runs one tool call at a time and refuses a second call while one runs, so a long
+`wait_for` holds its connection. A reload that changes only the limit applies it
+to new connections and revokes nothing. There is no token: the endpoint is reachable only by
 the user who runs SonicTerm. Agents reach it through the bundled `sonicterm-mcp`
 stdio bridge; [MCP Server](MCP-Server) shows how to connect one.
 

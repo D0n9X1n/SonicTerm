@@ -49,8 +49,8 @@ pub(crate) mod tools_read;
 
 pub(crate) use lifecycle::McpServer;
 
-/// The most connections served at once; a further one is refused.
-pub(crate) const MAX_CONNECTIONS: usize = 4;
+/// The default limit on connections served at once (`[mcp] max_connections`).
+pub(crate) const MAX_CONNECTIONS: usize = sonicterm_cfg::config::DEFAULT_MCP_CONNECTIONS as usize;
 /// How long a loop request may take before it is dropped.
 pub(crate) const LOOP_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a reader blocks before it rechecks `closed` and stop flags.
@@ -171,8 +171,9 @@ pub(crate) enum LoopReply {
     Refused(&'static str, String),
     /// [`LoopCall::CreatePane`] opened this pane.
     Created(crate::app::pane_target::CreatedPane),
-    /// A write queued this many bytes.
-    Written(usize),
+    /// A write queued this many bytes; `receipt` is its delivery ticket and the pane's probe, or
+    /// `None` for a pane without a PTY.
+    Written(usize, Option<(u64, sonicterm_io::pty::PtyDeliveryProbe)>),
     /// [`LoopCall::RunStart`] started a run.
     RunStarted(Box<run::RunStarted>),
     /// [`LoopCall::ClosePane`] closed the pane.
@@ -209,8 +210,11 @@ pub(crate) struct McpShared {
     wake_pending: AtomicBool,
     /// Wakes the event loop; `None` in tests, where the inbox is drained directly.
     proxy: Mutex<Option<EventLoopProxy<UserEvent>>>,
-    /// Live connections, at most [`MAX_CONNECTIONS`].
+    /// Live connections, at most `connection_limit`.
     pub(crate) connections: AtomicU64,
+    /// The most connections served at once; a further one is refused. A change applies to new
+    /// connections only.
+    pub(crate) connection_limit: AtomicU64,
     /// Connection notices queued and not yet shown, at most [`MAX_PENDING_NOTICES`].
     pending_notices: AtomicU64,
     /// Bytes every connection holds right now: partial request lines and replies being written.
@@ -257,6 +261,7 @@ impl McpShared {
             wake_pending: AtomicBool::new(false),
             proxy: Mutex::new(proxy),
             connections: AtomicU64::new(0),
+            connection_limit: AtomicU64::new(MAX_CONNECTIONS as u64),
             pending_notices: AtomicU64::new(0),
             buffered_bytes: AtomicU64::new(0),
             waiters: Mutex::new(Vec::new()),
@@ -309,6 +314,12 @@ impl McpShared {
         self.read_agent_only.store(read == McpRead::Agent, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.wake_waiters();
+    }
+
+    /// Set the connection limit for connections that arrive from now on; live ones are untouched.
+    // Ordering: connection_limit Release pairs with spawn_connection's Acquire load.
+    pub(crate) fn set_connection_limit(&self, limit: usize) {
+        self.connection_limit.store(limit as u64, Ordering::Release);
     }
 
     /// Change the control level and revoke every queued request.
@@ -792,12 +803,14 @@ pub(crate) fn close_connection(shared: &McpShared, closed: &AtomicBool) {
     shared.wake_waiters();
 }
 
-/// Run `serve_connection` on a new thread, counting it against [`MAX_CONNECTIONS`]; a connection
-/// past the limit is dropped at once.
-// Ordering: connections AcqRel makes the admit decision and the release atomic.
+/// Run `serve_connection` on a new thread, counting it against the server's `connection_limit`; a
+/// connection past the limit is dropped at once.
+// Ordering: connection_limit Acquire pairs with set_connection_limit's Release; connections AcqRel
+// makes the admit decision and the release atomic.
 pub(crate) fn spawn_connection(shared: &Arc<McpShared>, transport: Transport) {
-    if shared.connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS as u64 {
-        // When: `connections` was already at `MAX_CONNECTIONS`, this one is refused.
+    let limit = shared.connection_limit.load(Ordering::Acquire);
+    if shared.connections.fetch_add(1, Ordering::AcqRel) >= limit {
+        // When: `connections` was already at the `limit`, this one is refused.
         shared.connections.fetch_sub(1, Ordering::AcqRel);
         tracing::warn!(target: "mcp", "agent connection refused: too many connections");
         return;

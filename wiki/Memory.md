@@ -204,7 +204,7 @@ node count.
 While the agent control server runs it has one `Mcp` owner below the process
 root. Each retention pass charges it, as `ControlConnection`, the bytes every
 connection holds at that moment (partial request lines, the running call's
-arguments and replies being written) with one item per live connection. Both are bounded: four connections,
+arguments and replies being written) with one item per live connection. Both are bounded: `[mcp] max_connections` connections (4 by default, at most 16),
 and a request line of at most 1 MiB. Stopping the server releases the charge and
 closes the owner. No pane carries this class.
 

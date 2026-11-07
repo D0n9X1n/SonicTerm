@@ -97,7 +97,7 @@ fn send_text_wraps_a_paste_when_the_pane_asked() {
     let (mut app, _user, agent) = app_with_user_and_agent_panes();
     assert!(matches!(
         app.mcp_send_text(McpControl::Agent, agent, "ls", true),
-        LoopReply::Written(3)
+        LoopReply::Written(3, _)
     ));
     assert_eq!(written(&app, agent), b"ls\r");
     app.test_pty_writes.lock().clear();

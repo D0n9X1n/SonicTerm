@@ -216,6 +216,8 @@ control = "agent"
 # Read tools see: "agent" (panes an agent created) or "any" (every pane).
 # A config without this line sees only agent-created panes.
 read = "agent"
+# Connections served at once (1-16). Each runs one tool call at a time.
+max_connections = 4
 "#,
         config_dir = default_config_dir()
             .map(|dir| dir.display().to_string())

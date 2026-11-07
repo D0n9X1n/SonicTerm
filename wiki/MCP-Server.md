@@ -41,6 +41,7 @@ read = "agent"
 | `enabled` | `false` | `true` runs the server; `false` stops it. |
 | `control` | `"agent"` | `"off"`, `"agent"` or `"any"`; see Control scope below. |
 | `read` | `"agent"` | `"agent"` or `"any"`; see Read scope below. |
+| `max_connections` | `4` | Connections served at once, 1 to 16 (other values are clamped). Each runs one tool call at a time, so a long `wait_for` holds its connection. A reload that changes only this applies to new connections and revokes nothing. |
 
 To turn it on:
 
@@ -170,8 +171,8 @@ they run:
 | Tool | What it does |
 | --- | --- |
 | `create_pane` | Opens a helper beside a pane: a split to its right or below, or a new tab in its window. Focus does not move. With `argv` the program runs directly and the pane stays open after it exits, so `wait_for` with `exit` and `read_pane` can read how it ended. |
-| `send_text` | Types text, as a bracketed paste when the program asked for one; `submit` adds Enter. At most 64 KiB. |
-| `send_keys` | Sends named keys (`Enter`, `Tab`, `Escape`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`, a single character), each optionally with `Ctrl+`, `Alt+` or `Shift+`, encoded for the pane's keyboard mode. At most 64 keys; one unknown name sends nothing. |
+| `send_text` | Types text, as a bracketed paste when the program asked for one; `submit` adds Enter. At most 64 KiB. Reports `delivery`: `written` once the pane's writer wrote and flushed it to the PTY within 250 ms (never proof the program read it), `queued` if it was still waiting, `failed` if the writer stopped first. |
+| `send_keys` | Sends named keys (`Enter`, `Tab`, `Escape`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`, a single character), each optionally with `Ctrl+`, `Alt+` or `Shift+`, encoded for the pane's keyboard mode. At most 64 keys; one unknown name sends nothing. Reports `delivery` as `send_text` does. |
 | `run_command` | Runs one command line at the pane's shell prompt and waits for it to finish, returning its output and the exit code the shell reported (`completed`, with `exit_verified` saying whether SonicTerm's own shell integration vouched for it), `not_started` when the shell ended the prompt without running anything, `interfered` when someone else typed before its output began, `lost` when its record was evicted or the shell exited, `pane_closed` when the pane was closed first, or `running` at the timeout (default 60 s, at most 600 s). |
 | `close_pane` | Closes one pane; a tab's only pane closes the tab. The main window's last tab is never closed. |
 

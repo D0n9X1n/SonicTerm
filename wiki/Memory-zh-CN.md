@@ -163,7 +163,7 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 
 agent 控制服务器运行期间，在进程根下有一个 `Mcp` owner。每次保留量采样把所有连接此刻持有的字节
 （未完成的请求行、正在运行的调用的参数和正在写出的回复）以 `ControlConnection` 计入该 owner，每个存活连接计一个 item。
-两者都有上限：最多四个连接，单个请求行至多 1 MiB。停止服务器会释放计费并关闭该 owner。没有窗格
+两者都有上限：最多 `[mcp] max_connections` 个连接（默认 4，至多 16），单个请求行至多 1 MiB。停止服务器会释放计费并关闭该 owner。没有窗格
 携带这一类别。
 
 为性能检查点采集的 `memory snapshot` 行包含同样字段，另加四个标注：`checkpoint_index`、
