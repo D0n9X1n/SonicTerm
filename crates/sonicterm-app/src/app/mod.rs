@@ -253,6 +253,8 @@ pub(crate) use owners::OwnerGuard;
 use owners::{pane_owner_limits, pane_seam_cap_sum_bytes, tracking_only_owner_limits};
 pub use owners::{pane_seam_cap_terms, PaneSeamCapTerm};
 mod pane_exit;
+mod pane_signal;
+pub(crate) use pane_signal::PaneSignal;
 mod pane_launch;
 mod pane_refresh;
 use pane_refresh::update_terminal_ime_cursor_area;

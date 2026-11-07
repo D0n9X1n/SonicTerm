@@ -144,6 +144,8 @@ pub(crate) struct PaneEntry {
     pub(crate) output_generation: Arc<AtomicU64>,
     /// The process's exit status once known.
     pub(crate) exit_status: Arc<OnceLock<sonicterm_types::PaneExitStatus>>,
+    /// Announced after each output batch and after the exit is recorded; a wait sleeps on it.
+    pub(crate) change_signal: Arc<crate::app::PaneSignal>,
     /// The first typing stamp since an agent run reset it; 0 when none.
     pub(crate) run_typed_at: Arc<AtomicU64>,
     /// Set while an agent run owns the pane.
@@ -793,6 +795,7 @@ pub(crate) fn test_entry(cols: u16, rows: u16, scrollback: usize) -> PaneEntry {
         ))),
         output_generation: Arc::new(AtomicU64::new(0)),
         exit_status: Arc::new(OnceLock::new()),
+        change_signal: Arc::default(),
         run_typed_at: Arc::new(AtomicU64::new(0)),
         agent_run: Arc::new(AtomicBool::new(false)),
     }

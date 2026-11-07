@@ -654,12 +654,18 @@ A read takes the pane's parser for one attempt of at most 5 ms, visits at most
 32,768 cells (blank rows included) and stops copying at its byte cap; a held parser answers `busy` and
 `truncated` instead of waiting. Each tool call is admitted under the server's
 current generation, and a call revoked before it returns answers with the
-`revoked` error and no pane text. `wait_for` polls the pane's output counter and exit status every 50 ms
-without a lock. Without `after_row` its first look reads the tail, as `read_pane` does; with `after_row` it
+`revoked` error and no pane text. `wait_for` reads the pane's output counter and exit status
+without a lock, then sleeps on the pane's change signal: the VT worker announces it after each
+batch's output counter is published (with the parser released), and the event loop after it
+records the exit status, so either wakes every waiting call on that pane at once. The wait reads
+the signal before each check and sleeps only while it is unchanged, so a change during the
+check is not slept through. An idle wait still checks at least every 250 ms, so a closed
+client or a stopped or changed server ends it; a busy parser or an unfinished scan is retried
+after 50 ms, since nothing announces work on the wait's own side. Without `after_row` its first look reads the tail, as `read_pane` does; with `after_row` it
 starts on the row after that token. After that it scans forward from the next row it has not
 inspected, oldest first, so a matching line that more than a tail of output
-pushed past between two polls is still found. Each scan holds the parser within the same 5 ms and
-32,768-cell bounds, runs the regex after releasing it, and finishes a larger backlog on later polls.
+pushed past between two checks is still found. Each scan holds the parser within the same 5 ms and
+32,768-cell bounds, runs the regex after releasing it, and finishes a larger backlog on later checks.
 Each logical line is read whole from its own first row, so a soft-wrapped continuation is never
 matched as a line of its own, and rows of a line that began at or before `after_row` never count.
 The newest line is checked as it stands, so a prompt with no newline after it can match, and it
@@ -681,9 +687,9 @@ has caught up with the output on both screens, and the newest output was inspect
 (a busy parser defers that). Every result reports `scan_complete: false` while rows are still
 unscanned on either screen, including a match found before the rest of a backlog, a timeout, an
 exit and a revocation, and none of them claims those rows held no match. A line cut for its length
-is not read again on later polls.
+is not read again on later checks.
 It scans retained terminal content, not an output journal: text
-rewritten in place, erased, or lost across a resize or screen switch between polls can go unseen,
+rewritten in place, erased, or lost across a resize or screen switch between checks can go unseen,
 and `missed_output: false` is not proof of completeness in those cases. Disabling the server, changing
 `control`, a disconnect or the 10 s deadline drops a queued request before the
 event loop acts on it, and ends a running wait as `revoked`. Pane text is

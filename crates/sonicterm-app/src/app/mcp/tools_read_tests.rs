@@ -21,6 +21,7 @@ fn scope(shared: &McpShared) -> CallScope {
 fn emit(entry: &PaneEntry, bytes: &[u8]) {
     entry.parser.lock().advance(bytes);
     entry.output_generation.fetch_add(1, Ordering::Release);
+    entry.change_signal.notify();
 }
 
 /// A wait on `regex` after `after`, bounded by `timeout_ms`.
@@ -31,6 +32,7 @@ fn regex_wait(pattern: &str, after: Option<RowToken>, timeout_ms: u64) -> WaitCo
         quiet: None,
         watch_exit: false,
         timeout: Duration::from_millis(timeout_ms),
+        recheck: WAIT_RECHECK,
     }
 }
 
@@ -134,6 +136,7 @@ fn a_silent_pane_is_quiet() {
         quiet: Some(Duration::from_millis(150)),
         watch_exit: false,
         timeout: Duration::from_secs(5),
+        recheck: WAIT_RECHECK,
     };
     let started = Instant::now();
     let outcome = wait_until(&shared, &entry, &condition, &scope(&shared));
@@ -147,10 +150,11 @@ fn a_silent_pane_is_quiet() {
 fn a_silent_exit_ends_the_wait() {
     let shared = McpShared::new(McpControl::Agent, None);
     let entry = test_entry(20, 4, 100);
-    let exit_status = Arc::clone(&entry.exit_status);
+    let (exit_status, signal) = (Arc::clone(&entry.exit_status), Arc::clone(&entry.change_signal));
     let setter = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         let _ = exit_status.set(PaneExitStatus::Code(3));
+        signal.notify();
     });
     let condition = WaitCondition {
         regex: None,
@@ -158,6 +162,7 @@ fn a_silent_exit_ends_the_wait() {
         quiet: None,
         watch_exit: true,
         timeout: Duration::from_secs(5),
+        recheck: WAIT_RECHECK,
     };
     let outcome = wait_until(&shared, &entry, &condition, &scope(&shared));
     setter.join().unwrap();
@@ -219,10 +224,12 @@ fn moving_output_is_not_quiet_while_the_parser_is_held() {
     let entry = test_entry(20, 4, 100);
     let held = Arc::clone(&entry.parser);
     let generation = Arc::clone(&entry.output_generation);
+    let signal = Arc::clone(&entry.change_signal);
     let ticker = std::thread::spawn(move || {
         let _guard = held.lock();
         for _ in 0..30 {
             generation.fetch_add(1, Ordering::Release);
+            signal.notify();
             std::thread::sleep(Duration::from_millis(10));
         }
     });
@@ -232,6 +239,7 @@ fn moving_output_is_not_quiet_while_the_parser_is_held() {
         quiet: Some(Duration::from_millis(100)),
         watch_exit: false,
         timeout: Duration::from_millis(250),
+        recheck: WAIT_RECHECK,
     };
     // Output moves every 10 ms for 300 ms, so the 250 ms timeout comes before any 100 ms of quiet.
     let outcome = wait_until(&shared, &entry, &condition, &scope(&shared));

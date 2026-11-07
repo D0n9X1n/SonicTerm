@@ -352,6 +352,8 @@ pub(in crate::app) struct PaneVtHandles {
     sync_deadline_word: Arc<AtomicU64>,
     sync_resets: Arc<AtomicU64>,
     output_generation: Arc<AtomicU64>,
+    /// Announced after each nonempty batch's generation is published, waking MCP waiters.
+    change_signal: Arc<super::PaneSignal>,
     output_bytes: Arc<AtomicU64>,
     output_counting: Arc<AtomicBool>,
     output_outstanding: Arc<AtomicBool>,
@@ -391,6 +393,7 @@ impl PaneVtHandles {
             sync_deadline_word: pane.sync_deadline_word.clone(),
             sync_resets: pane.sync_resets.clone(),
             output_generation: pane.output_generation.clone(),
+            change_signal: pane.change_signal.clone(),
             output_bytes: pane.output_bytes.clone(),
             output_counting: pane.output_counting.clone(),
             output_outstanding: pane.output_outstanding.clone(),

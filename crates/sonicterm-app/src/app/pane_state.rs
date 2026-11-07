@@ -181,6 +181,9 @@ pub struct PaneState {
     /// The child process's exit status, set once when the exit is first handled, so a waiter on
     /// another thread reads it without the event loop.
     pub(crate) exit_status: Arc<std::sync::OnceLock<sonicterm_types::PaneExitStatus>>,
+    /// Announced after each published output batch and after `exit_status` is set, so an MCP
+    /// `wait_for` sleeps until the pane changes; travels with the pane across window transfers.
+    pub(crate) change_signal: Arc<super::PaneSignal>,
     /// The first typing write the input queue admitted (keyboard, paste, IME, drop, broadcast,
     /// agent text and keys, never terminal replies or focus and pointer reports) since an agent run
     /// reset it to 0, as an `mcp::run::typing_stamp`. A run compares it with C.
@@ -368,6 +371,7 @@ impl PaneState {
             exit_reported: false,
             agent_owned: false,
             exit_status: Arc::new(std::sync::OnceLock::new()),
+            change_signal: Arc::default(),
             run_typed_at: Arc::new(AtomicU64::new(0)),
             last_input_at: None,
             agent_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),

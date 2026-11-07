@@ -58,6 +58,8 @@ impl App {
             // Recorded before the repeat check below, so a waiter sees the first status and a
             // repeated report cannot replace it.
             let _ = pane.exit_status.set(status.clone());
+            // Announced after the cell is set, so a woken exit wait finds the status.
+            pane.change_signal.notify();
         }
         let Some(hold) = self.mark_exit_reported(pane_id) else {
             // When: `mark_exit_reported` finds no live pane, or one already reported, nothing remains to do.

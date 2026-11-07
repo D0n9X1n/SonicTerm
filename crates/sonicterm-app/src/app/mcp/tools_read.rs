@@ -14,8 +14,13 @@ use super::jsonrpc::{tool_error, tool_result};
 use super::read::{read_pane, ReadLimits, ReadLine, ReadMode, ReadSnapshot, PARSER_WAIT};
 use super::{CallScope, Caller, LoopCall, LoopReply, McpShared, PaneEntry};
 
-/// How often `wait_for` checks the pane's output counter and exit cell.
+/// How soon `wait_for` reads again while the parser was busy or a scan stopped at its budget:
+/// that work is pending on the wait itself, so no pane change will announce it.
 pub(crate) const WAIT_POLL: Duration = Duration::from_millis(50);
+/// The longest an idle `wait_for` sleeps between checks. Output and exit wake it at once through
+/// the pane's change signal; this bound is for revocation (a closed client, a stopped or changed
+/// server), which the pane does not announce.
+pub(crate) const WAIT_RECHECK: Duration = Duration::from_millis(250);
 /// The default and largest `wait_for` timeouts.
 pub(crate) const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 /// The largest timeout a caller may ask for.
@@ -338,8 +343,8 @@ impl WaitReason {
     }
 }
 
-/// `wait_for`: polls the pane's output counter and exit cell without any lock, and reads a
-/// bounded tail only when the counter moved.
+/// `wait_for`: checks the pane's output counter and exit cell without any lock, reads a bounded
+/// tail only when the counter moved, and sleeps on the pane's change signal in between.
 // Ordering: output_generation Acquire pairs with the VT worker's Release publish after each batch.
 fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
     let entry = match resolve(shared, arguments, scope) {
@@ -373,7 +378,8 @@ fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
         .get("timeout_ms")
         .and_then(Value::as_u64)
         .map_or(DEFAULT_WAIT, |millis| Duration::from_millis(millis).min(MAX_WAIT));
-    let condition = WaitCondition { regex, after, quiet, watch_exit, timeout };
+    let condition =
+        WaitCondition { regex, after, quiet, watch_exit, timeout, recheck: WAIT_RECHECK };
     let outcome = wait_until(shared, &entry, &condition, scope);
     let mut structured = json!({
         "reason": outcome.reason.as_str(),
@@ -434,6 +440,9 @@ pub(crate) struct WaitCondition {
     pub(crate) watch_exit: bool,
     /// Stop after this long regardless.
     pub(crate) timeout: Duration,
+    /// The longest idle sleep between checks, [`WAIT_RECHECK`] outside tests. A test lengthens it
+    /// so a wake that depends on it, rather than on the pane's change signal, misses its bound.
+    pub(crate) recheck: Duration,
 }
 
 /// How a wait ended.
@@ -453,16 +462,17 @@ pub(crate) struct WaitOutcome {
     /// it held no match.
     pub(crate) truncated: bool,
     /// The wait saw the screen switch. Text the program rewrote in place on a screen between two
-    /// polls is outside the scan, so a match it overwrote may be missed.
+    /// checks is outside the scan, so a match it overwrote may be missed.
     pub(crate) screen_changed: bool,
     /// Every row written so far was scanned. `false` when a wait ended (by a match, timeout, exit
     /// or revocation) with rows still unscanned on either screen, so those rows are unknown.
     pub(crate) scan_complete: bool,
 }
 
-/// Poll until `condition` holds, the client goes away, the server stops or changes since the
+/// Wait until `condition` holds, the client goes away, the server stops or changes since the
 /// call was admitted, or the timeout passes. The first check runs immediately; quiet is measured
-/// from the call.
+/// from the call. Between checks the wait sleeps on the pane's change signal, so output and exit
+/// wake it at once; see [`wait_until_observed`] for the sleep bounds.
 pub(crate) fn wait_until(
     shared: &McpShared,
     entry: &PaneEntry,
@@ -473,7 +483,14 @@ pub(crate) fn wait_until(
 }
 
 /// [`wait_until`], calling `after_first_look` once, right after the wait's own first completed
-/// inspection and before its next poll; tests use it to write output at exactly that point.
+/// inspection and before its next check; tests use it to write output at exactly that point.
+///
+/// Each check reads the change signal's sequence *before* it inspects the pane, then sleeps only
+/// while that sequence is unchanged, so a change during the inspection is never slept through.
+/// The sleep ends at the earliest of a change, the quiet deadline (only once every row was
+/// scanned), the timeout and `recheck`. Pending work on the wait's own side (a busy parser, a
+/// generation not yet inspected, a scan stopped at its budget) has no announcement, so it is
+/// retried after [`WAIT_POLL`] instead.
 // Ordering: output_generation Acquire pairs with the VT worker's Release publish; read alone.
 pub(crate) fn wait_until_observed(
     shared: &McpShared,
@@ -507,6 +524,10 @@ pub(crate) fn wait_until_observed(
         scan_pending(condition.regex.is_some(), cursor.any_backlog(), inspected, current)
     };
     loop {
+        #[cfg(test)]
+        WAIT_CHECKS.with(|checks| checks.set(checks.get() + 1));
+        // Read before anything is inspected, so a change during the checks below moves past it.
+        let seen = entry.change_signal.sequence();
         if scope.revoked(shared) {
             // When: the call `scope` was `revoked` (closed, stopped or changed), the wait stops.
             let unscanned = pending(inspected_generation, &cursor);
@@ -528,7 +549,7 @@ pub(crate) fn wait_until_observed(
             last_change = Instant::now();
         }
         observed_generation = Some(generation);
-        // A scan that stopped at its budget continues on the next poll without new output.
+        // A scan that stopped at its budget continues on the next check without new output.
         let backlog = cursor.any_backlog();
         if inspected_generation != Some(generation) || backlog {
             // When: `generation` is new or a `backlog` remains, unscanned output may match.
@@ -543,7 +564,7 @@ pub(crate) fn wait_until_observed(
                 done.screen_changed |= flags.screen_changed;
                 return done;
             }
-            // A busy parser leaves the generation uninspected, so the next poll reads again.
+            // A busy parser leaves the generation uninspected, so the next check reads again.
             if !matches!(checked, Some(TailCheck::Busy)) {
                 inspected_generation = Some(generation);
                 if let Some(observer) = after_first_look.take() {
@@ -565,8 +586,28 @@ pub(crate) fn wait_until_observed(
             // When: the `timeout` passed first, the wait ends without a match.
             return outcome(WaitReason::Timeout, flags, unscanned);
         }
-        std::thread::sleep(WAIT_POLL);
+        let timeout_at = started + condition.timeout;
+        if unscanned {
+            // When: rows are still `unscanned` (busy parser or budget stop), nothing announces
+            // them, so the wait reads again after the short retry.
+            std::thread::sleep(WAIT_POLL.min(timeout_at.saturating_duration_since(now)));
+            continue;
+        }
+        // Quiet is due `quiet` after the last change; every row is scanned here, so it can fire.
+        let quiet_at = condition.quiet.map(|quiet| last_change + quiet);
+        let wake_at = [Some(timeout_at), Some(now + condition.recheck), quiet_at]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(timeout_at);
+        entry.change_signal.wait_past(seen, wake_at);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many checks this thread's waits ran, so a test counts an idle wait's wakeups.
+    pub(crate) static WAIT_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Whether a wait still has rows to check: it has a regex and either a screen's scan stopped at
@@ -586,7 +627,7 @@ pub(crate) fn scan_pending(
 pub(crate) enum TailCheck {
     /// The wait ends with this outcome.
     Done(WaitOutcome),
-    /// The parser was held; read again on the next poll.
+    /// The parser was held; read again on the next check.
     Busy,
     /// Nothing matched.
     NoMatch,
@@ -637,7 +678,7 @@ pub(crate) fn inspect(
         return check;
     }
     let Some(guard) = entry.parser.try_lock_for(super::read::PARSER_WAIT) else {
-        // When: `try_lock_for` misses within `PARSER_WAIT`, the scan waits for the next poll.
+        // When: `try_lock_for` misses within `PARSER_WAIT`, the scan waits for the next check.
         return TailCheck::Busy;
     };
     let grid = guard.grid();
@@ -750,7 +791,7 @@ fn match_tail(
         return (TailCheck::Done(done), start);
     }
     if snapshot.busy {
-        // A busy read leaves no cursor, so the next poll reads the tail again.
+        // A busy read leaves no cursor, so the next check reads the tail again.
         (TailCheck::Busy, None)
     } else {
         // When: the read was not `busy` and nothing matched, the wait goes on.
@@ -761,3 +802,7 @@ fn match_tail(
 #[cfg(test)]
 #[path = "tools_read_tests.rs"]
 mod tools_read_tests;
+
+#[cfg(test)]
+#[path = "tools_read_wake_tests.rs"]
+mod tools_read_wake_tests;

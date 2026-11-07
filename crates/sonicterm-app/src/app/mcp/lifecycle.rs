@@ -275,6 +275,7 @@ impl App {
             parser: Arc::clone(&pane.parser),
             output_generation: Arc::clone(&pane.output_generation),
             exit_status: Arc::clone(&pane.exit_status),
+            change_signal: Arc::clone(&pane.change_signal),
             run_typed_at: Arc::clone(&pane.run_typed_at),
             agent_run: Arc::clone(&pane.agent_run),
         })

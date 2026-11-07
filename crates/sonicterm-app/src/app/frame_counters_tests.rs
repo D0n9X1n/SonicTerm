@@ -357,6 +357,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/spawn_pane_media.rs", "inline_images", 2),
     // The image store's own lock and snapshot: its mutex guards image entries, never a parser.
     ("app/media_store.rs", "images", 1),
+    // A pane's change signal: its mutex guards one counter, never a parser.
+    ("app/pane_signal.rs", "sequence", 3),
     ("app/guard_correlation.rs", "state", 5),
     ("bin/pty_multi_round_helper.rs", "stdin", 1),
     ("bin/pty_multi_round_helper.rs", "stdout", 1),
