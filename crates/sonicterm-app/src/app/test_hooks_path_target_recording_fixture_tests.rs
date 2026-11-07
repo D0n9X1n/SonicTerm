@@ -252,7 +252,7 @@ fn url_wrap_recordings_match_live_multiplexers() {
     let url_rows = |bytes: &[u8], case: &RecordedCase| {
         let (app, window, pane) = replay_recording(case.screen_columns(), bytes);
         let spans = locate_url_pieces(&app, window, pane, &case.url_pieces());
-        let parser = app.windows[&window].panes[&pane].parser.lock();
+        let parser = app.registry.windows[&window].panes[&pane].parser.lock();
         spans
             .iter()
             .map(|span| parser.grid().row(span.row).iter().map(|cell| cell.ch).collect::<String>())

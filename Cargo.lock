@@ -3633,6 +3633,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "sonicterm-app",
  "sonicterm-app-core",
  "sonicterm-cfg",
  "sonicterm-gpu",

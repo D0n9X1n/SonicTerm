@@ -12,8 +12,11 @@ impl App {
         request: super::super::WindowRequest,
     ) -> Result<PreparedDestination, DestinationFailure> {
         let tear_start = Instant::now();
-        let spare_accepts_gpu_work =
-            self.warm_window_pool.last().map(|warm| warm.renderer.device_accepts_gpu_work());
+        let spare_accepts_gpu_work = self
+            .registry
+            .warm_window_pool
+            .last()
+            .map(|warm| warm.renderer.device_accepts_gpu_work());
         if let Some(stage) = warm_destination_refusal(spare_accepts_gpu_work) {
             // When: `warm_destination_refusal` returns a stage, the stopped spare stays pooled.
             return Err(DestinationFailure::new(

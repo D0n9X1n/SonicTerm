@@ -46,7 +46,7 @@ impl GpuRenderer {
             let mut seen = std::collections::HashSet::new();
             panes
                 .iter()
-                .flat_map(|pane| &pane.inline_images)
+                .flat_map(|pane| pane.inline_images.iter())
                 .filter(|image| seen.insert(image.id))
                 .fold(0usize, |total, image| total.saturating_add(image.bgra.len()))
         };

@@ -470,6 +470,7 @@ pub(crate) fn fixtures(plan: &Plan) -> Vec<FixtureFile> {
             // RestStream creates its target file at run time, beside the generated fixtures.
             Workload::IdleShell
             | Workload::DateLoop
+            | Workload::SustainedFlood
             | Workload::ExitAfterGo
             | Workload::RestStream => {}
             Workload::Flood { bulk_bytes, .. } => files.push(bulk_fixture(bulk_bytes)),

@@ -451,7 +451,9 @@ previous snapshot and takes deltas.
 | `stopped` | count | attempts that found the GPU device stopped |
 | `failed` | count | attempts that failed |
 | `contention_parser` | count | frame collections that found a visible pane's parser lock busy |
-| `contention_images` | count | frame collections that found a visible image store busy |
+| `contention_images` | count | frame collections that held every visible parser but found an image store busy |
+| `contention_budget_expired` | count | frame collections whose shared parser deadline had already passed before a later pane was probed, as when the thread was preempted between panes; disjoint from `contention_parser`, which counts a pane that was probed and offered time, so the three contention counts sum to the failed collections |
+| `miss_pane_0`, `miss_pane_1`, `miss_pane_2`, `miss_pane_3_plus` | count | failed collections by the visible-pane order index (layout order) of the pane that missed; panes 3 and later share the last count |
 | `defer_timeout` | count | redraws deferred because a surface timeout is pending within the frame period |
 | `defer_contention` | count | redraws deferred by the lock-contention retry floor |
 | `defer_sync` | count | redraws held because a visible pane's synchronized update (DEC 2026) was open, at admission or by the recheck under the parser guards |
@@ -468,6 +470,7 @@ previous snapshot and takes deltas.
 | `present_interval` | ms histogram | time between consecutive presented frames |
 | `handler` | ms histogram | each `window_event` dispatch for the window |
 | `flush_to_redraw` | ms histogram | oldest pending flush to the first redraw of a window that shows the pane |
+| `parser_lock_wait` | us histogram | each frame collection's time taking its parsers, from its first acquisition to its last guard or its miss; its count is the window's collections, the denominator of a failed-collection fraction |
 
 The four `defer_*` counts record the rule that won. The rules are checked in
 that order, and a later one is never evaluated once an earlier one holds, so each

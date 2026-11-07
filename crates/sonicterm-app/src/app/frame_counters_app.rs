@@ -11,7 +11,7 @@ impl super::super::App {
     /// Returns [`FrameCountersTooLate`] once the App has created a window or a pane.
     #[doc(hidden)]
     pub fn force_frame_counters_on(&mut self) -> Result<(), FrameCountersTooLate> {
-        if self.frame_counters_sealed.get() {
+        if self.diagnostics.frame_counters_sealed.get() {
             // When: `frame_counters_sealed` is set, a window or pane exists and may have read the gate.
             return Err(FrameCountersTooLate);
         }
@@ -88,7 +88,7 @@ impl super::super::App {
     /// draws, the active tab's leaves or only its zoomed pane. A hidden pane's flush stays
     /// pending until a redraw shows it. The tree is walked in place, allocating nothing.
     pub(in crate::app) fn note_redraw_requested(&mut self, id: winit::window::WindowId) {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: the window is gone, there is nothing to count.
             return;
         };
@@ -125,6 +125,7 @@ impl super::super::App {
         };
         let elapsed_us = micros_between(started, Instant::now());
         let live = self
+            .registry
             .windows
             .get_mut(&id)
             .and_then(|window| window.redraw.frame_counters.as_deref_mut());
@@ -153,12 +154,12 @@ impl super::super::App {
         // A window an earlier dispatch closed without recording its time is finalized now.
         app.finish_closing();
         app.dispatching = Some(id);
-        self.windows.get(&id).is_some_and(|window| window.redraw.frame_counters.is_some())
+        self.registry.windows.get(&id).is_some_and(|window| window.redraw.frame_counters.is_some())
     }
 
     /// Count one serviced output event (`PaneOutput` or `RequestRedraw`) for window `id`.
     pub(in crate::app) fn note_user_request_redraw(&mut self, id: winit::window::WindowId) {
-        let window = self.windows.get_mut(&id);
+        let window = self.registry.windows.get_mut(&id);
         if let Some(counters) =
             window.and_then(|window| window.redraw.frame_counters.as_deref_mut())
         {
@@ -179,9 +180,9 @@ impl super::super::App {
     /// The counter handles for a pane being created; `None` when the gate is off. The first
     /// pane seals the gate with a plain write to event-loop-owned state.
     pub(in crate::app) fn pane_frame_counters(&self) -> Option<PaneFrameCounters> {
-        self.frame_counters_sealed.set(true);
+        self.diagnostics.frame_counters_sealed.set(true);
         // The gate is now fixed, so the foreground worker's statistics are too.
-        self.fg_probes.seal_stats(
+        self.services.fg_probes.seal_stats(
             self.frame_counters.as_ref().map(|counters| Arc::clone(&counters.fg_worker)),
         );
         self.frame_counters

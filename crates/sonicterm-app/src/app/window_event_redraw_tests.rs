@@ -20,14 +20,14 @@ fn real_pty_readonly_pointer_press_latches_local() {
         for read_only in [false, true] {
             let (mut app, windows) = input_test_windows();
             let (window, pane) = windows[target];
-            app.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
+            app.registry.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
                 CopyModeState::read_only_at((0, 0))
             } else {
                 CopyModeState::new_at((0, 0))
             });
             app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
-            let bytes = app.windows.get_mut(&window).unwrap().begin_pointer_press(
+            let bytes = app.registry.windows.get_mut(&window).unwrap().begin_pointer_press(
                 pointer_cell(pane, 2, 3),
                 MouseTracking::AnyMotion,
                 true,
@@ -41,7 +41,8 @@ fn real_pty_readonly_pointer_press_latches_local() {
                 "target={target} read_only={read_only}"
             );
             assert_eq!(
-                app.windows[&window].pointer_gesture.unwrap().owner == PointerGestureOwner::Local,
+                app.registry.windows[&window].pointer_gesture.unwrap().owner
+                    == PointerGestureOwner::Local,
                 read_only
             );
         }
@@ -65,12 +66,12 @@ fn real_pty_readonly_shared_drop_is_consumed() {
         for read_only in [false, true] {
             let (mut app, windows) = input_test_windows();
             let (window, pane) = windows[target];
-            app.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
+            app.registry.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
                 CopyModeState::read_only_at((0, 0))
             } else {
                 CopyModeState::new_at((0, 0))
             });
-            app.broadcast =
+            app.interaction.broadcast =
                 BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
             app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
@@ -148,6 +149,7 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
             app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             let press = app
+                .registry
                 .windows
                 .get_mut(&window)
                 .unwrap()
@@ -155,13 +157,13 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
                 .unwrap();
             assert!(app.write_to_pane(pane, press, PtyInputSource::PointerButton));
             assert_eq!(submitted.take(), vec![(pane, b"\x1b[<0;4;3M".to_vec())]);
-            app.windows.get_mut(&window).unwrap().copy_mode =
+            app.registry.windows.get_mut(&window).unwrap().copy_mode =
                 Some(CopyModeState::read_only_at((0, 0)));
             if local_overlay {
                 app.run_action_for_window(&Action::OpenCommandPalette, window);
             }
             let release = take_pointer_release(
-                &mut app.windows.get_mut(&window).unwrap().pointer_gesture,
+                &mut app.registry.windows.get_mut(&window).unwrap().pointer_gesture,
                 ModifiersState::SHIFT,
             )
             .unwrap();
@@ -171,9 +173,9 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
             app.wait_for_input_queues();
             assert!(app.write_to_pane(destination, bytes, PtyInputSource::PointerButton));
             assert_eq!(submitted.take(), vec![(pane, b"\x1b[<4;4;3m".to_vec())]);
-            assert!(app.windows[&window].pointer_gesture.is_none());
-            app.command_palette.close();
-            app.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1004h");
+            assert!(app.registry.windows[&window].pointer_gesture.is_none());
+            app.interaction.command_palette.close();
+            app.registry.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1004h");
             app.wait_for_input_queues();
             app.handle_window_focus_changed(window, false);
             app.wait_for_input_queues();
@@ -203,7 +205,8 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
     }
     let (mut app, windows) = input_test_windows();
     let (source_window, source) = windows[0];
-    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.interaction.broadcast =
+        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     let encode = |targets: BTreeSet<u64>, bytes: &[u8]| {
@@ -215,13 +218,20 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
     let writes = encode(app.terminal_key_targets(source), b"press");
     let accepted = app.dispatch_terminal_key_writes(writes);
     let key = PhysicalKey::Code(KeyCode::ArrowUp);
-    app.windows.get_mut(&source_window).unwrap().pty_pressed_keys.insert(key, accepted.clone());
+    app.registry
+        .windows
+        .get_mut(&source_window)
+        .unwrap()
+        .pty_pressed_keys
+        .insert(key, accepted.clone());
     submitted.take();
     for (window, _) in windows {
-        app.windows.get_mut(&window).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+        app.registry.windows.get_mut(&window).unwrap().copy_mode =
+            Some(CopyModeState::read_only_at((0, 0)));
     }
     let repeat =
-        terminal_repeat_targets(&app.windows[&source_window].pty_pressed_keys, key, true).unwrap();
+        terminal_repeat_targets(&app.registry.windows[&source_window].pty_pressed_keys, key, true)
+            .unwrap();
     app.wait_for_input_queues();
     app.dispatch_terminal_key_writes(encode(repeat.keys().copied().collect(), b"repeat"));
     assert_eq!(
@@ -229,7 +239,7 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
         accepted.keys().copied().collect()
     );
     assert!(terminal_repeat_targets(
-        &app.windows[&source_window].pty_pressed_keys,
+        &app.registry.windows[&source_window].pty_pressed_keys,
         PhysicalKey::Code(KeyCode::ArrowLeft),
         true
     )
@@ -253,16 +263,19 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
         for read_only in [false, true] {
             let (mut app, windows) = input_test_windows();
             let (window, pane) = windows[target];
-            app.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
+            app.registry.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
                 CopyModeState::read_only_at((0, 0))
             } else {
                 CopyModeState::new_at((0, 0))
             });
-            app.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+            app.registry.windows[&window].panes[&pane]
+                .parser
+                .lock()
+                .advance(b"\x1b[?1003h\x1b[?1006h");
             app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             let route = child_no_button_motion_report(
-                &app.windows[&window],
+                &app.registry.windows[&window],
                 pointer_cell(pane, 2, 3),
                 MouseTracking::AnyMotion,
                 true,
@@ -312,7 +325,7 @@ fn native_input_dispatch_has_one_source_window_boundary() {
     let (_, dispatch) = source.split_once("pub(super) fn do_window_event(").unwrap();
     let child = CHILD_SOURCES;
     let warm = dispatch.find("self.is_warm_window_id(win_id)").unwrap();
-    let live = dispatch.find("!self.windows.contains_key(&win_id)").unwrap();
+    let live = dispatch.find("!self.registry.windows.contains_key(&win_id)").unwrap();
     let split = dispatch.find("self.handle_child_window_event(event_loop, win_id, event)").unwrap();
     for call in [
         "self.handle_window_keyboard(win_id, &event, is_synthetic)",

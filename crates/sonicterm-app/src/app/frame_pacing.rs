@@ -133,7 +133,7 @@ impl App {
     /// Preserve pending input and arm a future main-window collection retry without changing frame timestamps.
     #[doc(hidden)]
     pub fn defer_redraw_on_lock_contention(&mut self, was_dirty: bool) {
-        if let Some(id) = self.main_window_id {
+        if let Some(id) = self.registry.main_window_id {
             let now = self.dispatch_now();
             self.defer_window_lock_contention(id, was_dirty, now);
         }
@@ -145,7 +145,7 @@ impl App {
         was_dirty: bool,
         now: Instant,
     ) {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` no longer names a window, no retry state may keep the event loop awake.
             return;
         };
@@ -160,7 +160,7 @@ impl App {
             // the App's gate is on, each armed contention retry is counted.
             counters.contention_retry_armed += 1;
         }
-        if self.main_window_id == Some(id) {
+        if self.registry.main_window_id == Some(id) {
             self.pending_redraw = true;
         } else {
             // When: `id` is not `main_window_id`, retain the retry in the child's independent wake set.
@@ -176,7 +176,7 @@ impl App {
     #[doc(hidden)]
     pub fn defer_child_redraw(&mut self, win_id: WindowId, was_dirty: bool) {
         self.pending_redraw_windows.insert(win_id);
-        if let Some(window) = self.windows.get_mut(&win_id) {
+        if let Some(window) = self.registry.windows.get_mut(&win_id) {
             if was_dirty && !window.redraw.input_pending() {
                 window.mark_redraw(redraw::RedrawCause::Input);
             }

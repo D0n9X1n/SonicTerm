@@ -358,7 +358,9 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `stopped` | 次数 | 发现 GPU 设备已停止的尝试 |
 | `failed` | 次数 | 失败的尝试 |
 | `contention_parser` | 次数 | 发现某个可见窗格的解析器锁忙碌的帧收集 |
-| `contention_images` | 次数 | 发现某个可见图像存储忙碌的帧收集 |
+| `contention_images` | 次数 | 已取得所有可见解析器、但发现某个图像存储忙碌的帧收集 |
+| `contention_budget_expired` | 次数 | 在探测较后的窗格之前，共享的解析器截止时间就已过去的帧收集，例如线程在两个窗格之间被抢占；它与 `contention_parser` 互不重叠，后者统计已被探测并分得时间的窗格，因此三个竞争计数之和等于失败的帧收集 |
+| `miss_pane_0`、`miss_pane_1`、`miss_pane_2`、`miss_pane_3_plus` | 次数 | 按失败窗格的可见窗格顺序索引（布局顺序）统计的失败帧收集；索引 3 及之后的窗格共用最后一个计数 |
 | `defer_timeout` | 次数 | 因帧周期内有待处理的表面超时而推迟的重绘 |
 | `defer_contention` | 次数 | 因锁争用重试下限而推迟的重绘 |
 | `defer_sync` | 次数 | 因某个可见窗格的同步更新（DEC 2026）仍在进行而保持的重绘，包括准入时和在解析器锁下重新检查时 |
@@ -375,6 +377,7 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `present_interval` | 毫秒直方图 | 相邻两次呈现之间的时间 |
 | `handler` | 毫秒直方图 | 该窗口每次 `window_event` 分发 |
 | `flush_to_redraw` | 毫秒直方图 | 最早的待处理 flush 到显示该窗格的窗口第一次重绘 |
+| `parser_lock_wait` | 微秒直方图 | 每次帧收集获取其解析器所用的时间，从第一次获取到最后一个 guard 或失败；其计数即该窗口的帧收集次数，是失败帧收集比例的分母 |
 
 四个 `defer_*` 计数记录胜出的规则。规则按上述顺序检查，前一条成立后不再求值后面的规则，因此每次
 推迟的重绘只计一次（重试下限见[渲染模式](Rendering-Modes-zh-CN#锁争用重试)）。

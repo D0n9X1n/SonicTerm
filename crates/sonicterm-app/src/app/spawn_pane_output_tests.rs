@@ -478,9 +478,9 @@ fn release_is_sent_after_the_batch_generation_is_published() {
     .with_capture_staging_pool(CaptureStagingPool::new())
     .with_inline_media_pool(crate::app::media::InlineMediaPool::new());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
-    let pane_id = app.windows[&main].tab_states[0].active_pane;
-    let pane = &app.windows[&main].panes[&pane_id];
+    let main = app.registry.main_window_id.unwrap();
+    let pane_id = app.registry.windows[&main].tab_states[0].active_pane;
+    let pane = &app.registry.windows[&main].panes[&pane_id];
     *pane.redraw_target.lock() = Some(main);
     let handles = PaneVtHandles::from_pane_state(pane);
     let mut flush = OutputFlush::new(pane_id, &handles);
@@ -550,7 +550,7 @@ fn release_is_sent_after_the_batch_generation_is_published() {
     flush.after_batch(&handles, at, || deliver(&handles, &mut queued));
     assert_eq!(queued, [(2, 1)], "sent once, after the generation and the decoded image");
     let causes = |app: &App| {
-        let redraw = &app.windows[&main].redraw;
+        let redraw = &app.registry.windows[&main].redraw;
         (redraw.cause_generation(RedrawCause::Output), redraw.cause_generation(RedrawCause::Chrome))
     };
     let (output_before, chrome_before) = causes(&app);

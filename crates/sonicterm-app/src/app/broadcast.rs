@@ -9,7 +9,7 @@ impl App {
         bytes: Vec<u8>,
         source: PtyInputSource,
     ) {
-        let BroadcastState::On { source_pane, .. } = self.broadcast else {
+        let BroadcastState::On { source_pane, .. } = self.interaction.broadcast else {
             // When: `broadcast` is not `On`, so there is no fan-out group and the
             // bytes belong to the focused pane alone.
             return;
@@ -38,7 +38,7 @@ impl App {
 
     /// The admitted broadcast receivers, and how many READONLY receivers were left out.
     pub(crate) fn broadcast_receivers_counted(&self) -> (std::collections::BTreeSet<u64>, usize) {
-        let BroadcastState::On { scope, source_pane } = self.broadcast else {
+        let BroadcastState::On { scope, source_pane } = self.interaction.broadcast else {
             // When: `broadcast` is not `On`, so no `scope` or `source_pane`
             // defines a group and the receiver set is empty.
             return Default::default();
@@ -52,14 +52,12 @@ impl App {
 
     /// The window that holds `pane_id`, if any.
     pub(crate) fn window_of_pane(&self, pane_id: u64) -> Option<WindowId> {
-        self.windows
-            .iter()
-            .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id))
+        self.registry.window_of_pane(pane_id)
     }
 
     /// Return render-only participants, including the live source; never use this set for PTY fan-out.
     pub(crate) fn broadcast_participants(&self) -> std::collections::BTreeSet<u64> {
-        let BroadcastState::On { source_pane, .. } = self.broadcast else {
+        let BroadcastState::On { source_pane, .. } = self.interaction.broadcast else {
             // When: broadcast is Off, no pane needs safety chrome.
             return Default::default();
         };
@@ -73,10 +71,10 @@ impl App {
     }
 
     pub(super) fn clear_closed_broadcast_source(&mut self) {
-        if let BroadcastState::On { source_pane, .. } = self.broadcast {
+        if let BroadcastState::On { source_pane, .. } = self.interaction.broadcast {
             if self.pane_by_id(source_pane).is_none() {
                 // A closed source needs its safety chrome erased in every surviving window before sleeping.
-                self.broadcast = BroadcastState::Off;
+                self.interaction.broadcast = BroadcastState::Off;
                 self.request_redraw_all_terminal_windows();
             }
         }
@@ -88,7 +86,7 @@ impl App {
         source_pane: u64,
     ) -> std::collections::BTreeSet<u64> {
         let mut receivers = std::collections::BTreeSet::new();
-        for window in self.windows.values() {
+        for window in self.registry.windows.values() {
             if window.role.is_report() {
                 // When: the window is a report (Memory Usage or About), its pane has no shell and is never a receiver.
                 continue;
@@ -101,7 +99,7 @@ impl App {
                         .tab_states
                         .iter()
                         .enumerate()
-                        .find(|(_, tab)| tab.tree.leaves().contains(&source_pane))
+                        .find(|(_, tab)| tab.tree.contains_pane(source_pane))
                     {
                         // When: a tab's `leaves` hold `source_pane`, so that tab's
                         // panes are the receiver set for this window.

@@ -449,17 +449,27 @@ jobs:
         # `linux-core` documents it. The perf features gate only perf_scenarios
         # example code, which `cargo doc` never documents; each host's core jobs
         # test and lint that example with each feature set below, and every
-        # declared perf feature is in exactly one set.
+        # declared perf feature is in exactly one set. `test-support` is turned on
+        # by sonicterm-app's dev-dependency on itself, so workspace Clippy and
+        # tests build it on, and each core job lints the library once with it off.
         self.assertEqual(
             workflow_test_fixture.optional_feature_packages(),
             {"sonicterm-resource": ("test-util",),
              "sonicterm-app": ("perf-counters", "perf-echo-trace", "perf-frame-texture",
-                               "perf-hook-checkpoint-memory", "perf-hook-trim")},
+                               "perf-hook-checkpoint-memory", "perf-hook-trim", "test-support")},
         )
+        app_manifest = (workflow_test_fixture._HERE.parent / "crates" / "sonicterm-app" / "Cargo.toml").read_text(
+            encoding="utf-8"
+        )
+        app_dev_dependencies = app_manifest.split("\n[dev-dependencies]\n", 1)[1].split("\n[", 1)[0]
+        # Through the workspace entry, which pins the version, so cargo-deny sees no wildcard.
+        self.assertIn('sonicterm-app = { workspace = true, features = ["test-support"] }', app_dev_dependencies)
         feature_sets = ("perf-counters,perf-hook-checkpoint-memory,perf-hook-trim", "perf-frame-texture",
                         "perf-echo-trace")
         covered = [feature for feature_set in feature_sets for feature in feature_set.split(",")]
-        self.assertEqual(sorted(covered), sorted(workflow_test_fixture.optional_feature_packages()["sonicterm-app"]))
+        perf_features = [feature for feature in workflow_test_fixture.optional_feature_packages()["sonicterm-app"]
+                         if feature != "test-support"]
+        self.assertEqual(sorted(covered), sorted(perf_features))
         manifest = (workflow_test_fixture._HERE.parent / "crates" / "sonicterm-logging" / "Cargo.toml").read_text(
             encoding="utf-8"
         )

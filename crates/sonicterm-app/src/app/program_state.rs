@@ -288,10 +288,15 @@ impl App {
             // When: nothing is reported or shown, or no backend exists, there is nothing to do.
             return None;
         }
-        let live: HashSet<u64> =
-            self.windows.values().flat_map(|window| window.panes.keys().copied()).collect();
+        let live: HashSet<u64> = self
+            .registry
+            .windows
+            .values()
+            .flat_map(|window| window.panes.keys().copied())
+            .collect();
         self.program.reports.retain(|pane_id, _| live.contains(pane_id));
         let windows: Vec<WindowProgress> = self
+            .registry
             .windows
             .values()
             .filter(|window| window.role == super::WindowRole::Terminal)
@@ -352,9 +357,8 @@ impl App {
             // When: sanitizing left neither a title nor a body, there is nothing to show.
             return;
         }
-        let Some((window_id, tab_index)) = self.windows.iter().find_map(|(id, window)| {
-            let index =
-                window.tab_states.iter().position(|tab| tab.tree.leaves().contains(&pane_id))?;
+        let Some((window_id, tab_index)) = self.registry.windows.iter().find_map(|(id, window)| {
+            let index = window.tab_states.iter().position(|tab| tab.tree.contains_pane(pane_id))?;
             Some((*id, index))
         }) else {
             // When: no window holds pane_id, the pane closed before its notification arrived.
@@ -363,7 +367,7 @@ impl App {
         self.mark_program_notify(window_id, tab_index);
         let coalesce = self.program.toast.as_ref().is_some_and(|toast| {
             let shown = now < toast.expires_at
-                && self.windows.get(&toast.window_id).is_some_and(|window| {
+                && self.registry.windows.get(&toast.window_id).is_some_and(|window| {
                     window
                         .notification
                         .as_ref()
@@ -388,7 +392,7 @@ impl App {
         let message = self.program_toast_message(&origin, &title, &body, more);
         if let Some(previous) = self.program.toast.take() {
             // Only one program toast is visible: a stale one in another window closes.
-            if let Some(window) = self.windows.get_mut(&previous.window_id) {
+            if let Some(window) = self.registry.windows.get_mut(&previous.window_id) {
                 if window
                     .notification
                     .as_ref()
@@ -400,7 +404,7 @@ impl App {
             }
         }
         let expires_at = now + TOAST_DURATION;
-        let kind = if Some(window_id) == self.main_window_id {
+        let kind = if Some(window_id) == self.registry.main_window_id {
             FrontmostKind::Main
         } else {
             // When: window_id is not the main window, the toast shows in that child window.
@@ -414,7 +418,7 @@ impl App {
         );
         // Showing the toast requested its window's redraw.
         self.note_status_line(|counters| counters.program_toast_redraws += 1);
-        let focused = self.frontmost_window == Some(window_id);
+        let focused = self.registry.frontmost_window == Some(window_id);
         if wants_desktop(delivery, cfg!(windows), focused) {
             // When: wants_desktop holds, Windows also raises a desktop notification, its title
             // opening with the same origin cue.
@@ -454,7 +458,7 @@ impl App {
         toast.message = message.clone();
         let window_id = toast.window_id;
         tracing::debug!(target: "sonicterm_app::app", pane_id = toast.pane_id, more = u64::from(more), "program notifications coalesced");
-        if let Some(window) = self.windows.get_mut(&window_id) {
+        if let Some(window) = self.registry.windows.get_mut(&window_id) {
             if let Some(bubble) = window.notification.as_mut() {
                 bubble.message = message;
             }
@@ -485,7 +489,7 @@ impl App {
 
     /// Mark the notified tab, when a shown strip lists `alerts` with the `notify` source.
     fn mark_program_notify(&mut self, window_id: WindowId, tab_index: usize) {
-        let Some(window) = self.windows.get_mut(&window_id) else {
+        let Some(window) = self.registry.windows.get_mut(&window_id) else {
             // When: window_id closed, there is no tab to mark.
             return;
         };

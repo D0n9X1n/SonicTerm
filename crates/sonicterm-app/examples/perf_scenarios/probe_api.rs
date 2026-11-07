@@ -256,6 +256,10 @@ impl Probe {
             trim_experiment: self.plan.trim_experiment,
             trim_seq_after_hook: self.trim_seq_after_hook,
             atlas_recovery: self.atlas_recovery.clone(),
+            contention: self
+                .flood_watch
+                .as_ref()
+                .map(|(_, watch)| crate::contention::record(&self.role_grids, watch)),
             native_focus_events_dropped: self.native_focus_dropped,
             native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,

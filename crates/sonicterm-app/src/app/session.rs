@@ -141,12 +141,55 @@ impl App {
         let pty_reaper = reaper_driver::ReaperDriver::new(governor.clone())
             .expect("native PTY teardown driver could not start");
         Self {
+            registry: crate::app::WindowRegistry {
+                windows: HashMap::new(),
+                main_window_id: None,
+                frontmost_window: None,
+                window_keys: crate::window_key_boundary::WindowKeyRegistry::new(),
+                warm_window_pool: Vec::new(),
+            },
+            interaction: InteractionState {
+                command_palette,
+                palette_attached_window: None,
+                window_rename_target: None,
+                tab_edit_target: None,
+                palette_pointer_capture: None,
+                field_pointer_capture: None,
+                field_owed_releases: Vec::new(),
+                os_drag_handoff_started: false,
+                os_drag_backend: None,
+                os_drag_pending: Arc::new(os_drag::PendingDragOutcome::default()),
+                os_drag_bars: Arc::new(os_drag::TabBarRegistry::default()),
+                os_drag_source: None,
+                pending_os_drag_payloads: Vec::new(),
+                pending_winit_file_drops: HashMap::new(),
+                broadcast: BroadcastState::Off,
+            },
+            services: RuntimeServices {
+                fg_probes,
+                foreground_schedule: fg_probe::ForegroundSchedule::default(),
+                mcp_server: None,
+                pty_reaper,
+                gpu_recovery: None,
+                font_catalog_worker: None,
+                runtime_smoke: None,
+            },
+            redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
+            reap_call_count: std::sync::atomic::AtomicUsize::new(0),
+            diagnostics: DiagnosticsState {
+                frame_counters_sealed: std::cell::Cell::new(false),
+                accessibility_tree_builds: 0,
+                next_echo_arm: 1,
+                breadcrumb_recorder: None,
+                last_retention_sample: None,
+                trim_seq: 0,
+                last_trim_source: None,
+                last_memory_totals: None,
+            },
             theme,
             inline_media_pool: media::InlineMediaPool::process_default(),
             capture_staging_pool: CaptureStagingPool::process_default(),
             process_privilege: crate::ProcessPrivilege::default(),
-            fg_probes,
-            foreground_schedule: fg_probe::ForegroundSchedule::default(),
             config,
             config_normalizer,
             font_dirs,
@@ -155,7 +198,6 @@ impl App {
             configured_font_family,
             font_catalog: font_catalog::FontCatalog::default(),
             font_enumerator: sonicterm_gpu::installed_monospace_families,
-            font_catalog_worker: None,
             font_picker_original: None,
             font_family_generation: 0,
             #[cfg(test)]
@@ -166,6 +208,7 @@ impl App {
             pending_osc52_reassert: None,
             test_clipboard_text: None,
             test_clipboard_files: None,
+            #[cfg(any(test, feature = "test-support"))]
             test_clipboard_write_failure: false,
             test_pty_writes: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
@@ -181,47 +224,23 @@ impl App {
             about: Default::default(),
             pending_tear_out: None,
             pending_os_teardown: false,
+            #[cfg(any(test, feature = "test-support"))]
             test_post_snapshot_hook: None,
             pending_exit: false,
-            last_retention_sample: None,
-            trim_seq: 0,
-            last_trim_source: None,
             #[cfg(test)]
             test_scheduler_trims: Vec::new(),
-            last_memory_totals: None,
-            breadcrumb_recorder: None,
-            command_palette,
-            palette_attached_window: None,
-            window_rename_target: None,
-            tab_edit_target: None,
-            palette_pointer_capture: None,
-            field_pointer_capture: None,
-            field_owed_releases: Vec::new(),
-            os_drag_handoff_started: false,
             governor,
-            windows: HashMap::new(),
-            pty_reaper,
             session_finished: None,
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
-            frame_counters_sealed: std::cell::Cell::new(false),
             dispatch_redraws: super::redraw::DispatchRedraws::default(),
-            accessibility_tree_builds: 0,
             accessibility: Default::default(),
-            next_echo_arm: 1,
-            main_window_id: None,
-            frontmost_window: None,
-            pending_os_drag_payloads: Vec::new(),
-            pending_winit_file_drops: HashMap::new(),
             theme_loader: None,
             keymap_loader: None,
             event_loop_proxy,
-            gpu_recovery: None,
             path_workers,
             home_dir,
             runtime_config_path: None,
             local_hostname,
-            runtime_smoke: None,
-            mcp_server: None,
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
@@ -232,27 +251,18 @@ impl App {
             pending_redraw: false,
             pending_redraw_windows: HashSet::new(),
             redraw_due: Vec::new(),
-            warm_window_pool: Vec::new(),
             i18n,
             os_drag_sink: None,
-            os_drag_backend: None,
-            os_drag_pending: Arc::new(os_drag::PendingDragOutcome::default()),
             default_handlers: default_handlers::DefaultHandlersState::default(),
-            os_drag_bars: Arc::new(os_drag::TabBarRegistry::default()),
-            os_drag_source: None,
             tab_bar_visible: true,
             status_line: Default::default(),
             startup_loads: None,
             program: Default::default(),
-            broadcast: BroadcastState::Off,
             quit_hold: quit_hold::QuitHold::new(),
             on_resumed: None,
             on_window_ready: None,
-            redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
-            reap_call_count: std::sync::atomic::AtomicUsize::new(0),
             test_viewport_override: None,
             machine,
-            window_keys: crate::window_key_boundary::WindowKeyRegistry::new(),
         }
     }
 
@@ -265,8 +275,9 @@ impl App {
         // A report walk still running must not outlive the session it describes.
         self.cancel_memory_report_sampling();
         // Agents lose the endpoint before their panes go, so no request races the teardown.
-        self.mcp_server = None;
+        self.services.mcp_server = None;
         let panes: Vec<_> = self
+            .registry
             .windows
             .values_mut()
             .flat_map(|window| std::mem::take(&mut window.panes).into_values())
@@ -274,24 +285,24 @@ impl App {
         for pane in panes {
             self.retire_pane(pane);
         }
-        let settled = self.pty_reaper.finish();
+        let settled = self.services.pty_reaper.finish();
         self.session_finished = Some(settled);
         settled
     }
 
     pub(super) fn retire_previous_main(&mut self) {
-        if let Some(previous_id) = self.main_window_id.take() {
+        if let Some(previous_id) = self.registry.main_window_id.take() {
             self.cancel_window_rename(previous_id);
             self.cancel_tab_edit(previous_id);
             self.accessibility.remove(&previous_id);
-            if let Some(mut previous) = self.windows.remove(&previous_id) {
+            if let Some(mut previous) = self.registry.windows.remove(&previous_id) {
                 self.retire_window_counters(previous_id, &mut previous);
                 for pane in std::mem::take(&mut previous.panes).into_values() {
                     self.retire_pane(pane);
                 }
                 self.release_owners_of(&mut previous);
             }
-            self.window_keys.remove(previous_id);
+            self.registry.window_keys.remove(previous_id);
         }
     }
 
@@ -301,7 +312,7 @@ impl App {
             return;
         }
         if let Some(pty) = pane.pty.as_mut() {
-            match self.pty_reaper.reserve(pty) {
+            match self.services.pty_reaper.reserve(pty) {
                 Ok(slot) => pane.reap_slot = Some(slot),
                 Err(reason) => {
                     tracing::debug!(
@@ -322,12 +333,12 @@ impl App {
             // A watched pane's retirement disarms it and frees its diagnostic buffers now, whatever
             // worker handles survive, and ends a window timeline it owned.
             counters.echo.retire();
-            for window in self.windows.values_mut() {
+            for window in self.registry.windows.values_mut() {
                 window.redraw.timeline.end_for_watch(&counters.echo);
             }
         }
         if let Some(pty) = pane.pty.take() {
-            self.pty_reaper.retire(pty, pane.reap_slot.take());
+            self.services.pty_reaper.retire(pty, pane.reap_slot.take());
         }
         pane.charges.clear();
         drop(pane.owner.take());
@@ -337,7 +348,7 @@ impl App {
         &mut self,
         recorder: sonicterm_logging::breadcrumbs::BreadcrumbRecorder,
     ) {
-        self.breadcrumb_recorder = Some(recorder);
+        self.diagnostics.breadcrumb_recorder = Some(recorder);
     }
 
     /// Reports [`Config::quit_on_last_window_close`] on macOS and `true`
@@ -441,7 +452,7 @@ impl App {
     #[cfg(test)]
     pub(crate) fn with_inline_media_pool(mut self, pool: Arc<media::InlineMediaPool>) -> Self {
         debug_assert!(
-            self.windows.values().all(|window| window.panes.is_empty()),
+            self.registry.windows.values().all(|window| window.panes.is_empty()),
             "inject the inline-media pool before any pane exists"
         );
         self.inline_media_pool = pool;
@@ -455,7 +466,7 @@ impl App {
     #[cfg(test)]
     pub(crate) fn with_capture_staging_pool(mut self, pool: Arc<CaptureStagingPool>) -> Self {
         debug_assert!(
-            self.windows.values().all(|window| window.panes.is_empty()),
+            self.registry.windows.values().all(|window| window.panes.is_empty()),
             "inject the capture staging pool before any pane exists"
         );
         self.capture_staging_pool = pool;

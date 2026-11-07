@@ -8,7 +8,10 @@ drag/tear-out, and the platform shell abstractions.
 
 ## Key files
 - `src/app/mod.rs` - `App` and the window-registration
-  chokepoint. `user_event.rs` owns typed events and `application_handler.rs` forwards callbacks.
+  chokepoint. `App`'s state is split across four owners, visible only inside `app`:
+  `WindowRegistry` (`registry`, `window_registry_state.rs`), `RuntimeServices` (`services`,
+  `runtime_services.rs`), `InteractionState` (`interaction`, `interaction.rs`) and
+  `DiagnosticsState` (`diagnostics`, `diagnostics.rs`). `user_event.rs` owns typed events and `application_handler.rs` forwards callbacks.
   Window, pane, session, input, and effect orchestration live in
   `window_state.rs`, `window_registry.rs`, `pane_state.rs`, `session.rs`,
   `input_dispatch.rs`, and `effects.rs`.
@@ -75,6 +78,11 @@ cargo build -p sonicterm-app
 ```
 
 ## Guardrails
+- A new `__test_*` hook or `test_*` App field that only this crate's unit or integration tests read
+  carries `#[cfg(any(test, feature = "test-support"))]`; one an example, another crate or
+  production calls stays ungated and is listed in `UNGATED_HOOKS`/`UNGATED_FIELDS`
+  (`src/app/mod_test_support_tests.rs`). Check `cargo clippy -p sonicterm-app --lib` too: only
+  that build has the feature off.
 - All pane destruction uses `retire_pane`; transfers preserve the PTY and its
   `ReapSlot`. Reserved native waits run only through the one `ReaperDriver`.
   Admission refusal retries once, then logs/counts synchronous fallback.

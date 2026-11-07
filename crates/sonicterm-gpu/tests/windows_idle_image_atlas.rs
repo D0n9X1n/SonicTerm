@@ -160,7 +160,7 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
         cursor_style: CursorStyle::BlockSteady,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: if image {
+        inline_images: Arc::new(if image {
             vec![InlineImage {
                 scroll_mark: 0,
                 id: 1,
@@ -173,7 +173,7 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
             }]
         } else {
             Vec::new()
-        },
+        }),
     }];
     renderer
         .render(

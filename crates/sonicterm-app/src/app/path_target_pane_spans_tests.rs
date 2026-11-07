@@ -155,13 +155,13 @@ fn hardwrap_chains_never_cross_a_split_border() {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let window = app.__test_seed_child_window(&["multiplexer"]);
         let pane = app.__test_child_pane_ids(window).unwrap()[0];
-        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(41, 4);
+        app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(41, 4);
         let output = format!(
             "\x1b[?1049h{}\x1b[1;22H(https://ex.co/aaaaa\x1b[2;1H{lower}",
             pane_border(21, 4)
         );
         assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-        let parser = app.windows[&window].panes[&pane].parser.lock();
+        let parser = app.registry.windows[&window].panes[&pane].parser.lock();
         // A fresh grid has no scrollback, so the alternate screen's first row is absolute row 0.
         for (row, col) in [(0, 25), (1, 3)] {
             let found = hardwrap_uri_at_cell(parser.grid(), 0, AbsoluteCell { row, col });
@@ -300,7 +300,7 @@ fn hyperlink_hover_reaches_window_render_state() {
         b"\x1b]8;;https://example.com/\x1b\\Docs\x1b]8;;\x1b\\"
     ));
     for active in [false, true, false] {
-        app.windows.get_mut(&window).unwrap().modifiers = if !active {
+        app.registry.windows.get_mut(&window).unwrap().modifiers = if !active {
             winit::keyboard::ModifiersState::empty()
         } else if cfg!(target_os = "macos") {
             winit::keyboard::ModifiersState::SUPER
@@ -309,13 +309,14 @@ fn hyperlink_hover_reaches_window_render_state() {
         };
         let target = app.cell_target_at(window, pane, 0, 1);
         app.apply_target_hover(window, target);
-        let hover = app.windows[&window].hovered_url.as_ref().expect("OSC 8 renderer input");
+        let hover =
+            app.registry.windows[&window].hovered_url.as_ref().expect("OSC 8 renderer input");
         assert_eq!(hover.cells.active, active);
-        assert!(app.windows[&other].hovered_url.is_none());
+        assert!(app.registry.windows[&other].hovered_url.is_none());
     }
     app.apply_target_hover(window, None);
-    assert!(app.windows[&window].hovered_url.is_none());
-    assert!(!app.windows[&window].hover_link);
+    assert!(app.registry.windows[&window].hovered_url.is_none());
+    assert!(!app.registry.windows[&window].hover_link);
 }
 
 /// A busy parser is not proof that a hovered URL disappeared during a TUI output burst.
@@ -327,20 +328,20 @@ fn busy_target_lookup_preserves_visuals_but_real_absence_clears_them() {
     assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
     let target = app.cell_target_at(window, pane, 0, 3);
     app.apply_target_hover(window, target);
-    let before = app.windows[&window].hovered_url.clone();
+    let before = app.registry.windows[&window].hovered_url.clone();
     assert!(before.is_some());
-    let parser = std::sync::Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let parser = std::sync::Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
     let guard = parser.lock();
     let lookup = app.cell_target_lookup(window, pane, 0, 3);
     assert!(lookup.is_err());
     assert!(app.cell_target_at(window, pane, 0, 3).is_none());
     app.apply_target_lookup(window, lookup);
-    assert_eq!(app.windows[&window].hovered_url, before);
+    assert_eq!(app.registry.windows[&window].hovered_url, before);
     drop(guard);
     assert!(app.__test_advance_child_pane_parser(window, pane, b"\r\x1b[2Kplain"));
     let target = app.cell_target_at(window, pane, 0, 3);
     app.apply_target_hover(window, target);
-    assert!(app.windows[&window].hovered_url.is_none());
+    assert!(app.registry.windows[&window].hovered_url.is_none());
 }
 
 /// Releasing the open modifier during contention cannot leave a recolored, clickable-looking target.
@@ -349,8 +350,8 @@ fn busy_target_lookup_drops_active_feedback_when_modifier_is_released() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["hover modifier"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.frontmost_window = Some(window);
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.frontmost_window = Some(window);
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -358,16 +359,17 @@ fn busy_target_lookup_drops_active_feedback_when_modifier_is_released() {
     assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
     let target = app.cell_target_at(window, pane, 0, 3);
     app.apply_target_hover(window, target);
-    assert!(app.windows[&window].hovered_url.as_ref().unwrap().active());
-    assert!(app.windows[&window].link_preview.is_some());
-    let parser = std::sync::Arc::clone(&app.windows[&window].panes[&pane].parser);
+    assert!(app.registry.windows[&window].hovered_url.as_ref().unwrap().active());
+    assert!(app.registry.windows[&window].link_preview.is_some());
+    let parser = std::sync::Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
     let guard = parser.lock();
-    app.windows.get_mut(&window).unwrap().modifiers = winit::keyboard::ModifiersState::empty();
+    app.registry.windows.get_mut(&window).unwrap().modifiers =
+        winit::keyboard::ModifiersState::empty();
     let lookup = app.cell_target_lookup(window, pane, 0, 3);
     app.apply_target_lookup(window, lookup);
-    assert!(!app.windows[&window].hovered_url.as_ref().unwrap().active());
-    assert!(app.windows[&window].link_preview.is_none());
-    assert!(!app.windows[&window].hover_link);
+    assert!(!app.registry.windows[&window].hovered_url.as_ref().unwrap().active());
+    assert!(app.registry.windows[&window].link_preview.is_none());
+    assert!(!app.registry.windows[&window].hover_link);
     assert!(!app.activate_target_at(window, pane, 0, 3));
     drop(guard);
 }

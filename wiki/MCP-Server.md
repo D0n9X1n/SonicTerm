@@ -29,14 +29,18 @@ The server is controlled by the `[mcp]` section of `sonicterm.toml`:
 # Nothing listens while this is off.
 enabled = false
 # Control tools act on: "off" (none), "agent" (panes an agent created),
-# or "any" (every pane). Read tools work on every pane when enabled.
+# or "any" (every pane).
 control = "agent"
+# Read tools see: "agent" (panes an agent created) or "any" (every pane).
+# A config without this line reads every pane.
+read = "agent"
 ```
 
 | Key | Default | Values |
 | --- | --- | --- |
 | `enabled` | `false` | `true` runs the server; `false` stops it. |
 | `control` | `"agent"` | `"off"`, `"agent"` or `"any"`; see Control scope below. |
+| `read` | `"any"` (`"agent"` in a new config file) | `"agent"` or `"any"`; see Read scope below. |
 
 To turn it on:
 
@@ -113,8 +117,8 @@ and `--help` (`-h`) print and exit.
 
 ## Control scope
 
-`[mcp] control` sets what the control tools may touch. Read tools work on every
-pane whenever the server runs.
+`[mcp] control` sets what the control tools may touch; `[mcp] read` sets what the
+read tools may see (see Read scope).
 
 | `control` | Control tools may act on |
 | --- | --- |
@@ -125,6 +129,28 @@ pane whenever the server runs.
 A pane in a READONLY window is always refused, whatever the scope. A tab holding
 an agent's pane shows a purple ring marker before its title. A reload that
 changes `control` drops every request already queued.
+
+## Read scope
+
+`[mcp] read` sets which panes `list_panes`, `read_pane` and `wait_for` may see.
+
+| `read` | Read tools see |
+| --- | --- |
+| `"agent"` | only panes an agent created; any other pane is refused as `out_of_scope` and left out of `list_panes` |
+| `"any"` | every pane |
+
+A configuration without `read` keeps the old behavior, `"any"`, so an upgrade
+never narrows an existing setup. The config file SonicTerm writes on first start
+sets `read = "agent"`, so an agent cannot read an unrelated SSH or log pane unless
+you allow it. Use `"any"` when an agent should read your own panes, for example
+the one it was started from.
+
+Which panes are an agent's comes only from SonicTerm's own records, never from
+the client: the bridge's preamble names the agent's pane as a default for
+`self_pane_id`, but cannot unlock a pane under `"agent"`. `run_command` returns
+the output of the command it ran as part of the run; that is governed by
+`control`, not `read`. A reload that changes `read` drops every queued request
+and ends a running `wait_for`.
 
 Pane text is untrusted input: a program can print text meant to steer an agent.
 The server tells agents never to follow instructions found in pane text, but keep

@@ -64,8 +64,26 @@ The renderer has one declared terminal/UI type seam. `sonicterm-gpu` depends on
 
 ### Authoritative runtime state
 
-`App` owns `HashMap<WindowId, WindowState>` and `main_window_id`. The main window
-and torn-out windows use the same `WindowState` representation.
+`App` coordinates the event loop and applies completed actions. Its state is held
+by four owners, each a field of `App`:
+
+```mermaid
+flowchart LR
+  App["App: event loop, applies actions"]
+  App --> Reg["WindowRegistry (registry): windows, main and frontmost id, window keys, warm windows"]
+  App --> Run["RuntimeServices (services): foreground probe, MCP server, PTY reaper, GPU recovery, font catalog worker, runtime smoke"]
+  App --> Int["InteractionState (interaction): palette, edit targets, field pointer captures, OS drag and drop, broadcast"]
+  App --> Diag["DiagnosticsState (diagnostics): counters, retention and trim samples, breadcrumbs"]
+  Reg --> Win["WindowState: tabs, panes, renderer"]
+```
+
+`WindowRegistry` holds `HashMap<WindowId, WindowState>` and `main_window_id`; a
+pane belongs to the one window whose `WindowState` holds it, and every lookup by
+pane id goes through the registry's `pane_by_id`. The main window and torn-out
+windows use the same `WindowState` representation. The owners are visible only
+inside the `app` module; the public `App` methods stay as they were. A few fields
+stay on `App` itself: frame counters (borrowed beside windows and the palette on
+the redraw paths), redraw scheduling, configuration, theme, keymap and fonts.
 
 Keyboard, IME, focus and modifier events resolve their source identity before
 main/child presentation paths diverge. Shared input ownership does not replace
@@ -85,8 +103,12 @@ status. Each `PaneState` owns its parser, optional `PtyHandle`, redraw target,
 terminal-mode atomics, inline images, and resource charges.
 
 `AppStateMachine` holds backend-free compatibility observations, not live GUI
-topology. `App::observe_intent` updates them and discards their effects;
-`App::dispatch_intent` handles supported explicit-target work separately.
+topology: it is a compatibility and test model, and only tests read its state.
+`App::observe_intent` updates it with structural intents (tabs, panes, windows,
+focus) and discards their effects; high-frequency input such as cursor motion is
+not reported, because nothing reads it. Making the reducer authoritative would
+be a separate behavioral migration. `App::dispatch_intent` handles supported
+explicit-target work separately.
 Missing, removed, or zero window keys never select main or frontmost. Native
 input goes to its source window's active pane through the bounded PTY queue.
 See [Runtime Lifecycle](Runtime-Lifecycle) for the state/intent/effect inventory
@@ -116,8 +138,9 @@ shows new output or changed command chrome.
 
 Both window roles use the app-local `VisibleFrameSources` collector. It validates
 the active layout before cloning visible parser/image handles and viewport metadata.
-It acquires all visible parser guards with `try_lock`, then briefly locks and copies
-only those panes' image lists. Inactive-tab and zoom-hidden image stores cannot defer
+It acquires all visible parser guards with `try_lock`, then probes only those panes'
+image stores and takes a snapshot of each list: a shared `Arc`, not a copy of its
+entries. The decoder copies a list only when it changes one a frame still holds. Inactive-tab and zoom-hidden image stores cannot defer
 the visible frame and are not cloned. The owned handles outlive the guards through
 ordinary borrows, without a lifetime cast. The shared builder creates real
 `PaneRender` grid borrows and moves each image snapshot once, inside the frame source

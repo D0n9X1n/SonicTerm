@@ -13,11 +13,11 @@ fn a_right_press_hits_the_strip_at_the_top() {
     let mut app = app_with_strip(true);
     let child = app.__test_seed_child_window(&["work"]);
     let strip = sonicterm_gpu::status_strip::StripHit { top: placement.top, ..strip_over_top() };
-    app.windows.get_mut(&child).unwrap().status_strip = Some(strip);
+    app.registry.windows.get_mut(&child).unwrap().status_strip = Some(strip);
     assert!(!app.right_press_status_line(child, 50.0, 10.0), "in the titlebar band");
     assert!(!app.right_press_status_line(child, 50.0, 580.0), "where the bottom strip was");
     assert!(app.right_press_status_line(child, 50.0, 35.0), "inside the top band");
-    assert!(app.command_palette.is_open());
+    assert!(app.interaction.command_palette.is_open());
 }
 
 /// App tests hold no renderer, so this pins the sync call site: every window's renderer gets the
@@ -85,7 +85,7 @@ fn reload_changes_the_strip_font_scale_in_every_window() {
         assert!(strip.visible, "the strip is shown in every window");
         assert!((strip.font_scale - 0.8).abs() < 1e-6, "{strip:?}");
     }
-    let before = windows.map(|id| asks(&app.windows[&id]));
+    let before = windows.map(|id| asks(&app.registry.windows[&id]));
     std::fs::write(&path, "[status_line]\nenabled = true\nfont_scale = 0.6\n").unwrap();
     app.force_reload_config();
     {
@@ -96,7 +96,11 @@ fn reload_changes_the_strip_font_scale_in_every_window() {
     for (index, id) in windows.into_iter().enumerate() {
         let strip = recorded_strip(&app, id);
         assert!((strip.font_scale - 0.6).abs() < 1e-6, "window {index}: {strip:?}");
-        assert_eq!(asks(&app.windows[&id]) - before[index], 1, "window {index} redraws once");
+        assert_eq!(
+            asks(&app.registry.windows[&id]) - before[index],
+            1,
+            "window {index} redraws once"
+        );
     }
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

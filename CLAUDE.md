@@ -125,6 +125,7 @@ python3 scripts/local-gate.py
 | `source-size` | `python3 scripts/check-source-size.py` | macOS, Windows, Linux | `local` | `python` | `tooling` |
 | `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `app-library-clippy` | `cargo clippy --locked -p sonicterm-app --lib -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
@@ -140,6 +141,7 @@ python3 scripts/local-gate.py
 | `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `macos-gate-custody` | `python3 scripts/local-gate_tests.py RunnerTests.test_a_zombie_only_group_kill_is_refused_on_macos_and_the_step_is_still_reaped` | macOS | `local` | `bash` | `macos-core` |
 | `workflow-syntax` | `actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml` | macOS, Windows, Linux | `local` | `actionlint` | `tooling` |
+| `native-dependency-delta` | `python3 scripts/native-dependency-delta.py --with-tests` | macOS, Windows, Linux | `local` | `python`, `network` | `tooling` |
 | `cargo-deny` | `cargo deny --locked check` | macOS, Windows, Linux | `local` | `rust`, `cargo-deny` | `linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests-workspace`, `linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-workspace`, `linux-core` |
@@ -193,6 +195,7 @@ Needs:
 - `pwsh`: PowerShell 7 (`pwsh`) on `PATH`.
 - `llvm-cov`: `cargo-llvm-cov` at the version `scripts/pinned-tools.json` pins.
 - `cargo-deny`: `cargo-deny` at the version `scripts/pinned-tools.json` pins, and network access for its advisory database.
+- `network`: network access to the pinned upstream archives `scripts/native-dependencies.json` lists.
 - `win-target`: the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).
 - `warp`: a DX12 WARP adapter with allocator reporting.
 - Every step also needs Git and Python 3 on `PATH`.
@@ -379,8 +382,9 @@ a reproduction.
     `--short --runs 5 --counters --counters-runs 2` and a release profile without
     LTO (the same for both refs). Under `--short` a variant whose `--list` entry
     declares `run_caps` takes min(requested, cap) runs per side in every set
-    (`S2/flood` 2, `S1/atlas-retry` 2, `S6/rest` 2, `S11/release` 1, `S1/status-line` 1 and
-    `S12/status-line` 1 on both platforms, `S11/gdi` and `S11/wgpu` 2 on Windows),
+    (`S7` 3, `S2/flood` 2, `S1/atlas-retry` 2, `S6/rest` 2, `S11/release` 1, `S1/status-line` 1,
+    `S12/status-line` 1, `S13/default` 1 and `S13/sustained-4` 1 on both platforms, `S11/gdi` and
+    `S11/wgpu` 2 on Windows),
     its rows read `(runs N of M)`, and release runs are uncapped. One macOS job
     builds both refs once; three macOS
     shards measure its binaries, bound to the run, attempt and manifest digest;

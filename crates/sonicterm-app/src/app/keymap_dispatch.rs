@@ -64,7 +64,7 @@ const _: () = {
 impl App {
     /// Arm or confirm keyboard quit on the live source window without changing frontmost routing.
     pub(super) fn on_quit_chord_pressed(&mut self, win_id: WindowId, is_repeat: bool) -> bool {
-        if !self.windows.contains_key(&win_id) {
+        if !self.registry.windows.contains_key(&win_id) {
             // When: win_id is stale, it cannot arm a quit prompt on another window.
             return false;
         }
@@ -193,6 +193,7 @@ impl App {
                 .and_then(|main| main.copy_mode.as_ref())
                 .is_some_and(|mode| mode.is_read_only()),
             FrontmostKind::Child(id) => self
+                .registry
                 .windows
                 .get(&id)
                 .and_then(|child| child.copy_mode.as_ref())
@@ -211,7 +212,9 @@ impl App {
         let _ = self.clear_stale_frontmost();
         let field_window = match self.frontmost_kind() {
             FrontmostKind::Child(id) => Some(id),
-            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => self.main_window_id,
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                self.registry.main_window_id
+            }
         };
         if field_window.is_some_and(|id| self.run_field_clipboard_action(action, id)) {
             // When: run_field_clipboard_action accepts field_window's copy or paste, READONLY and terminal routing never see it.
@@ -262,7 +265,7 @@ impl App {
                     }
                     // Child vanished between focus and dispatch — clear
                     // tracker and fall through.
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 let tab_number = self.main_tabs().map(|tabs| tabs.len() + 1).unwrap_or(1);
                 self.new_tab(format!("shell {tab_number}"));
@@ -283,7 +286,7 @@ impl App {
                         // When: close_active_tab_in_child succeeds for id, the child fully consumed CloseTab.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 let tab_index = self.main_tabs().map(|tabs| tabs.active_index()).unwrap_or(0);
                 self.close_tab_at(tab_index);
@@ -300,7 +303,7 @@ impl App {
                         // When: next_tab_in_child succeeds for id, the child fully consumed NextTab.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.next_main_tab();
             }
@@ -315,7 +318,7 @@ impl App {
                         // When: prev_tab_in_child succeeds for id, the child fully consumed PrevTab.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.prev_main_tab();
             }
@@ -331,7 +334,7 @@ impl App {
                         // When: activate_tab_in_child succeeds for id and tab_index, the child consumed ActivateTab.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.activate_main_tab(*tab_index);
             }
@@ -343,7 +346,7 @@ impl App {
                         // When: activate_last_tab_in_child succeeds for id, the child consumed ActivateLastTab.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.activate_last_main_tab();
             }
@@ -392,7 +395,7 @@ impl App {
                         // When: close_active_pane_in_child succeeds for id, the child consumed ClosePane.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.close_active_pane();
             }
@@ -408,7 +411,7 @@ impl App {
                         // When: close_active_pane_or_tab_in_child succeeds, the child consumed the close.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 // iTerm2/wezterm-style Cmd+W: when the active tab has more
                 // than one pane, close just the focused pane; otherwise
@@ -423,7 +426,7 @@ impl App {
                     let tab_index = main.map(|window| window.tabs.active_index()).unwrap_or(0);
                     let pane_count = main
                         .and_then(|window| window.tab_states.get(tab_index))
-                        .map(|tab| tab.tree.leaves().len())
+                        .map(|tab| tab.tree.leaf_count())
                         .unwrap_or(0);
                     (tab_index, pane_count)
                 };
@@ -449,7 +452,7 @@ impl App {
                         // When: toggle_active_pane_zoom_in_child succeeds, the child consumed TogglePaneZoom.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.toggle_active_pane_zoom();
             }
@@ -487,7 +490,7 @@ impl App {
                         // When: focus_pane_dir_in_child succeeds for id and direction, the child consumed FocusPane.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.focus_pane_dir(*direction);
             }
@@ -504,7 +507,7 @@ impl App {
                         // When: resize_active_split_in_child succeeds Left, the child consumed ResizePaneLeft.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.resize_active_split(Direction::Left);
             }
@@ -521,7 +524,7 @@ impl App {
                         // When: resize_active_split_in_child succeeds Right, the child consumed ResizePaneRight.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.resize_active_split(Direction::Right);
             }
@@ -538,7 +541,7 @@ impl App {
                         // When: resize_active_split_in_child succeeds Up, the child consumed ResizePaneUp.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.resize_active_split(Direction::Up);
             }
@@ -555,7 +558,7 @@ impl App {
                         // When: resize_active_split_in_child succeeds Down, the child consumed ResizePaneDown.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.resize_active_split(Direction::Down);
             }
@@ -570,7 +573,7 @@ impl App {
                         // When: open_search_in_child succeeds for id, the child consumed OpenSearch.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 self.open_search();
             }
@@ -595,7 +598,7 @@ impl App {
                 let target = match self.frontmost_kind() {
                     FrontmostKind::Child(id) => Some(id),
                     FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
-                        self.main_window_id
+                        self.registry.main_window_id
                     }
                 };
                 if let Some(target) = target {
@@ -619,7 +622,7 @@ impl App {
             Action::RenameWindow => {
                 let target = match self.frontmost_kind() {
                     FrontmostKind::Child(id) => Some(id),
-                    _ => self.main_window_id,
+                    _ => self.registry.main_window_id,
                 };
                 if let Some(id) = target {
                     self.start_rename_window(id);
@@ -629,7 +632,7 @@ impl App {
             Action::NewWindow => {
                 let source = match self.frontmost_kind() {
                     FrontmostKind::Child(id) => Some(id),
-                    FrontmostKind::Main => self.main_window_id,
+                    FrontmostKind::Main => self.registry.main_window_id,
                     FrontmostKind::None | FrontmostKind::Other => None,
                 };
                 self.pending_new_window = Some(self.window_request(source));
@@ -649,7 +652,7 @@ impl App {
                 let source_window = match self.frontmost_kind() {
                     FrontmostKind::Child(id) => Some(id),
                     FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
-                        self.main_window_id
+                        self.registry.main_window_id
                     }
                 };
                 if let Some(source_window) = source_window {
@@ -700,7 +703,7 @@ impl App {
                         // When: routed is true, at least one child resize consumed the action.
                         return true;
                     }
-                    self.frontmost_window = None;
+                    self.registry.frontmost_window = None;
                 }
                 for _ in 0..*amount {
                     self.resize_active_split(*dir);
@@ -729,16 +732,16 @@ impl App {
         true
     }
 
-    /// Classify an explicit window id (rather than `self.frontmost_window`).
+    /// Classify an explicit window id (rather than `self.registry.frontmost_window`).
     /// Mirrors [`Self::frontmost_kind`] but takes the id from the caller —
     /// used by [`Self::run_action_for_window`] to route a keyboard chord
     /// to the window that produced it.
     pub(super) fn kind_for(&self, id: WindowId) -> FrontmostKind {
-        if self.main_window_id == Some(id) && self.windows.contains_key(&id) {
+        if self.registry.main_window_id == Some(id) && self.registry.windows.contains_key(&id) {
             // When: main_window_id matches a live windows entry, native handle readiness cannot change its routing identity.
             return FrontmostKind::Main;
         }
-        if self.windows.contains_key(&id) {
+        if self.registry.windows.contains_key(&id) {
             // When: windows contains id, classify the explicit source as Child.
             return FrontmostKind::Child(id);
         }
@@ -748,12 +751,14 @@ impl App {
     fn toggle_fullscreen_for(&mut self, kind: FrontmostKind) {
         if let FrontmostKind::Child(id) = kind {
             // When: kind is FrontmostKind::Child(id), toggle that window before falling back.
-            if let Some(window) = self.windows.get(&id).and_then(|child| child.window.as_ref()) {
+            if let Some(window) =
+                self.registry.windows.get(&id).and_then(|child| child.window.as_ref())
+            {
                 // When: child.window is Some(window), toggle it and finish child routing.
                 toggle_window_fullscreen(window);
                 return;
             }
-            self.frontmost_window = None;
+            self.registry.frontmost_window = None;
         }
         if let Some(window) = self.main_window() {
             // The main fallback toggles its available window.

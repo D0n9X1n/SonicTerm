@@ -21,7 +21,7 @@ impl App {
     /// returns whether the press was consumed before pane input.
     pub(super) fn handle_child_left_press_chrome(&mut self, win_id: WindowId) -> bool {
         let cursor_pos =
-            self.windows.get(&win_id).map(|child| child.cursor_pos).unwrap_or((0.0, 0.0));
+            self.registry.windows.get(&win_id).map(|child| child.cursor_pos).unwrap_or((0.0, 0.0));
         if self.dismiss_notification_at(
             FrontmostKind::Child(win_id),
             cursor_pos.0 as f32,
@@ -36,6 +36,7 @@ impl App {
             return true;
         }
         let (cursor_x, cursor_y) = self
+            .registry
             .windows
             .get(&win_id)
             .map(|child| (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32))
@@ -48,7 +49,7 @@ impl App {
             HitOutcome::StartDrag(state) => {
                 // When: `StartDrag` — the press landed on the thumb, so
                 // a drag is armed and tracked until release.
-                if let Some(child) = self.windows.get_mut(&win_id) {
+                if let Some(child) = self.registry.windows.get_mut(&win_id) {
                     child.mouse_down = true;
                     child.begin_scrollbar_drag(
                         state,
@@ -76,7 +77,7 @@ impl App {
         if let Some(hit) = self.splitter_hit_at_in_child(win_id, cursor_x, cursor_y) {
             // When: `splitter_hit_at_in_child` reports a `hit`, so the
             // press begins a divider drag instead of a selection.
-            if let Some(child) = self.windows.get_mut(&win_id) {
+            if let Some(child) = self.registry.windows.get_mut(&win_id) {
                 child.splitter_drag = Some(super::SplitterDragState {
                     splitter: hit.id,
                     axis: hit.axis,
@@ -94,11 +95,12 @@ impl App {
         // come from one device-pixel-snapped renderer snapshot.
         {
             let pixel_target = self
+                .registry
                 .windows
                 .get(&win_id)
                 .and_then(|child| child.renderer.as_ref())
                 .and_then(|renderer| renderer.pixel_to_pane_cell(cursor_x, cursor_y));
-            let geometry_pane = self.windows.get(&win_id).and_then(|child| {
+            let geometry_pane = self.registry.windows.get(&win_id).and_then(|child| {
                 let rects = App::compute_pane_rects_for(child);
                 pane_id_at_point(&rects, cursor_x, cursor_y).or_else(|| {
                     let tab_idx = child.tabs.active_index();
@@ -114,7 +116,7 @@ impl App {
                 });
                 if let Some(pane_id) = pane_id.filter(|_| opened) {
                     // When: `pane_id` survives the `opened` filter, focus and flash that exact pane before consuming the click.
-                    if let Some(child) = self.windows.get_mut(&win_id) {
+                    if let Some(child) = self.registry.windows.get_mut(&win_id) {
                         child.mouse_down = false;
                         if let Some(change) = child.begin_pointer_pane_focus_change(pane_id) {
                             child.finish_pointer_pane_focus_change(change);
@@ -136,31 +138,40 @@ impl App {
     ) -> bool {
         // A splitter drag in flight resizes the divider, ahead of the
         // scrollbar and selection paths.
-        let splitter_dragging =
-            self.windows.get(&win_id).map(|child| child.splitter_drag.is_some()).unwrap_or(false);
+        let splitter_dragging = self
+            .registry
+            .windows
+            .get(&win_id)
+            .map(|child| child.splitter_drag.is_some())
+            .unwrap_or(false);
         if splitter_dragging {
             // When: `splitter_dragging` — the pointer is moving a divider,
             // so the move resizes panes rather than hovering or selecting.
             let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
-            if let Some(child) = self.windows.get_mut(&win_id) {
+            if let Some(child) = self.registry.windows.get_mut(&win_id) {
                 child.cursor_pos = (position.x, position.y);
             }
             self.apply_splitter_drag_in_child(win_id, cursor_x, cursor_y);
             return true;
         }
-        let dragging =
-            self.windows.get(&win_id).map(|child| child.scrollbar_drag.is_some()).unwrap_or(false);
+        let dragging = self
+            .registry
+            .windows
+            .get(&win_id)
+            .map(|child| child.scrollbar_drag.is_some())
+            .unwrap_or(false);
         if dragging {
             // When: `dragging` — a scrollbar thumb is held, so the move
             // scrolls that pane instead of updating hover state.
             let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
-            if let Some(child) = self.windows.get_mut(&win_id) {
+            if let Some(child) = self.registry.windows.get_mut(&win_id) {
                 child.cursor_pos = (position.x, position.y);
             }
             if let Some((pane_id, new_top)) =
                 self.scrollbar_drag_apply_in_child(win_id, cursor_x, cursor_y)
             {
                 let (live_top, at) = self
+                    .registry
                     .windows
                     .get(&win_id)
                     .and_then(|child| child.panes.get(&pane_id))
@@ -180,9 +191,10 @@ impl App {
         // cursor. Done here (free `self`) before the dispatcher's main match
         // re-borrows `child`. Mouse-down selection-drag runs later, in
         // `handle_child_cursor_moved` (it needs the renderer borrow).
-        let mouse_down = self.windows.get(&win_id).map(|child| child.mouse_down).unwrap_or(false);
+        let mouse_down =
+            self.registry.windows.get(&win_id).map(|child| child.mouse_down).unwrap_or(false);
         if !mouse_down {
-            if let Some(child) = self.windows.get_mut(&win_id) {
+            if let Some(child) = self.registry.windows.get_mut(&win_id) {
                 child.cursor_pos = (position.x, position.y);
             }
             self.refresh_child_splitter_hover(win_id, position.x as f32, position.y as f32);
@@ -301,7 +313,7 @@ impl App {
         position: PhysicalPosition<f64>,
         config: &Config,
     ) {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so this child closed and
             // no hover or selection state remains to update.
             return;
@@ -317,9 +329,7 @@ impl App {
         } else {
             // When: `child.mouse_down` is false, child chrome may suppress no-button terminal motion.
             let scrollbar_owned = pointer_cell.is_some_and(|cell| {
-                let pane = App::compute_pane_rects_for(child)
-                    .into_iter()
-                    .find_map(|(id, rect)| (id == cell.pane_id).then_some(rect));
+                let pane = App::pane_rect_for(child, cell.pane_id);
                 pane.is_some_and(|pane| {
                     let (edge_active, visible) =
                         child.scrollbar_vis.get(&cell.pane_id).map_or((false, false), |state| {
@@ -328,32 +338,11 @@ impl App {
                                 state.alpha > crate::app::scrollbar_visibility::ALPHA_EMIT_FLOOR,
                             )
                         });
-                    let (content, gutter_width) = child.renderer.as_ref().map_or(
-                        (pane, crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX),
-                        |renderer| {
-                            let content = super::window_event::pointer_scrollbar_content_rect(
-                                pane,
-                                [
-                                    renderer.padding_left_px(),
-                                    renderer.padding_right_px(),
-                                    renderer.padding_top_px(),
-                                    renderer.padding_bottom_px(),
-                                ],
-                                renderer.cell_size(),
-                            );
-                            (
-                                content,
-                                crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX
-                                    * renderer.scale_factor(),
-                            )
-                        },
-                    );
-                    super::window_event::native_scrollbar_owns_pointer(
+                    super::window_event::pane_scrollbar_owns_pointer(
                         config.appearance.scrollbar,
-                        content,
-                        position.x as f32,
-                        position.y as f32,
-                        gutter_width,
+                        pane,
+                        child.renderer.as_ref().map(super::window_event::ScrollbarMetrics::of),
+                        (position.x as f32, position.y as f32),
                         edge_active,
                         visible,
                     )
@@ -423,7 +412,7 @@ impl App {
             // When: `apply_tab_motion` took the move for the tab gesture, so the local selection does not extend.
             return;
         }
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so no selection remains to extend.
             return;
         };
@@ -442,7 +431,7 @@ impl App {
         win_id: WindowId,
         state: ElementState,
     ) {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so this child closed and
             // has no gesture state left to begin or resolve.
             return;
@@ -463,7 +452,7 @@ impl App {
                     let _ = child;
                     self.apply_tab_press(win_id, tab_press);
                     let repaint = tab_press != TabPress::OpenSelector;
-                    if let Some(child) = self.windows.get(&win_id).filter(|_| repaint) {
+                    if let Some(child) = self.registry.windows.get(&win_id).filter(|_| repaint) {
                         child.request_window_redraw();
                     }
                     return;
@@ -669,3 +658,7 @@ fn child_pane_at_cursor(child: &WindowState, cursor_x: f32, cursor_y: f32) -> Op
     }
     None
 }
+
+#[cfg(test)]
+#[path = "child_window_pointer_tests.rs"]
+mod child_window_pointer_tests;

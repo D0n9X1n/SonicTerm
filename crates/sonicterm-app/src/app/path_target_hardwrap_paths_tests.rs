@@ -119,17 +119,17 @@ fn structural_boundaries_resolve_real_files_and_revoke_changed_cwd() {
     let cwd = local_file_uri(&uri_path).unwrap();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main boundaries");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child boundaries"]);
     for window in [main, child] {
-        let pane = *app.windows[&window].panes.keys().next().unwrap();
-        app.frontmost_window = Some(window);
-        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        let pane = *app.registry.windows[&window].panes.keys().next().unwrap();
+        app.registry.frontmost_window = Some(window);
+        app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
             winit::keyboard::ModifiersState::SUPER
         } else {
             winit::keyboard::ModifiersState::CONTROL
         };
-        app.windows[&window].panes[&pane].parser.lock().resize(120, 8);
+        app.registry.windows[&window].panes[&pane].parser.lock().resize(120, 8);
         for (text, path, col) in [
             ("前文 【reports/flight.html】，正文", "reports/flight.html", 8),
             ("前文 (reports/flight.md)，正文", "reports/flight.md", 8),
@@ -143,24 +143,37 @@ fn structural_boundaries_resolve_real_files_and_revoke_changed_cwd() {
             };
             let selection = probe_candidates(&key.candidates, classify_local_target).unwrap();
             assert_eq!(selection.candidate.resolved_path, root.join(path));
-            let request =
-                app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+            let request = app
+                .registry
+                .windows
+                .get_mut(&window)
+                .unwrap()
+                .path_probe
+                .request(key.clone())
+                .unwrap();
             let result = PathProbeResult { request, selection: Some(selection), failure: None };
-            assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+            assert!(app
+                .registry
+                .windows
+                .get_mut(&window)
+                .unwrap()
+                .path_probe
+                .accept(&result, Some(&key)));
             app.apply_target_hover(window, Some(snapshot));
             assert_eq!(
-                PathBuf::from(&app.windows[&window].link_preview.as_ref().unwrap().uri),
+                PathBuf::from(&app.registry.windows[&window].link_preview.as_ref().unwrap().uri),
                 root.join(path)
             );
-            assert!(app.windows[&window].path_probe.authorized(&key, true));
+            assert!(app.registry.windows[&window].path_probe.authorized(&key, true));
             let change = format!("\x1b]7;{cwd}/other\x1b\\");
             assert!(app.__test_advance_child_pane_parser(window, pane, change.as_bytes()));
             let changed = app.cell_target_at(window, pane, 0, col).unwrap();
             let ResolvedCellTarget::Path(changed_key) = changed.target else {
                 panic!("changed path")
             };
-            assert!(!app.windows[&window].path_probe.authorized(&changed_key, true));
+            assert!(!app.registry.windows[&window].path_probe.authorized(&changed_key, true));
             assert!(!app
+                .registry
                 .windows
                 .get_mut(&window)
                 .unwrap()

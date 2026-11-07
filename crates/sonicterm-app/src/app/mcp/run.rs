@@ -166,9 +166,7 @@ impl App {
             // When: `authorize_control` refused the pane, nothing runs.
             return refusal.reply();
         }
-        let Some(entry) =
-            self.mcp_pane_entries().into_iter().find(|entry| entry.pane_id == pane_id)
-        else {
+        let Some(entry) = self.mcp_resolve_pane(pane_id) else {
             // When: the pane has no entry, it is gone.
             return Refusal::PaneGone.reply();
         };
@@ -198,9 +196,7 @@ impl App {
         command: &str,
     ) -> Result<u64, Refusal> {
         let (last_typing, queued) = self
-            .windows
-            .values()
-            .find_map(|window| window.panes.get(&pane_id))
+            .pane_by_id(pane_id)
             .map(|pane| {
                 let queued = pane.pty.as_ref().is_some_and(|pty| {
                     let diagnostics = pty.input_diagnostics();

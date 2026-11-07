@@ -46,12 +46,16 @@ pub(crate) struct AboutState {
 impl App {
     /// The About window, if one is open.
     pub(crate) fn about_window_id(&self) -> Option<WindowId> {
-        self.windows.iter().find(|(_, window)| window.role == WindowRole::About).map(|(id, _)| *id)
+        self.registry
+            .windows
+            .iter()
+            .find(|(_, window)| window.role == WindowRole::About)
+            .map(|(id, _)| *id)
     }
 
     /// Whether `id` is the About window.
     pub(crate) fn is_about_window(&self, id: WindowId) -> bool {
-        self.windows.get(&id).is_some_and(|window| window.role == WindowRole::About)
+        self.registry.windows.get(&id).is_some_and(|window| window.role == WindowRole::About)
     }
 
     /// Run `show_about`: focus and refresh the open About window, or request one.
@@ -61,10 +65,12 @@ impl App {
             self.about.open_requested = true;
             return;
         };
-        if let Some(window) = self.windows.get(&about_id).and_then(|state| state.window.as_ref()) {
+        if let Some(window) =
+            self.registry.windows.get(&about_id).and_then(|state| state.window.as_ref())
+        {
             window.focus_window();
         }
-        self.frontmost_window = Some(about_id);
+        self.registry.frontmost_window = Some(about_id);
         self.refresh_about();
     }
 
@@ -119,11 +125,13 @@ impl App {
             return;
         };
         // The width and the size generation are read under one lock, so they describe one grid.
-        let (pane_cols, size) =
-            self.windows.get(&about_id).and_then(about_pane).map_or((u16::MAX, None), |pane| {
+        let (pane_cols, size) = self.registry.windows.get(&about_id).and_then(about_pane).map_or(
+            (u16::MAX, None),
+            |pane| {
                 let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                 (parser.grid().cols, Some(parser.grid().size_generation()))
-            });
+            },
+        );
         let view = render(&self.collect_about_facts(), &self.about_labels(), pane_cols);
         if self.feed_report_pane(about_id, &view.text) {
             self.about.view = Some(view);
@@ -135,12 +143,13 @@ impl App {
     /// height: a native resize, a font zoom or reset, a reload or a DPI change all resize it first.
     /// An unchanged grid costs one lock and one comparison.
     pub(crate) fn relayout_about_if_resized(&mut self) {
-        let size =
-            self.about_window_id().and_then(|id| self.windows.get(&id)).and_then(about_pane).map(
-                |pane| {
-                    crate::app::frame_counters::lock_parser(&pane.parser).grid().size_generation()
-                },
-            );
+        let size = self
+            .about_window_id()
+            .and_then(|id| self.registry.windows.get(&id))
+            .and_then(about_pane)
+            .map(|pane| {
+                crate::app::frame_counters::lock_parser(&pane.parser).grid().size_generation()
+            });
         if size.is_some() && size != self.about.laid_out_size {
             // The rows were laid out for another grid size, so they are laid out again for this one.
             self.refresh_about();
@@ -226,11 +235,13 @@ impl App {
     /// The facts the About window shows, read from the running app.
     pub(super) fn collect_about_facts(&self) -> AboutFacts {
         let renderer = self
+            .registry
             .main_window_id
-            .and_then(|id| self.windows.get(&id))
+            .and_then(|id| self.registry.windows.get(&id))
             .and_then(|window| window.renderer.as_ref())
             .or_else(|| {
-                self.windows
+                self.registry
+                    .windows
                     .values()
                     .filter(|window| window.role == WindowRole::Terminal)
                     .find_map(|window| window.renderer.as_ref())
@@ -329,7 +340,7 @@ impl App {
     pub(crate) fn about_copy_at(&mut self, row: u16, col: u16) -> bool {
         let hit = self
             .about_window_id()
-            .and_then(|id| self.windows.get(&id))
+            .and_then(|id| self.registry.windows.get(&id))
             .zip(self.about.view.as_ref())
             .is_some_and(|(window, view)| about_button_hit(window, &view.button_label, row, col));
         if !hit {

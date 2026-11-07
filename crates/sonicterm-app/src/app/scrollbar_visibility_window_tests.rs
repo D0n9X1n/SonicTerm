@@ -11,9 +11,9 @@ fn focus_loss_during_a_drag_and_a_drag_cancel_each_start_a_fade() {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.config.appearance.scrollbar = ScrollbarMode::Auto;
         let pane = app.__test_seed_tab("drag");
-        let main = app.main_window_id.expect("seeded main window");
+        let main = app.registry.main_window_id.expect("seeded main window");
         let started = at(2, Instant::now());
-        let window = app.windows.get_mut(&main).unwrap();
+        let window = app.registry.windows.get_mut(&main).unwrap();
         window.scrollbar_drag = Some(drag_state(pane));
         let mut state = ScrollbarVisState::new(started);
         note_activity(&mut state, started);
@@ -25,7 +25,7 @@ fn focus_loss_during_a_drag_and_a_drag_cancel_each_start_a_fade() {
         } else {
             app.handle_window_focus_changed(main, false);
         }
-        let window = &app.windows[&main];
+        let window = &app.registry.windows[&main];
         assert!(window.scrollbar_drag.is_none(), "cancel {cancel}");
         let state = window.scrollbar_vis[&pane];
         assert_eq!(state.target, 0.0, "cancel {cancel}: the hold ended");
@@ -185,17 +185,21 @@ fn releasing_a_settled_drag_over_text_requests_the_fade_frame_in_main_and_child(
         let (mut app, window_id, pane, before) = settled_drag(child);
         let release = Instant::now();
         assert!(app
+            .registry
             .windows
             .get_mut(&window_id)
             .unwrap()
             .end_scrollbar_drag(ScrollbarMode::Auto, release));
-        let window = &app.windows[&window_id];
+        let window = &app.registry.windows[&window_id];
         let state = window.scrollbar_vis[&pane];
         assert_eq!((state.alpha, state.target), (1.0, 0.0), "child {child}");
         assert!(window.redraw.request_in_flight, "child {child}: the release requested a frame");
         assert_ne!(window.redraw.snapshot(), before, "child {child}: a scrollbar cause is marked");
         frames_until_settled(&mut app, window_id, pane, release + FRAME);
-        assert_eq!(app.windows[&window_id].scrollbar_vis[&pane].alpha, 0.0, "child {child}");
+        assert_eq!(
+            app.registry.windows[&window_id].scrollbar_vis[&pane].alpha, 0.0,
+            "child {child}"
+        );
     }
     for handler in [include_str!("window_pointer.rs"), include_str!("child_window_pointer.rs")] {
         assert!(handler.replace("\r\n", "\n").contains(".end_scrollbar_drag("));
@@ -212,7 +216,7 @@ fn focus_loss_and_a_drag_cancel_request_the_fade_frame() {
         } else {
             app.handle_window_focus_changed(window_id, false);
         }
-        let window = &app.windows[&window_id];
+        let window = &app.registry.windows[&window_id];
         assert!(window.scrollbar_drag.is_none(), "cancel {cancel}");
         assert_eq!(window.scrollbar_vis[&pane].target, 0.0, "cancel {cancel}");
         assert!(window.redraw.request_in_flight, "cancel {cancel}: a frame was requested");
@@ -323,10 +327,11 @@ fn crossing_the_edge_band_asks_for_one_redraw_each_way_in_main_and_child() {
 
         assert_eq!(hover_to(&mut app, window_id, child, edge), (1, true), "child {child}: entry");
         present(&mut app, window_id, pane);
-        let state = app.windows.get_mut(&window_id).unwrap().scrollbar_vis.get_mut(&pane).unwrap();
+        let state =
+            app.registry.windows.get_mut(&window_id).unwrap().scrollbar_vis.get_mut(&pane).unwrap();
         state.last_active = Some(at(2, Instant::now()));
         assert_eq!(hover_to(&mut app, window_id, child, away), (1, true), "child {child}: exit");
-        assert_eq!(app.windows[&window_id].scrollbar_vis[&pane].target, 0.0);
+        assert_eq!(app.registry.windows[&window_id].scrollbar_vis[&pane].target, 0.0);
 
         present(&mut app, window_id, pane);
         assert_eq!(

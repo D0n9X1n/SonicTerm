@@ -150,7 +150,7 @@ impl App {
         id: WindowId,
         source: Box<dyn DisplayLinkSource>,
     ) {
-        if let Some(window) = self.windows.get_mut(&id) {
+        if let Some(window) = self.registry.windows.get_mut(&id) {
             window.display_link.source = Some(source);
             window.display_link.native_generation = None;
             window.push_preferred_period();
@@ -161,7 +161,8 @@ impl App {
     /// event-loop proxy. Only macOS installs one, and only from macOS 14; every other window keeps
     /// the timer path. A window that already has a source keeps it.
     pub(super) fn install_native_display_link(&mut self, id: WindowId) {
-        if self.windows.get(&id).is_none_or(|window| window.display_link.source.is_some()) {
+        if self.registry.windows.get(&id).is_none_or(|window| window.display_link.source.is_some())
+        {
             // When: `id` is gone or already has a source, a second link would duplicate its ticks.
             return;
         }
@@ -176,7 +177,7 @@ impl App {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let mtm = objc2::MainThreadMarker::new()?;
         let proxy = self.event_loop_proxy.clone()?;
-        let window = self.windows.get(&id)?;
+        let window = self.registry.windows.get(&id)?;
         let handle = window.window.as_ref()?.window_handle().ok()?;
         let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
             // When: the handle is not AppKit's, there is no NSView to take a link from.
@@ -199,7 +200,7 @@ impl App {
     /// Start or pause every window's display link from its pending admission's mode.
     pub(super) fn sync_display_links(&mut self) {
         let software = self.software_render_degrade;
-        for window in self.windows.values_mut() {
+        for window in self.registry.windows.values_mut() {
             window.sync_display_link(software);
         }
     }
@@ -214,7 +215,7 @@ impl App {
     ) {
         let software = self.software_render_degrade;
         let now = self.dispatch_now();
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` closed after its tick was queued, no other window may take the tick.
             tracing::trace!(
                 ?id,
@@ -251,7 +252,7 @@ impl App {
         let turning_on = degrade && !self.software_render_degrade;
         self.software_render_degrade = degrade;
         if turning_on {
-            for window in self.windows.values_mut() {
+            for window in self.registry.windows.values_mut() {
                 window.redraw.invalidate_link_pacing();
             }
         }

@@ -57,7 +57,7 @@ fn malformed_run_arguments_are_refused() {
     // Each refusal exits 2 before any window opens, so a typo never measures the wrong thing.
     let cases: &[&[&str]] = &[
         &[],
-        &["S13", "/tmp/perf"],
+        &["S14", "/tmp/perf"],
         &["S1", "--variant", "flood", "/tmp/perf"],
         &["S1", "--variant"],
         &["S1"],

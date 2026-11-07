@@ -148,7 +148,7 @@ impl App {
     /// Carry out a routed press on `window`'s bar: select the tab, close it or open the
     /// overflow selector. The main window and a child select and close through their own paths.
     pub(super) fn apply_tab_press(&mut self, window: WindowId, press: TabPress) {
-        let is_main = Some(window) == self.main_window_id;
+        let is_main = Some(window) == self.registry.main_window_id;
         match press {
             TabPress::Miss => {
                 // When: `press` is Miss, the pointer missed the bar, so nothing on it changes.
@@ -156,7 +156,7 @@ impl App {
             TabPress::Activate(tab_index) => {
                 if is_main {
                     self.activate_main_tab(tab_index);
-                } else if let Some(state) = self.windows.get_mut(&window) {
+                } else if let Some(state) = self.registry.windows.get_mut(&window) {
                     // When: `window` is a child still in `windows`; it selects its own tab and resizes its panes.
                     state.tabs.activate(tab_index);
                     resize_visible_panes_in_child(state);
@@ -196,7 +196,7 @@ impl App {
             }
             TabMotion::Drag { chip, seek_target } => {
                 if let Some(renderer) =
-                    self.windows.get_mut(&window).and_then(|state| state.renderer.as_mut())
+                    self.registry.windows.get_mut(&window).and_then(|state| state.renderer.as_mut())
                 {
                     renderer.set_drag_chip(chip);
                 }
@@ -208,19 +208,19 @@ impl App {
             // When: `seek_target` is false, the button is up, so pane input runs.
             return false;
         }
-        let is_main = Some(window) == self.main_window_id;
+        let is_main = Some(window) == self.registry.main_window_id;
         let target = if is_main {
             self.compute_main_drag_target(position)
         } else {
             // When: `is_main` is false, so drop targets are searched from the child `window`.
             self.compute_child_drag_target(window, position)
         };
-        if let Some(state) = self.windows.get_mut(&window) {
+        if let Some(state) = self.registry.windows.get_mut(&window) {
             state.drag_target = target;
         }
-        if is_main && !self.os_drag_handoff_started {
+        if is_main && !self.interaction.os_drag_handoff_started {
             // When: `is_main` and `os_drag_handoff_started` is false, test once whether the drag crossed the OS threshold.
-            let started_index = self.windows.get(&window).and_then(|state| {
+            let started_index = self.registry.windows.get(&window).and_then(|state| {
                 state
                     .drag_session
                     .as_ref()
@@ -231,11 +231,11 @@ impl App {
             });
             if let Some(index) = started_index {
                 // When: `started_index` is Some, hand this tab gesture to the OS backend once.
-                self.os_drag_handoff_started = true;
+                self.interaction.os_drag_handoff_started = true;
                 let _ = self.try_os_drag_handoff(index);
             }
         }
-        if let Some(state) = self.windows.get(&window) {
+        if let Some(state) = self.registry.windows.get(&window) {
             state.request_window_redraw();
         }
         true

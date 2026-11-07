@@ -20,7 +20,8 @@ impl App {
         viewport_row: u16,
         col: u16,
     ) -> Result<Option<CellTargetSnapshot>, ()> {
-        let Some(pane) = self.windows.get(&window_id).and_then(|window| window.panes.get(&pane_id))
+        let Some(pane) =
+            self.registry.windows.get(&window_id).and_then(|window| window.panes.get(&pane_id))
         else {
             // When: the owning pane is gone, this is genuine absence rather than transient parser contention.
             return Ok(None);
@@ -330,7 +331,7 @@ impl App {
     }
 
     pub(super) fn pointer_target_cell(&self, window_id: WindowId) -> Option<(u64, u16, u16)> {
-        let window = self.windows.get(&window_id)?;
+        let window = self.registry.windows.get(&window_id)?;
         let (cursor_x_px, cursor_y_px) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
         let (rendered_pane, row, col) = match window.renderer.as_ref() {
             Some(renderer) => renderer.pixel_to_pane_cell(cursor_x_px, cursor_y_px)?,
@@ -338,7 +339,7 @@ impl App {
         };
         let pane_id = if rendered_pane == 0 {
             // When: `rendered_pane` is zero, use `main_window_id` geometry for the main `window_id` and child geometry otherwise.
-            if Some(window_id) == self.main_window_id {
+            if Some(window_id) == self.registry.main_window_id {
                 self.pane_at_cursor(cursor_x_px, cursor_y_px)?
             } else {
                 super::super::pane_id_at_point(

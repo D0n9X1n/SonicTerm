@@ -74,7 +74,7 @@ fn the_owners_take_freezes_and_transfers_exactly_once() {
     assert_eq!(app.take_echo_timeline_v1(u64::MAX, token), EchoTimelineTakeV1::NoPane);
     assert!(matches!(app.take_echo_watch(pane_id, token), TakeOutcome::Trace(_)));
     assert_eq!(watch.peek_timeline(), "frozen", "the owner's take froze the record");
-    assert!(app.windows[&main].redraw.timeline.owner.is_none(), "and ended the owner");
+    assert!(app.registry.windows[&main].redraw.timeline.owner.is_none(), "and ended the owner");
     let EchoTimelineTakeV1::Timeline(timeline) = app.take_echo_timeline_v1(pane_id, token) else {
         panic!("the frozen record transfers");
     };
@@ -102,7 +102,7 @@ fn a_same_pane_rearm_replaces_the_owner() {
     app.note_dispatch_return(main);
     let second = armed(arm_on_both_clocks(&mut app, pane_id));
     assert_eq!(
-        app.windows[&main].redraw.timeline.owner.as_ref().map(|owner| owner.token),
+        app.registry.windows[&main].redraw.timeline.owner.as_ref().map(|owner| owner.token),
         Some(second)
     );
     app.note_dispatch_entry(main);
@@ -126,12 +126,12 @@ fn a_same_pane_rearm_replaces_the_owner() {
 fn an_overlapping_arm_records_nothing_and_leaves_the_owner_untouched() {
     let (mut app, main, _child, _base, owner_pane) = watched_owners();
     let other_pane = app.__test_seed_counting_tab("other");
-    app.windows.get_mut(&main).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&main).unwrap().tabs.activate(0);
     let owner_token = armed(arm_on_both_clocks(&mut app, owner_pane));
     service(&mut app, main, owner_pane);
     let other_token = armed(arm_on_both_clocks(&mut app, other_pane));
     assert_eq!(watch_of(&app, other_pane).peek_timeline(), "absent");
-    assert_eq!(app.windows[&main].redraw.timeline.watched_pane(), Some(owner_pane));
+    assert_eq!(app.registry.windows[&main].redraw.timeline.watched_pane(), Some(owner_pane));
     service(&mut app, main, other_pane);
     // A stale take of the non-owner pane with the owner's token, then its own take: neither touches the ring.
     assert_eq!(app.take_echo_watch(other_pane, owner_token), TakeOutcome::Mismatch);
@@ -160,7 +160,7 @@ fn a_stale_take_cannot_touch_another_tokens_ring() {
     service(&mut app, main, pane_id);
     assert_eq!(app.take_echo_watch(pane_id, stale), TakeOutcome::Mismatch);
     assert_eq!(app.take_echo_timeline_v1(pane_id, stale), EchoTimelineTakeV1::Mismatch);
-    assert_eq!(app.windows[&main].redraw.timeline.watched_pane(), Some(pane_id));
+    assert_eq!(app.registry.windows[&main].redraw.timeline.watched_pane(), Some(pane_id));
     assert_eq!(watch_of(&app, pane_id).peek_timeline(), "recording");
     let timeline = take_timeline(&mut app, pane_id, current);
     assert_eq!(timeline.flood_services, [FloodServiceV1 { loop_seq: 1, pane_id }]);
@@ -173,9 +173,10 @@ fn a_pane_transfer_ends_the_timeline_without_complete_evidence() {
     let (mut app, main, child, _base, pane_id) = watched_owners();
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
     service(&mut app, main, pane_id);
-    let pane = app.windows.get_mut(&main).unwrap().remove_pane(pane_id).expect("owner pane");
-    app.windows.get_mut(&child).unwrap().panes.insert(pane_id, pane);
-    assert!(app.windows[&main].redraw.timeline.owner.is_none());
+    let pane =
+        app.registry.windows.get_mut(&main).unwrap().remove_pane(pane_id).expect("owner pane");
+    app.registry.windows.get_mut(&child).unwrap().panes.insert(pane_id, pane);
+    assert!(app.registry.windows[&main].redraw.timeline.owner.is_none());
     assert_eq!(watch_of(&app, pane_id).peek_timeline(), "absent");
     assert!(matches!(app.take_echo_watch(pane_id, token), TakeOutcome::Trace(_)));
     assert_eq!(app.take_echo_timeline_v1(pane_id, token), EchoTimelineTakeV1::NotRecorded);
@@ -186,12 +187,12 @@ fn a_pane_transfer_ends_the_timeline_without_complete_evidence() {
 #[test]
 fn closing_the_owner_window_releases_the_timeline_while_a_worker_handle_survives() {
     let (mut app, _main, child, _base, _main_pane) = watched_owners();
-    let pane_id = app.windows[&child].tab_states[0].active_pane;
+    let pane_id = app.registry.windows[&child].tab_states[0].active_pane;
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
-    let handles = PaneVtHandles::from_pane_state(app.find_pane(pane_id).expect("child pane"));
+    let handles = PaneVtHandles::from_pane_state(app.pane_by_id(pane_id).expect("child pane"));
     let watch = watch_of(&app, pane_id);
     let weak = Arc::downgrade(&watch);
-    drop(app.windows.remove(&child).expect("child window"));
+    drop(app.registry.windows.remove(&child).expect("child window"));
     assert_eq!(watch.peek_timeline(), "absent", "the closed window's owner released it");
     assert!(weak.upgrade().is_some(), "the worker handle still owns the watch");
     assert_eq!(
@@ -208,12 +209,19 @@ fn closing_the_owner_window_releases_the_timeline_while_a_worker_handle_survives
 fn retirement_releases_the_timeline_and_a_stale_writer_changes_nothing() {
     let (mut app, main, _child, _base, pane_id) = watched_owners();
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
-    let handles = PaneVtHandles::from_pane_state(app.find_pane(pane_id).expect("owner pane"));
+    let handles = PaneVtHandles::from_pane_state(app.pane_by_id(pane_id).expect("owner pane"));
     let watch = watch_of(&app, pane_id);
-    let pane = app.windows.get_mut(&main).unwrap().panes.remove(&pane_id).expect("owner pane");
-    assert!(app.windows[&main].redraw.timeline.owner.is_some(), "a bare removal ended nothing");
+    let pane =
+        app.registry.windows.get_mut(&main).unwrap().panes.remove(&pane_id).expect("owner pane");
+    assert!(
+        app.registry.windows[&main].redraw.timeline.owner.is_some(),
+        "a bare removal ended nothing"
+    );
     app.retire_pane(pane);
-    assert!(app.windows[&main].redraw.timeline.owner.is_none(), "retirement ended the owner");
+    assert!(
+        app.registry.windows[&main].redraw.timeline.owner.is_none(),
+        "retirement ended the owner"
+    );
     assert_eq!(watch.peek_timeline(), "absent");
     assert_eq!(watch.armed_token(), 0, "and disarmed the watch");
     let at = Instant::now();
@@ -232,7 +240,7 @@ fn retirement_releases_the_timeline_and_a_stale_writer_changes_nothing() {
 fn unrepresentable_sequences_drop_their_events_and_set_overflow() {
     let (mut app, main, _child, _base, pane_id) = watched_owners();
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
-    app.windows.get_mut(&main).unwrap().redraw.timeline.owner.as_mut().unwrap().loop_seq =
+    app.registry.windows.get_mut(&main).unwrap().redraw.timeline.owner.as_mut().unwrap().loop_seq =
         u64::from(u32::MAX) - 1;
     app.note_dispatch_entry(main);
     app.note_dispatch_return(main);
@@ -244,8 +252,16 @@ fn unrepresentable_sequences_drop_their_events_and_set_overflow() {
     assert!(timeline.overflow, "the return's loop_seq did not fit");
 
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
-    app.windows.get_mut(&main).unwrap().redraw.timeline.owner.as_mut().unwrap().dispatch_seq =
-        u64::from(u32::MAX);
+    app.registry
+        .windows
+        .get_mut(&main)
+        .unwrap()
+        .redraw
+        .timeline
+        .owner
+        .as_mut()
+        .unwrap()
+        .dispatch_seq = u64::from(u32::MAX);
     app.note_dispatch_entry(main);
     let marker = app.render_marker(main).expect("a watched dispatch is in progress");
     marker.enter();
@@ -391,7 +407,7 @@ fn the_output_service_records_a_check_before_publication() {
 #[test]
 fn the_admission_check_can_be_the_first_qualifying_observation() {
     let (mut app, main, _child, base, pane_id) = watched_owners();
-    app.windows.get_mut(&main).unwrap().redraw.pacing =
+    app.registry.windows.get_mut(&main).unwrap().redraw.pacing =
         Some(super::super::super::display_link::PacingMode::Timer);
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
     let watch = watch_of(&app, pane_id);
@@ -428,11 +444,13 @@ fn the_admission_check_can_be_the_first_qualifying_observation() {
 fn the_explicit_load_samples_the_watched_pane_beside_a_short_circuiting_any() {
     let (mut app, main, _child, _base, visible_pane) = watched_owners();
     let hidden_pane = app.__test_seed_counting_tab("hidden");
-    app.windows.get_mut(&main).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&main).unwrap().tabs.activate(0);
     let token = armed(arm_on_both_clocks(&mut app, hidden_pane));
     publish_output(&app, main);
     for _ in 0..2 {
-        app.windows[&main].panes[&hidden_pane].output_generation.fetch_add(1, Ordering::Release);
+        app.registry.windows[&main].panes[&hidden_pane]
+            .output_generation
+            .fetch_add(1, Ordering::Release);
     }
     service(&mut app, main, visible_pane);
     let timeline = take_timeline(&mut app, hidden_pane, token);
@@ -454,7 +472,7 @@ fn the_initial_permit_comes_from_a_pre_arm_tick_and_a_permit_consumes_it() {
     let identity = TickIdentityV1 {
         tick_seq: 1,
         generation: u32::try_from(
-            app.windows[&main].redraw.link_generation.load(Ordering::Acquire),
+            app.registry.windows[&main].redraw.link_generation.load(Ordering::Acquire),
         )
         .unwrap(),
     };
@@ -465,7 +483,7 @@ fn the_initial_permit_comes_from_a_pre_arm_tick_and_a_permit_consumes_it() {
     assert!(!timeline.initial_permit_unknown, "never both");
     assert_eq!(decisions(&timeline), [AdmissionDecisionV1::Permit { tick_seq: Some(1) }]);
     assert!(clears(&timeline).is_empty(), "a consumption is not a clear");
-    assert!(app.windows[&main].redraw.link_permit.is_none());
+    assert!(app.registry.windows[&main].redraw.link_permit.is_none());
 }
 
 /// A permit held at arm whose tick identity is not representable is `initial_permit_unknown`, never
@@ -475,7 +493,7 @@ fn an_unrepresentable_permit_at_arm_is_unknown() {
     let (mut app, main, _child, base, pane_id) = watched_owners();
     install_link(&mut app, main);
     pend_link(&mut app, main, base);
-    app.windows.get_mut(&main).unwrap().redraw.timeline.tick_seq = u64::from(u32::MAX);
+    app.registry.windows.get_mut(&main).unwrap().redraw.timeline.tick_seq = u64::from(u32::MAX);
     fire_at(&mut app, main, at_ms(base, 16));
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
     assert!(redraw_at(&mut app, main, at_ms(base, 16)));
@@ -521,11 +539,11 @@ fn a_stale_tick_records_nothing() {
     install_link(&mut app, main);
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
     pend_link(&mut app, main, base);
-    let live = app.windows[&main].redraw.link_live.expect("the link runs");
+    let live = app.registry.windows[&main].redraw.link_live.expect("the link runs");
     set_fake_now(at_ms(base, 16));
     app.handle_display_link_tick(main, live - 1, at_ms(base, 16));
-    assert!(app.windows[&main].redraw.link_permit.is_none());
-    assert_eq!(app.windows[&main].redraw.timeline.tick_seq, 0);
+    assert!(app.registry.windows[&main].redraw.link_permit.is_none());
+    assert_eq!(app.registry.windows[&main].redraw.timeline.tick_seq, 0);
     assert!(ticks(&take_timeline(&mut app, pane_id, token)).is_empty());
 }
 
@@ -555,7 +573,7 @@ fn a_non_permit_admission_records_its_discard() {
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
     pend_link(&mut app, main, base);
     fire_at(&mut app, main, at_ms(base, 16));
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     let generation = window.panes[&pane_id].output_generation.load(Ordering::Acquire);
     window.panes.get_mut(&pane_id).unwrap().observed_output_generation = generation;
     // Pending input with no new output is not streaming work, so no tick is consumed.
@@ -576,7 +594,7 @@ fn link_reset_records_the_clear_including_software_degrade() {
     pend_link(&mut app, main, base);
     fire_at(&mut app, main, at_ms(base, 16));
     app.set_software_render_degrade(true);
-    app.windows.get_mut(&main).unwrap().redraw.invalidate_link_pacing();
+    app.registry.windows.get_mut(&main).unwrap().redraw.invalidate_link_pacing();
     let timeline = take_timeline(&mut app, pane_id, token);
     assert_eq!(clears(&timeline), [(Some(1), PermitClearCauseV1::LinkReset)]);
 }
@@ -589,7 +607,7 @@ fn a_link_pause_records_the_clear() {
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
     pend_link(&mut app, main, base);
     fire_at(&mut app, main, at_ms(base, 16));
-    app.windows.get_mut(&main).unwrap().redraw.pacing = None;
+    app.registry.windows.get_mut(&main).unwrap().redraw.pacing = None;
     app.sync_display_links();
     let timeline = take_timeline(&mut app, pane_id, token);
     assert_eq!(clears(&timeline), [(Some(1), PermitClearCauseV1::LinkPaused)]);
@@ -603,14 +621,14 @@ fn held_and_deferred_leave_the_permit_untouched() {
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
     pend_link(&mut app, main, base);
     fire_at(&mut app, main, at_ms(base, 16));
-    app.windows.get_mut(&main).unwrap().hidden = true;
+    app.registry.windows.get_mut(&main).unwrap().hidden = true;
     assert!(!redraw_at(&mut app, main, at_ms(base, 16)));
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     window.hidden = false;
     window.redraw.timeout_pending = true;
     window.last_render = at_ms(base, 16);
     assert!(!redraw_at(&mut app, main, at_ms(base, 17)));
-    assert!(app.windows[&main].redraw.link_permit.is_some(), "the permit is still held");
+    assert!(app.registry.windows[&main].redraw.link_permit.is_some(), "the permit is still held");
     let timeline = take_timeline(&mut app, pane_id, token);
     assert_eq!(
         decisions(&timeline),
@@ -670,7 +688,7 @@ fn the_flood_ring_evicts_by_loop_seq() {
 fn flood_services_are_counted_by_loop_seq() {
     let (mut app, main, _child, _base, owner_pane) = watched_owners();
     let other_pane = app.__test_seed_counting_tab("other");
-    app.windows.get_mut(&main).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&main).unwrap().tabs.activate(0);
     let token = armed(arm_on_both_clocks(&mut app, owner_pane));
     service(&mut app, main, other_pane);
     publish_output(&app, main);

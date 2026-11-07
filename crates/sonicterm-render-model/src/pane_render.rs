@@ -116,8 +116,9 @@ pub struct PaneRender<'a> {
     /// `0.0` = hidden. The renderer multiplies the scrollbar tint
     /// alphas by this and skips the emit entirely below the floor.
     pub scrollbar_alpha: f32,
-    /// Decoded inline media images anchored to this pane's grid.
-    pub inline_images: Vec<InlineImage>,
+    /// Decoded inline media images anchored to this pane's grid, shared with the pane's store: a
+    /// frame of an unchanged pane holds the same list the previous frame did, copying nothing.
+    pub inline_images: Arc<Vec<InlineImage>>,
 }
 
 /// A frame's panes, lent to the renderer once. The renderer assembles the frame inside `lend`'s

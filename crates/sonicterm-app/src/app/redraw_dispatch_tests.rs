@@ -37,11 +37,11 @@ pub(in crate::app) fn paced_owners(base: Instant) -> (App, WindowId, WindowId) {
     app.force_frame_counters_on().expect("no window exists yet");
     app.__test_set_dispatch_clock(fake_now);
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child", "background"]);
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     for id in [main, child] {
-        let window = app.windows.get_mut(&id).unwrap();
+        let window = app.registry.windows.get_mut(&id).unwrap();
         window.redraw.monitor_period = Duration::from_millis(10);
         window.last_render = base;
         window.stream_clock = base;
@@ -52,7 +52,7 @@ pub(in crate::app) fn paced_owners(base: Instant) -> (App, WindowId, WindowId) {
 
 /// Publish one completed output batch on the window's visible active pane.
 pub(in crate::app) fn publish_output(app: &App, id: WindowId) {
-    let window = &app.windows[&id];
+    let window = &app.registry.windows[&id];
     let pane = window.tab_states[window.tabs.active_index()].active_pane;
     window.panes[&pane].output_generation.fetch_add(1, Ordering::Release);
 }
@@ -62,7 +62,7 @@ pub(in crate::app) fn counters_of(
     app: &App,
     id: WindowId,
 ) -> &super::super::frame_counters::WindowFrameCounters {
-    app.windows[&id].redraw.frame_counters.as_deref().expect("counting App")
+    app.registry.windows[&id].redraw.frame_counters.as_deref().expect("counting App")
 }
 
 /// The text of the impl-level method `signature` names, up to its closing brace.
@@ -93,7 +93,7 @@ fn dispatch_clock_stamps_admission_and_completion_for_both_roles() {
         let snapshot = app.snapshot_window_redraw_at(owner, fake_now()).unwrap();
         set_fake_now(at_ms(base, 12));
         app.complete_window_redraw(owner, &snapshot, FrameSettlement::Presented);
-        let window = &app.windows[&owner];
+        let window = &app.registry.windows[&owner];
         assert_eq!(window.last_render, at_ms(base, 12), "child: {child_owner}");
         assert_eq!(window.stream_clock, at_ms(base, 12), "child: {child_owner}");
         assert_eq!(window.redraw.last_present, Some(at_ms(base, 12)), "child: {child_owner}");
@@ -114,7 +114,7 @@ fn contention_floor_follows_the_dispatch_clock_for_both_roles() {
         assert!(app.admit_window_redraw(owner));
         if child_owner {
             // The child reaches the floor through the frame-unavailable adapter at the dispatch instant.
-            let window = &app.windows[&owner];
+            let window = &app.registry.windows[&owner];
             let pane_id = window.tab_states[window.tabs.active_index()].active_pane;
             let busy =
                 crate::app::visible_frame::FrameUnavailable::Contended { pane_id, images: false };
@@ -125,7 +125,11 @@ fn contention_floor_follows_the_dispatch_clock_for_both_roles() {
             app.defer_redraw_on_lock_contention(false);
         }
         let floor = at_ms(base, 26);
-        assert_eq!(app.windows[&owner].retry_not_before, Some(floor), "child: {child_owner}");
+        assert_eq!(
+            app.registry.windows[&owner].retry_not_before,
+            Some(floor),
+            "child: {child_owner}"
+        );
         let frames: Vec<_> = app
             .frame_due_work_at(fake_now())
             .into_iter()
@@ -210,7 +214,8 @@ fn completion_through_the_adapters_keeps_the_input_exemption_and_settles_once() 
             );
             app.software_render_degrade = case.software;
             if case.retry_armed {
-                app.windows.get_mut(&owner).unwrap().retry_not_before = Some(at_ms(base, 100));
+                app.registry.windows.get_mut(&owner).unwrap().retry_not_before =
+                    Some(at_ms(base, 100));
             }
             let cause = if case.new_input { RedrawCause::Input } else { RedrawCause::Expose };
             app.mark_window_redraw(owner, cause);
@@ -221,7 +226,7 @@ fn completion_through_the_adapters_keeps_the_input_exemption_and_settles_once() 
             let total_before = settlement_total(&app, owner);
             set_fake_now(at_ms(base, 7));
             app.complete_window_redraw(owner, &snapshot, case.outcome);
-            let window = &app.windows[&owner];
+            let window = &app.registry.windows[&owner];
             assert_eq!(window.last_render, at_ms(base, 7), "{label}");
             let expected_stream = if case.exempt { base } else { at_ms(base, 7) };
             assert_eq!(window.stream_clock, expected_stream, "{label}");
@@ -353,9 +358,9 @@ fn a_timer_wake_services_due_frames_at_the_dispatch_clock() {
         1,
         "a deadline the dispatch clock has not reached stays queued"
     );
-    assert!(!app.windows[&main].redraw.request_in_flight);
+    assert!(!app.registry.windows[&main].redraw.request_in_flight);
     set_fake_now(at_ms(base, 20));
     app.service_resume_time(&resume);
     assert!(app.redraw_due.is_empty(), "a passed deadline is serviced");
-    assert!(app.windows[&main].redraw.request_in_flight);
+    assert!(app.registry.windows[&main].redraw.request_in_flight);
 }

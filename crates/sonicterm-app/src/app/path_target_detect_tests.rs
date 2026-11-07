@@ -15,15 +15,16 @@ fn busy_hover_revalidates_host_modifier_for_main_and_child_renderers() {
                 (window, app.__test_child_pane_ids(window).unwrap()[0])
             } else {
                 let pane = app.__test_seed_tab("hover");
-                (app.main_window_id.unwrap(), pane)
+                (app.registry.main_window_id.unwrap(), pane)
             };
-            app.frontmost_window = Some(window);
-            let parser = app.windows[&window].panes[&pane].parser.clone();
+            app.registry.frontmost_window = Some(window);
+            let parser = app.registry.windows[&window].panes[&pane].parser.clone();
             parser.lock().advance(b"\x1b[?1049h\x1b[?1003h\x1b[?1006hhttps://example.com/");
             let target = app.cell_target_at(window, pane, 0, 3);
             app.apply_target_hover(window, target);
-            assert!(!app.windows[&window].hovered_url.as_ref().unwrap().active());
-            app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+            assert!(!app.registry.windows[&window].hovered_url.as_ref().unwrap().active());
+            app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos")
+            {
                 winit::keyboard::ModifiersState::SUPER
             } else {
                 winit::keyboard::ModifiersState::CONTROL
@@ -32,21 +33,21 @@ fn busy_hover_revalidates_host_modifier_for_main_and_child_renderers() {
             let busy = app.cell_target_lookup(window, pane, 0, 3);
             assert!(busy.is_err());
             app.apply_target_lookup(window, busy);
-            assert!(!app.windows[&window].hovered_url.as_ref().unwrap().active());
+            assert!(!app.registry.windows[&window].hovered_url.as_ref().unwrap().active());
             assert!(!app.activate_target_at(window, pane, 0, 3));
             let target = app.cell_target_from_parser(window, pane, 0, 3, &guard, None);
             app.apply_target_hover(window, target);
-            assert!(app.windows[&window].hovered_url.as_ref().unwrap().active());
+            assert!(app.registry.windows[&window].hovered_url.as_ref().unwrap().active());
             assert_eq!(
-                app.windows[&window].link_preview.as_ref().unwrap().uri,
+                app.registry.windows[&window].link_preview.as_ref().unwrap().uri,
                 "https://example.com/"
             );
-            app.windows.get_mut(&window).unwrap().modifiers =
+            app.registry.windows.get_mut(&window).unwrap().modifiers =
                 winit::keyboard::ModifiersState::empty();
             let busy = app.cell_target_lookup(window, pane, 0, 3);
             app.apply_target_lookup(window, busy);
-            assert!(!app.windows[&window].hovered_url.as_ref().unwrap().active());
-            assert!(app.windows[&window].link_preview.is_none());
+            assert!(!app.registry.windows[&window].hovered_url.as_ref().unwrap().active());
+            assert!(app.registry.windows[&window].link_preview.is_none());
         }
     }
 }
@@ -60,15 +61,15 @@ fn collected_parser_rejects_a_hover_after_content_changes() {
     assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
     let target = app.cell_target_at(window, pane, 0, 3);
     app.apply_target_hover(window, target);
-    let parser = std::sync::Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let parser = std::sync::Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
     let mut guard = parser.lock();
     let lookup = app.cell_target_lookup(window, pane, 0, 3);
     app.apply_target_lookup(window, lookup);
-    assert!(app.windows[&window].hovered_url.is_some());
+    assert!(app.registry.windows[&window].hovered_url.is_some());
     guard.advance(b"\r\x1b[2Kplain");
     let target = app.cell_target_from_parser(window, pane, 0, 3, &guard, None);
     app.apply_target_hover(window, target);
-    assert!(app.windows[&window].hovered_url.is_none());
+    assert!(app.registry.windows[&window].hovered_url.is_none());
 }
 
 /// Parenthesized plain and OSC 8 URLs reach the same window hover renderer without underlining wrappers.
@@ -87,7 +88,7 @@ fn parenthesized_url_hover_reaches_render_state() {
         assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
         let target = app.cell_target_at(window, pane, 0, 15);
         app.apply_target_hover(window, target);
-        let cells = app.windows[&window].hovered_url.as_ref().unwrap().cells;
+        let cells = app.registry.windows[&window].hovered_url.as_ref().unwrap().cells;
         assert_eq!(
             (cells.spans()[0].start_col, cells.spans()[0].end_col),
             (10, 10 + uri.len() as u16)
@@ -104,9 +105,9 @@ fn plain_url_width_contract_resolves_full_destination() {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let window = app.__test_seed_child_window(&["URL width baseline"]);
         let pane = app.__test_child_pane_ids(window).unwrap()[0];
-        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, 8);
+        app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, 8);
         assert!(app.__test_advance_child_pane_parser(window, pane, uri.as_bytes()));
-        let wrapped = app.windows[&window].panes[&pane]
+        let wrapped = app.registry.windows[&window].panes[&pane]
             .parser
             .lock()
             .grid()
@@ -135,7 +136,7 @@ fn hyperlink_hover_preserves_occurrence_and_wide_cell_geometry() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["wrapped"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(6, 10);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(6, 10);
     let open = "\x1b]8;id=same;https://example.com/\x1b\\";
     let close = "\x1b]8;;\x1b\\";
     let output = format!("{open}ab界cdef{close}\r\n{open}xy{close} {open}zz{close}");
@@ -158,7 +159,7 @@ fn hyperlink_hover_preserves_occurrence_and_wide_cell_geometry() {
     let target = app.cell_target_at(window, pane, 0, 3);
     app.apply_target_hover(window, target);
     app.clear_target_hover(window);
-    assert!(app.windows[&window].hovered_url.is_none());
+    assert!(app.registry.windows[&window].hovered_url.is_none());
 }
 
 /// Long visible labels retain the pointed row within the fixed renderer fragment budget.
@@ -168,7 +169,7 @@ fn hyperlink_hover_bounds_long_labels_without_losing_pointer() {
     let window = app.__test_seed_child_window(&["long"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
     // 144 cells on 4 columns span 36 rows, more than the renderer's fragment cap.
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 40);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 40);
     let output = format!("\x1b]8;;https://example.com/\x1b\\{}\x1b]8;;\x1b\\", "x".repeat(144));
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
     let mut capped = false;
@@ -188,7 +189,7 @@ fn quoted_command_paths_preserve_app_spans_across_wraps() {
     let window = app.__test_seed_child_window(&["quoted command"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
     let cols = 40;
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, 8);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, 8);
     let path = if cfg!(windows) {
         r"C:\work\OneDrive - Team\Promotion Analysis"
     } else {
@@ -286,7 +287,7 @@ fn structured_paths_reach_filesystem_probe_and_reject_stale_identity() {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let window = app.__test_seed_child_window(&["filesystem probe"]);
         let pane = app.__test_child_pane_ids(window).unwrap()[0];
-        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(240, 4);
+        app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(240, 4);
         assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
         let col = text.find(needle).unwrap() as u16;
         let snapshot = app.cell_target_at(window, pane, 0, col).unwrap();
@@ -295,15 +296,21 @@ fn structured_paths_reach_filesystem_probe_and_reject_stale_identity() {
         assert_eq!(selected.candidate.resolved_path, expected);
         assert_eq!(selected.decision, decision);
         let request =
-            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+            app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
         let result = PathProbeResult { request, selection: Some(selected), failure: None };
-        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
-        assert!(app.windows[&window].path_probe.authorized(&key, true));
+        assert!(app
+            .registry
+            .windows
+            .get_mut(&window)
+            .unwrap()
+            .path_probe
+            .accept(&result, Some(&key)));
+        assert!(app.registry.windows[&window].path_probe.authorized(&key, true));
         assert!(app.__test_advance_child_pane_parser(window, pane, b"\r!"));
         let changed = app.cell_target_at(window, pane, 0, col);
         assert!(changed.is_none_or(|snapshot| match snapshot.target {
             ResolvedCellTarget::Path(next) =>
-                !app.windows[&window].path_probe.authorized(&next, true),
+                !app.registry.windows[&window].path_probe.authorized(&next, true),
             _ => true,
         }));
     }

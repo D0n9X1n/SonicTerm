@@ -71,7 +71,8 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
                         flag_checks: Sequence[perf_comparison_rows.FlagCheck] | None = None,
                         unclassified_rows: Sequence[Sequence[str]] = (),
                         counters_only_rows: Sequence[Sequence[str]] = (),
-                        attribution_rows: Sequence[Sequence[str]] = ()) -> str:
+                        attribution_rows: Sequence[Sequence[str]] = (),
+                        contention_rows: Sequence[Sequence[str]] = ()) -> str:
     """Assemble comparison.md: the PR table, the laps, counters, overhead and allocation tables when run,
     the host block and details.
 
@@ -111,6 +112,11 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
     if attribution_rows:
         parts.append(f"### S10 attribution (counters runs)\n\n{perf_attribution_report.ATTRIBUTION_NOTE}\n\n"
                      + perf_inventory.render_table(attribution_rows, perf_attribution_report.ATTRIBUTION_HEADER))
+    if contention_rows:
+        # Resolve this runtime-only dependency after module initialization.
+        import perf_contention_verdict
+        parts.append(f"### S13 multi-pane contention (counters runs)\n\n{perf_contention_verdict.NOTE}\n\n"
+                     + perf_inventory.render_table(contention_rows, perf_contention_verdict.HEADER))
     if overhead_rows:
         parts.append(f"### Counters overhead (S2 and S3)\n\n{perf_counter_rows.OVERHEAD_NOTE}.\n\n"
                      + perf_inventory.render_table(overhead_rows, perf_counter_rows.OVERHEAD_HEADER))

@@ -28,6 +28,7 @@ impl App {
             // so leave the previous contents intact.
             return false;
         }
+        #[cfg(any(test, feature = "test-support"))]
         if self.test_clipboard_write_failure {
             // When: `test_clipboard_write_failure` is true, reject at the set_text
             // boundary without changing the in-memory or system clipboard.
@@ -64,10 +65,11 @@ impl App {
         let id = match kind {
             FrontmostKind::Child(id) => id,
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
-                self.main_window_id?
+                self.registry.main_window_id?
             }
         };
-        self.windows
+        self.registry
+            .windows
             .get(&id)
             .and_then(|window| window.tab_states.get(window.tabs.active_index()))
             .filter(|tab| tab.search.is_some())
@@ -191,7 +193,7 @@ impl App {
             return;
         }
         let window_id = match kind {
-            FrontmostKind::Main => self.main_window_id,
+            FrontmostKind::Main => self.registry.main_window_id,
             FrontmostKind::Child(id) => Some(id),
             FrontmostKind::None | FrontmostKind::Other => None,
         };

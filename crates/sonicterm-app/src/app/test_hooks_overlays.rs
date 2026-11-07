@@ -5,6 +5,7 @@ use super::*;
 
 /// IME anchor kind (`"field"`, `"pending"`, `"terminal"`) with the candidate area's
 /// physical position and size when a presented caret anchors it.
+#[cfg(any(test, feature = "test-support"))]
 type ImeAnchorReading = (&'static str, Option<((i32, i32), (u32, u32))>);
 
 impl App {
@@ -14,6 +15,7 @@ impl App {
     /// (cmd+1, cmd+2, cmd+Right, cmd+Left) actually resolve to their
     /// expected Action variants.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_keymap_lookup(&self, keys: &str) -> Option<Action> {
         self.keymap.lookup(keys).cloned()
     }
@@ -23,49 +25,50 @@ impl App {
     /// child window. Used by overlay-routing regression tests.
     #[doc(hidden)]
     pub fn __test_palette_attached_window(&self) -> Option<WindowId> {
-        self.palette_attached_window
+        self.interaction.palette_attached_window
     }
 
     /// Test-only: whether the command palette is currently open.
     #[doc(hidden)]
     pub fn __test_palette_open(&self) -> bool {
-        self.command_palette.is_open()
+        self.interaction.command_palette.is_open()
     }
 
     /// Test-only: command palette query text.
     #[doc(hidden)]
     pub fn __test_palette_query(&self) -> &str {
-        self.command_palette.query()
+        self.interaction.command_palette.query()
     }
 
     /// Test-only: command palette caret byte offset.
     #[doc(hidden)]
     pub fn __test_palette_cursor(&self) -> usize {
-        self.command_palette.cursor()
+        self.interaction.command_palette.cursor()
     }
 
     /// Test-only: replace the command-palette query and refresh its selection.
     #[doc(hidden)]
     pub fn __test_set_palette_query(&mut self, query: &str) {
-        self.palette_pointer_capture = None;
-        self.command_palette.set_query(query);
+        self.interaction.palette_pointer_capture = None;
+        self.interaction.command_palette.set_query(query);
     }
 
     /// Test-only: drive command-palette core editing without constructing a
     /// platform-private winit `KeyEvent`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_command_palette_text_edit(
         &mut self,
         key: &winit::keyboard::Key,
         modifiers: ModifiersState,
     ) -> bool {
-        if !self.command_palette.is_open() || self.palette_ime_is_composing() {
+        if !self.interaction.command_palette.is_open() || self.palette_ime_is_composing() {
             // When: `command_palette` is shut, or an IME preedit owns its input,
             // so a core text edit would corrupt composition or edit nothing.
-            return self.command_palette.is_open();
+            return self.interaction.command_palette.is_open();
         }
         if matches!(
-            self.command_palette.mode(),
+            self.interaction.command_palette.mode(),
             sonicterm_ui::command_palette::CommandPaletteMode::TabColor
                 | sonicterm_ui::command_palette::CommandPaletteMode::Confirm
         ) {
@@ -78,15 +81,16 @@ impl App {
             // query is untouched and the key is reported unhandled.
             return false;
         };
-        self.command_palette.apply_text_edit(edit);
-        self.request_redraw_for_overlay(self.palette_attached_window);
+        self.interaction.command_palette.apply_text_edit(edit);
+        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
         true
     }
 
     /// Test-only: enter tab-rename mode with a known value.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_start_rename_tab(&mut self, title: &str) {
-        self.command_palette.start_rename_tab(title);
+        self.interaction.command_palette.start_rename_tab(title);
     }
 
     /// Test-only: drive command-palette key handling by logical key.
@@ -97,6 +101,7 @@ impl App {
 
     /// Test-only: drive command-palette IME handling.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_command_palette_handle_ime(&mut self, event: &winit::event::Ime) -> bool {
         self.command_palette_handle_ime(event)
     }
@@ -104,8 +109,11 @@ impl App {
     /// Test-only: describe where the main window will anchor the OS IME
     /// candidate area.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_ime_candidate_anchor_kind(&self) -> &'static str {
-        if self.command_palette.is_open() && self.palette_attached_window.is_none() {
+        if self.interaction.command_palette.is_open()
+            && self.interaction.palette_attached_window.is_none()
+        {
             "palette"
         } else {
             // When: `command_palette` is shut, or `palette_attached_window` names
@@ -116,6 +124,7 @@ impl App {
 
     /// Test-only: read the main window notification bubble message.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_notification_message(&self) -> Option<&str> {
         self.main()
             .and_then(|main| main.notification.as_ref())
@@ -124,6 +133,7 @@ impl App {
 
     /// Test-only: whether the main notification is ongoing.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_notification_ongoing(&self) -> Option<bool> {
         self.main()
             .and_then(|main| main.notification.as_ref())
@@ -132,6 +142,7 @@ impl App {
 
     /// Test-only: install a notification with a specific expiration.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_show_notification_until(
         &mut self,
         kind: FrontmostKind,
@@ -144,6 +155,7 @@ impl App {
 
     /// Test-only: run notification expiry and return the next wake time.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_expire_notifications(
         &mut self,
         now: std::time::Instant,
@@ -153,8 +165,10 @@ impl App {
 
     /// Test-only: read a child window notification bubble message.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_notification_message(&self, id: WindowId) -> Option<&str> {
-        self.windows
+        self.registry
+            .windows
             .get(&id)
             .and_then(|child| child.notification.as_ref())
             .map(|bubble| bubble.message.as_str())
@@ -165,6 +179,7 @@ impl App {
     /// integration tests can assert the stale-id no-op contract for
     /// overlay routing.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_open_search_in_child(&mut self, id: WindowId) -> bool {
         self.open_search_in_child(id)
     }
@@ -206,7 +221,7 @@ impl App {
             // there is no session for the query to land in.
             return false;
         }
-        let Some(child) = self.windows.get_mut(&id) else {
+        let Some(child) = self.registry.windows.get_mut(&id) else {
             // When: `windows` no longer tracks this id, so the child vanished
             // between opening search and installing the query.
             return false;
@@ -234,6 +249,7 @@ impl App {
     /// Test-only: apply a core edit to main or child search through the same
     /// shared state operation used by production routing.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_search_text_edit(
         &mut self,
         id: Option<WindowId>,
@@ -245,13 +261,13 @@ impl App {
             // search term is untouched and the key is reported unhandled.
             return false;
         };
-        let target = id.or(self.main_window_id);
+        let target = id.or(self.registry.main_window_id);
         let Some(target) = target else {
             // When: neither the supplied id nor `main_window_id` yields a
             // `target`, so no window owns the search this edit would change.
             return false;
         };
-        let Some(window) = self.windows.get_mut(&target) else {
+        let Some(window) = self.registry.windows.get_mut(&target) else {
             // When: `windows` no longer tracks `target`, so the window closed
             // between resolving it and applying the edit.
             return false;
@@ -284,14 +300,15 @@ impl App {
     /// Test-only: read main or child search query and caret.
     #[doc(hidden)]
     pub fn __test_search_query_cursor(&self, id: Option<WindowId>) -> Option<(&str, usize)> {
-        let target = id.or(self.main_window_id)?;
-        let window = self.windows.get(&target)?;
+        let target = id.or(self.registry.main_window_id)?;
+        let window = self.registry.windows.get(&target)?;
         let search = window.tab_states.get(window.tabs.active_index())?.search.as_ref()?;
         Some((search.query.as_str(), search.cursor()))
     }
 
     /// Test-only: seed main IME preedit state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_main_ime_preedit(&mut self, text: &str) -> bool {
         let Some(main) = self.main_mut() else {
             // When: `main_mut` resolves nothing, so no window holds the IME state
@@ -314,18 +331,21 @@ impl App {
 
     /// Test-only: read the in-memory clipboard buffer if installed.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_memory_clipboard(&self) -> Option<String> {
         self.test_clipboard_text.clone()
     }
 
     /// Test-only: make clipboard writes fail before either clipboard seam changes.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_clipboard_write_failure(&mut self, enabled: bool) {
         self.test_clipboard_write_failure = enabled;
     }
 
     /// Test-only: exercise file-drop path paste routing without a platform drop event.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_paste_file_paths_for_kind(
         &mut self,
         kind: FrontmostKind,
@@ -336,6 +356,7 @@ impl App {
 
     /// Bind an unbound headless selection to a synthetic window's active pane,
     /// matching production mouse selection creation.
+    #[cfg(any(test, feature = "test-support"))]
     fn bind_test_selection(
         window: &WindowState,
         selection: Option<Selection>,
@@ -361,19 +382,20 @@ impl App {
 
     /// Test-only: set the synthetic main window's selection.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_main_selection(&mut self, selection: Option<Selection>) -> bool {
-        let Some(id) = self.main_window_id else {
+        let Some(id) = self.registry.main_window_id else {
             // When: `main_window_id` is unset, so no main window exists to carry
             // the selection.
             return false;
         };
-        let Some(window) = self.windows.get(&id) else {
+        let Some(window) = self.registry.windows.get(&id) else {
             // When: `windows` no longer tracks this id, so the content state the
             // selection binds to cannot be read.
             return false;
         };
         let selection = Self::bind_test_selection(window, selection);
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: the window disappeared between binding and assignment, so the
             // bound selection has nowhere to be stored.
             return false;
@@ -384,18 +406,19 @@ impl App {
 
     /// Test-only: set a synthetic child window's selection.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_child_selection(
         &mut self,
         id: WindowId,
         selection: Option<Selection>,
     ) -> bool {
-        let Some(window) = self.windows.get(&id) else {
+        let Some(window) = self.registry.windows.get(&id) else {
             // When: `windows` tracks no entry for this id, so the content state
             // the selection binds to cannot be read.
             return false;
         };
         let selection = Self::bind_test_selection(window, selection);
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: the window disappeared between binding and assignment, so the
             // bound selection has nowhere to be stored.
             return false;
@@ -409,14 +432,16 @@ impl App {
     /// The outer `None` means `id` is unknown; the inner `None` means the
     /// window is tracked but has no selection.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_selection(&self, id: WindowId) -> Option<Option<Selection>> {
-        self.windows.get(&id).map(|state| state.selection)
+        self.registry.windows.get(&id).map(|state| state.selection)
     }
 
     /// Test-only: seed child IME preedit state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_child_ime_preedit(&mut self, id: WindowId, text: &str) -> bool {
-        let Some(child) = self.windows.get_mut(&id) else {
+        let Some(child) = self.registry.windows.get_mut(&id) else {
             // When: `windows` tracks no entry for this id, so no child holds the
             // IME state this preedit would seed.
             return false;
@@ -427,26 +452,28 @@ impl App {
 
     /// Test-only: read whether a child IME composition is active.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_ime_composing(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).map(|child| child.ime.is_composing())
+        self.registry.windows.get(&id).map(|child| child.ime.is_composing())
     }
 
     /// Test-only: query, selection and caret of the field that owns `id`'s pointer input.
     ///
     /// Uses the same ownership rule as field pointer routing; `None` when no editable field owns `id`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_state(
         &self,
         id: WindowId,
     ) -> Option<(String, Option<std::ops::Range<usize>>, usize)> {
         match self.field_pointer_target(id)? {
             field_pointer::FieldTarget::Palette { .. } => Some((
-                self.command_palette.query().to_string(),
-                self.command_palette.selected_range(),
-                self.command_palette.cursor(),
+                self.interaction.command_palette.query().to_string(),
+                self.interaction.command_palette.selected_range(),
+                self.interaction.command_palette.cursor(),
             )),
             field_pointer::FieldTarget::Search(_) => {
-                let window = self.windows.get(&id)?;
+                let window = self.registry.windows.get(&id)?;
                 let search = window.tab_states.get(window.tabs.active_index())?.search.as_ref()?;
                 Some((search.query.clone(), search.selected_range(), search.cursor()))
             }
@@ -455,16 +482,17 @@ impl App {
 
     /// Test-only: the presented caret of the field that owns `id`, from the renderer getter production uses.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_caret_rect(
         &self,
         id: WindowId,
     ) -> Option<sonicterm_gpu::field_geometry::FieldRect> {
-        let window = self.windows.get(&id)?;
+        let window = self.registry.windows.get(&id)?;
         let renderer = window.renderer.as_ref()?;
         let preedit = window.ime.preedit();
         match self.field_pointer_target(id)? {
             field_pointer::FieldTarget::Palette { .. } => {
-                renderer.palette_field_caret_rect(&self.command_palette, preedit)
+                renderer.palette_field_caret_rect(&self.interaction.command_palette, preedit)
             }
             field_pointer::FieldTarget::Search(_) => {
                 let search = window.tab_states.get(window.tabs.active_index())?.search.as_ref()?;
@@ -475,6 +503,7 @@ impl App {
 
     /// Test-only: map a physical point through the production field hit resolver for `id`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_hit(
         &self,
         id: WindowId,
@@ -490,8 +519,9 @@ impl App {
     /// Returns `"field"` with the candidate area, `"pending"` when a field owns IME without a
     /// presented caret, or `"terminal"`; it calls the same selector both redraw paths call.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_ime_anchor(&self, id: WindowId) -> ImeAnchorReading {
-        let Some(window) = self.windows.get(&id) else {
+        let Some(window) = self.registry.windows.get(&id) else {
             // When: `id` is not tracked, no renderer can anchor IME.
             return ("terminal", None);
         };
@@ -499,17 +529,17 @@ impl App {
             // When: the window has no renderer, nothing was presented and the terminal path applies.
             return ("terminal", None);
         };
-        let palette_here = if Some(id) == self.main_window_id {
-            self.palette_attached_window.is_none()
+        let palette_here = if Some(id) == self.registry.main_window_id {
+            self.interaction.palette_attached_window.is_none()
         } else {
             // When: `id` is a child window, the palette is here only while attached to `id`.
-            self.palette_attached_window == Some(id)
+            self.interaction.palette_attached_window == Some(id)
         };
         let search =
             window.tab_states.get(window.tabs.active_index()).and_then(|tab| tab.search.as_ref());
         match overlays::field_ime_anchor(
             renderer,
-            palette_here.then_some(&self.command_palette),
+            palette_here.then_some(&self.interaction.command_palette),
             search,
             window.ime.preedit(),
         ) {
@@ -524,8 +554,9 @@ impl App {
 
     /// Test-only: the window holding a field pointer capture and whether it is still dragging.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_pointer_capture(&self) -> Option<(WindowId, bool)> {
-        match self.field_pointer_capture? {
+        match self.interaction.field_pointer_capture? {
             field_pointer::FieldPointerCapture::Dragging { window_id, .. } => {
                 Some((window_id, true))
             }
@@ -535,26 +566,28 @@ impl App {
 
     /// Test-only: whether `id` owes the release of a cancelled field gesture, held or parked.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_owes_release(&self, id: WindowId) -> bool {
-        self.field_owed_releases.contains(&id)
+        self.interaction.field_owed_releases.contains(&id)
             || matches!(
-                self.field_pointer_capture,
+                self.interaction.field_pointer_capture,
                 Some(field_pointer::FieldPointerCapture::Swallow { window_id }) if window_id == id
             )
     }
 
     /// Test-only: collapse the field selection that owns `id` onto its caret, keeping the caret.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_collapse_field_selection(&mut self, id: WindowId) -> bool {
         match self.field_pointer_target(id) {
             Some(field_pointer::FieldTarget::Palette { .. }) => {
-                let caret = self.command_palette.cursor();
-                self.command_palette.set_cursor(caret);
+                let caret = self.interaction.command_palette.cursor();
+                self.interaction.command_palette.set_cursor(caret);
                 true
             }
             Some(field_pointer::FieldTarget::Search(_)) => {
                 // When: `id` hosts the search field, collapse that search's selection onto its caret.
-                let Some(window) = self.windows.get_mut(&id) else {
+                let Some(window) = self.registry.windows.get_mut(&id) else {
                     // When: `id` closed after the target lookup, there is no search to collapse.
                     return false;
                 };
@@ -579,12 +612,13 @@ impl App {
         &mut self,
         id: WindowId,
     ) -> Option<&mut sonicterm_gpu::core::GpuRenderer> {
-        self.windows.get_mut(&id)?.renderer.as_mut()
+        self.registry.windows.get_mut(&id)?.renderer.as_mut()
     }
 
     /// Test-only: a tracked window's custom name, as the window-rename editor commits it.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_custom_name(&self, id: WindowId) -> Option<&str> {
-        self.windows.get(&id).map(|window| window.custom_window_name.as_str())
+        self.registry.windows.get(&id).map(|window| window.custom_window_name.as_str())
     }
 }

@@ -13,9 +13,9 @@ use winit::{
 
 use super::tab_gesture::{TabMotion, TabPress, TabRelease};
 use super::window_event::{
-    native_scrollbar_owns_pointer, no_button_motion_report, pointer_route_bytes,
-    pointer_scrollbar_content_rect, route_pressed_pointer_motion, take_pointer_release,
-    wheel_report_bytes, wheel_route, PointerMotionRoute, PointerReportKind, WheelRoute,
+    no_button_motion_report, pointer_route_bytes, route_pressed_pointer_motion,
+    take_pointer_release, wheel_report_bytes, wheel_route, PointerMotionRoute, PointerReportKind,
+    WheelRoute,
 };
 use super::{
     pane_id_at_point, App, FrontmostKind, PointerCell, PointerGestureOwner, PtyInputSource,
@@ -35,7 +35,7 @@ impl App {
             window.splitter_hover = None;
             window.cursor_pos = (-1.0, -1.0);
         }
-        if let Some(window_id) = self.main_window_id {
+        if let Some(window_id) = self.registry.main_window_id {
             self.clear_target_hover(window_id);
         }
         if let Some(main_window) = self.main_window() {
@@ -109,16 +109,8 @@ impl App {
         if let Some(window) = self.main_mut() {
             window.cursor_pos = (position.x, position.y);
         }
-        // Notify the reducer so its compatibility state tracks the
-        // cursor. Its effects are discarded, so hover repaints come from
-        // the app's own checks below.
-        self.observe_intent(sonicterm_app_core::AppIntent::MouseMove {
-            window: sonicterm_types::WindowKey::new(0),
-            pos: sonicterm_app_core::LogicalPos {
-                pixel_x: cursor_x as f64,
-                pixel_y: cursor_y as f64,
-            },
-        });
+        // The compatibility reducer is not told about cursor motion: nothing reads its cursor
+        // state, and this runs on every move. Hover repaints come from the app's checks below.
         let mut hover_redraw = false;
         if let Some(window) = self.main_mut() {
             if let Some(renderer) = window.renderer.as_mut() {
@@ -144,9 +136,10 @@ impl App {
         // A held tab's drag session follows the pointer and draws its chip against the main
         // bar as laid out; while the button is down the drop target follows across windows.
         let held_tab_layout = self.main_held_tab_layout();
-        if let Some(main_id) = self.main_window_id {
+        if let Some(main_id) = self.registry.main_window_id {
             // When: `main_window_id` names the main window, whose held tab this move may drive.
             let motion = self
+                .registry
                 .windows
                 .get_mut(&main_id)
                 .map(|window| {
@@ -252,7 +245,7 @@ impl App {
             let splitter_hover = self.refresh_splitter_hover(cursor_x, cursor_y);
             if !splitter_hover {
                 self.refresh_hovered_url();
-            } else if let Some(window_id) = self.main_window_id {
+            } else if let Some(window_id) = self.registry.main_window_id {
                 // When: splitter hover owns the pointer in `window_id`, clear any terminal target beneath it.
                 self.clear_target_hover(window_id);
             }
@@ -271,32 +264,11 @@ impl App {
                             )
                         })
                     });
-                    let (content, gutter_width) = self.main_renderer().map_or(
-                        (pane, crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX),
-                        |renderer| {
-                            let content = pointer_scrollbar_content_rect(
-                                pane,
-                                [
-                                    renderer.padding_left_px(),
-                                    renderer.padding_right_px(),
-                                    renderer.padding_top_px(),
-                                    renderer.padding_bottom_px(),
-                                ],
-                                renderer.cell_size(),
-                            );
-                            (
-                                content,
-                                crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX
-                                    * renderer.scale_factor(),
-                            )
-                        },
-                    );
-                    Some(native_scrollbar_owns_pointer(
+                    Some(super::window_event::pane_scrollbar_owns_pointer(
                         self.config.appearance.scrollbar,
-                        content,
-                        cursor_x,
-                        cursor_y,
-                        gutter_width,
+                        pane,
+                        self.main_renderer().map(super::window_event::ScrollbarMetrics::of),
+                        (cursor_x, cursor_y),
                         edge_active,
                         visible,
                     ))
@@ -484,7 +456,7 @@ impl App {
                 // re-arm the OS-drag
                 // handoff gate so the CursorMoved threshold check
                 // can fire once for the new gesture.
-                self.os_drag_handoff_started = false;
+                self.interaction.os_drag_handoff_started = false;
                 let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
                 let (pixel_x, pixel_y) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
                 let window_width = self
@@ -658,7 +630,7 @@ impl App {
                         .or(geometry_pane);
                     if let Some((_, row, col)) = pixel_target {
                         // When: `pixel_target` identifies a rendered cell, pair its coordinates with the same-snapshot pane before activation.
-                        let opened = self.main_window_id.zip(clicked_pane).is_some_and(
+                        let opened = self.registry.main_window_id.zip(clicked_pane).is_some_and(
                             |(window_id, pane_id)| {
                                 self.activate_target_at(window_id, pane_id, row, col)
                             },

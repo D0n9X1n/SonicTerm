@@ -36,7 +36,7 @@ pub(super) fn present_with(
             click: click.clone(),
         })
         .collect();
-    app.windows.get_mut(&window_id).unwrap().status_strip =
+    app.registry.windows.get_mut(&window_id).unwrap().status_strip =
         Some(StripHit { top: 500.0, height: 20.0, segments });
 }
 
@@ -120,11 +120,11 @@ pub(super) fn ring_after_marks(
     let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
     let (mut app, window_id) = app_with_tabs(&titles);
     for tab in 0..marked {
-        app.windows.get_mut(&window_id).unwrap().tabs.mark(tab, marks);
+        app.registry.windows.get_mut(&window_id).unwrap().tabs.mark(tab, marks);
     }
     let start = Instant::now();
     activate(&mut app, window_id, start);
-    app.windows.get_mut(&window_id).unwrap().tabs.mark(rings, |marks| marks.bell = true);
+    app.registry.windows.get_mut(&window_id).unwrap().tabs.mark(rings, |marks| marks.bell = true);
     let _ = app.flush_accessibility(start + Duration::from_secs(1));
     announced(&app, window_id).map(|said| said.text).unwrap_or_default()
 }

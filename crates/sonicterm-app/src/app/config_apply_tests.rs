@@ -272,7 +272,7 @@ fn reload_order_normalizes_before_any_config_side_effect() {
     let body = &SOURCE[start..];
     let normalize = body.find("Self::normalize_config").expect("normalization call");
     let baseline = body.find("self.configured_font_size").expect("font baseline update");
-    let warm = body.find("self.warm_window_pool.clear()").expect("warm-pool clear");
+    let warm = body.find("self.registry.warm_window_pool.clear()").expect("warm-pool clear");
     let storage = body.find("self.config = new_cfg").expect("config storage");
     assert!(normalize < baseline && normalize < warm && normalize < storage);
 }
@@ -325,7 +325,7 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_synthetic_main();
     let child_id = app.__test_seed_child_window(&["child"]);
-    let window_ids = [app.main_window_id.expect("synthetic main"), child_id];
+    let window_ids = [app.registry.main_window_id.expect("synthetic main"), child_id];
     let mut stale = Vec::new();
 
     for window_id in window_ids {
@@ -349,7 +349,7 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
             screen_epoch: 0,
             alt_screen: false,
         };
-        let window = app.windows.get_mut(&window_id).expect("seeded window");
+        let window = app.registry.windows.get_mut(&window_id).expect("seeded window");
         let request = window.path_probe.request(key.clone()).expect("new target probe");
         let result = PathProbeResult {
             failure: None,
@@ -376,13 +376,13 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
 
     // A probe that finishes after the reload carries the old epoch and cannot authorize a click.
     for (window_id, key, result) in &stale {
-        let window = app.windows.get_mut(window_id).expect("seeded window");
+        let window = app.registry.windows.get_mut(window_id).expect("seeded window");
         assert!(!window.path_probe.accept(result, Some(key)));
         assert!(window.path_probe.decision_for(key).is_none());
     }
 
     for window_id in window_ids {
-        let window = app.windows.get(&window_id).expect("seeded window");
+        let window = app.registry.windows.get(&window_id).expect("seeded window");
         assert!(window.hovered_url.is_none());
         assert!(!window.hover_link);
         assert!(window
@@ -548,7 +548,7 @@ fn palette_locale_consumers_preserve_attached_window_and_command() {
     let config = Config { locale: "ja".into(), ..Config::default() };
     let mut app = App::new(Theme::default(), config, Keymap::default());
     assert_eq!(
-        app.command_palette.label_for_visible_index(0),
+        app.interaction.command_palette.label_for_visible_index(0),
         Some(localized_label(&Action::NewTab, &app.i18n).as_str())
     );
     app.__test_synthetic_main();
@@ -556,29 +556,33 @@ fn palette_locale_consumers_preserve_attached_window_and_command() {
     app.__test_set_frontmost_window(Some(child));
     assert!(app.run_action(&Action::OpenCommandPalette));
     app.__test_set_palette_query("hide");
-    let selected = app.command_palette.current().cloned();
+    let selected = app.interaction.command_palette.current().cloned();
     let Some(sonicterm_ui::command_palette::PaletteEntry::Command(action)) = &selected else {
         panic!("hide query selects a command");
     };
-    app.command_palette.move_cursor_left();
-    let cursor = app.command_palette.cursor();
+    app.interaction.command_palette.move_cursor_left();
+    let cursor = app.interaction.command_palette.cursor();
     app.set_locale("zh-CN");
-    assert_eq!(app.command_palette.current(), selected.as_ref());
+    assert_eq!(app.interaction.command_palette.current(), selected.as_ref());
     assert_eq!(app.__test_palette_attached_window(), Some(child));
-    assert_eq!(app.command_palette.cursor(), cursor);
+    assert_eq!(app.interaction.command_palette.cursor(), cursor);
     assert_eq!(
-        app.command_palette.label_for_visible_index(app.command_palette.selected()),
+        app.interaction
+            .command_palette
+            .label_for_visible_index(app.interaction.command_palette.selected()),
         Some(localized_label(action, &app.i18n).as_str())
     );
     let mut reloaded = app.config.clone();
     reloaded.locale = "en".into();
     app.apply_new_config(reloaded);
-    assert_eq!(app.command_palette.current(), selected.as_ref());
-    assert_eq!(app.command_palette.query(), "hide");
-    assert_eq!(app.command_palette.cursor(), cursor);
+    assert_eq!(app.interaction.command_palette.current(), selected.as_ref());
+    assert_eq!(app.interaction.command_palette.query(), "hide");
+    assert_eq!(app.interaction.command_palette.cursor(), cursor);
     assert_eq!(app.__test_palette_attached_window(), Some(child));
     assert_eq!(
-        app.command_palette.label_for_visible_index(app.command_palette.selected()),
+        app.interaction
+            .command_palette
+            .label_for_visible_index(app.interaction.command_palette.selected()),
         Some(localized_label(action, &app.i18n).as_str())
     );
 }

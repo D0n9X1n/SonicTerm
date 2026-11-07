@@ -8,7 +8,7 @@ impl App {
         src_id: WindowId,
         local_in_src: (f64, f64),
     ) -> Option<crate::tab_drag::DropTarget<WindowId>> {
-        let src_child = self.windows.get(&src_id)?;
+        let src_child = self.registry.windows.get(&src_id)?;
         let src_origin = src_child
             .window
             .as_ref()?
@@ -37,8 +37,8 @@ impl App {
                 }),
             ));
         }
-        for (id, child) in &self.windows {
-            if *id == src_id || Some(*id) == self.main_window_id {
+        for (id, child) in &self.registry.windows {
+            if *id == src_id || Some(*id) == self.registry.main_window_id {
                 // When: `id` is the drag source or the window named by `main_window_id`,
                 // which was already pushed above; skip so no window is a candidate twice.
                 continue;
@@ -80,8 +80,8 @@ impl App {
             .map(|position| (position.x, position.y))
             .unwrap_or_else(|_| (0, 0));
         let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
-        let candidates = self.windows.iter().filter_map(|(id, child)| {
-            if Some(*id) == self.main_window_id || child.role.is_report() {
+        let candidates = self.registry.windows.iter().filter_map(|(id, child)| {
+            if Some(*id) == self.registry.main_window_id || child.role.is_report() {
                 // When: `id` is `main_window_id`, the window this drag started in, or a report
                 // window, which accepts no tab; keep both out of `candidates`.
                 return None;
@@ -103,7 +103,7 @@ impl App {
     }
 
     pub fn try_cross_window_merge(&mut self, index: usize) -> bool {
-        let main_id = self.main_window_id;
+        let main_id = self.registry.main_window_id;
         let Some(target) = self
             .main()
             .and_then(|window| window.drag_target)

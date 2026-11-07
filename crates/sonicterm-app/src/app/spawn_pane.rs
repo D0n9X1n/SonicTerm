@@ -352,11 +352,13 @@ pub(in crate::app) struct PaneVtHandles {
     sync_deadline_word: Arc<AtomicU64>,
     sync_resets: Arc<AtomicU64>,
     output_generation: Arc<AtomicU64>,
+    /// Announced after each nonempty batch's generation is published, waking MCP waiters.
+    change_signal: Arc<super::PaneSignal>,
     output_bytes: Arc<AtomicU64>,
     output_counting: Arc<AtomicBool>,
     output_outstanding: Arc<AtomicBool>,
     bells: Arc<AtomicU64>,
-    inline_images: Arc<Mutex<Vec<InlineImage>>>,
+    inline_images: Arc<super::media::InlineImageStore>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
     frame_counters: Option<super::frame_counters::PaneFrameCounters>,
     /// This worker's echo-watch target and recorded facts, so an armed watch locks its slot once
@@ -391,6 +393,7 @@ impl PaneVtHandles {
             sync_deadline_word: pane.sync_deadline_word.clone(),
             sync_resets: pane.sync_resets.clone(),
             output_generation: pane.output_generation.clone(),
+            change_signal: pane.change_signal.clone(),
             output_bytes: pane.output_bytes.clone(),
             output_counting: pane.output_counting.clone(),
             output_outstanding: pane.output_outstanding.clone(),
@@ -660,7 +663,7 @@ impl App {
         frame_counters_on: bool,
     ) -> sonicterm_io::pty::ShellSpawnOpts {
         sonicterm_io::pty::ShellSpawnOpts {
-            clean_e2e: self.runtime_smoke.is_some(),
+            clean_e2e: self.services.runtime_smoke.is_some(),
             diagnostic_timestamps: frame_counters_on,
             extra_env: self.pane_control_env(pane_id),
             ..launch.shell_spawn_opts(
@@ -720,7 +723,7 @@ impl App {
             let mut parser_guard = crate::app::frame_counters::lock_parser(&parser);
             super::seed_parser_theme_colors(&mut parser_guard, &self.theme);
         }
-        let redraw_target = Arc::new(Mutex::new(self.main_window_id));
+        let redraw_target = Arc::new(Mutex::new(self.registry.main_window_id));
         // The gate is read before the PTY exists, so its reader stamps reads from the first one.
         let frame_counters = self.pane_frame_counters();
         let mut shell_opts = self.pane_spawn_opts(pane_id, launch, frame_counters.is_some());

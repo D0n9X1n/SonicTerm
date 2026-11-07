@@ -20,7 +20,7 @@ fn a_counting_collection_times_custody_from_its_first_guard() {
         drop(custody);
         dispatch.unwrap().rendered();
         assert_eq!(custody_counts(&totals), (1, 1, 0), "child={child}: a rendered frame");
-        let blocked = Arc::clone(&app.windows[&window].panes[&right].parser);
+        let blocked = Arc::clone(&app.registry.windows[&window].panes[&right].parser);
         let guard = blocked.lock();
         assert!(counted.try_collect(|| {}).is_err());
         assert_eq!(
@@ -29,7 +29,7 @@ fn a_counting_collection_times_custody_from_its_first_guard() {
             "child={child}: contention after the first guard"
         );
         drop(guard);
-        let first = Arc::clone(&app.windows[&window].panes[&left].parser);
+        let first = Arc::clone(&app.registry.windows[&window].panes[&left].parser);
         let guard = first.lock();
         assert!(counted.try_collect(|| {}).is_err());
         assert_eq!(custody_counts(&totals), (2, 1, 1), "child={child}: no guard, nothing recorded");
@@ -118,7 +118,7 @@ fn an_unwinding_collection_records_custody_only_after_every_guard_is_released() 
         let (mut app, window, left, right, _) = fixture(child, false);
         let parsers: Vec<_> = [left, right]
             .iter()
-            .map(|id| Arc::clone(&app.windows[&window].panes[id].parser))
+            .map(|id| Arc::clone(&app.registry.windows[&window].panes[id].parser))
             .collect();
         // Each entry is whether every visible parser could be locked when a custody recorded.
         let guards_free_at_record = std::rc::Rc::new(RefCell::new(Vec::new()));
@@ -209,7 +209,7 @@ fn an_unwind_after_collection_releases_the_held_frames_guards_first() {
         let (mut app, window, left, right, _) = fixture(child, false);
         let parsers: Vec<_> = [left, right]
             .iter()
-            .map(|id| Arc::clone(&app.windows[&window].panes[id].parser))
+            .map(|id| Arc::clone(&app.registry.windows[&window].panes[id].parser))
             .collect();
         let guards_free_at_record = std::rc::Rc::new(RefCell::new(Vec::new()));
         let observed = std::rc::Rc::clone(&guards_free_at_record);
@@ -262,7 +262,7 @@ fn a_counting_collection_records_spans_ending_at_the_custody_release() {
         drop(held.guards);
         drop(held.custody);
         held.dispatch.unwrap().rendered();
-        let blocked = Arc::clone(&app.windows[&window].panes[&right].parser);
+        let blocked = Arc::clone(&app.registry.windows[&window].panes[&right].parser);
         let guard = blocked.lock();
         assert!(counted.try_collect(|| {}).is_err());
         drop(guard);
@@ -432,7 +432,7 @@ fn a_parser_busy_through_the_deadline_is_contended_with_every_guard_released() {
     ]);
     let outcome = sources.try_collect_with(&second_busy, budget, || {});
     assert_eq!(outcome.err(), Some(FrameUnavailable::Contended { pane_id: right, images: false }));
-    let state = &app.windows[&window];
+    let state = &app.registry.windows[&window];
     assert!(state.panes[&left].parser.try_lock().is_some(), "the earlier guard was released");
     assert!(state.panes[&right].parser.try_lock().is_some());
     assert!(sources.image_visits.borrow().is_empty(), "every parser is taken before any image");
@@ -452,7 +452,7 @@ fn a_guard_obtained_after_the_deadline_is_released_and_counts_as_a_miss() {
     ]);
     let outcome = sources.try_collect_with(&late, budget, || {});
     assert_eq!(outcome.err(), Some(FrameUnavailable::Contended { pane_id: right, images: false }));
-    let state = &app.windows[&window];
+    let state = &app.registry.windows[&window];
     assert!(state.panes[&left].parser.try_lock().is_some(), "the earlier guard was released");
     assert!(state.panes[&right].parser.try_lock().is_some(), "the late guard was released");
     // The nonwaiting probe succeeds, but only after the deadline: that guard is released too.
@@ -462,7 +462,7 @@ fn a_guard_obtained_after_the_deadline_is_released_and_counts_as_a_miss() {
     ]);
     let outcome = sources.try_collect_with(&late_probe, budget, || {});
     assert_eq!(outcome.err(), Some(FrameUnavailable::Contended { pane_id: right, images: false }));
-    let state = &app.windows[&window];
+    let state = &app.registry.windows[&window];
     assert!(state.panes[&left].parser.try_lock().is_some(), "the earlier guard was released");
     assert!(state.panes[&right].parser.try_lock().is_some(), "the late probe's guard was released");
     assert!(sources.image_visits.borrow().is_empty(), "no image is visited after a late guard");
@@ -490,7 +490,7 @@ fn a_guard_obtained_after_the_deadline_is_released_and_counts_as_a_miss() {
 fn a_failed_probe_falls_through_to_the_timed_wait_that_takes_the_released_parser() {
     for child in [false, true] {
         let (mut app, window, _left, right, _inactive) = fixture(child, false);
-        let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+        let parser = Arc::clone(&app.registry.windows[&window].panes[&right].parser);
         let sources = sources(&mut app, window, child).ok().unwrap();
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -546,7 +546,9 @@ fn collection_waits_with_a_deadline_and_the_worker_releases_fairly() {
         "self.try_collect_with(&TimedParserAcquire, COLLECTION_LOCK_BUDGET, before_first_lock)"
     ));
     assert!(!production.contains("entry.parser.try_lock()"), "no parser is only probed");
-    assert_eq!(production.matches("let deadline = acquire.now() + budget;").count(), 1);
+    // One absolute deadline, taken from the clock once at the collection's start.
+    assert_eq!(production.matches("let started = acquire.now();").count(), 1);
+    assert_eq!(production.matches("let deadline = started + budget;").count(), 1);
     let worker = strip(concat!(
         include_str!("spawn_pane.rs"),
         "\n",
@@ -564,7 +566,7 @@ fn collection_waits_with_a_deadline_and_the_worker_releases_fairly() {
 #[test]
 fn a_parked_collection_takes_a_parser_its_holder_releases() {
     let (mut app, window, _left, right, _inactive) = fixture(false, false);
-    let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+    let parser = Arc::clone(&app.registry.windows[&window].panes[&right].parser);
     let sources = sources(&mut app, window, false).ok().unwrap();
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
@@ -586,7 +588,7 @@ fn a_parked_collection_takes_a_parser_its_holder_releases() {
 #[test]
 fn a_parser_held_past_the_production_budget_is_contended_without_hanging() {
     let (mut app, window, _left, right, _inactive) = fixture(false, false);
-    let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+    let parser = Arc::clone(&app.registry.windows[&window].panes[&right].parser);
     let sources = sources(&mut app, window, false).ok().unwrap();
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (returned_tx, returned_rx) = std::sync::mpsc::channel::<()>();

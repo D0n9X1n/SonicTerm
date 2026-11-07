@@ -56,7 +56,7 @@ impl super::super::App {
             // When: is_warm_window_id names a warm spare, it was never shown and is never trimmed.
             return TrimDecision::Skipped(TrimSkip::Warm);
         }
-        let Some(window) = self.windows.get_mut(&window_id) else {
+        let Some(window) = self.registry.windows.get_mut(&window_id) else {
             // When: window_id names no live window, there is nothing to trim.
             return TrimDecision::Skipped(TrimSkip::NoWindow);
         };
@@ -77,14 +77,14 @@ impl super::super::App {
         }
         window.redraw.trimmed = true;
         window.redraw.trim_released_requested_bytes = report.gpu_released_requested_bytes;
-        self.trim_seq += 1;
-        self.last_trim_source = Some(rule.source());
-        TrimDecision::Trimmed { trim_seq: self.trim_seq }
+        self.diagnostics.trim_seq += 1;
+        self.diagnostics.last_trim_source = Some(rule.source());
+        TrimDecision::Trimmed { trim_seq: self.diagnostics.trim_seq }
     }
 
     /// The retention pass's trim: every live window covered for 30 s gives back what it can rebuild.
     pub(in crate::app) fn trim_covered_renderers(&mut self, now: Instant) {
-        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        let window_ids: Vec<WindowId> = self.registry.windows.keys().copied().collect();
         for window_id in window_ids {
             let decision = self.trim_window_if_eligible(window_id, now, TrimRule::After30s);
             #[cfg(test)]

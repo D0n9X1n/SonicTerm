@@ -61,8 +61,23 @@ crate 中身份不变的类型。
 
 ### 权威运行时状态
 
-`App` 持有 `HashMap<WindowId, WindowState>` 和 `main_window_id`。主窗口和拆出的窗口
-使用同一种 `WindowState` 表示。
+`App` 协调事件循环并应用已完成的操作。其状态由四个所有者持有，每个都是 `App` 的字段：
+
+```mermaid
+flowchart LR
+  App["App：事件循环，应用操作"]
+  App --> Reg["WindowRegistry（registry）：窗口、主窗口与最前窗口 id、窗口 key、预备窗口"]
+  App --> Run["RuntimeServices（services）：前台进程探测、MCP 服务器、PTY 回收器、GPU 恢复、字体目录 worker、运行时冒烟"]
+  App --> Int["InteractionState（interaction）：命令面板、编辑目标、字段指针捕获、系统拖放、广播"]
+  App --> Diag["DiagnosticsState（diagnostics）：计数器、保留与裁剪采样、面包屑"]
+  Reg --> Win["WindowState：标签页、窗格、渲染器"]
+```
+
+`WindowRegistry` 持有 `HashMap<WindowId, WindowState>` 和 `main_window_id`；窗格属于持有它的
+那个窗口的 `WindowState`，所有按窗格 id 的查找都经过注册表的 `pane_by_id`。主窗口和拆出的窗口
+使用同一种 `WindowState` 表示。这些所有者只在 `app` 模块内可见；`App` 的公开方法保持不变。
+少数字段仍留在 `App` 上：帧计数器（在重绘路径上与窗口和命令面板一同借用）、重绘调度、配置、
+主题、键位和字体。
 
 键盘、IME、焦点和修饰键事件在主/子窗口呈现路径分流前，先查找来源窗口身份。共享输入
 所有权不替代每窗格终端协议协商或原生平台元数据。原生拖放所有者也在创建窗口前，根据
@@ -79,9 +94,10 @@ crate 中身份不变的类型。
 `PaneState` 持有解析器、可选 `PtyHandle`、重绘目标、终端模式原子值、内联图像和
 资源计费令牌。
 
-`AppStateMachine` 保存不依赖后端的兼容观察值，不决定实时 GUI 拓扑。
-`App::observe_intent` 更新观察值并丢弃效果；`App::dispatch_intent` 单独处理受支持的
-显式目标工作。缺失、已移除或零窗口 key 不会选择主窗口或最前窗口。原生输入通过有界 PTY
+`AppStateMachine` 保存不依赖后端的兼容观察值，不决定实时 GUI 拓扑：它是兼容与测试模型，
+只有测试会读取其状态。`App::observe_intent` 用结构性意图（标签页、窗格、窗口、焦点）更新它
+并丢弃效果；光标移动等高频输入不会上报，因为没有任何地方读取它。让归约器成为权威来源将是另一项
+行为迁移。`App::dispatch_intent` 单独处理受支持的显式目标工作。缺失、已移除或零窗口 key 不会选择主窗口或最前窗口。原生输入通过有界 PTY
 队列发送给源窗口的活动窗格。完整状态/意图/效果清单，以及记录效果与原生完成的区别，见
 [运行时生命周期](Runtime-Lifecycle-zh-CN)。
 
@@ -104,8 +120,9 @@ crate 中身份不变的类型。
 #### 渲染
 
 主窗口和子窗口共用应用内的 `VisibleFrameSources` 收集器。它先验证活动布局，再克隆可见
-窗格的解析器/图像句柄及视口元数据。先用 `try_lock` 取得所有可见解析器保护对象，再短暂锁住
-并复制这些窗格的图像列表。非活动标签页和缩放隐藏的图像存储不会推迟可见帧，也不会被克隆。
+窗格的解析器/图像句柄及视口元数据。先用 `try_lock` 取得所有可见解析器保护对象，再只探测
+这些窗格的图像存储并为每个列表取快照：共享的 `Arc`，不复制其中的条目。只有当解码器修改仍被
+某一帧持有的列表时，才会复制该列表。非活动标签页和缩放隐藏的图像存储不会推迟可见帧，也不会被克隆。
 拥有所有权的句柄通过普通借用活得比保护对象更久，无需转换生命周期。共享构建器创建真正的
 `PaneRender` 网格借用，并且每份图像快照只移动一次，这一过程发生在持有解析器保护对象的帧源
 （`HeldFrameSource`）内部。`GpuRenderer::render_releasing` 只从该帧源借用一次窗格，用于组帧。

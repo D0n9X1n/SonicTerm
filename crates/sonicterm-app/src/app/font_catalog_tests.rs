@@ -173,7 +173,7 @@ fn a_report_after_finish_session_changes_nothing() {
     entered.recv_timeout(GATE_TIMEOUT).expect("the worker entered enumeration");
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape));
     app.finish_session();
-    let worker = app.font_catalog_worker.take().expect("the picker started a worker");
+    let worker = app.services.font_catalog_worker.take().expect("the picker started a worker");
     assert!(!worker.is_finished(), "finish_session waited for the held enumeration");
     drop(release);
     let deadline = Instant::now() + GATE_TIMEOUT;

@@ -265,7 +265,7 @@ fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
             cursor_style: CursorStyle::BlockSteady,
             is_broadcast_participant: false,
             scrollbar_alpha: 0.0,
-            inline_images: Vec::new(),
+            inline_images: Default::default(),
         })
         .collect();
     let released = renderer.render_releasing(

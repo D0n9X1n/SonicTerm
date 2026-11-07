@@ -209,8 +209,11 @@ update_interval_ms = 2000
 # Nothing listens while this is off.
 enabled = false
 # Control tools act on: "off" (none), "agent" (panes an agent created),
-# or "any" (every pane). Read tools work on every pane when enabled.
+# or "any" (every pane).
 control = "agent"
+# Read tools see: "agent" (panes an agent created) or "any" (every pane).
+# A config without this line reads every pane.
+read = "agent"
 "#,
         config_dir = default_config_dir()
             .map(|dir| dir.display().to_string())

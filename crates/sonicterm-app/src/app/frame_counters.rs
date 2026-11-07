@@ -532,6 +532,13 @@ pub(crate) struct WindowFrameCounters {
     pub(crate) contention_parser: u64,
     /// Frame collections that found a visible image store busy.
     pub(crate) contention_images: u64,
+    /// Frame collections whose shared parser deadline passed before a later pane was probed.
+    pub(crate) contention_budget_expired: u64,
+    /// Failed collections by the visible-pane order index of the pane that missed: 0, 1, 2, then 3
+    /// and later together.
+    pub(crate) miss_pane: [u64; 4],
+    /// Time each collection spent taking its parsers, success or miss.
+    pub(crate) parser_lock_wait: Histogram,
     /// Redraws deferred by a surface timeout.
     pub(crate) defer_timeout: u64,
     /// Redraws deferred by the contention retry floor.
@@ -592,6 +599,9 @@ impl Default for WindowFrameCounters {
             failed: 0,
             contention_parser: 0,
             contention_images: 0,
+            contention_budget_expired: 0,
+            miss_pane: [0; 4],
+            parser_lock_wait: Histogram::new(HistogramUnit::Micros),
             defer_timeout: 0,
             defer_contention: 0,
             defer_sync: 0,
@@ -834,7 +844,7 @@ impl super::App {
             return;
         };
         if let Some((id, state)) =
-            window.and_then(|(id, _)| self.windows.get_mut(&id).map(|state| (id, state)))
+            window.and_then(|(id, _)| self.registry.windows.get_mut(&id).map(|state| (id, state)))
         {
             let renderer = state.renderer.as_ref();
             if let Some(counters) = state.redraw.frame_counters.as_deref_mut() {
@@ -876,7 +886,7 @@ impl super::App {
         };
         app.finish_closing();
         let now = Instant::now();
-        for (id, window) in &mut self.windows {
+        for (id, window) in &mut self.registry.windows {
             if let Some(renderer) = window.renderer.as_mut() {
                 // the App is exiting, so each renderer settles its growth episodes before the read.
                 renderer.finalize_frame_stats();

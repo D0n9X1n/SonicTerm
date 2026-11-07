@@ -18,7 +18,7 @@ fn a_rolled_back_tear_out_keeps_each_pane_on_its_media_pool() {
     assert!(app.tear_out_tab_with_installer(1, fail_without_destination));
 
     assert_eq!(pool.live_charges(), 3, "a rolled-back tear-out neither adds nor releases a charge");
-    for pane in app.windows[&source].panes.values() {
+    for pane in app.registry.windows[&source].panes.values() {
         assert!(Arc::ptr_eq(pane.inline_media_charge.lock().pool(), &pool));
     }
 }
@@ -33,13 +33,13 @@ fn a_transferred_tab_keeps_its_pane_on_the_media_pool() {
     let moved = app.__test_seed_tab("moved");
     app.__test_seed_tab("remaining");
     let child = app.__test_seed_child_window(&["destination"]);
-    app.windows.get_mut(&child).unwrap().test_pane_viewport =
+    app.registry.windows.get_mut(&child).unwrap().test_pane_viewport =
         Some((sonicterm_ui::pane::Rect { x: 0.0, y: 0.0, w: 800.0, h: 500.0 }, 10.0, 20.0));
     assert_eq!(pool.live_charges(), 3);
 
     app.transfer_tab(None, 0, Some(child), 1).unwrap();
 
-    let pane = &app.windows[&child].panes[&moved];
+    let pane = &app.registry.windows[&child].panes[&moved];
     assert!(
         Arc::ptr_eq(pane.inline_media_charge.lock().pool(), &pool),
         "the moved pane keeps its pool"
@@ -244,15 +244,15 @@ fn registration_time_device_stop_revokes_and_restores_the_last_tab() {
                 registered: None,
             }));
             let destination = window.id();
-            app.warm_window_pool.push(crate::app::WarmWindow {
+            app.registry.warm_window_pool.push(crate::app::WarmWindow {
                 window,
                 renderer,
                 created_at: Instant::now(),
             });
             let before = source_snapshot(&app, source);
-            let windows: HashSet<_> = app.windows.keys().copied().collect();
+            let windows: HashSet<_> = app.registry.windows.keys().copied().collect();
             let hidden = app.__test_main_hidden();
-            let frontmost = app.frontmost_window;
+            let frontmost = app.registry.frontmost_window;
             assert!(app.tear_out_tab(event_loop, 0));
             assert!(!state.accepts_gpu_work(), "registration must inject the stop");
             assert_eq!(
@@ -264,11 +264,11 @@ fn registration_time_device_stop_revokes_and_restores_the_last_tab() {
                 before,
                 "restore the last tab and its pane custody"
             );
-            assert_eq!(app.windows.keys().copied().collect::<HashSet<_>>(), windows);
+            assert_eq!(app.registry.windows.keys().copied().collect::<HashSet<_>>(), windows);
             assert_eq!(app.__test_main_hidden(), hidden, "never hide the source's last tab");
-            assert_eq!(app.frontmost_window, frontmost);
+            assert_eq!(app.registry.frontmost_window, frontmost);
             assert!(
-                app.warm_window_pool.is_empty(),
+                app.registry.warm_window_pool.is_empty(),
                 "retire the destination mutated during registration"
             );
             assert!(!app.pending_exit);

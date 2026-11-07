@@ -109,7 +109,7 @@ impl super::App {
     /// indistinguishable from a renderer that genuinely holds nothing. Warm
     /// entries own their renderer outright, so none is ever absent.
     pub(super) fn log_renderer_retention(&self) {
-        for (window_id, window) in &self.windows {
+        for (window_id, window) in &self.registry.windows {
             let Some(renderer) = window.renderer.as_ref() else {
                 // When: this window has no renderer yet, omit a misleading zero-retention record.
                 continue;
@@ -121,7 +121,7 @@ impl super::App {
             );
         }
 
-        for (index, warm) in self.warm_window_pool.iter().enumerate() {
+        for (index, warm) in self.registry.warm_window_pool.iter().enumerate() {
             emit_renderer_retention(
                 &format!("warm[{index}]"),
                 "warm",

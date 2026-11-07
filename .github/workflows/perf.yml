@@ -212,22 +212,28 @@ jobs:
       # S1/atlas-retry and S6/rest run twice per side (--list run_caps). A release comparison runs them uncapped.
       # S12 runs in S9-S10sync, a shard perf-compare.py's cell-layout decision reads (CELL_LAYOUT_SHARDS). Shard
       # names remain stable artifact identities. Exact-head elapsed time, including queues, must stay below 35 min.
+      # Run 42371975980 measured S7-S4 at 41.3 min from creation, the critical path: S7 alone takes 21.0 min of its
+      # scenarios. S13 and S13/sustained-4 (2.6 min each) moved to S10-S11release, which had 13.8 min of slack, and
+      # S12/status-line (1.4) and S3 (1.5) to S9-S10sync (13.6 min of slack), so S7-S4 leaves S7 with S4, S8,
+      # S6/selection-drag and the counters-only S1/atlas-retry. Run 42375734702 still measured 36.7 min with S7 at
+      # 20.9 (base and head alike; the last earlier PR run, 41234583335, was 46.4 min on the same path), so S7 takes
+      # 3 short runs a side in every set (--list run_caps), about 6 min less; a release comparison runs it uncapped.
       matrix:
         include:
           - platform: macOS
             runner: macos-15
             shard: S7-S4
-            scenarios: S7 S4 S1/atlas-retry S12/status-line S3 S8 S6/selection-drag
+            scenarios: S7 S4 S1/atlas-retry S8 S6/selection-drag
             laps: ""
           - platform: macOS
             runner: macos-15
             shard: S9-S10sync
-            scenarios: S10/sync S9 S11 S6 S1 S5 S6/rest S1/status-line S12
+            scenarios: S10/sync S9 S11 S6 S1 S5 S6/rest S1/status-line S12 S12/status-line S3
             laps: S9
           - platform: macOS
             runner: macos-15
             shard: S10-S11release
-            scenarios: S10 S11/release S2 S2/flood S6/flood
+            scenarios: S10 S11/release S2 S2/flood S6/flood S13 S13/sustained-4
             laps: ""
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
@@ -405,7 +411,8 @@ jobs:
       # uncapped. S9-S10 measured 22.6 (run 37147065934); S9's laps set, two runs a side, adds about 0.4.
       # S6/rest joins S2-S10sync. Its added time is not estimated here: the exact-head run, read with
       # scripts/perf-critical-path.py, is the measurement. S1/status-line and S12/status-line join S7, the
-      # one-scenario shard, one run per side in each set: nominally about 1 and 2 min, not measured.
+      # one-scenario shard, one run per side in each set: nominally about 1 and 2 min, not measured. S13 and
+      # S13/sustained-4 join S2-S10sync on the same caps, nominally about 6 min a variant, not measured.
       matrix:
         include:
           - platform: Windows
@@ -421,7 +428,7 @@ jobs:
           - platform: Windows
             runner: windows-latest
             shard: S2-S10sync
-            scenarios: S2 S10/sync S6/rest
+            scenarios: S2 S10/sync S6/rest S13 S13/sustained-4
             laps: ""
           - platform: Windows
             runner: windows-latest

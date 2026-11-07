@@ -14,7 +14,7 @@ use sonicterm_grid::grid::RowToken;
 use super::{scan_from, ScanCursor, ScanCursors};
 use crate::app::mcp::read::{read_pane, ReadLimits, ReadMode};
 use crate::app::mcp::tools_read::{
-    inspect, wait_until, ScanFlags, TailCheck, WaitCondition, WaitOutcome, WaitReason,
+    inspect, wait_until, ScanFlags, TailCheck, WaitCondition, WaitOutcome, WaitReason, WAIT_RECHECK,
 };
 use crate::app::mcp::{test_entry, CallScope, McpShared, PaneEntry};
 
@@ -27,6 +27,7 @@ pub(super) fn scope(shared: &McpShared) -> CallScope {
 pub(super) fn emit(entry: &PaneEntry, bytes: &[u8]) {
     entry.parser.lock().advance(bytes);
     entry.output_generation.fetch_add(1, Ordering::Release);
+    entry.change_signal.notify();
 }
 
 /// A wait on `pattern` for lines after `after`, bounded by `timeout_ms`.
@@ -37,6 +38,7 @@ pub(super) fn regex_wait(pattern: &str, after: Option<RowToken>, timeout_ms: u64
         quiet: None,
         watch_exit: false,
         timeout: Duration::from_millis(timeout_ms),
+        recheck: WAIT_RECHECK,
     }
 }
 

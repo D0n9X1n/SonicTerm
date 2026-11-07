@@ -172,16 +172,17 @@ impl App {
         target: Option<WindowId>,
         target_idx: usize,
     ) -> Result<(), TransferError> {
-        let source = source.or(self.main_window_id).ok_or(TransferError::SourceMissing)?;
-        let target = target.or(self.main_window_id).ok_or(TransferError::TargetMissing)?;
-        if !self.windows.contains_key(&source) {
+        let source = source.or(self.registry.main_window_id).ok_or(TransferError::SourceMissing)?;
+        let target = target.or(self.registry.main_window_id).ok_or(TransferError::TargetMissing)?;
+        if !self.registry.windows.contains_key(&source) {
             // When: the explicit source disappeared, report its absence before any destination preparation.
             return Err(TransferError::SourceMissing);
         }
         self.validate_transfer_destination(target)?;
         if source == target {
             // When: source equals target, reorder in place without detaching or reattributing its panes.
-            let window = self.windows.get_mut(&source).ok_or(TransferError::SourceMissing)?;
+            let window =
+                self.registry.windows.get_mut(&source).ok_or(TransferError::SourceMissing)?;
             if source_idx >= window.tabs.len() || source_idx >= window.tab_states.len() {
                 // When: source_idx exceeds tabs or tab_states, reject before reorder can change a different live tab.
                 return Err(TransferError::SourceIndexOutOfBounds);
@@ -189,7 +190,7 @@ impl App {
             window.reorder_tab(source_idx, target_idx);
             return Ok(());
         }
-        let origin = if self.main_window_id == Some(source) {
+        let origin = if self.registry.main_window_id == Some(source) {
             tear_out::TearOutSource::Main(source)
         } else {
             // When: source is not main_window_id, rollback must restore the child rather than the main strip.
@@ -199,26 +200,29 @@ impl App {
             .detach_for_tear_out(origin, source_idx)
             .ok_or(TransferError::SourceIndexOutOfBounds)?;
         transaction.attach(self, target, target_idx)?;
-        self.frontmost_window = Some(target);
-        if let Some(window) = self.windows.get(&target).and_then(|state| state.window.as_ref()) {
+        self.registry.frontmost_window = Some(target);
+        if let Some(window) =
+            self.registry.windows.get(&target).and_then(|state| state.window.as_ref())
+        {
             window.focus_window();
             crate::app::frame_counters::request_native_redraw(window);
         }
-        if Some(target) == self.main_window_id && self.main_is_hidden() {
+        if Some(target) == self.registry.main_window_id && self.main_is_hidden() {
             self.show_main_window();
         }
-        let source_empty = self.windows.get(&source).is_some_and(|window| window.tabs.is_empty());
+        let source_empty =
+            self.registry.windows.get(&source).is_some_and(|window| window.tabs.is_empty());
         if source_empty {
-            if Some(source) == self.main_window_id {
+            if Some(source) == self.registry.main_window_id {
                 self.hide_main_window();
             } else {
                 // When: source is not main_window_id, transferred charges are committed and the empty child owner can now close.
                 self.reap_empty_child(source);
             }
-        } else if Some(source) == self.main_window_id {
+        } else if Some(source) == self.registry.main_window_id {
             // When: the nonempty source is main_window_id, complete its newly active pane layout.
             self.resize_visible_panes();
-        } else if let Some(window) = self.windows.get_mut(&source) {
+        } else if let Some(window) = self.registry.windows.get_mut(&source) {
             // When: a nonempty child source remains live, complete its neighbour layout without replacing focus.
             child_window::resize_visible_panes_in_child(window);
         }

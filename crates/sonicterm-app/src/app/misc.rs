@@ -45,7 +45,7 @@ use super::{
 impl App {
     /// Refresh the main window's URI or validated-path hover state.
     pub(super) fn refresh_hovered_url(&mut self) {
-        if let Some(window_id) = self.main_window_id {
+        if let Some(window_id) = self.registry.main_window_id {
             self.refresh_target_hover(window_id);
         }
     }
@@ -79,7 +79,7 @@ impl App {
         let state = Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor));
         match kind {
             FrontmostKind::Child(id) => {
-                if let Some(child) = self.windows.get_mut(&id) {
+                if let Some(child) = self.registry.windows.get_mut(&id) {
                     child.copy_mode = state;
                     mark_all_panes_dirty(&child.panes);
                 }
@@ -121,9 +121,9 @@ impl App {
         self.note_hover(|hover| hover.quick_select_rows_scanned += rows_scanned);
         let window_id = match kind {
             FrontmostKind::Child(id) => Some(id),
-            _ => self.main_window_id,
+            _ => self.registry.main_window_id,
         };
-        if let Some(window) = window_id.and_then(|id| self.windows.get_mut(&id)) {
+        if let Some(window) = window_id.and_then(|id| self.registry.windows.get_mut(&id)) {
             window.copy_mode = Some(state);
             mark_all_panes_dirty(&window.panes);
             window.request_window_redraw();
@@ -209,6 +209,7 @@ impl App {
     // Ordering: redraw_request_count fetch_add is Relaxed; the counter is only
     // incremented, never loaded, so it publishes no other memory.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_drain_menubar_actions(&mut self) {
         let mut ran_any = false;
         for action in crate::menubar_bridge::drain() {
@@ -229,6 +230,7 @@ impl App {
         path: std::path::PathBuf,
     ) {
         let Some(pane) = self
+            .registry
             .windows
             .get(&window_id)
             .and_then(|window| window.tab_states.get(window.tabs.active_index()))
@@ -242,12 +244,12 @@ impl App {
             self.note_pane_input(pane, InputState::Blocked(1));
             return;
         }
-        self.pending_winit_file_drops.entry(window_id).or_default().push(path);
+        self.interaction.pending_winit_file_drops.entry(window_id).or_default().push(path);
     }
 
     /// Deliver each window's current-turn winit paths as one paste, discarding closed or newly READONLY targets.
     pub(super) fn drain_winit_file_drops(&mut self) {
-        for (window_id, paths) in std::mem::take(&mut self.pending_winit_file_drops) {
+        for (window_id, paths) in std::mem::take(&mut self.interaction.pending_winit_file_drops) {
             self.paste_file_paths_in_window(window_id, paths);
         }
     }
@@ -274,12 +276,12 @@ impl App {
         window_id: WindowId,
         paths: Vec<std::path::PathBuf>,
     ) {
-        if !self.windows.contains_key(&window_id) {
+        if !self.registry.windows.contains_key(&window_id) {
             // When: windows no longer contains window_id, discard its drop instead of selecting current focus.
             return;
         }
         self.paste_file_paths_for_kind(self.kind_for(window_id), paths);
-        if let Some(window) = self.windows.get(&window_id) {
+        if let Some(window) = self.registry.windows.get(&window_id) {
             window.request_window_redraw();
         }
     }
@@ -330,12 +332,12 @@ impl App {
         self.resize_visible_panes();
     }
     pub(super) fn drain_pending_os_drag_payloads(&mut self) {
-        if self.main_mut().is_none() || self.pending_os_drag_payloads.is_empty() {
+        if self.main_mut().is_none() || self.interaction.pending_os_drag_payloads.is_empty() {
             // When: main_mut has no WindowState or pending_os_drag_payloads is
             // empty; nothing can be replayed, so the queue waits for a later drain.
             return;
         }
-        let pending = std::mem::take(&mut self.pending_os_drag_payloads);
+        let pending = std::mem::take(&mut self.interaction.pending_os_drag_payloads);
         for payload in pending {
             let idx = self.new_tab_from_payload(&payload);
             tracing::info!(idx, "spawned queued OS-drag payload");
@@ -346,7 +348,7 @@ impl App {
         if self.main_mut().is_none() {
             // When: main_mut has no WindowState yet; queue the payload so a drop
             // arriving before the main window exists is replayed, not lost.
-            self.pending_os_drag_payloads.push(payload.clone());
+            self.interaction.pending_os_drag_payloads.push(payload.clone());
             tracing::info!(
                 tab = %payload.tab_title,
                 "os_drag: queued payload until main WindowState exists"
@@ -374,6 +376,10 @@ impl App {
 #[path = "misc_tests.rs"]
 mod misc_tests;
 
+#[cfg(test)]
+#[path = "misc_quick_select_tests.rs"]
+mod misc_quick_select_tests;
+
 #[path = "misc_clipboard.rs"]
 mod clipboard;
 #[path = "misc_window_create.rs"]
@@ -386,7 +392,7 @@ impl App {
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
                 // When: kind is any FrontmostKind other than Child; all three resolve
                 // to the main window, which owns the selection being copied.
-                let Some(id) = self.main_window_id else {
+                let Some(id) = self.registry.main_window_id else {
                     // When: main_window_id is unset; no main window has been created
                     // yet, so there is no window to copy a selection from.
                     return;
@@ -395,7 +401,7 @@ impl App {
             }
         };
         let (text, clear_after_copy) = {
-            let Some(window) = self.windows.get_mut(&window_id) else {
+            let Some(window) = self.registry.windows.get_mut(&window_id) else {
                 // When: windows no longer holds window_id; the window closed before
                 // the copy ran, so there is no selection left to read.
                 return;
@@ -446,7 +452,7 @@ impl App {
         self.note_copy_result(window_id, copied);
         if copied && clear_after_copy {
             // A volatile selection is consumed only after confirmed clipboard delivery.
-            if let Some(window) = self.windows.get_mut(&window_id) {
+            if let Some(window) = self.registry.windows.get_mut(&window_id) {
                 // Clear the highlight and invalidate retained rows before requesting its frame.
                 window.selection = None;
                 mark_all_panes_dirty(&window.panes);
@@ -470,7 +476,7 @@ impl App {
             return (0, Vec::new());
         }
         let mut destinations = vec![source_pane];
-        if matches!(self.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
+        if matches!(self.interaction.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
         {
             // `source_pane` armed this broadcast, so append only its currently admitted receivers.
             let (receivers, blocked) = self.broadcast_receivers_counted();

@@ -18,9 +18,10 @@ fn real_pty_readonly_parser_reply_uses_production_spool() {
     let (mut app, windows) = input_test_windows();
     let observed = PtySubmissions::start();
     for (window, pane_id) in windows {
-        app.windows.get_mut(&window).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+        app.registry.windows.get_mut(&window).unwrap().copy_mode =
+            Some(CopyModeState::read_only_at((0, 0)));
         assert!(!app.admits_new_user_input(pane_id));
-        let pane = &app.windows[&window].panes[&pane_id];
+        let pane = &app.registry.windows[&window].panes[&pane_id];
         let pty = pane.pty.as_ref().unwrap();
         let replies = pty.reply_sender();
         let handles = PaneVtHandles::from_pane_state(pane);
@@ -250,8 +251,8 @@ fn main_split_without_window_or_tab_leaves_topology_empty() {
     // Missing destinations are no-ops rather than installing a pane outside a tab tree.
     let mut app = app_with_unavailable_shell();
     app.split_active(Direction::Down);
-    assert!(app.main_window_id.is_none());
-    assert!(app.windows.is_empty());
+    assert!(app.registry.main_window_id.is_none());
+    assert!(app.registry.windows.is_empty());
 
     app.__test_synthetic_main();
     app.split_active(Direction::Down);
@@ -269,7 +270,7 @@ fn main_tab_and_split_inherit_exact_active_pane_cwd() {
         app.__test_seed_tab("unrelated tab");
         app.main_mut().unwrap().tabs.activate(0);
         let child = app.__test_seed_child_window(&["unrelated window"]);
-        app.frontmost_window = Some(child);
+        app.registry.frontmost_window = Some(child);
         let native = if cfg!(windows) { "/C:/work/source" } else { "/work/source" };
         app.__test_advance_pane_parser(
             pane,
@@ -496,9 +497,9 @@ fn parser_test_hooks_publish_pointer_snapshot_in_main_and_child() {
     assert_eq!(pane.pointer_modes().tracking(), sonicterm_vt::vt::MouseTracking::Button);
 
     let child = app.__test_seed_child_window(&["pointer-child"]);
-    let child_pane = app.windows[&child].tab_states[0].active_pane;
+    let child_pane = app.registry.windows[&child].tab_states[0].active_pane;
     assert!(app.__test_advance_child_pane_parser(child, child_pane, b"\x1b[?1003h\x1b[?1049h"));
-    let modes = app.windows[&child].panes[&child_pane].pointer_modes();
+    let modes = app.registry.windows[&child].panes[&child_pane].pointer_modes();
     assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::AnyMotion);
     assert!(modes.is_alt());
 }
@@ -534,7 +535,7 @@ fn a_worker_keeps_the_media_pool_alive_after_the_app_closes() {
     .with_inline_media_pool(pool.clone());
     let pane_id = app.__test_seed_tab("worker");
     let main = app.__test_main_window_id().expect("the synthetic main window exists");
-    let worker = PaneVtHandles::from_pane_state(&app.windows[&main].panes[&pane_id]);
+    let worker = PaneVtHandles::from_pane_state(&app.registry.windows[&main].panes[&pane_id]);
 
     drop(app);
     assert_eq!(pool.live_charges(), 1, "the worker still holds the pane's charge");

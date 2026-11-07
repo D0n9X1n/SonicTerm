@@ -16,6 +16,7 @@ impl App {
             return false;
         }
         let Some((source_window, source_tab)) = self
+            .registry
             .main_window_id
             .and_then(|window| self.tab_id_at(window, index).map(|tab| (window, tab)))
         else {
@@ -42,7 +43,7 @@ impl App {
         // (winit intercepts mouse events, so NSDraggingSession proper isn't reachable) —
         // we still fall through to the sink, which also writes the pasteboard and
         // returns NotAcknowledged.
-        if self.os_drag_backend.is_some() {
+        if self.interaction.os_drag_backend.is_some() {
             // When: an `os_drag_backend` is installed, so it owns cursor capture and the
             // pasteboard/OLE handoff; run it before the sink to avoid a second DoDragDrop.
             let payload_json = payload.to_json().unwrap_or_default();
@@ -136,7 +137,7 @@ impl App {
             // is still over SonicTerm; stop before walking the child windows.
             return true;
         }
-        for child in self.windows.values() {
+        for child in self.registry.windows.values() {
             let Some(window) = child.window.as_ref() else {
                 // When: this child holds no `window`, so it has no screen rect to test
                 // the cursor against; skip it rather than treat it as a hit.

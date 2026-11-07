@@ -387,7 +387,7 @@ impl sonicterm_render_model::FrameSource for OwningSource {
                 cursor_style: sonicterm_render_model::CursorStyle::default(),
                 is_broadcast_participant: false,
                 scrollbar_alpha: 0.0,
-                inline_images: Vec::new(),
+                inline_images: Default::default(),
             })
             .collect();
         assemble(&mut panes)

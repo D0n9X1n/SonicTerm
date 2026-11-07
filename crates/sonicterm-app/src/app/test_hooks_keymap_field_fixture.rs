@@ -5,7 +5,7 @@ use super::*;
 /// Put a real terminal selection under a field so a wrong copy route is observable.
 #[cfg(any(windows, unix))]
 pub(super) fn seed_terminal_selection(app: &mut App, window: WindowId, pane: u64) {
-    let parser = app.windows[&window].panes[&pane].parser.clone();
+    let parser = app.registry.windows[&window].panes[&pane].parser.clone();
     let selection = {
         let mut parser = parser.lock();
         parser.advance(b"term");
@@ -16,7 +16,7 @@ pub(super) fn seed_terminal_selection(app: &mut App, window: WindowId, pane: u64
             .with_content_state(pane, grid.content_seq(), grid.is_alt(), grid.scrollback_evicted())
             .with_content_fingerprint(grid)
     };
-    app.windows.get_mut(&window).unwrap().selection = Some(selection);
+    app.registry.windows.get_mut(&window).unwrap().selection = Some(selection);
 }
 
 /// Open the requested editable palette mode through the owner's public action route.
@@ -32,17 +32,17 @@ pub(super) fn open_field_palette(
         assert!(app.run_action_for_window(&Action::RenameTab, owner));
     }
     assert!(app.command_palette_owns_input(owner));
-    assert_eq!(app.command_palette.mode(), mode);
+    assert_eq!(app.interaction.command_palette.mode(), mode);
 }
 
 /// Reset palette ownership so each case opens its own field.
 #[cfg(any(windows, unix))]
 pub(super) fn close_field_palette(app: &mut App) {
-    app.command_palette.close();
-    app.palette_attached_window = None;
-    app.tab_edit_target = None;
-    app.window_rename_target = None;
-    for window in app.windows.values_mut() {
+    app.interaction.command_palette.close();
+    app.interaction.palette_attached_window = None;
+    app.interaction.tab_edit_target = None;
+    app.interaction.window_rename_target = None;
+    for window in app.registry.windows.values_mut() {
         window.copy_mode = None;
     }
 }
@@ -71,7 +71,7 @@ pub(super) fn dispatch_field_test_action(
 pub(super) fn search_paste_fixture() -> (InputTestApp, [(WindowId, u64); 3]) {
     let (mut app, windows) = input_test_windows();
     for (id, pane) in windows {
-        let window = app.windows.get_mut(&id).unwrap();
+        let window = app.registry.windows.get_mut(&id).unwrap();
         let pane = window.panes.get_mut(&pane).unwrap();
         let mut parser = pane.parser.lock();
         *parser = Parser::new(Grid::new(40, 3));
@@ -92,7 +92,7 @@ pub(super) fn search_paste_fixture() -> (InputTestApp, [(WindowId, u64); 3]) {
 /// Install search on the selected tab so tests cannot accidentally assume that tab zero is active.
 #[cfg(any(windows, unix))]
 pub(super) fn set_search_paste_query(app: &mut App, id: WindowId, query: &str) {
-    let window = app.windows.get_mut(&id).unwrap();
+    let window = app.registry.windows.get_mut(&id).unwrap();
     let tab = &mut window.tab_states[window.tabs.active_index()];
     let mut search = SearchState::new();
     search.set_query(query, window.panes[&tab.active_pane].parser.lock().grid());

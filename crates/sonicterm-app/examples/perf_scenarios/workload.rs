@@ -81,10 +81,11 @@ pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> St
     let level = if laps { "debug" } else { "info" };
     let scrollback = plan.scrollback_rows;
     let rows = plan.window_rows.map_or(GRID_ROWS, usize::from);
+    let cols = plan.window_cols.map_or(GRID_COLS, usize::from);
     // A status-line run bounds presents by their causes, so the cursor must not blink there.
     let blink = if plan.status_line { "cursor_blink = false\n" } else { "" };
     let mut config = format!(
-        "[window]\ncols = {GRID_COLS}\nrows = {rows}\n\n\
+        "[window]\ncols = {cols}\nrows = {rows}\n\n\
          [font]\nfamily = \"{FONT_FAMILY}\"\nsize = {FONT_SIZE}\n\n\
          [logging]\nlevel = \"{level}\"\n\n\
          [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n{blink}"
@@ -190,6 +191,7 @@ fn workload_lines(workload: Workload, role: usize, nonce: &str, bound_s: u64) ->
             [vec![format!("yes | head -n {lines}"), cat(BULK_FILE_NAME)], finish, shell].concat()
         }
         Workload::DateLoop => vec!["while :; do date; sleep 0.01; done".to_owned()],
+        Workload::SustainedFlood => vec!["exec yes".to_owned()],
         Workload::PrintThenShell(fixture) => {
             [vec![cat(fixture_file_name(fixture))], finish, shell].concat()
         }
@@ -310,6 +312,8 @@ pub(crate) enum ProgramStep {
     Cat(&'static str),
     /// Print a `date` line every 10 ms, never ending.
     DateLoop,
+    /// Write `y` lines with no pause, never ending, as `exec yes` does.
+    SustainedYes,
     /// Play this many frame files in order, each followed by a 16 ms sleep.
     Frames(u32),
     /// Print the completion sentinel.
@@ -339,6 +343,7 @@ pub(crate) fn program_steps(workload: Workload) -> Vec<ProgramStep> {
             vec![ProgramStep::Yes(lines), Cat(BULK_FILE_NAME), Sentinel, Done, Shell]
         }
         Workload::DateLoop => vec![ProgramStep::DateLoop],
+        Workload::SustainedFlood => vec![ProgramStep::SustainedYes],
         Workload::PrintThenShell(fixture) => {
             vec![Cat(fixture_file_name(fixture)), Sentinel, Done, Shell]
         }
@@ -366,6 +371,7 @@ pub(crate) fn posix_lines(
         ProgramStep::Yes(lines) => vec![format!("yes | head -n {lines}")],
         ProgramStep::Cat(name) => vec![format!("cat \"$scratch/workload/fixtures/{name}\"")],
         ProgramStep::DateLoop => vec!["while :; do date; sleep 0.01; done".to_owned()],
+        ProgramStep::SustainedYes => vec!["exec yes".to_owned()],
         ProgramStep::Frames(count) => vec![
             "frame=0".to_owned(),
             format!(

@@ -10,30 +10,30 @@ fn palette_rename_and_color_keep_their_source_after_focus_changes() {
     // Editor entry and completion must keep the palette's window rather than following new focus.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     app.__test_set_frontmost_window(Some(child));
     app.run_action(&Action::OpenCommandPalette);
     app.__test_set_palette_query("Rename Tab");
     app.__test_set_frontmost_window(Some(main));
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
-    assert_eq!(app.command_palette.query(), "child");
-    app.command_palette.set_query("renamed");
+    assert_eq!(app.interaction.command_palette.query(), "child");
+    app.interaction.command_palette.set_query("renamed");
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
-    assert_eq!(app.windows[&child].tabs.active_title_body().as_deref(), Some("renamed"));
-    assert_eq!(app.windows[&main].tabs.active_title_body().as_deref(), Some("main"));
+    assert_eq!(app.registry.windows[&child].tabs.active_title_body().as_deref(), Some("renamed"));
+    assert_eq!(app.registry.windows[&main].tabs.active_title_body().as_deref(), Some("main"));
     app.__test_set_frontmost_window(Some(child));
     app.run_action(&Action::OpenCommandPalette);
     app.__test_set_palette_query("Update Tab Color");
     app.__test_set_frontmost_window(Some(main));
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
-    assert_eq!(app.palette_attached_window, Some(child));
+    assert_eq!(app.interaction.palette_attached_window, Some(child));
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::ArrowDown));
-    let color = app.command_palette.selected_tab_color().unwrap().hex.clone();
+    let color = app.interaction.command_palette.selected_tab_color().unwrap().hex.clone();
     assert!(color.is_some());
     app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
-    assert_eq!(app.windows[&child].tabs.active_custom_color(), color.as_deref());
-    assert_eq!(app.windows[&main].tabs.active_custom_color(), None);
+    assert_eq!(app.registry.windows[&child].tabs.active_custom_color(), color.as_deref());
+    assert_eq!(app.registry.windows[&main].tabs.active_custom_color(), None);
 }
 
 #[test]
@@ -97,14 +97,14 @@ fn open_tab_editor(
             for title in titles {
                 app.__test_seed_tab(title);
             }
-            app.main_window_id.unwrap()
+            app.registry.main_window_id.unwrap()
         }
         EditHost::Child => {
             app.__test_seed_tab("main");
             app.__test_seed_child_window(titles)
         }
     };
-    let host = app.windows.get_mut(&window).unwrap();
+    let host = app.registry.windows.get_mut(&window).unwrap();
     host.tabs.activate(edited);
     let tab = host.tabs.active().unwrap().id;
     // Headless main has no native handle, so recording its id as frontmost would classify it as
@@ -120,7 +120,7 @@ fn open_tab_editor(
     if case.palette {
         assert!(app.run_action(&Action::OpenCommandPalette));
         app.__test_set_palette_query(if case.color { "Update Tab Color" } else { "Rename Tab" });
-        assert_eq!(app.command_palette.current(), Some(&PaletteEntry::Command(action)));
+        assert_eq!(app.interaction.command_palette.current(), Some(&PaletteEntry::Command(action)));
         assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter)));
     } else if case.host == EditHost::Child {
         assert!(app.run_action_for_window(&action, window));
@@ -130,8 +130,11 @@ fn open_tab_editor(
     }
     let expected =
         if case.color { CommandPaletteMode::TabColor } else { CommandPaletteMode::RenameTab };
-    assert_eq!(app.command_palette.mode(), expected, "{case:?}");
-    assert_eq!(app.palette_attached_window, attached, "{case:?}: the editor's attachment");
+    assert_eq!(app.interaction.command_palette.mode(), expected, "{case:?}");
+    assert_eq!(
+        app.interaction.palette_attached_window, attached,
+        "{case:?}: the editor's attachment"
+    );
     (app, window, tab)
 }
 
@@ -140,15 +143,16 @@ fn submit_tab_edit(app: &mut App, case: EditCase) {
     if case.color {
         assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::ArrowDown)));
     } else {
-        app.command_palette.set_query("renamed");
+        app.interaction.command_palette.set_query("renamed");
     }
     assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter)));
-    assert!(!app.command_palette.is_open(), "{case:?}: submit closes the editor");
+    assert!(!app.interaction.command_palette.is_open(), "{case:?}: submit closes the editor");
 }
 
 /// Every tab in every window that carries a custom title or color.
 fn edited_tabs(app: &App) -> Vec<sonicterm_ui::tabs::TabId> {
-    app.windows
+    app.registry
+        .windows
         .values()
         .flat_map(|window| window.tabs.tabs())
         .filter(|tab| tab.custom_title.is_some() || tab.custom_color.is_some())
@@ -167,7 +171,7 @@ fn assert_no_tab_edited(app: &App, case: EditCase) {
 /// Test windows have no renderer, so without it the transfer refuses with `TargetNotReady`.
 fn give_transfer_geometry(app: &mut App, window: winit::window::WindowId) {
     let outer = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 500.0);
-    if app.main_window_id == Some(window) {
+    if app.registry.main_window_id == Some(window) {
         assert!(app.__test_set_main_pane_viewport(outer, 10.0, 20.0));
     } else {
         assert!(app.__test_set_child_pane_viewport(window, outer, 10.0, 20.0));
@@ -181,7 +185,8 @@ fn tab_edit_changes_exactly_its_captured_tab() {
         let (mut app, window, tab) = open_tab_editor(case, &["earlier", "edited", "survivor"], 1);
         submit_tab_edit(&mut app, case);
         assert_eq!(edited_tabs(&app), vec![tab], "{case:?}");
-        let edited = app.windows[&window].tabs.tabs().iter().find(|entry| entry.id == tab).unwrap();
+        let edited =
+            app.registry.windows[&window].tabs.tabs().iter().find(|entry| entry.id == tab).unwrap();
         if case.color {
             assert!(edited.custom_color.is_some(), "{case:?}");
         } else {
@@ -195,9 +200,9 @@ fn tab_edit_changes_exactly_its_captured_tab() {
 fn tab_edit_after_a_clean_exit_of_its_tab_changes_nothing() {
     for case in edit_cases() {
         let (mut app, window, tab) = open_tab_editor(case, &["earlier", "edited", "survivor"], 1);
-        let pane = app.windows[&window].tab_states[1].active_pane;
+        let pane = app.registry.windows[&window].tab_states[1].active_pane;
         app.handle_pane_process_exited(pane, sonicterm_types::PaneExitStatus::Code(0));
-        let tabs = &app.windows[&window].tabs;
+        let tabs = &app.registry.windows[&window].tabs;
         assert!(
             tabs.tabs().iter().all(|entry| entry.id != tab),
             "{case:?}: the exit closes its tab"
@@ -227,7 +232,7 @@ fn tab_edit_follows_its_tab_after_an_earlier_tab_closes() {
 fn tab_edit_follows_its_tab_across_a_reorder() {
     for case in edit_cases() {
         let (mut app, window, tab) = open_tab_editor(case, &["earlier", "edited", "survivor"], 1);
-        let host = app.windows.get_mut(&window).unwrap();
+        let host = app.registry.windows.get_mut(&window).unwrap();
         host.tabs.reorder(1, 2);
         host.tab_states.swap(1, 2);
         host.tabs.reorder(0, 1);
@@ -254,7 +259,7 @@ fn tab_edit_ignores_a_pointer_or_menu_tab_switch() {
                 // A child tab-bar press applies the same activation this helper performs.
                 assert!(app.activate_tab_in_child(window, 2));
             }
-            assert_ne!(app.windows[&window].tabs.active().unwrap().id, tab, "{case:?}");
+            assert_ne!(app.registry.windows[&window].tabs.active().unwrap().id, tab, "{case:?}");
             submit_tab_edit(&mut app, case);
             assert_eq!(edited_tabs(&app), vec![tab], "{case:?} by_menu={by_menu}");
         }
@@ -270,7 +275,7 @@ fn tab_edit_never_lands_on_a_same_title_replacement() {
             EditHost::Main => {
                 app.close_tab_at(1);
                 app.__test_seed_tab("edited");
-                let host = app.windows.get_mut(&window).unwrap();
+                let host = app.registry.windows.get_mut(&window).unwrap();
                 host.tabs.reorder(2, 1);
                 host.tab_states.swap(1, 2);
             }
@@ -281,7 +286,7 @@ fn tab_edit_never_lands_on_a_same_title_replacement() {
                 app.transfer_tab(None, 1, Some(window), 1).unwrap();
             }
         }
-        let tabs = &app.windows[&window].tabs;
+        let tabs = &app.registry.windows[&window].tabs;
         let replacement = tabs.active().unwrap();
         assert_ne!(replacement.id, tab);
         assert_eq!(replacement.title, "edited");
@@ -300,7 +305,10 @@ fn tab_edit_closes_with_its_source_window() {
             EditHost::Main => app.hide_main_window(),
             EditHost::Child => assert!(app.close_child_window(window)),
         }
-        assert!(!app.command_palette.is_open(), "{case:?}: the editor closes with its window");
+        assert!(
+            !app.interaction.command_palette.is_open(),
+            "{case:?}: the editor closes with its window"
+        );
         // A stray Enter afterwards has no editor to submit.
         app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
         assert_no_tab_edited(&app, case);
@@ -314,12 +322,15 @@ fn tab_edit_fails_closed_after_its_tab_moves_to_another_window() {
         let (mut app, window, tab) = open_tab_editor(case, &["edited", "survivor"], 0);
         let destination = match case.host {
             EditHost::Main => app.__test_seed_child_window(&["other"]),
-            EditHost::Child => app.main_window_id.unwrap(),
+            EditHost::Child => app.registry.main_window_id.unwrap(),
         };
         give_transfer_geometry(&mut app, destination);
         app.transfer_tab(Some(window), 0, Some(destination), 1).unwrap();
-        assert!(app.windows[&destination].tabs.tabs().iter().any(|entry| entry.id == tab));
-        assert!(app.command_palette.is_open(), "{case:?}: the source window survives the move");
+        assert!(app.registry.windows[&destination].tabs.tabs().iter().any(|entry| entry.id == tab));
+        assert!(
+            app.interaction.command_palette.is_open(),
+            "{case:?}: the source window survives the move"
+        );
         submit_tab_edit(&mut app, case);
         assert_no_tab_edited(&app, case);
     }

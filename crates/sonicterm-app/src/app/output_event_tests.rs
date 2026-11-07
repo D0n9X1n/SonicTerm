@@ -11,9 +11,9 @@ fn owners() -> (App, WindowId, WindowId) {
         sonicterm_cfg::keymap::Keymap::default(),
     );
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child", "background"]);
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     (app, main, child)
 }
 
@@ -24,13 +24,14 @@ fn native_requests() -> u64 {
 
 /// The pane shown by tab `tab_index` of window `id`.
 fn tab_pane(app: &App, id: WindowId, tab_index: usize) -> u64 {
-    app.windows[&id].tab_states[tab_index].active_pane
+    app.registry.windows[&id].tab_states[tab_index].active_pane
 }
 
 /// Parse `bytes` as the pane's VT worker would: publish the batch and bump its output generation.
 fn worker_batch(app: &App, id: WindowId, pane_id: u64, bytes: &[u8]) -> Vec<Vec<u8>> {
-    let handles =
-        crate::app::spawn_pane::PaneVtHandles::from_pane_state(&app.windows[&id].panes[&pane_id]);
+    let handles = crate::app::spawn_pane::PaneVtHandles::from_pane_state(
+        &app.registry.windows[&id].panes[&pane_id],
+    );
     let mut replies = Vec::new();
     crate::app::spawn_pane::process_pane_vt_batch_and_publish(
         &handles,
@@ -46,7 +47,7 @@ fn worker_batch(app: &App, id: WindowId, pane_id: u64, bytes: &[u8]) -> Vec<Vec<
 
 /// Flush the pane's output as its worker does; returns the windows it queued an event for.
 fn worker_flush(app: &App, id: WindowId, pane_id: u64) -> Vec<WindowId> {
-    let pane = &app.windows[&id].panes[&pane_id];
+    let pane = &app.registry.windows[&id].panes[&pane_id];
     let mut queued = Vec::new();
     crate::app::spawn_pane::send_output_redraw(
         &pane.redraw_target,
@@ -76,7 +77,7 @@ fn active_tab_title_bell_and_reply_only_output_each_request_a_frame() {
     {
         let (mut app, _, child) = owners();
         let pane = tab_pane(&app, child, 0);
-        *app.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
+        *app.registry.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
         let replies = worker_batch(&app, child, pane, bytes);
         if name == "reply only" {
             assert!(!replies.is_empty(), "the DA1 query produces a reply");
@@ -88,7 +89,7 @@ fn active_tab_title_bell_and_reply_only_output_each_request_a_frame() {
             Instant::now(),
         );
         assert_eq!(native_requests() - before, 1, "{name}");
-        assert!(app.windows[&child].redraw.request_in_flight, "{name}");
+        assert!(app.registry.windows[&child].redraw.request_in_flight, "{name}");
     }
 }
 
@@ -102,23 +103,23 @@ fn switching_to_a_background_tab_shows_its_latest_output_and_title() {
     use std::collections::{BTreeSet, HashMap};
     let (mut app, _, child) = owners();
     let pane = tab_pane(&app, child, 1);
-    *app.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
+    *app.registry.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
     worker_batch(&app, child, pane, b"\x1b]2;background title\x07latest line");
     worker_flush(&app, child, pane);
     app.service_output_event(OutputEvent::Pane { window_id: child, pane_id: pane }, Instant::now());
     // Clean before the switch, so the dirt the frame reads below is the switch's own.
-    app.windows[&child].panes[&pane].parser.lock().grid_mut().clear_dirty();
-    let topology = app.windows[&child].redraw.cause_generation(RedrawCause::Topology);
+    app.registry.windows[&child].panes[&pane].parser.lock().grid_mut().clear_dirty();
+    let topology = app.registry.windows[&child].redraw.cause_generation(RedrawCause::Topology);
 
     assert!(app.__test_invoke_activate_tab_in_child(child, 1));
-    assert!(app.windows[&child].redraw.cause_generation(RedrawCause::Topology) > topology);
+    assert!(app.registry.windows[&child].redraw.cause_generation(RedrawCause::Topology) > topology);
 
     let rect = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 480.0);
     let sources = app.child_visible_frame_sources(child, rect).expect("valid owner");
     assert_eq!((sources.tab_index, sources.active_id()), (1, pane));
     let crate::app::visible_frame::HeldVisibleFrame { snapshot, mut guards, mut images, .. } =
         sources.try_collect(|| app.snapshot_window_redraw(child)).expect("uncontended");
-    let window = app.windows.get_mut(&child).unwrap();
+    let window = app.registry.windows.get_mut(&child).unwrap();
     let viewports = sources.reconcile_viewports(&mut window.panes, &guards).expect("owner");
     crate::app::refresh_active_tab_title(
         &mut window.tabs,
@@ -148,7 +149,7 @@ fn switching_to_a_background_tab_shows_its_latest_output_and_title() {
         FrameSettlement::Presented,
         Instant::now(),
     );
-    let state = &app.windows[&child].panes[&pane];
+    let state = &app.registry.windows[&child].panes[&pane];
     assert_eq!(state.observed_output_generation, state.output_generation.load(Ordering::Acquire));
 }
 
@@ -162,7 +163,10 @@ fn public_output_hooks_imitate_the_worker_and_read_the_active_title() {
     assert_eq!(panes, [tab_pane(&app, child, 0), tab_pane(&app, child, 1)]);
     assert_eq!(app.__test_publish_pane_output(child, panes[1], b"x"), [child]);
     assert!(app.__test_publish_pane_output(child, panes[1], b"y").is_empty(), "coalesced");
-    assert_eq!(app.windows[&child].panes[&panes[1]].output_generation.load(Ordering::Acquire), 2);
+    assert_eq!(
+        app.registry.windows[&child].panes[&panes[1]].output_generation.load(Ordering::Acquire),
+        2
+    );
     app.service_output_event(
         OutputEvent::Pane { window_id: child, pane_id: panes[1] },
         Instant::now(),
@@ -171,7 +175,7 @@ fn public_output_hooks_imitate_the_worker_and_read_the_active_title() {
     assert!(app.__test_publish_pane_output(child, 0, b"z").is_empty(), "no such pane");
     assert_eq!(
         app.__test_window_active_tab_title(child),
-        app.windows[&child].tabs.active().map(|tab| tab.title.clone())
+        app.registry.windows[&child].tabs.active().map(|tab| tab.title.clone())
     );
 }
 
@@ -183,7 +187,7 @@ fn both_orders_of_worker_swap_and_acknowledgement_show_the_latest_output() {
     for swap_before_acknowledgement in [true, false] {
         let (mut app, _, child) = owners();
         let pane = tab_pane(&app, child, 0);
-        *app.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
+        *app.registry.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
         worker_batch(&app, child, pane, b"first");
         assert_eq!(worker_flush(&app, child, pane), [child]);
         let event = OutputEvent::Pane { window_id: child, pane_id: pane };
@@ -198,9 +202,12 @@ fn both_orders_of_worker_swap_and_acknowledgement_show_the_latest_output() {
             assert_eq!(worker_flush(&app, child, pane), [child], "the acknowledged token sends");
             app.service_output_event(event, Instant::now());
         }
-        assert!(app.windows[&child].redraw.request_in_flight, "the latest output requests a frame");
+        assert!(
+            app.registry.windows[&child].redraw.request_in_flight,
+            "the latest output requests a frame"
+        );
         present(&mut app, child);
-        let window = &app.windows[&child];
+        let window = &app.registry.windows[&child];
         let latest = window.panes[&pane].output_generation.load(Ordering::Acquire);
         assert_eq!(latest, 2);
         assert_eq!(window.panes[&pane].observed_output_generation, latest);
@@ -216,10 +223,10 @@ fn a_flush_between_acknowledgement_and_check_sends_a_fresh_event() {
     use std::cell::RefCell;
     let (mut app, _, child) = owners();
     let pane = tab_pane(&app, child, 0);
-    *app.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
+    *app.registry.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
     worker_batch(&app, child, pane, b"first");
     assert_eq!(worker_flush(&app, child, pane), [child]);
-    let state = &app.windows[&child].panes[&pane];
+    let state = &app.registry.windows[&child].panes[&pane];
     let handles = crate::app::spawn_pane::PaneVtHandles::from_pane_state(state);
     let (target, outstanding) = (state.redraw_target.clone(), state.output_outstanding.clone());
     let queued = std::rc::Rc::new(RefCell::new(Vec::new()));
@@ -250,11 +257,11 @@ fn a_flush_between_acknowledgement_and_check_sends_a_fresh_event() {
     app.service_output_event(event, Instant::now());
 
     assert_eq!(*queued.borrow(), [child], "the flush after the acknowledgement sends");
-    assert!(app.windows[&child].redraw.request_in_flight);
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
     present(&mut app, child);
     app.service_output_event(event, Instant::now());
     present(&mut app, child);
-    let state = &app.windows[&child].panes[&pane];
+    let state = &app.registry.windows[&child].panes[&pane];
     assert_eq!(state.output_generation.load(Ordering::Acquire), 2);
     assert_eq!(state.observed_output_generation, 2, "the latest output is shown");
     assert!(!state.output_outstanding.load(Ordering::Acquire));
@@ -266,25 +273,34 @@ fn a_flush_between_acknowledgement_and_check_sends_a_fresh_event() {
 fn output_event_queued_before_a_transfer_requests_only_the_new_owner() {
     let (mut app, main, child) = owners();
     let pane = tab_pane(&app, main, 0);
-    *app.windows[&main].panes[&pane].redraw_target.lock() = Some(main);
+    *app.registry.windows[&main].panes[&pane].redraw_target.lock() = Some(main);
     worker_batch(&app, main, pane, b"moved");
     assert_eq!(worker_flush(&app, main, pane), [main]);
     // A headless destination needs explicit geometry to accept a tab.
-    app.windows.get_mut(&child).unwrap().test_pane_viewport =
+    app.registry.windows.get_mut(&child).unwrap().test_pane_viewport =
         Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 500.0), 10.0, 20.0));
     app.transfer_tab(None, 0, Some(child), 2).unwrap();
-    let main_causes = app.windows[&main].redraw.snapshot();
-    let main_output = app.windows[&main].redraw.cause_generation(RedrawCause::Output);
-    let child_output = app.windows[&child].redraw.cause_generation(RedrawCause::Output);
-    app.windows.get_mut(&child).unwrap().redraw.request_in_flight = false;
+    let main_causes = app.registry.windows[&main].redraw.snapshot();
+    let main_output = app.registry.windows[&main].redraw.cause_generation(RedrawCause::Output);
+    let child_output = app.registry.windows[&child].redraw.cause_generation(RedrawCause::Output);
+    app.registry.windows.get_mut(&child).unwrap().redraw.request_in_flight = false;
 
     app.service_output_event(OutputEvent::Pane { window_id: main, pane_id: pane }, Instant::now());
 
-    assert!(!app.windows[&child].panes[&pane].output_outstanding.load(Ordering::Acquire));
-    assert_eq!(app.windows[&main].redraw.snapshot(), main_causes, "the old owner is untouched");
-    assert_eq!(app.windows[&main].redraw.cause_generation(RedrawCause::Output), main_output);
-    assert!(app.windows[&child].redraw.cause_generation(RedrawCause::Output) > child_output);
-    assert!(app.windows[&child].redraw.request_in_flight);
+    assert!(!app.registry.windows[&child].panes[&pane].output_outstanding.load(Ordering::Acquire));
+    assert_eq!(
+        app.registry.windows[&main].redraw.snapshot(),
+        main_causes,
+        "the old owner is untouched"
+    );
+    assert_eq!(
+        app.registry.windows[&main].redraw.cause_generation(RedrawCause::Output),
+        main_output
+    );
+    assert!(
+        app.registry.windows[&child].redraw.cause_generation(RedrawCause::Output) > child_output
+    );
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
 }
 
 /// A late output event for a pane retired after its worker cloned the redraw target finds no pane
@@ -293,12 +309,12 @@ fn output_event_queued_before_a_transfer_requests_only_the_new_owner() {
 fn late_output_event_for_a_retired_pane_does_nothing() {
     let (mut app, main, child) = owners();
     let pane = tab_pane(&app, child, 0);
-    *app.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
+    *app.registry.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
     worker_batch(&app, child, pane, b"last words");
-    let cloned_target = *app.windows[&child].panes[&pane].redraw_target.lock();
-    let retired = app.windows.get_mut(&child).unwrap().panes.remove(&pane).unwrap();
+    let cloned_target = *app.registry.windows[&child].panes[&pane].redraw_target.lock();
+    let retired = app.registry.windows.get_mut(&child).unwrap().panes.remove(&pane).unwrap();
     app.retire_pane(retired);
-    let causes = [main, child].map(|id| app.windows[&id].redraw.snapshot());
+    let causes = [main, child].map(|id| app.registry.windows[&id].redraw.snapshot());
     let before = native_requests();
 
     app.service_output_event(
@@ -307,8 +323,8 @@ fn late_output_event_for_a_retired_pane_does_nothing() {
     );
 
     assert_eq!(native_requests(), before);
-    assert_eq!([main, child].map(|id| app.windows[&id].redraw.snapshot()), causes);
-    assert!(!app.windows[&child].redraw.request_in_flight);
+    assert_eq!([main, child].map(|id| app.registry.windows[&id].redraw.snapshot()), causes);
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
 }
 
 /// Whether the variant use at `offset` in `code` is a match pattern: after its fields, `=>` or
@@ -468,7 +484,7 @@ fn output_arms_route_only_through_the_service_and_only_the_worker_builds_pane_ou
 /// `owners()` with the alerts segment listed on the child window's strip.
 fn alerting_owners() -> (App, WindowId, WindowId) {
     let (mut app, main, child) = owners();
-    app.windows.get_mut(&child).unwrap().alert_settings =
+    app.registry.windows.get_mut(&child).unwrap().alert_settings =
         Some(sonicterm_cfg::status_line::AlertsSettings::default());
     (app, main, child)
 }
@@ -486,25 +502,28 @@ fn bell_marks_a_hidden_tab_until_it_is_visited() {
     let (active, hidden) = (tab_pane(&app, child, 0), tab_pane(&app, child, 1));
     worker_batch(&app, child, hidden, b"\x07\x07\x07");
     assert_eq!(
-        app.windows[&child].panes[&hidden].bells.load(Ordering::Relaxed),
+        app.registry.windows[&child].panes[&hidden].bells.load(Ordering::Relaxed),
         1,
         "one per batch"
     );
     service(&mut app, child, hidden);
-    assert!(app.windows[&child].tabs.tabs()[1].marks.bell);
-    assert_eq!(app.windows[&child].panes[&hidden].acked_bells, 0, "service never acknowledges");
+    assert!(app.registry.windows[&child].tabs.tabs()[1].marks.bell);
+    assert_eq!(
+        app.registry.windows[&child].panes[&hidden].acked_bells, 0,
+        "service never acknowledges"
+    );
 
     worker_batch(&app, child, active, b"\x07");
     service(&mut app, child, active);
     assert!(
-        !app.windows[&child].tabs.tabs()[0].marks.is_marked(),
+        !app.registry.windows[&child].tabs.tabs()[0].marks.is_marked(),
         "the active tab is never marked"
     );
-    app.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(1);
     app.acknowledge_tab_activations();
-    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked(), "visited");
+    assert!(!app.registry.windows[&child].tabs.tabs()[1].marks.is_marked(), "visited");
     service(&mut app, child, active);
-    assert!(!app.windows[&child].tabs.tabs()[0].marks.is_marked(), "a ring the user saw");
+    assert!(!app.registry.windows[&child].tabs.tabs()[0].marks.is_marked(), "a ring the user saw");
 }
 
 /// Without alerts listed nothing is marked; an OSC 9 notification marks nothing until the
@@ -515,7 +534,7 @@ fn osc_9_and_unlisted_alerts_mark_nothing() {
     let hidden = tab_pane(&app, child, 1);
     worker_batch(&app, child, hidden, b"\x07");
     service(&mut app, child, hidden);
-    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked(), "alerts not listed");
+    assert!(!app.registry.windows[&child].tabs.tabs()[1].marks.is_marked(), "alerts not listed");
 
     let (mut app, _main, child) = alerting_owners();
     let hidden = tab_pane(&app, child, 1);
@@ -523,8 +542,8 @@ fn osc_9_and_unlisted_alerts_mark_nothing() {
         worker_batch(&app, child, hidden, sequence);
         service(&mut app, child, hidden);
     }
-    assert_eq!(app.windows[&child].panes[&hidden].bells.load(Ordering::Relaxed), 0);
-    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked());
+    assert_eq!(app.registry.windows[&child].panes[&hidden].bells.load(Ordering::Relaxed), 0);
+    assert!(!app.registry.windows[&child].tabs.tabs()[1].marks.is_marked());
 }
 
 /// A command that ran at least `min_secs` and ended in a hidden tab marks it with its duration; a
@@ -535,7 +554,7 @@ fn finished_command_marks_a_hidden_tab_after_min_secs() {
     let (mut app, _main, child) = alerting_owners();
     let hidden = tab_pane(&app, child, 1);
     let push = |app: &App, secs| {
-        app.windows[&child].panes[&hidden].command_events.lock().push(PaneCommandEvent {
+        app.registry.windows[&child].panes[&hidden].command_events.lock().push(PaneCommandEvent {
             event: CommandEvent::CmdEnd(Some(0)),
             at: Instant::now(),
             duration: Some(Duration::from_secs(secs)),
@@ -543,27 +562,30 @@ fn finished_command_marks_a_hidden_tab_after_min_secs() {
     };
     push(&app, 5);
     app.command_maintenance(child, Instant::now());
-    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked(), "under min_secs");
+    assert!(!app.registry.windows[&child].tabs.tabs()[1].marks.is_marked(), "under min_secs");
     push(&app, 12);
     app.command_maintenance(child, Instant::now());
-    assert_eq!(app.windows[&child].tabs.tabs()[1].marks.finished_secs, Some(12));
-    app.windows.get_mut(&child).unwrap().tabs.activate(1);
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    assert_eq!(app.registry.windows[&child].tabs.tabs()[1].marks.finished_secs, Some(12));
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     push(&app, 30);
-    app.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(1);
     app.acknowledge_tab_activations();
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     app.acknowledge_tab_activations();
     app.command_maintenance(child, Instant::now());
-    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked(), "seen during the visit");
+    assert!(
+        !app.registry.windows[&child].tabs.tabs()[1].marks.is_marked(),
+        "seen during the visit"
+    );
 }
 
 /// The alerts click activates the next marked tab after the active one.
 #[test]
 fn alerts_click_goes_to_the_next_marked_tab() {
     let (mut app, _main, child) = alerting_owners();
-    app.windows.get_mut(&child).unwrap().tabs.mark(1, |marks| marks.bell = true);
+    app.registry.windows.get_mut(&child).unwrap().tabs.mark(1, |marks| marks.bell = true);
     app.activate_next_alert(child);
-    assert_eq!(app.windows[&child].tabs.active_index(), 1);
-    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked());
+    assert_eq!(app.registry.windows[&child].tabs.active_index(), 1);
+    assert!(!app.registry.windows[&child].tabs.tabs()[1].marks.is_marked());
 }

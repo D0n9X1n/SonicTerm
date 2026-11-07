@@ -30,7 +30,7 @@ fn ten_px_per_char(content: &TabContent<'_>) -> Option<f32> {
 fn two_windows() -> (App, WindowId, WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let child = app.__test_seed_child_window(&["zsh", "cargo build --workspace", "vim"]);
-    let main = app.main_window_id.expect("the child seed creates a synthetic main window");
+    let main = app.registry.main_window_id.expect("the child seed creates a synthetic main window");
     for title in ["htop", "~/work/sonicterm/crates/app", "ssh prod"] {
         let _ = app.__test_seed_tab(title);
     }
@@ -53,19 +53,24 @@ fn move_pointer(app: &mut App, window: WindowId, point: (f32, f32)) -> bool {
 /// Measure one window's tabs the way its redraw does, holding them by the same rule.
 fn remeasure(app: &mut App, window: WindowId) {
     let hold = app.tab_widths_held_in(window, BAR_BAND);
-    let state = app.windows.get_mut(&window).expect("window");
+    let state = app.registry.windows.get_mut(&window).expect("window");
     state.tabs.refresh_content_widths(Instant::now(), false, 1, hold, ten_px_per_char);
 }
 
 /// The layout the renderer draws for a 900 × 600 window with its bar at the bottom.
 fn drawn_layout(app: &App, window: WindowId) -> TabBarLayout {
-    TabBarLayout::compute_with_insertion_slot(&app.windows[&window].tabs, 900.0, 40.0, None)
-        .with_top_offset(560.0)
+    TabBarLayout::compute_with_insertion_slot(
+        &app.registry.windows[&window].tabs,
+        900.0,
+        40.0,
+        None,
+    )
+    .with_top_offset(560.0)
 }
 
 /// The layout the pointer, drag, tear-out and snapshot paths compute for the same window.
 fn pointer_layout(app: &App, window: WindowId) -> TabBarLayout {
-    TabBarLayout::compute_with_height(&app.windows[&window].tabs, 900.0, 40.0)
+    TabBarLayout::compute_with_height(&app.registry.windows[&window].tabs, 900.0, 40.0)
         .with_top_offset(560.0)
         .with_visible(true)
 }
@@ -75,7 +80,7 @@ fn tab_rects(layout: &TabBarLayout) -> Vec<(usize, f32, f32)> {
 }
 
 fn retitle(app: &mut App, window: WindowId, position: usize, title: &str) {
-    let tabs = &mut app.windows.get_mut(&window).expect("window").tabs;
+    let tabs = &mut app.registry.windows.get_mut(&window).expect("window").tabs;
     let id = tabs.tabs()[position].id;
     tabs.set_title(id, title);
 }
@@ -111,7 +116,7 @@ fn assert_pointer_matches_drawing(app: &App, window: WindowId) {
 fn press_at(app: &mut App, window: WindowId, point: (f32, f32)) -> TabPress {
     move_pointer(app, window, point);
     let layout = pointer_layout(app, window);
-    let state = app.windows.get_mut(&window).expect("window");
+    let state = app.registry.windows.get_mut(&window).expect("window");
     let press = state.route_tab_press(window, &layout, point);
     app.apply_tab_press(window, press);
     press
@@ -122,7 +127,7 @@ fn press_at(app: &mut App, window: WindowId, point: (f32, f32)) -> TabPress {
 fn drag_to(app: &mut App, window: WindowId, point: (f32, f32)) -> bool {
     move_pointer(app, window, point);
     let layout = pointer_layout(app, window);
-    let state = app.windows.get_mut(&window).expect("window");
+    let state = app.registry.windows.get_mut(&window).expect("window");
     let motion = state.route_tab_motion(Some(&layout), point);
     app.apply_tab_motion(window, motion, (f64::from(point.0), f64::from(point.1)))
 }
@@ -131,7 +136,7 @@ fn drag_to(app: &mut App, window: WindowId, point: (f32, f32)) -> bool {
 /// out, then carry out the returned drop. A release on the bar never tears the tab out.
 fn release_button(app: &mut App, window: WindowId) -> TabRelease {
     let layout = drawn_layout(app, window);
-    let state = app.windows.get_mut(&window).expect("window");
+    let state = app.registry.windows.get_mut(&window).expect("window");
     let release = state.route_tab_release(Some(&layout));
     assert!(!state.mouse_down && state.pressed_tab.is_none() && state.drag_session.is_none());
     app.apply_tab_release(release, |_, _, _| panic!("a drop on the bar tore out"));
@@ -152,14 +157,14 @@ fn a_pressed_or_dragged_tab_holds_every_bar_and_a_resting_pointer_holds_its_own(
     assert!(!app.tab_widths_held_in(main, None), "a hidden bar holds nothing");
 
     move_pointer(&mut app, main, ON_CONTENT);
-    app.windows.get_mut(&child).expect("child").pressed_tab = Some(1);
+    app.registry.windows.get_mut(&child).expect("child").pressed_tab = Some(1);
     assert!(app.tab_widths_held_in(main, BAR_BAND));
-    app.windows.get_mut(&child).expect("child").pressed_tab = None;
-    let source_tab = app.windows[&main].tabs.tabs()[0].id;
-    app.windows.get_mut(&main).expect("main").drag_session =
+    app.registry.windows.get_mut(&child).expect("child").pressed_tab = None;
+    let source_tab = app.registry.windows[&main].tabs.tabs()[0].id;
+    app.registry.windows.get_mut(&main).expect("main").drag_session =
         Some(DragSession::new(main, source_tab, ON_BAR));
     assert!(app.tab_widths_held_in(child, BAR_BAND));
-    app.windows.get_mut(&main).expect("main").drag_session = None;
+    app.registry.windows.get_mut(&main).expect("main").drag_session = None;
     assert!(!app.tab_gesture_active());
     assert!(!app.tab_widths_held_in(main, BAR_BAND));
 }
@@ -200,11 +205,15 @@ fn every_pointer_move_and_leave_is_recorded_before_any_handler() {
     let (mut app, main, child) = two_windows();
     for window in [main, child] {
         move_pointer(&mut app, window, ON_BAR);
-        assert_eq!(app.windows[&window].cursor_pos, (450.0, 580.0));
+        assert_eq!(app.registry.windows[&window].cursor_pos, (450.0, 580.0));
         dispatch(&mut app, window, &WindowEvent::Focused(true));
-        assert_eq!(app.windows[&window].cursor_pos, (450.0, 580.0), "only pointer events record");
+        assert_eq!(
+            app.registry.windows[&window].cursor_pos,
+            (450.0, 580.0),
+            "only pointer events record"
+        );
         dispatch(&mut app, window, &WindowEvent::CursorLeft { device_id: DeviceId::dummy() });
-        assert_eq!(app.windows[&window].cursor_pos, (-1.0, -1.0));
+        assert_eq!(app.registry.windows[&window].cursor_pos, (-1.0, -1.0));
     }
     let source = concat!(
         include_str!("window_event.rs"),
@@ -243,18 +252,18 @@ fn a_frame_that_does_not_present_keeps_the_drawn_widths() {
         PresentOutcome::Failed(anyhow::anyhow!("frame failed")),
     ];
     for (round, outcome) in outcomes.into_iter().enumerate() {
-        let drawn = app.windows[&main].tabs.laid_out_widths();
+        let drawn = app.registry.windows[&main].tabs.laid_out_widths();
         retitle(&mut app, main, 0, &format!("cargo test --workspace --all-targets {round}"));
         remeasure(&mut app, main);
         assert_ne!(tab_rects(&drawn_layout(&app, main)), on_screen, "{outcome:?} laid nothing out");
-        let tabs = &mut app.windows.get_mut(&main).expect("main").tabs;
+        let tabs = &mut app.registry.windows.get_mut(&main).expect("main").tabs;
         settle_tab_widths(tabs, drawn, &outcome);
         assert_eq!(tab_rects(&pointer_layout(&app, main)), on_screen, "{outcome:?} moved the bar");
         assert_pointer_matches_drawing(&app, main);
     }
-    let drawn = app.windows[&main].tabs.laid_out_widths();
+    let drawn = app.registry.windows[&main].tabs.laid_out_widths();
     remeasure(&mut app, main);
-    let tabs = &mut app.windows.get_mut(&main).expect("main").tabs;
+    let tabs = &mut app.registry.windows.get_mut(&main).expect("main").tabs;
     settle_tab_widths(tabs, drawn, &PresentOutcome::Presented);
     assert_ne!(tab_rects(&pointer_layout(&app, main)), on_screen, "a presented frame reverted");
     assert_pointer_matches_drawing(&app, main);
@@ -279,7 +288,7 @@ fn clicks_and_drops_land_on_the_drawn_bar_in_main_and_child_windows() {
 
         // A click selects the wide tab and leaves every tab in place.
         assert_eq!(press_at(&mut app, window, centre(1)), TabPress::Activate(1));
-        assert_eq!(app.windows[&window].tabs.active_index(), 1);
+        assert_eq!(app.registry.windows[&window].tabs.active_index(), 1);
         retitle(&mut app, window, 0, "cargo test --workspace --all-targets");
         remeasure(&mut app, window);
         assert_eq!(tab_rects(&drawn_layout(&app, window)), drawn, "a pressed tab's bar moved");
@@ -288,20 +297,21 @@ fn clicks_and_drops_land_on_the_drawn_bar_in_main_and_child_windows() {
             matches!(click, TabRelease::Finish(_, DragAction::ReturnToOriginalBar)),
             "a click moved a tab: {click:?}"
         );
-        assert_eq!(app.windows[&window].tabs.active_index(), 1);
+        assert_eq!(app.registry.windows[&window].tabs.active_index(), 1);
         remeasure(&mut app, window);
         assert_eq!(tab_rects(&drawn_layout(&app, window)), drawn, "a still pointer's bar moved");
         assert_pointer_matches_drawing(&app, window);
 
         // A drag moves the last tab into the drawn gap between the first two.
         let widths = |state: &App| -> HashMap<TabId, Option<f32>> {
-            let tabs = state.windows[&window].tabs.tabs();
+            let tabs = state.registry.windows[&window].tabs.tabs();
             tabs.iter().map(|tab| (tab.id, tab.content_width_px())).collect()
         };
         let held = widths(&app);
-        let order: Vec<TabId> = app.windows[&window].tabs.tabs().iter().map(|tab| tab.id).collect();
+        let order: Vec<TabId> =
+            app.registry.windows[&window].tabs.tabs().iter().map(|tab| tab.id).collect();
         assert_eq!(press_at(&mut app, window, centre(2)), TabPress::Activate(2));
-        assert_eq!(app.windows[&window].tabs.active_index(), 2);
+        assert_eq!(app.registry.windows[&window].tabs.active_index(), 2);
         let gap = ((drawn[0].1 + drawn[0].2 + drawn[1].1) * 0.5, ON_BAR.1);
         assert!(drag_to(&mut app, window, gap), "the drag left the tab gesture");
         let drop = release_button(&mut app, window);
@@ -310,7 +320,7 @@ fn clicks_and_drops_land_on_the_drawn_bar_in_main_and_child_windows() {
             "the drop missed the drawn gap: {drop:?}"
         );
         let dropped: Vec<TabId> =
-            app.windows[&window].tabs.tabs().iter().map(|tab| tab.id).collect();
+            app.registry.windows[&window].tabs.tabs().iter().map(|tab| tab.id).collect();
         assert_eq!(dropped, vec![order[0], order[2], order[1]], "the drop missed the drawn gap");
         remeasure(&mut app, window);
         assert_eq!(widths(&app), held, "the drop moved a held width");
@@ -338,7 +348,7 @@ fn a_width_limit_reload_reaches_hit_testing_only_with_a_presented_frame() {
             remeasure(&mut app, window);
         }
         let on_screen = [main, child].map(|window| tab_rects(&drawn_layout(&app, window)));
-        let redraws = [main, child].map(|window| app.windows[&window].redraw.snapshot());
+        let redraws = [main, child].map(|window| app.registry.windows[&window].redraw.snapshot());
 
         let mut reloaded = app.config.clone();
         reloaded.tab_min_width = 120.0;
@@ -346,18 +356,18 @@ fn a_width_limit_reload_reaches_hit_testing_only_with_a_presented_frame() {
         assert_eq!(tabbar_view::min_tab_width(), 120.0);
 
         for (position, window) in [main, child].into_iter().enumerate() {
-            assert_ne!(app.windows[&window].redraw.snapshot(), redraws[position]);
+            assert_ne!(app.registry.windows[&window].redraw.snapshot(), redraws[position]);
             let before_frame = tab_rects(&pointer_layout(&app, window));
             assert_eq!(before_frame, on_screen[position], "the reload moved hit-testing early");
             assert!(app.tab_widths_held_in(window, BAR_BAND), "the pointer rests on the bar");
 
             // The redraw lays the held bar out with the new limit, and its frame times out.
-            let drawn = app.windows[&window].tabs.laid_out_widths();
+            let drawn = app.registry.windows[&window].tabs.laid_out_widths();
             remeasure(&mut app, window);
             let reloaded_rects = tab_rects(&drawn_layout(&app, window));
             assert_ne!(reloaded_rects, on_screen[position], "the reload was held");
             let timeout = PresentOutcome::SurfaceRetry(SurfaceRetryReason::Timeout);
-            let tabs = &mut app.windows.get_mut(&window).expect("window").tabs;
+            let tabs = &mut app.registry.windows.get_mut(&window).expect("window").tabs;
             settle_tab_widths(tabs, drawn, &timeout);
             assert_eq!(tab_rects(&pointer_layout(&app, window)), on_screen[position]);
             let hit = pointer_layout(&app, window).hit(click.0, click.1);
@@ -365,9 +375,9 @@ fn a_width_limit_reload_reaches_hit_testing_only_with_a_presented_frame() {
             assert_pointer_matches_drawing(&app, window);
 
             // The next redraw presents the new geometry, and hit-testing follows it.
-            let drawn = app.windows[&window].tabs.laid_out_widths();
+            let drawn = app.registry.windows[&window].tabs.laid_out_widths();
             remeasure(&mut app, window);
-            let tabs = &mut app.windows.get_mut(&window).expect("window").tabs;
+            let tabs = &mut app.registry.windows.get_mut(&window).expect("window").tabs;
             settle_tab_widths(tabs, drawn, &PresentOutcome::Presented);
             assert_eq!(tab_rects(&pointer_layout(&app, window)), reloaded_rects);
             let hit = pointer_layout(&app, window).hit(click.0, click.1);
@@ -382,12 +392,12 @@ fn a_font_reload_redraws_every_window() {
     // Config apply marks every window for a redraw, and that redraw measures the tabs with the
     // new font key, which lays even a held bar out again at once.
     let (mut app, main, child) = two_windows();
-    let redraws = [main, child].map(|window| app.windows[&window].redraw.snapshot());
+    let redraws = [main, child].map(|window| app.registry.windows[&window].redraw.snapshot());
     let mut reloaded = app.config.clone();
     reloaded.font.size += 2.0;
     app.apply_new_config(reloaded);
     for (position, window) in [main, child].into_iter().enumerate() {
-        assert_ne!(app.windows[&window].redraw.snapshot(), redraws[position]);
+        assert_ne!(app.registry.windows[&window].redraw.snapshot(), redraws[position]);
     }
 }
 
@@ -400,12 +410,12 @@ fn a_font_or_dpi_reload_lays_a_held_bar_out_again() {
     remeasure(&mut app, child);
     let before = tab_rects(&drawn_layout(&app, child));
 
-    app.windows.get_mut(&child).expect("child").pressed_tab = Some(1);
+    app.registry.windows.get_mut(&child).expect("child").pressed_tab = Some(1);
     let hold = app.tab_widths_held_in(child, BAR_BAND);
     assert!(hold, "a pressed tab holds the bar");
     // A larger font triples every drawn advance, so the longest title passes tab_min_width,
     // and changes the font key from 1 to 2.
-    let tabs = &mut app.windows.get_mut(&child).expect("child").tabs;
+    let tabs = &mut app.registry.windows.get_mut(&child).expect("child").tabs;
     tabs.refresh_content_widths(Instant::now(), false, 2, hold, |content| {
         ten_px_per_char(content).map(|width_px| width_px * 3.0)
     });
@@ -522,7 +532,10 @@ fn leaving_a_bar_that_holds_widths_still_requests_a_redraw() {
         move_pointer(&mut app, window, ON_BAR);
         retitle(&mut app, window, 0, "a title measured while the pointer rests on the bar");
         remeasure(&mut app, window);
-        assert!(app.windows[&window].tabs.has_held_content_widths(), "the resting pointer holds");
+        assert!(
+            app.registry.windows[&window].tabs.has_held_content_widths(),
+            "the resting pointer holds"
+        );
         for leave in [(-1.0, -1.0), (450.0, 300.0)] {
             assert!(held_bar_release_wakes(false, true, leave, BAR_BAND), "{leave:?} wakes");
         }

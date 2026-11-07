@@ -6,7 +6,7 @@ impl App {
     /// Where an IME commit in `win_id` goes now, or `None` when the window is gone. The handler and
     /// the status line's `ime` segment both read this, so they cannot name different owners.
     pub(in crate::app) fn ime_route(&self, win_id: WindowId) -> Option<ImeRoute> {
-        let window = self.windows.get(&win_id)?;
+        let window = self.registry.windows.get(&win_id)?;
         Some(ime_route_for(window, self.command_palette_owns_input(win_id)))
     }
 
@@ -26,7 +26,7 @@ impl App {
             // When: route is Palette and the palette consumed ime_event, no other input owner may receive it.
             return;
         }
-        let Some(window) = self.windows.get_mut(&win_id) else {
+        let Some(window) = self.registry.windows.get_mut(&win_id) else {
             // When: win_id no longer resolves, a late IME event must not fall back to another window.
             return;
         };

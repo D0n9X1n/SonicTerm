@@ -421,13 +421,14 @@ impl super::App {
     /// to zero, because a busy pane holds *more* memory than an idle one and
     /// zeroing it would understate the process at the worst moment.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_charge_pane_owners(&mut self) {
         self.charge_pane_owners();
     }
 
     /// Test-only: enter the **gated** production sampling path.
     ///
-    /// Distinct from [`Self::__test_charge_pane_owners`], which calls the
+    /// Distinct from `Self::__test_charge_pane_owners`, which calls the
     /// charging step directly. Production reaches charging only through
     /// `sample_pane_retention`, whose `enabled!(target: "memory", …)` gate is
     /// the part that was closed in every shipped session. A test that enters
@@ -437,7 +438,7 @@ impl super::App {
     /// Clears the rate limiter so the sample is due.
     #[doc(hidden)]
     pub fn __test_sample_pane_retention_now(&mut self) -> bool {
-        self.last_retention_sample = None;
+        self.diagnostics.last_retention_sample = None;
         self.sample_pane_retention(Instant::now())
     }
 
@@ -471,7 +472,7 @@ impl super::App {
     /// Skips a pane whose parser lock is contended: a pane actively parsing is
     /// by definition not stalled.
     fn reclaim_stalled_captures(&mut self) {
-        for window in self.windows.values_mut() {
+        for window in self.registry.windows.values_mut() {
             for (pane_id, pane) in window.panes.iter_mut() {
                 let Some(mut parser) = pane.parser.try_lock() else {
                     // When: try_lock finds parser contended, so the pane is parsing
@@ -524,9 +525,9 @@ impl super::App {
     }
 
     fn charge_pane_owners(&mut self) {
-        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        let window_ids: Vec<WindowId> = self.registry.windows.keys().copied().collect();
         for window_id in window_ids {
-            let Some(window) = self.windows.get(&window_id) else {
+            let Some(window) = self.registry.windows.get(&window_id) else {
                 // When: window_id came from a snapshot taken before this walk; a
                 // window closed since then has no panes left to charge.
                 continue;
@@ -535,6 +536,7 @@ impl super::App {
 
             for pane_id in pane_ids {
                 let Some(pane) = self
+                    .registry
                     .windows
                     .get(&window_id)
                     .and_then(|window_state| window_state.panes.get(&pane_id))
@@ -555,6 +557,7 @@ impl super::App {
                 };
 
                 let Some(pane) = self
+                    .registry
                     .windows
                     .get_mut(&window_id)
                     .and_then(|window_state| window_state.panes.get_mut(&pane_id))
@@ -580,7 +583,7 @@ impl super::App {
     fn trim_over_ceiling_inline_media(&mut self) {
         let reclaimed = trim_panes_over_pool_ceiling(
             &self.inline_media_pool,
-            self.windows.values().flat_map(|window| window.panes.values()),
+            self.registry.windows.values().flat_map(|window| window.panes.values()),
         );
         if reclaimed > 0 {
             tracing::warn!(
@@ -620,7 +623,7 @@ impl super::App {
         // the ledger backs a tripwire and the log lines back a growth curve
         // across a session, and both answer questions on a scale of minutes.
         // A control loop that had to act within a frame could not read this.
-        if !retention_sample_due(&mut self.last_retention_sample, now) {
+        if !retention_sample_due(&mut self.diagnostics.last_retention_sample, now) {
             // When: retention_sample_due says the interval has not elapsed; this
             // pass walks every pane and reclaims, so it is far too costly per wake.
             return false;
@@ -691,25 +694,26 @@ impl super::App {
         // cycle. The breadcrumb recorder is nonblocking; filesystem IO remains on
         // its worker thread.
         let info_enabled = tracing::enabled!(target: "memory", tracing::Level::INFO);
-        if info_enabled || self.breadcrumb_recorder.is_some() {
+        if info_enabled || self.diagnostics.breadcrumb_recorder.is_some() {
             // When: info_enabled or a breadcrumb_recorder exists; the snapshot is
             // built once here and shared, so neither consumer builds it twice.
             let snapshot = self.build_memory_snapshot();
             if info_enabled {
                 memory_snapshot::emit_memory_snapshot_with_graphics(
                     &snapshot,
-                    self.last_memory_totals,
+                    self.diagnostics.last_memory_totals,
                     &self.build_graphics_reading(),
                 );
-                self.last_memory_totals = Some(snapshot.totals());
+                self.diagnostics.last_memory_totals = Some(snapshot.totals());
             }
-            if let Some(recorder) = &self.breadcrumb_recorder {
+            if let Some(recorder) = &self.diagnostics.breadcrumb_recorder {
                 // When: a breadcrumb_recorder is installed; these counts persist so
                 // a later hang report names the last known state.
                 use sonicterm_logging::breadcrumbs::BreadcrumbEvent;
-                let windows = u32::try_from(self.windows.len()).unwrap_or(u32::MAX);
+                let windows = u32::try_from(self.registry.windows.len()).unwrap_or(u32::MAX);
                 let panes = u32::try_from(
-                    self.windows
+                    self.registry
+                        .windows
                         .values()
                         .fold(0usize, |total, window| total.saturating_add(window.panes.len())),
                 )
@@ -753,6 +757,7 @@ impl super::App {
         }
 
         let labelled: Vec<(String, &PaneState)> = self
+            .registry
             .windows
             .iter()
             .flat_map(|(win_id, window)| {

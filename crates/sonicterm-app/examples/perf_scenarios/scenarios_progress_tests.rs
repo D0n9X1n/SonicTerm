@@ -261,6 +261,10 @@ fn run_caps_list_only_where_a_scenario_declares_them() {
             assert_eq!(entry["run_caps"], serde_json::json!({"rest": 2}));
         } else if entry["id"] == "S12" {
             assert_eq!(entry["run_caps"], serde_json::json!({"status-line": 1}));
+        } else if entry["id"] == "S7" {
+            assert_eq!(entry["run_caps"], serde_json::json!({"default": 3}));
+        } else if entry["id"] == "S13" {
+            assert_eq!(entry["run_caps"], serde_json::json!({"default": 1, "sustained-4": 1}));
         } else if entry["id"] == "S11" {
             assert_eq!(entry["run_caps"], serde_json::json!({"release": 1, "gdi": 2, "wgpu": 2}));
         } else {

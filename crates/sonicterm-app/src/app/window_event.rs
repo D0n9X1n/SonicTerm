@@ -79,7 +79,7 @@ impl App {
             // When: win_id is an unpromoted warm window, it owns no input scheduling state.
             return;
         }
-        if !self.windows.contains_key(&win_id) {
+        if !self.registry.windows.contains_key(&win_id) {
             // When: win_id is stale, no sibling can inherit its input cause.
             return;
         }
@@ -93,7 +93,7 @@ impl App {
         }
         // Main and child windows share one refresh, before the child dispatch below.
         self.refresh_monitor_for_event(win_id, &event);
-        if let Some(window) = self.windows.get_mut(&win_id) {
+        if let Some(window) = self.registry.windows.get_mut(&win_id) {
             if matches!(
                 event,
                 WindowEvent::KeyboardInput { .. }
@@ -119,7 +119,7 @@ impl App {
                 | WindowEvent::ScaleFactorChanged { .. }
                 | WindowEvent::Focused(false)
         ) {
-            if let Some(window) = self.windows.get_mut(&win_id) {
+            if let Some(window) = self.registry.windows.get_mut(&win_id) {
                 window.invalidate_path_hover();
             }
         }
@@ -164,11 +164,13 @@ impl App {
         }
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
-        // the main window also lives in `self.windows`
+        // the main window also lives in `self.registry.windows`
         // now (shadow entry, `Some(main_window_id)`), but its events
         // must continue to flow through the legacy `App.*` paths
         // below. Skip the main window's id explicitly.
-        if self.windows.contains_key(&win_id) && Some(win_id) != self.main_window_id {
+        if self.registry.windows.contains_key(&win_id)
+            && Some(win_id) != self.registry.main_window_id
+        {
             // When: windows contains win_id and main_window_id differs, delegate to child state.
             self.handle_child_window_event(event_loop, win_id, event);
             return;
@@ -274,9 +276,9 @@ impl App {
 
             WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, mut inner_size_writer } => {
                 // When: ScaleFactorChanged arrives, synchronously bind native and renderer geometry to one physical target.
-                if let Some(id) = self.main_window_id {
+                if let Some(id) = self.registry.main_window_id {
                     // When: main_window_id identifies the live main window, update exactly that state.
-                    if let Some(window) = self.windows.get_mut(&id) {
+                    if let Some(window) = self.registry.windows.get_mut(&id) {
                         // When: windows still contains id, apply the shared transition before winit commits WM_DPICHANGED.
                         let _ = crate::app::apply_window_dpi_transition(
                             window,
@@ -318,10 +320,10 @@ mod window_event_tests;
 #[path = "window_event_pointer.rs"]
 mod pointer;
 pub(super) use pointer::{
-    cancel_pointer_gesture, native_scrollbar_owns_pointer, no_button_motion_report,
-    pointer_route_bytes, pointer_scrollbar_content_rect, route_pressed_pointer_motion,
-    take_focus_loss_pointer_release, take_pointer_release, terminal_repeat_targets,
-    wheel_report_bytes, wheel_route,
+    cancel_pointer_gesture, no_button_motion_report, pane_scrollbar_owns_pointer,
+    pointer_route_bytes, route_pressed_pointer_motion, take_focus_loss_pointer_release,
+    take_pointer_release, terminal_repeat_targets, wheel_report_bytes, wheel_route,
+    ScrollbarMetrics,
 };
 #[path = "window_event_redraw.rs"]
 mod redraw;
@@ -341,6 +343,7 @@ impl App {
         // The bar holds its widths while a tab gesture runs in any window or this window's own
         // pointer rests on it.
         let tab_bar_band = self
+            .registry
             .windows
             .get(&win_id)
             .and_then(|window| window.renderer.as_ref())
@@ -354,9 +357,9 @@ impl App {
         let pty_burst = self.main().is_some_and(WindowState::visible_output_advanced);
         let mut timing = crate::app::render_timing::RenderTiming::start("main");
         self.pending_redraw = false;
-        let main_id_opt = self.main_window_id;
+        let main_id_opt = self.registry.main_window_id;
         if let Some(id) = main_id_opt {
-            if let Some(window) = self.windows.get_mut(&id) {
+            if let Some(window) = self.registry.windows.get_mut(&id) {
                 window.tabs.clear_expired_command_badges(Instant::now());
             }
         }
@@ -364,9 +367,9 @@ impl App {
         // A burst or strip-only frame reads the cache only; other frames set demand, never probe.
         let status_only = self.main().is_some_and(|window| window.redraw.status_only_attempt());
         let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
-            .then(|| std::sync::Arc::clone(&self.fg_probes));
+            .then(|| std::sync::Arc::clone(&self.services.fg_probes));
         if let Some(id) = main_id_opt {
-            if let Some(window) = self.windows.get_mut(&id) {
+            if let Some(window) = self.registry.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(
                     &mut window.tabs,
                     &window.tab_states,
@@ -470,6 +473,7 @@ impl App {
         let mut frame = {
             // End the Result's drop scope before later branches release its borrowed sources.
             let collected = sources.try_collect(|| self.snapshot_window_redraw(win_id));
+            self.note_collection(win_id, sources.take_note());
             match collected {
                 Ok(frame) => frame,
                 Err(why) => {
@@ -535,7 +539,7 @@ impl App {
         if let Some(window) = self.main_mut() {
             window.coherent_frame_collected();
         }
-        let marker_observed = self.runtime_smoke.as_ref().is_some_and(|smoke| {
+        let marker_observed = self.services.runtime_smoke.as_ref().is_some_and(|smoke| {
             smoke.is_waiting_for_marker()
                 && frame
                     .guards
@@ -545,12 +549,15 @@ impl App {
         if marker_observed {
             let baseline =
                 self.main_renderer().map(GpuRenderer::successful_frame_count).unwrap_or(0);
-            if let Some(smoke) = self.runtime_smoke.as_mut() {
+            if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                 smoke.begin_present_wait(baseline);
             }
         }
-        let smoke_waiting_for_present =
-            self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.is_waiting_for_present());
+        let smoke_waiting_for_present = self
+            .services
+            .runtime_smoke
+            .as_ref()
+            .is_some_and(|smoke| smoke.is_waiting_for_present());
         let mut smoke_presented_count = None;
         let mut frame_completion = None;
         // A presented frame's receipts; bound and stored as the window's pending set after the call.
@@ -565,16 +572,16 @@ impl App {
         // An owned handle for the watched dispatch's render pair; it holds no lock or borrow.
         let render_marker = self.render_marker(win_id);
         // Borrow-split: pull the renderer out via direct
-        // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
+        // map-lookup on `self.registry.windows` (NOT through `main_renderer_mut`,
         // which would borrow all of `self`). That keeps
-        // `self.command_palette`, `self.ime` available for the
+        // `self.interaction.command_palette`, `self.ime` available for the
         // disjoint mut borrows the render call needs in the same
         // expression scope.
         // panes live in the main `WindowState` too, so they're
         // pulled from the same field-disjoint split borrow.
-        let main_id_opt = self.main_window_id;
+        let main_id_opt = self.registry.main_window_id;
         let counts_selection = self.counts_selection();
-        let mut ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
+        let mut ws_opt = main_id_opt.and_then(|id| self.registry.windows.get_mut(&id));
         if let Some(main) = ws_opt.as_deref_mut() {
             // The collector validated the actual active position before taking any lock.
             invalidate_selection_for_content(
@@ -600,12 +607,16 @@ impl App {
                     counters.status_line.sel_cells += cells_read;
                 }
             }
-            if self.command_palette.is_open() && self.palette_attached_window.is_none() {
-                self.command_palette.set_context(super::overlays::command_palette_context(
-                    main,
-                    Some(frame.guards[active_pos].1.grid()),
-                ));
-                self.command_palette.set_tabs(&main.tabs, &self.i18n);
+            if self.interaction.command_palette.is_open()
+                && self.interaction.palette_attached_window.is_none()
+            {
+                self.interaction.command_palette.set_context(
+                    super::overlays::command_palette_context(
+                        main,
+                        Some(frame.guards[active_pos].1.grid()),
+                    ),
+                );
+                self.interaction.command_palette.set_tabs(&main.tabs, &self.i18n);
             }
         }
         #[allow(clippy::type_complexity)]
@@ -740,7 +751,7 @@ impl App {
                     active_id,
                 ));
                 let cursor_rect_copy = frame.guards[active_pos].2;
-                let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
+                let recovery_sample = self.services.runtime_smoke.as_ref().and_then(|smoke| {
                     smoke.recovery_marker_sample(
                         win_id,
                         frame
@@ -782,8 +793,8 @@ impl App {
                     },
                     &self.theme,
                     cursor_visible_now
-                        && !(self.command_palette.is_open()
-                            && self.palette_attached_window.is_none()),
+                        && !(self.interaction.command_palette.is_open()
+                            && self.interaction.palette_attached_window.is_none()),
                     ws_selection_ref,
                     ws_copy_mode_ref,
                     tabs_mref,
@@ -792,7 +803,10 @@ impl App {
                     // Feed the palette only to its attached window;
                     // `None` denotes main, and routing it elsewhere
                     // would paint the overlay on the wrong window.
-                    self.palette_attached_window.is_none().then_some(&mut self.command_palette),
+                    self.interaction
+                        .palette_attached_window
+                        .is_none()
+                        .then_some(&mut self.interaction.command_palette),
                     ws_ime_ref,
                     frame_viewports.active,
                     ws_notification_ref,
@@ -816,12 +830,12 @@ impl App {
                 // Keep the new widths only if this frame reached the screen, so hit-testing
                 // matches the bar the user sees.
                 super::tab_widths::settle_tab_widths(tabs_mref, drawn_tab_widths, &outcome);
-                if let Some(recovery) = self.gpu_recovery.as_mut() {
+                if let Some(recovery) = self.services.gpu_recovery.as_mut() {
                     recovery.observe_frame(r.device_generation(), &outcome, Instant::now());
                 }
                 presented_receipts = receipts;
                 if let (Some(smoke), Some(sample)) =
-                    (self.runtime_smoke.as_mut(), recovery_sample.as_ref())
+                    (self.services.runtime_smoke.as_mut(), recovery_sample.as_ref())
                 {
                     smoke.observe_recovery_frame(win_id, r.device_generation(), sample, &outcome);
                 }
@@ -837,7 +851,7 @@ impl App {
                     // When: `smoke_waiting_for_present` is true, retain the post-render native-present count.
                     smoke_presented_count = Some(Ok(r.successful_frame_count()));
                 }
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.note_render_attempt();
                 }
                 if let Some(timer) = timing.as_mut() {
@@ -848,7 +862,10 @@ impl App {
                 let preedit = ws_ime_ref.map(|ime| ime.preedit()).unwrap_or("");
                 let field_ime = super::overlays::field_ime_anchor(
                     r,
-                    self.palette_attached_window.is_none().then_some(&self.command_palette),
+                    self.interaction
+                        .palette_attached_window
+                        .is_none()
+                        .then_some(&self.interaction.command_palette),
                     search,
                     preedit,
                 );
@@ -928,6 +945,7 @@ impl App {
                 Ok(count) => {
                     // Compare the successful presentation count with the frozen baseline.
                     let advanced = self
+                        .services
                         .runtime_smoke
                         .as_mut()
                         .is_some_and(|smoke| smoke.observe_presented_frame(count));
@@ -938,7 +956,7 @@ impl App {
                 }
                 Err(failure) => {
                     // When: `presented` is `Err(failure)`, retain presentation as the failed boundary.
-                    if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                         smoke.fail(failure);
                     }
                     event_loop.exit();

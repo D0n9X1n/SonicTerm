@@ -179,7 +179,7 @@ fn recovery_release_rechecks_identity_and_uses_production_pool_shrink() {
     assert!(release.contains("!probe.stale_event_observed"));
     assert!(release.contains("renderer.device_generation() != snapshot.committed"));
     assert!(source.contains("self.warm_window_pool_maintain(event_loop)"));
-    assert!(!source.contains("self.warm_window_pool.clear()"));
+    assert!(!source.contains("self.registry.warm_window_pool.clear()"));
     let event = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     let tagged =
         event.split_once("UserEvent::GpuDeviceGenerationChanged { generation } => {").unwrap().1;

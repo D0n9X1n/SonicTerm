@@ -163,8 +163,8 @@ impl App {
     /// The title terminal window `id` would show now; `None` for an unnumbered or unknown window.
     #[cfg(test)]
     pub(super) fn native_window_title(&self, id: WindowId) -> Option<String> {
-        let key = self.window_keys.get(id)?;
-        let window = self.windows.get(&id)?;
+        let key = self.registry.window_keys.get(id)?;
+        let window = self.registry.windows.get(&id)?;
         let body = window.tabs.active().map(tab_display_body);
         Some(window_title_text(key.raw(), &window.custom_window_name, body))
     }
@@ -172,7 +172,7 @@ impl App {
     /// Bring every terminal window's native title up to date; returns when a throttled title is
     /// next due, so the event loop wakes to deliver it. Each window keeps its own interval.
     pub(super) fn sync_native_titles(&mut self, now: Instant) -> Option<Instant> {
-        let Self { window_keys, windows, .. } = self;
+        let Self { registry: crate::app::WindowRegistry { window_keys, windows, .. }, .. } = self;
         windows
             .iter_mut()
             .filter_map(|(id, window)| sync_window(window_keys.get(*id)?, window, now, false))
@@ -192,7 +192,7 @@ impl App {
     /// The title last written to window `id`'s native window, for tests in other modules.
     #[cfg(test)]
     pub(super) fn applied_native_title(&self, id: WindowId) -> Option<&str> {
-        self.windows.get(&id)?.native_title.applied.as_deref()
+        self.registry.windows.get(&id)?.native_title.applied.as_deref()
     }
 
     /// Bring window `id`'s native title up to date. `immediate` writes a changed title now, for
@@ -204,8 +204,8 @@ impl App {
         now: Instant,
         immediate: bool,
     ) -> Option<Instant> {
-        let key = self.window_keys.get(id)?;
-        sync_window(key, self.windows.get_mut(&id)?, now, immediate)
+        let key = self.registry.window_keys.get(id)?;
+        sync_window(key, self.registry.windows.get_mut(&id)?, now, immediate)
     }
 }
 

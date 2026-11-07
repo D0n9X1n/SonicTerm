@@ -20,7 +20,7 @@ impl App {
     ) {
         let target = self.pointer_target_cell(window_id).and_then(|(pane_id, row, col)| {
             let (_, parser) = parsers.into_iter().find(|(id, _)| *id == pane_id)?;
-            let pane = self.windows.get(&window_id)?.panes.get(&pane_id)?;
+            let pane = self.registry.windows.get(&window_id)?.panes.get(&pane_id)?;
             let viewport = pane.resolved_viewport(parser.grid());
             self.hover_target_from_parser(window_id, pane_id, row, col, parser, viewport)
         });
@@ -36,7 +36,8 @@ impl App {
         viewport_row: u16,
         col: u16,
     ) -> Result<Option<CellTargetSnapshot>, ()> {
-        let Some(pane) = self.windows.get(&window_id).and_then(|window| window.panes.get(&pane_id))
+        let Some(pane) =
+            self.registry.windows.get(&window_id).and_then(|window| window.panes.get(&pane_id))
         else {
             // When: the owning pane is gone, this is genuine absence rather than transient parser contention.
             return Ok(None);
@@ -79,6 +80,7 @@ impl App {
             clickable_path_max_chars: terminal.effective_clickable_path_max_chars(),
         };
         let cached = self
+            .registry
             .windows
             .get(&window_id)
             .and_then(|window| window.hover_detection.lookup(&context, grid));
@@ -92,7 +94,7 @@ impl App {
         }
         let target = self.detect_cell_target(window_id, pane_id, viewport_row, col, parser, &frame);
         let rows_read = frame.rows_read();
-        if let Some(window) = self.windows.get_mut(&window_id) {
+        if let Some(window) = self.registry.windows.get_mut(&window_id) {
             window.hover_detection.store(context, grid, frame.read_span(), target.clone());
         }
         self.note_hover(|hover| {
@@ -111,7 +113,7 @@ impl App {
         let Ok(target) = lookup else {
             // When: parser contention prevents a fresh lookup, preserve the hint without extending modifier-only feedback.
             if !self.open_modifier_held(window_id) {
-                if let Some(window) = self.windows.get_mut(&window_id) {
+                if let Some(window) = self.registry.windows.get_mut(&window_id) {
                     let was_active =
                         window.hovered_url.as_ref().is_some_and(|hover| hover.active());
                     let had_preview = window.link_preview.take().is_some();
@@ -127,7 +129,7 @@ impl App {
                 }
             }
             // A busy lookup needs a coherent frame so stationary feedback cannot wait for unrelated input.
-            if let Some(window) = self.windows.get(&window_id) {
+            if let Some(window) = self.registry.windows.get(&window_id) {
                 window.request_window_redraw();
             }
             return;
@@ -141,15 +143,16 @@ impl App {
         target: Option<CellTargetSnapshot>,
     ) {
         let modifier_held = self.open_modifier_held(window_id);
-        let preview_allowed = self.frontmost_window == Some(window_id)
-            && !(self.command_palette.is_open()
-                && self.palette_attached_window.or(self.main_window_id) == Some(window_id));
+        let preview_allowed = self.registry.frontmost_window == Some(window_id)
+            && !(self.interaction.command_palette.is_open()
+                && self.interaction.palette_attached_window.or(self.registry.main_window_id)
+                    == Some(window_id));
         let mut probe_request = None;
         let mut hovered = None;
         let explicit_hyperlink = target.as_ref().is_some_and(|target| target.explicit_hyperlink);
         let mut visual_changed = false;
 
-        if let Some(window) = self.windows.get_mut(&window_id) {
+        if let Some(window) = self.registry.windows.get_mut(&window_id) {
             window.hover_unresolved = false;
             let previous_hover = window.hovered_url.clone();
             let previous_link = window.hover_link;
@@ -230,7 +233,7 @@ impl App {
                 self.note_path_submit();
             }
         }
-        if let Some(window) = self.windows.get(&window_id) {
+        if let Some(window) = self.registry.windows.get(&window_id) {
             if visual_changed {
                 if let Some(native) = window.window.as_ref() {
                     native.set_cursor(if window.hover_link {
@@ -245,7 +248,7 @@ impl App {
     }
 
     pub(in crate::app) fn clear_target_hover(&mut self, window_id: WindowId) {
-        let Some(window) = self.windows.get_mut(&window_id) else {
+        let Some(window) = self.registry.windows.get_mut(&window_id) else {
             // When: `window_id` no longer identifies a live window, there is no hover or probe state left to clear.
             return;
         };
@@ -269,7 +272,7 @@ impl App {
     /// Retains a current probe completion for validation against the next fresh hover snapshot.
     pub(in crate::app) fn handle_path_probe_finished(&mut self, result: PathProbeResult) {
         let window_id = result.request.key.window_id;
-        let Some(window) = self.windows.get_mut(&window_id) else {
+        let Some(window) = self.registry.windows.get_mut(&window_id) else {
             // When: windows no longer contains window_id, discard the result with its original owner.
             return;
         };
@@ -284,8 +287,12 @@ impl App {
     }
 
     pub(in crate::app) fn open_modifier_held(&self, window_id: WindowId) -> bool {
-        let modifiers =
-            self.windows.get(&window_id).map(|window| window.modifiers).unwrap_or_default();
+        let modifiers = self
+            .registry
+            .windows
+            .get(&window_id)
+            .map(|window| window.modifiers)
+            .unwrap_or_default();
         open_modifier_in(modifiers)
     }
 }

@@ -218,6 +218,10 @@ pub(super) const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S12 default short", "800f25bd5fd34f2e15749136b3f6b7b23df09bab219127dc07da9cc0845e0022"),
     ("S12 status-line full", "a1407eb7222747d569bbd761157d651ebacd4334a3134332595310ea1a43e65e"),
     ("S12 status-line short", "4a03c33e4327ab15b3d551cef06c4345f3c7ece37f8cfd262dadfa1c0b1a9315"),
+    ("S13 default full", "4acadfdfc6d208e9b97755df3e3037f70a6c8e52cc642582bd4afc04a3708a6d"),
+    ("S13 default short", "b75d489e2b988e6baba4c76ce2daf92482ba65dace86b4b34b365bd63c47a868"),
+    ("S13 sustained-4 full", "e55d0298c25c376d418ea07fa2c01c198a0a1bb22f13e2b9c65f7a69f9c5c866"),
+    ("S13 sustained-4 short", "08699d8b061104e92ef78a6700441388fb86d6f552d2b0c848913efc996ec0bb"),
     ("S2 default full", "b8794652682021a93564b1a2821feb8336f918626dde0156749fc8245abf8864"),
     ("S2 default short", "0a29f4e7229a367ab9f687772abb28d8120420f2bcad9592f26e7cbd7a5accba"),
     ("S2 flood full", "c80b829c203c03d8a7bd02df240c39996c067ae4b80f88b02ad6576712eb477f"),
@@ -622,6 +626,9 @@ pub(super) fn expected_role_output(plan: &Plan, role: usize) -> Vec<u8> {
         Workload::IdleShell | Workload::ExitAfterGo => return expected,
         Workload::DateLoop | Workload::RestStream => {
             panic!("a date loop's output depends on the clock")
+        }
+        Workload::SustainedFlood => {
+            panic!("a sustained flood never ends, so it has no full output")
         }
         Workload::Flood { lines, .. } => {
             [b"y\n".repeat(lines as usize), file_bytes("bulk.txt")].concat()

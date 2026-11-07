@@ -41,17 +41,21 @@ impl App {
         // The bar holds its widths while a tab gesture runs in any window or this window's own
         // pointer rests on it.
         let tab_bar_band = self
+            .registry
             .windows
             .get(&win_id)
             .and_then(|window| window.renderer.as_ref())
             .and_then(|renderer| renderer.tab_bar_band());
         let hold_tab_widths = self.tab_widths_held_in(win_id, tab_bar_band);
         // A burst or strip-only frame reads the cache only; other frames set demand, never probe.
-        let status_only =
-            self.windows.get(&win_id).is_some_and(|child| child.redraw.status_only_attempt());
+        let status_only = self
+            .registry
+            .windows
+            .get(&win_id)
+            .is_some_and(|child| child.redraw.status_only_attempt());
         let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
-            .then(|| std::sync::Arc::clone(&self.fg_probes));
-        let Some(child) = self.windows.get_mut(&win_id) else {
+            .then(|| std::sync::Arc::clone(&self.services.fg_probes));
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so this child closed and
             // has no frame left to render.
             return;
@@ -106,6 +110,7 @@ impl App {
         let mut frame = {
             // End the Result's drop scope before later branches release its borrowed sources.
             let collected = sources.try_collect(|| self.snapshot_window_redraw(win_id));
+            self.note_collection(win_id, sources.take_note());
             match collected {
                 Ok(frame) => frame,
                 Err(why) => {
@@ -137,7 +142,7 @@ impl App {
             frame.guards.iter().map(|(id, parser, _)| (*id, &**parser)),
         );
         let counts_selection = self.counts_selection();
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: windows no longer contains win_id, discard its collected frame instead of presenting retained hover.
             return;
         };
@@ -159,7 +164,7 @@ impl App {
             }
         };
         child.coherent_frame_collected();
-        let mut palette_for_render = palette_here.then_some(&mut self.command_palette);
+        let mut palette_for_render = palette_here.then_some(&mut self.interaction.command_palette);
         if let Some(timing) = timing.as_mut() {
             timing.lap("inline_images");
         }
@@ -264,7 +269,7 @@ impl App {
                 active_id,
             ));
             let cursor_rect_copy = frame.guards[active_pos].2;
-            let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
+            let recovery_sample = self.services.runtime_smoke.as_ref().and_then(|smoke| {
                 smoke.recovery_marker_sample(
                     win_id,
                     frame
@@ -283,6 +288,7 @@ impl App {
             // survives tear-out of this child.
             let cursor_visible_now = pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed);
             let smoke_waiting_for_present = self
+                .services
                 .runtime_smoke
                 .as_ref()
                 .is_some_and(|smoke| smoke.is_waiting_for_adopted_present(win_id));
@@ -366,13 +372,13 @@ impl App {
                 // Keep the new widths only if this frame reached the screen, so hit-testing
                 // matches the bar the user sees.
                 super::tab_widths::settle_tab_widths(&mut child.tabs, drawn_tab_widths, &outcome);
-                if let Some(recovery) = self.gpu_recovery.as_mut() {
+                if let Some(recovery) = self.services.gpu_recovery.as_mut() {
                     recovery.observe_frame(r.device_generation(), &outcome, Instant::now());
                 }
                 // A presented frame's receipts replace the pending set emptied at collection.
                 sources.store_presented(&mut child.pending_receipts, receipts);
                 if let (Some(smoke), Some(sample)) =
-                    (self.runtime_smoke.as_mut(), recovery_sample.as_ref())
+                    (self.services.runtime_smoke.as_mut(), recovery_sample.as_ref())
                 {
                     smoke.observe_recovery_frame(win_id, r.device_generation(), sample, &outcome);
                 }
@@ -396,7 +402,7 @@ impl App {
                     // When: rendering succeeded while `smoke_waiting_for_present` is true, retain its frame count.
                     smoke_presented_count = Some(Ok(r.successful_frame_count()));
                 }
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.note_render_attempt();
                 }
             } else {
@@ -409,7 +415,7 @@ impl App {
                 // stamps the dispatch clock and writes both clocks, pane generations and the surface probe.
                 self.complete_window_redraw(win_id, snapshot, settlement);
             }
-            let Some(child) = self.windows.get_mut(&win_id) else {
+            let Some(child) = self.registry.windows.get_mut(&win_id) else {
                 // When: completion found `win_id` gone, no child remains to anchor IME or a drag bar.
                 return;
             };
@@ -425,7 +431,7 @@ impl App {
                     Ok(count) => count,
                     Err(failure) => {
                         // When: `presented` is `Err(failure)`, retain it and stop the smoke.
-                        if let Some(smoke) = self.runtime_smoke.as_mut() {
+                        if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                             smoke.fail(failure);
                         }
                         event_loop.exit();
@@ -433,6 +439,7 @@ impl App {
                     }
                 };
                 let presented = self
+                    .services
                     .runtime_smoke
                     .as_mut()
                     .is_some_and(|smoke| smoke.observe_adopted_present(win_id, count));
@@ -442,8 +449,9 @@ impl App {
                     drop(sources);
                     let _ = child;
                     let released = self.close_child_window(win_id);
-                    self.warm_window_pool.clear();
+                    self.registry.warm_window_pool.clear();
                     let complete = self
+                        .services
                         .runtime_smoke
                         .as_mut()
                         .is_some_and(|smoke| smoke.finish_warm_release(win_id, released));
@@ -460,6 +468,7 @@ impl App {
                     }
                     if !complete
                         || self
+                            .services
                             .runtime_smoke
                             .as_ref()
                             .is_some_and(|smoke| smoke.outcome().is_some())
@@ -495,7 +504,7 @@ impl App {
                 {
                     let anchor = super::overlays::field_ime_anchor(
                         renderer,
-                        palette_here.then_some(&self.command_palette),
+                        palette_here.then_some(&self.interaction.command_palette),
                         search,
                         child.ime.preedit(),
                     );
@@ -560,7 +569,7 @@ impl App {
                 );
                 if child.role == super::WindowRole::Terminal {
                     // Only a terminal window's bar is a drop target; the Memory Usage report's is not.
-                    self.os_drag_bars.publish(snap);
+                    self.interaction.os_drag_bars.publish(snap);
                 }
             }
             if let Some(timing) = timing {

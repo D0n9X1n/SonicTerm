@@ -85,7 +85,8 @@ pub(crate) struct SampleRequest {
 impl App {
     /// The report window, if one is open.
     pub(crate) fn memory_report_window_id(&self) -> Option<WindowId> {
-        self.windows
+        self.registry
+            .windows
             .iter()
             .find(|(_, window)| window.role == WindowRole::MemoryReport)
             .map(|(id, _)| *id)
@@ -93,7 +94,7 @@ impl App {
 
     /// Whether `id` is the report window.
     pub(crate) fn is_memory_report_window(&self, id: WindowId) -> bool {
-        self.windows.get(&id).is_some_and(|window| window.role == WindowRole::MemoryReport)
+        self.registry.windows.get(&id).is_some_and(|window| window.role == WindowRole::MemoryReport)
     }
 
     /// Run `show_memory_usage`: focus and refresh an open report, or request one.
@@ -103,10 +104,12 @@ impl App {
             self.memory_report.open_requested = true;
             return;
         };
-        if let Some(window) = self.windows.get(&report_id).and_then(|state| state.window.as_ref()) {
+        if let Some(window) =
+            self.registry.windows.get(&report_id).and_then(|state| state.window.as_ref())
+        {
             window.focus_window();
         }
-        self.frontmost_window = Some(report_id);
+        self.registry.frontmost_window = Some(report_id);
         self.refresh_memory_report();
     }
 
@@ -127,7 +130,7 @@ impl App {
     /// Build the native window and its renderer, then install and fill the report pane.
     fn create_memory_report_window(&mut self, event_loop: &ActiveEventLoop) {
         let title = self.i18n.translate("memory-report-window-title");
-        let inner_size = self.window_request(self.main_window_id).inner_size;
+        let inner_size = self.window_request(self.registry.main_window_id).inner_size;
         let Some((window, renderer, cells)) =
             self.build_report_window(event_loop, &title, "memory-report", inner_size)
         else {
@@ -289,7 +292,7 @@ impl App {
             title,
         );
         self.insert_window_registered(window_id, state);
-        self.frontmost_window = Some(window_id);
+        self.registry.frontmost_window = Some(window_id);
     }
 
     /// Take a fresh sample: counted figures now, OS figures from the one sampling worker.
@@ -394,14 +397,15 @@ impl App {
     /// the history it anchored to replaced. The report waits in `current` and
     /// [`Self::apply_deferred_memory_report`] shows it later.
     fn render_or_defer_memory_report(&mut self) {
-        let held = self.memory_report_window_id().and_then(|id| self.windows.get(&id)).is_some_and(
-            |window| {
+        let held = self
+            .memory_report_window_id()
+            .and_then(|id| self.registry.windows.get(&id))
+            .is_some_and(|window| {
                 window.copy_mode.is_some()
                     || window.mouse_down
                     || window.pointer_gesture.is_some()
                     || window.selection.as_ref().is_some_and(|selection| !selection.is_empty())
-            },
-        );
+            });
         if held {
             // When: `held`, a selection, gesture or copy mode owns the pane, so the new text waits.
             self.memory_report.render_deferred = true;
@@ -448,7 +452,7 @@ impl App {
     /// drop its retained frame. Returns whether a pane received the text.
     pub(super) fn feed_report_pane(&mut self, report_id: WindowId, text: &str) -> bool {
         let scrollbar = self.config.appearance.scrollbar;
-        let Some(window) = self.windows.get_mut(&report_id) else {
+        let Some(window) = self.registry.windows.get_mut(&report_id) else {
             // When: the window vanished between the lookup and the borrow.
             return false;
         };
@@ -532,14 +536,15 @@ impl App {
 
     /// Move focus off removed report window `removed` to the terminal window actions redirect to.
     pub(super) fn repair_focus_after_report(&mut self, removed: WindowId) {
-        if self.frontmost_window != Some(removed) {
+        if self.registry.frontmost_window != Some(removed) {
             // When: `frontmost_window` is another window, focus does not need repairing.
             return;
         }
-        self.frontmost_window = self.memory_report_redirect_target();
+        self.registry.frontmost_window = self.memory_report_redirect_target();
         if let Some(window) = self
+            .registry
             .frontmost_window
-            .and_then(|id| self.windows.get(&id))
+            .and_then(|id| self.registry.windows.get(&id))
             .and_then(|state| state.window.as_ref())
         {
             window.focus_window();
@@ -550,15 +555,16 @@ impl App {
     ///
     /// The visible main window first, then the lowest-id terminal child, then a hidden main.
     pub(crate) fn memory_report_redirect_target(&self) -> Option<WindowId> {
-        let main = self.main_window_id.filter(|id| self.windows.contains_key(id));
+        let main = self.registry.main_window_id.filter(|id| self.registry.windows.contains_key(id));
         if let Some(main) = main.filter(|_| !self.main_is_hidden()) {
             // When: main is live and visible, it is where the user expects terminal actions.
             return Some(main);
         }
-        self.windows
+        self.registry
+            .windows
             .iter()
             .filter(|(id, window)| {
-                window.role == WindowRole::Terminal && Some(**id) != self.main_window_id
+                window.role == WindowRole::Terminal && Some(**id) != self.registry.main_window_id
             })
             .map(|(id, _)| *id)
             .min()
@@ -577,8 +583,9 @@ impl App {
         source: Option<WindowId>,
         from_cached_focus: bool,
     ) -> Option<bool> {
-        let report_id = source
-            .filter(|id| self.windows.get(id).is_some_and(|window| window.role.is_report()))?;
+        let report_id = source.filter(|id| {
+            self.registry.windows.get(id).is_some_and(|window| window.role.is_report())
+        })?;
         let route = report_route(action);
         let scroll_via_cached_focus = from_cached_focus && matches!(action, Action::Scroll(_));
         match route {
@@ -645,15 +652,18 @@ impl App {
             .collect();
         let report_id = self.memory_report_window_id();
         let mut ordered: Vec<WindowId> = self
+            .registry
             .windows
             .iter()
             .filter(|(id, window)| {
-                window.role == WindowRole::Terminal && Some(**id) != self.main_window_id
+                window.role == WindowRole::Terminal && Some(**id) != self.registry.main_window_id
             })
             .map(|(id, _)| *id)
             .collect();
         ordered.sort_unstable();
-        if let Some(main) = self.main_window_id.filter(|id| self.windows.contains_key(id)) {
+        if let Some(main) =
+            self.registry.main_window_id.filter(|id| self.registry.windows.contains_key(id))
+        {
             ordered.insert(0, main);
         }
         let numbered_windows = ordered.len();
@@ -665,7 +675,7 @@ impl App {
         let mut roots = Vec::new();
         let mut listed = std::collections::HashSet::new();
         for (window_index, window_id) in ordered.iter().enumerate() {
-            let Some(window) = self.windows.get(window_id) else {
+            let Some(window) = self.registry.windows.get(window_id) else {
                 // When: the id was collected from `windows` above, so this cannot miss; skip defensively.
                 continue;
             };

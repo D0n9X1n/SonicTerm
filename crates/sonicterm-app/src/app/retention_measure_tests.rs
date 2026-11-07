@@ -8,13 +8,13 @@ fn measured_inline_media_mixed_transitions_update_existing_charges() {
     // One larger image and several smaller images move bytes/items in opposite directions through real retention.
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     let pane_id = app.__test_seed_tab("media");
-    let window = app.main_window_id.unwrap();
+    let window = app.registry.main_window_id.unwrap();
     app.reconcile_pane_owners();
-    let owner = app.windows[&window].panes[&pane_id].owner.as_ref().unwrap().id();
+    let owner = app.registry.windows[&window].panes[&pane_id].owner.as_ref().unwrap().id();
     let mut previous = None;
     for sizes in [&[4096][..], &[512, 512, 512][..], &[8192][..]] {
         {
-            let pane = &app.windows[&window].panes[&pane_id];
+            let pane = &app.registry.windows[&window].panes[&pane_id];
             let mut images = pane.inline_images.lock();
             *images = sizes
                 .iter()
@@ -31,14 +31,14 @@ fn measured_inline_media_mixed_transitions_update_existing_charges() {
                 })
                 .collect();
         }
-        let measured = measure_pane(&app.windows[&window].panes[&pane_id]).unwrap();
+        let measured = measure_pane(&app.registry.windows[&window].panes[&pane_id]).unwrap();
         if let Some(old) = previous {
             assert!(!measured.inline_media.component_le(old));
             assert!(!old.component_le(measured.inline_media));
         }
         app.__test_charge_pane_owners();
         app.__test_charge_pane_owners();
-        let pane = &app.windows[&window].panes[&pane_id];
+        let pane = &app.registry.windows[&window].panes[&pane_id];
         assert_eq!(
             pane.charges[&ResourceClass::InlineMediaRetained].committed_amount(),
             measured.inline_media
@@ -633,6 +633,7 @@ fn pane_owner_moves_transfer_existing_charges_across_every_window_direction() {
     let second_child = app.__test_seed_child_window(&[]);
 
     let parser = app
+        .registry
         .windows
         .get(&main)
         .and_then(|window| window.panes.get(&pane_id))
@@ -710,6 +711,7 @@ fn rejected_pane_owner_transfer_preserves_source_and_destination_window() {
     let destination = app.__test_seed_child_window(&[]);
     {
         let pane = app
+            .registry
             .windows
             .get(&main)
             .and_then(|window| window.panes.get(&pane_id))
@@ -745,6 +747,7 @@ fn rejected_pane_owner_transfer_preserves_source_and_destination_window() {
 
     let result = {
         let pane = app
+            .registry
             .windows
             .get_mut(&main)
             .and_then(|window| window.panes.get_mut(&pane_id))

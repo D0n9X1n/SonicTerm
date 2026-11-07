@@ -38,16 +38,16 @@ impl App {
             }
             OutputEvent::Pane { window_id, pane_id } => {
                 // When: a worker flushed pane_id, acknowledge it and filter the frame request.
-                let Some(owner) = self
-                    .windows
-                    .iter()
-                    .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id))
+                let Some(owner) =
+                    self.registry.windows.iter().find_map(|(id, window)| {
+                        window.panes.contains_key(&pane_id).then_some(*id)
+                    })
                 else {
                     // When: no window holds pane_id, it retired after its worker read the target.
                     return;
                 };
                 // Acknowledge before any check, so a flush after this point sends a fresh event.
-                self.windows[&owner].panes[&pane_id]
+                self.registry.windows[&owner].panes[&pane_id]
                     .output_outstanding
                     .swap(false, Ordering::AcqRel);
                 #[cfg(test)]
@@ -58,10 +58,16 @@ impl App {
                 let mut chrome = self.command_maintenance(owner, now);
                 chrome |= self.mark_bell(owner, pane_id);
                 // The watched pane is loaded explicitly first, so `any` below sees at least its generation.
-                let watched =
-                    self.windows.get(&owner).and_then(|window| window.watched_observation());
-                let visible =
-                    self.windows.get(&owner).is_some_and(|window| window.visible_output_advanced());
+                let watched = self
+                    .registry
+                    .windows
+                    .get(&owner)
+                    .and_then(|window| window.watched_observation());
+                let visible = self
+                    .registry
+                    .windows
+                    .get(&owner)
+                    .is_some_and(|window| window.visible_output_advanced());
                 // Only the Output request is the check's outcome; a chrome-only request leaves it `None`.
                 let mut outcome = OutputCheckOutcomeV1::None;
                 if visible {
@@ -70,7 +76,7 @@ impl App {
                     // When: only tab-bar command chrome changed, the frame repaints chrome, not output.
                     self.request_owner_redraw(owner, RedrawCause::Chrome);
                 }
-                if let Some(window) = self.windows.get_mut(&owner) {
+                if let Some(window) = self.registry.windows.get_mut(&owner) {
                     window.redraw.timeline.note_output_service(pane_id, watched, outcome);
                 }
             }
@@ -106,7 +112,7 @@ impl App {
     /// whether the tab's mark appeared.
     // Ordering: bells is Relaxed; it is compared only with this pane's own acknowledgement.
     fn mark_bell(&mut self, owner: WindowId, pane_id: u64) -> bool {
-        let Some(window) = self.windows.get_mut(&owner) else {
+        let Some(window) = self.registry.windows.get_mut(&owner) else {
             // When: no window has owner, there is no tab to mark.
             return false;
         };
@@ -123,7 +129,7 @@ impl App {
             return false;
         }
         let Some(tab_idx) =
-            window.tab_states.iter().position(|tab| tab.tree.leaves().contains(&pane_id))
+            window.tab_states.iter().position(|tab| tab.tree.contains_pane(pane_id))
         else {
             // When: no tab holds pane_id, it is between tabs.
             return false;
@@ -136,7 +142,7 @@ impl App {
     /// user saw is never replayed. A log that overflowed acknowledges the whole window.
     // Ordering: bells is Relaxed; an acknowledgement is compared only with the same pane's count.
     pub(super) fn acknowledge_tab_activations(&mut self) {
-        let Self { windows, config, .. } = self;
+        let Self { registry: crate::app::WindowRegistry { windows, .. }, config, .. } = self;
         for window in windows.values_mut() {
             let log = window.tabs.take_activation_log();
             if log.entries.is_empty() && !log.overflowed {

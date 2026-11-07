@@ -164,11 +164,11 @@ fn closing_a_child_window_cancels_its_probe_and_discards_its_late_result() {
     assert!(app.close_child_window(running));
     // The running probe completes after its window closed, so no owner receives it.
     app.handle_path_probe_finished(worker.finish());
-    assert!(!app.windows.contains_key(&running));
+    assert!(!app.registry.windows.contains_key(&running));
     app.handle_path_probe_finished(worker.serve("/work/survivor"));
     worker.assert_idle();
     hover_probe_key(&mut app, survivor, &survivor_key);
-    assert!(app.windows[&survivor].path_probe.authorized(&survivor_key, true));
+    assert!(app.registry.windows[&survivor].path_probe.authorized(&survivor_key, true));
 }
 
 /// A stationary hover keeps its feedback while a second window submits a new probe on every
@@ -225,8 +225,8 @@ fn quiet_hover_keeps_first_window_feedback_while_a_second_window_streams() {
     });
     let quiet = app.__test_seed_child_window(&["quiet"]);
     let peer = app.__test_seed_child_window(&["peer"]);
-    app.frontmost_window = Some(quiet);
-    app.windows.get_mut(&quiet).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.frontmost_window = Some(quiet);
+    app.registry.windows.get_mut(&quiet).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -234,7 +234,7 @@ fn quiet_hover_keeps_first_window_feedback_while_a_second_window_streams() {
     let quiet_key = seeded_probe_key(quiet, quiet_path.to_str().unwrap());
     let peer_key = |index: usize| seeded_probe_key(peer, frame_path(index).to_str().unwrap());
     let assert_quiet_feedback = |app: &App, moment: &str| {
-        let window = &app.windows[&quiet];
+        let window = &app.registry.windows[&quiet];
         assert!(
             window.path_probe.authorized(&quiet_key, true),
             "{moment}: the quiet target is authorized"
@@ -300,7 +300,7 @@ fn only_a_validated_current_probe_authorizes_activation() {
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
     let output = format!("\x1b]7;file://{}\x1b\\./notes.txt", root.display());
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -312,7 +312,7 @@ fn only_a_validated_current_probe_authorizes_activation() {
     };
     // Each click starts unarmed so a pending-failure click never becomes a copy confirmation.
     let click = |app: &mut App| {
-        app.windows.get_mut(&window).unwrap().path_probe.failed_click = None;
+        app.registry.windows.get_mut(&window).unwrap().path_probe.failed_click = None;
         app.activate_target_at(window, pane, 0, 3)
     };
     let serve = |request: PathProbeRequest| {
@@ -371,11 +371,11 @@ fn clicks_accept_a_finished_check_only_for_their_own_key() {
         });
         let window = app.__test_seed_child_window(&["waiting"]);
         let pane = app.__test_child_pane_ids(window).unwrap()[0];
-        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(40, 3);
+        app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(40, 3);
         // The path sits on the second row, so two more lines scroll it to the top row.
         let output = format!("\x1b]7;file://{}\x1b\\\r\n./notes.txt", root.display());
         assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
             winit::keyboard::ModifiersState::SUPER
         } else {
             winit::keyboard::ModifiersState::CONTROL
@@ -397,7 +397,7 @@ fn clicks_accept_a_finished_check_only_for_their_own_key() {
             1
         };
         // No hover refresh ran, so the finished result still waits when the click arrives.
-        assert!(app.windows[&window].path_probe.pending_result.is_some());
+        assert!(app.registry.windows[&window].path_probe.pending_result.is_some());
         assert!(app.activate_target_at(window, pane, row, 3));
         if viewport_moves {
             assert!(opens.try_recv().is_err(), "a moved viewport never uses the waiting result");

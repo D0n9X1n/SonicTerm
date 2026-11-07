@@ -49,7 +49,7 @@ impl Write for ChannelWriter {
 }
 
 /// The client's side of one in-memory connection.
-struct Client {
+pub(super) struct Client {
     /// Bytes to the server; `None` once the client hung up.
     to_server: Option<ChannelWriter>,
     /// Replies from the server.
@@ -58,14 +58,14 @@ struct Client {
 
 impl Client {
     /// Send one JSON value as a line.
-    fn send(&mut self, value: &Value) {
+    pub(super) fn send(&mut self, value: &Value) {
         let mut line = serde_json::to_vec(value).unwrap();
         line.push(b'\n');
         self.to_server.as_mut().expect("still connected").write_all(&line).unwrap();
     }
 
     /// The next reply, waiting through read timeouts for up to five seconds.
-    fn reply(&mut self) -> Value {
+    pub(super) fn reply(&mut self) -> Value {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let mut line = String::new();
@@ -96,7 +96,7 @@ impl Client {
 }
 
 /// A connected client and the server-side transport for it.
-fn connection() -> (Client, Transport) {
+pub(super) fn connection() -> (Client, Transport) {
     let (client_tx, server_rx) = channel();
     let (server_tx, client_rx) = channel();
     let client = Client {
@@ -111,12 +111,12 @@ fn connection() -> (Client, Transport) {
 }
 
 /// A JSON-RPC request line.
-fn call(id: u64, method: &str, params: Value) -> Value {
+pub(super) fn call(id: u64, method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
 }
 
 /// A `tools/call` request for `name` with `arguments`.
-fn tool(id: u64, name: &str, arguments: Value) -> Value {
+pub(super) fn tool(id: u64, name: &str, arguments: Value) -> Value {
     call(id, "tools/call", json!({ "name": name, "arguments": arguments }))
 }
 

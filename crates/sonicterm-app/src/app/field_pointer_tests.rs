@@ -26,9 +26,9 @@ thread_local! {
 /// Query length of the field `target` names in `window_id`.
 fn target_len(app: &App, window_id: WindowId, target: FieldTarget) -> usize {
     match target {
-        FieldTarget::Palette { .. } => app.command_palette.query().len(),
+        FieldTarget::Palette { .. } => app.interaction.command_palette.query().len(),
         FieldTarget::Search(_) => {
-            let window = &app.windows[&window_id];
+            let window = &app.registry.windows[&window_id];
             window.tab_states[window.tabs.active_index()]
                 .search
                 .as_ref()
@@ -75,7 +75,7 @@ fn left(state: ElementState) -> WindowEvent {
 
 /// Move the recorded pointer, as `record_window_pointer` does before handlers run.
 fn move_to(app: &mut App, window_id: WindowId, pointer_x: f64) -> WindowEvent {
-    app.windows.get_mut(&window_id).unwrap().cursor_pos = (pointer_x, 20.0);
+    app.registry.windows.get_mut(&window_id).unwrap().cursor_pos = (pointer_x, 20.0);
     WindowEvent::CursorMoved {
         device_id: DeviceId::dummy(),
         position: PhysicalPosition::new(pointer_x, 20.0),
@@ -90,9 +90,9 @@ fn palette_app(query: &str) -> (App, WindowId) {
     reset_fake();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let window_id = app.main_window_id.unwrap();
-    app.command_palette.open();
-    app.command_palette.set_query(query);
+    let window_id = app.registry.main_window_id.unwrap();
+    app.interaction.command_palette.open();
+    app.interaction.command_palette.set_query(query);
     (app, window_id)
 }
 
@@ -101,8 +101,8 @@ fn search_app(query: &str) -> (App, WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("first");
     app.__test_seed_tab("second");
-    let window_id = app.main_window_id.unwrap();
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     let active = window.tabs.active_index();
     let mut search = SearchState::new();
     search.query = query.to_string();
@@ -111,7 +111,7 @@ fn search_app(query: &str) -> (App, WindowId) {
 }
 
 fn search_of(app: &App, window_id: WindowId) -> &SearchState {
-    let window = &app.windows[&window_id];
+    let window = &app.registry.windows[&window_id];
     window.tab_states[window.tabs.active_index()].search.as_ref().unwrap()
 }
 
@@ -123,23 +123,23 @@ fn palette_press_drag_release_selects_without_row_activation() {
     let press_move = move_to(&mut app, window_id, 120.0);
     let _ = press_move;
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    assert_eq!(app.command_palette.cursor(), 2);
-    assert_eq!(app.command_palette.selected_range(), None);
+    assert_eq!(app.interaction.command_palette.cursor(), 2);
+    assert_eq!(app.interaction.command_palette.selected_range(), None);
 
     let drag = move_to(&mut app, window_id, 150.0);
     assert!(dispatch(&mut app, window_id, &drag));
-    assert_eq!(app.command_palette.selected_range(), Some(2..5));
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(2..5));
 
     // Dragging past the field clamps to the query end.
     let past = move_to(&mut app, window_id, 900.0);
     assert!(dispatch(&mut app, window_id, &past));
-    assert_eq!(app.command_palette.selected_range(), Some(2..6));
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(2..6));
 
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
-    assert_eq!(app.field_pointer_capture, None);
-    assert!(app.command_palette.is_open(), "release must not activate a row");
-    assert_eq!(app.command_palette.query(), "abcdef");
-    assert_eq!(app.command_palette.selected_range(), Some(2..6));
+    assert_eq!(app.interaction.field_pointer_capture, None);
+    assert!(app.interaction.command_palette.is_open(), "release must not activate a row");
+    assert_eq!(app.interaction.command_palette.query(), "abcdef");
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(2..6));
 }
 
 /// A reverse drag selects backward from the press anchor.
@@ -150,19 +150,20 @@ fn palette_reverse_drag_keeps_the_press_anchor() {
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
     let back = move_to(&mut app, window_id, 110.0);
     assert!(dispatch(&mut app, window_id, &back));
-    assert_eq!(app.command_palette.selected_range(), Some(1..5));
-    assert_eq!(app.command_palette.cursor(), 1);
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(1..5));
+    assert_eq!(app.interaction.command_palette.cursor(), 1);
 }
 
 /// Shift+press extends from the existing caret instead of collapsing it.
 #[test]
 fn shift_press_extends_from_the_existing_caret() {
     let (mut app, window_id) = palette_app("abcdef");
-    app.command_palette.set_cursor(1);
-    app.windows.get_mut(&window_id).unwrap().modifiers = winit::keyboard::ModifiersState::SHIFT;
+    app.interaction.command_palette.set_cursor(1);
+    app.registry.windows.get_mut(&window_id).unwrap().modifiers =
+        winit::keyboard::ModifiersState::SHIFT;
     move_to(&mut app, window_id, 140.0);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    assert_eq!(app.command_palette.selected_range(), Some(1..4));
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(1..4));
 }
 
 /// A press outside the field is left to the palette modal and terminal handlers.
@@ -171,7 +172,7 @@ fn press_outside_the_field_is_not_consumed() {
     let (mut app, window_id) = palette_app("abc");
     move_to(&mut app, window_id, 40.0);
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    assert_eq!(app.field_pointer_capture, None);
+    assert_eq!(app.interaction.field_pointer_capture, None);
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Released)));
 }
 
@@ -180,14 +181,14 @@ fn press_outside_the_field_is_not_consumed() {
 fn held_window_gestures_keep_their_events() {
     let (mut app, window_id) = palette_app("abc");
     move_to(&mut app, window_id, 120.0);
-    app.windows.get_mut(&window_id).unwrap().mouse_down = true;
+    app.registry.windows.get_mut(&window_id).unwrap().mouse_down = true;
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Pressed)));
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Released)));
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.mouse_down = false;
     window.pressed_tab = Some(0);
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    assert_eq!(app.field_pointer_capture, None);
+    assert_eq!(app.interaction.field_pointer_capture, None);
 }
 
 /// A press on unpresented geometry is held, not given to the terminal, and
@@ -198,12 +199,16 @@ fn stale_press_waits_for_presented_geometry() {
     move_to(&mut app, window_id, 120.0);
     STALE_HITS.with(|count| count.set(2));
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    assert_eq!(app.command_palette.cursor(), 6, "no caret move before geometry");
+    assert_eq!(app.interaction.command_palette.cursor(), 6, "no caret move before geometry");
     let still_stale = move_to(&mut app, window_id, 140.0);
     assert!(dispatch(&mut app, window_id, &still_stale));
     let presented = move_to(&mut app, window_id, 150.0);
     assert!(dispatch(&mut app, window_id, &presented));
-    assert_eq!(app.command_palette.selected_range(), Some(2..5), "anchored at the press point");
+    assert_eq!(
+        app.interaction.command_palette.selected_range(),
+        Some(2..5),
+        "anchored at the press point"
+    );
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
 }
 
@@ -212,20 +217,23 @@ fn stale_press_waits_for_presented_geometry() {
 #[test]
 fn unavailable_press_swallows_only_its_release() {
     let (mut app, window_id) = palette_app("abc");
-    app.command_palette.select_all();
+    app.interaction.command_palette.select_all();
     move_to(&mut app, window_id, 120.0);
     UNAVAILABLE.with(|flag| flag.set(true));
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    assert_eq!(app.command_palette.cursor(), 3);
+    assert_eq!(app.interaction.command_palette.cursor(), 3);
     let drag = move_to(&mut app, window_id, 150.0);
     assert!(dispatch(&mut app, window_id, &drag), "the held button's motion stays consumed");
-    assert_eq!(app.command_palette.cursor(), 3, "swallowed motion never edits");
+    assert_eq!(app.interaction.command_palette.cursor(), 3, "swallowed motion never edits");
     assert_eq!(
-        app.command_palette.selected_range(),
+        app.interaction.command_palette.selected_range(),
         Some(0..3),
         "unavailable hit preserves selection"
     );
-    assert_eq!(app.field_pointer_capture, Some(FieldPointerCapture::Swallow { window_id }));
+    assert_eq!(
+        app.interaction.field_pointer_capture,
+        Some(FieldPointerCapture::Swallow { window_id })
+    );
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Released)));
     let after = move_to(&mut app, window_id, 160.0);
@@ -241,23 +249,23 @@ fn anchored_unavailable_drag_preserves_selection_and_consumes_events() {
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
     let drag = move_to(&mut app, window_id, 120.0);
     assert!(dispatch(&mut app, window_id, &drag));
-    assert_eq!(app.command_palette.selected_range(), Some(2..5));
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(2..5));
     UNAVAILABLE.with(|flag| flag.set(true));
     let missing = move_to(&mut app, window_id, 100.0);
     assert!(dispatch(&mut app, window_id, &missing));
-    assert_eq!(app.command_palette.selected_range(), Some(2..5));
-    assert_eq!(app.command_palette.cursor(), 2);
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(2..5));
+    assert_eq!(app.interaction.command_palette.cursor(), 2);
     assert!(matches!(
-        app.field_pointer_capture,
+        app.interaction.field_pointer_capture,
         Some(FieldPointerCapture::Dragging { anchored: true, .. })
     ));
     UNAVAILABLE.with(|flag| flag.set(false));
     let resumed = move_to(&mut app, window_id, 110.0);
     assert!(dispatch(&mut app, window_id, &resumed));
-    assert_eq!(app.command_palette.selected_range(), Some(1..5));
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(1..5));
     UNAVAILABLE.with(|flag| flag.set(true));
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
-    assert_eq!(app.command_palette.selected_range(), Some(1..5));
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(1..5));
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Released)));
 }
 
@@ -271,9 +279,13 @@ fn focus_loss_cancels_but_still_consumes_the_release() {
     assert!(!dispatch(&mut app, window_id, &WindowEvent::Focused(false)));
     let drag = move_to(&mut app, window_id, 160.0);
     assert!(dispatch(&mut app, window_id, &drag), "the held button's motion stays consumed");
-    assert_eq!(app.command_palette.selected_range(), None, "cancelled drag stops selecting");
+    assert_eq!(
+        app.interaction.command_palette.selected_range(),
+        None,
+        "cancelled drag stops selecting"
+    );
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
-    assert_eq!(app.field_pointer_capture, None);
+    assert_eq!(app.interaction.field_pointer_capture, None);
 }
 
 /// Closing the palette mid-drag cancels selection; the held button's motion
@@ -283,16 +295,16 @@ fn owner_close_mid_drag_cancels_and_swallows() {
     let (mut app, window_id) = palette_app("abcdef");
     move_to(&mut app, window_id, 120.0);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    app.command_palette.close();
+    app.interaction.command_palette.close();
     let drag = move_to(&mut app, window_id, 160.0);
     assert!(dispatch(&mut app, window_id, &drag));
     assert_eq!(
-        app.field_pointer_capture,
+        app.interaction.field_pointer_capture,
         Some(FieldPointerCapture::Swallow { window_id }),
         "the stale owner becomes a swallowed release"
     );
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
-    assert_eq!(app.field_pointer_capture, None);
+    assert_eq!(app.interaction.field_pointer_capture, None);
 }
 
 /// A search drag belongs to the tab it started on; switching tabs cancels it
@@ -307,7 +319,7 @@ fn search_drag_is_bound_to_its_tab() {
     assert!(dispatch(&mut app, window_id, &drag));
     assert_eq!(search_of(&app, window_id).selected_range(), Some(1..3));
 
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     let other = if window.tabs.active_index() == 0 { 1 } else { 0 };
     window.tabs.activate(other);
     let mut other_search = SearchState::new();
@@ -324,7 +336,7 @@ fn search_drag_is_bound_to_its_tab() {
 #[test]
 fn palette_blocks_search_in_its_window() {
     let (mut app, window_id) = search_app("needle");
-    app.command_palette.start_tab_color_picker("tab", Vec::new());
+    app.interaction.command_palette.start_tab_color_picker("tab", Vec::new());
     move_to(&mut app, window_id, 110.0);
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Pressed)));
     assert_eq!(search_of(&app, window_id).cursor(), 0);
@@ -338,7 +350,10 @@ fn release_in_another_window_is_not_consumed() {
     move_to(&mut app, window_id, 120.0);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
     assert!(!dispatch(&mut app, child, &left(ElementState::Released)));
-    assert!(matches!(app.field_pointer_capture, Some(FieldPointerCapture::Dragging { .. })));
+    assert!(matches!(
+        app.interaction.field_pointer_capture,
+        Some(FieldPointerCapture::Dragging { .. })
+    ));
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
 }
 
@@ -351,7 +366,7 @@ fn keyboard_action_cancels_the_drag() {
     app.cancel_field_pointer(window_id);
     let drag = move_to(&mut app, window_id, 160.0);
     assert!(dispatch(&mut app, window_id, &drag), "the held button's motion stays consumed");
-    assert_eq!(app.command_palette.selected_range(), None);
+    assert_eq!(app.interaction.command_palette.selected_range(), None);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
 }
 
@@ -372,9 +387,13 @@ fn cancelled_drag_swallows_motion_leave_and_release() {
     let elsewhere = move_to(&mut app, child, 160.0);
     assert!(!dispatch(&mut app, child, &elsewhere), "another window's motion is not owed");
     assert!(!dispatch(&mut app, child, &leave));
-    assert_eq!(app.command_palette.selected_range(), None, "swallowed motion never selects");
+    assert_eq!(
+        app.interaction.command_palette.selected_range(),
+        None,
+        "swallowed motion never selects"
+    );
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
-    assert_eq!(app.field_pointer_capture, None);
+    assert_eq!(app.interaction.field_pointer_capture, None);
     let free = move_to(&mut app, window_id, 170.0);
     assert!(!dispatch(&mut app, window_id, &free));
 }
@@ -391,16 +410,16 @@ fn other_window_press_keeps_the_source_capture() {
     assert!(!dispatch(&mut app, child, &left(ElementState::Pressed)));
     assert!(
         matches!(
-            app.field_pointer_capture,
+            app.interaction.field_pointer_capture,
             Some(FieldPointerCapture::Dragging { window_id: source, .. }) if source == window_id
         ),
         "the source window keeps its gesture"
     );
     let drag = move_to(&mut app, window_id, 150.0);
     assert!(dispatch(&mut app, window_id, &drag));
-    assert_eq!(app.command_palette.selected_range(), Some(2..5));
+    assert_eq!(app.interaction.command_palette.selected_range(), Some(2..5));
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
-    assert_eq!(app.field_pointer_capture, None);
+    assert_eq!(app.interaction.field_pointer_capture, None);
 }
 
 /// Closing the tab a rename editor captured, while a sibling remains active, turns
@@ -411,20 +430,27 @@ fn closed_rename_tab_mid_drag_stops_editing() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("first");
     app.__test_seed_tab("second");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     app.start_rename_active_tab();
-    assert_eq!(app.command_palette.query(), "second");
+    assert_eq!(app.interaction.command_palette.query(), "second");
     move_to(&mut app, window_id, 110.0);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    assert_eq!(app.command_palette.cursor(), 1);
-    let active = app.windows[&window_id].tabs.active_index();
+    assert_eq!(app.interaction.command_palette.cursor(), 1);
+    let active = app.registry.windows[&window_id].tabs.active_index();
     app.close_tab_at(active);
-    assert_eq!(app.windows[&window_id].tabs.len(), 1, "the sibling tab remains");
-    assert!(app.command_palette.is_open(), "the editor is still showing");
+    assert_eq!(app.registry.windows[&window_id].tabs.len(), 1, "the sibling tab remains");
+    assert!(app.interaction.command_palette.is_open(), "the editor is still showing");
     let drag = move_to(&mut app, window_id, 150.0);
     assert!(dispatch(&mut app, window_id, &drag), "the held button's motion stays consumed");
-    assert_eq!(app.command_palette.selected_range(), None, "the orphaned query is not edited");
-    assert_eq!(app.field_pointer_capture, Some(FieldPointerCapture::Swallow { window_id }));
+    assert_eq!(
+        app.interaction.command_palette.selected_range(),
+        None,
+        "the orphaned query is not edited"
+    );
+    assert_eq!(
+        app.interaction.field_pointer_capture,
+        Some(FieldPointerCapture::Swallow { window_id })
+    );
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
 }
 
@@ -435,13 +461,20 @@ fn reopened_palette_does_not_inherit_the_capture() {
     let (mut app, window_id) = palette_app("abcdef");
     move_to(&mut app, window_id, 120.0);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    app.command_palette.close();
-    app.command_palette.open();
-    app.command_palette.set_query("abcdef");
+    app.interaction.command_palette.close();
+    app.interaction.command_palette.open();
+    app.interaction.command_palette.set_query("abcdef");
     let drag = move_to(&mut app, window_id, 150.0);
     assert!(dispatch(&mut app, window_id, &drag));
-    assert_eq!(app.command_palette.selected_range(), None, "the new editor is not selected");
-    assert_eq!(app.field_pointer_capture, Some(FieldPointerCapture::Swallow { window_id }));
+    assert_eq!(
+        app.interaction.command_palette.selected_range(),
+        None,
+        "the new editor is not selected"
+    );
+    assert_eq!(
+        app.interaction.field_pointer_capture,
+        Some(FieldPointerCapture::Swallow { window_id })
+    );
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
 }
 
@@ -470,7 +503,7 @@ fn lost_release_does_not_block_another_windows_field() {
     let (mut app, window_id) = palette_app("abcdef");
     let child = app.__test_seed_child_window(&["child"]);
     {
-        let window = app.windows.get_mut(&child).unwrap();
+        let window = app.registry.windows.get_mut(&child).unwrap();
         let active = window.tabs.active_index();
         let mut search = SearchState::new();
         search.query = "needle".to_string();
@@ -490,7 +523,11 @@ fn lost_release_does_not_block_another_windows_field() {
     assert_eq!(search_of(&app, child).selected_range(), Some(1..3));
     let source_motion = move_to(&mut app, window_id, 160.0);
     assert!(dispatch(&mut app, window_id, &source_motion), "the owed window's motion stays ours");
-    assert_eq!(app.command_palette.selected_range(), None, "the owed window never selects");
+    assert_eq!(
+        app.interaction.command_palette.selected_range(),
+        None,
+        "the owed window never selects"
+    );
     assert!(dispatch(&mut app, child, &left(ElementState::Released)));
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)), "late release consumed");
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Released)), "consumed only once");
@@ -506,7 +543,7 @@ fn reaped_child_drops_its_field_capture() {
     let (mut app, window_id) = search_app("needle");
     let child = app.__test_seed_child_window(&["child"]);
     {
-        let window = app.windows.get_mut(&child).unwrap();
+        let window = app.registry.windows.get_mut(&child).unwrap();
         let active = window.tabs.active_index();
         let mut search = SearchState::new();
         search.query = "haystack".to_string();
@@ -515,12 +552,18 @@ fn reaped_child_drops_its_field_capture() {
     let child_pane = app.__test_child_active_pane(child).unwrap();
     move_to(&mut app, child, 110.0);
     assert!(dispatch(&mut app, child, &left(ElementState::Pressed)));
-    assert!(matches!(app.field_pointer_capture, Some(FieldPointerCapture::Dragging { .. })));
+    assert!(matches!(
+        app.interaction.field_pointer_capture,
+        Some(FieldPointerCapture::Dragging { .. })
+    ));
 
     app.handle_pane_process_exited(child_pane, sonicterm_types::PaneExitStatus::Code(0));
-    assert!(!app.windows.contains_key(&child), "the empty child window is reaped");
-    assert_eq!(app.field_pointer_capture, None, "the reaped child's capture is dropped");
-    assert!(app.field_owed_releases.is_empty(), "the reaped child owes nothing");
+    assert!(!app.registry.windows.contains_key(&child), "the empty child window is reaped");
+    assert_eq!(
+        app.interaction.field_pointer_capture, None,
+        "the reaped child's capture is dropped"
+    );
+    assert!(app.interaction.field_owed_releases.is_empty(), "the reaped child owes nothing");
 
     move_to(&mut app, window_id, 110.0);
     assert!(
@@ -530,7 +573,7 @@ fn reaped_child_drops_its_field_capture() {
     assert!(!dispatch(&mut app, child, &WindowEvent::Destroyed));
     assert!(
         matches!(
-            app.field_pointer_capture,
+            app.interaction.field_pointer_capture,
             Some(FieldPointerCapture::Dragging { window_id: source, .. }) if source == window_id
         ),
         "a late Destroyed for the reaped child leaves main's drag"
@@ -539,7 +582,7 @@ fn reaped_child_drops_its_field_capture() {
     assert!(dispatch(&mut app, window_id, &drag));
     assert_eq!(search_of(&app, window_id).selected_range(), Some(1..3));
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
-    assert_eq!(app.field_pointer_capture, None);
+    assert_eq!(app.interaction.field_pointer_capture, None);
 }
 
 /// A drag held by a window that is now hidden can never deliver its release, so it
@@ -549,7 +592,7 @@ fn hidden_source_drag_does_not_block_another_window() {
     let (mut app, window_id) = search_app("needle");
     let child = app.__test_seed_child_window(&["child"]);
     {
-        let window = app.windows.get_mut(&child).unwrap();
+        let window = app.registry.windows.get_mut(&child).unwrap();
         let active = window.tabs.active_index();
         let mut search = SearchState::new();
         search.query = "haystack".to_string();
@@ -557,10 +600,10 @@ fn hidden_source_drag_does_not_block_another_window() {
     }
     move_to(&mut app, window_id, 110.0);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    app.windows.get_mut(&window_id).unwrap().hidden = true;
+    app.registry.windows.get_mut(&window_id).unwrap().hidden = true;
     move_to(&mut app, child, 110.0);
     assert!(dispatch(&mut app, child, &left(ElementState::Pressed)), "child press is not blocked");
-    assert!(app.field_owed_releases.is_empty(), "the hidden window keeps no debt");
+    assert!(app.interaction.field_owed_releases.is_empty(), "the hidden window keeps no debt");
     assert!(dispatch(&mut app, child, &left(ElementState::Released)));
-    assert_eq!(app.field_pointer_capture, None);
+    assert_eq!(app.interaction.field_pointer_capture, None);
 }

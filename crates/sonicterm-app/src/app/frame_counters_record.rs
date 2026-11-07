@@ -68,14 +68,25 @@ impl WindowFrameCounters {
         }
     }
 
-    /// Count a frame collection that found a visible lock busy.
-    pub(crate) fn note_contention(&mut self, images: bool) {
-        if images {
-            self.contention_images += 1;
-        } else {
-            // When: `images` is false, the busy lock was a visible parser, not an image store.
-            self.contention_parser += 1;
+    /// Count one frame collection: its parser wait, and for a `miss` its kind and the visible-pane
+    /// index it happened on. The kinds are disjoint, so their counts sum to the failed collections.
+    pub(in crate::app) fn note_collection(
+        &mut self,
+        parser_wait_us: u64,
+        miss: Option<(usize, super::super::visible_frame::MissKind)>,
+    ) {
+        use super::super::visible_frame::MissKind;
+        self.parser_lock_wait.record_us(parser_wait_us);
+        let Some((index, kind)) = miss else {
+            // When: the collection held every lock, there is no miss to attribute.
+            return;
+        };
+        match kind {
+            MissKind::Parser => self.contention_parser += 1,
+            MissKind::BudgetExpired => self.contention_budget_expired += 1,
+            MissKind::Images => self.contention_images += 1,
         }
+        self.miss_pane[index.min(self.miss_pane.len() - 1)] += 1;
     }
 }
 
@@ -394,6 +405,11 @@ impl WindowFrameCounters {
             ("failed", self.failed),
             ("contention_parser", self.contention_parser),
             ("contention_images", self.contention_images),
+            ("contention_budget_expired", self.contention_budget_expired),
+            ("miss_pane_0", self.miss_pane[0]),
+            ("miss_pane_1", self.miss_pane[1]),
+            ("miss_pane_2", self.miss_pane[2]),
+            ("miss_pane_3_plus", self.miss_pane[3]),
             ("defer_timeout", self.defer_timeout),
             ("defer_contention", self.defer_contention),
             ("defer_sync", self.defer_sync),
@@ -414,6 +430,7 @@ impl WindowFrameCounters {
             ("present_interval", &self.present_interval),
             ("handler", &self.handler),
             ("flush_to_redraw", &self.flush_to_redraw),
+            ("parser_lock_wait", &self.parser_lock_wait),
         ] {
             record.push_histogram(name, histogram.clone());
         }
@@ -493,6 +510,7 @@ impl super::super::App {
     pub fn frame_counters_snapshot(&self) -> Option<FrameCountersSnapshot> {
         let app = self.frame_counters.as_ref()?;
         let windows = self
+            .registry
             .windows
             .iter()
             .filter_map(|(id, window)| {

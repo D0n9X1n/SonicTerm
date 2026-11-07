@@ -17,6 +17,10 @@ pub const MAX_CASCADE_DEPTH: usize = 16;
 
 /// Pure-data state machine driven by the platform shell.
 ///
+/// In the running app this is a compatibility and test model, not the authority for live
+/// behavior: `sonicterm-app` reports structural intents to it and discards the effects, and only
+/// tests read its state. Making it authoritative would be a separate behavioral migration.
+///
 /// The shell calls `handle(intent)` once per intent and consumes the returned
 /// `SmallVec<[AppEffect; 4]>`. Reducer arms express normal multi-effect
 /// operations in that batch. The private `pending` queue is retained as an

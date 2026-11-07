@@ -30,6 +30,7 @@ python3 scripts/local-gate.py
 | `source-size` | `python3 scripts/check-source-size.py` | macOS、Windows、Linux | `local` | `python` | `tooling` |
 | `fmt` | `cargo fmt --all --check` | macOS、Windows、Linux | `local` | `rust` | `macos-core`、`windows-checks`、`linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `app-library-clippy` | `cargo clippy --locked -p sonicterm-app --lib -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
@@ -45,6 +46,7 @@ python3 scripts/local-gate.py
 | `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `tooling`、`windows-checks`、`linux-core` |
 | `macos-gate-custody` | `python3 scripts/local-gate_tests.py RunnerTests.test_a_zombie_only_group_kill_is_refused_on_macos_and_the_step_is_still_reaped` | macOS | `local` | `bash` | `macos-core` |
 | `workflow-syntax` | `actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml` | macOS、Windows、Linux | `local` | `actionlint` | `tooling` |
+| `native-dependency-delta` | `python3 scripts/native-dependency-delta.py --with-tests` | macOS、Windows、Linux | `local` | `python`、`network` | `tooling` |
 | `cargo-deny` | `cargo deny --locked check` | macOS、Windows、Linux | `local` | `rust`、`cargo-deny` | `linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS、Windows、Linux | `local` | `rust`、`native`、`bash` | `macos-core`、`windows-tests-workspace`、`linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-workspace`、`linux-core` |
@@ -98,6 +100,7 @@ python3 scripts/local-gate.py
 - `pwsh`：`PATH` 上的 PowerShell 7（`pwsh`）。
 - `llvm-cov`：`scripts/pinned-tools.json` 固定版本的 `cargo-llvm-cov`。
 - `cargo-deny`：`scripts/pinned-tools.json` 固定版本的 `cargo-deny`，以及用于其 advisory 数据库的网络访问。
+- `network`：可访问 `scripts/native-dependencies.json` 列出的固定上游归档的网络。
 - `win-target`：`x86_64-pc-windows-msvc` 标准库（`rustup target add x86_64-pc-windows-msvc`）。
 - `warp`：支持 allocator report 的 DX12 WARP adapter。
 - 每个步骤还需要 `PATH` 上的 Git 与 Python 3。
@@ -644,9 +647,10 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | `S1/role-exit` | 仅 Windows：角色程序在 GO 之后立即以 1 退出，该次运行必须以无效结束；smoke 使用它。 |
 | `S1/atlas-retry` | 只在计数器组中运行；没有计数器组时被拒绝。70 行静态文本稳定后，运行 8 个恢复回合，每回合四个强制帧：A 重试一次注入的字形图集变更，B 是第一次呈现的恢复帧，C 与 D 重绘不变的画面。`result.json` 以 `atlas_recovery` 记录每帧的计数器增量，对比增加一张 "Atlas retry recovery" 表，在被接受的计数器运行上汇总每帧的行缓存未命中与命中、塑形请求和尝试次数。稳定后画面一旦变化，运行即判为无效，原因写明变化的字段及其稳定值与读取值（标题转义为 ASCII）；行文本变化则只写出第一个不同的行号。稳定还要等待 App 已应用两个前台进程样本：每个都给出进程名，且采样时间严格晚于观察到最终进程的时刻（Windows 上为看到哨兵行，macOS 上为 harness 自己的查询完成并给出 `sleep`），最新一个给出该进程名，读取到的标题等于该进程对应的标题。缺失或被清除的样本会使计数重新开始；屏障未满足时，尝试在 10 秒稳定上限处过期，原因写明未满足的条件；标签页带自定义标题时，尝试立即判为无效。harness 日志在稳定时和失败时各记一行 `atlas-retry evidence`，内容取自判定所依据的那次读取：比较的两个标题、与该次读取一同采集的 App 已应用前台进程样本、角色的 leader pid、标题与前台进程相关的累计计数器，以及 harness 自己的前台进程查询（单独标注，带有自己的时间），另外还有最终进程查询的次数与总耗时，以及观察到最终进程的时刻。 |
 | `S1/status-line`、`S12/status-line` | 该场景的默认计划，临时配置中加入 `[status_line] enabled = true`；`S1/status-line` 先运行 `print`：在列出 `history` 与 `size` 的情况下，把 5,000 行全宽、全部为 OSC 8 链接的行打印进 10,000 行的历史；链接单元格比普通单元格占用更多内存，因此字节预算会把历史截断到行数上限以下。启用计数器时，`History: trimmed` 必须恰好出现一次（`status_line_history_shows`），状态栏只能因采样或这次出现而重绘。`idle` 之后加入 `select`（拖动选中文本）与 `selected`（保持该选区；`--short` 下各 2 秒，否则各 10 秒）。启用计数器时，`select` 必须至少计数一次选区，且每次计数最多读取 200,000 个单元格（`status_line_sel_counts`、`status_line_sel_cells`），`selected` 不得再次计数。最后，`input` 以每秒 10 个字符向 shell 输入 10 个字符并静置 1 秒；启用计数器时，`Input: held` 不得出现（`status_line_held_shows`），状态栏只能因采样而重绘，因此键入安排的未完成写入检查不会呈现任何帧。随后 `glyphs` 清空当前行，在 POSIX 角色中用 `printf` 打印 U+0378（未分配，任何字体都不覆盖）；Windows 角色直接输入该字符。启用计数器时，`Glyphs:` 至多出现一次（POSIX 角色中恰好一次，`status_line_glyph_shows`），状态栏只能因采样或这次出现而重绘。随后 `held` 清空当前行，在 POSIX 角色中运行 `stty raw -echo; sleep 1; head -c 262144 >/dev/null; stty sane`，并在 0.3 秒后粘贴 256 KiB（临时配置设置 `held_after_ms = 250`），使写入端阻塞在停止读取的程序之后；启用计数器时，`Input: held` 必须恰好出现一次，并在 `head` 读完粘贴后隐藏。Windows 角色的 shell 无法停止读取，只按下 Enter；任何一侧都要求 `held` 至多出现一次。没有状态栏的 base 忽略该表，运行普通计划。`S12/status-line` 在 `uncovered` 之后以 `program` 结束：POSIX 角色先输出 `OSC 9;4` 设置为 40，再在 250 ms 任务栏间隔内以 100 ms 间隔连续输出 50 与 70，然后在一次写入中输出一条 OSC 9 与一条 OSC 777 通知，最后清除，各步之间至少间隔 300 ms，然后等待 0.7 s；Windows 角色的 `cmd` 无法输出 ESC，只按回车。开启计数器时，状态栏只能因采样重绘，每批通知最多一次提示重绘（`program_notify_events`、`program_toast_redraws`），每次进度变化最多一次显示位置投递（`program_progress_events`、`taskbar_progress_deliveries`）；在每种角色上，窗口呈现的帧数不超过状态栏重绘次数、状态栏采样次数与提示重绘次数之和，再加上每个提交步骤六帧（其回显、输出与提示符），状态栏运行的配置关闭光标闪烁；POSIX 角色上设置、连续变化与清除都必须到达 App，每批通知恰好重绘一次，且窗口呈现的帧数不少于提示重绘次数。开启 `perf_taskbar_progress_api` 时，计数显示位置的记录必须依次为 40、连续变化的最后值 70（PTY 把两者合并为一次读取时可以没有 50）、最后为清除，任意两次投递的间隔不小于该间隔，且值的个数等于 `taskbar_progress_deliveries`；关闭时该阶段照常运行，只是没有这些投递检查。App 没有程序计数器的一侧只检查状态栏。启用计数器时，每个保持阶段都依据 App 的 `status_line_samples`、`status_line_wakes` 与 `status_line_redraws` 检查状态栏的空闲约定：`idle` 与 `uncovered` 中每个 2 秒间隔最多一次采样再加一次，没有无采样的唤醒，状态栏重绘不超过采样次数加一；`uncovered` 至少采样一次；`covered` 在 App 收到 `Occluded(true)` 时最多一次采样和一次唤醒。违反约定时运行无效。App 没有状态栏计数器的一侧不做检查。 |
+| `S13/default`、`S13/sustained-4` | 多窗格竞争：角色 0 运行 `SustainedFlood`（`exec yes`，或 Windows 程序中不暂停的 `y` 写入器），它从不休眠，因此其解析器在整个运行期间都忙碌。每个窗格都占满窗口宽度并上下堆叠：`default` 是该窗格位于一个空闲窗格之上、窗口高两个窗格；`sustained-4` 是四个等高的行、窗口高四个窗格（向下拆分，再拆分上下两半），因此窗格只在数量上不同。两者都以每秒 10 个字符向空闲的角色 1 输入 300 个字符（完整长度 600 个），然后保持 `tail` 5 秒（完整长度 10 秒），再空闲到 GO + 60 秒。`result.json` 的 `contention` 记录输入结束时每个角色窗格的实际网格，并针对 `typing` 与 `tail` 记录持续输出窗格自身的进展：harness 每 100 毫秒读取一次它的已滚动行数，最多等待解析器 2 毫秒，并记录从每个阶段开始到结束、没有任何前进读数的最长区间（未观测的开头或结尾、只有忙碌的读取以及停滞都计入）。对比的 S13 部分读取每个变体在 head 上的计数器运行；只有当每个变体都有至少 200 个样本、失败归因、`typing` 与 `tail` 中各至少 1 MiB 的 `vt.parse_bytes`、两个阶段都被观测且没有超过 1 秒无进展的区间，并且持续输出窗格与输入窗格的网格在每个方向上相差不超过一个单元（拆分的取整：17 行窗口中上下堆叠的窗格分别为 8 行与 7 行）时才给出结论。当 4 窗格的 p95 不超过 2 窗格 p95 的 10%，且 4 窗格变体中所有失败的帧收集（`contention_parser`、`contention_images` 与 `contention_budget_expired`）少于其帧收集次数（`parser_lock_wait_us` 的计数）的 1% 时为 `unchanged`，否则为 `not unchanged`。 |
 
 pull request 性能流水线在 macOS 和 Windows 上按名称运行 `S2/flood`、`S6/flood`、
-`S6/selection-drag`、`S6/rest`、`S1/atlas-retry`、`S1/status-line` 和 `S12/status-line`；它们所在的分片见 [CI 能测量什么](#ci-能测量什么)。
+`S6/selection-drag`、`S6/rest`、`S1/atlas-retry`、`S1/status-line`、`S12/status-line` 和 `S13/sustained-4`；它们所在的分片见 [CI 能测量什么](#ci-能测量什么)。
 
 每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
 5 秒，smoke 即如此）。多数场景以一段至少持续到那时的空闲期结束；S4 与 S5 则结束于 60 秒的输出流阶段，此时
@@ -766,12 +770,12 @@ job 完成。被取代、被取消或被跳过的运行从不算作成功。
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
 该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。允许两种缺口：base 未声明 `perf-counters` 时的计数器组，
 它仍显示 `n/a`；以及因 harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行任何内容。其他任何被阻止的一侧仍会失败，
-没有可运行内容的选择也永远不会通过。三个 macOS 分片运行 S7、S4、S1/atlas-retry、S12/status-line、S3、S8 与 S6/selection-drag；
-S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line 与 S12；以及 S10、S11/release、S2、S2/flood 与 S6/flood。五个 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
-S2、S10/sync 与 S6/rest；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，其中 macOS 分配根据实测阶段成本重新均衡，35 分钟余量仍由 exact-head 计时验证；Windows 的 S7 还运行 S1/status-line 与 S12/status-line。
+没有可运行内容的选择也永远不会通过。三个 macOS 分片运行 S7、S4、S1/atlas-retry、S8 与 S6/selection-drag；
+S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line、S12、S12/status-line 与 S3；以及 S10、S11/release、S2、S2/flood、S6/flood、S13 与 S13/sustained-4。五个 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
+S2、S10/sync、S6/rest、S13 与 S13/sustained-4；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，其中 macOS 分配根据实测阶段成本重新均衡，35 分钟余量仍由 exact-head 计时验证；Windows 的 S7 还运行 S1/status-line 与 S12/status-line。
 各平台包含 S9 的分片（macOS 的 S9-S10sync，Windows 的 S9-S10）还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
 lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
-裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S2/flood` 每侧上限 2 次，`S11/release`、`S1/status-line` 与 `S12/status-line` 上限 1 次，
+裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S7` 每侧上限 3 次（仅它就使关键路径超过 35 分钟），`S2/flood` 每侧上限 2 次，`S11/release`、`S1/status-line`、`S12/status-line`、`S13/default` 与 `S13/sustained-4` 上限 1 次，
 `S11/gdi`、`S11/wgpu`、`S1/atlas-retry` 与 `S6/rest` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 35 分钟内：release 对比完整运行它。
 带 `perf-frame-texture` 时，S11 的 `end` 检查点记录 `frame_texture_bytes`：head 在 GDI 下为 4 B，未声明该 feature 的 base
 为 `n/a`。S9 与 S12 的 `end` 检查点记录渲染器的字形完整性：每次呈现 `Full` 帧时，渲染器保存一份证书，包含该帧的场景

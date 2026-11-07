@@ -82,7 +82,7 @@ pub struct WindowState {
     /// cannot silently register a phantom owner that never closes.
     ///
     /// An [`OwnerGuard`] for the same reason the pane's is: the window is
-    /// removed from `self.windows` at three sites across two files, and the
+    /// removed from `self.registry.windows` at three sites across two files, and the
     /// close has to be a property of ownership rather than something each of
     /// them remembers.
     ///
@@ -209,9 +209,9 @@ pub struct WindowState {
     pub pending_tear_out_timing: Option<TearOutTiming>,
     /// Test-only mirror of the renderer's `drag_chip` overlay.
     /// Production code leaves this `None`. Headless tests use
-    /// [`App::__test_set_window_drag_chip_marker`] to flip it `Some(true)`
+    /// `App::__test_set_window_drag_chip_marker` to flip it `Some(true)`
     /// before calling [`App::cancel_drag_session`], then assert it is
-    /// `Some(false)` afterward via [`App::__test_window_drag_chip_marker`].
+    /// `Some(false)` afterward via `App::__test_window_drag_chip_marker`.
     /// `cancel_drag_session` flips this in lock-step with the real
     /// `renderer.set_drag_chip(None)` call (when `Some(_)`), so the test
     /// observes the SAME loop iteration the production path runs — if
@@ -560,7 +560,7 @@ impl WindowState {
         let tab_idx = self.tabs.active_index();
         let tab = self.tab_states.get_mut(tab_idx)?;
         if tab.active_pane == pane_id
-            || !tab.tree.leaves().contains(&pane_id)
+            || !tab.tree.contains_pane(pane_id)
             || !self.panes.contains_key(&pane_id)
             || tab.tree.zoomed_pane_id().is_some_and(|zoomed| zoomed != pane_id)
         {
@@ -642,7 +642,7 @@ impl WindowState {
     /// short-circuit cleanly. This matters because the deferred
     /// `pending_os_teardown` drain (see [`App::cancel_drag_session`]
     /// and `App::drain_pending_os_teardown`) iterates a snapshot of
-    /// `self.windows.keys()`, and a tear-out spawn that just landed
+    /// `self.registry.windows.keys()`, and a tear-out spawn that just landed
     /// may have produced a `WindowState` whose renderer
     /// is still being constructed. Both fields are flipped together —
     /// callers MUST NOT split them, or the headless-test marker stops

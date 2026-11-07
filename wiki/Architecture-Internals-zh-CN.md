@@ -283,7 +283,8 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 争用重试结算。`VisibleFrameSources` 先验证树叶编号
 唯一且存活、活动窗格身份及缩放一致性，再只为可见布局持有句柄。源向量先声明，解析器保护
 对象向量再从它借用。两个窗口角色都采用“解析器 → 可见图像”的顺序；这改变了主窗口原先先
-图像后解析器的顺序，并保留子窗口原先先解析器的顺序。每个图像锁在克隆列表后立即释放。
+图像后解析器的顺序，并保留子窗口原先先解析器的顺序。每个图像锁在取得列表的 `Arc` 快照后立即
+释放，这只增加引用计数，不复制条目；之后新增图像的解码会在写入时复制列表，因此一帧保留它收集到的列表。
 这些快照不是原子的网格/媒体代际：解码后的媒体稍后合并，工作线程的重绘通知和渲染器的
 图像身份会修复这一暂态。
 
@@ -751,6 +752,17 @@ workspace package 版本并验证 release asset 工具。它不会重复源码�
 边界直接开始，只执行原生 release build、原生二进制 smoke、package 验证、MSI metadata
 验证，以及安装布局中的 DMG 应用和 Linux package smoke。Release Rust target build 不读写 Rust cache；Windows job 可以恢复由普通 CI 立即发布的
 vcpkg binary cache。
+
+测试插桩不进入 release 二进制。`sonicterm-app` 的 `test-support` feature 用
+`#[cfg(any(test, feature = "test-support"))]` 屏蔽所有只被本 crate unit 与 integration
+测试读取的 `__test_*` hook 和 App 的 `test_*` 字段。该 crate 通过对自身的 dev-dependency
+开启这个 feature，所以只有它自己的测试和 example 构建能看到；`sonicterm-mac`、
+`sonicterm-windows` 或 `sonicterm-linux` 的 release 构建不会编译这些条目。被 example、
+其他 crate 或生产代码调用的 hook 保持不屏蔽，因为这些构建永远拿不到该 feature（性能对比还会把
+example 叠加到较旧的 base 上）。源码测试
+`test_hooks_are_gated_unless_an_example_or_production_reads_them` 会在以下情况失败：
+某个 hook 或字段未被屏蔽且没有列出理由；某个列出的 hook 已没有非测试调用者；库外代码调用了
+被屏蔽的 hook。
 
 ### 源码与检查索引
 

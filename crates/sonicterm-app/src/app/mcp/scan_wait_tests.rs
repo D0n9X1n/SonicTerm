@@ -12,7 +12,7 @@ use sonicterm_cfg::config::McpControl;
 use super::scan_tests::{emit, end_row, noise, scope, step_then_emit, Steps};
 use super::ScanCursor;
 use crate::app::mcp::tools_read::{
-    scan_pending, wait_until, wait_until_observed, WaitCondition, WaitReason,
+    scan_pending, wait_until, wait_until_observed, WaitCondition, WaitReason, WAIT_RECHECK,
 };
 use crate::app::mcp::{test_entry, McpShared};
 
@@ -34,6 +34,7 @@ fn quiet_waits_for_the_scan_backlog() {
         quiet: Some(Duration::from_millis(60)),
         watch_exit: false,
         timeout: Duration::from_secs(5),
+        recheck: WAIT_RECHECK,
     };
     let outcome = wait_until(&shared, &entry, &condition, &scope(&shared));
     assert_eq!(outcome.reason, WaitReason::Matched, "quiet fired before the scan reached DONE");
@@ -81,6 +82,7 @@ fn quiet_waits_for_an_inspection_a_busy_parser_deferred() {
         quiet: Some(Duration::from_millis(30)),
         watch_exit: false,
         timeout: Duration::from_secs(3),
+        recheck: WAIT_RECHECK,
     };
     // Held before the wait starts, so no look can complete until it is released, long after the
     // 30 ms quiet window; an ungated quiet would end the wait while the holder still sleeps.
@@ -119,6 +121,7 @@ fn an_exit_before_any_inspection_reports_the_scan_incomplete() {
         quiet: None,
         watch_exit: true,
         timeout: Duration::from_secs(3),
+        recheck: WAIT_RECHECK,
     };
     let outcome = wait_until(&shared, &entry, &condition, &scope(&shared));
     assert_eq!(outcome.reason, WaitReason::Exited);
@@ -142,6 +145,7 @@ fn a_timeout_mid_backlog_reports_the_scan_incomplete() {
         quiet: None,
         watch_exit: false,
         timeout: Duration::from_millis(250),
+        recheck: WAIT_RECHECK,
     };
     let outcome = wait_until(&shared, &entry, &condition, &scope(&shared));
     assert_eq!(outcome.reason, WaitReason::Timeout);
@@ -176,6 +180,7 @@ fn wait_through(burst: &[u8], timeout_ms: u64) -> crate::app::mcp::tools_read::W
         quiet: Some(Duration::from_millis(60)),
         watch_exit: false,
         timeout: Duration::from_millis(timeout_ms),
+        recheck: WAIT_RECHECK,
     };
     // The wait's own first look reads the tail; only then, before its next poll, is the burst
     // written, so the wait's real state sees the primary screen first and the burst after it.
@@ -267,6 +272,7 @@ fn a_quiet_wait_with_no_backlog_is_complete() {
         quiet: Some(Duration::from_millis(80)),
         watch_exit: false,
         timeout: Duration::from_secs(5),
+        recheck: WAIT_RECHECK,
     };
     let outcome = wait_until(&shared, &entry, &condition, &scope(&shared));
     assert_eq!(outcome.reason, WaitReason::Quiet);

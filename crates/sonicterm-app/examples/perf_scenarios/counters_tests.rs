@@ -77,6 +77,11 @@ pub(super) const CONTRACT: &[(&str, &[&str])] = &[
             "failed",
             "contention_parser",
             "contention_images",
+            "contention_budget_expired",
+            "miss_pane_0",
+            "miss_pane_1",
+            "miss_pane_2",
+            "miss_pane_3_plus",
             "defer_timeout",
             "defer_contention",
             "defer_sync",
@@ -93,6 +98,7 @@ pub(super) const CONTRACT: &[(&str, &[&str])] = &[
             "present_interval_ms",
             "handler_ms",
             "flush_to_redraw_ms",
+            "parser_lock_wait_us",
         ],
     ),
     (
@@ -260,11 +266,11 @@ pub(super) fn every_contract_field_serializes_present_and_zero_with_the_right_hi
         }
     }
     // Every field ending in _ms or _us is a histogram; the names above with those suffixes
-    // are exactly the fourteen contract histograms (the retired event-loop fg_probe_us beside the
-    // worker's fg_worker_probe_us, and the renderer's atlas_growth_to_present_ms);
-    // row_cache_invalidate_us is a plain sum.
+    // are exactly the fifteen contract histograms (the retired event-loop fg_probe_us beside the
+    // worker's fg_worker_probe_us, the renderer's atlas_growth_to_present_ms, and the window's
+    // per-collection parser_lock_wait_us); row_cache_invalidate_us is a plain sum.
     let histograms = FIELDS.iter().filter(|field| matches!(field.kind, FieldKind::Histogram(_)));
-    assert_eq!(histograms.count(), 14);
+    assert_eq!(histograms.count(), 15);
 }
 
 #[test]
@@ -633,6 +639,12 @@ pub(super) const NEWER_SOURCES: &[&str] = &[
     "display_link_admissions",
     "display_link_fallbacks",
     "dirt_ack_dropped",
+    "contention_budget_expired",
+    "miss_pane_0",
+    "miss_pane_1",
+    "miss_pane_2",
+    "miss_pane_3_plus",
+    "parser_lock_wait",
     "damage_waste_permille_sum",
     "full_frames",
     "partial_frames",

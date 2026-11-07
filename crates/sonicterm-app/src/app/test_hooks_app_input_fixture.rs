@@ -38,7 +38,7 @@ impl std::ops::DerefMut for InputTestApp {
 impl InputTestApp {
     /// Wait for queue capacity before a delivery assertion; native completion is a separate observation.
     pub(in crate::app) fn wait_for_input_queues(&self) {
-        for window in self.windows.values() {
+        for window in self.registry.windows.values() {
             for (pane_id, pane) in &window.panes {
                 let Some(pty) = pane.pty.as_ref() else { continue };
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -62,7 +62,7 @@ impl InputTestApp {
 #[cfg(any(windows, unix))]
 impl Drop for InputTestApp {
     fn drop(&mut self) {
-        for window in self.0.windows.values_mut() {
+        for window in self.0.registry.windows.values_mut() {
             for (pane_id, pane) in &mut window.panes {
                 input_phase(*pane_id, "drop-begin");
                 let pid = pane.pty.as_ref().and_then(PtyHandle::pid);
@@ -128,9 +128,12 @@ pub(in crate::app) fn attach_idle_pty(app: &mut App, window: WindowId, pane: u64
     #[cfg(unix)]
     let (program, args) = ("/bin/sh", vec!["-s".into()]);
     input_phase(pane, "spawn-begin");
-    app.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().pty =
+    app.registry.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().pty =
         Some(PtyHandle::spawn_with_args(program, &args, 80, 24).expect("idle input PTY"));
-    record_process(app.windows[&window].panes[&pane].pty.as_ref().unwrap().pid().unwrap(), true);
+    record_process(
+        app.registry.windows[&window].panes[&pane].pty.as_ref().unwrap().pid().unwrap(),
+        true,
+    );
     input_phase(pane, "spawn-end");
 }
 
@@ -138,7 +141,7 @@ pub(in crate::app) fn attach_idle_pty(app: &mut App, window: WindowId, pane: u64
 pub(in crate::app) fn input_test_app() -> (InputTestApp, WindowId, u64) {
     let mut app = InputTestApp(App::new(Theme::default(), Config::default(), Keymap::default()));
     let pane = app.__test_seed_tab("input");
-    let window = app.main_window_id.unwrap();
+    let window = app.registry.main_window_id.unwrap();
     attach_idle_pty(&mut app, window, pane);
     (app, window, pane)
 }
@@ -149,8 +152,8 @@ pub(in crate::app) fn input_test_windows() -> (InputTestApp, [(WindowId, u64); 3
     let (mut app, main, main_pane) = input_test_app();
     let child = app.__test_seed_child_window(&["child"]);
     let sibling = app.__test_seed_child_window(&["sibling"]);
-    let child_pane = app.windows[&child].tab_states[0].active_pane;
-    let sibling_pane = app.windows[&sibling].tab_states[0].active_pane;
+    let child_pane = app.registry.windows[&child].tab_states[0].active_pane;
+    let sibling_pane = app.registry.windows[&sibling].tab_states[0].active_pane;
     attach_idle_pty(&mut app, child, child_pane);
     attach_idle_pty(&mut app, sibling, sibling_pane);
     (app, [(main, main_pane), (child, child_pane), (sibling, sibling_pane)])

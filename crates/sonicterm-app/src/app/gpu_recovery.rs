@@ -170,8 +170,8 @@ enum RendererOwner {
 impl App {
     /// Retain one process context before later windows can install compatibility wakers.
     pub(super) fn initialize_gpu_recovery(&mut self, renderer: &GpuRenderer) {
-        if self.gpu_recovery.is_none() {
-            self.gpu_recovery =
+        if self.services.gpu_recovery.is_none() {
+            self.services.gpu_recovery =
                 Some(GpuRecovery::new(renderer.shared_context(), self.event_loop_proxy.clone()));
         }
         if let Some(proxy) = self.event_loop_proxy.clone() {
@@ -182,6 +182,7 @@ impl App {
     /// Reject stale callback identities before inspecting or scheduling current work.
     pub(super) fn gpu_generation_changed(&mut self, event_loop: &ActiveEventLoop, generation: u64) {
         if self
+            .services
             .gpu_recovery
             .as_ref()
             .is_some_and(|recovery| recovery.coordinator.committed() == generation)
@@ -194,6 +195,7 @@ impl App {
     /// A completion event is a hint; only the worker channel transfers its result.
     pub(super) fn gpu_recovery_ready(&mut self, event_loop: &ActiveEventLoop, ticket: u64) {
         if self
+            .services
             .gpu_recovery
             .as_ref()
             .is_some_and(|recovery| recovery.worker.in_flight() == Some(ticket))
@@ -206,26 +208,26 @@ impl App {
     pub(super) fn gpu_recovery_snapshot(
         &self,
     ) -> Option<sonicterm_gpu::recovery::RecoverySnapshot> {
-        self.gpu_recovery.as_ref().map(|recovery| recovery.coordinator.snapshot())
+        self.services.gpu_recovery.as_ref().map(|recovery| recovery.coordinator.snapshot())
     }
 
     /// Recovery timers never create a frame; even exhausted requests retain a disposal wake.
     pub(super) fn gpu_recovery_deadline(&self) -> Option<Instant> {
-        if self.runtime_smoke.as_ref().is_some_and(|smoke| !smoke.recovery_enabled()) {
+        if self.services.runtime_smoke.as_ref().is_some_and(|smoke| !smoke.recovery_enabled()) {
             // When: `runtime_smoke` owns containment evidence, its deliberate loss must remain stopped.
             return None;
         }
-        let recovery = self.gpu_recovery.as_ref()?;
+        let recovery = self.services.gpu_recovery.as_ref()?;
         deadline(recovery.coordinator.phase(), recovery.result_poll_at)
     }
 
     /// Drain actual completions and commit every renderer before returning to event dispatch.
     pub(super) fn service_gpu_recovery(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
-        if self.runtime_smoke.as_ref().is_some_and(|smoke| !smoke.recovery_enabled()) {
+        if self.services.runtime_smoke.as_ref().is_some_and(|smoke| !smoke.recovery_enabled()) {
             // When: `runtime_smoke` owns containment evidence, recovery would invalidate its stopped-device oracle.
             return;
         }
-        let Some(mut recovery) = self.gpu_recovery.take() else {
+        let Some(mut recovery) = self.services.gpu_recovery.take() else {
             // When: `gpu_recovery` is absent, no renderer has established the process context yet.
             return;
         };
@@ -301,7 +303,7 @@ impl App {
             }
         }
         recovery.arm_result_poll(Instant::now());
-        self.gpu_recovery = Some(recovery);
+        self.services.gpu_recovery = Some(recovery);
     }
 
     fn start_gpu_request(
@@ -317,7 +319,8 @@ impl App {
             // When: `disconnected` is false, choose a surviving native surface without opening a per-window device.
             self.main_renderer()
                 .or_else(|| {
-                    self.windows
+                    self.registry
+                        .windows
                         .iter()
                         .filter_map(|(id, window)| {
                             window.renderer.as_ref().map(|renderer| (id, renderer))
@@ -325,7 +328,7 @@ impl App {
                         .min_by_key(|(id, _)| *id)
                         .map(|(_, renderer)| renderer)
                 })
-                .or_else(|| self.warm_window_pool.first().map(|warm| &warm.renderer))
+                .or_else(|| self.registry.warm_window_pool.first().map(|warm| &warm.renderer))
                 .ok_or_else(|| anyhow::anyhow!("no window remains for GPU recovery"))
                 .and_then(|renderer| renderer.recovery_request(event_loop))
         };
@@ -423,16 +426,17 @@ impl App {
         let (context, surface) = candidate.into_parts();
         let mut surface = Some(surface);
         let mut windows: Vec<_> = self
+            .registry
             .windows
             .iter()
             .filter_map(|(id, window)| window.renderer.as_ref().map(|_| *id))
             .collect();
         windows.sort_unstable();
-        let live = windows.len() + self.warm_window_pool.len();
+        let live = windows.len() + self.registry.warm_window_pool.len();
         let prepared = (|| -> anyhow::Result<Vec<(RendererOwner, PreparedRebind)>> {
             let mut prepared = Vec::with_capacity(live);
             for &id in &windows {
-                let renderer = self.windows[&id]
+                let renderer = self.registry.windows[&id]
                     .renderer
                     .as_ref()
                     .expect("renderer population is stable inside the callback");
@@ -447,7 +451,7 @@ impl App {
                     )?,
                 ));
             }
-            for (index, warm) in self.warm_window_pool.iter().enumerate() {
+            for (index, warm) in self.registry.warm_window_pool.iter().enumerate() {
                 let owned_surface =
                     (requested_window == Some(warm.window.id())).then(|| surface.take()).flatten();
                 prepared.push((
@@ -470,11 +474,14 @@ impl App {
                 for (owner, prepared) in prepared {
                     let renderer = match owner {
                         RendererOwner::Window(id) => self
+                            .registry
                             .windows
                             .get_mut(&id)
                             .and_then(|window| window.renderer.as_mut())
                             .expect("prepared renderer is still owned"),
-                        RendererOwner::Warm(index) => &mut self.warm_window_pool[index].renderer,
+                        RendererOwner::Warm(index) => {
+                            &mut self.registry.warm_window_pool[index].renderer
+                        }
                     };
                     match renderer.commit_rebind(prepared) {
                         Ok(gate) => {
@@ -508,8 +515,10 @@ impl App {
                     .expect("retirement names the previous committed context");
                 if let Some(renderer) = self
                     .main_renderer()
-                    .or_else(|| self.windows.values().find_map(|window| window.renderer.as_ref()))
-                    .or_else(|| self.warm_window_pool.first().map(|warm| &warm.renderer))
+                    .or_else(|| {
+                        self.registry.windows.values().find_map(|window| window.renderer.as_ref())
+                    })
+                    .or_else(|| self.registry.warm_window_pool.first().map(|warm| &warm.renderer))
                 {
                     let degrade = super::should_degrade_for_software_render(
                         self.config.appearance.software_render_mode,
@@ -522,8 +531,11 @@ impl App {
                     );
                 }
                 for id in windows {
-                    let window =
-                        self.windows.get_mut(&id).expect("committed renderer is still owned");
+                    let window = self
+                        .registry
+                        .windows
+                        .get_mut(&id)
+                        .expect("committed renderer is still owned");
                     window.retry_not_before = None;
                     // A fast commit may precede the old generation's first stopped redraw.
                     window.redraw.stopped_generation.get_or_insert(retired_generation);

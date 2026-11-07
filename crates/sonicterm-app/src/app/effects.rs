@@ -246,7 +246,8 @@ impl App {
     }
 
     fn request_effect_redraw(&self, key: sonicterm_types::WindowKey) -> bool {
-        let Some(window) = self.window_keys.resolve(key).and_then(|id| self.windows.get(&id))
+        let Some(window) =
+            self.registry.window_keys.resolve(key).and_then(|id| self.registry.windows.get(&id))
         else {
             // When: `key` names no live window, never redirect operational work to main or frontmost.
             return false;
@@ -256,6 +257,12 @@ impl App {
         true
     }
 
+    /// Tell the compatibility reducer about `intent` and discard its effects.
+    ///
+    /// The reducer (`sonicterm_app_core::AppStateMachine`) is a compatibility and test model, not
+    /// the source of live behavior: the App's own handlers do the real work, and the reducer's
+    /// state is read only by tests. So only structural intents (tabs, panes, windows, focus) are
+    /// observed; high-frequency input such as cursor motion is not, because nothing reads it.
     pub(super) fn observe_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
         // Compatibility reducer state is observational; its synthetic effects never mutate live topology.
         let _ = self.machine.handle(intent);
@@ -276,6 +283,7 @@ impl App {
             }
             AppIntent::PtyBurst { pane, .. } | AppIntent::ForegroundProcChanged { pane, .. } => {
                 if let Some(id) = self
+                    .registry
                     .windows
                     .iter()
                     .find_map(|(id, window)| window.panes.contains_key(&pane.0).then_some(*id))
@@ -304,8 +312,9 @@ impl App {
                 self.request_effect_redraw(window);
             }
             AppIntent::ImeCommit { window, text } | AppIntent::Paste { window, text, .. } => {
-                if let Some(id) = self.window_keys.resolve(window) {
+                if let Some(id) = self.registry.window_keys.resolve(window) {
                     let pane = self
+                        .registry
                         .windows
                         .get(&id)
                         .and_then(|state| state.tab_states.get(state.tabs.active_index()))

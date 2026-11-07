@@ -110,13 +110,13 @@ impl HoverRetryProbe {
         app.__test_set_software_render_degrade(true);
         let (tracked_id, pane_id) = if case_index < 2 {
             let pane = app.__test_seed_tab("hover-main");
-            (app.main_window_id.unwrap(), pane)
+            (app.registry.main_window_id.unwrap(), pane)
         } else {
             let id = app.__test_seed_child_window(&["hover-child"]);
-            (id, app.windows[&id].tab_states[0].active_pane)
+            (id, app.registry.windows[&id].tab_states[0].active_pane)
         };
         assert!(app.__test_attach_window_renderer(tracked_id, window, renderer));
-        app.windows.get_mut(&tracked_id).unwrap().cursor_pos = (-100.0, -100.0);
+        app.registry.windows.get_mut(&tracked_id).unwrap().cursor_pos = (-100.0, -100.0);
         let label = if case_index.is_multiple_of(2) {
             Self::URI.to_owned()
         } else {
@@ -124,7 +124,7 @@ impl HoverRetryProbe {
         };
         // Identical terminal cells isolate OSC 8 metadata; alternate-screen mouse reporting stays enabled without a PTY.
         {
-            let pane = &app.windows[&tracked_id].panes[&pane_id];
+            let pane = &app.registry.windows[&tracked_id].panes[&pane_id];
             let mut parser = pane.parser.lock();
             parser.advance(
                 format!("\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?25l\x1b[2;2H{label}\x1b[6;1H")
@@ -134,7 +134,7 @@ impl HoverRetryProbe {
             pane.__test_publish_input_modes(&parser);
         }
         assert!(app.path_workers.is_none());
-        assert!(app.windows[&tracked_id].panes[&pane_id].pty.is_none());
+        assert!(app.registry.windows[&tracked_id].panes[&pane_id].pty.is_none());
         let now = Instant::now();
         let mut probe = Self {
             app,
@@ -171,7 +171,7 @@ impl HoverRetryProbe {
         assert!(
             !self.app.pending_redraw
                 && self.app.pending_redraw_windows.is_empty()
-                && self.app.windows[&self.tracked_id].retry_not_before.is_none(),
+                && self.app.registry.windows[&self.tracked_id].retry_not_before.is_none(),
             "INVALID {} {:?}: pacing or parser retry contaminated the native observation",
             self.case,
             self.phase,
@@ -193,7 +193,10 @@ impl HoverRetryProbe {
             format!("{:?}/render cycle={}", self.phase, self.cycle),
         );
         assert!(
-            self.app.windows[&self.tracked_id].panes[&self.pane_id].parser.try_lock().is_some(),
+            self.app.registry.windows[&self.tracked_id].panes[&self.pane_id]
+                .parser
+                .try_lock()
+                .is_some(),
             "INVALID {} {:?}: native frame arrived while parser lock was held",
             self.case,
             self.phase,
@@ -216,12 +219,12 @@ impl HoverRetryProbe {
     }
 
     pub(super) fn row_pixels(&self) -> Vec<[u8; 4]> {
-        let renderer = self.app.windows[&self.tracked_id].renderer.as_ref().unwrap();
+        let renderer = self.app.registry.windows[&self.tracked_id].renderer.as_ref().unwrap();
         let [origin_x, origin_y] =
             renderer.pane_grid_origin(self.pane_id).expect("native layout must exist");
         let (cell_w, cell_h) = renderer.cell_size();
         // Restrict readback to the URI row and prove the real tooltip geometry cannot cover its pixels.
-        if let Some(preview) = self.app.windows[&self.tracked_id].link_preview.as_ref() {
+        if let Some(preview) = self.app.registry.windows[&self.tracked_id].link_preview.as_ref() {
             let font_size = renderer.font_size().max(1.0) * renderer.scale_factor();
             let layout = sonicterm_ui::overlays::LinkPreviewLayout::compute(
                 &sonicterm_ui::overlays::link_preview_text(&preview.uri),
@@ -254,13 +257,13 @@ impl HoverRetryProbe {
     }
 
     pub(super) fn assert_hover(&self, active: bool) {
-        let hover = self.app.windows[&self.tracked_id]
+        let hover = self.app.registry.windows[&self.tracked_id]
             .hovered_url
             .as_ref()
             .expect("stationary URI must retain its hover identity");
         assert_eq!(hover.url, Self::URI, "{} {:?}", self.case, self.phase);
         assert_eq!(hover.active(), active, "{} {:?}", self.case, self.phase);
-        assert_eq!(self.app.frontmost_window, Some(self.tracked_id));
+        assert_eq!(self.app.registry.frontmost_window, Some(self.tracked_id));
     }
 
     /// The watchdog sees every modifier and pointer phase, including its repeated cycle, before the stimulus runs.
@@ -268,12 +271,15 @@ impl HoverRetryProbe {
         self.progress.set("hover", self.case, format!("{phase:?} cycle={}", self.cycle));
         self.assert_unscheduled();
         let period = crate::app::effective_frame_period(true, false, self.app.frame_period);
-        assert!(self.app.windows[&self.tracked_id].last_render.elapsed() > period);
+        assert!(self.app.registry.windows[&self.tracked_id].last_render.elapsed() > period);
         self.phase = phase;
         self.phase_started = std::time::Instant::now();
         self.phase_native_start = self.native_frames;
-        self.phase_present_start =
-            self.app.windows[&self.tracked_id].renderer.as_ref().unwrap().successful_frame_count();
+        self.phase_present_start = self.app.registry.windows[&self.tracked_id]
+            .renderer
+            .as_ref()
+            .unwrap()
+            .successful_frame_count();
     }
 
     /// Keep the fixture's lock flag visible throughout the real modifier lookup, but clear it before rendering.
@@ -285,8 +291,9 @@ impl HoverRetryProbe {
         phase: HoverRetryPhase,
     ) {
         self.begin_phase(phase);
-        let parser = self.app.windows[&self.tracked_id].panes[&self.pane_id].parser.clone();
-        let previous = self.app.windows[&self.tracked_id].hovered_url.clone();
+        let parser =
+            self.app.registry.windows[&self.tracked_id].panes[&self.pane_id].parser.clone();
+        let previous = self.app.registry.windows[&self.tracked_id].hovered_url.clone();
         self.progress.parser_lock(contended);
         let guard = contended.then(|| parser.lock());
         winit::application::ApplicationHandler::window_event(
@@ -298,15 +305,15 @@ impl HoverRetryProbe {
             ),
         );
         if contended && active {
-            assert_eq!(self.app.windows[&self.tracked_id].hovered_url, previous);
+            assert_eq!(self.app.registry.windows[&self.tracked_id].hovered_url, previous);
             self.assert_hover(false);
-            assert!(self.app.windows[&self.tracked_id].link_preview.is_none());
+            assert!(self.app.registry.windows[&self.tracked_id].link_preview.is_none());
         } else {
             self.assert_hover(active);
         }
         if contended && !active {
-            assert!(!self.app.windows[&self.tracked_id].hover_link);
-            assert!(self.app.windows[&self.tracked_id].link_preview.is_none());
+            assert!(!self.app.registry.windows[&self.tracked_id].hover_link);
+            assert!(self.app.registry.windows[&self.tracked_id].link_preview.is_none());
         }
         // The lock covers modifier lookup only; rendering with it held would test a different retry mechanism.
         drop(guard);
@@ -322,8 +329,8 @@ impl HoverRetryProbe {
         phase: HoverRetryPhase,
     ) {
         self.begin_phase(phase);
-        assert_eq!(self.app.windows[&self.tracked_id].modifiers, ModifiersState::CONTROL);
-        let window = self.app.windows.get_mut(&self.tracked_id).unwrap();
+        assert_eq!(self.app.registry.windows[&self.tracked_id].modifiers, ModifiersState::CONTROL);
+        let window = self.app.registry.windows.get_mut(&self.tracked_id).unwrap();
         let renderer = window.renderer.as_ref().unwrap();
         let [origin_x, origin_y] = renderer.pane_grid_origin(self.pane_id).unwrap();
         let (cell_w, cell_h) = renderer.cell_size();
@@ -338,13 +345,13 @@ impl HoverRetryProbe {
         // This is the shared pointer-refresh seam, not CursorMoved: its later mouse-report lock would block this fixture.
         self.app.refresh_target_hover(self.tracked_id);
         if contended {
-            assert_eq!(self.app.windows[&self.tracked_id].hovered_url, previous);
-            assert!(self.app.windows[&self.tracked_id].hovered_url.is_none());
-            assert!(self.app.windows[&self.tracked_id].link_preview.is_none());
+            assert_eq!(self.app.registry.windows[&self.tracked_id].hovered_url, previous);
+            assert!(self.app.registry.windows[&self.tracked_id].hovered_url.is_none());
+            assert!(self.app.registry.windows[&self.tracked_id].link_preview.is_none());
         } else if on_uri {
             self.assert_hover(true);
         } else {
-            assert!(self.app.windows[&self.tracked_id].hovered_url.is_none());
+            assert!(self.app.registry.windows[&self.tracked_id].hovered_url.is_none());
         }
         drop(guard);
         self.progress.parser_lock(false);
@@ -374,10 +381,13 @@ impl HoverRetryProbe {
         }
         self.assert_unscheduled();
         let frames = self.native_frames - self.phase_native_start;
-        let presents =
-            self.app.windows[&self.tracked_id].renderer.as_ref().unwrap().successful_frame_count()
-                - self.phase_present_start;
-        let hover = self.app.windows[&self.tracked_id].hovered_url.as_ref();
+        let presents = self.app.registry.windows[&self.tracked_id]
+            .renderer
+            .as_ref()
+            .unwrap()
+            .successful_frame_count()
+            - self.phase_present_start;
+        let hover = self.app.registry.windows[&self.tracked_id].hovered_url.as_ref();
         eprintln!(
             "hover case={} phase={:?} cycle={} native_frames={frames} presents={presents} uri={:?} active={:?}",
             self.case,
@@ -410,7 +420,7 @@ impl HoverRetryProbe {
         );
         match self.phase {
             Setup => {
-                let window = self.app.windows.get_mut(&self.tracked_id).unwrap();
+                let window = self.app.registry.windows.get_mut(&self.tracked_id).unwrap();
                 let renderer = window.renderer.as_ref().unwrap();
                 assert!(
                     renderer.__test_pane_focus_flash_target().is_none(),
@@ -471,7 +481,7 @@ impl HoverRetryProbe {
                 self.pointer_refresh(false, false, PointerBaselineBlank);
             }
             PointerBaselineBlank => {
-                assert!(self.app.windows[&self.tracked_id].hovered_url.is_none());
+                assert!(self.app.registry.windows[&self.tracked_id].hovered_url.is_none());
                 self.blank_pixels = self.row_pixels();
                 self.pointer_refresh(true, false, PointerBaselineActive);
             }
@@ -492,7 +502,7 @@ impl HoverRetryProbe {
                 self.pointer_refresh(false, false, PointerContendedBlank);
             }
             PointerContendedBlank => {
-                assert!(self.app.windows[&self.tracked_id].hovered_url.is_none());
+                assert!(self.app.registry.windows[&self.tracked_id].hovered_url.is_none());
                 assert_eq!(
                     self.row_pixels(),
                     self.blank_pixels,
@@ -545,7 +555,7 @@ impl ModifierSelectionProbe {
         app.keymap = Keymap::parse_resilient("[meta]\nname = \"selection\"\nversion = \"1.0\"\n[[binding]]\nkeys = \"ctrl+shift+c\"\naction = \"copy_to_clipboard\"\n", "native selection fixture").unwrap();
         app.__test_enable_pty_write_log();
         let main_pane = app.__test_seed_tab("modifier-main");
-        let main = app.main_window_id.unwrap();
+        let main = app.registry.main_window_id.unwrap();
         let child = app.__test_seed_child_window(&["modifier-child"]);
         let child_pane = app.__test_child_pane_ids(child).unwrap()[0];
         let mut targets = Vec::new();
@@ -560,7 +570,8 @@ impl ModifierSelectionProbe {
             )
             .unwrap();
             let input = pty.input_sender();
-            let pane = app.windows.get_mut(&window_id).unwrap().panes.get_mut(&pane_id).unwrap();
+            let pane =
+                app.registry.windows.get_mut(&window_id).unwrap().panes.get_mut(&pane_id).unwrap();
             pane.pty = Some(pty);
             progress.set("selection", case, "prepare_parser");
             let mut parser = pane.parser.lock();
@@ -622,14 +633,17 @@ impl ModifierSelectionProbe {
         };
         if down && !repeat {
             for (window_id, pane_id, _) in &self.targets {
-                let case =
-                    if Some(*window_id) == self.app.main_window_id { "main" } else { "child" };
+                let case = if Some(*window_id) == self.app.registry.main_window_id {
+                    "main"
+                } else {
+                    "child"
+                };
                 self.progress.set(
                     "selection",
                     case,
                     format!("prepare kitty={kitty} vk={virtual_key} down={down} repeat={repeat}"),
                 );
-                let pane = &self.app.windows[window_id].panes[pane_id];
+                let pane = &self.app.registry.windows[window_id].panes[pane_id];
                 let mut parser = pane.parser.lock();
                 parser.advance(if kitty { b"\x1b[=10u" } else { b"\x1b[=0u" });
                 pane.keyboard_input
@@ -641,7 +655,7 @@ impl ModifierSelectionProbe {
                 }
                 let mut selection = Selection::new(0, 0);
                 selection.end = (0, 8);
-                if Some(*window_id) == self.app.main_window_id {
+                if Some(*window_id) == self.app.registry.main_window_id {
                     self.app.__test_set_main_selection(Some(selection));
                 } else {
                     self.app.__test_set_child_selection(*window_id, Some(selection));
@@ -710,7 +724,8 @@ impl ModifierSelectionProbe {
         }
         let copy_chord = virtual_key == 0x43;
         for (window_id, pane_id, _) in &self.targets {
-            let case = if Some(*window_id) == self.app.main_window_id { "main" } else { "child" };
+            let case =
+                if Some(*window_id) == self.app.registry.main_window_id { "main" } else { "child" };
             self.progress.set(
                 "selection",
                 case,
@@ -726,7 +741,7 @@ impl ModifierSelectionProbe {
             } else {
                 ModifiersState::empty()
             };
-            self.app.windows.get_mut(window_id).unwrap().modifiers = mods;
+            self.app.registry.windows.get_mut(window_id).unwrap().modifiers = mods;
             let writes_before = self.app.__test_pty_write_log().len();
             winit::application::ApplicationHandler::window_event(
                 &mut self.app,
@@ -739,7 +754,7 @@ impl ModifierSelectionProbe {
                 case,
                 format!("check kitty={kitty} vk={virtual_key} down={down} repeat={repeat}"),
             );
-            let state = &self.app.windows[window_id];
+            let state = &self.app.registry.windows[window_id];
             if state.selection.is_some() != (modifier || copy_chord) {
                 failures.push(format!("window={window_id:?} kitty={kitty} vk={virtual_key} down={down} repeat={repeat}: selection_present={}", state.selection.is_some()));
             }

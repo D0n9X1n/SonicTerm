@@ -93,7 +93,7 @@ fn render(renderer: &mut GpuRenderer, grid: &mut Grid) -> Result<(), String> {
         cursor_style: CursorStyle::BlockSteady,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     let tabs = TabBar::new();
     renderer
@@ -127,7 +127,7 @@ fn render_outcome(renderer: &mut GpuRenderer, grid: &mut Grid) -> PresentOutcome
         cursor_style: CursorStyle::BlockSteady,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     let tabs = TabBar::new();
     let fonts = renderer.begin_frame_fonts();

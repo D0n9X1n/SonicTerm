@@ -729,10 +729,10 @@ pub(super) fn settled_drag(
         let id = app.__test_seed_child_window(&["drag"]);
         (id, app.__test_child_active_pane(id).expect("child pane"))
     } else {
-        (app.main_window_id.expect("seeded main window"), main_pane)
+        (app.registry.main_window_id.expect("seeded main window"), main_pane)
     };
     let started = at(2, Instant::now());
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.begin_scrollbar_drag(drag_state(pane), ScrollbarMode::Auto, started);
     window.note_scrollbar_activity(pane, ScrollbarMode::Auto, started);
     // The fade-in finished long ago and its last frame presented.
@@ -745,7 +745,7 @@ pub(super) fn settled_drag(
 /// Run the frames the render path runs while `is_animating` holds: the same
 /// update the frame calls, at 60 Hz from `first`, with the pointer over text.
 pub(super) fn frames_until_settled(app: &mut App, window_id: WindowId, pane: u64, first: Instant) {
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     let rect = (pane, 0.0, 30.0, 800.0, 570.0);
     for frame_count in 0..60u32 {
         let state = window.scrollbar_vis[&pane];
@@ -780,14 +780,14 @@ pub(super) fn edge_band_app(child: bool) -> (App, WindowId, u64, sonicterm_ui::p
     let main_pane = app.__test_seed_tab("edge");
     let (window_id, pane) = if child {
         let id = app.__test_seed_child_window(&["edge"]);
-        app.windows.get_mut(&id).unwrap().test_pane_viewport = Some((outer, 10.0, 20.0));
+        app.registry.windows.get_mut(&id).unwrap().test_pane_viewport = Some((outer, 10.0, 20.0));
         (id, app.__test_child_active_pane(id).expect("child pane"))
     } else {
         app.__test_set_main_pane_viewport(outer, 10.0, 20.0);
-        (app.main_window_id.expect("seeded main window"), main_pane)
+        (app.registry.main_window_id.expect("seeded main window"), main_pane)
     };
     let rects = if child {
-        App::compute_pane_rects_for(&app.windows[&window_id])
+        App::compute_pane_rects_for(&app.registry.windows[&window_id])
     } else {
         app.compute_active_pane_rects()
     };
@@ -803,7 +803,8 @@ pub(super) fn hover_to(
     child: bool,
     point: (f32, f32),
 ) -> (u64, bool) {
-    app.windows.get_mut(&window_id).unwrap().cursor_pos = (f64::from(point.0), f64::from(point.1));
+    app.registry.windows.get_mut(&window_id).unwrap().cursor_pos =
+        (f64::from(point.0), f64::from(point.1));
     let before = crate::app::window_state::window_redraw_requests();
     let crossed = if child {
         app.refresh_scrollbar_hover_from_cursor_in_child(window_id)
@@ -816,7 +817,7 @@ pub(super) fn hover_to(
 /// Stand in for the frame that presented: alpha reached its target and the
 /// window has no request in flight.
 pub(super) fn present(app: &mut App, window_id: WindowId, pane: u64) {
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     let state = window.scrollbar_vis.get_mut(&pane).unwrap();
     state.alpha = state.target;
     window.redraw.request_in_flight = false;

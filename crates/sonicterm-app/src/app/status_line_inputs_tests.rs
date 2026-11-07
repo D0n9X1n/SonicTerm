@@ -216,7 +216,7 @@ fn ime_shows_a_dropped_commit_then_only_non_pane_compositions() {
 fn copy_mode_commit_is_dropped_and_recorded() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("main");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     app.__test_enable_pty_write_log();
     app.main_mut().unwrap().copy_mode = Some(CopyModeState::new_at((0, 0)));
     assert_eq!(app.ime_route(main_id), Some(ImeRoute::CopyMode));
@@ -289,7 +289,7 @@ fn clip_records_outcomes_and_goes_to_the_source_tab() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let source = app.__test_seed_tab("source");
     app.__test_seed_tab("other");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     app.__test_set_memory_clipboard("old");
     let accepted = ClipAttempts { total: 1, accepted: 1, refused: 0, latest: None };
     let now = Instant::now();
@@ -314,7 +314,7 @@ fn clip_records_outcomes_and_goes_to_the_source_tab() {
 
     app.activate_main_tab(1);
     app.activate_clip_source();
-    assert_eq!(app.windows[&main_id].tabs.active_index(), 0, "the source tab");
+    assert_eq!(app.registry.windows[&main_id].tabs.active_index(), 0, "the source tab");
 }
 
 /// Each progress read moves the deadline as `held` requires: idle disarms, an old write shows and
@@ -397,7 +397,7 @@ fn rejection_text_maps_to_its_reason() {
 fn paste_outcomes_are_recorded_for_the_window() {
     let mut app = app_with_strip(true);
     let pane_id = app.__test_seed_tab("main");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     let _ = app.sync_status_line(Instant::now());
     app.__test_enable_pty_write_log();
     app.__test_set_memory_clipboard("ls");
@@ -470,7 +470,7 @@ fn glyphs_input_hides_below_min_count() {
 fn glyphs_click_lists_codepoints_without_touching_the_clipboard() {
     let mut app = app_with_strip(true);
     app.__test_seed_tab("main");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     app.__test_set_memory_clipboard("kept");
     app.list_missing_glyphs(main_id);
     assert_eq!(app.__test_main_notification_message(), None, "nothing counted, nothing listed");
@@ -509,7 +509,7 @@ fn out_rate_counts_each_panes_bytes_once_per_interval() {
     let mut app = app_with_strip(true);
     app.config.status_line.preset = sonicterm_cfg::status_line::StatusPreset::Diagnostics;
     let pane_id = app.__test_seed_tab("main");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     let now = Instant::now();
     let _ = app.sync_status_line(now);
     app.sample_out(now);

@@ -165,7 +165,7 @@ fn render_once(
         cursor_style: CursorStyle::BlockSteady,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     renderer.render_with_outcome(
         fonts,

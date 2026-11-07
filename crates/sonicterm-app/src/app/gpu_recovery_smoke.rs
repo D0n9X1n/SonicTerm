@@ -186,7 +186,8 @@ fn mark_proves(mark: &RecoveryMark, baseline_rows: usize) -> bool {
 impl App {
     /// Only the explicit recovery smoke arms this native-observation timer.
     pub(in crate::app) fn gpu_recovery_smoke_deadline(&self) -> Option<Instant> {
-        self.runtime_smoke
+        self.services
+            .runtime_smoke
             .as_ref()
             .filter(|smoke| smoke.phase == RuntimeSmokePhase::RecoveryReady)
             .map(|smoke| smoke.next_probe_at.unwrap_or_else(Instant::now))
@@ -198,14 +199,15 @@ impl App {
         event_loop: &ActiveEventLoop,
         now: Instant,
     ) -> bool {
-        if !self.runtime_smoke.as_ref().is_some_and(|smoke| {
+        if !self.services.runtime_smoke.as_ref().is_some_and(|smoke| {
             smoke.phase == RuntimeSmokePhase::RecoveryReady
                 && smoke.next_probe_at.is_none_or(|due| now >= due)
         }) {
             // When: `runtime_smoke` has no due recovery phase, normal sessions gain no polling or native work.
             return false;
         }
-        let mut smoke = self.runtime_smoke.take().expect("due recovery smoke remains installed");
+        let mut smoke =
+            self.services.runtime_smoke.take().expect("due recovery smoke remains installed");
         let mut probe = smoke.recovery_probe.take().unwrap_or_else(|| RecoveryProbe::new(now));
         let result = if now.saturating_duration_since(probe.started) >= DEADLINE {
             probe.report_timeout(now, "phase-deadline");
@@ -232,7 +234,7 @@ impl App {
         }
         smoke.recovery_probe = Some(probe);
         smoke.next_probe_at = Some(Instant::now() + POLL_INTERVAL);
-        self.runtime_smoke = Some(smoke);
+        self.services.runtime_smoke = Some(smoke);
         terminal
     }
 
@@ -246,17 +248,18 @@ impl App {
         match probe.stage {
             Stage::Create => {
                 // When: `stage` is Create, use production window creation so the shell and renderer keep normal ownership.
-                if self.windows.len() != 1 {
+                if self.registry.windows.len() != 1 {
                     // When: `windows` contains another owner already, the two-window oracle has no controlled baseline.
                     return Err(FAILURE);
                 }
                 self.config.window.warm_window_pool = 1;
-                let main = self.main_window_id.ok_or(FAILURE)?;
+                let main = self.registry.main_window_id.ok_or(FAILURE)?;
                 self.create_new_terminal_window(event_loop, self.window_request(Some(main)));
-                let child = self.windows.keys().copied().find(|id| *id != main).ok_or(FAILURE)?;
+                let child =
+                    self.registry.windows.keys().copied().find(|id| *id != main).ok_or(FAILURE)?;
                 if let (Some(main), Some(child)) = (
                     self.main_window(),
-                    self.windows.get(&child).and_then(|window| window.window.as_ref()),
+                    self.registry.windows.get(&child).and_then(|window| window.window.as_ref()),
                 ) {
                     if let Ok(position) = main.outer_position() {
                         child.set_outer_position(winit::dpi::PhysicalPosition::new(
@@ -270,7 +273,7 @@ impl App {
             }
             Stage::Capture => {
                 // When: `stage` is Capture, require the complete topology before freezing original shell identities.
-                if self.windows.len() != 2 || self.warm_window_pool.len() != 1 {
+                if self.registry.windows.len() != 2 || self.registry.warm_window_pool.len() != 1 {
                     // When: `warm_window_pool` is not replenished yet, wait under the smoke's fixed deadline.
                     return Ok(false);
                 }
@@ -284,10 +287,10 @@ impl App {
                     return Err(FAILURE);
                 }
                 let mut panes = Vec::with_capacity(2);
-                let mut ids: Vec<_> = self.windows.keys().copied().collect();
+                let mut ids: Vec<_> = self.registry.windows.keys().copied().collect();
                 ids.sort_unstable();
                 for id in ids {
-                    let window = &self.windows[&id];
+                    let window = &self.registry.windows[&id];
                     let renderer = window.renderer.as_ref().ok_or(FAILURE)?;
                     if renderer.successful_frame_count() == 0 {
                         // When: `successful_frame_count` is zero, establish presentation before injecting any loss.
@@ -328,6 +331,7 @@ impl App {
                     });
                 }
                 if !self
+                    .registry
                     .warm_window_pool
                     .iter()
                     .all(|warm| warm.renderer.device_generation() == context.committed)
@@ -439,8 +443,8 @@ impl App {
                 }
                 let main = probe.panes.iter().find(|pane| pane.window != child).ok_or(FAILURE)?;
                 self.recovery_shells_alive(std::slice::from_ref(main))?;
-                if self.windows.len() != 1
-                    || !self.warm_window_pool.is_empty()
+                if self.registry.windows.len() != 1
+                    || !self.registry.warm_window_pool.is_empty()
                     || live_renderer_count() != smoke.renderer_baseline + 1
                 {
                     // When: `windows`, `warm_window_pool`, or `live_renderer_count` retains an extra owner, cleanup is incomplete.
@@ -455,6 +459,7 @@ impl App {
     fn recovery_shells_alive(&self, panes: &[PaneProof]) -> Result<(), RuntimeSmokeFailure> {
         for proof in panes {
             let pane = self
+                .registry
                 .windows
                 .get(&proof.window)
                 .and_then(|window| window.panes.get(&proof.pane))
@@ -475,7 +480,7 @@ impl App {
     ) -> Result<(), RuntimeSmokeFailure> {
         self.recovery_shells_alive(panes)?;
         for proof in panes {
-            self.windows[&proof.window].panes[&proof.pane]
+            self.registry.windows[&proof.window].panes[&proof.pane]
                 .pty
                 .as_ref()
                 .ok_or(FAILURE)?
@@ -494,7 +499,7 @@ impl App {
         self.recovery_shells_alive(panes)?;
         let mut counts = Vec::with_capacity(panes.len());
         for proof in panes.iter() {
-            let pane = &self.windows[&proof.window].panes[&proof.pane];
+            let pane = &self.registry.windows[&proof.window].panes[&proof.pane];
             let Some(parser) = pane.parser.try_lock() else {
                 // When: `parser` is busy, capture none of this round's baseline until every pane is observable.
                 return Ok(false);
@@ -517,7 +522,7 @@ impl App {
         self.recovery_shells_alive(panes)?;
         let mut ready = true;
         for proof in panes {
-            let window = &self.windows[&proof.window];
+            let window = &self.registry.windows[&proof.window];
             let pane = &window.panes[&proof.pane];
             let Some(parser) = pane.parser.try_lock() else {
                 // When: `parser` is busy, no stale marker or presentation count can satisfy this observation.
@@ -538,8 +543,8 @@ impl App {
         generation: u64,
         baseline: usize,
     ) -> Result<(), RuntimeSmokeFailure> {
-        if self.windows.len() != 2
-            || self.warm_window_pool.len() != 1
+        if self.registry.windows.len() != 2
+            || self.registry.warm_window_pool.len() != 1
             || live_renderer_count() != baseline + 3
         {
             // When: `windows`, `warm_window_pool`, or `live_renderer_count` differs, the required three-renderer topology was lost.
@@ -548,8 +553,12 @@ impl App {
         let accepts = |renderer: &sonicterm_gpu::core::GpuRenderer| {
             renderer.device_generation() == generation && renderer.device_accepts_gpu_work()
         };
-        if !self.windows.values().all(|window| window.renderer.as_ref().is_some_and(accepts))
-            || !self.warm_window_pool.iter().all(|warm| accepts(&warm.renderer))
+        if !self
+            .registry
+            .windows
+            .values()
+            .all(|window| window.renderer.as_ref().is_some_and(accepts))
+            || !self.registry.warm_window_pool.iter().all(|warm| accepts(&warm.renderer))
         {
             // When: `accepts` rejects any live or warm renderer, partial replacement cannot count as recovery.
             return Err(FAILURE);

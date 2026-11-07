@@ -580,6 +580,12 @@ struct Probe {
     trim_seq_after_hook: Option<u64>,
     /// S1/atlas-retry's `atlas_recovery`, once every episode is recorded and validated.
     atlas_recovery: Option<serde_json::Value>,
+    /// S13: the flooding pane's progress through `typing` and `tail`, observed every
+    /// [`crate::contention::OBSERVE_EVERY_MS`]; `None` for every other scenario.
+    /// The running phase's start and last look, then the watch itself.
+    flood_watch: Option<(Option<(Instant, Option<Instant>)>, crate::contention::FloodWatch)>,
+    /// S13: each role pane's grid, read as `typing` ended.
+    role_grids: Vec<Option<(u16, u16)>>,
     /// Dispatch-timeline recorder storage, reused from sample to sample; empty until a sample is armed.
     timeline_storage: TimelineStorage,
     /// The `ApplicationHandler` callback running now, which a sample armed inside it starts clipped in.

@@ -173,6 +173,65 @@ pub(in crate::app) fn native_scrollbar_owns_pointer(
         && pixel_y < pane.y + pane.h
 }
 
+/// The renderer metrics that place a pane's scrollbar: content padding (left, right, top,
+/// bottom), the cell size the content never shrinks below, and the display scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::app) struct ScrollbarMetrics {
+    /// Content padding in window pixels: left, right, top, bottom.
+    pub(in crate::app) insets: [f32; 4],
+    /// One cell's width and height in window pixels.
+    pub(in crate::app) cell: (f32, f32),
+    /// Display scale factor; the gutter width is logical pixels times this.
+    pub(in crate::app) scale: f32,
+}
+
+impl ScrollbarMetrics {
+    /// The metrics of a live renderer.
+    pub(in crate::app) fn of(renderer: &sonicterm_gpu::core::GpuRenderer) -> Self {
+        Self {
+            insets: [
+                renderer.padding_left_px(),
+                renderer.padding_right_px(),
+                renderer.padding_top_px(),
+                renderer.padding_bottom_px(),
+            ],
+            cell: renderer.cell_size(),
+            scale: renderer.scale_factor(),
+        }
+    }
+}
+
+/// Whether a no-button pointer at (`pixel_x`, `pixel_y`) belongs to the scrollbar of the pane laid
+/// out at `pane` (its outer rect). With `metrics` (a live renderer) the gutter is measured inside
+/// the padded content at the scaled width; without one (headless), on the outer rect at the
+/// logical width. Main and child windows both route motion through this one calculation.
+pub(in crate::app) fn pane_scrollbar_owns_pointer(
+    mode: ScrollbarMode,
+    pane: sonicterm_ui::pane::Rect,
+    metrics: Option<ScrollbarMetrics>,
+    pixel: (f32, f32),
+    edge_active: bool,
+    visible: bool,
+) -> bool {
+    let width_px = crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX;
+    let (content, gutter_width) = match metrics {
+        Some(metrics) => (
+            pointer_scrollbar_content_rect(pane, metrics.insets, metrics.cell),
+            width_px * metrics.scale,
+        ),
+        None => (pane, width_px),
+    };
+    native_scrollbar_owns_pointer(
+        mode,
+        content,
+        pixel.0,
+        pixel.1,
+        gutter_width,
+        edge_active,
+        visible,
+    )
+}
+
 /// Inset a pane rect to the content area that owns the rendered scrollbar.
 pub(in crate::app) fn pointer_scrollbar_content_rect(
     pane: sonicterm_ui::pane::Rect,

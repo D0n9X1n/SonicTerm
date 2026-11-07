@@ -16,26 +16,30 @@ fn child_split_after_zoom_keeps_active_parser_visible_in_every_direction() {
             let child_id = app.__test_seed_child_window(&["child"]);
             let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
             assert!(app.__test_set_child_pane_viewport(child_id, outer, 10.0, 10.0));
-            resize_visible_panes_in_child(app.windows.get_mut(&child_id).expect("child window"));
+            resize_visible_panes_in_child(
+                app.registry.windows.get_mut(&child_id).expect("child window"),
+            );
             if nested {
                 assert!(app.split_active_pane_in_child(child_id, Direction::Right));
             }
-            let child = app.windows.get(&child_id).expect("child window");
+            let child = app.registry.windows.get(&child_id).expect("child window");
             let tab = &child.tab_states[child.tabs.active_index()];
             let previous_active = tab.active_pane;
             let mut expected = tab.tree.clone();
             assert!(app.toggle_active_pane_zoom_in_child(child_id));
             assert_eq!(
-                App::compute_pane_rects_for(app.windows.get(&child_id).expect("child window")),
+                App::compute_pane_rects_for(
+                    app.registry.windows.get(&child_id).expect("child window")
+                ),
                 [(previous_active, outer)],
             );
-            for pane in app.windows.get(&child_id).expect("child window").panes.values() {
+            for pane in app.registry.windows.get(&child_id).expect("child window").panes.values() {
                 pane.parser.lock().grid_mut().clear_dirty();
             }
 
             assert!(app.split_active_pane_in_child(child_id, direction));
 
-            let child = app.windows.get(&child_id).expect("child window");
+            let child = app.registry.windows.get(&child_id).expect("child window");
             let tab = &child.tab_states[child.tabs.active_index()];
             let active = tab.active_pane;
             assert_ne!(active, previous_active);
@@ -80,7 +84,7 @@ fn child_split_refusal_preserves_zoom_focus_and_live_panes() {
         let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
         assert!(app.__test_set_child_pane_viewport(child_id, outer, 10.0, 10.0));
         assert!(app.toggle_active_pane_zoom_in_child(child_id));
-        let child = app.windows.get_mut(&child_id).expect("child window");
+        let child = app.registry.windows.get_mut(&child_id).expect("child window");
         let pane = child.tab_states[0].active_pane;
         if missing_live_pane {
             child.panes.remove(&pane);
@@ -94,7 +98,7 @@ fn child_split_refusal_preserves_zoom_focus_and_live_panes() {
 
         assert!(!app.split_active_pane_in_child(child_id, Direction::Down));
 
-        let child = app.windows.get(&child_id).expect("child window");
+        let child = app.registry.windows.get(&child_id).expect("child window");
         let tab = &child.tab_states[0];
         let mut panes_after: Vec<_> = child.panes.keys().copied().collect();
         panes_after.sort_unstable();
@@ -125,7 +129,7 @@ fn refused_child_split_actions_never_fall_through_to_main() {
                 let main_pane = app.__test_seed_tab("main");
                 let child_id = app.__test_seed_child_window(&["child"]);
                 assert!(app.toggle_active_pane_zoom_in_child(child_id));
-                let child = app.windows.get_mut(&child_id).expect("child window");
+                let child = app.registry.windows.get_mut(&child_id).expect("child window");
                 let original = child.tab_states[0].active_pane;
                 if missing_live_pane {
                     child.panes.remove(&original);
@@ -134,7 +138,7 @@ fn refused_child_split_actions_never_fall_through_to_main() {
                 }
                 let child_active = child.tab_states[0].active_pane;
                 let pane_count = child.panes.len();
-                app.frontmost_window = Some(child_id);
+                app.registry.frontmost_window = Some(child_id);
 
                 if explicit_window {
                     assert!(app.run_action_for_window(&action, child_id));
@@ -146,8 +150,8 @@ fn refused_child_split_actions_never_fall_through_to_main() {
                 assert_eq!(main.tab_states[0].tree.leaves(), [main_pane]);
                 assert_eq!(main.tab_states[0].active_pane, main_pane);
                 assert_eq!(main.panes.len(), 1);
-                assert_eq!(app.frontmost_window, Some(child_id));
-                let child = app.windows.get(&child_id).expect("child window");
+                assert_eq!(app.registry.frontmost_window, Some(child_id));
+                let child = app.registry.windows.get(&child_id).expect("child window");
                 assert_eq!(child.tab_states[0].tree.leaves(), [original]);
                 assert_eq!(child.tab_states[0].tree.zoomed_pane_id(), Some(original));
                 assert_eq!(child.tab_states[0].active_pane, child_active);
@@ -163,11 +167,11 @@ fn child_split_without_window_or_tab_leaves_topology_empty() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let child_id = app.__test_seed_child_window(&[]);
     assert!(!app.split_active_pane_in_child(child_id, Direction::Right));
-    let child = app.windows.get(&child_id).expect("empty child window");
+    let child = app.registry.windows.get(&child_id).expect("empty child window");
     assert!(child.tab_states.is_empty());
     assert!(child.panes.is_empty());
 
-    app.windows.remove(&child_id);
+    app.registry.windows.remove(&child_id);
     assert!(!app.split_active_pane_in_child(child_id, Direction::Right));
-    assert!(!app.windows.contains_key(&child_id));
+    assert!(!app.registry.windows.contains_key(&child_id));
 }

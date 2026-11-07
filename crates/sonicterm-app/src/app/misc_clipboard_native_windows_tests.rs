@@ -256,17 +256,21 @@ fn native_clipboard_paste_action_reaches_real_pty() {
     // READONLY consumes the action before any native read reaches the PTY.
     seed.clear().unwrap();
     seed.set().file_list(&files).unwrap();
-    app.windows.get_mut(&window).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+    app.registry.windows.get_mut(&window).unwrap().copy_mode =
+        Some(CopyModeState::read_only_at((0, 0)));
     let (submitted, sources) = paste(&mut app);
     assert!(submitted.is_empty() && sources.is_empty(), "READONLY pasted {submitted:?}");
-    app.windows.get_mut(&window).unwrap().copy_mode = None;
+    app.registry.windows.get_mut(&window).unwrap().copy_mode = None;
 
     // An open search takes the native text only; the co-offered files reach neither its query nor the PTY.
     add_unicode_text_keeping_files("needle");
-    app.windows.get_mut(&window).unwrap().tab_states[0].search = Some(SearchState::new());
+    app.registry.windows.get_mut(&window).unwrap().tab_states[0].search = Some(SearchState::new());
     let (submitted, sources) = paste(&mut app);
     assert!(submitted.is_empty() && sources.is_empty(), "search pasted {submitted:?}");
-    assert_eq!(app.windows[&window].tab_states[0].search.as_ref().unwrap().query, "needle");
+    assert_eq!(
+        app.registry.windows[&window].tab_states[0].search.as_ref().unwrap().query,
+        "needle"
+    );
 
     // Release the PTYs and clipboard handle before checking that the original station and desktop come back.
     drop(app);

@@ -673,12 +673,15 @@ impl App {
     /// whose child is not known to have exited; others are dropped and counted stale. A changed
     /// observation or warning repaints that window's chrome; a hidden window is marked only.
     pub(super) fn drain_foreground_probe_results(&mut self, now: Instant) {
-        let drained = self.fg_probes.drain();
+        let drained = self.services.fg_probes.drain();
         let mut stale = 0u64;
         let mut repaint: Vec<WindowId> = Vec::new();
         for (pane_id, result) in drained.results {
-            let Some((&window_id, window)) =
-                self.windows.iter_mut().find(|(_, window)| window.panes.contains_key(&pane_id))
+            let Some((&window_id, window)) = self
+                .registry
+                .windows
+                .iter_mut()
+                .find(|(_, window)| window.panes.contains_key(&pane_id))
             else {
                 // When: no window holds `pane_id`, the pane closed after its sample was taken.
                 stale += 1;
@@ -710,13 +713,13 @@ impl App {
                 repaint.push(window_id);
             }
         }
-        self.fg_probes.note_stale(stale);
+        self.services.fg_probes.note_stale(stale);
         for id in repaint {
             self.repaint_owner(id, &[RedrawCause::Chrome]);
         }
         // A dead worker's results are applied above first; demand now resolves synchronously.
         if drained.dead {
-            self.fg_probes.enter_unavailable("worker stopped");
+            self.services.fg_probes.enter_unavailable("worker stopped");
         }
         let warning_active = self.foreground_warning_active();
         self.finish_foreground_process_probe(now, warning_active);
@@ -724,8 +727,11 @@ impl App {
 
     /// Clear a pane's foreground state when its child exits, clean or not; the pane may stay.
     pub(super) fn clear_exited_foreground(&mut self, pane_id: u64, now: Instant) {
-        let Some((&window_id, window)) =
-            self.windows.iter_mut().find(|(_, window)| window.panes.contains_key(&pane_id))
+        let Some((&window_id, window)) = self
+            .registry
+            .windows
+            .iter_mut()
+            .find(|(_, window)| window.panes.contains_key(&pane_id))
         else {
             // When: no window holds `pane_id`, the pane is already gone.
             return;
@@ -749,7 +755,8 @@ impl App {
     // only Windows arms the wakes.
     /// Whether any window shows a per-tab foreground warning in accepted tab state.
     pub(in crate::app) fn foreground_warning_active(&self) -> bool {
-        self.windows
+        self.registry
+            .windows
             .values()
             .any(|window| window.tabs.tabs().iter().any(|tab| tab.foreground_privileged))
     }
@@ -763,8 +770,8 @@ impl App {
     ) {
         let privileged = self.process_privilege.is_privileged();
         // A cleared warning wake leaves warning-only demand with nothing to serve.
-        if self.foreground_schedule.settle_warning(now, warning_active, privileged) {
-            self.fg_probes.clear_warning_wants();
+        if self.services.foreground_schedule.settle_warning(now, warning_active, privileged) {
+            self.services.fg_probes.clear_warning_wants();
         }
     }
 
@@ -779,13 +786,13 @@ impl App {
     ) -> Vec<WindowId> {
         let privileged = self.process_privilege.is_privileged();
         let warning_active = self.foreground_warning_active();
-        let origin = self.foreground_schedule.take_due(now, warning_active, privileged);
+        let origin = self.services.foreground_schedule.take_due(now, warning_active, privileged);
         let mut changed_windows = Vec::new();
         if let Some(origin) = origin {
             // When: `origin` names a due wake, one demand covers every tab's active pane.
-            let probes = std::sync::Arc::clone(&self.fg_probes);
+            let probes = std::sync::Arc::clone(&self.services.fg_probes);
             let mut queued = false;
-            for (window_id, window) in &mut self.windows {
+            for (window_id, window) in &mut self.registry.windows {
                 let mut changed = false;
                 for (tab_idx, tab_state) in window.tab_states.iter().enumerate() {
                     let Some(pane) = window.panes.get_mut(&tab_state.active_pane) else {

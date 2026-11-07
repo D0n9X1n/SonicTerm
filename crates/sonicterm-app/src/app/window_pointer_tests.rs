@@ -56,7 +56,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                         10.0,
                         10.0,
                     );
-                    (app.main_window_id.unwrap(), main_pane)
+                    (app.registry.main_window_id.unwrap(), main_pane)
                 };
                 self.progress.set("wheel", case, "spawn_pty");
                 let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(
@@ -67,7 +67,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                 )
                 .unwrap();
                 let input = pty.input_sender();
-                let window_state = app.windows.get_mut(&window).unwrap();
+                let window_state = app.registry.windows.get_mut(&window).unwrap();
                 window_state.cursor_pos = (40.0, 40.0);
                 let pane = window_state.panes.get_mut(&pane_id).unwrap();
                 pane.pty = Some(pty);
@@ -98,7 +98,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                 }
                 self.progress.set("wheel", case, "check_tracked_wheel");
                 let completed = input.diagnostics().completed_messages;
-                let viewport = app.windows[&window].panes[&pane_id].viewport_top_abs;
+                let viewport = app.registry.windows[&window].panes[&pane_id].viewport_top_abs;
                 if completed != 1 || viewport != Some(10) {
                     self.failures.push(format!(
                         "child={child}: accepted/completed={completed}, viewport={viewport:?}"
@@ -106,7 +106,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                 }
                 self.progress.set("wheel", case, "reset_tracking");
                 {
-                    let pane = &app.windows[&window].panes[&pane_id];
+                    let pane = &app.registry.windows[&window].panes[&pane_id];
                     let mut parser = pane.parser.lock();
                     parser.advance(b"\x1b[?1003l");
                     // The reset reaches the wheel handler only through the published byte.
@@ -124,7 +124,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                     },
                 );
                 self.progress.set("wheel", case, "check_fallback");
-                let fallback = app.windows[&window].panes[&pane_id].viewport_top_abs;
+                let fallback = app.registry.windows[&window].panes[&pane_id].viewport_top_abs;
                 if fallback != viewport.map(|top| top.saturating_sub(3)) {
                     self.failures
                         .push(format!("child={child}: reset fallback viewport={fallback:?}"));
@@ -396,7 +396,7 @@ fn child_pointer_handlers_route_by_published_modes_while_the_parser_is_held() {
         ));
         let pane_id = app.__test_child_active_pane(child).unwrap();
         app.__test_enable_pty_write_log();
-        let pane = &app.windows[&child].panes[&pane_id];
+        let pane = &app.registry.windows[&child].panes[&pane_id];
         pane.pointer_input.store(modes.bits(), std::sync::atomic::Ordering::Relaxed);
         let (holder, release) = hold_parser(pane.parser.clone());
         let config = app.config.clone();
@@ -407,7 +407,7 @@ fn child_pointer_handlers_route_by_published_modes_while_the_parser_is_held() {
             app.handle_child_cursor_moved(child, position, &config);
         }
         crate::app::App::handle_child_mouse_wheel(
-            app.windows.get_mut(&child).unwrap(),
+            app.registry.windows.get_mut(&child).unwrap(),
             MouseScrollDelta::LineDelta(0.0, 1.0),
             &None,
             config.appearance.scrollbar,
@@ -423,7 +423,10 @@ fn child_pointer_handlers_route_by_published_modes_while_the_parser_is_held() {
             .map(|bytes| (pane_id, bytes))
             .collect();
         assert_eq!(app.__test_pty_write_log(), expected, "{modes:?}");
-        assert_eq!(app.windows[&child].panes[&pane_id].viewport_top_abs, None, "no local scroll");
+        assert_eq!(
+            app.registry.windows[&child].panes[&pane_id].viewport_top_abs, None,
+            "no local scroll"
+        );
     }
 }
 
@@ -499,7 +502,7 @@ fn child_wheel_follows_modes_published_from_parser_batches() {
         ));
         let pane_id = app.__test_child_active_pane(child).unwrap();
         let config = app.config.clone();
-        let window = app.windows.get_mut(&child).unwrap();
+        let window = app.registry.windows.get_mut(&child).unwrap();
         window.cursor_pos = (25.0, 15.0);
         let pane = window.panes.get_mut(&pane_id).unwrap();
         pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
@@ -513,7 +516,10 @@ fn child_wheel_follows_modes_published_from_parser_batches() {
             config.appearance.scrollbar,
         );
 
-        assert_eq!(app.windows[&child].panes[&pane_id].viewport_top_abs, viewport, "{name}");
+        assert_eq!(
+            app.registry.windows[&child].panes[&pane_id].viewport_top_abs, viewport,
+            "{name}"
+        );
     }
 }
 
@@ -880,15 +886,16 @@ fn native_output_events_request_frames_only_for_visible_output_or_explicit_reque
                 _ => None,
             };
             if let Some(pane) = published {
-                let pane = &self.app.windows[&self.child].panes[&pane];
+                let pane = &self.app.registry.windows[&self.child].panes[&pane];
                 pane.output_generation.fetch_add(1, Ordering::Release);
                 pane.output_outstanding.store(true, Ordering::Release);
             }
-            self.app.foreground_schedule.activity_wake = None;
+            self.app.services.foreground_schedule.activity_wake = None;
             let before = crate::app::window_state::window_redraw_requests();
             ApplicationHandler::user_event(&mut self.app, event_loop, event);
             let requests = crate::app::window_state::window_redraw_requests() - before;
-            self.results.push((requests, self.app.foreground_schedule.activity_wake.is_some()));
+            self.results
+                .push((requests, self.app.services.foreground_schedule.activity_wake.is_some()));
             // Settle the frame so the next request is not absorbed by one still in flight.
             if let Some(snapshot) = self.app.snapshot_window_redraw(self.child) {
                 self.app.finish_window_redraw(
@@ -912,9 +919,9 @@ fn native_output_events_request_frames_only_for_visible_output_or_explicit_reque
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["visible", "background"]);
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
-    let visible_pane = app.windows[&child].tab_states[0].active_pane;
-    let hidden_pane = app.windows[&child].tab_states[1].active_pane;
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
+    let visible_pane = app.registry.windows[&child].tab_states[0].active_pane;
+    let hidden_pane = app.registry.windows[&child].tab_states[1].active_pane;
     let event_loop =
         EventLoop::<UserEvent>::with_user_event().with_any_thread(true).build().unwrap();
     let proxy = event_loop.create_proxy();

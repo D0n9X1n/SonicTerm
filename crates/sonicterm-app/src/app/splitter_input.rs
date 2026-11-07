@@ -143,7 +143,7 @@ impl App {
     /// Outer pane-layout rect for a child window (same basis the renderer
     /// + `compute_pane_rects_for` use).
     fn child_pane_outer_rect(&self, win_id: WindowId) -> Option<sonicterm_ui::pane::Rect> {
-        let child = self.windows.get(&win_id)?;
+        let child = self.registry.windows.get(&win_id)?;
         if let Some((outer, _, _)) = child.test_pane_viewport {
             // When: `test_pane_viewport` supplies `outer` directly, so headless
             // tests get pane geometry without a renderer.
@@ -169,7 +169,7 @@ impl App {
         pixel_y: f32,
     ) -> Option<sonicterm_ui::pane::SplitterHit> {
         let outer = self.child_pane_outer_rect(win_id)?;
-        let child = self.windows.get(&win_id)?;
+        let child = self.registry.windows.get(&win_id)?;
         let tab_idx = child.tabs.active_index();
         child.tab_states.get(tab_idx).and_then(|state| {
             state.tree.hit_splitter(outer, CHILD_SPLITTER_HIT_THICKNESS, pixel_x, pixel_y)
@@ -181,7 +181,7 @@ impl App {
         win_id: WindowId,
         axis: sonicterm_ui::pane::SplitAxis,
     ) {
-        if let Some(child) = self.windows.get(&win_id) {
+        if let Some(child) = self.registry.windows.get(&win_id) {
             if let Some(native_window) = child.window.as_ref() {
                 let icon = match axis {
                     sonicterm_ui::pane::SplitAxis::Vertical => CursorIcon::ColResize,
@@ -200,9 +200,13 @@ impl App {
     ) -> bool {
         let hit = self.splitter_hit_at_in_child(win_id, pixel_x, pixel_y);
         let axis = hit.map(|hit| hit.axis);
-        let changed =
-            self.windows.get(&win_id).map(|child| child.splitter_hover != axis).unwrap_or(false);
-        if let Some(child) = self.windows.get_mut(&win_id) {
+        let changed = self
+            .registry
+            .windows
+            .get(&win_id)
+            .map(|child| child.splitter_hover != axis)
+            .unwrap_or(false);
+        if let Some(child) = self.registry.windows.get_mut(&win_id) {
             child.splitter_hover = axis;
         }
         if let Some(axis) = axis {
@@ -210,7 +214,7 @@ impl App {
         } else if changed {
             // When: `changed` and no axis — the pointer just left a divider, so
             // the resize cursor must be handed back to the default.
-            if let Some(child) = self.windows.get(&win_id) {
+            if let Some(child) = self.registry.windows.get(&win_id) {
                 if let Some(native_window) = child.window.as_ref() {
                     native_window.set_cursor(CursorIcon::Default);
                 }
@@ -222,6 +226,7 @@ impl App {
     /// Test-only: prove the child splitter hit-test is reachable with headless
     /// viewport geometry.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_splitter_hit_axis(
         &self,
         win_id: WindowId,
@@ -235,6 +240,7 @@ impl App {
     /// whether hover state or cursor shape changed, so the no-button hover path
     /// is reachable with headless viewport geometry.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_refresh_child_splitter_hover(
         &mut self,
         win_id: WindowId,
@@ -246,11 +252,12 @@ impl App {
 
     /// Test-only: read child splitter-hover state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_splitter_hover(
         &self,
         win_id: WindowId,
     ) -> Option<sonicterm_ui::pane::SplitAxis> {
-        self.windows.get(&win_id).and_then(|child| child.splitter_hover)
+        self.registry.windows.get(&win_id).and_then(|child| child.splitter_hover)
     }
 
     /// Apply an in-flight splitter drag in the child window `win_id`.
@@ -260,7 +267,8 @@ impl App {
         pixel_x: f32,
         pixel_y: f32,
     ) -> bool {
-        let Some(drag) = self.windows.get(&win_id).and_then(|child| child.splitter_drag.clone())
+        let Some(drag) =
+            self.registry.windows.get(&win_id).and_then(|child| child.splitter_drag.clone())
         else {
             // When: no `splitter_drag` is recorded, so this cursor move is not
             // part of a divider drag and belongs to the ordinary hover path.
@@ -278,8 +286,10 @@ impl App {
             // and the drag stays live without re-laying out the tree.
             return true;
         }
-        let tab_idx = self.windows.get(&win_id).map(|child| child.tabs.active_index()).unwrap_or(0);
+        let tab_idx =
+            self.registry.windows.get(&win_id).map(|child| child.tabs.active_index()).unwrap_or(0);
         let changed = self
+            .registry
             .windows
             .get_mut(&win_id)
             .and_then(|child| child.tab_states.get_mut(tab_idx))
@@ -288,11 +298,11 @@ impl App {
             })
             .unwrap_or(false);
         if changed {
-            if let Some(child) = self.windows.get_mut(&win_id) {
+            if let Some(child) = self.registry.windows.get_mut(&win_id) {
                 resize_visible_panes_in_child_for_pointer(child);
             }
         }
-        if let Some(child) = self.windows.get_mut(&win_id) {
+        if let Some(child) = self.registry.windows.get_mut(&win_id) {
             if let Some(active) = child.splitter_drag.as_mut() {
                 active.last_pos = (pixel_x, pixel_y);
             }

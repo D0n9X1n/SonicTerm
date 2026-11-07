@@ -75,27 +75,27 @@ impl App {
             self.main_renderer().is_some_and(GpuRenderer::device_accepts_gpu_work);
         let configured = self.config.window.warm_window_pool;
         let target = super::super::warm_window_pool_target(configured, software_rendering);
-        let count_before = self.warm_window_pool.len();
-        if self.warm_window_pool.len() > target {
-            self.warm_window_pool.truncate(target);
+        let count_before = self.registry.warm_window_pool.len();
+        if self.registry.warm_window_pool.len() > target {
+            self.registry.warm_window_pool.truncate(target);
         }
         if super::super::warm_window_pool_may_spawn(
             device_accepts_gpu_work,
-            self.warm_window_pool.len(),
+            self.registry.warm_window_pool.len(),
             configured,
             software_rendering,
         ) {
             if let Some(warm) = self.create_warm_window(event_loop) {
-                self.warm_window_pool.push(warm);
+                self.registry.warm_window_pool.push(warm);
             }
         }
-        if self.warm_window_pool.len() != count_before {
+        if self.registry.warm_window_pool.len() != count_before {
             tracing::debug!(
                 target: "memory",
                 configured,
                 target,
                 software_rendering,
-                warm_renderer_count = self.warm_window_pool.len(),
+                warm_renderer_count = self.registry.warm_window_pool.len(),
                 "warm renderer pool maintained"
             );
         }
@@ -161,24 +161,27 @@ impl App {
     }
 
     pub(super) fn take_warm_window(&mut self) -> Option<super::super::WarmWindow> {
-        self.warm_window_pool.pop()
+        self.registry.warm_window_pool.pop()
     }
 
     /// Test hook: build one warm-pool window exactly as pool maintenance does, pool it, and return
     /// its id; `None` when its window or renderer could not be built.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_prewarm_window(&mut self, event_loop: &ActiveEventLoop) -> Option<WindowId> {
         let warm = self.create_warm_window(event_loop)?;
         let id = warm.window.id();
-        self.warm_window_pool.push(warm);
+        self.registry.warm_window_pool.push(warm);
         Some(id)
     }
 
     /// Test hook: the glyph atlas dimension of pooled warm window `id`, `None` once it left the pool.
     #[doc(hidden)]
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_warm_glyph_atlas_dim(&self, id: WindowId) -> Option<u32> {
-        self.warm_window_pool
+        self.registry
+            .warm_window_pool
             .iter()
             .find(|warm| warm.window.id() == id)
             .map(|warm| warm.renderer.glyph_atlas_facts().dim)
@@ -187,12 +190,13 @@ impl App {
     /// Test hook: tear the main window's tab at `index` out through the production route, which
     /// adopts a pooled warm window when one is ready.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_tear_out_tab(&mut self, event_loop: &ActiveEventLoop, index: usize) -> bool {
         self.tear_out_tab(event_loop, index)
     }
 
     pub(in crate::app) fn is_warm_window_id(&self, win_id: WindowId) -> bool {
-        self.warm_window_pool.iter().any(|warm| warm.window.id() == win_id)
+        self.registry.warm_window_pool.iter().any(|warm| warm.window.id() == win_id)
     }
 }
 

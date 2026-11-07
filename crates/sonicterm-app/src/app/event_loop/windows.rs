@@ -14,13 +14,13 @@ impl App {
     #[cfg(windows)]
     pub(in crate::app) fn arm_foreground_probe_after_input(&mut self, now: Instant) {
         let privileged = self.process_privilege.is_privileged();
-        self.foreground_schedule.arm_after_input(now, privileged);
+        self.services.foreground_schedule.arm_after_input(now, privileged);
     }
 
     #[cfg(windows)]
     pub(in crate::app) fn arm_foreground_probe_after_output(&mut self, now: Instant) {
         let privileged = self.process_privilege.is_privileged();
-        self.foreground_schedule.arm_after_output(now, privileged);
+        self.services.foreground_schedule.arm_after_output(now, privileged);
     }
 
     #[cfg(target_os = "windows")]

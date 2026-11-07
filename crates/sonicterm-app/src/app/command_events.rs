@@ -45,12 +45,12 @@ impl App {
     }
 
     pub(super) fn poll_command_events_for_tab(&mut self, tab_idx: usize) {
-        let Some(id) = self.main_window_id else {
+        let Some(id) = self.registry.main_window_id else {
             // When: `main_window_id` is unset, so no tab bar exists yet to carry
             // the status this poll would produce.
             return;
         };
-        let Some(main) = self.windows.get_mut(&id) else {
+        let Some(main) = self.registry.windows.get_mut(&id) else {
             // When: `id` no longer resolves in `windows`, so the state this poll
             // would write into is already gone.
             return;

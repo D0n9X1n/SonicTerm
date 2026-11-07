@@ -75,7 +75,7 @@ fn a_split_beside_a_torn_out_pane_stays_in_its_window() {
         10.0,
         10.0
     ));
-    let child_pane = app.windows[&child].tab_states[0].active_pane;
+    let child_pane = app.registry.windows[&child].tab_states[0].active_pane;
     let created = app
         .create_pane_at(child_pane, Placement::Down, AgentLaunch::default())
         .expect("helper created");
@@ -84,7 +84,7 @@ fn a_split_beside_a_torn_out_pane_stays_in_its_window() {
         Some(child),
         "the helper lives in the anchor's window"
     );
-    assert_eq!(app.windows[&child].tab_states[0].active_pane, child_pane, "focus stays");
+    assert_eq!(app.registry.windows[&child].tab_states[0].active_pane, child_pane, "focus stays");
 }
 
 /// A closed anchor fails with `PaneGone` and leaves every window's panes as they were.
@@ -109,8 +109,8 @@ fn a_missing_anchor_changes_nothing() {
 fn readonly_in_a_background_window_refuses_input_and_helpers() {
     let (mut app, _anchor, _active) = app_with_background_anchor();
     let child = app.__test_seed_child_window(&["child"]);
-    let child_pane = app.windows[&child].tab_states[0].active_pane;
-    app.windows.get_mut(&child).expect("child").copy_mode =
+    let child_pane = app.registry.windows[&child].tab_states[0].active_pane;
+    app.registry.windows.get_mut(&child).expect("child").copy_mode =
         Some(CopyModeState::read_only_at((0, 0)));
     app.pty_write_log_enabled = true;
     assert_eq!(
@@ -122,7 +122,7 @@ fn readonly_in_a_background_window_refuses_input_and_helpers() {
         app.create_pane_at(child_pane, Placement::Right, AgentLaunch::default()),
         Err(TargetError::ReadOnly)
     );
-    assert_eq!(app.windows[&child].panes.len(), 1);
+    assert_eq!(app.registry.windows[&child].panes.len(), 1);
 }
 
 /// A program the agent names runs held, so its exit status and output stay; the pane's spawn
@@ -180,7 +180,7 @@ fn agent_ownership_survives_a_tab_transfer() {
     app.transfer_tab(None, 2, Some(child), 1).expect("the helper tab moves");
     let location = app.locate_pane(created.pane_id).expect("still live");
     assert_eq!(location.window_id, child);
-    assert!(app.windows[&child].panes[&created.pane_id].agent_owned);
+    assert!(app.registry.windows[&child].panes[&created.pane_id].agent_owned);
 }
 
 /// The helper's grid starts at its split size, so a program that reads its size at launch never
@@ -214,11 +214,11 @@ fn a_hidden_child_tab_helper_is_owned_at_once() {
         10.0,
         10.0
     ));
-    let hidden = app.windows[&child].tab_states[0].active_pane;
+    let hidden = app.registry.windows[&child].tab_states[0].active_pane;
     let created = app
         .create_pane_at(hidden, Placement::Right, AgentLaunch::default())
         .expect("helper created");
-    let window = &app.windows[&child];
+    let window = &app.registry.windows[&child];
     assert_ne!(window.tabs.active_index(), 0, "the anchor's tab is hidden");
     assert_eq!(
         window.panes[&created.pane_id].owner.is_some(),

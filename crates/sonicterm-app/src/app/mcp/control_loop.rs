@@ -106,7 +106,7 @@ impl App {
             // When: `control` is `Off`, every control tool is refused.
             return Err(Refusal::ControlOff);
         }
-        let Some(pane) = self.windows.values().find_map(|window| window.panes.get(&pane_id)) else {
+        let Some(pane) = self.pane_by_id(pane_id) else {
             // When: no window holds `pane_id`, there is nothing to act on.
             return Err(Refusal::PaneGone);
         };
@@ -153,6 +153,7 @@ impl App {
             return refusal.reply();
         }
         let bracketed = self
+            .registry
             .windows
             .values()
             .find_map(|window| window.panes.get(&pane_id))
@@ -179,13 +180,11 @@ impl App {
             // When: `authorize_writable` refused the pane, nothing is written.
             return refusal.reply();
         }
-        let Some(snapshot) =
-            self.windows.values().find_map(|window| window.panes.get(&pane_id)).map(|pane| {
-                KeyboardSnapshot::from_bits(
-                    crate::app::frame_counters::lock_parser(&pane.parser).keyboard_input_snapshot(),
-                )
-            })
-        else {
+        let Some(snapshot) = self.pane_by_id(pane_id).map(|pane| {
+            KeyboardSnapshot::from_bits(
+                crate::app::frame_counters::lock_parser(&pane.parser).keyboard_input_snapshot(),
+            )
+        }) else {
             // When: the pane vanished between the check and the read, nothing is written.
             return Refusal::PaneGone.reply();
         };
@@ -201,6 +200,7 @@ impl App {
     fn authorize_writable(&self, control: McpControl, pane_id: u64) -> Result<(), Refusal> {
         self.authorize_control(control, pane_id, false)?;
         let running = self
+            .registry
             .windows
             .values()
             .find_map(|window| window.panes.get(&pane_id))
@@ -231,12 +231,12 @@ impl App {
             // When: `locate_pane` finds no tab for the pane, nothing closes.
             return Refusal::PaneGone.reply();
         };
-        let Some(window) = self.windows.get(&location.window_id) else {
+        let Some(window) = self.registry.windows.get(&location.window_id) else {
             // When: the pane's window is gone, nothing closes.
             return Refusal::PaneGone.reply();
         };
         let leaves =
-            window.tab_states.get(location.tab_index).map_or(0, |tab| tab.tree.leaves().len());
+            window.tab_states.get(location.tab_index).map_or(0, |tab| tab.tree.leaf_count());
         let last_tab = location.is_main && window.tab_states.len() == 1 && leaves == 1;
         if last_tab {
             // When: it is the main window's `last_tab`, closing it would quit SonicTerm.

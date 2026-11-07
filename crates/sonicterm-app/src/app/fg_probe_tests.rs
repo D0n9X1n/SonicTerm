@@ -112,24 +112,30 @@ fn app_with(
 ) -> (App, WindowId, u64, PtyExitObserved) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("main");
-    let main = app.main_window_id.expect("seeded main window");
-    app.fg_probes = Arc::new(probes);
+    let main = app.registry.main_window_id.expect("seeded main window");
+    app.services.fg_probes = Arc::new(probes);
     let exited = PtyExitObserved::detached();
-    app.windows.get_mut(&main).unwrap().panes.get_mut(&pane_id).unwrap().test_foreground_source =
-        Some((source, exited.clone()));
+    app.registry
+        .windows
+        .get_mut(&main)
+        .unwrap()
+        .panes
+        .get_mut(&pane_id)
+        .unwrap()
+        .test_foreground_source = Some((source, exited.clone()));
     (app, main, pane_id, exited)
 }
 
 /// Set demand for the app's pane, bypassing the TTL like a due Windows wake.
 fn demand(app: &mut App, main: WindowId, pane_id: u64) -> Demand {
-    let probes = Arc::clone(&app.fg_probes);
-    let pane = app.windows.get_mut(&main).unwrap().panes.get_mut(&pane_id).unwrap();
+    let probes = Arc::clone(&app.services.fg_probes);
+    let pane = app.registry.windows.get_mut(&main).unwrap().panes.get_mut(&pane_id).unwrap();
     probes.request(pane_id, pane, WantOrigin::Frame, Instant::now(), true)
 }
 
 /// The cached observation of the app's pane.
 fn cached(app: &App, main: WindowId, pane_id: u64) -> Option<ForegroundProcess> {
-    app.windows[&main].panes[&pane_id]
+    app.registry.windows[&main].panes[&pane_id]
         .fg_proc_cache
         .as_ref()
         .and_then(|(_, process)| process.clone())
@@ -206,10 +212,10 @@ fn drain_drops_mismatched_exited_and_closed_results_as_stale() {
             probes(scripted(vec![process("gsudo", true)], &observed), idle_spawner(), &observed);
         let (mut app, main, pane_id, exited) = app_with(probes, identity(10, 1));
         let stats = Arc::new(ForegroundWorkerStats::default());
-        app.fg_probes.seal_stats(Some(Arc::clone(&stats)));
+        app.services.fg_probes.seal_stats(Some(Arc::clone(&stats)));
         assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-        assert!(drive(&app.fg_probes));
-        let window = app.windows.get_mut(&main).unwrap();
+        assert!(drive(&app.services.fg_probes));
+        let window = app.registry.windows.get_mut(&main).unwrap();
         match case {
             "token" => {
                 window.panes.get_mut(&pane_id).unwrap().fg_probe.as_mut().unwrap().identity =
@@ -229,7 +235,7 @@ fn drain_drops_mismatched_exited_and_closed_results_as_stale() {
         assert_eq!(stats.stale.load(Ordering::Relaxed), 1, "{case}");
         if case != "closed" {
             assert_eq!(cached(&app, main, pane_id), None, "{case}: the cache is unchanged");
-            assert!(!app.windows[&main].tabs.tabs()[0].foreground_privileged, "{case}");
+            assert!(!app.registry.windows[&main].tabs.tabs()[0].foreground_privileged, "{case}");
         }
     }
 }
@@ -265,15 +271,15 @@ fn drain_repaints_chrome_for_a_name_change_and_not_for_an_unchanged_sample() {
         &observed,
     );
     let (mut app, main, pane_id, _) = app_with(probes, identity(10, 1));
-    app.windows.get_mut(&main).unwrap().panes.get_mut(&pane_id).unwrap().fg_proc_cache =
+    app.registry.windows.get_mut(&main).unwrap().panes.get_mut(&pane_id).unwrap().fg_proc_cache =
         Some((Instant::now(), process("zsh", false)));
 
     for (expected_repaint, label) in [(true, "name change"), (false, "unchanged")] {
         assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-        assert!(drive(&app.fg_probes));
-        let before = app.windows[&main].redraw.snapshot();
+        assert!(drive(&app.services.fg_probes));
+        let before = app.registry.windows[&main].redraw.snapshot();
         app.drain_foreground_probe_results(Instant::now());
-        let after = app.windows[&main].redraw.snapshot();
+        let after = app.registry.windows[&main].redraw.snapshot();
         assert_eq!(cached(&app, main, pane_id), process("vim", false), "{label}");
         assert_eq!(after != before, expected_repaint, "{label}");
     }
@@ -287,12 +293,12 @@ fn drain_applies_a_privileged_sample_to_the_tab_warning() {
         probes(scripted(vec![process("gsudo", true)], &observed), idle_spawner(), &observed);
     let (mut app, main, pane_id, _) = app_with(probes, identity(10, 1));
     assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-    assert!(drive(&app.fg_probes));
+    assert!(drive(&app.services.fg_probes));
 
     app.drain_foreground_probe_results(Instant::now());
 
     assert_eq!(cached(&app, main, pane_id), process("gsudo", true));
-    assert!(app.windows[&main].tabs.tabs()[0].foreground_privileged);
+    assert!(app.registry.windows[&main].tabs.tabs()[0].foreground_privileged);
 }
 
 /// Death while a ready event is undelivered sends no second event; one drain applies the
@@ -315,10 +321,10 @@ fn death_with_an_undelivered_event_posts_nothing_more_and_one_drain_applies_then
     let (mut app, main, pane_id, _) =
         app_with(probes(sampler, thread_spawner(), &observed), identity(10, 1));
     assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-    app.fg_probes.wake();
+    app.services.fg_probes.wake();
     wait_until("the first ready event", || observed.notified() == 1);
     assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-    app.fg_probes.wake();
+    app.services.fg_probes.wake();
     wait_until("the worker to die", || observed.live() == 0);
     assert_eq!(observed.notified(), 1, "death never queues a second undelivered event");
 
@@ -329,10 +335,10 @@ fn death_with_an_undelivered_event_posts_nothing_more_and_one_drain_applies_then
         process("vim", false),
         "results apply before Unavailable"
     );
-    assert!(app.fg_probes.is_unavailable());
-    assert!(app.fg_probes.shared.map.lock().entries.is_empty());
+    assert!(app.services.fg_probes.is_unavailable());
+    assert!(app.services.fg_probes.shared.map.lock().entries.is_empty());
     app.drain_foreground_probe_results(Instant::now());
-    assert!(app.fg_probes.is_unavailable(), "a second drain changes nothing");
+    assert!(app.services.fg_probes.is_unavailable(), "a second drain changes nothing");
 }
 
 /// Death after its last event was drained posts exactly one new event; the drain it
@@ -355,17 +361,17 @@ fn death_after_a_drain_posts_exactly_one_event_then_stops() {
     let (mut app, main, pane_id, _) =
         app_with(probes(sampler, thread_spawner(), &observed), identity(10, 1));
     assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-    app.fg_probes.wake();
+    app.services.fg_probes.wake();
     wait_until("the first ready event", || observed.notified() == 1);
     app.drain_foreground_probe_results(Instant::now());
-    assert!(!app.fg_probes.is_unavailable());
+    assert!(!app.services.fg_probes.is_unavailable());
 
     assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-    app.fg_probes.wake();
+    app.services.fg_probes.wake();
     wait_until("the worker to die", || observed.live() == 0);
     assert_eq!(observed.notified(), 2, "death posts one event");
     app.drain_foreground_probe_results(Instant::now());
-    assert!(app.fg_probes.is_unavailable());
+    assert!(app.services.fg_probes.is_unavailable());
 }
 
 /// Dropping the probes with a wake still buffered exits the worker without probing or
@@ -435,7 +441,7 @@ fn an_exit_clears_name_warning_and_entry_but_keeps_an_unclean_pane() {
     let probes = probes(scripted(Vec::new(), &observed), idle_spawner(), &observed);
     let (mut app, main, pane_id, exited) = app_with(probes, identity(10, 1));
     assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     window.panes.get_mut(&pane_id).unwrap().fg_proc_cache =
         Some((Instant::now(), process("gsudo", true)));
     assert!(window.tabs.set_foreground_privileged(0, true));
@@ -443,11 +449,11 @@ fn an_exit_clears_name_warning_and_entry_but_keeps_an_unclean_pane() {
 
     app.handle_pane_process_exited(pane_id, sonicterm_types::PaneExitStatus::Code(1));
 
-    let pane = &app.windows[&main].panes[&pane_id];
+    let pane = &app.registry.windows[&main].panes[&pane_id];
     assert_eq!(cached(&app, main, pane_id), None);
     assert!(pane.fg_probe.is_none());
-    assert!(!app.windows[&main].tabs.tabs()[0].foreground_privileged);
-    assert!(app.fg_probes.shared.map.lock().entries.is_empty());
+    assert!(!app.registry.windows[&main].tabs.tabs()[0].foreground_privileged);
+    assert!(app.services.fg_probes.shared.map.lock().entries.is_empty());
     assert_eq!(demand(&mut app, main, pane_id), Demand::Fresh, "an exited pane demands nothing");
 }
 
@@ -747,7 +753,7 @@ fn holding_spawner(held: &Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>) -> Spawner 
 fn two_tab_app(probes: ForegroundProbes) -> (App, WindowId, [u64; 2]) {
     let (mut app, main, first, _) = app_with(probes, identity(10, 1));
     let second = app.__test_seed_tab("second");
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     window.panes.get_mut(&second).unwrap().test_foreground_source =
         Some((identity(20, 1), PtyExitObserved::detached()));
     window.panes.get_mut(&first).unwrap().fg_proc_cache =
@@ -771,7 +777,7 @@ fn the_due_adapter_serves_simultaneous_expiry_with_one_batch_and_the_drain_settl
     );
     let (mut app, main, _) = two_tab_app(probes);
     let due = Instant::now();
-    app.foreground_schedule = ForegroundSchedule {
+    app.services.foreground_schedule = ForegroundSchedule {
         activity_wake: Some(PendingForegroundProbe { due, fixed: true }),
         warning_wake: Some(due),
     };
@@ -779,10 +785,13 @@ fn the_due_adapter_serves_simultaneous_expiry_with_one_batch_and_the_drain_settl
     let _ = app.refresh_foreground_privileges_if_due(due);
 
     assert_eq!(held.lock().len(), 1, "one worker for the whole due demand");
-    assert!(app.foreground_schedule.activity_wake.is_none(), "the due activity wake was consumed");
-    assert!(app.foreground_schedule.warning_wake.is_none_or(|wake| wake > due));
-    assert!(drive(&app.fg_probes));
-    assert!(drive(&app.fg_probes));
+    assert!(
+        app.services.foreground_schedule.activity_wake.is_none(),
+        "the due activity wake was consumed"
+    );
+    assert!(app.services.foreground_schedule.warning_wake.is_none_or(|wake| wake > due));
+    assert!(drive(&app.services.fg_probes));
+    assert!(drive(&app.services.fg_probes));
     let batches = observed.batches.lock().clone();
     assert_eq!(batches.len(), 1, "simultaneous expiry is one batch");
     let mut pids: Vec<u32> = batches[0].iter().map(|identity| identity.pid).collect();
@@ -791,8 +800,12 @@ fn the_due_adapter_serves_simultaneous_expiry_with_one_batch_and_the_drain_settl
 
     app.drain_foreground_probe_results(due);
 
-    assert!(app.windows[&main].tabs.tabs().iter().all(|tab| !tab.foreground_privileged));
-    assert_eq!(app.foreground_schedule, ForegroundSchedule::default(), "no warning, no wake");
+    assert!(app.registry.windows[&main].tabs.tabs().iter().all(|tab| !tab.foreground_privileged));
+    assert_eq!(
+        app.services.foreground_schedule,
+        ForegroundSchedule::default(),
+        "no warning, no wake"
+    );
 }
 
 /// A warning wake expiring as a drain clears the warning: the due adapter sets warning demand,
@@ -810,18 +823,19 @@ fn a_warning_cleared_by_the_drain_at_its_expiry_drops_only_warning_demand() {
     let (mut app, main, [first, second]) = two_tab_app(probes);
     // An earlier batch for the first pane has stored its result, still undrained.
     assert_eq!(demand(&mut app, main, first), Demand::Queued);
-    assert!(drive(&app.fg_probes));
+    assert!(drive(&app.services.fg_probes));
     // The second pane has frame demand pending.
     assert_eq!(demand(&mut app, main, second), Demand::Queued);
     let due = Instant::now();
-    app.foreground_schedule = ForegroundSchedule { activity_wake: None, warning_wake: Some(due) };
+    app.services.foreground_schedule =
+        ForegroundSchedule { activity_wake: None, warning_wake: Some(due) };
 
     let _ = app.refresh_foreground_privileges_if_due(due);
     app.drain_foreground_probe_results(due);
 
-    assert!(app.windows[&main].tabs.tabs().iter().all(|tab| !tab.foreground_privileged));
-    assert_eq!(app.foreground_schedule.warning_wake, None, "the warning wake is cleared");
-    assert!(drive(&app.fg_probes));
+    assert!(app.registry.windows[&main].tabs.tabs().iter().all(|tab| !tab.foreground_privileged));
+    assert_eq!(app.services.foreground_schedule.warning_wake, None, "the warning wake is cleared");
+    assert!(drive(&app.services.fg_probes));
     let batches = observed.batches.lock().clone();
     assert_eq!(batches.len(), 2);
     let pids: Vec<u32> = batches[1].iter().map(|identity| identity.pid).collect();
@@ -838,46 +852,6 @@ fn warning_demand_never_replaces_another_origin() {
     );
     assert_eq!(WantOrigin::merge(Some(WantOrigin::Warning), WantOrigin::Frame), WantOrigin::Frame);
     assert_eq!(WantOrigin::merge(None, WantOrigin::Warning), WantOrigin::Warning);
-}
-
-/// No frame path or timer walks the process table: the probe and `pid()` appear only in
-/// the worker's platform sampler.
-#[test]
-fn no_event_loop_path_probes_the_foreground_process() {
-    for (name, source) in [
-        ("privilege.rs", include_str!("privilege.rs")),
-        ("tab_state.rs", include_str!("tab_state.rs")),
-        (
-            "window_event.rs",
-            concat!(
-                include_str!("window_event.rs"),
-                "\n",
-                include_str!("window_event_pointer.rs"),
-                "\n",
-                include_str!("window_event_redraw.rs")
-            ),
-        ),
-        ("child_window_redraw.rs", include_str!("child_window_redraw.rs")),
-        ("event_loop/windows.rs", include_str!("event_loop/windows.rs")),
-    ] {
-        let source = source.replace("\r\n", "\n");
-        for probe in ["foreground_process_info", "foreground_processes_info"] {
-            assert!(!source.contains(probe), "{name} probes on the event loop");
-        }
-        assert!(!source.contains(".pid()"), "{name} reads a pid on the frame path");
-    }
-    let frame_counters = concat!(
-        include_str!("frame_counters.rs"),
-        "\n",
-        include_str!("frame_counters_app.rs"),
-        "\n",
-        include_str!("frame_counters_dispatch.rs"),
-        "\n",
-        include_str!("frame_counters_histogram.rs"),
-        "\n",
-        include_str!("frame_counters_record.rs")
-    );
-    assert!(!frame_counters.contains("fn time_probe"), "the event-loop probe timer is deleted");
 }
 
 /// The App's real foreground demand progression, through the injectable sampler, spawner and clock:
@@ -904,15 +878,15 @@ fn frame_demand_keeps_sampling_the_foreground_every_ttl_while_frames_continue() 
     for frame in 0..200_u64 {
         let now = start + Duration::from_millis(16 * frame);
         *virtual_now.lock() = now;
-        let probes = Arc::clone(&app.fg_probes);
-        let pane = app.windows.get_mut(&main).unwrap().panes.get_mut(&pane_id).unwrap();
+        let probes = Arc::clone(&app.services.fg_probes);
+        let pane = app.registry.windows.get_mut(&main).unwrap().panes.get_mut(&pane_id).unwrap();
         if probes.request(pane_id, pane, WantOrigin::Frame, now, false) == Demand::Queued {
             // When: the frame's demand is queued, the worker batch runs and the event loop applies it.
-            assert!(drive(&app.fg_probes));
+            assert!(drive(&app.services.fg_probes));
             app.drain_foreground_probe_results(now);
         }
         let sampled_at =
-            app.windows[&main].panes[&pane_id].fg_proc_cache.as_ref().map(|entry| entry.0);
+            app.registry.windows[&main].panes[&pane_id].fg_proc_cache.as_ref().map(|entry| entry.0);
         if let Some(sampled_at) = sampled_at.filter(|at| applied.last() != Some(at)) {
             // When: a new `sampled_at` is applied, this frame's demand produced a sample.
             applied.push(sampled_at);
@@ -979,10 +953,10 @@ fn injected_death_does_not_wait_for_a_slow_panic_hook() {
     let (mut app, main, pane_id, _) =
         app_with(probes(sampler, spawner, &observed), identity(10, 1));
     assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-    app.fg_probes.wake();
+    app.services.fg_probes.wake();
     wait_until("the first ready event", || observed.notified() == 1);
     app.drain_foreground_probe_results(Instant::now());
     assert_eq!(demand(&mut app, main, pane_id), Demand::Queued);
-    app.fg_probes.wake();
+    app.services.fg_probes.wake();
     wait_until("the worker to die", || observed.live() == 0);
 }

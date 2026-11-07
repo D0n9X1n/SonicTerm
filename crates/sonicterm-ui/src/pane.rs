@@ -178,21 +178,12 @@ impl PaneTree {
             return true;
         }
 
-        if self.contains_leaf(active_pane) {
+        if self.contains_pane(active_pane) {
             self.set_zoomed_pane_id(Some(active_pane));
             true
         } else {
             // When: `contains_leaf` is false, `active_pane` lives in another tab, so nothing zooms.
             false
-        }
-    }
-
-    fn contains_leaf(&self, needle: PaneId) -> bool {
-        match self {
-            PaneTree::Leaf { id, .. } => *id == needle,
-            PaneTree::Split { first, second, .. } => {
-                first.contains_leaf(needle) || second.contains_leaf(needle)
-            }
         }
     }
 
@@ -299,12 +290,36 @@ impl PaneTree {
     }
 
     fn collect(&self, out: &mut Vec<PaneId>) {
+        self.for_each_leaf(&mut |id| out.push(id));
+    }
+
+    /// Call `visit` with each leaf id in [`Self::leaves`] order, without allocating.
+    pub fn for_each_leaf(&self, visit: &mut impl FnMut(PaneId)) {
         match self {
-            PaneTree::Leaf { id, .. } => out.push(*id),
+            PaneTree::Leaf { id, .. } => visit(*id),
             PaneTree::Split { first, second, .. } => {
-                first.collect(out);
-                second.collect(out);
+                first.for_each_leaf(visit);
+                second.for_each_leaf(visit);
             }
+        }
+    }
+
+    /// Whether `id` is a leaf of this tree; the same as `leaves().contains(&id)`, without
+    /// allocating, and stopping at the first match.
+    pub fn contains_pane(&self, id: PaneId) -> bool {
+        match self {
+            PaneTree::Leaf { id: leaf, .. } => *leaf == id,
+            PaneTree::Split { first, second, .. } => {
+                first.contains_pane(id) || second.contains_pane(id)
+            }
+        }
+    }
+
+    /// The number of leaves; the same as `leaves().len()`, without allocating.
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            PaneTree::Leaf { .. } => 1,
+            PaneTree::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
         }
     }
 
@@ -344,12 +359,42 @@ impl PaneTree {
         }
     }
 
+    /// The rectangle `layout(outer)` gives `id`, without building every leaf's rectangle: it
+    /// follows only the split that contains `id`. `None` when `id` is not visible, because it
+    /// is absent or another pane is zoomed.
+    pub fn pane_rect(&self, outer: Rect, id: PaneId) -> Option<Rect> {
+        if let Some(zoomed) = self.zoomed_pane_id().filter(|zoomed| self.contains_pane(*zoomed)) {
+            // When: a live pane is `zoomed`, it alone is visible and fills `outer`.
+            return (zoomed == id).then_some(outer);
+        }
+        let mut node = self;
+        let mut rect = outer;
+        loop {
+            match node {
+                PaneTree::Leaf { id: leaf, .. } => {
+                    // When: the walk reached a `Leaf`, it is `id` itself or `id` is not here.
+                    return (*leaf == id).then_some(rect);
+                }
+                PaneTree::Split { axis, ratio, first, second, .. } => {
+                    // The walk descends into the child holding `id`.
+                    let (first_rect, second_rect) = split_rects(*axis, *ratio, rect);
+                    if first.contains_pane(id) {
+                        (node, rect) = (first, first_rect);
+                    } else {
+                        // When: `first` does not contain `id`, only `second` can hold it.
+                        (node, rect) = (second, second_rect);
+                    }
+                }
+            }
+        }
+    }
+
     /// Recursively compute each visible leaf's rectangle inside `outer`.
     pub fn layout(&self, outer: Rect) -> Vec<(PaneId, Rect)> {
         if let Some(id) = self.zoomed_pane_id() {
             // When: `zoomed_pane_id` is `Some`, one pane may claim the whole rectangle.
-            if self.contains_leaf(id) {
-                // When: `contains_leaf` is true, the zoomed pane is live here and hides its siblings.
+            if self.contains_pane(id) {
+                // When: `contains_pane` is true, the zoomed pane is live here and hides its siblings.
                 return vec![(id, outer)];
             }
         }
@@ -362,24 +407,11 @@ impl PaneTree {
     fn layout_into(&self, outer: Rect, out: &mut Vec<(PaneId, Rect)>) {
         match self {
             PaneTree::Leaf { id, .. } => out.push((*id, outer)),
-            PaneTree::Split { axis, ratio, first, second, .. } => match axis {
-                SplitAxis::Vertical => {
-                    let first_width = outer.w * *ratio;
-                    let first_rect = Rect::new(outer.x, outer.y, first_width, outer.h);
-                    let second_rect =
-                        Rect::new(outer.x + first_width, outer.y, outer.w - first_width, outer.h);
-                    first.layout_into(first_rect, out);
-                    second.layout_into(second_rect, out);
-                }
-                SplitAxis::Horizontal => {
-                    let first_height = outer.h * *ratio;
-                    let first_rect = Rect::new(outer.x, outer.y, outer.w, first_height);
-                    let second_rect =
-                        Rect::new(outer.x, outer.y + first_height, outer.w, outer.h - first_height);
-                    first.layout_into(first_rect, out);
-                    second.layout_into(second_rect, out);
-                }
-            },
+            PaneTree::Split { axis, ratio, first, second, .. } => {
+                let (first_rect, second_rect) = split_rects(*axis, *ratio, outer);
+                first.layout_into(first_rect, out);
+                second.layout_into(second_rect, out);
+            }
         }
     }
 
@@ -390,7 +422,7 @@ impl PaneTree {
     /// these seams on top at the shared outer boundary, before applying any
     /// per-pane cell padding inside each pane.
     pub fn splitter_rects(&self, outer: Rect, thickness: f32) -> Vec<SplitterRect> {
-        if self.zoomed_pane_id().is_some_and(|id| self.contains_leaf(id)) {
+        if self.zoomed_pane_id().is_some_and(|id| self.contains_pane(id)) {
             // When: `zoomed_pane_id` names a leaf here, one pane covers the tab and hides every seam.
             return Vec::new();
         }
@@ -411,7 +443,7 @@ impl PaneTree {
         point_x: f32,
         point_y: f32,
     ) -> Option<SplitterHit> {
-        if self.zoomed_pane_id().is_some_and(|id| self.contains_leaf(id)) {
+        if self.zoomed_pane_id().is_some_and(|id| self.contains_pane(id)) {
             // When: `zoomed_pane_id` names a leaf here, no seam is drawn, so none can be hit.
             return None;
         }
@@ -742,6 +774,27 @@ impl PaneTree {
             }
         }
         best.map(|(_, id)| id)
+    }
+}
+
+/// The two child rectangles a split along `axis` at `ratio` divides `outer` into: first is left
+/// or top. [`PaneTree::layout`] and [`PaneTree::pane_rect`] both use it, so they cannot disagree.
+fn split_rects(axis: SplitAxis, ratio: f32, outer: Rect) -> (Rect, Rect) {
+    match axis {
+        SplitAxis::Vertical => {
+            let first_width = outer.w * ratio;
+            (
+                Rect::new(outer.x, outer.y, first_width, outer.h),
+                Rect::new(outer.x + first_width, outer.y, outer.w - first_width, outer.h),
+            )
+        }
+        SplitAxis::Horizontal => {
+            let first_height = outer.h * ratio;
+            (
+                Rect::new(outer.x, outer.y, outer.w, first_height),
+                Rect::new(outer.x, outer.y + first_height, outer.w, outer.h - first_height),
+            )
+        }
     }
 }
 

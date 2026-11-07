@@ -58,6 +58,10 @@ jobs:
       - name: Validate workflow syntax and contexts
         run: actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml
 
+      # Downloads each vendored library's pinned archive and holds the tree's delta to its local_modifications.
+      - name: Check vendored native trees against their upstream archives
+        run: python3 scripts/native-dependency-delta.py --with-tests
+
       - name: Check declared rust-version against the lock
         shell: bash
         run: bash scripts/check-rust-version.sh
@@ -143,6 +147,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The workspace lint enables sonicterm-app's test-support feature through its self dev-dependency;
+      # this lints the library as release binaries compile it, with every gated test hook absent.
+      - name: Lint the app library without test support
+        run: cargo clippy --locked -p sonicterm-app --lib -- -D warnings
 
       # perf-counters only marks that the App has the counter API, and perf-hook-checkpoint-memory and
       # perf-hook-trim that it has the checkpoint memory and covered-window trim hooks; the perf_scenarios
@@ -637,6 +646,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The workspace lint enables sonicterm-app's test-support feature through its self dev-dependency;
+      # this lints the library as release binaries compile it, with every gated test hook absent.
+      - name: Lint the app library without test support
+        run: cargo clippy --locked -p sonicterm-app --lib -- -D warnings
 
       # perf-counters only marks that the App has the counter API, and perf-hook-checkpoint-memory and
       # perf-hook-trim that it has the checkpoint memory and covered-window trim hooks; the perf_scenarios
@@ -1444,6 +1458,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The workspace lint enables sonicterm-app's test-support feature through its self dev-dependency;
+      # this lints the library as release binaries compile it, with every gated test hook absent.
+      - name: Lint the app library without test support
+        run: cargo clippy --locked -p sonicterm-app --lib -- -D warnings
 
       # perf-counters only marks that the App has the counter API, and perf-hook-checkpoint-memory and
       # perf-hook-trim that it has the checkpoint memory and covered-window trim hooks; the perf_scenarios

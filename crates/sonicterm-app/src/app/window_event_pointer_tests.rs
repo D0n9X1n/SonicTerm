@@ -108,7 +108,7 @@ fn window_press_uses_live_shift_and_latches_the_real_owner() {
     let window_id = app.__test_seed_child_window(&["child"]);
     let pane = app.__test_child_pane_ids(window_id).expect("seeded child window")[0];
     let cell = pointer_cell(pane, 2, 3);
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.selection = Some(Selection::new(2, 3));
     window.modifiers = ModifiersState::SHIFT;
 
@@ -339,18 +339,60 @@ fn keyboard_and_modifier_transitions_preserve_path_probe_authorization() {
 
 #[test]
 fn main_and_child_no_button_paths_share_scrollbar_ownership() {
-    // Both runtime paths must call the same gutter predicate so Always and Auto
-    // scrollbar ownership cannot drift between main and torn-out windows.
+    // Both runtime paths must call the same gutter calculation, padding and scale included, so
+    // Always and Auto scrollbar ownership cannot drift between main and torn-out windows.
+    // The main sources include the helper's own definition, so one call means two matches.
     assert_eq!(
-        MAIN_SOURCES.matches("native_scrollbar_owns_pointer(").count(),
+        MAIN_SOURCES.matches("pane_scrollbar_owns_pointer(").count(),
         2,
-        "main source must define and call the shared ownership helper",
+        "the main window must define and call the shared ownership calculation once",
     );
     assert_eq!(
-        CHILD_SOURCES.matches("native_scrollbar_owns_pointer(").count(),
+        CHILD_SOURCES.matches("pane_scrollbar_owns_pointer(").count(),
         1,
-        "child source must call the shared ownership helper once",
+        "the child window must call the shared ownership calculation once",
     );
+    // Only the shared calculation reads the gutter width; neither window derives its own.
+    let width_reads = |source: &str| source.matches("scrollbar_input::SCROLLBAR_WIDTH_PX").count();
+    assert_eq!(width_reads(MAIN_SOURCES), 1, "main computes its own gutter width");
+    assert_eq!(width_reads(CHILD_SOURCES), 0, "child computes its own gutter width");
+}
+
+/// The shared calculation places the gutter where the renderer draws the bar: inside the
+/// padded content, at the scaled width, and against the content's right edge even when the pane
+/// width leaves a fractional cell; without a renderer it uses the outer rect at the logical width.
+#[test]
+fn the_shared_gutter_calculation_follows_padding_scale_and_remainders() {
+    let pane = sonicterm_ui::pane::Rect::new(100.0, 40.0, 405.5, 300.0);
+    let metrics = ScrollbarMetrics { insets: [8.0, 6.0, 4.0, 2.0], cell: (9.0, 18.0), scale: 2.0 };
+    let width = crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX * metrics.scale;
+    let content_right = pane.x + pane.w - metrics.insets[1];
+    let row_y = pane.y + 50.0;
+    let owns = |metrics: Option<ScrollbarMetrics>, pixel_x: f32| {
+        pane_scrollbar_owns_pointer(
+            ScrollbarMode::Always,
+            pane,
+            metrics,
+            (pixel_x, row_y),
+            false,
+            false,
+        )
+    };
+    assert!(owns(Some(metrics), content_right - 0.5), "just inside the padded right edge");
+    assert!(owns(Some(metrics), content_right - width + 0.5), "the scaled gutter's left edge");
+    assert!(!owns(Some(metrics), content_right - width - 0.5), "left of the scaled gutter");
+    assert!(!owns(Some(metrics), content_right + 0.5), "in the right padding, outside the bar");
+    let logical = crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX;
+    assert!(owns(None, pane.x + pane.w - logical + 0.5), "headless: the outer rect's gutter");
+    assert!(!owns(None, pane.x + pane.w - logical - 0.5));
+    assert!(!pane_scrollbar_owns_pointer(
+        ScrollbarMode::Never,
+        pane,
+        Some(metrics),
+        (content_right - 0.5, row_y),
+        true,
+        true
+    ));
 }
 
 #[test]
@@ -517,7 +559,7 @@ fn terminal_repeat_owner_is_resolved_before_local_input_owners() {
         .find("match self.window_key_owner(win_id)")
         .expect("source-window owner selection");
     assert!(release < repeat && repeat < quit && quit < owners);
-    assert!(!keyboard.contains("self.frontmost_window ="));
+    assert!(!keyboard.contains("self.registry.frontmost_window ="));
 }
 
 #[test]
@@ -529,16 +571,16 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
     let pane = app.__test_child_pane_ids(window).expect("seeded child window")[0];
     let cell = pointer_cell(pane, 6, 7);
 
-    let child = app.windows.get(&window).expect("seeded child state");
+    let child = app.registry.windows.get(&window).expect("seeded child state");
     assert!(matches!(
         child_no_button_motion_report(child, cell, MouseTracking::AnyMotion, true, false),
         Some(PointerMotionRoute::Report { pane_id, .. }) if pane_id == pane
     ));
 
-    app.windows.get_mut(&window).unwrap().splitter_hover = Some(SplitAxis::Vertical);
+    app.registry.windows.get_mut(&window).unwrap().splitter_hover = Some(SplitAxis::Vertical);
     assert_eq!(
         child_no_button_motion_report(
-            app.windows.get(&window).unwrap(),
+            app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
             true,
@@ -546,9 +588,9 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
         ),
         None
     );
-    app.windows.get_mut(&window).unwrap().splitter_hover = None;
+    app.registry.windows.get_mut(&window).unwrap().splitter_hover = None;
 
-    app.windows.get_mut(&window).unwrap().hovered_url = Some(HoveredUrl {
+    app.registry.windows.get_mut(&window).unwrap().hovered_url = Some(HoveredUrl {
         label: None,
         cells: sonicterm_render_model::inputs::HoveredUrlCells::single(pane, 6, 7, 8, true)
             .unwrap(),
@@ -556,7 +598,7 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
     });
     assert_eq!(
         child_no_button_motion_report(
-            app.windows.get(&window).unwrap(),
+            app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
             true,
@@ -564,12 +606,12 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
         ),
         None
     );
-    app.windows.get_mut(&window).unwrap().hovered_url = None;
+    app.registry.windows.get_mut(&window).unwrap().hovered_url = None;
 
-    app.windows.get_mut(&window).unwrap().hover_link = true;
+    app.registry.windows.get_mut(&window).unwrap().hover_link = true;
     assert_eq!(
         child_no_button_motion_report(
-            app.windows.get(&window).unwrap(),
+            app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
             true,
@@ -577,11 +619,11 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
         ),
         None
     );
-    app.windows.get_mut(&window).unwrap().hover_link = false;
+    app.registry.windows.get_mut(&window).unwrap().hover_link = false;
 
     assert_eq!(
         child_no_button_motion_report(
-            app.windows.get(&window).unwrap(),
+            app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
             true,
@@ -694,15 +736,15 @@ fn monitor_period_refreshes_on_focus_resize_move_and_unocclusion() {
     let initial = Duration::from_micros(16_667);
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_synthetic_main();
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     for id in [main, child] {
         let reset = |app: &mut App, rate: Option<u32>| {
-            let window = app.windows.get_mut(&id).unwrap();
+            let window = app.registry.windows.get_mut(&id).unwrap();
             window.redraw.monitor_period = initial;
             window.redraw.monitor_rate_override = Some(rate);
         };
-        let period = |app: &App| app.windows[&id].redraw.monitor_period;
+        let period = |app: &App| app.registry.windows[&id].redraw.monitor_period;
         for (event, refreshes) in [
             (WindowEvent::Focused(true), true),
             (WindowEvent::Resized(PhysicalSize::new(800, 600)), true),
@@ -721,7 +763,7 @@ fn monitor_period_refreshes_on_focus_resize_move_and_unocclusion() {
         assert_eq!(period(&app), refreshed, "un-occlusion refreshes");
         // An unavailable or zero rate keeps the last known period.
         for rate in [None, Some(0)] {
-            app.windows.get_mut(&id).unwrap().redraw.monitor_rate_override = Some(rate);
+            app.registry.windows.get_mut(&id).unwrap().redraw.monitor_rate_override = Some(rate);
             app.refresh_monitor_for_event(id, &WindowEvent::Focused(true));
             assert_eq!(period(&app), refreshed, "rate {rate:?} keeps the last period");
         }

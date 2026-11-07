@@ -56,19 +56,19 @@ pub(super) fn assert_home_prose_paths_resolve(prefix: &str, create_settings: imp
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.home_dir = Some(root.clone());
     app.__test_seed_tab("home prose main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["home prose child"]);
     let text = "同步时会将客户端设置写入 ~/.claude/settings.json，将 MCP 配置块写入顶层的 ~/.claude.json，并将权限";
     for window in [main, child] {
-        let pane = *app.windows[&window].panes.keys().next().unwrap();
-        app.frontmost_window = Some(window);
-        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        let pane = *app.registry.windows[&window].panes.keys().next().unwrap();
+        app.registry.frontmost_window = Some(window);
+        app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
             winit::keyboard::ModifiersState::SUPER
         } else {
             winit::keyboard::ModifiersState::CONTROL
         };
         for width in [160, 40] {
-            let parser = app.windows[&window].panes[&pane].parser.clone();
+            let parser = app.registry.windows[&window].panes[&pane].parser.clone();
             {
                 let mut parser = parser.lock();
                 parser.resize(width, 8);
@@ -115,12 +115,18 @@ pub(super) fn assert_home_prose_paths_resolve(prefix: &str, create_settings: imp
                         .spans
                         .iter()
                         .any(|span| span.contains(cells[end].0)));
-                    let request =
-                        app.windows.get_mut(&window).unwrap().path_probe.request(key.clone());
+                    let request = app
+                        .registry
+                        .windows
+                        .get_mut(&window)
+                        .unwrap()
+                        .path_probe
+                        .request(key.clone());
                     if let Some(request) = request {
                         let result =
                             PathProbeResult { request, selection: Some(selection), failure: None };
                         assert!(app
+                            .registry
                             .windows
                             .get_mut(&window)
                             .unwrap()
@@ -128,9 +134,11 @@ pub(super) fn assert_home_prose_paths_resolve(prefix: &str, create_settings: imp
                             .accept(&result, Some(&key)));
                     }
                     app.apply_target_hover(window, Some(snapshot));
-                    assert!(app.windows[&window].path_probe.authorized(&key, true));
+                    assert!(app.registry.windows[&window].path_probe.authorized(&key, true));
                     assert_eq!(
-                        PathBuf::from(&app.windows[&window].link_preview.as_ref().unwrap().uri),
+                        PathBuf::from(
+                            &app.registry.windows[&window].link_preview.as_ref().unwrap().uri
+                        ),
                         expected
                     );
                     // A blocked or existing longer literal cannot displace the shorter existing file.
@@ -222,7 +230,7 @@ pub(super) fn target_after(
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["multiplexer"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
     app.cell_target_at(window, pane, row, col)
 }
@@ -433,7 +441,7 @@ pub(super) fn wrapped_url_pane(
 ) -> (WindowId, u64) {
     let window = app.__test_seed_child_window(&["wrapped url"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
     assert!(app.__test_advance_child_pane_parser(window, pane, output));
     (window, pane)
 }
@@ -449,7 +457,7 @@ pub(super) fn hardwrap_pane_sized(
 ) -> (WindowId, u64) {
     let window = app.__test_seed_child_window(&["hard wrap"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
     assert!(app.__test_advance_child_pane_parser(window, pane, lines.join("\r\n").as_bytes()));
     (window, pane)
 }
@@ -537,7 +545,7 @@ pub(super) fn pane_after(cols: u16, rows: u16, output: &str) -> (App, WindowId, 
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["frame scope"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
     (app, window, pane)
 }
@@ -570,7 +578,7 @@ pub(super) fn counted_hover_app(cols: u16, rows: u16) -> (App, WindowId, u64, Ho
     });
     let window = app.__test_seed_child_window(&["hover cache"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
     (app, window, pane, HoverMailbox { mailbox, _wake: wake })
 }
 
@@ -583,10 +591,10 @@ pub(super) fn frame_hover_at(
     (row, col): (u16, u16),
     viewport: Option<u64>,
 ) {
-    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let parser = Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
     let guard = parser.lock();
-    let viewport =
-        viewport.or_else(|| app.windows[&window].panes[&pane].resolved_viewport(guard.grid()));
+    let viewport = viewport
+        .or_else(|| app.registry.windows[&window].panes[&pane].resolved_viewport(guard.grid()));
     let target = app.hover_target_from_parser(window, pane, row, col, &guard, viewport);
     drop(guard);
     app.apply_target_hover(window, target);
@@ -615,7 +623,7 @@ pub(super) fn set_open_modifier(app: &mut App, window: WindowId, held: bool) {
     } else {
         winit::keyboard::ModifiersState::CONTROL
     };
-    app.windows.get_mut(&window).unwrap().modifiers =
+    app.registry.windows.get_mut(&window).unwrap().modifiers =
         if held { modifier } else { winit::keyboard::ModifiersState::empty() };
 }
 

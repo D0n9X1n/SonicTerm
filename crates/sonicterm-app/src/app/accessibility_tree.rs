@@ -206,7 +206,7 @@ impl App {
         tab: TabId,
         kind: MarkKind,
     ) -> Option<String> {
-        let tabs = &self.windows.get(&window_id)?.tabs;
+        let tabs = &self.registry.windows.get(&window_id)?.tabs;
         let index = tabs.index_of(tab)?;
         Some(self.alert_phrase(index + 1, kind))
     }

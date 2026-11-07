@@ -486,5 +486,9 @@ from perf_echo_loader_tests import (
     OutputDiagnosticTests,
 )
 
+from perf_contention_verdict_tests import (
+    ContentionVerdictTests,
+)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

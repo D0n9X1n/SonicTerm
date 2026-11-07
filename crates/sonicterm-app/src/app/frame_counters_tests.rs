@@ -355,6 +355,10 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/echo_watch.rs", "slot", 1),
     // The VT worker's media helpers, after the parser section: the pane's image store, not a parser.
     ("app/spawn_pane_media.rs", "inline_images", 2),
+    // The image store's own lock and snapshot: its mutex guards image entries, never a parser.
+    ("app/media_store.rs", "images", 1),
+    // A pane's change signal: its mutex guards one counter, never a parser.
+    ("app/pane_signal.rs", "sequence", 3),
     ("app/guard_correlation.rs", "state", 5),
     ("bin/pty_multi_round_helper.rs", "stdin", 1),
     ("bin/pty_multi_round_helper.rs", "stdout", 1),
@@ -441,17 +445,23 @@ pub(super) fn the_parser_lock_audit_reports_each_unconverted_site() {
 
 /// Give every pane of window `id` counters, as pane creation does with the gate on.
 pub(super) fn attach_pane_counters(app: &mut App, id: winit::window::WindowId) {
-    let pane_ids: Vec<u64> = app.windows[&id].panes.keys().copied().collect();
+    let pane_ids: Vec<u64> = app.registry.windows[&id].panes.keys().copied().collect();
     for pane_id in pane_ids {
         let counters = app.pane_frame_counters().expect("gate on");
-        app.windows.get_mut(&id).unwrap().panes.get_mut(&pane_id).unwrap().frame_counters =
-            Some(counters);
+        app.registry
+            .windows
+            .get_mut(&id)
+            .unwrap()
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .frame_counters = Some(counters);
     }
 }
 
 /// The pending-flush slot of pane `pane_id` in window `id`.
 pub(super) fn flush_slot(app: &App, id: winit::window::WindowId, pane_id: u64) -> &AtomicU64 {
-    let pane = &app.windows[&id].panes[&pane_id];
+    let pane = &app.registry.windows[&id].panes[&pane_id];
     pane.frame_counters.as_ref().expect("counting pane").pending_flush.as_ref()
 }
 
@@ -463,18 +473,19 @@ pub(super) fn a_background_tabs_flush_waits_until_its_tab_is_shown() {
     app.force_frame_counters_on().unwrap();
     let child = app.__test_seed_child_window(&["front", "back"]);
     attach_pane_counters(&mut app, child);
-    let window = app.windows.get_mut(&child).unwrap();
+    let window = app.registry.windows.get_mut(&child).unwrap();
     window.tabs.activate(0);
     let back_pane = window.tab_states[1].active_pane;
     flush_slot(&app, child, back_pane).store(flush_clock_ns(), Ordering::Release);
     app.note_redraw_requested(child);
     let taken = |app: &App| {
-        let counters = app.windows[&child].redraw.frame_counters.as_deref().expect("counting");
+        let counters =
+            app.registry.windows[&child].redraw.frame_counters.as_deref().expect("counting");
         (counters.redraw_requested, counters.flush_to_redraw.count())
     };
     assert_eq!(taken(&app), (1, 0), "the foreground redraw left the hidden flush");
     assert_ne!(flush_slot(&app, child, back_pane).load(Ordering::Acquire), 0);
-    app.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(1);
     app.note_redraw_requested(child);
     assert_eq!(taken(&app), (2, 1), "shown, its flush is measured once");
     assert_eq!(flush_slot(&app, child, back_pane).load(Ordering::Acquire), 0);
@@ -488,7 +499,7 @@ pub(super) fn a_pane_hidden_by_zoom_keeps_its_flush() {
     app.force_frame_counters_on().unwrap();
     let child = app.__test_seed_child_window(&["front", "back"]);
     attach_pane_counters(&mut app, child);
-    let window = app.windows.get_mut(&child).unwrap();
+    let window = app.registry.windows.get_mut(&child).unwrap();
     // The back tab's pane is reused as the front tab's second leaf; only the front tab is shown.
     let back_pane = window.tab_states[1].active_pane;
     window.tabs.activate(0);
@@ -499,7 +510,7 @@ pub(super) fn a_pane_hidden_by_zoom_keeps_its_flush() {
     flush_slot(&app, child, back_pane).store(flush_clock_ns(), Ordering::Release);
     flush_slot(&app, child, front_pane).store(flush_clock_ns(), Ordering::Release);
     app.note_redraw_requested(child);
-    let counters = app.windows[&child].redraw.frame_counters.as_deref().expect("counting");
+    let counters = app.registry.windows[&child].redraw.frame_counters.as_deref().expect("counting");
     assert_eq!(counters.flush_to_redraw.count(), 1, "only the zoomed pane was measured");
     assert_ne!(flush_slot(&app, child, back_pane).load(Ordering::Acquire), 0);
 }
@@ -846,7 +857,7 @@ pub(super) fn run_stopped_growth(
     if app.begin_window_redraw(id, Instant::now()) {
         return Err("a stopped window starts no frame".into());
     }
-    let mut removed = app.windows.remove(&id).ok_or("the window is tracked")?;
+    let mut removed = app.registry.windows.remove(&id).ok_or("the window is tracked")?;
     app.retire_window_counters(id, &mut removed);
     let closed = app.frame_counters_snapshot().ok_or("counting app")?.closed_windows;
     let reported = (

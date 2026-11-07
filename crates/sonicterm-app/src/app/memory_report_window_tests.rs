@@ -18,7 +18,7 @@ fn app_with_report() -> (App, u64, WindowId) {
 
 /// The report pane's id.
 fn report_pane(app: &App, report_id: WindowId) -> u64 {
-    let window = &app.windows[&report_id];
+    let window = &app.registry.windows[&report_id];
     window.tab_states[window.tabs.active_index()].active_pane
 }
 
@@ -30,8 +30,12 @@ fn showing_memory_usage_twice_keeps_one_window() {
     let first_generation = app.memory_report.generation;
     assert!(app.run_action(&Action::ShowMemoryUsage));
     assert!(app.run_action(&Action::ShowMemoryUsage));
-    let reports =
-        app.windows.values().filter(|window| window.role == WindowRole::MemoryReport).count();
+    let reports = app
+        .registry
+        .windows
+        .values()
+        .filter(|window| window.role == WindowRole::MemoryReport)
+        .count();
     assert_eq!(reports, 1);
     assert_eq!(app.memory_report_window_id(), Some(report_id));
     assert!(app.memory_report.generation > first_generation, "a repeat run refreshes");
@@ -53,10 +57,11 @@ fn copy_all_copies_exactly_the_rendered_report() {
     assert!(rendered.starts_with("SonicTerm "), "{rendered}");
     assert!(rendered.contains("PROCESS (from the OS)"));
     assert!(rendered.contains("\"zsh\""));
-    app.frontmost_window = Some(report_id);
+    app.registry.frontmost_window = Some(report_id);
     assert!(app.run_action(&Action::CopyMemoryReport));
     assert_eq!(app.test_clipboard_text.as_deref(), Some(rendered.as_str()));
-    let parser = app.windows[&report_id].panes[&report_pane(&app, report_id)].parser.clone();
+    let parser =
+        app.registry.windows[&report_id].panes[&report_pane(&app, report_id)].parser.clone();
     let first_row = {
         let guard = parser.lock();
         let mut selection = Selection::new(0, 0);
@@ -71,7 +76,7 @@ fn copy_all_copies_exactly_the_rendered_report() {
 #[test]
 fn keys_and_pastes_in_the_report_never_reach_a_pty() {
     let (mut app, _, report_id) = app_with_report();
-    assert!(app.windows[&report_id].panes.values().all(|pane| pane.pty.is_none()));
+    assert!(app.registry.windows[&report_id].panes.values().all(|pane| pane.pty.is_none()));
     app.__test_enable_pty_write_log();
     app.test_clipboard_text = Some("rm -rf /\n".to_string());
     assert!(app.run_action_for_window(&Action::PasteFromClipboard, report_id));
@@ -86,7 +91,7 @@ fn copy_in_the_report_takes_the_report_selection() {
     let main_parser = app.main().unwrap().panes[&main_pane].parser.clone();
     main_parser.lock().advance(b"main text");
     let pane_id = report_pane(&app, report_id);
-    let parser = app.windows[&report_id].panes[&pane_id].parser.clone();
+    let parser = app.registry.windows[&report_id].panes[&pane_id].parser.clone();
     let (selection, expected) = {
         let guard = parser.lock();
         let grid = guard.grid();
@@ -104,8 +109,8 @@ fn copy_in_the_report_takes_the_report_selection() {
         (selection, expected)
     };
     assert!(!expected.is_empty());
-    app.windows.get_mut(&report_id).unwrap().selection = Some(selection);
-    app.frontmost_window = Some(report_id);
+    app.registry.windows.get_mut(&report_id).unwrap().selection = Some(selection);
+    app.registry.frontmost_window = Some(report_id);
     assert!(app.run_action(&Action::CopyToClipboard));
     assert_eq!(app.test_clipboard_text.as_deref(), Some(expected.as_str()));
     assert!(!expected.contains("main text"));
@@ -118,11 +123,11 @@ fn report_actions_redirect_or_are_consumed() {
     let (mut app, _, report_id) = app_with_report();
     assert!(app.run_action_for_window(&Action::NewTab, report_id));
     assert_eq!(app.__test_main_tab_count(), 2, "NewTab ran in the main window");
-    assert_eq!(app.windows[&report_id].tabs.len(), 1);
-    app.frontmost_window = Some(report_id);
+    assert_eq!(app.registry.windows[&report_id].tabs.len(), 1);
+    app.registry.frontmost_window = Some(report_id);
     assert!(app.run_action(&Action::SplitRight));
     assert!(app.run_action(&Action::NextTab));
-    assert_eq!(app.windows[&report_id].panes.len(), 1, "the report pane is never split");
+    assert_eq!(app.registry.windows[&report_id].panes.len(), 1, "the report pane is never split");
     assert_eq!(app.__test_main_tab_count(), 2);
     assert!(app.run_action(&Action::Scroll(ScrollAction::PageUp)));
 }
@@ -145,9 +150,9 @@ fn closing_the_report_never_quits() {
 fn closing_the_last_terminal_exits_with_the_report_open() {
     let (mut app, _, report_id) = app_with_report();
     assert_eq!(app.child_window_count(), 0);
-    app.frontmost_window = app.main_window_id;
+    app.registry.frontmost_window = app.registry.main_window_id;
     assert!(app.run_action(&Action::CloseTab));
-    assert!(app.windows.contains_key(&report_id));
+    assert!(app.registry.windows.contains_key(&report_id));
     assert!(app.should_exit());
     assert!(app.pending_exit, "the last terminal close requests exit despite the report");
 }
@@ -157,7 +162,7 @@ fn closing_the_last_terminal_exits_with_the_report_open() {
 fn broadcast_never_targets_the_report_pane() {
     let (mut app, main_pane, report_id) = app_with_report();
     let second = app.__test_seed_tab("second");
-    app.frontmost_window = app.main_window_id;
+    app.registry.frontmost_window = app.registry.main_window_id;
     app.__test_set_active_pane(0, main_pane);
     app.toggle_broadcast(BroadcastScope::AllTabs);
     let receivers = app.__test_broadcast_receivers();
@@ -194,7 +199,8 @@ fn report_history_is_independent_of_the_scrollback_setting() {
     let report_id = app.__test_open_memory_report_window();
     let long_report: String = (0..300).map(|line| format!("line {line}\n")).collect();
     assert!(app.feed_memory_report(&long_report));
-    let parser = app.windows[&report_id].panes[&report_pane(&app, report_id)].parser.clone();
+    let parser =
+        app.registry.windows[&report_id].panes[&report_pane(&app, report_id)].parser.clone();
     let history = parser.lock().grid().scrollback_len();
     assert!(history > 5, "history {history} was trimmed to the user setting");
 }
@@ -250,7 +256,7 @@ fn app_with_manual_report() -> (App, WindowId) {
 /// A non-empty selection on the report pane's first row.
 fn report_selection(app: &App, report_id: WindowId) -> Selection {
     let pane_id = report_pane(app, report_id);
-    let parser = app.windows[&report_id].panes[&pane_id].parser.clone();
+    let parser = app.registry.windows[&report_id].panes[&pane_id].parser.clone();
     let guard = parser.lock();
     let grid = guard.grid();
     let mut selection = Selection::new(0, 0);
@@ -281,12 +287,12 @@ fn report_with_row_five(marker: &str) -> String {
 fn a_history_row_replacement_is_not_planned_as_noop() {
     let (mut app, _, report_id) = app_with_report();
     assert!(app.feed_memory_report(&report_with_row_five("AAAA")));
-    let drops_before = app.windows[&report_id].redraw.retained_frame_drops;
+    let drops_before = app.registry.windows[&report_id].redraw.retained_frame_drops;
     assert!(app.feed_memory_report(&report_with_row_five("BBBB")));
-    let retained = app.windows[&report_id].redraw.retained_frame_drops == drops_before;
+    let retained = app.registry.windows[&report_id].redraw.retained_frame_drops == drops_before;
 
     let pane_id = report_pane(&app, report_id);
-    let pane = &app.windows[&report_id].panes[&pane_id];
+    let pane = &app.registry.windows[&report_id].panes[&pane_id];
     let parser = pane.parser.clone();
     let guard = parser.lock();
     let grid = guard.grid();
@@ -326,7 +332,7 @@ fn readonly_report_source_blocks_redirects_and_closes() {
     assert_eq!(app.__test_child_read_only(report_id), Some(true));
     assert!(app.run_action_for_window(&Action::NewTab, report_id));
     assert!(app.run_action_for_window(&Action::CloseTab, report_id));
-    app.frontmost_window = Some(report_id);
+    app.registry.frontmost_window = Some(report_id);
     assert!(app.run_action(&Action::NewTab));
     assert!(app.run_action(&Action::CloseActivePaneOrTab));
     assert_eq!(app.__test_main_tab_count(), 1, "no redirect reached the writable main window");
@@ -338,11 +344,11 @@ fn readonly_report_source_blocks_redirects_and_closes() {
 #[test]
 fn writable_report_redirect_respects_a_readonly_destination() {
     let (mut app, _, report_id) = app_with_report();
-    app.frontmost_window = app.main_window_id;
+    app.registry.frontmost_window = app.registry.main_window_id;
     assert!(app.run_action(&Action::EnterCopyMode));
     assert!(app.__test_main_read_only());
     assert!(app.run_action_for_window(&Action::NewTab, report_id));
-    app.frontmost_window = Some(report_id);
+    app.registry.frontmost_window = Some(report_id);
     assert!(app.run_action(&Action::NewTab));
     assert_eq!(app.__test_main_tab_count(), 1, "the READONLY main window refused both redirects");
     assert!(app.run_action_for_window(&Action::CloseTab, report_id));
@@ -359,7 +365,10 @@ fn native_close_stops_sampling_and_repairs_focus() {
     assert!(app.close_child_window(report_id));
     assert!(cancel.load(Ordering::Relaxed), "the outstanding walk was cancelled");
     assert!(app.memory_report.current.is_none() && app.memory_report.last_text.is_none());
-    assert_eq!(app.frontmost_window, app.main_window_id, "focus moved back to a terminal");
+    assert_eq!(
+        app.registry.frontmost_window, app.registry.main_window_id,
+        "focus moved back to a terminal"
+    );
     assert_eq!(app.__test_answer_memory_sample(), Some(1));
     assert!(app.memory_report.current.is_none() && app.memory_report.last_text.is_none());
     assert_eq!(app.memory_report.in_flight, None, "the late answer freed the worker slot");
@@ -375,7 +384,7 @@ fn tab_close_stops_sampling_and_repairs_focus() {
     assert!(app.memory_report_window_id().is_none());
     assert!(cancel.load(Ordering::Relaxed));
     assert!(app.memory_report.current.is_none() && app.memory_report.last_text.is_none());
-    assert_eq!(app.frontmost_window, app.main_window_id);
+    assert_eq!(app.registry.frontmost_window, app.registry.main_window_id);
     let _ = app.__test_answer_memory_sample();
     assert!(app.memory_report.last_text.is_none(), "a late answer never refills a closed report");
 }
@@ -409,12 +418,16 @@ fn a_late_sample_waits_for_the_selection_then_applies() {
     let (mut app, report_id) = app_with_manual_report();
     let before = app.memory_report.last_text.clone();
     let selection = report_selection(&app, report_id);
-    app.windows.get_mut(&report_id).unwrap().selection = Some(selection);
+    app.registry.windows.get_mut(&report_id).unwrap().selection = Some(selection);
     assert_eq!(app.__test_answer_memory_sample(), Some(1));
     assert!(app.memory_report.render_deferred);
     assert_eq!(app.memory_report.last_text, before, "the shown text is unchanged");
-    assert_eq!(app.windows[&report_id].selection, Some(selection), "the selection survives");
-    app.windows.get_mut(&report_id).unwrap().selection = None;
+    assert_eq!(
+        app.registry.windows[&report_id].selection,
+        Some(selection),
+        "the selection survives"
+    );
+    app.registry.windows.get_mut(&report_id).unwrap().selection = None;
     app.apply_deferred_memory_report();
     assert!(!app.memory_report.render_deferred);
     assert!(app.memory_report.last_text.as_deref().is_some_and(|text| text.contains("uptime 1s")));
@@ -424,7 +437,7 @@ fn a_late_sample_waits_for_the_selection_then_applies() {
     let held = app.memory_report.last_text.clone();
     assert_eq!(app.__test_answer_memory_sample(), Some(2));
     assert_eq!(app.memory_report.last_text, held, "copy mode also holds the pane");
-    app.windows.get_mut(&report_id).unwrap().copy_mode = None;
+    app.registry.windows.get_mut(&report_id).unwrap().copy_mode = None;
     app.apply_deferred_memory_report();
     assert!(app.memory_report.last_text.as_deref().is_some_and(|text| text.contains("uptime 2s")));
 }
@@ -439,7 +452,7 @@ fn a_sample_during_a_press_waits_for_the_gesture_to_end() {
     let pane_id = report_pane(&app, report_id);
     let before = app.memory_report.last_text.clone();
     let press = |app: &mut App| {
-        let window = app.windows.get_mut(&report_id).unwrap();
+        let window = app.registry.windows.get_mut(&report_id).unwrap();
         assert!(window.begin_local_selection(pane_id, (2, 0), 1));
         window.mouse_down = true;
         assert!(
@@ -448,7 +461,7 @@ fn a_sample_during_a_press_waits_for_the_gesture_to_end() {
         );
     };
     let release = |app: &mut App| {
-        let window = app.windows.get_mut(&report_id).unwrap();
+        let window = app.registry.windows.get_mut(&report_id).unwrap();
         let modifiers = window.modifiers;
         let _ =
             crate::app::window_event::take_pointer_release(&mut window.pointer_gesture, modifiers);
@@ -460,16 +473,26 @@ fn a_sample_during_a_press_waits_for_the_gesture_to_end() {
     app.apply_deferred_memory_report();
     assert!(app.memory_report.render_deferred, "the pressed pane holds the new figures");
     assert_eq!(app.memory_report.last_text, before);
-    assert!(app.windows.get_mut(&report_id).unwrap().extend_local_selection_to_cell((2, 10)));
-    let dragged = app.windows[&report_id].selection.expect("the drag extended the selection");
+    assert!(app
+        .registry
+        .windows
+        .get_mut(&report_id)
+        .unwrap()
+        .extend_local_selection_to_cell((2, 10)));
+    let dragged =
+        app.registry.windows[&report_id].selection.expect("the drag extended the selection");
     assert!(!dragged.is_empty());
     assert_eq!(app.memory_report.last_text, before, "the old text stays until release");
     release(&mut app);
     app.apply_deferred_memory_report();
-    assert_eq!(app.windows[&report_id].selection, Some(dragged), "a dragged selection is kept");
+    assert_eq!(
+        app.registry.windows[&report_id].selection,
+        Some(dragged),
+        "a dragged selection is kept"
+    );
     assert_eq!(app.memory_report.last_text, before, "and the figures wait for it to clear");
 
-    app.windows.get_mut(&report_id).unwrap().selection = None;
+    app.registry.windows.get_mut(&report_id).unwrap().selection = None;
     app.refresh_memory_report();
     let refreshed = app.memory_report.last_text.clone();
     press(&mut app);

@@ -348,7 +348,7 @@ fn frame_with_receipts(
             cursor_style: CursorStyle::BlockSteady,
             is_broadcast_participant: false,
             scrollbar_alpha: 0.0,
-            inline_images: pane.images.clone(),
+            inline_images: Arc::new(pane.images.clone()),
         })
         .collect();
     let released = renderer.render_releasing(

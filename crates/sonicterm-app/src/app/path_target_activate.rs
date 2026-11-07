@@ -75,7 +75,7 @@ impl App {
         pane_id: u64,
         target: &str,
     ) -> bool {
-        let Some(window) = self.windows.get_mut(&window_id) else {
+        let Some(window) = self.registry.windows.get_mut(&window_id) else {
             // When: window_id has closed, no confirmation remains actionable.
             return false;
         };
@@ -117,7 +117,12 @@ impl App {
         reason: &str,
         target: &str,
     ) {
-        if !self.windows.get(&window_id).is_some_and(|window| window.panes.contains_key(&pane_id)) {
+        if !self
+            .registry
+            .windows
+            .get(&window_id)
+            .is_some_and(|window| window.panes.contains_key(&pane_id))
+        {
             // When: window_id no longer owns pane_id, a late failure must not overwrite the clipboard.
             return;
         }
@@ -131,7 +136,7 @@ impl App {
             sonicterm_ui::overlays::NotificationLevel::Error,
             message.clone(),
         );
-        self.windows.get_mut(&window_id).unwrap().path_probe.failed_click =
+        self.registry.windows.get_mut(&window_id).unwrap().path_probe.failed_click =
             Some(FailedTargetClick {
                 pane_id,
                 target: target.to_owned(),
@@ -177,11 +182,11 @@ impl App {
             }
             ResolvedCellTarget::Path(key) => {
                 // When: `target.target` is `Path`, activation requires the current typed probe result and bounded opener.
-                if let Some(window) = self.windows.get_mut(&window_id) {
+                if let Some(window) = self.registry.windows.get_mut(&window_id) {
                     // A finished check can wait for a hover refresh; the click's own key validates it.
                     window.path_probe.accept_waiting_for(&key);
                 }
-                let Some(selection) = self.windows.get(&window_id).and_then(|window| {
+                let Some(selection) = self.registry.windows.get(&window_id).and_then(|window| {
                     window.path_probe.authorized_selection(&key, modifier_held).cloned()
                 }) else {
                     // When: authorized_selection is absent, only explicit path syntax permits failure feedback.
@@ -190,6 +195,7 @@ impl App {
                         return false;
                     };
                     let reason = self
+                        .registry
                         .windows
                         .get(&window_id)
                         .and_then(|window| window.path_probe.failure_for(&key))

@@ -10,6 +10,18 @@ use super::{
     PROGRAM_SETTLE_MS, PROGRAM_WINDOWS_STEPS, REST_PATH_ROW, REST_TAIL_ROW, SETTLE_MS,
     STRIP_SAFE_ROWS, TRIM_EXPERIMENT,
 };
+#[cfg(any(target_os = "macos", windows, test))]
+use sonicterm_cfg::keymap::Direction;
+
+/// Columns of every S13 window and so of every S13 pane, which spans the window's width. A host may
+/// size the window differently (a macOS host gave 135 columns and 17 or 34 rows), but both variants
+/// then scale alike, so every pane still matches: 135x8 in both there. The comparison checks it.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const S13_WINDOW_COLS: u16 = 120;
+/// Rows each S13 pane requests; the window stacks two (`default`) or four (`sustained-4`) of them,
+/// so the 40-row 4-pane window stays below the macOS runner's 43-row screen clamp.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const S13_PANE_ROWS: u16 = 10;
 
 /// The plan for `id` and `variant` on `host`, or `None` when the catalog does not list them.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -316,6 +328,48 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 end,
             ],
         ),
+        // The flood starts at GO and never ends; typing lands in idle role 1, the pane below the flood.
+        // The
+        // `tail` hold after typing shows the flood still running at the end of sampling; `idle` then
+        // keeps memory's `end` reading at GO + 60 s (5 s short) like every other plan.
+        ("S13", _) => {
+            // Every pane spans the window's full width, stacked: the panes differ from the 2-pane
+            // layout only in count, never in width, and `window_rows` doubles with the pane count.
+            let (roles, setup) = if variant == "sustained-4" {
+                (
+                    vec![
+                        Workload::SustainedFlood,
+                        Workload::IdleShell,
+                        Workload::IdleShell,
+                        Workload::IdleShell,
+                    ],
+                    vec![
+                        // Halve, then halve the top half and the bottom half: four equal rows, the
+                        // flood (role 0) on top. Each split focuses the pane it opens, so focus ends
+                        // on the bottom row and one step up returns it to role 1, the typing pane.
+                        SetupAction::SplitDown,
+                        SetupAction::FocusPane(Direction::Up),
+                        SetupAction::SplitDown,
+                        SetupAction::FocusPane(Direction::Down),
+                        SetupAction::FocusPane(Direction::Down),
+                        SetupAction::SplitDown,
+                        SetupAction::FocusPane(Direction::Up),
+                    ],
+                )
+            } else {
+                // When: the `default` variant runs, one flooding pane sits above one idle pane.
+                (vec![Workload::SustainedFlood, Workload::IdleShell], vec![SetupAction::SplitDown])
+            };
+            let chars = if short { 300 } else { 600 };
+            let typing = Driver::Typing { role: 1, chars, per_second: 10, settle_ms: 2_000 };
+            let steps = vec![
+                Step::Phase(driven("typing", PhaseKind::Sustained, typing, PhaseEnd::DriverDone)),
+                Step::Phase(timed("tail", PhaseKind::Sustained, PhaseEnd::Hold(hold(10_000)))),
+                idle,
+                end,
+            ];
+            (roles, setup, steps)
+        }
         ("S12", _) => {
             let mut steps = vec![
                 print(vec![0, 1, 2]),
@@ -384,8 +438,13 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         // S1 and S12 carry the status line comparisons; every variant of theirs but atlas-retry,
         // whose fixture fills 70 rows, requests a grid below the macOS runner's screen clamp with
         // the strip on, so both refs measure the same grid and the presenter variants stay alike.
-        window_rows: (matches!(spec.id, "S1" | "S12") && variant != "atlas-retry")
-            .then_some(STRIP_SAFE_ROWS),
+        window_rows: match spec.id {
+            "S1" | "S12" if variant != "atlas-retry" => Some(STRIP_SAFE_ROWS),
+            // S13 stacks two or four full-width panes, so the window is that many panes tall.
+            "S13" => Some(if variant == "sustained-4" { 4 } else { 2 } * S13_PANE_ROWS),
+            _ => None,
+        },
+        window_cols: (spec.id == "S13").then_some(S13_WINDOW_COLS),
         focused: true,
         roles,
         setup,

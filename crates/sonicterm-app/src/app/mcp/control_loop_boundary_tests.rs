@@ -32,10 +32,10 @@ fn app() -> App {
 /// Install a running server at `control` that binds nothing.
 fn install(app: &mut App, control: McpControl) -> Arc<McpShared> {
     let shared = McpShared::new(control, None);
-    let config = McpConfig { enabled: true, control };
+    let config = McpConfig { enabled: true, control, ..McpConfig::default() };
     app.config.mcp = config;
     let owner = app.register_mcp_owner();
-    app.mcp_server = Some(McpServer {
+    app.services.mcp_server = Some(McpServer {
         shared: Arc::clone(&shared),
         endpoint: "test-endpoint".into(),
         _endpoint_guard: None,
@@ -76,7 +76,12 @@ fn call_through_loop(
 fn attach(app: &mut App, pane_id: u64, program: &str, args: &[&str], agent_owned: bool) {
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(program, &args, 80, 24).expect("pty");
-    let pane = app.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id)).unwrap();
+    let pane = app
+        .registry
+        .windows
+        .values_mut()
+        .find_map(|window| window.panes.get_mut(&pane_id))
+        .unwrap();
     pane.pty = Some(pty);
     pane.agent_owned = agent_owned;
 }
@@ -91,8 +96,12 @@ fn idle_program() -> (&'static str, &'static [&'static str]) {
 
 /// The panes and tabs of every window, to show nothing changed.
 fn topology(app: &App) -> Vec<(usize, usize)> {
-    let mut shape: Vec<_> =
-        app.windows.values().map(|window| (window.tab_states.len(), window.panes.len())).collect();
+    let mut shape: Vec<_> = app
+        .registry
+        .windows
+        .values()
+        .map(|window| (window.tab_states.len(), window.panes.len()))
+        .collect();
     shape.sort_unstable();
     shape
 }
@@ -224,10 +233,11 @@ fn closing_a_child_windows_last_tab_reaps_the_window() {
     let mut app = app();
     let main_pane = app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["helper"]);
-    let child_pane = *app.windows[&child].panes.keys().next().unwrap();
-    app.windows.get_mut(&child).unwrap().panes.get_mut(&child_pane).unwrap().agent_owned = true;
+    let child_pane = *app.registry.windows[&child].panes.keys().next().unwrap();
+    app.registry.windows.get_mut(&child).unwrap().panes.get_mut(&child_pane).unwrap().agent_owned =
+        true;
     assert!(matches!(app.mcp_close_pane(McpControl::Agent, child_pane), LoopReply::Closed));
-    assert!(!app.windows.contains_key(&child), "the emptied child window is reaped");
+    assert!(!app.registry.windows.contains_key(&child), "the emptied child window is reaped");
     assert!(app.mcp_pane_entries().iter().all(|entry| entry.pane_id != child_pane));
     assert!(matches!(
         app.mcp_close_pane(McpControl::Any, main_pane),

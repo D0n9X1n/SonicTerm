@@ -43,6 +43,11 @@ STEPS = (
          ("rust",), _CORE_CHECKS),
     gate_model.Step("clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"),
          gate_model.HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=gate_model.WindowsPolicy.COMPILE_ONLY),
+    # The workspace lint builds sonicterm-app with its self-enabled test-support feature; this is the
+    # one lint of the library as release binaries compile it, with every gated test hook absent.
+    gate_model.Step("app-library-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--lib", "--", "-D", "warnings"),
+         gate_model.HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=gate_model.WindowsPolicy.COMPILE_ONLY),
     # perf-counters marks only that the App has the counter API, and perf-hook-checkpoint-memory and
     # perf-hook-trim that it has the checkpoint memory and covered-window trim hooks; the perf_scenarios
     # example is their sole reader, so every host lints that example with them as well as without them.
@@ -100,6 +105,10 @@ STEPS = (
          ("macos",), 60, "local", ("bash",), ("macos-core",)),
     gate_model.Step("workflow-syntax", ("actionlint", "-shellcheck=", "-pyflakes=", ".github/workflows/ci.yml",
                              ".github/workflows/perf.yml"), gate_model.HOSTS, 60, "local", ("actionlint",), ("tooling",)),
+    # The vendored trees' delta from their pinned archives is platform independent, so CI runs it once, in
+    # tooling; it downloads those archives, so it needs the network as cargo-deny does.
+    gate_model.Step("native-dependency-delta", ("python3", "scripts/native-dependency-delta.py", "--with-tests"), gate_model.HOSTS, 300,
+         "local", ("python", "network"), ("tooling",)),
     # The dependency audit reads only Cargo.lock and deny.toml, so CI runs it once, in linux-core.
     gate_model.Step("cargo-deny", ("cargo", "deny", "--locked", "check"), gate_model.HOSTS, 300, "local",
          ("rust", "cargo-deny"), ("linux-core",)),

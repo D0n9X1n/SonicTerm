@@ -17,8 +17,8 @@ impl App {
     }
 
     fn command_palette_modifiers(&self) -> ModifiersState {
-        match self.palette_attached_window {
-            Some(id) => self.windows.get(&id).map(|window| window.modifiers),
+        match self.interaction.palette_attached_window {
+            Some(id) => self.registry.windows.get(&id).map(|window| window.modifiers),
             None => self.main().map(|window| window.modifiers),
         }
         .unwrap_or_else(ModifiersState::empty)
@@ -39,12 +39,12 @@ impl App {
             },
         };
         // One whole-event replacement: RenameWindow validates atomically, other modes strip controls.
-        self.command_palette.input_str(text.unwrap_or_default());
+        self.interaction.command_palette.input_str(text.unwrap_or_default());
     }
 
     pub(in crate::app) fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
         let mods = self.command_palette_modifiers();
-        if self.command_palette.is_open() && !self.palette_ime_is_composing() {
+        if self.interaction.command_palette.is_open() && !self.palette_ime_is_composing() {
             // When: command_palette is open and palette_ime_is_composing is false, a clipboard chord belongs to its field.
             if let crate::app::field_input::FieldBinding::Clipboard { chord, action } =
                 crate::app::field_input::first_field_binding(&self.keymap, event, mods)
@@ -55,7 +55,9 @@ impl App {
                     // When: terminal_input_passthrough_binding accepts chord, the field consumes Alt+V without paste or text.
                     return true;
                 }
-                if let Some(owner) = self.palette_attached_window.or(self.main_window_id) {
+                if let Some(owner) =
+                    self.interaction.palette_attached_window.or(self.registry.main_window_id)
+                {
                     // Rejected, empty, or unavailable clipboard text still belongs to the field, never a PTY.
                     self.run_field_clipboard_action(&action, owner);
                 }
@@ -83,43 +85,43 @@ impl App {
         native_command: Option<Option<crate::app::field_input::FieldCommand>>,
     ) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        if !self.command_palette.is_open() {
+        if !self.interaction.command_palette.is_open() {
             // When: command_palette is closed no palette state may change here;
             // both callers gate on their own checks and discard this false.
             return false;
         }
-        self.palette_pointer_capture = None;
+        self.interaction.palette_pointer_capture = None;
         self.refresh_command_palette_context();
         if self.palette_ime_is_composing() {
             // When: palette_ime_is_composing is true the IME owns the keystroke;
             // swallow every key so a half-formed CJK sequence cannot also navigate.
             if matches!(*logical_key, Key::Named(NamedKey::Escape)) {
-                if let Some(window) = match self.palette_attached_window {
-                    Some(id) => self.windows.get_mut(&id),
+                if let Some(window) = match self.interaction.palette_attached_window {
+                    Some(id) => self.registry.windows.get_mut(&id),
                     None => self.main_mut(),
                 } {
                     window.ime.cancel();
                 }
                 self.update_command_palette_ime_cursor_area();
-                self.request_redraw_for_overlay(self.palette_attached_window);
+                self.request_redraw_for_overlay(self.interaction.palette_attached_window);
             }
             return true;
         }
-        if self.command_palette.mode() == CommandPaletteMode::Confirm {
+        if self.interaction.command_palette.mode() == CommandPaletteMode::Confirm {
             // When: `mode` is `Confirm`, only Apply or Cancel closes the page; text input is ignored.
             match logical_key {
                 Key::Named(NamedKey::Escape) => self.confirm_default_handlers(false),
                 Key::Named(NamedKey::Enter) => {
-                    let apply = self.command_palette.confirm_applies();
+                    let apply = self.interaction.command_palette.confirm_applies();
                     self.confirm_default_handlers(apply);
                 }
                 Key::Named(NamedKey::ArrowDown) => {
-                    self.command_palette.move_selection_down();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.interaction.command_palette.move_selection_down();
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                 }
                 Key::Named(NamedKey::ArrowUp) => {
-                    self.command_palette.move_selection_up();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.interaction.command_palette.move_selection_up();
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                 }
                 _ => {
                     // When: `logical_key` is any other key, swallow it so it never reaches a terminal.
@@ -127,15 +129,15 @@ impl App {
             }
             return true;
         }
-        if self.command_palette.mode() == CommandPaletteMode::StatusSegments {
+        if self.interaction.command_palette.mode() == CommandPaletteMode::StatusSegments {
             // When: mode is StatusSegments, Enter toggles and keeps the page open, Left and Right
             // move a shown segment, Up and Down skip headings; other keys edit the filter query.
             let direction = match logical_key {
                 Key::Named(NamedKey::Escape) => {
                     // When: logical_key is Escape, the checklist closes and its window redraws.
                     self.request_checklist_redraw();
-                    self.command_palette.close();
-                    self.palette_attached_window = None;
+                    self.interaction.command_palette.close();
+                    self.interaction.palette_attached_window = None;
                     return true;
                 }
                 Key::Named(NamedKey::Enter) => {
@@ -145,13 +147,13 @@ impl App {
                 }
                 Key::Named(NamedKey::ArrowDown) => {
                     // When: logical_key is ArrowDown, the highlight steps down past any heading.
-                    self.command_palette.move_selection_down();
+                    self.interaction.command_palette.move_selection_down();
                     self.request_checklist_redraw();
                     return true;
                 }
                 Key::Named(NamedKey::ArrowUp) => {
                     // When: logical_key is ArrowUp, the highlight steps up past any heading.
-                    self.command_palette.move_selection_up();
+                    self.interaction.command_palette.move_selection_up();
                     self.request_checklist_redraw();
                     return true;
                 }
@@ -168,7 +170,7 @@ impl App {
                 return true;
             }
         }
-        if self.command_palette.mode() == CommandPaletteMode::FontFamily {
+        if self.interaction.command_palette.mode() == CommandPaletteMode::FontFamily {
             // When: mode is FontFamily, arrows preview the highlighted family, Enter keeps it and
             // Escape restores the font the picker opened with; other keys edit the filter.
             match logical_key {
@@ -184,13 +186,13 @@ impl App {
                 }
                 Key::Named(NamedKey::ArrowDown) => {
                     // When: logical_key is ArrowDown, the next family applies live.
-                    self.command_palette.move_selection_down();
+                    self.interaction.command_palette.move_selection_down();
                     self.preview_font_family();
                     return true;
                 }
                 Key::Named(NamedKey::ArrowUp) => {
                     // When: logical_key is ArrowUp, the previous family applies live.
-                    self.command_palette.move_selection_up();
+                    self.interaction.command_palette.move_selection_up();
                     self.preview_font_family();
                     return true;
                 }
@@ -199,33 +201,34 @@ impl App {
                 }
             }
         }
-        if self.command_palette.mode()
+        if self.interaction.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::TabColor
         {
             match logical_key {
                 Key::Named(NamedKey::Escape) => {
-                    self.command_palette.close();
-                    self.palette_attached_window = None;
-                    self.tab_edit_target = None;
+                    self.interaction.command_palette.close();
+                    self.interaction.palette_attached_window = None;
+                    self.interaction.tab_edit_target = None;
                     true
                 }
                 Key::Named(NamedKey::Enter) => {
-                    let source = self.palette_attached_window.or(self.main_window_id);
+                    let source =
+                        self.interaction.palette_attached_window.or(self.registry.main_window_id);
                     self.apply_selected_tab_color();
-                    self.command_palette.close();
-                    self.palette_attached_window = None;
+                    self.interaction.command_palette.close();
+                    self.interaction.palette_attached_window = None;
                     // Repaint the host even when a closed or moved tab left nothing to change.
                     self.request_redraw_for_overlay(source);
                     true
                 }
                 Key::Named(NamedKey::ArrowDown) => {
-                    self.command_palette.move_selection_down();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.interaction.command_palette.move_selection_down();
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::ArrowUp) => {
-                    self.command_palette.move_selection_up();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.interaction.command_palette.move_selection_up();
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 _ => true,
@@ -236,40 +239,44 @@ impl App {
             // When: command_palette_field_command recognizes an edit, extension, or select-all, only the attached editor consumes it.
             use crate::app::field_input::FieldCommand;
             match command {
-                FieldCommand::Edit(edit) => self.command_palette.apply_text_edit(edit),
-                FieldCommand::Extend(edit) => self.command_palette.apply_text_edit_extending(edit),
-                FieldCommand::SelectAll => self.command_palette.select_all(),
+                FieldCommand::Edit(edit) => self.interaction.command_palette.apply_text_edit(edit),
+                FieldCommand::Extend(edit) => {
+                    self.interaction.command_palette.apply_text_edit_extending(edit)
+                }
+                FieldCommand::SelectAll => self.interaction.command_palette.select_all(),
             }
             self.update_command_palette_ime_cursor_area();
-            self.request_redraw_for_overlay(self.palette_attached_window);
+            self.request_redraw_for_overlay(self.interaction.palette_attached_window);
             true
         } else if matches!(
-            self.command_palette.mode(),
+            self.interaction.command_palette.mode(),
             CommandPaletteMode::RenameTab | CommandPaletteMode::RenameWindow
         ) {
             // When: matches! selects RenameTab or RenameWindow, consume keys locally instead of dispatching terminal commands.
             match logical_key {
                 Key::Named(NamedKey::Escape) => {
-                    let source = self.palette_attached_window.or(self.main_window_id);
-                    self.command_palette.close();
-                    self.window_rename_target = None;
-                    self.tab_edit_target = None;
-                    self.palette_attached_window = None;
+                    let source =
+                        self.interaction.palette_attached_window.or(self.registry.main_window_id);
+                    self.interaction.command_palette.close();
+                    self.interaction.window_rename_target = None;
+                    self.interaction.tab_edit_target = None;
+                    self.interaction.palette_attached_window = None;
                     self.request_redraw_for_overlay(source);
                     true
                 }
                 Key::Named(NamedKey::Enter) => {
                     // When: Enter ends a name edit, window and tab names use stable targets
                     // rather than active-tab state.
-                    if self.command_palette.mode() == CommandPaletteMode::RenameWindow {
+                    if self.interaction.command_palette.mode() == CommandPaletteMode::RenameWindow {
                         // When: RenameWindow owns the editor, validation must finish before changing the native title.
                         self.submit_window_name();
                         return true;
                     }
-                    let title = self.command_palette.query().trim().to_string();
-                    let source = self.palette_attached_window.or(self.main_window_id);
-                    self.command_palette.close();
-                    self.palette_attached_window = None;
+                    let title = self.interaction.command_palette.query().trim().to_string();
+                    let source =
+                        self.interaction.palette_attached_window.or(self.registry.main_window_id);
+                    self.interaction.command_palette.close();
+                    self.interaction.palette_attached_window = None;
                     // A closed or moved tab keeps its name; the title never lands on another tab.
                     self.edit_captured_tab(|tabs, tab| tabs.set_custom_title(tab, title));
                     self.request_redraw_for_overlay(source);
@@ -280,45 +287,45 @@ impl App {
                         ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER,
                     ) =>
                 {
-                    self.command_palette.backspace();
+                    self.interaction.command_palette.backspace();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::Space) | Key::Character(_) => {
                     self.command_palette_input_text(logical_key, event_text);
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::ArrowLeft) => {
-                    self.command_palette.move_cursor_left();
+                    self.interaction.command_palette.move_cursor_left();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::ArrowRight) => {
-                    self.command_palette.move_cursor_right();
+                    self.interaction.command_palette.move_cursor_right();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::Home) => {
-                    self.command_palette.move_cursor_home();
+                    self.interaction.command_palette.move_cursor_home();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::End) => {
-                    self.command_palette.move_cursor_end();
+                    self.interaction.command_palette.move_cursor_end();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::Delete) => {
-                    self.command_palette.delete_forward();
+                    self.interaction.command_palette.delete_forward();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 _ => true,
@@ -328,25 +335,26 @@ impl App {
             // the command list, where Enter runs the selected action.
             match logical_key {
                 Key::Named(NamedKey::Escape) => {
-                    self.command_palette.close();
-                    self.palette_attached_window = None;
+                    self.interaction.command_palette.close();
+                    self.interaction.palette_attached_window = None;
                     true
                 }
                 Key::Named(NamedKey::Enter) => {
                     // When: Enter arrives in list mode it runs the highlighted
                     // entry; RenameTab and UpdateTabColor re-enter sub-modes.
-                    let Some(action) = self.command_palette.current().cloned() else {
+                    let Some(action) = self.interaction.command_palette.current().cloned() else {
                         // When: `current` is absent, keep a disabled or empty result visible without dispatch.
-                        self.request_redraw_for_overlay(self.palette_attached_window);
+                        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                         return true;
                     };
-                    let source_window = self.palette_attached_window.or(self.main_window_id);
+                    let source_window =
+                        self.interaction.palette_attached_window.or(self.registry.main_window_id);
                     let action = match action {
                         sonicterm_ui::command_palette::PaletteEntry::Command(action) => action,
                         sonicterm_ui::command_palette::PaletteEntry::About => {
                             // When: About is selected, close the palette and open or focus the About window.
-                            self.command_palette.close();
-                            self.palette_attached_window = None;
+                            self.interaction.command_palette.close();
+                            self.interaction.palette_attached_window = None;
                             self.show_about();
                             self.request_redraw_for_overlay(source_window);
                             return true;
@@ -354,8 +362,11 @@ impl App {
                         sonicterm_ui::command_palette::PaletteEntry::Tab { id, .. } => {
                             // When: `Tab` supplies `id`, resolve it in the captured source before closing the palette.
                             let target = source_window.and_then(|window_id| {
-                                let window =
-                                    self.windows.get(&window_id).filter(|window| !window.hidden)?;
+                                let window = self
+                                    .registry
+                                    .windows
+                                    .get(&window_id)
+                                    .filter(|window| !window.hidden)?;
                                 window
                                     .tabs
                                     .tabs()
@@ -365,11 +376,13 @@ impl App {
                             });
                             let Some((window_id, index)) = target else {
                                 // When: `target` vanished, never substitute another tab or window at the old position.
-                                self.request_redraw_for_overlay(self.palette_attached_window);
+                                self.request_redraw_for_overlay(
+                                    self.interaction.palette_attached_window,
+                                );
                                 return true;
                             };
-                            self.command_palette.close();
-                            self.palette_attached_window = None;
+                            self.interaction.command_palette.close();
+                            self.interaction.palette_attached_window = None;
                             self.run_action_for_window(&Action::ActivateTab(index), window_id);
                             self.request_redraw_for_overlay(Some(window_id));
                             return true;
@@ -386,30 +399,30 @@ impl App {
                         // When: matches finds RenameTab the palette stays open as
                         // a rename editor seeded with the active tab title.
                         let body = source_window
-                            .and_then(|id| self.windows.get(&id))
+                            .and_then(|id| self.registry.windows.get(&id))
                             .and_then(|window| window.tabs.active_title_body())
                             .unwrap_or_default();
-                        self.command_palette.start_rename_tab(body);
+                        self.interaction.command_palette.start_rename_tab(body);
                         self.capture_tab_edit_target(source_window);
                         self.update_command_palette_ime_cursor_area();
-                        self.request_redraw_for_overlay(self.palette_attached_window);
+                        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                         return true;
                     }
                     if matches!(action, sonicterm_cfg::keymap::Action::UpdateTabColor) {
                         // When: matches finds UpdateTabColor the palette switches
                         // to the tab color picker instead of closing.
                         let title = source_window
-                            .and_then(|id| self.windows.get(&id))
+                            .and_then(|id| self.registry.windows.get(&id))
                             .and_then(|window| window.tabs.active_title_body())
                             .unwrap_or_default();
                         let choices = theme_tab_color_choices(&self.theme);
-                        self.command_palette.start_tab_color_picker(title, choices);
+                        self.interaction.command_palette.start_tab_color_picker(title, choices);
                         self.capture_tab_edit_target(source_window);
-                        self.request_redraw_for_overlay(self.palette_attached_window);
+                        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                         return true;
                     }
-                    self.command_palette.close();
-                    self.palette_attached_window = None;
+                    self.interaction.command_palette.close();
+                    self.interaction.palette_attached_window = None;
                     if let Some(source_window) = source_window {
                         self.run_action_for_window(&action, source_window);
                     } else {
@@ -419,11 +432,11 @@ impl App {
                     true
                 }
                 Key::Named(NamedKey::ArrowDown) => {
-                    self.command_palette.move_selection_down();
+                    self.interaction.command_palette.move_selection_down();
                     true
                 }
                 Key::Named(NamedKey::ArrowUp) => {
-                    self.command_palette.move_selection_up();
+                    self.interaction.command_palette.move_selection_up();
                     true
                 }
                 Key::Named(NamedKey::Backspace)
@@ -431,45 +444,45 @@ impl App {
                         ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER,
                     ) =>
                 {
-                    self.command_palette.backspace();
+                    self.interaction.command_palette.backspace();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::Space) | Key::Character(_) => {
                     self.command_palette_input_text(logical_key, event_text);
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::ArrowLeft) => {
-                    self.command_palette.move_cursor_left();
+                    self.interaction.command_palette.move_cursor_left();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::ArrowRight) => {
-                    self.command_palette.move_cursor_right();
+                    self.interaction.command_palette.move_cursor_right();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::Home) => {
-                    self.command_palette.move_cursor_home();
+                    self.interaction.command_palette.move_cursor_home();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::End) => {
-                    self.command_palette.move_cursor_end();
+                    self.interaction.command_palette.move_cursor_end();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::Delete) => {
-                    self.command_palette.delete_forward();
+                    self.interaction.command_palette.delete_forward();
                     self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
                     true
                 }
                 _ => true, // swallow other keys while palette is open

@@ -18,12 +18,12 @@ fn checklist_app() -> (App, winit::window::WindowId) {
 
 /// The kinds of the checklist's rows, in display order.
 fn kinds(app: &App) -> Vec<Kind> {
-    app.command_palette.status_segment_rows().iter().map(|row| row.kind).collect()
+    app.interaction.command_palette.status_segment_rows().iter().map(|row| row.kind).collect()
 }
 
 /// The label of `id`'s row.
 fn label(app: &App, id: Seg) -> String {
-    let rows = app.command_palette.status_segment_rows();
+    let rows = app.interaction.command_palette.status_segment_rows();
     rows.iter().find(|row| row.kind == Kind::Segment(id)).map(|row| row.label.clone()).unwrap()
 }
 
@@ -66,7 +66,11 @@ fn the_checklist_lists_every_implemented_segment_grouped_in_catalog_order() {
     let mem_side = app.current_status_line().segment(Seg::Mem).map(|segment| segment.side);
     assert_eq!(mem_side, Some(StatusSide::Right), "the developer preset shows mem on the right");
     assert_eq!(label(&app, Seg::Mem), "✓ Mem — right");
-    assert_eq!(app.palette_attached_window, Some(child), "attached to the window it came from");
+    assert_eq!(
+        app.interaction.palette_attached_window,
+        Some(child),
+        "attached to the window it came from"
+    );
 }
 
 #[test]
@@ -79,9 +83,12 @@ fn enter_toggles_and_keeps_the_page_open_and_arrows_move_a_checked_segment() {
         |app: &mut App| app.current_status_line().segment(Seg::Cpu).map(|segment| segment.side);
     assert_eq!(side(&mut app), None);
     assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter)));
-    assert!(app.command_palette.is_open(), "Enter keeps the checklist open");
+    assert!(app.interaction.command_palette.is_open(), "Enter keeps the checklist open");
     assert_eq!(side(&mut app), Some(StatusSide::Right));
-    assert_eq!(app.command_palette.selected_status_row(), Some(Kind::Segment(Seg::Cpu)));
+    assert_eq!(
+        app.interaction.command_palette.selected_status_row(),
+        Some(Kind::Segment(Seg::Cpu))
+    );
     assert!(label(&app, Seg::Cpu).starts_with('✓'), "the row is redrawn checked");
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowLeft));
     assert_eq!(side(&mut app), Some(StatusSide::Center));
@@ -94,8 +101,8 @@ fn enter_toggles_and_keeps_the_page_open_and_arrows_move_a_checked_segment() {
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowLeft));
     assert_eq!(side(&mut app), None, "an unchecked row does not move");
     assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape)));
-    assert!(!app.command_palette.is_open());
-    assert_eq!(app.palette_attached_window, None);
+    assert!(!app.interaction.command_palette.is_open());
+    assert_eq!(app.interaction.palette_attached_window, None);
 }
 
 #[test]
@@ -105,7 +112,7 @@ fn the_toggle_rows_and_reset_change_the_session_only() {
     app.open_status_segments(Some(child), Some(Seg::Cpu));
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
     app.open_status_segments(Some(child), None);
-    assert_eq!(app.command_palette.selected_status_row(), Some(Kind::ShowStrip));
+    assert_eq!(app.interaction.command_palette.selected_status_row(), Some(Kind::ShowStrip));
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowDown));
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
     assert!(app.current_status_line().hide_sensitive);
@@ -113,11 +120,15 @@ fn the_toggle_rows_and_reset_change_the_session_only() {
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
     assert!(!app.current_status_line().enabled, "Show status line turns the strip off");
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowUp));
-    assert_eq!(app.command_palette.selected_status_row(), Some(Kind::Reset), "Up wraps to Reset");
+    assert_eq!(
+        app.interaction.command_palette.selected_status_row(),
+        Some(Kind::Reset),
+        "Up wraps to Reset"
+    );
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
     let after = app.current_status_line();
     assert!(after.enabled && !after.hide_sensitive && after.segment(Seg::Cpu).is_none());
-    assert!(app.command_palette.is_open());
+    assert!(app.interaction.command_palette.is_open());
 }
 
 #[test]

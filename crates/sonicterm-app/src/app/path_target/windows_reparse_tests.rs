@@ -354,22 +354,22 @@ fn structural_paths_native_interaction() {
         }
         fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
             self.app.about_to_wait(event_loop);
-            let native_windows = self.app.windows.iter().filter_map(|(id, state)| {
+            let native_windows = self.app.registry.windows.iter().filter_map(|(id, state)| {
                 let window = state.window.as_ref()?;
                 let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else { return None };
                 let active_pane = state.tab_states.get(state.tabs.active_index())?.active_pane;
                 let pane = state.panes.get(&active_pane)?;
                 let parser = pane.parser.try_lock()?;
                 let rows = parser.grid().rows_iter().map(|row| row.iter().map(|cell| cell.ch).collect::<String>()).collect::<Vec<_>>();
-                Some(serde_json::json!({"hwnd":handle.hwnd.get(),"main":Some(*id)==self.app.main_window_id,"width":window.inner_size().width,"height":window.inner_size().height,"scale":window.scale_factor(),"tabs":state.tabs.len(),"rows":rows,"hidden":state.hidden}))
+                Some(serde_json::json!({"hwnd":handle.hwnd.get(),"main":Some(*id)==self.app.registry.main_window_id,"width":window.inner_size().width,"height":window.inner_size().height,"scale":window.scale_factor(),"tabs":state.tabs.len(),"rows":rows,"hidden":state.hidden}))
             }).collect::<Vec<_>>();
             std::fs::write(
                 self.root.join("windows.json"),
                 serde_json::to_vec(&native_windows).unwrap(),
             )
             .unwrap();
-            if let Some(id) = self.app.main_window_id {
-                let window = &self.app.windows[&id];
+            if let Some(id) = self.app.registry.main_window_id {
+                let window = &self.app.registry.windows[&id];
                 let tab = &window.tab_states[window.tabs.active_index()];
                 if let (Some(native), Some(renderer), Some(pane)) =
                     (&window.window, &window.renderer, window.panes.get(&tab.active_pane))

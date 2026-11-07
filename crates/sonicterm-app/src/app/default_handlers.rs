@@ -55,7 +55,7 @@ impl App {
 
     /// The notification target for `window`, or the frontmost window when it has closed.
     fn default_handlers_kind(&self, window: Option<WindowId>) -> FrontmostKind {
-        match window.filter(|id| self.windows.contains_key(id)) {
+        match window.filter(|id| self.registry.windows.contains_key(id)) {
             Some(id) => self.kind_for(id),
             None => self.frontmost_kind(),
         }
@@ -69,7 +69,7 @@ impl App {
     pub(super) fn start_default_handlers(&mut self) {
         let window = match self.frontmost_kind() {
             FrontmostKind::Child(id) => Some(id),
-            _ => self.main_window_id,
+            _ => self.registry.main_window_id,
         };
         let kind = self.default_handlers_kind(window);
         tracing::info!(
@@ -121,28 +121,31 @@ impl App {
             .map(|item| item.describe())
             .chain(plan.confirm_notes.iter().cloned())
             .collect();
-        self.palette_pointer_capture = None;
-        self.command_palette.start_confirm(
+        self.interaction.palette_pointer_capture = None;
+        self.interaction.command_palette.start_confirm(
             self.i18n.translate(title_key),
             self.i18n.translate(apply_key),
             self.i18n.translate("default-handlers-cancel"),
             items,
         );
-        self.palette_attached_window = match self.frontmost_kind() {
+        self.interaction.palette_attached_window = match self.frontmost_kind() {
             FrontmostKind::Child(id) => Some(id),
             _ => None,
         };
-        self.default_handlers.pending =
-            Some(PendingConfirmation { session: self.command_palette.session(), window, plan });
-        self.request_redraw_for_overlay(self.palette_attached_window);
+        self.default_handlers.pending = Some(PendingConfirmation {
+            session: self.interaction.command_palette.session(),
+            window,
+            plan,
+        });
+        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 
     /// Close the confirmation page; `apply` is true only for Apply on that page.
     pub(super) fn confirm_default_handlers(&mut self, apply: bool) {
-        let session = self.command_palette.session();
-        let source = self.palette_attached_window.or(self.main_window_id);
-        self.command_palette.close();
-        self.palette_attached_window = None;
+        let session = self.interaction.command_palette.session();
+        let source = self.interaction.palette_attached_window.or(self.registry.main_window_id);
+        self.interaction.command_palette.close();
+        self.interaction.palette_attached_window = None;
         self.request_redraw_for_overlay(source);
         let pending =
             self.default_handlers.pending.take().filter(|pending| pending.session == session);

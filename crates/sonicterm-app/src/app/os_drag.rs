@@ -419,10 +419,10 @@ impl App {
     /// Install the platform OS handoff backend. `sonicterm-mac` supplies its
     /// pasteboard publisher; `sonicterm-windows` supplies OLE `DoDragDrop`.
     /// Tests use it via
-    /// [`Self::__test_set_os_drag_backend`] to inject a mock.
+    /// `Self::__test_set_os_drag_backend` to inject a mock.
     #[doc(hidden)]
     pub fn set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {
-        self.os_drag_backend = Some(backend);
+        self.interaction.os_drag_backend = Some(backend);
     }
 
     /// build an [`os_drag::AppHandle`] tied to the App's
@@ -438,10 +438,10 @@ impl App {
         self.event_loop_proxy.clone().map(|proxy| {
             os_drag::AppHandle::with_pending_and_bars(
                 proxy,
-                self.os_drag_pending.clone(),
-                self.os_drag_bars.clone(),
+                self.interaction.os_drag_pending.clone(),
+                self.interaction.os_drag_bars.clone(),
             )
-            .with_main_window(self.main_window_id)
+            .with_main_window(self.registry.main_window_id)
         })
     }
 
@@ -450,7 +450,7 @@ impl App {
     /// stash a reference for use inside the OLE IDropTarget::Drop
     /// callback, where the AppHandle isn't always available.
     pub fn os_drag_bar_registry(&self) -> Arc<os_drag::TabBarRegistry> {
-        self.os_drag_bars.clone()
+        self.interaction.os_drag_bars.clone()
     }
 
     /// Publish the current tab bar layout for `window` into the shared
@@ -459,7 +459,7 @@ impl App {
     /// converting logical-px / window-local to screen via
     /// winit's `Window::outer_position`).
     pub fn publish_os_drag_bar_snapshot(&self, snapshot: os_drag::TabBarSnapshot) {
-        self.os_drag_bars.publish(snapshot);
+        self.interaction.os_drag_bars.publish(snapshot);
     }
 
     /// Convenience: build a [`os_drag::TabBarSnapshot`] from the main
@@ -506,7 +506,7 @@ impl App {
     /// Remove a window's snapshot from the registry (called on window
     /// close). Safe to call with `None` (matches main-window convention).
     pub fn remove_os_drag_bar_snapshot(&self, window: Option<WindowId>) {
-        self.os_drag_bars.remove(window);
+        self.interaction.os_drag_bars.remove(window);
     }
 
     /// Publish the tab bar snapshot for the child window keyed by `id`.
@@ -514,7 +514,7 @@ impl App {
     /// path right after `Renderer::render`.
     pub fn publish_child_window_tab_bar(&self, id: WindowId) {
         use sonicterm_ui::tabbar_view::TabBarLayout;
-        let Some(child) = self.windows.get(&id) else {
+        let Some(child) = self.registry.windows.get(&id) else {
             // When: `id` tracks no window, so there is no child tab bar to
             // publish geometry for.
             return;
@@ -564,13 +564,13 @@ impl App {
                 // When: `ReturnToOriginalBar` keeps the captured tab in place, no topology mutation is owed.
             }
             crate::tab_drag::DragAction::ReorderTab { to } => {
-                if let Some(window) = self.windows.get_mut(&session.source_window) {
+                if let Some(window) = self.registry.windows.get_mut(&session.source_window) {
                     window.reorder_tab(index, to);
                 }
             }
             crate::tab_drag::DragAction::MergeIntoWindow(target) => {
                 // When: MergeIntoWindow selects target, preserve the transfer refusal instead of reporting a completed drag.
-                let moved = if self.main_window_id == Some(session.source_window) {
+                let moved = if self.registry.main_window_id == Some(session.source_window) {
                     self.merge_main_into_child(index, target)
                 } else {
                     // When: session.source_window is not main_window_id, keep child-specific source close policy.
@@ -585,7 +585,7 @@ impl App {
                 tear_out(self, session.source_window, index);
             }
         }
-        if let Some(window) = self.windows.get(&session.source_window) {
+        if let Some(window) = self.registry.windows.get(&session.source_window) {
             window.request_window_redraw();
         }
         true
@@ -613,12 +613,12 @@ impl App {
             // drag context and recording a source would strand it.
             return false;
         };
-        let Some(backend) = self.os_drag_backend.as_mut() else {
+        let Some(backend) = self.interaction.os_drag_backend.as_mut() else {
             // When: no `os_drag_backend` is installed, so nothing can carry the
             // session and the source must not be recorded.
             return false;
         };
-        self.os_drag_source = Some((source_window, source_tab));
+        self.interaction.os_drag_source = Some((source_window, source_tab));
         backend.begin_session(handle, source_window, source_tab_idx, payload_json, drag_image_png);
         true
     }
@@ -628,11 +628,18 @@ impl App {
     /// the legacy `OsDragSink` after `begin_os_tab_drag` returns —
     /// running both on Windows would invoke `DoDragDrop` twice.
     pub fn os_drag_backend_handles_full_gesture(&self) -> bool {
-        self.os_drag_backend.as_ref().map(|backend| backend.handles_full_gesture()).unwrap_or(false)
+        self.interaction
+            .os_drag_backend
+            .as_ref()
+            .map(|backend| backend.handles_full_gesture())
+            .unwrap_or(false)
     }
 
     pub(super) fn owns_native_drop_target(&self) -> bool {
-        self.os_drag_backend.as_ref().is_some_and(|backend| backend.owns_native_drop_target())
+        self.interaction
+            .os_drag_backend
+            .as_ref()
+            .is_some_and(|backend| backend.owns_native_drop_target())
     }
 
     pub(super) fn native_drop_attributes(&self, attrs: WindowAttributes) -> WindowAttributes {
@@ -653,14 +660,18 @@ impl App {
         window_id: WindowId,
         window: &std::sync::Arc<winit::window::Window>,
     ) -> Result<(), String> {
-        if self.os_drag_backend.is_none() {
+        if self.interaction.os_drag_backend.is_none() {
             // When: os_drag_backend is absent, winit retains its default file-drop ownership.
             return Ok(());
         }
         let handle = self
             .os_drag_app_handle()
             .ok_or_else(|| "native drop event loop unavailable".to_string())?;
-        self.os_drag_backend.as_mut().unwrap().register_window(handle, window_id, window)
+        self.interaction
+            .os_drag_backend
+            .as_mut()
+            .unwrap()
+            .register_window(handle, window_id, window)
     }
 
     pub(super) fn release_child_window_registries(&mut self, window_id: WindowId) {
@@ -674,9 +685,9 @@ impl App {
             // discarded on arrival.
             workers.cancel_window(window_id);
         }
-        self.window_keys.remove(window_id);
-        self.os_drag_bars.remove(Some(window_id));
-        if let Some(backend) = self.os_drag_backend.as_mut() {
+        self.registry.window_keys.remove(window_id);
+        self.interaction.os_drag_bars.remove(Some(window_id));
+        if let Some(backend) = self.interaction.os_drag_backend.as_mut() {
             if let Err(error) = backend.unregister_window(window_id) {
                 // Failed revocation leaves native custody with the backend for its final cleanup.
                 tracing::error!(target: "sonicterm_app::app", ?window_id, %error, "native drop-target release failed");
@@ -690,7 +701,7 @@ impl App {
     /// the OS cursor stream. Reserved for future "highlight drop
     /// target in destination bar" feedback.
     pub fn handle_os_drag_moved(&mut self) -> Option<(i32, i32)> {
-        let pos = self.os_drag_pending.take_moved();
+        let pos = self.interaction.os_drag_pending.take_moved();
         if let Some(position) = pos {
             tracing::trace!(target: "sonicterm_app::app", p = ?position, "os_drag_session: cursor moved");
         }
@@ -704,8 +715,8 @@ impl App {
     /// dispatcher just clears the in-flight bookkeeping). Returns the
     /// outcome that was processed for tests to assert on.
     pub fn handle_os_drag_ended(&mut self) -> Option<os_drag::DragOutcome> {
-        let outcome = self.os_drag_pending.take_ended()?;
-        let source = self.os_drag_source.take().and_then(|(window, tab)| {
+        let outcome = self.interaction.os_drag_pending.take_ended()?;
+        let source = self.interaction.os_drag_source.take().and_then(|(window, tab)| {
             self.tab_index_of_id(window, tab).map(|index| (window, index, tab))
         });
         match outcome {
@@ -728,8 +739,8 @@ impl App {
                 // source side, but the *target* may legitimately be the
                 // main window. Detect that by comparing against the
                 // App's `window` field.
-                let src_opt = (self.main_window_id != Some(src_win)).then_some(src_win);
-                let tgt_opt = target_window.filter(|id| Some(*id) != self.main_window_id);
+                let src_opt = (self.registry.main_window_id != Some(src_win)).then_some(src_win);
+                let tgt_opt = target_window.filter(|id| Some(*id) != self.registry.main_window_id);
                 if let Err(error) = self.transfer_tab(src_opt, src_idx, tgt_opt, target_slot) {
                     tracing::warn!(target: "sonicterm_app::app", e = ?error, "os_drag_session: transfer_tab refused — cancelling");
                     self.cancel_drag_session();
@@ -808,7 +819,7 @@ impl App {
         let mut had = false;
         // (defensive): snapshot window-id keys BEFORE the
         // mutation loop. The loop body calls `clear_drag_chip` /
-        // `request_redraw`, neither of which mutate `self.windows`
+        // `request_redraw`, neither of which mutate `self.registry.windows`
         // today, but a future per-window handler (or a winit reentrant
         // callback on Windows under heavy load) could
         // insert/remove a window mid-iteration. Iterating a snapshot of
@@ -817,15 +828,16 @@ impl App {
         // all-windows loop runs UNCONDITIONALLY — never short-circuit, so a
         // second invocation after the session is re-armed still clears
         // every window.
-        let ids: Vec<_> = self.windows.keys().copied().collect();
+        let ids: Vec<_> = self.registry.windows.keys().copied().collect();
         // Invoke the test-only
         // post-snapshot hook AFTER `ids` is collected but BEFORE the
         // iteration body starts. The `take()` releases the hook so it
         // never re-fires, and (more importantly) leaves no live borrow
-        // on `self` — the closure can freely mutate `self.windows`,
+        // on `self` — the closure can freely mutate `self.registry.windows`,
         // which is the exact race we need to exercise to prove the
-        // `get_mut(&id).else { continue }` arm below fires. Always
-        // `None` in production (the setter is `__test_*`-gated).
+        // `get_mut(&id).else { continue }` arm below fires. Release builds
+        // compile none of it: the field and this call need `test-support`.
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(hook) = self.test_post_snapshot_hook.take() {
             hook(self);
         }
@@ -840,7 +852,7 @@ impl App {
         // refresh. Iterate every WindowState (main + children) and wipe
         // the lot.
         for id in ids {
-            let Some(window) = self.windows.get_mut(&id) else {
+            let Some(window) = self.registry.windows.get_mut(&id) else {
                 // When: `windows` dropped `id` between the snapshot and this
                 // iteration, so its residue is already gone with the window.
                 continue;
@@ -874,7 +886,7 @@ impl App {
                 crate::app::frame_counters::request_native_redraw(native);
             }
         }
-        self.os_drag_handoff_started = false;
+        self.interaction.os_drag_handoff_started = false;
         had
     }
 }

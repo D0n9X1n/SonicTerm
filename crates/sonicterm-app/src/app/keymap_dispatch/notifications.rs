@@ -27,7 +27,7 @@ impl App {
         match kind {
             FrontmostKind::Child(id) => {
                 // When: kind is FrontmostKind::Child(id), prefer that child's notification surface.
-                if let Some(child) = self.windows.get_mut(&id) {
+                if let Some(child) = self.registry.windows.get_mut(&id) {
                     // When: windows.get_mut finds id, install the bubble and finish child routing.
                     child.notification = Some(bubble);
                     child.request_window_redraw();
@@ -67,7 +67,7 @@ impl App {
         match kind {
             FrontmostKind::Child(id) => {
                 // When: kind is FrontmostKind::Child(id), dismiss that child's notification first.
-                if let Some(child) = self.windows.get_mut(&id) {
+                if let Some(child) = self.registry.windows.get_mut(&id) {
                     // When: windows.get_mut finds id, clear its notification and finish child routing.
                     child.notification = None;
                     child.request_window_redraw();
@@ -93,7 +93,7 @@ impl App {
     ) -> Option<sonicterm_ui::overlays::NotificationBubbleLayout> {
         match kind {
             FrontmostKind::Child(id) => {
-                let child = self.windows.get(&id)?;
+                let child = self.registry.windows.get(&id)?;
                 let message = child.notification.as_ref()?.message.clone();
                 let renderer = child.renderer.as_ref()?;
                 let window = child.window.as_ref()?;

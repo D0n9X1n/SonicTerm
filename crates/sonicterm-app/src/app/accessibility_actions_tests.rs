@@ -30,7 +30,7 @@ fn an_assistive_technology_click_obeys_readonly_and_stays_on_its_window() {
     // routing, so READONLY there refuses a disallowed action, and an allowed one acts on that
     // window even while another is frontmost.
     let (mut app, window_id) = app_with_window();
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     app.__test_set_frontmost_window(Some(main));
     assert!(!crate::app::keymap_dispatch::read_only_allows_action(&Action::NewTab));
     present_with(
@@ -42,8 +42,9 @@ fn an_assistive_technology_click_obeys_readonly_and_stays_on_its_window() {
         ],
     );
     activate(&mut app, window_id, Instant::now());
-    app.windows.get_mut(&window_id).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
-    let tabs = app.windows[&window_id].tabs.len();
+    app.registry.windows.get_mut(&window_id).unwrap().copy_mode =
+        Some(CopyModeState::read_only_at((0, 0)));
+    let tabs = app.registry.windows[&window_id].tabs.len();
     let state = access(&app, window_id);
     let targets: HashMap<StatusSegmentId, Option<RequestTarget>> =
         [StatusSegmentId::Mem, StatusSegmentId::Cpu]
@@ -55,10 +56,14 @@ fn an_assistive_technology_click_obeys_readonly_and_stays_on_its_window() {
         target: targets[&id],
     };
     app.handle_accessibility_request(window_id, click(StatusSegmentId::Mem));
-    assert_eq!(app.windows[&window_id].tabs.len(), tabs, "READONLY refused the new tab");
-    app.windows.get_mut(&window_id).unwrap().copy_mode = None;
+    assert_eq!(app.registry.windows[&window_id].tabs.len(), tabs, "READONLY refused the new tab");
+    app.registry.windows.get_mut(&window_id).unwrap().copy_mode = None;
     app.handle_accessibility_request(window_id, click(StatusSegmentId::Cpu));
-    assert_eq!(app.palette_attached_window, Some(window_id), "rename opened on the source");
+    assert_eq!(
+        app.interaction.palette_attached_window,
+        Some(window_id),
+        "rename opened on the source"
+    );
 }
 
 #[test]
@@ -126,7 +131,7 @@ fn ime_blur_and_tab_changes_end_strip_focus() {
     app.handle_window_focus_changed(window_id, false);
     assert_eq!(focus(&app), None, "blur ends focus");
     app.focus_status_line(window_id);
-    app.windows.get_mut(&window_id).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&window_id).unwrap().tabs.activate(0);
     assert!(!app.status_focus_key(window_id, &Key::Named(NamedKey::ArrowRight), false));
     assert_eq!(focus(&app), None, "a tab change ends focus");
 }
@@ -215,7 +220,7 @@ fn a_queued_click_whose_node_now_carries_another_action_is_dropped() {
         &[(StatusSegmentId::Mem, 0.0, Some(SegmentClick::Action(Action::RenameWindow)))],
     );
     app.handle_accessibility_request(window_id, AccessibilityRequest::Click { node: mem, target });
-    assert_eq!(app.palette_attached_window, None, "the new action did not run");
+    assert_eq!(app.interaction.palette_attached_window, None, "the new action did not run");
     assert!(app.status_line_shown(), "nor did the old one");
 }
 
@@ -255,7 +260,7 @@ fn a_request_resolved_against_the_old_tree_is_dropped_after_its_replacement() {
     assert_eq!(target, tree_one, "resolved against the tree the adapter still held");
     assert_ne!(access(&app, window_id).resolve(mem), tree_one, "tree 2's target is published");
     app.handle_accessibility_request(window_id, AccessibilityRequest::Click { node: mem, target });
-    assert_eq!(app.palette_attached_window, None, "neither tree 2's action ran");
+    assert_eq!(app.interaction.palette_attached_window, None, "neither tree 2's action ran");
     assert!(app.status_line_shown(), "nor tree 1's");
 }
 
@@ -311,12 +316,16 @@ fn a_segment_click_hands_the_keyboard_to_what_it_opens() {
     );
     app.focus_status_line(window_id);
     assert!(app.status_focus_key(window_id, &Key::Named(NamedKey::Enter), false));
-    assert_eq!(app.palette_attached_window, Some(window_id), "the rename editor opened");
+    assert_eq!(
+        app.interaction.palette_attached_window,
+        Some(window_id),
+        "the rename editor opened"
+    );
     assert_eq!(access(&app, window_id).focus, None, "strip focus ended before the click ran");
-    let before = app.command_palette.query().to_owned();
+    let before = app.interaction.command_palette.query().to_owned();
     app.handle_window_ime(window_id, Ime::Commit("x".into()));
     assert_eq!(
-        app.command_palette.query(),
+        app.interaction.command_palette.query(),
         format!("{before}x"),
         "the character reached the editor"
     );
@@ -333,7 +342,8 @@ fn the_charge_always_equals_the_capacity_estimate_and_disconnect_frees_the_model
     let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
     let (mut app, window_id) = app_with_tabs(&titles);
     present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
-    let owner = app.windows[&window_id].owner.as_ref().map(|guard| guard.id()).expect("owner");
+    let owner =
+        app.registry.windows[&window_id].owner.as_ref().map(|guard| guard.id()).expect("owner");
     let charged = |app: &App| {
         app.__test_owner_snapshot(owner).unwrap().owner_class_bytes
             [ResourceClass::AccessibilityTree]
@@ -342,7 +352,7 @@ fn the_charge_always_equals_the_capacity_estimate_and_disconnect_frees_the_model
     activate(&mut app, window_id, start);
     assert_eq!(charged(&app), access(&app, window_id).retained_bytes());
     for tab in 0..29 {
-        app.windows.get_mut(&window_id).unwrap().tabs.mark(tab, |marks| marks.bell = true);
+        app.registry.windows.get_mut(&window_id).unwrap().tabs.mark(tab, |marks| marks.bell = true);
     }
     for step in 1..100_u64 {
         let error = (step % 2 == 0).then(|| anyhow::anyhow!("bad key {step}"));
@@ -363,8 +373,11 @@ fn spoken_values_update_while_frame_collection_is_contended() {
     present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
     activate(&mut app, window_id, Instant::now());
     let rect = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 480.0);
-    let parsers: Vec<_> =
-        app.windows[&window_id].panes.values().map(|pane| Arc::clone(&pane.parser)).collect();
+    let parsers: Vec<_> = app.registry.windows[&window_id]
+        .panes
+        .values()
+        .map(|pane| Arc::clone(&pane.parser))
+        .collect();
     let held: Vec<_> = parsers.iter().map(|parser| parser.lock()).collect();
     let sources = app.child_visible_frame_sources(window_id, rect).expect("a live owner");
     let collected = sources.try_collect(|| ());
@@ -395,11 +408,15 @@ fn a_mouse_click_on_a_segment_hands_the_keyboard_to_what_it_opens() {
     );
     app.focus_status_line(window_id);
     assert!(app.press_status_line(window_id, 10.0, 510.0), "the press was on the strip");
-    assert_eq!(app.palette_attached_window, Some(window_id), "the rename editor opened");
+    assert_eq!(
+        app.interaction.palette_attached_window,
+        Some(window_id),
+        "the rename editor opened"
+    );
     assert_eq!(access(&app, window_id).focus, None);
-    let before = app.command_palette.query().to_owned();
+    let before = app.interaction.command_palette.query().to_owned();
     app.handle_window_ime(window_id, Ime::Commit("x".into()));
-    assert_eq!(app.command_palette.query(), format!("{before}x"));
+    assert_eq!(app.interaction.command_palette.query(), format!("{before}x"));
 }
 
 #[test]
@@ -432,7 +449,12 @@ fn the_retained_model_does_not_grow_with_the_tab_count() {
         let start = Instant::now();
         activate(&mut app, window_id, start);
         for tab in 0..count - 1 {
-            app.windows.get_mut(&window_id).unwrap().tabs.mark(tab, |marks| marks.bell = true);
+            app.registry
+                .windows
+                .get_mut(&window_id)
+                .unwrap()
+                .tabs
+                .mark(tab, |marks| marks.bell = true);
         }
         let _ = app.flush_accessibility(start + Duration::from_secs(1));
         access(&app, window_id).retained_bytes()
@@ -469,8 +491,13 @@ fn a_finished_announcement_keeps_its_duration_after_the_tab_is_visited() {
     let (mut app, window_id) = app_with_tabs(&["first", "second"]);
     let start = Instant::now();
     activate(&mut app, window_id, start);
-    app.windows.get_mut(&window_id).unwrap().tabs.mark(0, |marks| marks.finished_secs = Some(134));
-    app.windows.get_mut(&window_id).unwrap().tabs.activate(0);
+    app.registry
+        .windows
+        .get_mut(&window_id)
+        .unwrap()
+        .tabs
+        .mark(0, |marks| marks.finished_secs = Some(134));
+    app.registry.windows.get_mut(&window_id).unwrap().tabs.activate(0);
     let _ = app.flush_accessibility(start + Duration::from_secs(1));
     let heard = announced(&app, window_id).map(|said| said.text).unwrap_or_default();
     assert!(heard.contains(&format_duration(134)), "{heard}");

@@ -5,13 +5,16 @@ use sonicterm_cfg::theme::Theme;
 use winit::keyboard::{Key, NamedKey};
 
 fn pointer_target(app: &App, index: usize) -> super::PalettePointerHit {
-    super::PalettePointerHit::Row { index, entry: app.command_palette.visible()[index].clone() }
+    super::PalettePointerHit::Row {
+        index,
+        entry: app.interaction.command_palette.visible()[index].clone(),
+    }
 }
 
 fn press_palette_target(app: &mut App, window_id: winit::window::WindowId, index: usize) {
-    let entry = app.command_palette.visible()[index].clone();
-    assert!(app.command_palette.select_visible_index(index));
-    app.palette_pointer_capture = Some(super::PalettePointerCapture {
+    let entry = app.interaction.command_palette.visible()[index].clone();
+    assert!(app.interaction.command_palette.select_visible_index(index));
+    app.interaction.palette_pointer_capture = Some(super::PalettePointerCapture {
         window_id,
         target: super::PalettePointerTarget::Entry(entry),
     });
@@ -23,19 +26,19 @@ fn palette_pointer_release_revalidates_attached_tab_identity() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["same", "same", "peer"]);
-    let target = app.windows[&child].tabs.tabs()[0].id;
+    let target = app.registry.windows[&child].tabs.tabs()[0].id;
     app.open_tab_selector(child);
     press_palette_target(&mut app, child, 0);
     let release = pointer_target(&app, 0);
-    let window = app.windows.get_mut(&child).unwrap();
+    let window = app.registry.windows.get_mut(&child).unwrap();
     window.tabs.reorder(0, 1);
     window.tab_states.swap(0, 1);
     window.tabs.activate(2);
-    app.__test_set_frontmost_window(app.main_window_id);
+    app.__test_set_frontmost_window(app.registry.main_window_id);
     app.release_command_palette_pointer(child, Some(release));
-    assert_eq!(app.windows[&child].tabs.active().unwrap().id, target);
-    assert!(!app.command_palette.is_open());
-    assert!(app.palette_pointer_capture.is_none());
+    assert_eq!(app.registry.windows[&child].tabs.active().unwrap().id, target);
+    assert!(!app.interaction.command_palette.is_open());
+    assert!(app.interaction.palette_pointer_capture.is_none());
 }
 
 /// A redraw that moves another row under the held pointer cancels activation instead of retargeting it.
@@ -45,18 +48,18 @@ fn palette_pointer_release_rejects_a_different_displayed_row() {
     app.__test_seed_tab("first");
     app.__test_seed_tab("second");
     app.__test_seed_tab("active");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     let active = app.main_tabs().unwrap().active().unwrap().id;
     app.open_tab_selector(window_id);
     press_palette_target(&mut app, window_id, 0);
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.tabs.reorder(0, 1);
     window.tab_states.swap(0, 1);
     app.refresh_command_palette_context();
     let release = pointer_target(&app, 0);
     app.release_command_palette_pointer(window_id, Some(release));
     assert_eq!(app.main_tabs().unwrap().active().unwrap().id, active);
-    assert!(app.command_palette.is_open());
+    assert!(app.interaction.command_palette.is_open());
 }
 
 /// Closed targets cannot lend their pointer capture to a same-title replacement at the old slot.
@@ -65,22 +68,22 @@ fn palette_pointer_release_rejects_a_closed_target() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("same");
     app.__test_seed_tab("active");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     let target = app.main_tabs().unwrap().tabs()[0].id;
     let active = app.main_tabs().unwrap().active().unwrap().id;
     app.open_tab_selector(window_id);
     press_palette_target(&mut app, window_id, 0);
     let release = pointer_target(&app, 0);
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.tabs.close(target);
     window.tab_states.remove(0);
     app.__test_seed_tab("same");
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.tabs.activate(0);
     app.release_command_palette_pointer(window_id, Some(release));
     assert_eq!(app.main_tabs().unwrap().active().unwrap().id, active);
-    assert!(app.command_palette.is_open());
-    assert!(app.command_palette.current().is_none());
+    assert!(app.interaction.command_palette.is_open());
+    assert!(app.interaction.command_palette.current().is_none());
 }
 
 /// Disabled clicks keep the modal open, while outside dismissal consumes its own paired release.
@@ -88,21 +91,21 @@ fn palette_pointer_release_rejects_a_closed_target() {
 fn palette_pointer_disabled_and_outside_clicks_never_dispatch() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     assert!(app.run_action(&Action::OpenCommandPalette));
     app.__test_set_palette_query("Copy to Clipboard");
     app.__test_set_memory_clipboard("unchanged");
     press_palette_target(&mut app, window_id, 0);
     let release = pointer_target(&app, 0);
     app.release_command_palette_pointer(window_id, Some(release));
-    assert!(app.command_palette.is_open());
+    assert!(app.interaction.command_palette.is_open());
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("unchanged"));
-    app.palette_pointer_capture = Some(super::PalettePointerCapture {
+    app.interaction.palette_pointer_capture = Some(super::PalettePointerCapture {
         window_id,
         target: super::PalettePointerTarget::Outside,
     });
     app.release_command_palette_pointer(window_id, Some(super::PalettePointerHit::Outside));
-    assert!(!app.command_palette.is_open());
+    assert!(!app.interaction.command_palette.is_open());
     assert!(app.__test_pty_write_log().is_empty());
 }
 
@@ -112,7 +115,7 @@ fn palette_pointer_capture_is_cleared_by_keyboard_ime_and_reopen() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("first");
     app.__test_seed_tab("active");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     for edit in 0..3 {
         app.open_tab_selector(window_id);
         press_palette_target(&mut app, window_id, 0);
@@ -130,7 +133,7 @@ fn palette_pointer_capture_is_cleared_by_keyboard_ime_and_reopen() {
                 app.open_tab_selector(window_id);
             }
         }
-        assert!(app.palette_pointer_capture.is_none());
+        assert!(app.interaction.palette_pointer_capture.is_none());
         app.main_mut().unwrap().ime.cancel();
     }
 }
@@ -143,7 +146,7 @@ fn palette_pointer_wheel_is_bounded_and_modal() {
     app.__test_seed_tab("first");
     app.__test_seed_tab("second");
     app.__test_seed_tab("last");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     app.open_tab_selector(window_id);
     let wheel = |vertical_lines| WindowEvent::MouseWheel {
         device_id: DeviceId::dummy(),
@@ -151,20 +154,20 @@ fn palette_pointer_wheel_is_bounded_and_modal() {
         phase: TouchPhase::Moved,
     };
     assert!(app.command_palette_handle_pointer_event(window_id, &wheel(f32::MAX)));
-    assert_eq!(app.command_palette.selected(), 0);
+    assert_eq!(app.interaction.command_palette.selected(), 0);
     assert!(app.command_palette_handle_pointer_event(window_id, &wheel(-f32::MAX)));
-    assert_eq!(app.command_palette.selected(), 1);
+    assert_eq!(app.interaction.command_palette.selected(), 1);
     for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0] {
         assert!(app.command_palette_handle_pointer_event(window_id, &wheel(value)));
-        assert_eq!(app.command_palette.selected(), 1);
+        assert_eq!(app.interaction.command_palette.selected(), 1);
     }
     for _ in 0..4 {
         app.command_palette_handle_pointer_event(window_id, &wheel(-1.0));
     }
-    assert_eq!(app.command_palette.selected(), 2);
-    app.command_palette.start_rename_tab("literal");
+    assert_eq!(app.interaction.command_palette.selected(), 2);
+    app.interaction.command_palette.start_rename_tab("literal");
     assert!(app.command_palette_handle_pointer_event(window_id, &wheel(-1.0)));
-    assert_eq!(app.command_palette.query(), "literal");
+    assert_eq!(app.interaction.command_palette.query(), "literal");
     assert!(app.__test_pty_write_log().is_empty());
 }
 
@@ -173,7 +176,7 @@ fn palette_pointer_wheel_is_bounded_and_modal() {
 fn palette_pointer_capture_does_not_cross_window_ownership() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("same");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     let main_tab = app.main_tabs().unwrap().active().unwrap().id;
     let child = app.__test_seed_child_window(&["same", "active"]);
     app.open_tab_selector(child);
@@ -182,12 +185,12 @@ fn palette_pointer_capture_does_not_cross_window_ownership() {
     app.__test_remove_window(child);
     app.release_command_palette_pointer(child, Some(release));
     assert_eq!(app.main_tabs().unwrap().active().unwrap().id, main_tab);
-    assert!(app.command_palette.is_open());
+    assert!(app.interaction.command_palette.is_open());
     app.open_tab_selector(main_id);
     press_palette_target(&mut app, main_id, 0);
     let release = pointer_target(&app, 0);
     app.release_command_palette_pointer(child, Some(release));
-    assert!(app.command_palette.is_open());
+    assert!(app.interaction.command_palette.is_open());
     assert_eq!(app.main_tabs().unwrap().active().unwrap().id, main_tab);
 }
 
@@ -200,21 +203,21 @@ fn palette_pointer_click_toggles_a_checklist_row_and_keeps_it_open() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let child = app.__test_seed_child_window(&["work"]);
     app.open_status_segments(Some(child), Some(Seg::Cpu));
-    let index = app.command_palette.selected();
+    let index = app.interaction.command_palette.selected();
     let capture = |kind| super::PalettePointerCapture {
         window_id: child,
         target: super::PalettePointerTarget::StatusRow(kind),
     };
-    app.palette_pointer_capture = Some(capture(Kind::Segment(Seg::Cpu)));
+    app.interaction.palette_pointer_capture = Some(capture(Kind::Segment(Seg::Cpu)));
     let other = super::PalettePointerHit::StatusRow { index: 0, kind: Kind::ShowStrip };
     app.release_command_palette_pointer(child, Some(other));
     assert!(app.current_status_line().segment(Seg::Cpu).is_none(), "released elsewhere");
-    app.palette_pointer_capture = Some(capture(Kind::Segment(Seg::Cpu)));
+    app.interaction.palette_pointer_capture = Some(capture(Kind::Segment(Seg::Cpu)));
     let same = super::PalettePointerHit::StatusRow { index, kind: Kind::Segment(Seg::Cpu) };
     app.release_command_palette_pointer(child, Some(same));
     assert!(app.current_status_line().segment(Seg::Cpu).is_some(), "the click toggled it");
-    assert!(app.command_palette.is_open());
-    assert!(app.palette_pointer_capture.is_none());
+    assert!(app.interaction.command_palette.is_open());
+    assert!(app.interaction.palette_pointer_capture.is_none());
 }
 
 /// A checklist change from a click or a key, including turning the strip on or off, asks its
@@ -228,15 +231,17 @@ fn a_checklist_click_or_key_requests_one_redraw_per_terminal_window() {
     config.status_line.enabled = false;
     let mut app = App::new(Theme::default(), config, Keymap::default());
     let child = app.__test_seed_child_window(&["work"]);
-    let main = app.main_window_id.expect("the seed made a main window");
+    let main = app.registry.main_window_id.expect("the seed made a main window");
     app.open_status_segments(Some(child), Some(Seg::Cpu));
     let strip_row = app
+        .interaction
         .command_palette
         .status_segment_rows()
         .iter()
         .position(|row| row.kind == Kind::ShowStrip)
         .expect("the checklist lists the strip row");
-    let counts = |app: &App| (asks(&app.windows[&main]), asks(&app.windows[&child]));
+    let counts =
+        |app: &App| (asks(&app.registry.windows[&main]), asks(&app.registry.windows[&child]));
     // One key dispatch: the palette's key handler, then the KeyboardInput arm's own request.
     let key = |app: &mut App| {
         let _dispatch = app.frame_dispatch_scope();
@@ -246,8 +251,8 @@ fn a_checklist_click_or_key_requests_one_redraw_per_terminal_window() {
     // One click dispatch: the release over the row the press captured.
     let click = |app: &mut App, kind| {
         let _dispatch = app.frame_dispatch_scope();
-        let index = app.command_palette.selected();
-        app.palette_pointer_capture = Some(super::PalettePointerCapture {
+        let index = app.interaction.command_palette.selected();
+        app.interaction.palette_pointer_capture = Some(super::PalettePointerCapture {
             window_id: child,
             target: super::PalettePointerTarget::StatusRow(kind),
         });
@@ -267,7 +272,7 @@ fn a_checklist_click_or_key_requests_one_redraw_per_terminal_window() {
     click(&mut app, Kind::Segment(Seg::Cpu));
     expect_one(&app, "click toggling cpu", before);
     assert!(app.current_status_line().segment(Seg::Cpu).is_none());
-    assert!(app.command_palette.select_status_row(strip_row));
+    assert!(app.interaction.command_palette.select_status_row(strip_row));
     let before = counts(&app);
     key(&mut app);
     expect_one(&app, "key turning the strip on", before);

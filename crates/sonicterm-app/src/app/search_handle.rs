@@ -37,7 +37,7 @@ use super::{
 impl App {
     /// Apply committed text to the source window's search without changing its viewed rows.
     pub(super) fn search_handle_ime_commit(&mut self, win_id: WindowId, text: &str) -> bool {
-        let Some(window) = self.windows.get_mut(&win_id) else {
+        let Some(window) = self.registry.windows.get_mut(&win_id) else {
             // When: win_id is gone, search input cannot select another window.
             return false;
         };
@@ -80,7 +80,7 @@ impl App {
         command: super::field_input::FieldCommand,
     ) -> bool {
         use super::field_input::FieldCommand;
-        let Some(window) = self.windows.get_mut(&win_id) else {
+        let Some(window) = self.registry.windows.get_mut(&win_id) else {
             // When: win_id is gone, search selection cannot select another window.
             return false;
         };
@@ -133,7 +133,7 @@ impl App {
         edit: Option<sonicterm_ui::text_edit::TextEdit>,
         text: Option<&str>,
     ) -> bool {
-        let Some(window) = self.windows.get_mut(&win_id) else {
+        let Some(window) = self.registry.windows.get_mut(&win_id) else {
             // When: win_id is gone, search input cannot select another window.
             return false;
         };

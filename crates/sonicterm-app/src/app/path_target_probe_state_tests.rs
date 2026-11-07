@@ -76,17 +76,17 @@ fn completed_probe_waits_for_fresh_hover_without_reprobing() {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let window = app.__test_seed_child_window(&["pending probe"]);
         if main {
-            app.main_window_id = Some(window);
+            app.registry.main_window_id = Some(window);
         }
         let mut key = probe_key("/work/source.rs", 0);
         key.window_id = window;
         let request =
-            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+            app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
         let epoch = request.epoch;
         app.handle_path_probe_finished(openable_result(request));
-        assert!(!app.windows[&window].path_probe.authorized(&key, true));
+        assert!(!app.registry.windows[&window].path_probe.authorized(&key, true));
         app.apply_target_lookup(window, Err(()));
-        assert_eq!(app.windows[&window].path_probe.epoch, epoch);
+        assert_eq!(app.registry.windows[&window].path_probe.epoch, epoch);
         app.apply_target_hover(
             window,
             Some(CellTargetSnapshot {
@@ -98,9 +98,9 @@ fn completed_probe_waits_for_fresh_hover_without_reprobing() {
                 target: ResolvedCellTarget::Path(key.clone()),
             }),
         );
-        assert!(app.windows[&window].path_probe.authorized(&key, true));
-        assert_eq!(app.windows[&window].path_probe.epoch, epoch);
-        assert!(app.windows.get_mut(&window).unwrap().path_probe.request(key).is_none());
+        assert!(app.registry.windows[&window].path_probe.authorized(&key, true));
+        assert_eq!(app.registry.windows[&window].path_probe.epoch, epoch);
+        assert!(app.registry.windows.get_mut(&window).unwrap().path_probe.request(key).is_none());
     }
 }
 
@@ -111,7 +111,8 @@ fn completed_probe_cannot_authorize_changed_content() {
     let window = app.__test_seed_child_window(&["changed probe"]);
     let mut key = probe_key("/work/source.rs", 0);
     key.window_id = window;
-    let request = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    let request =
+        app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
     let epoch = request.epoch;
     app.handle_path_probe_finished(openable_result(request));
     key.rows[0].fingerprint += 1;
@@ -126,7 +127,7 @@ fn completed_probe_cannot_authorize_changed_content() {
             target: ResolvedCellTarget::Path(key.clone()),
         }),
     );
-    let state = &app.windows[&window].path_probe;
+    let state = &app.registry.windows[&window].path_probe;
     assert!(!state.authorized(&key, true));
     assert_ne!(state.epoch, epoch);
     assert_eq!(state.current.as_ref(), Some(&key));
@@ -139,9 +140,11 @@ fn completed_probe_ignores_old_epochs_and_clears_on_leave() {
     let window = app.__test_seed_child_window(&["probe epochs"]);
     let mut key = probe_key("/work/source.rs", 0);
     key.window_id = window;
-    let old = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    let old =
+        app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
     app.clear_target_hover(window);
-    let current = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    let current =
+        app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
     app.handle_path_probe_finished(openable_result(current));
     app.handle_path_probe_finished(openable_result(old));
     let target = CellTargetSnapshot {
@@ -153,13 +156,14 @@ fn completed_probe_ignores_old_epochs_and_clears_on_leave() {
         target: ResolvedCellTarget::Path(key.clone()),
     };
     app.apply_target_hover(window, Some(target.clone()));
-    assert!(app.windows[&window].path_probe.authorized(&key, true));
+    assert!(app.registry.windows[&window].path_probe.authorized(&key, true));
     app.clear_target_hover(window);
-    let request = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    let request =
+        app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
     app.handle_path_probe_finished(openable_result(request));
     app.clear_target_hover(window);
     app.apply_target_hover(window, Some(target));
-    assert!(!app.windows[&window].path_probe.authorized(&key, true));
+    assert!(!app.registry.windows[&window].path_probe.authorized(&key, true));
 }
 
 /// A completed probe requests its own frame even after PTY output and pointer movement stop.
@@ -206,8 +210,8 @@ fn completed_probe_schedules_its_validation_frame() {
 fn local_path_preview_requires_current_authorization() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["preview"]);
-    app.frontmost_window = Some(window);
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.frontmost_window = Some(window);
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -222,24 +226,27 @@ fn local_path_preview_requires_current_authorization() {
         explicit_hyperlink: false,
         target: ResolvedCellTarget::Path(key.clone()),
     };
-    let request = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    let request =
+        app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
     app.apply_target_hover(window, Some(target.clone()));
     assert!(
-        app.windows[&window].link_preview.is_none(),
+        app.registry.windows[&window].link_preview.is_none(),
         "unverified candidates are not destinations"
     );
     let mut result = openable_result(request);
     result.selection.as_mut().unwrap().decision = PathOpenDecision::SourceReveal;
-    assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+    assert!(app.registry.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
     app.apply_target_hover(window, Some(target.clone()));
-    let preview = app.windows[&window].link_preview.as_ref().expect("validated path preview");
+    let preview =
+        app.registry.windows[&window].link_preview.as_ref().expect("validated path preview");
     assert!(preview.uri.contains("/work/source.rs"));
     assert!(preview.available);
-    app.windows.get_mut(&window).unwrap().modifiers = winit::keyboard::ModifiersState::empty();
+    app.registry.windows.get_mut(&window).unwrap().modifiers =
+        winit::keyboard::ModifiersState::empty();
     app.apply_target_hover(window, Some(target));
-    assert!(app.windows[&window].link_preview.is_none());
+    assert!(app.registry.windows[&window].link_preview.is_none());
     app.clear_target_hover(window);
-    assert!(app.windows[&window].link_preview.is_none());
+    assert!(app.registry.windows[&window].link_preview.is_none());
 }
 
 /// Listing guesses, missing paths, and rejected local links never become preview destinations.
@@ -247,20 +254,26 @@ fn local_path_preview_requires_current_authorization() {
 fn unresolved_local_path_preview_is_hidden() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["preview"]);
-    app.frontmost_window = Some(window);
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.frontmost_window = Some(window);
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
     };
     for failure in ["path-error-missing", "path-error-blocked"] {
-        app.windows.get_mut(&window).unwrap().path_probe.invalidate();
+        app.registry.windows.get_mut(&window).unwrap().path_probe.invalidate();
         let mut key = probe_key("/work/setup-windows-cairo.ps1", 0);
         key.window_id = window;
         let request =
-            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+            app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
         let result = PathProbeResult { request, selection: None, failure: Some(failure) };
-        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        assert!(app
+            .registry
+            .windows
+            .get_mut(&window)
+            .unwrap()
+            .path_probe
+            .accept(&result, Some(&key)));
         app.apply_target_hover(
             window,
             Some(CellTargetSnapshot {
@@ -272,7 +285,7 @@ fn unresolved_local_path_preview_is_hidden() {
                 target: ResolvedCellTarget::Path(key),
             }),
         );
-        assert!(app.windows[&window].link_preview.is_none(), "{failure}");
+        assert!(app.registry.windows[&window].link_preview.is_none(), "{failure}");
     }
     app.apply_target_hover(
         window,
@@ -285,7 +298,7 @@ fn unresolved_local_path_preview_is_hidden() {
             target: ResolvedCellTarget::Rejected("path-error-blocked"),
         }),
     );
-    assert!(app.windows[&window].link_preview.is_none());
+    assert!(app.registry.windows[&window].link_preview.is_none());
 }
 
 /// Failure reasons cannot survive a new target, stale result, or explicit invalidation.

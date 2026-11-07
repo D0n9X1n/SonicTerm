@@ -75,3 +75,43 @@ fn a_stop_before_the_snapshot_takes_none() {
     assert!(observations.is_empty());
     assert_eq!(*snapshots.lock().unwrap(), 0);
 }
+
+/// No frame path or timer walks the process table: the probe and `pid()` appear only in
+/// the worker's platform sampler.
+#[test]
+fn no_event_loop_path_probes_the_foreground_process() {
+    for (name, source) in [
+        ("privilege.rs", include_str!("privilege.rs")),
+        ("tab_state.rs", include_str!("tab_state.rs")),
+        (
+            "window_event.rs",
+            concat!(
+                include_str!("window_event.rs"),
+                "\n",
+                include_str!("window_event_pointer.rs"),
+                "\n",
+                include_str!("window_event_redraw.rs")
+            ),
+        ),
+        ("child_window_redraw.rs", include_str!("child_window_redraw.rs")),
+        ("event_loop/windows.rs", include_str!("event_loop/windows.rs")),
+    ] {
+        let source = source.replace("\r\n", "\n");
+        for probe in ["foreground_process_info", "foreground_processes_info"] {
+            assert!(!source.contains(probe), "{name} probes on the event loop");
+        }
+        assert!(!source.contains(".pid()"), "{name} reads a pid on the frame path");
+    }
+    let frame_counters = concat!(
+        include_str!("frame_counters.rs"),
+        "\n",
+        include_str!("frame_counters_app.rs"),
+        "\n",
+        include_str!("frame_counters_dispatch.rs"),
+        "\n",
+        include_str!("frame_counters_histogram.rs"),
+        "\n",
+        include_str!("frame_counters_record.rs")
+    );
+    assert!(!frame_counters.contains("fn time_probe"), "the event-loop probe timer is deleted");
+}

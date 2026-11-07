@@ -13,7 +13,7 @@ impl super::super::App {
         let mut smoke = RuntimeSmokeState::from_spec(spec, renderer_baseline);
         smoke.verify_fresh_drop_target = self.owns_native_drop_target();
         smoke.scenario = scenario;
-        self.runtime_smoke = Some(smoke);
+        self.services.runtime_smoke = Some(smoke);
     }
 
     pub(in crate::app) fn smoke_check_native_title(
@@ -28,7 +28,7 @@ impl super::super::App {
             tracing::warn!(?observed, ?expected, matches, "runtime smoke native title readback");
             if !matches {
                 // Native readback disproves the title write even if the model is correct.
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.fail(RuntimeSmokeFailure::Display);
                 }
             }
@@ -50,17 +50,19 @@ impl super::super::App {
         id: winit::window::WindowId,
     ) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let Some(native) = self.windows.get(&id).and_then(|state| state.window.clone()) else {
+        let Some(native) = self.registry.windows.get(&id).and_then(|state| state.window.clone())
+        else {
             // When: id lacks a native handle, model-only assertions cannot establish this smoke contract.
             return false;
         };
         for name in ["Work 工作", ""] {
             self.start_rename_window(id);
-            self.command_palette.set_query(name);
+            self.interaction.command_palette.set_query(name);
             self.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
             // A name shows as `#N name`; a cleared one gives the title back to the active tab.
-            let number = self.window_keys.get(id).unwrap().raw();
+            let number = self.registry.window_keys.get(id).unwrap().raw();
             let body = self
+                .registry
                 .windows
                 .get(&id)
                 .and_then(|state| state.tabs.active())
@@ -76,7 +78,7 @@ impl super::super::App {
     }
 
     pub(crate) fn runtime_smoke_result(&self) -> Result<(), RuntimeSmokeFailure> {
-        let Some(smoke) = self.runtime_smoke.as_ref() else {
+        let Some(smoke) = self.services.runtime_smoke.as_ref() else {
             // When: no smoke was installed, a caller cannot claim runtime-smoke completion.
             return Err(RuntimeSmokeFailure::EventLoop);
         };
@@ -85,7 +87,8 @@ impl super::super::App {
 
     /// Only an installed fault smoke contributes periodic wakeups; normal sessions stay idle.
     pub(in crate::app) fn gpu_fault_smoke_deadline(&self) -> Option<Instant> {
-        self.runtime_smoke
+        self.services
+            .runtime_smoke
             .as_ref()
             .filter(|smoke| smoke.fault_pending())
             .map(|smoke| smoke.next_probe_at.unwrap_or_else(Instant::now))
@@ -93,11 +96,12 @@ impl super::super::App {
 
     /// Advance fault injection on the event-loop thread, outside every parser/render borrow.
     pub(in crate::app) fn drive_gpu_fault_smoke(&mut self, now: Instant) -> bool {
-        if !self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.fault_pending()) {
+        if !self.services.runtime_smoke.as_ref().is_some_and(|smoke| smoke.fault_pending()) {
             // When: runtime_smoke is absent or not in a fault phase, no fault or polling is enabled.
             return false;
         }
         if self
+            .services
             .runtime_smoke
             .as_ref()
             .and_then(|smoke| smoke.next_probe_at)
@@ -106,7 +110,7 @@ impl super::super::App {
             // When: next_probe_at is still ahead of now, avoid a redraw busy-loop during observation.
             return false;
         }
-        let Some(mut smoke) = self.runtime_smoke.take() else {
+        let Some(mut smoke) = self.services.runtime_smoke.take() else {
             // When: runtime_smoke disappeared, no smoke-owned action may run.
             return false;
         };
@@ -118,7 +122,7 @@ impl super::super::App {
         if finished {
             tracing::warn!(outcome = ?smoke.outcome(), "runtime smoke GPU fault verdict");
         }
-        self.runtime_smoke = Some(smoke);
+        self.services.runtime_smoke = Some(smoke);
         finished
     }
 
@@ -153,12 +157,13 @@ impl super::super::App {
             return Err(failure);
         }
         let snapshot = self.main_renderer().ok_or(failure)?.device_error_snapshot();
-        let shared = self.windows.values().all(|window| {
+        let shared = self.registry.windows.values().all(|window| {
             window
                 .renderer
                 .as_ref()
                 .is_some_and(|renderer| renderer.device_generation() == snapshot.generation)
         }) && self
+            .registry
             .warm_window_pool
             .iter()
             .all(|warm| warm.renderer.device_generation() == snapshot.generation);
@@ -172,7 +177,7 @@ impl super::super::App {
         ) {
             // When: matches! selects a starting phase, freeze renderer population before sampling totals.
             self.config.window.warm_window_pool = 0;
-            self.warm_window_pool.clear();
+            self.registry.warm_window_pool.clear();
             if matches!(smoke.phase, RuntimeSmokePhase::FaultPrecondition)
                 && sonicterm_gpu::core::live_renderer_count() != smoke.renderer_baseline + 1
             {
@@ -180,15 +185,16 @@ impl super::super::App {
                 return Err(RuntimeSmokeFailure::WarmLifecycle);
             }
         }
-        let frames = self.windows.values().filter_map(|window| window.renderer.as_ref()).fold(
-            SmokeFrameCounts::default(),
-            |mut total, renderer| {
-                total.presents = total.presents.saturating_add(renderer.present_call_count());
-                total.successful =
-                    total.successful.saturating_add(renderer.successful_frame_count());
-                total
-            },
-        );
+        let frames =
+            self.registry.windows.values().filter_map(|window| window.renderer.as_ref()).fold(
+                SmokeFrameCounts::default(),
+                |mut total, renderer| {
+                    total.presents = total.presents.saturating_add(renderer.present_call_count());
+                    total.successful =
+                        total.successful.saturating_add(renderer.successful_frame_count());
+                    total
+                },
+            );
         let pane = self
             .main_active_pane_id()
             .and_then(|id| self.main().and_then(|window| window.panes.get(&id)))
@@ -209,7 +215,7 @@ impl super::super::App {
                 return Err(RuntimeSmokeFailure::GpuFaultContainment);
             }
             let baseline = smoke.capture_fault_baseline(
-                self.main_window_id.ok_or(failure)?,
+                self.registry.main_window_id.ok_or(failure)?,
                 kind,
                 &snapshot,
                 frames,

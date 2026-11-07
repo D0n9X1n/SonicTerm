@@ -43,12 +43,12 @@ enum PalettePointerHit {
 
 impl App {
     fn command_palette_pointer_hit(&mut self, window_id: WindowId) -> Option<PalettePointerHit> {
-        let window = self.windows.get(&window_id)?;
+        let window = self.registry.windows.get(&window_id)?;
         let renderer = window.renderer.as_ref()?;
         let (width, height) = renderer.logical_size();
         let (pointer_x, pointer_y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
         let layout = PaletteLayout::compute(
-            &mut self.command_palette,
+            &mut self.interaction.command_palette,
             width,
             height,
             self.config.appearance.panel_padding,
@@ -60,19 +60,20 @@ impl App {
         }
         if let Some(row) = layout.rows.iter().find(|row| row.rect.contains(pointer_x, pointer_y)) {
             // When: `row.rect` contains the pointer, retain its displayed identity before refreshing live targets.
-            if self.command_palette.mode() == CommandPaletteMode::StatusSegments {
+            if self.interaction.command_palette.mode() == CommandPaletteMode::StatusSegments {
                 // When: mode is StatusSegments, the row is named by what it does.
-                let rows = self.command_palette.status_segment_rows();
+                let rows = self.interaction.command_palette.status_segment_rows();
                 let kind = rows.get(row.item_index)?.kind;
                 return Some(PalettePointerHit::StatusRow { index: row.item_index, kind });
             }
-            if self.command_palette.mode() == CommandPaletteMode::FontFamily {
+            if self.interaction.command_palette.mode() == CommandPaletteMode::FontFamily {
                 // When: mode is FontFamily, the row is named by its family.
-                let rows = self.command_palette.font_family_rows();
+                let rows = self.interaction.command_palette.font_family_rows();
                 let family = rows.get(row.item_index)?.family.clone();
                 return Some(PalettePointerHit::FontRow { index: row.item_index, family });
             }
-            let entry = self.command_palette.visible().get(row.item_index).copied()?.clone();
+            let entry =
+                self.interaction.command_palette.visible().get(row.item_index).copied()?.clone();
             return Some(PalettePointerHit::Row { index: row.item_index, entry });
         }
         Some(PalettePointerHit::Inside)
@@ -83,15 +84,16 @@ impl App {
         window_id: WindowId,
         hit: Option<PalettePointerHit>,
     ) {
-        let Some(capture) = self.palette_pointer_capture.take() else {
+        let Some(capture) = self.interaction.palette_pointer_capture.take() else {
             // When: `palette_pointer_capture` is empty, swallow the opener's release without choosing a row.
             return;
         };
         if capture.window_id != window_id
-            || self.palette_attached_window.or(self.main_window_id) != Some(window_id)
-            || !self.command_palette.is_open()
+            || self.interaction.palette_attached_window.or(self.registry.main_window_id)
+                != Some(window_id)
+            || !self.interaction.command_palette.is_open()
             || !matches!(
-                self.command_palette.mode(),
+                self.interaction.command_palette.mode(),
                 CommandPaletteMode::Commands
                     | CommandPaletteMode::StatusSegments
                     | CommandPaletteMode::FontFamily
@@ -103,14 +105,14 @@ impl App {
         }
         match (capture.target, hit) {
             (PalettePointerTarget::Outside, Some(PalettePointerHit::Outside))
-                if self.command_palette.mode() == CommandPaletteMode::FontFamily =>
+                if self.interaction.command_palette.mode() == CommandPaletteMode::FontFamily =>
             {
                 // An outside click cancels the picker and restores the font it opened with.
                 self.close_font_family_picker(false);
             }
             (PalettePointerTarget::Outside, Some(PalettePointerHit::Outside)) => {
-                self.command_palette.close();
-                self.palette_attached_window = None;
+                self.interaction.command_palette.close();
+                self.interaction.palette_attached_window = None;
                 self.request_redraw_for_overlay(Some(window_id));
             }
             (PalettePointerTarget::Entry(pressed), Some(PalettePointerHit::Row { entry, .. }))
@@ -118,7 +120,11 @@ impl App {
             {
                 // Revalidate live context before delegating the displayed identity to the Enter route.
                 self.refresh_command_palette_context();
-                if self.command_palette.current().is_some_and(|entry| pressed.same_identity(entry))
+                if self
+                    .interaction
+                    .command_palette
+                    .current()
+                    .is_some_and(|entry| pressed.same_identity(entry))
                 {
                     self.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
                 }
@@ -129,7 +135,7 @@ impl App {
                 Some(PalettePointerHit::StatusRow { index, kind }),
             ) if pressed == kind => {
                 // The checklist row released on is the one pressed: toggle it and keep the page.
-                if self.command_palette.select_status_row(index) {
+                if self.interaction.command_palette.select_status_row(index) {
                     self.activate_status_segment_row();
                 }
                 // The checklist's window is `window_id` here; an activation already asked once.
@@ -138,7 +144,7 @@ impl App {
             (
                 PalettePointerTarget::FontRow(pressed),
                 Some(PalettePointerHit::FontRow { index, family }),
-            ) if pressed == family && self.command_palette.select_font_row(index) => {
+            ) if pressed == family && self.interaction.command_palette.select_font_row(index) => {
                 // The picker row released on is the one pressed: keep that family and close.
                 self.close_font_family_picker(true);
             }
@@ -154,12 +160,14 @@ impl App {
         window_id: WindowId,
         event: &WindowEvent,
     ) -> bool {
-        if !self.command_palette.is_open() {
+        if !self.interaction.command_palette.is_open() {
             // When: `command_palette` is closed, revoke any capture and leave terminal event ownership unchanged.
-            self.palette_pointer_capture = None;
+            self.interaction.palette_pointer_capture = None;
             return false;
         }
-        if self.palette_attached_window.or(self.main_window_id) != Some(window_id) {
+        if self.interaction.palette_attached_window.or(self.registry.main_window_id)
+            != Some(window_id)
+        {
             // When: `window_id` differs from the palette host, leave that window's pointer input independent.
             return false;
         }
@@ -174,12 +182,14 @@ impl App {
                 | WindowEvent::Destroyed
         ) {
             // When: `matches!` identifies input or lifecycle changes, revoke the click while preserving normal event handling.
-            self.palette_pointer_capture = None;
+            self.interaction.palette_pointer_capture = None;
             return false;
         }
-        let Some(window) = self.windows.get_mut(&window_id).filter(|window| !window.hidden) else {
+        let Some(window) =
+            self.registry.windows.get_mut(&window_id).filter(|window| !window.hidden)
+        else {
             // When: `window_id` has no visible host, its stale capture cannot borrow another window's context.
-            self.palette_pointer_capture = None;
+            self.interaction.palette_pointer_capture = None;
             return false;
         };
         if window.mouse_down
@@ -190,7 +200,7 @@ impl App {
             || window.splitter_drag.is_some()
         {
             // When: `window` already owns a held gesture, its original handler must receive motion and the paired release.
-            self.palette_pointer_capture = None;
+            self.interaction.palette_pointer_capture = None;
             return false;
         }
         match event {
@@ -205,14 +215,14 @@ impl App {
             WindowEvent::CursorLeft { .. } => {
                 window.cursor_pos = (-1.0, -1.0);
                 window.invalidate_path_hover();
-                self.palette_pointer_capture = None;
+                self.interaction.palette_pointer_capture = None;
                 true
             }
             WindowEvent::CursorEntered { .. } => true,
             WindowEvent::MouseInput { state, button, .. } => {
                 // When: `MouseInput` belongs to the modal, never forward either half of the click to a terminal.
                 if !matches!(
-                    self.command_palette.mode(),
+                    self.interaction.command_palette.mode(),
                     CommandPaletteMode::Commands
                         | CommandPaletteMode::StatusSegments
                         | CommandPaletteMode::FontFamily
@@ -220,16 +230,16 @@ impl App {
                     || *button != MouseButton::Left
                 {
                     // When: `button`, mode, or composition forbids activation, consume input without retaining a click.
-                    self.palette_pointer_capture = None;
+                    self.interaction.palette_pointer_capture = None;
                     return true;
                 }
                 let hit = self.command_palette_pointer_hit(window_id);
                 match state {
                     ElementState::Pressed => {
-                        self.palette_pointer_capture = match hit {
+                        self.interaction.palette_pointer_capture = match hit {
                             Some(PalettePointerHit::Row { index, entry }) => {
                                 // Capture the displayed identity before any live target refresh can move this row.
-                                self.command_palette.select_visible_index(index);
+                                self.interaction.command_palette.select_visible_index(index);
                                 Some(PalettePointerCapture {
                                     window_id,
                                     target: PalettePointerTarget::Entry(entry),
@@ -237,7 +247,7 @@ impl App {
                             }
                             Some(PalettePointerHit::FontRow { index, family }) => {
                                 // A picker row is highlighted on press and applied on release.
-                                self.command_palette.select_font_row(index).then_some(
+                                self.interaction.command_palette.select_font_row(index).then_some(
                                     PalettePointerCapture {
                                         window_id,
                                         target: PalettePointerTarget::FontRow(family),
@@ -246,7 +256,7 @@ impl App {
                             }
                             Some(PalettePointerHit::StatusRow { index, kind }) => {
                                 // A heading cannot be pressed; a row is highlighted on press.
-                                self.command_palette.select_status_row(index).then_some(
+                                self.interaction.command_palette.select_status_row(index).then_some(
                                     PalettePointerCapture {
                                         window_id,
                                         target: PalettePointerTarget::StatusRow(kind),
@@ -267,8 +277,8 @@ impl App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // When: `MouseWheel` belongs to the modal, cancel held clicks and keep all deltas away from the PTY.
-                self.palette_pointer_capture = None;
-                if self.command_palette.mode() != CommandPaletteMode::Commands
+                self.interaction.palette_pointer_capture = None;
+                if self.interaction.command_palette.mode() != CommandPaletteMode::Commands
                     || self.palette_ime_is_composing()
                 {
                     // When: `command_palette` is editing a title/color or composing, wheel input cannot change its selection.
@@ -282,9 +292,9 @@ impl App {
                     // When: `vertical` is finite and nonzero, move at most one row without looping over event magnitudes.
                     self.refresh_command_palette_context();
                     let _ = self.command_palette_pointer_hit(window_id);
-                    let last = self.command_palette.len().saturating_sub(1);
-                    let selected = self.command_palette.selected();
-                    let next = if selected >= self.command_palette.len() {
+                    let last = self.interaction.command_palette.len().saturating_sub(1);
+                    let selected = self.interaction.command_palette.selected();
+                    let next = if selected >= self.interaction.command_palette.len() {
                         if vertical > 0.0 {
                             last
                         } else {
@@ -298,7 +308,7 @@ impl App {
                         // When: `vertical` moves forward from a row, clamp to the last row rather than wrapping.
                         (selected + 1).min(last)
                     };
-                    self.command_palette.select_visible_index(next);
+                    self.interaction.command_palette.select_visible_index(next);
                     self.request_redraw_for_overlay(Some(window_id));
                 }
                 true

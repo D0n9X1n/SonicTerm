@@ -11,7 +11,7 @@ fn gate_off_answers_gate_off_with_no_recorder_clock_read_or_allocation() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_set_dispatch_clock(fake_now);
     let pane_id = app.__test_seed_tab("off");
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     let base = test_base();
     set_fake_now(base);
     let counts_before = recorder_counts();
@@ -28,7 +28,7 @@ fn gate_off_answers_gate_off_with_no_recorder_clock_read_or_allocation() {
         );
     }
     assert_eq!(recorder_counts(), counts_before, "no recorder clock read or allocation");
-    assert!(app.windows.values().all(|window| window.redraw.timeline.owner.is_none()));
+    assert!(app.registry.windows.values().all(|window| window.redraw.timeline.owner.is_none()));
 }
 
 /// The public take protocol through the prerequisite's own arm, take and accessor APIs only:

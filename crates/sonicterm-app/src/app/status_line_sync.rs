@@ -71,7 +71,7 @@ impl App {
         self.note_status_line(|counters| counters.full_passes += 1);
         let woke = self.status_line.armed_wake.take().is_some_and(|armed| now >= armed);
         let visible = self.status_line.visible;
-        let any_eligible = self.windows.values().any(|window| {
+        let any_eligible = self.registry.windows.values().any(|window| {
             window.role == super::super::WindowRole::Terminal
                 && window.renderer.is_some()
                 && window.frame_deadlines_allowed()
@@ -159,7 +159,7 @@ impl App {
             let rollover = now + Duration::from_millis(MemHistory::next_rollover_ms(wall_ms));
             next_wake = Some(next_wake.map_or(rollover, |wake| wake.min(rollover)));
         }
-        let broadcast = match self.broadcast {
+        let broadcast = match self.interaction.broadcast {
             super::super::BroadcastState::On { source_pane, .. } => {
                 Some((source_pane, self.broadcast_receivers().len()))
             }
@@ -170,9 +170,10 @@ impl App {
         });
         let locale = self.config.locale.clone();
         let palette_window = self
+            .interaction
             .command_palette
             .is_open()
-            .then(|| self.palette_attached_window.or(self.main_window_id))
+            .then(|| self.interaction.palette_attached_window.or(self.registry.main_window_id))
             .flatten();
         let font = (self.config.font.size != self.configured_font_size)
             .then(|| FontInput::from_sizes(self.config.font.size, self.configured_font_size));
@@ -199,7 +200,14 @@ impl App {
             self.note_input(window_id, input, now);
         }
         self.service_held_input(now);
-        let Self { windows, status_line: state, i18n, dispatch_redraws, accessibility, .. } = self;
+        let Self {
+            registry: crate::app::WindowRegistry { windows, .. },
+            status_line: state,
+            i18n,
+            dispatch_redraws,
+            accessibility,
+            ..
+        } = self;
         // An assistive technology hears new alert marks even while no shown strip lists `alerts`.
         let alerts_announced = state
             .resolved
@@ -482,7 +490,7 @@ impl App {
                         Some(owner) if owner == *window_id => window
                             .tab_states
                             .iter()
-                            .position(|tab| tab.tree.leaves().contains(&record.pane_id))
+                            .position(|tab| tab.tree.contains_pane(record.pane_id))
                             .map_or(ClipSource::OtherWindow, |index| ClipSource::Tab(index + 1)),
                         Some(_) => ClipSource::OtherWindow,
                         None => ClipSource::Closed,

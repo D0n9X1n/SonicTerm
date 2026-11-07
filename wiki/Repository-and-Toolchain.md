@@ -158,6 +158,29 @@ vulnerabilities; that evidence comes from the recorded base release and from
 reading each recorded upstream fix at its source. There is no command that
 reconstructs a locally patched tree, and the tool does not pretend otherwise.
 
+Each entry also lists its `local_modifications`: every retained file that differs
+from the pinned archive's subset or that the archive lacks, with a one-line reason.
+They are kept apart from `upstream_fixes`, which record backports only. winit lists
+13 files: the desktop-subset trims to `Cargo.toml`, `Cargo.lock`, `build.rs`, the
+platform module tables and docs, and the Windows native keyboard metadata in
+`src/platform/windows.rs` and the `platform_impl/windows` keyboard, event loop and
+module files, plus the added `keyboard_tests.rs`. zlib lists the two files its
+upstream fixes touch. A separate tool reaches the network to hold that list to the
+truth:
+
+```sh
+python3 scripts/native-dependency-delta.py
+python3 scripts/native-dependency-delta.py --library winit
+python3 scripts/native-dependency-delta.py --with-tests
+```
+
+It downloads each pinned archive, verifies its sha256, reads the `include` subset
+in memory (nothing is written), and fails when the set of differing or added
+files is not exactly `local_modifications`: an unrecorded edit, a recorded edit
+that was lost, and an added file are each reported. The `native-dependency-delta`
+gate step runs it with its offline tests and needs the network, so CI runs it in
+`tooling`. `native-dependencies.py` stays offline and never reads an archive.
+
 For an update, use one reviewable library change at a time:
 
 1. Review the official release and advisories, including regressions in the new
@@ -175,7 +198,10 @@ For an update, use one reviewable library change at a time:
    current vendor tree, replace only that clean vendor directory, then record the
    new `tree_sha256` from `check`'s reported digest after reviewing the diff.
    Review added/removed C/C++ files against `build.rs`; an import is not a
-   compilation result.
+   compilation result. For a library with `local_modifications`, run
+   `native-dependency-delta.py --library <name>` against the old pin first, carry
+   each listed modification onto the new upstream by hand, re-pin `tree_sha256`,
+   then update the list until the delta tool passes on the new pin.
 4. For FreeType/HarfBuzz, use `cargo install bindgen-cli --version 0.71.1 --locked`
    and run `bash scripts/regenerate-freetype.sh` or
    `bash scripts/regenerate-harfbuzz.sh`. `BINDGEN` can select a separately installed

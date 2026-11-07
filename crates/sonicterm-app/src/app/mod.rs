@@ -17,9 +17,12 @@ use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonicterm_cfg::{
     config::{BackdropKind, Config, SoftwareRenderMode},
-    keymap::{Action, BroadcastScope, Keymap},
+    keymap::{BroadcastScope, Keymap},
     theme::Theme,
 };
+// Only the gated test hooks name `Action` through `use super::*`.
+#[cfg(any(test, feature = "test-support"))]
+use sonicterm_cfg::keymap::Action;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_resource::ResourceGovernor;
@@ -250,6 +253,8 @@ pub(crate) use owners::OwnerGuard;
 use owners::{pane_owner_limits, pane_seam_cap_sum_bytes, tracking_only_owner_limits};
 pub use owners::{pane_seam_cap_terms, PaneSeamCapTerm};
 mod pane_exit;
+pub(crate) mod pane_signal;
+pub(crate) use pane_signal::PaneSignal;
 mod pane_launch;
 mod pane_refresh;
 use pane_refresh::update_terminal_ime_cursor_area;
@@ -304,8 +309,16 @@ mod search_handle;
 mod selection_gesture;
 pub use selection_gesture::next_click_count;
 use selection_gesture::{PointerCell, PointerGesture, PointerGestureOwner};
+mod diagnostics;
 mod session;
 mod shell_token;
+pub(in crate::app) use diagnostics::DiagnosticsState;
+mod runtime_services;
+pub(in crate::app) use runtime_services::RuntimeServices;
+mod interaction;
+pub(in crate::app) use interaction::InteractionState;
+mod window_registry_state;
+pub(in crate::app) use window_registry_state::WindowRegistry;
 mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
@@ -382,6 +395,31 @@ pub(super) struct PendingOsc52Reassert {
 
 #[doc(hidden)]
 pub struct App {
+    /// The windows that exist, the main and frontmost window, each window key, and prepared windows.
+    pub(in crate::app) registry: WindowRegistry,
+    /// Cross-window interaction: the palette, edit targets, field pointer captures, OS drag and drop, broadcast.
+    pub(in crate::app) interaction: InteractionState,
+    /// Background services the App starts, polls and stops: probes, MCP, the reaper, GPU recovery.
+    pub(in crate::app) services: RuntimeServices,
+    /// Diagnostic and accounting state: counters, retention and trim samples, breadcrumbs.
+    /// Test-only redraw request counter. Every
+    /// production code path that calls `window.request_redraw()` after
+    /// a `run_action` dispatch also bumps this counter in lock-step.
+    /// Tests assert against this rather than the live winit window
+    /// (which has no public introspection API). Stays at zero in
+    /// release builds whose tests don't touch it.
+    #[doc(hidden)]
+    pub redraw_request_count: std::sync::atomic::AtomicUsize,
+    /// Test-only counter incremented on every call to
+    /// `App::reap_empty_child`. Lets tests
+    /// distinguish "child window cleanup went through the unified reap
+    /// contract" from "a direct `windows.remove` happened" — both would
+    /// shrink the `windows` map, but only the former nulls out straggler
+    /// `redraw_target`s and fires the reap trace. Stays at zero in
+    /// release builds whose tests don't touch it.
+    #[doc(hidden)]
+    pub reap_call_count: std::sync::atomic::AtomicUsize,
+    pub(in crate::app) diagnostics: DiagnosticsState,
     pub(super) theme: Theme,
     /// Pool each pane charges its inline media to: the process-default pool in
     /// production, or a private pool a test injects with
@@ -393,10 +431,6 @@ pub struct App {
     pub(super) capture_staging_pool: Arc<CaptureStagingPool>,
     /// Process privilege observed once by the native binary before window creation.
     pub(super) process_privilege: crate::ProcessPrivilege,
-    /// Foreground-process probes: demand, the worker and its latest-value result map.
-    pub(super) fg_probes: Arc<fg_probe::ForegroundProbes>,
-    /// Activity and warning wakes for the foreground-process schedule; only Windows arms them.
-    pub(super) foreground_schedule: fg_probe::ForegroundSchedule,
     pub(super) config: Config,
     /// Native-platform capability policy applied before config affects app state.
     pub(crate) config_normalizer: ConfigNormalizer,
@@ -423,8 +457,6 @@ pub struct App {
     pub(super) font_catalog: font_catalog::FontCatalog,
     /// Enumerates installed monospace families for the catalog worker; tests inject a counter.
     pub(super) font_enumerator: font_catalog::FontEnumerator,
-    /// The catalog worker, once the picker started it; kept so it is owned, never joined.
-    pub(super) font_catalog_worker: Option<std::thread::JoinHandle<()>>,
     /// The live family when the font picker opened, restored when the picker is cancelled.
     pub(super) font_picker_original: Option<String>,
     /// Moves on every reload, save and picker choice of the font family, so a catalog report the
@@ -437,7 +469,7 @@ pub struct App {
     pub(super) keymap: Keymap,
     // The main window holds no state of its own here. Its renderer, tabs,
     // tab states, panes, selection, modifiers, copy mode, last render, cursor
-    // visibility, and hover link all live in `self.windows[main_window_id]`,
+    // visibility, and hover link all live in `self.registry.windows[main_window_id]`,
     // the same place a torn-out child's do — so one set of code paths serves
     // both. Reach them through `main_renderer()`, `main_tabs()`,
     // `main_panes()`, `main_selection()`, and their `_mut` counterparts.
@@ -464,6 +496,7 @@ pub struct App {
     /// boundary. Disabled in every constructor so ordinary runs retain the real
     /// clipboard behavior and the in-memory success seam remains opt-in.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) test_clipboard_write_failure: bool,
     /// Test-only PTY write ledger. `write_to_pane` records every boundary write
     /// here before resolving the pane to a real PTY, so headless tests can assert
@@ -503,7 +536,7 @@ pub struct App {
     /// on the `DroppedOnEmpty` branch instead of cancelling inline,
     /// so any tear-out-spawn produced by the existing
     /// `pending_new_window` drain runs to completion BEFORE
-    /// cross-window drag-residue cleanup mutates `self.windows`.
+    /// cross-window drag-residue cleanup mutates `self.registry.windows`.
     /// Drained by `App::drain_pending_os_teardown` AFTER
     /// `App::drain_pending_window_creates` at the natural event-loop
     /// boundary in `event_loop.rs::do_user_event`. The
@@ -512,85 +545,28 @@ pub struct App {
     /// WHETHER, so the cleanup stays idempotent.
     pub(super) pending_os_teardown: bool,
     /// Test-only callback fired
-    /// inside [`Self::cancel_drag_session`] AFTER the `self.windows.keys()`
+    /// inside [`Self::cancel_drag_session`] AFTER the `self.registry.windows.keys()`
     /// snapshot is collected but BEFORE the per-id iteration body runs.
     /// Lets a regression test
-    /// mutate `self.windows` in the exact race window that the
+    /// mutate `self.registry.windows` in the exact race window that the
     /// `get_mut(&id).else { continue }` arm is designed to tolerate.
     /// Consumed (`take()`-d) at the call site so the closure is invoked
     /// at most once per `cancel_drag_session` run and the mutable
-    /// borrow on `self.windows` is not held while it runs. Production
-    /// cost is one extra `Option::take()` per `cancel_drag_session`
-    /// invocation (always `None` outside tests) — gated by
-    /// `#[doc(hidden)]` rather than `#[cfg(test)]` so an integration test,
-    /// which compiles the crate without `cfg(test)`, can install it through
+    /// borrow on `self.registry.windows` is not held while it runs. Compiled only
+    /// under `cfg(test)` or `test-support`, so release builds carry neither the
+    /// field nor the call; an integration test installs it through
     /// `App::__test_set_post_snapshot_hook`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) test_post_snapshot_hook: Option<Box<dyn FnOnce(&mut App) + Send>>,
     /// Deferred app-exit request, set by a quit action or by a close that
     /// leaves no active terminal window. `do_about_to_wait` drains it by
     /// calling `event_loop.exit()`; the flag exists because those paths have
     /// no `ActiveEventLoop` handle.
     pub(super) pending_exit: bool,
-    /// When pane retention was last sampled for the memory log.
-    ///
-    /// `None` until the first sample. Gating on elapsed time rather than
-    /// sampling every idle turn keeps a measurement that walks every pane off
-    /// the path that governs idle CPU.
-    pub(super) last_retention_sample: Option<std::time::Instant>,
-    /// Covered-window trims performed since startup; the latest trim's number.
-    pub(super) trim_seq: u64,
-    /// What requested the latest trim; `None` until the first one.
-    pub(super) last_trim_source: Option<retention::TrimSource>,
     /// Unit-test observation of every scheduler trim decision, in pass order.
     #[cfg(test)]
     pub(super) test_scheduler_trims: Vec<(WindowId, retention::TrimDecision)>,
-    /// The preceding cycle's totals, so a snapshot can report movement.
-    ///
-    /// `None` until the first sample has been taken, which is what makes the
-    /// first snapshot's deltas report `unavailable` rather than `+0` — the
-    /// latter claims the process did not move, which is a measurement nobody
-    /// made.
-    ///
-    /// Only the totals are retained rather than the whole snapshot: the
-    /// per-renderer breakdown is a string per renderer, and holding it between
-    /// samples would keep it alive for the life of the session to serve a
-    /// report that never reads it.
-    pub(super) last_memory_totals: Option<memory_snapshot::MemoryTotals>,
-    /// Nonblocking recorder for bounded postmortem breadcrumbs.
-    ///
-    /// The platform binary owns the writer thread; the app only holds this cheap
-    /// sender and never performs filesystem IO on the event-loop path.
-    pub(super) breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
-    pub(super) command_palette: CommandPalette,
-    /// Which window the (single, modal) command palette is attached to.
-    /// `None` means it is closed OR attached to the main window; `Some(id)`
-    /// means that child window. Both the main and child render paths consult
-    /// it so the palette paints only on the window it was opened from —
-    /// without it, Cmd+Shift+P typed in a torn-out child opened the palette
-    /// on the original main window.
-    pub(super) palette_attached_window: Option<WindowId>,
-    /// Stable editor target, including main; an absent key never falls back to another window.
-    pub(super) window_rename_target: Option<sonicterm_types::WindowKey>,
-    /// Tab captured when a rename or color editor opened; submit edits only that live tab.
-    tab_edit_target: Option<overlays::TabEditTarget>,
-    /// One modal press retains its source and target until release or an intervening input change.
-    palette_pointer_capture: Option<overlays::PalettePointerCapture>,
-    /// Left-button gesture inside a palette or search query, bound to its source window and field.
-    field_pointer_capture: Option<field_pointer::FieldPointerCapture>,
-    /// Windows whose cancelled field gesture still owes a left release after another window
-    /// started a field gesture; bounded by live windows and cleared on release or close.
-    field_owed_releases: Vec<winit::window::WindowId>,
-    /// Set the moment a held-tab drag
-    /// crosses [`os_drag::OS_DRAG_THRESHOLD_PX`] from its press point,
-    /// before the user releases the button. Guards
-    /// [`Self::try_os_drag_handoff`] in the `CursorMoved` path so the
-    /// OS-level drag session starts mid-gesture (cursor still down)
-    /// rather than waiting until mouse-up — which was too late for
-    /// `DoDragDrop` to capture the cursor across windows. Cleared on
-    /// `cancel_drag_session` and at every fresh mouse-down so a new
-    /// gesture re-arms cleanly.
-    pub(super) os_drag_handoff_started: bool,
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
     /// Process-wide resource governor and its owner hierarchy.
@@ -605,61 +581,15 @@ pub struct App {
     /// ownership only. Charging producers through it is the larger job that
     /// changes when allocation happens, not merely where the number lives.
     pub(super) governor: ResourceGovernor,
-    pub(super) windows: HashMap<WindowId, WindowState>,
-    /// One bounded driver owns every retired native transport after its pane leaves the UI.
-    pty_reaper: reaper_driver::ReaperDriver,
     /// Cached terminal disposition prevents a repeated finish from retiring panes or draining twice.
     session_finished: Option<bool>,
     /// This App's frame and lock counters; `Some` only when its gate is on, fixed for its lifetime.
     pub(super) frame_counters: Option<frame_counters::AppFrameCounters>,
-    /// Set by the first window or pane; the gate can no longer be forced on after it.
-    pub(super) frame_counters_sealed: std::cell::Cell<bool>,
     /// The windows asked for a frame in the current dispatch; see [`redraw::DispatchRedraws`].
     pub(super) dispatch_redraws: redraw::DispatchRedraws,
-    /// Trees sent to assistive technology since start; stays 0 while none is connected.
-    pub(super) accessibility_tree_builds: u64,
     /// Each terminal window's adapter and strip focus by window id, warm spares included.
     pub(super) accessibility:
         std::collections::HashMap<WindowId, accessibility::WindowAccessibility>,
-    /// The token the next `arm_echo_watch` issues; starts at 1, so 0 never names an arming.
-    pub(super) next_echo_arm: u64,
-    /// Id of the main window. Set in `do_resumed` once the main `Window` is
-    /// created and its [`WindowState`] is inserted into [`Self::windows`].
-    ///
-    /// `None` before that point, which is why every `main_*()` accessor
-    /// returns an `Option` rather than assuming a main window exists.
-    pub(super) main_window_id: Option<WindowId>,
-    /// Most-recently-OS-frontmost window id, INCLUDING the main window.
-    /// Tracks *every* sonic-owned terminal window with a single
-    /// non-`Option` discriminant once the first focus arrives:
-    ///
-    ///   * `Some(main_window_id)`  → main window is OS-frontmost
-    ///   * `Some(child_window_id)` → that child window is OS-frontmost
-    ///   * `None`                  → no sonic window has been focused yet,
-    ///     OR focus has moved out of every sonic window to another app.
-    ///
-    /// Subsumes a separate "which child has focus" field: main-vs-child is
-    /// discriminated by `frontmost_kind()`, so one id answers both questions
-    /// and the two cannot disagree.
-    ///
-    /// Keyboard / menubar / accelerator actions (Cmd+T, Cmd+W, Cmd+\\, …)
-    /// route through this id so a chord typed in window B never mutates
-    /// window A's tab vec. Set in both the main and child `Focused(true)`
-    /// arms; on `Focused(false)` we only clear when the dropped window was
-    /// the current frontmost — focus moving to a *different* sonic window
-    /// arrives as that other window's `Focused(true)` and overwrites
-    /// frontmost in the right order.
-    ///
-    /// Without it, Cmd+T after a tear-out opened a tab in the wrong window,
-    /// and Cmd+W in a new window closed the old window's tab.
-    pub(super) frontmost_window: Option<WindowId>,
-    /// OS-drag tab payloads received before the main [`WindowState`] exists.
-    /// Startup pasteboard / OLE deliveries can arrive before `do_resumed`
-    /// inserts `main_window_id`; queue them so the destination tab is created
-    /// after main is available instead of silently dropping the payload.
-    pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
-    /// Native winit paths collected by source window until the current event-loop turn ends.
-    pub(super) pending_winit_file_drops: HashMap<WindowId, Vec<PathBuf>>,
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
     pub(crate) theme_loader: Option<ThemeLoader>,
@@ -668,8 +598,6 @@ pub struct App {
     /// Proxy used to wake the idle event loop. `None` in tests that
     /// construct `App` directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
-    /// One committed GPU context survives window closure and owns every recovery attempt.
-    gpu_recovery: Option<gpu_recovery::GpuRecovery>,
     /// Bounded workers for openability probes and native direct-open dispatch.
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Current native home captured once for deterministic `~/` target resolution.
@@ -678,10 +606,6 @@ pub struct App {
     pub(super) runtime_config_path: Option<PathBuf>,
     /// Local hostname used to reject foreign-authority OSC 7 snapshots.
     pub(super) local_hostname: String,
-    /// Hidden Linux package-smoke state; absent during ordinary application runs.
-    pub(super) runtime_smoke: Option<runtime_smoke::RuntimeSmokeState>,
-    /// The local control server agents connect to, while `[mcp] enabled` is on.
-    pub(super) mcp_server: Option<mcp::McpServer>,
     /// Minimum interval between two successive frames. Defaults to 1/60s
     /// and is updated in `resumed` from the current monitor's reported
     /// refresh rate. Used by the RedrawRequested handler to skip an
@@ -707,7 +631,7 @@ pub struct App {
     pub(super) software_render_degrade: bool,
     /// The one clock every pacing read goes through: redraw admission and completion for both window
     /// roles, collection contention, the display-link tick and the wait fold. `Instant::now` in
-    /// production; a test installs a fake through [`Self::__test_set_dispatch_clock`].
+    /// production; a test installs a fake through `Self::__test_set_dispatch_clock`.
     pub(super) dispatch_clock: fn() -> Instant,
     /// Legacy observation of main pacing deferral; owner redraw state, not this flag, arms deadlines.
     pub(super) pending_redraw: bool,
@@ -715,7 +639,6 @@ pub struct App {
     pub(super) pending_redraw_windows: HashSet<WindowId>,
     /// Typed owner-addressed deadlines armed by the most recent event-loop fold.
     redraw_due: Vec<redraw::DueWork>,
-    pub(super) warm_window_pool: Vec<WarmWindow>,
     /// Translation bundle. Rebuilt when the user picks a new locale in
     /// the preferences "Language" dropdown.
     pub(super) i18n: sonicterm_ui::i18n::I18n,
@@ -730,28 +653,8 @@ pub struct App {
     /// [`crate::shell::MacShell::with_os_drag_sink`] /
     /// [`crate::shell::WindowsShell::with_os_drag_sink`].
     pub(crate) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
-    /// Platform OS-drag backend. Distinct from `os_drag_sink` (wire-format
-    /// publication): Windows drives OLE `DoDragDrop`; macOS currently publishes
-    /// the pasteboard payload and posts a cancelled outcome without cursor capture.
-    /// Installed by the platform bin (`sonicterm-mac` / `sonicterm-windows`)
-    /// at startup. `None` in tests + on platforms without an impl.
-    pub(super) os_drag_backend: Option<Box<dyn os_drag::OsTabDragBackend>>,
-    /// Shared mailbox the [`os_drag::OsTabDragBackend`] writes pending
-    /// drag outcomes into. Drained by `do_user_event` on every
-    /// `UserEvent::DragMoved` / `DragEnded` wake.
-    pub(super) os_drag_pending: Arc<os_drag::PendingDragOutcome>,
     /// The default-handler command's backend, confirmation and active run.
     pub(in crate::app) default_handlers: default_handlers::DefaultHandlersState,
-    /// Shared tab-bar snapshot registry. The App publishes the live
-    /// per-window tab bar layout into this on every redraw (see
-    /// `publish_os_drag_bar_snapshot`); a Phase-C2 OS-drag backend
-    /// reads from it inside its drop callback (Windows
-    /// IDropTarget::Drop / macOS NSDraggingDestination::performDrop)
-    /// to resolve the raw screen-coordinate drop into a real
-    /// `(WindowId, slot)` pair before posting a `DroppedOnBar` outcome.
-    pub(super) os_drag_bars: Arc<os_drag::TabBarRegistry>,
-    /// Captured window and tab identity until the native drag outcome is consumed.
-    pub(super) os_drag_source: Option<(WindowId, sonicterm_ui::tabs::TabId)>,
     /// View → Toggle Tab Bar state. When `false`, the menubar Toggle
     /// Tab Bar action has hidden the tab bar chrome. Defaults to
     /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
@@ -763,9 +666,6 @@ pub struct App {
     pub(super) startup_loads: Option<config_apply::StartupLoads>,
     /// Program-reported progress for the taskbar, Dock or launcher, and the program toast.
     pub(super) program: program_state::ProgramState,
-    /// Broadcast-input mode. When enabled, bytes typed into `source_pane`
-    /// are mirrored into matching receiver panes after the source PTY write.
-    pub(super) broadcast: BroadcastState,
     /// Quit confirmation guard for the Cmd+Q chord. A single press arms it and
     /// shows a red "press again" prompt; the app exits on a second press during
     /// the confirmation window. See [`quit_hold`].
@@ -785,23 +685,6 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    /// Test-only redraw request counter. Every
-    /// production code path that calls `window.request_redraw()` after
-    /// a `run_action` dispatch also bumps this counter in lock-step.
-    /// Tests assert against this rather than the live winit window
-    /// (which has no public introspection API). Stays at zero in
-    /// release builds whose tests don't touch it.
-    #[doc(hidden)]
-    pub redraw_request_count: std::sync::atomic::AtomicUsize,
-    /// Test-only counter incremented on every call to
-    /// [`Self::reap_empty_child`]. Lets tests
-    /// distinguish "child window cleanup went through the unified reap
-    /// contract" from "a direct `windows.remove` happened" — both would
-    /// shrink the `windows` map, but only the former nulls out straggler
-    /// `redraw_target`s and fires the reap trace. Stays at zero in
-    /// release builds whose tests don't touch it.
-    #[doc(hidden)]
-    pub reap_call_count: std::sync::atomic::AtomicUsize,
     /// Test-only viewport override. When
     /// `Some((outer, cell_w, cell_h))`, [`Self::compute_active_pane_rects`]
     /// uses `outer` instead of fetching the renderer's logical size and
@@ -814,7 +697,6 @@ pub struct App {
     pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
     /// Compatibility reducer observations; live topology decisions and native effect targets belong to App.
     pub(crate) machine: sonicterm_app_core::AppStateMachine,
-    window_keys: crate::window_key_boundary::WindowKeyRegistry,
 }
 
 impl App {
@@ -835,12 +717,12 @@ impl App {
     /// Panes already in `window` are adopted by this call. A window populated
     /// after insertion instead reconciles when those panes arrive.
     pub(super) fn insert_window_registered(&mut self, id: WindowId, mut window: WindowState) {
-        self.frame_counters_sealed.set(true);
+        self.diagnostics.frame_counters_sealed.set(true);
         if let Some(app) = self.frame_counters.as_mut() {
             // the App's gate is on, every registered window and its renderer count.
             if window.redraw.frame_counters.is_none() {
                 window.redraw.frame_counters =
-                    Some(app.window_counters(self.main_window_id == Some(id)));
+                    Some(app.window_counters(self.registry.main_window_id == Some(id)));
             }
             app.dispatch.register_native(id);
             if let Some(renderer) = window.renderer.as_mut() {
@@ -857,9 +739,9 @@ impl App {
             }
         } else {
             // When: `window.role` is not a report, intern a window number; its title is written below.
-            self.window_keys.intern(id);
+            self.registry.window_keys.intern(id);
         }
-        self.windows.insert(id, window);
+        self.registry.windows.insert(id, window);
         let _ = self.sync_native_title(id, Instant::now(), true);
         // The link takes the period the refresh above just read; only macOS installs one.
         self.install_native_display_link(id);
@@ -897,7 +779,7 @@ impl App {
         // Cloned before the window borrow: `ResourceGovernor` is a handle over
         // an `Arc<Ledger>`, so this shares the ledger rather than copying it.
         let governor_handle = self.governor.clone();
-        let Some(window) = self.windows.get(&id) else {
+        let Some(window) = self.registry.windows.get(&id) else {
             // When: `windows` tracks no entry for this id, so an owner created
             // here would have no window to retain or close it.
             return;
@@ -911,7 +793,7 @@ impl App {
             self.governor.create_child(root, OwnerKind::Window, tracking_only_owner_limits());
         match owner {
             Ok(owner) => {
-                if let Some(window) = self.windows.get_mut(&id) {
+                if let Some(window) = self.registry.windows.get_mut(&id) {
                     window.owner = Some(OwnerGuard::new(governor_handle, owner));
                 }
             }
@@ -946,6 +828,10 @@ mod close_baseline_tests;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;
+
+#[cfg(test)]
+#[path = "mod_test_support_tests.rs"]
+mod test_support_tests;
 
 mod user_event;
 pub use user_event::UserEvent;

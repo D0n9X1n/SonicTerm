@@ -173,7 +173,8 @@ pub(super) fn retained_bytes(pane: &PaneState) -> usize {
 ///
 /// These tests are in-crate, so nothing has to be made public to drive them.
 pub(super) fn seeded_pane(app: &App, window: WindowId, pane_id: u64) -> &PaneState {
-    app.windows
+    app.registry
+        .windows
         .get(&window)
         .and_then(|state| state.panes.get(&pane_id))
         .expect("the seeded pane exists")
@@ -694,7 +695,7 @@ pub(super) fn draw_window(app: &mut App, window_id: WindowId, rows: &str) -> Res
         cursor_style: sonicterm_render_model::CursorStyle::BlockSteady,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     renderer
         .render(
@@ -776,7 +777,7 @@ pub(super) fn pass_at(
     window_id: WindowId,
 ) -> Option<TrimDecision> {
     app.test_scheduler_trims.clear();
-    app.last_retention_sample = None;
+    app.diagnostics.last_retention_sample = None;
     app.sample_pane_retention(base + Duration::from_secs(secs));
     app.test_scheduler_trims
         .iter()
@@ -807,7 +808,7 @@ pub(super) fn run_live_scheduler(
     let mut app = app_with_private_pools();
     app.__test_set_dispatch_clock(fake_now);
     let pane_id = app.__test_seed_tab("covered");
-    let main = app.main_window_id.ok_or("the seeded main window")?;
+    let main = app.registry.main_window_id.ok_or("the seeded main window")?;
     let (window, renderer) = live_renderer(event_loop, true, "live-scheduler")?;
     if !app.__test_attach_window_renderer(main, window, renderer) {
         return Err(String::from("the renderer attaches"));
@@ -847,8 +848,13 @@ pub(super) fn run_live_scheduler(
     if !renderer.__frame_texture_trimmed() {
         return Err(String::from("the renderer's frame texture was trimmed"));
     }
-    if (app.trim_seq, app.last_trim_source) != (1, Some(TrimSource::Scheduler)) {
-        return Err(format!("one scheduler trim: {:?}", (app.trim_seq, app.last_trim_source)));
+    if (app.diagnostics.trim_seq, app.diagnostics.last_trim_source)
+        != (1, Some(TrimSource::Scheduler))
+    {
+        return Err(format!(
+            "one scheduler trim: {:?}",
+            (app.diagnostics.trim_seq, app.diagnostics.last_trim_source)
+        ));
     }
     // The window's trim state reaches the App's own snapshot: its renderer summary says trimmed and
     // carries the released request size, and a tagged checkpoint line names the scheduler's trim.
@@ -887,8 +893,13 @@ pub(super) fn run_live_scheduler(
         return Err(format!("the checkpoint's renderer entry carries the trim: {breakdown}"));
     }
     let later = pass_at(&mut app, base, 60, main);
-    if later != Some(TrimDecision::Skipped(TrimSkip::AlreadyTrimmed)) || app.trim_seq != 1 {
-        return Err(format!("one trim per covered stretch: {later:?}, trim_seq {}", app.trim_seq));
+    if later != Some(TrimDecision::Skipped(TrimSkip::AlreadyTrimmed))
+        || app.diagnostics.trim_seq != 1
+    {
+        return Err(format!(
+            "one trim per covered stretch: {later:?}, trim_seq {}",
+            app.diagnostics.trim_seq
+        ));
     }
 
     // Shown, drawn and covered again, then a pass with no subscriber installed: still trimmed.
@@ -905,7 +916,7 @@ pub(super) fn run_live_scheduler(
     let (spare_window, spare_renderer) = live_renderer(event_loop, false, "live-scheduler-spare")?;
     let spare = spare_window.id();
     let spare_before = spare_renderer.retained_amounts();
-    app.warm_window_pool.push(crate::app::WarmWindow {
+    app.registry.warm_window_pool.push(crate::app::WarmWindow {
         window: spare_window,
         renderer: spare_renderer,
         created_at: Instant::now(),
@@ -917,7 +928,7 @@ pub(super) fn run_live_scheduler(
     if app.test_scheduler_trims.iter().any(|(decided, _)| *decided == spare) {
         return Err(String::from("the pass never visits a warm spare"));
     }
-    let spare_after = &app.warm_window_pool[0].renderer;
+    let spare_after = &app.registry.warm_window_pool[0].renderer;
     if spare_after.retained_amounts() != spare_before || spare_after.__frame_texture_trimmed() {
         return Err(String::from("the warm spare's renderer is untouched"));
     }

@@ -48,9 +48,9 @@ pub fn theme_tab_color_choices(theme: &Theme) -> Vec<TabColorChoice> {
 impl App {
     /// Record the active tab of `window_id` as the only tab a rename or color editor may change.
     pub(super) fn capture_tab_edit_target(&mut self, window_id: Option<WindowId>) {
-        self.tab_edit_target = window_id.and_then(|id| {
-            let window = self.window_keys.get(id)?;
-            let tab = self.windows.get(&id)?.tabs.active()?.id;
+        self.interaction.tab_edit_target = window_id.and_then(|id| {
+            let window = self.registry.window_keys.get(id)?;
+            let tab = self.registry.windows.get(&id)?.tabs.active()?.id;
             Some(TabEditTarget { window, tab })
         });
     }
@@ -64,12 +64,15 @@ impl App {
         &mut self,
         edit: impl FnOnce(&mut sonicterm_ui::tabs::TabBar, sonicterm_ui::tabs::TabId) -> bool,
     ) {
-        let Some(target) = self.tab_edit_target.take() else {
+        let Some(target) = self.interaction.tab_edit_target.take() else {
             // When: no target was captured, no editor opened for a tab and nothing may change.
             return;
         };
-        let Some(window) =
-            self.window_keys.resolve(target.window).and_then(|id| self.windows.get_mut(&id))
+        let Some(window) = self
+            .registry
+            .window_keys
+            .resolve(target.window)
+            .and_then(|id| self.registry.windows.get_mut(&id))
         else {
             // When: resolve finds no live window, the captured tab closed with it.
             return;
@@ -81,9 +84,10 @@ impl App {
 
     /// Live window that still holds the captured edit tab, or `None` once it closed or moved.
     pub(in crate::app) fn tab_edit_target_window(&self) -> Option<WindowId> {
-        let target = self.tab_edit_target?;
-        let id = self.window_keys.resolve(target.window)?;
-        self.windows
+        let target = self.interaction.tab_edit_target?;
+        let id = self.registry.window_keys.resolve(target.window)?;
+        self.registry
+            .windows
             .get(&id)
             .filter(|window| window.tabs.tabs().iter().any(|tab| tab.id == target.tab))
             .map(|_| id)
@@ -92,59 +96,65 @@ impl App {
     /// Close a tab rename or color editor whose captured tab belongs to the closing window `id`.
     pub(in crate::app) fn cancel_tab_edit(&mut self, id: WindowId) {
         let editing_tab = matches!(
-            self.command_palette.mode(),
+            self.interaction.command_palette.mode(),
             CommandPaletteMode::RenameTab | CommandPaletteMode::TabColor
         );
-        let captured =
-            self.tab_edit_target.and_then(|target| self.window_keys.resolve(target.window));
+        let captured = self
+            .interaction
+            .tab_edit_target
+            .and_then(|target| self.registry.window_keys.resolve(target.window));
         if editing_tab && captured == Some(id) {
-            self.command_palette.close();
-            self.tab_edit_target = None;
-            self.palette_attached_window = None;
-            self.palette_pointer_capture = None;
+            self.interaction.command_palette.close();
+            self.interaction.tab_edit_target = None;
+            self.interaction.palette_attached_window = None;
+            self.interaction.palette_pointer_capture = None;
         }
     }
 
     pub(in crate::app) fn start_rename_active_tab(&mut self) {
-        self.palette_pointer_capture = None;
+        self.interaction.palette_pointer_capture = None;
         let body = self.active_tab_title_body().unwrap_or_default();
-        self.command_palette.start_rename_tab(body);
-        self.palette_attached_window = match self.frontmost_kind() {
+        self.interaction.command_palette.start_rename_tab(body);
+        self.interaction.palette_attached_window = match self.frontmost_kind() {
             FrontmostKind::Child(id) => Some(id),
             _ => None,
         };
-        self.capture_tab_edit_target(self.palette_attached_window.or(self.main_window_id));
+        self.capture_tab_edit_target(
+            self.interaction.palette_attached_window.or(self.registry.main_window_id),
+        );
         self.update_command_palette_ime_cursor_area();
-        self.request_redraw_for_overlay(self.palette_attached_window);
+        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 
     pub(super) fn active_tab_title_body(&self) -> Option<String> {
         match self.frontmost_kind() {
             FrontmostKind::Child(id) => {
-                self.windows.get(&id).and_then(|window| window.tabs.active_title_body())
+                self.registry.windows.get(&id).and_then(|window| window.tabs.active_title_body())
             }
             _ => self.main_tabs().and_then(|tabs| tabs.active_title_body()),
         }
     }
 
     pub(in crate::app) fn start_update_tab_color(&mut self) {
-        self.palette_pointer_capture = None;
+        self.interaction.palette_pointer_capture = None;
         let title = self.active_tab_title_body().unwrap_or_else(|| "current tab".to_string());
         let choices = theme_tab_color_choices(&self.theme);
-        self.command_palette.start_tab_color_picker(title, choices);
-        self.palette_attached_window = match self.frontmost_kind() {
+        self.interaction.command_palette.start_tab_color_picker(title, choices);
+        self.interaction.palette_attached_window = match self.frontmost_kind() {
             FrontmostKind::Child(id) => Some(id),
             _ => None,
         };
-        self.capture_tab_edit_target(self.palette_attached_window.or(self.main_window_id));
-        self.request_redraw_for_overlay(self.palette_attached_window);
+        self.capture_tab_edit_target(
+            self.interaction.palette_attached_window.or(self.registry.main_window_id),
+        );
+        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 
     pub(super) fn apply_selected_tab_color(&mut self) {
-        let Some(choice) = self.command_palette.selected_tab_color().cloned() else {
+        let Some(choice) = self.interaction.command_palette.selected_tab_color().cloned() else {
             // When: selected_tab_color has no entry at the current index the
             // picker is empty or the selection is stale; leave the color as is.
-            self.tab_edit_target = None;
+            self.interaction.tab_edit_target = None;
             return;
         };
         // Recolor only the tab captured when the picker opened, never whichever tab is active now.

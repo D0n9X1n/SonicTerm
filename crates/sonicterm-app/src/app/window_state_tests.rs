@@ -23,7 +23,7 @@ fn split_child() -> (App, WindowId, u64, u64) {
 fn pointer_focus_transition_is_one_shot_and_clears_stale_selection() {
     let (mut app, child, source, target) = split_child();
     let stale = Selection::new(0, 0).with_content_state(source, 0, false, 0);
-    let window = app.windows.get_mut(&child).expect("seeded child window");
+    let window = app.registry.windows.get_mut(&child).expect("seeded child window");
     window.selection = Some(stale);
 
     let change = window.begin_pointer_pane_focus_change(target).expect("inactive pane transition");
@@ -49,7 +49,7 @@ fn pointer_focus_transition_is_one_shot_and_clears_stale_selection() {
 fn pane_focus_transition_rejects_non_leaf_targets() {
     let (mut app, child, source, _target) = split_child();
     let selection = Selection::new(0, 0).with_content_state(source, 0, false, 0);
-    let window = app.windows.get_mut(&child).expect("seeded child window");
+    let window = app.registry.windows.get_mut(&child).expect("seeded child window");
     window.selection = Some(selection);
 
     assert!(window.begin_pane_focus_change(u64::MAX).is_none());
@@ -61,7 +61,7 @@ fn pane_focus_transition_rejects_non_leaf_targets() {
 #[test]
 fn pane_focus_feedback_finishes_with_dirty_target_frame() {
     let (mut app, child, _source, target) = split_child();
-    let window = app.windows.get_mut(&child).expect("seeded child window");
+    let window = app.registry.windows.get_mut(&child).expect("seeded child window");
     for pane in window.panes.values() {
         pane.parser.lock().grid_mut().clear_dirty();
     }
@@ -169,7 +169,7 @@ fn window_dirt(window: &WindowState) -> std::collections::BTreeMap<u64, usize> {
 #[test]
 fn pointer_focus_press_dirties_no_pane() {
     let (mut app, child, _source, target) = split_child();
-    let window = app.windows.get_mut(&child).expect("seeded child window");
+    let window = app.registry.windows.get_mut(&child).expect("seeded child window");
     clear_window_dirt(window);
 
     assert!(window.begin_local_selection(target, (0, 0), 1), "the press binds a selection");
@@ -185,7 +185,7 @@ fn child_scroll_and_view_top_dirty_no_pane() {
     let (mut app, child, active, sibling) = split_child();
     assert!(app.__test_advance_child_pane_parser(child, active, "line\r\n".repeat(80).as_bytes()));
     let mode = app.config.appearance.scrollbar;
-    let window = app.windows.get_mut(&child).expect("seeded child window");
+    let window = app.registry.windows.get_mut(&child).expect("seeded child window");
     clear_window_dirt(window);
 
     super::child_window::scroll_child_pane(window, active, -3, mode);
@@ -199,7 +199,7 @@ fn child_scroll_and_view_top_dirty_no_pane() {
         (grid.scrollback_len() as u64, super::viewport_anchor::ViewportBaseline::of(grid))
     };
     app.set_child_pane_view_top(child, active, live_top / 2, live_top, at);
-    let window = &app.windows[&child];
+    let window = &app.registry.windows[&child];
     assert_eq!(window.panes[&active].viewport_top_abs, Some(live_top / 2));
     assert!(window_dirt(window).values().all(|&count| count == 0), "{:?}", window_dirt(window));
     assert!(window.panes.contains_key(&sibling));
@@ -241,7 +241,7 @@ fn child_splitter_drag_dirties_only_resized_panes() {
     assert!(app.__test_child_split_active_right(child));
     let right = app.__test_child_active_pane(child).expect("second split pane");
     let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
-    let window = app.windows.get_mut(&child).expect("seeded child window");
+    let window = app.registry.windows.get_mut(&child).expect("seeded child window");
     let rects = window.tab_states[0].tree.layout(outer);
     let right_rect = rects.iter().find(|(id, _)| *id == right).map(|(_, rect)| *rect).unwrap();
     let seam = (right_rect.x, right_rect.y + 10.0);
@@ -253,7 +253,7 @@ fn child_splitter_drag_dirties_only_resized_panes() {
 
     assert!(app.apply_splitter_drag_in_child(child, seam.0 + 40.0, seam.1));
 
-    let window = &app.windows[&child];
+    let window = &app.registry.windows[&child];
     assert_eq!(app.__test_child_pane_grid_size(child, left), before, "the far pane kept its size");
     let dirt = window_dirt(window);
     assert_eq!(dirt[&left], 0, "an unresized pane gains no dirt: {dirt:?}");
@@ -268,7 +268,7 @@ fn child_splitter_drag_dirties_only_resized_panes() {
 fn tab_reorder_keeps_window_wide_dirt() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let child = app.__test_seed_child_window(&["first", "second"]);
-    let window = app.windows.get_mut(&child).expect("seeded child window");
+    let window = app.registry.windows.get_mut(&child).expect("seeded child window");
     clear_window_dirt(window);
 
     assert!(window.reorder_tab(0, 1));
@@ -356,10 +356,10 @@ fn every_window_constructor_starts_both_clocks_together() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_synthetic_main();
     let child = app.__test_seed_child_window(&["child"]);
-    for window in app.windows.values() {
+    for window in app.registry.windows.values() {
         assert_eq!(window.stream_clock, window.last_render);
     }
-    assert!(app.windows.contains_key(&child));
+    assert!(app.registry.windows.contains_key(&child));
     // The native constructors cannot run headless, so their literals are pinned by source.
     for (name, source) in [
         (
@@ -410,8 +410,8 @@ fn backdating_hook_moves_both_clocks() {
     let child = app.__test_seed_child_window(&["child"]);
     let backdated = Instant::now() - Duration::from_millis(500);
     assert!(app.__test_set_window_last_render(child, backdated));
-    assert_eq!(app.windows[&child].last_render, backdated);
-    assert_eq!(app.windows[&child].stream_clock, backdated);
+    assert_eq!(app.registry.windows[&child].last_render, backdated);
+    assert_eq!(app.registry.windows[&child].stream_clock, backdated);
 }
 
 /// A local selection drag reads only its press pane: with the sibling pane's parser held by
@@ -423,7 +423,7 @@ fn selection_drag_locks_only_the_selecting_pane() {
     use std::sync::{atomic::Ordering, mpsc, Arc};
     use std::time::{Duration, Instant};
     let (mut app, child, active, sibling) = split_child();
-    let window = app.windows.get_mut(&child).expect("seeded child window");
+    let window = app.registry.windows.get_mut(&child).expect("seeded child window");
     clear_window_dirt(window);
     let before = window_dirt(window);
 

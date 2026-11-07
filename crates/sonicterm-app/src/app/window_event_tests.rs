@@ -105,18 +105,22 @@ pub(super) fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveE
         let mut current = renderer.take().unwrap();
         current.set_tab_bar_visible(false);
         assert!(app.__test_attach_window_renderer(window, native.clone(), current));
-        app.windows.get_mut(&window).unwrap().cursor_pos = (40.0, 80.0);
+        app.registry.windows.get_mut(&window).unwrap().cursor_pos = (40.0, 80.0);
         app.__test_set_window_last_render(window, Instant::now() - Duration::from_secs(1));
         app.do_window_event(event_loop, window, WindowEvent::RedrawRequested);
-        let cell =
-            app.windows[&window].renderer.as_ref().unwrap().pixel_to_pane_cell(40.0, 80.0).unwrap();
+        let cell = app.registry.windows[&window]
+            .renderer
+            .as_ref()
+            .unwrap()
+            .pixel_to_pane_cell(40.0, 80.0)
+            .unwrap();
         assert_eq!(cell.0, pane_id, "rendered hit-test fixture must name the live pane");
         app.wait_for_input_queues();
         let submitted = PtySubmissions::start();
         for read_only in [false, true] {
             for tracked in [false, true] {
                 for is_alt in [false, true] {
-                    let window_state = app.windows.get_mut(&window).unwrap();
+                    let window_state = app.registry.windows.get_mut(&window).unwrap();
                     window_state.copy_mode = Some(if read_only {
                         CopyModeState::read_only_at((0, 0))
                     } else {
@@ -174,7 +178,7 @@ pub(super) fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveE
                     );
                     if !is_alt {
                         assert_eq!(
-                            app.windows[&window].panes[&pane_id].viewport_top_abs,
+                            app.registry.windows[&window].panes[&pane_id].viewport_top_abs,
                             if read_only || !tracked { Some(7) } else { Some(10) }
                         );
                     }
@@ -237,7 +241,7 @@ pub(super) fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveE
                         }
                     );
                     assert_eq!(
-                        app.windows[&window].pointer_gesture.unwrap().owner
+                        app.registry.windows[&window].pointer_gesture.unwrap().owner
                             == PointerGestureOwner::Local,
                         read_only || !tracked
                     );
@@ -275,7 +279,7 @@ pub(super) fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveE
                 if read_only { Vec::new() } else { vec![(pane_id, b"\"safe path\"".to_vec())] }
             );
         }
-        renderer = app.windows.get_mut(&window).unwrap().renderer.take();
-        app.windows.get_mut(&window).unwrap().window = None;
+        renderer = app.registry.windows.get_mut(&window).unwrap().renderer.take();
+        app.registry.windows.get_mut(&window).unwrap().window = None;
     }
 }

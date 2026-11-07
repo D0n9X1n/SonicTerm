@@ -254,7 +254,7 @@ fn frame(renderer: &mut GpuRenderer, layout: &Layout, scene: &mut Scene) -> Pres
         cursor_style: CursorStyle::BlockSteady,
         is_broadcast_participant: false,
         scrollbar_alpha: scene.scrollbar_alpha,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     renderer.render_with_outcome(
         &fonts,

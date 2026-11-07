@@ -7,17 +7,17 @@ use super::*;
 fn refused_charged_transfer_cannot_reap_the_source_window() {
     // A charged final tab stays attached if the destination has no accounting owner.
     let mut app = app_with_tabs(&["destination"]);
-    let target = app.main_window_id.unwrap();
+    let target = app.registry.main_window_id.unwrap();
     app.__test_set_main_pane_viewport(
         sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
         10.0,
         10.0,
     );
     let source = app.__test_seed_child_window(&["source"]);
-    let pane_id = app.windows[&source].tab_states[0].active_pane;
+    let pane_id = app.registry.windows[&source].tab_states[0].active_pane;
     prepare_non_vacuous_source(&mut app, source, pane_id);
-    let source_owner = app.windows[&source].owner.as_ref().unwrap().id();
-    let window = app.windows.get_mut(&target).unwrap();
+    let source_owner = app.registry.windows[&source].owner.as_ref().unwrap().id();
+    let window = app.registry.windows.get_mut(&target).unwrap();
     for pane in window.panes.values_mut() {
         pane.charges.clear();
         drop(pane.owner.take());
@@ -544,7 +544,7 @@ fn a_tear_out_without_an_id_falls_back_to_its_index() {
 fn tear_out_retitles_the_source_and_rollback_restores_it() {
     let mut app = app_with_tabs(&["left", "torn"]);
     let window = app.__test_main_window_id().expect("synthetic main");
-    app.window_keys.intern(window);
+    app.registry.window_keys.intern(window);
     let now = Instant::now();
     let _ = app.sync_native_titles(now);
     assert_eq!(app.applied_native_title(window), Some("#1 torn"));

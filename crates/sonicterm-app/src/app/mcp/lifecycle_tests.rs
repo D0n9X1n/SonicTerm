@@ -28,7 +28,7 @@ fn install_server(app: &mut App, config: McpConfig) -> Arc<McpShared> {
     let shared = McpShared::new(config.control, None);
     app.config.mcp = config;
     let owner = app.register_mcp_owner();
-    app.mcp_server = Some(McpServer {
+    app.services.mcp_server = Some(McpServer {
         shared: Arc::clone(&shared),
         endpoint: "test-endpoint".into(),
         _endpoint_guard: None,
@@ -41,7 +41,7 @@ fn install_server(app: &mut App, config: McpConfig) -> Arc<McpShared> {
 
 /// The `[mcp]` values with the server on at `control`.
 fn enabled(control: McpControl) -> McpConfig {
-    McpConfig { enabled: true, control }
+    McpConfig { enabled: true, control, ..McpConfig::default() }
 }
 
 /// A queued `ListPanes` request with this admitting `generation` and `deadline`.
@@ -75,7 +75,7 @@ fn the_server_is_off_by_default() {
     let mut app = test_app();
     assert!(!app.config.mcp.enabled);
     app.reconcile_mcp();
-    assert!(app.mcp_server.is_none());
+    assert!(app.services.mcp_server.is_none());
     assert!(app.mcp_endpoint().is_none());
 }
 
@@ -87,7 +87,11 @@ fn an_unchanged_reload_keeps_the_generation() {
     let shared = install_server(&mut app, enabled(McpControl::Agent));
     let before = shared.generation.load(Ordering::Acquire);
     app.reconcile_mcp();
-    assert!(app.mcp_server.as_ref().is_some_and(|server| Arc::ptr_eq(&server.shared, &shared)));
+    assert!(app
+        .services
+        .mcp_server
+        .as_ref()
+        .is_some_and(|server| Arc::ptr_eq(&server.shared, &shared)));
     assert_eq!(shared.generation.load(Ordering::Acquire), before);
 }
 
@@ -115,7 +119,7 @@ fn disabling_stops_the_server() {
     let shared = install_server(&mut app, enabled(McpControl::Agent));
     app.config.mcp = McpConfig::default();
     app.reconcile_mcp();
-    assert!(app.mcp_server.is_none());
+    assert!(app.services.mcp_server.is_none());
     assert!(shared.is_stopped());
 }
 
@@ -194,8 +198,12 @@ fn a_missing_pane_is_gone() {
 fn connection_buffers_are_charged_to_the_mcp_owner() {
     let mut app = test_app();
     let shared = install_server(&mut app, enabled(McpControl::Agent));
-    let owner =
-        app.mcp_server.as_ref().and_then(|server| server.owner.as_ref()).map(OwnerGuard::id);
+    let owner = app
+        .services
+        .mcp_server
+        .as_ref()
+        .and_then(|server| server.owner.as_ref())
+        .map(OwnerGuard::id);
     let owner = owner.expect("the owner registers");
     shared.hold_bytes(4096);
     shared.connections.store(1, Ordering::Release);
@@ -246,4 +254,93 @@ fn connection_notices_reach_the_notification() {
     shared.notify("Agent disconnected: test".into());
     app.drain_mcp_requests();
     assert!(app.main().unwrap().notification.is_none());
+}
+
+/// A tool that names one pane resolves exactly the entry `list_panes` shows for it, without
+/// enumerating every pane: across a main window with split tabs, two child windows, a report
+/// window holding a pane-shaped entry, and a leaf whose pane is mid-teardown, the resolver agrees
+/// with the list for every pane, and returns nothing for the report window, the torn-down leaf
+/// and an unknown id.
+#[test]
+fn resolving_one_pane_matches_its_listed_entry() {
+    let mut app = test_app();
+    app.__test_seed_tab("one");
+    app.__test_split_active_right();
+    app.__test_seed_tab("two");
+    app.__test_split_active_right();
+    let first_child = app.__test_seed_child_window(&["c1", "c2"]);
+    let second_child = app.__test_seed_child_window(&["d1"]);
+    let report_child = app.__test_seed_child_window(&["report"]);
+    let report_pane = app.__test_child_active_pane(report_child).unwrap();
+    app.registry.windows.get_mut(&report_child).unwrap().role =
+        crate::app::WindowRole::MemoryReport;
+    // A terminal window created after the report window keeps its creation-order index: the
+    // report window's slot is skipped, not reused (main 0, children 1, 2, report 3, this one 4).
+    let after_report = app.__test_seed_child_window(&["after"]);
+    let after_pane = app.__test_child_active_pane(after_report).unwrap();
+    let first_child_panes: Vec<_> =
+        (0..2).map(|tab| app.registry.windows[&first_child].tab_states[tab].active_pane).collect();
+    let main_second_tab = app.main().unwrap().tab_states[1].active_pane;
+    // A leaf whose pane already left `panes`, as during teardown, is listed by neither path.
+    let torn = app.__test_child_active_pane(second_child).unwrap();
+    let removed = app.registry.windows.get_mut(&second_child).unwrap().panes.remove(&torn);
+    assert!(removed.is_some());
+    let listed = app.mcp_pane_entries();
+    assert!(
+        listed.len() >= 5,
+        "the layout has panes in several windows and tabs: {}",
+        listed.len()
+    );
+    assert!(listed.iter().any(|entry| entry.window_index > 0), "child windows are listed");
+    // Explicit (window, tab) indices, independent of the ordering helper both paths share.
+    let expected = [
+        (main_second_tab, 0, 1),
+        (first_child_panes[0], 1, 0),
+        (first_child_panes[1], 1, 1),
+        (after_pane, 4, 0),
+    ];
+    for (pane, window_index, tab_index) in expected {
+        let resolved = app.mcp_resolve_pane(pane).expect("a terminal pane resolves");
+        assert_eq!(
+            (resolved.window_index, resolved.tab_index),
+            (window_index, tab_index),
+            "pane {pane}"
+        );
+        let entry = listed.iter().find(|entry| entry.pane_id == pane).expect("listed");
+        assert_eq!((entry.window_index, entry.tab_index), (window_index, tab_index), "pane {pane}");
+    }
+    for entry in &listed {
+        let resolved = app.mcp_resolve_pane(entry.pane_id).expect("a listed pane resolves");
+        let pair = |entry: &PaneEntry| {
+            (entry.pane_id, entry.window_index, entry.tab_index, entry.active, entry.readonly)
+        };
+        assert_eq!(pair(&resolved), pair(entry), "pane {}", entry.pane_id);
+        assert!(Arc::ptr_eq(&resolved.parser, &entry.parser), "the same pane's parser");
+    }
+    for absent in [report_pane, torn, 987_654] {
+        assert!(app.mcp_resolve_pane(absent).is_none(), "pane {absent} is not a terminal pane");
+        assert!(listed.iter().all(|entry| entry.pane_id != absent));
+    }
+}
+
+/// Resolving one pane builds exactly one entry, where listing builds one per pane; counted while
+/// resolving, so building every entry and discarding all but one (the old `find` over the list,
+/// whose final reference counts look the same) fails here.
+#[test]
+fn resolving_one_pane_builds_only_its_entry() {
+    let mut app = test_app();
+    for title in ["one", "two", "three"] {
+        app.__test_seed_tab(title);
+        app.__test_split_active_right();
+    }
+    let built = || super::ENTRIES_BUILT.with(std::cell::Cell::get);
+    let before_list = built();
+    let listed = app.mcp_pane_entries();
+    assert_eq!(built() - before_list, listed.len(), "the list builds one entry per pane");
+    assert!(listed.len() >= 6);
+    let target = listed[3].pane_id;
+    let before_resolve = built();
+    let resolved = app.mcp_resolve_pane(target).expect("a listed pane resolves");
+    assert_eq!(built() - before_resolve, 1, "resolving builds only the named pane's entry");
+    assert_eq!(resolved.pane_id, target);
 }

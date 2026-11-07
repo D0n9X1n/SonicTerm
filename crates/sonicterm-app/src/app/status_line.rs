@@ -321,7 +321,7 @@ impl App {
                 self.status_line.size_shown.insert(window_id, (facts.pane_id, until));
             }
         }
-        if let Some(window) = self.windows.get_mut(&window_id) {
+        if let Some(window) = self.registry.windows.get_mut(&window_id) {
             if let Some(renderer) = window.renderer.as_ref() {
                 // The renderer commits a strip layout only when its frame presented; routing and
                 // the next accessibility flush read it. No tree is built on this redraw path.
@@ -371,7 +371,7 @@ impl App {
     /// with the App-owned values (memory, CPU, health, alert marks) read now, so they stay current
     /// while the strip is off or the window is covered, parked or device-stopped.
     pub(super) fn accessible_inputs(&self, window_id: WindowId) -> Option<StatusLineInputs> {
-        let window = self.windows.get(&window_id)?;
+        let window = self.registry.windows.get(&window_id)?;
         let state = &self.status_line;
         let mut inputs =
             state.built.get(&window_id).map(|built| built.inputs.clone()).unwrap_or_default();
@@ -384,6 +384,7 @@ impl App {
         inputs.alerts = AlertsInput {
             tabs: marked_tabs(window),
             other_windows: self
+                .registry
                 .windows
                 .iter()
                 .filter(|(other, other_window)| {
@@ -504,7 +505,7 @@ impl App {
         pointer_y: f32,
     ) -> bool {
         let Some(strip) =
-            self.windows.get(&window_id).and_then(|window| window.status_strip.as_ref())
+            self.registry.windows.get(&window_id).and_then(|window| window.status_strip.as_ref())
         else {
             // When: `status_strip` is None, the window presented no strip.
             return false;
@@ -531,7 +532,7 @@ impl App {
             return false;
         }
         let Some((pointer_x, pointer_y)) =
-            self.windows.get(&window_id).map(|window| window.cursor_pos)
+            self.registry.windows.get(&window_id).map(|window| window.cursor_pos)
         else {
             // When: windows lacks window_id, there is no strip to press.
             return false;
@@ -543,7 +544,8 @@ impl App {
     /// dispatch's record, so the strip pass, the checklist and the input path together ask each
     /// terminal window at most once.
     pub(in crate::app) fn request_checklist_redraw(&mut self) {
-        let Some(id) = self.palette_attached_window.or(self.main_window_id) else {
+        let Some(id) = self.interaction.palette_attached_window.or(self.registry.main_window_id)
+        else {
             // When: palette_attached_window and main_window_id are both None, nothing hosts it.
             return;
         };
@@ -626,7 +628,9 @@ impl App {
 
     /// Drop the per-pane records of panes no window holds any more, after a retirement.
     fn forget_retired_panes(&mut self) {
-        let Self { windows, status_line: state, .. } = self;
+        let Self {
+            registry: crate::app::WindowRegistry { windows, .. }, status_line: state, ..
+        } = self;
         let live =
             |pane_id: &u64| windows.values().any(|window| window.panes.contains_key(pane_id));
         state.history_ack.retain(|pane_id, _| live(pane_id));
@@ -645,7 +649,7 @@ impl App {
     /// Record the result of a copy the user requested in `window_id`; the
     /// segment shows it for `copied_secs`, even when the copy cleared the selection.
     pub(super) fn note_copy_result(&mut self, window_id: WindowId, copied: bool) {
-        if let Some(window) = self.windows.get_mut(&window_id) {
+        if let Some(window) = self.registry.windows.get_mut(&window_id) {
             window.sel_status.last_copy = Some((Instant::now(), copied));
         }
     }

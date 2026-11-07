@@ -1,4 +1,4 @@
-//! The scenario catalog, S1 to S12, and each scenario's plan as data.
+//! The scenario catalog, S1 to S13, and each scenario's plan as data.
 //!
 //! The catalog is compiled everywhere because `--list` works on every platform.
 //! Plans exist where they run (macOS and Windows) and in tests, which pin both hosts' plans on
@@ -48,7 +48,10 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
         spec("S6", "pointer motion", &["default", "flood", "selection-drag", "rest"], 300, 240),
         &[("rest", 2)],
     ),
-    spec("S7", "scrollback wheel", &["default"], 420, 360),
+    // S7 is the longest variant (about 1.5 min a run on macOS, 21 min of a 14-run short comparison)
+    // and alone set the PR pipeline's critical path past its 35-minute budget, before and with this
+    // catalog's S13; 3 short runs a side keep it inside. A release comparison runs it uncapped.
+    capped(spec("S7", "scrollback wheel", &["default"], 420, 360), &[("default", 3)]),
     spec("S8", "search", &["default"], 300, 240),
     spec("S9", "emoji and CJK text", &["default"], 300, 240),
     spec("S10", "full-screen redraw", &["default", "sync"], 300, 240),
@@ -60,6 +63,13 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     capped(
         spec("S12", "covered window", &["default", "status-line"], 480, 360),
         &[("status-line", 1)],
+    ),
+    // S13 types into an idle pane beside one that floods without pause: `default` is two side by
+    // side, `sustained-4` a 2x2 grid with one flooding. One short run a side per variant keeps the
+    // PR budget; a short run types 300 characters, so a two-run counters set holds 600 samples.
+    capped(
+        spec("S13", "sustained multi-pane flood", &["default", "sustained-4"], 300, 240),
+        &[("default", 1), ("sustained-4", 1)],
     ),
 ];
 
@@ -158,6 +168,9 @@ pub(crate) enum Workload {
     Flood { lines: u32, bulk_bytes: u64 },
     /// `while :; do date; sleep 0.01; done`, which never ends.
     DateLoop,
+    /// `yes`, unbounded and never sleeping: the PTY's backpressure alone paces it, so its parser is
+    /// busy for the whole run. S13's flooding pane.
+    SustainedFlood,
     /// `cat` of one fixture, the sentinel, then the idle shell.
     PrintThenShell(Fixture),
     /// `cat` of one fixture, the sentinel, then `exec sleep`, so no prompt redraws it.
@@ -236,6 +249,9 @@ pub(crate) enum SetupAction {
     SplitDown,
     /// `Action::ActivateTab(index)`; opens nothing.
     ActivateTab(usize),
+    /// `Action::FocusPane(direction)`; opens nothing. S13 uses it to split the left column and then
+    /// to return focus to the pane it types into.
+    FocusPane(sonicterm_cfg::keymap::Direction),
 }
 
 /// A synthetic action the probe performs at a phase's start or between phases.
@@ -649,6 +665,8 @@ pub(crate) struct Plan {
     pub(crate) scrollback_rows: usize,
     /// `[window].rows` the scratch config requests; `None` keeps the harness default.
     pub(crate) window_rows: Option<u16>,
+    /// `[window].cols` the scratch config requests; `None` keeps the harness default.
+    pub(crate) window_cols: Option<u16>,
     /// Whether the window gets a synthetic `Focused(true)` before setup.
     pub(crate) focused: bool,
     /// Each role's workload, in role order; role 0 is the first tab's shell.

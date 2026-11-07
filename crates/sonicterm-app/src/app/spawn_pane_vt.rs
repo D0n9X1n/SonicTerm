@@ -64,6 +64,9 @@ pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>
     );
     if nonempty {
         handles.output_generation.fetch_add(1, Ordering::Release);
+        // The batch's parser and media guards were released inside `process_pane_vt_batch_with`,
+        // so a woken waiter's first read never blocks on this worker.
+        handles.change_signal.notify();
     }
 }
 

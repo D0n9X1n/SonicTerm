@@ -95,7 +95,7 @@ impl App {
                 // A held or cancelled gesture keeps its leave away from the terminal; the next
                 // move clamps a live drag, and only the source window's leave is owed.
                 self.field_capture_window() == Some(window_id)
-                    || self.field_owed_releases.contains(&window_id)
+                    || self.interaction.field_owed_releases.contains(&window_id)
             }
             WindowEvent::Focused(false)
             | WindowEvent::KeyboardInput { .. }
@@ -122,22 +122,23 @@ impl App {
     pub(super) fn drop_field_pointer_for_window(&mut self, window_id: WindowId) {
         if self.field_capture_window() == Some(window_id) {
             // `window_id` holds the capture, so no paired release can arrive any more.
-            self.field_pointer_capture = None;
+            self.interaction.field_pointer_capture = None;
         }
-        self.field_owed_releases.retain(|owed| *owed != window_id);
+        self.interaction.field_owed_releases.retain(|owed| *owed != window_id);
     }
 
     /// End a field drag in `window_id`; its paired release is still consumed.
     pub(super) fn cancel_field_pointer(&mut self, window_id: WindowId) {
         if self.field_drag_source() == Some(window_id) {
             // The drag stops selecting, but its button is still down.
-            self.field_pointer_capture = Some(FieldPointerCapture::Swallow { window_id });
+            self.interaction.field_pointer_capture =
+                Some(FieldPointerCapture::Swallow { window_id });
         }
     }
 
     /// Window of a live drag, if any.
     fn field_drag_source(&self) -> Option<WindowId> {
-        match self.field_pointer_capture {
+        match self.interaction.field_pointer_capture {
             Some(FieldPointerCapture::Dragging { window_id, .. }) => Some(window_id),
             _ => None,
         }
@@ -145,7 +146,7 @@ impl App {
 
     /// Window that owns the current capture, dragging or owed a release.
     fn field_capture_window(&self) -> Option<WindowId> {
-        match self.field_pointer_capture {
+        match self.interaction.field_pointer_capture {
             Some(
                 FieldPointerCapture::Dragging { window_id, .. }
                 | FieldPointerCapture::Swallow { window_id },
@@ -159,26 +160,29 @@ impl App {
     /// The palette is modal over its host window's search; the colour picker's
     /// title row is not an editable field.
     pub(super) fn field_pointer_target(&self, window_id: WindowId) -> Option<FieldTarget> {
-        let window = self.windows.get(&window_id).filter(|window| !window.hidden)?;
-        if self.command_palette.is_open()
-            && self.palette_attached_window.or(self.main_window_id) == Some(window_id)
+        let window = self.registry.windows.get(&window_id).filter(|window| !window.hidden)?;
+        if self.interaction.command_palette.is_open()
+            && self.interaction.palette_attached_window.or(self.registry.main_window_id)
+                == Some(window_id)
         {
             // When: the palette is open on `window_id`, only its query may own a field gesture.
-            let mode = self.command_palette.mode();
+            let mode = self.interaction.command_palette.mode();
             let live = match mode {
                 CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => false,
                 // A rename edits one captured tab or window; once it closed or moved, the
                 // editor still shows but its query belongs to nothing and must not be edited.
                 CommandPaletteMode::RenameTab => self.tab_edit_target_window() == Some(window_id),
                 CommandPaletteMode::RenameWindow => {
-                    self.window_rename_target.and_then(|key| self.window_keys.resolve(key))
+                    self.interaction
+                        .window_rename_target
+                        .and_then(|key| self.registry.window_keys.resolve(key))
                         == Some(window_id)
                 }
                 CommandPaletteMode::Commands
                 | CommandPaletteMode::StatusSegments
                 | CommandPaletteMode::FontFamily => true,
             };
-            let session = self.command_palette.session();
+            let session = self.interaction.command_palette.session();
             return live.then_some(FieldTarget::Palette { mode, session });
         }
         let active = window.tabs.active_index();
@@ -195,11 +199,13 @@ impl App {
         extend: bool,
     ) {
         match target {
-            FieldTarget::Palette { .. } if extend => self.command_palette.extend_to(offset),
-            FieldTarget::Palette { .. } => self.command_palette.set_cursor(offset),
+            FieldTarget::Palette { .. } if extend => {
+                self.interaction.command_palette.extend_to(offset)
+            }
+            FieldTarget::Palette { .. } => self.interaction.command_palette.set_cursor(offset),
             FieldTarget::Search(_) => {
                 // When: `target` is the search field, the offset edits that window's active search.
-                let Some(window) = self.windows.get_mut(&window_id) else {
+                let Some(window) = self.registry.windows.get_mut(&window_id) else {
                     // When: the source window closed, there is no search to edit.
                     return;
                 };
@@ -224,7 +230,7 @@ impl App {
     fn field_pointer_press(&mut self, window_id: WindowId, resolve: FieldHitResolver) -> bool {
         if let Some(source) = self
             .field_capture_window()
-            .filter(|source| self.windows.get(source).is_none_or(|window| window.hidden))
+            .filter(|source| self.registry.windows.get(source).is_none_or(|window| window.hidden))
         {
             // The capture's window is gone or hidden and can never deliver its release, so its
             // gesture must not block this press.
@@ -236,12 +242,12 @@ impl App {
             return false;
         }
         // A press in this window settles any release it still owed.
-        self.field_owed_releases.retain(|owed| *owed != window_id);
-        match self.field_pointer_capture.take() {
+        self.interaction.field_owed_releases.retain(|owed| *owed != window_id);
+        match self.interaction.field_pointer_capture.take() {
             Some(FieldPointerCapture::Swallow { window_id: owed }) if owed != window_id => {
                 // Another window's cancelled gesture never delivered its release (focus moved
                 // away), so keep that debt per window and still consume its late release.
-                self.field_owed_releases.push(owed);
+                self.interaction.field_owed_releases.push(owed);
             }
             _ => {
                 // When: `field_pointer_capture` held no other window's debt, an earlier owed
@@ -249,13 +255,13 @@ impl App {
             }
         }
         // Debts of windows that closed without a close event can never be paid.
-        let windows = &self.windows;
-        self.field_owed_releases.retain(|owed| windows.contains_key(owed));
+        let windows = &self.registry.windows;
+        self.interaction.field_owed_releases.retain(|owed| windows.contains_key(owed));
         let Some(target) = self.field_pointer_target(window_id) else {
             // When: `field_pointer_target` finds no editable field in `window_id`, the press is not ours.
             return false;
         };
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: the window vanished between lookups, there is nothing to press.
             return false;
         };
@@ -290,19 +296,20 @@ impl App {
                 FieldPointerCapture::Swallow { window_id }
             }
         };
-        self.field_pointer_capture = Some(capture);
-        self.palette_pointer_capture = None;
+        self.interaction.field_pointer_capture = Some(capture);
+        self.interaction.palette_pointer_capture = None;
         true
     }
 
     /// Pointer motion: extend the held field selection, clamped to the query.
     fn field_pointer_move(&mut self, window_id: WindowId, resolve: FieldHitResolver) -> bool {
-        if self.field_owed_releases.contains(&window_id) {
+        if self.interaction.field_owed_releases.contains(&window_id) {
             // When: `window_id` still owes the release of a cancelled gesture, its button is
             // held, so its motion stays away from the terminal and mouse reporting.
             return true;
         }
-        let (source, target, press, extend, anchored) = match self.field_pointer_capture {
+        let (source, target, press, extend, anchored) = match self.interaction.field_pointer_capture
+        {
             Some(FieldPointerCapture::Dragging {
                 window_id: source,
                 target,
@@ -327,7 +334,8 @@ impl App {
         if self.field_pointer_target(window_id) != Some(target) {
             // When: `target` closed, changed mode, or its tab lost focus, stop selecting
             // but keep the held button's motion and release away from the terminal.
-            self.field_pointer_capture = Some(FieldPointerCapture::Swallow { window_id });
+            self.interaction.field_pointer_capture =
+                Some(FieldPointerCapture::Swallow { window_id });
             return true;
         }
         if !anchored {
@@ -336,7 +344,7 @@ impl App {
                 FieldHit::Offset(offset) => {
                     // The press point maps now; anchor there before following the pointer.
                     self.apply_field_offset(window_id, target, offset, extend);
-                    self.field_pointer_capture = Some(FieldPointerCapture::Dragging {
+                    self.interaction.field_pointer_capture = Some(FieldPointerCapture::Dragging {
                         window_id,
                         target,
                         press,
@@ -346,7 +354,8 @@ impl App {
                 }
                 FieldHit::Unavailable => {
                     // When: `target` became unmappable (preedit), only the release is owed.
-                    self.field_pointer_capture = Some(FieldPointerCapture::Swallow { window_id });
+                    self.interaction.field_pointer_capture =
+                        Some(FieldPointerCapture::Swallow { window_id });
                     return true;
                 }
                 FieldHit::Stale | FieldHit::Outside => {
@@ -356,7 +365,7 @@ impl App {
                 }
             }
         }
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: the window closed mid-drag, nothing more can be selected.
             return true;
         };
@@ -372,14 +381,16 @@ impl App {
 
     /// Left release: end the gesture and consume the release of every consumed press.
     fn field_pointer_release(&mut self, window_id: WindowId, resolve: FieldHitResolver) -> bool {
-        if let Some(index) = self.field_owed_releases.iter().position(|owed| *owed == window_id) {
+        if let Some(index) =
+            self.interaction.field_owed_releases.iter().position(|owed| *owed == window_id)
+        {
             // When: `window_id` owes a parked cancelled gesture's late release, consume it exactly once.
-            self.field_owed_releases.swap_remove(index);
+            self.interaction.field_owed_releases.swap_remove(index);
             return true;
         }
-        match self.field_pointer_capture {
+        match self.interaction.field_pointer_capture {
             Some(FieldPointerCapture::Swallow { window_id: owed }) if owed == window_id => {
-                self.field_pointer_capture = None;
+                self.interaction.field_pointer_capture = None;
                 true
             }
             Some(FieldPointerCapture::Dragging {
@@ -389,7 +400,7 @@ impl App {
                 extend,
                 anchored,
             }) if source == window_id => {
-                self.field_pointer_capture = None;
+                self.interaction.field_pointer_capture = None;
                 if !anchored && self.field_pointer_target(window_id) == Some(target) {
                     // A click whose geometry arrived only now still places the caret at its press.
                     if let FieldHit::Offset(offset) =
@@ -413,7 +424,7 @@ impl App {
         point: (f32, f32),
         mode: FieldHitMode,
     ) -> FieldHit {
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: the window closed, there is no presented field to hit.
             return FieldHit::Outside;
         };
@@ -424,7 +435,7 @@ impl App {
         let preedit = window.ime.preedit();
         match target {
             FieldTarget::Palette { .. } => {
-                renderer.palette_field_hit(&self.command_palette, preedit, point, mode)
+                renderer.palette_field_hit(&self.interaction.command_palette, preedit, point, mode)
             }
             FieldTarget::Search(_) => {
                 let active = window.tabs.active_index();

@@ -20,7 +20,7 @@ pub(super) fn target() -> EchoWatchTarget {
 /// Give window `id`'s active pane counter handles, as a gate-on spawn would, and return its id.
 pub(super) fn watch_active_pane(app: &mut App, id: WindowId) -> u64 {
     let counters = app.pane_frame_counters();
-    let window = app.windows.get_mut(&id).expect("live window");
+    let window = app.registry.windows.get_mut(&id).expect("live window");
     let pane_id = window.tab_states[window.tabs.active_index()].active_pane;
     window.panes.get_mut(&pane_id).expect("active pane").frame_counters = counters;
     pane_id
@@ -59,7 +59,7 @@ pub(super) fn armed(outcome: ArmOutcome) -> ArmToken {
 
 /// `pane_id`'s watch, as a worker clone would hold it.
 pub(super) fn watch_of(app: &App, pane_id: u64) -> Arc<EchoWatch> {
-    let pane = app.find_pane(pane_id).expect("live pane");
+    let pane = app.pane_by_id(pane_id).expect("live pane");
     Arc::clone(&pane.frame_counters.as_ref().expect("counting pane").echo)
 }
 
@@ -143,7 +143,7 @@ pub(super) fn install_link(app: &mut App, id: WindowId) {
     let log = std::rc::Rc::new(std::cell::RefCell::new(
         super::super::display_link::FakeLinkLog::default(),
     ));
-    app.windows.get_mut(&id).expect("live window").display_link.source =
+    app.registry.windows.get_mut(&id).expect("live window").display_link.source =
         Some(Box::new(super::super::display_link::FakeLink(log)));
 }
 
@@ -158,7 +158,7 @@ pub(super) fn pend_link(app: &mut App, id: WindowId, base: Instant) {
 /// Deliver a tick of the window's live generation at `at`, as the native target does.
 pub(super) fn fire_at(app: &mut App, id: WindowId, at: Instant) {
     set_fake_now(at);
-    let generation = app.windows[&id].redraw.link_live.expect("the link runs");
+    let generation = app.registry.windows[&id].redraw.link_live.expect("the link runs");
     app.handle_display_link_tick(id, generation, at);
 }
 
@@ -195,7 +195,7 @@ pub(super) fn unarmed_hooks_take_no_slot_lock_clock_read_or_allocation() {
     app.set_software_render_degrade(true);
     assert_eq!(super::super::echo_watch::slot_locks(), locks_before);
     assert_eq!(recorder_counts(), counts_before);
-    assert!(app.windows[&main].redraw.timeline.owner.is_none());
+    assert!(app.registry.windows[&main].redraw.timeline.owner.is_none());
     assert!(app.render_marker(main).is_none());
 }
 
@@ -320,13 +320,16 @@ pub(super) fn a_check_keeps_its_observation_instant_across_a_delayed_record() {
     for admission in [false, true] {
         let (mut app, main, _child, _base, pane_id) = watched_owners();
         let token = armed(arm_on_both_clocks(&mut app, pane_id));
-        let observation = app.windows[&main].watched_observation().expect("an owner observes");
+        let observation =
+            app.registry.windows[&main].watched_observation().expect("an owner observes");
         std::thread::sleep(Duration::from_millis(5));
         // The worker publishes the next batch after the load and before the record.
-        app.windows[&main].panes[&pane_id].output_generation.fetch_add(1, Ordering::Release);
+        app.registry.windows[&main].panes[&pane_id]
+            .output_generation
+            .fetch_add(1, Ordering::Release);
         let published_at = Instant::now();
         std::thread::sleep(Duration::from_millis(5));
-        let timeline = &mut app.windows.get_mut(&main).unwrap().redraw.timeline;
+        let timeline = &mut app.registry.windows.get_mut(&main).unwrap().redraw.timeline;
         if admission {
             timeline.note_admission(AdmissionDecisionV1::Admitted, None, Some(observation));
         } else {
@@ -408,7 +411,8 @@ pub(super) fn a_lost_sequence_sets_overflow_behind_a_compressed_check() {
                 });
             }));
         }
-        let owner = app.windows.get_mut(&main).unwrap().redraw.timeline.owner.as_mut().unwrap();
+        let owner =
+            app.registry.windows.get_mut(&main).unwrap().redraw.timeline.owner.as_mut().unwrap();
         owner.loop_seq = u64::from(u32::MAX) - 1;
         service(&mut app, main, pane_id);
         service(&mut app, main, pane_id);
@@ -424,11 +428,12 @@ pub(super) fn a_lost_sequence_sets_overflow_behind_a_compressed_check() {
     }
     let (mut app, main, _child, _base, pane_id) = watched_owners();
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
-    let owner = app.windows.get_mut(&main).unwrap().redraw.timeline.owner.as_mut().unwrap();
+    let owner =
+        app.registry.windows.get_mut(&main).unwrap().redraw.timeline.owner.as_mut().unwrap();
     owner.loop_seq = u64::from(u32::MAX) - 1;
     for _ in 0..2 {
-        let observation = app.windows[&main].watched_observation();
-        let timeline = &mut app.windows.get_mut(&main).unwrap().redraw.timeline;
+        let observation = app.registry.windows[&main].watched_observation();
+        let timeline = &mut app.registry.windows.get_mut(&main).unwrap().redraw.timeline;
         timeline.note_admission(AdmissionDecisionV1::Admitted, None, observation);
     }
     let timeline = take_timeline(&mut app, pane_id, token);
@@ -477,14 +482,17 @@ pub(super) fn the_sixty_fifth_event_overflows_and_keeps_the_prefix_and_trace() {
 #[test]
 pub(super) fn a_watched_child_records_its_render_pair() {
     let (mut app, main, child, _base, _main_pane) = watched_owners();
-    let pane_id = app.windows[&child].tab_states[0].active_pane;
+    let pane_id = app.registry.windows[&child].tab_states[0].active_pane;
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
     app.note_dispatch_entry(main);
     assert!(app.render_marker(main).is_none(), "the main window has no owner");
     app.note_dispatch_return(main);
     app.note_dispatch_entry(child);
-    let marker =
-        app.windows[&child].redraw.timeline.render_marker().expect("watched child dispatch");
+    let marker = app.registry.windows[&child]
+        .redraw
+        .timeline
+        .render_marker()
+        .expect("watched child dispatch");
     marker.enter();
     marker.exit_at(Instant::now());
     drop(marker);
@@ -508,7 +516,7 @@ pub(super) fn recorded_events_share_one_clock_in_record_order() {
     let (mut app, main, _child, _base, pane_id) = watched_owners();
     app.__test_set_dispatch_clock(Instant::now);
     let now = Instant::now();
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     // A 10 s period keeps the streaming frame waiting for its tick however slow the host is.
     window.redraw.monitor_period = Duration::from_secs(10);
     window.last_render = now;
@@ -521,7 +529,7 @@ pub(super) fn recorded_events_share_one_clock_in_record_order() {
     assert!(!app.admit_window_redraw(main), "streaming waits for a tick inside the period");
     app.note_dispatch_return(main);
     app.sync_display_links();
-    let generation = app.windows[&main].redraw.link_live.expect("the link runs");
+    let generation = app.registry.windows[&main].redraw.link_live.expect("the link runs");
     app.handle_display_link_tick(main, generation, Instant::now());
     app.service_output_event(OutputEvent::Pane { window_id: main, pane_id }, Instant::now());
     app.note_dispatch_entry(main);

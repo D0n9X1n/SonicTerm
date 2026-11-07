@@ -112,6 +112,7 @@ impl Probe {
             SetupAction::SplitRight => (Action::SplitRight, true),
             SetupAction::SplitDown => (Action::SplitDown, true),
             SetupAction::ActivateTab(index) => (Action::ActivateTab(index), false),
+            SetupAction::FocusPane(direction) => (Action::FocusPane(direction), false),
         };
         if !self.run_action(event_loop, &action) {
             self.invalidate(event_loop, format!("the App refused setup action {setup:?}"));
@@ -209,6 +210,7 @@ impl Probe {
                 Step::Phase(phase) => {
                     if self.meter.is_none() {
                         self.begin_phase(event_loop, phase);
+                        self.begin_flood_watch(phase);
                     }
                     if self.stage == Stage::Done {
                         return;
@@ -217,6 +219,7 @@ impl Probe {
                     if self.stage == Stage::Done {
                         return;
                     }
+                    self.observe_flood(phase);
                     if self.image.present.take_redraw_request() {
                         self.request_image_redraw(event_loop);
                     }
@@ -384,6 +387,18 @@ impl Probe {
     /// per-phase results, then transport it and write progress. A delivery problem returns before the
     /// transport, so the caller's finish transports the phase exactly once.
     pub(super) fn finalize_phase(&mut self, phase: &PhaseSpec) -> Option<String> {
+        self.end_flood_watch(phase);
+        if self.plan.scenario == "S13" && phase.name == "typing" {
+            // When: S13's typing ends, every role pane's grid is read for the geometry check.
+            self.role_grids = (0..self.plan.roles.len())
+                .map(|role| {
+                    self.role_pane(role).map(|pane| {
+                        let parser = pane.parser.lock();
+                        (parser.grid().cols, parser.grid().rows)
+                    })
+                })
+                .collect();
+        }
         self.close_sample(UnattributedReason::NoCandidate);
         self.driver = DriverState::None;
         self.end_attribution();
@@ -674,3 +689,63 @@ impl Probe {
 #[cfg(test)]
 #[path = "probe_phases_tests.rs"]
 mod probe_phases_tests;
+
+impl Probe {
+    /// Whether `phase` is one of S13's measured phases, whose flood progress is watched.
+    fn watches_flood(&self, phase: &PhaseSpec) -> bool {
+        self.plan.scenario == "S13" && matches!(phase.name, "typing" | "tail")
+    }
+
+    /// S13: a measured phase begins; its flood progress is accounted from now.
+    pub(super) fn begin_flood_watch(&mut self, phase: &PhaseSpec) {
+        if self.watches_flood(phase) {
+            let watch = self.flood_watch.get_or_insert_with(Default::default);
+            watch.1.begin(phase.name);
+            watch.0 = Some((Instant::now(), None));
+        }
+    }
+
+    /// S13: the measured phase ends now, so a stretch after its last progress counts to here.
+    pub(super) fn end_flood_watch(&mut self, phase: &PhaseSpec) {
+        if !self.watches_flood(phase) {
+            return;
+        }
+        if let Some((Some((started, _)), watch)) = self.flood_watch.as_mut() {
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            watch.end(elapsed_ms);
+        }
+    }
+
+    /// S13: look at the flooding pane (role 0) at most every [`crate::contention::OBSERVE_EVERY_MS`]
+    /// while `typing` or `tail` runs. The read waits at most [`crate::contention::OBSERVE_WAIT`],
+    /// the same in both variants; a parser still busy then is recorded as busy, which shows no
+    /// progress, so a stretch of busy looks counts against the flood like no look at all.
+    pub(super) fn observe_flood(&mut self, phase: &PhaseSpec) {
+        if !self.watches_flood(phase) {
+            return;
+        }
+        let now = Instant::now();
+        let interval = Duration::from_millis(crate::contention::OBSERVE_EVERY_MS);
+        let Some((Some((started, last_look)), _)) = self.flood_watch.as_mut() else {
+            // When: the phase's watch never began, there is no span to account the look in.
+            return;
+        };
+        if last_look.is_some_and(|last| now.duration_since(last) < interval) {
+            // When: the last look is under an interval old, this wake records nothing.
+            return;
+        }
+        *last_look = Some(now);
+        let elapsed_ms =
+            u64::try_from(now.duration_since(*started).as_millis()).unwrap_or(u64::MAX);
+        // A flooding parser is almost always held, so the read queues for it briefly, as a frame
+        // collection does, and is handed the lock by the worker's fair release.
+        let lines = self.role_pane(0).and_then(|pane| {
+            pane.parser
+                .try_lock_for(crate::contention::OBSERVE_WAIT)
+                .map(|parser| parser.grid().lines_scrolled())
+        });
+        if let Some((_, watch)) = self.flood_watch.as_mut() {
+            watch.observe(elapsed_ms, lines);
+        }
+    }
+}

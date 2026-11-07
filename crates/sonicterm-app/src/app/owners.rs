@@ -180,12 +180,12 @@ impl App {
     /// Runs from the periodic retention sampler rather than per frame, so its
     /// cost is bounded by that interval regardless of how often panes move.
     pub(super) fn reconcile_pane_owners(&mut self) {
-        for window in self.windows.values_mut() {
+        for window in self.registry.windows.values_mut() {
             window.reconcile_pane_owners();
             for pane in window.panes.values_mut() {
                 if pane.reap_slot.is_none() {
                     if let Some(pty) = pane.pty.as_mut() {
-                        match self.pty_reaper.reserve(pty) {
+                        match self.services.pty_reaper.reserve(pty) {
                             Ok(slot) => pane.reap_slot = Some(slot),
                             Err(reason) => {
                                 tracing::debug!(
@@ -222,9 +222,9 @@ impl App {
     /// invariant failed; the owned provisional guard closes before that failure
     /// stops the move, while every token remains on the old owner.
     pub(super) fn reattribute_pane_owners(&mut self) {
-        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        let window_ids: Vec<WindowId> = self.registry.windows.keys().copied().collect();
         for window_id in window_ids {
-            let Some(window) = self.windows.get(&window_id) else {
+            let Some(window) = self.registry.windows.get(&window_id) else {
                 // When: `window_id` no longer resolves, so no pane set remains
                 // whose owners could be reattributed.
                 continue;
@@ -267,6 +267,7 @@ impl App {
                 let provisional = OwnerGuard::new(self.governor.clone(), new_owner);
                 let transferred = {
                     let Some(pane) = self
+                        .registry
                         .windows
                         .get_mut(&window_id)
                         .and_then(|window| window.panes.get_mut(&pane_id))
@@ -321,8 +322,9 @@ impl App {
         drop(window.owner.take());
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn release_window_owner(&mut self, id: WindowId) {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` no longer resolves, so the map exposes no guards to
             // drain and the owner records are already unreachable.
             return;

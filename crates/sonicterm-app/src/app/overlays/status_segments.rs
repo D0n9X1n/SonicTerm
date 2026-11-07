@@ -67,22 +67,23 @@ impl App {
         window_id: Option<WindowId>,
         highlighted: Option<StatusSegmentId>,
     ) {
-        self.palette_pointer_capture = None;
+        self.interaction.palette_pointer_capture = None;
         let attached = window_id.or_else(|| match self.frontmost_kind() {
             FrontmostKind::Child(id) => Some(id),
             _ => None,
         });
         // The checklist takes the window's keys, so strip focus there ends and its ring clears.
-        if let Some(focused) = attached.or(self.main_window_id) {
+        if let Some(focused) = attached.or(self.registry.main_window_id) {
             self.end_status_focus(focused);
         }
         // The palette names its main-window attachment `None`, as every other page does.
-        self.palette_attached_window = attached.filter(|id| Some(*id) != self.main_window_id);
+        self.interaction.palette_attached_window =
+            attached.filter(|id| Some(*id) != self.registry.main_window_id);
         let rows = self.status_segment_rows();
         let title = self.i18n.translate("status-checklist-title");
         let footer = self.i18n.translate("status-checklist-footer");
-        self.command_palette.start_status_segments(title, footer, rows, highlighted);
-        self.request_redraw_for_overlay(self.palette_attached_window);
+        self.interaction.command_palette.start_status_segments(title, footer, rows, highlighted);
+        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 
     /// The checklist rows for the strip the session shows now.
@@ -149,7 +150,7 @@ impl App {
 
     /// Apply the highlighted checklist row; the page stays open and shows the change.
     pub(in crate::app) fn activate_status_segment_row(&mut self) {
-        let Some(kind) = self.command_palette.selected_status_row() else {
+        let Some(kind) = self.interaction.command_palette.selected_status_row() else {
             // When: selected_status_row is None, no row is highlighted and Enter changes nothing.
             return;
         };
@@ -168,7 +169,8 @@ impl App {
     /// Move the highlighted segment to the neighbouring list when it is shown. Returns whether
     /// the key was a move; on any other row the key edits the query as usual.
     pub(in crate::app) fn move_status_segment_row(&mut self, direction: MoveDirection) -> bool {
-        let Some(StatusSegmentRowKind::Segment(id)) = self.command_palette.selected_status_row()
+        let Some(StatusSegmentRowKind::Segment(id)) =
+            self.interaction.command_palette.selected_status_row()
         else {
             // When: selected_status_row is not a Segment, Left and Right move the caret.
             return false;
@@ -185,7 +187,7 @@ impl App {
     /// Rebuild the open checklist's rows after a change and redraw its window once.
     fn refresh_status_segment_rows(&mut self) {
         let rows = self.status_segment_rows();
-        self.command_palette.update_status_segments(rows);
+        self.interaction.command_palette.update_status_segments(rows);
         self.request_checklist_redraw();
     }
 }
