@@ -390,8 +390,8 @@ pub(super) fn run_failed_route(route: FailureRoute, stage: TearOutStage) {
         (state.tab_count, state.live_window_count, state.active_tab_idx)
     };
     let pending_new_window = app.pending_new_window;
-    let redraws = app.diagnostics.redraw_request_count.load(Ordering::Relaxed);
-    let reaps = app.diagnostics.reap_call_count.load(Ordering::Relaxed);
+    let redraws = app.redraw_request_count.load(Ordering::Relaxed);
+    let reaps = app.reap_call_count.load(Ordering::Relaxed);
     let cleanup_calls = std::rc::Rc::new(Cell::new(0usize));
     let cleanup_drops = std::rc::Rc::new(Cell::new(0usize));
     let observed_detached = std::rc::Rc::new(Cell::new(false));
@@ -449,8 +449,8 @@ pub(super) fn run_failed_route(route: FailureRoute, stage: TearOutStage) {
     let state = app.machine.state();
     assert_eq!((state.tab_count, state.live_window_count, state.active_tab_idx), reducer);
     assert_eq!(app.pending_new_window, pending_new_window);
-    assert_eq!(app.diagnostics.redraw_request_count.load(Ordering::Relaxed), redraws);
-    assert_eq!(app.diagnostics.reap_call_count.load(Ordering::Relaxed), reaps);
+    assert_eq!(app.redraw_request_count.load(Ordering::Relaxed), redraws);
+    assert_eq!(app.reap_call_count.load(Ordering::Relaxed), reaps);
 }
 
 pub(super) struct AcceptedSink;

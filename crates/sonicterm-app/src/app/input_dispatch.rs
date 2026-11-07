@@ -332,9 +332,7 @@ impl App {
             #[cfg(test)]
             self.record_test_write_source(pane_id, source);
         }
-        let Some(pane) =
-            self.registry.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
-        else {
+        let Some(pane) = self.registry.pane_mut(pane_id) else {
             // When: find_map cannot resolve pane_id, its input has no live destination.
             return false;
         };

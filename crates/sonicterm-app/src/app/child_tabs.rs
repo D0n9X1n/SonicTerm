@@ -38,7 +38,7 @@ impl App {
         // Bump the test-observable counter on EVERY invocation (even no-ops on
         // stale ids) so tests can pin that child-window cleanup routed through
         // this contract rather than a raw `windows.remove`.
-        self.diagnostics.reap_call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.reap_call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(child) = self.registry.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 self.accessibility.remove(&win_id);

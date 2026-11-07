@@ -58,14 +58,22 @@ fn check(app: &App, context: &str) {
 
 #[test]
 fn registry_invariants_hold_across_lifecycle_sequences() {
+    use sonicterm_ui::pane::Rect;
     let mut seed: u64 = 0x1800_0004;
     let mut next = |bound: u64| {
         seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
         (seed >> 33) % bound.max(1)
     };
+    // How many of each operation actually ran, so a sequence that refused every transfer or resize
+    // cannot pass on the setup alone.
+    let (mut transfers, mut resizes) = (0_usize, 0_usize);
+    let geometry = |width_px: f32| Rect::new(0.0, 0.0, width_px, 240.0);
     for round in 0..12 {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.__test_seed_tab("main");
+        // Every window gets explicit test geometry, so transfers have a destination size and a
+        // resize really changes the panes' grids, as a renderer would provide.
+        assert!(app.__test_set_main_pane_viewport(geometry(800.0), 10.0, 10.0));
         check(&app, "seeded");
         for step in 0..25 {
             let children: Vec<_> = app
@@ -81,7 +89,8 @@ fn registry_invariants_hold_across_lifecycle_sequences() {
                     app.__test_seed_tab("tab");
                 }
                 1 => {
-                    app.__test_seed_child_window(&["c1", "c2"]);
+                    let child = app.__test_seed_child_window(&["c1", "c2"]);
+                    assert!(app.__test_set_child_pane_viewport(child, geometry(800.0), 10.0, 10.0));
                 }
                 2 => app.__test_split_active_right(),
                 3 if !children.is_empty() => {
@@ -98,28 +107,51 @@ fn registry_invariants_hold_across_lifecycle_sequences() {
                             .and_then(|id| app.registry.windows.get(&id))
                             .map_or(0, |window| window.tabs.len())
                     };
-                    if tabs(source, &app) > 1 {
-                        let _ = app.transfer_tab(
-                            source,
-                            next(tabs(source, &app) as u64) as usize,
-                            target,
-                            0,
+                    let source_tabs = tabs(source, &app);
+                    if source_tabs > 1 {
+                        let target_tabs = tabs(target, &app);
+                        let index = next(source_tabs as u64) as usize;
+                        app.transfer_tab(source, index, target, 0).unwrap_or_else(|error| {
+                            panic!("{context}: transfer refused: {error:?}")
+                        });
+                        assert_eq!(
+                            tabs(source, &app),
+                            source_tabs - 1,
+                            "{context}: source lost it"
                         );
+                        assert_eq!(tabs(target, &app), target_tabs + 1, "{context}: target got it");
+                        transfers += 1;
                     }
                 }
                 5 if !children.is_empty() => {
                     let child = children[next(children.len() as u64) as usize];
                     app.__test_invoke_close_active_pane_or_tab_in_child(child);
                 }
-                _ => app.__test_resize_visible_panes(),
+                _ => {
+                    // Alternate the main viewport's width, so every resize changes the visible grids.
+                    let current = app.test_viewport_override.map_or(800.0, |(outer, _, _)| outer.w);
+                    let width_px = if current == 800.0 { 600.0 } else { 800.0 };
+                    let before = app.compute_active_pane_rects();
+                    assert!(app.__test_set_main_pane_viewport(geometry(width_px), 10.0, 10.0));
+                    app.__test_resize_visible_panes();
+                    // Each visible pane's grid now fits its own layout rect in the new viewport.
+                    let rects = app.compute_active_pane_rects();
+                    assert_ne!(rects, before, "{context}: the layout changed with the viewport");
+                    for (pane, rect) in rects {
+                        let cols = app.__test_pane_grid_size(pane).expect("a main pane").0;
+                        assert_eq!(
+                            u32::from(cols),
+                            (rect.w / 10.0).floor() as u32,
+                            "{context}: pane {pane}'s grid follows the resize"
+                        );
+                    }
+                    resizes += 1;
+                }
             }
-            if app
-                .registry
-                .main_window_id
-                .is_some_and(|main| app.registry.windows.contains_key(&main))
-            {
-                check(&app, &context);
-            }
+            // The main window survives every operation here, so the invariants are always checked.
+            check(&app, &context);
         }
     }
+    assert!(transfers >= 10, "only {transfers} transfers ran");
+    assert!(resizes >= 10, "only {resizes} resizes ran");
 }

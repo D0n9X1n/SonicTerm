@@ -195,9 +195,7 @@ impl App {
         // Users perceived this as "Ctrl/Cmd+W needs two presses." Mirror
         // the keyboard path so the first press is visible immediately.
         if ran_any {
-            self.diagnostics
-                .redraw_request_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(window) = self.main_window() {
                 crate::app::frame_counters::request_native_redraw(window);
             }
@@ -219,9 +217,7 @@ impl App {
             ran_any = true;
         }
         if ran_any {
-            self.diagnostics
-                .redraw_request_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(window) = self.main_window() {
                 crate::app::frame_counters::request_native_redraw(window);
             }

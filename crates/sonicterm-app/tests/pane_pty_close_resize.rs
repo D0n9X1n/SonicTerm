@@ -28,3 +28,13 @@ fn pty_close_refits_surviving_split_pane_to_full_width() {
     assert_eq!(app.__test_pane_ids(), vec![survivor]);
     assert_eq!(app.__test_pane_grid_size(survivor), Some((80, 24)));
 }
+
+/// `App::redraw_request_count` and `App::reap_call_count` stay public fields of `App` itself, the
+/// path code outside the crate reads, even though the rest of the diagnostics live in their own owner.
+#[test]
+fn diagnostic_counters_keep_their_public_app_paths() {
+    let app = test_app();
+    let redraws = app.redraw_request_count.load(std::sync::atomic::Ordering::Relaxed);
+    let reaps = app.reap_call_count.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!((redraws, reaps), (0, 0));
+}

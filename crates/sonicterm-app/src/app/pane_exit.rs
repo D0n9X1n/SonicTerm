@@ -49,9 +49,7 @@ impl App {
     pub(super) fn handle_pane_process_exited(&mut self, pane_id: u64, status: PaneExitStatus) {
         // Any exit, clean or not, clears the pane's process name and warning; an unclean pane stays.
         self.clear_exited_foreground(pane_id, std::time::Instant::now());
-        if let Some(pane) =
-            self.registry.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
-        {
+        if let Some(pane) = self.registry.pane_mut(pane_id) {
             // When: the exited pane is still live, its phase resets and its first status is kept.
             // The shell is gone, so no prompt is confirmed; the last command is kept.
             pane.command_state.phase = super::CommandPhase::Unknown;
@@ -117,8 +115,7 @@ impl App {
 
     /// Mark `pane_id`'s exit as handled and return its hold flag; `None` if absent or already marked.
     fn mark_exit_reported(&mut self, pane_id: u64) -> Option<bool> {
-        let pane =
-            self.registry.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))?;
+        let pane = self.registry.pane_mut(pane_id)?;
         if pane.exit_reported {
             // When: `exit_reported` is already set, the status line exists and the close was decided.
             return None;
@@ -143,11 +140,11 @@ impl App {
     fn locate_exited_pane(&self, pane_id: u64) -> Option<ExitedPaneSite> {
         self.registry.windows.iter().find_map(|(window_id, window)| {
             window.tab_states.iter().enumerate().find_map(|(tab_index, tab_state)| {
-                let leaves = tab_state.tree.leaves();
-                leaves.contains(&pane_id).then_some(ExitedPaneSite {
+                // Membership and the leaf count need no allocated leaf list.
+                tab_state.tree.contains_pane(pane_id).then_some(ExitedPaneSite {
                     window: *window_id,
                     tab_index,
-                    sole_leaf: leaves.len() == 1,
+                    sole_leaf: tab_state.tree.leaf_count() == 1,
                 })
             })
         })

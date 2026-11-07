@@ -16,23 +16,6 @@ pub(in crate::app) struct DiagnosticsState {
     /// sender and never performs filesystem IO on the event-loop path.
     pub(in crate::app) breadcrumb_recorder:
         Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
-    /// Test-only redraw request counter. Every
-    /// production code path that calls `window.request_redraw()` after
-    /// a `run_action` dispatch also bumps this counter in lock-step.
-    /// Tests assert against this rather than the live winit window
-    /// (which has no public introspection API). Stays at zero in
-    /// release builds whose tests don't touch it.
-    #[doc(hidden)]
-    pub redraw_request_count: std::sync::atomic::AtomicUsize,
-    /// Test-only counter incremented on every call to
-    /// `App::reap_empty_child`. Lets tests
-    /// distinguish "child window cleanup went through the unified reap
-    /// contract" from "a direct `windows.remove` happened" — both would
-    /// shrink the `windows` map, but only the former nulls out straggler
-    /// `redraw_target`s and fires the reap trace. Stays at zero in
-    /// release builds whose tests don't touch it.
-    #[doc(hidden)]
-    pub reap_call_count: std::sync::atomic::AtomicUsize,
     /// When pane retention was last sampled for the memory log.
     ///
     /// `None` until the first sample. Gating on elapsed time rather than

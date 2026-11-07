@@ -52,10 +52,7 @@ impl App {
 
     /// The window that holds `pane_id`, if any.
     pub(crate) fn window_of_pane(&self, pane_id: u64) -> Option<WindowId> {
-        self.registry
-            .windows
-            .iter()
-            .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id))
+        self.registry.window_of_pane(pane_id)
     }
 
     /// Return render-only participants, including the live source; never use this set for PTY fan-out.

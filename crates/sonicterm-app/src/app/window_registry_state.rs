@@ -43,3 +43,26 @@ pub(in crate::app) struct WindowRegistry {
     /// Windows created ahead of need, so a new window or tear-out appears without the wait.
     pub(in crate::app) warm_window_pool: Vec<WarmWindow>,
 }
+
+impl WindowRegistry {
+    /// The pane `pane_id` in whichever window owns it; a pane belongs to exactly one window.
+    pub(in crate::app) fn pane(&self, pane_id: u64) -> Option<&PaneState> {
+        self.windows.values().find_map(|window| window.panes.get(&pane_id))
+    }
+
+    /// [`Self::pane`], mutably.
+    pub(in crate::app) fn pane_mut(&mut self, pane_id: u64) -> Option<&mut PaneState> {
+        self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
+    }
+
+    /// The window that owns `pane_id`, if any.
+    pub(in crate::app) fn window_of_pane(&self, pane_id: u64) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id))
+    }
+}
+
+#[cfg(test)]
+#[path = "window_registry_state_tests.rs"]
+mod window_registry_state_tests;
