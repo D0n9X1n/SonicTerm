@@ -30,7 +30,7 @@ fn app_with_client_under(
     let user = app.__test_seed_tab("user");
     let agent = app.__test_seed_tab("agent");
     app.main_mut().unwrap().panes.get_mut(&agent).unwrap().agent_owned = true;
-    app.config.mcp = McpConfig { enabled: true, control, read };
+    app.config.mcp = McpConfig { enabled: true, control, read: Some(read) };
     let shared = McpShared::new(control, None);
     shared.set_read(read);
     let owner = app.register_mcp_owner();
@@ -41,6 +41,7 @@ fn app_with_client_under(
         config: app.config.mcp,
         charges: std::collections::HashMap::new(),
         owner,
+        read_notice_due: false,
     });
     let (client, transport) = connection();
     spawn_connection(&shared, transport);
@@ -155,7 +156,7 @@ fn tightening_read_on_reload_revokes_a_running_wait() {
         app.drain_mcp_requests();
         std::thread::sleep(Duration::from_millis(5));
     }
-    app.config.mcp.read = McpRead::Agent;
+    app.config.mcp.read = Some(McpRead::Agent);
     app.reconcile_mcp();
     let deadline = Instant::now() + Duration::from_secs(5);
     while !worker.is_finished() {

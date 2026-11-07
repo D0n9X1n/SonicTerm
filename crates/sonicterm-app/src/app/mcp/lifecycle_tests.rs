@@ -35,6 +35,7 @@ fn install_server(app: &mut App, config: McpConfig) -> Arc<McpShared> {
         config,
         charges: HashMap::new(),
         owner,
+        read_notice_due: false,
     });
     shared
 }
@@ -184,7 +185,7 @@ fn a_missing_pane_is_gone() {
     shared.inbox.lock().push(LoopRequest {
         call: LoopCall::ResolvePane { pane_id: 999_999 },
         generation: shared.generation.load(Ordering::Acquire),
-        deadline: Instant::now() + Duration::from_secs(5),
+        deadline: std::time::Instant::now() + Duration::from_secs(5),
         closed: Arc::new(AtomicBool::new(false)),
         reply,
     });
@@ -343,4 +344,109 @@ fn resolving_one_pane_builds_only_its_entry() {
     let resolved = app.mcp_resolve_pane(target).expect("a listed pane resolves");
     assert_eq!(built() - before_resolve, 1, "resolving builds only the named pane's entry");
     assert_eq!(resolved.pane_id, target);
+}
+
+/// A server running without `[mcp] read` shows the default-change notice once, only after a main
+/// window exists; later calls show nothing more.
+#[test]
+fn an_unset_read_is_announced_once_after_a_window_exists() {
+    let mut app = test_app();
+    install_server(&mut app, enabled(McpControl::Agent));
+    app.services.mcp_server.as_mut().unwrap().read_notice_due = true;
+    // No main window yet: the notice waits.
+    app.show_mcp_read_notice_if_due();
+    assert!(app.services.mcp_server.as_ref().unwrap().read_notice_due);
+    app.__test_seed_tab("first");
+    app.show_mcp_read_notice_if_due();
+    assert_eq!(app.__test_main_notification_message(), Some(READ_UNSET_NOTICE));
+    assert!(!app.services.mcp_server.as_ref().unwrap().read_notice_due);
+    app.main_mut().unwrap().notification = None;
+    app.show_mcp_read_notice_if_due();
+    assert_eq!(app.__test_main_notification_message(), None, "shown twice");
+}
+
+/// The notice names the actual default (agent-created panes, not "your own"), and an explicit
+/// `read = "any"` is kept: only a missing key reads as `"agent"`.
+#[test]
+fn the_read_notice_wording_and_explicit_any() {
+    assert!(READ_UNSET_NOTICE.contains("agent-created panes"));
+    assert!(READ_UNSET_NOTICE.contains("read = \"any\""));
+    let mut app = test_app();
+    let mut config = enabled(McpControl::Agent);
+    config.read = Some(sonicterm_cfg::config::McpRead::Any);
+    let shared = install_server(&mut app, config);
+    shared.set_read(config.read());
+    assert_eq!(shared.read(), sonicterm_cfg::config::McpRead::Any);
+}
+
+/// The notice through the real lifecycle: a server started by `reconcile_mcp` without `read`
+/// announces once when the first window appears; a reload that changes nothing says nothing more;
+/// stopping and starting again (a restart) announces again; and an explicit `read` is never
+/// announced, at start or on a restart.
+#[cfg(unix)]
+#[test]
+fn the_read_notice_follows_start_reload_restart_and_explicit_keys() {
+    // A fresh private directory the server creates itself, as it does its per-user one.
+    let root = tempfile::tempdir().unwrap();
+    let scratch = root.path().join("sonicterm");
+    crate::app::mcp::endpoint_unix::TEST_ENDPOINT_DIR.set(Some(scratch.clone()));
+    let mut app = test_app();
+    let without_read = McpConfig { enabled: true, read: None, ..McpConfig::default() };
+    app.config.mcp = without_read;
+    app.reconcile_mcp();
+    assert!(app.services.mcp_server.as_ref().expect("started").read_notice_due, "due at start");
+    // The first main window shows it; the event loop calls this as that window appears.
+    app.__test_seed_tab("first");
+    app.show_mcp_read_notice_if_due();
+    assert_eq!(app.__test_main_notification_message(), Some(READ_UNSET_NOTICE));
+    // An unchanged reload keeps the server and says nothing more.
+    app.main_mut().unwrap().notification = None;
+    app.reconcile_mcp();
+    app.show_mcp_read_notice_if_due();
+    assert_eq!(app.__test_main_notification_message(), None, "a reload repeated it");
+    // A restart (stop, then start without the key) announces again, at once since a window exists.
+    app.config.mcp = McpConfig::default();
+    app.reconcile_mcp();
+    app.config.mcp = without_read;
+    app.reconcile_mcp();
+    assert_eq!(app.__test_main_notification_message(), Some(READ_UNSET_NOTICE));
+    // An explicit read, at start or after a restart, is never announced.
+    for read in [sonicterm_cfg::config::McpRead::Agent, sonicterm_cfg::config::McpRead::Any] {
+        app.main_mut().unwrap().notification = None;
+        app.config.mcp = McpConfig::default();
+        app.reconcile_mcp();
+        app.config.mcp = McpConfig { enabled: true, read: Some(read), ..McpConfig::default() };
+        app.reconcile_mcp();
+        assert!(!app.services.mcp_server.as_ref().unwrap().read_notice_due, "{read:?}");
+        assert_eq!(app.__test_main_notification_message(), None, "{read:?} was announced");
+    }
+    app.config.mcp = McpConfig::default();
+    app.reconcile_mcp();
+    crate::app::mcp::endpoint_unix::TEST_ENDPOINT_DIR.set(None);
+}
+
+/// A pane outside the read scope is refused with the fix in the message itself, since a headless
+/// agent never sees the notification.
+#[test]
+fn an_out_of_scope_refusal_names_the_fix() {
+    let mut app = test_app();
+    let pane_id = app.__test_seed_tab("user");
+    let shared = install_server(&mut app, enabled(McpControl::Agent));
+    shared.set_read(sonicterm_cfg::config::McpRead::Agent);
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    shared.inbox.lock().push(crate::app::mcp::LoopRequest {
+        call: crate::app::mcp::LoopCall::ResolvePane { pane_id },
+        generation: shared.generation.load(std::sync::atomic::Ordering::Acquire),
+        deadline: std::time::Instant::now() + Duration::from_secs(5),
+        closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reply,
+    });
+    app.drain_mcp_requests();
+    match answer.recv().unwrap() {
+        LoopReply::Refused(code, message) => {
+            assert_eq!(code, "out_of_scope");
+            assert!(message.contains("read = \"any\""), "{message}");
+        }
+        _ => panic!("the user's pane was not refused"),
+    }
 }

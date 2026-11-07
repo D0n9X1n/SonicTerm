@@ -212,7 +212,7 @@ enabled = false
 # or "any" (every pane).
 control = "agent"
 # Read tools see: "agent" (panes an agent created) or "any" (every pane).
-# A config without this line reads every pane.
+# A config without this line sees only agent-created panes.
 read = "agent"
 "#,
         config_dir = default_config_dir()

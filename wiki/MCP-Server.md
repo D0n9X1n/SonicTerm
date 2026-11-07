@@ -32,7 +32,7 @@ enabled = false
 # or "any" (every pane).
 control = "agent"
 # Read tools see: "agent" (panes an agent created) or "any" (every pane).
-# A config without this line reads every pane.
+# A config without this line sees only agent-created panes.
 read = "agent"
 ```
 
@@ -40,7 +40,7 @@ read = "agent"
 | --- | --- | --- |
 | `enabled` | `false` | `true` runs the server; `false` stops it. |
 | `control` | `"agent"` | `"off"`, `"agent"` or `"any"`; see Control scope below. |
-| `read` | `"any"` (`"agent"` in a new config file) | `"agent"` or `"any"`; see Read scope below. |
+| `read` | `"agent"` | `"agent"` or `"any"`; see Read scope below. |
 
 To turn it on:
 
@@ -139,10 +139,13 @@ changes `control` drops every request already queued.
 | `"agent"` | only panes an agent created; any other pane is refused as `out_of_scope` and left out of `list_panes` |
 | `"any"` | every pane |
 
-A configuration without `read` keeps the old behavior, `"any"`, so an upgrade
-never narrows an existing setup. The config file SonicTerm writes on first start
-sets `read = "agent"`, so an agent cannot read an unrelated SSH or log pane unless
-you allow it. Use `"any"` when an agent should read your own panes, for example
+A configuration without `read` reads only agent-created panes, so an agent cannot
+read an unrelated SSH or log pane unless you allow it. Until v1.4.4 a missing key
+meant `"any"`; a server that starts without the key logs a warning and shows a
+notification once the first window is open, and an `out_of_scope` refusal says
+which line restores the old scope. An explicit `read = "any"` is never changed.
+Every agent session sees every agent-created pane, not only its own.
+Use `"any"` when an agent should read your own panes, for example
 the one it was started from.
 
 Which panes are an agent's comes only from SonicTerm's own records, never from

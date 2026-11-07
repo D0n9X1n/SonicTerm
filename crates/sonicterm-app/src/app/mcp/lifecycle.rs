@@ -29,7 +29,13 @@ pub(crate) struct McpServer {
     pub(crate) charges: HashMap<ResourceClass, CommittedReservation>,
     /// The governor's process-level `Mcp` owner; `None` when it could not register.
     pub(crate) owner: Option<OwnerGuard>,
+    /// `[mcp] read` is not set and the user has not been told yet what that now means.
+    pub(crate) read_notice_due: bool,
 }
+
+/// What an unset `[mcp] read` now means, shown once each time the server starts without it.
+pub(crate) const READ_UNSET_NOTICE: &str = "[mcp] read is not set: agents now see only agent-created \
+panes. Set read = \"any\" to restore the previous default.";
 
 // Lifecycle: McpServer drop calls stop on the listener and every connection; then
 // `_endpoint_guard` removes the socket file, and `charges` and `owner` drop in order.
@@ -64,18 +70,18 @@ impl App {
             // When: a `server` runs and only the control level or read scope changed, queued
             // requests and running waits are revoked.
             server.shared.set_control(wanted.control);
-            server.shared.set_read(wanted.read);
+            server.shared.set_read(wanted.read());
             server.config = wanted;
             tracing::info!(
                 target: "mcp",
                 control = wanted.control.as_str(),
-                read = wanted.read.as_str(),
+                read = wanted.read().as_str(),
                 "control level changed"
             );
             return;
         }
         let shared = McpShared::new(wanted.control, self.event_loop_proxy.clone());
-        shared.set_read(wanted.read);
+        shared.set_read(wanted.read());
         match super::start_listener(&shared) {
             Ok((endpoint, guard)) => {
                 tracing::info!(target: "mcp", control = wanted.control.as_str(), "control server started");
@@ -87,12 +93,42 @@ impl App {
                     config: wanted,
                     charges: HashMap::new(),
                     owner,
+                    read_notice_due: wanted.read.is_none(),
                 });
+                if wanted.read.is_none() {
+                    // The default changed under the user: say so in the log now and in a
+                    // notification once a window can show it.
+                    tracing::warn!(target: "mcp", "{READ_UNSET_NOTICE}");
+                }
+                self.show_mcp_read_notice_if_due();
             }
             Err(error) => {
                 tracing::warn!(target: "mcp", %error, "control server could not start");
             }
         }
+    }
+
+    /// Show [`READ_UNSET_NOTICE`] once a main window exists to show it, if the running server
+    /// started without `[mcp] read`. Called when the server starts and when the first main window
+    /// appears, so a server started before any window still tells the user.
+    pub(crate) fn show_mcp_read_notice_if_due(&mut self) {
+        if self.registry.main_window_id.is_none() {
+            // When: no `main_window_id` yet, the notice waits for the first main window.
+            return;
+        }
+        let Some(server) = self.services.mcp_server.as_mut() else {
+            // When: no `mcp_server` runs, there is nothing to announce.
+            return;
+        };
+        if !std::mem::take(&mut server.read_notice_due) {
+            // When: `read_notice_due` was not set or was already taken, nothing more is said.
+            return;
+        }
+        self.show_notification_for_kind(
+            self.frontmost_kind(),
+            sonicterm_ui::overlays::NotificationLevel::Info,
+            READ_UNSET_NOTICE.to_string(),
+        );
     }
 
     /// Register the governor's `Mcp` owner below the process root. A server that cannot register
@@ -202,7 +238,10 @@ impl App {
                 Some(entry) if readable(&entry) => LoopReply::Pane(entry),
                 Some(_) => LoopReply::Refused(
                     "out_of_scope",
-                    format!("pane {pane_id} is outside [mcp] read = \"agent\""),
+                    format!(
+                        "pane {pane_id} is outside [mcp] read = \"agent\" (the default); set \
+                         read = \"any\" to let agents read every pane"
+                    ),
                 ),
                 None => LoopReply::Refused("pane_gone", format!("no pane {pane_id}")),
             },

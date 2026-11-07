@@ -2,9 +2,9 @@
 """Drive a release SonicTerm's MCP control server end to end through the sonicterm-mcp bridge.
 
 The smoke starts the release app with a scratch config directory whose sonicterm.toml enables
-`[mcp]` (control "agent"), scratch logs and, on Unix, a scratch XDG_RUNTIME_DIR, so it never
-reaches a SonicTerm the user is running. It then speaks JSON-RPC to the release bridge over
-stdio: initialize, list_panes, a helper that exits 3, a sleeper stopped with Ctrl+C, and a fake
+`[mcp]` (control "agent"; read "any", so list_panes sees the startup pane), scratch logs and,
+on Unix, a scratch XDG_RUNTIME_DIR, so it never reaches a SonicTerm the user is running. It then
+speaks JSON-RPC to the release bridge over stdio: initialize, list_panes, a helper that exits 3, a sleeper stopped with Ctrl+C, and a fake
 OSC 133 shell that run_command drives to exit code 5, then closes every helper. A second app run
 with `[mcp] enabled = false` proves that the bridge finds no endpoint and exits 1.
 
@@ -168,8 +168,10 @@ def sleeper_ready_regex(host: str) -> str:
 
 
 def config_text(enabled: bool, control: str = "agent") -> str:
-    """The scratch sonicterm.toml: only the [mcp] section, every other key at its default."""
-    return f'[mcp]\nenabled = {"true" if enabled else "false"}\ncontrol = "{control}"\n'
+    """The scratch sonicterm.toml: only the [mcp] section, every other key at its default. Read
+    scope is "any" because the first check lists the user's startup pane, not an agent's."""
+    return (f'[mcp]\nenabled = {"true" if enabled else "false"}\ncontrol = "{control}"\n'
+            'read = "any"\n')
 
 
 def encode_request(request_id: int, method: str, params: Mapping[str, object] | None = None) -> bytes:

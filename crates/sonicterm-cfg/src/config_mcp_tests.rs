@@ -34,13 +34,17 @@ fn an_unknown_value_or_key_fails_the_load() {
     assert!(toml::from_str::<Config>("[mcp]\nenable = true\n").is_err());
 }
 
-/// A config with no `read` key keeps today's behavior, so an existing configuration is never
-/// narrowed by an upgrade: read tools see every pane.
+/// A config with no `read` key sees only agent-created panes, and remembers that the key was
+/// missing so the running server can say so; an explicit `"any"` is kept exactly.
 #[test]
-fn a_missing_read_key_reads_every_pane() {
+fn a_missing_read_key_reads_agent_panes_only() {
     let parsed: Config = toml::from_str("[mcp]\nenabled = true\ncontrol = \"agent\"\n").unwrap();
-    assert_eq!(parsed.mcp.read, McpRead::Any);
-    assert_eq!(McpConfig::default().read, McpRead::Any);
+    assert_eq!(parsed.mcp.read, None);
+    assert_eq!(parsed.mcp.read(), McpRead::Agent);
+    assert_eq!(McpConfig::default().read(), McpRead::Agent);
+    let explicit: Config = toml::from_str("[mcp]\nread = \"any\"\n").unwrap();
+    assert_eq!(explicit.mcp.read, Some(McpRead::Any));
+    assert_eq!(explicit.mcp.read(), McpRead::Any);
 }
 
 /// Each read value parses from its lowercase spelling and round-trips through `as_str`; an
@@ -50,7 +54,7 @@ fn every_read_value_parses_and_an_unknown_one_fails() {
     for read in [McpRead::Agent, McpRead::Any] {
         let text = format!("[mcp]\nread = \"{}\"\n", read.as_str());
         let parsed: Config = toml::from_str(&text).expect("valid [mcp] read");
-        assert_eq!(parsed.mcp.read, read);
+        assert_eq!(parsed.mcp.read, Some(read));
     }
     assert!(toml::from_str::<Config>("[mcp]\nread = \"off\"\n").is_err());
 }
@@ -62,6 +66,6 @@ fn the_new_config_template_reads_agent_panes_only() {
     let template = crate::config::default_config_template();
     assert!(template.contains("\nread = \"agent\"\n"), "the template sets read");
     let parsed: Config = toml::from_str(&template).expect("the template parses");
-    assert_eq!(parsed.mcp.read, McpRead::Agent);
+    assert_eq!(parsed.mcp.read, Some(McpRead::Agent));
     assert!(!parsed.mcp.enabled, "the server stays off by default");
 }

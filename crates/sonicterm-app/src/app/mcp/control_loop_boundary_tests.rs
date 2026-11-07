@@ -42,6 +42,7 @@ fn install(app: &mut App, control: McpControl) -> Arc<McpShared> {
         config,
         charges: HashMap::new(),
         owner,
+        read_notice_due: false,
     });
     shared
 }

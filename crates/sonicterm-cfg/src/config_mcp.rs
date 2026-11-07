@@ -11,9 +11,18 @@ pub struct McpConfig {
     pub enabled: bool,
     /// Which panes control tools may act on.
     pub control: McpControl,
-    /// Which panes read tools may see. A missing key is `"any"`, so existing configurations keep
-    /// working; the template a new config file starts from sets `"agent"`.
-    pub read: McpRead,
+    /// Which panes read tools may see, as written. A missing key (`None`) means `"agent"`; the
+    /// running server tells the user once that the key is unset. Read it through [`Self::read`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<McpRead>,
+}
+
+impl McpConfig {
+    /// The read scope in force: the configured one, or `"agent"` when the key is missing.
+    #[must_use]
+    pub fn read(&self) -> McpRead {
+        self.read.unwrap_or_default()
+    }
 }
 
 /// Which panes the read tools (`list_panes`, `read_pane`, `wait_for`) may see. Pane identity
@@ -21,10 +30,10 @@ pub struct McpConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum McpRead {
-    /// Only panes an agent created.
+    /// Only panes an agent created; the default when `read` is not set.
+    #[default]
     Agent,
     /// Every pane.
-    #[default]
     Any,
 }
 

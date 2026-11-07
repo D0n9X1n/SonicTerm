@@ -649,6 +649,7 @@ impl App {
         self.registry.main_window_id = Some(main_id);
         let checks_started = std::time::Instant::now();
         self.record_startup_load_errors();
+        self.show_mcp_read_notice_if_due();
         self.note_startup(checks_started, |spans| &mut spans.load_checks_ns);
         // Both pacing clocks start at one instant, so neither paces a new window differently.
         let created_at = std::time::Instant::now();

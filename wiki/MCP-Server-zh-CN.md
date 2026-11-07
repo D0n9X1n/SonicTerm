@@ -30,7 +30,7 @@ enabled = false
 # or "any" (every pane).
 control = "agent"
 # Read tools see: "agent" (panes an agent created) or "any" (every pane).
-# A config without this line reads every pane.
+# A config without this line sees only agent-created panes.
 read = "agent"
 ```
 
@@ -38,7 +38,7 @@ read = "agent"
 | --- | --- | --- |
 | `enabled` | `false` | `true` 运行服务器；`false` 停止服务器。 |
 | `control` | `"agent"` | `"off"`、`"agent"` 或 `"any"`；见下文“控制范围”。 |
-| `read` | `"any"`（新配置文件中为 `"agent"`） | `"agent"` 或 `"any"`；见下文“读取范围”。 |
+| `read` | `"agent"` | `"agent"` 或 `"any"`；见下文“读取范围”。 |
 
 开启方法：
 
@@ -125,8 +125,10 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 | `"agent"` | 只有 agent 创建的窗格；其他窗格以 `out_of_scope` 拒绝，且不出现在 `list_panes` 中 |
 | `"any"` | 所有窗格 |
 
-没有 `read` 的配置保持原有行为 `"any"`，因此升级永远不会收窄现有设置。SonicTerm 首次启动时写入的
-配置文件设置 `read = "agent"`，因此除非你允许，agent 无法读取无关的 SSH 或日志窗格。若希望 agent
+没有 `read` 的配置只读取 agent 创建的窗格，因此除非你允许，agent 无法读取无关的 SSH 或日志窗格。
+在 v1.4.4 及之前，缺少该键表示 `"any"`；服务器在没有该键时启动会记录一条警告，并在第一个窗口打开后显示一次通知，
+`out_of_scope` 拒绝信息也会说明恢复旧范围所需的那一行。显式的 `read = "any"` 永远不会被改变。
+每个 agent 会话都能看到所有 agent 创建的窗格，而不只是它自己创建的。若希望 agent
 读取你自己的窗格（例如启动它的那个窗格），请使用 `"any"`。
 
 哪些窗格属于 agent 只由 SonicTerm 自己的记录决定，从不取决于客户端：桥接程序的前导消息会把 agent

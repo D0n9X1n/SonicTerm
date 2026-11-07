@@ -207,8 +207,20 @@ impl Drop for SocketGuard {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's endpoint directory, so a test that starts the real server binds in scratch space.
+    pub(crate) static TEST_ENDPOINT_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Bind the socket in the per-user directory and start the listener thread.
 pub(crate) fn start(shared: &Arc<McpShared>) -> io::Result<Endpoint> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_ENDPOINT_DIR.with_borrow(Clone::clone) {
+        // When: a test set `TEST_ENDPOINT_DIR`, the server binds there instead of the user's directory.
+        return start_in(shared, &dir);
+    }
     start_in(shared, &endpoint_dir())
 }
 
