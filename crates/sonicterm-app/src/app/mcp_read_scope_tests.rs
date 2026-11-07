@@ -18,12 +18,20 @@ use crate::app::App;
 /// An App with a running server at `read`, one user pane and one agent-created pane, a connected
 /// client, and the two pane ids (user, agent).
 fn app_with_client(read: McpRead) -> (App, Arc<McpShared>, Client, u64, u64) {
+    app_with_client_under(read, McpControl::Agent)
+}
+
+/// [`app_with_client`] with an explicit `control` scope.
+fn app_with_client_under(
+    read: McpRead,
+    control: McpControl,
+) -> (App, Arc<McpShared>, Client, u64, u64) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let user = app.__test_seed_tab("user");
     let agent = app.__test_seed_tab("agent");
     app.main_mut().unwrap().panes.get_mut(&agent).unwrap().agent_owned = true;
-    app.config.mcp = McpConfig { enabled: true, control: McpControl::Agent, read };
-    let shared = McpShared::new(McpControl::Agent, None);
+    app.config.mcp = McpConfig { enabled: true, control, read };
+    let shared = McpShared::new(control, None);
     shared.set_read(read);
     let owner = app.register_mcp_owner();
     app.services.mcp_server = Some(McpServer {
@@ -172,4 +180,52 @@ fn changing_only_the_read_scope_revokes_queued_requests() {
     assert_eq!(shared.read(), McpRead::Agent);
     shared.set_read(McpRead::Any);
     assert_eq!(shared.read(), McpRead::Any);
+}
+
+#[test]
+fn every_read_tool_answers_each_pane_by_ownership_and_scope() {
+    // The full matrix: list_panes, read_pane and wait_for, on the user's pane and the agent's,
+    // under "agent" and "any". Each permitted call succeeds (a quiet wait ends `quiet`, never
+    // refused); each forbidden one is refused as out_of_scope, so neither half can pass alone.
+    for read in [McpRead::Agent, McpRead::Any] {
+        let (mut app, shared, mut client, user, agent) = app_with_client(read);
+        for (pane, owned) in [(user, false), (agent, true)] {
+            let permitted = read == McpRead::Any || owned;
+            let label = format!("{read:?} pane owned={owned}");
+            let (reply, next) = exchange(&mut app, client, tool(1, "list_panes", json!({})));
+            assert_eq!(listed(&reply).contains(&pane.to_string()), permitted, "{label}: list");
+            let read_pane = tool(2, "read_pane", json!({ "pane_id": pane.to_string() }));
+            let (reply, next) = exchange(&mut app, next, read_pane);
+            let expected = (!permitted).then(|| "out_of_scope".to_owned());
+            assert_eq!(refusal(&reply), expected, "{label}: read_pane {reply}");
+            let wait = json!({ "pane_id": pane.to_string(), "quiet_ms": 50, "timeout_ms": 2_000 });
+            let (reply, next) = exchange(&mut app, next, tool(3, "wait_for", wait));
+            assert_eq!(refusal(&reply), expected, "{label}: wait_for {reply}");
+            if permitted {
+                assert_eq!(reply["result"]["structuredContent"]["reason"], "quiet", "{label}");
+            }
+            client = next;
+        }
+        shared.stop();
+    }
+}
+
+#[test]
+fn run_command_follows_control_not_read() {
+    // run_command returns the output of the command it ran, a control tool's result, so under
+    // read = "agent" with control = "any" it is never refused as out of scope on a user's pane;
+    // the scope it answers to is control. (Without a live PTY the run then fails for that reason.)
+    let (mut app, shared, client, user, _agent) =
+        app_with_client_under(McpRead::Agent, McpControl::Any);
+    let run = tool(1, "run_command", json!({ "pane_id": user.to_string(), "command": "true" }));
+    let (reply, client) = exchange(&mut app, client, run);
+    assert_ne!(refusal(&reply).as_deref(), Some("out_of_scope"), "{reply}");
+    let read = tool(2, "read_pane", json!({ "pane_id": user.to_string() }));
+    let (reply, _client) = exchange(&mut app, client, read);
+    assert_eq!(
+        refusal(&reply).as_deref(),
+        Some("out_of_scope"),
+        "the read tools still follow read"
+    );
+    shared.stop();
 }

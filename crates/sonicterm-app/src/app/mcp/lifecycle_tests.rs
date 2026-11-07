@@ -274,6 +274,13 @@ fn resolving_one_pane_matches_its_listed_entry() {
     let report_pane = app.__test_child_active_pane(report_child).unwrap();
     app.registry.windows.get_mut(&report_child).unwrap().role =
         crate::app::WindowRole::MemoryReport;
+    // A terminal window created after the report window keeps its creation-order index: the
+    // report window's slot is skipped, not reused (main 0, children 1, 2, report 3, this one 4).
+    let after_report = app.__test_seed_child_window(&["after"]);
+    let after_pane = app.__test_child_active_pane(after_report).unwrap();
+    let first_child_panes: Vec<_> =
+        (0..2).map(|tab| app.registry.windows[&first_child].tab_states[tab].active_pane).collect();
+    let main_second_tab = app.main().unwrap().tab_states[1].active_pane;
     // A leaf whose pane already left `panes`, as during teardown, is listed by neither path.
     let torn = app.__test_child_active_pane(second_child).unwrap();
     let removed = app.registry.windows.get_mut(&second_child).unwrap().panes.remove(&torn);
@@ -285,7 +292,23 @@ fn resolving_one_pane_matches_its_listed_entry() {
         listed.len()
     );
     assert!(listed.iter().any(|entry| entry.window_index > 0), "child windows are listed");
-    let _ = first_child;
+    // Explicit (window, tab) indices, independent of the ordering helper both paths share.
+    let expected = [
+        (main_second_tab, 0, 1),
+        (first_child_panes[0], 1, 0),
+        (first_child_panes[1], 1, 1),
+        (after_pane, 4, 0),
+    ];
+    for (pane, window_index, tab_index) in expected {
+        let resolved = app.mcp_resolve_pane(pane).expect("a terminal pane resolves");
+        assert_eq!(
+            (resolved.window_index, resolved.tab_index),
+            (window_index, tab_index),
+            "pane {pane}"
+        );
+        let entry = listed.iter().find(|entry| entry.pane_id == pane).expect("listed");
+        assert_eq!((entry.window_index, entry.tab_index), (window_index, tab_index), "pane {pane}");
+    }
     for entry in &listed {
         let resolved = app.mcp_resolve_pane(entry.pane_id).expect("a listed pane resolves");
         let pair = |entry: &PaneEntry| {
