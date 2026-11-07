@@ -546,7 +546,9 @@ fn collection_waits_with_a_deadline_and_the_worker_releases_fairly() {
         "self.try_collect_with(&TimedParserAcquire, COLLECTION_LOCK_BUDGET, before_first_lock)"
     ));
     assert!(!production.contains("entry.parser.try_lock()"), "no parser is only probed");
-    assert_eq!(production.matches("let deadline = acquire.now() + budget;").count(), 1);
+    // One absolute deadline, taken from the clock once at the collection's start.
+    assert_eq!(production.matches("let started = acquire.now();").count(), 1);
+    assert_eq!(production.matches("let deadline = started + budget;").count(), 1);
     let worker = strip(concat!(
         include_str!("spawn_pane.rs"),
         "\n",

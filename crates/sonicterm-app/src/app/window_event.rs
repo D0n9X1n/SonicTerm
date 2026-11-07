@@ -473,6 +473,7 @@ impl App {
         let mut frame = {
             // End the Result's drop scope before later branches release its borrowed sources.
             let collected = sources.try_collect(|| self.snapshot_window_redraw(win_id));
+            self.note_collection(win_id, sources.take_note());
             match collected {
                 Ok(frame) => frame,
                 Err(why) => {

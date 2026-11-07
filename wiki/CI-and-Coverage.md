@@ -240,7 +240,8 @@ Overlapping main runs can still race to save an immutable key.
 
 The three macOS perf shards keep their artifact names and run every scenario
 exactly once, in sets of about 19 minutes from run 40344066083's per-variant times:
-`S7-S4` runs S7, S4, atlas-retry, S12/status-line, S3, S8 and S6/selection-drag;
+`S7-S4` runs S7, S4, atlas-retry, S12/status-line, S3, S8, S6/selection-drag, S13 and
+S13/sustained-4 (the S13 pair added without a measured time);
 `S9-S10sync` runs S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line and S12;
 `S10-S11release` runs S10, S11/release, S2, S2/flood and S6/flood. All three start
 when the binaries land: this repository runs at most five macOS jobs at once, and CI

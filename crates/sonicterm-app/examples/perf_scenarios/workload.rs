@@ -190,6 +190,7 @@ fn workload_lines(workload: Workload, role: usize, nonce: &str, bound_s: u64) ->
             [vec![format!("yes | head -n {lines}"), cat(BULK_FILE_NAME)], finish, shell].concat()
         }
         Workload::DateLoop => vec!["while :; do date; sleep 0.01; done".to_owned()],
+        Workload::SustainedFlood => vec!["exec yes".to_owned()],
         Workload::PrintThenShell(fixture) => {
             [vec![cat(fixture_file_name(fixture))], finish, shell].concat()
         }
@@ -310,6 +311,8 @@ pub(crate) enum ProgramStep {
     Cat(&'static str),
     /// Print a `date` line every 10 ms, never ending.
     DateLoop,
+    /// Write `y` lines with no pause, never ending, as `exec yes` does.
+    SustainedYes,
     /// Play this many frame files in order, each followed by a 16 ms sleep.
     Frames(u32),
     /// Print the completion sentinel.
@@ -339,6 +342,7 @@ pub(crate) fn program_steps(workload: Workload) -> Vec<ProgramStep> {
             vec![ProgramStep::Yes(lines), Cat(BULK_FILE_NAME), Sentinel, Done, Shell]
         }
         Workload::DateLoop => vec![ProgramStep::DateLoop],
+        Workload::SustainedFlood => vec![ProgramStep::SustainedYes],
         Workload::PrintThenShell(fixture) => {
             vec![Cat(fixture_file_name(fixture)), Sentinel, Done, Shell]
         }
@@ -366,6 +370,7 @@ pub(crate) fn posix_lines(
         ProgramStep::Yes(lines) => vec![format!("yes | head -n {lines}")],
         ProgramStep::Cat(name) => vec![format!("cat \"$scratch/workload/fixtures/{name}\"")],
         ProgramStep::DateLoop => vec!["while :; do date; sleep 0.01; done".to_owned()],
+        ProgramStep::SustainedYes => vec!["exec yes".to_owned()],
         ProgramStep::Frames(count) => vec![
             "frame=0".to_owned(),
             format!(

@@ -198,6 +198,12 @@ pub(super) fn run_step(
             host.sleep(DATE_INTERVAL)
                 .map_err(|error| format!("pause after a date line: {error}"))?;
         },
+        // The loop never ends by itself and never sleeps: the console's backpressure paces it.
+        ProgramStep::SustainedYes => loop {
+            write_yes(&mut *out, u32::MAX)
+                .and_then(|()| out.flush())
+                .map_err(|error| format!("write y lines: {error}"))?;
+        },
         ProgramStep::Frames(count) => {
             // The same order and names as the script's `frames/$frame` loop.
             for frame in 0..count {

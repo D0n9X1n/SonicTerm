@@ -112,6 +112,7 @@ impl Probe {
             SetupAction::SplitRight => (Action::SplitRight, true),
             SetupAction::SplitDown => (Action::SplitDown, true),
             SetupAction::ActivateTab(index) => (Action::ActivateTab(index), false),
+            SetupAction::FocusPane(direction) => (Action::FocusPane(direction), false),
         };
         if !self.run_action(event_loop, &action) {
             self.invalidate(event_loop, format!("the App refused setup action {setup:?}"));

@@ -10,6 +10,8 @@ use super::{
     PROGRAM_SETTLE_MS, PROGRAM_WINDOWS_STEPS, REST_PATH_ROW, REST_TAIL_ROW, SETTLE_MS,
     STRIP_SAFE_ROWS, TRIM_EXPERIMENT,
 };
+#[cfg(any(target_os = "macos", windows, test))]
+use sonicterm_cfg::keymap::Direction;
 
 /// The plan for `id` and `variant` on `host`, or `None` when the catalog does not list them.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -316,6 +318,44 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 end,
             ],
         ),
+        // The flood starts at GO and never ends; typing lands in the idle top-right pane. `sustained-4`
+        // splits the right column, then the left one, so all four panes have the same size, and refocuses
+        // the top-right pane. The
+        // `tail` hold after typing shows the flood still running at the end of sampling; `idle` then
+        // keeps memory's `end` reading at GO + 60 s (5 s short) like every other plan.
+        ("S13", _) => {
+            let (roles, setup) = if variant == "sustained-4" {
+                (
+                    vec![
+                        Workload::SustainedFlood,
+                        Workload::IdleShell,
+                        Workload::IdleShell,
+                        Workload::IdleShell,
+                    ],
+                    vec![
+                        SetupAction::SplitRight,
+                        SetupAction::SplitDown,
+                        SetupAction::FocusPane(Direction::Left),
+                        SetupAction::SplitDown,
+                        // Roles 0 and 1 are the top row; focus returns to role 1, the typing target.
+                        SetupAction::FocusPane(Direction::Right),
+                        SetupAction::FocusPane(Direction::Up),
+                    ],
+                )
+            } else {
+                // When: the `default` variant runs, one flooding and one idle pane sit side by side.
+                (vec![Workload::SustainedFlood, Workload::IdleShell], vec![SetupAction::SplitRight])
+            };
+            let chars = if short { 300 } else { 600 };
+            let typing = Driver::Typing { role: 1, chars, per_second: 10, settle_ms: 2_000 };
+            let steps = vec![
+                Step::Phase(driven("typing", PhaseKind::Sustained, typing, PhaseEnd::DriverDone)),
+                Step::Phase(timed("tail", PhaseKind::Sustained, PhaseEnd::Hold(hold(10_000)))),
+                idle,
+                end,
+            ];
+            (roles, setup, steps)
+        }
         ("S12", _) => {
             let mut steps = vec![
                 print(vec![0, 1, 2]),

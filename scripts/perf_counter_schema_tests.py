@@ -21,11 +21,12 @@ import perf_settings
 # each section's integer counts, then its histograms (the suffix names the unit).
 COUNTER_CONTRACT = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
-                "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_sync",
+                "contention_parser", "contention_images", "contention_budget_expired", "miss_pane_0", "miss_pane_1",
+                "miss_pane_2", "miss_pane_3_plus", "defer_timeout", "defer_contention", "defer_sync",
                 "defer_streaming", "stream_clock_exempt", "display_link_ticks", "display_link_admissions", "display_link_fallbacks",
                 "contention_retry_armed", "dirt_ack_dropped", "native_request_redraw",
                 "user_request_redraw", "redraw_requested"),
-               ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
+               ("present_interval_ms", "handler_ms", "flush_to_redraw_ms", "parser_lock_wait_us")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
              "native_request_redraw_unregistered", "ui_guard_custody_ns", "ui_guard_custodies",

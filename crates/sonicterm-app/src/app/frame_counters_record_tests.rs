@@ -74,7 +74,7 @@ fn settlements_count_each_outcome_and_the_present_interval() {
     let interval = &counters.present_interval;
     assert_eq!((interval.count(), interval.sum_us()), (1, 16_000));
     counters.note_defer(DeferRule::Streaming);
-    counters.note_contention(false);
+    counters.note_collection(0, Some((0, crate::app::visible_frame::MissKind::Parser)));
     assert_eq!((counters.defer_streaming, counters.contention_parser), (1, 1));
 }
 
@@ -92,6 +92,11 @@ fn a_counting_apps_windows_count_outcomes_and_contention_on_their_paths() {
     let snapshot = window.redraw.snapshot();
     window.redraw.settle(snapshot, FrameSettlement::Presented, now);
     let contended = FrameUnavailable::Contended { pane_id: 1, images: true };
+    let miss = Some((0, crate::app::visible_frame::MissKind::Images));
+    app.note_collection(
+        main,
+        Some(crate::app::visible_frame::CollectionNote { parser_wait_us: 0, miss }),
+    );
     app.visible_frame_unavailable(main, contended, false, now);
     let counters =
         app.registry.windows[&main].redraw.frame_counters.as_deref().expect("counting window");

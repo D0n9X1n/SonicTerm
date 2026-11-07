@@ -12,6 +12,7 @@ import perf_atlas_rows
 import perf_attribution_report
 import perf_build_policy
 import perf_comparison_rows
+import perf_contention_verdict
 import perf_counter_rows
 import perf_delivery
 import perf_execution
@@ -265,6 +266,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: p
     attribution_evidence: dict[str, dict] = {}
     omitted = 0
     presenter_notes: list[str] = []
+    # S13's head counters results by variant, for its contention verdict.
+    contention_heads: dict[str, list[dict]] = {}
     for result in results:
         # Lookups stay keyed by the plain label; only the rows carry the cap.
         shown = perf_sets.capped_label(result)
@@ -292,6 +295,9 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: p
                     counters_only_rows.extend(perf_comparison_rows.comparison_rows(shown, result.base, result.head))
             rows, left_out = perf_counter_rows.counter_rows(shown, result.base, result.head)
             counters_table.extend(rows)
+            if result.label.split("/")[0] == perf_contention_verdict.SCENARIO:
+                label = result.label if "/" in result.label else f"{result.label}/default"
+                contention_heads[label] = [outcome.result or {} for outcome in result.head.outcomes]
             recovery_rows.extend(perf_attribution_report.atlas_recovery_rows(result.label, result.base, result.head))
             counters_table.extend(perf_atlas_rows.glyph_atlas_reconciliation_rows(shown, result.base, result.head))
             split_details.extend(perf_counter_rows.attempt_split_details(shown, result.base, result.head))
@@ -365,7 +371,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: p
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead,
                                    capped_note=capped_note, recovery_rows=recovery_rows,
                                    flag_checks=perf_comparison_rows.flag_checks(results), unclassified_rows=unclassified_rows,
-                                   counters_only_rows=counters_only_rows, attribution_rows=attribution_rows)
+                                   counters_only_rows=counters_only_rows, attribution_rows=attribution_rows,
+                                   contention_rows=perf_contention_verdict.verdict_rows(contention_heads))
     if attribution_evidence:
         perf_outcomes._write_json(out / perf_attribution_report.ATTRIBUTION_FILE, {
             "schema_version": perf_settings.SCHEMA_VERSION, "harness_cfgs": list(harness_cfgs),

@@ -73,10 +73,13 @@ pub(super) fn seconds_after_go(plan: &Plan, drivers: bool) -> u64 {
 }
 
 #[test]
-pub(super) fn catalog_lists_twelve_scenarios_with_their_variants() {
+pub(super) fn catalog_lists_thirteen_scenarios_with_their_variants() {
     // The comparison script selects runs by exactly these ids and variant names.
     let ids: Vec<_> = SCENARIOS.iter().map(|spec| spec.id).collect();
-    assert_eq!(ids, ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S12"]);
+    let listed = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S12", "S13"];
+    assert_eq!(ids, listed);
+    // S13's `default` is the two-pane sustained flood and `sustained-4` its 2x2 counterpart.
+    assert_eq!(find("S13").unwrap().variants, ["default", "sustained-4"]);
     assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
     assert_eq!(find("S6").unwrap().variants, ["default", "flood", "selection-drag", "rest"]);
     assert_eq!(find("S10").unwrap().variants, ["default", "sync"]);
@@ -107,7 +110,7 @@ pub(super) fn catalog_lists_twelve_scenarios_with_their_variants() {
         assert_eq!(spec.variants[0], "default", "{} lists default first", spec.id);
         assert!(spec.short_timeout_s <= spec.timeout_s, "{} short bound", spec.id);
     }
-    assert!(find("S13").is_none());
+    assert!(find("S14").is_none());
     assert!(plan("S1", "flood", false).is_none(), "an unlisted variant has no plan");
 }
 
@@ -349,6 +352,12 @@ pub(super) const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S12/status-line", "print", "transition", Some("sentinel-parsed")),
     ("S12/status-line", "uncovered", "hold", None),
     ("S12/status-line", "program", "sustained", None),
+    ("S13/default", "idle", "hold", None),
+    ("S13/default", "tail", "sustained", None),
+    ("S13/default", "typing", "sustained", None),
+    ("S13/sustained-4", "idle", "hold", None),
+    ("S13/sustained-4", "tail", "sustained", None),
+    ("S13/sustained-4", "typing", "sustained", None),
     ("S2/default", "idle", "hold", None),
     ("S2/default", "typing", "sustained", None),
     ("S2/flood", "idle", "hold", None),

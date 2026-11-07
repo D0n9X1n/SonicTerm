@@ -46,6 +46,27 @@ pub(super) enum FrameUnavailable {
     Contended { pane_id: u64, images: bool },
 }
 
+/// Why one collection missed, for its window's counters. The kinds are disjoint, so their sum is
+/// the collection's failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MissKind {
+    /// A parser was probed and not obtained, or obtained only after the deadline.
+    Parser,
+    /// The shared deadline had already passed before this pane's parser was probed.
+    BudgetExpired,
+    /// Every parser was held but an image store was busy.
+    Images,
+}
+
+/// What one collection attempt measured, read by its caller for the window's counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct CollectionNote {
+    /// Time spent taking parsers: from the first acquisition to the last guard or the miss, in us.
+    pub(super) parser_wait_us: u64,
+    /// The miss and the visible-pane order index (layout order) of the pane it happened on.
+    pub(super) miss: Option<(usize, MissKind)>,
+}
+
 /// The requested maximum a collection waits, in total across its visible panes, for busy parsers.
 ///
 /// A PTY worker relocks its parser every few tens of microseconds during a flood, so a nonwaiting
@@ -128,6 +149,8 @@ pub(super) struct VisibleFrameSources {
     spans: Option<super::guard_correlation::SharedSpanStore>,
     pub(super) tab_index: usize,
     pub(super) active_pos: usize,
+    /// The last collection's measurement; its caller takes it into the window's counters.
+    note: std::cell::Cell<Option<CollectionNote>>,
     #[cfg(test)]
     image_visits: std::cell::RefCell<Vec<u64>>,
     #[cfg(test)]
@@ -190,11 +213,17 @@ impl VisibleFrameSources {
             spans: None,
             tab_index,
             active_pos: layout.active_pos,
+            note: std::cell::Cell::new(None),
             #[cfg(test)]
             image_visits: Default::default(),
             #[cfg(test)]
             image_clones: Default::default(),
         })
+    }
+
+    /// The last collection's measurement, once; `None` before a collection or after it was taken.
+    pub(super) fn take_note(&self) -> Option<CollectionNote> {
+        self.note.take()
     }
 
     /// The validated active pane; its index is not assumed to be zero.
@@ -229,7 +258,12 @@ impl VisibleFrameSources {
     ) -> Result<HeldVisibleFrame<'_, S>, FrameUnavailable> {
         let snapshot = before_first_lock();
         // One absolute deadline for every visible parser: a later pane gets only what remains.
-        let deadline = acquire.now() + budget;
+        let started = acquire.now();
+        let deadline = started + budget;
+        let waited_us = || {
+            u64::try_from(acquire.now().saturating_duration_since(started).as_micros())
+                .unwrap_or(u64::MAX)
+        };
         // The span collection's identity is issued before the first acquisition, with no lock taken; declared
         // first, so it drops last, after every guard and the custody that closes it.
         let mut collection =
@@ -241,11 +275,18 @@ impl VisibleFrameSources {
             super::guard_custody::DispatchClock,
         )> = None;
         let mut guards = Vec::with_capacity(self.entries.len());
-        for entry in &self.entries {
+        for (index, entry) in self.entries.iter().enumerate() {
+            // Checked before the attempt, so a pane the deadline left no time for is told apart.
+            let expired = acquire.now() >= deadline;
             let Some(parser) = acquire_parser(acquire, entry.id, &entry.parser, deadline) else {
                 // When: a parser is contended, the earlier guards are released, then their custody closes.
                 drop(guards);
                 drop(timing);
+                let kind = if expired { MissKind::BudgetExpired } else { MissKind::Parser };
+                self.note.set(Some(CollectionNote {
+                    parser_wait_us: waited_us(),
+                    miss: Some((index, kind)),
+                }));
                 return Err(FrameUnavailable::Contended { pane_id: entry.id, images: false });
             };
             if timing.is_none() {
@@ -259,8 +300,9 @@ impl VisibleFrameSources {
             }
             guards.push((entry.id, parser, entry.rect));
         }
+        let parser_wait_us = waited_us();
         let mut images = Vec::with_capacity(self.entries.len());
-        for entry in &self.entries {
+        for (index, entry) in self.entries.iter().enumerate() {
             #[cfg(test)]
             self.image_visits.borrow_mut().push(entry.id);
             let Some(store) = entry.images.try_snapshot() else {
@@ -268,6 +310,8 @@ impl VisibleFrameSources {
                 drop(images);
                 drop(guards);
                 drop(timing);
+                let miss = Some((index, MissKind::Images));
+                self.note.set(Some(CollectionNote { parser_wait_us, miss }));
                 return Err(FrameUnavailable::Contended { pane_id: entry.id, images: true });
             };
             #[cfg(test)]
@@ -275,6 +319,7 @@ impl VisibleFrameSources {
             images.push(store);
         }
         let (custody, dispatch) = timing.unzip();
+        self.note.set(Some(CollectionNote { parser_wait_us, miss: None }));
         Ok(HeldVisibleFrame { snapshot, guards, custody, dispatch, images })
     }
 
@@ -429,6 +474,17 @@ impl App {
         Ok(sources)
     }
 
+    /// Record one collection's `note` in `id`'s counters when the App counts: its parser wait, and
+    /// for a miss its kind and the visible-pane index it happened on.
+    pub(super) fn note_collection(&mut self, id: WindowId, note: Option<CollectionNote>) {
+        let window = self.registry.windows.get_mut(&id);
+        if let (Some(counters), Some(note)) =
+            (window.and_then(|window| window.redraw.frame_counters.as_deref_mut()), note)
+        {
+            counters.note_collection(note.parser_wait_us, note.miss);
+        }
+    }
+
     /// Only genuine visible contention enters the existing retry-floor adapter.
     ///
     /// Structural invalidity consumes the captured causes and parks every owner frame deadline.
@@ -441,14 +497,8 @@ impl App {
         now: Instant,
     ) {
         match why {
-            FrameUnavailable::Contended { images, .. } => {
-                let window = self.registry.windows.get_mut(&id);
-                if let Some(counters) =
-                    window.and_then(|window| window.redraw.frame_counters.as_deref_mut())
-                {
-                    // the App's gate is on, the busy lock is counted where it returns here.
-                    counters.note_contention(images);
-                }
+            FrameUnavailable::Contended { .. } => {
+                // The miss itself is counted from the collection's note, which its caller recorded.
                 self.defer_window_lock_contention(id, was_dirty, now)
             }
             FrameUnavailable::NoLayout => {
@@ -492,6 +542,10 @@ impl App {
 #[cfg(test)]
 #[path = "visible_frame_tests.rs"]
 mod visible_frame_tests;
+
+#[cfg(test)]
+#[path = "visible_frame_note_tests.rs"]
+mod visible_frame_note_tests;
 
 #[path = "visible_frame_acquire.rs"]
 mod acquire;

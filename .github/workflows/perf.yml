@@ -212,12 +212,14 @@ jobs:
       # S1/atlas-retry and S6/rest run twice per side (--list run_caps). A release comparison runs them uncapped.
       # S12 runs in S9-S10sync, a shard perf-compare.py's cell-layout decision reads (CELL_LAYOUT_SHARDS). Shard
       # names remain stable artifact identities. Exact-head elapsed time, including queues, must stay below 35 min.
+      # S13 and S13/sustained-4 join S7-S4, one short timed run a side each (--list run_caps) plus the counters
+      # set's two: nominally about 6 min a variant, not measured; perf-critical-path.py reads the exact head.
       matrix:
         include:
           - platform: macOS
             runner: macos-15
             shard: S7-S4
-            scenarios: S7 S4 S1/atlas-retry S12/status-line S3 S8 S6/selection-drag
+            scenarios: S7 S4 S1/atlas-retry S12/status-line S3 S8 S6/selection-drag S13 S13/sustained-4
             laps: ""
           - platform: macOS
             runner: macos-15
@@ -405,7 +407,8 @@ jobs:
       # uncapped. S9-S10 measured 22.6 (run 37147065934); S9's laps set, two runs a side, adds about 0.4.
       # S6/rest joins S2-S10sync. Its added time is not estimated here: the exact-head run, read with
       # scripts/perf-critical-path.py, is the measurement. S1/status-line and S12/status-line join S7, the
-      # one-scenario shard, one run per side in each set: nominally about 1 and 2 min, not measured.
+      # one-scenario shard, one run per side in each set: nominally about 1 and 2 min, not measured. S13 and
+      # S13/sustained-4 join S2-S10sync on the same caps, nominally about 6 min a variant, not measured.
       matrix:
         include:
           - platform: Windows
@@ -421,7 +424,7 @@ jobs:
           - platform: Windows
             runner: windows-latest
             shard: S2-S10sync
-            scenarios: S2 S10/sync S6/rest
+            scenarios: S2 S10/sync S6/rest S13 S13/sustained-4
             laps: ""
           - platform: Windows
             runner: windows-latest

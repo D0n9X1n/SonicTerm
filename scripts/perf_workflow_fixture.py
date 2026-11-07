@@ -32,7 +32,8 @@ RESULT_STEP = "Require every comparison job to succeed"
 # run beside their scenario's default, since a bare ID selects only the default; S1/atlas-retry runs only
 # its counters set.
 ALL_SCENARIOS = ["S1", "S1/atlas-retry", "S1/status-line", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood",
-                 "S6/selection-drag", "S6/rest", "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12", "S12/status-line"]
+                 "S6/selection-drag", "S6/rest", "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12", "S12/status-line", "S13",
+                 "S13/sustained-4"]
 # The variants only one platform's shards add: S11/release on both (capped at 1), the presenter controls on Windows.
 PLATFORM_SCENARIOS = {"macOS": ["S11/release"], "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")

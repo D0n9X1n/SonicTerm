@@ -251,6 +251,8 @@ pub(super) struct ScriptedAcquire {
     pub(super) calls: std::cell::RefCell<Vec<AcquireCall>>,
     /// How far the clock moves while the hook after a failed probe runs.
     pub(super) hook_advance: std::cell::Cell<Duration>,
+    /// How far the clock moves at each read, as preemption between two panes would; zero by default.
+    pub(super) tick_per_read: std::cell::Cell<Duration>,
 }
 
 impl ScriptedAcquire {
@@ -260,12 +262,14 @@ impl ScriptedAcquire {
             script: script.iter().copied().collect(),
             calls: Default::default(),
             hook_advance: Default::default(),
+            tick_per_read: Default::default(),
         }
     }
 }
 
 impl ParserAcquire for ScriptedAcquire {
     fn now(&self) -> Instant {
+        self.clock.set(self.clock.get() + self.tick_per_read.get());
         self.clock.get()
     }
 

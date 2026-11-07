@@ -427,9 +427,11 @@ class WindowsComparisonLegTests(unittest.TestCase):
 
     def test_the_macos_shards_are_the_reviewed_three_set_partition(self):
         # Three sets of about 19 min from measured per-variant times: S7 leads the first, S12 joins the S9 set and S2
-        # the release set. Exact-head CI must measure it including runner queues against the 35-minute budget.
+        # the release set; S13's two variants join the first, unmeasured. Exact-head CI must measure it including
+        # runner queues against the 35-minute budget.
         self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
-            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S12/status-line", "S3", "S8", "S6/selection-drag"],
+            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S12/status-line", "S3", "S8", "S6/selection-drag", "S13",
+                      "S13/sustained-4"],
             "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5", "S6/rest", "S1/status-line", "S12"],
             "S10-S11release": ["S10", "S11/release", "S2", "S2/flood", "S6/flood"],
         })

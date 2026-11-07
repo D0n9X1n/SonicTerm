@@ -9,6 +9,7 @@ use crate::scenarios::{
     STATUS_LINE_INTERVAL_MS,
 };
 use crate::scenarios::{ProgramDeltas, StatusLineDeltas};
+use sonicterm_cfg::keymap::Direction;
 
 /// A status line variant requests the same grid as its default variant, and that grid plus the
 /// strip fits below the macOS runner's 43-row screen clamp, so the ref without the strip and the
@@ -637,4 +638,48 @@ fn program_settles_past_the_held_input_watch_it_arms() {
             );
         }
     }
+}
+
+/// S13's variants differ only in pane count: both flood role 0 with `SustainedFlood`, whose script
+/// never sleeps (`DateLoop` sleeps 10 ms a line and leaves the parser idle), and type into idle role 1.
+/// `sustained-4` builds a 2x2 grid by splitting the right column, refocusing left, then splitting it,
+/// and returns focus to role 1 (top right) for typing.
+#[test]
+fn s13_runs_the_same_sustained_flood_in_two_and_four_panes() {
+    for host in [Host::Posix, Host::Windows] {
+        for short in [false, true] {
+            let two = plan_for("S13", "default", short, host).unwrap();
+            let four = plan_for("S13", "sustained-4", short, host).unwrap();
+            assert_eq!(two.roles, [Workload::SustainedFlood, Workload::IdleShell]);
+            assert_eq!(four.roles[0], Workload::SustainedFlood);
+            assert_eq!(&four.roles[1..], [Workload::IdleShell; 3]);
+            assert_eq!(two.setup, [SetupAction::SplitRight]);
+            assert_eq!(
+                four.setup,
+                [
+                    SetupAction::SplitRight,
+                    SetupAction::SplitDown,
+                    SetupAction::FocusPane(Direction::Left),
+                    SetupAction::SplitDown,
+                    SetupAction::FocusPane(Direction::Right),
+                    SetupAction::FocusPane(Direction::Up),
+                ]
+            );
+            assert_eq!(two.steps, four.steps, "the same phases and typing in both variants");
+            let typing = two.steps.iter().find_map(|step| match step {
+                Step::Phase(phase) if phase.name == "typing" => Some(phase.driver),
+                _ => None,
+            });
+            let chars = if short { 300 } else { 600 };
+            let expected = Driver::Typing { role: 1, chars, per_second: 10, settle_ms: 2_000 };
+            assert_eq!(typing, Some(expected));
+        }
+    }
+    let script = crate::workload::program_steps(Workload::SustainedFlood)
+        .iter()
+        .flat_map(|step| crate::workload::posix_lines(step, 0, "nonce", 60))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(script, "exec yes");
+    assert!(!script.contains("sleep"), "a sustained flood never pauses");
 }
