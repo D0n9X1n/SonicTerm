@@ -15,6 +15,8 @@ pub enum Shell {
     Zsh,
     /// bash 4.4 or newer (`PS0`).
     Bash,
+    /// PowerShell 7 or newer with PSReadLine.
+    Pwsh,
 }
 
 impl Shell {
@@ -23,6 +25,7 @@ impl Shell {
         match name {
             "zsh" => Some(Self::Zsh),
             "bash" => Some(Self::Bash),
+            "pwsh" | "powershell" => Some(Self::Pwsh),
             _ => None,
         }
     }
@@ -32,6 +35,7 @@ impl Shell {
         match self {
             Self::Zsh => ZSH,
             Self::Bash => BASH,
+            Self::Pwsh => PWSH,
         }
     }
 }
@@ -101,6 +105,23 @@ if [[ $- == *i* && -n "${SONICTERM_SHELL_TOKEN-}" && -z "${__sonicterm_token-}" 
   PS0='$(__sonicterm_mark C)'"${PS0-}"
 fi
 "#;
+
+/// PowerShell 7+: D and A from a wrapped `prompt`, B at the end of the prompt text, C from a
+/// wrapped `PSConsoleHostReadLine` once PSReadLine returns a non-blank line. PSReadLine keeps
+/// editing incomplete input (an open `{`) inside its ReadLine, so a returned non-blank line is one
+/// the shell will run. A blank or cancelled line gets no C, but the next prompt still writes D, so
+/// a run that never started ends as `not_started`, as zsh's and bash's do. D's code: 0 when `$?`
+/// held. Otherwise, a line whose commands are all cmdlets (read from its parsed syntax tree) can run
+/// no native program, so it is 1. For any other line: a new error record and a non-zero
+/// `$LASTEXITCODE` together give no code at all (a D with none), since which statement ended the
+/// line is unknown even when the native code repeats; a new error record alone gives 1; a non-zero
+/// `$LASTEXITCODE` alone gives that code (which a function failing silently may have left from an
+/// earlier line); anything else gives 1. The snippet only reads
+/// `$LASTEXITCODE`, so every command sees the value it would without integration. Without PSReadLine
+/// the script loads nothing, so `run_command` refuses the pane instead of waiting on markers that never
+/// come. The token lives only in a PowerShell variable, which no child process inherits. The
+/// script is `scripts/shell-integration.ps1`, where first-party PowerShell lives.
+const PWSH: &str = include_str!("../../../scripts/shell-integration.ps1");
 
 #[cfg(all(test, unix))]
 #[path = "shell_integration_tests.rs"]

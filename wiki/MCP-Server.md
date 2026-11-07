@@ -288,6 +288,29 @@ eval "$(sonicterm-mcp --shell-integration zsh)"    # zsh 5.3+, in ~/.zshrc
 eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+, in ~/.bashrc
 ```
 
+```powershell
+sonicterm-mcp --shell-integration pwsh | Out-String | Invoke-Expression   # PowerShell 7+, in $PROFILE
+```
+
+The PowerShell integration needs PSReadLine, which PowerShell 7 loads in every
+interactive console; without it the script loads nothing, so `run_command` refuses
+the pane (`no_shell_integration`) rather than waiting for markers. It wraps `prompt`
+(D, A and, after your prompt text, B) and PSReadLine's `PSConsoleHostReadLine`: C is
+written once ReadLine returns an accepted line, so a multi-line `{` block counts once
+and a line cancelled with Ctrl+C runs nothing. The script only reads
+`$LASTEXITCODE`, so every command sees the value it would without the integration. D's
+code is 0 when the line succeeded. A failed line whose commands are all cmdlets cannot
+have run a native program, so its code is 1, even after an earlier native failure. For
+any other failed line, the code is 1 when it raised a new PowerShell error and
+`$LASTEXITCODE` is 0 or unset, and the native `$LASTEXITCODE` when that is non-zero and no
+new error was raised. A line with both, such as
+`Get-Item missing -ErrorAction SilentlyContinue; sh -c 'exit 4'`, ends with no code,
+even when the native code repeats the previous one: it is unknown which statement failed
+last, so `run_command` reports `completed` with `exit_code: null` rather than a guess.
+One case remains inexact: a line that calls a function or script (which might run a
+native program) and fails without raising an error reports the last non-zero native
+code, which may come from an earlier line. Windows PowerShell 5.1 is not supported.
+
 It adds its hooks beside any existing ones, so it can stay alongside another
 OSC 133 integration. Once it is loaded, though, markers from a nested shell or
 an ssh session in that pane carry no token and are dropped, so `run_command`
@@ -297,8 +320,7 @@ pane's token), `unverified` (it had no valid token, as from a nested shell, ssh
 or a program printing markers, whether admitted or dropped), or `none` (no marker
 yet). It is observed marker evidence, not proof of which program is running; the
 older boolean `shell_integration` keeps its meaning (the newest prompt marked its
-input start). PowerShell has no SonicTerm integration yet, so
-on Windows `exit_verified` stays `false`. The secret guards against output from
+input start). The secret guards against output from
 files, remote hosts and programs that never saw the shell's environment. A program
 running in the pane as you, which could read the shell's memory, is out of scope:
 it already has the agent's powers.

@@ -242,12 +242,28 @@ eval "$(sonicterm-mcp --shell-integration zsh)"    # zsh 5.3+，写入 ~/.zshrc
 eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+，写入 ~/.bashrc
 ```
 
+```powershell
+sonicterm-mcp --shell-integration pwsh | Out-String | Invoke-Expression   # PowerShell 7+，写入 $PROFILE
+```
+
+PowerShell 集成需要 PSReadLine，PowerShell 7 会在每个交互式控制台中加载它；没有它时脚本不加载任何内容，
+因此 `run_command` 会拒绝该窗格（`no_shell_integration`），而不是等待标记。它包装 `prompt`（D、A，以及在你的
+提示符文本之后的 B）和 PSReadLine 的 `PSConsoleHostReadLine`：ReadLine 返回一行已接受的输入时写出 C，因此多行
+`{` 代码块只算一次，用 Ctrl+C 取消的行不会运行任何内容。脚本只读取 `$LASTEXITCODE`，因此每条命令看到的值
+与没有集成时相同。该行成功时 D 的退出码为 0。失败的行若只包含 cmdlet，就不可能运行原生程序，因此退出码为 1，
+即使之前有原生命令失败也是如此。其他失败的行：产生了新的 PowerShell 错误且 `$LASTEXITCODE` 为 0 或未设置时为 1；
+`$LASTEXITCODE` 非零且没有产生新错误时取该原生退出码。两者都有的行，例如
+`Get-Item missing -ErrorAction SilentlyContinue; sh -c 'exit 4'`，以不带退出码的 D 结束，即使原生退出码与上一次
+相同也是如此：无法知道最后失败的是哪条语句，因此 `run_command` 报告 `completed` 且 `exit_code: null`，而不是
+猜测一个值。仍有一种情况不精确：调用函数或脚本（它们可能运行原生程序）且失败时未产生错误的行，会报告最后一个
+非零的原生退出码，而它可能来自更早的行。不支持 Windows PowerShell 5.1。
+
 它把自己的钩子加在已有钩子旁边，因此可以与其他 OSC 133 集成并存。但一旦加载，该窗格中嵌套 shell
 或 ssh 会话发出的标记都不带密钥，会被丢弃，所以 `run_command` 只能在窗格自己的 shell 中使用。
 `list_panes` 与 `read_pane` 以 `shell_integration_state` 报告最新标记的情况：`verified`（带有窗格密钥）、`unverified`
 （没有有效密钥，例如来自嵌套 shell、ssh 或打印标记的程序，无论被接受还是被丢弃）或 `none`（尚无标记）。
 它是观察到的标记证据，并不能证明当前运行的是哪个程序；旧的布尔字段 `shell_integration` 含义不变（最新提示符标记了输入起点）。
-PowerShell 目前还没有 SonicTerm 集成，因此在 Windows 上 `exit_verified` 始终为 `false`。该密钥用于防范
+该密钥用于防范
 来自文件、远程主机以及从未见过 shell 环境的程序的输出。以你的身份在窗格中运行、能读取 shell 内存的
 程序不在防范范围内：它本就拥有 agent 的权限。
 
