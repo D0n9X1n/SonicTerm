@@ -344,20 +344,30 @@ impl ParserAcquire for ReleaseAfterFailedProbe {
     }
 }
 
-/// Through the real collection and `PaneRender` boundary: two frames of an unchanged pane hand
-/// the renderer the same image list (no entries copied), and an image the decoder adds after a
-/// frame was collected leaves that frame's list as collected.
+/// Through the real collection and the real `HeldFrameSource::lend` the renderer receives: two
+/// frames of an unchanged pane hand the renderer the same image list (no entries copied), and an
+/// image the decoder adds after a frame was collected leaves that frame's list as collected.
 #[test]
 fn frames_share_an_unchanged_pane_image_list_and_keep_their_own() {
     let (mut app, window, _left, right, _inactive) = fixture(false, false);
     let sources = sources(&mut app, window, false).ok().unwrap();
     let lists = |app: &mut App, sources: &VisibleFrameSources| {
-        let mut held = sources.try_collect(|| {}).ok().unwrap();
-        let mut seen = Vec::new();
-        assemble(app, window, sources, &mut held, |panes| {
-            seen = panes.iter().map(|pane| Arc::clone(&pane.inline_images)).collect();
-        });
-        seen
+        let held = sources.try_collect(|| {}).ok().unwrap();
+        let state = app.registry.windows.get_mut(&window).unwrap();
+        let viewports = sources.reconcile_viewports(&mut state.panes, &held.guards).unwrap();
+        let (broadcast, alpha) = (BTreeSet::new(), HashMap::new());
+        let source = HeldFrameSource {
+            guards: held.guards,
+            custody: held.custody,
+            images: held.images,
+            viewports: &viewports,
+            active: sources.active_id(),
+            broadcast: &broadcast,
+            scrollbar_alpha: &alpha,
+        };
+        source.lend(|panes| {
+            panes.iter().map(|pane| Arc::clone(&pane.inline_images)).collect::<Vec<_>>()
+        })
     };
     let first = lists(&mut app, &sources);
     let second = lists(&mut app, &sources);

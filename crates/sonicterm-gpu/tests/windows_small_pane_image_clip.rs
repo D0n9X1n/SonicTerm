@@ -185,7 +185,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
         let sample_y = 24;
         let baseline_hwnd = hwnd_pixel(&window, sample_x, sample_y)?;
         let frame_count = renderer.successful_frame_count();
-        panes[0].inline_images.push(InlineImage {
+        std::sync::Arc::make_mut(&mut panes[0].inline_images).push(InlineImage {
             scroll_mark: 0,
             id: 1,
             row: 0,

@@ -397,7 +397,9 @@ and a miss settles through the unchanged contention retry. `VisibleFrameSources`
 and zoom agreement before owning handles for only the visible layout. Its source
 vector is declared before the separately borrowed parser-guard vector. Both roles use
 parsers → visible images; this changes main's former images-first order and retains
-child's parser-first order. Each image lock is released after cloning its list. The
+child's parser-first order. Each image lock is released after taking its list's `Arc`
+snapshot, a reference count and no entries copied; a later decode that adds an image
+copies the list on write, so a frame keeps the list it collected. The
 snapshots are not an atomic grid/media generation: decoded media merges later, and
 the worker's redraw plus the renderer's image identity repairs that transient.
 

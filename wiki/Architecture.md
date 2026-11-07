@@ -138,8 +138,9 @@ shows new output or changed command chrome.
 
 Both window roles use the app-local `VisibleFrameSources` collector. It validates
 the active layout before cloning visible parser/image handles and viewport metadata.
-It acquires all visible parser guards with `try_lock`, then briefly locks and copies
-only those panes' image lists. Inactive-tab and zoom-hidden image stores cannot defer
+It acquires all visible parser guards with `try_lock`, then probes only those panes'
+image stores and takes a snapshot of each list: a shared `Arc`, not a copy of its
+entries. The decoder copies a list only when it changes one a frame still holds. Inactive-tab and zoom-hidden image stores cannot defer
 the visible frame and are not cloned. The owned handles outlive the guards through
 ordinary borrows, without a lifetime cast. The shared builder creates real
 `PaneRender` grid borrows and moves each image snapshot once, inside the frame source
