@@ -12,7 +12,13 @@ impl Perform for Performer {
             0x07 => self.events.push(VtEvent::Bell),
             0x08 => self.grid.backspace(),
             0x09 => self.grid.tab(),
-            0x0A..=0x0C => self.advance_hard_line(self.erase_fill_cell(), false),
+            0x0A..=0x0C => {
+                if let Some(tap) = self.tap.as_mut() {
+                    // A stream reader armed the `tap`: a line feed ends the recorded line.
+                    tap.push('\n');
+                }
+                self.advance_hard_line(self.erase_fill_cell(), false);
+            }
             0x0D => self.grid.carriage_return(),
             _ => {
                 // When: byte is an unhandled C0 control, leave cells unchanged while keeping the parser outside ground.

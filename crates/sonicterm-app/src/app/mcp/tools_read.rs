@@ -102,7 +102,10 @@ pub(crate) fn tool_list() -> Value {
                             checked against every retained line written during the wait, not \
                             only the newest; missed_output true means some left scrollback \
                             unchecked, and truncated true means a line too long to check whole \
-                            was skipped, so a timeout does not prove no match.",
+                            was skipped, so a timeout does not prove no match. source \"stream\" \
+                            matches the text printed since the wait began instead, including \
+                            text later overwritten by \\r; it needs a regex and refuses \
+                            after_row, and context_truncated true means older text was dropped.",
             "inputSchema": {
                 "type": "object",
                 "required": ["pane_id"],
@@ -113,12 +116,16 @@ pub(crate) fn tool_list() -> Value {
                     "quiet_ms": { "type": "integer", "minimum": 1 },
                     "exit": { "type": "boolean" },
                     "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 120000 },
+                    "source": { "enum": ["screen", "stream"] },
                 },
             },
             "outputSchema": {
                 "type": "object",
                 "properties": {
                     "reason": { "enum": ["matched", "quiet", "exited", "timeout", "revoked", "pane_closed"] },
+                    "source": { "type": "string" },
+                    "offset": { "type": "integer" },
+                    "context_truncated": { "type": "boolean" },
                     "line": { "type": "string" },
                     "row": { "type": "string" },
                     "exit_code": { "type": "integer" },
@@ -432,6 +439,17 @@ fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
             return error;
         }
     };
+    let stream = match super::stream_wait::wants_stream(arguments) {
+        Ok(stream) => stream,
+        Err(error) => {
+            // When: `source` named neither screen nor stream, its tool `error` is the result.
+            return error;
+        }
+    };
+    if stream {
+        // When: a `stream` wait was asked for, it runs on the output tap instead of the rows.
+        return stream_wait_for(shared, &entry, arguments, regex, scope);
+    }
     let after = match after_row_arg(arguments) {
         Ok(after) => after,
         Err(error) => {
@@ -445,10 +463,7 @@ fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
         // When: no `regex`, `quiet` or `watch_exit` condition was given, there is nothing to wait on.
         return tool_error("invalid_arguments", "give regex, quiet_ms or exit");
     }
-    let timeout = arguments
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .map_or(DEFAULT_WAIT, |millis| Duration::from_millis(millis).min(MAX_WAIT));
+    let timeout = wait_timeout(arguments);
     #[cfg(test)]
     let recheck = shared.recheck_override.lock().unwrap_or(WAIT_RECHECK);
     #[cfg(not(test))]
@@ -480,6 +495,41 @@ fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
         return tool_error("stale_row", "after_row belongs to the other screen");
     }
     tool_result(outcome.reason.as_str(), structured)
+}
+
+/// `wait_for` with `source: "stream"`: a regex is required and `after_row` is refused, since tap
+/// offsets are not rows.
+fn stream_wait_for(
+    shared: &McpShared,
+    entry: &PaneEntry,
+    arguments: &Value,
+    regex: Option<regex::Regex>,
+    scope: &CallScope,
+) -> Value {
+    let Some(regex) = regex else {
+        // When: no `regex` was given, a stream wait has nothing to look for.
+        return tool_error("invalid_arguments", "source \"stream\" needs a regex");
+    };
+    if arguments.get("after_row").is_some() {
+        // When: `after_row` `is_some`, its row token has no meaning in the printed stream.
+        return tool_error("invalid_arguments", "after_row applies only to source \"screen\"");
+    }
+    let condition = super::stream_wait::StreamCondition {
+        regex,
+        watch_exit: arguments.get("exit").and_then(Value::as_bool).unwrap_or(false),
+        quiet: arguments.get("quiet_ms").and_then(Value::as_u64).map(Duration::from_millis),
+        timeout: wait_timeout(arguments),
+        recheck: WAIT_RECHECK,
+    };
+    super::stream_wait::wait(shared, entry, &condition, scope)
+}
+
+/// The `timeout_ms` argument, defaulted and capped.
+fn wait_timeout(arguments: &Value) -> Duration {
+    arguments
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_WAIT, |millis| Duration::from_millis(millis).min(MAX_WAIT))
 }
 
 /// The `regex` argument compiled within the size limits, `None` when absent.

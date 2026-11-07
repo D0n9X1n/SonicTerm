@@ -203,7 +203,10 @@ iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有�
 | `revoked` | 两者 | 客户端离开，或服务器停止、或 `control`、`read` 发生变化。 |
 | `pane_closed` | 两者 | 窗格先被关闭。 |
 
-两个工具还会报告 `output_incomplete`：对 `wait_for` 为 `missed_output || truncated || !scan_complete`（等待期间写入的部分输出未被检查，因此超时不能证明什么）；
+`source: "stream"` 的 `wait_for` 匹配等待开始后打印的文本而非屏幕行，因此之后被 `\r` 覆盖的进度行仍可匹配；
+见 [平台集成](Platform-Integration-zh-CN)。
+
+两个工具还会报告 `output_incomplete`：对 `wait_for` 为 `missed_output || truncated || !scan_complete`（流式等待为 `context_truncated`）（等待期间写入的部分输出未被检查，因此超时不能证明什么）；
 对 `run_command` 为 `truncated || output_truncated`（返回的行可能缺少命令的部分输出）。
 
 ### 信任退出码

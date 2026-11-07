@@ -679,6 +679,8 @@ struct Performer {
     /// ECMA-48: REP repeats the GRAPHIC CHARACTER immediately preceding
     /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
+    /// Printed text for stream readers; `None` unless one has armed it.
+    tap: Option<Box<vt_tap::OutputTap>>,
     dcs_capture: Option<MediaCapture>,
     /// Pool this parser's media captures stage in.
     staging_pool: Arc<CaptureStagingPool>,
@@ -745,7 +747,11 @@ mod vt_kitty_cursor;
 
 #[path = "vt_image_cursor.rs"]
 mod vt_image_cursor;
+
+#[path = "vt_tap.rs"]
+mod vt_tap;
 pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
+pub use vt_tap::{TapHold, TapText, OUTPUT_TAP_CHARS};
 
 use vt_capture::parse_iterm2_file_event;
 pub use vt_osc::{parse_osc7_cwd, parse_osc7_cwd_snapshot};

@@ -105,6 +105,8 @@ impl Parser {
     }
 
     fn advance_prefix(&mut self, bytes: &[u8]) -> (usize, Vec<VtEvent>) {
+        // A tap whose readers all left is freed here, under the parser's own lock.
+        self.release_idle_tap();
         let mut offset = 0;
         let len = bytes.len();
         while offset < len {

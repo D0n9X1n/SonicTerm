@@ -234,8 +234,12 @@ here; a client should treat an unknown value as `timeout`/`running`.
 | `revoked` | both | The client went away, or the server stopped or changed `control` or `read`. |
 | `pane_closed` | both | The pane was closed first. |
 
+A `wait_for` with `source: "stream"` matches the text printed since the wait began
+rather than screen rows, so a progress line later overwritten by `\r` still matches;
+see [Platform Integration](Platform-Integration).
+
 Both tools also report `output_incomplete`: for `wait_for` it is
-`missed_output || truncated || !scan_complete` (some output written during the wait
+`missed_output || truncated || !scan_complete` (`context_truncated` for a stream wait) (some output written during the wait
 was not checked, so a timeout proves nothing); for `run_command` it is
 `truncated || output_truncated` (the returned lines may be missing some of the
 command's output).
