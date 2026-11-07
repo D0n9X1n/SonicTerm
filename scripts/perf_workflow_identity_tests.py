@@ -474,6 +474,25 @@ class WindowsComparisonLegTests(unittest.TestCase):
         self.assertNotIn("timeout-minutes", (Path(__file__).resolve().parent.parent / ".github" / "workflows"
                                              / "perf.yml").read_text(encoding="utf-8"))
 
+    def test_only_a_release_run_adds_s13s_wide_layouts(self):
+        # Every entry carries release_scenarios: S13's three wide layouts on the shard holding S13, empty
+        # elsewhere; the comparison step appends them only when the run is not short, so a pull request
+        # never runs them and its 35-minute budget is untouched.
+        wide = ["S13/wide-8", "S13/wide-16", "S13/wide-32"]
+        for job_id in ("compare-macos", "compare-windows"):
+            with self.subTest(job=job_id):
+                entries = self.matrix(job_id)
+                self.assertTrue(all("release_scenarios" in entry for entry in entries))
+                holders = {entry["shard"]: entry["release_scenarios"].split() for entry in entries
+                           if entry["release_scenarios"]}
+                self.assertEqual(list(holders.values()), [wide])
+                holder = next(entry for entry in entries if entry["release_scenarios"])
+                self.assertIn("S13", holder["scenarios"].split())
+                step = next(step for step in perf_workflow_fixture.load_perf_workflow()["jobs"][job_id]["steps"]
+                            if step.get("name") == "Compare the base and the head")
+                self.assertEqual(step["env"]["RELEASE_SCENARIOS"], "${{ matrix.release_scenarios }}")
+                self.assertIn('if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_SCENARIOS" ]; then', step["run"])
+
     def test_windows_legs_get_cairo_bash_and_their_own_names(self):
         # Windows builds need Cairo from vcpkg, the shared step scripts need bash, and the two platforms'
         # shards must not share an artifact name.

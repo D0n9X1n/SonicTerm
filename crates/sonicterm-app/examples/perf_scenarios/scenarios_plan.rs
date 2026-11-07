@@ -22,6 +22,24 @@ pub(crate) const S13_WINDOW_COLS: u16 = 120;
 /// so the 40-row 4-pane window stays below the macOS runner's 43-row screen clamp.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) const S13_PANE_ROWS: u16 = 10;
+/// Rows each pane of an S13 wide layout requests: the 8-row grid stays at 40 rows, below the
+/// macOS runner's 43-row clamp, so every layout gets the geometry it asks for.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const S13_WIDE_PANE_ROWS: u16 = 5;
+/// Columns of every S13 wide layout; each pane gets a quarter of the window's width.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const S13_WIDE_COLUMNS: usize = 4;
+
+/// The rows of S13's wide `variant`, or `None` for the stacked variants.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn s13_wide_rows(variant: &str) -> Option<usize> {
+    match variant {
+        "wide-8" => Some(2),
+        "wide-16" => Some(4),
+        "wide-32" => Some(8),
+        _ => None,
+    }
+}
 
 /// The plan for `id` and `variant` on `host`, or `None` when the catalog does not list them.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -335,7 +353,13 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         ("S13", _) => {
             // Every pane spans the window's full width, stacked: the panes differ from the 2-pane
             // layout only in count, never in width, and `window_rows` doubles with the pane count.
-            let (roles, setup) = if variant == "sustained-4" {
+            let (roles, setup) = if let Some(rows) = s13_wide_rows(variant) {
+                // An equal grid four panes wide; role 0 floods top left and role 1 types.
+                let (setup, _) = grid::grid_setup(S13_WIDE_COLUMNS, rows);
+                let mut roles = vec![Workload::IdleShell; S13_WIDE_COLUMNS * rows];
+                roles[0] = Workload::SustainedFlood;
+                (roles, setup)
+            } else if variant == "sustained-4" {
                 (
                     vec![
                         Workload::SustainedFlood,
@@ -441,7 +465,10 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         window_rows: match spec.id {
             "S1" | "S12" if variant != "atlas-retry" => Some(STRIP_SAFE_ROWS),
             // S13 stacks two or four full-width panes, so the window is that many panes tall.
-            "S13" => Some(if variant == "sustained-4" { 4 } else { 2 } * S13_PANE_ROWS),
+            "S13" => Some(match s13_wide_rows(variant) {
+                Some(rows) => rows as u16 * S13_WIDE_PANE_ROWS,
+                None => (if variant == "sustained-4" { 4 } else { 2 }) * S13_PANE_ROWS,
+            }),
             _ => None,
         },
         window_cols: (spec.id == "S13").then_some(S13_WINDOW_COLS),
@@ -488,3 +515,7 @@ pub(crate) fn all_plans_on(host: Host) -> Vec<Plan> {
 #[cfg(test)]
 #[path = "scenarios_plan_tests.rs"]
 mod scenarios_plan_tests;
+
+#[cfg(any(target_os = "macos", windows, test))]
+#[path = "scenarios_plan_grid.rs"]
+mod grid;

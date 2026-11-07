@@ -334,6 +334,12 @@ parser guards only while it assembles; they are released before the surface is
 acquired and the frame presented, on the GPU and GDI paths alike. The retry floor
 stays one full frame period.
 
+Collection stays whole-frame: every visible pane is taken in one assembly. S13
+measured under 1% failed collections and an unchanged p95 at two and four panes,
+and each release comparison measures 8, 16 and 32 panes beside one flood; whole-frame
+collection is revisited only when that release `Scaling` row reports a layout above
+1% failed collections or a p95 growing more than 10% per doubling.
+
 ### Windows CPU presentation
 
 When degradation is active on Windows, `software_frame::SoftwareFrame` composes

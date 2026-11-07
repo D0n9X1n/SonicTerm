@@ -409,7 +409,9 @@ a reproduction.
   - **Release pipeline:** runs for each pushed release tag and may take hours.
     It compares the previous release tag with the new one using full-length
     runs, `--counters` and the shipping release profile. Put any long or exhaustive perf
-    measurement here, not in the PR pipeline.
+    measurement here, not in the PR pipeline: the matrix entry holding S13 also runs its
+    release-only wide layouts (`S13/wide-8`, `S13/wide-16`, `S13/wide-32`) through its
+    `release_scenarios` field, whose `Scaling` row is reported, not a gate.
   - **Locally:** build and run the functional checks only. The local gate,
     including `macos-perf-smoke` and `windows-perf-smoke`, proves the tooling
     works and asserts no timing.

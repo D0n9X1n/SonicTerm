@@ -128,5 +128,60 @@ class ContentionVerdictTests(unittest.TestCase):
         self.assertTrue(all(len(row) == len(verdict_rule.COLUMNS) for row in rows))
 
 
+class WideScalingTests(unittest.TestCase):
+    """The release-only scaling rule over S13's wide layouts."""
+
+    def wide(self, p95s=(10.0, 10.5, 11.0), failed=(0, 0, 0), grid=(30, 5), collections=(1_000,) * 3):
+        return {label: [run([value] * 300, parser=miss, grids=(grid,) * panes, collections=count)]
+                for label, value, miss, panes, count
+                in zip(verdict_rule.WIDE, p95s, failed, verdict_rule.WIDE_PANES, collections)}
+
+    def test_a_layout_without_collections_gives_no_verdict(self):
+        # Equal grids and enough samples, but one layout recorded no collection: no verdict, named,
+        # for whichever layout it is, rather than a division by zero.
+        for empty, label in enumerate(verdict_rule.WIDE):
+            counts = tuple(0 if index == empty else 1_000 for index in range(3))
+            row = self.scaling(self.wide(collections=counts))
+            self.assertEqual(row[1], verdict_rule.NO_VERDICT, label)
+            self.assertIn(f"{label}: no collection was recorded", row[2])
+
+    def scaling(self, heads):
+        rows = verdict_rule.verdict_rows(heads)
+        return next(row for row in rows if row[0] == "Scaling")
+
+    def test_steady_layouts_scale(self):
+        # Within 10% per doubling and under 1% failed collections: the rule says it scales.
+        self.assertEqual(self.scaling(self.wide())[1], verdict_rule.SCALES)
+
+    def test_a_p95_jump_or_failed_collections_do_not_scale(self):
+        # A 20% jump from 16 to 32 panes, or 1% failed collections in one layout, breaks the rule.
+        self.assertEqual(self.scaling(self.wide(p95s=(10.0, 10.5, 12.6)))[1], verdict_rule.DOES_NOT_SCALE)
+        self.assertEqual(self.scaling(self.wide(failed=(0, 10, 0)))[1], verdict_rule.DOES_NOT_SCALE)
+
+    def test_unequal_workloads_or_a_missing_layout_give_no_verdict(self):
+        # A host's own equal size for every layout (31x3 on one macOS host) is fine.
+        self.assertEqual(self.scaling(self.wide(grid=(31, 3)))[1], verdict_rule.SCALES)
+        # Shrinking panes as the count doubles is a different workload per pane, not scaling.
+        heads = self.wide()
+        heads["S13/wide-8"] = [run([10.0] * 300, grids=((120, 20),) * 8)]
+        heads["S13/wide-16"] = [run([10.0] * 300, grids=((60, 10),) * 16)]
+        self.assertEqual(self.scaling(heads)[1], verdict_rule.NO_VERDICT)
+        # A layout that recorded fewer roles than its plan is not that layout.
+        heads = self.wide()
+        heads["S13/wide-32"] = [run([10.0] * 300, grids=((30, 5),) * 2)]
+        self.assertEqual(self.scaling(heads)[1], verdict_rule.NO_VERDICT)
+        # Panes unequal within a layout, or a missing layout, prove nothing.
+        heads = self.wide()
+        heads["S13/wide-16"] = [run([10.0] * 300, grids=((30, 5),) * 15 + ((15, 5),))]
+        self.assertEqual(self.scaling(heads)[1], verdict_rule.NO_VERDICT)
+        heads = self.wide()
+        del heads["S13/wide-32"]
+        self.assertEqual(self.scaling(heads)[1], verdict_rule.NO_VERDICT)
+
+    def test_a_pr_run_without_wide_layouts_adds_no_scaling_rows(self):
+        # The PR pipeline never runs them, so its S13 section is unchanged.
+        heads = {verdict_rule.TWO_PANES: [run([10.0] * 300)], verdict_rule.FOUR_PANES: [run([10.0] * 300)]}
+        self.assertFalse(any(row[0] == "Scaling" for row in verdict_rule.verdict_rows(heads)))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
