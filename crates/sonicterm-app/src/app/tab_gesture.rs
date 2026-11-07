@@ -218,7 +218,7 @@ impl App {
         if let Some(state) = self.windows.get_mut(&window) {
             state.drag_target = target;
         }
-        if is_main && !self.os_drag_handoff_started {
+        if is_main && !self.interaction.os_drag_handoff_started {
             // When: `is_main` and `os_drag_handoff_started` is false, test once whether the drag crossed the OS threshold.
             let started_index = self.windows.get(&window).and_then(|state| {
                 state
@@ -231,7 +231,7 @@ impl App {
             });
             if let Some(index) = started_index {
                 // When: `started_index` is Some, hand this tab gesture to the OS backend once.
-                self.os_drag_handoff_started = true;
+                self.interaction.os_drag_handoff_started = true;
                 let _ = self.try_os_drag_handoff(index);
             }
         }

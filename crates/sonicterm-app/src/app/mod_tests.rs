@@ -509,7 +509,8 @@ fn native_drag_keeps_the_pressed_tab_after_an_earlier_tab_closes() {
         let pressed = app.tab_id_at(source, 1).unwrap();
         app.__test_set_os_drag_source(Some((source, 1)));
         drop(app.detach_from_child(source, 0));
-        app.os_drag_pending
+        app.interaction
+            .os_drag_pending
             .set_ended(os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos: (120, 240) });
 
         app.handle_os_drag_ended();
@@ -532,7 +533,8 @@ fn native_drag_cancels_when_the_pressed_tab_has_closed() {
     let survivor = app.tab_id_at(main, 2).unwrap();
     app.__test_set_os_drag_source(Some((main, 1)));
     drop(app.detach_from_child(main, 1));
-    app.os_drag_pending
+    app.interaction
+        .os_drag_pending
         .set_ended(os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos: (120, 240) });
 
     app.handle_os_drag_ended();
@@ -591,11 +593,11 @@ fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes(
                         target_slot: 0,
                     }
                 };
-                app.os_drag_pending.set_ended(outcome);
+                app.interaction.os_drag_pending.set_ended(outcome);
 
                 assert_eq!(app.handle_os_drag_ended(), Some(outcome));
                 assert!(app.handle_os_drag_ended().is_none());
-                assert!(app.os_drag_source.is_none());
+                assert!(app.interaction.os_drag_source.is_none());
                 assert!(app.pending_tear_out.is_none());
                 let transferred = !cancelled && matches!(mutation, 0 | 2);
                 assert_eq!(app.windows[&target].tabs.len(), if transferred { 2 } else { 1 });

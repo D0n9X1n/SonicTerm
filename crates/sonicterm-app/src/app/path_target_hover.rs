@@ -142,8 +142,9 @@ impl App {
     ) {
         let modifier_held = self.open_modifier_held(window_id);
         let preview_allowed = self.frontmost_window == Some(window_id)
-            && !(self.command_palette.is_open()
-                && self.palette_attached_window.or(self.main_window_id) == Some(window_id));
+            && !(self.interaction.command_palette.is_open()
+                && self.interaction.palette_attached_window.or(self.main_window_id)
+                    == Some(window_id));
         let mut probe_request = None;
         let mut hovered = None;
         let explicit_hyperlink = target.as_ref().is_some_and(|target| target.explicit_hyperlink);

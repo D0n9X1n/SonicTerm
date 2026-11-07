@@ -618,7 +618,9 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_ime_candidate_anchor_kind(&self, win_id: WindowId) -> Option<&'static str> {
         let child = self.windows.get(&win_id)?;
-        if self.command_palette.is_open() && self.palette_attached_window == Some(win_id) {
+        if self.interaction.command_palette.is_open()
+            && self.interaction.palette_attached_window == Some(win_id)
+        {
             // When: the palette is open and attached to `win_id`, so it owns the
             // caret and the candidate window anchors to its query row.
             return Some("palette");

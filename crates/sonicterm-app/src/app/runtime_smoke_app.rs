@@ -56,7 +56,7 @@ impl super::super::App {
         };
         for name in ["Work 工作", ""] {
             self.start_rename_window(id);
-            self.command_palette.set_query(name);
+            self.interaction.command_palette.set_query(name);
             self.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
             // A name shows as `#N name`; a cleared one gives the title back to the active tab.
             let number = self.window_keys.get(id).unwrap().raw();

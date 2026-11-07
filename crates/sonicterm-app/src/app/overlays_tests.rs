@@ -16,9 +16,9 @@ fn reopening_tab_selector_in_another_window_selects_its_first_tab() {
         app.open_tab_selector(window);
         let expected = app.windows[&window].tabs.tabs()[0].id;
         assert!(
-            matches!(app.command_palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == expected)
+            matches!(app.interaction.command_palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == expected)
         );
-        app.command_palette.close();
+        app.interaction.command_palette.close();
     }
 }
 
@@ -34,17 +34,17 @@ fn palette_input_is_owned_by_its_attached_window_only() {
         app.open_tab_selector(owner);
         for source in [main, child, sibling] {
             assert_eq!(app.command_palette_owns_input(source), source == owner);
-            let before = app.command_palette.query().to_string();
+            let before = app.interaction.command_palette.query().to_string();
             let consumed = app.command_palette_handle_ime_in_window(
                 source,
                 &winit::event::Ime::Commit("x".into()),
             );
             assert_eq!(consumed, source == owner);
             if source != owner {
-                assert_eq!(app.command_palette.query(), before);
+                assert_eq!(app.interaction.command_palette.query(), before);
             }
         }
-        app.command_palette.close();
+        app.interaction.command_palette.close();
     }
 }
 
@@ -73,7 +73,7 @@ fn palette_pointer_event_preserves_existing_gesture_ownership() {
     assert!(!app.command_palette_handle_pointer_event(window_id, &release));
     app.main_mut().unwrap().mouse_down = false;
     assert!(app.command_palette_handle_pointer_event(window_id, &release));
-    assert!(app.command_palette.is_open());
+    assert!(app.interaction.command_palette.is_open());
     let child = app.__test_seed_child_window(&["child"]);
     assert!(!app.command_palette_handle_pointer_event(child, &release));
     assert!(!app.command_palette_handle_pointer_event(window_id, &WindowEvent::Focused(false)));
@@ -121,13 +121,13 @@ fn palette_copy_context_rejects_replaced_selection_and_busy_parser() {
     app.__test_set_palette_query("Copy to Clipboard");
     app.refresh_command_palette_context();
     assert_eq!(
-        app.command_palette.current(),
+        app.interaction.command_palette.current(),
         Some(&PaletteEntry::Command(Action::CopyToClipboard))
     );
     parser.lock().advance(b"\rcopy me");
     app.refresh_command_palette_context();
     assert_eq!(
-        app.command_palette.current(),
+        app.interaction.command_palette.current(),
         Some(&PaletteEntry::Command(Action::CopyToClipboard))
     );
     let guard = parser.lock();
@@ -136,13 +136,15 @@ fn palette_copy_context_rejects_replaced_selection_and_busy_parser() {
     );
     app.refresh_command_palette_context();
     assert_eq!(
-        app.command_palette.disabled_reason_for_visible_index(app.command_palette.selected()),
+        app.interaction
+            .command_palette
+            .disabled_reason_for_visible_index(app.interaction.command_palette.selected()),
         Some(DisabledReason::NoSelection)
     );
     drop(guard);
     parser.lock().advance(b"\rnew text");
     app.refresh_command_palette_context();
-    assert!(app.command_palette.current().is_none());
+    assert!(app.interaction.command_palette.current().is_none());
     app.__test_set_memory_clipboard("keep changed content out");
     assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter)));
     assert!(app.__test_palette_open());
@@ -160,13 +162,16 @@ fn palette_context_keeps_its_attached_window_and_rejects_vanished_tabs() {
     app.__test_set_frontmost_window(app.main_window_id);
     app.__test_set_palette_query("Activate Tab 2");
     assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::ArrowLeft)));
-    assert_eq!(app.command_palette.current(), Some(&PaletteEntry::Command(Action::ActivateTab(1))));
+    assert_eq!(
+        app.interaction.command_palette.current(),
+        Some(&PaletteEntry::Command(Action::ActivateTab(1)))
+    );
     assert_eq!(app.__test_palette_attached_window(), Some(child));
     assert!(app.__test_remove_window(child));
     assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter)));
     assert!(app.__test_palette_open());
     assert_eq!(app.main_tabs().unwrap().len(), 1);
-    assert!(app.command_palette.current().is_none());
+    assert!(app.interaction.command_palette.current().is_none());
 }
 
 /// READONLY on the attached child blocks destructive palette commands before source dispatch.
@@ -185,7 +190,7 @@ fn readonly_palette_cannot_close_a_tab_or_enter_a_mutating_submode() {
         assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter)));
         assert!(app.__test_palette_open());
         assert_eq!(
-            app.command_palette.mode(),
+            app.interaction.command_palette.mode(),
             sonicterm_ui::command_palette::CommandPaletteMode::Commands
         );
         assert_eq!(app.windows.get(&child).unwrap().tabs.len(), 2);

@@ -65,14 +65,14 @@ pub(in crate::app) fn field_ime_area(
 
 impl App {
     fn palette_ime_preedit(&self) -> &str {
-        match self.palette_attached_window {
+        match self.interaction.palette_attached_window {
             Some(id) => self.windows.get(&id).map(|window| window.ime.preedit()).unwrap_or(""),
             None => self.main().map(|window| window.ime.preedit()).unwrap_or(""),
         }
     }
 
     fn update_palette_ime_state(&mut self, ime_event: &winit::event::Ime) {
-        let target = self.palette_attached_window;
+        let target = self.interaction.palette_attached_window;
         let Some(window) = (match target {
             Some(id) => self.windows.get_mut(&id),
             None => self.main_mut(),
@@ -95,7 +95,7 @@ impl App {
     }
 
     pub(in crate::app) fn palette_ime_is_composing(&self) -> bool {
-        match self.palette_attached_window {
+        match self.interaction.palette_attached_window {
             Some(id) => {
                 self.windows.get(&id).map(|window| window.ime.is_composing()).unwrap_or(false)
             }
@@ -110,23 +110,23 @@ impl App {
     pub(in crate::app) fn command_palette_ime_cursor_area(
         &self,
     ) -> Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)> {
-        if !self.command_palette.is_open() {
+        if !self.interaction.command_palette.is_open() {
             // When: command_palette is closed there is no query row to anchor
             // the IME candidate box to; None leaves the cursor area unchanged.
             return None;
         }
-        let renderer = match self.palette_attached_window {
+        let renderer = match self.interaction.palette_attached_window {
             Some(id) => self.windows.get(&id)?.renderer.as_ref()?,
             None => self.main_renderer()?,
         };
         renderer
-            .palette_field_caret_rect(&self.command_palette, self.palette_ime_preedit())
+            .palette_field_caret_rect(&self.interaction.command_palette, self.palette_ime_preedit())
             .map(field_ime_area)
     }
 
     /// Move the attached window's OS IME candidate box to the presented palette caret.
     pub(in crate::app) fn update_command_palette_ime_cursor_area(&self) {
-        let window = match self.palette_attached_window {
+        let window = match self.interaction.palette_attached_window {
             Some(id) => self.windows.get(&id).and_then(|child| child.window.clone()),
             None => self.main_window().cloned(),
         };
@@ -151,26 +151,26 @@ impl App {
         &mut self,
         ime_event: &winit::event::Ime,
     ) -> bool {
-        if !self.command_palette.is_open() {
+        if !self.interaction.command_palette.is_open() {
             // When: command_palette is closed the IME event belongs to the
             // terminal; returning false lets window_event run its commit path.
             return false;
         }
-        self.palette_pointer_capture = None;
+        self.interaction.palette_pointer_capture = None;
         self.refresh_command_palette_context();
         self.update_palette_ime_state(ime_event);
         match ime_event {
             winit::event::Ime::Commit(text) => {
                 // One replacement per commit: RenameWindow validates atomically, other modes strip controls.
-                self.command_palette.input_str(text);
+                self.interaction.command_palette.input_str(text);
                 self.update_command_palette_ime_cursor_area();
-                self.request_redraw_for_overlay(self.palette_attached_window);
+                self.request_redraw_for_overlay(self.interaction.palette_attached_window);
             }
             winit::event::Ime::Preedit(_, _)
             | winit::event::Ime::Enabled
             | winit::event::Ime::Disabled => {
                 self.update_command_palette_ime_cursor_area();
-                self.request_redraw_for_overlay(self.palette_attached_window);
+                self.request_redraw_for_overlay(self.interaction.palette_attached_window);
             }
         }
         true

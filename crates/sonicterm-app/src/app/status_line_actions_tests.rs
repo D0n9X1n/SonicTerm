@@ -17,7 +17,7 @@ fn a_right_press_hits_the_strip_at_the_top() {
     assert!(!app.right_press_status_line(child, 50.0, 10.0), "in the titlebar band");
     assert!(!app.right_press_status_line(child, 50.0, 580.0), "where the bottom strip was");
     assert!(app.right_press_status_line(child, 50.0, 35.0), "inside the top band");
-    assert!(app.command_palette.is_open());
+    assert!(app.interaction.command_palette.is_open());
 }
 
 /// App tests hold no renderer, so this pins the sync call site: every window's renderer gets the

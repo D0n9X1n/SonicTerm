@@ -31,7 +31,7 @@ fn real_pty_readonly_ime_paste_source_and_receiver_matrix() {
                         source_readonly.then(|| CopyModeState::read_only_at((0, 0)));
                     app.windows.get_mut(&receiver_window).unwrap().copy_mode =
                         receiver_readonly.then(|| CopyModeState::read_only_at((0, 0)));
-                    app.broadcast =
+                    app.interaction.broadcast =
                         BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
                     app.__test_set_memory_clipboard("你好é");
                     app.wait_for_input_queues();
@@ -88,7 +88,7 @@ fn keyboard_owner_precedence_is_source_scoped_for_main_and_child() {
         assert_eq!(app.window_key_owner(owner), Some(WindowKeyOwner::Palette));
         assert_eq!(app.window_key_owner(other), Some(WindowKeyOwner::Terminal));
         assert_eq!(app.frontmost_window, Some(other));
-        app.command_palette.close();
+        app.interaction.command_palette.close();
         let window = app.windows.get_mut(&owner).unwrap();
         window.ime.cancel();
         window.tab_states[0].search = None;
@@ -363,7 +363,7 @@ fn window_ime_overlay_owners_take_precedence_over_readonly_and_broadcast() {
             let child = app.__test_seed_child_window(&["child"]);
             let (owner, other) = if owner_is_child { (child, main) } else { (main, child) };
             let pane = app.windows[&owner].tab_states[0].active_pane;
-            app.broadcast =
+            app.interaction.broadcast =
                 BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
             app.windows.get_mut(&owner).unwrap().copy_mode =
                 Some(CopyModeState::read_only_at((0, 0)));
@@ -384,7 +384,7 @@ fn window_ime_overlay_owners_take_precedence_over_readonly_and_broadcast() {
             assert!(app.windows[&owner].copy_mode.is_some());
             match owner_kind {
                 "palette" => {
-                    assert_eq!(app.command_palette.query(), "你好");
+                    assert_eq!(app.interaction.command_palette.query(), "你好");
                     assert!(app.windows[&owner].tab_states[0]
                         .search
                         .as_ref()
@@ -400,10 +400,10 @@ fn window_ime_overlay_owners_take_precedence_over_readonly_and_broadcast() {
                 }
                 _ => assert!(app.windows[&owner].tab_states[0].search.is_none()),
             }
-            app.command_palette.close();
+            app.interaction.command_palette.close();
             app.windows.get_mut(&owner).unwrap().tab_states[0].search = None;
             app.windows.get_mut(&owner).unwrap().copy_mode = None;
-            app.broadcast = BroadcastState::Off;
+            app.interaction.broadcast = BroadcastState::Off;
             app.handle_window_ime(owner, Ime::Commit("next".into()));
             assert_eq!(app.__test_drain_pty_writes(), vec![(pane, b"next".to_vec())]);
         }
@@ -424,7 +424,8 @@ fn window_ime_broadcasts_only_from_its_recorded_source_once() {
     let sibling = app.__test_seed_child_window(&["sibling"]);
     let sibling_pane = app.windows[&sibling].tab_states[0].active_pane;
     for (owner, pane, other) in [(main, main_pane, child), (child, child_pane, main)] {
-        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
+        app.interaction.broadcast =
+            BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
         app.frontmost_window = Some(other);
         app.__test_enable_pty_write_log();
         app.handle_window_ime(owner, Ime::Commit("é".into()));
@@ -458,10 +459,10 @@ fn window_ime_missing_owner_or_search_pane_never_falls_back() {
         app.handle_window_ime(target, Ime::Preedit("ignored".into(), None));
         app.handle_window_ime(target, Ime::Commit("ignored".into()));
     }
-    assert!(app.command_palette.query().is_empty());
+    assert!(app.interaction.command_palette.query().is_empty());
     assert!(app.windows[&main].ime.preedit().is_empty());
     assert!(app.__test_drain_pty_writes().is_empty());
-    app.command_palette.close();
+    app.interaction.command_palette.close();
     let child = app.__test_seed_child_window(&["child"]);
     for owner in [main, child] {
         let window = app.windows.get_mut(&owner).unwrap();

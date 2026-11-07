@@ -91,7 +91,7 @@ impl App {
     /// Test-only: active broadcast source pane, if broadcast is enabled.
     #[doc(hidden)]
     pub fn __test_broadcast_source(&self) -> Option<u64> {
-        match self.broadcast {
+        match self.interaction.broadcast {
             BroadcastState::On { source_pane, .. } => Some(source_pane),
             BroadcastState::Off => None,
         }

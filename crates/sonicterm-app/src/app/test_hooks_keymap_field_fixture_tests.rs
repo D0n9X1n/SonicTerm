@@ -32,14 +32,14 @@ fn real_pty_palette_field_clipboard_owns_explicit_and_menu_actions() {
                     );
                     // Cached focus names the owner only for the menu path; explicit dispatch must ignore it.
                     app.frontmost_window = Some(if menu { owner } else { unrelated });
-                    app.command_palette.set_query("你好");
-                    app.command_palette.apply_text_edit(TextEdit::MoveStart);
-                    app.command_palette.apply_text_edit(TextEdit::MoveForward);
+                    app.interaction.command_palette.set_query("你好");
+                    app.interaction.command_palette.apply_text_edit(TextEdit::MoveStart);
+                    app.interaction.command_palette.apply_text_edit(TextEdit::MoveForward);
                     app.__test_set_memory_clipboard("é");
                     app.wait_for_input_queues();
                     dispatch_field_test_action(&mut app, &Action::PasteFromClipboard, owner, menu);
-                    assert_eq!(app.command_palette.query(), "你é好", "{case}");
-                    assert_eq!(app.command_palette.cursor(), "你é".len(), "{case}");
+                    assert_eq!(app.interaction.command_palette.query(), "你é好", "{case}");
+                    assert_eq!(app.interaction.command_palette.cursor(), "你é".len(), "{case}");
                     assert_eq!(
                         (app.__test_drain_pty_writes(), submitted.take()),
                         (Vec::new(), Vec::new()),
@@ -47,13 +47,17 @@ fn real_pty_palette_field_clipboard_owns_explicit_and_menu_actions() {
                     );
 
                     // Copy writes only the selected Unicode field text and keeps the selection visible.
-                    app.command_palette.extend_to("你é好".len());
+                    app.interaction.command_palette.extend_to("你é好".len());
                     dispatch_field_test_action(&mut app, &Action::CopyToClipboard, owner, menu);
                     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("好"), "{case}");
-                    assert_eq!(app.command_palette.selected_text(), Some("好"), "{case}");
+                    assert_eq!(
+                        app.interaction.command_palette.selected_text(),
+                        Some("好"),
+                        "{case}"
+                    );
 
                     // Without a field selection, copy is a no-op rather than the terminal selection underneath.
-                    app.command_palette.set_cursor(0);
+                    app.interaction.command_palette.set_cursor(0);
                     app.__test_set_memory_clipboard("sentinel");
                     dispatch_field_test_action(&mut app, &Action::CopyToClipboard, owner, menu);
                     assert_eq!(
@@ -62,7 +66,7 @@ fn real_pty_palette_field_clipboard_owns_explicit_and_menu_actions() {
                         "{case}"
                     );
                     assert!(app.windows[&owner].selection.is_some(), "{case}");
-                    assert_eq!(app.command_palette.mode(), mode, "{case}");
+                    assert_eq!(app.interaction.command_palette.mode(), mode, "{case}");
                     if search_open {
                         let search = app.windows[&owner].tab_states[0].search.as_ref().unwrap();
                         assert_eq!(search.query, "underlay", "{case}");
@@ -93,8 +97,8 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
         let (owner, _) = windows[owner_index];
         let (unrelated, unrelated_pane) = windows[(owner_index + 2) % 3];
         open_field_palette(&mut app, owner, CommandPaletteMode::RenameTab);
-        app.command_palette.set_query("你好");
-        app.command_palette.select_all();
+        app.interaction.command_palette.set_query("你好");
+        app.interaction.command_palette.select_all();
         let whole = Some(0.."你好".len());
 
         // A rejected clipboard write keeps the field text, its selection, and the prior clipboard.
@@ -103,7 +107,7 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
         assert!(app.run_action_for_window(&Action::CopyToClipboard, owner));
         app.__test_set_clipboard_write_failure(false);
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("sentinel"));
-        assert_eq!(app.command_palette.selected_range(), whole);
+        assert_eq!(app.interaction.command_palette.selected_range(), whole);
 
         // Empty, control-only, and unreadable clipboards are consumed without any fallback delivery.
         for text in [Some(""), Some("\r\n\x1b\x7f"), None] {
@@ -111,8 +115,8 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
             app.clipboard = None;
             app.wait_for_input_queues();
             assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
-            assert_eq!(app.command_palette.query(), "你好", "{text:?}");
-            assert_eq!(app.command_palette.selected_range(), whole, "{text:?}");
+            assert_eq!(app.interaction.command_palette.query(), "你好", "{text:?}");
+            assert_eq!(app.interaction.command_palette.selected_range(), whole, "{text:?}");
             assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
         }
 
@@ -122,7 +126,7 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
         assert!(app.run_action_for_window(&Action::CopyToClipboard, owner));
         app.windows.get_mut(&owner).unwrap().ime.cancel();
-        assert_eq!(app.command_palette.query(), "你好");
+        assert_eq!(app.interaction.command_palette.query(), "你好");
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("blocked"));
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
 
@@ -132,17 +136,17 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, unrelated));
         let expected = vec![(unrelated_pane, b"u".to_vec())];
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (expected.clone(), expected));
-        assert_eq!(app.command_palette.query(), "你好");
+        assert_eq!(app.interaction.command_palette.query(), "你好");
 
         // A lost tab capture or a hidden owner cannot retarget the paste to a terminal.
-        app.tab_edit_target = None;
+        app.interaction.tab_edit_target = None;
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
-        assert_eq!(app.command_palette.query(), "你好");
+        assert_eq!(app.interaction.command_palette.query(), "你好");
         open_field_palette(&mut app, owner, CommandPaletteMode::Commands);
         app.windows.get_mut(&owner).unwrap().hidden = true;
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
         app.windows.get_mut(&owner).unwrap().hidden = false;
-        assert_eq!(app.command_palette.query(), "");
+        assert_eq!(app.interaction.command_palette.query(), "");
         app.wait_for_input_queues();
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
 
@@ -150,12 +154,12 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
         close_field_palette(&mut app);
         assert!(app.run_action_for_window(&Action::OpenCommandPalette, owner));
         assert!(app.run_action_for_window(&Action::UpdateTabColor, owner));
-        assert_eq!(app.command_palette.mode(), CommandPaletteMode::TabColor);
+        assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::TabColor);
         app.__test_set_memory_clipboard("sentinel");
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
         assert!(app.run_action_for_window(&Action::CopyToClipboard, owner));
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("sentinel"));
-        assert_eq!(app.command_palette.query(), "");
+        assert_eq!(app.interaction.command_palette.query(), "");
         app.wait_for_input_queues();
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
         close_field_palette(&mut app);

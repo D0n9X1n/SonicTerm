@@ -129,9 +129,9 @@ fn startup_and_reload_never_call_the_backend() {
 fn selecting_the_command_shows_the_list_and_changes_nothing() {
     let (mut app, calls, _) = app_with(Ok(two_item_plan()), Vec::new());
     assert!(app.run_action(&Action::SetDefaultHandlers));
-    assert_eq!(app.command_palette.mode(), CommandPaletteMode::Confirm);
-    assert!(app.command_palette.is_open());
-    let rows: Vec<_> = app.command_palette.confirm_rows().to_vec();
+    assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::Confirm);
+    assert!(app.interaction.command_palette.is_open());
+    let rows: Vec<_> = app.interaction.command_palette.confirm_rows().to_vec();
     assert_eq!(
         rows,
         vec![
@@ -142,8 +142,11 @@ fn selecting_the_command_shows_the_list_and_changes_nothing() {
             ConfirmRow::Item("confirm note".to_string()),
         ]
     );
-    assert_eq!(app.command_palette.confirm_title(), "SonicTerm will become the default for:");
-    assert!(!app.command_palette.confirm_applies());
+    assert_eq!(
+        app.interaction.command_palette.confirm_title(),
+        "SonicTerm will become the default for:"
+    );
+    assert!(!app.interaction.command_palette.confirm_applies());
     let calls = calls.lock().unwrap();
     assert_eq!(calls.plans, 1);
     assert!(calls.applied.is_empty());
@@ -156,10 +159,10 @@ fn cancel_makes_no_backend_call() {
     let (mut app, calls, _) = app_with(Ok(two_item_plan()), Vec::new());
     app.run_action(&Action::SetDefaultHandlers);
     press(&mut app, NamedKey::Escape);
-    assert!(!app.command_palette.is_open());
+    assert!(!app.interaction.command_palette.is_open());
     app.run_action(&Action::SetDefaultHandlers);
     press(&mut app, NamedKey::Enter);
-    assert!(!app.command_palette.is_open());
+    assert!(!app.interaction.command_palette.is_open());
     assert!(app.default_handlers.pending.is_none());
     let calls = calls.lock().unwrap();
     assert_eq!(calls.plans, 2);
@@ -173,7 +176,7 @@ fn apply_calls_the_backend_once_and_reports_every_item() {
     let (mut app, calls, posted) = app_with(Ok(two_item_plan()), Vec::new());
     app.run_action(&Action::SetDefaultHandlers);
     press(&mut app, NamedKey::ArrowUp);
-    assert!(app.command_palette.confirm_applies());
+    assert!(app.interaction.command_palette.confirm_applies());
     press(&mut app, NamedKey::Enter);
     {
         let calls = calls.lock().unwrap();
@@ -234,7 +237,7 @@ fn refusal_is_reported_without_a_confirmation_page() {
     let (mut app, calls, _) =
         app_with(Err("Move SonicTerm to Applications first.".into()), Vec::new());
     app.run_action(&Action::SetDefaultHandlers);
-    assert!(!app.command_palette.is_open());
+    assert!(!app.interaction.command_palette.is_open());
     assert_eq!(
         app.__test_main_notification_message(),
         Some("Move SonicTerm to Applications first.")
@@ -248,7 +251,7 @@ fn no_backend_reports_unavailable() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     app.run_action(&Action::SetDefaultHandlers);
-    assert!(!app.command_palette.is_open());
+    assert!(!app.interaction.command_palette.is_open());
     assert_eq!(
         app.__test_main_notification_message(),
         Some("Setting default handlers is not available in this build.")
@@ -263,7 +266,7 @@ fn a_second_run_waits_for_the_first() {
     press(&mut app, NamedKey::ArrowUp);
     press(&mut app, NamedKey::Enter);
     app.run_action(&Action::SetDefaultHandlers);
-    assert!(!app.command_palette.is_open());
+    assert!(!app.interaction.command_palette.is_open());
     assert_eq!(calls.lock().unwrap().plans, 1);
     assert!(app.__test_main_notification_message().unwrap().starts_with("Still waiting"));
 }
@@ -274,8 +277,8 @@ fn a_second_run_waits_for_the_first() {
 fn a_stale_confirmation_applies_nothing() {
     let (mut app, calls, _) = app_with(Ok(two_item_plan()), Vec::new());
     app.run_action(&Action::SetDefaultHandlers);
-    app.command_palette.start_confirm("other", "Apply", "Cancel", Vec::new());
-    app.command_palette.move_selection_up();
+    app.interaction.command_palette.start_confirm("other", "Apply", "Cancel", Vec::new());
+    app.interaction.command_palette.move_selection_up();
     press(&mut app, NamedKey::Enter);
     assert!(calls.lock().unwrap().applied.is_empty());
 }
@@ -302,8 +305,9 @@ fn the_palette_entry_opens_the_confirmation_page() {
     let (mut app, calls, _) = app_with(Ok(two_item_plan()), Vec::new());
     let main = app.main_window_id.unwrap();
     app.run_action_for_window(&Action::OpenCommandPalette, main);
-    app.command_palette.set_query("default handler");
+    app.interaction.command_palette.set_query("default handler");
     let position = app
+        .interaction
         .command_palette
         .visible()
         .iter()
@@ -314,9 +318,9 @@ fn the_palette_entry_opens_the_confirmation_page() {
             )
         })
         .expect("the command is searchable by its keywords");
-    assert!(app.command_palette.select_visible_index(position));
+    assert!(app.interaction.command_palette.select_visible_index(position));
     press(&mut app, NamedKey::Enter);
-    assert_eq!(app.command_palette.mode(), CommandPaletteMode::Confirm);
+    assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::Confirm);
     assert_eq!(calls.lock().unwrap().plans, 1);
     assert!(calls.lock().unwrap().applied.is_empty());
 }

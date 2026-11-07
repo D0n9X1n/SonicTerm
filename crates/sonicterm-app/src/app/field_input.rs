@@ -149,13 +149,13 @@ impl App {
 
     /// Apply field copy or paste to the palette, doing nothing for a modal, stale, hidden, or composing editor.
     fn palette_field_clipboard(&mut self, copy: bool, window_id: WindowId) {
-        let editable = match self.command_palette.mode() {
+        let editable = match self.interaction.command_palette.mode() {
             CommandPaletteMode::Commands
             | CommandPaletteMode::StatusSegments
             | CommandPaletteMode::FontFamily => true,
             CommandPaletteMode::RenameTab => self.tab_edit_target_window() == Some(window_id),
             CommandPaletteMode::RenameWindow => {
-                self.window_rename_target.and_then(|key| self.window_keys.resolve(key))
+                self.interaction.window_rename_target.and_then(|key| self.window_keys.resolve(key))
                     == Some(window_id)
             }
             CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => false,
@@ -169,7 +169,8 @@ impl App {
         }
         if copy {
             // When: copy is requested, only the palette query's own selection may reach the clipboard.
-            if let Some(text) = self.command_palette.selected_text().map(str::to_owned) {
+            if let Some(text) = self.interaction.command_palette.selected_text().map(str::to_owned)
+            {
                 // When: selected_text is nonempty, write it and keep the selection; a failed write changes nothing.
                 let _ = self.set_clipboard_text(text);
             }
@@ -180,9 +181,9 @@ impl App {
             return;
         };
         // RenameWindow validates the whole replacement; other modes strip controls once.
-        self.command_palette.input_str(&text);
+        self.interaction.command_palette.input_str(&text);
         self.update_command_palette_ime_cursor_area();
-        self.request_redraw_for_overlay(self.palette_attached_window);
+        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 }
 

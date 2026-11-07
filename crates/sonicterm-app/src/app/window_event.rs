@@ -570,7 +570,7 @@ impl App {
         // Borrow-split: pull the renderer out via direct
         // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
         // which would borrow all of `self`). That keeps
-        // `self.command_palette`, `self.ime` available for the
+        // `self.interaction.command_palette`, `self.ime` available for the
         // disjoint mut borrows the render call needs in the same
         // expression scope.
         // panes live in the main `WindowState` too, so they're
@@ -603,12 +603,16 @@ impl App {
                     counters.status_line.sel_cells += cells_read;
                 }
             }
-            if self.command_palette.is_open() && self.palette_attached_window.is_none() {
-                self.command_palette.set_context(super::overlays::command_palette_context(
-                    main,
-                    Some(frame.guards[active_pos].1.grid()),
-                ));
-                self.command_palette.set_tabs(&main.tabs, &self.i18n);
+            if self.interaction.command_palette.is_open()
+                && self.interaction.palette_attached_window.is_none()
+            {
+                self.interaction.command_palette.set_context(
+                    super::overlays::command_palette_context(
+                        main,
+                        Some(frame.guards[active_pos].1.grid()),
+                    ),
+                );
+                self.interaction.command_palette.set_tabs(&main.tabs, &self.i18n);
             }
         }
         #[allow(clippy::type_complexity)]
@@ -785,8 +789,8 @@ impl App {
                     },
                     &self.theme,
                     cursor_visible_now
-                        && !(self.command_palette.is_open()
-                            && self.palette_attached_window.is_none()),
+                        && !(self.interaction.command_palette.is_open()
+                            && self.interaction.palette_attached_window.is_none()),
                     ws_selection_ref,
                     ws_copy_mode_ref,
                     tabs_mref,
@@ -795,7 +799,10 @@ impl App {
                     // Feed the palette only to its attached window;
                     // `None` denotes main, and routing it elsewhere
                     // would paint the overlay on the wrong window.
-                    self.palette_attached_window.is_none().then_some(&mut self.command_palette),
+                    self.interaction
+                        .palette_attached_window
+                        .is_none()
+                        .then_some(&mut self.interaction.command_palette),
                     ws_ime_ref,
                     frame_viewports.active,
                     ws_notification_ref,
@@ -851,7 +858,10 @@ impl App {
                 let preedit = ws_ime_ref.map(|ime| ime.preedit()).unwrap_or("");
                 let field_ime = super::overlays::field_ime_anchor(
                     r,
-                    self.palette_attached_window.is_none().then_some(&self.command_palette),
+                    self.interaction
+                        .palette_attached_window
+                        .is_none()
+                        .then_some(&self.interaction.command_palette),
                     search,
                     preedit,
                 );

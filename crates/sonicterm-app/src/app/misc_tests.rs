@@ -31,7 +31,8 @@ fn real_pty_search_paste_menubar_target_matrix() {
             window.tab_states[0].search = Some(search);
         }
         app.pane_by_id(bracketed).unwrap().parser.lock().advance(b"\x1b[?2004h");
-        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.interaction.broadcast =
+            BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
         app.__test_enable_pty_write_log();
         app.__test_set_memory_clipboard("menu");
         // Some(main) makes the synthetic target exercise run_action's READONLY gate rather than its no-focus fallback.
@@ -111,7 +112,8 @@ fn real_pty_paste_keeps_mixed_bracketed_destinations() {
     let (_, receiver) = windows[1];
     let (_, peer) = windows[2];
     app.pane_by_id(receiver).unwrap().parser.lock().advance(b"\x1b[?2004h");
-    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.interaction.broadcast =
+        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
     app.__test_set_memory_clipboard("paste");
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
@@ -179,7 +181,7 @@ fn assert_paste_destination_matrix(paths: bool) {
                     ));
                 }
             }
-            app.broadcast = BroadcastState::On { scope, source_pane: source };
+            app.interaction.broadcast = BroadcastState::On { scope, source_pane: source };
             app.frontmost_window = Some(missing_window);
             app.__test_enable_pty_write_log();
             app.__test_set_memory_clipboard("p'aste");
@@ -276,7 +278,8 @@ fn real_pty_paste_cmd_refusal_keeps_other_destinations() {
     record_process(pty.pid().unwrap(), true);
     app.windows.get_mut(&peer_window).unwrap().panes.get_mut(&peer).unwrap().pty = Some(pty);
     phase(peer, "spawn-end");
-    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.interaction.broadcast =
+        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
     let kind = app.kind_for(source_window);
     let submitted = PtySubmissions::start();
     for source_bracketed in [false, true] {
@@ -310,7 +313,8 @@ fn paste_oversized_destination_does_not_stop_peers() {
     let payload = "x".repeat(sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES);
     app.__test_set_memory_clipboard(&payload);
     app.__test_enable_pty_write_log();
-    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.interaction.broadcast =
+        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
     let kind = app.kind_for(source_window);
     for source_bracketed in [false, true] {
         for receiver_bracketed in [false, true] {
@@ -470,7 +474,8 @@ fn paste_notice_counts_partial_too_large() {
         .unwrap()
         .active_pane;
     app.pane_by_id(guarded).unwrap().parser.lock().advance(b"\x1b[?2004h");
-    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.interaction.broadcast =
+        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
     let text = "x".repeat(MAX_PTY_INPUT_MESSAGE_BYTES);
     app.__test_set_memory_clipboard(&text);
     app.__test_enable_pty_write_log();
@@ -507,7 +512,8 @@ fn real_pty_paste_refusal_notice_is_source_owned() {
             state.notification = None;
         }
         app.frontmost_window = Some(windows[2].0);
-        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.interaction.broadcast =
+            BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
         app.wait_for_input_queues();
         app.paste_file_paths_in_window(source_window, vec!["private\nfile.txt".into()]);
         assert!(submitted.take().is_empty());
@@ -543,7 +549,8 @@ fn real_pty_paste_refusal_notice_groups_kinds_counts_and_sizes() {
     for tab in &app.windows[&missing_window].tab_states[1..] {
         app.pane_by_id(tab.active_pane).unwrap().parser.lock().advance(b"\x1b[?2004h");
     }
-    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.interaction.broadcast =
+        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
     app.frontmost_window = Some(windows[0].0);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
@@ -565,7 +572,8 @@ fn paste_refusal_notice_handles_clipboard_and_success() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let source = app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["peer"]);
-    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.interaction.broadcast =
+        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
     app.__test_set_memory_clipboard(&"x".repeat(MAX_PTY_INPUT_MESSAGE_BYTES + 1));
     app.paste_clipboard_for_kind(FrontmostKind::Main);
     let message = app.main().unwrap().notification.as_ref().unwrap().message.clone();
@@ -602,7 +610,7 @@ fn winit_drop_collection_keeps_window_batches_atomic() {
     }
     app.drain_winit_file_drops();
     assert!(app.__test_drain_pty_writes().is_empty());
-    assert!(app.pending_winit_file_drops.is_empty());
+    assert!(app.interaction.pending_winit_file_drops.is_empty());
     app.drain_winit_file_drops();
     assert!(app.__test_drain_pty_writes().is_empty());
 }
@@ -625,7 +633,7 @@ fn winit_drop_collection_consumes_readonly_and_closed_sources() {
     app.windows.get_mut(&main).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
     app.drain_winit_file_drops();
     assert!(app.__test_drain_pty_writes().is_empty());
-    assert!(app.pending_winit_file_drops.is_empty());
+    assert!(app.interaction.pending_winit_file_drops.is_empty());
     assert!(app.main().unwrap().notification.is_none());
 
     // Main must be writable so an incorrect closed-child fallback cannot hide behind READONLY admission.
@@ -636,7 +644,7 @@ fn winit_drop_collection_consumes_readonly_and_closed_sources() {
     app.drain_winit_file_drops();
     let writes = app.__test_drain_pty_writes();
     assert!(writes.is_empty(), "closed-child drop reached writable main: {writes:?}");
-    assert!(app.pending_winit_file_drops.is_empty());
+    assert!(app.interaction.pending_winit_file_drops.is_empty());
     assert!(app.main().unwrap().notification.is_none());
 }
 

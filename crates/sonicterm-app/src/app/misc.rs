@@ -246,12 +246,12 @@ impl App {
             self.note_pane_input(pane, InputState::Blocked(1));
             return;
         }
-        self.pending_winit_file_drops.entry(window_id).or_default().push(path);
+        self.interaction.pending_winit_file_drops.entry(window_id).or_default().push(path);
     }
 
     /// Deliver each window's current-turn winit paths as one paste, discarding closed or newly READONLY targets.
     pub(super) fn drain_winit_file_drops(&mut self) {
-        for (window_id, paths) in std::mem::take(&mut self.pending_winit_file_drops) {
+        for (window_id, paths) in std::mem::take(&mut self.interaction.pending_winit_file_drops) {
             self.paste_file_paths_in_window(window_id, paths);
         }
     }
@@ -334,12 +334,12 @@ impl App {
         self.resize_visible_panes();
     }
     pub(super) fn drain_pending_os_drag_payloads(&mut self) {
-        if self.main_mut().is_none() || self.pending_os_drag_payloads.is_empty() {
+        if self.main_mut().is_none() || self.interaction.pending_os_drag_payloads.is_empty() {
             // When: main_mut has no WindowState or pending_os_drag_payloads is
             // empty; nothing can be replayed, so the queue waits for a later drain.
             return;
         }
-        let pending = std::mem::take(&mut self.pending_os_drag_payloads);
+        let pending = std::mem::take(&mut self.interaction.pending_os_drag_payloads);
         for payload in pending {
             let idx = self.new_tab_from_payload(&payload);
             tracing::info!(idx, "spawned queued OS-drag payload");
@@ -350,7 +350,7 @@ impl App {
         if self.main_mut().is_none() {
             // When: main_mut has no WindowState yet; queue the payload so a drop
             // arriving before the main window exists is replayed, not lost.
-            self.pending_os_drag_payloads.push(payload.clone());
+            self.interaction.pending_os_drag_payloads.push(payload.clone());
             tracing::info!(
                 tab = %payload.tab_title,
                 "os_drag: queued payload until main WindowState exists"
@@ -474,7 +474,7 @@ impl App {
             return (0, Vec::new());
         }
         let mut destinations = vec![source_pane];
-        if matches!(self.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
+        if matches!(self.interaction.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
         {
             // `source_pane` armed this broadcast, so append only its currently admitted receivers.
             let (receivers, blocked) = self.broadcast_receivers_counted();

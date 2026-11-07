@@ -739,7 +739,7 @@ impl App {
     /// Test-only: pending OS-drag payload count.
     #[doc(hidden)]
     pub fn __test_pending_os_drag_payload_count(&self) -> usize {
-        self.pending_os_drag_payloads.len()
+        self.interaction.pending_os_drag_payloads.len()
     }
 
     /// Test-only: drain queued OS-drag payloads after a synthetic main has
@@ -760,7 +760,7 @@ impl App {
     /// Test-only: install a mock [`os_drag::OsTabDragBackend`].
     #[doc(hidden)]
     pub fn __test_set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {
-        self.os_drag_backend = Some(backend);
+        self.interaction.os_drag_backend = Some(backend);
     }
 
     /// Test-only: hand out the shared pending-outcome mailbox
@@ -768,7 +768,7 @@ impl App {
     /// constructing a real [`winit::event_loop::EventLoopProxy`].
     #[doc(hidden)]
     pub fn __test_os_drag_pending(&self) -> Arc<os_drag::PendingDragOutcome> {
-        self.os_drag_pending.clone()
+        self.interaction.os_drag_pending.clone()
     }
 
     /// Test-only: seed the in-flight source bookkeeping that
@@ -777,7 +777,7 @@ impl App {
     /// `begin_os_tab_drag`.
     #[doc(hidden)]
     pub fn __test_set_os_drag_source(&mut self, source: Option<(WindowId, usize)>) {
-        self.os_drag_source = source
+        self.interaction.os_drag_source = source
             .and_then(|(window, index)| self.tab_id_at(window, index).map(|tab| (window, tab)));
     }
 

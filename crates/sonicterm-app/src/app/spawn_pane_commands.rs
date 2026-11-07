@@ -197,7 +197,7 @@ impl App {
             // When: active_pane_id_for_kind returns None, no pane can source the broadcast.
             return;
         };
-        self.broadcast = self.broadcast.toggled(scope, source_pane);
+        self.interaction.broadcast = self.interaction.broadcast.toggled(scope, source_pane);
         self.request_redraw_all_terminal_windows();
     }
 

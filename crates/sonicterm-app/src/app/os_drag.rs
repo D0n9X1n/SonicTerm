@@ -422,7 +422,7 @@ impl App {
     /// [`Self::__test_set_os_drag_backend`] to inject a mock.
     #[doc(hidden)]
     pub fn set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {
-        self.os_drag_backend = Some(backend);
+        self.interaction.os_drag_backend = Some(backend);
     }
 
     /// build an [`os_drag::AppHandle`] tied to the App's
@@ -438,8 +438,8 @@ impl App {
         self.event_loop_proxy.clone().map(|proxy| {
             os_drag::AppHandle::with_pending_and_bars(
                 proxy,
-                self.os_drag_pending.clone(),
-                self.os_drag_bars.clone(),
+                self.interaction.os_drag_pending.clone(),
+                self.interaction.os_drag_bars.clone(),
             )
             .with_main_window(self.main_window_id)
         })
@@ -450,7 +450,7 @@ impl App {
     /// stash a reference for use inside the OLE IDropTarget::Drop
     /// callback, where the AppHandle isn't always available.
     pub fn os_drag_bar_registry(&self) -> Arc<os_drag::TabBarRegistry> {
-        self.os_drag_bars.clone()
+        self.interaction.os_drag_bars.clone()
     }
 
     /// Publish the current tab bar layout for `window` into the shared
@@ -459,7 +459,7 @@ impl App {
     /// converting logical-px / window-local to screen via
     /// winit's `Window::outer_position`).
     pub fn publish_os_drag_bar_snapshot(&self, snapshot: os_drag::TabBarSnapshot) {
-        self.os_drag_bars.publish(snapshot);
+        self.interaction.os_drag_bars.publish(snapshot);
     }
 
     /// Convenience: build a [`os_drag::TabBarSnapshot`] from the main
@@ -506,7 +506,7 @@ impl App {
     /// Remove a window's snapshot from the registry (called on window
     /// close). Safe to call with `None` (matches main-window convention).
     pub fn remove_os_drag_bar_snapshot(&self, window: Option<WindowId>) {
-        self.os_drag_bars.remove(window);
+        self.interaction.os_drag_bars.remove(window);
     }
 
     /// Publish the tab bar snapshot for the child window keyed by `id`.
@@ -613,12 +613,12 @@ impl App {
             // drag context and recording a source would strand it.
             return false;
         };
-        let Some(backend) = self.os_drag_backend.as_mut() else {
+        let Some(backend) = self.interaction.os_drag_backend.as_mut() else {
             // When: no `os_drag_backend` is installed, so nothing can carry the
             // session and the source must not be recorded.
             return false;
         };
-        self.os_drag_source = Some((source_window, source_tab));
+        self.interaction.os_drag_source = Some((source_window, source_tab));
         backend.begin_session(handle, source_window, source_tab_idx, payload_json, drag_image_png);
         true
     }
@@ -628,11 +628,18 @@ impl App {
     /// the legacy `OsDragSink` after `begin_os_tab_drag` returns —
     /// running both on Windows would invoke `DoDragDrop` twice.
     pub fn os_drag_backend_handles_full_gesture(&self) -> bool {
-        self.os_drag_backend.as_ref().map(|backend| backend.handles_full_gesture()).unwrap_or(false)
+        self.interaction
+            .os_drag_backend
+            .as_ref()
+            .map(|backend| backend.handles_full_gesture())
+            .unwrap_or(false)
     }
 
     pub(super) fn owns_native_drop_target(&self) -> bool {
-        self.os_drag_backend.as_ref().is_some_and(|backend| backend.owns_native_drop_target())
+        self.interaction
+            .os_drag_backend
+            .as_ref()
+            .is_some_and(|backend| backend.owns_native_drop_target())
     }
 
     pub(super) fn native_drop_attributes(&self, attrs: WindowAttributes) -> WindowAttributes {
@@ -653,14 +660,18 @@ impl App {
         window_id: WindowId,
         window: &std::sync::Arc<winit::window::Window>,
     ) -> Result<(), String> {
-        if self.os_drag_backend.is_none() {
+        if self.interaction.os_drag_backend.is_none() {
             // When: os_drag_backend is absent, winit retains its default file-drop ownership.
             return Ok(());
         }
         let handle = self
             .os_drag_app_handle()
             .ok_or_else(|| "native drop event loop unavailable".to_string())?;
-        self.os_drag_backend.as_mut().unwrap().register_window(handle, window_id, window)
+        self.interaction
+            .os_drag_backend
+            .as_mut()
+            .unwrap()
+            .register_window(handle, window_id, window)
     }
 
     pub(super) fn release_child_window_registries(&mut self, window_id: WindowId) {
@@ -675,8 +686,8 @@ impl App {
             workers.cancel_window(window_id);
         }
         self.window_keys.remove(window_id);
-        self.os_drag_bars.remove(Some(window_id));
-        if let Some(backend) = self.os_drag_backend.as_mut() {
+        self.interaction.os_drag_bars.remove(Some(window_id));
+        if let Some(backend) = self.interaction.os_drag_backend.as_mut() {
             if let Err(error) = backend.unregister_window(window_id) {
                 // Failed revocation leaves native custody with the backend for its final cleanup.
                 tracing::error!(target: "sonicterm_app::app", ?window_id, %error, "native drop-target release failed");
@@ -690,7 +701,7 @@ impl App {
     /// the OS cursor stream. Reserved for future "highlight drop
     /// target in destination bar" feedback.
     pub fn handle_os_drag_moved(&mut self) -> Option<(i32, i32)> {
-        let pos = self.os_drag_pending.take_moved();
+        let pos = self.interaction.os_drag_pending.take_moved();
         if let Some(position) = pos {
             tracing::trace!(target: "sonicterm_app::app", p = ?position, "os_drag_session: cursor moved");
         }
@@ -704,8 +715,8 @@ impl App {
     /// dispatcher just clears the in-flight bookkeeping). Returns the
     /// outcome that was processed for tests to assert on.
     pub fn handle_os_drag_ended(&mut self) -> Option<os_drag::DragOutcome> {
-        let outcome = self.os_drag_pending.take_ended()?;
-        let source = self.os_drag_source.take().and_then(|(window, tab)| {
+        let outcome = self.interaction.os_drag_pending.take_ended()?;
+        let source = self.interaction.os_drag_source.take().and_then(|(window, tab)| {
             self.tab_index_of_id(window, tab).map(|index| (window, index, tab))
         });
         match outcome {
@@ -874,7 +885,7 @@ impl App {
                 crate::app::frame_counters::request_native_redraw(native);
             }
         }
-        self.os_drag_handoff_started = false;
+        self.interaction.os_drag_handoff_started = false;
         had
     }
 }

@@ -54,10 +54,13 @@ fn assert_window_name_paste_matrix(menu: bool) {
                 configure_window_name_underlay(&mut app, &windows, owner, read_only, search_open);
                 app.windows.get_mut(&owner).unwrap().custom_window_name = "你é好".into();
                 app.start_rename_window(owner);
-                assert_eq!(app.palette_attached_window, (owner_index != 0).then_some(owner));
-                assert_eq!(app.window_rename_target, app.window_key(owner));
-                app.command_palette.apply_text_edit(TextEdit::MoveStart);
-                app.command_palette.apply_text_edit(TextEdit::MoveForward);
+                assert_eq!(
+                    app.interaction.palette_attached_window,
+                    (owner_index != 0).then_some(owner)
+                );
+                assert_eq!(app.interaction.window_rename_target, app.window_key(owner));
+                app.interaction.command_palette.apply_text_edit(TextEdit::MoveStart);
+                app.interaction.command_palette.apply_text_edit(TextEdit::MoveForward);
                 app.frontmost_window = focus;
                 app.__test_set_memory_clipboard("界");
                 let searches = window_name_search_snapshot(&app, &windows);
@@ -75,7 +78,7 @@ fn assert_window_name_paste_matrix(menu: bool) {
                 dispatch_window_name_test_paste(&mut app, owner, menu);
                 let captures = (app.__test_drain_pty_writes(), submitted.take());
                 assert_eq!(
-                    app.command_palette.query(),
+                    app.interaction.command_palette.query(),
                     "你界é好",
                     "menu={menu} owner={owner_index} read_only={read_only} search={search_open}"
                 );
@@ -83,9 +86,12 @@ fn assert_window_name_paste_matrix(menu: bool) {
                     app.windows[&owner].redraw.input_pending(),
                     "accepted name input must invalidate its overlay"
                 );
-                assert_eq!(app.command_palette.cursor(), "你界".len());
-                assert_eq!(app.command_palette.mode(), CommandPaletteMode::RenameWindow);
-                assert_eq!(app.window_rename_target, app.window_key(owner));
+                assert_eq!(app.interaction.command_palette.cursor(), "你界".len());
+                assert_eq!(
+                    app.interaction.command_palette.mode(),
+                    CommandPaletteMode::RenameWindow
+                );
+                assert_eq!(app.interaction.window_rename_target, app.window_key(owner));
                 assert_eq!(window_name_search_snapshot(&app, &windows), searches);
                 assert_eq!(captures, (Vec::new(), Vec::new()), "rename paste reached a PTY");
                 for ((id, _), mode) in windows.iter().zip(&modes) {
@@ -99,8 +105,8 @@ fn assert_window_name_paste_matrix(menu: bool) {
                 assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter)));
                 assert_eq!(app.windows[&owner].custom_window_name, "你界é好");
                 assert_eq!(app.windows[&other].custom_window_name, "");
-                assert!(!app.command_palette.is_open());
-                assert_eq!(app.window_rename_target, None);
+                assert!(!app.interaction.command_palette.is_open());
+                assert_eq!(app.interaction.window_rename_target, None);
             }
         }
     }
@@ -142,30 +148,30 @@ fn real_pty_window_name_paste_rejects_chunks_without_fallback() {
                         (None, WindowNameError::ControlCharacter),
                     ];
                     for (text, error) in payloads {
-                        app.command_palette.set_query("Keep");
+                        app.interaction.command_palette.set_query("Keep");
                         if text.as_ref().is_none_or(String::is_empty) {
                             // Empty or unavailable input must not erase an earlier rejection.
-                            app.command_palette.input_window_name("\n");
+                            app.interaction.command_palette.input_window_name("\n");
                         }
                         app.test_clipboard_text = text;
                         app.clipboard = None;
                         app.wait_for_input_queues();
                         dispatch_window_name_test_paste(&mut app, owner, menu);
                         let captures = (app.__test_drain_pty_writes(), submitted.take());
-                        assert_eq!(app.command_palette.query(), "Keep");
+                        assert_eq!(app.interaction.command_palette.query(), "Keep");
                         assert_eq!(
-                            app.command_palette.window_name_error(),
+                            app.interaction.command_palette.window_name_error(),
                             Some(error),
                             "menu={menu} owner={owner_index} ro={read_only} search={search_open}"
                         );
                         assert_eq!(window_name_search_snapshot(&app, &windows), searches);
                         assert_eq!(captures, (Vec::new(), Vec::new()), "rejected paste leaked");
                         assert_eq!(app.windows[&owner].custom_window_name, "Keep");
-                        assert!(app.command_palette.is_open());
+                        assert!(app.interaction.command_palette.is_open());
                     }
                     // Escape discards the rejected edit rather than saving a partial name.
                     assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape)));
-                    assert!(!app.command_palette.is_open());
+                    assert!(!app.interaction.command_palette.is_open());
                     assert_eq!(app.windows[&owner].custom_window_name, "Keep");
                 }
             }
@@ -198,8 +204,8 @@ fn real_pty_window_name_paste_during_composition_is_consumed() {
                 app.wait_for_input_queues();
                 dispatch_window_name_test_paste(&mut app, owner, menu);
                 let captures = (app.__test_drain_pty_writes(), submitted.take());
-                assert_eq!(app.command_palette.query(), "Keep");
-                assert_eq!(app.command_palette.window_name_error(), None);
+                assert_eq!(app.interaction.command_palette.query(), "Keep");
+                assert_eq!(app.interaction.command_palette.window_name_error(), None);
                 assert!(app.windows[&owner].ime.is_composing());
                 assert_eq!(window_name_search_snapshot(&app, &windows), searches);
                 assert_eq!(captures, (Vec::new(), Vec::new()), "composing paste leaked");
@@ -232,8 +238,8 @@ fn real_pty_window_name_paste_respects_another_live_source() {
             app.wait_for_input_queues();
             dispatch_window_name_test_paste(&mut app, other, menu);
             let captures = (app.__test_drain_pty_writes(), submitted.take());
-            assert_eq!(app.command_palette.query(), "Keep");
-            assert_eq!(app.window_rename_target, app.window_key(owner));
+            assert_eq!(app.interaction.command_palette.query(), "Keep");
+            assert_eq!(app.interaction.window_rename_target, app.window_key(owner));
             assert_eq!(
                 app.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
                 "underlay"
@@ -277,8 +283,8 @@ fn real_pty_window_name_paste_after_owner_close_or_hide_keeps_live_routing() {
             assert!(!handled, "a closed explicit source must not fall back to main");
             assert_eq!(captures, (Vec::new(), Vec::new()));
         }
-        assert!(!app.command_palette.is_open());
-        assert_eq!(app.window_rename_target, None);
+        assert!(!app.interaction.command_palette.is_open());
+        assert_eq!(app.interaction.window_rename_target, None);
         app.frontmost_window = Some(other);
         app.wait_for_input_queues();
         dispatch_window_name_test_paste(&mut app, other, true);
@@ -286,7 +292,7 @@ fn real_pty_window_name_paste_after_owner_close_or_hide_keeps_live_routing() {
         assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "underlay");
         assert_eq!(app.windows[&owner].custom_window_name, "Keep");
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
-        assert!(!app.command_palette.is_open());
+        assert!(!app.interaction.command_palette.is_open());
     }
 }
 
@@ -325,7 +331,7 @@ fn real_pty_window_name_paste_without_modal_preserves_normal_routes() {
                     let expected = window_name_terminal_writes(&windows, owner_index, "plain");
                     assert_eq!(captures, (expected.clone(), expected));
                 }
-                assert!(!app.command_palette.is_open());
+                assert!(!app.interaction.command_palette.is_open());
                 assert_eq!(
                     app.windows[&other].tab_states[0].search.as_ref().unwrap().query,
                     "peer"
@@ -344,7 +350,8 @@ fn window_name_paste_fixture(
     let (owner, source) = windows[owner_index];
     let (_, bracketed) = windows[(owner_index + 1) % windows.len()];
     app.pane_by_id(bracketed).unwrap().parser.lock().advance(b"\x1b[?2004h");
-    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.interaction.broadcast =
+        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
     app.__test_enable_pty_write_log();
     app.clipboard = None;
     app.__test_set_memory_clipboard("probe");
@@ -502,7 +509,8 @@ fn real_pty_search_paste_explicit_source_matrix() {
         window.tabs.activate(1);
         attach_idle_pty(&mut app, source_window, inactive);
         app.pane_by_id(bracketed).unwrap().parser.lock().advance(b"\x1b[?2004h");
-        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.interaction.broadcast =
+            BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
         app.frontmost_window = Some(other_window);
         app.__test_set_memory_clipboard("le");
         let submitted = PtySubmissions::start();
@@ -582,7 +590,8 @@ fn real_pty_search_paste_missing_pane_never_broadcasts() {
         let (mut app, windows) = search_paste_fixture();
         let (source_window, source) = windows[source_index];
         let (other_window, _) = windows[(source_index + 1) % 3];
-        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.interaction.broadcast =
+            BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
         app.frontmost_window = Some(other_window);
         app.__test_set_memory_clipboard("probe");
         let submitted = PtySubmissions::start();
@@ -636,7 +645,8 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
         let (mut app, windows) = search_paste_fixture();
         let (source_window, source) = windows[source_index];
         let (other_window, _) = windows[(source_index + 1) % 3];
-        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.interaction.broadcast =
+            BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
         app.frontmost_window = Some(other_window);
         let submitted = PtySubmissions::start();
         // Successful delivery to these same peers proves that empty captures below are not disconnected-PTY artifacts.

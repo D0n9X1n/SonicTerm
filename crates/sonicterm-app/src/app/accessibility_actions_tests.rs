@@ -58,7 +58,11 @@ fn an_assistive_technology_click_obeys_readonly_and_stays_on_its_window() {
     assert_eq!(app.windows[&window_id].tabs.len(), tabs, "READONLY refused the new tab");
     app.windows.get_mut(&window_id).unwrap().copy_mode = None;
     app.handle_accessibility_request(window_id, click(StatusSegmentId::Cpu));
-    assert_eq!(app.palette_attached_window, Some(window_id), "rename opened on the source");
+    assert_eq!(
+        app.interaction.palette_attached_window,
+        Some(window_id),
+        "rename opened on the source"
+    );
 }
 
 #[test]
@@ -215,7 +219,7 @@ fn a_queued_click_whose_node_now_carries_another_action_is_dropped() {
         &[(StatusSegmentId::Mem, 0.0, Some(SegmentClick::Action(Action::RenameWindow)))],
     );
     app.handle_accessibility_request(window_id, AccessibilityRequest::Click { node: mem, target });
-    assert_eq!(app.palette_attached_window, None, "the new action did not run");
+    assert_eq!(app.interaction.palette_attached_window, None, "the new action did not run");
     assert!(app.status_line_shown(), "nor did the old one");
 }
 
@@ -255,7 +259,7 @@ fn a_request_resolved_against_the_old_tree_is_dropped_after_its_replacement() {
     assert_eq!(target, tree_one, "resolved against the tree the adapter still held");
     assert_ne!(access(&app, window_id).resolve(mem), tree_one, "tree 2's target is published");
     app.handle_accessibility_request(window_id, AccessibilityRequest::Click { node: mem, target });
-    assert_eq!(app.palette_attached_window, None, "neither tree 2's action ran");
+    assert_eq!(app.interaction.palette_attached_window, None, "neither tree 2's action ran");
     assert!(app.status_line_shown(), "nor tree 1's");
 }
 
@@ -311,12 +315,16 @@ fn a_segment_click_hands_the_keyboard_to_what_it_opens() {
     );
     app.focus_status_line(window_id);
     assert!(app.status_focus_key(window_id, &Key::Named(NamedKey::Enter), false));
-    assert_eq!(app.palette_attached_window, Some(window_id), "the rename editor opened");
+    assert_eq!(
+        app.interaction.palette_attached_window,
+        Some(window_id),
+        "the rename editor opened"
+    );
     assert_eq!(access(&app, window_id).focus, None, "strip focus ended before the click ran");
-    let before = app.command_palette.query().to_owned();
+    let before = app.interaction.command_palette.query().to_owned();
     app.handle_window_ime(window_id, Ime::Commit("x".into()));
     assert_eq!(
-        app.command_palette.query(),
+        app.interaction.command_palette.query(),
         format!("{before}x"),
         "the character reached the editor"
     );
@@ -395,11 +403,15 @@ fn a_mouse_click_on_a_segment_hands_the_keyboard_to_what_it_opens() {
     );
     app.focus_status_line(window_id);
     assert!(app.press_status_line(window_id, 10.0, 510.0), "the press was on the strip");
-    assert_eq!(app.palette_attached_window, Some(window_id), "the rename editor opened");
+    assert_eq!(
+        app.interaction.palette_attached_window,
+        Some(window_id),
+        "the rename editor opened"
+    );
     assert_eq!(access(&app, window_id).focus, None);
-    let before = app.command_palette.query().to_owned();
+    let before = app.interaction.command_palette.query().to_owned();
     app.handle_window_ime(window_id, Ime::Commit("x".into()));
-    assert_eq!(app.command_palette.query(), format!("{before}x"));
+    assert_eq!(app.interaction.command_palette.query(), format!("{before}x"));
 }
 
 #[test]

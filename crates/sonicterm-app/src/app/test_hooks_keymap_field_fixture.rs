@@ -32,16 +32,16 @@ pub(super) fn open_field_palette(
         assert!(app.run_action_for_window(&Action::RenameTab, owner));
     }
     assert!(app.command_palette_owns_input(owner));
-    assert_eq!(app.command_palette.mode(), mode);
+    assert_eq!(app.interaction.command_palette.mode(), mode);
 }
 
 /// Reset palette ownership so each case opens its own field.
 #[cfg(any(windows, unix))]
 pub(super) fn close_field_palette(app: &mut App) {
-    app.command_palette.close();
-    app.palette_attached_window = None;
-    app.tab_edit_target = None;
-    app.window_rename_target = None;
+    app.interaction.command_palette.close();
+    app.interaction.palette_attached_window = None;
+    app.interaction.tab_edit_target = None;
+    app.interaction.window_rename_target = None;
     for window in app.windows.values_mut() {
         window.copy_mode = None;
     }

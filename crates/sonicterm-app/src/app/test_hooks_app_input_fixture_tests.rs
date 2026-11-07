@@ -159,7 +159,7 @@ fn real_pty_alltabs_keyboard_excludes_readonly_receivers() {
             } else {
                 CopyModeState::new_at((0, 0))
             });
-            app.broadcast =
+            app.interaction.broadcast =
                 BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
             app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
@@ -216,7 +216,8 @@ fn real_pty_alltabs_byte_fanout_excludes_readonly_receivers() {
         let (_, peer) = windows[(source_index + 2) % 3];
         app.windows.get_mut(&protected_window).unwrap().copy_mode =
             Some(CopyModeState::read_only_at((0, 0)));
-        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.interaction.broadcast =
+            BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
         app.wait_for_input_queues();
         let submitted = PtySubmissions::start();
         app.broadcast_from(source, b"fanout".to_vec(), PtyInputSource::Ime);

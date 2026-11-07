@@ -543,7 +543,7 @@ impl App {
     /// dispatch's record, so the strip pass, the checklist and the input path together ask each
     /// terminal window at most once.
     pub(in crate::app) fn request_checklist_redraw(&mut self) {
-        let Some(id) = self.palette_attached_window.or(self.main_window_id) else {
+        let Some(id) = self.interaction.palette_attached_window.or(self.main_window_id) else {
             // When: palette_attached_window and main_window_id are both None, nothing hosts it.
             return;
         };

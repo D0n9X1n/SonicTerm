@@ -159,7 +159,7 @@ impl App {
             }
         };
         child.coherent_frame_collected();
-        let mut palette_for_render = palette_here.then_some(&mut self.command_palette);
+        let mut palette_for_render = palette_here.then_some(&mut self.interaction.command_palette);
         if let Some(timing) = timing.as_mut() {
             timing.lap("inline_images");
         }
@@ -499,7 +499,7 @@ impl App {
                 {
                     let anchor = super::overlays::field_ime_anchor(
                         renderer,
-                        palette_here.then_some(&self.command_palette),
+                        palette_here.then_some(&self.interaction.command_palette),
                         search,
                         child.ime.preedit(),
                     );
@@ -564,7 +564,7 @@ impl App {
                 );
                 if child.role == super::WindowRole::Terminal {
                     // Only a terminal window's bar is a drop target; the Memory Usage report's is not.
-                    self.os_drag_bars.publish(snap);
+                    self.interaction.os_drag_bars.publish(snap);
                 }
             }
             if let Some(timing) = timing {

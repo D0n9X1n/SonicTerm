@@ -70,7 +70,7 @@ fn real_pty_readonly_shared_drop_is_consumed() {
             } else {
                 CopyModeState::new_at((0, 0))
             });
-            app.broadcast =
+            app.interaction.broadcast =
                 BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
             app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
@@ -172,7 +172,7 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
             assert!(app.write_to_pane(destination, bytes, PtyInputSource::PointerButton));
             assert_eq!(submitted.take(), vec![(pane, b"\x1b[<4;4;3m".to_vec())]);
             assert!(app.windows[&window].pointer_gesture.is_none());
-            app.command_palette.close();
+            app.interaction.command_palette.close();
             app.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1004h");
             app.wait_for_input_queues();
             app.handle_window_focus_changed(window, false);
@@ -203,7 +203,8 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
     }
     let (mut app, windows) = input_test_windows();
     let (source_window, source) = windows[0];
-    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.interaction.broadcast =
+        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     let encode = |targets: BTreeSet<u64>, bytes: &[u8]| {

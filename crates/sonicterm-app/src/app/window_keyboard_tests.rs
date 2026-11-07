@@ -106,7 +106,8 @@ pub(super) fn run_search_paste_key_cases(native: &winit::event::KeyEvent) {
             app.windows.get_mut(&id).unwrap().tab_states[0].search = Some(SearchState::new());
         }
         app.pane_by_id(bracketed).unwrap().parser.lock().advance(b"\x1b[?2004h");
-        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.interaction.broadcast =
+            BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
         app.frontmost_window = Some(other_window);
         app.__test_enable_pty_write_log();
         let submitted = PtySubmissions::start();
@@ -193,7 +194,7 @@ pub(super) fn run_search_paste_key_cases(native: &winit::event::KeyEvent) {
             app.start_rename_window(source_window);
             app.__test_set_memory_clipboard("renamed");
             app.handle_window_keyboard(source_window, native, false);
-            assert_eq!(app.command_palette.query(), "renamed");
+            assert_eq!(app.interaction.command_palette.query(), "renamed");
             assert_eq!(
                 app.windows[&source_window].tab_states[0].search.as_ref().unwrap().query,
                 "paste"
@@ -207,14 +208,14 @@ pub(super) fn run_search_paste_key_cases(native: &winit::event::KeyEvent) {
                 if rename_tab {
                     assert!(app.run_action_for_window(&Action::RenameTab, source_window));
                 }
-                app.command_palette.set_query("");
+                app.interaction.command_palette.set_query("");
                 app.windows.get_mut(&source_window).unwrap().copy_mode =
                     Some(CopyModeState::read_only_at((0, 0)));
                 app.__test_set_memory_clipboard("field");
                 app.wait_for_input_queues();
                 app.handle_window_keyboard(source_window, native, false);
                 assert_eq!(
-                    app.command_palette.query(),
+                    app.interaction.command_palette.query(),
                     "field",
                     "target={target} chord={chord} rename_tab={rename_tab}"
                 );
@@ -226,9 +227,9 @@ pub(super) fn run_search_paste_key_cases(native: &winit::event::KeyEvent) {
                     (app.__test_drain_pty_writes(), submitted.take()),
                     (Vec::new(), Vec::new())
                 );
-                app.command_palette.close();
-                app.palette_attached_window = None;
-                app.tab_edit_target = None;
+                app.interaction.command_palette.close();
+                app.interaction.palette_attached_window = None;
+                app.interaction.tab_edit_target = None;
             }
             app.windows.get_mut(&source_window).unwrap().copy_mode = None;
             for (id, _) in windows {
@@ -264,15 +265,15 @@ pub(super) fn run_search_paste_key_cases(native: &winit::event::KeyEvent) {
                 "",
                 "{case}"
             );
-            assert_eq!(app.command_palette.query(), "", "{case}");
+            assert_eq!(app.interaction.command_palette.query(), "", "{case}");
             assert_eq!(
                 (app.__test_drain_pty_writes(), submitted.take()),
                 (Vec::new(), Vec::new()),
                 "{case}"
             );
             assert!(app.windows[&source_window].pty_pressed_keys.is_empty(), "{case}");
-            app.command_palette.close();
-            app.palette_attached_window = None;
+            app.interaction.command_palette.close();
+            app.interaction.palette_attached_window = None;
         }
     }
 }
@@ -403,9 +404,9 @@ pub(super) fn run_field_selection_key_cases(
         let submitted = PtySubmissions::start();
         for field in ["search", "commands", "rename-tab"] {
             let case = format!("target={target} field={field}");
-            app.command_palette.close();
-            app.palette_attached_window = None;
-            app.tab_edit_target = None;
+            app.interaction.command_palette.close();
+            app.interaction.palette_attached_window = None;
+            app.interaction.tab_edit_target = None;
             let window = app.windows.get_mut(&source_window).unwrap();
             window.copy_mode = None;
             window.tab_states[0].search = None;
@@ -419,7 +420,7 @@ pub(super) fn run_field_selection_key_cases(
                 if field == "rename-tab" {
                     assert!(app.run_action_for_window(&Action::RenameTab, source_window));
                 }
-                app.command_palette.set_query(text);
+                app.interaction.command_palette.set_query(text);
             }
             app.frontmost_window = Some(other_window);
             // READONLY still permits local field editing and copying.
@@ -431,7 +432,7 @@ pub(super) fn run_field_selection_key_cases(
                     search.selected_text().map(str::to_owned)
                 } else {
                     // When: a palette field is under test, its selection lives on the shared palette.
-                    app.command_palette.selected_text().map(str::to_owned)
+                    app.interaction.command_palette.selected_text().map(str::to_owned)
                 }
             };
             let search_state = |app: &App| {
@@ -452,7 +453,7 @@ pub(super) fn run_field_selection_key_cases(
                 window.tab_states[0].search.as_mut().unwrap().set_cursor(text.len());
             } else {
                 // When: a palette field is under test, collapse the shared palette selection.
-                app.command_palette.set_cursor(text.len());
+                app.interaction.command_palette.set_cursor(text.len());
             }
             app.windows.get_mut(&source_window).unwrap().modifiers = ModifiersState::SHIFT;
             app.handle_window_keyboard(source_window, left, false);
@@ -476,9 +477,9 @@ pub(super) fn run_field_selection_key_cases(
 
         // Outside a field, Ctrl+A is not select-all: it reaches the terminal owner's configured binding.
         // Posted messages hold no real Control state, so raw chord encoding is not observable here.
-        app.command_palette.close();
-        app.palette_attached_window = None;
-        app.tab_edit_target = None;
+        app.interaction.command_palette.close();
+        app.interaction.palette_attached_window = None;
+        app.interaction.tab_edit_target = None;
         app.keymap.bindings = vec![Binding {
             keys: "ctrl+a".into(),
             action: ActionWrapper(Action::PasteFromClipboard),
@@ -539,8 +540,8 @@ pub(super) fn run_field_clipboard_alias_cases(native: &winit::event::KeyEvent) {
         app.windows.get_mut(&source_window).unwrap().modifiers = mods;
         // Reset the source to a `needle` search, with the palette over it for the commands field.
         let open_field = |app: &mut App, field: &str, select_all: bool| {
-            app.command_palette.close();
-            app.palette_attached_window = None;
+            app.interaction.command_palette.close();
+            app.interaction.palette_attached_window = None;
             let window = app.windows.get_mut(&source_window).unwrap();
             let mut search = SearchState::new();
             search.set_query("needle", window.panes[&source].parser.lock().grid());
@@ -551,9 +552,9 @@ pub(super) fn run_field_clipboard_alias_cases(native: &winit::event::KeyEvent) {
             if field == "commands" {
                 // When: the palette field is under test, open it on the source through its public action route.
                 assert!(app.run_action_for_window(&Action::OpenCommandPalette, source_window));
-                app.command_palette.set_query("needle");
+                app.interaction.command_palette.set_query("needle");
                 if select_all {
-                    app.command_palette.select_all();
+                    app.interaction.command_palette.select_all();
                 }
             }
         };
@@ -563,7 +564,7 @@ pub(super) fn run_field_clipboard_alias_cases(native: &winit::event::KeyEvent) {
                 (search.query.clone(), search.selected_text().map(str::to_owned))
             } else {
                 // When: the palette field is under test, its text and selection live on the shared palette.
-                let palette = &app.command_palette;
+                let palette = &app.interaction.command_palette;
                 (palette.query().to_owned(), palette.selected_text().map(str::to_owned))
             }
         };
@@ -614,8 +615,8 @@ pub(super) fn run_field_clipboard_alias_cases(native: &winit::event::KeyEvent) {
                 "{case}"
             );
             assert!(app.windows[&source_window].pty_pressed_keys.is_empty(), "{case}");
-            app.command_palette.close();
-            app.palette_attached_window = None;
+            app.interaction.command_palette.close();
+            app.interaction.palette_attached_window = None;
         }
         assert_eq!(app.frontmost_window, Some(other_window));
     }
@@ -725,7 +726,7 @@ pub(super) fn run_accepted_key_cases(native: &winit::event::KeyEvent) {
                 pane.keyboard_input
                     .store(parser.keyboard_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
             }
-            app.broadcast =
+            app.interaction.broadcast =
                 BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
             app.wait_for_input_queues();
             let submitted = PtySubmissions::start();

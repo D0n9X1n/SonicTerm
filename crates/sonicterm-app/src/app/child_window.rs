@@ -205,7 +205,7 @@ impl App {
         // Snapshot the app-level overlay attachment before the mutable `child`
         // borrow below pins `self.windows` for the rest of the match. Used only
         // by the `RedrawRequested` arm but cheap enough to compute once.
-        let palette_here = self.palette_attached_window == Some(win_id);
+        let palette_here = self.interaction.palette_attached_window == Some(win_id);
         let was_dirty =
             self.windows.get(&win_id).is_some_and(|window| window.redraw.input_pending());
         let pty_burst = self.windows.get(&win_id).is_some_and(WindowState::visible_output_advanced);

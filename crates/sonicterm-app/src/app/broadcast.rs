@@ -9,7 +9,7 @@ impl App {
         bytes: Vec<u8>,
         source: PtyInputSource,
     ) {
-        let BroadcastState::On { source_pane, .. } = self.broadcast else {
+        let BroadcastState::On { source_pane, .. } = self.interaction.broadcast else {
             // When: `broadcast` is not `On`, so there is no fan-out group and the
             // bytes belong to the focused pane alone.
             return;
@@ -38,7 +38,7 @@ impl App {
 
     /// The admitted broadcast receivers, and how many READONLY receivers were left out.
     pub(crate) fn broadcast_receivers_counted(&self) -> (std::collections::BTreeSet<u64>, usize) {
-        let BroadcastState::On { scope, source_pane } = self.broadcast else {
+        let BroadcastState::On { scope, source_pane } = self.interaction.broadcast else {
             // When: `broadcast` is not `On`, so no `scope` or `source_pane`
             // defines a group and the receiver set is empty.
             return Default::default();
@@ -59,7 +59,7 @@ impl App {
 
     /// Return render-only participants, including the live source; never use this set for PTY fan-out.
     pub(crate) fn broadcast_participants(&self) -> std::collections::BTreeSet<u64> {
-        let BroadcastState::On { source_pane, .. } = self.broadcast else {
+        let BroadcastState::On { source_pane, .. } = self.interaction.broadcast else {
             // When: broadcast is Off, no pane needs safety chrome.
             return Default::default();
         };
@@ -73,10 +73,10 @@ impl App {
     }
 
     pub(super) fn clear_closed_broadcast_source(&mut self) {
-        if let BroadcastState::On { source_pane, .. } = self.broadcast {
+        if let BroadcastState::On { source_pane, .. } = self.interaction.broadcast {
             if self.pane_by_id(source_pane).is_none() {
                 // A closed source needs its safety chrome erased in every surviving window before sleeping.
-                self.broadcast = BroadcastState::Off;
+                self.interaction.broadcast = BroadcastState::Off;
                 self.request_redraw_all_terminal_windows();
             }
         }

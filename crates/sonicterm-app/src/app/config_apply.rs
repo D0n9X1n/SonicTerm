@@ -302,8 +302,8 @@ impl App {
                 // reload_locale; None would defer to the OS locale instead.
                 if new_cfg.locale.is_empty() { None } else { Some(new_cfg.locale.as_str()) };
             self.i18n.reload_locale(requested);
-            self.palette_pointer_capture = None;
-            self.command_palette.set_locale(&self.i18n);
+            self.interaction.palette_pointer_capture = None;
+            self.interaction.command_palette.set_locale(&self.i18n);
             tracing::info!(locale = %self.i18n.locale(), "live-reload: locale");
         }
 
@@ -562,8 +562,8 @@ impl App {
                         keymap.meta.name,
                         keymap.bindings.len()
                     );
-                    self.palette_pointer_capture = None;
-                    self.command_palette.set_keymap(&keymap, &self.i18n);
+                    self.interaction.palette_pointer_capture = None;
+                    self.interaction.command_palette.set_keymap(&keymap, &self.i18n);
                     self.keymap = keymap;
                     self.set_keymap_reload_error(None);
                 }

@@ -455,7 +455,7 @@ impl App {
                 // re-arm the OS-drag
                 // handoff gate so the CursorMoved threshold check
                 // can fire once for the new gesture.
-                self.os_drag_handoff_started = false;
+                self.interaction.os_drag_handoff_started = false;
                 let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
                 let (pixel_x, pixel_y) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
                 let window_width = self

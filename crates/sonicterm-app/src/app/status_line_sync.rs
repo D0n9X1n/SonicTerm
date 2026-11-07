@@ -159,7 +159,7 @@ impl App {
             let rollover = now + Duration::from_millis(MemHistory::next_rollover_ms(wall_ms));
             next_wake = Some(next_wake.map_or(rollover, |wake| wake.min(rollover)));
         }
-        let broadcast = match self.broadcast {
+        let broadcast = match self.interaction.broadcast {
             super::super::BroadcastState::On { source_pane, .. } => {
                 Some((source_pane, self.broadcast_receivers().len()))
             }
@@ -170,9 +170,10 @@ impl App {
         });
         let locale = self.config.locale.clone();
         let palette_window = self
+            .interaction
             .command_palette
             .is_open()
-            .then(|| self.palette_attached_window.or(self.main_window_id))
+            .then(|| self.interaction.palette_attached_window.or(self.main_window_id))
             .flatten();
         let font = (self.config.font.size != self.configured_font_size)
             .then(|| FontInput::from_sizes(self.config.font.size, self.configured_font_size));

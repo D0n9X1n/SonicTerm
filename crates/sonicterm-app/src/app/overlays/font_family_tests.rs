@@ -18,7 +18,7 @@ fn picker_app(family: &str) -> (App, winit::window::WindowId) {
 
 /// The picker's row labels, in display order.
 fn labels(app: &App) -> Vec<String> {
-    app.command_palette.font_family_rows().iter().map(|row| row.label.clone()).collect()
+    app.interaction.command_palette.font_family_rows().iter().map(|row| row.label.clone()).collect()
 }
 
 /// The bindable action lists the catalog with the live family marked; an arrow applies the
@@ -27,13 +27,13 @@ fn labels(app: &App) -> Vec<String> {
 fn arrows_preview_live_and_escape_restores() {
     let (mut app, child) = picker_app("Menlo");
     assert!(app.run_action_for_window(&Action::ChooseFontFamily, child));
-    assert_eq!(app.command_palette.mode(), CommandPaletteMode::FontFamily);
+    assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::FontFamily);
     assert_eq!(labels(&app), ["✓ Menlo", "  Monaco", "  Rec Mono"]);
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowDown));
     assert_eq!(app.config.font.family, "Monaco");
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape));
     assert_eq!(app.config.font.family, "Menlo");
-    assert!(!app.command_palette.is_open());
+    assert!(!app.interaction.command_palette.is_open());
 }
 
 /// Enter keeps the highlighted family for the session, and Save writes it to `[font] family`.
@@ -48,7 +48,7 @@ fn enter_keeps_the_family_and_save_writes_it() {
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowUp));
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
     assert_eq!(app.config.font.family, "Rec Mono");
-    assert!(!app.command_palette.is_open());
+    assert!(!app.interaction.command_palette.is_open());
     app.save_current_settings_to(&path).unwrap();
     assert_eq!(Config::load_strict(&path).unwrap().font.family, "Rec Mono");
     std::fs::remove_dir_all(&dir).unwrap();
@@ -78,13 +78,16 @@ fn an_open_picker_fills_in_when_the_catalog_lands() {
     app.font_catalog = FontCatalog::Loading;
     assert!(app.run_action_for_window(&Action::ChooseFontFamily, child));
     assert_eq!(labels(&app), ["✓ Menlo"]);
-    app.command_palette.input_str("e");
+    app.interaction.command_palette.input_str("e");
     let catalog = vec!["Menlo".to_string(), "Monaco".to_string(), "Rec Mono".to_string()];
     app.adopt_font_catalog(catalog);
     assert_eq!(labels(&app), ["✓ Menlo", "  Rec Mono"]);
-    assert_eq!(app.command_palette.query(), "e");
-    assert_eq!(app.command_palette.selected_font_family(), Some("Menlo"));
-    assert_eq!(app.command_palette.font_title(), app.i18n.translate("font-picker-title"));
+    assert_eq!(app.interaction.command_palette.query(), "e");
+    assert_eq!(app.interaction.command_palette.selected_font_family(), Some("Menlo"));
+    assert_eq!(
+        app.interaction.command_palette.font_title(),
+        app.i18n.translate("font-picker-title")
+    );
 }
 
 /// Previewing a family and cancelling with Escape restores the font every renderer is asked for,

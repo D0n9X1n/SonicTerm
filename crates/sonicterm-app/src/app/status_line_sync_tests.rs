@@ -469,20 +469,20 @@ fn a_right_press_routes_through_the_shared_dispatcher_in_main_and_torn_out_windo
         }
         assert_eq!(app.route_shared_pointer(window_id, &right(ElementState::Pressed)), Some(false));
         assert_eq!(
-            app.command_palette.selected_status_row(),
+            app.interaction.command_palette.selected_status_row(),
             Some(Kind::Segment(StatusSegmentId::Mem)),
             "the pressed row is highlighted"
         );
-        assert_eq!(app.palette_attached_window.or(app.main_window_id), Some(window_id));
+        assert_eq!(app.interaction.palette_attached_window.or(app.main_window_id), Some(window_id));
         let release = app.route_shared_pointer(window_id, &right(ElementState::Released));
         assert_eq!(release, Some(false), "the release is consumed too");
-        app.command_palette.close();
-        app.palette_attached_window = None;
+        app.interaction.command_palette.close();
+        app.interaction.palette_attached_window = None;
     }
-    app.command_palette.open();
+    app.interaction.command_palette.open();
     assert!(app.route_shared_pointer(main, &right(ElementState::Pressed)).is_some());
     assert_eq!(
-        app.command_palette.mode(),
+        app.interaction.command_palette.mode(),
         CommandPaletteMode::Commands,
         "the open palette took it"
     );
@@ -500,16 +500,16 @@ fn a_right_press_in_the_strip_opens_the_checklist_on_that_segment() {
     app.windows.get_mut(&child).unwrap().status_strip = Some(strip_over_top());
     app.__test_enable_pty_write_log();
     assert!(!app.right_press_status_line(child, 50.0, 200.0), "below the band");
-    assert!(!app.command_palette.is_open());
+    assert!(!app.interaction.command_palette.is_open());
     assert!(app.right_press_status_line(child, 50.0, 10.0), "on mem, which is inert");
     assert_eq!(
-        app.command_palette.selected_status_row(),
+        app.interaction.command_palette.selected_status_row(),
         Some(Kind::Segment(StatusSegmentId::Mem))
     );
-    assert_eq!(app.palette_attached_window, Some(child));
-    app.command_palette.close();
+    assert_eq!(app.interaction.palette_attached_window, Some(child));
+    app.interaction.command_palette.close();
     assert!(app.right_press_status_line(child, 150.0, 10.0), "between segments");
-    assert_eq!(app.command_palette.selected_status_row(), Some(Kind::ShowStrip));
+    assert_eq!(app.interaction.command_palette.selected_status_row(), Some(Kind::ShowStrip));
     assert!(app.__test_drain_pty_writes().is_empty(), "nothing reached a PTY");
 }
 

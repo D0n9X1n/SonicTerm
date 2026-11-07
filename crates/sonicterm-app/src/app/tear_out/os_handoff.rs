@@ -42,7 +42,7 @@ impl App {
         // (winit intercepts mouse events, so NSDraggingSession proper isn't reachable) —
         // we still fall through to the sink, which also writes the pasteboard and
         // returns NotAcknowledged.
-        if self.os_drag_backend.is_some() {
+        if self.interaction.os_drag_backend.is_some() {
             // When: an `os_drag_backend` is installed, so it owns cursor capture and the
             // pasteboard/OLE handoff; run it before the sink to avoid a second DoDragDrop.
             let payload_json = payload.to_json().unwrap_or_default();

@@ -310,6 +310,8 @@ mod shell_token;
 pub(in crate::app) use diagnostics::DiagnosticsState;
 mod runtime_services;
 pub(in crate::app) use runtime_services::RuntimeServices;
+mod interaction;
+pub(in crate::app) use interaction::InteractionState;
 mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
@@ -386,6 +388,8 @@ pub(super) struct PendingOsc52Reassert {
 
 #[doc(hidden)]
 pub struct App {
+    /// Cross-window interaction: the palette, edit targets, field pointer captures, OS drag and drop, broadcast.
+    pub(in crate::app) interaction: InteractionState,
     /// Background services the App starts, polls and stops: probes, MCP, the reaper, GPU recovery.
     pub(in crate::app) services: RuntimeServices,
     /// Diagnostic and accounting state: counters, retention and trim samples, breadcrumbs.
@@ -537,35 +541,6 @@ pub struct App {
     /// Unit-test observation of every scheduler trim decision, in pass order.
     #[cfg(test)]
     pub(super) test_scheduler_trims: Vec<(WindowId, retention::TrimDecision)>,
-    pub(super) command_palette: CommandPalette,
-    /// Which window the (single, modal) command palette is attached to.
-    /// `None` means it is closed OR attached to the main window; `Some(id)`
-    /// means that child window. Both the main and child render paths consult
-    /// it so the palette paints only on the window it was opened from —
-    /// without it, Cmd+Shift+P typed in a torn-out child opened the palette
-    /// on the original main window.
-    pub(super) palette_attached_window: Option<WindowId>,
-    /// Stable editor target, including main; an absent key never falls back to another window.
-    pub(super) window_rename_target: Option<sonicterm_types::WindowKey>,
-    /// Tab captured when a rename or color editor opened; submit edits only that live tab.
-    tab_edit_target: Option<overlays::TabEditTarget>,
-    /// One modal press retains its source and target until release or an intervening input change.
-    palette_pointer_capture: Option<overlays::PalettePointerCapture>,
-    /// Left-button gesture inside a palette or search query, bound to its source window and field.
-    field_pointer_capture: Option<field_pointer::FieldPointerCapture>,
-    /// Windows whose cancelled field gesture still owes a left release after another window
-    /// started a field gesture; bounded by live windows and cleared on release or close.
-    field_owed_releases: Vec<winit::window::WindowId>,
-    /// Set the moment a held-tab drag
-    /// crosses [`os_drag::OS_DRAG_THRESHOLD_PX`] from its press point,
-    /// before the user releases the button. Guards
-    /// [`Self::try_os_drag_handoff`] in the `CursorMoved` path so the
-    /// OS-level drag session starts mid-gesture (cursor still down)
-    /// rather than waiting until mouse-up — which was too late for
-    /// `DoDragDrop` to capture the cursor across windows. Cleared on
-    /// `cancel_drag_session` and at every fresh mouse-down so a new
-    /// gesture re-arms cleanly.
-    pub(super) os_drag_handoff_started: bool,
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
     /// Process-wide resource governor and its owner hierarchy.
@@ -620,13 +595,6 @@ pub struct App {
     /// Without it, Cmd+T after a tear-out opened a tab in the wrong window,
     /// and Cmd+W in a new window closed the old window's tab.
     pub(super) frontmost_window: Option<WindowId>,
-    /// OS-drag tab payloads received before the main [`WindowState`] exists.
-    /// Startup pasteboard / OLE deliveries can arrive before `do_resumed`
-    /// inserts `main_window_id`; queue them so the destination tab is created
-    /// after main is available instead of silently dropping the payload.
-    pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
-    /// Native winit paths collected by source window until the current event-loop turn ends.
-    pub(super) pending_winit_file_drops: HashMap<WindowId, Vec<PathBuf>>,
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
     pub(crate) theme_loader: Option<ThemeLoader>,
@@ -691,28 +659,8 @@ pub struct App {
     /// [`crate::shell::MacShell::with_os_drag_sink`] /
     /// [`crate::shell::WindowsShell::with_os_drag_sink`].
     pub(crate) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
-    /// Platform OS-drag backend. Distinct from `os_drag_sink` (wire-format
-    /// publication): Windows drives OLE `DoDragDrop`; macOS currently publishes
-    /// the pasteboard payload and posts a cancelled outcome without cursor capture.
-    /// Installed by the platform bin (`sonicterm-mac` / `sonicterm-windows`)
-    /// at startup. `None` in tests + on platforms without an impl.
-    pub(super) os_drag_backend: Option<Box<dyn os_drag::OsTabDragBackend>>,
-    /// Shared mailbox the [`os_drag::OsTabDragBackend`] writes pending
-    /// drag outcomes into. Drained by `do_user_event` on every
-    /// `UserEvent::DragMoved` / `DragEnded` wake.
-    pub(super) os_drag_pending: Arc<os_drag::PendingDragOutcome>,
     /// The default-handler command's backend, confirmation and active run.
     pub(in crate::app) default_handlers: default_handlers::DefaultHandlersState,
-    /// Shared tab-bar snapshot registry. The App publishes the live
-    /// per-window tab bar layout into this on every redraw (see
-    /// `publish_os_drag_bar_snapshot`); a Phase-C2 OS-drag backend
-    /// reads from it inside its drop callback (Windows
-    /// IDropTarget::Drop / macOS NSDraggingDestination::performDrop)
-    /// to resolve the raw screen-coordinate drop into a real
-    /// `(WindowId, slot)` pair before posting a `DroppedOnBar` outcome.
-    pub(super) os_drag_bars: Arc<os_drag::TabBarRegistry>,
-    /// Captured window and tab identity until the native drag outcome is consumed.
-    pub(super) os_drag_source: Option<(WindowId, sonicterm_ui::tabs::TabId)>,
     /// View → Toggle Tab Bar state. When `false`, the menubar Toggle
     /// Tab Bar action has hidden the tab bar chrome. Defaults to
     /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
@@ -724,9 +672,6 @@ pub struct App {
     pub(super) startup_loads: Option<config_apply::StartupLoads>,
     /// Program-reported progress for the taskbar, Dock or launcher, and the program toast.
     pub(super) program: program_state::ProgramState,
-    /// Broadcast-input mode. When enabled, bytes typed into `source_pane`
-    /// are mirrored into matching receiver panes after the source PTY write.
-    pub(super) broadcast: BroadcastState,
     /// Quit confirmation guard for the Cmd+Q chord. A single press arms it and
     /// shows a red "press again" prompt; the app exits on a second press during
     /// the confirmation window. See [`quit_hold`].

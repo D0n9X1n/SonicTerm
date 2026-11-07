@@ -23,32 +23,32 @@ impl App {
     /// child window. Used by overlay-routing regression tests.
     #[doc(hidden)]
     pub fn __test_palette_attached_window(&self) -> Option<WindowId> {
-        self.palette_attached_window
+        self.interaction.palette_attached_window
     }
 
     /// Test-only: whether the command palette is currently open.
     #[doc(hidden)]
     pub fn __test_palette_open(&self) -> bool {
-        self.command_palette.is_open()
+        self.interaction.command_palette.is_open()
     }
 
     /// Test-only: command palette query text.
     #[doc(hidden)]
     pub fn __test_palette_query(&self) -> &str {
-        self.command_palette.query()
+        self.interaction.command_palette.query()
     }
 
     /// Test-only: command palette caret byte offset.
     #[doc(hidden)]
     pub fn __test_palette_cursor(&self) -> usize {
-        self.command_palette.cursor()
+        self.interaction.command_palette.cursor()
     }
 
     /// Test-only: replace the command-palette query and refresh its selection.
     #[doc(hidden)]
     pub fn __test_set_palette_query(&mut self, query: &str) {
-        self.palette_pointer_capture = None;
-        self.command_palette.set_query(query);
+        self.interaction.palette_pointer_capture = None;
+        self.interaction.command_palette.set_query(query);
     }
 
     /// Test-only: drive command-palette core editing without constructing a
@@ -59,13 +59,13 @@ impl App {
         key: &winit::keyboard::Key,
         modifiers: ModifiersState,
     ) -> bool {
-        if !self.command_palette.is_open() || self.palette_ime_is_composing() {
+        if !self.interaction.command_palette.is_open() || self.palette_ime_is_composing() {
             // When: `command_palette` is shut, or an IME preedit owns its input,
             // so a core text edit would corrupt composition or edit nothing.
-            return self.command_palette.is_open();
+            return self.interaction.command_palette.is_open();
         }
         if matches!(
-            self.command_palette.mode(),
+            self.interaction.command_palette.mode(),
             sonicterm_ui::command_palette::CommandPaletteMode::TabColor
                 | sonicterm_ui::command_palette::CommandPaletteMode::Confirm
         ) {
@@ -78,15 +78,15 @@ impl App {
             // query is untouched and the key is reported unhandled.
             return false;
         };
-        self.command_palette.apply_text_edit(edit);
-        self.request_redraw_for_overlay(self.palette_attached_window);
+        self.interaction.command_palette.apply_text_edit(edit);
+        self.request_redraw_for_overlay(self.interaction.palette_attached_window);
         true
     }
 
     /// Test-only: enter tab-rename mode with a known value.
     #[doc(hidden)]
     pub fn __test_start_rename_tab(&mut self, title: &str) {
-        self.command_palette.start_rename_tab(title);
+        self.interaction.command_palette.start_rename_tab(title);
     }
 
     /// Test-only: drive command-palette key handling by logical key.
@@ -105,7 +105,9 @@ impl App {
     /// candidate area.
     #[doc(hidden)]
     pub fn __test_main_ime_candidate_anchor_kind(&self) -> &'static str {
-        if self.command_palette.is_open() && self.palette_attached_window.is_none() {
+        if self.interaction.command_palette.is_open()
+            && self.interaction.palette_attached_window.is_none()
+        {
             "palette"
         } else {
             // When: `command_palette` is shut, or `palette_attached_window` names
@@ -441,9 +443,9 @@ impl App {
     ) -> Option<(String, Option<std::ops::Range<usize>>, usize)> {
         match self.field_pointer_target(id)? {
             field_pointer::FieldTarget::Palette { .. } => Some((
-                self.command_palette.query().to_string(),
-                self.command_palette.selected_range(),
-                self.command_palette.cursor(),
+                self.interaction.command_palette.query().to_string(),
+                self.interaction.command_palette.selected_range(),
+                self.interaction.command_palette.cursor(),
             )),
             field_pointer::FieldTarget::Search(_) => {
                 let window = self.windows.get(&id)?;
@@ -464,7 +466,7 @@ impl App {
         let preedit = window.ime.preedit();
         match self.field_pointer_target(id)? {
             field_pointer::FieldTarget::Palette { .. } => {
-                renderer.palette_field_caret_rect(&self.command_palette, preedit)
+                renderer.palette_field_caret_rect(&self.interaction.command_palette, preedit)
             }
             field_pointer::FieldTarget::Search(_) => {
                 let search = window.tab_states.get(window.tabs.active_index())?.search.as_ref()?;
@@ -500,16 +502,16 @@ impl App {
             return ("terminal", None);
         };
         let palette_here = if Some(id) == self.main_window_id {
-            self.palette_attached_window.is_none()
+            self.interaction.palette_attached_window.is_none()
         } else {
             // When: `id` is a child window, the palette is here only while attached to `id`.
-            self.palette_attached_window == Some(id)
+            self.interaction.palette_attached_window == Some(id)
         };
         let search =
             window.tab_states.get(window.tabs.active_index()).and_then(|tab| tab.search.as_ref());
         match overlays::field_ime_anchor(
             renderer,
-            palette_here.then_some(&self.command_palette),
+            palette_here.then_some(&self.interaction.command_palette),
             search,
             window.ime.preedit(),
         ) {
@@ -525,7 +527,7 @@ impl App {
     /// Test-only: the window holding a field pointer capture and whether it is still dragging.
     #[doc(hidden)]
     pub fn __test_field_pointer_capture(&self) -> Option<(WindowId, bool)> {
-        match self.field_pointer_capture? {
+        match self.interaction.field_pointer_capture? {
             field_pointer::FieldPointerCapture::Dragging { window_id, .. } => {
                 Some((window_id, true))
             }
@@ -536,9 +538,9 @@ impl App {
     /// Test-only: whether `id` owes the release of a cancelled field gesture, held or parked.
     #[doc(hidden)]
     pub fn __test_field_owes_release(&self, id: WindowId) -> bool {
-        self.field_owed_releases.contains(&id)
+        self.interaction.field_owed_releases.contains(&id)
             || matches!(
-                self.field_pointer_capture,
+                self.interaction.field_pointer_capture,
                 Some(field_pointer::FieldPointerCapture::Swallow { window_id }) if window_id == id
             )
     }
@@ -548,8 +550,8 @@ impl App {
     pub fn __test_collapse_field_selection(&mut self, id: WindowId) -> bool {
         match self.field_pointer_target(id) {
             Some(field_pointer::FieldTarget::Palette { .. }) => {
-                let caret = self.command_palette.cursor();
-                self.command_palette.set_cursor(caret);
+                let caret = self.interaction.command_palette.cursor();
+                self.interaction.command_palette.set_cursor(caret);
                 true
             }
             Some(field_pointer::FieldTarget::Search(_)) => {

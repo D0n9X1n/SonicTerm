@@ -198,7 +198,7 @@ impl App {
     pub(super) fn terminal_key_targets(&self, source_pane: u64) -> BTreeSet<u64> {
         let mut targets = BTreeSet::from([source_pane]);
         if matches!(
-            self.broadcast,
+            self.interaction.broadcast,
             BroadcastState::On {
                 source_pane: broadcast_source,
                 ..

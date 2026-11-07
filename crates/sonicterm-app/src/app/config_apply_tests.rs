@@ -548,7 +548,7 @@ fn palette_locale_consumers_preserve_attached_window_and_command() {
     let config = Config { locale: "ja".into(), ..Config::default() };
     let mut app = App::new(Theme::default(), config, Keymap::default());
     assert_eq!(
-        app.command_palette.label_for_visible_index(0),
+        app.interaction.command_palette.label_for_visible_index(0),
         Some(localized_label(&Action::NewTab, &app.i18n).as_str())
     );
     app.__test_synthetic_main();
@@ -556,29 +556,33 @@ fn palette_locale_consumers_preserve_attached_window_and_command() {
     app.__test_set_frontmost_window(Some(child));
     assert!(app.run_action(&Action::OpenCommandPalette));
     app.__test_set_palette_query("hide");
-    let selected = app.command_palette.current().cloned();
+    let selected = app.interaction.command_palette.current().cloned();
     let Some(sonicterm_ui::command_palette::PaletteEntry::Command(action)) = &selected else {
         panic!("hide query selects a command");
     };
-    app.command_palette.move_cursor_left();
-    let cursor = app.command_palette.cursor();
+    app.interaction.command_palette.move_cursor_left();
+    let cursor = app.interaction.command_palette.cursor();
     app.set_locale("zh-CN");
-    assert_eq!(app.command_palette.current(), selected.as_ref());
+    assert_eq!(app.interaction.command_palette.current(), selected.as_ref());
     assert_eq!(app.__test_palette_attached_window(), Some(child));
-    assert_eq!(app.command_palette.cursor(), cursor);
+    assert_eq!(app.interaction.command_palette.cursor(), cursor);
     assert_eq!(
-        app.command_palette.label_for_visible_index(app.command_palette.selected()),
+        app.interaction
+            .command_palette
+            .label_for_visible_index(app.interaction.command_palette.selected()),
         Some(localized_label(action, &app.i18n).as_str())
     );
     let mut reloaded = app.config.clone();
     reloaded.locale = "en".into();
     app.apply_new_config(reloaded);
-    assert_eq!(app.command_palette.current(), selected.as_ref());
-    assert_eq!(app.command_palette.query(), "hide");
-    assert_eq!(app.command_palette.cursor(), cursor);
+    assert_eq!(app.interaction.command_palette.current(), selected.as_ref());
+    assert_eq!(app.interaction.command_palette.query(), "hide");
+    assert_eq!(app.interaction.command_palette.cursor(), cursor);
     assert_eq!(app.__test_palette_attached_window(), Some(child));
     assert_eq!(
-        app.command_palette.label_for_visible_index(app.command_palette.selected()),
+        app.interaction
+            .command_palette
+            .label_for_visible_index(app.interaction.command_palette.selected()),
         Some(localized_label(action, &app.i18n).as_str())
     );
 }
