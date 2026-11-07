@@ -81,7 +81,10 @@ flowchart LR
 `insert_window` 和 `remove_window` 能添加或移除窗口，且两者在 debug 构建中都会检查没有窗格同时
 属于两个窗口。只有 `App::insert_window_registered` 调用 `insert_window`，它同时注册窗口的
 governor owner；`scripts/check-window-owner-registration.sh` 强制这一点。窗格在窗口之间移动仍经过
-`WindowState` 自身的 `panes` 与 `tab_states`。主窗口和拆出的窗口
+`WindowState` 自身的 `panes` 与 `tab_states`。一个带种子的状态机测试
+（`window_registry_state_lifecycle_tests.rs`）以随机顺序执行拆分、关闭、标签页转移、拆出、等待、输出和退出，
+并在每一步后检查：每个窗格只属于一个窗口，`locate_pane` 与逐一扫描一致，每个已退役窗格的信号已关闭，
+每个存活窗格都持有一个打开的 governor owner；`SONICTERM_LIFECYCLE_SEED` 可再加一个种子。主窗口和拆出的窗口
 使用同一种 `WindowState` 表示。这些所有者只在 `app` 模块内可见；`App` 的公开方法保持不变。
 少数字段仍留在 `App` 上：帧计数器（在重绘路径上与窗口和命令面板一同借用）、重绘调度、配置、
 主题和键位。字体状态与报告窗口状态有各自的所有者：`FontState` 与 `ReportWindows`。

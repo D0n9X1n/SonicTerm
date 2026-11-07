@@ -276,11 +276,40 @@ fn needs_recheck(observations: &Observations) -> bool {
     })
 }
 
+/// A gate a test closes to keep this driver's runs from starting, so retired custody can be
+/// observed before its teardown runs, and opens to let them run.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct RunHold {
+    held: parking_lot::Mutex<bool>,
+    released: parking_lot::Condvar,
+}
+
+#[cfg(test)]
+impl RunHold {
+    /// Close (`true`) or open (`false`) the gate; opening wakes every held driver.
+    pub(super) fn set(&self, held: bool) {
+        *self.held.lock() = held;
+        self.released.notify_all();
+    }
+
+    /// Wait while the gate is closed.
+    fn with_hold(&self) {
+        let mut held = self.held.lock();
+        while *held {
+            self.released.wait(&mut held);
+        }
+    }
+}
+
 struct DriverSchedule {
     run_budget: Duration,
     recheck_interval: Duration,
     #[cfg(test)]
     runs: std::sync::atomic::AtomicUsize,
+    /// Keeps runs from starting while a test holds it closed.
+    #[cfg(test)]
+    hold: Arc<RunHold>,
 }
 
 fn drive(
@@ -310,6 +339,8 @@ fn drive(
             // When: has_startable_work is true after collection and control, a run can advance current work without another wake.
             #[cfg(test)]
             schedule.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(test)]
+            schedule.hold.with_hold();
             supervisor.run_until(Instant::now() + schedule.run_budget, cancel);
             continue;
         }
@@ -345,6 +376,9 @@ pub(super) struct ReaperDriver {
     /// How long synchronous fallbacks blocked the retiring thread.
     fallback_timing: Mutex<super::reaper_fallback::FallbackTiming>,
     finished: Option<bool>,
+    /// The worker's run gate, for a test that holds teardown back.
+    #[cfg(test)]
+    pub(super) hold: Arc<RunHold>,
 }
 
 impl ReaperDriver {
@@ -378,11 +412,15 @@ impl ReaperDriver {
         let batches = limits.max_tasks.div_ceil(units_per_batch);
         let run_budget =
             PTY_TEARDOWN_TAIL_BOUND.saturating_mul(u32::try_from(batches).unwrap_or(u32::MAX));
+        #[cfg(test)]
+        let hold = Arc::new(RunHold::default());
         let schedule = DriverSchedule {
             run_budget,
             recheck_interval: UNJOINED_RECHECK_INTERVAL,
             #[cfg(test)]
             runs: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            hold: Arc::clone(&hold),
         };
         let worker = thread::Builder::new()
             .name("sonic-pty-reaper".into())
@@ -412,6 +450,8 @@ impl ReaperDriver {
             paths: Mutex::new((0, 0)),
             fallback_timing: Mutex::default(),
             finished: None,
+            #[cfg(test)]
+            hold,
         })
     }
 

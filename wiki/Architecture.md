@@ -87,7 +87,12 @@ registry's `insert_window` and `remove_window` add or drop one, and in debug bui
 both check that no pane belongs to two windows. `insert_window` is called only from
 `App::insert_window_registered`, which also registers the window's governor owner;
 `scripts/check-window-owner-registration.sh` enforces that. Moving panes between
-windows still goes through `WindowState`'s own `panes` and `tab_states`. The main window and torn-out
+windows still goes through `WindowState`'s own `panes` and `tab_states`. A seeded
+state-machine test (`window_registry_state_lifecycle_tests.rs`) runs splits, closes, tab
+transfers, tear-outs, waits, output and exits in random order and checks after every
+step that each pane is in one window, `locate_pane` agrees with a scan, each retired
+pane's signal is closed and each live pane holds an open governor owner;
+`SONICTERM_LIFECYCLE_SEED` adds a seed. The main window and torn-out
 windows use the same `WindowState` representation. The owners are visible only
 inside the `app` module; the public `App` methods stay as they were. A few fields
 stay on `App` itself: frame counters (borrowed beside windows and the palette on

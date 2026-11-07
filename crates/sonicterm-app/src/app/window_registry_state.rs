@@ -235,3 +235,7 @@ impl WindowRegistry {
 #[cfg(test)]
 #[path = "window_registry_state_tests.rs"]
 mod window_registry_state_tests;
+
+#[cfg(test)]
+#[path = "window_registry_state_lifecycle_tests.rs"]
+mod window_registry_state_lifecycle_tests;
