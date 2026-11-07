@@ -132,6 +132,8 @@ clickable_path_max_chars = {clickable_path_max_chars}
 # Cursor behavior. Shape: "block", "bar", or "underline".
 cursor_blink = false
 cursor_shape = "block"
+# Programs may set the clipboard with OSC 52: "allow" or "deny".
+osc52 = "allow"
 
 [logging]
 # Logs are written to {config_dir}/logs/sonicterm.log.

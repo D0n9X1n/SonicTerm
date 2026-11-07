@@ -571,3 +571,27 @@ fn script_draft_rejection_becomes_a_visible_warning() {
 
     assert_eq!(app.__test_main_notification_message(), Some("unsafe script path"));
 }
+
+/// A reload to `osc52 = "deny"` drops a pending reassertion: reloading allow before its deadline
+/// and servicing it then writes nothing the denial stopped.
+#[cfg(windows)]
+#[test]
+fn reloading_deny_cancels_a_pending_osc52_reassertion() {
+    use sonicterm_cfg::config::{Config, Osc52Policy};
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    app.__test_set_memory_clipboard("before");
+    app.handle_clipboard_write("from OSC 52".into());
+    let due = app.pending_osc52_reassert.as_ref().expect("a reassertion is armed").due;
+    let mut deny = Config::default();
+    deny.terminal.osc52 = Osc52Policy::Deny;
+    app.apply_new_config(deny);
+    assert!(app.pending_osc52_reassert.is_none(), "deny cancelled the reassertion");
+    app.apply_new_config(Config::default());
+    app.__test_set_memory_clipboard("user copy");
+    app.reassert_osc52_clipboard_if_due(due);
+    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("user copy"));
+}

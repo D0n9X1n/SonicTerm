@@ -586,3 +586,18 @@ fn mem_without_graphics_leaves_other_sources_alone() {
     let none = GraphicsMemory::unavailable(GraphicsSource::None);
     assert_eq!(mem_without_graphics(footprint, &none), footprint);
 }
+
+/// `[terminal] osc52 = "deny"` is enforced where the clipboard is written: a write queued before a
+/// reload to deny writes nothing, and the clipboard segment says it was denied.
+#[test]
+fn a_denied_osc52_write_leaves_the_clipboard_alone() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let source = app.__test_seed_tab("source");
+    app.__test_set_memory_clipboard("kept");
+    app.config.terminal.osc52 = sonicterm_cfg::config::Osc52Policy::Deny;
+    let outcome = app.handle_clipboard_write("from a remote host".into());
+    app.note_clip_write(source, 18, outcome);
+    assert_eq!(outcome, crate::app::event_loop::ClipWriteOutcome::Denied);
+    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("kept"));
+    assert_eq!(app.status_line.clip_write.get(&source), Some(&ClipOutcome::Denied));
+}

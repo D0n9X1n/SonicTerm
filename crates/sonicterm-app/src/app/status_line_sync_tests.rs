@@ -149,7 +149,7 @@ fn retiring_a_pane_forgets_its_status_records() {
     app.force_frame_counters_on().expect("no window or pane exists yet");
     let pane_id = app.__test_seed_tab("source");
     let main_id = app.registry.main_window_id.unwrap();
-    app.note_clip_write(pane_id, 5, true);
+    app.note_clip_write(pane_id, 5, crate::app::event_loop::ClipWriteOutcome::Written);
     app.status_line.history_ack.insert(pane_id, 7);
     app.status_line.size_seen.insert(pane_id, 1);
     let pane =

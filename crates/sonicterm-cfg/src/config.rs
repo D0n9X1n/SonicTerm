@@ -320,6 +320,21 @@ pub struct TerminalConfig {
     pub cursor_blink: bool,
     /// Cursor shape.
     pub cursor_shape: CursorShape,
+    /// Whether programs may write the clipboard with OSC 52; see [`Osc52Policy`].
+    pub osc52: Osc52Policy,
+}
+
+/// Whether OSC 52 clipboard writes from programs in a pane reach the system clipboard. Reads are
+/// never answered either way. `Deny` suits panes that run untrusted remote programs, since any
+/// program printing to the terminal can otherwise replace the local clipboard.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Osc52Policy {
+    /// Accepted writes (at most 512 KiB of UTF-8 text) reach the clipboard.
+    #[default]
+    Allow,
+    /// Every write is refused before the clipboard is touched.
+    Deny,
 }
 
 /// User preference for legacy keypad input, independent of hardware NumLock.
@@ -563,6 +578,7 @@ impl Default for TerminalConfig {
             clickable_path_max_chars: DEFAULT_CLICKABLE_PATH_CHARS,
             cursor_blink: false,
             cursor_shape: CursorShape::default(),
+            osc52: Osc52Policy::default(),
         }
     }
 }

@@ -611,6 +611,12 @@ impl App {
             }
         }
 
+        // A reload to `osc52 = "deny"` cancels a write still waiting to be reasserted, so a later
+        // reload back to allow cannot replay what the denial stopped.
+        #[cfg(target_os = "windows")]
+        if new_cfg.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
+            self.pending_osc52_reassert = None;
+        }
         self.config = new_cfg;
         // `[mcp]` changes start, stop or downgrade the control server at once.
         self.reconcile_mcp();

@@ -34,7 +34,8 @@ pub(crate) struct McpServer {
 }
 
 /// What an unset `[mcp] read` now means, shown once each time the server starts without it.
-pub(crate) const READ_UNSET_NOTICE: &str = "[mcp] read is not set: agents now see only agent-created \
+pub(crate) const READ_UNSET_NOTICE: &str =
+    "[mcp] read is not set: agents now see only agent-created \
 panes. Set read = \"any\" to restore the previous default.";
 
 // Lifecycle: McpServer drop calls stop on the listener and every connection; then

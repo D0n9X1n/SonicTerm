@@ -655,6 +655,15 @@ pub(super) fn format_clip(
             StatusTone::Error,
             env.i18n.translate("status-spoken-clip-failed"),
         ),
+        ClipOutcome::Denied => (
+            format!(
+                "{} {}",
+                symbol(env.icons, "⚠", "!"),
+                env.i18n.translate("status-value-clip-denied")
+            ),
+            StatusTone::Warn,
+            env.i18n.translate("status-spoken-clip-denied"),
+        ),
         ClipOutcome::ReadRefused => (
             format!(
                 "{} {}",
