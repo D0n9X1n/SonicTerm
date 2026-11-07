@@ -158,7 +158,7 @@ pub struct PaneState {
     /// A published reset count above it releases the pane for one frame.
     pub(crate) presented_sync_resets: u64,
     /// Decoded inline media images captured from terminal protocols.
-    pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
+    pub inline_images: Arc<super::media::InlineImageStore>,
     /// This pane's share of the process-wide inline-media total.
     ///
     /// Co-owned with the pane's VT worker. The worker ends when its shell
@@ -360,7 +360,7 @@ impl PaneState {
             ))),
             sync_resets: Arc::new(AtomicU64::new(sync_state.resets)),
             presented_sync_resets: sync_state.resets,
-            inline_images: Arc::new(Mutex::new(Vec::new())),
+            inline_images: Arc::default(),
             inline_media_charge: media_pool.new_charge(),
             frame_counters: None,
             guard_correlation: None,

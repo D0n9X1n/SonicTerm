@@ -116,7 +116,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         cursor_style: CursorStyle::BlockSteady,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     let tabs = TabBar::new();
     let mut no_panes: [PaneRender<'_>; 0] = [];

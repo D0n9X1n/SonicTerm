@@ -114,7 +114,7 @@ struct VisibleSource {
     id: u64,
     rect: Rect,
     parser: Arc<Mutex<Parser>>,
-    images: Arc<Mutex<Vec<InlineImage>>>,
+    images: Arc<super::media::InlineImageStore>,
     viewport_top_abs: Option<u64>,
     viewport_anchor: ViewportAnchor,
 }
@@ -145,7 +145,7 @@ pub(super) struct HeldVisibleFrame<'a, S = ()> {
     pub(super) custody: Option<super::guard_custody::GuardCustody>,
     /// The frame's dispatch interval when its App counts.
     pub(super) dispatch: Option<super::guard_custody::DispatchClock>,
-    pub(super) images: Vec<Vec<InlineImage>>,
+    pub(super) images: Vec<Arc<Vec<InlineImage>>>,
 }
 
 impl VisibleFrameSources {
@@ -263,16 +263,16 @@ impl VisibleFrameSources {
         for entry in &self.entries {
             #[cfg(test)]
             self.image_visits.borrow_mut().push(entry.id);
-            let Some(store) = entry.images.try_lock() else {
+            let Some(store) = entry.images.try_snapshot() else {
                 // When: an image store is contended, the guards are released, then their custody closes.
                 drop(images);
                 drop(guards);
                 drop(timing);
                 return Err(FrameUnavailable::Contended { pane_id: entry.id, images: true });
             };
-            images.push(store.clone());
             #[cfg(test)]
             self.image_clones.borrow_mut().push((entry.id, store.len()));
+            images.push(store);
         }
         let (custody, dispatch) = timing.unzip();
         Ok(HeldVisibleFrame { snapshot, guards, custody, dispatch, images })
@@ -332,7 +332,7 @@ pub(super) struct HeldFrameSource<'guard, 'window> {
     pub(super) guards: ParserGuards<'guard>,
     /// The frame's guard custody; declared after `guards`, so it records right after the last release.
     pub(super) custody: Option<super::guard_custody::GuardCustody>,
-    pub(super) images: Vec<Vec<InlineImage>>,
+    pub(super) images: Vec<Arc<Vec<InlineImage>>>,
     pub(super) viewports: &'window FrameViewports,
     pub(super) active: u64,
     pub(super) broadcast: &'window BTreeSet<u64>,
@@ -365,7 +365,7 @@ impl FrameSource for HeldFrameSource<'_, '_> {
 /// Build real PaneRender borrows from the held grids, moving each media snapshot exactly once.
 pub(super) fn pane_renders<'a>(
     guards: &'a mut ParserGuards<'_>,
-    images: &mut [Vec<InlineImage>],
+    images: &mut [Arc<Vec<InlineImage>>],
     viewports: &FrameViewports,
     active: u64,
     broadcast: &BTreeSet<u64>,

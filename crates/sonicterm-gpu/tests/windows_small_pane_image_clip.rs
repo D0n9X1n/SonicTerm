@@ -165,7 +165,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
                 cursor_style: CursorStyle::BlockSteady,
                 is_broadcast_participant: false,
                 scrollbar_alpha: 0.0,
-                inline_images: Vec::new(),
+                inline_images: Default::default(),
             },
             PaneRender {
                 id: 2,
@@ -176,7 +176,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
                 cursor_style: CursorStyle::BlockSteady,
                 is_broadcast_participant: false,
                 scrollbar_alpha: 0.0,
-                inline_images: Vec::new(),
+                inline_images: Default::default(),
             },
         ];
         render(&mut renderer, &mut panes, &theme)?;

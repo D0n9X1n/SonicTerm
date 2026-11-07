@@ -339,3 +339,35 @@ impl ParserAcquire for ReleaseAfterFailedProbe {
         TimedParserAcquire.wait_until(pane_id, parser, deadline)
     }
 }
+
+/// Through the real collection and `PaneRender` boundary: two frames of an unchanged pane hand
+/// the renderer the same image list (no entries copied), and an image the decoder adds after a
+/// frame was collected leaves that frame's list as collected.
+#[test]
+fn frames_share_an_unchanged_pane_image_list_and_keep_their_own() {
+    let (mut app, window, _left, right, _inactive) = fixture(false, false);
+    let sources = sources(&mut app, window, false).ok().unwrap();
+    let lists = |app: &mut App, sources: &VisibleFrameSources| {
+        let mut held = sources.try_collect(|| {}).ok().unwrap();
+        let mut seen = Vec::new();
+        assemble(app, window, sources, &mut held, |panes| {
+            seen = panes.iter().map(|pane| Arc::clone(&pane.inline_images)).collect();
+        });
+        seen
+    };
+    let first = lists(&mut app, &sources);
+    let second = lists(&mut app, &sources);
+    assert_eq!(first.len(), 2, "both visible panes");
+    for (before, after) in first.iter().zip(&second) {
+        assert!(Arc::ptr_eq(before, after), "an unchanged pane's list is shared, not copied");
+    }
+    let held = lists(&mut app, &sources);
+    app.windows[&window].panes[&right].inline_images.lock().push(held[1][0].clone());
+    assert!(held.iter().all(|list| list.len() == 1), "the collected frame kept its lists");
+    let next = lists(&mut app, &sources);
+    assert_eq!(
+        next.iter().map(|list| list.len()).sum::<usize>(),
+        3,
+        "the next frame sees the new image"
+    );
+}

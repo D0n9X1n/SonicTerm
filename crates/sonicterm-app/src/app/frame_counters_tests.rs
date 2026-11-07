@@ -355,6 +355,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/echo_watch.rs", "slot", 1),
     // The VT worker's media helpers, after the parser section: the pane's image store, not a parser.
     ("app/spawn_pane_media.rs", "inline_images", 2),
+    // The image store's own lock and snapshot: its mutex guards image entries, never a parser.
+    ("app/media_store.rs", "images", 1),
     ("app/guard_correlation.rs", "state", 5),
     ("bin/pty_multi_round_helper.rs", "stdin", 1),
     ("bin/pty_multi_round_helper.rs", "stdout", 1),

@@ -684,7 +684,7 @@ impl FallbackFixture {
             cursor_style: sonicterm_render_model::CursorStyle::default(),
             is_broadcast_participant: false,
             scrollbar_alpha: 0.0,
-            inline_images: Vec::new(),
+            inline_images: Default::default(),
         }];
         let ended = GpuRenderer::finish_assembly_pass(&mut plan, &panes, pass_end);
         drop(panes);

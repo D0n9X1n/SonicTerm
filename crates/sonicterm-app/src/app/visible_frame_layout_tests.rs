@@ -57,7 +57,7 @@ fn hidden_parser_and_image_barriers_do_not_block_visible_assembly_in_either_role
                 });
                 assert!(called);
                 assert!(
-                    held.images.iter().all(Vec::is_empty),
+                    held.images.iter().all(|images| images.is_empty()),
                     "media snapshots were moved, not cloned twice"
                 );
                 assert_eq!(app.windows[&window].retry_not_before, None);

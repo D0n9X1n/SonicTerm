@@ -19,7 +19,7 @@ fn planned_acknowledgement_rejects_newer_grid_and_replacement() {
         cursor_style: CursorStyle::default(),
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     acknowledge_plan(&plan, &mut panes);
     assert!(panes[0].grid.dirty_count() > 0);
@@ -118,7 +118,7 @@ fn borrowed_acknowledgement_clears_only_matching_receipts_and_their_rows() {
         cursor_style: CursorStyle::default(),
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     assert_eq!(acknowledge_receipts(&[other], &mut panes), 0, "another pane's receipt");
     assert_eq!(panes[0].grid.dirty_count(), 3);
@@ -167,7 +167,7 @@ fn settling_a_borrowed_frame_clears_dirt_only_when_presented() {
             cursor_style: CursorStyle::default(),
             is_broadcast_participant: false,
             scrollbar_alpha: 0.0,
-            inline_images: Vec::new(),
+            inline_images: Default::default(),
         }];
         let frame = FrameOutcome { outcome, receipts: vec![receipt] };
         let settled = settle_borrowed_frame(frame, &mut panes);

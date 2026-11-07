@@ -694,7 +694,7 @@ pub(super) fn draw_window(app: &mut App, window_id: WindowId, rows: &str) -> Res
         cursor_style: sonicterm_render_model::CursorStyle::BlockSteady,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     renderer
         .render(

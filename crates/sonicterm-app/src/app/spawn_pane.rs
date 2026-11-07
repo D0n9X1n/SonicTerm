@@ -356,7 +356,7 @@ pub(in crate::app) struct PaneVtHandles {
     output_counting: Arc<AtomicBool>,
     output_outstanding: Arc<AtomicBool>,
     bells: Arc<AtomicU64>,
-    inline_images: Arc<Mutex<Vec<InlineImage>>>,
+    inline_images: Arc<super::media::InlineImageStore>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
     frame_counters: Option<super::frame_counters::PaneFrameCounters>,
     /// This worker's echo-watch target and recorded facts, so an armed watch locks its slot once

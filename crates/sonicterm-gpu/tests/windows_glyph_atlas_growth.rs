@@ -449,7 +449,7 @@ fn frame(renderer: &mut GpuRenderer, window: &Window, grid: &mut Grid) -> Presen
         cursor_style: CursorStyle::BlockSteady,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
-        inline_images: Vec::new(),
+        inline_images: Default::default(),
     }];
     renderer.render_with_outcome(
         &fonts, &mut panes, &theme, false, None, None, &tabs, false, None, None, None, None, None,
