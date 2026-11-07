@@ -98,6 +98,14 @@ fn spawn_wait(entry: &PaneEntry, condition: WaitCondition) -> SpawnedWait {
     let (shared, entry) = (McpShared::new(McpControl::Agent, None), entry.clone());
     let (sender, events) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
+        // `Parked` comes from inside the signal's wait, with its mutex held, so a publication sent
+        // after it must take that mutex after the waiter is registered and must notify it.
+        let parked = sender.clone();
+        crate::app::pane_signal::PARK_HOOK.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                let _ = parked.send(WaitEvent::Parked);
+            }));
+        });
         WAIT_OBSERVER.with_borrow_mut(|observer| *observer = Some(sender));
         let started = Instant::now();
         let outcome = wait_until(&shared, &entry, &condition, &scope(&shared));

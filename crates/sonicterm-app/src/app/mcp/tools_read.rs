@@ -604,10 +604,6 @@ pub(crate) fn wait_until_observed(
             .flatten()
             .min()
             .unwrap_or(timeout_at);
-        // Announced only once the sequence is read and every check is done, so a test that publishes
-        // after this event exercises the sleep, not the first inspection.
-        #[cfg(test)]
-        observe_wait(WaitEvent::Parked);
         entry.change_signal.wait_past(seen, wake_at);
     }
 }
@@ -627,7 +623,8 @@ thread_local! {
 pub(crate) enum WaitEvent {
     /// A check found the parser held and left the generation uninspected.
     Busy,
-    /// The wait is about to sleep on the pane's change signal with nothing pending.
+    /// The wait is registered on the pane's change signal: it holds the signal's mutex, found the
+    /// sequence unchanged, and is entering the condition-variable wait (see `PaneSignal::wait_past`).
     Parked,
 }
 

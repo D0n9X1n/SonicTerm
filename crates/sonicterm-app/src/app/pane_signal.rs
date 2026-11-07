@@ -37,6 +37,10 @@ impl PaneSignal {
     pub(crate) fn wait_past(&self, seen: u64, deadline: Instant) -> u64 {
         let mut sequence = self.sequence.lock();
         while *sequence == seen {
+            // Reported with the mutex held and the sequence confirmed unchanged, so a publisher that
+            // acts on it can only bump the sequence after this waiter is on the condition variable.
+            #[cfg(test)]
+            PARK_HOOK.with_borrow(|hook| hook.as_ref().map(|hook| hook()));
             if self.changed.wait_until(&mut sequence, deadline).timed_out() {
                 // When: the `deadline` passed with no announcement, the caller rechecks its state.
                 break;
@@ -44,6 +48,14 @@ impl PaneSignal {
         }
         *sequence
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Called on this thread each time a wait is about to block on the condition variable, with
+    /// the signal's mutex held, so a test synchronizes on real registration rather than sleeping.
+    pub(crate) static PARK_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
