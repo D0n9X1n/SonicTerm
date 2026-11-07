@@ -46,6 +46,7 @@ python3 scripts/local-gate.py
 | `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `tooling`、`windows-checks`、`linux-core` |
 | `macos-gate-custody` | `python3 scripts/local-gate_tests.py RunnerTests.test_a_zombie_only_group_kill_is_refused_on_macos_and_the_step_is_still_reaped` | macOS | `local` | `bash` | `macos-core` |
 | `workflow-syntax` | `actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml` | macOS、Windows、Linux | `local` | `actionlint` | `tooling` |
+| `native-dependency-delta` | `python3 scripts/native-dependency-delta.py --with-tests` | macOS、Windows、Linux | `local` | `python`、`network` | `tooling` |
 | `cargo-deny` | `cargo deny --locked check` | macOS、Windows、Linux | `local` | `rust`、`cargo-deny` | `linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS、Windows、Linux | `local` | `rust`、`native`、`bash` | `macos-core`、`windows-tests-workspace`、`linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-workspace`、`linux-core` |
@@ -99,6 +100,7 @@ python3 scripts/local-gate.py
 - `pwsh`：`PATH` 上的 PowerShell 7（`pwsh`）。
 - `llvm-cov`：`scripts/pinned-tools.json` 固定版本的 `cargo-llvm-cov`。
 - `cargo-deny`：`scripts/pinned-tools.json` 固定版本的 `cargo-deny`，以及用于其 advisory 数据库的网络访问。
+- `network`：可访问 `scripts/native-dependencies.json` 列出的固定上游归档的网络。
 - `win-target`：`x86_64-pc-windows-msvc` 标准库（`rustup target add x86_64-pc-windows-msvc`）。
 - `warp`：支持 allocator report 的 DX12 WARP adapter。
 - 每个步骤还需要 `PATH` 上的 Git 与 Python 3。

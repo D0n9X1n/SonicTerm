@@ -125,6 +125,24 @@ python3 scripts/native-dependencies_tests.py
 不存在漏洞，后者来自清单记录的基础发布版本，以及在上游逐条阅读所记录的修复。本工具没有
 任何命令可以重建带本地补丁的源码树，也不会假装具备该能力。
 
+每个条目还列出 `local_modifications`：保留下来、与固定归档子集不同或归档中不存在的每个
+文件，并附一行原因。它与只记录回移修复的 `upstream_fixes` 分开。winit 列出 13 个文件：
+桌面子集对 `Cargo.toml`、`Cargo.lock`、`build.rs`、平台模块表与文档的裁剪，以及
+`src/platform/windows.rs` 和 `platform_impl/windows` 的键盘、事件循环、模块文件中的
+Windows 原生键盘元数据，外加新增的 `keyboard_tests.rs`。zlib 列出其上游修复涉及的两个文件。
+另一个会访问网络的工具负责让该列表与实际一致：
+
+```sh
+python3 scripts/native-dependency-delta.py
+python3 scripts/native-dependency-delta.py --library winit
+python3 scripts/native-dependency-delta.py --with-tests
+```
+
+它下载每个固定归档，验证 sha256，在内存中读取 `include` 子集（不写入任何文件）；当不同或
+新增文件的集合不恰好等于 `local_modifications` 时失败：未记录的修改、已记录但丢失的修改，
+以及新增文件都会被报告。`native-dependency-delta` gate 步骤会连同其离线测试一起运行它，
+并且需要网络，因此 CI 在 `tooling` 中运行。`native-dependencies.py` 保持离线，从不读取归档。
+
 每次以单个库为单位进行可审查的更新：
 
 1. 阅读官方发布和安全公告，包括新版本引入的回归。验证发布者/来源和可用签名或独立
@@ -136,7 +154,9 @@ python3 scripts/native-dependencies_tests.py
    逐条应用所记录的上游修复——与所导入的发布版本比对，而不是与仓库内的副本比对。将结果
    与当前第三方目录做差异比较，只替换干净的对应目录；审查该差异后，再把 `check` 输出的
    摘要填入新的 `tree_sha256`。核对新增/删除的 C/C++ 文件和 `build.rs`；导入成功不是
-   编译成功。
+   编译成功。对带 `local_modifications` 的库，先针对旧固定版本运行
+   `native-dependency-delta.py --library <name>`，再把列出的每项修改手工带到新的上游版本，
+   重新固定 `tree_sha256`，然后更新列表，直到 delta 工具在新固定版本上通过。
 4. 更新 FreeType/HarfBuzz 时，用 `cargo install bindgen-cli --version 0.71.1 --locked`
    安装工具，再运行 `bash scripts/regenerate-freetype.sh` 或
    `bash scripts/regenerate-harfbuzz.sh`。`BINDGEN` 可指定单独安装的相同版本可执行文件。

@@ -141,6 +141,7 @@ python3 scripts/local-gate.py
 | `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `macos-gate-custody` | `python3 scripts/local-gate_tests.py RunnerTests.test_a_zombie_only_group_kill_is_refused_on_macos_and_the_step_is_still_reaped` | macOS | `local` | `bash` | `macos-core` |
 | `workflow-syntax` | `actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml` | macOS, Windows, Linux | `local` | `actionlint` | `tooling` |
+| `native-dependency-delta` | `python3 scripts/native-dependency-delta.py --with-tests` | macOS, Windows, Linux | `local` | `python`, `network` | `tooling` |
 | `cargo-deny` | `cargo deny --locked check` | macOS, Windows, Linux | `local` | `rust`, `cargo-deny` | `linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests-workspace`, `linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-workspace`, `linux-core` |
@@ -194,6 +195,7 @@ Needs:
 - `pwsh`: PowerShell 7 (`pwsh`) on `PATH`.
 - `llvm-cov`: `cargo-llvm-cov` at the version `scripts/pinned-tools.json` pins.
 - `cargo-deny`: `cargo-deny` at the version `scripts/pinned-tools.json` pins, and network access for its advisory database.
+- `network`: network access to the pinned upstream archives `scripts/native-dependencies.json` lists.
 - `win-target`: the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).
 - `warp`: a DX12 WARP adapter with allocator reporting.
 - Every step also needs Git and Python 3 on `PATH`.

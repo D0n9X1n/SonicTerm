@@ -14,6 +14,7 @@
       },
       "include": ["include/**", "src/**", "builds/**", "LICENSE.TXT", "README", "ChangeLog", "docs/FTL.TXT", "docs/GPLv2.TXT", "docs/LICENSE.TXT", "docs/CHANGES"],
       "upstream_fixes": [],
+      "local_modifications": [],
       "tree_sha256": "ab93a207b5f03bd923590dac918cc7463e10bd101a430e0fc020f748b2be419d",
       "version_check": [
         {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_MAJOR\\s+(\\d+)", "value": "2"},
@@ -34,6 +35,7 @@
       },
       "include": ["src/**", "COPYING", "AUTHORS", "NEWS", "README.md", "CONFIG.md", "SECURITY.md"],
       "upstream_fixes": [],
+      "local_modifications": [],
       "tree_sha256": "618e4922d98ef66891b520fe7f32b61a8161b4ea1d5cf61b233556cf876c5f62",
       "version_check": {"path": "src/hb-version.h", "pattern": "HB_VERSION_STRING\\s+\"([^\"]+)\"", "value": "14.6.0"}
     },
@@ -50,6 +52,7 @@
       },
       "include": ["*.c", "*.h", "arm/**", "intel/**", "loongarch/**", "mips/**", "powerpc/**", "riscv/**", "scripts/pnglibconf.h.prebuilt", "LICENSE", "AUTHORS", "CHANGES", "README", "TRADEMARK"],
       "upstream_fixes": [],
+      "local_modifications": [],
       "tree_sha256": "a4663dc1dfe43329e9808cba99f2a0dbd2400218ccfaccd57a36f0d3ab88cad9",
       "version_check": {"path": "png.h", "pattern": "PNG_LIBPNG_VER_STRING\\s+\"([^\"]+)\"", "value": "1.6.59"}
     },
@@ -83,6 +86,10 @@
           "url": "https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148"
         }
       ],
+      "local_modifications": [
+        {"path": "gzwrite.c", "reason": "carries the upstream_fixes backports to gzwrite.c"},
+        {"path": "infback.c", "reason": "carries the upstream_fixes backports to infback.c"}
+      ],
       "tree_sha256": "d021ec147dcd37fb5b33f8413d7409942d4a7607558e03b6bc0c191a6b5156f8",
       "version_check": {"path": "zlib.h", "pattern": "ZLIB_VERSION\\s+\"([^\"]+)\"", "value": "1.3.2"}
     },
@@ -99,6 +106,21 @@
       },
       "include": ["Cargo.toml", "Cargo.lock", "build.rs", "LICENSE", "src/*.rs", "src/platform/mod.rs", "src/platform/windows.rs", "src/platform/macos.rs", "src/platform/x11.rs", "src/platform/wayland.rs", "src/platform/startup_notify.rs", "src/platform/pump_events.rs", "src/platform/run_on_demand.rs", "src/platform/modifier_supplement.rs", "src/platform/scancode.rs", "src/platform_impl/mod.rs", "src/platform_impl/windows/**", "src/platform_impl/macos/**", "src/platform_impl/linux/**", "tests/*.rs"],
       "upstream_fixes": [],
+      "local_modifications": [
+        {"path": "Cargo.lock", "reason": "resolved for the retained Windows, macOS and Linux desktop subset"},
+        {"path": "Cargo.toml", "reason": "retains only the desktop subset, publish = false, and packages its own Cargo files"},
+        {"path": "build.rs", "reason": "restricts the free Unix backends to Linux"},
+        {"path": "src/keyboard.rs", "reason": "omits upstream keyboard illustrations that link to unretained docs"},
+        {"path": "src/lib.rs", "reason": "documents the desktop platforms only, without the upstream changelog"},
+        {"path": "src/platform/mod.rs", "reason": "exposes only the retained desktop platform extensions"},
+        {"path": "src/platform/run_on_demand.rs", "reason": "uses an unambiguous Rustdoc method-link target"},
+        {"path": "src/platform/windows.rs", "reason": "exposes owned native Windows keyboard metadata (UTF-16 text and scan state) on key events"},
+        {"path": "src/platform_impl/mod.rs", "reason": "selects only the Windows, macOS and Linux desktop backends"},
+        {"path": "src/platform_impl/windows/event_loop.rs", "reason": "snapshots native key state before modifier callbacks run"},
+        {"path": "src/platform_impl/windows/keyboard.rs", "reason": "preserves native keyboard metadata through text delivery"},
+        {"path": "src/platform_impl/windows/keyboard_tests.rs", "reason": "added: tests for the preserved native keyboard metadata"},
+        {"path": "src/platform_impl/windows/mod.rs", "reason": "retains owned native metadata on Windows key events"}
+      ],
       "tree_sha256": "e9e7ee5adefc2fbc8f81d7983658ca63ed6cf88a0a7c5257280c1739b9e4b456",
       "version_check": {"path": "Cargo.toml", "pattern": "(?m)^version = \"([^\"]+)\"$", "value": "0.30.13"}
     }

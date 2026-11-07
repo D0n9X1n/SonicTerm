@@ -10,6 +10,11 @@ patched by hand, once, under review; the manifest records what that import was, 
 recipe for rebuilding it. Nothing here reconstructs a vendor tree from an archive plus
 local patch files, so no such patch files are kept.
 
+Each library also lists its `local_modifications`: every retained file that differs from the
+pinned archive's `include` subset or that the archive lacks, with a reason. `check` validates
+their shape only; `native-dependency-delta.py`, a separate network tool, compares the tree
+with the archive so this verifier stays offline and never reads an archive.
+
 What a matching digest does and does not establish: it proves the working copy still holds
 exactly the bytes that were reviewed and committed, so drift, truncation, and local edits
 are caught. It says nothing about who published those bytes or whether they are free of
@@ -47,6 +52,7 @@ from typing import Sequence
 SCHEMA_VERSION = 2
 TREE_ALGORITHM = b"sonicterm-native-tree-v1"
 UPSTREAM_FIX_KEYS = ("revision", "url")
+LOCAL_MODIFICATION_KEYS = ("path", "reason")
 
 
 class DependencyError(Exception):
@@ -109,6 +115,27 @@ def _validate_upstream_fixes(library: dict, name: str) -> None:
                                  " and ".join(repr(key) for key in UPSTREAM_FIX_KEYS)))
 
 
+def _validate_local_modifications(library: dict, name: str) -> None:
+    """Require one `path` and a non-empty `reason` per retained file that differs from upstream."""
+    modifications = _require(library, "local_modifications", name)
+    if not isinstance(modifications, list):
+        raise DependencyError("library {} local_modifications must be a list".format(name))
+    seen: set[str] = set()
+    for modification in modifications:
+        if not isinstance(modification, dict) or set(modification) != set(LOCAL_MODIFICATION_KEYS):
+            raise DependencyError("library {} local_modifications entries carry exactly {}"
+                                  .format(name, " and ".join(repr(key) for key in LOCAL_MODIFICATION_KEYS)))
+        for key in LOCAL_MODIFICATION_KEYS:
+            value = modification[key]
+            if not isinstance(value, str) or not value.strip():
+                raise DependencyError("library {} local_modifications entry needs a non-empty {!r}"
+                                      .format(name, key))
+        if modification["path"] in seen:
+            raise DependencyError("library {} lists {} twice in local_modifications"
+                                  .format(name, modification["path"]))
+        seen.add(modification["path"])
+
+
 def load_manifest(manifest_path: Path) -> list[dict]:
     """Read the manifest and reject a schema this tool cannot claim to understand."""
     try:
@@ -142,6 +169,7 @@ def load_manifest(manifest_path: Path) -> list[dict]:
         if not library["include"]:
             raise DependencyError("library {} has an empty include list".format(name))
         _validate_upstream_fixes(library, name)
+        _validate_local_modifications(library, name)
     return libraries
 
 

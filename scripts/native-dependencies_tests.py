@@ -101,6 +101,7 @@ class Fixture:
             "tag": None,
             "include": ["a.txt", "sub/**"],
             "upstream_fixes": [],
+            "local_modifications": [],
             "tree_sha256": PINNED_TWO_FILE_TREE,
         }
         library.update(overrides)

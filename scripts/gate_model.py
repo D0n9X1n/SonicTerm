@@ -97,6 +97,10 @@ PREREQUISITES = {
         "advisory database.",
         "`scripts/pinned-tools.json` 固定版本的 `cargo-deny`，以及用于其 advisory 数据库的网络访问。",
     ),
+    "network": (
+        "network access to the pinned upstream archives `scripts/native-dependencies.json` lists.",
+        "可访问 `scripts/native-dependencies.json` 列出的固定上游归档的网络。",
+    ),
     "win-target": (
         "the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).",
         "`x86_64-pc-windows-msvc` 标准库（`rustup target add x86_64-pc-windows-msvc`）。",

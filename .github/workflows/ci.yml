@@ -58,6 +58,10 @@ jobs:
       - name: Validate workflow syntax and contexts
         run: actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml
 
+      # Downloads each vendored library's pinned archive and holds the tree's delta to its local_modifications.
+      - name: Check vendored native trees against their upstream archives
+        run: python3 scripts/native-dependency-delta.py --with-tests
+
       - name: Check declared rust-version against the lock
         shell: bash
         run: bash scripts/check-rust-version.sh
