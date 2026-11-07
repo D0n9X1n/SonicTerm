@@ -779,11 +779,6 @@ impl super::App {
         self.next_echo_arm = next;
     }
 
-    /// The pane `pane_id` in whichever window holds it.
-    pub(super) fn find_pane(&self, pane_id: u64) -> Option<&super::PaneState> {
-        self.windows.values().find_map(|window| window.panes.get(&pane_id))
-    }
-
     /// Whether `pane_id` is drawn by the main window's active tab.
     fn pane_shown_in_main(&self, pane_id: u64) -> bool {
         let Some(main) = self.main() else {

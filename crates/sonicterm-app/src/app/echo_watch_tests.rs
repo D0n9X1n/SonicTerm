@@ -32,7 +32,7 @@ fn target() -> EchoWatchTarget {
 
 /// The pane's echo watch, shared like the worker's clone.
 fn watch_of(app: &App, pane_id: u64) -> Arc<EchoWatch> {
-    let pane = app.find_pane(pane_id).expect("seeded pane");
+    let pane = app.pane_by_id(pane_id).expect("seeded pane");
     Arc::clone(&pane.frame_counters.as_ref().expect("counting pane").echo)
 }
 
@@ -165,7 +165,7 @@ fn take_disarms_the_watch() {
 #[test]
 fn arm_and_take_take_no_parser_lock() {
     let (mut app, pane_id) = counting_app();
-    let parser = Arc::clone(&app.find_pane(pane_id).expect("seeded pane").parser);
+    let parser = Arc::clone(&app.pane_by_id(pane_id).expect("seeded pane").parser);
     let (locked_tx, locked_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {
@@ -190,7 +190,7 @@ fn gate_off_arm_and_take_return_gate_off_and_allocate_nothing() {
     let pane_id = app.__test_seed_counting_tab("off");
     assert_eq!(app.arm_echo_watch(pane_id, target()), ArmOutcome::GateOff);
     assert_eq!(app.take_echo_watch(pane_id, ArmToken(1)), TakeOutcome::GateOff);
-    assert!(app.find_pane(pane_id).expect("seeded pane").frame_counters.is_none());
+    assert!(app.pane_by_id(pane_id).expect("seeded pane").frame_counters.is_none());
     assert_eq!(app.next_echo_arm, 1, "no token was issued");
 }
 
@@ -201,7 +201,7 @@ fn a_removed_pane_keeps_its_slot_until_the_worker_handle_drops() {
     let (mut app, pane_id) = counting_app();
     let token = armed(app.arm_echo_watch(pane_id, target()));
     let handles = crate::app::spawn_pane::PaneVtHandles::from_pane_state(
-        app.find_pane(pane_id).expect("seeded pane"),
+        app.pane_by_id(pane_id).expect("seeded pane"),
     );
     let weak = Arc::downgrade(&watch_of(&app, pane_id));
     let removed = app.main_mut().and_then(|main| main.panes.remove(&pane_id));

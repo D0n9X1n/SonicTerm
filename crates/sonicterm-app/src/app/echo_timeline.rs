@@ -670,7 +670,7 @@ impl super::App {
             // When: `frame_counters` is None, the gate is off and no pane has a watch.
             return EchoTimelineTakeV1::GateOff;
         }
-        let Some(pane) = self.find_pane(pane_id) else {
+        let Some(pane) = self.pane_by_id(pane_id) else {
             // When: no window holds pane_id, its record is unreachable.
             return EchoTimelineTakeV1::NoPane;
         };

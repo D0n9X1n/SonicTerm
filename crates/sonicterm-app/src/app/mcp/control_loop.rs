@@ -106,7 +106,7 @@ impl App {
             // When: `control` is `Off`, every control tool is refused.
             return Err(Refusal::ControlOff);
         }
-        let Some(pane) = self.windows.values().find_map(|window| window.panes.get(&pane_id)) else {
+        let Some(pane) = self.pane_by_id(pane_id) else {
             // When: no window holds `pane_id`, there is nothing to act on.
             return Err(Refusal::PaneGone);
         };
@@ -179,13 +179,11 @@ impl App {
             // When: `authorize_writable` refused the pane, nothing is written.
             return refusal.reply();
         }
-        let Some(snapshot) =
-            self.windows.values().find_map(|window| window.panes.get(&pane_id)).map(|pane| {
-                KeyboardSnapshot::from_bits(
-                    crate::app::frame_counters::lock_parser(&pane.parser).keyboard_input_snapshot(),
-                )
-            })
-        else {
+        let Some(snapshot) = self.pane_by_id(pane_id).map(|pane| {
+            KeyboardSnapshot::from_bits(
+                crate::app::frame_counters::lock_parser(&pane.parser).keyboard_input_snapshot(),
+            )
+        }) else {
             // When: the pane vanished between the check and the read, nothing is written.
             return Refusal::PaneGone.reply();
         };

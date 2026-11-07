@@ -59,7 +59,7 @@ pub(super) fn armed(outcome: ArmOutcome) -> ArmToken {
 
 /// `pane_id`'s watch, as a worker clone would hold it.
 pub(super) fn watch_of(app: &App, pane_id: u64) -> Arc<EchoWatch> {
-    let pane = app.find_pane(pane_id).expect("live pane");
+    let pane = app.pane_by_id(pane_id).expect("live pane");
     Arc::clone(&pane.frame_counters.as_ref().expect("counting pane").echo)
 }
 

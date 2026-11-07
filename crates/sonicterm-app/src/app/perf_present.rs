@@ -33,7 +33,7 @@ impl super::App {
         updates: u32,
     ) -> Option<u64> {
         let usable = |marker: &str| !marker.is_empty() && marker.len() <= MARKER_MAX_BYTES;
-        if !usable(nonce) || !usable(prompt) || updates == 0 || self.find_pane(pane_id).is_none() {
+        if !usable(nonce) || !usable(prompt) || updates == 0 || self.pane_by_id(pane_id).is_none() {
             // When: `usable` rejects a marker, `updates` is 0 or `find_pane` finds no `pane_id`, nothing is armed.
             return None;
         }

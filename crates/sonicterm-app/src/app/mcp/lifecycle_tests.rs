@@ -247,3 +247,68 @@ fn connection_notices_reach_the_notification() {
     app.drain_mcp_requests();
     assert!(app.main().unwrap().notification.is_none());
 }
+
+/// A tool that names one pane resolves exactly the entry `list_panes` shows for it, without
+/// enumerating every pane: across a main window with split tabs, two child windows, a report
+/// window holding a pane-shaped entry, and a leaf whose pane is mid-teardown, the resolver agrees
+/// with the list for every pane, and returns nothing for the report window, the torn-down leaf
+/// and an unknown id.
+#[test]
+fn resolving_one_pane_matches_its_listed_entry() {
+    let mut app = test_app();
+    app.__test_seed_tab("one");
+    app.__test_split_active_right();
+    app.__test_seed_tab("two");
+    app.__test_split_active_right();
+    let first_child = app.__test_seed_child_window(&["c1", "c2"]);
+    let second_child = app.__test_seed_child_window(&["d1"]);
+    let report_child = app.__test_seed_child_window(&["report"]);
+    let report_pane = app.__test_child_active_pane(report_child).unwrap();
+    app.windows.get_mut(&report_child).unwrap().role = crate::app::WindowRole::MemoryReport;
+    // A leaf whose pane already left `panes`, as during teardown, is listed by neither path.
+    let torn = app.__test_child_active_pane(second_child).unwrap();
+    let removed = app.windows.get_mut(&second_child).unwrap().panes.remove(&torn);
+    assert!(removed.is_some());
+    let listed = app.mcp_pane_entries();
+    assert!(
+        listed.len() >= 5,
+        "the layout has panes in several windows and tabs: {}",
+        listed.len()
+    );
+    assert!(listed.iter().any(|entry| entry.window_index > 0), "child windows are listed");
+    let _ = first_child;
+    for entry in &listed {
+        let resolved = app.mcp_resolve_pane(entry.pane_id).expect("a listed pane resolves");
+        let pair = |entry: &PaneEntry| {
+            (entry.pane_id, entry.window_index, entry.tab_index, entry.active, entry.readonly)
+        };
+        assert_eq!(pair(&resolved), pair(entry), "pane {}", entry.pane_id);
+        assert!(Arc::ptr_eq(&resolved.parser, &entry.parser), "the same pane's parser");
+    }
+    for absent in [report_pane, torn, 987_654] {
+        assert!(app.mcp_resolve_pane(absent).is_none(), "pane {absent} is not a terminal pane");
+        assert!(listed.iter().all(|entry| entry.pane_id != absent));
+    }
+}
+
+/// Resolving one pane builds exactly one entry, where listing builds one per pane; counted while
+/// resolving, so building every entry and discarding all but one (the old `find` over the list,
+/// whose final reference counts look the same) fails here.
+#[test]
+fn resolving_one_pane_builds_only_its_entry() {
+    let mut app = test_app();
+    for title in ["one", "two", "three"] {
+        app.__test_seed_tab(title);
+        app.__test_split_active_right();
+    }
+    let built = || super::ENTRIES_BUILT.with(std::cell::Cell::get);
+    let before_list = built();
+    let listed = app.mcp_pane_entries();
+    assert_eq!(built() - before_list, listed.len(), "the list builds one entry per pane");
+    assert!(listed.len() >= 6);
+    let target = listed[3].pane_id;
+    let before_resolve = built();
+    let resolved = app.mcp_resolve_pane(target).expect("a listed pane resolves");
+    assert_eq!(built() - before_resolve, 1, "resolving builds only the named pane's entry");
+    assert_eq!(resolved.pane_id, target);
+}

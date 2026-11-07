@@ -181,55 +181,89 @@ impl App {
                 self.mcp_run_start(control, *pane_id, command)
             }
             LoopCall::ClosePane { pane_id } => self.mcp_close_pane(control, *pane_id),
-            LoopCall::ResolvePane { pane_id } => {
-                match self.mcp_pane_entries().into_iter().find(|entry| entry.pane_id == *pane_id) {
-                    Some(entry) => LoopReply::Pane(entry),
-                    None => LoopReply::Refused("pane_gone", format!("no pane {pane_id}")),
-                }
-            }
+            LoopCall::ResolvePane { pane_id } => match self.mcp_resolve_pane(*pane_id) {
+                Some(entry) => LoopReply::Pane(entry),
+                None => LoopReply::Refused("pane_gone", format!("no pane {pane_id}")),
+            },
         }
     }
 
-    /// Every pane in every window, main first, then children in creation order.
-    pub(crate) fn mcp_pane_entries(&self) -> Vec<PaneEntry> {
+    /// Every window in the order agents see them: main first, then children in creation order.
+    /// A pane's `window_index` is its window's position here, for the list and for one pane alike.
+    fn mcp_window_order(&self) -> Vec<WindowId> {
         let mut windows: Vec<WindowId> = self.windows.keys().copied().collect();
         windows.sort_by_key(|id| {
             let is_main = Some(*id) == self.main_window_id;
             (!is_main, self.window_key(*id).map(|key| key.0))
         });
+        windows
+    }
+
+    /// Every pane in every window, main first, then children in creation order. `list_panes` uses
+    /// it; a tool that names one pane uses [`Self::mcp_resolve_pane`] instead.
+    pub(crate) fn mcp_pane_entries(&self) -> Vec<PaneEntry> {
         let mut entries = Vec::new();
-        for (window_index, window_id) in windows.into_iter().enumerate() {
+        for (window_index, window_id) in self.mcp_window_order().into_iter().enumerate() {
             let window = &self.windows[&window_id];
             if window.role.is_report() {
                 // When: the window `role` is a report window, it holds no terminal panes.
                 continue;
             }
-            let readonly = window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only);
-            let active_tab = window.tabs.active_index();
             for (tab_index, tab_state) in window.tab_states.iter().enumerate() {
-                for pane_id in tab_state.tree.leaves() {
-                    let Some(pane) = window.panes.get(&pane_id) else {
-                        // When: a leaf has no live pane, it is mid-teardown and is skipped.
-                        continue;
-                    };
-                    entries.push(PaneEntry {
-                        pane_id,
-                        window_index,
-                        tab_index,
-                        active: tab_index == active_tab && tab_state.active_pane == pane_id,
-                        readonly,
-                        agent_owned: pane.agent_owned,
-                        parser: Arc::clone(&pane.parser),
-                        output_generation: Arc::clone(&pane.output_generation),
-                        exit_status: Arc::clone(&pane.exit_status),
-                        run_typed_at: Arc::clone(&pane.run_typed_at),
-                        agent_run: Arc::clone(&pane.agent_run),
-                    });
-                }
+                tab_state.tree.for_each_leaf(&mut |pane_id| {
+                    entries.extend(Self::mcp_entry(window, window_index, tab_index, pane_id));
+                });
             }
         }
         entries
     }
+
+    /// The entry for `pane_id` alone, exactly as [`Self::mcp_pane_entries`] would list it, without
+    /// building the others: one window's tabs are searched, and only this pane's handles cloned.
+    /// `None` when no terminal window holds the pane or it is mid-teardown.
+    pub(crate) fn mcp_resolve_pane(&self, pane_id: u64) -> Option<PaneEntry> {
+        let (window_id, window) = self
+            .windows
+            .iter()
+            .find(|(_, window)| !window.role.is_report() && window.panes.contains_key(&pane_id))?;
+        let window_index = self.mcp_window_order().iter().position(|id| id == window_id)?;
+        let tab_index =
+            window.tab_states.iter().position(|tab_state| tab_state.tree.contains_pane(pane_id))?;
+        Self::mcp_entry(window, window_index, tab_index, pane_id)
+    }
+
+    /// One pane's entry, cloning only its own shared handles; `None` when `pane_id` is a leaf
+    /// whose pane is already gone, as during teardown.
+    fn mcp_entry(
+        window: &crate::app::WindowState,
+        window_index: usize,
+        tab_index: usize,
+        pane_id: u64,
+    ) -> Option<PaneEntry> {
+        let pane = window.panes.get(&pane_id)?;
+        let tab_state = window.tab_states.get(tab_index)?;
+        #[cfg(test)]
+        ENTRIES_BUILT.with(|built| built.set(built.get() + 1));
+        Some(PaneEntry {
+            pane_id,
+            window_index,
+            tab_index,
+            active: tab_index == window.tabs.active_index() && tab_state.active_pane == pane_id,
+            readonly: window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only),
+            agent_owned: pane.agent_owned,
+            parser: Arc::clone(&pane.parser),
+            output_generation: Arc::clone(&pane.output_generation),
+            exit_status: Arc::clone(&pane.exit_status),
+            run_typed_at: Arc::clone(&pane.run_typed_at),
+            agent_run: Arc::clone(&pane.agent_run),
+        })
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Entries built on this thread, so a test can tell resolving one pane from listing them all.
+    pub(crate) static ENTRIES_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

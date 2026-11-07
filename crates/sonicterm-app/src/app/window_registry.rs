@@ -106,7 +106,8 @@ impl App {
         self.pane_by_id(id)
     }
 
-    pub(super) fn pane_by_id(&self, pane_id: u64) -> Option<&PaneState> {
+    /// The pane `pane_id` in whichever window holds it; the one lookup by id, not by window.
+    pub(crate) fn pane_by_id(&self, pane_id: u64) -> Option<&PaneState> {
         self.windows.values().find_map(|window| window.panes.get(&pane_id))
     }
 

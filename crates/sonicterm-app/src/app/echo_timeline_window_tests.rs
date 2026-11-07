@@ -188,7 +188,7 @@ fn closing_the_owner_window_releases_the_timeline_while_a_worker_handle_survives
     let (mut app, _main, child, _base, _main_pane) = watched_owners();
     let pane_id = app.windows[&child].tab_states[0].active_pane;
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
-    let handles = PaneVtHandles::from_pane_state(app.find_pane(pane_id).expect("child pane"));
+    let handles = PaneVtHandles::from_pane_state(app.pane_by_id(pane_id).expect("child pane"));
     let watch = watch_of(&app, pane_id);
     let weak = Arc::downgrade(&watch);
     drop(app.windows.remove(&child).expect("child window"));
@@ -208,7 +208,7 @@ fn closing_the_owner_window_releases_the_timeline_while_a_worker_handle_survives
 fn retirement_releases_the_timeline_and_a_stale_writer_changes_nothing() {
     let (mut app, main, _child, _base, pane_id) = watched_owners();
     let token = armed(arm_on_both_clocks(&mut app, pane_id));
-    let handles = PaneVtHandles::from_pane_state(app.find_pane(pane_id).expect("owner pane"));
+    let handles = PaneVtHandles::from_pane_state(app.pane_by_id(pane_id).expect("owner pane"));
     let watch = watch_of(&app, pane_id);
     let pane = app.windows.get_mut(&main).unwrap().panes.remove(&pane_id).expect("owner pane");
     assert!(app.windows[&main].redraw.timeline.owner.is_some(), "a bare removal ended nothing");
