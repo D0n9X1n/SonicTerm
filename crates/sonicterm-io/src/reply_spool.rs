@@ -55,6 +55,20 @@ struct SpoolCounters {
     dropped_replies: AtomicU64,
     /// Largest number of live spilled bytes seen.
     peak_live_bytes: AtomicU64,
+    /// Live spilled bytes after the last operation; published under the spool lock and read without it.
+    live_bytes: AtomicU64,
+    /// Bytes the resident tier holds allocated after the last operation (its capacity, which
+    /// outlives a drain), published like `live_bytes`.
+    resident_bytes: AtomicU64,
+}
+
+impl SpoolCounters {
+    /// Publish `state`'s live spill and resident allocation, so `stats` never takes the spool lock.
+    // Ordering: live_bytes and resident_bytes Relaxed; sampled gauges that publish no other data.
+    fn publish(&self, state: &SpoolState) {
+        self.live_bytes.store(state.live_spill_bytes(), Ordering::Relaxed);
+        self.resident_bytes.store(state.ram.capacity() as u64, Ordering::Relaxed);
+    }
 }
 
 /// The error a reply carries when the spill budget refused it. A native filesystem quota failure
@@ -82,8 +96,11 @@ pub struct ReplySpoolStats {
     pub dropped_replies: u64,
     /// Largest number of live spilled bytes (records and headers) seen.
     pub peak_live_bytes: u64,
-    /// Live spilled bytes now.
+    /// Live spilled bytes now, on disk.
     pub live_bytes: u64,
+    /// Bytes the resident tier holds allocated now, in memory: its capacity, which a drain does not
+    /// return, so it can exceed the records it holds.
+    pub resident_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -122,18 +139,22 @@ impl PtyReplySender {
             self.stats.dropped_replies.fetch_add(1, Ordering::Relaxed);
         }
         self.stats.peak_live_bytes.fetch_max(state.live_spill_bytes(), Ordering::Relaxed);
+        self.stats.publish(&state);
         // One pending hint is sufficient; notifications must not backpressure admission.
         let _ = self.wake.try_send(());
         result
     }
 
-    /// The backlog counters: refused submissions and the largest live spill seen.
-    // Ordering: dropped_replies and peak_live_bytes Relaxed loads read diagnostics only; see `send`.
+    /// The backlog counters as of the last send or pop. Read without the spool lock, so a sampler
+    /// on the event loop never waits on a send or pop blocked in file I/O.
+    // Ordering: dropped_replies, peak_live_bytes, live_bytes and resident_bytes load Relaxed; gauges
+    // only, each published Relaxed under the spool lock by SpoolCounters::publish.
     pub fn stats(&self) -> ReplySpoolStats {
         ReplySpoolStats {
             dropped_replies: self.stats.dropped_replies.load(Ordering::Relaxed),
             peak_live_bytes: self.stats.peak_live_bytes.load(Ordering::Relaxed),
-            live_bytes: self.state.lock().live_spill_bytes(),
+            live_bytes: self.stats.live_bytes.load(Ordering::Relaxed),
+            resident_bytes: self.stats.resident_bytes.load(Ordering::Relaxed),
         }
     }
 
@@ -360,6 +381,7 @@ impl ReplyReader {
         let mut state = self.sender.state.lock();
         let result = state.pop();
         let result = state.finish_operation(result);
+        self.sender.stats.publish(&state);
         if !state.ram.is_empty() || state.spill.is_some() {
             // When: ram or spill still holds records, retain a wake hint for the next writer turn.
             let _ = self.sender.wake.try_send(());
@@ -369,7 +391,10 @@ impl ReplyReader {
 
     /// Latch native writer failure for future reply admissions.
     pub(crate) fn fail(&self, error: io::Error) {
-        self.sender.state.lock().fail(error);
+        let mut state = self.sender.state.lock();
+        state.fail(error);
+        // The storage is gone, so a sampler reading the gauges sees zero rather than the last backlog.
+        self.sender.stats.publish(&state);
     }
 }
 
@@ -377,7 +402,9 @@ impl ReplyReader {
 impl Drop for ReplyReader {
     fn drop(&mut self) {
         self.sender.close();
-        self.sender.state.lock().clear();
+        let mut state = self.sender.state.lock();
+        state.clear();
+        self.sender.stats.publish(&state);
     }
 }
 

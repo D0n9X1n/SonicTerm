@@ -342,6 +342,8 @@ pub(super) struct ReaperDriver {
     cancel: CancelSource,
     observations: Observations,
     paths: Mutex<(usize, usize)>,
+    /// How long synchronous fallbacks blocked the retiring thread.
+    fallback_timing: Mutex<super::reaper_fallback::FallbackTiming>,
     finished: Option<bool>,
 }
 
@@ -408,6 +410,7 @@ impl ReaperDriver {
             cancel,
             observations,
             paths: Mutex::new((0, 0)),
+            fallback_timing: Mutex::default(),
             finished: None,
         })
     }
@@ -428,7 +431,8 @@ impl ReaperDriver {
         Ok(slot)
     }
 
-    // Lock order: observations releases before paths; neither lock is held during enqueue or native fallback destruction.
+    // Lock order: observations -> paths -> fallback_timing, one at a time; none is held during
+    // enqueue or native fallback destruction.
     pub(super) fn retire(&self, mut pty: PtyHandle, slot: Option<ReapSlot>) -> RetirementPath {
         let slot = slot.or_else(|| self.reserve(&mut pty).ok());
         let task =
@@ -448,13 +452,33 @@ impl ReaperDriver {
                 owner = owner_id.get(),
                 "PTY teardown admission refused; using bounded synchronous fallback"
             );
+            let started = Instant::now();
             drop(task);
+            self.note_fallback(owner_id.get(), started.elapsed());
             RetirementPath::Fallback
         }
     }
 
     pub(super) fn path_counts(&self) -> (usize, usize) {
         *self.paths.lock()
+    }
+
+    /// Record one synchronous fallback that blocked for `blocked`, warning when it was slow.
+    pub(super) fn note_fallback(&self, owner: u64, blocked: std::time::Duration) {
+        self.fallback_timing.lock().record(blocked);
+        if let Some(blocked_ms) = super::reaper_fallback::slow_fallback_warning(blocked) {
+            // Slow: it held the retiring thread past SLOW_FALLBACK.
+            tracing::warn!(
+                owner,
+                blocked_ms,
+                "synchronous PTY teardown fallback blocked the event loop"
+            );
+        }
+    }
+
+    /// How long synchronous fallbacks have blocked so far.
+    pub(crate) fn fallback_timing(&self) -> super::reaper_fallback::FallbackTiming {
+        *self.fallback_timing.lock()
     }
 
     pub(super) fn finish(&mut self) -> bool {

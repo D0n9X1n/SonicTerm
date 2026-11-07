@@ -76,8 +76,11 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
         items: pty.out_rx.len(),
     });
 
+    // Everything the input side holds in memory: queued input, the message the writer is writing,
+    // and the reply spool's resident ring. Each byte sits in exactly one of the three; spilled
+    // replies are on disk and stay out of this figure.
     let pty_input = pane.pty.as_ref().map_or_else(ResourceAmount::default, |pty| {
-        let bytes = pty.queued_input_bytes();
+        let bytes = usize::try_from(pty.queue_footprint().resident_bytes()).unwrap_or(usize::MAX);
         ResourceAmount { bytes, items: usize::from(bytes > 0) }
     });
 

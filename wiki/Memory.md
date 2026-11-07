@@ -116,7 +116,8 @@ live workers retain that grant. Counts describe custody, not only running thread
 
 Admission refusal keeps ownership. A slotless close retries once, then takes an
 explicit synchronous fallback; it does not inherit the reserved route's fast
-caller return. Sink entries retain capacity until process exit, so `QueueFull`
+caller return. Its time on the retiring thread is recorded, and one longer than
+50 ms is warned about (see `pty queues` on [Logging](Logging)). Sink entries retain capacity until process exit, so `QueueFull`
 can persist for the rest of the process. Terminal disposal preserves incomplete
 native payloads and their accounting instead of running unsafe destructors.
 
@@ -184,7 +185,7 @@ One pane report contains eight disjoint seams:
 | `hyperlink_bytes` | interned OSC 8 strings — one allocation per distinct URI and one per client id under it — and the lookup tables |
 | `inline_media_bytes` | decoded image pixels retained by the pane |
 | `pty_output_bytes` | ring memory pinned by queued PTY output |
-| `pty_input_bytes` | queued input vectors |
+| `pty_input_bytes` | input-side memory: queued input vectors, the message the writer is writing, and the reply spool's resident ring (spilled replies are on disk and not counted) |
 
 `total_bytes` is their sum. `largest_seam` names the largest part. A
 `session retention` line sums the same fields across sampled panes.
@@ -515,6 +516,7 @@ selection is never wiped while you make or copy it. Pressing `R` always shows a 
 | `SAMPLE` | Panes measured and panes skipped because their lock was held (`busy, skipped`), so a partial total is never shown as the whole session. |
 | `WINDOWS / RENDERERS` | Each window's renderer by part (glyph atlas with size, entries and fit, row caches, scratch buffers), the report window's own renderer, and any warm renderer. Under each renderer, `GPU requested` lists its requested GPU bytes and resource count by class: surface, frame texture, glyph atlas, image atlas and present buffers. |
 | `PANES` | Each pane by tab title, split into grid visible, history and alternate, parser, hyperlinks, inline media, and PTY output and input. The per-pane rows sum to the pane total. |
+| `PTY QUEUES` | Every pane's PTY queues summed: bytes in memory (input waiting in the channel, the message the writer is writing, and the resident reply tier's allocation, which a drain keeps) and reply spill on disk, shown apart. Then the reaper's synchronous teardown fallbacks: how many, how many blocked past 50 ms, the longest and the total, and once any ran, their blocked times in power-of-four microsecond buckets. Each pane's figures are read without taking its queue's lock. |
 | `THREADS` | Thread count and names. Threads share the process's memory and hold none of their own. |
 | `CHILD PROCESSES` | Each pane shell and its descendants with the OS figure for each (`footprint`, `private` or `RSS`), at most 64 descendants per pane. These are separate processes, not part of SonicTerm's footprint. A process that left its shell's tree, such as a daemonized tmux server, is not listed, and WSL or remote processes are not visible. |
 

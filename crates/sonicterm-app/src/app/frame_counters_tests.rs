@@ -328,6 +328,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/reaper_driver.rs", "state", 2),
     ("app/reaper_driver.rs", "observations", 2),
     ("app/reaper_driver.rs", "paths", 3),
+    // The synchronous fallback's timing record, taken after the native drop returns.
+    ("app/reaper_driver.rs", "fallback_timing", 2),
     ("app/window_setup/windows.rs", "brushes", 1),
     ("app/media.rs", "charge", 3),
     ("app/command_events.rs", "command_events", 1),

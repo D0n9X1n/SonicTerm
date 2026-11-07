@@ -198,6 +198,43 @@ struct PtyWriterProgress {
     terminal: AtomicU8,
 }
 
+/// What one PTY's input and reply queues hold, from [`PtyHandle::queue_footprint`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PtyQueueFootprint {
+    /// User input waiting in the channel, in memory.
+    pub input_queued_bytes: u64,
+    /// The message (user input or a reply turn) the writer took and is writing, in memory.
+    pub writer_in_flight_bytes: u64,
+    /// Parser replies in the resident tier, in memory.
+    pub reply_resident_bytes: u64,
+    /// Parser replies spilled to the private temporary file, on disk.
+    pub reply_spill_bytes: u64,
+}
+
+/// One queue footprint from the counters a handle and its senders share.
+// Ordering: queued_bytes and in_flight_bytes Relaxed; accounting snapshots, not synchronization.
+fn queue_footprint(
+    queued_bytes: &AtomicUsize,
+    progress: &PtyWriterProgress,
+    replies: &PtyReplySender,
+) -> PtyQueueFootprint {
+    let reply_stats = replies.stats();
+    PtyQueueFootprint {
+        input_queued_bytes: queued_bytes.load(Ordering::Relaxed) as u64,
+        writer_in_flight_bytes: progress.in_flight_bytes.load(Ordering::Relaxed) as u64,
+        reply_resident_bytes: reply_stats.resident_bytes,
+        reply_spill_bytes: reply_stats.live_bytes,
+    }
+}
+
+impl PtyQueueFootprint {
+    /// Memory the queues hold: queued input, the writer's message, resident replies. Disk is apart.
+    #[must_use]
+    pub fn resident_bytes(&self) -> u64 {
+        self.input_queued_bytes + self.writer_in_flight_bytes + self.reply_resident_bytes
+    }
+}
+
 /// Where an admitted user-input message stands, from [`PtyDeliveryProbe::status`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PtyDelivery {
@@ -675,6 +712,14 @@ impl PtyHandle {
     #[must_use]
     pub fn reply_sender(&self) -> PtyReplySender {
         self.replies.clone()
+    }
+
+    /// What this PTY's input and reply queues hold now, memory and disk apart. Each message counts
+    /// once: queued (or in the reply spool) until the writer takes it, then in flight until written.
+    // Ordering: in_flight_bytes Relaxed; an accounting snapshot like queued_input_bytes.
+    #[must_use]
+    pub fn queue_footprint(&self) -> PtyQueueFootprint {
+        queue_footprint(&self.queued_input_bytes, &self.writer_progress, &self.replies)
     }
 
     /// Sample queue occupancy and native writer progress; fields are concurrent observations, not one transaction.

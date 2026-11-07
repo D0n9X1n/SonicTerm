@@ -134,6 +134,14 @@ fn slow_writer_recovers_without_replaying_rejected_input() {
     assert_eq!(full.completed_messages, 0);
     assert_eq!(full.in_flight_bytes, first.len());
     assert_eq!(full.queued_messages, PTY_INPUT_QUEUE_CAPACITY);
+    // The message the writer took left the queue as it entered the writer: counted once.
+    let replies = reply_spool().0;
+    let footprint =
+        crate::pty::queue_footprint(&sender.queued_bytes, &sender.writer_progress, &replies);
+    let waiting_bytes: usize = waiting.iter().map(Vec::len).sum();
+    assert_eq!(footprint.input_queued_bytes, waiting_bytes as u64);
+    assert_eq!(footprint.writer_in_flight_bytes, first.len() as u64);
+    assert_eq!(footprint.resident_bytes(), (waiting_bytes + first.len()) as u64);
     permit_tx.send(true).unwrap();
     for completed in 1..=waiting.len() {
         assert_eq!(

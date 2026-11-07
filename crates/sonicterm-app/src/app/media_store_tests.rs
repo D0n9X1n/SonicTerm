@@ -69,3 +69,60 @@ fn a_snapshot_never_waits_for_a_writer() {
     drop(held);
     assert!(store.try_snapshot().is_some());
 }
+
+/// Many writes under one held snapshot copy the list once, not once per write: after the first
+/// write makes the list the store's own, later writes edit in place until the next snapshot. The
+/// copy moves entries only, `size_of::<InlineImage>()` bytes each, never pixel data.
+#[test]
+fn writes_under_one_held_snapshot_copy_the_list_once() {
+    let store = InlineImageStore::default();
+    for id in 0..64 {
+        store.lock().push(image(id));
+    }
+    let held = store.try_snapshot().unwrap();
+    store.lock().push(image(64));
+    let after_first = Arc::as_ptr(&store.try_snapshot().unwrap());
+    for id in 65..128 {
+        store.lock().push(image(id));
+    }
+    let after_many = store.try_snapshot().unwrap();
+    assert_eq!(Arc::as_ptr(&after_many), after_first, "only the first write copied the list");
+    assert_eq!(held.len(), 64, "the held frame kept its own list");
+    assert_eq!(after_many.len(), 128);
+    // What that one copy moved: 64 entries of fixed size, sharing every pixel buffer.
+    let copied_bytes = 64 * std::mem::size_of::<InlineImage>();
+    assert!(copied_bytes < 64 * 1024, "the copy is entries only: {copied_bytes} bytes");
+    assert!(Arc::ptr_eq(&held[0].bgra, &after_many[0].bgra));
+}
+
+/// Counted, not inferred from pointers: with one snapshot held, N writes copy the list once (one
+/// allocation for the copy, the rest growing it in place), and with no snapshot held they copy
+/// nothing. The image pixels are shared either way, so a copy is the entry list alone.
+#[test]
+fn writes_copy_the_list_at_most_once_per_held_snapshot() {
+    let store = InlineImageStore::default();
+    for id in 0..8 {
+        store.lock().push(image(id));
+    }
+    let images: Vec<InlineImage> = (100..116).map(image).collect();
+    // A held snapshot: the first write copies the 8 entries, later writes edit that copy.
+    let held = store.try_snapshot().unwrap();
+    let counter = crate::lib_tests::CountAllocations::start();
+    for entry in images.iter().take(8).cloned() {
+        store.lock().push(entry);
+    }
+    let with_snapshot = counter.count();
+    drop(counter);
+    // No snapshot: every write edits the list in place.
+    drop(held);
+    let counter = crate::lib_tests::CountAllocations::start();
+    for entry in images.iter().skip(8).cloned() {
+        store.lock().push(entry);
+    }
+    let without_snapshot = counter.count();
+    drop(counter);
+    // One allocation for the copy, at most a few for growth; never one per write.
+    assert!((1..=4).contains(&with_snapshot), "{with_snapshot} allocations for 8 writes");
+    assert!(without_snapshot <= 2, "{without_snapshot} allocations with no snapshot held");
+    assert_eq!(store.try_snapshot().unwrap().len(), 24);
+}

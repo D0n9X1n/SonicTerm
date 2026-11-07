@@ -1015,7 +1015,24 @@ session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
                   grid_history_bytes=<bytes> grid_alternate_bytes=<bytes> parser_bytes=<bytes>
                   hyperlink_bytes=<bytes> inline_media_bytes=<bytes>
                   pty_output_bytes=<bytes> pty_input_bytes=<bytes>
+pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
+           writer_in_flight_bytes=<bytes> reply_resident_bytes=<bytes>
+           reply_spill_disk_bytes=<bytes> teardown_fallbacks=<count>
+           teardown_fallbacks_slow=<count> teardown_fallback_longest_us=<us>
+           teardown_fallback_total_us=<us>
 ```
+
+`pty queues` sums every pane's PTY queues on the same cadence: input waiting in
+the channel, the message the writer is writing (user input or a reply turn,
+counted once as it leaves the queue), the allocation of the resident reply tier
+(its capacity, which a drain keeps, so it can exceed the replies it holds), and
+replies spilled to disk (`reply_spill_disk_bytes`, never part of
+`resident_bytes`). The reply figures are each pane's spool counters as of its last
+send or pop, read without the spool's lock, so a pane whose storage is stalled
+cannot hold up the event loop's sample. The teardown fields report the reaper's synchronous fallback:
+how many ran, how many blocked longer than 50 ms, the longest and the total. A
+fallback past 50 ms also logs `synchronous PTY teardown fallback blocked the event
+loop` at `warn` with `owner` and `blocked_ms`.
 
 The eight seam fields are disjoint and sum to `total_bytes`:
 
@@ -1028,7 +1045,7 @@ The eight seam fields are disjoint and sum to `total_bytes`:
 | `hyperlink_bytes` | interned OSC 8 URI and id strings | no action; bounded and reclaimed when links leave retained history |
 | `inline_media_bytes` | decoded inline images retained by panes | display fewer images or close image-heavy panes |
 | `pty_output_bytes` | local PTY output queued or in flight | let output drain |
-| `pty_input_bytes` | input queued toward the shell, usually a large paste | let the shell drain it |
+| `pty_input_bytes` | input queued toward the shell or being written (usually a large paste), plus resident parser replies; spilled replies are not included | let the shell drain it |
 
 Read `largest_seam` first, then compare at least five consecutive samples. A
 large flat working set is different from a value that rises every sample. Pane

@@ -97,7 +97,7 @@ Windows 使用 20 个 helper 槽位和 2,048 个原生句柄许可；Unix 使用
 worker 继续持有整组 grant。计数表示持有的资源，不只是正在运行的线程。
 
 接纳拒绝不会丢弃所有权。无槽位关闭重试一次，再明确采用同步回退；它不享有预留路径的
-调用方快速返回保证。sink 条目持有容量直到进程退出，因此 `QueueFull` 可能持续到本次
+调用方快速返回保证。它在退役线程上的耗时会被记录，超过 50 ms 时会发出警告（见[日志](Logging-zh-CN)中的 `pty queues`）。sink 条目持有容量直到进程退出，因此 `QueueFull` 可能持续到本次
 进程结束。终态释放保留未完成的原生载荷和记账，而不执行不安全的析构。
 
 类型系统还定义了 `SharedFont`、`SharedRaster`、`SharedAtlas`、`LocalPty` 和 mux
@@ -150,7 +150,7 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 | `hyperlink_bytes` | 驻留的 OSC 8 字符串（每个不同的 URI 一次分配，其下每个客户端 id 一次分配）及查找表 |
 | `inline_media_bytes` | 窗格保留的已解码图像像素 |
 | `pty_output_bytes` | 排队 PTY 输出固定的环形缓冲内存 |
-| `pty_input_bytes` | 排队输入向量 |
+| `pty_input_bytes` | 输入侧内存：排队输入向量、写入线程正在写的消息，以及回复暂存区的常驻环形缓冲（溢出到磁盘的回复不计入） |
 
 `total_bytes` 是八项之和，`largest_seam` 指出最大项。`session retention` 行会对所有
 已采样窗格汇总同样字段。
@@ -395,6 +395,7 @@ allocator_largest_block_bytes
 | `SAMPLE` | 已测量的窗格数，以及因锁被占用而跳过的窗格数（`busy, skipped`），因此不完整的总量不会被当成整个会话。 |
 | `WINDOWS / RENDERERS` | 每个窗口渲染器的各部分（字形图集的尺寸、条目数与 fit、行缓存、临时缓冲），报告窗口自身的渲染器，以及预热渲染器。每个渲染器下的 `GPU requested` 按类别列出其请求的 GPU 字节数与资源数：surface、帧纹理、字形图集、图像图集与呈现缓冲区。 |
 | `PANES` | 按标签页标题列出每个窗格，分为网格可见区、历史、备用屏、解析器、超链接、内联媒体以及 PTY 输出与输入。各窗格行之和等于窗格总量。 |
+| `PTY QUEUES` | 所有窗格的 PTY 队列汇总：内存中的字节（通道中等待的输入、writer 正在写入的消息，以及常驻回复层的已分配内存，排空后仍保留）与磁盘上的回复溢出，分开显示。随后是回收器的同步 teardown 回退：次数、阻塞超过 50 ms 的次数、最长与总耗时；一旦发生过回退，还按 4 的幂次微秒分桶列出阻塞时间。每个窗格的数值读取时不获取其队列的锁。 |
 | `THREADS` | 线程数量与名称。线程共享进程内存，自身不持有内存。 |
 | `CHILD PROCESSES` | 每个窗格的 shell 及其后代进程，并给出各自的操作系统数值（`footprint`、`private` 或 `RSS`），每个窗格最多 64 个后代。它们是独立进程，不计入 SonicTerm 的 footprint。已离开 shell 进程树的进程（例如守护化的 tmux server）不会列出，WSL 与远程进程也不可见。 |
 

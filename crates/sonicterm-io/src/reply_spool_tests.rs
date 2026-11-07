@@ -229,6 +229,58 @@ fn a_slow_reader_keeps_the_spill_file_bounded_and_ordered() {
     assert_eq!(next_read, next_sent);
 }
 
+/// A failed or dropped reader frees the backlog, and the gauges a held sender reads say so: no
+/// resident ring and no live spill are reported after the storage is gone.
+#[test]
+fn a_failed_or_dropped_reader_zeroes_the_gauges() {
+    for drop_reader in [false, true] {
+        let (sender, reader) = reply_spool();
+        // Past the resident tier, so both the ring and the spill file hold bytes.
+        while sender.stats().live_bytes == 0 {
+            sender.send(vec![1u8; CHUNK_BYTES]).unwrap();
+        }
+        assert!(sender.stats().resident_bytes > 0);
+        if drop_reader {
+            drop(reader);
+        } else {
+            reader.fail(io::Error::other("writer failed"));
+        }
+        let stats = sender.stats();
+        assert_eq!(
+            (stats.live_bytes, stats.resident_bytes),
+            (0, 0),
+            "drop={drop_reader}: {stats:?}"
+        );
+    }
+}
+
+/// `stats` never takes the spool lock, so a sampler is not stuck behind a send or pop blocked in
+/// file I/O; and the resident figure is the allocation a drain keeps, not the bytes still queued.
+#[test]
+fn stats_read_without_the_lock_and_count_retained_capacity() {
+    let (sender, reader) = reply_spool();
+    sender.send(vec![7u8; 100]).unwrap();
+    assert_eq!(reader.pop().unwrap().unwrap(), vec![7u8; 100]);
+    let held = sender.state.lock();
+    let (done, finished) = std::sync::mpsc::channel();
+    let sampler = {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let stats = sender.stats();
+            done.send(()).unwrap();
+            stats
+        })
+    };
+    // The lock is held, as a stalled file operation would hold it; the sample still returns.
+    finished
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("stats did not wait on the lock");
+    drop(held);
+    let stats = sampler.join().unwrap();
+    assert!(stats.resident_bytes >= 104, "the drained ring keeps its allocation: {stats:?}");
+    assert_eq!(stats.live_bytes, 0);
+}
+
 /// A compaction whose file I/O fails latches the spool like any storage failure: the error is
 /// returned, later sends and pops report it, and the storage is released.
 #[test]

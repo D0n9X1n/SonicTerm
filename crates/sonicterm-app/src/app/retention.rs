@@ -781,6 +781,7 @@ impl super::App {
         // that ability would invert the direction of the crate boundary.
         // What was missing was never the measurement — it was a reader.
         self.log_renderer_retention();
+        self.log_pty_queues();
         true
     }
 }
