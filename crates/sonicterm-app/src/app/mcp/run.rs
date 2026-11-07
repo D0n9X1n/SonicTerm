@@ -11,7 +11,6 @@ use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use sonicterm_cfg::config::McpControl;
 use sonicterm_grid::grid::{Grid, PinnedRun};
 
 use super::control_loop::{has_control_character, Refusal};
@@ -154,7 +153,7 @@ impl App {
     // refused start; run_typed_at SeqCst publishes the reset.
     pub(crate) fn mcp_run_start(
         &mut self,
-        control: McpControl,
+        access: super::agents::Access,
         pane_id: u64,
         command: &str,
     ) -> LoopReply {
@@ -165,7 +164,7 @@ impl App {
                 "the command holds a control character".into(),
             );
         }
-        if let Err(refusal) = self.authorize_control(control, pane_id, false) {
+        if let Err(refusal) = self.authorize_control(access, pane_id, false) {
             // When: `authorize_control` refused the pane, nothing runs.
             return refusal.reply();
         }

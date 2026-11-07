@@ -57,6 +57,11 @@ pub(super) struct Client {
 }
 
 impl Client {
+    /// Close the client's end, as a bridge that exits does.
+    pub(super) fn hang_up(&mut self) {
+        self.to_server = None;
+    }
+
     /// Send one JSON value as a line.
     pub(super) fn send(&mut self, value: &Value) {
         let mut line = serde_json::to_vec(value).unwrap();

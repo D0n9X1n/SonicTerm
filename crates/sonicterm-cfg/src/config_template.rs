@@ -218,6 +218,12 @@ control = "agent"
 read = "agent"
 # Connections served at once (1-16). Each runs one tool call at a time.
 max_connections = 4
+# What "agent" above covers: "shared" (every agent's panes) or "session"
+# (only panes the calling connection created).
+isolation = "shared"
+# Panes create_pane may open a helper beside under control = "agent":
+# "any" (every pane) or "agent" (only panes the agent may control).
+create_anchor = "any"
 "#,
         config_dir = default_config_dir()
             .map(|dir| dir.display().to_string())

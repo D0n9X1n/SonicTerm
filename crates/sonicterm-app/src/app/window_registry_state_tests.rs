@@ -17,8 +17,9 @@ fn the_registry_finds_each_pane_in_its_owning_window() {
         assert_eq!(app.registry.window_of_pane(pane), Some(window));
         let found = app.registry.pane(pane).expect("an owned pane") as *const _;
         assert_eq!(found, &app.registry.windows[&window].panes[&pane] as *const _);
-        app.registry.pane_mut(pane).expect("an owned pane").agent_owned = true;
-        assert!(app.registry.windows[&window].panes[&pane].agent_owned);
+        app.registry.pane_mut(pane).expect("an owned pane").creator =
+            crate::app::mcp::agents::PaneOwner::agent_if(true);
+        assert!(app.registry.windows[&window].panes[&pane].creator.is_agent());
     }
     assert!(app.registry.pane(u64::MAX).is_none());
     assert!(app.registry.window_of_pane(u64::MAX).is_none());

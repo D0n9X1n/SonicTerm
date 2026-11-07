@@ -81,3 +81,32 @@ fn max_connections_defaults_and_clamps() {
     let many: Config = toml::from_str("[mcp]\nmax_connections = 200\n").unwrap();
     assert_eq!(many.mcp.max_connections(), 16);
 }
+
+/// `isolation` defaults to `"shared"` and `create_anchor` to `"any"`, today's behavior; each value
+/// parses from its spelling, an unknown one fails the load, and the template spells the defaults.
+#[test]
+fn isolation_and_create_anchor_default_parse_and_appear_in_the_template() {
+    let defaults = McpConfig::default();
+    assert_eq!(
+        (defaults.isolation, defaults.create_anchor),
+        (McpIsolation::Shared, McpCreateAnchor::Any)
+    );
+    for isolation in [McpIsolation::Shared, McpIsolation::Session] {
+        let text = format!("[mcp]\nisolation = \"{}\"\n", isolation.as_str());
+        assert_eq!(toml::from_str::<Config>(&text).unwrap().mcp.isolation, isolation);
+    }
+    for anchor in [McpCreateAnchor::Any, McpCreateAnchor::Agent] {
+        let text = format!("[mcp]\ncreate_anchor = \"{}\"\n", anchor.as_str());
+        assert_eq!(toml::from_str::<Config>(&text).unwrap().mcp.create_anchor, anchor);
+    }
+    assert!(toml::from_str::<Config>("[mcp]\nisolation = \"none\"\n").is_err());
+    assert!(toml::from_str::<Config>("[mcp]\ncreate_anchor = \"user\"\n").is_err());
+    let template = crate::config::default_config_template();
+    assert!(template.contains("\nisolation = \"shared\"\n"));
+    assert!(template.contains("\ncreate_anchor = \"any\"\n"));
+    let parsed: Config = toml::from_str(&template).unwrap();
+    assert_eq!(
+        (parsed.mcp.isolation, parsed.mcp.create_anchor),
+        (McpIsolation::Shared, McpCreateAnchor::Any)
+    );
+}

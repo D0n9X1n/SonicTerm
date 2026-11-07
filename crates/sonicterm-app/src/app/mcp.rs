@@ -16,12 +16,14 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::Value;
-use sonicterm_cfg::config::{McpControl, McpRead};
+use sonicterm_cfg::config::{McpControl, McpCreateAnchor, McpIsolation, McpRead};
 use sonicterm_vt::vt::Parser;
 use winit::event_loop::EventLoopProxy;
 
 use super::UserEvent;
 
+#[path = "mcp/agents.rs"]
+pub(crate) mod agents;
 #[path = "mcp/control_loop.rs"]
 pub(crate) mod control_loop;
 #[cfg(unix)]
@@ -145,8 +147,8 @@ pub(crate) struct PaneEntry {
     pub(crate) pane_id: u64,
     /// Where the pane sits; `Some` only for `list_panes` entries.
     pub(crate) metadata: Option<PaneMetadata>,
-    /// Whether an agent created the pane.
-    pub(crate) agent_owned: bool,
+    /// Who created the pane; `agent_owned` in tool results is `creator.is_agent()`.
+    pub(crate) creator: agents::PaneOwner,
     /// The pane's parser, read with one bounded attempt.
     pub(crate) parser: Arc<Mutex<Parser>>,
     /// Bumped after each batch of output; read without any lock.
@@ -190,6 +192,8 @@ pub(crate) struct LoopRequest {
     pub(crate) deadline: Instant,
     /// Set when the client is gone.
     pub(crate) closed: Arc<AtomicBool>,
+    /// The agent session that asked, whose `"agent"` scopes the loop applies.
+    pub(crate) session: agents::AgentSessionId,
     /// Where the answer goes; the loop only `try_send`s.
     pub(crate) reply: SyncSender<LoopReply>,
 }
@@ -204,6 +208,10 @@ pub(crate) struct McpShared {
     pub(crate) control: AtomicU8,
     /// Whether read tools are limited to agent-created panes (`[mcp] read = "agent"`).
     pub(crate) read_agent_only: AtomicBool,
+    /// `[mcp] isolation` and `create_anchor`, packed by [`agent_scope_code`].
+    agent_scope: AtomicU8,
+    /// Agent sessions still connected; a pane whose creator left reads as orphaned.
+    pub(crate) sessions: agents::LiveSessions,
     /// Set to stop the listener and every connection.
     pub(crate) stopped: AtomicBool,
     /// Whether a wake-up is already queued, so a burst of requests wakes the loop once.
@@ -257,6 +265,11 @@ impl McpShared {
             generation: AtomicU64::new(1),
             control: AtomicU8::new(control_code(control)),
             read_agent_only: AtomicBool::new(false),
+            agent_scope: AtomicU8::new(agent_scope_code(
+                McpIsolation::Shared,
+                McpCreateAnchor::Any,
+            )),
+            sessions: agents::LiveSessions::default(),
             stopped: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             proxy: Mutex::new(proxy),
@@ -316,6 +329,30 @@ impl McpShared {
         self.wake_waiters();
     }
 
+    /// The current `[mcp] isolation` and `create_anchor`.
+    // Ordering: agent_scope Acquire pairs with the Release store in `set_agent_scope`.
+    pub(crate) fn agent_scope(&self) -> (McpIsolation, McpCreateAnchor) {
+        let code = self.agent_scope.load(Ordering::Acquire);
+        let isolation = if code & 1 == 0 { McpIsolation::Shared } else { McpIsolation::Session };
+        let anchor = if code & 2 == 0 { McpCreateAnchor::Any } else { McpCreateAnchor::Agent };
+        (isolation, anchor)
+    }
+
+    /// Change `isolation` and `create_anchor` and revoke every queued request and running wait,
+    /// as a `control` or `read` change does: both narrow or widen what a call may touch.
+    // Ordering: agent_scope Release publishes the scope before the generation AcqRel bump.
+    pub(crate) fn set_agent_scope(&self, isolation: McpIsolation, anchor: McpCreateAnchor) {
+        self.agent_scope.store(agent_scope_code(isolation, anchor), Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake_waiters();
+    }
+
+    /// What `session` may touch right now.
+    pub(crate) fn access(&self, session: agents::AgentSessionId) -> agents::Access {
+        let (isolation, create_anchor) = self.agent_scope();
+        agents::Access { control: self.control(), isolation, create_anchor, session }
+    }
+
     /// Set the connection limit for connections that arrive from now on; live ones are untouched.
     // Ordering: connection_limit Release pairs with spawn_connection's Acquire load.
     pub(crate) fn set_connection_limit(&self, limit: usize) {
@@ -360,6 +397,7 @@ impl McpShared {
             generation: scope.generation,
             deadline,
             closed: Arc::clone(closed),
+            session: scope.session,
             reply,
         };
         self.inbox.lock().push(request);
@@ -424,6 +462,8 @@ impl McpShared {
             generation: self.generation.load(Ordering::Acquire),
             deadline: Instant::now() + LOOP_DEADLINE,
             closed: Arc::new(AtomicBool::new(false)),
+            // A notice reads no pane, so the session it carries is never checked.
+            session: agents::AgentSessionId::next(),
             reply,
         });
         let _ = self.wake();
@@ -500,13 +540,29 @@ pub(crate) struct CallScope {
     pub(crate) closed: Arc<AtomicBool>,
     /// The generation that accepted the call.
     pub(crate) generation: u64,
+    /// The connection's agent session.
+    pub(crate) session: agents::AgentSessionId,
 }
 
 impl CallScope {
-    /// Admit a call now, on `shared`, for a connection whose close flag is `closed`.
+    /// Admit a call now, on `shared`, for `session`'s connection whose close flag is `closed`.
     // Ordering: generation Acquire reads the value `set_control` and `stop` publish with AcqRel.
+    pub(crate) fn admit_for(
+        shared: &McpShared,
+        closed: &Arc<AtomicBool>,
+        session: agents::AgentSessionId,
+    ) -> Self {
+        Self {
+            closed: Arc::clone(closed),
+            generation: shared.generation.load(Ordering::Acquire),
+            session,
+        }
+    }
+
+    /// [`Self::admit_for`] a fresh live session, for tests that drive one connection's calls.
+    #[cfg(test)]
     pub(crate) fn admit(shared: &McpShared, closed: &Arc<AtomicBool>) -> Self {
-        Self { closed: Arc::clone(closed), generation: shared.generation.load(Ordering::Acquire) }
+        Self::admit_for(shared, closed, shared.sessions.open())
     }
 
     /// Whether the call was revoked since it was admitted.
@@ -527,6 +583,11 @@ pub(crate) struct Caller {
     pub(crate) client: Option<String>,
     /// Whether `initialize` already ran; only the first one is announced.
     pub(crate) initialized: bool,
+}
+
+/// `isolation` and `create_anchor` as one byte: bit 0 is `"session"`, bit 1 is `"agent"`.
+fn agent_scope_code(isolation: McpIsolation, anchor: McpCreateAnchor) -> u8 {
+    u8::from(isolation == McpIsolation::Session) | (u8::from(anchor == McpCreateAnchor::Agent) << 1)
 }
 
 /// Serve one connection until it closes or the server stops: a reader thread parses lines and
@@ -554,9 +615,13 @@ pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> 
         // When: the worker thread could not start, the connection cannot run tools and closes.
         return None;
     }
-    let calls = CallSlot { queue: calls, in_flight, closed: Arc::clone(&closed) };
+    // The session starts before the first call is admitted and ends with the connection, so a
+    // pane it created reads as orphaned from the moment the client is gone.
+    let session = shared.sessions.open();
+    let calls = CallSlot { queue: calls, in_flight, closed: Arc::clone(&closed), session };
     read_loop(&shared, transport.reader, &writer, &caller, &calls, &closed);
     close_connection(&shared, &closed);
+    shared.sessions.close(session);
     let client = caller.lock().client.clone();
     client
 }
@@ -617,10 +682,27 @@ pub(crate) struct AdmittedCall {
 
 impl AdmittedCall {
     /// Admit a call now: its scope takes the current generation and its arguments are charged.
+    fn admit_on(shared: &Arc<McpShared>, calls: &CallSlot, id: Value, params: Value) -> Self {
+        Self::admit_scoped(shared, &calls.closed, calls.session, id, params)
+    }
+
+    /// [`Self::admit_on`] for a fresh live session, for tests without a connection's slot.
+    #[cfg(test)]
     fn admit(shared: &Arc<McpShared>, closed: &Arc<AtomicBool>, id: Value, params: Value) -> Self {
+        Self::admit_scoped(shared, closed, shared.sessions.open(), id, params)
+    }
+
+    /// Admit a call for `session` on the connection whose close flag is `closed`.
+    fn admit_scoped(
+        shared: &Arc<McpShared>,
+        closed: &Arc<AtomicBool>,
+        session: agents::AgentSessionId,
+        id: Value,
+        params: Value,
+    ) -> Self {
         let bytes = params.to_string().len();
         shared.hold_bytes(bytes);
-        let scope = CallScope::admit(shared, closed);
+        let scope = CallScope::admit_for(shared, closed, session);
         Self { id, params, scope, shared: Arc::clone(shared), bytes }
     }
 }
@@ -641,6 +723,8 @@ struct CallSlot {
     in_flight: Arc<AtomicBool>,
     /// The connection's close flag, which every admitted call carries.
     closed: Arc<AtomicBool>,
+    /// The connection's agent session, which every admitted call carries.
+    session: agents::AgentSessionId,
 }
 
 impl CallSlot {
@@ -763,7 +847,7 @@ fn answer_request(
         "tools/call" => {
             // When: this `method` claimed the call slot, the worker replies; a failed send means it is
             // gone and the connection is ending.
-            let call = AdmittedCall::admit(shared, &calls.closed, id.clone(), params);
+            let call = AdmittedCall::admit_on(shared, calls, id.clone(), params);
             let _ = calls.queue.try_send(call);
             return None;
         }
@@ -868,7 +952,7 @@ pub(crate) fn test_entry(cols: u16, rows: u16, scrollback: usize) -> PaneEntry {
     PaneEntry {
         pane_id: 7,
         metadata: None,
-        agent_owned: false,
+        creator: agents::PaneOwner::User,
         parser: Arc::new(Mutex::new(Parser::new_with_staging_pool(
             grid,
             None,
@@ -897,3 +981,7 @@ mod mcp_tests;
 #[cfg(test)]
 #[path = "mcp_read_scope_tests.rs"]
 mod mcp_read_scope_tests;
+
+#[cfg(test)]
+#[path = "mcp_isolation_tests.rs"]
+mod mcp_isolation_tests;

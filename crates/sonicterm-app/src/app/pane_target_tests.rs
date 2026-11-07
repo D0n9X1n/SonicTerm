@@ -45,7 +45,7 @@ fn a_split_in_a_background_tab_keeps_focus_and_takes_its_own_size() {
     assert_eq!(window.tab_states[1].active_pane, active);
     assert_eq!(window.tab_states[0].active_pane, anchor, "the anchor keeps its tab's focus");
     assert!(window.tab_states[0].tree.leaves().contains(&created.pane_id));
-    assert!(window.panes[&created.pane_id].agent_owned);
+    assert!(window.panes[&created.pane_id].creator.is_agent());
     // The background tab's 800 px is split in two, so each 10 px-cell pane is 40 columns wide.
     let grid_cols = window.panes[&created.pane_id].parser.lock().grid().cols;
     assert_eq!(grid_cols, 40, "sized from the hidden tab's layout, not the 80-column spawn size");
@@ -180,7 +180,7 @@ fn agent_ownership_survives_a_tab_transfer() {
     app.transfer_tab(None, 2, Some(child), 1).expect("the helper tab moves");
     let location = app.locate_pane(created.pane_id).expect("still live");
     assert_eq!(location.window_id, child);
-    assert!(app.registry.windows[&child].panes[&created.pane_id].agent_owned);
+    assert!(app.registry.windows[&child].panes[&created.pane_id].creator.is_agent());
 }
 
 /// The helper's grid starts at its split size, so a program that reads its size at launch never

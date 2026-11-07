@@ -84,7 +84,7 @@ fn attach(app: &mut App, pane_id: u64, program: &str, args: &[&str], agent_owned
         .find_map(|window| window.panes.get_mut(&pane_id))
         .unwrap();
     pane.pty = Some(pty);
-    pane.agent_owned = agent_owned;
+    pane.creator = crate::app::mcp::agents::PaneOwner::agent_if(agent_owned);
 }
 
 /// A program that echoes nothing and stays alive, on this platform.
@@ -179,7 +179,7 @@ fn queued_input_refuses_a_run_before_anything_is_pinned() {
     }
     // The writes above stamped typing; clear it so only the queue can refuse.
     app.main_mut().unwrap().panes.get_mut(&pane_id).unwrap().last_input_at = None;
-    let reply = app.mcp_run_start(McpControl::Agent, pane_id, "ls");
+    let reply = app.mcp_run_start(McpControl::Agent.into(), pane_id, "ls");
     assert!(matches!(reply, LoopReply::Refused("input_busy", _)));
     assert!(parser.lock().grid().pinned_run().is_none(), "nothing is pinned");
     assert!(!app.main().unwrap().panes[&pane_id].agent_run.load(Ordering::Acquire));
@@ -235,13 +235,13 @@ fn closing_a_child_windows_last_tab_reaps_the_window() {
     let main_pane = app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["helper"]);
     let child_pane = *app.registry.windows[&child].panes.keys().next().unwrap();
-    app.registry.windows.get_mut(&child).unwrap().panes.get_mut(&child_pane).unwrap().agent_owned =
-        true;
-    assert!(matches!(app.mcp_close_pane(McpControl::Agent, child_pane), LoopReply::Closed));
+    app.registry.windows.get_mut(&child).unwrap().panes.get_mut(&child_pane).unwrap().creator =
+        crate::app::mcp::agents::PaneOwner::agent_if(true);
+    assert!(matches!(app.mcp_close_pane(McpControl::Agent.into(), child_pane), LoopReply::Closed));
     assert!(!app.registry.windows.contains_key(&child), "the emptied child window is reaped");
     assert!(app.mcp_pane_entries().iter().all(|entry| entry.pane_id != child_pane));
     assert!(matches!(
-        app.mcp_close_pane(McpControl::Any, main_pane),
+        app.mcp_close_pane(McpControl::Any.into(), main_pane),
         LoopReply::Refused("last_tab", _)
     ));
 }
@@ -254,7 +254,8 @@ fn closing_a_child_windows_last_tab_reaps_the_window() {
 fn a_helper_with_argv_is_held_after_its_real_exit() {
     let mut app = app();
     let anchor = app.__test_seed_tab("agent");
-    app.main_mut().unwrap().panes.get_mut(&anchor).unwrap().agent_owned = true;
+    app.main_mut().unwrap().panes.get_mut(&anchor).unwrap().creator =
+        crate::app::mcp::agents::PaneOwner::Agent(crate::app::mcp::agents::AgentSessionId::next());
     let shared = install(&mut app, McpControl::Agent);
     let created = call_through_loop(
         &mut app,

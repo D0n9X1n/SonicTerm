@@ -23,6 +23,10 @@ pub struct McpConfig {
     /// Connections served at once. Each runs one tool call at a time, so a long `wait_for` holds
     /// its connection's slot. Read through [`Self::max_connections`], which clamps it.
     pub max_connections: u8,
+    /// Whether an agent session's `"agent"` scopes cover every agent's panes or only its own.
+    pub isolation: McpIsolation,
+    /// Which panes `create_pane` may open a helper beside under `control = "agent"`.
+    pub create_anchor: McpCreateAnchor,
 }
 
 impl Default for McpConfig {
@@ -32,6 +36,8 @@ impl Default for McpConfig {
             control: McpControl::default(),
             read: None,
             max_connections: DEFAULT_MCP_CONNECTIONS,
+            isolation: McpIsolation::default(),
+            create_anchor: McpCreateAnchor::default(),
         }
     }
 }
@@ -95,6 +101,52 @@ impl McpControl {
             Self::Off => "off",
             Self::Agent => "agent",
             Self::Any => "any",
+        }
+    }
+}
+
+/// What `"agent"` in `control` and `read` covers when several agents connect. An agent session is
+/// one connection; a reconnecting bridge is a new session.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpIsolation {
+    /// Every agent-created pane, whichever session created it.
+    #[default]
+    Shared,
+    /// Only panes the calling session created; another session's panes are out of scope.
+    Session,
+}
+
+impl McpIsolation {
+    /// The config spelling, for logs and templates.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Session => "session",
+        }
+    }
+}
+
+/// Which panes `create_pane` may anchor a helper on under `control = "agent"`; `"any"` always
+/// allows every pane.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpCreateAnchor {
+    /// Any pane, the user's included: a helper never touches its anchor's input.
+    #[default]
+    Any,
+    /// Only a pane the agent could control, so an agent cannot place panes beside the user's.
+    Agent,
+}
+
+impl McpCreateAnchor {
+    /// The config spelling, for logs and templates.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Agent => "agent",
         }
     }
 }

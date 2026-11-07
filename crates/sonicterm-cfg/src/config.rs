@@ -827,7 +827,10 @@ mod template;
 
 #[path = "config_mcp.rs"]
 mod mcp;
-pub use mcp::{McpConfig, McpControl, McpRead, DEFAULT_MCP_CONNECTIONS, MAX_MCP_CONNECTIONS};
+pub use mcp::{
+    McpConfig, McpControl, McpCreateAnchor, McpIsolation, McpRead, DEFAULT_MCP_CONNECTIONS,
+    MAX_MCP_CONNECTIONS,
+};
 
 pub use persist::FamilySave;
 #[cfg(test)]

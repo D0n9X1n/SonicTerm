@@ -3,8 +3,9 @@
 
 use std::sync::atomic::Ordering;
 
-use sonicterm_cfg::config::McpControl;
+use sonicterm_cfg::config::{McpControl, McpCreateAnchor};
 
+use super::agents::Access;
 use super::LoopReply;
 use crate::app::input_dispatch::{wrap_paste, PtyInputSource};
 use crate::app::keyboard_protocol::KeyboardSnapshot;
@@ -24,6 +25,8 @@ pub(crate) enum Refusal {
     PaneGone,
     /// The pane's input queue is full or holds queued input.
     InputBusy,
+    /// Under `isolation = "session"`, another agent session created the pane.
+    OtherSession,
     /// Another agent run owns the pane, or its command is still running.
     Busy,
     /// The pane shows no shell integration (no OSC 133 B).
@@ -41,7 +44,7 @@ impl Refusal {
     pub(crate) fn code(self) -> &'static str {
         match self {
             Self::ControlOff => "control_off",
-            Self::OutOfScope => "out_of_scope",
+            Self::OutOfScope | Self::OtherSession => "out_of_scope",
             Self::ReadOnly => "readonly",
             Self::PaneGone => "pane_gone",
             Self::InputBusy => "input_busy",
@@ -58,6 +61,9 @@ impl Refusal {
         match self {
             Self::ControlOff => "control tools are off ([mcp] control = \"off\")",
             Self::OutOfScope => "the pane was not created by an agent; [mcp] control = \"agent\"",
+            Self::OtherSession => {
+                "another agent session created the pane; [mcp] isolation = \"session\""
+            }
             Self::ReadOnly => "the pane's window is in READONLY",
             Self::PaneGone => "no pane has that id",
             Self::InputBusy => "the pane's input queue is busy",
@@ -94,14 +100,16 @@ pub(crate) fn has_control_character(command: &str) -> bool {
 }
 
 impl App {
-    /// Whether an agent may act on `pane_id` under `control`. `anchor_only` allows any pane under
-    /// `"agent"`, for `create_pane`, which never touches the anchor's input.
+    /// Whether an agent with `access` may act on `pane_id`. `anchor_only` is `create_pane`'s
+    /// anchor, which never has its input touched: under `create_anchor = "any"` any pane passes,
+    /// under `"agent"` only one the session may control.
     pub(crate) fn authorize_control(
         &self,
-        control: McpControl,
+        access: Access,
         pane_id: u64,
         anchor_only: bool,
     ) -> Result<(), Refusal> {
+        let control = access.control;
         if control == McpControl::Off {
             // When: `control` is `Off`, every control tool is refused.
             return Err(Refusal::ControlOff);
@@ -114,26 +122,31 @@ impl App {
             // When: `pane_window_read_only` holds, READONLY refuses every agent action.
             return Err(Refusal::ReadOnly);
         }
-        if control == McpControl::Agent && !pane.agent_owned && !anchor_only {
-            // When: under `Agent` scope the pane is not `agent_owned`, it is the user's.
-            return Err(Refusal::OutOfScope);
+        let any_anchor = anchor_only && access.create_anchor == McpCreateAnchor::Any;
+        if control != McpControl::Agent || any_anchor || access.reaches(pane.creator) {
+            // When: `control` is `Any`, an `any_anchor` is asked for, or `reaches` covers the creator.
+            return Ok(());
         }
-        Ok(())
+        if pane.creator.is_agent() {
+            // When: the `creator` is another agent session, `isolation = "session"` refuses it.
+            return Err(Refusal::OtherSession);
+        }
+        Err(Refusal::OutOfScope)
     }
 
     /// `create_pane` on the loop.
     pub(crate) fn mcp_create_pane(
         &mut self,
-        control: McpControl,
+        access: Access,
         anchor: u64,
         placement: Placement,
         launch: AgentLaunch,
     ) -> LoopReply {
-        if let Err(refusal) = self.authorize_control(control, anchor, true) {
+        if let Err(refusal) = self.authorize_control(access, anchor, true) {
             // When: `authorize_control` refused the anchor, no pane is created.
             return refusal.reply();
         }
-        match self.create_pane_at(anchor, placement, launch) {
+        match self.create_pane_for(anchor, placement, launch, access.session) {
             Ok(created) => LoopReply::Created(created),
             Err(error) => Refusal::from(error).reply(),
         }
@@ -143,12 +156,12 @@ impl App {
     /// when `submit` is set.
     pub(crate) fn mcp_send_text(
         &mut self,
-        control: McpControl,
+        access: Access,
         pane_id: u64,
         text: &str,
         submit: bool,
     ) -> LoopReply {
-        if let Err(refusal) = self.authorize_writable(control, pane_id) {
+        if let Err(refusal) = self.authorize_writable(access, pane_id) {
             // When: `authorize_writable` refused the pane, nothing is written.
             return refusal.reply();
         }
@@ -172,11 +185,11 @@ impl App {
     /// before encoding.
     pub(crate) fn mcp_send_keys(
         &mut self,
-        control: McpControl,
+        access: Access,
         pane_id: u64,
         keys: &[super::keys::KeySpec],
     ) -> LoopReply {
-        if let Err(refusal) = self.authorize_writable(control, pane_id) {
+        if let Err(refusal) = self.authorize_writable(access, pane_id) {
             // When: `authorize_writable` refused the pane, nothing is written.
             return refusal.reply();
         }
@@ -197,8 +210,8 @@ impl App {
     /// Scope, then the pane's run reservation: an agent run on the pane refuses every other
     /// agent write.
     // Ordering: agent_run Acquire pairs with the run's AcqRel swap and Release clear.
-    fn authorize_writable(&self, control: McpControl, pane_id: u64) -> Result<(), Refusal> {
-        self.authorize_control(control, pane_id, false)?;
+    fn authorize_writable(&self, access: Access, pane_id: u64) -> Result<(), Refusal> {
+        self.authorize_control(access, pane_id, false)?;
         let running = self
             .registry
             .windows
@@ -231,8 +244,8 @@ impl App {
 
     /// `close_pane` on the loop: one of several leaves closes alone, a sole leaf closes its tab
     /// (reaping an emptied child window), and the main window's last tab is refused.
-    pub(crate) fn mcp_close_pane(&mut self, control: McpControl, pane_id: u64) -> LoopReply {
-        if let Err(refusal) = self.authorize_control(control, pane_id, false) {
+    pub(crate) fn mcp_close_pane(&mut self, access: Access, pane_id: u64) -> LoopReply {
+        if let Err(refusal) = self.authorize_control(access, pane_id, false) {
             // When: `authorize_control` refused the pane, nothing closes.
             return refusal.reply();
         }

@@ -42,6 +42,8 @@ read = "agent"
 | `control` | `"agent"` | `"off"`, `"agent"` or `"any"`; see Control scope below. |
 | `read` | `"agent"` | `"agent"` or `"any"`; see Read scope below. |
 | `max_connections` | `4` | Connections served at once, 1 to 16 (other values are clamped). Each runs one tool call at a time, so a long `wait_for` holds its connection. A reload that changes only this applies to new connections and revokes nothing. |
+| `isolation` | `"shared"` | `"shared"` or `"session"`; see Agent sessions below. |
+| `create_anchor` | `"any"` | `"any"` or `"agent"`; see Agent sessions below. |
 
 To turn it on:
 
@@ -145,7 +147,8 @@ read an unrelated SSH or log pane unless you allow it. Until v1.4.4 a missing ke
 meant `"any"`; a server that starts without the key logs a warning and shows a
 notification once the first window is open, and an `out_of_scope` refusal says
 which line restores the old scope. An explicit `read = "any"` is never changed.
-Every agent session sees every agent-created pane, not only its own.
+Under the default `isolation = "shared"`, every agent session sees every
+agent-created pane, not only its own.
 Use `"any"` when an agent should read your own panes, for example
 the one it was started from.
 
@@ -155,6 +158,34 @@ the client: the bridge's preamble names the agent's pane as a default for
 the output of the command it ran as part of the run; that is governed by
 `control`, not `read`. A reload that changes `read` drops every queued request
 and ends a running `wait_for`.
+
+## Agent sessions
+
+Each connection is one agent session, with an id SonicTerm assigns when it
+connects; nothing the client sends chooses it. A pane `create_pane` opens belongs
+to the session that opened it, and keeps that owner through tab moves and
+tear-out. `list_panes` reports each pane's `owner` from the caller's side: `you`,
+`other_agent` (a session still connected), `orphaned` (a session that has
+disconnected) or `user`.
+
+`[mcp] isolation` sets what `"agent"` in `control` and `read` covers:
+
+| `isolation` | `"agent"` covers |
+| --- | --- |
+| `"shared"` (default) | every agent-created pane, whichever session created it, orphaned ones included |
+| `"session"` | only the panes the calling session created; another session's pane is refused as `out_of_scope` and left out of `list_panes` |
+
+A pane outlives its session. Under `"session"` an orphaned pane is controllable and
+readable by no agent until you close it: a reconnecting bridge is a new session and
+does not regain it, because `self_pane_id` is not a credential. `"any"` scopes are
+unaffected.
+
+`[mcp] create_anchor` sets which panes `create_pane` may open a helper beside under
+`control = "agent"`. With `"any"` (the default) that is every pane, since a helper
+never types into its anchor; with `"agent"` it is only a pane the session may
+control, so an agent cannot place panes beside yours. A reload that changes
+`isolation` or `create_anchor` drops every queued request and ends a running
+`wait_for`.
 
 Pane text is untrusted input: a program can print text meant to steer an agent.
 The server tells agents never to follow instructions found in pane text, but keep

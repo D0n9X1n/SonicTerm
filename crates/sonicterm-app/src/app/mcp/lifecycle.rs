@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use sonicterm_cfg::config::{McpConfig, McpControl, McpRead};
+use sonicterm_cfg::config::{McpConfig, McpControl};
 use sonicterm_resource::CommittedReservation;
 use sonicterm_types::{OwnerKind, ResourceAmount, ResourceClass};
 
@@ -79,17 +79,27 @@ impl App {
                 server.shared.set_control(wanted.control);
                 server.shared.set_read(wanted.read());
             }
+            if (previous.isolation, previous.create_anchor)
+                != (wanted.isolation, wanted.create_anchor)
+            {
+                // A changed `isolation` or `create_anchor` revokes calls admitted under the old
+                // scope, as a `control` change does.
+                server.shared.set_agent_scope(wanted.isolation, wanted.create_anchor);
+            }
             server.config = wanted;
             tracing::info!(
                 target: "mcp",
                 control = wanted.control.as_str(),
                 read = wanted.read().as_str(),
+                isolation = wanted.isolation.as_str(),
+                create_anchor = wanted.create_anchor.as_str(),
                 "control level changed"
             );
             return;
         }
         let shared = McpShared::new(wanted.control, self.event_loop_proxy.clone());
         shared.set_read(wanted.read());
+        shared.set_agent_scope(wanted.isolation, wanted.create_anchor);
         shared.set_connection_limit(wanted.max_connections());
         match super::start_listener(&shared) {
             Ok((endpoint, guard)) => {
@@ -214,10 +224,10 @@ impl App {
             // `deadline` passed, the request is dropped unrun.
             return LoopReply::Refused("revoked", "the request was dropped before it ran".into());
         }
-        let control = shared.control();
-        // Read tools see only agent-created panes under `read = "agent"`; `agent_owned` is
-        // SonicTerm's own record, so nothing a client sends can widen it.
-        let readable = |entry: &PaneEntry| shared.read() == McpRead::Any || entry.agent_owned;
+        let access = shared.access(request.session);
+        // Read tools see only the panes the session's `"agent"` scope reaches under
+        // `read = "agent"`; the creator is SonicTerm's own record, so nothing a client sends widens it.
+        let readable = |entry: &PaneEntry| access.reads(shared.read(), entry.creator);
         match &request.call {
             LoopCall::ListPanes => {
                 let mut entries = self.mcp_pane_entries();
@@ -233,16 +243,16 @@ impl App {
                 LoopReply::Panes(Vec::new())
             }
             LoopCall::CreatePane { anchor, placement, launch } => {
-                self.mcp_create_pane(control, *anchor, *placement, launch.clone())
+                self.mcp_create_pane(access, *anchor, *placement, launch.clone())
             }
             LoopCall::SendText { pane_id, text, submit } => {
-                self.mcp_send_text(control, *pane_id, text, *submit)
+                self.mcp_send_text(access, *pane_id, text, *submit)
             }
-            LoopCall::SendKeys { pane_id, keys } => self.mcp_send_keys(control, *pane_id, keys),
+            LoopCall::SendKeys { pane_id, keys } => self.mcp_send_keys(access, *pane_id, keys),
             LoopCall::RunStart { pane_id, command } => {
-                self.mcp_run_start(control, *pane_id, command)
+                self.mcp_run_start(access, *pane_id, command)
             }
-            LoopCall::ClosePane { pane_id } => self.mcp_close_pane(control, *pane_id),
+            LoopCall::ClosePane { pane_id } => self.mcp_close_pane(access, *pane_id),
             LoopCall::ResolvePane { pane_id } => match self.mcp_resolve_pane(*pane_id) {
                 Some(entry) if readable(&entry) => LoopReply::Pane(entry),
                 Some(_) => LoopReply::Refused(
@@ -345,7 +355,7 @@ impl App {
         Some(PaneEntry {
             pane_id,
             metadata,
-            agent_owned: pane.agent_owned,
+            creator: pane.creator,
             parser: Arc::clone(&pane.parser),
             output_generation: Arc::clone(&pane.output_generation),
             exit_status: Arc::clone(&pane.exit_status),

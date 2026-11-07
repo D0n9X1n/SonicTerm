@@ -208,7 +208,8 @@ fn agent_markers_follow_the_panes_each_frame() {
     let now = Instant::now();
     let pane = || PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(80, 24)))), None);
     let mut helper = pane();
-    helper.agent_owned = true;
+    helper.creator =
+        crate::app::mcp::agents::PaneOwner::Agent(crate::app::mcp::agents::AgentSessionId::next());
     let mut panes = HashMap::from([(10, pane()), (20, pane()), (21, helper)]);
     let mut split = PaneTree::leaf(20);
     assert!(split.split(20, sonicterm_cfg::keymap::Direction::Right, 21));

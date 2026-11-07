@@ -57,6 +57,7 @@ fn request(
         generation,
         deadline,
         closed: Arc::new(AtomicBool::new(closed)),
+        session: crate::app::mcp::agents::AgentSessionId::next(),
         reply,
     };
     (request, answer)
@@ -188,6 +189,7 @@ fn a_missing_pane_is_gone() {
         generation: shared.generation.load(Ordering::Acquire),
         deadline: std::time::Instant::now() + Duration::from_secs(5),
         closed: Arc::new(AtomicBool::new(false)),
+        session: crate::app::mcp::agents::AgentSessionId::next(),
         reply,
     });
     app.drain_mcp_requests();
@@ -446,6 +448,7 @@ fn an_out_of_scope_refusal_names_the_fix() {
         generation: shared.generation.load(std::sync::atomic::Ordering::Acquire),
         deadline: std::time::Instant::now() + Duration::from_secs(5),
         closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        session: crate::app::mcp::agents::AgentSessionId::next(),
         reply,
     });
     app.drain_mcp_requests();

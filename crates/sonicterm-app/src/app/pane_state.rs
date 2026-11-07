@@ -175,9 +175,10 @@ pub struct PaneState {
     pub(crate) hold_on_exit: bool,
     /// Whether this pane's exit was already handled, so its status line is written once.
     pub(crate) exit_reported: bool,
-    /// Whether an agent created this pane through the control server. It lives on the pane, so
-    /// it survives tab transfer and tear-out; agents may control such panes by default.
-    pub(crate) agent_owned: bool,
+    /// Who created this pane: the user, or an agent session through the control server. It
+    /// lives on the pane, so it survives tab transfer and tear-out; agents may control their own
+    /// panes by default.
+    pub(crate) creator: crate::app::mcp::agents::PaneOwner,
     /// The child process's exit status, set once when the exit is first handled, so a waiter on
     /// another thread reads it without the event loop.
     pub(crate) exit_status: Arc<std::sync::OnceLock<sonicterm_types::PaneExitStatus>>,
@@ -369,7 +370,7 @@ impl PaneState {
             guard_correlation: None,
             hold_on_exit: false,
             exit_reported: false,
-            agent_owned: false,
+            creator: crate::app::mcp::agents::PaneOwner::User,
             exit_status: Arc::new(std::sync::OnceLock::new()),
             change_signal: Arc::default(),
             run_typed_at: Arc::new(AtomicU64::new(0)),

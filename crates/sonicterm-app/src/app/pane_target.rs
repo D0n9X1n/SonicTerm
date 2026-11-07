@@ -81,6 +81,14 @@ pub(crate) enum TargetError {
     Unavailable,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's action while a helper is being created, after its pane exists and before it is
+    /// installed with its owner, to pin a disconnect racing the create.
+    pub(crate) static CREATE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl App {
     /// The window and tab that hold `pane_id`, searching the main window and every child.
     pub(crate) fn locate_pane(&self, pane_id: u64) -> Option<PaneLocation> {
@@ -100,15 +108,28 @@ impl App {
             .is_some_and(CopyModeState::is_read_only)
     }
 
-    /// Open a helper pane beside `anchor` without moving the user's focus: a split in the
-    /// anchor's tab, or a new tab in its window. The pane is agent-owned; a program it runs is
-    /// held after it exits so its output and status stay readable. A missing anchor or a
-    /// READONLY window changes nothing.
+    /// [`Self::create_pane_for`] a fresh agent session, for tests that need only one agent.
+    #[cfg(test)]
     pub(crate) fn create_pane_at(
         &mut self,
         anchor: u64,
         placement: Placement,
         agent_launch: AgentLaunch,
+    ) -> Result<CreatedPane, TargetError> {
+        let session = crate::app::mcp::agents::AgentSessionId::next();
+        self.create_pane_for(anchor, placement, agent_launch, session)
+    }
+
+    /// Open a helper pane beside `anchor` without moving the user's focus: a split in the
+    /// anchor's tab, or a new tab in its window. The pane is owned by agent `session`; a program
+    /// it runs is held after it exits so its output and status stay readable. A missing anchor or
+    /// a READONLY window changes nothing.
+    pub(crate) fn create_pane_for(
+        &mut self,
+        anchor: u64,
+        placement: Placement,
+        agent_launch: AgentLaunch,
+        session: crate::app::mcp::agents::AgentSessionId,
     ) -> Result<CreatedPane, TargetError> {
         let location = self.locate_pane(anchor).ok_or(TargetError::PaneGone)?;
         if self.pane_window_read_only(anchor) {
@@ -141,7 +162,10 @@ impl App {
         // whole-window size first.
         let size = self.target_cells(location, anchor, placement, pane_id);
         let mut pane = self.spawn_target_pane(location, pane_id, &launch, size)?;
-        pane.agent_owned = true;
+        // Between spawning and recording the owner, a test ends the creating session here.
+        #[cfg(test)]
+        CREATE_HOOK.with_borrow(|hook| hook.as_ref().map(|hook| hook()));
+        pane.creator = crate::app::mcp::agents::PaneOwner::Agent(session);
         let outcome =
             if pane.pty.is_some() { LaunchOutcome::Started } else { LaunchOutcome::Failed };
         self.install_target_pane(location, anchor, placement, pane_id, pane, agent_launch.title)?;
@@ -149,6 +173,7 @@ impl App {
             target: "mcp",
             pane = pane_id,
             anchor,
+            session = session.get(),
             ?placement,
             started = outcome == LaunchOutcome::Started,
             "agent pane created"

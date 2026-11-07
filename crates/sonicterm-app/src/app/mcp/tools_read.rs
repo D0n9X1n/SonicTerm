@@ -10,6 +10,7 @@ use regex::RegexBuilder;
 use serde_json::{json, Value};
 use sonicterm_grid::grid::RowToken;
 
+use super::agents::OwnerView;
 use super::jsonrpc::{tool_error, tool_result};
 use super::read::{read_pane, ReadLimits, ReadLine, ReadMode, ReadSnapshot, PARSER_WAIT};
 use super::{CallScope, Caller, LoopCall, LoopReply, McpShared, PaneEntry};
@@ -216,7 +217,15 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
     // One budget for every parser probe, so many busy panes cannot stretch the call: once it is
     // spent, later panes are listed without their live details.
     let budget_ends = Instant::now() + LIST_BUDGET;
-    let panes: Vec<Value> = entries.iter().map(|entry| pane_summary(entry, budget_ends)).collect();
+    let live = |session| shared.sessions.contains(session);
+    let panes: Vec<Value> = entries
+        .iter()
+        .map(|entry| {
+            let mut pane = pane_summary(entry, budget_ends);
+            pane["owner"] = json!(OwnerView::of(entry.creator, scope.session, live).as_str());
+            pane
+        })
+        .collect();
     let partial = panes.iter().any(|pane| pane["details"] == "skipped");
     let summary = format!("{} pane(s)", panes.len());
     let self_pane = caller.self_pane.filter(|id| entries.iter().any(|entry| entry.pane_id == *id));
@@ -246,7 +255,7 @@ fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
         "tab_index": metadata.map(|position| position.tab_index),
         "active": metadata.map(|position| position.active),
         "readonly": metadata.map(|position| position.readonly),
-        "agent_owned": entry.agent_owned,
+        "agent_owned": entry.creator.is_agent(),
     });
     let wait = budget_ends.saturating_duration_since(Instant::now()).min(PARSER_WAIT);
     if wait.is_zero() {

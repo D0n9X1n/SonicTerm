@@ -275,6 +275,8 @@ to. It is off by default; while it is off nothing listens and no endpoint exists
 | `enabled` | `false` | Starts the server. Saving `true` and reloading starts it at once; saving `false` stops it, ends every connection and removes its endpoint. |
 | `control` | `"agent"` | Which panes control tools may act on: `"off"` (none), `"agent"` (panes an agent created) or `"any"` (every pane). A reload that changes it drops every request already queued. Any other value fails the load. |
 | `max_connections` | `4` | Connections the MCP server serves at once, 1 to 16 (other values are clamped). A reload that changes only this applies to new connections. |
+| `isolation` | `"shared"` | What `"agent"` in `control` and `read` covers: `"shared"` (every agent's panes) or `"session"` (only panes the calling connection created). A reload that changes it drops queued requests and ends a running `wait_for`. Any other value fails the load. |
+| `create_anchor` | `"any"` | Which panes `create_pane` may open a helper beside under `control = "agent"`: `"any"` (every pane) or `"agent"` (only a pane the agent may control). A reload that changes it drops queued requests. Any other value fails the load. |
 | `read` | `"agent"` | Which panes read tools may see: `"agent"` (panes an agent created) or `"any"` (every pane). A config without the key reads only agent-created panes (before v1.4.5 it read every pane); a server started without it says so once in a notification and the log. A reload that changes it drops queued requests and ends a running `wait_for`. Any other value fails the load. |
 
 A reload that leaves `[mcp]` unchanged keeps the server and its connections, so

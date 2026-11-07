@@ -40,6 +40,8 @@ read = "agent"
 | `control` | `"agent"` | `"off"`、`"agent"` 或 `"any"`；见下文“控制范围”。 |
 | `read` | `"agent"` | `"agent"` 或 `"any"`；见下文“读取范围”。 |
 | `max_connections` | `4` | 同时服务的连接数，1 到 16（其他取值会被限制到该范围）。每个连接同一时间只运行一个工具调用，因此较长的 `wait_for` 会占用它的连接。只修改此项的重载只作用于新连接，不撤销任何调用。 |
+| `isolation` | `"shared"` | `"shared"` 或 `"session"`；见下文“Agent 会话”。 |
+| `create_anchor` | `"any"` | `"any"` 或 `"agent"`；见下文“Agent 会话”。 |
 
 开启方法：
 
@@ -129,12 +131,35 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 没有 `read` 的配置只读取 agent 创建的窗格，因此除非你允许，agent 无法读取无关的 SSH 或日志窗格。
 在 v1.4.4 及之前，缺少该键表示 `"any"`；服务器在没有该键时启动会记录一条警告，并在第一个窗口打开后显示一次通知，
 `out_of_scope` 拒绝信息也会说明恢复旧范围所需的那一行。显式的 `read = "any"` 永远不会被改变。
-每个 agent 会话都能看到所有 agent 创建的窗格，而不只是它自己创建的。若希望 agent
+在默认的 `isolation = "shared"` 下，每个 agent 会话都能看到所有 agent 创建的窗格，而不只是它自己创建的。若希望 agent
 读取你自己的窗格（例如启动它的那个窗格），请使用 `"any"`。
 
 哪些窗格属于 agent 只由 SonicTerm 自己的记录决定，从不取决于客户端：桥接程序的前导消息会把 agent
 所在窗格作为 `self_pane_id` 的默认值，但在 `"agent"` 下无法解锁任何窗格。`run_command` 会在运行中
 返回它所执行命令的输出；这由 `control` 决定，而不是 `read`。重载时修改 `read` 会丢弃所有已排队的
+请求，并结束正在进行的 `wait_for`。
+
+## Agent 会话
+
+每个连接是一个 agent 会话，其 id 由 SonicTerm 在连接时分配，客户端发送的任何内容都无法选择它。
+`create_pane` 打开的窗格属于打开它的会话，并在标签页移动和拆出后保持该所有者。`list_panes` 从
+调用方角度报告每个窗格的 `owner`：`you`、`other_agent`（仍在连接的会话）、`orphaned`（已断开的
+会话）或 `user`。
+
+`[mcp] isolation` 决定 `control` 与 `read` 中 `"agent"` 的范围：
+
+| `isolation` | `"agent"` 覆盖 |
+| --- | --- |
+| `"shared"`（默认） | 所有 agent 创建的窗格，无论由哪个会话创建，包括孤立窗格 |
+| `"session"` | 只有发起调用的会话创建的窗格；其他会话的窗格以 `out_of_scope` 拒绝，且不出现在 `list_panes` 中 |
+
+窗格比它的会话存活得更久。在 `"session"` 下，孤立窗格在你关闭它之前不能被任何 agent 控制或读取：
+重新连接的桥接程序是一个新会话，不会重新获得它，因为 `self_pane_id` 不是凭据。`"any"` 范围不受
+影响。
+
+`[mcp] create_anchor` 决定在 `control = "agent"` 下 `create_pane` 可以在哪些窗格旁打开辅助窗格。
+`"any"`（默认）表示所有窗格，因为辅助窗格从不向其锚点输入；`"agent"` 只允许该会话可控制的窗格，
+因此 agent 无法在你的窗格旁放置窗格。重载时修改 `isolation` 或 `create_anchor` 会丢弃所有已排队的
 请求，并结束正在进行的 `wait_for`。
 
 窗格文本是不可信输入：程序可以打印意在操纵 agent 的文本。服务器告知 agent 从不执行窗格文本中的
