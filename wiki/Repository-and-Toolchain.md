@@ -181,6 +181,24 @@ that was lost, and an added file are each reported. The `native-dependency-delta
 gate step runs it with its offline tests and needs the network, so CI runs it in
 `tooling`. `native-dependencies.py` stays offline and never reads an archive.
 
+The same tool reports whether a newer upstream release exists. Run it before each
+release:
+
+```sh
+python3 scripts/native-dependency-delta.py --latest
+```
+
+Each manifest entry names a `latest_source`: the `git-tags` provider, the upstream
+repository URL, and a pattern that matches only stable version tags, so `beta`,
+`rc` and other pre-release tags never count. The pattern must read the pinned `tag`
+back as the pinned `version`; the offline tests check that for every library. For
+each library it runs one `git ls-remote --tags`, killed after 60 s or 1 MiB of
+output, and prints `current`, `update` or `ahead` with the pinned version, the
+newest stable tag and the local modification count, or `error` with the reason.
+It exits 0 once the manifest loads: a newer release is a prompt to review, not a
+defect, and nothing schedules it. An `update` line starts the update procedure
+below; it never changes the manifest.
+
 For an update, use one reviewable library change at a time:
 
 1. Review the official release and advisories, including regressions in the new

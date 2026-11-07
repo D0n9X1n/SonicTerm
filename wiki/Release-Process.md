@@ -165,6 +165,9 @@ Before pushing a tag:
 
 - verify the workspace version and intended tag;
 - run the full gate and native release build;
+- run `python3 scripts/native-dependency-delta.py --latest` and review any
+  `update` line against the native dependency procedure in
+  [Repository and Toolchain](Repository-and-Toolchain);
 - compare README and every affected wiki page with current config, logging,
   input, palette, rendering, window, platform, and package behavior;
 - launch the package, exercise alternate-screen entry/exit, scrolling, busy

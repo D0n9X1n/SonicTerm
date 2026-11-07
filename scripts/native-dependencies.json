@@ -6,6 +6,7 @@
       "path": "crates/sonicterm-freetype/freetype2",
       "version": "2.15.0",
       "tag": "VER-2-15-0",
+      "latest_source": {"provider": "git-tags", "url": "https://gitlab.freedesktop.org/freetype/freetype.git", "pattern": "VER-(\\d+)-(\\d+)(?:-(\\d+))?"},
       "revision": "37515cf56ba3349656049edbed89ffc6f6466f2d",
       "archive": {
         "url": "https://sourceforge.net/projects/freetype/files/freetype2/2.15.0/freetype-2.15.0.tar.xz/download",
@@ -27,6 +28,7 @@
       "path": "crates/sonicterm-harfbuzz/harfbuzz",
       "version": "14.6.0",
       "tag": "14.6.0",
+      "latest_source": {"provider": "git-tags", "url": "https://github.com/harfbuzz/harfbuzz.git", "pattern": "(\\d+)\\.(\\d+)\\.(\\d+)"},
       "revision": "c7a7457b7385f33178e8cf87615ca077a810bbe7",
       "archive": {
         "url": "https://github.com/harfbuzz/harfbuzz/releases/download/14.6.0/harfbuzz-14.6.0.tar.xz",
@@ -44,6 +46,7 @@
       "path": "crates/sonicterm-freetype/libpng",
       "version": "1.6.59",
       "tag": "v1.6.59",
+      "latest_source": {"provider": "git-tags", "url": "https://github.com/pnggroup/libpng.git", "pattern": "v(\\d+)\\.(\\d+)\\.(\\d+)"},
       "revision": "cd952f49f95bb27154ae77dbb103032d95f6e580",
       "archive": {
         "url": "https://download.sourceforge.net/libpng/libpng-1.6.59.tar.xz",
@@ -61,6 +64,7 @@
       "path": "crates/sonicterm-freetype/zlib",
       "version": "1.3.2",
       "tag": "v1.3.2",
+      "latest_source": {"provider": "git-tags", "url": "https://github.com/madler/zlib.git", "pattern": "v(\\d+)\\.(\\d+)(?:\\.(\\d+))?"},
       "revision": "da607da739fa6047df13e66a2af6b8bec7c2a498",
       "archive": {
         "url": "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.xz",
@@ -98,6 +102,7 @@
       "path": "crates/sonicterm-winit",
       "version": "0.30.13",
       "tag": "v0.30.13",
+      "latest_source": {"provider": "git-tags", "url": "https://github.com/rust-windowing/winit.git", "pattern": "v(\\d+)\\.(\\d+)\\.(\\d+)"},
       "revision": "e9809ef54b18499bb4f2cac945719ecc2a61061b",
       "archive": {
         "url": "https://static.crates.io/crates/winit/winit-0.30.13.crate",
