@@ -181,7 +181,7 @@ impl super::super::App {
     pub(in crate::app) fn pane_frame_counters(&self) -> Option<PaneFrameCounters> {
         self.diagnostics.frame_counters_sealed.set(true);
         // The gate is now fixed, so the foreground worker's statistics are too.
-        self.fg_probes.seal_stats(
+        self.services.fg_probes.seal_stats(
             self.frame_counters.as_ref().map(|counters| Arc::clone(&counters.fg_worker)),
         );
         self.frame_counters

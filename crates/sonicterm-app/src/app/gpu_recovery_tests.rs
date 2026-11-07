@@ -122,7 +122,7 @@ fn headless_app_has_no_recovery_lifecycle() {
         sonicterm_cfg::config::Config::default(),
         sonicterm_cfg::keymap::Keymap::default(),
     );
-    assert!(app.gpu_recovery.is_none());
+    assert!(app.services.gpu_recovery.is_none());
     assert_eq!(app.gpu_recovery_deadline(), None);
     assert!(app.redraw_due.is_empty());
 }

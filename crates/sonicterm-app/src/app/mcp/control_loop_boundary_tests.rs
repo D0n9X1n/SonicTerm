@@ -35,7 +35,7 @@ fn install(app: &mut App, control: McpControl) -> Arc<McpShared> {
     let config = McpConfig { enabled: true, control, ..McpConfig::default() };
     app.config.mcp = config;
     let owner = app.register_mcp_owner();
-    app.mcp_server = Some(McpServer {
+    app.services.mcp_server = Some(McpServer {
         shared: Arc::clone(&shared),
         endpoint: "test-endpoint".into(),
         _endpoint_guard: None,

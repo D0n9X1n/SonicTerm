@@ -105,7 +105,7 @@ fn real_pty_reaper_settles_owned_processes_before_fixture_cleanup() {
         );
     }
     cleanup_processes(&processes).unwrap();
-    assert_eq!(app.pty_reaper.path_counts(), (1, 0));
+    assert_eq!(app.services.pty_reaper.path_counts(), (1, 0));
     assert!(settled, "reserved native teardown did not settle");
     assert!(native_settled, "an owned process survived reaper cleanup before fixture intervention");
     pty_test_support::record_process(processes[0].pid, false);
@@ -269,7 +269,7 @@ fn measure_close(scenario: &str, sample: usize) -> Result<(Sample, Sample)> {
     ensure!(app.close_pty_pane(pane), "baseline pane was not closed");
     let close = Sample { elapsed: start.elapsed(), censored: false };
     pty_test_support::phase(pane, "baseline-close-end");
-    let (reaper_closes, fallback_closes) = app.pty_reaper.path_counts();
+    let (reaper_closes, fallback_closes) = app.services.pty_reaper.path_counts();
     ensure!(
         (reaper_closes, fallback_closes) == (1, 0),
         "baseline requires one reserved reaper close, observed reaper={reaper_closes} fallback={fallback_closes}"

@@ -834,6 +834,7 @@ pub(super) fn a_status_only_frame_schedules_no_foreground_probe() {
         include_str!("child_window_redraw.rs"),
     ] {
         assert!(source.contains("super::redraw::sets_fg_demand(pty_burst, status_only)"));
-        assert!(!source.contains("(!pty_burst).then(|| std::sync::Arc::clone(&self.fg_probes))"));
+        assert!(!source
+            .contains("(!pty_burst).then(|| std::sync::Arc::clone(&self.services.fg_probes))"));
     }
 }

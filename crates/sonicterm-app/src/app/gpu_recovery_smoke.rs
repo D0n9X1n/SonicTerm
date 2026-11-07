@@ -186,7 +186,8 @@ fn mark_proves(mark: &RecoveryMark, baseline_rows: usize) -> bool {
 impl App {
     /// Only the explicit recovery smoke arms this native-observation timer.
     pub(in crate::app) fn gpu_recovery_smoke_deadline(&self) -> Option<Instant> {
-        self.runtime_smoke
+        self.services
+            .runtime_smoke
             .as_ref()
             .filter(|smoke| smoke.phase == RuntimeSmokePhase::RecoveryReady)
             .map(|smoke| smoke.next_probe_at.unwrap_or_else(Instant::now))
@@ -198,14 +199,15 @@ impl App {
         event_loop: &ActiveEventLoop,
         now: Instant,
     ) -> bool {
-        if !self.runtime_smoke.as_ref().is_some_and(|smoke| {
+        if !self.services.runtime_smoke.as_ref().is_some_and(|smoke| {
             smoke.phase == RuntimeSmokePhase::RecoveryReady
                 && smoke.next_probe_at.is_none_or(|due| now >= due)
         }) {
             // When: `runtime_smoke` has no due recovery phase, normal sessions gain no polling or native work.
             return false;
         }
-        let mut smoke = self.runtime_smoke.take().expect("due recovery smoke remains installed");
+        let mut smoke =
+            self.services.runtime_smoke.take().expect("due recovery smoke remains installed");
         let mut probe = smoke.recovery_probe.take().unwrap_or_else(|| RecoveryProbe::new(now));
         let result = if now.saturating_duration_since(probe.started) >= DEADLINE {
             probe.report_timeout(now, "phase-deadline");
@@ -232,7 +234,7 @@ impl App {
         }
         smoke.recovery_probe = Some(probe);
         smoke.next_probe_at = Some(Instant::now() + POLL_INTERVAL);
-        self.runtime_smoke = Some(smoke);
+        self.services.runtime_smoke = Some(smoke);
         terminal
     }
 

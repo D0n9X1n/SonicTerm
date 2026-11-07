@@ -170,8 +170,8 @@ enum RendererOwner {
 impl App {
     /// Retain one process context before later windows can install compatibility wakers.
     pub(super) fn initialize_gpu_recovery(&mut self, renderer: &GpuRenderer) {
-        if self.gpu_recovery.is_none() {
-            self.gpu_recovery =
+        if self.services.gpu_recovery.is_none() {
+            self.services.gpu_recovery =
                 Some(GpuRecovery::new(renderer.shared_context(), self.event_loop_proxy.clone()));
         }
         if let Some(proxy) = self.event_loop_proxy.clone() {
@@ -182,6 +182,7 @@ impl App {
     /// Reject stale callback identities before inspecting or scheduling current work.
     pub(super) fn gpu_generation_changed(&mut self, event_loop: &ActiveEventLoop, generation: u64) {
         if self
+            .services
             .gpu_recovery
             .as_ref()
             .is_some_and(|recovery| recovery.coordinator.committed() == generation)
@@ -194,6 +195,7 @@ impl App {
     /// A completion event is a hint; only the worker channel transfers its result.
     pub(super) fn gpu_recovery_ready(&mut self, event_loop: &ActiveEventLoop, ticket: u64) {
         if self
+            .services
             .gpu_recovery
             .as_ref()
             .is_some_and(|recovery| recovery.worker.in_flight() == Some(ticket))
@@ -206,26 +208,26 @@ impl App {
     pub(super) fn gpu_recovery_snapshot(
         &self,
     ) -> Option<sonicterm_gpu::recovery::RecoverySnapshot> {
-        self.gpu_recovery.as_ref().map(|recovery| recovery.coordinator.snapshot())
+        self.services.gpu_recovery.as_ref().map(|recovery| recovery.coordinator.snapshot())
     }
 
     /// Recovery timers never create a frame; even exhausted requests retain a disposal wake.
     pub(super) fn gpu_recovery_deadline(&self) -> Option<Instant> {
-        if self.runtime_smoke.as_ref().is_some_and(|smoke| !smoke.recovery_enabled()) {
+        if self.services.runtime_smoke.as_ref().is_some_and(|smoke| !smoke.recovery_enabled()) {
             // When: `runtime_smoke` owns containment evidence, its deliberate loss must remain stopped.
             return None;
         }
-        let recovery = self.gpu_recovery.as_ref()?;
+        let recovery = self.services.gpu_recovery.as_ref()?;
         deadline(recovery.coordinator.phase(), recovery.result_poll_at)
     }
 
     /// Drain actual completions and commit every renderer before returning to event dispatch.
     pub(super) fn service_gpu_recovery(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
-        if self.runtime_smoke.as_ref().is_some_and(|smoke| !smoke.recovery_enabled()) {
+        if self.services.runtime_smoke.as_ref().is_some_and(|smoke| !smoke.recovery_enabled()) {
             // When: `runtime_smoke` owns containment evidence, recovery would invalidate its stopped-device oracle.
             return;
         }
-        let Some(mut recovery) = self.gpu_recovery.take() else {
+        let Some(mut recovery) = self.services.gpu_recovery.take() else {
             // When: `gpu_recovery` is absent, no renderer has established the process context yet.
             return;
         };
@@ -301,7 +303,7 @@ impl App {
             }
         }
         recovery.arm_result_poll(Instant::now());
-        self.gpu_recovery = Some(recovery);
+        self.services.gpu_recovery = Some(recovery);
     }
 
     fn start_gpu_request(

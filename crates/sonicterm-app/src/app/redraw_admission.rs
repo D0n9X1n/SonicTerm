@@ -16,7 +16,7 @@ impl App {
                 // When: `renderer` refuses device work, one report is allowed but no frame assembly follows.
                 window.redraw.stopped_generation = Some(renderer.device_generation());
                 window.redraw.cancel_surface_probe();
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.note_stopped_redraw_refusal(id, &renderer.device_error_snapshot());
                 }
                 if let Some(outcome) = renderer.take_stopped_render_outcome() {

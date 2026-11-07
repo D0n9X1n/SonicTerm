@@ -7,7 +7,7 @@ use winit::event_loop::EventLoopProxy;
 impl App {
     /// Return the committed recovery context, or select a live renderer before it is registered.
     pub(super) fn shared_gpu_context(&self) -> Option<GpuSharedContext> {
-        if let Some(recovery) = &self.gpu_recovery {
+        if let Some(recovery) = &self.services.gpu_recovery {
             // When: `gpu_recovery` owns the context, a discarded partial rebind must never supply a new window.
             return Some(recovery.context());
         }

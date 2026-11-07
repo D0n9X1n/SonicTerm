@@ -30,13 +30,13 @@ fn foreground_maintenance_requests_only_changed_owners() {
             ));
             assert!(window.tabs.set_foreground_privileged(active, true));
         }
-        app.foreground_schedule.activity_wake =
+        app.services.foreground_schedule.activity_wake =
             Some(super::super::super::fg_probe::PendingForegroundProbe { due, fixed: true });
         app.redraw_due = vec![DueWork { owner: None, cause: DueCause::Foreground, deadline: due }];
         let before = [main, child].map(|id| app.windows[&id].redraw.snapshot());
         app.service_redraw_due(due - Duration::from_nanos(1));
         assert!(app.windows.values().all(|window| !window.redraw.request_in_flight));
-        assert_eq!(app.foreground_schedule.next_deadline(), Some(due));
+        assert_eq!(app.services.foreground_schedule.next_deadline(), Some(due));
         app.service_redraw_due(due);
         for (id, baseline) in [main, child].into_iter().zip(before) {
             let window = &app.windows[&id];
@@ -51,7 +51,7 @@ fn foreground_maintenance_requests_only_changed_owners() {
             assert!(window.tabs.tabs().iter().all(|tab| !tab.foreground_privileged));
         }
         assert!(app.redraw_due.is_empty());
-        assert_eq!(app.foreground_schedule.next_deadline(), None);
+        assert_eq!(app.services.foreground_schedule.next_deadline(), None);
     }
 }
 

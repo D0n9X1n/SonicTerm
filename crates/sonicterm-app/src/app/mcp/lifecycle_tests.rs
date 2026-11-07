@@ -28,7 +28,7 @@ fn install_server(app: &mut App, config: McpConfig) -> Arc<McpShared> {
     let shared = McpShared::new(config.control, None);
     app.config.mcp = config;
     let owner = app.register_mcp_owner();
-    app.mcp_server = Some(McpServer {
+    app.services.mcp_server = Some(McpServer {
         shared: Arc::clone(&shared),
         endpoint: "test-endpoint".into(),
         _endpoint_guard: None,
@@ -75,7 +75,7 @@ fn the_server_is_off_by_default() {
     let mut app = test_app();
     assert!(!app.config.mcp.enabled);
     app.reconcile_mcp();
-    assert!(app.mcp_server.is_none());
+    assert!(app.services.mcp_server.is_none());
     assert!(app.mcp_endpoint().is_none());
 }
 
@@ -87,7 +87,11 @@ fn an_unchanged_reload_keeps_the_generation() {
     let shared = install_server(&mut app, enabled(McpControl::Agent));
     let before = shared.generation.load(Ordering::Acquire);
     app.reconcile_mcp();
-    assert!(app.mcp_server.as_ref().is_some_and(|server| Arc::ptr_eq(&server.shared, &shared)));
+    assert!(app
+        .services
+        .mcp_server
+        .as_ref()
+        .is_some_and(|server| Arc::ptr_eq(&server.shared, &shared)));
     assert_eq!(shared.generation.load(Ordering::Acquire), before);
 }
 
@@ -115,7 +119,7 @@ fn disabling_stops_the_server() {
     let shared = install_server(&mut app, enabled(McpControl::Agent));
     app.config.mcp = McpConfig::default();
     app.reconcile_mcp();
-    assert!(app.mcp_server.is_none());
+    assert!(app.services.mcp_server.is_none());
     assert!(shared.is_stopped());
 }
 
@@ -194,8 +198,12 @@ fn a_missing_pane_is_gone() {
 fn connection_buffers_are_charged_to_the_mcp_owner() {
     let mut app = test_app();
     let shared = install_server(&mut app, enabled(McpControl::Agent));
-    let owner =
-        app.mcp_server.as_ref().and_then(|server| server.owner.as_ref()).map(OwnerGuard::id);
+    let owner = app
+        .services
+        .mcp_server
+        .as_ref()
+        .and_then(|server| server.owner.as_ref())
+        .map(OwnerGuard::id);
     let owner = owner.expect("the owner registers");
     shared.hold_bytes(4096);
     shared.connections.store(1, Ordering::Release);

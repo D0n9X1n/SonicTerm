@@ -127,7 +127,7 @@ impl App {
             }
             UserEvent::GpuDeviceGenerationChanged { generation } => {
                 self.gpu_generation_changed(event_loop, generation);
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.observe_recovery_device_event(generation);
                 }
             }
@@ -187,8 +187,8 @@ impl App {
             UserEvent::McpRequest => self.drain_mcp_requests(),
             UserEvent::RuntimeSmokeTimeout => {
                 // When: `event` is `RuntimeSmokeTimeout`, classify the boundary before exiting.
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
-                    // When: `self.runtime_smoke.as_mut()` yields `smoke`, preserve its active boundary.
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
+                    // When: `self.services.runtime_smoke.as_mut()` yields `smoke`, preserve its active boundary.
                     smoke.fail_from_watchdog(Instant::now());
                     event_loop.exit();
                     return;
@@ -406,7 +406,7 @@ impl App {
         {
             // SonicTerm owns tab grouping before hooks or native windows can create AppKit tabs.
             event_loop.set_allows_automatic_window_tabbing(false);
-            if let Some(smoke) = self.runtime_smoke.as_mut() {
+            if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                 // When: smoke is active, verify the process property rather than infer visible tab-strip behavior.
                 if event_loop.allows_automatic_window_tabbing() {
                     // When: event_loop still allows automatic tabbing, stop before creating a window under the wrong policy.
@@ -449,8 +449,8 @@ impl App {
             Ok(window) => Arc::new(window),
             Err(error) => {
                 // When: `event_loop.create_window(attrs)` returns `Err(error)`, smoke exits while normal startup panics.
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
-                    // When: `self.runtime_smoke.as_mut()` yields `smoke`, retain the display failure.
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
+                    // When: `self.services.runtime_smoke.as_mut()` yields `smoke`, retain the display failure.
                     tracing::error!(%error, "runtime smoke could not create a window");
                     smoke.fail(RuntimeSmokeFailure::Display);
                     event_loop.exit();
@@ -459,7 +459,7 @@ impl App {
                 panic!("create window: {error}");
             }
         };
-        if let Some(smoke) = self.runtime_smoke.as_mut() {
+        if let Some(smoke) = self.services.runtime_smoke.as_mut() {
             smoke.begin_gpu();
         }
         // PANIC (above): `create_window` only fails when winit cannot reach
@@ -532,8 +532,8 @@ impl App {
             Ok(renderer) => renderer,
             Err(error) => {
                 // When: `renderer_result` is `Err(error)`, smoke exits while normal startup panics.
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
-                    // When: `self.runtime_smoke.as_mut()` yields `smoke`, retain the GPU failure.
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
+                    // When: `self.services.runtime_smoke.as_mut()` yields `smoke`, retain the GPU failure.
                     tracing::error!(%error, "runtime smoke could not initialize the renderer");
                     smoke.fail(RuntimeSmokeFailure::Gpu);
                     event_loop.exit();
@@ -612,7 +612,7 @@ impl App {
         if let Err(error) = self.register_window_with_os_drag_backend(main_id, &window) {
             // When: native registration fails, stop before a visible window or shell can depend on its drop ownership.
             tracing::error!(?main_id, %error, "main native drop-target registration failed");
-            if let Some(smoke) = self.runtime_smoke.as_mut() {
+            if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                 smoke.fail(RuntimeSmokeFailure::Display);
             }
             event_loop.exit();
@@ -716,7 +716,7 @@ impl App {
 
         // Seed script-file tabs when launch events arrived before the window;
         // otherwise preserve the normal one-shell startup.
-        if let Some(smoke) = self.runtime_smoke.as_mut() {
+        if let Some(smoke) = self.services.runtime_smoke.as_mut() {
             smoke.begin_pty();
         }
         let spawn_started = std::time::Instant::now();
@@ -724,7 +724,7 @@ impl App {
         self.note_startup(spawn_started, |spans| &mut spans.pane_spawn_ns);
         // The first tab now names the window, before it is shown or a smoke reads it back.
         let _ = self.sync_native_title(main_id, Instant::now(), true);
-        if self.runtime_smoke.is_some()
+        if self.services.runtime_smoke.is_some()
             && (!self.smoke_check_native_title(&window, "#1 shell")
                 || !self.smoke_exercise_window_name(main_id))
         {
@@ -733,9 +733,10 @@ impl App {
             return;
         }
         window.set_visible(true);
-        if self.runtime_smoke.is_some() {
-            // When: `self.runtime_smoke.is_some()` is true, verify and exercise the smoke PTY.
-            let command = self.runtime_smoke.as_ref().map(|smoke| smoke.command().to_vec());
+        if self.services.runtime_smoke.is_some() {
+            // When: `self.services.runtime_smoke.is_some()` is true, verify and exercise the smoke PTY.
+            let command =
+                self.services.runtime_smoke.as_ref().map(|smoke| smoke.command().to_vec());
             let active_pane = self
                 .main_active_pane_id()
                 .and_then(|pane_id| self.main().and_then(|window| window.panes.get(&pane_id)));
@@ -751,13 +752,13 @@ impl App {
             };
             if let Some(failure) = smoke_failure {
                 // When: `smoke_failure` contains `failure`, retain that PTY/marker boundary.
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.fail(failure);
                 }
                 event_loop.exit();
                 return;
             }
-            if let Some(smoke) = self.runtime_smoke.as_mut() {
+            if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                 smoke.begin_marker_wait();
             }
         }

@@ -46,7 +46,7 @@ fn finish_session_drains_every_window_and_is_idempotent() {
     assert!(app.windows.contains_key(&child), "native windows remain owned until App drop");
     assert!(owners.into_iter().all(|owner| !app.__test_owner_is_open(owner)));
     assert!(app.finish_session(), "a repeated finish returns the cached disposition");
-    assert_eq!(app.pty_reaper.path_counts(), (0, 0));
+    assert_eq!(app.services.pty_reaper.path_counts(), (0, 0));
 }
 
 /// Every permanent close route submits owned native custody, while a live pane transfer preserves its reservation.
@@ -136,7 +136,7 @@ fn real_pty_close_paths_take_no_fallback() {
             }
             _ => unreachable!(),
         }
-        let paths = app.pty_reaper.path_counts();
+        let paths = app.services.pty_reaper.path_counts();
         let settled = app.finish_session();
         assert_eq!(paths, (1, 0), "{route}");
         assert!(settled, "{route} left native custody unsettled");
@@ -160,7 +160,7 @@ fn real_pty_uninstalled_main_tab_uses_reaper() {
         .with_inline_media_pool(media::InlineMediaPool::new());
     assert!(app.main_window_id.is_none());
     app.new_tab_with_launch("uninstalled", pane_launch::PaneLaunch::default());
-    let paths = app.pty_reaper.path_counts();
+    let paths = app.services.pty_reaper.path_counts();
     assert!(app.finish_session(), "uninstalled native transport did not settle");
     assert_eq!(paths, (1, 0));
     assert!(app.windows.is_empty());

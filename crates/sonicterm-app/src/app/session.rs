@@ -141,6 +141,15 @@ impl App {
         let pty_reaper = reaper_driver::ReaperDriver::new(governor.clone())
             .expect("native PTY teardown driver could not start");
         Self {
+            services: RuntimeServices {
+                fg_probes,
+                foreground_schedule: fg_probe::ForegroundSchedule::default(),
+                mcp_server: None,
+                pty_reaper,
+                gpu_recovery: None,
+                font_catalog_worker: None,
+                runtime_smoke: None,
+            },
             diagnostics: DiagnosticsState {
                 frame_counters_sealed: std::cell::Cell::new(false),
                 accessibility_tree_builds: 0,
@@ -157,8 +166,6 @@ impl App {
             inline_media_pool: media::InlineMediaPool::process_default(),
             capture_staging_pool: CaptureStagingPool::process_default(),
             process_privilege: crate::ProcessPrivilege::default(),
-            fg_probes,
-            foreground_schedule: fg_probe::ForegroundSchedule::default(),
             config,
             config_normalizer,
             font_dirs,
@@ -167,7 +174,6 @@ impl App {
             configured_font_family,
             font_catalog: font_catalog::FontCatalog::default(),
             font_enumerator: sonicterm_gpu::installed_monospace_families,
-            font_catalog_worker: None,
             font_picker_original: None,
             font_family_generation: 0,
             #[cfg(test)]
@@ -207,7 +213,6 @@ impl App {
             os_drag_handoff_started: false,
             governor,
             windows: HashMap::new(),
-            pty_reaper,
             session_finished: None,
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
             dispatch_redraws: super::redraw::DispatchRedraws::default(),
@@ -219,13 +224,10 @@ impl App {
             theme_loader: None,
             keymap_loader: None,
             event_loop_proxy,
-            gpu_recovery: None,
             path_workers,
             home_dir,
             runtime_config_path: None,
             local_hostname,
-            runtime_smoke: None,
-            mcp_server: None,
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
@@ -267,7 +269,7 @@ impl App {
         // A report walk still running must not outlive the session it describes.
         self.cancel_memory_report_sampling();
         // Agents lose the endpoint before their panes go, so no request races the teardown.
-        self.mcp_server = None;
+        self.services.mcp_server = None;
         let panes: Vec<_> = self
             .windows
             .values_mut()
@@ -276,7 +278,7 @@ impl App {
         for pane in panes {
             self.retire_pane(pane);
         }
-        let settled = self.pty_reaper.finish();
+        let settled = self.services.pty_reaper.finish();
         self.session_finished = Some(settled);
         settled
     }
@@ -303,7 +305,7 @@ impl App {
             return;
         }
         if let Some(pty) = pane.pty.as_mut() {
-            match self.pty_reaper.reserve(pty) {
+            match self.services.pty_reaper.reserve(pty) {
                 Ok(slot) => pane.reap_slot = Some(slot),
                 Err(reason) => {
                     tracing::debug!(
@@ -329,7 +331,7 @@ impl App {
             }
         }
         if let Some(pty) = pane.pty.take() {
-            self.pty_reaper.retire(pty, pane.reap_slot.take());
+            self.services.pty_reaper.retire(pty, pane.reap_slot.take());
         }
         pane.charges.clear();
         drop(pane.owner.take());

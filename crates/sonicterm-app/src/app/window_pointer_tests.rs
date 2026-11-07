@@ -884,11 +884,12 @@ fn native_output_events_request_frames_only_for_visible_output_or_explicit_reque
                 pane.output_generation.fetch_add(1, Ordering::Release);
                 pane.output_outstanding.store(true, Ordering::Release);
             }
-            self.app.foreground_schedule.activity_wake = None;
+            self.app.services.foreground_schedule.activity_wake = None;
             let before = crate::app::window_state::window_redraw_requests();
             ApplicationHandler::user_event(&mut self.app, event_loop, event);
             let requests = crate::app::window_state::window_redraw_requests() - before;
-            self.results.push((requests, self.app.foreground_schedule.activity_wake.is_some()));
+            self.results
+                .push((requests, self.app.services.foreground_schedule.activity_wake.is_some()));
             // Settle the frame so the next request is not absorbed by one still in flight.
             if let Some(snapshot) = self.app.snapshot_window_redraw(self.child) {
                 self.app.finish_window_redraw(

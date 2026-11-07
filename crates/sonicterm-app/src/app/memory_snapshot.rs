@@ -643,7 +643,7 @@ impl super::App {
                 .map(super::retention::TrimSource::as_str),
             allocator,
             live_renderers: sonicterm_gpu::core::live_renderer_count(),
-            live_fg_probe_workers: self.fg_probes.live_workers(),
+            live_fg_probe_workers: self.services.fg_probes.live_workers(),
         };
         (snapshot, measures)
     }

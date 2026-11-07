@@ -76,7 +76,7 @@ impl App {
         let proxy = self.event_loop_proxy.clone();
         // The handle is kept but never joined: finish_session does not wait for enumeration. After the
         // loop ends `send_event` returns `EventLoopClosed`, and a report after shutdown is ignored.
-        self.font_catalog_worker = spawn(self.font_enumerator, move |report| {
+        self.services.font_catalog_worker = spawn(self.font_enumerator, move |report| {
             if let Some(proxy) = proxy {
                 // When: `proxy` is Some, an event loop is running to receive the report.
                 let _ = proxy.send_event(UserEvent::FontCatalogReady { families: report.families });

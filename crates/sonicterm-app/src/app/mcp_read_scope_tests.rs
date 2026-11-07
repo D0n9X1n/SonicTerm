@@ -26,7 +26,7 @@ fn app_with_client(read: McpRead) -> (App, Arc<McpShared>, Client, u64, u64) {
     let shared = McpShared::new(McpControl::Agent, None);
     shared.set_read(read);
     let owner = app.register_mcp_owner();
-    app.mcp_server = Some(McpServer {
+    app.services.mcp_server = Some(McpServer {
         shared: Arc::clone(&shared),
         endpoint: "test-endpoint".into(),
         _endpoint_guard: None,

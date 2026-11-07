@@ -49,18 +49,18 @@ impl App {
     /// level. A reload that changes nothing in `[mcp]` leaves the server and its requests alone.
     pub(crate) fn reconcile_mcp(&mut self) {
         let wanted = self.config.mcp;
-        let running = self.mcp_server.as_ref().map(|server| server.config);
+        let running = self.services.mcp_server.as_ref().map(|server| server.config);
         if running == Some(wanted) || (!wanted.enabled && running.is_none()) {
             // When: the `running` config already equals `wanted`, nothing changes.
             return;
         }
         if !wanted.enabled {
             // When: `wanted.enabled` is off, the server stops and its endpoint goes away.
-            self.mcp_server = None;
+            self.services.mcp_server = None;
             tracing::info!(target: "mcp", "control server stopped");
             return;
         }
-        if let Some(server) = self.mcp_server.as_mut() {
+        if let Some(server) = self.services.mcp_server.as_mut() {
             // When: a `server` runs and only the control level or read scope changed, queued
             // requests and running waits are revoked.
             server.shared.set_control(wanted.control);
@@ -80,7 +80,7 @@ impl App {
             Ok((endpoint, guard)) => {
                 tracing::info!(target: "mcp", control = wanted.control.as_str(), "control server started");
                 let owner = self.register_mcp_owner();
-                self.mcp_server = Some(McpServer {
+                self.services.mcp_server = Some(McpServer {
                     shared,
                     endpoint,
                     _endpoint_guard: Some(guard),
@@ -112,7 +112,7 @@ impl App {
     /// so the figure lags by at most one interval, like every other charge.
     // Ordering: connections Acquire reads the live count; it is a sampled gauge.
     pub(crate) fn charge_mcp_connections(&mut self) {
-        let Some(server) = self.mcp_server.as_mut() else {
+        let Some(server) = self.services.mcp_server.as_mut() else {
             // When: no `mcp_server` runs, there is nothing to charge.
             return;
         };
@@ -135,12 +135,14 @@ impl App {
 
     /// The endpoint path new panes get as `SONICTERM_CONTROL`, while the server runs.
     pub(crate) fn mcp_endpoint(&self) -> Option<&str> {
-        self.mcp_server.as_ref().map(|server| server.endpoint.as_str())
+        self.services.mcp_server.as_ref().map(|server| server.endpoint.as_str())
     }
 
     /// Answer every request connection threads queued for the event loop.
     pub(crate) fn drain_mcp_requests(&mut self) {
-        let Some(shared) = self.mcp_server.as_ref().map(|server| Arc::clone(&server.shared)) else {
+        let Some(shared) =
+            self.services.mcp_server.as_ref().map(|server| Arc::clone(&server.shared))
+        else {
             // When: no `mcp_server` runs, a late wake-up has nothing to answer.
             return;
         };

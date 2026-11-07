@@ -185,7 +185,7 @@ impl App {
             for pane in window.panes.values_mut() {
                 if pane.reap_slot.is_none() {
                     if let Some(pty) = pane.pty.as_mut() {
-                        match self.pty_reaper.reserve(pty) {
+                        match self.services.pty_reaper.reserve(pty) {
                             Ok(slot) => pane.reap_slot = Some(slot),
                             Err(reason) => {
                                 tracing::debug!(

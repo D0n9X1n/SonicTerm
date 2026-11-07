@@ -660,7 +660,7 @@ impl App {
         frame_counters_on: bool,
     ) -> sonicterm_io::pty::ShellSpawnOpts {
         sonicterm_io::pty::ShellSpawnOpts {
-            clean_e2e: self.runtime_smoke.is_some(),
+            clean_e2e: self.services.runtime_smoke.is_some(),
             diagnostic_timestamps: frame_counters_on,
             extra_env: self.pane_control_env(pane_id),
             ..launch.shell_spawn_opts(

@@ -94,13 +94,17 @@ fn foreground_probe_input_deadline_is_not_postponed_by_output() {
     app.arm_foreground_probe_after_input(start);
     app.arm_foreground_probe_after_output(start + Duration::from_millis(400));
 
-    let wake = app.foreground_schedule.activity_wake.expect("input arms a probe wake");
+    let wake = app.services.foreground_schedule.activity_wake.expect("input arms a probe wake");
     assert_eq!(wake.due, start + FOREGROUND_PROCESS_TTL);
     assert!(wake.fixed);
 
     app.arm_foreground_probe_after_input(start + Duration::from_millis(450));
     assert_eq!(
-        app.foreground_schedule.activity_wake.expect("later input rearms the fixed wake").due,
+        app.services
+            .foreground_schedule
+            .activity_wake
+            .expect("later input rearms the fixed wake")
+            .due,
         start + Duration::from_millis(450) + FOREGROUND_PROCESS_TTL
     );
 }
@@ -126,7 +130,7 @@ fn due_foreground_probe_forces_shell_return_refresh() {
 
     assert_eq!(changed, vec![main_id]);
     assert!(!app.windows[&main_id].tabs.tabs()[0].foreground_privileged);
-    assert!(app.foreground_schedule.warning_wake.is_none());
+    assert!(app.services.foreground_schedule.warning_wake.is_none());
 }
 
 #[cfg(windows)]

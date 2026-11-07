@@ -514,7 +514,7 @@ fn fault_polling_is_default_disabled_and_uses_a_fixed_deadline() {
     let (mut smoke, _, now, _) = fault_fixture(GpuFaultKind::FrameValidation);
     let due = now + FAULT_POLL_INTERVAL;
     smoke.next_probe_at = Some(due);
-    app.runtime_smoke = Some(smoke);
+    app.services.runtime_smoke = Some(smoke);
     assert_eq!(app.gpu_fault_smoke_deadline(), Some(due));
     assert!(!app.drive_gpu_fault_smoke(now));
     assert_eq!(app.gpu_fault_smoke_deadline(), Some(due));

@@ -78,7 +78,7 @@ impl App {
         // A report that waited for a selection or copy mode is shown once neither holds the pane.
         self.apply_deferred_memory_report();
         self.expire_quit_confirmation();
-        if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.needs_fresh_window()) {
+        if self.services.runtime_smoke.as_ref().is_some_and(|smoke| smoke.needs_fresh_window()) {
             // When: smoke needs a fresh HWND, disable replenishment rather than accidentally adopting another spare.
             self.config.window.warm_window_pool = 0;
             self.warm_window_pool.clear();
@@ -87,7 +87,7 @@ impl App {
             let child = self.windows.keys().copied().find(|id| Some(*id) != self.main_window_id);
             let Some(child) = child else {
                 // When: child is absent after creation, the fresh native lifecycle has failed.
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                 }
                 event_loop.exit();
@@ -109,7 +109,7 @@ impl App {
                 .and_then(|window| window.renderer.as_ref())
                 .map(GpuRenderer::successful_frame_count)
                 .unwrap_or(0);
-            if let Some(smoke) = self.runtime_smoke.as_mut() {
+            if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                 // When: runtime_smoke remains installed, bind the fresh child before accepting a presentation.
                 let _ = smoke.begin_fresh_window(child, baseline);
             }
@@ -123,9 +123,15 @@ impl App {
             event_loop.exit();
             return;
         }
-        if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.should_maintain_warm_pool()) {
+        if self
+            .services
+            .runtime_smoke
+            .as_ref()
+            .is_some_and(|smoke| smoke.should_maintain_warm_pool())
+        {
             // When: `runtime_smoke` requests warm-pool maintenance, prove the default spare before adoption.
-            let baseline = self.runtime_smoke.as_ref().map(|smoke| smoke.renderer_baseline());
+            let baseline =
+                self.services.runtime_smoke.as_ref().map(|smoke| smoke.renderer_baseline());
             let snapshot = self.build_memory_snapshot();
             let warm_reported = snapshot.renderers.iter().any(|renderer| renderer.role == "warm");
             let warm_count = self.warm_window_pool.len();
@@ -155,7 +161,7 @@ impl App {
                         || baseline.is_none_or(|baseline| adopted_live_count != baseline + 2)
                     {
                         // When: `expected_child`, `warm_window_pool`, or `adopted_live_count` disagrees with `baseline`, adoption failed.
-                        if let Some(smoke) = self.runtime_smoke.as_mut() {
+                        if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                             smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                         }
                         event_loop.exit();
@@ -176,11 +182,11 @@ impl App {
                         .and_then(|window| window.renderer.as_ref())
                         .map(GpuRenderer::successful_frame_count)
                         .unwrap_or(0);
-                    if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                         // When: `smoke` remains installed, bind the adopted child and its presentation baseline.
                         let _ = smoke.begin_warm_adoption(child, present_baseline);
                     }
-                } else if let Some(smoke) = self.runtime_smoke.as_mut() {
+                } else if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     // When: `child` is absent but `smoke` remains installed, record warm-lifecycle failure.
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                     event_loop.exit();
@@ -188,7 +194,7 @@ impl App {
                 }
             } else if warm_count > 0 {
                 // When: `warm_count` is nonzero but creation/reporting invariants disagree, fail instead of timing out.
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                 }
                 event_loop.exit();
@@ -331,7 +337,7 @@ impl App {
             due.push(DueWork { owner: None, cause: DueCause::QuitHold, deadline });
         }
         #[cfg(windows)]
-        if let Some(deadline) = self.foreground_schedule.next_deadline() {
+        if let Some(deadline) = self.services.foreground_schedule.next_deadline() {
             due.push(DueWork { owner: None, cause: DueCause::Foreground, deadline });
         }
         #[cfg(windows)]

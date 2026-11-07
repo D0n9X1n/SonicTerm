@@ -13,7 +13,7 @@ impl super::super::App {
         let mut smoke = RuntimeSmokeState::from_spec(spec, renderer_baseline);
         smoke.verify_fresh_drop_target = self.owns_native_drop_target();
         smoke.scenario = scenario;
-        self.runtime_smoke = Some(smoke);
+        self.services.runtime_smoke = Some(smoke);
     }
 
     pub(in crate::app) fn smoke_check_native_title(
@@ -28,7 +28,7 @@ impl super::super::App {
             tracing::warn!(?observed, ?expected, matches, "runtime smoke native title readback");
             if !matches {
                 // Native readback disproves the title write even if the model is correct.
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.fail(RuntimeSmokeFailure::Display);
                 }
             }
@@ -76,7 +76,7 @@ impl super::super::App {
     }
 
     pub(crate) fn runtime_smoke_result(&self) -> Result<(), RuntimeSmokeFailure> {
-        let Some(smoke) = self.runtime_smoke.as_ref() else {
+        let Some(smoke) = self.services.runtime_smoke.as_ref() else {
             // When: no smoke was installed, a caller cannot claim runtime-smoke completion.
             return Err(RuntimeSmokeFailure::EventLoop);
         };
@@ -85,7 +85,8 @@ impl super::super::App {
 
     /// Only an installed fault smoke contributes periodic wakeups; normal sessions stay idle.
     pub(in crate::app) fn gpu_fault_smoke_deadline(&self) -> Option<Instant> {
-        self.runtime_smoke
+        self.services
+            .runtime_smoke
             .as_ref()
             .filter(|smoke| smoke.fault_pending())
             .map(|smoke| smoke.next_probe_at.unwrap_or_else(Instant::now))
@@ -93,11 +94,12 @@ impl super::super::App {
 
     /// Advance fault injection on the event-loop thread, outside every parser/render borrow.
     pub(in crate::app) fn drive_gpu_fault_smoke(&mut self, now: Instant) -> bool {
-        if !self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.fault_pending()) {
+        if !self.services.runtime_smoke.as_ref().is_some_and(|smoke| smoke.fault_pending()) {
             // When: runtime_smoke is absent or not in a fault phase, no fault or polling is enabled.
             return false;
         }
         if self
+            .services
             .runtime_smoke
             .as_ref()
             .and_then(|smoke| smoke.next_probe_at)
@@ -106,7 +108,7 @@ impl super::super::App {
             // When: next_probe_at is still ahead of now, avoid a redraw busy-loop during observation.
             return false;
         }
-        let Some(mut smoke) = self.runtime_smoke.take() else {
+        let Some(mut smoke) = self.services.runtime_smoke.take() else {
             // When: runtime_smoke disappeared, no smoke-owned action may run.
             return false;
         };
@@ -118,7 +120,7 @@ impl super::super::App {
         if finished {
             tracing::warn!(outcome = ?smoke.outcome(), "runtime smoke GPU fault verdict");
         }
-        self.runtime_smoke = Some(smoke);
+        self.services.runtime_smoke = Some(smoke);
         finished
     }
 

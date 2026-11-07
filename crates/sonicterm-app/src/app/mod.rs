@@ -307,7 +307,9 @@ use selection_gesture::{PointerCell, PointerGesture, PointerGestureOwner};
 mod diagnostics;
 mod session;
 mod shell_token;
-pub(crate) use diagnostics::DiagnosticsState;
+pub(in crate::app) use diagnostics::DiagnosticsState;
+mod runtime_services;
+pub(in crate::app) use runtime_services::RuntimeServices;
 mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
@@ -384,8 +386,10 @@ pub(super) struct PendingOsc52Reassert {
 
 #[doc(hidden)]
 pub struct App {
+    /// Background services the App starts, polls and stops: probes, MCP, the reaper, GPU recovery.
+    pub(in crate::app) services: RuntimeServices,
     /// Diagnostic and accounting state: counters, retention and trim samples, breadcrumbs.
-    pub(super) diagnostics: DiagnosticsState,
+    pub(in crate::app) diagnostics: DiagnosticsState,
     pub(super) theme: Theme,
     /// Pool each pane charges its inline media to: the process-default pool in
     /// production, or a private pool a test injects with
@@ -397,10 +401,6 @@ pub struct App {
     pub(super) capture_staging_pool: Arc<CaptureStagingPool>,
     /// Process privilege observed once by the native binary before window creation.
     pub(super) process_privilege: crate::ProcessPrivilege,
-    /// Foreground-process probes: demand, the worker and its latest-value result map.
-    pub(super) fg_probes: Arc<fg_probe::ForegroundProbes>,
-    /// Activity and warning wakes for the foreground-process schedule; only Windows arms them.
-    pub(super) foreground_schedule: fg_probe::ForegroundSchedule,
     pub(super) config: Config,
     /// Native-platform capability policy applied before config affects app state.
     pub(crate) config_normalizer: ConfigNormalizer,
@@ -427,8 +427,6 @@ pub struct App {
     pub(super) font_catalog: font_catalog::FontCatalog,
     /// Enumerates installed monospace families for the catalog worker; tests inject a counter.
     pub(super) font_enumerator: font_catalog::FontEnumerator,
-    /// The catalog worker, once the picker started it; kept so it is owned, never joined.
-    pub(super) font_catalog_worker: Option<std::thread::JoinHandle<()>>,
     /// The live family when the font picker opened, restored when the picker is cancelled.
     pub(super) font_picker_original: Option<String>,
     /// Moves on every reload, save and picker choice of the font family, so a catalog report the
@@ -583,8 +581,6 @@ pub struct App {
     /// changes when allocation happens, not merely where the number lives.
     pub(super) governor: ResourceGovernor,
     pub(super) windows: HashMap<WindowId, WindowState>,
-    /// One bounded driver owns every retired native transport after its pane leaves the UI.
-    pty_reaper: reaper_driver::ReaperDriver,
     /// Cached terminal disposition prevents a repeated finish from retiring panes or draining twice.
     session_finished: Option<bool>,
     /// This App's frame and lock counters; `Some` only when its gate is on, fixed for its lifetime.
@@ -639,8 +635,6 @@ pub struct App {
     /// Proxy used to wake the idle event loop. `None` in tests that
     /// construct `App` directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
-    /// One committed GPU context survives window closure and owns every recovery attempt.
-    gpu_recovery: Option<gpu_recovery::GpuRecovery>,
     /// Bounded workers for openability probes and native direct-open dispatch.
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Current native home captured once for deterministic `~/` target resolution.
@@ -649,10 +643,6 @@ pub struct App {
     pub(super) runtime_config_path: Option<PathBuf>,
     /// Local hostname used to reject foreign-authority OSC 7 snapshots.
     pub(super) local_hostname: String,
-    /// Hidden Linux package-smoke state; absent during ordinary application runs.
-    pub(super) runtime_smoke: Option<runtime_smoke::RuntimeSmokeState>,
-    /// The local control server agents connect to, while `[mcp] enabled` is on.
-    pub(super) mcp_server: Option<mcp::McpServer>,
     /// Minimum interval between two successive frames. Defaults to 1/60s
     /// and is updated in `resumed` from the current monitor's reported
     /// refresh rate. Used by the RedrawRequested handler to skip an

@@ -457,7 +457,7 @@ pub(super) fn run_detached_preservation() -> Result<()> {
         );
         ensure!(finished, "detached fixture native teardown did not settle");
         ensure!(
-            app.pty_reaper.path_counts() == (1, 0),
+            app.services.pty_reaper.path_counts() == (1, 0),
             "detached fixture bypassed reserved teardown"
         );
         let survival_end =

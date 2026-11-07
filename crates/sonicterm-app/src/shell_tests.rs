@@ -152,7 +152,10 @@ fn runtime_smoke_uses_clean_shell_startup_without_replacing_home() {
         let end = main[helper..].find("\n    }\n");
         assert!(end.is_some(), "the spawn-option helper's end is found on a {checkout} checkout");
         let helper_body = &main[helper..helper + end.unwrap_or(main.len() - helper)];
-        assert!(helper_body.contains("clean_e2e: self.runtime_smoke.is_some()"), "{checkout}");
+        assert!(
+            helper_body.contains("clean_e2e: self.services.runtime_smoke.is_some()"),
+            "{checkout}"
+        );
     }
     assert!(MAIN.contains("self.pane_spawn_opts(pane_id, launch, frame_counters.is_some())"));
     assert!(CHILD.contains("self.pane_spawn_opts(pane_id, launch, frame_counters.is_some())"));

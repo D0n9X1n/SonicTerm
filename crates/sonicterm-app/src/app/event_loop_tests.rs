@@ -126,7 +126,7 @@ pub(super) fn macos_tabbing_smoke_checks_the_process_property_before_window_crea
     let hook = resumed.find("self.on_resumed.take()").unwrap();
     let policy = &resumed[setter..hook];
     assert!(policy.contains("if event_loop.allows_automatic_window_tabbing()"));
-    assert!(policy.contains("self.runtime_smoke.as_mut()"));
+    assert!(policy.contains("self.services.runtime_smoke.as_mut()"));
     assert!(policy.contains("smoke.fail(RuntimeSmokeFailure::Display)"));
     assert!(policy.contains("event_loop.exit()"));
     assert!(policy.contains("return;"));
@@ -369,7 +369,7 @@ pub(super) fn foreground_probe_output_activity_debounces_until_quiet() {
     app.arm_foreground_probe_after_output(start);
     app.arm_foreground_probe_after_output(start + Duration::from_millis(400));
 
-    let wake = app.foreground_schedule.activity_wake.expect("output arms a probe wake");
+    let wake = app.services.foreground_schedule.activity_wake.expect("output arms a probe wake");
     assert_eq!(wake.due, start + Duration::from_millis(400) + FOREGROUND_PROCESS_TTL);
     assert!(!wake.fixed);
     assert_eq!(app.wake_deadline(None), Some(wake.due));
@@ -384,16 +384,16 @@ pub(super) fn foreground_probe_rearms_only_for_per_tab_warning_in_regular_proces
 
     app.finish_foreground_process_probe(now, true);
     // The warning wake is separate from the activity wake, so output never postpones it.
-    let wake = app.foreground_schedule.warning_wake.expect("foreground warning rearms");
+    let wake = app.services.foreground_schedule.warning_wake.expect("foreground warning rearms");
     assert_eq!(wake, now + FOREGROUND_PROCESS_TTL);
-    assert!(app.foreground_schedule.activity_wake.is_none());
+    assert!(app.services.foreground_schedule.activity_wake.is_none());
 
     app.finish_foreground_process_probe(now, false);
-    assert!(app.foreground_schedule.warning_wake.is_none());
+    assert!(app.services.foreground_schedule.warning_wake.is_none());
 
     app.set_process_privilege(crate::ProcessPrivilege::Privileged);
     app.finish_foreground_process_probe(now, true);
-    assert!(app.foreground_schedule.warning_wake.is_none());
+    assert!(app.services.foreground_schedule.warning_wake.is_none());
 }
 
 pub(super) fn arm_snap_scrollbar(

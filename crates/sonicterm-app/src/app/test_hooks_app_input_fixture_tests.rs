@@ -21,9 +21,9 @@ fn real_pty_transfer_preserves_native_teardown_reservation() {
     assert!(app.__test_move_pane_between_windows(main, child, pane));
     assert!(app.windows[&child].panes[&pane].reap_slot.is_some());
     assert_eq!(app.windows[&child].panes[&pane].pty.as_ref().unwrap().pid(), Some(pid));
-    assert_eq!(app.pty_reaper.path_counts(), (0, 0));
+    assert_eq!(app.services.pty_reaper.path_counts(), (0, 0));
     assert!(app.finish_session());
-    assert_eq!(app.pty_reaper.path_counts(), (1, 0));
+    assert_eq!(app.services.pty_reaper.path_counts(), (1, 0));
     record_process(pid, false);
 }
 

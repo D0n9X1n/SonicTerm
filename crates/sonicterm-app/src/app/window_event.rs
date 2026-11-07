@@ -364,7 +364,7 @@ impl App {
         // A burst or strip-only frame reads the cache only; other frames set demand, never probe.
         let status_only = self.main().is_some_and(|window| window.redraw.status_only_attempt());
         let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
-            .then(|| std::sync::Arc::clone(&self.fg_probes));
+            .then(|| std::sync::Arc::clone(&self.services.fg_probes));
         if let Some(id) = main_id_opt {
             if let Some(window) = self.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(
@@ -535,7 +535,7 @@ impl App {
         if let Some(window) = self.main_mut() {
             window.coherent_frame_collected();
         }
-        let marker_observed = self.runtime_smoke.as_ref().is_some_and(|smoke| {
+        let marker_observed = self.services.runtime_smoke.as_ref().is_some_and(|smoke| {
             smoke.is_waiting_for_marker()
                 && frame
                     .guards
@@ -545,12 +545,15 @@ impl App {
         if marker_observed {
             let baseline =
                 self.main_renderer().map(GpuRenderer::successful_frame_count).unwrap_or(0);
-            if let Some(smoke) = self.runtime_smoke.as_mut() {
+            if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                 smoke.begin_present_wait(baseline);
             }
         }
-        let smoke_waiting_for_present =
-            self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.is_waiting_for_present());
+        let smoke_waiting_for_present = self
+            .services
+            .runtime_smoke
+            .as_ref()
+            .is_some_and(|smoke| smoke.is_waiting_for_present());
         let mut smoke_presented_count = None;
         let mut frame_completion = None;
         // A presented frame's receipts; bound and stored as the window's pending set after the call.
@@ -740,7 +743,7 @@ impl App {
                     active_id,
                 ));
                 let cursor_rect_copy = frame.guards[active_pos].2;
-                let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
+                let recovery_sample = self.services.runtime_smoke.as_ref().and_then(|smoke| {
                     smoke.recovery_marker_sample(
                         win_id,
                         frame
@@ -816,12 +819,12 @@ impl App {
                 // Keep the new widths only if this frame reached the screen, so hit-testing
                 // matches the bar the user sees.
                 super::tab_widths::settle_tab_widths(tabs_mref, drawn_tab_widths, &outcome);
-                if let Some(recovery) = self.gpu_recovery.as_mut() {
+                if let Some(recovery) = self.services.gpu_recovery.as_mut() {
                     recovery.observe_frame(r.device_generation(), &outcome, Instant::now());
                 }
                 presented_receipts = receipts;
                 if let (Some(smoke), Some(sample)) =
-                    (self.runtime_smoke.as_mut(), recovery_sample.as_ref())
+                    (self.services.runtime_smoke.as_mut(), recovery_sample.as_ref())
                 {
                     smoke.observe_recovery_frame(win_id, r.device_generation(), sample, &outcome);
                 }
@@ -837,7 +840,7 @@ impl App {
                     // When: `smoke_waiting_for_present` is true, retain the post-render native-present count.
                     smoke_presented_count = Some(Ok(r.successful_frame_count()));
                 }
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                     smoke.note_render_attempt();
                 }
                 if let Some(timer) = timing.as_mut() {
@@ -928,6 +931,7 @@ impl App {
                 Ok(count) => {
                     // Compare the successful presentation count with the frozen baseline.
                     let advanced = self
+                        .services
                         .runtime_smoke
                         .as_mut()
                         .is_some_and(|smoke| smoke.observe_presented_frame(count));
@@ -938,7 +942,7 @@ impl App {
                 }
                 Err(failure) => {
                     // When: `presented` is `Err(failure)`, retain presentation as the failed boundary.
-                    if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    if let Some(smoke) = self.services.runtime_smoke.as_mut() {
                         smoke.fail(failure);
                     }
                     event_loop.exit();
