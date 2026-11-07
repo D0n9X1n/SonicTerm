@@ -152,6 +152,9 @@ pending 不是文件不存在的证据。事件包含可能敏感的路径，但
 生产终端回复在解析器与副作用锁外进入独立 FIFO，使用 64 KiB 内存和私有临时文件溢出存储。
 UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理。存储或原生失败会锁存，并以
 `terminal reply delivery failed` 报告一次，包含窗格标识与字节数；输出、重绘和退出观察继续。
+因窗格 16 MiB 溢出预算已满而被拒绝的回复不算失败：它被丢弃并计数，每段积压的第一次丢弃在
+`warn` 级别记录 `terminal replies dropped: the program is not reading its input`，包含
+`pane_id`、`rejected_bytes`、`dropped` 与 `peak_live_bytes`；程序恢复读取后，后续回复照常交付。
 原生 writer 与暂存读取错误独立记录。正常销毁会释放暂存文件，不产生拒绝通知。
 存储与交付限制见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。
 

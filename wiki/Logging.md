@@ -189,7 +189,11 @@ temporary-file spill, outside parser and side-effect locks. UI queue saturation
 does not discard replies, trigger rejection warnings, or stop output processing.
 Storage/native failure is latched and reported once as `terminal reply delivery
 failed` with pane identity and byte count; output, redraw, and exit observation
-continue. Native writer/spool read errors are independently logged. Intentional
+continue. A reply refused because the pane's 16 MiB spill budget is full is not a
+failure: it is dropped and counted, and the first such drop of each backlog logs
+`terminal replies dropped: the program is not reading its input` at `warn` with
+`pane_id`, `rejected_bytes`, `dropped` and `peak_live_bytes`; later replies are
+still delivered once the program reads. Native writer/spool read errors are independently logged. Intentional
 teardown releases spill storage without a rejection notice. See
 [Terminal IO and VT](Terminal-IO-and-VT) for storage and delivery limits.
 

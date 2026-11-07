@@ -74,8 +74,19 @@ capacity, so a finite output-before-input query burst can continue draining.
 The existing native writer selects between UI input and complete reply submissions
 fitting a 32 KiB turn; length framing prevents keyboard bytes from splitting a reply.
 Ready UI input gets a turn after each reply turn. Each stream preserves its own
-byte order; no ordering between the two producers is promised. Spill disk
-usage is not capped, and consumed file prefixes remain until the spill drains.
+byte order; no ordering between the two producers is promised. Live spilled
+bytes are capped at 16 MiB per pane (`SPILL_BUDGET_BYTES`): a reply past the cap
+is refused alone with a `ReplyBudgetExceeded` error, counted, and dropped, and the spool stays
+usable for later replies. This is the case of a program that keeps querying and
+never reads its input; a finite burst, such as 512 full-size replies before the
+program reads, fits. Once the consumed prefix is at least 1 MiB and at least half
+the file, the live records move to the front, so the file stays below twice the
+budget plus one record and each admission costs one record write plus an amortised
+copy. Admission stays on the VT worker: the budget bounds the bytes one admission can
+write or copy, not its elapsed time, so a stalled filesystem still stalls that
+pane's VT worker; a separate I/O thread would add a thread per pane and reorder
+failure reporting. A native filesystem quota error is a storage failure, not a
+budget refusal.
 Drain and writer exit remove the file. Pane teardown rejects admissions immediately;
 the native writer owns final cleanup and waits for any in-flight storage operation
 off the event-loop thread. Storage exhaustion, spool

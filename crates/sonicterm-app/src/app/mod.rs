@@ -324,6 +324,7 @@ pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
 pub(crate) use shared_gpu::{font_fallback_waker, gpu_device_state_waker};
+mod reply_delivery;
 mod spawn_pane;
 mod splitter_input;
 mod sync_clock;

@@ -464,7 +464,7 @@ pub(super) fn spawn_pane_workers(
         .name(vt_thread_name.into())
         .spawn(move || {
             let mut command_started: Option<Instant> = None;
-            let mut replies_failed = false;
+            let mut replies = super::reply_delivery::ReplyDelivery::default();
             let mut flush = OutputFlush::new(pane_id, &worker_handles);
             let send_output = || {
                 if let Some(proxy) = redraw_proxy.as_ref() {
@@ -488,18 +488,16 @@ pub(super) fn spawn_pane_workers(
                             &mut flush.sync_latch,
                             redraw_proxy.as_ref(),
                             |reply| {
-                                if replies_failed {
-                                    // When: replies_failed is latched, keep consuming output and observing exit without repeated errors.
+                                if !replies.accepting() {
+                                    // When: `replies` is not accepting after a failure, keep consuming output and observing exit without repeated errors.
                                     return;
                                 }
                                 let rejected_bytes = reply.len();
-                                if let Err(error) = in_tx_reply.send(reply) {
-                                    // Report storage/native failure once without abandoning output or exit observation.
-                                    replies_failed = true;
-                                    if !input_state.is_closing() {
-                                        tracing::warn!(pane_id, rejected_bytes, %error, "terminal reply delivery failed");
-                                    }
-                                }
+                                let result = in_tx_reply.send(reply);
+                                let closing = input_state.is_closing();
+                                replies.report(pane_id, rejected_bytes, &result, closing, || {
+                                    in_tx_reply.stats()
+                                });
                             },
                         );
                         flush.after_batch(&worker_handles, Instant::now(), send_output);

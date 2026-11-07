@@ -148,8 +148,8 @@ fn oversized_submission_is_refused_without_poisoning_storage() {
 }
 
 #[test]
-fn never_empty_spill_retains_consumed_prefix_until_drain() {
-    // Bound RAM honestly: this single-file design does not reclaim consumed disk prefixes until empty.
+fn never_empty_spill_retains_a_small_consumed_prefix() {
+    // A consumed prefix below the compaction minimum stays in the file until it drains or grows.
     let (sender, reader) = reply_spool();
     for _ in 0..4 {
         sender.send(vec![b'a'; CHUNK_BYTES]).unwrap();
@@ -161,4 +161,101 @@ fn never_empty_spill_retains_consumed_prefix_until_drain() {
     let spill = state.spill.as_ref().unwrap();
     assert_eq!(spill.read, (CHUNK_BYTES + HEADER_BYTES) as u64);
     assert_eq!(spill.file.metadata().unwrap().len(), (4 * (CHUNK_BYTES + HEADER_BYTES)) as u64);
+}
+
+/// A program that never reads its input cannot grow the spill past its disk budget: later replies
+/// are refused alone and counted, the spool is not failed, and every admitted record still pops
+/// in order once the reader resumes.
+#[test]
+fn unread_backlog_stops_at_the_disk_budget_without_failing() {
+    let (sender, reader) = reply_spool();
+    let record = (CHUNK_BYTES + HEADER_BYTES) as u64;
+    let mut admitted = 0u32;
+    let mut refused = 0u32;
+    for index in 0..1024u32 {
+        match sender.send(vec![(index % 251) as u8; CHUNK_BYTES]) {
+            Ok(()) => admitted += 1,
+            Err(error) => {
+                assert!(is_budget_refusal(&error), "{error}");
+                refused += 1;
+            }
+        }
+        let state = sender.state.lock();
+        if let Some(spill) = state.spill.as_ref() {
+            assert!(spill.file.metadata().unwrap().len() <= SPILL_BUDGET_BYTES);
+        }
+    }
+    // One record sits in the resident tier; the spill holds as many whole records as the budget allows.
+    assert_eq!(u64::from(admitted), 1 + SPILL_BUDGET_BYTES / record);
+    assert_eq!(admitted + refused, 1024);
+    assert_eq!(sender.stats().dropped_replies, u64::from(refused));
+    assert_eq!(sender.stats().peak_live_bytes, SPILL_BUDGET_BYTES / record * record);
+    for index in 0..admitted {
+        assert_eq!(reader.pop().unwrap().unwrap(), vec![(index % 251) as u8; CHUNK_BYTES]);
+    }
+    assert!(reader.pop().unwrap().is_none());
+    // Drained, the spool admits again.
+    sender.send(vec![7]).unwrap();
+    assert_eq!(reader.pop().unwrap().unwrap(), [7]);
+}
+
+/// A reader that keeps up only partly never lets the file grow without bound: once the consumed
+/// prefix dominates, compaction moves the live records to the front, in order.
+#[test]
+fn a_slow_reader_keeps_the_spill_file_bounded_and_ordered() {
+    let (sender, reader) = reply_spool();
+    let mut next_sent = 0u32;
+    let mut next_read = 0u32;
+    let mut largest_file = 0;
+    // Two sends per read: the backlog grows until the budget refuses, then holds at the budget.
+    for _ in 0..4000 {
+        for _ in 0..2 {
+            if sender.send(vec![(next_sent % 251) as u8; CHUNK_BYTES]).is_ok() {
+                next_sent += 1;
+            }
+        }
+        assert_eq!(reader.pop().unwrap().unwrap(), vec![(next_read % 251) as u8; CHUNK_BYTES]);
+        next_read += 1;
+        if let Some(spill) = sender.state.lock().spill.as_ref() {
+            largest_file = largest_file.max(spill.file.metadata().unwrap().len());
+        }
+    }
+    let record = (CHUNK_BYTES + HEADER_BYTES) as u64;
+    assert!(largest_file <= 2 * SPILL_BUDGET_BYTES + record, "spill file grew to {largest_file}");
+    while let Some(bytes) = reader.pop().unwrap() {
+        assert_eq!(bytes, vec![(next_read % 251) as u8; CHUNK_BYTES]);
+        next_read += 1;
+    }
+    assert_eq!(next_read, next_sent);
+}
+
+/// A compaction whose file I/O fails latches the spool like any storage failure: the error is
+/// returned, later sends and pops report it, and the storage is released.
+#[test]
+fn a_failed_compaction_latches_the_spool() {
+    let (sender, reader) = reply_spool();
+    let record = (CHUNK_BYTES + HEADER_BYTES) as u64;
+    // Fill past the compaction minimum, then consume more than half so the next spill compacts.
+    let spilled = (2 * COMPACT_MIN_BYTES / record + 2) as usize;
+    for _ in 0..=spilled {
+        sender.send(vec![b'a'; CHUNK_BYTES]).unwrap();
+    }
+    for _ in 0..(spilled * 3 / 4) {
+        reader.pop().unwrap().unwrap();
+    }
+    {
+        let mut state = sender.state.lock();
+        let spill = state.spill.as_mut().unwrap();
+        assert!(spill.read >= COMPACT_MIN_BYTES && spill.read * 2 >= spill.written);
+        // A read-only handle makes the compaction's first write fail.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spill");
+        std::fs::write(&path, vec![0u8; spill.written as usize]).unwrap();
+        spill.file = File::open(&path).unwrap();
+    }
+    let error = sender.send(vec![b'b'; CHUNK_BYTES]).unwrap_err();
+    assert!(!is_budget_refusal(&error));
+    assert_eq!(sender.send(vec![b'c']).unwrap_err().kind(), error.kind());
+    assert_eq!(reader.pop().unwrap_err().kind(), error.kind());
+    assert!(sender.state.lock().spill.is_none());
 }
