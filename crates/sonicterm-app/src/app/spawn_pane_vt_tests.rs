@@ -624,9 +624,12 @@ fn every_production_parser_write_is_published() {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap();
-            let (_, bare) = crate::app::source_scan_support::code_views(&source);
-            let writes =
-                bare.matches(".advance(").count() + bare.matches(".advance_with_replies(").count();
+            // Real method calls only, read from the syntax tree; test-only items do not count.
+            let writes = crate::app::source_syntax_support::method_calls(
+                &source,
+                &["advance", "advance_with_replies"],
+            )
+            .unwrap_or_else(|| panic!("{name} parses"));
             if writes > 0 {
                 found.push((name, writes));
             }

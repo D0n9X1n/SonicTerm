@@ -726,6 +726,8 @@ mod pty_test_support;
 
 #[cfg(test)]
 mod source_scan_support;
+#[cfg(test)]
+mod source_syntax_support;
 
 #[cfg(all(test, any(windows, unix)))]
 #[path = "mod_close_baseline_tests.rs"]
