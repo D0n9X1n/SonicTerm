@@ -16,6 +16,8 @@ pub(crate) const MAX_FLOOD_GAP_MS: u64 = 1_000;
 /// How often the probe looks at the flooding pane while a measured phase runs.
 pub(crate) const OBSERVE_EVERY_MS: u64 = 100;
 /// The longest one look waits for the flooding pane's parser: the frame collection's own budget.
+/// Read only by the probe, which runs where the harness measures (macOS and Windows).
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) const OBSERVE_WAIT: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// One measured phase's flood progress, in ms since the phase began.
