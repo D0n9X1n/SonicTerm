@@ -494,7 +494,7 @@ fn window_ime_missing_owner_or_search_pane_never_falls_back() {
 
 /// Focus changes reach the renderer as a damage class, so the handler dirties no pane and
 /// never locks a peer pane: with the peer's parser held by another thread, blur and focus both
-/// complete promptly, every pane's dirt is unchanged, and each call takes at most one counted
+/// complete promptly, the peer's dirt is unchanged, and each call takes at most one counted
 /// parser lock, the active pane's focus-reporting read. Main and child windows share the handler.
 #[test]
 fn focus_change_adds_no_pane_dirt_and_never_locks_a_peer_pane() {
@@ -505,18 +505,12 @@ fn focus_change_adds_no_pane_dirt_and_never_locks_a_peer_pane() {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let (window_id, active, peer) = split_focus_window(&mut app, in_child);
         assert_ne!(active, peer);
+        // The split spawned a real shell in the active pane, whose prompt may still be arriving, so
+        // its dirt says nothing about focus. The peer runs no new output here; focus must not dirty it.
         let window = &app.registry.windows[&window_id];
-        for pane in window.panes.values() {
-            pane.parser.lock().grid_mut().clear_dirty();
-        }
-        let dirt = |app: &App| -> Vec<(u64, usize)> {
-            let mut counts: Vec<(u64, usize)> = app.registry.windows[&window_id]
-                .panes
-                .iter()
-                .map(|(&pane_id, pane)| (pane_id, pane.parser.lock().grid().dirty_count()))
-                .collect();
-            counts.sort_unstable();
-            counts
+        window.panes[&peer].parser.lock().grid_mut().clear_dirty();
+        let dirt = |app: &App| -> usize {
+            app.registry.windows[&window_id].panes[&peer].parser.lock().grid().dirty_count()
         };
         let before = dirt(&app);
 
@@ -549,7 +543,7 @@ fn focus_change_adds_no_pane_dirt_and_never_locks_a_peer_pane() {
         }
         release.send(()).expect("the holder is waiting");
         holder.join().expect("the holder exits");
-        assert_eq!(dirt(&app), before, "in_child={in_child}: focus dirtied a pane");
+        assert_eq!(dirt(&app), before, "in_child={in_child}: focus dirtied the peer pane");
     }
 }
 
