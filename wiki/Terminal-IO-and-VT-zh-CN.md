@@ -550,5 +550,6 @@ mouse ownership 与 OSC 52 实际配置见 [终端复用器](Terminal-Multiplexe
 | 窗格工作线程与重绘合并 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | 主窗口/子窗口输入路由 | `crates/sonicterm-app/src/app/{window_event,window_keyboard,window_pointer,child_window,child_window_pointer}.rs` |
 | VT 解析器与模式 | `crates/sonicterm-vt/src/vt.rs` |
+| 带种子的模糊测试 | `crates/sonicterm-vt/src/vt_fuzz_tests.rs`（解析器；`SONICTERM_FUZZ_ITERS` 可提高其 20,000 次迭代）、`crates/sonicterm-io/src/reply_spool_tests.rs`（回复缓冲）、`crates/sonicterm-app/src/app/spawn_pane_vt_fuzz_tests.rs`（经批量发布器的图像片段） |
 | 网格与行存储 | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
 | 选区与复制 | `crates/sonicterm-ui/src/selection.rs`、`crates/sonicterm-app/src/app/misc.rs` |

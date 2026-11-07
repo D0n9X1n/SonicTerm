@@ -86,3 +86,7 @@ pub(in crate::app) fn publish_grid_change(
 #[cfg(test)]
 #[path = "spawn_pane_vt_tests.rs"]
 mod spawn_pane_vt_tests;
+
+#[cfg(test)]
+#[path = "spawn_pane_vt_fuzz_tests.rs"]
+mod spawn_pane_vt_fuzz_tests;

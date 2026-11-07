@@ -740,5 +740,6 @@ fixed screen positions that changed.
 | Pane worker and redraw coalescing | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | Main/child input routing | `crates/sonicterm-app/src/app/{window_event,window_keyboard,window_pointer,child_window,child_window_pointer}.rs` |
 | VT parser and modes | `crates/sonicterm-vt/src/vt.rs` |
+| Seeded fuzz tests | `crates/sonicterm-vt/src/vt_fuzz_tests.rs` (parser; `SONICTERM_FUZZ_ITERS` raises its 20,000 iterations), `crates/sonicterm-io/src/reply_spool_tests.rs` (reply spool), `crates/sonicterm-app/src/app/spawn_pane_vt_fuzz_tests.rs` (image fragments through the batch publisher) |
 | Grid and line storage | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
 | Selection and copy | `crates/sonicterm-ui/src/selection.rs`, `crates/sonicterm-app/src/app/misc.rs` |

@@ -311,3 +311,75 @@ fn a_failed_compaction_latches_the_spool() {
     assert_eq!(reader.pop().unwrap_err().kind(), error.kind());
     assert!(sender.state.lock().spill.is_none());
 }
+
+/// A seeded mix of record sizes, from one byte to a full chunk, with a reader that falls behind
+/// and catches up: every accepted record comes back once, in order and whole (a pop may join
+/// several, never split one); a refusal is the typed budget refusal; live spill never exceeds the
+/// budget; the file never passes twice it.
+#[test]
+fn random_record_sizes_stay_ordered_and_within_the_budget() {
+    let (sender, reader) = reply_spool();
+    let mut seed = 0x0DD5_EED5_u64;
+    let mut random = move |bound: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % bound as u64) as usize
+    };
+    let mut expected = std::collections::VecDeque::new();
+    let mut next_tag = 0u8;
+    let mut largest_file = 0;
+    let mut refused = 0;
+    for round in 0..3000 {
+        // Bursts of sends, then a reader that takes a random share of the backlog. The first
+        // thousand rounds read rarely, so the backlog reaches the budget before it drains.
+        for _ in 0..random(6) {
+            let size = 1 + random(CHUNK_BYTES);
+            let record = vec![next_tag; size];
+            match sender.send(record.clone()) {
+                Ok(()) => {
+                    expected.push_back(record);
+                    next_tag = next_tag.wrapping_add(1);
+                }
+                Err(error) => {
+                    assert!(is_budget_refusal(&error), "round {round}: {error}");
+                    refused += 1;
+                }
+            }
+        }
+        let reads = if round < 1000 { usize::from(random(8) == 0) } else { random(5) };
+        for _ in 0..reads {
+            match reader.pop().unwrap() {
+                Some(bytes) => take_whole_records(&bytes, &mut expected, round),
+                None => assert!(expected.is_empty(), "round {round}: a record went missing"),
+            }
+        }
+        let stats = sender.stats();
+        assert!(stats.live_bytes <= SPILL_BUDGET_BYTES, "round {round}: {stats:?}");
+        if let Some(spill) = sender.state.lock().spill.as_ref() {
+            largest_file = largest_file.max(spill.file.metadata().unwrap().len());
+        }
+    }
+    let record = (CHUNK_BYTES + HEADER_BYTES) as u64;
+    assert!(largest_file <= 2 * SPILL_BUDGET_BYTES + record, "spill file grew to {largest_file}");
+    assert!(refused > 0, "the backlog reached the budget");
+    while let Some(bytes) = reader.pop().unwrap() {
+        take_whole_records(&bytes, &mut expected, usize::MAX);
+    }
+    assert!(expected.is_empty(), "every accepted record was read back");
+}
+
+/// Match one pop's `bytes` against the oldest `expected` records: it must be exactly a run of
+/// whole records, in order, which it removes.
+fn take_whole_records(
+    bytes: &[u8],
+    expected: &mut std::collections::VecDeque<Vec<u8>>,
+    round: usize,
+) {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let record = expected.pop_front().unwrap_or_else(|| panic!("round {round}: extra bytes"));
+        assert!(rest.starts_with(&record), "round {round}: a record was split or reordered");
+        rest = &rest[record.len()..];
+    }
+}

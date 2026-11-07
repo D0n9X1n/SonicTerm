@@ -753,3 +753,7 @@ pub use vt_osc::{parse_osc7_cwd, parse_osc7_cwd_snapshot};
 #[cfg(test)]
 #[path = "vt_test_support.rs"]
 mod vt_test_support;
+
+#[cfg(test)]
+#[path = "vt_fuzz_tests.rs"]
+mod vt_fuzz_tests;
