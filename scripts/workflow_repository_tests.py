@@ -462,7 +462,8 @@ jobs:
             encoding="utf-8"
         )
         app_dev_dependencies = app_manifest.split("\n[dev-dependencies]\n", 1)[1].split("\n[", 1)[0]
-        self.assertIn('sonicterm-app = { path = ".", features = ["test-support"] }', app_dev_dependencies)
+        # Through the workspace entry, which pins the version, so cargo-deny sees no wildcard.
+        self.assertIn('sonicterm-app = { workspace = true, features = ["test-support"] }', app_dev_dependencies)
         feature_sets = ("perf-counters,perf-hook-checkpoint-memory,perf-hook-trim", "perf-frame-texture",
                         "perf-echo-trace")
         covered = [feature for feature_set in feature_sets for feature in feature_set.split(",")]

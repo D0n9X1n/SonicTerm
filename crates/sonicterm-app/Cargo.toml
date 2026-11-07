@@ -102,7 +102,7 @@ tempfile = "3"
 wgpu.workspace = true
 # Turns on `test-support` for this crate's own unit tests, integration tests and examples
 # only: dev-dependency features never reach the release binaries under resolver 2.
-sonicterm-app = { path = ".", features = ["test-support"] }
+sonicterm-app = { workspace = true, features = ["test-support"] }
 # Drives that test's asynchronous adapter enumeration to completion.
 pollster.workspace = true
 
