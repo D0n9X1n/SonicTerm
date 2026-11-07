@@ -46,10 +46,10 @@ fn check(app: &App, context: &str) {
         );
     }
     for entry in app.mcp_pane_entries() {
-        let resolved = app.mcp_resolve_pane(entry.pane_id).expect("a listed pane resolves");
+        assert!(app.mcp_resolve_pane(entry.pane_id).is_some(), "{context}: a listed pane resolves");
         assert_eq!(
-            (resolved.window_index, resolved.tab_index),
-            (entry.window_index, entry.tab_index),
+            app.mcp_pane_metadata(entry.pane_id),
+            entry.metadata,
             "{context}: list and lookup agree for pane {}",
             entry.pane_id
         );

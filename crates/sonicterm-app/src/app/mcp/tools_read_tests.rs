@@ -331,3 +331,34 @@ fn a_wait_reports_the_generation_it_inspected() {
     assert_eq!(outcome.inspected_generation, Some(1));
     assert_eq!(entry.output_generation.load(Ordering::Acquire), 2);
 }
+
+/// `list_panes` spends one budget on parser probes: with every parser held, the list returns well
+/// within a few probe waits instead of one per pane, later panes are marked
+/// `"details": "skipped"`, and the result says it is `partial`.
+#[test]
+fn a_busy_list_stops_probing_after_its_budget() {
+    let entries: Vec<PaneEntry> = (0..40)
+        .map(|index| {
+            let mut entry = crate::app::mcp::test_entry(20, 4, 100);
+            entry.pane_id = index;
+            entry.metadata = Some(crate::app::mcp::PaneMetadata {
+                window_index: 0,
+                tab_index: index as usize,
+                active: false,
+                readonly: false,
+            });
+            entry
+        })
+        .collect();
+    let guards: Vec<_> = entries.iter().map(|entry| entry.parser.lock()).collect();
+    let started = Instant::now();
+    let budget_ends = started + LIST_BUDGET;
+    let panes: Vec<Value> = entries.iter().map(|entry| pane_summary(entry, budget_ends)).collect();
+    let elapsed = started.elapsed();
+    drop(guards);
+    // 40 panes at a 5 ms wait each would take 200 ms; the budget bounds the whole list. The bound
+    // is half of that, leaving a loaded CI runner room for oversleeping timed lock attempts.
+    assert!(elapsed < PARSER_WAIT * 40 / 2, "the list took {elapsed:?}");
+    assert!(panes.iter().any(|pane| pane["details"] == "skipped"), "no pane was skipped");
+    assert!(panes.iter().all(|pane| pane["details"] == "skipped" || pane["busy"] == true));
+}

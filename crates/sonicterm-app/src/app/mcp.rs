@@ -123,11 +123,10 @@ pub(crate) enum LoopCall {
     },
 }
 
-/// A pane the loop resolved, with handles a connection thread reads without the loop.
-#[derive(Clone)]
-pub(crate) struct PaneEntry {
-    /// The pane's id.
-    pub(crate) pane_id: u64,
+/// Where a pane sits in the UI, which only `list_panes` reports. Computing it orders every
+/// window, so a tool that names one pane never asks for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneMetadata {
     /// The window's position: 0 for the main window, then children in creation order.
     pub(crate) window_index: usize,
     /// The pane's tab index in its window.
@@ -136,6 +135,16 @@ pub(crate) struct PaneEntry {
     pub(crate) active: bool,
     /// Whether the pane's window is in READONLY.
     pub(crate) readonly: bool,
+}
+
+/// A pane the loop resolved: the handles a connection thread reads without the loop, plus its UI
+/// position when it came from `list_panes`.
+#[derive(Clone)]
+pub(crate) struct PaneEntry {
+    /// The pane's id.
+    pub(crate) pane_id: u64,
+    /// Where the pane sits; `Some` only for `list_panes` entries.
+    pub(crate) metadata: Option<PaneMetadata>,
     /// Whether an agent created the pane.
     pub(crate) agent_owned: bool,
     /// The pane's parser, read with one bounded attempt.
@@ -845,10 +854,7 @@ pub(crate) fn test_entry(cols: u16, rows: u16, scrollback: usize) -> PaneEntry {
     grid.set_scrollback_limit(scrollback);
     PaneEntry {
         pane_id: 7,
-        window_index: 0,
-        tab_index: 0,
-        active: true,
-        readonly: false,
+        metadata: None,
         agent_owned: false,
         parser: Arc::new(Mutex::new(Parser::new_with_staging_pool(
             grid,

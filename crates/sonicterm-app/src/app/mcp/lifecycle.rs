@@ -10,7 +10,7 @@ use sonicterm_cfg::config::{McpConfig, McpControl, McpRead};
 use sonicterm_resource::CommittedReservation;
 use sonicterm_types::{OwnerKind, ResourceAmount, ResourceClass};
 
-use super::{LoopCall, LoopReply, LoopRequest, McpShared, PaneEntry};
+use super::{LoopCall, LoopReply, LoopRequest, McpShared, PaneEntry, PaneMetadata};
 use crate::app::owners::{tracking_only_owner_limits, OwnerGuard};
 use crate::app::{App, CopyModeState, WindowId};
 
@@ -252,6 +252,8 @@ impl App {
     /// Every window in the order agents see them: main first, then children in creation order.
     /// A pane's `window_index` is its window's position here, for the list and for one pane alike.
     fn mcp_window_order(&self) -> Vec<WindowId> {
+        #[cfg(test)]
+        WINDOW_ORDERS.with(|orders| orders.set(orders.get() + 1));
         let mut windows: Vec<WindowId> = self.registry.windows.keys().copied().collect();
         windows.sort_by_key(|id| {
             let is_main = Some(*id) == self.registry.main_window_id;
@@ -272,17 +274,33 @@ impl App {
             }
             for (tab_index, tab_state) in window.tab_states.iter().enumerate() {
                 tab_state.tree.for_each_leaf(&mut |pane_id| {
-                    entries.extend(Self::mcp_entry(window, window_index, tab_index, pane_id));
+                    entries.extend(Self::mcp_entry(
+                        window,
+                        Some((window_index, tab_index)),
+                        pane_id,
+                    ));
                 });
             }
         }
         entries
     }
 
-    /// The entry for `pane_id` alone, exactly as [`Self::mcp_pane_entries`] would list it, without
-    /// building the others: one window's tabs are searched, and only this pane's handles cloned.
-    /// `None` when no terminal window holds the pane or it is mid-teardown.
+    /// The handles for `pane_id` alone, without its UI position: one window is found, no window
+    /// is ordered, and only this pane's handles are cloned. `None` when no terminal window holds
+    /// the pane or it is mid-teardown.
     pub(crate) fn mcp_resolve_pane(&self, pane_id: u64) -> Option<PaneEntry> {
+        let window = self
+            .registry
+            .windows
+            .values()
+            .find(|window| !window.role.is_report() && window.panes.contains_key(&pane_id))?;
+        Self::mcp_entry(window, None, pane_id)
+    }
+
+    /// The UI position `list_panes` would report for `pane_id`, for tests that check both paths
+    /// agree.
+    #[cfg(test)]
+    pub(crate) fn mcp_pane_metadata(&self, pane_id: u64) -> Option<PaneMetadata> {
         let (window_id, window) =
             self.registry.windows.iter().find(|(_, window)| {
                 !window.role.is_report() && window.panes.contains_key(&pane_id)
@@ -290,27 +308,35 @@ impl App {
         let window_index = self.mcp_window_order().iter().position(|id| id == window_id)?;
         let tab_index =
             window.tab_states.iter().position(|tab_state| tab_state.tree.contains_pane(pane_id))?;
-        Self::mcp_entry(window, window_index, tab_index, pane_id)
+        Self::mcp_entry(window, Some((window_index, tab_index)), pane_id)?.metadata
     }
 
     /// One pane's entry, cloning only its own shared handles; `None` when `pane_id` is a leaf
     /// whose pane is already gone, as during teardown.
     fn mcp_entry(
         window: &crate::app::WindowState,
-        window_index: usize,
-        tab_index: usize,
+        position: Option<(usize, usize)>,
         pane_id: u64,
     ) -> Option<PaneEntry> {
         let pane = window.panes.get(&pane_id)?;
-        let tab_state = window.tab_states.get(tab_index)?;
+        let metadata = match position {
+            Some((window_index, tab_index)) => {
+                let tab_state = window.tab_states.get(tab_index)?;
+                Some(PaneMetadata {
+                    window_index,
+                    tab_index,
+                    active: tab_index == window.tabs.active_index()
+                        && tab_state.active_pane == pane_id,
+                    readonly: window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only),
+                })
+            }
+            None => None,
+        };
         #[cfg(test)]
         ENTRIES_BUILT.with(|built| built.set(built.get() + 1));
         Some(PaneEntry {
             pane_id,
-            window_index,
-            tab_index,
-            active: tab_index == window.tabs.active_index() && tab_state.active_pane == pane_id,
-            readonly: window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only),
+            metadata,
             agent_owned: pane.agent_owned,
             parser: Arc::clone(&pane.parser),
             output_generation: Arc::clone(&pane.output_generation),
@@ -326,6 +352,9 @@ impl App {
 thread_local! {
     /// Entries built on this thread, so a test can tell resolving one pane from listing them all.
     pub(crate) static ENTRIES_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Window orderings computed on this thread, so a test can tell that resolving one pane ordered
+    /// no windows.
+    pub(crate) static WINDOW_ORDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

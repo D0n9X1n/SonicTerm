@@ -21,6 +21,8 @@ pub(crate) const WAIT_POLL: Duration = Duration::from_millis(50);
 /// the pane's change signal; this bound is for revocation (a closed client, a stopped or changed
 /// server), which the pane does not announce.
 pub(crate) const WAIT_RECHECK: Duration = Duration::from_millis(250);
+/// The total time `list_panes` spends waiting for busy parsers across every pane.
+pub(crate) const LIST_BUDGET: Duration = Duration::from_millis(50);
 /// How long a wait keeps scanning a closed pane's published output (a busy parser or a scan
 /// backlog) before it reports `pane_closed` with the rest unscanned.
 pub(crate) const CLOSE_DRAIN: Duration = Duration::from_secs(1);
@@ -49,6 +51,7 @@ pub(crate) fn tool_list() -> Value {
                     "instance_pid": { "type": "integer" },
                     "control": { "enum": ["off", "agent", "any"] },
                     "read": { "enum": ["agent", "any"] },
+                    "partial": { "type": "boolean" },
                     "panes": { "type": "array", "items": { "type": "object" } },
                     "error": { "type": "string" },
                     "message": { "type": "string" },
@@ -209,7 +212,11 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
             return tool_error("internal", "unexpected reply");
         }
     };
-    let panes: Vec<Value> = entries.iter().map(pane_summary).collect();
+    // One budget for every parser probe, so many busy panes cannot stretch the call: once it is
+    // spent, later panes are listed without their live details.
+    let budget_ends = Instant::now() + LIST_BUDGET;
+    let panes: Vec<Value> = entries.iter().map(|entry| pane_summary(entry, budget_ends)).collect();
+    let partial = panes.iter().any(|pane| pane["details"] == "skipped");
     let summary = format!("{} pane(s)", panes.len());
     let self_pane = caller.self_pane.filter(|id| entries.iter().any(|entry| entry.pane_id == *id));
     tool_result(
@@ -219,23 +226,32 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
             "instance_pid": std::process::id(),
             "control": super::lifecycle::control_name(shared.control()),
             "read": shared.read().as_str(),
+            "partial": partial,
             "panes": panes,
         }),
     )
 }
 
-/// One pane's entry in `list_panes`.
-// Only this pane's parser is taken, once, with a bounded wait.
-fn pane_summary(entry: &PaneEntry) -> Value {
+/// One pane's entry in `list_panes`. Its parser is taken once, waiting at most until
+/// `budget_ends` and never longer than [`PARSER_WAIT`]; a pane reached after the budget is listed
+/// with `"details": "skipped"` and no live fields.
+fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
+    let metadata = entry.metadata.expect("list_panes entries carry their position");
     let mut pane = json!({
         "pane_id": entry.pane_id.to_string(),
-        "window_index": entry.window_index,
-        "tab_index": entry.tab_index,
-        "active": entry.active,
-        "readonly": entry.readonly,
+        "window_index": metadata.window_index,
+        "tab_index": metadata.tab_index,
+        "active": metadata.active,
+        "readonly": metadata.readonly,
         "agent_owned": entry.agent_owned,
     });
-    let Some(guard) = entry.parser.try_lock_for(PARSER_WAIT) else {
+    let wait = budget_ends.saturating_duration_since(Instant::now()).min(PARSER_WAIT);
+    if wait.is_zero() {
+        // When: the `wait` is zero because the list's `budget_ends` passed, details are skipped.
+        pane["details"] = json!("skipped");
+        return pane;
+    }
+    let Some(guard) = entry.parser.try_lock_for(wait) else {
         // When: `try_lock_for` misses, the pane is listed without its live details.
         pane["busy"] = json!(true);
         return pane;

@@ -171,9 +171,10 @@ fn the_loop_resolves_panes_for_a_connection() {
     };
     let ids: Vec<u64> = entries.iter().map(|entry| entry.pane_id).collect();
     assert_eq!(ids, vec![first, second]);
-    assert_eq!(entries.iter().map(|entry| entry.tab_index).collect::<Vec<_>>(), vec![0, 1]);
+    let positions: Vec<_> = entries.iter().map(|entry| entry.metadata.unwrap()).collect();
+    assert_eq!(positions.iter().map(|position| position.tab_index).collect::<Vec<_>>(), vec![0, 1]);
     let active_tab = app.main_tabs().unwrap().active_index();
-    assert!(entries.iter().all(|entry| entry.active == (entry.tab_index == active_tab)));
+    assert!(positions.iter().all(|position| position.active == (position.tab_index == active_tab)));
 }
 
 /// A request for a pane that does not exist is refused with `pane_gone`.
@@ -292,7 +293,10 @@ fn resolving_one_pane_matches_its_listed_entry() {
         "the layout has panes in several windows and tabs: {}",
         listed.len()
     );
-    assert!(listed.iter().any(|entry| entry.window_index > 0), "child windows are listed");
+    assert!(
+        listed.iter().any(|entry| entry.metadata.unwrap().window_index > 0),
+        "child windows are listed"
+    );
     // Explicit (window, tab) indices, independent of the ordering helper both paths share.
     let expected = [
         (main_second_tab, 0, 1),
@@ -301,21 +305,24 @@ fn resolving_one_pane_matches_its_listed_entry() {
         (after_pane, 4, 0),
     ];
     for (pane, window_index, tab_index) in expected {
-        let resolved = app.mcp_resolve_pane(pane).expect("a terminal pane resolves");
+        let position = app.mcp_pane_metadata(pane).expect("a terminal pane has a position");
         assert_eq!(
-            (resolved.window_index, resolved.tab_index),
+            (position.window_index, position.tab_index),
             (window_index, tab_index),
-            "pane {pane}"
+            "{pane}"
         );
         let entry = listed.iter().find(|entry| entry.pane_id == pane).expect("listed");
-        assert_eq!((entry.window_index, entry.tab_index), (window_index, tab_index), "pane {pane}");
+        let listed_position = entry.metadata.unwrap();
+        assert_eq!(
+            (listed_position.window_index, listed_position.tab_index),
+            (window_index, tab_index)
+        );
     }
     for entry in &listed {
         let resolved = app.mcp_resolve_pane(entry.pane_id).expect("a listed pane resolves");
-        let pair = |entry: &PaneEntry| {
-            (entry.pane_id, entry.window_index, entry.tab_index, entry.active, entry.readonly)
-        };
-        assert_eq!(pair(&resolved), pair(entry), "pane {}", entry.pane_id);
+        // Resolving one pane computes no position; the position helper agrees with the list.
+        assert!(resolved.metadata.is_none(), "pane {}", entry.pane_id);
+        assert_eq!(app.mcp_pane_metadata(entry.pane_id), entry.metadata, "pane {}", entry.pane_id);
         assert!(Arc::ptr_eq(&resolved.parser, &entry.parser), "the same pane's parser");
     }
     for absent in [report_pane, torn, 987_654] {
@@ -449,4 +456,18 @@ fn an_out_of_scope_refusal_names_the_fix() {
         }
         _ => panic!("the user's pane was not refused"),
     }
+}
+
+/// A tool that names one pane gets its handles without its UI position: no window is ordered and
+/// the entry carries no metadata, while `list_panes` entries always do.
+#[test]
+fn resolving_one_pane_orders_no_windows() {
+    let mut app = test_app();
+    let pane_id = app.__test_seed_tab("one");
+    app.__test_seed_child_window(&["child"]);
+    WINDOW_ORDERS.with(|orders| orders.set(0));
+    let entry = app.mcp_resolve_pane(pane_id).expect("the pane resolves");
+    assert!(entry.metadata.is_none());
+    assert_eq!(WINDOW_ORDERS.with(std::cell::Cell::get), 0, "resolving ordered the windows");
+    assert!(app.mcp_pane_entries().iter().all(|entry| entry.metadata.is_some()));
 }
