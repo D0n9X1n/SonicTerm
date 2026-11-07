@@ -9,7 +9,8 @@ The rule was fixed before any CI run measured S13:
   each phase, from its start to its end, no stretch may pass `max_flood_gap_ms` without a reading
   that advanced: an unobserved prefix or suffix, busy-only looks and a stall all count (`vt.parse_bytes`
   of at least `MIN_FLOOD_BYTES` per phase is a second, coarse floor). The flooding and typing panes
-  of both variants must have exactly the same grid, so pane count is the only difference.
+  of both variants must have the same grid within `SPLIT_ROUNDING_CELLS` per axis, the rounding of a
+  split, so pane count is the only difference.
   Otherwise there is no verdict.
 - `unchanged` holds when the 4-pane p95 is within `P95_TOLERANCE` of the 2-pane p95, and every failed
   collection in the 4-pane variant (parser, image and budget-expired misses together) is under
@@ -36,6 +37,8 @@ FAILURE_LIMIT = 0.01
 # A stopped flood leaves the busy parser idle and the comparison meaningless; a live `yes` writes many
 # megabytes in a 5 s hold, so 1 MiB per phase is a floor, not an estimate of throughput.
 MIN_FLOOD_BYTES = 1 << 20
+# Stacked panes in a window whose height does not divide evenly differ by at most this many cells.
+SPLIT_ROUNDING_CELLS = 1
 FAILURE_FIELDS = ("contention_parser", "contention_images", "contention_budget_expired")
 LIVENESS_PHASES = ("typing", "tail")
 UNCHANGED = "unchanged"
@@ -142,7 +145,11 @@ def verdict(two: dict, four: dict) -> tuple[str, str]:
     # Pane count must be the only difference: every run's flooding and typing panes share one grid,
     # within a cell of rounding at the split.
     grids = [grid for evidence in (two, four) for pair in evidence["pane_grids"] for grid in pair]
-    if not problems and len(set(grids)) > 1:
+    # One cell per axis is split rounding: a window whose height does not divide evenly gives stacked
+    # panes rows that differ by one (a macOS runner gave 8 and 7 in a 17-row window). Anything more is a
+    # different workload and leaves no verdict.
+    if not problems and grids and any(abs(grid[axis] - other[axis]) > SPLIT_ROUNDING_CELLS
+                                      for grid in grids for other in grids for axis in (0, 1)):
         problems.append(f"pane grids differ: {sorted(set(grids))}")
     if problems:
         return NO_VERDICT, "; ".join(problems)

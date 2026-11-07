@@ -104,11 +104,14 @@ class ContentionVerdictTests(unittest.TestCase):
         self.assertEqual(outcome, verdict_rule.NO_VERDICT)
         self.assertIn("did not watch the flood through tail", why)
 
-    def test_pane_grids_must_match_exactly(self):
-        # Pane count must be the only difference between the variants; any size difference, even a
-        # few columns, leaves no verdict rather than a tolerance that could hide a pane-count cost.
+    def test_pane_grids_must_match_up_to_split_rounding(self):
+        # Pane count must be the only difference between the variants. One cell is a split's rounding
+        # (a macOS runner gave stacked panes 8 and 7 rows in a 17-row window); any more leaves no verdict.
+        two = evidence(run([10.0] * 300, grids=((125, 8), (125, 7))))
+        rounded = evidence(run([10.0] * 300, grids=((125, 8), (125, 8))))
+        self.assertEqual(verdict_rule.verdict(two, rounded)[0], verdict_rule.UNCHANGED)
         two = evidence(run([10.0] * 300, grids=((120, 10), (120, 10))))
-        for grids in (((120, 20), (120, 20)), ((110, 10), (110, 10)), ((120, 11), (120, 11))):
+        for grids in (((120, 20), (120, 20)), ((110, 10), (110, 10)), ((120, 12), (120, 12))):
             other = evidence(run([10.0] * 300, grids=grids))
             outcome, why = verdict_rule.verdict(two, other)
             self.assertEqual(outcome, verdict_rule.NO_VERDICT, grids)

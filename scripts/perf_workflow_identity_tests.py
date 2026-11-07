@@ -426,14 +426,14 @@ class WindowsComparisonLegTests(unittest.TestCase):
         self.assertEqual(shard["scenarios"].split()[:6], ["S4", "S5", "S11"] + perf_workflow_fixture.PLATFORM_SCENARIOS["Windows"])
 
     def test_the_macos_shards_are_the_reviewed_three_set_partition(self):
-        # Three sets of about 19 min from measured per-variant times: S7 leads the first, S12 joins the S9 set and S2
-        # the release set; S13's two variants join the first, unmeasured. Exact-head CI must measure it including
-        # runner queues against the 35-minute budget.
+        # Three sets from measured per-variant times (run 42371975980): S7 leads the first, alone near the budget;
+        # S12, S12/status-line and S3 join the S9 set; S2 and S13's two variants the release set. Exact-head CI must
+        # measure it including runner queues against the 35-minute budget.
         self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
-            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S12/status-line", "S3", "S8", "S6/selection-drag", "S13",
-                      "S13/sustained-4"],
-            "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5", "S6/rest", "S1/status-line", "S12"],
-            "S10-S11release": ["S10", "S11/release", "S2", "S2/flood", "S6/flood"],
+            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S8", "S6/selection-drag"],
+            "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5", "S6/rest", "S1/status-line", "S12",
+                           "S12/status-line", "S3"],
+            "S10-S11release": ["S10", "S11/release", "S2", "S2/flood", "S6/flood", "S13", "S13/sustained-4"],
         })
 
     def test_the_cell_layout_reader_names_the_shard_that_holds_s12(self):

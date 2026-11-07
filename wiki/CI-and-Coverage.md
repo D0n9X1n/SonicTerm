@@ -239,11 +239,12 @@ enabled; a static-check archive can no longer occupy the test-codegen cache key.
 Overlapping main runs can still race to save an immutable key.
 
 The three macOS perf shards keep their artifact names and run every scenario
-exactly once, in sets of about 19 minutes from run 40344066083's per-variant times:
-`S7-S4` runs S7, S4, atlas-retry, S12/status-line, S3, S8, S6/selection-drag, S13 and
-S13/sustained-4 (the S13 pair added without a measured time);
-`S9-S10sync` runs S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line and S12;
-`S10-S11release` runs S10, S11/release, S2, S2/flood and S6/flood. All three start
+exactly once, partitioned from run 42371975980's per-variant times, in which S7 alone
+took 21 minutes of its shard's scenarios and that shard set the critical path:
+`S7-S4` runs S7, S4, atlas-retry, S8 and S6/selection-drag;
+`S9-S10sync` runs S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line, S12,
+S12/status-line and S3;
+`S10-S11release` runs S10, S11/release, S2, S2/flood, S6/flood, S13 and S13/sustained-4. All three start
 when the binaries land: this repository runs at most five macOS jobs at once, and CI
 holds two (core gates, which also runs the aarch64 smoke, and the Intel smoke). The
 35-minute PR budget includes queues; exact-head CI timing, not local estimates,
