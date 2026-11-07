@@ -68,15 +68,15 @@ impl App {
     /// Start the catalog worker the first time the picker opens; later opens reuse the loading or
     /// ready catalog. Without an event loop, as in unit tests, the report is dropped.
     pub(super) fn start_font_catalog(&mut self) {
-        if self.font_catalog != FontCatalog::Idle {
+        if self.fonts.font_catalog != FontCatalog::Idle {
             // When: `font_catalog` already started or finished, no second enumeration runs.
             return;
         }
-        self.font_catalog = FontCatalog::Loading;
+        self.fonts.font_catalog = FontCatalog::Loading;
         let proxy = self.event_loop_proxy.clone();
         // The handle is kept but never joined: finish_session does not wait for enumeration. After the
         // loop ends `send_event` returns `EventLoopClosed`, and a report after shutdown is ignored.
-        self.services.font_catalog_worker = spawn(self.font_enumerator, move |report| {
+        self.services.font_catalog_worker = spawn(self.fonts.font_enumerator, move |report| {
             if let Some(proxy) = proxy {
                 // When: `proxy` is Some, an event loop is running to receive the report.
                 let _ = proxy.send_event(UserEvent::FontCatalogReady { families: report.families });
@@ -91,7 +91,7 @@ impl App {
             return;
         }
         tracing::info!(monospace_families = families.len(), "font catalog ready");
-        self.font_catalog = FontCatalog::Ready(families);
+        self.fonts.font_catalog = FontCatalog::Ready(families);
         // A picker opened while the catalog loaded now lists it.
         self.refresh_font_family_picker();
     }
@@ -101,10 +101,13 @@ impl App {
     /// family and the baseline, in memory only. Logs the session family.
     pub(super) fn adopt_resolved_font_family(&mut self) {
         let resolved = self.main_renderer().and_then(|renderer| renderer.resolved_font_family());
-        let config_path =
-            self.runtime_config_path.clone().or_else(sonicterm_cfg::config::Config::default_path);
+        let config_path = self
+            .configs
+            .runtime_config_path
+            .clone()
+            .or_else(sonicterm_cfg::config::Config::default_path);
         let family_configured = config_path.as_deref().is_some_and(config_sets_family);
-        let generation = self.font_family_generation;
+        let generation = self.fonts.font_family_generation;
         self.adopt_resolved_family_from(
             sonicterm_gpu::DEFAULT_MONOSPACE_FAMILIES[0],
             resolved,
@@ -125,13 +128,13 @@ impl App {
         // Only the platform default may be replaced, only when the config names no family, and only
         // while no reload, save or picker choice has moved the family since the reading was taken.
         let untouched = !family_configured
-            && generation == self.font_family_generation
+            && generation == self.fonts.font_family_generation
             && self.config.font.family == default
-            && self.configured_font_family == default;
+            && self.fonts.configured_font_family == default;
         let adopted = resolved.filter(|family| untouched && *family != self.config.font.family);
         if let Some(family) = adopted {
             // A face other than the default stood in for it, so it becomes the session's family.
-            self.configured_font_family = family.clone();
+            self.fonts.configured_font_family = family.clone();
             self.set_font_family(&family);
         }
         tracing::info!(family = %self.config.font.family, "font family resolved");

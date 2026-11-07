@@ -21,7 +21,7 @@ fn enter_on_the_production_memory_segment_opens_memory_usage() {
     present_with(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, click)]);
     app.focus_status_line(window_id);
     assert!(app.status_focus_key(window_id, &Key::Named(NamedKey::Enter), false));
-    assert!(app.memory_report.open_requested, "Memory Usage was requested");
+    assert!(app.reports.memory_report.open_requested, "Memory Usage was requested");
 }
 
 #[test]

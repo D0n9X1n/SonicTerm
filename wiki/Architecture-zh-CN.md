@@ -61,7 +61,7 @@ crate 中身份不变的类型。
 
 ### 权威运行时状态
 
-`App` 协调事件循环并应用已完成的操作。其状态由四个所有者持有，每个都是 `App` 的字段：
+`App` 协调事件循环并应用已完成的操作。其状态由六个所有者持有，每个都是 `App` 的字段：
 
 ```mermaid
 flowchart LR
@@ -70,6 +70,8 @@ flowchart LR
   App --> Run["RuntimeServices（services）：前台进程探测、MCP 服务器、PTY 回收器、GPU 恢复、字体目录 worker、运行时冒烟"]
   App --> Int["InteractionState（interaction）：命令面板、编辑目标、字段指针捕获、系统拖放、广播"]
   App --> Diag["DiagnosticsState（diagnostics）：计数器、保留与裁剪采样、面包屑"]
+  App --> Fonts["FontState（fonts）：字体目录、配置的字号、粗细与字体族、字体目录与选择器"]
+  App --> Reports["ReportWindows（reports）：内存用量与关于窗口的状态"]
   Reg --> Win["WindowState：标签页、窗格、渲染器"]
 ```
 
@@ -77,7 +79,7 @@ flowchart LR
 那个窗口的 `WindowState`，所有按窗格 id 的查找都经过注册表的 `pane_by_id`。主窗口和拆出的窗口
 使用同一种 `WindowState` 表示。这些所有者只在 `app` 模块内可见；`App` 的公开方法保持不变。
 少数字段仍留在 `App` 上：帧计数器（在重绘路径上与窗口和命令面板一同借用）、重绘调度、配置、
-主题、键位和字体。
+主题和键位。字体状态与报告窗口状态有各自的所有者：`FontState` 与 `ReportWindows`。
 
 键盘、IME、焦点和修饰键事件在主/子窗口呈现路径分流前，先查找来源窗口身份。共享输入
 所有权不替代每窗格终端协议协商或原生平台元数据。原生拖放所有者也在创建窗口前，根据

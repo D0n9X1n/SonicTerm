@@ -191,17 +191,25 @@ impl App {
             capture_staging_pool: CaptureStagingPool::process_default(),
             process_privilege: crate::ProcessPrivilege::default(),
             config,
-            config_normalizer,
-            font_dirs,
-            configured_font_size,
-            configured_weight_scale,
-            configured_font_family,
-            font_catalog: font_catalog::FontCatalog::default(),
-            font_enumerator: sonicterm_gpu::installed_monospace_families,
-            font_picker_original: None,
-            font_family_generation: 0,
-            #[cfg(test)]
-            live_font_log: Vec::new(),
+            configs: super::config_state::ConfigState {
+                config_normalizer,
+                theme_loader: None,
+                keymap_loader: None,
+                runtime_config_path: None,
+                startup_loads: None,
+            },
+            fonts: super::font_state::FontState {
+                font_dirs,
+                configured_font_size,
+                configured_weight_scale,
+                configured_font_family,
+                font_catalog: font_catalog::FontCatalog::default(),
+                font_enumerator: sonicterm_gpu::installed_monospace_families,
+                font_picker_original: None,
+                font_family_generation: 0,
+                #[cfg(test)]
+                live_font_log: Vec::new(),
+            },
             keymap,
             clipboard: Clipboard::new().ok(),
             #[cfg(target_os = "windows")]
@@ -220,8 +228,7 @@ impl App {
             // so the ledger stays disabled and adds no per-write cost.
             pty_write_log_enabled: event_loop_proxy.is_none(),
             pending_new_window: None,
-            memory_report: Default::default(),
-            about: Default::default(),
+            reports: Default::default(),
             pending_tear_out: None,
             pending_os_teardown: false,
             #[cfg(any(test, feature = "test-support"))]
@@ -234,12 +241,9 @@ impl App {
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
             dispatch_redraws: super::redraw::DispatchRedraws::default(),
             accessibility: Default::default(),
-            theme_loader: None,
-            keymap_loader: None,
             event_loop_proxy,
             path_workers,
             home_dir,
-            runtime_config_path: None,
             local_hostname,
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
@@ -256,7 +260,6 @@ impl App {
             default_handlers: default_handlers::DefaultHandlersState::default(),
             tab_bar_visible: true,
             status_line: Default::default(),
-            startup_loads: None,
             program: Default::default(),
             quit_hold: quit_hold::QuitHold::new(),
             on_resumed: None,

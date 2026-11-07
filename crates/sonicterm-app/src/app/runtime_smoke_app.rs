@@ -9,7 +9,7 @@ impl super::super::App {
         renderer_baseline: usize,
         scenario: RuntimeSmokeScenario,
     ) {
-        self.runtime_config_path = Some(spec.config_dir().join("sonicterm.toml"));
+        self.configs.runtime_config_path = Some(spec.config_dir().join("sonicterm.toml"));
         let mut smoke = RuntimeSmokeState::from_spec(spec, renderer_baseline);
         smoke.verify_fresh_drop_target = self.owns_native_drop_target();
         smoke.scenario = scenario;

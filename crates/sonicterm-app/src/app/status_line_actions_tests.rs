@@ -74,7 +74,7 @@ fn reload_changes_the_strip_font_scale_in_every_window() {
     let path = scratch_config("reload-font-scale", "[status_line]\nenabled = true\n");
     let mut app =
         App::new(Theme::default(), Config::load_strict(&path).unwrap(), Keymap::default());
-    app.runtime_config_path = Some(path.clone());
+    app.configs.runtime_config_path = Some(path.clone());
     let windows = seed_recorded_windows(&mut app);
     {
         let _dispatch = app.frame_dispatch_scope();
@@ -183,7 +183,7 @@ fn a_save_round_trips_the_toggle_position_and_text_size() {
     assert!(text.contains("position = \"bottom\""), "{text}");
     assert!(text.contains("font_scale = 0.75"), "{text}");
     assert!(app.status_line.overrides.is_empty(), "the save satisfied every choice");
-    app.runtime_config_path = Some(path.clone());
+    app.configs.runtime_config_path = Some(path.clone());
     app.force_reload_config();
     let _ = app.sync_status_line(Instant::now());
     assert_eq!(app.status_line.resolved, shown, "the reload shows what was saved");

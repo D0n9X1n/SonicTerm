@@ -847,7 +847,7 @@ fn attach_native_main_renderer(app: &mut App, event_loop: &ActiveEventLoop) {
         &app.theme,
         RendererSettings {
             font_family: &app.config.font.family,
-            font_dirs: &app.font_dirs,
+            font_dirs: &app.fonts.font_dirs,
             font_size: app.config.font.size,
             line_height_mult: app.config.font.line_height,
             font_weight_scale: app.config.font.effective_weight_scale(),

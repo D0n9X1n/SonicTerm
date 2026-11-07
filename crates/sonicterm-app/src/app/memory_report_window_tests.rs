@@ -27,7 +27,7 @@ fn report_pane(app: &App, report_id: WindowId) -> u64 {
 #[test]
 fn showing_memory_usage_twice_keeps_one_window() {
     let (mut app, _, report_id) = app_with_report();
-    let first_generation = app.memory_report.generation;
+    let first_generation = app.reports.memory_report.generation;
     assert!(app.run_action(&Action::ShowMemoryUsage));
     assert!(app.run_action(&Action::ShowMemoryUsage));
     let reports = app
@@ -38,13 +38,13 @@ fn showing_memory_usage_twice_keeps_one_window() {
         .count();
     assert_eq!(reports, 1);
     assert_eq!(app.memory_report_window_id(), Some(report_id));
-    assert!(app.memory_report.generation > first_generation, "a repeat run refreshes");
-    assert!(!app.memory_report.open_requested);
+    assert!(app.reports.memory_report.generation > first_generation, "a repeat run refreshes");
+    assert!(!app.reports.memory_report.open_requested);
 
     let mut fresh = App::new(Theme::default(), Config::default(), Keymap::default());
     fresh.__test_seed_tab("zsh");
     assert!(fresh.run_action(&Action::ShowMemoryUsage));
-    assert!(fresh.memory_report.open_requested, "no window yet: the event loop creates it");
+    assert!(fresh.reports.memory_report.open_requested, "no window yet: the event loop creates it");
 }
 
 /// Contract: the report pane shows exactly the rendered report, and copy-all puts exactly that
@@ -52,8 +52,8 @@ fn showing_memory_usage_twice_keeps_one_window() {
 #[test]
 fn copy_all_copies_exactly_the_rendered_report() {
     let (mut app, _, report_id) = app_with_report();
-    let rendered = app.memory_report.current.as_ref().expect("report").render();
-    assert_eq!(app.memory_report.last_text.as_deref(), Some(rendered.as_str()));
+    let rendered = app.reports.memory_report.current.as_ref().expect("report").render();
+    assert_eq!(app.reports.memory_report.last_text.as_deref(), Some(rendered.as_str()));
     assert!(rendered.starts_with("SonicTerm "), "{rendered}");
     assert!(rendered.contains("PROCESS (from the OS)"));
     assert!(rendered.contains("\"zsh\""));
@@ -141,7 +141,7 @@ fn closing_the_report_never_quits() {
     assert!(!app.should_exit());
     assert!(!app.pending_exit);
     assert_eq!(app.__test_main_tab_count(), 1);
-    assert!(app.memory_report.last_text.is_none(), "no stale text survives the window");
+    assert!(app.reports.memory_report.last_text.is_none(), "no stale text survives the window");
 }
 
 /// Contract: the report window does not count as a terminal window, so closing the last
@@ -210,8 +210,8 @@ fn report_history_is_independent_of_the_scrollback_setting() {
 #[test]
 fn a_stale_os_sample_is_dropped() {
     let (mut app, _, _) = app_with_report();
-    let before = app.memory_report.last_text.clone();
-    let stale = app.memory_report.generation.wrapping_sub(1);
+    let before = app.reports.memory_report.last_text.clone();
+    let stale = app.reports.memory_report.generation.wrapping_sub(1);
     let sample = OsSample {
         footprint: sonicterm_logging::process_report::sample_footprint(),
         uptime_secs: Some(1),
@@ -222,7 +222,7 @@ fn a_stale_os_sample_is_dropped() {
         trees: Vec::new(),
     };
     app.handle_memory_report_sampled(stale, sample);
-    assert_eq!(app.memory_report.last_text, before);
+    assert_eq!(app.reports.memory_report.last_text, before);
 }
 
 /// Contract: IME composition, search and copy mode own keys before the report window does, so
@@ -248,7 +248,7 @@ fn app_with_manual_report() -> (App, WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.test_clipboard_text = Some(String::new());
     app.__test_seed_tab("zsh");
-    app.memory_report.manual_sampler = true;
+    app.reports.memory_report.manual_sampler = true;
     let report_id = app.__test_open_memory_report_window();
     (app, report_id)
 }
@@ -360,18 +360,24 @@ fn writable_report_redirect_respects_a_readonly_destination() {
 #[test]
 fn native_close_stops_sampling_and_repairs_focus() {
     let (mut app, report_id) = app_with_manual_report();
-    let cancel = Arc::clone(&app.memory_report.cancel);
-    assert!(app.memory_report.manual_pending.is_some(), "a walk is outstanding");
+    let cancel = Arc::clone(&app.reports.memory_report.cancel);
+    assert!(app.reports.memory_report.manual_pending.is_some(), "a walk is outstanding");
     assert!(app.close_child_window(report_id));
     assert!(cancel.load(Ordering::Relaxed), "the outstanding walk was cancelled");
-    assert!(app.memory_report.current.is_none() && app.memory_report.last_text.is_none());
+    assert!(
+        app.reports.memory_report.current.is_none()
+            && app.reports.memory_report.last_text.is_none()
+    );
     assert_eq!(
         app.registry.frontmost_window, app.registry.main_window_id,
         "focus moved back to a terminal"
     );
     assert_eq!(app.__test_answer_memory_sample(), Some(1));
-    assert!(app.memory_report.current.is_none() && app.memory_report.last_text.is_none());
-    assert_eq!(app.memory_report.in_flight, None, "the late answer freed the worker slot");
+    assert!(
+        app.reports.memory_report.current.is_none()
+            && app.reports.memory_report.last_text.is_none()
+    );
+    assert_eq!(app.reports.memory_report.in_flight, None, "the late answer freed the worker slot");
 }
 
 /// Contract: closing the report's tab (the tab close button, then the empty-window reap) runs the
@@ -379,14 +385,20 @@ fn native_close_stops_sampling_and_repairs_focus() {
 #[test]
 fn tab_close_stops_sampling_and_repairs_focus() {
     let (mut app, report_id) = app_with_manual_report();
-    let cancel = Arc::clone(&app.memory_report.cancel);
+    let cancel = Arc::clone(&app.reports.memory_report.cancel);
     assert!(app.close_tab_at_in_child(report_id, 0));
     assert!(app.memory_report_window_id().is_none());
     assert!(cancel.load(Ordering::Relaxed));
-    assert!(app.memory_report.current.is_none() && app.memory_report.last_text.is_none());
+    assert!(
+        app.reports.memory_report.current.is_none()
+            && app.reports.memory_report.last_text.is_none()
+    );
     assert_eq!(app.registry.frontmost_window, app.registry.main_window_id);
     let _ = app.__test_answer_memory_sample();
-    assert!(app.memory_report.last_text.is_none(), "a late answer never refills a closed report");
+    assert!(
+        app.reports.memory_report.last_text.is_none(),
+        "a late answer never refills a closed report"
+    );
 }
 
 /// Contract: rapid refreshes start at most one walk at a time; each refresh cancels the running
@@ -394,21 +406,33 @@ fn tab_close_stops_sampling_and_repairs_focus() {
 #[test]
 fn rapid_refreshes_run_one_walk_at_a_time_and_the_last_wins() {
     let (mut app, _) = app_with_manual_report();
-    assert_eq!(app.memory_report.started, vec![1]);
+    assert_eq!(app.reports.memory_report.started, vec![1]);
     for _ in 0..3 {
         app.refresh_memory_report();
     }
-    assert_eq!(app.memory_report.started, vec![1], "no second walk while one is running");
-    let running = app.memory_report.manual_pending.as_ref().expect("walk 1 held");
+    assert_eq!(app.reports.memory_report.started, vec![1], "no second walk while one is running");
+    let running = app.reports.memory_report.manual_pending.as_ref().expect("walk 1 held");
     assert!(running.cancel.load(Ordering::Relaxed), "the running walk was cancelled");
-    assert_eq!(app.memory_report.queued.as_ref().map(|request| request.generation), Some(4));
+    assert_eq!(
+        app.reports.memory_report.queued.as_ref().map(|request| request.generation),
+        Some(4)
+    );
     assert_eq!(app.__test_answer_memory_sample(), Some(1));
-    assert_eq!(app.memory_report.started, vec![1, 4], "only the newest refresh's walk ran next");
-    assert_eq!(app.memory_report.in_flight, Some(4));
+    assert_eq!(
+        app.reports.memory_report.started,
+        vec![1, 4],
+        "only the newest refresh's walk ran next"
+    );
+    assert_eq!(app.reports.memory_report.in_flight, Some(4));
     assert_eq!(app.__test_answer_memory_sample(), Some(4));
-    assert_eq!(app.memory_report.in_flight, None);
-    assert!(app.memory_report.queued.is_none());
-    assert!(app.memory_report.last_text.as_deref().is_some_and(|text| text.contains("uptime 4s")));
+    assert_eq!(app.reports.memory_report.in_flight, None);
+    assert!(app.reports.memory_report.queued.is_none());
+    assert!(app
+        .reports
+        .memory_report
+        .last_text
+        .as_deref()
+        .is_some_and(|text| text.contains("uptime 4s")));
 }
 
 /// Contract: OS figures that arrive while a selection or copy mode holds the report pane wait;
@@ -416,12 +440,12 @@ fn rapid_refreshes_run_one_walk_at_a_time_and_the_last_wins() {
 #[test]
 fn a_late_sample_waits_for_the_selection_then_applies() {
     let (mut app, report_id) = app_with_manual_report();
-    let before = app.memory_report.last_text.clone();
+    let before = app.reports.memory_report.last_text.clone();
     let selection = report_selection(&app, report_id);
     app.registry.windows.get_mut(&report_id).unwrap().selection = Some(selection);
     assert_eq!(app.__test_answer_memory_sample(), Some(1));
-    assert!(app.memory_report.render_deferred);
-    assert_eq!(app.memory_report.last_text, before, "the shown text is unchanged");
+    assert!(app.reports.memory_report.render_deferred);
+    assert_eq!(app.reports.memory_report.last_text, before, "the shown text is unchanged");
     assert_eq!(
         app.registry.windows[&report_id].selection,
         Some(selection),
@@ -429,17 +453,27 @@ fn a_late_sample_waits_for_the_selection_then_applies() {
     );
     app.registry.windows.get_mut(&report_id).unwrap().selection = None;
     app.apply_deferred_memory_report();
-    assert!(!app.memory_report.render_deferred);
-    assert!(app.memory_report.last_text.as_deref().is_some_and(|text| text.contains("uptime 1s")));
+    assert!(!app.reports.memory_report.render_deferred);
+    assert!(app
+        .reports
+        .memory_report
+        .last_text
+        .as_deref()
+        .is_some_and(|text| text.contains("uptime 1s")));
 
     app.refresh_memory_report();
     assert!(app.run_action_for_window(&Action::EnterCopyMode, report_id));
-    let held = app.memory_report.last_text.clone();
+    let held = app.reports.memory_report.last_text.clone();
     assert_eq!(app.__test_answer_memory_sample(), Some(2));
-    assert_eq!(app.memory_report.last_text, held, "copy mode also holds the pane");
+    assert_eq!(app.reports.memory_report.last_text, held, "copy mode also holds the pane");
     app.registry.windows.get_mut(&report_id).unwrap().copy_mode = None;
     app.apply_deferred_memory_report();
-    assert!(app.memory_report.last_text.as_deref().is_some_and(|text| text.contains("uptime 2s")));
+    assert!(app
+        .reports
+        .memory_report
+        .last_text
+        .as_deref()
+        .is_some_and(|text| text.contains("uptime 2s")));
 }
 
 /// Contract: a press in the report starts an empty selection whose gesture owns the pointer. OS
@@ -450,7 +484,7 @@ fn a_late_sample_waits_for_the_selection_then_applies() {
 fn a_sample_during_a_press_waits_for_the_gesture_to_end() {
     let (mut app, report_id) = app_with_manual_report();
     let pane_id = report_pane(&app, report_id);
-    let before = app.memory_report.last_text.clone();
+    let before = app.reports.memory_report.last_text.clone();
     let press = |app: &mut App| {
         let window = app.registry.windows.get_mut(&report_id).unwrap();
         assert!(window.begin_local_selection(pane_id, (2, 0), 1));
@@ -471,8 +505,8 @@ fn a_sample_during_a_press_waits_for_the_gesture_to_end() {
     press(&mut app);
     assert_eq!(app.__test_answer_memory_sample(), Some(1));
     app.apply_deferred_memory_report();
-    assert!(app.memory_report.render_deferred, "the pressed pane holds the new figures");
-    assert_eq!(app.memory_report.last_text, before);
+    assert!(app.reports.memory_report.render_deferred, "the pressed pane holds the new figures");
+    assert_eq!(app.reports.memory_report.last_text, before);
     assert!(app
         .registry
         .windows
@@ -482,7 +516,7 @@ fn a_sample_during_a_press_waits_for_the_gesture_to_end() {
     let dragged =
         app.registry.windows[&report_id].selection.expect("the drag extended the selection");
     assert!(!dragged.is_empty());
-    assert_eq!(app.memory_report.last_text, before, "the old text stays until release");
+    assert_eq!(app.reports.memory_report.last_text, before, "the old text stays until release");
     release(&mut app);
     app.apply_deferred_memory_report();
     assert_eq!(
@@ -490,17 +524,25 @@ fn a_sample_during_a_press_waits_for_the_gesture_to_end() {
         Some(dragged),
         "a dragged selection is kept"
     );
-    assert_eq!(app.memory_report.last_text, before, "and the figures wait for it to clear");
+    assert_eq!(app.reports.memory_report.last_text, before, "and the figures wait for it to clear");
 
     app.registry.windows.get_mut(&report_id).unwrap().selection = None;
     app.refresh_memory_report();
-    let refreshed = app.memory_report.last_text.clone();
+    let refreshed = app.reports.memory_report.last_text.clone();
     press(&mut app);
     assert_eq!(app.__test_answer_memory_sample(), Some(2));
     app.apply_deferred_memory_report();
-    assert_eq!(app.memory_report.last_text, refreshed, "held while the button is down");
+    assert_eq!(app.reports.memory_report.last_text, refreshed, "held while the button is down");
     release(&mut app);
     app.apply_deferred_memory_report();
-    assert!(!app.memory_report.render_deferred, "a plain click applies the figures at release");
-    assert!(app.memory_report.last_text.as_deref().is_some_and(|text| text.contains("uptime 2s")));
+    assert!(
+        !app.reports.memory_report.render_deferred,
+        "a plain click applies the figures at release"
+    );
+    assert!(app
+        .reports
+        .memory_report
+        .last_text
+        .as_deref()
+        .is_some_and(|text| text.contains("uptime 2s")));
 }

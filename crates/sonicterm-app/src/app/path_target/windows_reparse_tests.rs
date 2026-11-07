@@ -538,7 +538,7 @@ fn structural_paths_native_interaction() {
     if root.join("home").is_dir() {
         app.home_dir = Some(root.join("home"));
     }
-    app.runtime_config_path = Some(root.join("config/sonicterm.toml"));
+    app.configs.runtime_config_path = Some(root.join("config/sonicterm.toml"));
     let mut probe = NativeProbe {
         app,
         root,

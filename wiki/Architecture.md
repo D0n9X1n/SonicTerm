@@ -65,7 +65,7 @@ The renderer has one declared terminal/UI type seam. `sonicterm-gpu` depends on
 ### Authoritative runtime state
 
 `App` coordinates the event loop and applies completed actions. Its state is held
-by four owners, each a field of `App`:
+by six owners, each a field of `App`:
 
 ```mermaid
 flowchart LR
@@ -74,6 +74,8 @@ flowchart LR
   App --> Run["RuntimeServices (services): foreground probe, MCP server, PTY reaper, GPU recovery, font catalog worker, runtime smoke"]
   App --> Int["InteractionState (interaction): palette, edit targets, field pointer captures, OS drag and drop, broadcast"]
   App --> Diag["DiagnosticsState (diagnostics): counters, retention and trim samples, breadcrumbs"]
+  App --> Fonts["FontState (fonts): font directories, configured size, weight and family, font catalog and picker"]
+  App --> Reports["ReportWindows (reports): Memory Usage and About window state"]
   Reg --> Win["WindowState: tabs, panes, renderer"]
 ```
 
@@ -83,7 +85,8 @@ pane id goes through the registry's `pane_by_id`. The main window and torn-out
 windows use the same `WindowState` representation. The owners are visible only
 inside the `app` module; the public `App` methods stay as they were. A few fields
 stay on `App` itself: frame counters (borrowed beside windows and the palette on
-the redraw paths), redraw scheduling, configuration, theme, keymap and fonts.
+the redraw paths), redraw scheduling, configuration, theme and keymap. Font state
+and the report windows' state have their own owners, `FontState` and `ReportWindows`.
 
 Keyboard, IME, focus and modifier events resolve their source identity before
 main/child presentation paths diverge. Shared input ownership does not replace

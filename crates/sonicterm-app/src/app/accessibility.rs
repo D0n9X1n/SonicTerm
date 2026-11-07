@@ -580,6 +580,7 @@ impl App {
             .map(|window| window.custom_window_name.clone())
             .unwrap_or_default();
         let Some((rows, copy)) = self
+            .reports
             .about
             .view
             .as_ref()

@@ -439,7 +439,7 @@ impl App {
                 });
                 let about_copy = child.role == super::WindowRole::About
                     && pointer_cell.is_some_and(|cell| {
-                        self.about.view.as_ref().is_some_and(|view| {
+                        self.reports.about.view.as_ref().is_some_and(|view| {
                             super::about_window::about_button_hit(
                                 child,
                                 &view.button_label,

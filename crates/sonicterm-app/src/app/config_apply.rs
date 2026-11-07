@@ -170,11 +170,11 @@ impl App {
     }
 
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
-        let new_cfg = Self::normalize_config(&self.config_normalizer, new_cfg);
-        self.configured_font_size = new_cfg.font.size;
-        self.configured_font_family = new_cfg.font.family.clone();
-        self.font_family_generation += 1;
-        self.configured_weight_scale = new_cfg.font.effective_weight_scale();
+        let new_cfg = Self::normalize_config(&self.configs.config_normalizer, new_cfg);
+        self.fonts.configured_font_size = new_cfg.font.size;
+        self.fonts.configured_font_family = new_cfg.font.family.clone();
+        self.fonts.font_family_generation += 1;
+        self.fonts.configured_weight_scale = new_cfg.font.effective_weight_scale();
         // Config is only applied on an explicit user reload, so it must
         // render immediately rather than at the next vsync deadline.
         self.mark_all_window_inputs();
@@ -189,7 +189,7 @@ impl App {
             let theme_path = resolve_runtime_asset_path(
                 &new_cfg.theme,
                 "themes",
-                self.runtime_config_path.as_deref(),
+                self.configs.runtime_config_path.as_deref(),
                 &assets,
                 "wezterm",
             )
@@ -535,7 +535,7 @@ impl App {
             let km_path = match resolve_runtime_asset_path(
                 &new_cfg.keymap,
                 "keymaps",
-                self.runtime_config_path.as_deref(),
+                self.configs.runtime_config_path.as_deref(),
                 &assets,
                 sonicterm_cfg::keymap::platform_default_keymap_name(),
             ) {
@@ -551,7 +551,8 @@ impl App {
                 }
             };
             let loaded = km_path.as_ref().map(|km_path| {
-                self.keymap_loader
+                self.configs
+                    .keymap_loader
                     .as_ref()
                     .map_or_else(|| Keymap::load_strict(km_path), |loader| loader(km_path))
             });
@@ -643,7 +644,7 @@ impl App {
             // avoids re-seeding every pane parser and re-pushing an identical palette.
             return;
         }
-        let Some(loader) = self.theme_loader.as_ref() else {
+        let Some(loader) = self.configs.theme_loader.as_ref() else {
             // When: no theme_loader is installed, so name cannot be resolved to a
             // theme; warn and drop the request, leaving the active theme in place.
             tracing::warn!("ApplyTheme({name}): no theme_loader installed; ignoring");
@@ -709,7 +710,7 @@ impl App {
     pub(super) fn reset_font_size(&mut self) {
         // Return to the configured size, not `FontConfig::default()` — the
         // compile-time default is a size the user never asked for.
-        let target = self.configured_font_size;
+        let target = self.fonts.configured_font_size;
         if (self.config.font.size - target).abs() < f32::EPSILON {
             // When: the live font size already equals target, so a reset has nothing
             // to undo; returning avoids rebuilding every renderer's font stack.
@@ -735,7 +736,7 @@ impl App {
     /// Return monochrome-text weight to the configured `weight_scale`, discarding
     /// transient palette adjustments.
     pub(super) fn reset_font_weight(&mut self) {
-        let target = self.configured_weight_scale;
+        let target = self.fonts.configured_weight_scale;
         if (self.config.font.effective_weight_scale() - target).abs() < f32::EPSILON {
             // When: the live weight already equals target, so there is no transient
             // adjustment left to discard and no renderer needs a new font stack.
@@ -778,7 +779,8 @@ impl App {
             // save action without mutating process-global HOME or user files.
             return Ok(path);
         }
-        self.runtime_config_path
+        self.configs
+            .runtime_config_path
             .clone()
             .or_else(Config::default_path)
             .context("resolve the active SonicTerm config path for saving current settings")
@@ -806,7 +808,7 @@ impl App {
         let status_line = self.status_line_save();
         let family = sonicterm_cfg::config::FamilySave {
             live: &self.config.font.family,
-            baseline: &self.configured_font_family,
+            baseline: &self.fonts.configured_font_family,
         };
         let written = Config::persist_runtime_values(
             path,
@@ -816,10 +818,10 @@ impl App {
             Some(&status_line),
         )
         .with_context(|| format!("persist current settings to {}", path.display()))?;
-        self.configured_font_size = size;
-        self.configured_weight_scale = weight_scale;
-        self.configured_font_family = self.config.font.family.clone();
-        self.font_family_generation += 1;
+        self.fonts.configured_font_size = size;
+        self.fonts.configured_weight_scale = weight_scale;
+        self.fonts.configured_font_family = self.config.font.family.clone();
+        self.fonts.font_family_generation += 1;
         self.adopt_saved_status_line(written);
         Ok(())
     }
@@ -880,7 +882,7 @@ impl App {
             // When: `take_startup_check` reports it already ran, a later main window adds nothing.
             return;
         }
-        let Some(loads) = self.startup_loads.take() else {
+        let Some(loads) = self.configs.startup_loads.take() else {
             // When: `startup_loads` is None (smoke runs, tests passed no outcomes), there is nothing to show.
             return;
         };
@@ -890,12 +892,24 @@ impl App {
     }
 
     /// Keep the startup load outcomes until the first main window records them.
+    /// Install the theme and keymap loaders a live theme change or reload reads through.
+    pub(crate) fn set_loaders(
+        &mut self,
+        theme: Option<super::ThemeLoader>,
+        keymap: Option<super::KeymapLoader>,
+    ) {
+        self.configs.theme_loader = theme;
+        self.configs.keymap_loader = keymap;
+    }
+
+    /// Record the startup config, theme and keymap load outcomes for the first main window.
     pub(crate) fn set_startup_loads(&mut self, loads: StartupLoads) {
-        self.startup_loads = Some(loads);
+        self.configs.startup_loads = Some(loads);
     }
 
     pub(super) fn force_reload_config(&mut self) {
-        let Some(path) = self.runtime_config_path.clone().or_else(Config::default_path) else {
+        let Some(path) = self.configs.runtime_config_path.clone().or_else(Config::default_path)
+        else {
             // When: neither a smoke path nor the user path exists, keep the running config.
             return;
         };

@@ -123,7 +123,7 @@ fn reset_font_size_returns_to_the_configured_size_not_the_compile_time_default()
     );
 
     let mut app = App::new(Theme::default(), cfg, Keymap::default());
-    assert_eq!(app.configured_font_size, 20.0, "baseline seeds from config at construction");
+    assert_eq!(app.fonts.configured_font_size, 20.0, "baseline seeds from config at construction");
 
     app.set_font_size(16.0);
     assert_eq!(app.config.font.size, 16.0);
@@ -153,7 +153,7 @@ fn applying_a_config_moves_the_reset_target() {
     let mut cfg = Config::default();
     cfg.font.size = 14.0;
     let mut app = App::new(Theme::default(), cfg, Keymap::default());
-    assert_eq!(app.configured_font_size, 14.0);
+    assert_eq!(app.fonts.configured_font_size, 14.0);
 
     let mut reloaded = Config::default();
     reloaded.font.size = 18.0;
@@ -207,7 +207,7 @@ fn reload_normalizes_before_baselines_and_storage() {
     let warnings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = warnings.clone();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.config_normalizer = Box::new(move |mut config| {
+    app.configs.config_normalizer = Box::new(move |mut config| {
         let mut messages = Vec::new();
         if config.appearance.backdrop != BackdropKind::Opaque {
             observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -230,7 +230,7 @@ fn reload_normalizes_before_baselines_and_storage() {
 
     assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
     assert_eq!(app.config.font.size, 23.0);
-    assert_eq!(app.configured_font_size, 23.0);
+    assert_eq!(app.fonts.configured_font_size, 23.0);
     assert_eq!(warnings.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(warning_count.load(AtomicOrdering::SeqCst), 1);
 }
@@ -271,7 +271,7 @@ fn reload_order_normalizes_before_any_config_side_effect() {
     let start = SOURCE.find("fn apply_new_config").expect("config apply entry");
     let body = &SOURCE[start..];
     let normalize = body.find("Self::normalize_config").expect("normalization call");
-    let baseline = body.find("self.configured_font_size").expect("font baseline update");
+    let baseline = body.find("self.fonts.configured_font_size").expect("font baseline update");
     let warm = body.find("self.registry.warm_window_pool.clear()").expect("warm-pool clear");
     let storage = body.find("self.config = new_cfg").expect("config storage");
     assert!(normalize < baseline && normalize < warm && normalize < storage);
@@ -427,7 +427,7 @@ fn a_reload_reapplies_theme_and_keymap_even_when_their_names_are_unchanged() {
 
     let loaded = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = loaded.clone();
-    app.keymap_loader = Some(Box::new(move |_path: &std::path::Path| {
+    app.configs.keymap_loader = Some(Box::new(move |_path: &std::path::Path| {
         seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Keymap::default())
     }));
@@ -454,7 +454,7 @@ fn failed_dotted_keymap_reload_preserves_live_bindings_and_reports_resolved_path
     let mut app = App::new(Theme::default(), cfg, live);
     let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
     let seen = observed.clone();
-    app.keymap_loader = Some(Box::new(move |path: &std::path::Path| {
+    app.configs.keymap_loader = Some(Box::new(move |path: &std::path::Path| {
         *seen.lock().expect("path capture") = Some(path.to_path_buf());
         anyhow::bail!("deliberate strict-load failure")
     }));
@@ -515,7 +515,7 @@ fn reset_font_weight_returns_to_the_configured_weight() {
     let mut cfg = Config::default();
     cfg.font.weight_scale = 2.0;
     let mut app = App::new(Theme::default(), cfg, Keymap::default());
-    assert_eq!(app.configured_weight_scale, 2.0);
+    assert_eq!(app.fonts.configured_weight_scale, 2.0);
 
     app.change_font_weight(0.5);
     assert_eq!(app.config.font.weight_scale, 2.5);
@@ -538,7 +538,7 @@ fn changing_weight_leaves_font_size_untouched() {
     app.change_font_weight(1.0);
 
     assert_eq!(app.config.font.size, 16.0, "weight must not move the size");
-    assert_eq!(app.configured_font_size, 16.0, "weight must not move the size reset target");
+    assert_eq!(app.fonts.configured_font_size, 16.0, "weight must not move the size reset target");
 }
 
 /// Startup, direct locale changes, and config reloads refresh the same palette catalog without rerouting it.
@@ -653,8 +653,8 @@ fn successful_save_advances_both_reset_baselines() {
     let saved_weight = app.config.font.effective_weight_scale();
     app.save_current_settings_to(&path).expect("save current values");
 
-    assert_eq!(app.configured_font_size, saved_size);
-    assert_eq!(app.configured_weight_scale, saved_weight);
+    assert_eq!(app.fonts.configured_font_size, saved_size);
+    assert_eq!(app.fonts.configured_weight_scale, saved_weight);
     app.change_font_size(1.0);
     app.change_font_weight(0.25);
     app.reset_font_size();
@@ -681,16 +681,16 @@ fn failed_save_preserves_disk_live_values_and_reset_baselines() {
     app.change_font_weight(0.5);
     let live_size = app.config.font.size;
     let live_weight = app.config.font.effective_weight_scale();
-    let baseline_size = app.configured_font_size;
-    let baseline_weight = app.configured_weight_scale;
+    let baseline_size = app.fonts.configured_font_size;
+    let baseline_weight = app.fonts.configured_weight_scale;
 
     assert!(app.save_current_settings_to(&path).is_err());
 
     assert_eq!(std::fs::read(&path).expect("read unchanged config"), before);
     assert_eq!(app.config.font.size, live_size);
     assert_eq!(app.config.font.effective_weight_scale(), live_weight);
-    assert_eq!(app.configured_font_size, baseline_size);
-    assert_eq!(app.configured_weight_scale, baseline_weight);
+    assert_eq!(app.fonts.configured_font_size, baseline_size);
+    assert_eq!(app.fonts.configured_weight_scale, baseline_weight);
     remove_test_path(&path);
 }
 

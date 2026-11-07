@@ -62,7 +62,7 @@ impl App {
     pub(crate) fn show_about(&mut self) {
         let Some(about_id) = self.about_window_id() else {
             // When: `about_window_id` is None, no About window is open, so the next event-loop turn creates one.
-            self.about.open_requested = true;
+            self.reports.about.open_requested = true;
             return;
         };
         if let Some(window) =
@@ -76,7 +76,7 @@ impl App {
 
     /// Create the requested About window now that an event loop is available.
     pub(super) fn drain_pending_about(&mut self, event_loop: &ActiveEventLoop) {
-        if !std::mem::take(&mut self.about.open_requested) {
+        if !std::mem::take(&mut self.reports.about.open_requested) {
             // When: `open_requested` was false, nobody asked for an About window.
             return;
         }
@@ -114,7 +114,7 @@ impl App {
             WindowRole::About,
             ABOUT_HISTORY_ROWS,
         );
-        self.about.view = None;
+        self.reports.about.view = None;
         self.refresh_about();
     }
 
@@ -134,8 +134,8 @@ impl App {
         );
         let view = render(&self.collect_about_facts(), &self.about_labels(), pane_cols);
         if self.feed_report_pane(about_id, &view.text) {
-            self.about.view = Some(view);
-            self.about.laid_out_size = size;
+            self.reports.about.view = Some(view);
+            self.reports.about.laid_out_size = size;
         }
     }
 
@@ -150,7 +150,7 @@ impl App {
             .map(|pane| {
                 crate::app::frame_counters::lock_parser(&pane.parser).grid().size_generation()
             });
-        if size.is_some() && size != self.about.laid_out_size {
+        if size.is_some() && size != self.reports.about.laid_out_size {
             // The rows were laid out for another grid size, so they are laid out again for this one.
             self.refresh_about();
         }
@@ -163,7 +163,7 @@ impl App {
             // When: `about_window_id` is None, no About window is open, so there is nothing to copy.
             return false;
         };
-        let Some(text) = self.about.view.as_ref().map(|view| view.copy_text.clone()) else {
+        let Some(text) = self.reports.about.view.as_ref().map(|view| view.copy_text.clone()) else {
             // When: `view` is None, nothing has been shown yet, so there is nothing to copy.
             return false;
         };
@@ -192,8 +192,8 @@ impl App {
         match role {
             WindowRole::MemoryReport => self.forget_memory_report_window(removed),
             WindowRole::About => {
-                self.about.view = None;
-                self.about.laid_out_size = None;
+                self.reports.about.view = None;
+                self.reports.about.laid_out_size = None;
                 self.repair_focus_after_report(removed);
             }
             WindowRole::Terminal => {
@@ -276,9 +276,12 @@ impl App {
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
             .filter(|home| !home.as_os_str().is_empty());
-        let config_path =
-            self.runtime_config_path.clone().or_else(sonicterm_cfg::config::Config::default_path);
-        let config_status = match (&self.about.config_error, &config_path) {
+        let config_path = self
+            .configs
+            .runtime_config_path
+            .clone()
+            .or_else(sonicterm_cfg::config::Config::default_path);
+        let config_status = match (&self.reports.about.config_error, &config_path) {
             (Some(error), _) => ConfigStatus::Failed(error.clone()),
             (None, Some(path)) if path.exists() => ConfigStatus::Loaded,
             (None, _) => ConfigStatus::Missing,
@@ -296,12 +299,12 @@ impl App {
             font_family: self.config.font.family.clone(),
             font_size_pt: renderer.map_or(self.config.font.size, |renderer| renderer.font_size()),
             theme: or_default(&self.theme.name, "wezterm"),
-            theme_error: self.about.theme_error.clone(),
+            theme_error: self.reports.about.theme_error.clone(),
             keymap: or_default(
                 &self.keymap.meta.name,
                 sonicterm_cfg::keymap::platform_default_keymap_name(),
             ),
-            keymap_error: self.about.keymap_error.clone(),
+            keymap_error: self.reports.about.keymap_error.clone(),
             config_path: config_path
                 .as_deref()
                 .map_or_else(String::new, |path| home_relative(path, home.as_deref())),
@@ -341,7 +344,7 @@ impl App {
         let hit = self
             .about_window_id()
             .and_then(|id| self.registry.windows.get(&id))
-            .zip(self.about.view.as_ref())
+            .zip(self.reports.about.view.as_ref())
             .is_some_and(|(window, view)| about_button_hit(window, &view.button_label, row, col));
         if !hit {
             // When: hit is false, the press is on the text, not the button.
@@ -354,7 +357,7 @@ impl App {
     /// Test-only: open a headless About window `cols` by `rows` cells.
     #[cfg(test)]
     pub(crate) fn __test_open_about_window_sized(&mut self, cols: u16, rows: u16) -> WindowId {
-        self.about.open_requested = false;
+        self.reports.about.open_requested = false;
         let id = super::window_registry::next_synthetic_child_window_id();
         self.install_about_window(id, None, None, (cols, rows), "About SonicTerm".into());
         id
@@ -368,7 +371,7 @@ impl App {
             self.show_about();
             return existing;
         }
-        self.about.open_requested = false;
+        self.reports.about.open_requested = false;
         let id = super::window_registry::next_synthetic_child_window_id();
         let grid = super::memory_report_window::HEADLESS_GRID;
         self.install_about_window(id, None, None, grid, "About SonicTerm".into());
