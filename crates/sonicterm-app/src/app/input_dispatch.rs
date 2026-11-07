@@ -189,7 +189,7 @@ fn pty_input_rejected_event(
 impl App {
     /// Admit a new user gesture unless the pane's owning window is READONLY.
     pub(super) fn admits_new_user_input(&self, pane_id: u64) -> bool {
-        !self.windows.values().any(|window| {
+        !self.registry.windows.values().any(|window| {
             window.panes.contains_key(&pane_id)
                 && window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
         })
@@ -234,7 +234,7 @@ impl App {
             .iter()
             .filter_map(|pane_id| {
                 let (window_id, pane) = self
-                    .windows
+                    .registry.windows
                     .iter()
                     .find_map(|(id, window)| window.panes.get(pane_id).map(|pane| (*id, pane)))?;
                 let state =
@@ -288,7 +288,7 @@ impl App {
     // Ordering: keyboard_input loads Relaxed; cleanup validates one complete epoch without locking parser output.
     pub(super) fn release_window_native_keys(&mut self, window_id: WindowId) {
         use keyboard_protocol::KeyboardSnapshot;
-        let Some(window) = self.windows.get_mut(&window_id) else {
+        let Some(window) = self.registry.windows.get_mut(&window_id) else {
             // When: window_id is no longer live, no accepted key ownership remains to drain.
             return;
         };
@@ -333,7 +333,7 @@ impl App {
             self.record_test_write_source(pane_id, source);
         }
         let Some(pane) =
-            self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
+            self.registry.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
         else {
             // When: find_map cannot resolve pane_id, its input has no live destination.
             return false;
@@ -453,7 +453,7 @@ impl App {
 
     pub(super) fn flush_pointer_motion(&mut self, now: Instant) -> Option<Instant> {
         let mut pending = false;
-        for window in self.windows.values_mut() {
+        for window in self.registry.windows.values_mut() {
             for (&pane_id, pane) in &mut window.panes {
                 if pane.pending_pointer_motion.len == 0 {
                     // When: pending_pointer_motion.len is zero, idle panes need no parser or writer work.

@@ -175,7 +175,7 @@ impl App {
     pub(super) fn close_child_window(&mut self, win_id: WindowId) -> bool {
         // The adapter goes before the native window it hooks.
         self.accessibility.remove(&win_id);
-        let Some(mut removed) = self.windows.remove(&win_id) else {
+        let Some(mut removed) = self.registry.windows.remove(&win_id) else {
             // When: `windows.remove(&win_id)` is `None`, no child resources remain to release.
             return false;
         };
@@ -203,15 +203,17 @@ impl App {
         let config = self.config.clone();
         let process_privileged = self.process_privilege.is_privileged();
         // Snapshot the app-level overlay attachment before the mutable `child`
-        // borrow below pins `self.windows` for the rest of the match. Used only
+        // borrow below pins `self.registry.windows` for the rest of the match. Used only
         // by the `RedrawRequested` arm but cheap enough to compute once.
         let palette_here = self.interaction.palette_attached_window == Some(win_id);
         let was_dirty =
-            self.windows.get(&win_id).is_some_and(|window| window.redraw.input_pending());
-        let pty_burst = self.windows.get(&win_id).is_some_and(WindowState::visible_output_advanced);
+            self.registry.windows.get(&win_id).is_some_and(|window| window.redraw.input_pending());
+        let pty_burst =
+            self.registry.windows.get(&win_id).is_some_and(WindowState::visible_output_advanced);
         let software_render_degrade = self.software_render_degrade;
         let scrollbar_motion = crate::app::scrollbar_visibility::window_scrollbar_motion(
-            self.windows
+            self.registry
+                .windows
                 .get(&win_id)
                 .and_then(|window| window.renderer.as_ref())
                 .map(GpuRenderer::is_software_render_degraded),
@@ -259,7 +261,7 @@ impl App {
         }
         let broadcast_participants = self.broadcast_participants();
         let pty_event_proxy = self.event_loop_proxy.clone();
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the child was reaped
             // between the pre-match and here and has no state left to touch.
             return;

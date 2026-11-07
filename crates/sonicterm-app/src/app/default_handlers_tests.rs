@@ -303,7 +303,7 @@ fn apply_without_a_result_path_changes_nothing() {
 #[test]
 fn the_palette_entry_opens_the_confirmation_page() {
     let (mut app, calls, _) = app_with(Ok(two_item_plan()), Vec::new());
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     app.run_action_for_window(&Action::OpenCommandPalette, main);
     app.interaction.command_palette.set_query("default handler");
     let position = app

@@ -312,6 +312,8 @@ mod runtime_services;
 pub(in crate::app) use runtime_services::RuntimeServices;
 mod interaction;
 pub(in crate::app) use interaction::InteractionState;
+mod window_registry_state;
+pub(in crate::app) use window_registry_state::WindowRegistry;
 mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
@@ -388,6 +390,8 @@ pub(super) struct PendingOsc52Reassert {
 
 #[doc(hidden)]
 pub struct App {
+    /// The windows that exist, the main and frontmost window, each window key, and prepared windows.
+    pub(in crate::app) registry: WindowRegistry,
     /// Cross-window interaction: the palette, edit targets, field pointer captures, OS drag and drop, broadcast.
     pub(in crate::app) interaction: InteractionState,
     /// Background services the App starts, polls and stops: probes, MCP, the reaper, GPU recovery.
@@ -443,7 +447,7 @@ pub struct App {
     pub(super) keymap: Keymap,
     // The main window holds no state of its own here. Its renderer, tabs,
     // tab states, panes, selection, modifiers, copy mode, last render, cursor
-    // visibility, and hover link all live in `self.windows[main_window_id]`,
+    // visibility, and hover link all live in `self.registry.windows[main_window_id]`,
     // the same place a torn-out child's do — so one set of code paths serves
     // both. Reach them through `main_renderer()`, `main_tabs()`,
     // `main_panes()`, `main_selection()`, and their `_mut` counterparts.
@@ -509,7 +513,7 @@ pub struct App {
     /// on the `DroppedOnEmpty` branch instead of cancelling inline,
     /// so any tear-out-spawn produced by the existing
     /// `pending_new_window` drain runs to completion BEFORE
-    /// cross-window drag-residue cleanup mutates `self.windows`.
+    /// cross-window drag-residue cleanup mutates `self.registry.windows`.
     /// Drained by `App::drain_pending_os_teardown` AFTER
     /// `App::drain_pending_window_creates` at the natural event-loop
     /// boundary in `event_loop.rs::do_user_event`. The
@@ -518,14 +522,14 @@ pub struct App {
     /// WHETHER, so the cleanup stays idempotent.
     pub(super) pending_os_teardown: bool,
     /// Test-only callback fired
-    /// inside [`Self::cancel_drag_session`] AFTER the `self.windows.keys()`
+    /// inside [`Self::cancel_drag_session`] AFTER the `self.registry.windows.keys()`
     /// snapshot is collected but BEFORE the per-id iteration body runs.
     /// Lets a regression test
-    /// mutate `self.windows` in the exact race window that the
+    /// mutate `self.registry.windows` in the exact race window that the
     /// `get_mut(&id).else { continue }` arm is designed to tolerate.
     /// Consumed (`take()`-d) at the call site so the closure is invoked
     /// at most once per `cancel_drag_session` run and the mutable
-    /// borrow on `self.windows` is not held while it runs. Production
+    /// borrow on `self.registry.windows` is not held while it runs. Production
     /// cost is one extra `Option::take()` per `cancel_drag_session`
     /// invocation (always `None` outside tests) — gated by
     /// `#[doc(hidden)]` rather than `#[cfg(test)]` so an integration test,
@@ -555,7 +559,6 @@ pub struct App {
     /// ownership only. Charging producers through it is the larger job that
     /// changes when allocation happens, not merely where the number lives.
     pub(super) governor: ResourceGovernor,
-    pub(super) windows: HashMap<WindowId, WindowState>,
     /// Cached terminal disposition prevents a repeated finish from retiring panes or draining twice.
     session_finished: Option<bool>,
     /// This App's frame and lock counters; `Some` only when its gate is on, fixed for its lifetime.
@@ -565,36 +568,6 @@ pub struct App {
     /// Each terminal window's adapter and strip focus by window id, warm spares included.
     pub(super) accessibility:
         std::collections::HashMap<WindowId, accessibility::WindowAccessibility>,
-    /// Id of the main window. Set in `do_resumed` once the main `Window` is
-    /// created and its [`WindowState`] is inserted into [`Self::windows`].
-    ///
-    /// `None` before that point, which is why every `main_*()` accessor
-    /// returns an `Option` rather than assuming a main window exists.
-    pub(super) main_window_id: Option<WindowId>,
-    /// Most-recently-OS-frontmost window id, INCLUDING the main window.
-    /// Tracks *every* sonic-owned terminal window with a single
-    /// non-`Option` discriminant once the first focus arrives:
-    ///
-    ///   * `Some(main_window_id)`  → main window is OS-frontmost
-    ///   * `Some(child_window_id)` → that child window is OS-frontmost
-    ///   * `None`                  → no sonic window has been focused yet,
-    ///     OR focus has moved out of every sonic window to another app.
-    ///
-    /// Subsumes a separate "which child has focus" field: main-vs-child is
-    /// discriminated by `frontmost_kind()`, so one id answers both questions
-    /// and the two cannot disagree.
-    ///
-    /// Keyboard / menubar / accelerator actions (Cmd+T, Cmd+W, Cmd+\\, …)
-    /// route through this id so a chord typed in window B never mutates
-    /// window A's tab vec. Set in both the main and child `Focused(true)`
-    /// arms; on `Focused(false)` we only clear when the dropped window was
-    /// the current frontmost — focus moving to a *different* sonic window
-    /// arrives as that other window's `Focused(true)` and overwrites
-    /// frontmost in the right order.
-    ///
-    /// Without it, Cmd+T after a tear-out opened a tab in the wrong window,
-    /// and Cmd+W in a new window closed the old window's tab.
-    pub(super) frontmost_window: Option<WindowId>,
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
     pub(crate) theme_loader: Option<ThemeLoader>,
@@ -644,7 +617,6 @@ pub struct App {
     pub(super) pending_redraw_windows: HashSet<WindowId>,
     /// Typed owner-addressed deadlines armed by the most recent event-loop fold.
     redraw_due: Vec<redraw::DueWork>,
-    pub(super) warm_window_pool: Vec<WarmWindow>,
     /// Translation bundle. Rebuilt when the user picks a new locale in
     /// the preferences "Language" dropdown.
     pub(super) i18n: sonicterm_ui::i18n::I18n,
@@ -703,7 +675,6 @@ pub struct App {
     pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
     /// Compatibility reducer observations; live topology decisions and native effect targets belong to App.
     pub(crate) machine: sonicterm_app_core::AppStateMachine,
-    window_keys: crate::window_key_boundary::WindowKeyRegistry,
 }
 
 impl App {
@@ -729,7 +700,7 @@ impl App {
             // the App's gate is on, every registered window and its renderer count.
             if window.redraw.frame_counters.is_none() {
                 window.redraw.frame_counters =
-                    Some(app.window_counters(self.main_window_id == Some(id)));
+                    Some(app.window_counters(self.registry.main_window_id == Some(id)));
             }
             app.dispatch.register_native(id);
             if let Some(renderer) = window.renderer.as_mut() {
@@ -746,9 +717,9 @@ impl App {
             }
         } else {
             // When: `window.role` is not a report, intern a window number; its title is written below.
-            self.window_keys.intern(id);
+            self.registry.window_keys.intern(id);
         }
-        self.windows.insert(id, window);
+        self.registry.windows.insert(id, window);
         let _ = self.sync_native_title(id, Instant::now(), true);
         // The link takes the period the refresh above just read; only macOS installs one.
         self.install_native_display_link(id);
@@ -786,7 +757,7 @@ impl App {
         // Cloned before the window borrow: `ResourceGovernor` is a handle over
         // an `Arc<Ledger>`, so this shares the ledger rather than copying it.
         let governor_handle = self.governor.clone();
-        let Some(window) = self.windows.get(&id) else {
+        let Some(window) = self.registry.windows.get(&id) else {
             // When: `windows` tracks no entry for this id, so an owner created
             // here would have no window to retain or close it.
             return;
@@ -800,7 +771,7 @@ impl App {
             self.governor.create_child(root, OwnerKind::Window, tracking_only_owner_limits());
         match owner {
             Ok(owner) => {
-                if let Some(window) = self.windows.get_mut(&id) {
+                if let Some(window) = self.registry.windows.get_mut(&id) {
                     window.owner = Some(OwnerGuard::new(governor_handle, owner));
                 }
             }

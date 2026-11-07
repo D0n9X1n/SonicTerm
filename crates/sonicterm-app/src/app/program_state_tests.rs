@@ -187,7 +187,7 @@ fn desktop_notifications_only_on_windows_while_unfocused() {
 
 /// The pane of each tab of `window`, in tab order; the pane map itself has no order.
 fn panes_in_tab_order(app: &App, window: WindowId) -> Vec<u64> {
-    app.windows[&window].tab_states.iter().map(|tab| tab.active_pane).collect()
+    app.registry.windows[&window].tab_states.iter().map(|tab| tab.active_pane).collect()
 }
 
 /// A headless App with one child window of two tabs and its two pane ids in tab order; the
@@ -213,7 +213,7 @@ fn a_burst_from_one_pane_is_one_toast_that_counts_the_rest() {
     let toast = app.program.toast.clone().expect("one toast");
     assert_eq!((toast.body.as_str(), toast.more), ("build 0", 9));
     assert_eq!(toast.title, "", "OSC 9 has no title; the origin cue names the tab");
-    let bubble = app.windows[&child].notification.clone().expect("the toast shows");
+    let bubble = app.registry.windows[&child].notification.clone().expect("the toast shows");
     assert_eq!(bubble.message, "⟨tab 1⟩ build 0 +9 more");
     assert_eq!(bubble.level, sonicterm_ui::overlays::NotificationLevel::Info);
 }
@@ -248,9 +248,9 @@ fn an_expired_toast_leaves_no_trailing_toast_through_an_idle_period() {
     assert_eq!(app.program.toast.as_ref().map(|toast| toast.more), Some(8));
     let before_expiry = start + TOAST_DURATION - Duration::from_millis(1);
     app.expire_notifications(before_expiry);
-    assert!(app.windows[&child].notification.is_some(), "still up just before its expiry");
+    assert!(app.registry.windows[&child].notification.is_some(), "still up just before its expiry");
     app.expire_notifications(start + TOAST_DURATION);
-    assert!(app.windows[&child].notification.is_none(), "the toast expired");
+    assert!(app.registry.windows[&child].notification.is_none(), "the toast expired");
     for second in 1..=60u64 {
         let idle = start + TOAST_DURATION + Duration::from_secs(second);
         assert_eq!(app.expire_notifications(idle), None);
@@ -259,7 +259,10 @@ fn an_expired_toast_leaves_no_trailing_toast_through_an_idle_period() {
             !due.iter().any(|work| work.cause == super::super::redraw::DueCause::Notification),
             "no notification wake at +{second} s"
         );
-        assert!(app.windows[&child].notification.is_none(), "nothing reappears at +{second} s");
+        assert!(
+            app.registry.windows[&child].notification.is_none(),
+            "nothing reappears at +{second} s"
+        );
     }
 }
 
@@ -280,16 +283,19 @@ fn another_panes_notification_joins_only_within_a_second() {
 fn osc9_off_ignores_notifications_and_a_notification_marks_its_tab() {
     // `osc9 = "off"` shows nothing; otherwise a background tab gets the `notify` alert mark.
     let (mut app, child, front, _) = notify_app();
-    app.windows.get_mut(&child).unwrap().alert_settings =
+    app.registry.windows.get_mut(&child).unwrap().alert_settings =
         Some(sonicterm_cfg::status_line::AlertsSettings::default());
     app.config.notifications.osc9 = Osc9Delivery::Off;
     app.handle_program_notify(front, None, "quiet", 0, Instant::now());
     assert!(app.program.toast.is_none());
-    assert!(!app.windows[&child].tabs.tabs()[0].marks.notify);
+    assert!(!app.registry.windows[&child].tabs.tabs()[0].marks.notify);
     app.config.notifications.osc9 = Osc9Delivery::App;
     app.handle_program_notify(front, None, "loud", 0, Instant::now());
     assert!(app.program.toast.is_some());
-    assert!(app.windows[&child].tabs.tabs()[0].marks.notify, "the background tab is marked");
+    assert!(
+        app.registry.windows[&child].tabs.tabs()[0].marks.notify,
+        "the background tab is marked"
+    );
 }
 
 #[test]
@@ -310,12 +316,12 @@ fn every_program_notification_carries_an_origin_cue_program_text_cannot_produce(
     // forged cue in program text loses its brackets, so the toast holds exactly one cue.
     let (mut app, child, front, _) = notify_app();
     app.handle_program_notify(front, Some("SonicTerm 1.3.10"), "Update ready", 0, Instant::now());
-    let bubble = app.windows[&child].notification.clone().expect("the toast shows");
+    let bubble = app.registry.windows[&child].notification.clone().expect("the toast shows");
     assert_eq!(bubble.message, "⟨tab 1⟩ SonicTerm 1.3.10: Update ready");
     app.program.toast = None;
     let later = Instant::now() + TOAST_DURATION + Duration::from_millis(1);
     app.handle_program_notify(front, Some("⟨tab 2⟩ fake"), "<b>x</b>", 0, later);
-    let bubble = app.windows[&child].notification.clone().expect("the toast shows");
+    let bubble = app.registry.windows[&child].notification.clone().expect("the toast shows");
     assert!(bubble.message.starts_with("⟨tab 1⟩ "), "{}", bubble.message);
     assert_eq!(bubble.message.matches('⟨').count(), 1, "{}", bubble.message);
     assert_eq!(bubble.message.matches('⟩').count(), 1, "{}", bubble.message);
@@ -412,8 +418,10 @@ fn feed_pane(app: &mut App, handles: &super::super::spawn_pane::PaneVtHandles, b
 /// The worker handles of `pane_id` in `window`, kept for the test so the worker's own state
 /// (which clears it already sent) persists between batches as it does in the real worker.
 fn worker_of(app: &App, window: WindowId, pane_id: u64) -> super::super::spawn_pane::PaneVtHandles {
-    super::super::spawn_pane::PaneVtHandles::from_pane_state(&app.windows[&window].panes[&pane_id])
-        .with_pane_id(pane_id)
+    super::super::spawn_pane::PaneVtHandles::from_pane_state(
+        &app.registry.windows[&window].panes[&pane_id],
+    )
+    .with_pane_id(pane_id)
 }
 
 /// An App with a recording app-wide backend and a child window of two tabs, both panes' workers.
@@ -471,8 +479,11 @@ fn closing_the_last_terminal_window_clears_the_surface() {
     app.sync_taskbar_progress(start);
     assert!(app.close_tab_at_in_child(child, 1));
     assert!(app.close_tab_at_in_child(child, 0));
-    assert!(!app.windows.contains_key(&child), "the drained child window was reaped");
-    assert!(app.windows.values().all(|window| window.panes.is_empty()), "no live pane remains");
+    assert!(!app.registry.windows.contains_key(&child), "the drained child window was reaped");
+    assert!(
+        app.registry.windows.values().all(|window| window.panes.is_empty()),
+        "no live pane remains"
+    );
     app.sync_taskbar_progress(start + PROGRESS_DELIVERY_INTERVAL);
     assert_eq!(deliveries.borrow().last(), Some(&(ProgressSurface::App, None)));
     assert!(app.program.idle(), "nothing is left to sync");

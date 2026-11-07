@@ -50,7 +50,7 @@ impl App {
         // Any exit, clean or not, clears the pane's process name and warning; an unclean pane stays.
         self.clear_exited_foreground(pane_id, std::time::Instant::now());
         if let Some(pane) =
-            self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
+            self.registry.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
         {
             // When: the exited pane is still live, its phase resets and its first status is kept.
             // The shell is gone, so no prompt is confirmed; the last command is kept.
@@ -98,7 +98,7 @@ impl App {
             tab = site.tab_index,
             "pane child exited cleanly and emptied its tab; closing the tab"
         );
-        if Some(site.window) == self.main_window_id {
+        if Some(site.window) == self.registry.main_window_id {
             self.close_tab_at(site.tab_index);
             // A window with no tabs is not a state the app should be able to
             // reach, and this is the same reaper the keymap's tab close uses.
@@ -115,7 +115,8 @@ impl App {
 
     /// Mark `pane_id`'s exit as handled and return its hold flag; `None` if absent or already marked.
     fn mark_exit_reported(&mut self, pane_id: u64) -> Option<bool> {
-        let pane = self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))?;
+        let pane =
+            self.registry.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))?;
         if pane.exit_reported {
             // When: `exit_reported` is already set, the status line exists and the close was decided.
             return None;
@@ -127,7 +128,7 @@ impl App {
     /// Write `status`'s line into the held pane's grid and redraw its window.
     fn write_exit_status_line(&mut self, pane_id: u64, status: &PaneExitStatus) {
         let Some(window) =
-            self.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
+            self.registry.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
         else {
             // When: no window holds `pane_id`, it closed after its exit was marked.
             return;
@@ -138,7 +139,7 @@ impl App {
 
     /// Find the window and tab holding `pane_id`.
     fn locate_exited_pane(&self, pane_id: u64) -> Option<ExitedPaneSite> {
-        self.windows.iter().find_map(|(window_id, window)| {
+        self.registry.windows.iter().find_map(|(window_id, window)| {
             window.tab_states.iter().enumerate().find_map(|(tab_index, tab_state)| {
                 let leaves = tab_state.tree.leaves();
                 leaves.contains(&pane_id).then_some(ExitedPaneSite {
@@ -205,7 +206,7 @@ impl App {
             return true;
         }
 
-        for child in self.windows.values_mut() {
+        for child in self.registry.windows.values_mut() {
             let mut resize_child = false;
             let mut redraw_child = false;
             let active_tab = child.tabs.active_index();

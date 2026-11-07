@@ -98,15 +98,16 @@ impl App {
     pub(super) fn refresh_command_palette_context(&mut self) {
         use sonicterm_ui::command_label::CommandContext;
         let window_id = if self.interaction.command_palette.is_open() {
-            self.interaction.palette_attached_window.or(self.main_window_id)
+            self.interaction.palette_attached_window.or(self.registry.main_window_id)
         } else {
             // When: `command_palette` is closed, the next open follows the existing frontmost policy.
             match self.frontmost_kind() {
                 FrontmostKind::Child(id) => Some(id),
-                _ => self.main_window_id,
+                _ => self.registry.main_window_id,
             }
         };
-        let window = window_id.and_then(|id| self.windows.get(&id)).filter(|window| !window.hidden);
+        let window =
+            window_id.and_then(|id| self.registry.windows.get(&id)).filter(|window| !window.hidden);
         let context = window
             .map_or_else(CommandContext::default, |window| command_palette_context(window, None));
         self.interaction.command_palette.set_context(context);
@@ -119,20 +120,23 @@ impl App {
     /// Match native input to the window that owns the visible palette.
     pub(super) fn command_palette_owns_input(&self, window_id: WindowId) -> bool {
         self.interaction.command_palette.is_open()
-            && self.interaction.palette_attached_window.or(self.main_window_id) == Some(window_id)
+            && self.interaction.palette_attached_window.or(self.registry.main_window_id)
+                == Some(window_id)
     }
 
     /// Open live-tab navigation for the explicit window without changing action routing ownership.
     pub(super) fn open_tab_selector(&mut self, window_id: WindowId) {
-        if self.windows.get(&window_id).is_none_or(|window| window.hidden) {
+        if self.registry.windows.get(&window_id).is_none_or(|window| window.hidden) {
             // When: `window_id` is missing or hidden, do not populate a selector from another window.
             return;
         }
         self.interaction.palette_pointer_capture = None;
         self.interaction.palette_attached_window =
-            (Some(window_id) != self.main_window_id).then_some(window_id);
+            (Some(window_id) != self.registry.main_window_id).then_some(window_id);
         // Seed the requested window before opening selects a row from the cached tab inventory.
-        self.interaction.command_palette.set_tabs(&self.windows[&window_id].tabs, &self.i18n);
+        self.interaction
+            .command_palette
+            .set_tabs(&self.registry.windows[&window_id].tabs, &self.i18n);
         self.interaction.command_palette.open_tabs();
         self.refresh_command_palette_context();
         self.update_command_palette_ime_cursor_area();
@@ -208,7 +212,7 @@ impl App {
                 return;
             }
             // Child id was stale — fall through to main, clear stale.
-            self.frontmost_window = None;
+            self.registry.frontmost_window = None;
         }
         let (tab_index, pane_id) = {
             let Some(window) = self.main() else {
@@ -243,7 +247,7 @@ impl App {
     /// `false` if the recorded id is stale so the caller can fall back to
     /// the main App default.
     pub(super) fn open_search_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: win_id is no longer in windows the child closed since it
             // was recorded; return false so open_search falls back to main.
             return false;
@@ -271,12 +275,12 @@ impl App {
     /// `Some(id)` ⇒ that child window. Silently no-ops if the recorded id
     /// is stale.
     pub(super) fn request_redraw_for_overlay(&mut self, attached: Option<WindowId>) {
-        if let Some(id) = attached.or(self.main_window_id) {
+        if let Some(id) = attached.or(self.registry.main_window_id) {
             self.mark_window_redraw(id, super::redraw::RedrawCause::Input);
         }
         match attached {
             Some(id) => {
-                if let Some(child) = self.windows.get(&id) {
+                if let Some(child) = self.registry.windows.get(&id) {
                     child.request_window_redraw();
                 }
             }

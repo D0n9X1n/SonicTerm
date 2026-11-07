@@ -45,7 +45,7 @@ use super::{
 impl App {
     /// Refresh the main window's URI or validated-path hover state.
     pub(super) fn refresh_hovered_url(&mut self) {
-        if let Some(window_id) = self.main_window_id {
+        if let Some(window_id) = self.registry.main_window_id {
             self.refresh_target_hover(window_id);
         }
     }
@@ -79,7 +79,7 @@ impl App {
         let state = Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor));
         match kind {
             FrontmostKind::Child(id) => {
-                if let Some(child) = self.windows.get_mut(&id) {
+                if let Some(child) = self.registry.windows.get_mut(&id) {
                     child.copy_mode = state;
                     mark_all_panes_dirty(&child.panes);
                 }
@@ -121,9 +121,9 @@ impl App {
         self.note_hover(|hover| hover.quick_select_rows_scanned += rows_scanned);
         let window_id = match kind {
             FrontmostKind::Child(id) => Some(id),
-            _ => self.main_window_id,
+            _ => self.registry.main_window_id,
         };
-        if let Some(window) = window_id.and_then(|id| self.windows.get_mut(&id)) {
+        if let Some(window) = window_id.and_then(|id| self.registry.windows.get_mut(&id)) {
             window.copy_mode = Some(state);
             mark_all_panes_dirty(&window.panes);
             window.request_window_redraw();
@@ -233,6 +233,7 @@ impl App {
         path: std::path::PathBuf,
     ) {
         let Some(pane) = self
+            .registry
             .windows
             .get(&window_id)
             .and_then(|window| window.tab_states.get(window.tabs.active_index()))
@@ -278,12 +279,12 @@ impl App {
         window_id: WindowId,
         paths: Vec<std::path::PathBuf>,
     ) {
-        if !self.windows.contains_key(&window_id) {
+        if !self.registry.windows.contains_key(&window_id) {
             // When: windows no longer contains window_id, discard its drop instead of selecting current focus.
             return;
         }
         self.paste_file_paths_for_kind(self.kind_for(window_id), paths);
-        if let Some(window) = self.windows.get(&window_id) {
+        if let Some(window) = self.registry.windows.get(&window_id) {
             window.request_window_redraw();
         }
     }
@@ -378,6 +379,10 @@ impl App {
 #[path = "misc_tests.rs"]
 mod misc_tests;
 
+#[cfg(test)]
+#[path = "misc_quick_select_tests.rs"]
+mod misc_quick_select_tests;
+
 #[path = "misc_clipboard.rs"]
 mod clipboard;
 #[path = "misc_window_create.rs"]
@@ -390,7 +395,7 @@ impl App {
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
                 // When: kind is any FrontmostKind other than Child; all three resolve
                 // to the main window, which owns the selection being copied.
-                let Some(id) = self.main_window_id else {
+                let Some(id) = self.registry.main_window_id else {
                     // When: main_window_id is unset; no main window has been created
                     // yet, so there is no window to copy a selection from.
                     return;
@@ -399,7 +404,7 @@ impl App {
             }
         };
         let (text, clear_after_copy) = {
-            let Some(window) = self.windows.get_mut(&window_id) else {
+            let Some(window) = self.registry.windows.get_mut(&window_id) else {
                 // When: windows no longer holds window_id; the window closed before
                 // the copy ran, so there is no selection left to read.
                 return;
@@ -450,7 +455,7 @@ impl App {
         self.note_copy_result(window_id, copied);
         if copied && clear_after_copy {
             // A volatile selection is consumed only after confirmed clipboard delivery.
-            if let Some(window) = self.windows.get_mut(&window_id) {
+            if let Some(window) = self.registry.windows.get_mut(&window_id) {
                 // Clear the highlight and invalidate retained rows before requesting its frame.
                 window.selection = None;
                 mark_all_panes_dirty(&window.panes);

@@ -229,7 +229,7 @@ impl App {
         states: &[(u64, SyncState)],
         now: Instant,
     ) -> bool {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` closed during collection, there is no frame to hold.
             return false;
         };
@@ -252,7 +252,7 @@ impl App {
         if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
             counters.note_defer(DeferRule::Sync);
         }
-        if self.main_window_id == Some(id) {
+        if self.registry.main_window_id == Some(id) {
             self.pending_redraw = true;
         } else {
             // When: `id` is a child, its deferral joins the child wake set.

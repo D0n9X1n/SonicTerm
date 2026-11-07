@@ -32,8 +32,8 @@ impl App {
     /// to the new cell size.
     fn apply_live_font(&mut self) {
         let request = self.live_font_request();
-        // `self.windows` holds the main window and every child, so each renderer is rebuilt once.
-        for (window_id, child) in self.windows.iter_mut() {
+        // `self.registry.windows` holds the main window and every child, so each renderer is rebuilt once.
+        for (window_id, child) in self.registry.windows.iter_mut() {
             #[cfg(not(test))]
             let _ = window_id;
             let target: &mut dyn LiveFontTarget = match child.renderer.as_mut() {
@@ -70,7 +70,7 @@ impl App {
         if let Some(window) = self.main_window() {
             crate::app::frame_counters::request_native_redraw(window);
         }
-        for child in self.windows.values() {
+        for child in self.registry.windows.values() {
             // When: child.renderer is None only for test-seeded entries, which carry
             // no window either, so child.request_redraw would already do nothing.
             if child.renderer.is_none() {

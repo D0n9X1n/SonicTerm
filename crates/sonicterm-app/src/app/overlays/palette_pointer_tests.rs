@@ -26,17 +26,17 @@ fn palette_pointer_release_revalidates_attached_tab_identity() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["same", "same", "peer"]);
-    let target = app.windows[&child].tabs.tabs()[0].id;
+    let target = app.registry.windows[&child].tabs.tabs()[0].id;
     app.open_tab_selector(child);
     press_palette_target(&mut app, child, 0);
     let release = pointer_target(&app, 0);
-    let window = app.windows.get_mut(&child).unwrap();
+    let window = app.registry.windows.get_mut(&child).unwrap();
     window.tabs.reorder(0, 1);
     window.tab_states.swap(0, 1);
     window.tabs.activate(2);
-    app.__test_set_frontmost_window(app.main_window_id);
+    app.__test_set_frontmost_window(app.registry.main_window_id);
     app.release_command_palette_pointer(child, Some(release));
-    assert_eq!(app.windows[&child].tabs.active().unwrap().id, target);
+    assert_eq!(app.registry.windows[&child].tabs.active().unwrap().id, target);
     assert!(!app.interaction.command_palette.is_open());
     assert!(app.interaction.palette_pointer_capture.is_none());
 }
@@ -48,11 +48,11 @@ fn palette_pointer_release_rejects_a_different_displayed_row() {
     app.__test_seed_tab("first");
     app.__test_seed_tab("second");
     app.__test_seed_tab("active");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     let active = app.main_tabs().unwrap().active().unwrap().id;
     app.open_tab_selector(window_id);
     press_palette_target(&mut app, window_id, 0);
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.tabs.reorder(0, 1);
     window.tab_states.swap(0, 1);
     app.refresh_command_palette_context();
@@ -68,17 +68,17 @@ fn palette_pointer_release_rejects_a_closed_target() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("same");
     app.__test_seed_tab("active");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     let target = app.main_tabs().unwrap().tabs()[0].id;
     let active = app.main_tabs().unwrap().active().unwrap().id;
     app.open_tab_selector(window_id);
     press_palette_target(&mut app, window_id, 0);
     let release = pointer_target(&app, 0);
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.tabs.close(target);
     window.tab_states.remove(0);
     app.__test_seed_tab("same");
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.tabs.activate(0);
     app.release_command_palette_pointer(window_id, Some(release));
     assert_eq!(app.main_tabs().unwrap().active().unwrap().id, active);
@@ -91,7 +91,7 @@ fn palette_pointer_release_rejects_a_closed_target() {
 fn palette_pointer_disabled_and_outside_clicks_never_dispatch() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     assert!(app.run_action(&Action::OpenCommandPalette));
     app.__test_set_palette_query("Copy to Clipboard");
     app.__test_set_memory_clipboard("unchanged");
@@ -115,7 +115,7 @@ fn palette_pointer_capture_is_cleared_by_keyboard_ime_and_reopen() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("first");
     app.__test_seed_tab("active");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     for edit in 0..3 {
         app.open_tab_selector(window_id);
         press_palette_target(&mut app, window_id, 0);
@@ -146,7 +146,7 @@ fn palette_pointer_wheel_is_bounded_and_modal() {
     app.__test_seed_tab("first");
     app.__test_seed_tab("second");
     app.__test_seed_tab("last");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     app.open_tab_selector(window_id);
     let wheel = |vertical_lines| WindowEvent::MouseWheel {
         device_id: DeviceId::dummy(),
@@ -176,7 +176,7 @@ fn palette_pointer_wheel_is_bounded_and_modal() {
 fn palette_pointer_capture_does_not_cross_window_ownership() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("same");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     let main_tab = app.main_tabs().unwrap().active().unwrap().id;
     let child = app.__test_seed_child_window(&["same", "active"]);
     app.open_tab_selector(child);
@@ -231,7 +231,7 @@ fn a_checklist_click_or_key_requests_one_redraw_per_terminal_window() {
     config.status_line.enabled = false;
     let mut app = App::new(Theme::default(), config, Keymap::default());
     let child = app.__test_seed_child_window(&["work"]);
-    let main = app.main_window_id.expect("the seed made a main window");
+    let main = app.registry.main_window_id.expect("the seed made a main window");
     app.open_status_segments(Some(child), Some(Seg::Cpu));
     let strip_row = app
         .interaction
@@ -240,7 +240,8 @@ fn a_checklist_click_or_key_requests_one_redraw_per_terminal_window() {
         .iter()
         .position(|row| row.kind == Kind::ShowStrip)
         .expect("the checklist lists the strip row");
-    let counts = |app: &App| (asks(&app.windows[&main]), asks(&app.windows[&child]));
+    let counts =
+        |app: &App| (asks(&app.registry.windows[&main]), asks(&app.registry.windows[&child]));
     // One key dispatch: the palette's key handler, then the KeyboardInput arm's own request.
     let key = |app: &mut App| {
         let _dispatch = app.frame_dispatch_scope();

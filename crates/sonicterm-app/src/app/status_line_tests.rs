@@ -29,7 +29,7 @@ pub(super) fn seed_hovered_url(app: &mut App, window_id: WindowId) {
     use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan};
     let span = HoveredUrlSpan { row: 0, start_col: 0, end_col: 19 };
     let cells = HoveredUrlCells::new(1, [span], false).expect("one span");
-    app.windows.get_mut(&window_id).unwrap().hovered_url =
+    app.registry.windows.get_mut(&window_id).unwrap().hovered_url =
         Some(super::super::hovered_url::HoveredUrl {
             cells,
             url: "https://example.com".to_owned(),
@@ -115,9 +115,9 @@ pub(super) fn task_vm_graphics(
 /// setters; returns both ids, main first.
 pub(super) fn seed_recorded_windows(app: &mut App) -> [WindowId; 2] {
     let child = app.__test_seed_child_window(&["work"]);
-    let main = app.main_window_id.expect("the seed made a main window");
+    let main = app.registry.main_window_id.expect("the seed made a main window");
     for id in [main, child] {
-        let window = app.windows.get_mut(&id).expect("a seeded window");
+        let window = app.registry.windows.get_mut(&id).expect("a seeded window");
         window.test_strip_settings = Some(super::TestStripSettings::default());
     }
     [main, child]
@@ -125,5 +125,5 @@ pub(super) fn seed_recorded_windows(app: &mut App) -> [WindowId; 2] {
 
 /// What the sync handed window `id`'s strip.
 pub(super) fn recorded_strip(app: &App, id: WindowId) -> super::TestStripSettings {
-    app.windows[&id].test_strip_settings.clone().expect("a recorded window")
+    app.registry.windows[&id].test_strip_settings.clone().expect("a recorded window")
 }

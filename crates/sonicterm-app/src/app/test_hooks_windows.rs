@@ -14,7 +14,7 @@ impl App {
     /// Test-only: report whether any live window has unconsumed owner-local input.
     #[doc(hidden)]
     pub fn __test_input_dirty(&self) -> bool {
-        self.windows.values().any(|window| window.redraw.input_pending())
+        self.registry.windows.values().any(|window| window.redraw.input_pending())
     }
 
     /// Test-only: read the main window's `hidden` latch via the unified
@@ -52,7 +52,7 @@ impl App {
     /// Test-only: how many tabs the named child window currently owns.
     #[doc(hidden)]
     pub fn __test_child_tab_count(&self, id: WindowId) -> Option<usize> {
-        self.windows.get(&id).map(|child| child.tabs.len())
+        self.registry.windows.get(&id).map(|child| child.tabs.len())
     }
 
     /// Test-only: set the last cursor position for a synthetic child window.
@@ -63,7 +63,7 @@ impl App {
         cursor_x_px: f64,
         cursor_y_px: f64,
     ) -> bool {
-        match self.windows.get_mut(&id) {
+        match self.registry.windows.get_mut(&id) {
             Some(child) => {
                 child.cursor_pos = (cursor_x_px, cursor_y_px);
                 true
@@ -171,7 +171,7 @@ impl App {
     /// just the main one.
     #[doc(hidden)]
     pub fn __test_child_pressed_tab(&self, id: WindowId) -> Option<Option<usize>> {
-        self.windows.get(&id).map(|child| child.pressed_tab)
+        self.registry.windows.get(&id).map(|child| child.pressed_tab)
     }
 
     /// Test seam: whether a window is tracking a held mouse button.
@@ -180,7 +180,7 @@ impl App {
     /// unknown window from one with no button held.
     #[doc(hidden)]
     pub fn __test_child_mouse_down(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).map(|window| window.mouse_down)
+        self.registry.windows.get(&id).map(|window| window.mouse_down)
     }
 
     /// Test seam: whether a window has a tab drag in progress.
@@ -188,7 +188,7 @@ impl App {
     /// `None` when `id` names no tracked window.
     #[doc(hidden)]
     pub fn __test_child_has_drag_session(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).map(|window| window.drag_session.is_some())
+        self.registry.windows.get(&id).map(|window| window.drag_session.is_some())
     }
 
     /// Test seam: whether a window is a drop target for the current drag.
@@ -196,7 +196,7 @@ impl App {
     /// `None` when `id` names no tracked window.
     #[doc(hidden)]
     pub fn __test_child_has_drag_target(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).map(|window| window.drag_target.is_some())
+        self.registry.windows.get(&id).map(|window| window.drag_target.is_some())
     }
 
     /// Test-only: seed the headless drag-chip
@@ -209,7 +209,7 @@ impl App {
     /// is ever removed.
     #[doc(hidden)]
     pub fn __test_set_window_drag_chip_marker(&mut self, id: WindowId, present: bool) -> bool {
-        if let Some(window) = self.windows.get_mut(&id) {
+        if let Some(window) = self.registry.windows.get_mut(&id) {
             window.test_drag_chip_marker = Some(present);
             true
         } else {
@@ -225,7 +225,7 @@ impl App {
     /// `Some(false)` ⇒ marker was set and cancel ran on this window.
     #[doc(hidden)]
     pub fn __test_window_drag_chip_marker(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).and_then(|window| window.test_drag_chip_marker)
+        self.registry.windows.get(&id).and_then(|window| window.test_drag_chip_marker)
     }
 
     /// Test-only convenience: same as
@@ -254,7 +254,7 @@ impl App {
         mouse_down: bool,
         with_drag_session: bool,
     ) -> bool {
-        let Some(child) = self.windows.get_mut(&id) else {
+        let Some(child) = self.registry.windows.get_mut(&id) else {
             // When: `windows` tracks no entry for this id, so there is no child
             // state to seed drag residue onto.
             return false;
@@ -279,7 +279,7 @@ impl App {
     #[doc(hidden)]
     pub fn __test_set_focused_child(&mut self, id: Option<WindowId>) {
         self.__test_synthetic_main();
-        self.frontmost_window = id;
+        self.registry.frontmost_window = id;
     }
 
     /// Test-only: read back the current frontmost-child id.
@@ -296,7 +296,7 @@ impl App {
     /// Test-only: read back the current `frontmost_window`.
     #[doc(hidden)]
     pub fn __test_frontmost_window(&self) -> Option<WindowId> {
-        self.frontmost_window
+        self.registry.frontmost_window
     }
 
     /// Test-only: install a `frontmost_window` id without going through a
@@ -305,7 +305,7 @@ impl App {
     /// keymap-dispatched actions route to the right window's tab vec.
     #[doc(hidden)]
     pub fn __test_set_frontmost_window(&mut self, id: Option<WindowId>) {
-        self.frontmost_window = id;
+        self.registry.frontmost_window = id;
     }
 
     /// Test seam: give a tracked window a live winit window and renderer.
@@ -319,7 +319,7 @@ impl App {
         window: Arc<Window>,
         renderer: GpuRenderer,
     ) -> bool {
-        let Some(state) = self.windows.get_mut(&id) else {
+        let Some(state) = self.registry.windows.get_mut(&id) else {
             // When: `windows` tracks no entry for this id, so there is no state to
             // hold the window handle or its renderer.
             return false;
@@ -337,7 +337,8 @@ impl App {
         id: WindowId,
         hook: Option<Box<dyn FnMut() -> bool + Send>>,
     ) -> bool {
-        let Some(renderer) = self.windows.get_mut(&id).and_then(|state| state.renderer.as_mut())
+        let Some(renderer) =
+            self.registry.windows.get_mut(&id).and_then(|state| state.renderer.as_mut())
         else {
             // When: no `renderer` is attached to `id`, there is no presentation to hook.
             return false;
@@ -349,33 +350,34 @@ impl App {
     /// Test seam: how many receipts wait in a window's pending set.
     #[doc(hidden)]
     pub fn __test_window_pending_receipts(&self, id: WindowId) -> Option<usize> {
-        Some(self.windows.get(&id)?.pending_receipts.len())
+        Some(self.registry.windows.get(&id)?.pending_receipts.len())
     }
 
     /// Test seam: the frames a window's renderer has presented successfully.
     #[doc(hidden)]
     pub fn __test_window_successful_frames(&self, id: WindowId) -> Option<u64> {
-        Some(self.windows.get(&id)?.renderer.as_ref()?.successful_frame_count())
+        Some(self.registry.windows.get(&id)?.renderer.as_ref()?.successful_frame_count())
     }
 
     /// Test seam: the terminal IME area a window last published, as position and size.
     #[doc(hidden)]
     pub fn __test_window_ime_area(&self, id: WindowId) -> Option<((i32, i32), (u32, u32))> {
-        let area = self.windows.get(&id)?.ime_cursor_throttle.last()?;
+        let area = self.registry.windows.get(&id)?.ime_cursor_throttle.last()?;
         Some((area.position, area.size))
     }
 
     /// Test seam: the dirty rows of a pane's grid in a window.
     #[doc(hidden)]
     pub fn __test_window_pane_dirty_rows(&self, id: WindowId, pane_id: u64) -> Option<Vec<usize>> {
-        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        let pane = self.registry.windows.get(&id)?.panes.get(&pane_id)?;
         Some(pane.parser.lock().grid().dirty_rows().collect())
     }
 
     /// Test seam: stop a window's device outside any frame, as a loss between frames would.
     #[doc(hidden)]
     pub fn __test_stop_window_device(&mut self, id: WindowId) -> bool {
-        let Some(renderer) = self.windows.get_mut(&id).and_then(|state| state.renderer.as_mut())
+        let Some(renderer) =
+            self.registry.windows.get_mut(&id).and_then(|state| state.renderer.as_mut())
         else {
             // When: no `renderer` is attached to `id`, there is no device to stop.
             return false;
@@ -388,13 +390,13 @@ impl App {
     /// redraw until non-blocking font fallback has resolved the ones it inspects.
     #[doc(hidden)]
     pub fn __test_window_missing_tofu(&self, id: WindowId) -> Option<Vec<char>> {
-        Some(self.windows.get(&id)?.renderer.as_ref()?.last_missing_tofu().to_vec())
+        Some(self.registry.windows.get(&id)?.renderer.as_ref()?.last_missing_tofu().to_vec())
     }
 
     /// Test seam: the pane targeted by a window's real renderer flash state.
     #[doc(hidden)]
     pub fn __test_window_pane_focus_flash_target(&self, id: WindowId) -> Option<u64> {
-        self.windows.get(&id)?.renderer.as_ref()?.__test_pane_focus_flash_target()
+        self.registry.windows.get(&id)?.renderer.as_ref()?.__test_pane_focus_flash_target()
     }
 
     /// Test seam: one pixel of a window's software-rendered frame, as BGRA.
@@ -409,7 +411,12 @@ impl App {
         pixel_x: u32,
         pixel_y: u32,
     ) -> Option<[u8; 4]> {
-        self.windows.get(&id)?.renderer.as_ref()?.__test_software_frame_pixel_bgra(pixel_x, pixel_y)
+        self.registry
+            .windows
+            .get(&id)?
+            .renderer
+            .as_ref()?
+            .__test_software_frame_pixel_bgra(pixel_x, pixel_y)
     }
 
     /// Test seam: replace the dispatch clock that every pacing read goes through.
@@ -438,7 +445,7 @@ impl App {
     /// Test seam: observe a window's frame timestamp independently of its contention deadline.
     #[doc(hidden)]
     pub fn __test_window_last_render(&self, id: WindowId) -> Option<Instant> {
-        self.windows.get(&id).map(|window| window.last_render)
+        self.registry.windows.get(&id).map(|window| window.last_render)
     }
 
     /// Test seam: backdate a window's last-render instant and its streaming clock together.
@@ -448,7 +455,7 @@ impl App {
     /// `false` when `id` is unknown.
     #[doc(hidden)]
     pub fn __test_set_window_last_render(&mut self, id: WindowId, last_render: Instant) -> bool {
-        let Some(state) = self.windows.get_mut(&id) else {
+        let Some(state) = self.registry.windows.get_mut(&id) else {
             // When: `windows` tracks no entry for this id, so no render timestamp
             // exists to backdate.
             return false;
@@ -465,7 +472,7 @@ impl App {
     /// before layout or after its geometry is invalidated.
     #[doc(hidden)]
     pub fn __test_window_cell_geometry(&self, id: WindowId) -> Option<(f32, f32, f32)> {
-        let window = self.windows.get(&id)?;
+        let window = self.registry.windows.get(&id)?;
         let renderer = window.renderer.as_ref()?;
         let pane = window.tab_states.get(window.tabs.active_index())?.active_pane;
         let [_, top] = renderer.pane_grid_origin(pane)?;
@@ -482,7 +489,8 @@ impl App {
     /// Test-only: read whether a child window is in read-only copy mode.
     #[doc(hidden)]
     pub fn __test_child_read_only(&self, id: WindowId) -> Option<bool> {
-        self.windows
+        self.registry
+            .windows
             .get(&id)
             .map(|child| child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only()))
     }
@@ -490,7 +498,7 @@ impl App {
     /// Test-only: seed the headless renderer-focus marker for a child window.
     #[doc(hidden)]
     pub fn __test_set_child_renderer_focus_marker(&mut self, id: WindowId, focused: bool) -> bool {
-        let Some(child) = self.windows.get_mut(&id) else {
+        let Some(child) = self.registry.windows.get_mut(&id) else {
             // When: `windows` tracks no entry for this id, so no child carries the
             // renderer-focus marker to update.
             return false;
@@ -502,7 +510,7 @@ impl App {
     /// Test-only: read the headless renderer-focus marker for a child window.
     #[doc(hidden)]
     pub fn __test_child_renderer_focus_marker(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).and_then(|child| child.test_renderer_focus_marker)
+        self.registry.windows.get(&id).and_then(|child| child.test_renderer_focus_marker)
     }
 
     /// Test-only: invoke the child focus transition handler without constructing
@@ -565,7 +573,7 @@ impl App {
         self.drain_pending_os_teardown();
     }
 
-    /// Test-only: count of entries in `self.windows`. Used by the
+    /// Test-only: count of entries in `self.registry.windows`. Used by the
     /// `new_window_*` regression tests to assert that a real drain
     /// would change the windows-map cardinality (the post-drain
     /// state itself requires an `ActiveEventLoop`).
@@ -576,7 +584,7 @@ impl App {
     /// keep meaning "number of torn-out child terminal windows".
     #[doc(hidden)]
     pub fn __test_windows_len(&self) -> usize {
-        self.windows.len().saturating_sub(self.shadow_main_count())
+        self.registry.windows.len().saturating_sub(self.shadow_main_count())
     }
 
     /// Test-only: install a synthetic `drag_target` so the
@@ -603,7 +611,7 @@ impl App {
         }
     }
 
-    /// Test-only: remove a window from `self.windows` without going through
+    /// Test-only: remove a window from `self.registry.windows` without going through
     /// the production teardown paths, releasing its resource-governor owner
     /// first. Overlay and governor tests use it to model a window that
     /// vanished. Returns `true` if the window existed and was removed,
@@ -612,7 +620,7 @@ impl App {
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
         self.accessibility.remove(&id);
         self.release_window_owner(id);
-        self.windows.remove(&id).is_some()
+        self.registry.windows.remove(&id).is_some()
     }
 
     /// Test-only: drop a window without the explicit owner release first.
@@ -625,12 +633,12 @@ impl App {
     /// order. This models that path.
     #[doc(hidden)]
     pub fn __test_drop_window_without_release(&mut self, id: WindowId) -> bool {
-        self.windows.remove(&id).is_some()
+        self.registry.windows.remove(&id).is_some()
     }
 
     /// Test-only: install a callback
     /// that fires INSIDE [`Self::cancel_drag_session`], AFTER the
-    /// `self.windows.keys()` snapshot is collected but BEFORE the
+    /// `self.registry.windows.keys()` snapshot is collected but BEFORE the
     /// per-id iteration body runs. Lets tests exercise the exact
     /// `get_mut(&id).else { continue }` race-tolerance branch by
     /// removing (or inserting) a window in between.
@@ -647,7 +655,7 @@ impl App {
     /// Read-back of [`Self::main_window_id`] for tests.
     #[doc(hidden)]
     pub fn __test_main_window_id(&self) -> Option<WindowId> {
-        self.main_window_id
+        self.registry.main_window_id
     }
 
     // ShadowMainSnapshot helpers deleted — dpi + hovered_url
@@ -662,7 +670,7 @@ impl App {
     /// and removes it before inserting the real one.
     #[doc(hidden)]
     pub fn __test_synthetic_main(&mut self) {
-        if self.main_window_id.is_some() {
+        if self.registry.main_window_id.is_some() {
             // When: `main_window_id` is already set, so seeding a second entry
             // would displace the identity live state is keyed by.
             return;
@@ -733,7 +741,7 @@ impl App {
         };
         self.insert_window_registered(id, main);
         self.accessibility.insert(id, Default::default());
-        self.main_window_id = Some(id);
+        self.registry.main_window_id = Some(id);
     }
 
     /// Test-only: pending OS-drag payload count.

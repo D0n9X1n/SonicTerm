@@ -66,7 +66,9 @@ pub(in crate::app) fn field_ime_area(
 impl App {
     fn palette_ime_preedit(&self) -> &str {
         match self.interaction.palette_attached_window {
-            Some(id) => self.windows.get(&id).map(|window| window.ime.preedit()).unwrap_or(""),
+            Some(id) => {
+                self.registry.windows.get(&id).map(|window| window.ime.preedit()).unwrap_or("")
+            }
             None => self.main().map(|window| window.ime.preedit()).unwrap_or(""),
         }
     }
@@ -74,7 +76,7 @@ impl App {
     fn update_palette_ime_state(&mut self, ime_event: &winit::event::Ime) {
         let target = self.interaction.palette_attached_window;
         let Some(window) = (match target {
-            Some(id) => self.windows.get_mut(&id),
+            Some(id) => self.registry.windows.get_mut(&id),
             None => self.main_mut(),
         }) else {
             // When: target names a window already removed, or target is None and
@@ -96,9 +98,12 @@ impl App {
 
     pub(in crate::app) fn palette_ime_is_composing(&self) -> bool {
         match self.interaction.palette_attached_window {
-            Some(id) => {
-                self.windows.get(&id).map(|window| window.ime.is_composing()).unwrap_or(false)
-            }
+            Some(id) => self
+                .registry
+                .windows
+                .get(&id)
+                .map(|window| window.ime.is_composing())
+                .unwrap_or(false),
             None => self.main().map(|window| window.ime.is_composing()).unwrap_or(false),
         }
     }
@@ -116,7 +121,7 @@ impl App {
             return None;
         }
         let renderer = match self.interaction.palette_attached_window {
-            Some(id) => self.windows.get(&id)?.renderer.as_ref()?,
+            Some(id) => self.registry.windows.get(&id)?.renderer.as_ref()?,
             None => self.main_renderer()?,
         };
         renderer
@@ -127,7 +132,7 @@ impl App {
     /// Move the attached window's OS IME candidate box to the presented palette caret.
     pub(in crate::app) fn update_command_palette_ime_cursor_area(&self) {
         let window = match self.interaction.palette_attached_window {
-            Some(id) => self.windows.get(&id).and_then(|child| child.window.clone()),
+            Some(id) => self.registry.windows.get(&id).and_then(|child| child.window.clone()),
             None => self.main_window().cloned(),
         };
         let Some(window) = window else {

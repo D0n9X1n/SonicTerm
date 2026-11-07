@@ -16,6 +16,7 @@ impl App {
             return false;
         }
         let Some((source_window, source_tab)) = self
+            .registry
             .main_window_id
             .and_then(|window| self.tab_id_at(window, index).map(|tab| (window, tab)))
         else {
@@ -136,7 +137,7 @@ impl App {
             // is still over SonicTerm; stop before walking the child windows.
             return true;
         }
-        for child in self.windows.values() {
+        for child in self.registry.windows.values() {
             let Some(window) = child.window.as_ref() else {
                 // When: this child holds no `window`, so it has no screen rect to test
                 // the cursor against; skip it rather than treat it as a hit.

@@ -43,7 +43,7 @@ enum PalettePointerHit {
 
 impl App {
     fn command_palette_pointer_hit(&mut self, window_id: WindowId) -> Option<PalettePointerHit> {
-        let window = self.windows.get(&window_id)?;
+        let window = self.registry.windows.get(&window_id)?;
         let renderer = window.renderer.as_ref()?;
         let (width, height) = renderer.logical_size();
         let (pointer_x, pointer_y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
@@ -89,7 +89,8 @@ impl App {
             return;
         };
         if capture.window_id != window_id
-            || self.interaction.palette_attached_window.or(self.main_window_id) != Some(window_id)
+            || self.interaction.palette_attached_window.or(self.registry.main_window_id)
+                != Some(window_id)
             || !self.interaction.command_palette.is_open()
             || !matches!(
                 self.interaction.command_palette.mode(),
@@ -164,7 +165,9 @@ impl App {
             self.interaction.palette_pointer_capture = None;
             return false;
         }
-        if self.interaction.palette_attached_window.or(self.main_window_id) != Some(window_id) {
+        if self.interaction.palette_attached_window.or(self.registry.main_window_id)
+            != Some(window_id)
+        {
             // When: `window_id` differs from the palette host, leave that window's pointer input independent.
             return false;
         }
@@ -182,7 +185,9 @@ impl App {
             self.interaction.palette_pointer_capture = None;
             return false;
         }
-        let Some(window) = self.windows.get_mut(&window_id).filter(|window| !window.hidden) else {
+        let Some(window) =
+            self.registry.windows.get_mut(&window_id).filter(|window| !window.hidden)
+        else {
             // When: `window_id` has no visible host, its stale capture cannot borrow another window's context.
             self.interaction.palette_pointer_capture = None;
             return false;

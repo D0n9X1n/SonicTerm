@@ -226,7 +226,7 @@ pub(super) struct SourceSnapshot {
 }
 
 pub(super) fn source_snapshot(app: &App, window_id: WindowId) -> SourceSnapshot {
-    let window = app.windows.get(&window_id).expect("source window");
+    let window = app.registry.windows.get(&window_id).expect("source window");
     let mut pane_ids: Vec<_> = window.panes.keys().copied().collect();
     pane_ids.sort_unstable();
     SourceSnapshot {
@@ -269,6 +269,7 @@ pub(super) fn source_snapshot(app: &App, window_id: WindowId) -> SourceSnapshot 
 pub(super) fn prepare_non_vacuous_source(app: &mut App, window_id: WindowId, pane_id: u64) {
     {
         let pane = app
+            .registry
             .windows
             .get_mut(&window_id)
             .and_then(|window| window.panes.get_mut(&pane_id))
@@ -318,8 +319,8 @@ pub(super) fn existing_window_transfer_refusal_preserves_the_complete_source() {
     // Destination readiness and charge admission are checked before any source-owned state can be lost.
     for refusal in 0..3 {
         let mut app = app_with_tabs(&["A", "B", "C"]);
-        let source = app.main_window_id.unwrap();
-        let pane_id = app.windows[&source].tab_states[1].active_pane;
+        let source = app.registry.main_window_id.unwrap();
+        let pane_id = app.registry.windows[&source].tab_states[1].active_pane;
         app.main_tabs_mut().unwrap().activate(1);
         prepare_non_vacuous_source(&mut app, source, pane_id);
         let target = app.__test_seed_child_window(&["destination"]);
@@ -332,23 +333,25 @@ pub(super) fn existing_window_transfer_refusal_preserves_the_complete_source() {
             );
         }
         if refusal == 1 {
-            let window = app.windows.get_mut(&target).unwrap();
+            let window = app.registry.windows.get_mut(&target).unwrap();
             for pane in window.panes.values_mut() {
                 pane.charges.clear();
                 drop(pane.owner.take());
             }
             drop(window.owner.take());
         } else if refusal == 2 {
-            app.governor.begin_close(app.windows[&target].owner.as_ref().unwrap().id()).unwrap();
+            app.governor
+                .begin_close(app.registry.windows[&target].owner.as_ref().unwrap().id())
+                .unwrap();
         }
         let before = source_snapshot(&app, source);
-        let parser = app.windows[&source].panes[&pane_id].parser.clone();
+        let parser = app.registry.windows[&source].panes[&pane_id].parser.clone();
 
         assert!(app.transfer_tab(None, 1, Some(target), 0).is_err());
 
         assert_eq!(source_snapshot(&app, source), before, "refusal={refusal}");
-        assert!(Arc::ptr_eq(&app.windows[&source].panes[&pane_id].parser, &parser));
-        assert_eq!(app.windows[&target].tabs.len(), 1);
+        assert!(Arc::ptr_eq(&app.registry.windows[&source].panes[&pane_id].parser, &parser));
+        assert_eq!(app.registry.windows[&target].tabs.len(), 1);
     }
 }
 
@@ -378,8 +381,8 @@ pub(super) fn run_failed_route(route: FailureRoute, stage: TearOutStage) {
     };
     prepare_non_vacuous_source(&mut app, source_window, pane_id);
     let before = source_snapshot(&app, source_window);
-    let window_keys: HashSet<_> = app.windows.keys().copied().collect();
-    let frontmost = app.frontmost_window;
+    let window_keys: HashSet<_> = app.registry.windows.keys().copied().collect();
+    let frontmost = app.registry.frontmost_window;
     let hidden = app.__test_main_hidden();
     let reducer = {
         let state = app.machine.state();
@@ -440,8 +443,8 @@ pub(super) fn run_failed_route(route: FailureRoute, stage: TearOutStage) {
     assert_eq!(cleanup_drops.get(), 1);
     assert!(observed_detached.get());
     assert_eq!(source_snapshot(&app, source_window), before);
-    assert_eq!(app.windows.keys().copied().collect::<HashSet<_>>(), window_keys);
-    assert_eq!(app.frontmost_window, frontmost);
+    assert_eq!(app.registry.windows.keys().copied().collect::<HashSet<_>>(), window_keys);
+    assert_eq!(app.registry.frontmost_window, frontmost);
     assert_eq!(app.__test_main_hidden(), hidden);
     let state = app.machine.state();
     assert_eq!((state.tab_count, state.live_window_count, state.active_tab_idx), reducer);
@@ -541,20 +544,20 @@ pub(super) fn run_stopped_spare_tear_out(event_loop: &winit::event_loop::ActiveE
     renderer.force_rebuild_for_scale(renderer.scale_factor());
     assert!(!renderer.device_accepts_gpu_work(), "the spare's device must be stopped");
     let spare = window.id();
-    app.warm_window_pool.push(crate::app::WarmWindow {
+    app.registry.warm_window_pool.push(crate::app::WarmWindow {
         window,
         renderer,
         created_at: Instant::now(),
     });
     let before = source_snapshot(&app, source);
-    let windows: HashSet<_> = app.windows.keys().copied().collect();
+    let windows: HashSet<_> = app.registry.windows.keys().copied().collect();
 
     assert!(app.tear_out_tab(event_loop, 0));
 
-    assert_eq!(app.warm_window_pool.len(), 1, "the stopped spare stays pooled");
-    assert_eq!(app.warm_window_pool[0].window.id(), spare);
+    assert_eq!(app.registry.warm_window_pool.len(), 1, "the stopped spare stays pooled");
+    assert_eq!(app.registry.warm_window_pool[0].window.id(), spare);
     assert_eq!(source_snapshot(&app, source), before, "the source keeps its last tab");
-    assert_eq!(app.windows.keys().copied().collect::<HashSet<_>>(), windows);
+    assert_eq!(app.registry.windows.keys().copied().collect::<HashSet<_>>(), windows);
 }
 
 /// The body of the function enclosing byte `at` in `bare`: from its nearest preceding `fn` item to

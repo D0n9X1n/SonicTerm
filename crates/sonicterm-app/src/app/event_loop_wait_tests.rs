@@ -9,7 +9,7 @@ fn recovery_wakes_preserve_due_owner_frames_without_an_idle_heartbeat() {
     use crate::app::redraw::{DueCause, DueWork};
     for frame_offset in [Duration::ZERO, Duration::from_millis(10)] {
         let mut app = app_with_main_window();
-        let owner = app.main_window_id.unwrap();
+        let owner = app.registry.main_window_id.unwrap();
         let now = Instant::now();
         let frame_at = now + frame_offset;
         app.redraw_due = vec![
@@ -17,19 +17,19 @@ fn recovery_wakes_preserve_due_owner_frames_without_an_idle_heartbeat() {
             DueWork { owner: Some(owner), cause: DueCause::Frame, deadline: frame_at },
         ];
         app.service_redraw_due(now);
-        assert_eq!(app.windows[&owner].redraw.request_in_flight, frame_offset.is_zero());
+        assert_eq!(app.registry.windows[&owner].redraw.request_in_flight, frame_offset.is_zero());
         app.service_redraw_due(frame_at + Duration::from_millis(1));
-        assert!(app.windows[&owner].redraw.request_in_flight);
+        assert!(app.registry.windows[&owner].redraw.request_in_flight);
         assert!(app.redraw_due.is_empty());
     }
     let mut app = app_with_main_window();
-    let owner = app.main_window_id.unwrap();
+    let owner = app.registry.main_window_id.unwrap();
     let now = Instant::now();
     app.request_device_state_redraws();
-    assert!(!app.windows[&owner].redraw.request_in_flight);
+    assert!(!app.registry.windows[&owner].redraw.request_in_flight);
     app.redraw_due.push(DueWork { owner: None, cause: DueCause::GpuRecovery, deadline: now });
     app.service_redraw_due(now);
-    assert!(!app.windows[&owner].redraw.request_in_flight);
+    assert!(!app.registry.windows[&owner].redraw.request_in_flight);
     assert!(app.redraw_due.is_empty());
 }
 
@@ -116,8 +116,8 @@ fn due_foreground_probe_forces_shell_return_refresh() {
     let start = Instant::now();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("#1 pwsh");
-    let main_id = app.main_window_id.expect("synthetic main window");
-    let window = app.windows.get_mut(&main_id).expect("synthetic main state");
+    let main_id = app.registry.main_window_id.expect("synthetic main window");
+    let window = app.registry.windows.get_mut(&main_id).expect("synthetic main state");
     window.panes.get_mut(&pane_id).expect("synthetic pane").fg_proc_cache = Some((
         start,
         Some(sonicterm_io::proc_info::ForegroundProcess { name: "gsudo".into(), privileged: true }),
@@ -129,7 +129,7 @@ fn due_foreground_probe_forces_shell_return_refresh() {
     let changed = app.refresh_foreground_privileges_if_due(due);
 
     assert_eq!(changed, vec![main_id]);
-    assert!(!app.windows[&main_id].tabs.tabs()[0].foreground_privileged);
+    assert!(!app.registry.windows[&main_id].tabs.tabs()[0].foreground_privileged);
     assert!(app.services.foreground_schedule.warning_wake.is_none());
 }
 

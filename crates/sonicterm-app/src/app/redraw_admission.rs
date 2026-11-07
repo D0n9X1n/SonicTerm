@@ -5,7 +5,7 @@ use super::*;
 impl App {
     /// Device-stop reporting outranks occlusion and topology parking, then the owner-local pacing gate runs.
     pub(in crate::app) fn begin_window_redraw(&mut self, id: WindowId, now: Instant) -> bool {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` no longer names a live `window`, refuse without using a sibling.
             return false;
         };
@@ -191,10 +191,10 @@ impl App {
         if !defer {
             window.redraw.attempt_causes = Some(window.redraw.snapshot());
         }
-        if self.main_window_id == Some(id) {
+        if self.registry.main_window_id == Some(id) {
             self.pending_redraw = defer;
         }
-        if defer && self.main_window_id != Some(id) {
+        if defer && self.registry.main_window_id != Some(id) {
             self.pending_redraw_windows.insert(id);
         } else {
             // When: `defer` is false or `id` is main, no child compatibility marker is needed.
@@ -214,7 +214,7 @@ impl App {
         id: WindowId,
         now: Instant,
     ) -> Option<FrameSnapshot> {
-        let window = self.windows.get_mut(&id)?;
+        let window = self.registry.windows.get_mut(&id)?;
         let snapshot = window.capture_redraw_snapshot();
         window.redraw.attempt_causes = Some(snapshot.causes);
         // `frame` measures CPU-side time from here to settlement, on the real clock.
@@ -242,7 +242,7 @@ impl App {
         outcome: FrameSettlement,
         at: Instant,
     ) {
-        if let Some(window) = self.windows.get_mut(&id) {
+        if let Some(window) = self.registry.windows.get_mut(&id) {
             window.complete_attempt(snapshot, outcome, at, self.software_render_degrade);
             if window.hidden {
                 window.redraw.cancel_surface_probe();
@@ -254,7 +254,7 @@ impl App {
                 window.settle_output_snapshot(snapshot);
             }
         }
-        if self.main_window_id == Some(id) {
+        if self.registry.main_window_id == Some(id) {
             self.pending_redraw = false;
         }
         self.pending_redraw_windows.remove(&id);

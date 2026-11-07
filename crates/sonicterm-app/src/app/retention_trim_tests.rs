@@ -83,7 +83,7 @@ fn the_retention_pass_schedules_the_trim_after_thirty_seconds_of_cover() {
     let mut app = app_with_private_pools();
     app.__test_set_dispatch_clock(fake_now);
     app.__test_seed_tab("covered");
-    let main = app.main_window_id.expect("the seeded main window");
+    let main = app.registry.main_window_id.expect("the seeded main window");
     let child = app.__test_seed_child_window(&["shown again"]);
     app.handle_window_occlusion(main, true);
     app.handle_window_occlusion(child, true);
@@ -127,10 +127,10 @@ fn the_trim_hook_shares_the_scheduler_rules_and_runs_no_retention_pass() {
     let mut app = app_with_private_pools();
     app.__test_set_dispatch_clock(fake_now);
     app.__test_seed_tab("covered");
-    let main = app.main_window_id.expect("the seeded main window");
+    let main = app.registry.main_window_id.expect("the seeded main window");
     let sampled_at = base - Duration::from_secs(5);
     app.diagnostics.last_retention_sample = Some(sampled_at);
-    let panes_before: Vec<u64> = app.windows[&main].panes.keys().copied().collect();
+    let panes_before: Vec<u64> = app.registry.windows[&main].panes.keys().copied().collect();
 
     assert_eq!(app.__trim_covered_now(main), TrimDecision::Skipped(TrimSkip::NotOccluded));
     assert_eq!(
@@ -140,14 +140,14 @@ fn the_trim_hook_shares_the_scheduler_rules_and_runs_no_retention_pass() {
     app.handle_window_occlusion(main, true);
     // Covered this instant: the hook ignores the age, so only the absent renderer remains.
     assert_eq!(app.__trim_covered_now(main), TrimDecision::Skipped(TrimSkip::NoRenderer));
-    app.windows.get_mut(&main).expect("main").redraw.trimmed = true;
+    app.registry.windows.get_mut(&main).expect("main").redraw.trimmed = true;
     assert_eq!(app.__trim_covered_now(main), TrimDecision::Skipped(TrimSkip::AlreadyTrimmed));
 
     assert_eq!(app.diagnostics.trim_seq, 0);
     assert_eq!(app.diagnostics.last_trim_source, None);
     assert!(app.test_scheduler_trims.is_empty(), "the hook is not the scheduler");
     assert_eq!(app.diagnostics.last_retention_sample, Some(sampled_at), "no retention pass ran");
-    let panes_after: Vec<u64> = app.windows[&main].panes.keys().copied().collect();
+    let panes_after: Vec<u64> = app.registry.windows[&main].panes.keys().copied().collect();
     assert_eq!(panes_after, panes_before);
-    assert_eq!(app.windows.len(), 1, "no window was created or removed");
+    assert_eq!(app.registry.windows.len(), 1, "no window was created or removed");
 }

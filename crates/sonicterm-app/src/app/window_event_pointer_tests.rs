@@ -108,7 +108,7 @@ fn window_press_uses_live_shift_and_latches_the_real_owner() {
     let window_id = app.__test_seed_child_window(&["child"]);
     let pane = app.__test_child_pane_ids(window_id).expect("seeded child window")[0];
     let cell = pointer_cell(pane, 2, 3);
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.selection = Some(Selection::new(2, 3));
     window.modifiers = ModifiersState::SHIFT;
 
@@ -559,7 +559,7 @@ fn terminal_repeat_owner_is_resolved_before_local_input_owners() {
         .find("match self.window_key_owner(win_id)")
         .expect("source-window owner selection");
     assert!(release < repeat && repeat < quit && quit < owners);
-    assert!(!keyboard.contains("self.frontmost_window ="));
+    assert!(!keyboard.contains("self.registry.frontmost_window ="));
 }
 
 #[test]
@@ -571,16 +571,16 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
     let pane = app.__test_child_pane_ids(window).expect("seeded child window")[0];
     let cell = pointer_cell(pane, 6, 7);
 
-    let child = app.windows.get(&window).expect("seeded child state");
+    let child = app.registry.windows.get(&window).expect("seeded child state");
     assert!(matches!(
         child_no_button_motion_report(child, cell, MouseTracking::AnyMotion, true, false),
         Some(PointerMotionRoute::Report { pane_id, .. }) if pane_id == pane
     ));
 
-    app.windows.get_mut(&window).unwrap().splitter_hover = Some(SplitAxis::Vertical);
+    app.registry.windows.get_mut(&window).unwrap().splitter_hover = Some(SplitAxis::Vertical);
     assert_eq!(
         child_no_button_motion_report(
-            app.windows.get(&window).unwrap(),
+            app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
             true,
@@ -588,9 +588,9 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
         ),
         None
     );
-    app.windows.get_mut(&window).unwrap().splitter_hover = None;
+    app.registry.windows.get_mut(&window).unwrap().splitter_hover = None;
 
-    app.windows.get_mut(&window).unwrap().hovered_url = Some(HoveredUrl {
+    app.registry.windows.get_mut(&window).unwrap().hovered_url = Some(HoveredUrl {
         label: None,
         cells: sonicterm_render_model::inputs::HoveredUrlCells::single(pane, 6, 7, 8, true)
             .unwrap(),
@@ -598,7 +598,7 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
     });
     assert_eq!(
         child_no_button_motion_report(
-            app.windows.get(&window).unwrap(),
+            app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
             true,
@@ -606,12 +606,12 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
         ),
         None
     );
-    app.windows.get_mut(&window).unwrap().hovered_url = None;
+    app.registry.windows.get_mut(&window).unwrap().hovered_url = None;
 
-    app.windows.get_mut(&window).unwrap().hover_link = true;
+    app.registry.windows.get_mut(&window).unwrap().hover_link = true;
     assert_eq!(
         child_no_button_motion_report(
-            app.windows.get(&window).unwrap(),
+            app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
             true,
@@ -619,11 +619,11 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
         ),
         None
     );
-    app.windows.get_mut(&window).unwrap().hover_link = false;
+    app.registry.windows.get_mut(&window).unwrap().hover_link = false;
 
     assert_eq!(
         child_no_button_motion_report(
-            app.windows.get(&window).unwrap(),
+            app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
             true,
@@ -736,15 +736,15 @@ fn monitor_period_refreshes_on_focus_resize_move_and_unocclusion() {
     let initial = Duration::from_micros(16_667);
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_synthetic_main();
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     for id in [main, child] {
         let reset = |app: &mut App, rate: Option<u32>| {
-            let window = app.windows.get_mut(&id).unwrap();
+            let window = app.registry.windows.get_mut(&id).unwrap();
             window.redraw.monitor_period = initial;
             window.redraw.monitor_rate_override = Some(rate);
         };
-        let period = |app: &App| app.windows[&id].redraw.monitor_period;
+        let period = |app: &App| app.registry.windows[&id].redraw.monitor_period;
         for (event, refreshes) in [
             (WindowEvent::Focused(true), true),
             (WindowEvent::Resized(PhysicalSize::new(800, 600)), true),
@@ -763,7 +763,7 @@ fn monitor_period_refreshes_on_focus_resize_move_and_unocclusion() {
         assert_eq!(period(&app), refreshed, "un-occlusion refreshes");
         // An unavailable or zero rate keeps the last known period.
         for rate in [None, Some(0)] {
-            app.windows.get_mut(&id).unwrap().redraw.monitor_rate_override = Some(rate);
+            app.registry.windows.get_mut(&id).unwrap().redraw.monitor_rate_override = Some(rate);
             app.refresh_monitor_for_event(id, &WindowEvent::Focused(true));
             assert_eq!(period(&app), refreshed, "rate {rate:?} keeps the last period");
         }

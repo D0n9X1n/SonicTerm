@@ -63,7 +63,7 @@ pub(super) fn real_pty_winit_drop_turns_batch_each_window() {
             );
             for (window, _) in windows {
                 assert_eq!(
-                    app.windows[&window].notification.as_ref().unwrap().message,
+                    app.registry.windows[&window].notification.as_ref().unwrap().message,
                     "Paste refused for 1 of 1 destinations: ControlCharacter (destinations: 1)"
                 );
             }
@@ -99,7 +99,7 @@ pub(super) fn resumed_retires_previous_main_before_installing_its_replacement() 
     let source = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
     let retire = resumed.find("self.retire_previous_main()").unwrap();
-    let install = resumed.find("self.main_window_id = Some(main_id)").unwrap();
+    let install = resumed.find("self.registry.main_window_id = Some(main_id)").unwrap();
     assert!(retire < install);
 }
 
@@ -265,14 +265,14 @@ pub(super) fn contention_retry_is_nonstarving_per_window_across_frame_policies()
             for is_main in [false, true] {
                 let mut app = app_with_main_window();
                 let id = if is_main {
-                    app.main_window_id.unwrap()
+                    app.registry.main_window_id.unwrap()
                 } else {
                     app.__test_seed_child_window(&["child"])
                 };
                 let now = Instant::now();
                 let previous = now - Duration::from_secs(1);
                 app.software_render_degrade = software;
-                let window = app.windows.get_mut(&id).unwrap();
+                let window = app.registry.windows.get_mut(&id).unwrap();
                 window.last_render = previous;
                 window.stream_clock = previous;
                 if composing {
@@ -282,26 +282,27 @@ pub(super) fn contention_retry_is_nonstarving_per_window_across_frame_policies()
                     crate::app::effective_frame_period(software, composing, app.frame_period);
                 app.defer_window_lock_contention(id, true, now);
                 let due = now + period;
-                assert_eq!(app.windows[&id].retry_not_before, Some(due));
+                assert_eq!(app.registry.windows[&id].retry_not_before, Some(due));
                 assert_eq!(app.wake_deadline(None), Some(due));
                 for offset in [1, 2, 3] {
                     let event_at = now + period * offset / 4;
-                    assert!(app.windows[&id].contention_blocks_redraw(event_at, period, software));
+                    assert!(app.registry.windows[&id]
+                        .contention_blocks_redraw(event_at, period, software));
                     app.defer_window_lock_contention(id, false, event_at);
-                    assert_eq!(app.windows[&id].retry_not_before, Some(due));
+                    assert_eq!(app.registry.windows[&id].retry_not_before, Some(due));
                 }
-                assert!(!app.windows[&id].contention_blocks_redraw(due, period, software));
+                assert!(!app.registry.windows[&id].contention_blocks_redraw(due, period, software));
                 app.defer_window_lock_contention(id, false, due);
-                assert_eq!(app.windows[&id].retry_not_before, Some(due + period));
-                assert_eq!(app.windows[&id].last_render, previous);
+                assert_eq!(app.registry.windows[&id].retry_not_before, Some(due + period));
+                assert_eq!(app.registry.windows[&id].last_render, previous);
                 assert_eq!(
-                    app.windows[&id].stream_clock, previous,
+                    app.registry.windows[&id].stream_clock, previous,
                     "contention moves neither clock"
                 );
-                app.windows.get_mut(&id).unwrap().coherent_frame_collected();
-                assert_eq!(app.windows[&id].retry_not_before, None);
-                assert!(!app.windows[&id].contention_blocks_redraw(due, period, software));
-                app.windows.get_mut(&id).unwrap().redraw.deferred = false;
+                app.registry.windows.get_mut(&id).unwrap().coherent_frame_collected();
+                assert_eq!(app.registry.windows[&id].retry_not_before, None);
+                assert!(!app.registry.windows[&id].contention_blocks_redraw(due, period, software));
+                app.registry.windows.get_mut(&id).unwrap().redraw.deferred = false;
                 if is_main {
                     app.pending_redraw = false;
                 } else {
@@ -309,7 +310,7 @@ pub(super) fn contention_retry_is_nonstarving_per_window_across_frame_policies()
                 }
                 assert_eq!(app.wake_deadline(None), None);
                 app.defer_window_lock_contention(id, false, due);
-                app.windows.remove(&id);
+                app.registry.windows.remove(&id);
                 assert_eq!(app.wake_deadline(None), None);
             }
         }
@@ -407,7 +408,12 @@ pub(super) fn arm_snap_scrollbar(
     note_activity(&mut state, active);
     retarget(&mut state, sonicterm_cfg::config::ScrollbarMode::Auto, false, active);
     state.alpha = 1.0;
-    app.windows.get_mut(&window_id).expect("synthetic window").scrollbar_vis.insert(pane_id, state);
+    app.registry
+        .windows
+        .get_mut(&window_id)
+        .expect("synthetic window")
+        .scrollbar_vis
+        .insert(pane_id, state);
 }
 
 /// Expiration mutates only due windows and removes their stale deadline.

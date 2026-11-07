@@ -272,10 +272,11 @@ fn resolving_one_pane_matches_its_listed_entry() {
     let second_child = app.__test_seed_child_window(&["d1"]);
     let report_child = app.__test_seed_child_window(&["report"]);
     let report_pane = app.__test_child_active_pane(report_child).unwrap();
-    app.windows.get_mut(&report_child).unwrap().role = crate::app::WindowRole::MemoryReport;
+    app.registry.windows.get_mut(&report_child).unwrap().role =
+        crate::app::WindowRole::MemoryReport;
     // A leaf whose pane already left `panes`, as during teardown, is listed by neither path.
     let torn = app.__test_child_active_pane(second_child).unwrap();
-    let removed = app.windows.get_mut(&second_child).unwrap().panes.remove(&torn);
+    let removed = app.registry.windows.get_mut(&second_child).unwrap().panes.remove(&torn);
     assert!(removed.is_some());
     let listed = app.mcp_pane_entries();
     assert!(

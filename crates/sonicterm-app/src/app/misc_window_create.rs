@@ -8,7 +8,7 @@ impl App {
         source: Option<WindowId>,
     ) -> super::super::WindowRequest {
         let inherited = source
-            .and_then(|id| self.windows.get(&id))
+            .and_then(|id| self.registry.windows.get(&id))
             .and_then(|state| state.window.as_ref())
             .and_then(|window| {
                 super::super::inherited_window_size(
@@ -88,7 +88,7 @@ impl App {
             &'static str,
         ) -> Option<WindowId>,
     {
-        let source_is_main = Some(req.source_window) == self.main_window_id;
+        let source_is_main = Some(req.source_window) == self.registry.main_window_id;
         let source_tab_idx = match self.resolve_tear_out_source_index(&req) {
             Some(idx) => idx,
             None => {
@@ -143,7 +143,7 @@ impl App {
     /// `handle_os_drag_ended` on the `DroppedOnEmpty` branch. Callers MUST
     /// invoke this AFTER [`Self::drain_pending_window_creates`] so any
     /// tear-out-spawn has produced its new window before cross-window
-    /// drag-residue cleanup mutates `self.windows`. The all-windows
+    /// drag-residue cleanup mutates `self.registry.windows`. The all-windows
     /// loop inside `cancel_drag_session` still runs UNCONDITIONALLY
     /// when this drain fires, preserving that cleanup's idempotence —
     /// the flag controls WHEN, not WHETHER.
@@ -161,7 +161,7 @@ impl App {
     /// The renderer shares the live GPU device that [`Self::shared_gpu_context`]
     /// selects, and opens its own device only when no renderer exists yet.
     ///
-    /// It must work whether or not `self.windows` is empty, so it must not
+    /// It must work whether or not `self.registry.windows` is empty, so it must not
     /// assume that another terminal window exists.
     pub(in crate::app) fn create_new_terminal_window(
         &mut self,
@@ -350,10 +350,10 @@ impl App {
         // Eagerly mark frontmost so the next Cmd+T / Cmd+W routes
         // here before the OS Focus event arrives — mirrors the
         // tear_out_tab pattern.
-        self.frontmost_window = Some(win_id);
+        self.registry.frontmost_window = Some(win_id);
         tracing::info!(
             "Action::NewWindow: spawned terminal window; windows={}",
-            self.windows.len()
+            self.registry.windows.len()
         );
     }
 }

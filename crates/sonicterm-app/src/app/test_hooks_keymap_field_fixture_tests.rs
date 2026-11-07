@@ -31,7 +31,7 @@ fn real_pty_palette_field_clipboard_owns_explicit_and_menu_actions() {
                         search_open,
                     );
                     // Cached focus names the owner only for the menu path; explicit dispatch must ignore it.
-                    app.frontmost_window = Some(if menu { owner } else { unrelated });
+                    app.registry.frontmost_window = Some(if menu { owner } else { unrelated });
                     app.interaction.command_palette.set_query("你好");
                     app.interaction.command_palette.apply_text_edit(TextEdit::MoveStart);
                     app.interaction.command_palette.apply_text_edit(TextEdit::MoveForward);
@@ -65,10 +65,11 @@ fn real_pty_palette_field_clipboard_owns_explicit_and_menu_actions() {
                         Some("sentinel"),
                         "{case}"
                     );
-                    assert!(app.windows[&owner].selection.is_some(), "{case}");
+                    assert!(app.registry.windows[&owner].selection.is_some(), "{case}");
                     assert_eq!(app.interaction.command_palette.mode(), mode, "{case}");
                     if search_open {
-                        let search = app.windows[&owner].tab_states[0].search.as_ref().unwrap();
+                        let search =
+                            app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap();
                         assert_eq!(search.query, "underlay", "{case}");
                     }
                     assert_eq!(
@@ -76,7 +77,7 @@ fn real_pty_palette_field_clipboard_owns_explicit_and_menu_actions() {
                         (Vec::new(), Vec::new()),
                         "{case}"
                     );
-                    assert!(app.windows[&unrelated].notification.is_none(), "{case}");
+                    assert!(app.registry.windows[&unrelated].notification.is_none(), "{case}");
                 }
             }
         }
@@ -121,11 +122,11 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
         }
 
         // An unfinished IME composition suppresses both field clipboard actions.
-        app.windows.get_mut(&owner).unwrap().ime.handle_preedit("ni", None);
+        app.registry.windows.get_mut(&owner).unwrap().ime.handle_preedit("ni", None);
         app.__test_set_memory_clipboard("blocked");
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
         assert!(app.run_action_for_window(&Action::CopyToClipboard, owner));
-        app.windows.get_mut(&owner).unwrap().ime.cancel();
+        app.registry.windows.get_mut(&owner).unwrap().ime.cancel();
         assert_eq!(app.interaction.command_palette.query(), "你好");
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("blocked"));
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
@@ -143,9 +144,9 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
         assert_eq!(app.interaction.command_palette.query(), "你好");
         open_field_palette(&mut app, owner, CommandPaletteMode::Commands);
-        app.windows.get_mut(&owner).unwrap().hidden = true;
+        app.registry.windows.get_mut(&owner).unwrap().hidden = true;
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
-        app.windows.get_mut(&owner).unwrap().hidden = false;
+        app.registry.windows.get_mut(&owner).unwrap().hidden = false;
         assert_eq!(app.interaction.command_palette.query(), "");
         app.wait_for_input_queues();
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
@@ -178,13 +179,13 @@ fn real_pty_search_field_copy_uses_query_selection_only() {
         let (source_window, source) = windows[source_index];
         let (other_window, _) = windows[(source_index + 1) % 3];
         seed_terminal_selection(&mut app, source_window, source);
-        app.frontmost_window = Some(other_window);
+        app.registry.frontmost_window = Some(other_window);
         set_search_paste_query(&mut app, source_window, "你é好");
         app.__test_set_memory_clipboard("sentinel");
         // No query selection: the terminal selection must stay out of the clipboard.
         assert!(app.run_action_for_window(&Action::CopyToClipboard, source_window));
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("sentinel"));
-        let window = app.windows.get_mut(&source_window).unwrap();
+        let window = app.registry.windows.get_mut(&source_window).unwrap();
         let search = window.tab_states[0].search.as_mut().unwrap();
         search.set_cursor("你".len());
         search.extend_to("你é".len());
@@ -193,12 +194,12 @@ fn real_pty_search_field_copy_uses_query_selection_only() {
         let removed = window.panes.remove(&source).unwrap();
         window.copy_mode = Some(CopyModeState::read_only_at((0, 0)));
         assert!(app.run_action_for_window(&Action::CopyToClipboard, source_window));
-        app.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
+        app.registry.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("é"));
-        let search = app.windows[&source_window].tab_states[0].search.as_ref().unwrap();
+        let search = app.registry.windows[&source_window].tab_states[0].search.as_ref().unwrap();
         assert_eq!(search.selected_text(), Some("é"));
         assert_eq!((search.matches.len(), search.current), (matches, current));
-        assert!(app.windows[&source_window].selection.is_some());
+        assert!(app.registry.windows[&source_window].selection.is_some());
         assert_eq!(app.__test_drain_pty_writes(), Vec::new());
     }
 }
@@ -209,19 +210,22 @@ fn keyboard_quit_confirmation_stays_on_its_source_window() {
     for source_is_child in [false, true] {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.__test_seed_tab("main");
-        let main = app.main_window_id.unwrap();
+        let main = app.registry.main_window_id.unwrap();
         let child = app.__test_seed_child_window(&["child"]);
         let (source, other) = if source_is_child { (child, main) } else { (main, child) };
-        app.frontmost_window = Some(other);
+        app.registry.frontmost_window = Some(other);
         app.__test_enable_pty_write_log();
 
         assert!(app.on_quit_chord_pressed(source, false));
         assert_eq!(
-            app.windows[&source].notification.as_ref().map(|bubble| bubble.message.as_str()),
+            app.registry.windows[&source]
+                .notification
+                .as_ref()
+                .map(|bubble| bubble.message.as_str()),
             Some(super::super::super::super::quit_hold::QUIT_CONFIRM_PROMPT)
         );
-        assert!(app.windows[&other].notification.is_none());
-        assert_eq!(app.frontmost_window, Some(other));
+        assert!(app.registry.windows[&other].notification.is_none());
+        assert_eq!(app.registry.frontmost_window, Some(other));
         assert!(!app.pending_exit);
         assert!(app.on_quit_chord_pressed(source, true));
         assert!(!app.pending_exit);
@@ -236,15 +240,15 @@ fn stale_keyboard_quit_cannot_arm_a_live_window() {
     // A removed source must not contribute the first press or place a warning on the frontmost window.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["removed"]);
-    app.windows.remove(&child);
-    app.frontmost_window = Some(main);
+    app.registry.windows.remove(&child);
+    app.registry.frontmost_window = Some(main);
 
     assert!(!app.on_quit_chord_pressed(child, false));
-    assert!(app.windows[&main].notification.is_none());
+    assert!(app.registry.windows[&main].notification.is_none());
     assert!(!app.pending_exit);
     assert!(app.on_quit_chord_pressed(main, false));
     assert!(!app.pending_exit);
-    assert!(app.windows[&main].notification.is_some());
+    assert!(app.registry.windows[&main].notification.is_some());
 }

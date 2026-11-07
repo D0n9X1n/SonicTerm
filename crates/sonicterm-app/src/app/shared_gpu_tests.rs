@@ -41,8 +41,8 @@ fn headless_windows_offer_no_shared_context() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
-    assert!(app.main_renderer().is_none() && app.windows[&child].renderer.is_none());
-    assert!(app.warm_window_pool.is_empty());
+    assert!(app.main_renderer().is_none() && app.registry.windows[&child].renderer.is_none());
+    assert!(app.registry.warm_window_pool.is_empty());
     assert!(app.shared_gpu_context().is_none());
 }
 

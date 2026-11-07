@@ -7,7 +7,7 @@ use crate::app::{App, FrontmostKind};
 impl App {
     /// Route actions to their explicit live source window without falling back to cached focus.
     pub fn run_action_for_window(&mut self, action: &Action, source_window_id: WindowId) -> bool {
-        if !self.windows.contains_key(&source_window_id) {
+        if !self.registry.windows.contains_key(&source_window_id) {
             // When: windows lacks source_window_id, refuse its action instead of falling through to another terminal.
             return false;
         }
@@ -17,6 +17,7 @@ impl App {
         if let FrontmostKind::Child(id) = source_kind {
             // When: source_kind is Child(id), renderer readiness must not redirect the action to main.
             if self
+                .registry
                 .windows
                 .get(&id)
                 .is_some_and(|window| window.renderer.is_none() && window.window.is_some())
@@ -326,7 +327,7 @@ impl App {
             Action::MoveTabToNewWindow => {
                 // MoveTabToNewWindow routes tear-out from source_window_id.
                 // MoveTabToNewWindow queues the routed active tab for tear-out.
-                if self.windows.contains_key(&source_window_id) {
+                if self.registry.windows.contains_key(&source_window_id) {
                     // A registered source window can queue its active tab for tear-out.
                     self.queue_active_tab_tear_out(source_window_id);
                 }
@@ -351,7 +352,7 @@ impl App {
                 };
                 if let FrontmostKind::Child(id) = source_kind {
                     let mode = self.config.appearance.scrollbar;
-                    if let Some(window) = self.windows.get_mut(&id) {
+                    if let Some(window) = self.registry.windows.get_mut(&id) {
                         super::child_window::scroll_child_pane(window, pane, delta, mode);
                     }
                 } else {
@@ -365,9 +366,10 @@ impl App {
             // creates its own top level; search and palette use the main overlay.
             _ => {
                 // When: a shared action consults focus, lend it the explicit source and restore the actual focus record afterwards.
-                let previous = self.frontmost_window.replace(source_window_id);
+                let previous = self.registry.frontmost_window.replace(source_window_id);
                 let handled = self.run_action(action);
-                self.frontmost_window = previous.filter(|id| self.windows.contains_key(id));
+                self.registry.frontmost_window =
+                    previous.filter(|id| self.registry.windows.contains_key(id));
                 return handled;
             }
         }

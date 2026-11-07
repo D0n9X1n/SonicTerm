@@ -25,7 +25,7 @@ fn real_pty_search_paste_menubar_target_matrix() {
         let (source_window, source) = windows[target];
         let (_, bracketed) = windows[(target + 1) % 3];
         for (id, pane) in windows {
-            let window = app.windows.get_mut(&id).unwrap();
+            let window = app.registry.windows.get_mut(&id).unwrap();
             let mut search = SearchState::new();
             search.set_query("peer", window.panes[&pane].parser.lock().grid());
             window.tab_states[0].search = Some(search);
@@ -36,11 +36,11 @@ fn real_pty_search_paste_menubar_target_matrix() {
         app.__test_enable_pty_write_log();
         app.__test_set_memory_clipboard("menu");
         // Some(main) makes the synthetic target exercise run_action's READONLY gate rather than its no-focus fallback.
-        app.frontmost_window = Some(source_window);
+        app.registry.frontmost_window = Some(source_window);
         let submitted = PtySubmissions::start();
         for (read_only, search_open) in [(true, true), (false, true), (true, false), (false, false)]
         {
-            let window = app.windows.get_mut(&source_window).unwrap();
+            let window = app.registry.windows.get_mut(&source_window).unwrap();
             window.copy_mode = read_only.then(|| CopyModeState::read_only_at((0, 0)));
             window.tab_states[0].search = search_open.then(SearchState::new);
             app.wait_for_input_queues();
@@ -49,7 +49,7 @@ fn real_pty_search_paste_menubar_target_matrix() {
             let attempts = app.__test_drain_pty_writes();
             let accepted = submitted.take();
             assert_eq!(
-                app.windows[&source_window].tab_states[0]
+                app.registry.windows[&source_window].tab_states[0]
                     .search
                     .as_ref()
                     .map(|search| search.query.as_str()),
@@ -78,7 +78,7 @@ fn real_pty_search_paste_menubar_target_matrix() {
                 assert_eq!(accepted, expected);
             }
             for (id, _) in windows {
-                let window = &app.windows[&id];
+                let window = &app.registry.windows[&id];
                 assert!(window.notification.is_none());
                 assert_eq!(
                     window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only),
@@ -88,7 +88,7 @@ fn real_pty_search_paste_menubar_target_matrix() {
                     assert_eq!(window.tab_states[0].search.as_ref().unwrap().query, "peer");
                 }
             }
-            assert_eq!(app.frontmost_window, Some(source_window));
+            assert_eq!(app.registry.frontmost_window, Some(source_window));
             assert!(crate::menubar_bridge::drain().is_empty());
         }
     }
@@ -162,17 +162,23 @@ fn assert_paste_destination_matrix(paths: bool) {
             let (_, receiver) = windows[(source_index + 1) % 3];
             let (_, peer) = windows[(source_index + 2) % 3];
             let missing_window = app.__test_seed_child_window(&["no PTY"]);
-            let missing = app.windows[&missing_window].tab_states[0].active_pane;
+            let missing = app.registry.windows[&missing_window].tab_states[0].active_pane;
             if scope == BroadcastScope::Tab {
                 // Move existing real panes, not their native processes, into the source's split tab.
                 for (window, pane_id) in windows.into_iter().chain([(missing_window, missing)]) {
                     if pane_id == source {
                         continue;
                     }
-                    let pane =
-                        app.windows.get_mut(&window).unwrap().panes.remove(&pane_id).unwrap();
-                    app.windows.get_mut(&window).unwrap().tab_states.clear();
-                    let source_state = app.windows.get_mut(&source_window).unwrap();
+                    let pane = app
+                        .registry
+                        .windows
+                        .get_mut(&window)
+                        .unwrap()
+                        .panes
+                        .remove(&pane_id)
+                        .unwrap();
+                    app.registry.windows.get_mut(&window).unwrap().tab_states.clear();
+                    let source_state = app.registry.windows.get_mut(&source_window).unwrap();
                     source_state.panes.insert(pane_id, pane);
                     assert!(source_state.tab_states[0].tree.split(
                         source,
@@ -182,7 +188,7 @@ fn assert_paste_destination_matrix(paths: bool) {
                 }
             }
             app.interaction.broadcast = BroadcastState::On { scope, source_pane: source };
-            app.frontmost_window = Some(missing_window);
+            app.registry.frontmost_window = Some(missing_window);
             app.__test_enable_pty_write_log();
             app.__test_set_memory_clipboard("p'aste");
             let kind = app.kind_for(source_window);
@@ -242,7 +248,7 @@ fn assert_paste_destination_matrix(paths: bool) {
                             .filter(|(pane, _)| *pane != missing)
                             .collect::<Vec<_>>()
                     );
-                    assert_eq!(app.frontmost_window, Some(missing_window));
+                    assert_eq!(app.registry.frontmost_window, Some(missing_window));
                 }
             }
         }
@@ -266,7 +272,7 @@ fn real_pty_paste_cmd_refusal_keeps_other_destinations() {
     let (source_window, source) = windows[0];
     let (_, receiver) = windows[1];
     let peer_window = app.__test_seed_child_window(&["PowerShell", "missing"]);
-    let peer = app.windows[&peer_window].tab_states[0].active_pane;
+    let peer = app.registry.windows[&peer_window].tab_states[0].active_pane;
     phase(peer, "spawn-begin");
     let pty = PtyHandle::spawn_with_args(
         "powershell.exe",
@@ -276,7 +282,8 @@ fn real_pty_paste_cmd_refusal_keeps_other_destinations() {
     )
     .expect("PowerShell input PTY");
     record_process(pty.pid().unwrap(), true);
-    app.windows.get_mut(&peer_window).unwrap().panes.get_mut(&peer).unwrap().pty = Some(pty);
+    app.registry.windows.get_mut(&peer_window).unwrap().panes.get_mut(&peer).unwrap().pty =
+        Some(pty);
     phase(peer, "spawn-end");
     app.interaction.broadcast =
         BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
@@ -306,10 +313,10 @@ fn paste_oversized_destination_does_not_stop_peers() {
     use std::collections::BTreeSet;
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let source = app.__test_seed_tab("source");
-    let source_window = app.main_window_id.unwrap();
+    let source_window = app.registry.main_window_id.unwrap();
     let receiver_window = app.__test_seed_child_window(&["receiver", "peer"]);
-    let receiver = app.windows[&receiver_window].tab_states[0].active_pane;
-    let peer = app.windows[&receiver_window].tab_states[1].active_pane;
+    let receiver = app.registry.windows[&receiver_window].tab_states[0].active_pane;
+    let peer = app.registry.windows[&receiver_window].tab_states[1].active_pane;
     let payload = "x".repeat(sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES);
     app.__test_set_memory_clipboard(&payload);
     app.__test_enable_pty_write_log();
@@ -355,7 +362,7 @@ fn real_pty_windows_path_drop_is_atomic_and_never_adds_enter() {
     }
     let (mut app, windows) = input_test_windows();
     let powershell_window = app.__test_seed_child_window(&["PowerShell"]);
-    let powershell_pane = app.windows[&powershell_window].tab_states[0].active_pane;
+    let powershell_pane = app.registry.windows[&powershell_window].tab_states[0].active_pane;
     phase(powershell_pane, "spawn-begin");
     let pty = PtyHandle::spawn_with_args(
         "powershell.exe",
@@ -365,8 +372,14 @@ fn real_pty_windows_path_drop_is_atomic_and_never_adds_enter() {
     )
     .expect("PowerShell drop PTY");
     record_process(pty.pid().unwrap(), true);
-    app.windows.get_mut(&powershell_window).unwrap().panes.get_mut(&powershell_pane).unwrap().pty =
-        Some(pty);
+    app.registry
+        .windows
+        .get_mut(&powershell_window)
+        .unwrap()
+        .panes
+        .get_mut(&powershell_pane)
+        .unwrap()
+        .pty = Some(pty);
     phase(powershell_pane, "spawn-end");
     let valid = PathBuf::from(r"C:\private\first file.txt");
     let second = PathBuf::from(r"C:\private\it's.txt");
@@ -375,10 +388,10 @@ fn real_pty_windows_path_drop_is_atomic_and_never_adds_enter() {
     let submitted = PtySubmissions::start();
     for (window, pane) in windows.into_iter().chain([(powershell_window, powershell_pane)]) {
         for bracketed in [false, true] {
-            for state in app.windows.values_mut() {
+            for state in app.registry.windows.values_mut() {
                 state.notification = None;
             }
-            app.frontmost_window =
+            app.registry.frontmost_window =
                 Some(if window == windows[0].0 { windows[1].0 } else { windows[0].0 });
             app.pane_by_id(pane).unwrap().parser.lock().advance(if bracketed {
                 b"\x1b[?2004h"
@@ -391,20 +404,20 @@ fn real_pty_windows_path_drop_is_atomic_and_never_adds_enter() {
                 submitted.take().is_empty(),
                 "a valid prefix must never escape whole-list validation"
             );
-            let notice = app.windows[&window].notification.as_ref().unwrap();
+            let notice = app.registry.windows[&window].notification.as_ref().unwrap();
             assert_eq!(
                 notice.message,
                 "Paste refused for 1 of 1 destinations: NonUnicodePath (destinations: 1)"
             );
             assert_eq!(notice.level, sonicterm_ui::overlays::NotificationLevel::Warning);
             assert_eq!(
-                app.windows.values().filter(|state| state.notification.is_some()).count(),
+                app.registry.windows.values().filter(|state| state.notification.is_some()).count(),
                 1
             );
             assert!(!notice.message.contains("private"));
             assert!(!notice.message.contains("first file.txt"));
             assert!(!notice.message.contains('\u{fffd}'));
-            app.windows.get_mut(&window).unwrap().notification = None;
+            app.registry.windows.get_mut(&window).unwrap().notification = None;
             app.wait_for_input_queues();
             app.paste_file_paths_in_window(window, vec![valid.clone(), second.clone()]);
             let paths = if pane == powershell_pane {
@@ -422,7 +435,7 @@ fn real_pty_windows_path_drop_is_atomic_and_never_adds_enter() {
             assert!(writes
                 .iter()
                 .all(|(_, bytes)| !bytes.ends_with(b"\r") && !bytes.ends_with(b"\n")));
-            assert!(app.windows.values().all(|state| state.notification.is_none()));
+            assert!(app.registry.windows.values().all(|state| state.notification.is_none()));
         }
     }
 }
@@ -440,18 +453,21 @@ fn real_pty_paste_notice_counts_cmd_refusal() {
     }
     let (mut app, windows) = input_test_windows();
     let (source_window, _) = windows[1];
-    app.frontmost_window = Some(windows[0].0);
+    app.registry.frontmost_window = Some(windows[0].0);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     app.paste_file_paths_in_window(source_window, vec![r"C:\tmp\100%.txt".into()]);
     assert!(submitted.take().is_empty());
-    let notice = app.windows[&source_window].notification.as_ref().unwrap();
+    let notice = app.registry.windows[&source_window].notification.as_ref().unwrap();
     assert_eq!(
         notice.message,
         "Paste refused for 1 of 1 destinations: CmdUnsafeCharacter (destinations: 1)"
     );
     assert_eq!(notice.level, sonicterm_ui::overlays::NotificationLevel::Warning);
-    assert_eq!(app.windows.values().filter(|window| window.notification.is_some()).count(), 1);
+    assert_eq!(
+        app.registry.windows.values().filter(|window| window.notification.is_some()).count(),
+        1
+    );
     assert!(!notice.message.contains("100%"));
     assert!(!notice.message.contains(r"C:\tmp"));
 }
@@ -464,10 +480,10 @@ fn paste_notice_counts_partial_too_large() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let main = app.__test_seed_tab("main");
     let source_window = app.__test_seed_child_window(&["source", "guarded"]);
-    let source = app.windows[&source_window].tab_states
-        [app.windows[&source_window].tabs.active_index()]
+    let source = app.registry.windows[&source_window].tab_states
+        [app.registry.windows[&source_window].tabs.active_index()]
     .active_pane;
-    let guarded = app.windows[&source_window]
+    let guarded = app.registry.windows[&source_window]
         .tab_states
         .iter()
         .find(|tab| tab.active_pane != source)
@@ -483,12 +499,15 @@ fn paste_notice_counts_partial_too_large() {
     let writes = app.__test_drain_pty_writes();
     assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<Vec<_>>(), [source, main]);
     assert!(writes.iter().all(|(_, bytes)| bytes == text.as_bytes()));
-    let notice = app.windows[&source_window].notification.as_ref().unwrap();
+    let notice = app.registry.windows[&source_window].notification.as_ref().unwrap();
     assert_eq!(notice.message, format!(
         "Paste refused for 1 of 3 destinations: TooLarge (destinations: 1, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
         MAX_PTY_INPUT_MESSAGE_BYTES + 12));
     assert_eq!(notice.level, sonicterm_ui::overlays::NotificationLevel::Warning);
-    assert_eq!(app.windows.values().filter(|window| window.notification.is_some()).count(), 1);
+    assert_eq!(
+        app.registry.windows.values().filter(|window| window.notification.is_some()).count(),
+        1
+    );
     assert!(!notice.message.contains("xxxx"));
 }
 
@@ -508,23 +527,28 @@ fn real_pty_paste_refusal_notice_is_source_owned() {
     let (mut app, windows) = input_test_windows();
     let submitted = PtySubmissions::start();
     for (source_window, source) in windows {
-        for state in app.windows.values_mut() {
+        for state in app.registry.windows.values_mut() {
             state.notification = None;
         }
-        app.frontmost_window = Some(windows[2].0);
+        app.registry.frontmost_window = Some(windows[2].0);
         app.interaction.broadcast =
             BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
         app.wait_for_input_queues();
         app.paste_file_paths_in_window(source_window, vec!["private\nfile.txt".into()]);
         assert!(submitted.take().is_empty());
-        let notice =
-            app.windows[&source_window].notification.as_ref().expect("source refusal notice");
+        let notice = app.registry.windows[&source_window]
+            .notification
+            .as_ref()
+            .expect("source refusal notice");
         assert_eq!(
             notice.message,
             "Paste refused for 3 of 3 destinations: ControlCharacter (destinations: 3)"
         );
         assert_eq!(notice.level, sonicterm_ui::overlays::NotificationLevel::Warning);
-        assert_eq!(app.windows.values().filter(|state| state.notification.is_some()).count(), 1);
+        assert_eq!(
+            app.registry.windows.values().filter(|state| state.notification.is_some()).count(),
+            1
+        );
         assert!(!notice.message.contains("private"));
         assert!(!notice.message.contains("file.txt"));
     }
@@ -546,22 +570,26 @@ fn real_pty_paste_refusal_notice_groups_kinds_counts_and_sizes() {
     let (mut app, windows) = input_test_windows();
     let (source_window, source) = windows[1];
     let missing_window = app.__test_seed_child_window(&["plain", "guarded", "guarded again"]);
-    for tab in &app.windows[&missing_window].tab_states[1..] {
+    for tab in &app.registry.windows[&missing_window].tab_states[1..] {
         app.pane_by_id(tab.active_pane).unwrap().parser.lock().advance(b"\x1b[?2004h");
     }
     app.interaction.broadcast =
         BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
-    app.frontmost_window = Some(windows[0].0);
+    app.registry.frontmost_window = Some(windows[0].0);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     let path = format!("%{}", "x".repeat(MAX_PTY_INPUT_MESSAGE_BYTES));
     app.paste_file_paths_in_window(source_window, vec![path.into()]);
     assert!(submitted.take().is_empty());
-    let notice = app.windows[&source_window].notification.as_ref().expect("mixed refusal notice");
+    let notice =
+        app.registry.windows[&source_window].notification.as_ref().expect("mixed refusal notice");
     assert_eq!(notice.message, format!(
         "Paste refused for 6 of 6 destinations: CmdUnsafeCharacter (destinations: 3); TooLarge (destinations: 1, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes); TooLarge (destinations: 2, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
         MAX_PTY_INPUT_MESSAGE_BYTES + 3, MAX_PTY_INPUT_MESSAGE_BYTES + 15));
-    assert_eq!(app.windows.values().filter(|state| state.notification.is_some()).count(), 1);
+    assert_eq!(
+        app.registry.windows.values().filter(|state| state.notification.is_some()).count(),
+        1
+    );
 }
 
 /// Oversized clipboard text uses the same count-and-size notice, and a successful paste leaves an existing notice alone.
@@ -580,7 +608,7 @@ fn paste_refusal_notice_handles_clipboard_and_success() {
     assert_eq!(message, format!(
         "Paste refused for 2 of 2 destinations: TooLarge (destinations: 2, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
         MAX_PTY_INPUT_MESSAGE_BYTES + 1));
-    assert!(app.windows[&child].notification.is_none());
+    assert!(app.registry.windows[&child].notification.is_none());
     app.__test_set_memory_clipboard("ok");
     app.paste_clipboard_for_kind(FrontmostKind::Main);
     assert_eq!(app.main().unwrap().notification.as_ref().unwrap().message, message);
@@ -591,9 +619,9 @@ fn paste_refusal_notice_handles_clipboard_and_success() {
 fn winit_drop_collection_keeps_window_batches_atomic() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let main_pane = app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
-    let child_pane = app.windows[&child].tab_states[0].active_pane;
+    let child_pane = app.registry.windows[&child].tab_states[0].active_pane;
     app.__test_enable_pty_write_log();
     for window in [main, child] {
         app.collect_winit_file_drop(window, "a".into());
@@ -621,26 +649,28 @@ fn winit_drop_collection_consumes_readonly_and_closed_sources() {
     use sonicterm_ui::copy_mode::CopyModeState;
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     app.__test_enable_pty_write_log();
-    app.windows.get_mut(&main).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+    app.registry.windows.get_mut(&main).unwrap().copy_mode =
+        Some(CopyModeState::read_only_at((0, 0)));
     app.collect_winit_file_drop(main, "arrival-readonly".into());
-    app.windows.get_mut(&main).unwrap().copy_mode = None;
+    app.registry.windows.get_mut(&main).unwrap().copy_mode = None;
     app.drain_winit_file_drops();
     assert!(app.__test_drain_pty_writes().is_empty());
     app.collect_winit_file_drop(main, "drain-readonly".into());
-    app.windows.get_mut(&main).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+    app.registry.windows.get_mut(&main).unwrap().copy_mode =
+        Some(CopyModeState::read_only_at((0, 0)));
     app.drain_winit_file_drops();
     assert!(app.__test_drain_pty_writes().is_empty());
     assert!(app.interaction.pending_winit_file_drops.is_empty());
     assert!(app.main().unwrap().notification.is_none());
 
     // Main must be writable so an incorrect closed-child fallback cannot hide behind READONLY admission.
-    app.windows.get_mut(&main).unwrap().copy_mode = None;
+    app.registry.windows.get_mut(&main).unwrap().copy_mode = None;
     app.collect_winit_file_drop(child, "closed-child".into());
     assert!(app.close_child_window(child));
-    app.frontmost_window = Some(main);
+    app.registry.frontmost_window = Some(main);
     app.drain_winit_file_drops();
     let writes = app.__test_drain_pty_writes();
     assert!(writes.is_empty(), "closed-child drop reached writable main: {writes:?}");
@@ -653,18 +683,18 @@ fn native_file_drop_keeps_destination_through_focus_changes_and_closure() {
     // A captured native destination must not paste into a later frontmost window or main fallback.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     app.__test_enable_pty_write_log();
     for (owner, other) in [(main, child), (child, main)] {
-        app.frontmost_window = Some(other);
-        let pane_id = app.windows[&owner].tab_states[0].active_pane;
+        app.registry.frontmost_window = Some(other);
+        let pane_id = app.registry.windows[&owner].tab_states[0].active_pane;
         app.paste_file_paths_in_window(owner, vec![std::path::PathBuf::from("native drop.txt")]);
         assert_eq!(app.__test_drain_pty_writes(), vec![(pane_id, b"'native drop.txt'".to_vec())]);
-        assert_eq!(app.frontmost_window, Some(other));
+        assert_eq!(app.registry.frontmost_window, Some(other));
     }
     assert!(app.close_child_window(child));
-    app.frontmost_window = Some(main);
+    app.registry.frontmost_window = Some(main);
     app.paste_file_paths_in_window(child, vec![std::path::PathBuf::from("must-not-type")]);
     assert!(app.__test_drain_pty_writes().is_empty());
 }
@@ -800,7 +830,7 @@ fn run_on_native_event_loop(case: fn(&ActiveEventLoop)) {
 fn attach_native_main_renderer(app: &mut App, event_loop: &ActiveEventLoop) {
     use sonicterm_gpu::core::{RendererSettings, SurfaceAppearance};
     use winit::dpi::PhysicalSize;
-    let main = app.main_window_id.expect("seeded main window");
+    let main = app.registry.main_window_id.expect("seeded main window");
     let native = Arc::new(
         event_loop
             .create_window(
@@ -852,14 +882,15 @@ fn new_window_shares_the_main_renderer_device() {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.__test_seed_tab("main");
         attach_native_main_renderer(&mut app, event_loop);
-        let main = app.main_window_id.unwrap();
+        let main = app.registry.main_window_id.unwrap();
         let request = app.window_request(None);
         app.create_new_terminal_window(event_loop, request);
         // Retire native PTYs before an identity assertion can unwind; renderer ownership stays intact.
         let settled = app.finish_session();
-        let added: Vec<WindowId> = app.windows.keys().copied().filter(|id| *id != main).collect();
+        let added: Vec<WindowId> =
+            app.registry.windows.keys().copied().filter(|id| *id != main).collect();
         assert_eq!(added.len(), 1, "New Window must add exactly one window");
-        let child = app.windows[&added[0]].renderer.as_ref().expect("New Window renderer");
+        let child = app.registry.windows[&added[0]].renderer.as_ref().expect("New Window renderer");
         assert!(
             child.shares_device_with(app.main_renderer().unwrap()),
             "New Window opened a second GPU device instead of sharing the main one"
@@ -879,14 +910,14 @@ fn new_window_without_any_renderer_opens_its_own_device() {
     }
     run_on_native_event_loop(|event_loop| {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-        assert!(app.windows.is_empty() && app.warm_window_pool.is_empty());
+        assert!(app.registry.windows.is_empty() && app.registry.warm_window_pool.is_empty());
         assert!(app.shared_gpu_context().is_none(), "the fixture must start with no device");
         let request = app.window_request(None);
         app.create_new_terminal_window(event_loop, request);
         // Settlement closes the shell without removing the window or its shareable renderer.
         let settled = app.finish_session();
-        assert_eq!(app.windows.len(), 1, "New Window must add exactly one window");
-        let state = app.windows.values().next().unwrap();
+        assert_eq!(app.registry.windows.len(), 1, "New Window must add exactly one window");
+        let state = app.registry.windows.values().next().unwrap();
         assert!(state.window.is_some() && state.renderer.is_some());
         assert!(app.shared_gpu_context().is_some(), "the new device must be shareable");
         assert!(settled, "native PTY teardown did not settle");
@@ -923,55 +954,4 @@ fn scrolled_view_keeps_its_text_when_full_history_evicts_a_row() {
     let (after_top, after_text) = top_text(&app);
     assert_eq!(after_text, before_text, "the scrolled view must keep its history row");
     assert_eq!(after_top, before_top - 1, "eviction shifts the index, not the text");
-}
-
-/// Quick select labels the pane's displayed viewport: scrolled back, it hints only the history URL
-/// on screen, at its scrollback-absolute row, starts its cursor at the view's top, and scans one row
-/// per displayed row; on the live view it hints only the live screen's URL.
-#[test]
-fn quick_select_labels_the_displayed_viewport() {
-    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.force_frame_counters_on().expect("no window exists yet");
-    let window = app.__test_seed_child_window(&["quick select"]);
-    let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(30, 2);
-    let output = b"old http://h.co\r\nplain\r\nmid https://m.io\r\nlive http://l.co\r\n";
-    assert!(app.__test_advance_child_pane_parser(window, pane, output));
-    let history_rows = app.windows[&window].panes[&pane].parser.lock().grid().scrollback_len();
-    assert!(history_rows >= 3, "the fixture scrolls rows into history");
-
-    app.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().pin_viewport_top(Some(1));
-    app.enter_quick_select_for_kind(FrontmostKind::Child(window));
-    let state = app.windows[&window].copy_mode.clone().expect("quick select entered");
-    let hints = state.quick_select.expect("hints").hints;
-    let seen: Vec<(usize, usize, &str)> =
-        hints.iter().map(|hint| (hint.row, hint.col_start, hint.text.as_str())).collect();
-    assert_eq!(seen, vec![(2, 4, "https://m.io")]);
-    assert_eq!(state.cursor, (0, 1), "the cursor starts at the displayed top");
-    let rows_scanned = app.frame_counters.as_ref().unwrap().hover.quick_select_rows_scanned;
-    assert_eq!(rows_scanned, 2, "one scanned row per displayed row");
-
-    app.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().pin_viewport_top(None);
-    app.enter_quick_select_for_kind(FrontmostKind::Child(window));
-    let hints = app.windows[&window].copy_mode.clone().unwrap().quick_select.unwrap().hints;
-    assert!(hints.iter().all(|hint| hint.row >= history_rows), "{hints:?}");
-    assert!(!hints.iter().any(|hint| hint.text == "https://m.io"));
-}
-
-/// The quick-select rows counter records the rows the scan read: a viewport whose first 27 rows
-/// hold URLs ends the scan at the 27th, so the 13 rows below it are never visited or counted.
-#[test]
-fn quick_select_counts_only_the_rows_it_visited() {
-    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.force_frame_counters_on().expect("no window exists yet");
-    let window = app.__test_seed_child_window(&["quick select rows"]);
-    let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(20, 40);
-    let output: String = (1..=30).map(|row| format!("\x1b[{row};1Hhttp://a{row}.com")).collect();
-    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-    app.enter_quick_select_for_kind(FrontmostKind::Child(window));
-    let hints = app.windows[&window].copy_mode.clone().unwrap().quick_select.unwrap().hints;
-    assert_eq!(hints.len(), 26);
-    let rows_scanned = app.frame_counters.as_ref().unwrap().hover.quick_select_rows_scanned;
-    assert_eq!(rows_scanned, 27, "the scan stops at the 27th URL's row of the 40 displayed");
 }

@@ -12,10 +12,11 @@ impl App {
             return Some(recovery.context());
         }
         let windows = self
+            .registry
             .windows
             .iter()
             .filter_map(|(id, state)| state.renderer.as_ref().map(|renderer| (*id, renderer)));
-        let warm = self.warm_window_pool.iter().map(|pooled| &pooled.renderer);
+        let warm = self.registry.warm_window_pool.iter().map(|pooled| &pooled.renderer);
         select_shared_renderer(self.main_renderer(), windows, warm).map(GpuRenderer::shared_context)
     }
 }

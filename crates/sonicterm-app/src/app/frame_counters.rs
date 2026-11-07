@@ -834,7 +834,7 @@ impl super::App {
             return;
         };
         if let Some((id, state)) =
-            window.and_then(|(id, _)| self.windows.get_mut(&id).map(|state| (id, state)))
+            window.and_then(|(id, _)| self.registry.windows.get_mut(&id).map(|state| (id, state)))
         {
             let renderer = state.renderer.as_ref();
             if let Some(counters) = state.redraw.frame_counters.as_deref_mut() {
@@ -876,7 +876,7 @@ impl super::App {
         };
         app.finish_closing();
         let now = Instant::now();
-        for (id, window) in &mut self.windows {
+        for (id, window) in &mut self.registry.windows {
             if let Some(renderer) = window.renderer.as_mut() {
                 // the App is exiting, so each renderer settles its growth episodes before the read.
                 renderer.finalize_frame_stats();

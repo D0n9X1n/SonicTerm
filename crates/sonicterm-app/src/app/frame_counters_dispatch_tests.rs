@@ -149,7 +149,7 @@ fn native_redraw_requests_count_per_window_inside_a_counting_dispatch() {
     let mut app = app_under_filter("warn");
     app.force_frame_counters_on().unwrap();
     let child = app.__test_seed_child_window(&["only"]);
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     note_native_request(main);
     {
         let _dispatch = app.frame_dispatch_scope();
@@ -181,7 +181,7 @@ fn with_the_gate_off_a_native_request_writes_nothing() {
     // A non-counting App's dispatch opens no tally, so the request only reaches winit.
     let mut app = app_under_filter("warn");
     app.__test_synthetic_main();
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     {
         let _dispatch = app.frame_dispatch_scope();
         note_native_request(main);
@@ -213,7 +213,7 @@ fn repeated_requesting_dispatches_reuse_the_tally_storage() {
     let mut app = app_under_filter("warn");
     app.force_frame_counters_on().unwrap();
     app.__test_synthetic_main();
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     for _ in 0..3 {
         let _dispatch = app.frame_dispatch_scope();
         note_native_request(main);
@@ -234,7 +234,7 @@ fn requests_for_unregistered_windows_share_one_bounded_counter() {
     let mut app = app_under_filter("warn");
     app.force_frame_counters_on().unwrap();
     app.__test_synthetic_main();
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     let abandoned = |index: u64| winit::window::WindowId::from(u64::MAX / 2 + index);
     for round in 0..50 {
         let _dispatch = app.frame_dispatch_scope();

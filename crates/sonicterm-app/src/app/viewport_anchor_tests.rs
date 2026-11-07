@@ -304,15 +304,15 @@ fn transferred_tab_keeps_its_pinned_row_after_activation() {
     let pane_id = app.__test_seed_tab("moved");
     app.__test_seed_tab("remaining");
     let child = app.__test_seed_child_window(&["destination"]);
-    app.windows.get_mut(&child).unwrap().test_pane_viewport =
+    app.registry.windows.get_mut(&child).unwrap().test_pane_viewport =
         Some((sonicterm_ui::pane::Rect { x: 0.0, y: 0.0, w: 200.0, h: 60.0 }, 10.0, 20.0));
     seed_history(&app, pane_id, 10, 0..18);
     app.scroll_pane(pane_id, -6);
     let pinned_text = pane_text_at(&app, pane_id, 4);
     app.transfer_tab(None, 0, Some(child), 1).expect("tab transfer");
     app.__test_invoke_activate_tab_in_child(child, 1);
-    assert_eq!(app.windows[&child].tabs.active_index(), 1);
-    assert_eq!(app.windows[&child].tab_states[1].active_pane, pane_id);
+    assert_eq!(app.registry.windows[&child].tabs.active_index(), 1);
+    assert_eq!(app.registry.windows[&child].tab_states[1].active_pane, pane_id);
     let parser = app.pane_by_id(pane_id).unwrap().parser.clone();
     // Whatever size the destination gives the pane, print until two more rows are evicted.
     let start = parser.lock().grid().scrollback_evicted();
@@ -323,7 +323,7 @@ fn transferred_tab_keeps_its_pinned_row_after_activation() {
     }
     let evicted = parser.lock().grid().scrollback_evicted();
     assert_eq!(evicted, 8, "the pin was measured at 6 evictions and output evicted two more");
-    let destination = &app.windows[&child];
+    let destination = &app.registry.windows[&child];
     let (view_top, ..) = destination.viewport_row_selection_state(0).expect("active pane");
     assert_eq!(view_top, 2);
     assert_eq!(pane_text_at(&app, pane_id, view_top), pinned_text);
@@ -339,10 +339,10 @@ fn one_reconcile_pass_feeds_frame_selection_search_and_scrollbar_one_top() {
         let window = if child {
             app.__test_seed_child_window(&["child"])
         } else {
-            app.main_window_id.unwrap()
+            app.registry.main_window_id.unwrap()
         };
-        let pane_id = app.windows[&window].tab_states[0].active_pane;
-        let parser = app.windows[&window].panes[&pane_id].parser.clone();
+        let pane_id = app.registry.windows[&window].tab_states[0].active_pane;
+        let parser = app.registry.windows[&window].panes[&pane_id].parser.clone();
         {
             let mut parser = parser.lock();
             parser.resize(20, 3);
@@ -352,20 +352,20 @@ fn one_reconcile_pass_feeds_frame_selection_search_and_scrollbar_one_top() {
                 parser.advance(format!("{word} {line:03}\r\n").as_bytes());
             }
         }
-        let pane = app.windows.get_mut(&window).unwrap().panes.get_mut(&pane_id).unwrap();
+        let pane = app.registry.windows.get_mut(&window).unwrap().panes.get_mut(&pane_id).unwrap();
         pane.pin_viewport_top(Some(4));
         for line in 18..21u32 {
             parser.lock().advance(format!("other {line:03}\r\n").as_bytes());
         }
         let frame = {
             let held = parser.lock();
-            let state = app.windows.get_mut(&window).unwrap();
+            let state = app.registry.windows.get_mut(&window).unwrap();
             reconcile_held_viewports(&mut state.panes, [(pane_id, &*held)], pane_id)
         };
         assert_eq!(frame.of(pane_id), Some(1), "per-pane frame projection");
         assert_eq!(frame.active, Some(1), "window frame projection");
-        assert_eq!(app.windows[&window].panes[&pane_id].viewport_top_abs, Some(1));
-        let state = &app.windows[&window];
+        assert_eq!(app.registry.windows[&window].panes[&pane_id].viewport_top_abs, Some(1));
+        let state = &app.registry.windows[&window];
         let (view_top, ..) = state.viewport_row_selection_state(0).expect("active pane");
         assert_eq!(Some(view_top), frame.active, "hit-testing reads the frame's top");
         if child {
@@ -374,7 +374,7 @@ fn one_reconcile_pass_feeds_frame_selection_search_and_scrollbar_one_top() {
             app.open_search();
         }
         assert!(app.search_handle_ime_commit(window, "needle"));
-        let search = app.windows[&window].tab_states[0].search.as_ref().expect("search");
+        let search = app.registry.windows[&window].tab_states[0].search.as_ref().expect("search");
         let current = search.current.map(|index| search.matches[index].row);
         // Needles sit at rows 0, 3 and 6; the rebased view shows rows 1-3, a stale one 4-6.
         assert_eq!(current, Some(3), "search anchors in the rebased viewport");
@@ -384,7 +384,7 @@ fn one_reconcile_pass_feeds_frame_selection_search_and_scrollbar_one_top() {
             app.scrollbar_track_page(false);
         }
         // A page up from row 1 reaches row 0; one from the stale row 4 would stop at row 1.
-        assert_eq!(app.windows[&window].panes[&pane_id].viewport_top_abs, Some(0));
+        assert_eq!(app.registry.windows[&window].panes[&pane_id].viewport_top_abs, Some(0));
     }
 }
 

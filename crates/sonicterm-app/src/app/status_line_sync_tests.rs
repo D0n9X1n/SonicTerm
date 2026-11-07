@@ -148,11 +148,12 @@ fn retiring_a_pane_forgets_its_status_records() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.force_frame_counters_on().expect("no window or pane exists yet");
     let pane_id = app.__test_seed_tab("source");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     app.note_clip_write(pane_id, 5, true);
     app.status_line.history_ack.insert(pane_id, 7);
     app.status_line.size_seen.insert(pane_id, 1);
-    let pane = app.windows.get_mut(&main_id).and_then(|window| window.remove_pane(pane_id));
+    let pane =
+        app.registry.windows.get_mut(&main_id).and_then(|window| window.remove_pane(pane_id));
     app.retire_pane(pane.expect("the seeded pane"));
     let _ = app.sync_status_line(Instant::now());
     assert_eq!(full_passes(&app), 0, "the strip is hidden, so the prune runs without the pass");
@@ -169,18 +170,18 @@ fn the_link_segment_shows_only_while_the_open_modifier_is_held() {
     let mut app = app_with_strip(true);
     let window_id = app.__test_seed_child_window(&["child"]);
     seed_hovered_url(&mut app, window_id);
-    let hidden = strip_link(&app.windows[&window_id], None, &app.i18n);
+    let hidden = strip_link(&app.registry.windows[&window_id], None, &app.i18n);
     assert_eq!(hidden, None, "a plain hover shows no link");
-    app.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
-    let shown = strip_link(&app.windows[&window_id], None, &app.i18n);
+    app.registry.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
+    let shown = strip_link(&app.registry.windows[&window_id], None, &app.i18n);
     assert!(shown.is_some(), "holding the open modifier shows the hovered link");
     let other = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::CONTROL
     } else {
         winit::keyboard::ModifiersState::SUPER
     };
-    app.windows.get_mut(&window_id).unwrap().modifiers = other;
-    let other_shown = strip_link(&app.windows[&window_id], Some(&shown), &app.i18n);
+    app.registry.windows.get_mut(&window_id).unwrap().modifiers = other;
+    let other_shown = strip_link(&app.registry.windows[&window_id], Some(&shown), &app.i18n);
     assert_eq!(other_shown, None, "only the platform's open modifier shows the link");
 }
 
@@ -227,17 +228,17 @@ fn a_hover_an_event_clears_keeps_the_link_until_a_frame_resolves_it() {
     let mut app = app_with_strip(true);
     let window_id = app.__test_seed_child_window(&["child"]);
     seed_hovered_url(&mut app, window_id);
-    app.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
-    let shown = strip_link(&app.windows[&window_id], None, &app.i18n);
+    app.registry.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
+    let shown = strip_link(&app.registry.windows[&window_id], None, &app.i18n);
     assert!(shown.is_some(), "a resolved hover shows its link");
-    app.windows.get_mut(&window_id).unwrap().invalidate_path_hover();
-    assert!(app.windows[&window_id].hover_unresolved);
-    let held = strip_link(&app.windows[&window_id], Some(&shown), &app.i18n);
+    app.registry.windows.get_mut(&window_id).unwrap().invalidate_path_hover();
+    assert!(app.registry.windows[&window_id].hover_unresolved);
+    let held = strip_link(&app.registry.windows[&window_id], Some(&shown), &app.i18n);
     assert_eq!(held, shown, "a cleared hover the next frame re-detects keeps the strip unchanged");
     // The headless window has no grid under the pointer, so this lookup resolves to no target.
     app.refresh_target_hover(window_id);
-    assert!(!app.windows[&window_id].hover_unresolved);
-    let resolved = strip_link(&app.windows[&window_id], Some(&shown), &app.i18n);
+    assert!(!app.registry.windows[&window_id].hover_unresolved);
+    let resolved = strip_link(&app.registry.windows[&window_id], Some(&shown), &app.i18n);
     assert_eq!(resolved, None, "a frame that finds no target hides the link");
 }
 
@@ -373,25 +374,26 @@ fn every_ask_in_one_dispatch_reaches_a_window_once() {
     use crate::app::window_state::window_redraw_requests_for as asks;
     let mut app = app_with_strip(true);
     let child = app.__test_seed_child_window(&["work"]);
-    let main = app.main_window_id.expect("the seed made a main window");
+    let main = app.registry.main_window_id.expect("the seed made a main window");
     app.open_status_segments(Some(child), Some(StatusSegmentId::Cpu));
-    let before = (asks(&app.windows[&main]), asks(&app.windows[&child]));
+    let before = (asks(&app.registry.windows[&main]), asks(&app.registry.windows[&child]));
     {
         let _dispatch = app.frame_dispatch_scope();
-        let App { windows, dispatch_redraws, .. } = &mut app;
+        let App { registry: crate::app::WindowRegistry { windows, .. }, dispatch_redraws, .. } =
+            &mut app;
         // The strip pass asks twice when one pass both shows the strip and changes its pixels.
         dispatch_redraws.request(child, &windows[&child]);
         dispatch_redraws.request(child, &windows[&child]);
         app.request_checklist_redraw();
         app.finish_window_key(child);
     }
-    assert_eq!(asks(&app.windows[&child]) - before.1, 1, "one ask in one dispatch");
-    assert_eq!(asks(&app.windows[&main]), before.0, "the other window is not asked");
+    assert_eq!(asks(&app.registry.windows[&child]) - before.1, 1, "one ask in one dispatch");
+    assert_eq!(asks(&app.registry.windows[&main]), before.0, "the other window is not asked");
     {
         let _dispatch = app.frame_dispatch_scope();
         app.request_checklist_redraw();
     }
-    assert_eq!(asks(&app.windows[&child]) - before.1, 2, "a new dispatch asks again");
+    assert_eq!(asks(&app.registry.windows[&child]) - before.1, 2, "a new dispatch asks again");
 }
 
 #[test]
@@ -459,11 +461,11 @@ fn a_right_press_routes_through_the_shared_dispatcher_in_main_and_torn_out_windo
     };
     let mut app = app_with_strip(true);
     let child = app.__test_seed_child_window(&["torn"]);
-    let main = app.main_window_id.expect("the seed made a main window");
+    let main = app.registry.main_window_id.expect("the seed made a main window");
     app.__test_enable_pty_write_log();
     for window_id in [main, child] {
         {
-            let window = app.windows.get_mut(&window_id).unwrap();
+            let window = app.registry.windows.get_mut(&window_id).unwrap();
             window.status_strip = Some(strip_over_top());
             window.cursor_pos = (50.0, 10.0);
         }
@@ -473,7 +475,10 @@ fn a_right_press_routes_through_the_shared_dispatcher_in_main_and_torn_out_windo
             Some(Kind::Segment(StatusSegmentId::Mem)),
             "the pressed row is highlighted"
         );
-        assert_eq!(app.interaction.palette_attached_window.or(app.main_window_id), Some(window_id));
+        assert_eq!(
+            app.interaction.palette_attached_window.or(app.registry.main_window_id),
+            Some(window_id)
+        );
         let release = app.route_shared_pointer(window_id, &right(ElementState::Released));
         assert_eq!(release, Some(false), "the release is consumed too");
         app.interaction.command_palette.close();
@@ -497,7 +502,7 @@ fn a_right_press_in_the_strip_opens_the_checklist_on_that_segment() {
     use sonicterm_ui::command_palette::StatusSegmentRowKind as Kind;
     let mut app = app_with_strip(true);
     let child = app.__test_seed_child_window(&["work"]);
-    app.windows.get_mut(&child).unwrap().status_strip = Some(strip_over_top());
+    app.registry.windows.get_mut(&child).unwrap().status_strip = Some(strip_over_top());
     app.__test_enable_pty_write_log();
     assert!(!app.right_press_status_line(child, 50.0, 200.0), "below the band");
     assert!(!app.interaction.command_palette.is_open());
@@ -561,7 +566,7 @@ fn main_window_strip_consumes_press_and_wheel() {
     use winit::event::MouseScrollDelta;
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("main");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     app.test_viewport_override =
         Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
     app.__test_enable_pty_write_log();
@@ -598,7 +603,7 @@ fn torn_out_window_strip_consumes_press_and_wheel() {
     let history = "line\r\n".repeat(300);
     assert!(app.__test_advance_child_pane_parser(child, pane_id, history.as_bytes()));
     app.__test_enable_pty_write_log();
-    let window = app.windows.get_mut(&child).unwrap();
+    let window = app.registry.windows.get_mut(&child).unwrap();
     window.cursor_pos = (25.0, 15.0);
     window.status_strip = Some(strip_over_top());
     assert!(app.handle_child_left_press_chrome(child), "a press in the strip is consumed");
@@ -606,7 +611,7 @@ fn torn_out_window_strip_consumes_press_and_wheel() {
     let scrollbar = app.config.appearance.scrollbar;
     let wheel = |app: &mut App| {
         App::handle_child_mouse_wheel(
-            app.windows.get_mut(&child).unwrap(),
+            app.registry.windows.get_mut(&child).unwrap(),
             MouseScrollDelta::LineDelta(0.0, 1.0),
             &None,
             scrollbar,
@@ -614,15 +619,15 @@ fn torn_out_window_strip_consumes_press_and_wheel() {
     };
     wheel(&mut app);
     assert_eq!(
-        app.windows[&child].panes[&pane_id].viewport_top_abs, None,
+        app.registry.windows[&child].panes[&pane_id].viewport_top_abs, None,
         "no scroll over the strip"
     );
     assert_eq!(app.__test_pty_write_log(), Vec::new(), "nothing reaches the PTY");
-    app.windows.get_mut(&child).unwrap().status_strip = None;
+    app.registry.windows.get_mut(&child).unwrap().status_strip = None;
     assert!(!app.handle_child_left_press_chrome(child), "without a strip the press routes on");
     wheel(&mut app);
     assert!(
-        app.windows[&child].panes[&pane_id].viewport_top_abs.is_some(),
+        app.registry.windows[&child].panes[&pane_id].viewport_top_abs.is_some(),
         "the same wheel scrolls back"
     );
 }
@@ -632,7 +637,7 @@ fn torn_out_window_strip_consumes_press_and_wheel() {
 fn strip_scroll_segment_returns_the_pane_to_the_bottom() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("main");
-    let main_id = app.main_window_id.unwrap();
+    let main_id = app.registry.main_window_id.unwrap();
     app.main_mut().unwrap().panes.get_mut(&pane_id).unwrap().pin_viewport_top(Some(0));
     assert_eq!(app.main().unwrap().panes[&pane_id].viewport_top_abs, Some(0));
     let window = app.main_mut().unwrap();

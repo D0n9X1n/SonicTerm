@@ -7,7 +7,7 @@ fn native_mac_search_deletion_uses_the_source_window_and_preserves_viewport() {
     // Production search editing owns modified Backspace independently of focus and never forwards it to a terminal.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     app.__test_enable_pty_write_log();
     let key = Key::Named(NamedKey::Backspace);
@@ -17,7 +17,7 @@ fn native_mac_search_deletion_uses_the_source_window_and_preserves_viewport() {
             (ModifiersState::ALT, "alpha beta", "alpha "),
             (ModifiersState::CONTROL, "alpha é", "alpha e"),
         ] {
-            let window = app.windows.get_mut(&owner).unwrap();
+            let window = app.registry.windows.get_mut(&owner).unwrap();
             let pane_id = window.tab_states[0].active_pane;
             let pane = window.panes.get_mut(&pane_id).unwrap();
             *pane.parser.lock() = history_parser();
@@ -25,12 +25,15 @@ fn native_mac_search_deletion_uses_the_source_window_and_preserves_viewport() {
             let mut search = SearchState::new();
             search.set_query(before, pane.parser.lock().grid());
             window.tab_states[0].search = Some(search);
-            app.frontmost_window = Some(other);
+            app.registry.frontmost_window = Some(other);
             let edit = super::super::text_edit::search_text_edit_for_key(&key, mods);
             assert!(app.search_handle_key_parts(owner, &key, mods, edit, None));
-            assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, after);
-            assert_eq!(app.windows[&owner].panes[&pane_id].viewport_top_abs, Some(3));
-            assert_eq!(app.frontmost_window, Some(other));
+            assert_eq!(
+                app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
+                after
+            );
+            assert_eq!(app.registry.windows[&owner].panes[&pane_id].viewport_top_abs, Some(3));
+            assert_eq!(app.registry.frontmost_window, Some(other));
             assert!(app.__test_drain_pty_writes().is_empty());
         }
     }
@@ -41,20 +44,20 @@ fn unsupported_modified_backspace_keeps_search_text_and_owner() {
     // An unsupported chord is not plain Backspace, and its live search remains installed after rejection.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let owner = app.main_window_id.unwrap();
-    let pane = app.windows[&owner].tab_states[0].active_pane;
+    let owner = app.registry.main_window_id.unwrap();
+    let pane = app.registry.windows[&owner].tab_states[0].active_pane;
     let mut search = SearchState::new();
-    search.set_query("keep", app.windows[&owner].panes[&pane].parser.lock().grid());
-    app.windows.get_mut(&owner).unwrap().tab_states[0].search = Some(search);
+    search.set_query("keep", app.registry.windows[&owner].panes[&pane].parser.lock().grid());
+    app.registry.windows.get_mut(&owner).unwrap().tab_states[0].search = Some(search);
     let key = Key::Named(NamedKey::Backspace);
     let mods = ModifiersState::CONTROL | ModifiersState::ALT;
     let edit = super::super::text_edit::search_text_edit_for_key(&key, mods);
     assert_eq!(edit, None);
     assert!(!app.search_handle_key_parts(owner, &key, mods, edit, None));
-    assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "keep");
+    assert_eq!(app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "keep");
     // Shift alone is still plain Backspace, not an unsupported command chord.
     assert!(app.search_handle_key_parts(owner, &key, ModifiersState::SHIFT, None, None));
-    assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "kee");
+    assert_eq!(app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "kee");
 }
 
 fn history_parser() -> Parser {
@@ -149,26 +152,26 @@ fn source_window_search_commit_retains_viewport_and_ignores_frontmost() {
     // Shared commit routing anchors each window's own retained history without typing into its peer.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     for (owner, other, view_top, selected) in [(main, child, 12, 4), (child, main, 3, 1)] {
-        let pane_id = app.windows[&owner].tab_states[0].active_pane;
-        let window = app.windows.get_mut(&owner).unwrap();
+        let pane_id = app.registry.windows[&owner].tab_states[0].active_pane;
+        let window = app.registry.windows.get_mut(&owner).unwrap();
         window.tab_states[0].search = Some(SearchState::new());
         let pane = window.panes.get_mut(&pane_id).unwrap();
         *pane.parser.lock() = history_parser();
         pane.viewport_top_abs = Some(view_top);
-        app.frontmost_window = Some(other);
+        app.registry.frontmost_window = Some(other);
         app.__test_enable_pty_write_log();
         assert!(app.search_handle_ime_commit(owner, "needle"));
-        let search = app.windows[&owner].tab_states[0].search.as_ref().unwrap();
+        let search = app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap();
         assert_eq!(search.query, "needle");
         assert_eq!(search.current, Some(selected));
         assert_eq!(search.matches.len(), 7);
         assert_eq!(search.requested_scroll_row, None);
-        assert_eq!(app.windows[&owner].panes[&pane_id].viewport_top_abs, Some(view_top));
+        assert_eq!(app.registry.windows[&owner].panes[&pane_id].viewport_top_abs, Some(view_top));
         assert!(app.__test_drain_pty_writes().is_empty());
-        assert_eq!(app.frontmost_window, Some(other));
+        assert_eq!(app.registry.frontmost_window, Some(other));
     }
 }
 
@@ -177,20 +180,24 @@ fn source_window_search_commit_retains_missing_pane_state() {
     // A temporarily absent pane keeps its search query, while a stale window never borrows main's search.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     for owner in [main, child] {
-        let pane_id = app.windows[&owner].tab_states[0].active_pane;
-        app.windows.get_mut(&owner).unwrap().tab_states[0].search = Some(SearchState::new());
+        let pane_id = app.registry.windows[&owner].tab_states[0].active_pane;
+        app.registry.windows.get_mut(&owner).unwrap().tab_states[0].search =
+            Some(SearchState::new());
         assert!(app.search_handle_ime_commit(owner, "keep"));
-        let pane = app.windows.get_mut(&owner).unwrap().panes.remove(&pane_id).unwrap();
+        let pane = app.registry.windows.get_mut(&owner).unwrap().panes.remove(&pane_id).unwrap();
         assert!(!app.search_handle_ime_commit(owner, "discard"));
-        assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "keep");
-        app.windows.get_mut(&owner).unwrap().panes.insert(pane_id, pane);
+        assert_eq!(
+            app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
+            "keep"
+        );
+        app.registry.windows.get_mut(&owner).unwrap().panes.insert(pane_id, pane);
     }
     assert!(!app.search_handle_ime_commit(WindowId::from(0), "wrong"));
-    assert_eq!(app.windows[&main].tab_states[0].search.as_ref().unwrap().query, "keep");
-    assert_eq!(app.windows[&child].tab_states[0].search.as_ref().unwrap().query, "keep");
+    assert_eq!(app.registry.windows[&main].tab_states[0].search.as_ref().unwrap().query, "keep");
+    assert_eq!(app.registry.windows[&child].tab_states[0].search.as_ref().unwrap().query, "keep");
 }
 
 /// Search paste is window-local single-line input, never PTY or broadcast traffic.
@@ -202,12 +209,18 @@ fn search_paste_updates_main_and_child_counter_without_pty_delivery() {
         let window = if child {
             app.__test_seed_child_window(&["child"])
         } else {
-            app.main_window_id.unwrap()
+            app.registry.main_window_id.unwrap()
         };
-        let pane = app.windows[&window].tab_states[0].active_pane;
+        let pane = app.registry.windows[&window].tab_states[0].active_pane;
         *app.pane_by_id(pane).unwrap().parser.lock() = history_parser();
-        app.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().viewport_top_abs =
-            Some(12);
+        app.registry
+            .windows
+            .get_mut(&window)
+            .unwrap()
+            .panes
+            .get_mut(&pane)
+            .unwrap()
+            .viewport_top_abs = Some(12);
         if child {
             app.open_search_in_child(window);
         } else {
@@ -221,12 +234,12 @@ fn search_paste_updates_main_and_child_counter_without_pty_delivery() {
             super::super::FrontmostKind::Main
         };
         app.paste_clipboard_for_kind(kind);
-        let search = app.windows[&window].tab_states[0].search.as_ref().unwrap();
+        let search = app.registry.windows[&window].tab_states[0].search.as_ref().unwrap();
         assert_eq!(search.query, "needle");
         assert_eq!(search.current, Some(4));
         assert_eq!(search.matches.len(), 7);
         assert!(app.__test_pty_write_log().is_empty());
-        assert_eq!(app.windows[&window].panes[&pane].viewport_top_abs, Some(12));
+        assert_eq!(app.registry.windows[&window].panes[&pane].viewport_top_abs, Some(12));
     }
 }
 

@@ -11,8 +11,9 @@ fn hidden_parser_and_image_barriers_do_not_block_visible_assembly_in_either_role
             for image_lock in [false, true] {
                 let (mut app, window, left, right, inactive) = fixture(child, zoom);
                 let hidden = if zoom { left } else { inactive };
-                let parser = Arc::clone(&app.windows[&window].panes[&hidden].parser);
-                let images = Arc::clone(&app.windows[&window].panes[&hidden].inline_images);
+                let parser = Arc::clone(&app.registry.windows[&window].panes[&hidden].parser);
+                let images =
+                    Arc::clone(&app.registry.windows[&window].panes[&hidden].inline_images);
                 let ready = Arc::new(Barrier::new(2));
                 let release = Arc::new(Barrier::new(2));
                 let worker_ready = Arc::clone(&ready);
@@ -60,7 +61,7 @@ fn hidden_parser_and_image_barriers_do_not_block_visible_assembly_in_either_role
                     held.images.iter().all(|images| images.is_empty()),
                     "media snapshots were moved, not cloned twice"
                 );
-                assert_eq!(app.windows[&window].retry_not_before, None);
+                assert_eq!(app.registry.windows[&window].retry_not_before, None);
             }
         }
     }
@@ -108,7 +109,7 @@ fn visible_parser_and_image_barriers_release_everything_before_retry_in_either_r
                 let source_counts: Vec<_> = [left, right]
                     .into_iter()
                     .map(|id| {
-                        let pane = &app.windows[&window].panes[&id];
+                        let pane = &app.registry.windows[&window].panes[&id];
                         (
                             id,
                             Arc::strong_count(&pane.parser),
@@ -116,10 +117,12 @@ fn visible_parser_and_image_barriers_release_everything_before_retry_in_either_r
                         )
                     })
                     .collect();
-                let parser = Arc::clone(&app.windows[&window].panes[&blocked].parser);
-                let images = Arc::clone(&app.windows[&window].panes[&blocked].inline_images);
-                let pixel =
-                    Arc::clone(&app.windows[&window].panes[&left].inline_images.lock()[0].bgra);
+                let parser = Arc::clone(&app.registry.windows[&window].panes[&blocked].parser);
+                let images =
+                    Arc::clone(&app.registry.windows[&window].panes[&blocked].inline_images);
+                let pixel = Arc::clone(
+                    &app.registry.windows[&window].panes[&left].inline_images.lock()[0].bgra,
+                );
                 let pixel_baseline = Arc::strong_count(&pixel);
                 let ready = Arc::new(Barrier::new(2));
                 let release = Arc::new(Barrier::new(2));
@@ -175,18 +178,18 @@ fn visible_parser_and_image_barriers_release_everything_before_retry_in_either_r
                 }
                 drop(sources);
                 for (id, parsers, stores) in source_counts {
-                    let pane = &app.windows[&window].panes[&id];
+                    let pane = &app.registry.windows[&window].panes[&id];
                     assert_eq!(Arc::strong_count(&pane.parser), parsers);
                     assert_eq!(Arc::strong_count(&pane.inline_images), stores);
                 }
-                let before = app.windows[&window].last_render;
-                let stream_before = app.windows[&window].stream_clock;
+                let before = app.registry.windows[&window].last_render;
+                let stream_before = app.registry.windows[&window].stream_clock;
                 let now = Instant::now();
                 app.visible_frame_unavailable(window, why, true, now);
-                let floor = app.windows[&window].retry_not_before.unwrap();
+                let floor = app.registry.windows[&window].retry_not_before.unwrap();
                 assert!(floor > now);
-                assert_eq!(app.windows[&window].last_render, before);
-                assert_eq!(app.windows[&window].stream_clock, stream_before);
+                assert_eq!(app.registry.windows[&window].last_render, before);
+                assert_eq!(app.registry.windows[&window].stream_clock, stream_before);
                 assert!(if child {
                     app.pending_redraw_windows.contains(&window)
                 } else {
@@ -194,7 +197,7 @@ fn visible_parser_and_image_barriers_release_everything_before_retry_in_either_r
                 });
                 app.visible_frame_unavailable(window, why, true, now + Duration::from_micros(1));
                 assert_eq!(
-                    app.windows[&window].retry_not_before,
+                    app.registry.windows[&window].retry_not_before,
                     Some(floor),
                     "early attempts cannot postpone the floor"
                 );
@@ -210,8 +213,9 @@ fn hidden_media_clone_counts_stay_zero_and_sources_outlive_guards() {
         for zoom in [false, true] {
             let (mut app, window, left, right, inactive) = fixture(child, zoom);
             let hidden = if zoom { left } else { inactive };
-            let hidden_parser = Arc::clone(&app.windows[&window].panes[&hidden].parser);
-            let hidden_store = Arc::clone(&app.windows[&window].panes[&hidden].inline_images);
+            let hidden_parser = Arc::clone(&app.registry.windows[&window].panes[&hidden].parser);
+            let hidden_store =
+                Arc::clone(&app.registry.windows[&window].panes[&hidden].inline_images);
             let pixel = Arc::clone(&hidden_store.lock()[0].bgra);
             let before = (
                 Arc::strong_count(&hidden_parser),
@@ -301,7 +305,7 @@ fn structural_invalidity_is_not_contention_in_either_role() {
     for child in [false, true] {
         for defect in 0..5 {
             let (mut app, window, left, right, _) = fixture(child, false);
-            let state = app.windows.get_mut(&window).unwrap();
+            let state = app.registry.windows.get_mut(&window).unwrap();
             let before = state.last_render;
             let stream_before = state.stream_clock;
             let tab = &mut state.tab_states[0];
@@ -328,7 +332,7 @@ fn structural_invalidity_is_not_contention_in_either_role() {
                     LayoutInvalid::MissingTabState
                 }
             };
-            let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+            let parser = Arc::clone(&app.registry.windows[&window].panes[&right].parser);
             let baseline = Arc::strong_count(&parser);
             for _ in 0..2 {
                 let mut assembled = false;
@@ -349,7 +353,7 @@ fn structural_invalidity_is_not_contention_in_either_role() {
                     "invalid layouts clone no source handle"
                 );
                 app.visible_frame_unavailable(window, why, false, Instant::now());
-                let state = &app.windows[&window];
+                let state = &app.registry.windows[&window];
                 assert!(state.visible_frame_invalid);
                 assert_eq!(state.retry_not_before, None);
                 assert_eq!(state.last_render, before);
@@ -357,7 +361,7 @@ fn structural_invalidity_is_not_contention_in_either_role() {
                 assert!(!app.pending_redraw_windows.contains(&window));
                 assert!(!app.pending_redraw);
             }
-            let state = app.windows.get_mut(&window).unwrap();
+            let state = app.registry.windows.get_mut(&window).unwrap();
             if state.tab_states.is_empty() {
                 state.tab_states.push(TabState::new(PaneTree::leaf(right), right));
             } else {
@@ -366,11 +370,11 @@ fn structural_invalidity_is_not_contention_in_either_role() {
             app.mark_window_redraw(window, super::super::super::redraw::RedrawCause::Topology);
             let valid = sources(&mut app, window, child).ok().unwrap();
             assert!(
-                app.windows[&window].visible_frame_invalid,
+                app.registry.windows[&window].visible_frame_invalid,
                 "capturing valid topology does not yet complete the warning episode"
             );
             let held = valid.try_collect(|| {}).ok().unwrap();
-            let state = app.windows.get_mut(&window).unwrap();
+            let state = app.registry.windows.get_mut(&window).unwrap();
             valid.reconcile_viewports(&mut state.panes, &held.guards).unwrap();
             state.coherent_frame_collected();
             assert!(!state.visible_frame_invalid, "successful reconciliation resets the episode");
@@ -383,12 +387,12 @@ fn structural_invalidity_is_not_contention_in_either_role() {
 fn closing_tab_without_layout_is_silent_in_both_roles() {
     for child in [false, true] {
         let (mut app, window, _, _, _) = fixture(child, false);
-        app.windows.get_mut(&window).unwrap().tabs = Default::default();
+        app.registry.windows.get_mut(&window).unwrap().tabs = Default::default();
         let why = sources(&mut app, window, child).err().unwrap();
         assert_eq!(why, FrameUnavailable::NoLayout);
         app.visible_frame_unavailable(window, why, false, Instant::now());
-        assert!(!app.windows[&window].visible_frame_invalid);
-        assert_eq!(app.windows[&window].retry_not_before, None);
+        assert!(!app.registry.windows[&window].visible_frame_invalid);
+        assert_eq!(app.registry.windows[&window].retry_not_before, None);
     }
 }
 
@@ -397,7 +401,7 @@ fn closing_tab_without_layout_is_silent_in_both_roles() {
 fn visible_frame_preserves_eviction_anchored_viewport_and_actual_active_index() {
     for child in [false, true] {
         let (mut app, window, _, right, _) = fixture(child, false);
-        let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+        let parser = Arc::clone(&app.registry.windows[&window].panes[&right].parser);
         {
             let mut parser = parser.lock();
             parser.resize(20, 3);
@@ -406,7 +410,8 @@ fn visible_frame_preserves_eviction_anchored_viewport_and_actual_active_index() 
                 parser.advance(format!("line {line_number:03}\r\n").as_bytes());
             }
         }
-        app.windows
+        app.registry
+            .windows
             .get_mut(&window)
             .unwrap()
             .panes
@@ -424,7 +429,7 @@ fn visible_frame_preserves_eviction_anchored_viewport_and_actual_active_index() 
             assert!(panes[1].is_active);
             assert_eq!(panes[1].viewport_top_abs, Some(1));
         });
-        assert_eq!(app.windows[&window].panes[&right].viewport_top_abs, Some(1));
+        assert_eq!(app.registry.windows[&window].panes[&right].viewport_top_abs, Some(1));
     }
 }
 
@@ -433,7 +438,7 @@ fn visible_frame_preserves_eviction_anchored_viewport_and_actual_active_index() 
 fn active_tab_index_is_captured_in_both_role_adapters() {
     for child in [false, true] {
         let (mut app, window, _, _, inactive) = fixture(child, false);
-        app.windows.get_mut(&window).unwrap().tabs.activate(1);
+        app.registry.windows.get_mut(&window).unwrap().tabs.activate(1);
         let sources = sources(&mut app, window, child).ok().unwrap();
         assert_eq!(sources.tab_index, 1);
         assert_eq!(sources.active_pos, 0);
@@ -544,19 +549,19 @@ fn main_scrollbar_service_precedes_collection_and_contention_exit() {
 fn postlock_structural_invalidity_stays_latched_until_valid_reconciliation() {
     for child in [false, true] {
         let (mut app, window, left, right, _) = fixture(child, false);
-        let last_render = app.windows[&window].last_render;
-        let stream_clock = app.windows[&window].stream_clock;
+        let last_render = app.registry.windows[&window].last_render;
+        let stream_clock = app.registry.windows[&window].stream_clock;
         for attempt in 0..3 {
             let sources = sources(&mut app, window, child).ok().unwrap();
             assert_eq!(
-                app.windows[&window].visible_frame_invalid,
+                app.registry.windows[&window].visible_frame_invalid,
                 attempt > 0,
                 "valid capture cannot rearm a warning before held-frame validation",
             );
             let mut held = sources.try_collect(|| {}).ok().unwrap();
             // Both parsers are held, but their swapped order must reject the entire frame before viewport writes.
             held.guards.swap(0, 1);
-            let state = app.windows.get_mut(&window).unwrap();
+            let state = app.registry.windows.get_mut(&window).unwrap();
             let before =
                 [state.panes[&left].viewport_top_abs, state.panes[&right].viewport_top_abs];
             let why = sources.reconcile_viewports(&mut state.panes, &held.guards).err().unwrap();
@@ -568,7 +573,7 @@ fn postlock_structural_invalidity_stays_latched_until_valid_reconciliation() {
             drop(held);
             drop(sources);
             app.visible_frame_unavailable(window, why, false, Instant::now());
-            let state = &app.windows[&window];
+            let state = &app.registry.windows[&window];
             assert!(state.visible_frame_invalid);
             assert_eq!(state.retry_not_before, None);
             assert_eq!(state.last_render, last_render);
@@ -577,7 +582,7 @@ fn postlock_structural_invalidity_stays_latched_until_valid_reconciliation() {
         }
         let valid = sources(&mut app, window, child).ok().unwrap();
         let held = valid.try_collect(|| {}).ok().unwrap();
-        let state = app.windows.get_mut(&window).unwrap();
+        let state = app.registry.windows.get_mut(&window).unwrap();
         assert!(state.visible_frame_invalid);
         valid.reconcile_viewports(&mut state.panes, &held.guards).unwrap();
         // The real role handlers call this completion method only after their successful reconciliation branch.

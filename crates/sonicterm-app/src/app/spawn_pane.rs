@@ -720,7 +720,7 @@ impl App {
             let mut parser_guard = crate::app::frame_counters::lock_parser(&parser);
             super::seed_parser_theme_colors(&mut parser_guard, &self.theme);
         }
-        let redraw_target = Arc::new(Mutex::new(self.main_window_id));
+        let redraw_target = Arc::new(Mutex::new(self.registry.main_window_id));
         // The gate is read before the PTY exists, so its reader stamps reads from the first one.
         let frame_counters = self.pane_frame_counters();
         let mut shell_opts = self.pane_spawn_opts(pane_id, launch, frame_counters.is_some());

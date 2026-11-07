@@ -127,7 +127,7 @@ impl App {
     /// would be passed into `sonicterm_render_model::PaneRender`.
     #[doc(hidden)]
     pub fn __test_child_broadcast_render_flags(&self, id: WindowId) -> Option<Vec<(u64, bool)>> {
-        let child = self.windows.get(&id)?;
+        let child = self.registry.windows.get(&id)?;
         let tab_idx = child.tabs.active_index();
         let panes = child.tab_states.get(tab_idx)?.tree.leaves();
         let participants = self.broadcast_participants();
@@ -137,13 +137,13 @@ impl App {
     /// Test-only: how many panes the named child window currently owns.
     #[doc(hidden)]
     pub fn __test_child_pane_count(&self, id: WindowId) -> Option<usize> {
-        self.windows.get(&id).map(|child| child.panes.len())
+        self.registry.windows.get(&id).map(|child| child.panes.len())
     }
 
     /// Test-only: pane ids owned by the named child window.
     #[doc(hidden)]
     pub fn __test_child_pane_ids(&self, id: WindowId) -> Option<Vec<u64>> {
-        self.windows.get(&id).map(|child| child.panes.keys().copied().collect())
+        self.registry.windows.get(&id).map(|child| child.panes.keys().copied().collect())
     }
 
     /// Test-only: a pane's parser handle in any window, so a test can hold its lock: to make a memory
@@ -154,7 +154,7 @@ impl App {
         id: WindowId,
         pane_id: u64,
     ) -> Option<Arc<Mutex<Parser>>> {
-        self.windows.get(&id)?.panes.get(&pane_id).map(|pane| Arc::clone(&pane.parser))
+        self.registry.windows.get(&id)?.panes.get(&pane_id).map(|pane| Arc::clone(&pane.parser))
     }
 
     /// Test-only: install the headless pane-viewport seam on the main window
@@ -195,7 +195,7 @@ impl App {
         cell_w: f32,
         cell_h: f32,
     ) -> bool {
-        match self.windows.get_mut(&id) {
+        match self.registry.windows.get_mut(&id) {
             Some(child) => {
                 child.test_pane_viewport = Some((outer, cell_w, cell_h));
                 true
@@ -214,7 +214,7 @@ impl App {
     /// Test-only: grid (cols, rows) of a specific pane in the named child.
     #[doc(hidden)]
     pub fn __test_child_pane_grid_size(&self, id: WindowId, pane_id: u64) -> Option<(u16, u16)> {
-        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        let pane = self.registry.windows.get(&id)?.panes.get(&pane_id)?;
         let parser = pane.parser.lock();
         let grid = parser.grid();
         Some((grid.cols, grid.rows))
@@ -223,7 +223,7 @@ impl App {
     /// Test-only: the active pane id in the named child's active tab.
     #[doc(hidden)]
     pub fn __test_child_active_pane(&self, id: WindowId) -> Option<u64> {
-        let child = self.windows.get(&id)?;
+        let child = self.registry.windows.get(&id)?;
         let tab_idx = child.tabs.active_index();
         child.tab_states.get(tab_idx).map(|tab| tab.active_pane)
     }
@@ -234,7 +234,7 @@ impl App {
     /// on torn-out windows the same way they do on the main window.
     #[doc(hidden)]
     pub fn __test_child_scrollbar_active(&self, id: WindowId, pane_id: u64) -> Option<bool> {
-        let visibility = self.windows.get(&id)?.scrollbar_vis.get(&pane_id)?;
+        let visibility = self.registry.windows.get(&id)?.scrollbar_vis.get(&pane_id)?;
         let idle_ms = match visibility.last_active {
             Some(last_active) => last_active.elapsed().as_millis() as u64,
             None => u64::MAX,
@@ -245,7 +245,8 @@ impl App {
     /// Test-only: whether the child pane is currently marked as right-edge hovered.
     #[doc(hidden)]
     pub fn __test_child_scrollbar_near_edge(&self, id: WindowId, pane_id: u64) -> Option<bool> {
-        self.windows
+        self.registry
+            .windows
             .get(&id)?
             .scrollbar_vis
             .get(&pane_id)
@@ -270,6 +271,7 @@ impl App {
         live_top: u64,
     ) {
         let at = self
+            .registry
             .windows
             .get(&id)
             .and_then(|window| window.panes.get(&pane_id))
@@ -299,7 +301,8 @@ impl App {
         pane_id: u64,
         bytes: &[u8],
     ) -> bool {
-        let Some(pane) = self.windows.get(&id).and_then(|child| child.panes.get(&pane_id)) else {
+        let Some(pane) = self.registry.windows.get(&id).and_then(|child| child.panes.get(&pane_id))
+        else {
             // When: neither `windows` nor its `panes` resolve the request, so the
             // bytes have no parser to advance.
             return false;
@@ -313,7 +316,8 @@ impl App {
     /// Test-only: clear all dirty row flags for a child pane.
     #[doc(hidden)]
     pub fn __test_clear_child_pane_dirty(&self, id: WindowId, pane_id: u64) -> bool {
-        let Some(pane) = self.windows.get(&id).and_then(|child| child.panes.get(&pane_id)) else {
+        let Some(pane) = self.registry.windows.get(&id).and_then(|child| child.panes.get(&pane_id))
+        else {
             // When: neither `windows` nor its `panes` resolve the request, so no
             // grid exists whose dirty rows could be cleared.
             return false;
@@ -325,7 +329,7 @@ impl App {
     /// Test-only: count dirty rows for a child pane.
     #[doc(hidden)]
     pub fn __test_child_pane_dirty_count(&self, id: WindowId, pane_id: u64) -> Option<usize> {
-        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        let pane = self.registry.windows.get(&id)?.panes.get(&pane_id)?;
         Some(pane.parser.lock().grid().dirty_count())
     }
 
@@ -366,7 +370,8 @@ impl App {
     /// Test-only: the active pane of each tab of window `id`, in tab order.
     #[doc(hidden)]
     pub fn __test_window_tab_panes(&self, id: WindowId) -> Option<Vec<u64>> {
-        self.windows
+        self.registry
+            .windows
             .get(&id)
             .map(|window| window.tab_states.iter().map(|tab| tab.active_pane).collect())
     }
@@ -374,7 +379,7 @@ impl App {
     /// Test-only: the title the tab bar of window `id` holds for its active tab.
     #[doc(hidden)]
     pub fn __test_window_active_tab_title(&self, id: WindowId) -> Option<String> {
-        self.windows.get(&id)?.tabs.active().map(|tab| tab.title.clone())
+        self.registry.windows.get(&id)?.tabs.active().map(|tab| tab.title.clone())
     }
 
     /// Test-only: do what pane `pane_id`'s VT worker does with `bytes`, with window `id` as the
@@ -388,7 +393,9 @@ impl App {
         pane_id: u64,
         bytes: &[u8],
     ) -> Vec<WindowId> {
-        let Some(pane) = self.windows.get(&id).and_then(|window| window.panes.get(&pane_id)) else {
+        let Some(pane) =
+            self.registry.windows.get(&id).and_then(|window| window.panes.get(&pane_id))
+        else {
             // When: window `id` holds no pane `pane_id`, there is no worker to imitate.
             return Vec::new();
         };
@@ -421,7 +428,7 @@ impl App {
     /// flush decision across batches; `None` when the window has no such pane.
     #[doc(hidden)]
     pub fn __test_pane_worker(&self, id: WindowId, pane_id: u64) -> Option<TestPaneWorker> {
-        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        let pane = self.registry.windows.get(&id)?.panes.get(&pane_id)?;
         *pane.redraw_target.lock() = Some(id);
         let handles = super::spawn_pane::PaneVtHandles::from_pane_state(pane).with_pane_id(pane_id);
         let flush = super::spawn_pane::OutputFlush::new(pane_id, &handles);

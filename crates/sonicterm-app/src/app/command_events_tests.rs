@@ -187,15 +187,15 @@ fn background_and_torn_out_panes_keep_their_command_state() {
     let (front, back) = (panes[0], panes[1]);
     let at = Instant::now();
     for (pane, event) in [(front, CommandEvent::PromptEnd), (back, CommandEvent::CmdStart)] {
-        app.windows[&child].panes[&pane].command_events.lock().push(PaneCommandEvent {
+        app.registry.windows[&child].panes[&pane].command_events.lock().push(PaneCommandEvent {
             event,
             at,
             duration: None,
         });
     }
     let config = app.config.clone();
-    poll_command_events_for_child_window(app.windows.get_mut(&child).unwrap(), &config);
-    let window = &app.windows[&child];
+    poll_command_events_for_child_window(app.registry.windows.get_mut(&child).unwrap(), &config);
+    let window = &app.registry.windows[&child];
     assert_eq!(window.panes[&front].command_state.phase, CommandPhase::Prompt);
     assert_eq!(window.panes[&back].command_state.phase, CommandPhase::Running { started_at: at });
 }

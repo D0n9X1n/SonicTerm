@@ -30,7 +30,7 @@ enum WindowKeyOwner {
 
 impl App {
     fn window_key_owner(&self, win_id: WindowId) -> Option<WindowKeyOwner> {
-        let window = self.windows.get(&win_id)?;
+        let window = self.registry.windows.get(&win_id)?;
         Some(if self.command_palette_owns_input(win_id) {
             WindowKeyOwner::Palette
         } else if window.ime.is_composing() {
@@ -53,7 +53,8 @@ impl App {
     }
 
     fn copy_mode_allows_keymap(&self, win_id: WindowId) -> bool {
-        self.windows
+        self.registry
+            .windows
             .get(&win_id)
             .and_then(|window| window.copy_mode.as_ref())
             .is_some_and(|copy| copy.quick_select.is_none())
@@ -66,13 +67,14 @@ impl App {
         event: &KeyEvent,
         is_synthetic: bool,
     ) {
-        let Some(modifiers) = self.windows.get(&win_id).map(|window| window.modifiers) else {
+        let Some(modifiers) = self.registry.windows.get(&win_id).map(|window| window.modifiers)
+        else {
             // When: win_id is absent, a stale native event cannot borrow the main window's state.
             return;
         };
         if event.state == ElementState::Released {
             // When: event is Released, complete only destinations that admitted its physical press.
-            let targets = self.windows.get_mut(&win_id).and_then(|window| {
+            let targets = self.registry.windows.get_mut(&win_id).and_then(|window| {
                 super::keyboard_protocol::take_release_routes(
                     &mut window.pty_pressed_keys,
                     event.physical_key,
@@ -98,7 +100,7 @@ impl App {
             // never reaches a pane through a retained route, and only quit passes through.
             return;
         }
-        if let Some(mut targets) = self.windows.get(&win_id).and_then(|window| {
+        if let Some(mut targets) = self.registry.windows.get(&win_id).and_then(|window| {
             terminal_repeat_targets(&window.pty_pressed_keys, event.physical_key, event.repeat)
         }) {
             // When: targets retains an accepted hold, local overlays cannot redirect its repeats.
@@ -109,7 +111,7 @@ impl App {
                 Some(&mut targets),
                 is_synthetic,
             );
-            if let Some(window) = self.windows.get_mut(&win_id) {
+            if let Some(window) = self.registry.windows.get_mut(&win_id) {
                 window.pty_pressed_keys.insert(event.physical_key, targets);
             }
             self.dispatch_terminal_key_writes(writes);
@@ -140,7 +142,7 @@ impl App {
             Some(WindowKeyOwner::Composition) => {
                 // When: Composition owns input, the OS IME supplies text and Escape only cancels preedit.
                 if event.logical_key == Key::Named(NamedKey::Escape) {
-                    if let Some(window) = self.windows.get_mut(&win_id) {
+                    if let Some(window) = self.registry.windows.get_mut(&win_id) {
                         window.ime.cancel();
                     }
                 }
@@ -250,7 +252,7 @@ impl App {
             // When: repeat has no accepted hold, it cannot acquire the currently active terminal.
             return;
         }
-        let Some(active_pane) = self.windows.get(&win_id).and_then(|window| {
+        let Some(active_pane) = self.registry.windows.get(&win_id).and_then(|window| {
             window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane)
         }) else {
             // When: win_id has no active tab, there is no source pane for input or broadcast.
@@ -264,7 +266,7 @@ impl App {
             // When: delivered is empty, refused input must not clear selection or move the viewport.
             return;
         }
-        let Some(window) = self.windows.get_mut(&win_id) else {
+        let Some(window) = self.registry.windows.get_mut(&win_id) else {
             // When: win_id disappeared, accepted peer routes cannot mutate a replacement window.
             return;
         };
@@ -290,20 +292,20 @@ impl App {
         win_id: WindowId,
         modifiers: ModifiersState,
     ) {
-        let Some(window) = self.windows.get_mut(&win_id) else {
+        let Some(window) = self.registry.windows.get_mut(&win_id) else {
             // When: win_id is gone, its modifiers cannot affect the main window or a peer.
             return;
         };
         window.modifiers = modifiers;
         self.refresh_target_hover(win_id);
-        if let Some(window) = self.windows.get(&win_id) {
+        if let Some(window) = self.registry.windows.get(&win_id) {
             window.request_window_redraw();
         }
     }
 
     /// Apply native focus and release only the source window's held input owners.
     pub(super) fn handle_window_focus_changed(&mut self, win_id: WindowId, focused: bool) {
-        if !self.windows.contains_key(&win_id) {
+        if !self.registry.windows.contains_key(&win_id) {
             // When: win_id is gone, late focus cannot publish reducer state or touch another terminal.
             return;
         }
@@ -311,7 +313,7 @@ impl App {
             // Losing focus ends strip focus, so the next keys go to the terminal.
             self.end_status_focus(win_id);
         }
-        if Some(win_id) == self.main_window_id {
+        if Some(win_id) == self.registry.main_window_id {
             // Only main contributes this compatibility observation; live child focus stays in WindowState.
             let window = sonicterm_types::WindowKey::new(0);
             let intent = if focused {
@@ -327,13 +329,13 @@ impl App {
         }
         let mut pointer_release = None;
         let mut focus_report = None;
-        if let Some(window) = self.windows.get_mut(&win_id) {
+        if let Some(window) = self.registry.windows.get_mut(&win_id) {
             if focused {
                 window.ime_cursor_throttle.reset();
-                self.frontmost_window = Some(win_id);
-            } else if self.frontmost_window == Some(win_id) {
+                self.registry.frontmost_window = Some(win_id);
+            } else if self.registry.frontmost_window == Some(win_id) {
                 // When: win_id still owns focus, clear it without cancelling a sibling's newer focus event.
-                self.frontmost_window = None;
+                self.registry.frontmost_window = None;
             }
             window.ime.cancel();
             if !focused {
@@ -398,7 +400,7 @@ pub(super) enum ImeRoute {
 
 impl App {
     fn handle_window_copy_key(&mut self, win_id: WindowId, key: &Key) {
-        let Some(window) = self.windows.get_mut(&win_id) else {
+        let Some(window) = self.registry.windows.get_mut(&win_id) else {
             // When: win_id has disappeared, copy navigation cannot select a peer's grid.
             return;
         };

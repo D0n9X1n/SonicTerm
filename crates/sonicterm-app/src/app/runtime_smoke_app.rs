@@ -50,7 +50,8 @@ impl super::super::App {
         id: winit::window::WindowId,
     ) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let Some(native) = self.windows.get(&id).and_then(|state| state.window.clone()) else {
+        let Some(native) = self.registry.windows.get(&id).and_then(|state| state.window.clone())
+        else {
             // When: id lacks a native handle, model-only assertions cannot establish this smoke contract.
             return false;
         };
@@ -59,8 +60,9 @@ impl super::super::App {
             self.interaction.command_palette.set_query(name);
             self.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
             // A name shows as `#N name`; a cleared one gives the title back to the active tab.
-            let number = self.window_keys.get(id).unwrap().raw();
+            let number = self.registry.window_keys.get(id).unwrap().raw();
             let body = self
+                .registry
                 .windows
                 .get(&id)
                 .and_then(|state| state.tabs.active())
@@ -155,12 +157,13 @@ impl super::super::App {
             return Err(failure);
         }
         let snapshot = self.main_renderer().ok_or(failure)?.device_error_snapshot();
-        let shared = self.windows.values().all(|window| {
+        let shared = self.registry.windows.values().all(|window| {
             window
                 .renderer
                 .as_ref()
                 .is_some_and(|renderer| renderer.device_generation() == snapshot.generation)
         }) && self
+            .registry
             .warm_window_pool
             .iter()
             .all(|warm| warm.renderer.device_generation() == snapshot.generation);
@@ -174,7 +177,7 @@ impl super::super::App {
         ) {
             // When: matches! selects a starting phase, freeze renderer population before sampling totals.
             self.config.window.warm_window_pool = 0;
-            self.warm_window_pool.clear();
+            self.registry.warm_window_pool.clear();
             if matches!(smoke.phase, RuntimeSmokePhase::FaultPrecondition)
                 && sonicterm_gpu::core::live_renderer_count() != smoke.renderer_baseline + 1
             {
@@ -182,15 +185,16 @@ impl super::super::App {
                 return Err(RuntimeSmokeFailure::WarmLifecycle);
             }
         }
-        let frames = self.windows.values().filter_map(|window| window.renderer.as_ref()).fold(
-            SmokeFrameCounts::default(),
-            |mut total, renderer| {
-                total.presents = total.presents.saturating_add(renderer.present_call_count());
-                total.successful =
-                    total.successful.saturating_add(renderer.successful_frame_count());
-                total
-            },
-        );
+        let frames =
+            self.registry.windows.values().filter_map(|window| window.renderer.as_ref()).fold(
+                SmokeFrameCounts::default(),
+                |mut total, renderer| {
+                    total.presents = total.presents.saturating_add(renderer.present_call_count());
+                    total.successful =
+                        total.successful.saturating_add(renderer.successful_frame_count());
+                    total
+                },
+            );
         let pane = self
             .main_active_pane_id()
             .and_then(|id| self.main().and_then(|window| window.panes.get(&id)))
@@ -211,7 +215,7 @@ impl super::super::App {
                 return Err(RuntimeSmokeFailure::GpuFaultContainment);
             }
             let baseline = smoke.capture_fault_baseline(
-                self.main_window_id.ok_or(failure)?,
+                self.registry.main_window_id.ok_or(failure)?,
                 kind,
                 &snapshot,
                 frames,

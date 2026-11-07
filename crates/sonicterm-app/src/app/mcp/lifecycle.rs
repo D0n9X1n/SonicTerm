@@ -212,9 +212,9 @@ impl App {
     /// Every window in the order agents see them: main first, then children in creation order.
     /// A pane's `window_index` is its window's position here, for the list and for one pane alike.
     fn mcp_window_order(&self) -> Vec<WindowId> {
-        let mut windows: Vec<WindowId> = self.windows.keys().copied().collect();
+        let mut windows: Vec<WindowId> = self.registry.windows.keys().copied().collect();
         windows.sort_by_key(|id| {
-            let is_main = Some(*id) == self.main_window_id;
+            let is_main = Some(*id) == self.registry.main_window_id;
             (!is_main, self.window_key(*id).map(|key| key.0))
         });
         windows
@@ -225,7 +225,7 @@ impl App {
     pub(crate) fn mcp_pane_entries(&self) -> Vec<PaneEntry> {
         let mut entries = Vec::new();
         for (window_index, window_id) in self.mcp_window_order().into_iter().enumerate() {
-            let window = &self.windows[&window_id];
+            let window = &self.registry.windows[&window_id];
             if window.role.is_report() {
                 // When: the window `role` is a report window, it holds no terminal panes.
                 continue;
@@ -243,10 +243,10 @@ impl App {
     /// building the others: one window's tabs are searched, and only this pane's handles cloned.
     /// `None` when no terminal window holds the pane or it is mid-teardown.
     pub(crate) fn mcp_resolve_pane(&self, pane_id: u64) -> Option<PaneEntry> {
-        let (window_id, window) = self
-            .windows
-            .iter()
-            .find(|(_, window)| !window.role.is_report() && window.panes.contains_key(&pane_id))?;
+        let (window_id, window) =
+            self.registry.windows.iter().find(|(_, window)| {
+                !window.role.is_report() && window.panes.contains_key(&pane_id)
+            })?;
         let window_index = self.mcp_window_order().iter().position(|id| id == window_id)?;
         let tab_index =
             window.tab_states.iter().position(|tab_state| tab_state.tree.contains_pane(pane_id))?;

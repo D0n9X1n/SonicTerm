@@ -345,7 +345,7 @@ fn native_focus_cleanup_is_idempotent_for_main_and_child_without_parser_locks() 
     use super::keyboard_protocol::{encode_routed_key, KeyboardSnapshot};
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     let main_pane = app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     let child_pane = app.__test_child_pane_ids(child).unwrap()[0];
     app.pty_write_log_enabled = true;
@@ -372,7 +372,7 @@ fn native_focus_cleanup_is_idempotent_for_main_and_child_without_parser_locks() 
         )
         .unwrap()
         .held;
-        app.windows.get_mut(&window_id).unwrap().pty_pressed_keys.insert(
+        app.registry.windows.get_mut(&window_id).unwrap().pty_pressed_keys.insert(
             PhysicalKey::Code(winit::keyboard::KeyCode::Enter),
             std::collections::BTreeMap::from([(pane_id, held)]),
         );
@@ -380,7 +380,7 @@ fn native_focus_cleanup_is_idempotent_for_main_and_child_without_parser_locks() 
         app.release_window_native_keys(window_id);
         app.release_window_native_keys(window_id);
         drop(guard);
-        assert!(app.windows[&window_id].pty_pressed_keys.is_empty());
+        assert!(app.registry.windows[&window_id].pty_pressed_keys.is_empty());
     }
     assert_eq!(
         *app.test_pty_writes.lock(),
@@ -398,7 +398,7 @@ fn native_focus_cleanup_groups_all_held_keys_into_one_pane_admission() {
     use winit::keyboard::KeyCode;
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     let pane_id = app.__test_seed_tab("focus-group");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     app.__test_advance_pane_parser(pane_id, b"\x1b[?9001h");
     let epoch = app.pane_by_id(pane_id).unwrap().parser.lock().keyboard_protocol_epoch();
     for (key, virtual_key, scan_code) in [
@@ -408,7 +408,7 @@ fn native_focus_cleanup_groups_all_held_keys_into_one_pane_admission() {
         (KeyCode::KeyD, 68, 32),
         (KeyCode::KeyE, 69, 18),
     ] {
-        app.windows.get_mut(&window_id).unwrap().pty_pressed_keys.insert(
+        app.registry.windows.get_mut(&window_id).unwrap().pty_pressed_keys.insert(
             PhysicalKey::Code(key),
             std::collections::BTreeMap::from([(
                 pane_id,

@@ -122,7 +122,8 @@ fn app_cell_lookup_resolves_soft_wrapped_relative_path_from_each_fragment() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["wrapped"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows
+    app.registry
+        .windows
         .get(&window)
         .unwrap()
         .panes

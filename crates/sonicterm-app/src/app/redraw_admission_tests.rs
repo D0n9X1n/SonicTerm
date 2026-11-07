@@ -21,15 +21,15 @@ fn typed_due_service_wakes_only_due_owners_and_keeps_maintenance_ties() {
         },
     ];
     app.service_redraw_due(now);
-    assert!(!app.windows[&main].redraw.request_in_flight);
-    assert!(app.windows[&child].redraw.request_in_flight);
-    assert!(!app.windows[&other].redraw.request_in_flight);
+    assert!(!app.registry.windows[&main].redraw.request_in_flight);
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
+    assert!(!app.registry.windows[&other].redraw.request_in_flight);
     assert_eq!(app.redraw_due.len(), 1);
     assert_eq!(app.redraw_due[0].owner, Some(other));
-    let snapshot = app.windows[&child].redraw.snapshot();
+    let snapshot = app.registry.windows[&child].redraw.snapshot();
     app.service_redraw_due(now);
     assert_eq!(
-        app.windows[&child].redraw.snapshot().0,
+        app.registry.windows[&child].redraw.snapshot().0,
         snapshot.0,
         "serviced entries do not fire twice"
     );
@@ -62,21 +62,29 @@ fn settled_keypress_keeps_the_streaming_clock_until_the_next_non_input_completio
     let period = Duration::from_micros(16_667);
     for following in [FrameSettlement::Presented, FrameSettlement::Settled] {
         let (mut app, main, _) = counting_owners();
-        let pane = app.windows[&main].tab_states[0].active_pane;
-        app.windows[&main].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
+        let pane = app.registry.windows[&main].tab_states[0].active_pane;
+        app.registry.windows[&main].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
         let now = Instant::now() + Duration::from_secs(1);
         let backdated = now - period * 2;
         backdate_clocks(&mut app, main, backdated);
         app.mark_window_redraw(main, RedrawCause::Input);
         let snapshot = app.snapshot_window_redraw(main).unwrap();
         app.finish_window_redraw(main, &snapshot, FrameSettlement::Settled, now);
-        assert_eq!(app.windows[&main].last_render, now);
-        assert!(!app.windows[&main].redraw.input_pending());
-        assert!(app.windows[&main].panes[&pane].parser.lock().grid().dirty_count() > 0);
+        assert_eq!(app.registry.windows[&main].last_render, now);
+        assert!(!app.registry.windows[&main].redraw.input_pending());
+        assert!(app.registry.windows[&main].panes[&pane].parser.lock().grid().dirty_count() > 0);
         assert!(app.frame_due_work().is_empty(), "dirt or retained causes alone never arm a timer");
-        assert_eq!(app.windows[&main].stream_clock, backdated, "the keypress drew nothing");
+        assert_eq!(
+            app.registry.windows[&main].stream_clock, backdated,
+            "the keypress drew nothing"
+        );
         let exempt = |app: &App| {
-            app.windows[&main].redraw.frame_counters.as_deref().unwrap().stream_clock_exempt
+            app.registry.windows[&main]
+                .redraw
+                .frame_counters
+                .as_deref()
+                .unwrap()
+                .stream_clock_exempt
         };
         assert_eq!(exempt(&app), 1);
         // The echo lands one microsecond later and is admitted at once.
@@ -86,7 +94,10 @@ fn settled_keypress_keeps_the_streaming_clock_until_the_next_non_input_completio
         assert!(app.begin_window_redraw(main, echo_at), "the echo is not paced from the keypress");
         let snapshot = app.snapshot_window_redraw_at(main, echo_at).unwrap();
         app.finish_window_redraw(main, &snapshot, following, echo_at);
-        assert_eq!(app.windows[&main].stream_clock, echo_at, "{following:?} moves the clock");
+        assert_eq!(
+            app.registry.windows[&main].stream_clock, echo_at,
+            "{following:?} moves the clock"
+        );
         assert_eq!(exempt(&app), 1, "only input attempts are exempt");
         // Further output is streaming work, paced one period from the echo frame.
         publish_visible_output(&app, main);
@@ -109,36 +120,46 @@ fn settled_keypress_keeps_the_streaming_clock_until_the_next_non_input_completio
 fn structural_park_keeps_output_maintenance_without_repainting_and_unparks_once() {
     let (mut app, main, child) = owners();
     let now = Instant::now();
-    let pane = app.windows[&child].tab_states[1].active_pane;
-    app.windows.get_mut(&child).unwrap().panes.get_mut(&pane).unwrap().command_events.lock().push(
-        crate::app::PaneCommandEvent {
+    let pane = app.registry.windows[&child].tab_states[1].active_pane;
+    app.registry
+        .windows
+        .get_mut(&child)
+        .unwrap()
+        .panes
+        .get_mut(&pane)
+        .unwrap()
+        .command_events
+        .lock()
+        .push(crate::app::PaneCommandEvent {
             event: sonicterm_vt::vt::CommandEvent::CmdStart,
             at: now,
             duration: None,
-        },
-    );
-    let state = app.windows.get_mut(&child).unwrap();
+        });
+    let state = app.registry.windows.get_mut(&child).unwrap();
     state.redraw.mark(RedrawCause::Input);
     let snapshot = state.redraw.snapshot();
     state.redraw.park(snapshot);
     state.redraw.deferred = true;
     state.retry_not_before = Some(now + Duration::from_millis(1));
     app.output_redraw_notification(child, now);
-    assert!(app.windows[&child].redraw.parked);
-    assert!(!app.windows[&child].redraw.request_in_flight);
-    assert!(matches!(app.windows[&child].tabs.tabs()[1].command, CommandStatus::Running(_)));
+    assert!(app.registry.windows[&child].redraw.parked);
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
+    assert!(matches!(
+        app.registry.windows[&child].tabs.tabs()[1].command,
+        CommandStatus::Running(_)
+    ));
     assert!(app.frame_due_work().iter().all(|work| work.owner != Some(child)));
-    assert!(!app.windows[&main].redraw.has_pending());
+    assert!(!app.registry.windows[&main].redraw.has_pending());
     app.request_owner_redraw(child, RedrawCause::Chrome);
-    assert!(app.windows[&child].redraw.parked);
+    assert!(app.registry.windows[&child].redraw.parked);
     app.request_owner_redraw(child, RedrawCause::Topology);
-    assert!(!app.windows[&child].redraw.parked);
-    assert!(app.windows[&child].redraw.request_in_flight);
-    let captured = app.windows[&child].redraw.snapshot();
+    assert!(!app.registry.windows[&child].redraw.parked);
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
+    let captured = app.registry.windows[&child].redraw.snapshot();
     app.request_owner_redraw(child, RedrawCause::Output);
-    assert!(app.windows[&child].redraw.request_in_flight);
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
     assert_ne!(
-        app.windows[&child].redraw.snapshot().0,
+        app.registry.windows[&child].redraw.snapshot().0,
         captured.0,
         "later output remains a new cause"
     );
@@ -150,13 +171,13 @@ fn stopped_and_parked_owners_are_excluded_from_the_deadline_fold() {
     let (mut app, main, child) = owners();
     let now = Instant::now();
     for id in [main, child] {
-        let window = app.windows.get_mut(&id).unwrap();
+        let window = app.registry.windows.get_mut(&id).unwrap();
         window.redraw.deferred = true;
         window.last_render = now - Duration::from_secs(1);
         window.retry_not_before = Some(now);
     }
-    app.windows.get_mut(&main).unwrap().redraw.stopped_generation = Some(17);
-    app.windows.get_mut(&child).unwrap().redraw.parked = true;
+    app.registry.windows.get_mut(&main).unwrap().redraw.stopped_generation = Some(17);
+    app.registry.windows.get_mut(&child).unwrap().redraw.parked = true;
     assert!(app.frame_due_work().is_empty());
     let source = concat!(
         include_str!("redraw.rs"),
@@ -224,7 +245,7 @@ fn command_maintenance_runs_without_hidden_or_stopped_frame_requests() {
     for stopped in [false, true] {
         let (mut app, _, child) = owners();
         let now = Instant::now();
-        let state = app.windows.get_mut(&child).unwrap();
+        let state = app.registry.windows.get_mut(&child).unwrap();
         state.hidden = !stopped;
         if stopped {
             state.redraw.stopped_generation = Some(23);
@@ -236,7 +257,7 @@ fn command_maintenance_runs_without_hidden_or_stopped_frame_requests() {
             duration: None,
         });
         app.output_redraw_notification(child, now);
-        let state = &app.windows[&child];
+        let state = &app.registry.windows[&child];
         assert!(state.panes[&pane].command_events.lock().is_empty());
         assert!(matches!(state.tabs.tabs()[1].command, CommandStatus::Done { exit: Some(0), .. }));
         assert!(!state.redraw.request_in_flight);
@@ -258,7 +279,7 @@ fn in_flight_notification_and_scrollbar_expire_once_without_rearming_or_touching
             let now = started + Duration::from_millis(IDLE_HIDE_MS);
             let later_at = now + Duration::from_millis(200);
             for (id, expires) in [(owner, now), (later, later_at)] {
-                let window = app.windows.get_mut(&id).unwrap();
+                let window = app.registry.windows.get_mut(&id).unwrap();
                 if notification {
                     window.notification = Some(NotificationBubble {
                         level: NotificationLevel::Info,
@@ -281,13 +302,13 @@ fn in_flight_notification_and_scrollbar_expire_once_without_rearming_or_touching
                     window.scrollbar_vis.insert(pane, vis);
                 }
             }
-            let window = app.windows.get_mut(&owner).unwrap();
+            let window = app.registry.windows.get_mut(&owner).unwrap();
             window.redraw.deferred = true;
             window.redraw.request_in_flight = true;
             let before = window.redraw.snapshot();
-            let later_before = app.windows[&later].redraw.snapshot();
-            let later_bubble = app.windows[&later].notification.clone();
-            let later_vis = app.windows[&later].scrollbar_vis.clone();
+            let later_before = app.registry.windows[&later].redraw.snapshot();
+            let later_bubble = app.registry.windows[&later].notification.clone();
+            let later_vis = app.registry.windows[&later].scrollbar_vis.clone();
             let due = app.frame_due_work();
             assert!(!due
                 .iter()
@@ -298,7 +319,7 @@ fn in_flight_notification_and_scrollbar_expire_once_without_rearming_or_touching
             );
             app.redraw_due = due;
             app.service_redraw_due(now);
-            let window = &app.windows[&owner];
+            let window = &app.registry.windows[&owner];
             assert!(window.redraw.request_in_flight, "keep the existing native request");
             assert!(window.notification.is_none());
             if scrollbar {
@@ -315,11 +336,11 @@ fn in_flight_notification_and_scrollbar_expire_once_without_rearming_or_touching
             {
                 assert_eq!(after.0[cause as usize], before.0[cause as usize] + u64::from(present));
             }
-            assert_eq!(app.windows[&later].redraw.snapshot().0, later_before.0);
-            assert_eq!(app.windows[&later].notification, later_bubble);
-            assert!(!app.windows[&later].redraw.request_in_flight);
+            assert_eq!(app.registry.windows[&later].redraw.snapshot().0, later_before.0);
+            assert_eq!(app.registry.windows[&later].notification, later_bubble);
+            assert!(!app.registry.windows[&later].redraw.request_in_flight);
             for (pane, before) in &later_vis {
-                let after = app.windows[&later].scrollbar_vis[pane];
+                let after = app.registry.windows[&later].scrollbar_vis[pane];
                 assert_eq!(
                     (after.alpha, after.last_active, after.last_tick),
                     (before.alpha, before.last_active, before.last_tick)
@@ -336,11 +357,11 @@ fn in_flight_notification_and_scrollbar_expire_once_without_rearming_or_touching
                 .all(|work| work.owner == Some(later) && work.deadline == later_at));
             app.service_redraw_due(now);
             assert_eq!(
-                app.windows[&owner].redraw.snapshot().0,
+                app.registry.windows[&owner].redraw.snapshot().0,
                 after.0,
                 "expired entries cannot rearm"
             );
-            assert_eq!(app.windows[&later].redraw.snapshot().0, later_before.0);
+            assert_eq!(app.registry.windows[&later].redraw.snapshot().0, later_before.0);
         }
     }
 }
@@ -351,23 +372,23 @@ fn parked_close_tab_adapters_mark_only_the_surviving_owner_topology() {
     for close_child in [false, true] {
         let (mut app, main, child) = topology_owners();
         let (owner, other) = if close_child { (child, main) } else { (main, child) };
-        let removed = app.windows[&owner].tab_states[0].active_pane;
-        let survivor = app.windows[&owner].tabs.tabs()[1].id;
+        let removed = app.registry.windows[&owner].tab_states[0].active_pane;
+        let survivor = app.registry.windows[&owner].tabs.tabs()[1].id;
         let before = park_owner(&mut app, owner);
         park_owner(&mut app, other);
-        let other_before = app.windows[&other].redraw.snapshot();
+        let other_before = app.registry.windows[&other].redraw.snapshot();
         if close_child {
             assert!(app.close_tab_at_in_child(owner, 0));
         } else {
             app.close_tab_at(0);
         }
-        let window = &app.windows[&owner];
+        let window = &app.registry.windows[&owner];
         assert!(!window.redraw.parked);
         assert_eq!(window.redraw.snapshot().0[RedrawCause::Topology as usize], before + 1);
         assert_eq!(window.tabs.tabs()[0].id, survivor);
         assert!(!window.panes.contains_key(&removed));
-        assert!(app.windows[&other].redraw.parked);
-        assert_eq!(app.windows[&other].redraw.snapshot().0, other_before.0);
+        assert!(app.registry.windows[&other].redraw.parked);
+        assert_eq!(app.registry.windows[&other].redraw.snapshot().0, other_before.0);
     }
 }
 
@@ -378,7 +399,7 @@ fn parked_pane_exit_adapters_complete_topology_once_for_the_real_owner() {
         for split in [false, true] {
             let (mut app, main, child) = topology_owners();
             let (owner, other) = if child_exit { (child, main) } else { (main, child) };
-            let original = app.windows[&owner].tab_states[0].active_pane;
+            let original = app.registry.windows[&owner].tab_states[0].active_pane;
             if split {
                 if child_exit {
                     assert!(app.__test_invoke_split_active_pane_in_child(
@@ -389,12 +410,12 @@ fn parked_pane_exit_adapters_complete_topology_once_for_the_real_owner() {
                     app.__test_split_active_right();
                 }
             }
-            let exiting = app.windows[&owner].tab_states[0].active_pane;
+            let exiting = app.registry.windows[&owner].tab_states[0].active_pane;
             let before = park_owner(&mut app, owner);
             park_owner(&mut app, other);
-            let other_before = app.windows[&other].redraw.snapshot();
+            let other_before = app.registry.windows[&other].redraw.snapshot();
             app.handle_pane_process_exited(exiting, sonicterm_types::PaneExitStatus::Code(0));
-            let window = &app.windows[&owner];
+            let window = &app.registry.windows[&owner];
             assert!(!window.redraw.parked);
             assert_eq!(window.redraw.snapshot().0[RedrawCause::Topology as usize], before + 1);
             assert!(!window.panes.contains_key(&exiting));
@@ -406,12 +427,12 @@ fn parked_pane_exit_adapters_complete_topology_once_for_the_real_owner() {
             let after = window.redraw.snapshot();
             app.handle_pane_process_exited(exiting, sonicterm_types::PaneExitStatus::Code(0));
             assert_eq!(
-                app.windows[&owner].redraw.snapshot().0,
+                app.registry.windows[&owner].redraw.snapshot().0,
                 after.0,
                 "stale exits do not repeat completion"
             );
-            assert!(app.windows[&other].redraw.parked);
-            assert_eq!(app.windows[&other].redraw.snapshot().0, other_before.0);
+            assert!(app.registry.windows[&other].redraw.parked);
+            assert_eq!(app.registry.windows[&other].redraw.snapshot().0, other_before.0);
         }
     }
 }
@@ -423,8 +444,9 @@ fn parked_attach_and_transfer_adapters_preserve_real_pane_identity_and_unpark() 
         for direct_attach in [false, true] {
             let (mut app, main, child) = topology_owners();
             let (source, target) = if into_main { (child, main) } else { (main, child) };
-            let pane = app.windows[&source].tab_states[0].active_pane;
-            let generation = Arc::clone(&app.windows[&source].panes[&pane].output_generation);
+            let pane = app.registry.windows[&source].tab_states[0].active_pane;
+            let generation =
+                Arc::clone(&app.registry.windows[&source].panes[&pane].output_generation);
             generation.fetch_add(3, Ordering::Release);
             let source_before = park_owner(&mut app, source);
             let target_before = park_owner(&mut app, target);
@@ -438,7 +460,7 @@ fn parked_attach_and_transfer_adapters_preserve_real_pane_identity_and_unpark() 
             } else {
                 app.transfer_tab(Some(source), 0, Some(target), 1).unwrap();
             }
-            let destination = &app.windows[&target];
+            let destination = &app.registry.windows[&target];
             assert!(!destination.redraw.parked);
             assert_eq!(
                 destination.redraw.snapshot().0[RedrawCause::Topology as usize],
@@ -449,11 +471,12 @@ fn parked_attach_and_transfer_adapters_preserve_real_pane_identity_and_unpark() 
             assert_eq!(generation.load(Ordering::Acquire), 3);
             assert_eq!(destination.panes[&pane].observed_output_generation, 0);
             assert_eq!(*destination.panes[&pane].redraw_target.lock(), Some(target));
-            assert!(!app.windows[&source].panes.contains_key(&pane));
+            assert!(!app.registry.windows[&source].panes.contains_key(&pane));
             if !direct_attach {
-                assert!(!app.windows[&source].redraw.parked);
+                assert!(!app.registry.windows[&source].redraw.parked);
                 assert_eq!(
-                    app.windows[&source].redraw.snapshot().0[RedrawCause::Topology as usize],
+                    app.registry.windows[&source].redraw.snapshot().0
+                        [RedrawCause::Topology as usize],
                     source_before + 1
                 );
             }
@@ -469,12 +492,15 @@ fn device_recovery_rejects_unbound_causes_and_nonreplacement_snapshots() {
         let owner = if child_owner { child } else { main };
         let stopped = sonicterm_gpu::device_errors::DeviceErrorState::new().snapshot();
         let replacement = sonicterm_gpu::device_errors::DeviceErrorState::new().snapshot();
-        let window = app.windows.get_mut(&owner).unwrap();
+        let window = app.registry.windows.get_mut(&owner).unwrap();
         window.redraw.stopped_generation = Some(stopped.generation);
         window.redraw.parked = true;
         app.request_owner_redraw(owner, RedrawCause::DeviceRecovered);
-        assert_eq!(app.windows[&owner].redraw.stopped_generation, Some(stopped.generation));
-        assert!(!app.windows[&owner].redraw.request_in_flight);
+        assert_eq!(
+            app.registry.windows[&owner].redraw.stopped_generation,
+            Some(stopped.generation)
+        );
+        assert!(!app.registry.windows[&owner].redraw.request_in_flight);
         assert!(
             !app.request_recovered_window(owner),
             "an absent renderer cannot validate recovery"
@@ -489,7 +515,7 @@ fn device_recovery_rejects_unbound_causes_and_nonreplacement_snapshots() {
             rejected.generation = generation;
             rejected.state = state;
             rejected.destroy_requested = destroy_requested;
-            let window = app.windows.get_mut(&owner).unwrap();
+            let window = app.registry.windows.get_mut(&owner).unwrap();
             window.redraw.parked = true;
             let before = window.redraw.snapshot();
             assert!(!window.request_device_recovery(&rejected));
@@ -513,7 +539,7 @@ fn usable_different_generation_recovers_once_without_hidden_or_duplicate_native_
                 let stopped = sonicterm_gpu::device_errors::DeviceErrorState::new().snapshot();
                 let replacement = sonicterm_gpu::device_errors::DeviceErrorState::new().snapshot();
                 assert_ne!(stopped.generation, replacement.generation);
-                let window = app.windows.get_mut(&owner).unwrap();
+                let window = app.registry.windows.get_mut(&owner).unwrap();
                 window.hidden = hidden;
                 window.redraw.stopped_generation = Some(stopped.generation);
                 window.redraw.parked = true;
@@ -581,16 +607,17 @@ fn native_occlusion_transitions_preserve_dirt_and_ignore_duplicate_or_stale_even
         let (mut app, main, child) = owners();
         let (owner, other) = if child_owner { (child, main) } else { (main, child) };
         let now = Instant::now();
-        let pane = app.windows[&owner].tab_states[0].active_pane;
-        app.windows[&owner].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
-        app.windows[&owner].panes[&pane].output_generation.fetch_add(7, Ordering::Release);
+        let pane = app.registry.windows[&owner].tab_states[0].active_pane;
+        app.registry.windows[&owner].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
+        app.registry.windows[&owner].panes[&pane].output_generation.fetch_add(7, Ordering::Release);
         app.mark_window_redraw(owner, RedrawCause::Input);
-        let snapshot = app.windows[&owner].capture_redraw_snapshot();
-        let other_before = app.windows[&other].redraw.snapshot();
-        let last_render = app.windows[&owner].last_render;
-        let stream_clock = app.windows[&owner].stream_clock;
-        app.windows.get_mut(&owner).unwrap().retry_not_before = Some(now + Duration::from_secs(2));
-        app.windows.get_mut(&owner).unwrap().redraw.deferred = true;
+        let snapshot = app.registry.windows[&owner].capture_redraw_snapshot();
+        let other_before = app.registry.windows[&other].redraw.snapshot();
+        let last_render = app.registry.windows[&owner].last_render;
+        let stream_clock = app.registry.windows[&owner].stream_clock;
+        app.registry.windows.get_mut(&owner).unwrap().retry_not_before =
+            Some(now + Duration::from_secs(2));
+        app.registry.windows.get_mut(&owner).unwrap().redraw.deferred = true;
         app.redraw_due = vec![
             DueWork { owner: Some(owner), cause: DueCause::Frame, deadline: now },
             DueWork {
@@ -601,31 +628,34 @@ fn native_occlusion_transitions_preserve_dirt_and_ignore_duplicate_or_stale_even
         ];
         app.handle_window_occlusion(owner, true);
         app.handle_window_occlusion(owner, true);
-        assert!(app.windows[&owner].redraw.native_occluded);
+        assert!(app.registry.windows[&owner].redraw.native_occluded);
         assert!(
-            !app.windows[&owner].hidden,
+            !app.registry.windows[&owner].hidden,
             "native occlusion never substitutes for app hidden state"
         );
-        assert_eq!(app.windows[&owner].redraw.snapshot().0, snapshot.causes.0);
-        assert_eq!(app.windows[&owner].last_render, last_render);
-        assert_eq!(app.windows[&owner].stream_clock, stream_clock);
-        assert_eq!(app.windows[&owner].retry_not_before, Some(now + Duration::from_secs(2)));
-        assert_eq!(app.windows[&owner].panes[&pane].observed_output_generation, 0);
-        assert!(app.windows[&owner].panes[&pane].parser.lock().grid().dirty_count() > 0);
+        assert_eq!(app.registry.windows[&owner].redraw.snapshot().0, snapshot.causes.0);
+        assert_eq!(app.registry.windows[&owner].last_render, last_render);
+        assert_eq!(app.registry.windows[&owner].stream_clock, stream_clock);
+        assert_eq!(
+            app.registry.windows[&owner].retry_not_before,
+            Some(now + Duration::from_secs(2))
+        );
+        assert_eq!(app.registry.windows[&owner].panes[&pane].observed_output_generation, 0);
+        assert!(app.registry.windows[&owner].panes[&pane].parser.lock().grid().dirty_count() > 0);
         assert_eq!(app.redraw_due.len(), 1);
         assert_eq!(app.redraw_due[0].owner, Some(other));
         app.handle_window_occlusion(owner, false);
-        let visible = app.windows[&owner].redraw.snapshot();
+        let visible = app.registry.windows[&owner].redraw.snapshot();
         assert_eq!(
             visible.0[RedrawCause::Visibility as usize],
             snapshot.causes.0[RedrawCause::Visibility as usize] + 1
         );
         app.handle_window_occlusion(owner, false);
         app.handle_window_occlusion(WindowId::from(987654321), false);
-        assert_eq!(app.windows[&owner].redraw.snapshot().0, visible.0);
-        assert_eq!(app.windows[&other].redraw.snapshot().0, other_before.0);
+        assert_eq!(app.registry.windows[&owner].redraw.snapshot().0, visible.0);
+        assert_eq!(app.registry.windows[&other].redraw.snapshot().0, other_before.0);
         assert!(
-            !app.windows[&owner].redraw.request_in_flight,
+            !app.registry.windows[&owner].redraw.request_in_flight,
             "no renderer means no usable native target"
         );
     }
@@ -647,7 +677,7 @@ fn occluded_real_owner_gate_invokes_no_collector_or_frame_deadlines_but_drains_c
         );
         app.software_render_degrade = true;
         app.config.appearance.scrollbar = sonicterm_cfg::config::ScrollbarMode::Auto;
-        let window = app.windows.get_mut(&owner).unwrap();
+        let window = app.registry.windows.get_mut(&owner).unwrap();
         let pane = window.tab_states[0].active_pane;
         window.redraw.mark(RedrawCause::Input);
         window.last_render = now;
@@ -683,7 +713,7 @@ fn occluded_real_owner_gate_invokes_no_collector_or_frame_deadlines_but_drains_c
             calls += gated_collector_calls(&mut app, owner, now + Duration::from_secs(tick));
         }
         assert_eq!(calls, 0);
-        let window = &app.windows[&owner];
+        let window = &app.registry.windows[&owner];
         assert!(window.panes[&pane].command_events.lock().is_empty());
         assert!(matches!(window.tabs.tabs()[0].command, CommandStatus::Done { .. }));
         assert_eq!(window.last_render, now);
@@ -717,7 +747,7 @@ fn typed_surface_retry_reasons_keep_distinct_deadline_owners() {
             let due: Vec<_> =
                 app.frame_due_work().into_iter().filter(|work| work.owner == Some(owner)).collect();
             if reason == SurfaceRetryReason::Timeout {
-                let period = app.windows[&owner].redraw.monitor_period;
+                let period = app.registry.windows[&owner].redraw.monitor_period;
                 assert_eq!(due.len(), 1);
                 assert_eq!((due[0].cause, due[0].deadline), (DueCause::Frame, now + period));
                 app.mark_window_redraw(owner, RedrawCause::Input);
@@ -727,7 +757,7 @@ fn typed_surface_retry_reasons_keep_distinct_deadline_owners() {
                 );
                 assert_eq!(app.frame_due_work()[0].deadline, now + period);
             } else if reason == SurfaceRetryReason::Occluded {
-                assert!(app.windows[&owner].redraw.backend_occluded);
+                assert!(app.registry.windows[&owner].redraw.backend_occluded);
                 assert_eq!(gated_collector_calls(&mut app, owner, now + Duration::from_secs(2)), 0);
                 #[cfg(target_os = "macos")]
                 {
@@ -743,7 +773,7 @@ fn typed_surface_retry_reasons_keep_distinct_deadline_owners() {
                 assert!(due.is_empty(), "presenter-owned retries add no app timer");
             }
             assert!(
-                !app.windows[&owner].redraw.input_pending()
+                !app.registry.windows[&owner].redraw.input_pending()
                     || reason == SurfaceRetryReason::Timeout
             );
         }
@@ -765,15 +795,15 @@ fn typed_surface_retry_reasons_keep_distinct_deadline_owners() {
 fn hidden_or_stopped_visibility_never_resumes_and_duplicate_false_keeps_existing_work() {
     let (mut app, main, child) = owners();
     let now = Instant::now();
-    app.windows.get_mut(&main).unwrap().hidden = true;
-    app.windows.get_mut(&child).unwrap().redraw.stopped_generation = Some(99);
+    app.registry.windows.get_mut(&main).unwrap().hidden = true;
+    app.registry.windows.get_mut(&child).unwrap().redraw.stopped_generation = Some(99);
     for owner in [main, child] {
         app.handle_window_occlusion(owner, true);
         app.handle_window_occlusion(owner, false);
-        assert!(!app.windows[&owner].redraw.request_in_flight);
+        assert!(!app.registry.windows[&owner].redraw.request_in_flight);
         assert_eq!(gated_collector_calls(&mut app, owner, now), 0);
     }
-    assert_eq!(app.windows[&child].redraw.stopped_generation, Some(99));
+    assert_eq!(app.registry.windows[&child].redraw.stopped_generation, Some(99));
     app.redraw_due =
         vec![DueWork { owner: Some(child), cause: DueCause::Notification, deadline: now }];
     app.handle_window_occlusion(child, false);
@@ -798,11 +828,11 @@ fn backend_probe_deadlines_are_cancelled_by_native_hidden_or_stopped_state_and_s
     }
     let first = now + SURFACE_PROBE_PERIOD;
     let later = first + Duration::from_millis(200);
-    assert_eq!(app.windows[&main].surface_probe_deadline(), Some(first));
-    assert_eq!(app.windows[&child].surface_probe_deadline(), Some(later));
+    assert_eq!(app.registry.windows[&main].surface_probe_deadline(), Some(first));
+    assert_eq!(app.registry.windows[&child].surface_probe_deadline(), Some(later));
     app.service_surface_probe(child, later, first);
-    assert_eq!(app.windows[&child].surface_probe_deadline(), Some(later));
-    let main_window = app.windows.get_mut(&main).unwrap();
+    assert_eq!(app.registry.windows[&child].surface_probe_deadline(), Some(later));
+    let main_window = app.registry.windows.get_mut(&main).unwrap();
     main_window.finish_surface_probe(Ok(SurfaceAvailability::Retry), true, first);
     assert_eq!(main_window.surface_probe_deadline(), Some(first + SURFACE_PROBE_PERIOD));
     let before = main_window.redraw.snapshot();
@@ -819,10 +849,10 @@ fn backend_probe_deadlines_are_cancelled_by_native_hidden_or_stopped_state_and_s
     );
     let after = main_window.redraw.snapshot();
     app.service_surface_probe(main, first, first + SURFACE_PROBE_PERIOD);
-    assert_eq!(app.windows[&main].redraw.snapshot().0, after.0);
+    assert_eq!(app.registry.windows[&main].redraw.snapshot().0, after.0);
     app.redraw_due = app.frame_due_work();
     app.handle_window_occlusion(child, true);
-    assert_eq!(app.windows[&child].redraw.surface_probe_at, None);
+    assert_eq!(app.registry.windows[&child].redraw.surface_probe_at, None);
     assert!(app.redraw_due.iter().all(|work| work.owner != Some(child)));
     let snapshot = app.snapshot_window_redraw(main).unwrap();
     app.finish_window_redraw(
@@ -832,9 +862,9 @@ fn backend_probe_deadlines_are_cancelled_by_native_hidden_or_stopped_state_and_s
         now,
     );
     app.hide_main_window();
-    assert_eq!(app.windows[&main].redraw.surface_probe_at, None);
+    assert_eq!(app.registry.windows[&main].redraw.surface_probe_at, None);
     assert!(app.frame_due_work().iter().all(|work| work.owner != Some(main)));
-    app.windows.get_mut(&child).unwrap().redraw.native_occluded = false;
+    app.registry.windows.get_mut(&child).unwrap().redraw.native_occluded = false;
     let snapshot = app.snapshot_window_redraw(child).unwrap();
     app.finish_window_redraw(
         child,
@@ -844,7 +874,7 @@ fn backend_probe_deadlines_are_cancelled_by_native_hidden_or_stopped_state_and_s
     );
     let snapshot = app.snapshot_window_redraw(child).unwrap();
     app.finish_window_redraw(child, &snapshot, FrameSettlement::Stopped(5), now);
-    assert_eq!(app.windows[&child].redraw.surface_probe_at, None);
+    assert_eq!(app.registry.windows[&child].redraw.surface_probe_at, None);
 }
 
 /// The writers no headless fixture reaches still invalidate at the writer: `begin_window_redraw`'s

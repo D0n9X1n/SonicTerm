@@ -85,7 +85,7 @@ impl DetachedTab {
         index: usize,
     ) -> Result<(), super::TransferError> {
         let Self { source, request, original_index, prior_active_tab_id, tab, state, panes } = self;
-        let attached = if app.main_window_id == Some(target) {
+        let attached = if app.registry.main_window_id == Some(target) {
             app.attach_tab_state(index, tab, state, panes)
         } else {
             // When: target is not main_window_id, use the child admission boundary with the same custody guarantee.
@@ -201,7 +201,7 @@ impl DestinationUnwind {
                 DestinationDisposition::ReturnWarm => {
                     // Adoption has not mutated the hidden renderer, so restore
                     // the unchanged spare to the pool.
-                    app.warm_window_pool.push(warm);
+                    app.registry.warm_window_pool.push(warm);
                 }
                 DestinationDisposition::RetireWarm => {
                     // Adoption already changed renderer state, so drop the
@@ -296,7 +296,7 @@ impl App {
         window: WindowId,
         idx: usize,
     ) -> Option<sonicterm_ui::tabs::TabId> {
-        self.windows.get(&window)?.tabs.tabs().get(idx).map(|tab| tab.id)
+        self.registry.windows.get(&window)?.tabs.tabs().get(idx).map(|tab| tab.id)
     }
 
     /// Where the tab `id` currently sits in `window`, or `None` if it is gone.
@@ -310,7 +310,7 @@ impl App {
         window: WindowId,
         id: sonicterm_ui::tabs::TabId,
     ) -> Option<usize> {
-        self.windows.get(&window)?.tabs.tabs().iter().position(|tab| tab.id == id)
+        self.registry.windows.get(&window)?.tabs.tabs().iter().position(|tab| tab.id == id)
     }
 
     /// Detach one tab into a transaction that can be committed or restored.
@@ -321,10 +321,10 @@ impl App {
     ) -> Option<DetachedTab> {
         let source_window = source.window_id();
         let prior_active_tab_id = {
-            let window = self.windows.get(&source_window)?;
+            let window = self.registry.windows.get(&source_window)?;
             let source_matches = match source {
-                TearOutSource::Main(id) => self.main_window_id == Some(id),
-                TearOutSource::Child(id) => self.main_window_id != Some(id),
+                TearOutSource::Main(id) => self.registry.main_window_id == Some(id),
+                TearOutSource::Child(id) => self.registry.main_window_id != Some(id),
             };
             if !source_matches || index >= window.tabs.len() || index >= window.tab_states.len() {
                 // When: the source role or either parallel tab vector rejects the
@@ -367,7 +367,7 @@ impl App {
             state,
             panes,
         } = transaction;
-        let window = self.windows.get_mut(&source.window_id()).expect(
+        let window = self.registry.windows.get_mut(&source.window_id()).expect(
             "a tear-out source cannot disappear during synchronous destination preparation",
         );
         let index = original_index.min(window.tabs.len());
@@ -426,7 +426,7 @@ impl App {
             // first and strand its tab, so refuse until `pending_tear_out` is drained.
             return false;
         }
-        let source_tab_idx = if Some(source_window) == self.main_window_id {
+        let source_tab_idx = if Some(source_window) == self.registry.main_window_id {
             // When: `source_window` is the main window, whose tabs live in `main_tabs`,
             // not in the `windows` map; read the active index from there.
 
@@ -443,7 +443,7 @@ impl App {
 
             // When: no child window is registered under `source_window`, or it holds no
             // tabs; refuse rather than name an index no window can supply.
-            let child = match self.windows.get(&source_window) {
+            let child = match self.registry.windows.get(&source_window) {
                 Some(child) if !child.tabs.is_empty() => child,
                 _ => return false,
             };
@@ -474,7 +474,7 @@ impl App {
         let has_target = self
             .main()
             .and_then(|window| window.drag_target)
-            .is_some_and(|target| Some(target.window) != self.main_window_id);
+            .is_some_and(|target| Some(target.window) != self.registry.main_window_id);
         if has_target {
             // When: has_target selects a merge, refusal restores source custody instead of falling through to another move.
             if self.try_cross_window_merge(index) {
@@ -491,7 +491,7 @@ impl App {
             self.dispatch_tear_out_intent(index);
             return true;
         }
-        let Some(main_id) = self.main_window_id else {
+        let Some(main_id) = self.registry.main_window_id else {
             // When: `main_window_id` is `None`, no main tab can be detached or accounted.
             return true;
         };
@@ -508,13 +508,13 @@ impl App {
         }
         self.dispatch_tear_out_intent(index);
         self.tear_out_apply_source_side(index);
-        tracing::info!("tab torn out as new window; windows={}", self.windows.len());
+        tracing::info!("tab torn out as new window; windows={}", self.registry.windows.len());
         true
     }
 
     /// Record reducer state only after a main tab has left its source strip.
     fn dispatch_tear_out_intent(&mut self, index: usize) {
-        if let Some(src_window) = self.main_window_id.and_then(|id| self.window_key(id)) {
+        if let Some(src_window) = self.registry.main_window_id.and_then(|id| self.window_key(id)) {
             self.observe_intent(sonicterm_app_core::AppIntent::TearOutTab {
                 src_window,
                 src_tab: index,
@@ -611,12 +611,12 @@ impl App {
             // reaping or neighbour activation would mutate that restored window.
             return true;
         };
-        self.frontmost_window = Some(win_id);
+        self.registry.frontmost_window = Some(win_id);
         self.tear_out_apply_child_source_side(src_id, index);
         tracing::info!(
             "tab torn out of child {:?} as new window; windows={}",
             src_id,
-            self.windows.len()
+            self.registry.windows.len()
         );
         true
     }
@@ -624,18 +624,18 @@ impl App {
     /// child-side post-tear-out cleanup. Mirrors
     /// [`Self::tear_out_apply_source_side`] for a torn-from-child
     /// origin. Removes the source child window from
-    /// `self.windows` if it became empty; else activates the
+    /// `self.registry.windows` if it became empty; else activates the
     /// LEFT neighbor of the removed slot.
     pub fn tear_out_apply_child_source_side(&mut self, src_id: WindowId, removed_idx: usize) {
         let src_empty =
-            self.windows.get(&src_id).map(|child| child.tabs.is_empty()).unwrap_or(false);
+            self.registry.windows.get(&src_id).map(|child| child.tabs.is_empty()).unwrap_or(false);
         if src_empty {
             // When: `src_empty` reports the source child drained by the tear-out; reap it
             // so no empty window is left on screen once its last tab has moved out.
             self.reap_empty_child(src_id);
             return;
         }
-        if let Some(child) = self.windows.get_mut(&src_id) {
+        if let Some(child) = self.registry.windows.get_mut(&src_id) {
             let target = removed_idx.saturating_sub(1).min(child.tabs.len().saturating_sub(1));
             child.tabs.activate(target);
             super::child_window::resize_visible_panes_in_child(child);
@@ -756,7 +756,7 @@ impl App {
         let mut child_tabs = TabBar::new();
         child_tabs.push(transaction.tab.clone());
         let mut tab_states = Vec::with_capacity(1);
-        self.windows.reserve(1);
+        self.registry.windows.reserve(1);
         if let Err(error) = self
             .transfer_pane_owners(&mut transaction.panes, owner.as_ref().map(super::OwnerGuard::id))
         {
@@ -844,10 +844,10 @@ impl App {
         // what makes a torn-out SPLIT overlap — the left pane stays
         // full-window wide and wraps/paints across the divider into the right
         // pane. For a single-pane tab this is equivalent to a full-grid resize.
-        if let Some(child) = self.windows.get_mut(&win_id) {
+        if let Some(child) = self.registry.windows.get_mut(&win_id) {
             super::child_window::resize_visible_panes_in_child(child);
         }
-        if let Some(child) = self.windows.get_mut(&win_id) {
+        if let Some(child) = self.registry.windows.get_mut(&win_id) {
             if let Some(timing) = child.pending_tear_out_timing.as_mut() {
                 timing.install_ms = install_start.elapsed().as_secs_f32() * 1000.0;
                 tracing::warn!(
@@ -867,7 +867,7 @@ impl App {
         crate::app::frame_counters::request_native_redraw(&destination.window);
         // A consumed pooled window is not replaced here; the pool refills on
         // the next idle tick rather than on this path.
-        self.frontmost_window = Some(win_id);
+        self.registry.frontmost_window = Some(win_id);
         Some(win_id)
     }
 }

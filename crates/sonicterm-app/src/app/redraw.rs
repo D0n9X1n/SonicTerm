@@ -387,7 +387,7 @@ impl App {
             // When: matches! excludes `event`, it cannot move the window to another display, so the period stays.
             return;
         }
-        if let Some(window) = self.windows.get_mut(&id) {
+        if let Some(window) = self.registry.windows.get_mut(&id) {
             window.refresh_monitor_period();
         }
     }
@@ -400,7 +400,7 @@ impl App {
         }
         // One dispatch-clock read stamps the covered stretch, so a test's fake clock ages it.
         let now = (self.dispatch_clock)();
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` is stale, no other window may inherit its visibility transition.
             return;
         };
@@ -435,7 +435,7 @@ impl App {
     /// Service only the exact armed Metal probe, not a stale deadline or another owner's work.
     #[cfg(target_os = "macos")]
     fn service_surface_probe(&mut self, id: WindowId, deadline: Instant, now: Instant) {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` no longer exists, its old probe has no target.
             return;
         };
@@ -459,21 +459,22 @@ impl App {
     /// Mark only a currently live owner; stale notifications never fall back to main.
     /// Ask window `id` for a frame once per dispatch; a later ask in the same dispatch adds nothing.
     pub(super) fn request_redraw_once(&mut self, id: WindowId) {
-        let Self { windows, dispatch_redraws, .. } = self;
+        let Self { registry: crate::app::WindowRegistry { windows, .. }, dispatch_redraws, .. } =
+            self;
         if let Some(window) = windows.get(&id) {
             dispatch_redraws.request(id, window);
         }
     }
 
     pub(super) fn mark_window_redraw(&mut self, id: WindowId, cause: RedrawCause) {
-        if let Some(window) = self.windows.get_mut(&id) {
+        if let Some(window) = self.registry.windows.get_mut(&id) {
             window.mark_redraw(cause);
         }
     }
 
     /// Configuration changes intentionally invalidate input policy in every live window.
     pub(super) fn mark_all_window_inputs(&mut self) {
-        for window in self.windows.values_mut() {
+        for window in self.registry.windows.values_mut() {
             window.mark_redraw(RedrawCause::Input);
         }
     }
@@ -485,7 +486,7 @@ impl App {
         id: WindowId,
         cause: RedrawCause,
     ) -> super::OutputCheckOutcomeV1 {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` names no live window, nothing is marked or requested.
             return super::OutputCheckOutcomeV1::None;
         };
@@ -507,7 +508,7 @@ impl App {
     /// changed command chrome marks `Chrome`, and an `Output` frame is always requested.
     pub(super) fn output_redraw_notification(&mut self, id: WindowId, now: Instant) {
         if self.command_maintenance(id, now) {
-            if let Some(window) = self.windows.get_mut(&id) {
+            if let Some(window) = self.registry.windows.get_mut(&id) {
                 window.mark_redraw(RedrawCause::Chrome);
             }
         }
@@ -522,7 +523,7 @@ impl App {
     /// raise a desktop notification. Of these only `Tab::command` enters the frame key, through
     /// `command_status_hash`, so the comparison takes that hash beside the drawn badge.
     pub(super) fn command_maintenance(&mut self, id: WindowId, now: Instant) -> bool {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: no window has `id`, there is no tab bar to maintain.
             return false;
         };
@@ -534,10 +535,10 @@ impl App {
 
     /// Deliver stopped-device reports without turning unchanged usable devices into redraw causes.
     pub(super) fn request_device_state_redraws(&mut self) {
-        let owners: Vec<_> = self.windows.keys().copied().collect();
+        let owners: Vec<_> = self.registry.windows.keys().copied().collect();
         for id in owners {
             if !self.request_recovered_window(id) {
-                if let Some(window) = self.windows.get(&id) {
+                if let Some(window) = self.registry.windows.get(&id) {
                     if window
                         .renderer
                         .as_ref()
@@ -553,7 +554,7 @@ impl App {
 
     /// Request one visible recovery frame only after inspecting the owner's replacement renderer.
     pub(super) fn request_recovered_window(&mut self, id: WindowId) -> bool {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` is stale, recovery cannot be redirected to another window.
             return false;
         };
@@ -577,7 +578,7 @@ impl App {
             // When: tab_bar_visible is false, an old badge wake cannot request hidden chrome.
             return false;
         }
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: id no longer resolves, a removed owner must not fall back to the main window.
             return false;
         };
@@ -635,7 +636,9 @@ impl App {
                 DueCause::ImageAtlasRelease => {
                     // The whole predicate is checked again: a window that became busy since collection
                     // drops the work, which is collected again once it is idle. No repaint is queued.
-                    if let Some(window) = work.owner.and_then(|id| self.windows.get_mut(&id)) {
+                    if let Some(window) =
+                        work.owner.and_then(|id| self.registry.windows.get_mut(&id))
+                    {
                         if window.image_atlas_release_eligible(now) {
                             window.release_idle_image_atlas(now);
                         }
@@ -643,9 +646,14 @@ impl App {
                 }
                 DueCause::Frame | DueCause::Cursor | DueCause::Notification => {
                     if let Some(id) = work.owner {
-                        if self.windows.get(&id).is_some_and(WindowState::frame_deadlines_allowed) {
+                        if self
+                            .registry
+                            .windows
+                            .get(&id)
+                            .is_some_and(WindowState::frame_deadlines_allowed)
+                        {
                             if work.cause == DueCause::Notification {
-                                if let Some(window) = self.windows.get_mut(&id) {
+                                if let Some(window) = self.registry.windows.get_mut(&id) {
                                     if window
                                         .notification
                                         .as_ref()
@@ -702,7 +710,7 @@ impl App {
     /// Mark `causes` on window `id` and request one frame if its deadlines allow; a hidden
     /// or parked window is marked only and paints when it is next shown.
     pub(super) fn repaint_owner(&mut self, id: WindowId, causes: &[RedrawCause]) {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `windows` no longer holds `id`, the owner closed and nothing repaints.
             return;
         };

@@ -12,13 +12,13 @@ fn foreground_maintenance_requests_only_changed_owners() {
         let start = Instant::now();
         let due = start + super::super::super::FOREGROUND_PROCESS_TTL;
         let changed = changed_role.map(|is_child| if is_child { child } else { main });
-        for window in app.windows.values_mut() {
+        for window in app.registry.windows.values_mut() {
             for pane in window.panes.values_mut() {
                 pane.fg_proc_cache = Some((start, None));
             }
         }
         if let Some(id) = changed {
-            let window = app.windows.get_mut(&id).unwrap();
+            let window = app.registry.windows.get_mut(&id).unwrap();
             let active = window.tabs.active_index();
             let pane = window.tab_states[active].active_pane;
             window.panes.get_mut(&pane).unwrap().fg_proc_cache = Some((
@@ -33,13 +33,13 @@ fn foreground_maintenance_requests_only_changed_owners() {
         app.services.foreground_schedule.activity_wake =
             Some(super::super::super::fg_probe::PendingForegroundProbe { due, fixed: true });
         app.redraw_due = vec![DueWork { owner: None, cause: DueCause::Foreground, deadline: due }];
-        let before = [main, child].map(|id| app.windows[&id].redraw.snapshot());
+        let before = [main, child].map(|id| app.registry.windows[&id].redraw.snapshot());
         app.service_redraw_due(due - Duration::from_nanos(1));
-        assert!(app.windows.values().all(|window| !window.redraw.request_in_flight));
+        assert!(app.registry.windows.values().all(|window| !window.redraw.request_in_flight));
         assert_eq!(app.services.foreground_schedule.next_deadline(), Some(due));
         app.service_redraw_due(due);
         for (id, baseline) in [main, child].into_iter().zip(before) {
-            let window = &app.windows[&id];
+            let window = &app.registry.windows[&id];
             assert_eq!(window.redraw.request_in_flight, Some(id) == changed);
             if Some(id) == changed {
                 assert_ne!(window.redraw.snapshot().0, baseline.0);
@@ -61,7 +61,8 @@ fn command_badge_deadline_arms_for_an_idle_child_without_waking_main() {
     let (mut app, main, child) = owners();
     let now = Instant::now();
     let until = now + Duration::from_secs(3);
-    app.windows
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
@@ -73,7 +74,7 @@ fn command_badge_deadline_arms_for_an_idle_child_without_waking_main() {
         "a done badge in an otherwise idle child must contribute its expiry"
     );
     assert!(app.frame_due_work().iter().all(|work| work.owner != Some(main)));
-    assert!(!app.windows[&main].redraw.has_pending());
+    assert!(!app.registry.windows[&main].redraw.has_pending());
 }
 
 /// Running badges first appear at six seconds only when their tab is inactive.
@@ -82,7 +83,8 @@ fn command_badge_running_deadline_follows_active_tab_identity() {
     let (mut app, main, child) = owners();
     let started = Instant::now();
     let until = started + Duration::from_secs(6);
-    app.windows
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
@@ -93,9 +95,9 @@ fn command_badge_running_deadline_follows_active_tab_identity() {
             .any(|work| { work.owner == Some(child) && work.deadline == until }),
         "a silent inactive running command needs a six-second wake"
     );
-    app.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(1);
     assert!(app.frame_due_work().iter().all(|work| work.owner != Some(child)));
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     assert!(app
         .frame_due_work()
         .iter()
@@ -109,7 +111,8 @@ fn command_badge_idle_expiry_redraws_its_child_once() {
     let (mut app, main, child) = owners();
     let now = Instant::now();
     let until = now + Duration::from_secs(3);
-    app.windows
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
@@ -117,15 +120,15 @@ fn command_badge_idle_expiry_redraws_its_child_once() {
     app.redraw_due = app.frame_due_work();
     assert!(app.redraw_due.iter().any(|work| work.owner == Some(child)));
     app.service_redraw_due(until - Duration::from_nanos(1));
-    assert!(!app.windows[&child].redraw.request_in_flight);
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
     app.service_redraw_due(until);
-    assert_eq!(app.windows[&child].tabs.tabs()[1].command, CommandStatus::Idle);
-    assert!(app.windows[&child].redraw.request_in_flight);
-    assert!(app.windows[&child].redraw.has_pending());
-    assert!(!app.windows[&main].redraw.has_pending());
-    let after = app.windows[&child].redraw.snapshot();
+    assert_eq!(app.registry.windows[&child].tabs.tabs()[1].command, CommandStatus::Idle);
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
+    assert!(app.registry.windows[&child].redraw.has_pending());
+    assert!(!app.registry.windows[&main].redraw.has_pending());
+    let after = app.registry.windows[&child].redraw.snapshot();
     app.service_redraw_due(until + Duration::from_nanos(1));
-    assert_eq!(app.windows[&child].redraw.snapshot().0, after.0);
+    assert_eq!(app.registry.windows[&child].redraw.snapshot().0, after.0);
     assert!(app.frame_due_work().iter().all(|work| work.owner != Some(child)));
 }
 
@@ -136,7 +139,8 @@ fn command_badge_replacement_cannot_spend_an_old_deadline() {
     let now = Instant::now();
     let old_until = now + Duration::from_secs(3);
     let new_until = now + Duration::from_secs(30);
-    app.windows
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
@@ -144,11 +148,11 @@ fn command_badge_replacement_cannot_spend_an_old_deadline() {
     app.redraw_due = app.frame_due_work();
     assert!(app.redraw_due.iter().any(|work| work.owner == Some(child)));
     let replacement = CommandStatus::Done { exit: Some(1), until: new_until };
-    app.windows.get_mut(&child).unwrap().tabs.set_command_status(1, replacement.clone());
+    app.registry.windows.get_mut(&child).unwrap().tabs.set_command_status(1, replacement.clone());
     app.service_redraw_due(old_until);
-    assert_eq!(app.windows[&child].tabs.tabs()[1].command, replacement);
-    assert!(!app.windows[&child].redraw.request_in_flight);
-    assert!(!app.windows[&main].redraw.request_in_flight);
+    assert_eq!(app.registry.windows[&child].tabs.tabs()[1].command, replacement);
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
+    assert!(!app.registry.windows[&main].redraw.request_in_flight);
     assert!(app
         .frame_due_work()
         .iter()
@@ -160,7 +164,7 @@ fn command_badge_replacement_cannot_spend_an_old_deadline() {
 fn command_badge_hidden_tab_bar_and_suppressed_owner_have_no_frame_wake() {
     let (mut app, _, child) = owners();
     let now = Instant::now();
-    app.windows.get_mut(&child).unwrap().tabs.set_command_status(
+    app.registry.windows.get_mut(&child).unwrap().tabs.set_command_status(
         1,
         CommandStatus::Done { exit: Some(0), until: now + Duration::from_secs(3) },
     );
@@ -168,10 +172,10 @@ fn command_badge_hidden_tab_bar_and_suppressed_owner_have_no_frame_wake() {
     assert!(app.frame_due_work().iter().all(|work| work.owner != Some(child)));
     app.tab_bar_visible = true;
     assert!(app.frame_due_work().iter().any(|work| work.owner == Some(child)));
-    app.windows.get_mut(&child).unwrap().hidden = true;
+    app.registry.windows.get_mut(&child).unwrap().hidden = true;
     assert!(app.frame_due_work().iter().all(|work| work.owner != Some(child)));
-    app.windows.get_mut(&child).unwrap().hidden = false;
-    app.windows.get_mut(&child).unwrap().redraw.parked = true;
+    app.registry.windows.get_mut(&child).unwrap().hidden = false;
+    app.registry.windows.get_mut(&child).unwrap().redraw.parked = true;
     assert!(app.frame_due_work().iter().all(|work| work.owner != Some(child)));
 }
 
@@ -181,21 +185,27 @@ fn command_badge_closed_tab_drops_its_captured_due_identity() {
     let (mut app, main, child) = owners();
     let now = Instant::now();
     let until = now + Duration::from_secs(3);
-    let tab = app.windows[&child].tabs.tabs()[1].id;
-    app.windows
+    let tab = app.registry.windows[&child].tabs.tabs()[1].id;
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
         .set_command_status(1, CommandStatus::Done { exit: Some(0), until });
     app.redraw_due = app.frame_due_work();
     assert!(app.redraw_due.iter().any(|work| work.owner == Some(child)));
-    app.windows.get_mut(&child).unwrap().tabs.close(tab);
-    app.windows.get_mut(&child).unwrap().tabs.push(sonicterm_ui::tabs::Tab::new("replacement"));
+    app.registry.windows.get_mut(&child).unwrap().tabs.close(tab);
+    app.registry
+        .windows
+        .get_mut(&child)
+        .unwrap()
+        .tabs
+        .push(sonicterm_ui::tabs::Tab::new("replacement"));
     app.service_redraw_due(until);
-    assert_eq!(app.windows[&child].tabs.tabs()[1].command, CommandStatus::Idle);
-    assert!(!app.windows[&child].redraw.request_in_flight);
-    assert!(!app.windows[&child].redraw.has_pending());
-    assert!(!app.windows[&main].redraw.has_pending());
+    assert_eq!(app.registry.windows[&child].tabs.tabs()[1].command, CommandStatus::Idle);
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
+    assert!(!app.registry.windows[&child].redraw.has_pending());
+    assert!(!app.registry.windows[&main].redraw.has_pending());
     assert!(app.frame_due_work().is_empty());
 }
 
@@ -205,20 +215,24 @@ fn command_badge_running_due_is_invalidated_by_activation() {
     let (mut app, main, child) = owners();
     let started = Instant::now();
     let until = started + Duration::from_secs(6);
-    app.windows
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
         .set_command_status(1, CommandStatus::Running(started));
     app.redraw_due = app.frame_due_work();
     assert!(app.redraw_due.iter().any(|work| work.owner == Some(child)));
-    app.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(1);
     app.service_redraw_due(until);
-    assert!(!app.windows[&child].redraw.request_in_flight);
-    assert!(!app.windows[&child].redraw.has_pending());
-    assert!(!app.windows[&main].redraw.has_pending());
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
+    assert!(!app.registry.windows[&child].redraw.has_pending());
+    assert!(!app.registry.windows[&main].redraw.has_pending());
     assert!(app.frame_due_work().is_empty());
-    assert_eq!(app.windows[&child].tabs.tabs()[1].command, CommandStatus::Running(started));
+    assert_eq!(
+        app.registry.windows[&child].tabs.tabs()[1].command,
+        CommandStatus::Running(started)
+    );
 }
 
 /// Suppression after a timer was armed retains changed chrome without requesting a hidden frame.
@@ -227,19 +241,20 @@ fn command_badge_due_while_hidden_retains_only_owner_dirt() {
     let (mut app, main, child) = owners();
     let now = Instant::now();
     let until = now + Duration::from_secs(3);
-    app.windows
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
         .set_command_status(1, CommandStatus::Done { exit: Some(0), until });
     app.redraw_due = app.frame_due_work();
     assert!(app.redraw_due.iter().any(|work| work.owner == Some(child)));
-    app.windows.get_mut(&child).unwrap().hidden = true;
+    app.registry.windows.get_mut(&child).unwrap().hidden = true;
     app.service_redraw_due(until);
-    assert_eq!(app.windows[&child].tabs.tabs()[1].command, CommandStatus::Idle);
-    assert!(app.windows[&child].redraw.has_pending());
-    assert!(!app.windows[&child].redraw.request_in_flight);
-    assert!(!app.windows[&main].redraw.has_pending());
+    assert_eq!(app.registry.windows[&child].tabs.tabs()[1].command, CommandStatus::Idle);
+    assert!(app.registry.windows[&child].redraw.has_pending());
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
+    assert!(!app.registry.windows[&main].redraw.has_pending());
     assert!(app.frame_due_work().is_empty());
 }
 
@@ -258,7 +273,7 @@ fn command_badge_fake_clock_boundaries_expire_once_for_both_owner_roles() {
                 } else {
                     CommandStatus::Done { exit: Some(0), until: due }
                 };
-                let window = app.windows.get_mut(&owner).unwrap();
+                let window = app.registry.windows.get_mut(&owner).unwrap();
                 window.tabs.activate(usize::from(active));
                 window.tabs.set_command_status(1, status.clone());
                 let due_work = app.frame_due_work_at(now);
@@ -275,21 +290,22 @@ fn command_badge_fake_clock_boundaries_expire_once_for_both_owner_roles() {
                 assert_eq!(badge_due[0].deadline, due);
                 app.redraw_due = due_work;
                 app.service_redraw_due(due - Duration::from_nanos(1));
-                assert!(!app.windows[&owner].redraw.request_in_flight);
+                assert!(!app.registry.windows[&owner].redraw.request_in_flight);
                 app.service_redraw_due(due);
-                assert!(app.windows[&owner].redraw.request_in_flight);
-                assert!(!app.windows[&peer].redraw.has_pending());
-                let after = app.windows[&owner].redraw.snapshot();
-                let painted = app.windows[&owner].tabs.tabs()[1].command.clone().badge(due, active);
+                assert!(app.registry.windows[&owner].redraw.request_in_flight);
+                assert!(!app.registry.windows[&peer].redraw.has_pending());
+                let after = app.registry.windows[&owner].redraw.snapshot();
+                let painted =
+                    app.registry.windows[&owner].tabs.tabs()[1].command.clone().badge(due, active);
                 assert_eq!(painted, running.then_some("…"));
                 let frame = app.snapshot_window_redraw_at(owner, due).unwrap();
                 app.finish_window_redraw(owner, &frame, FrameSettlement::Presented, due);
                 assert!(app.frame_due_work_at(due).is_empty());
                 assert!(app.frame_due_work_at(due + Duration::from_nanos(1)).is_empty());
                 app.service_redraw_due(due + Duration::from_secs(30));
-                assert_eq!(app.windows[&owner].redraw.snapshot().0, after.0);
-                assert!(!app.windows[&owner].redraw.request_in_flight);
-                assert!(!app.windows[&peer].redraw.has_pending());
+                assert_eq!(app.registry.windows[&owner].redraw.snapshot().0, after.0);
+                assert!(!app.registry.windows[&owner].redraw.request_in_flight);
+                assert!(!app.registry.windows[&peer].redraw.has_pending());
             }
         }
     }
@@ -303,17 +319,17 @@ fn command_badge_transfer_recomputes_owner_without_reusing_the_source_deadline()
         let (source, target) = if into_main { (child, main) } else { (main, child) };
         let now = Instant::now();
         let due = now + Duration::from_secs(3);
-        let moved_id = app.windows[&source].tabs.tabs()[1].id;
+        let moved_id = app.registry.windows[&source].tabs.tabs()[1].id;
         let status = CommandStatus::Done { exit: Some(0), until: due };
-        app.windows.get_mut(&source).unwrap().tabs.set_command_status(1, status.clone());
-        app.windows.get_mut(&source).unwrap().tab_states[1].command = status;
+        app.registry.windows.get_mut(&source).unwrap().tabs.set_command_status(1, status.clone());
+        app.registry.windows.get_mut(&source).unwrap().tab_states[1].command = status;
         app.redraw_due = app.frame_due_work_at(now);
         assert_eq!(app.redraw_due.len(), 1);
         assert_eq!(app.redraw_due[0].owner, Some(source));
         app.transfer_tab(Some(source), 1, Some(target), 1).unwrap();
-        assert_eq!(app.windows[&target].tabs.tabs()[1].id, moved_id);
-        let source_before = app.windows[&source].redraw.snapshot();
-        let target_before = app.windows[&target].redraw.snapshot();
+        assert_eq!(app.registry.windows[&target].tabs.tabs()[1].id, moved_id);
+        let source_before = app.registry.windows[&source].redraw.snapshot();
+        let target_before = app.registry.windows[&target].redraw.snapshot();
         let current = app.frame_due_work_at(now);
         let target_due: Vec<_> = current
             .iter()
@@ -322,17 +338,17 @@ fn command_badge_transfer_recomputes_owner_without_reusing_the_source_deadline()
         assert_eq!(target_due.len(), 1);
         assert_eq!(target_due[0].owner, Some(target));
         app.service_redraw_due(due);
-        assert_eq!(app.windows[&source].redraw.snapshot().0, source_before.0);
-        assert_eq!(app.windows[&target].redraw.snapshot().0, target_before.0);
+        assert_eq!(app.registry.windows[&source].redraw.snapshot().0, source_before.0);
+        assert_eq!(app.registry.windows[&target].redraw.snapshot().0, target_before.0);
         // Replay only the newly folded target token after proving the old source token is inert.
         app.redraw_due = target_due.into_iter().copied().collect();
         app.service_redraw_due(due);
-        assert_eq!(app.windows[&target].tabs.tabs()[1].command, CommandStatus::Idle);
+        assert_eq!(app.registry.windows[&target].tabs.tabs()[1].command, CommandStatus::Idle);
         assert_eq!(
-            app.windows[&target].redraw.snapshot().0[RedrawCause::Chrome as usize],
+            app.registry.windows[&target].redraw.snapshot().0[RedrawCause::Chrome as usize],
             target_before.0[RedrawCause::Chrome as usize] + 1
         );
-        assert_eq!(app.windows[&source].redraw.snapshot().0, source_before.0);
+        assert_eq!(app.registry.windows[&source].redraw.snapshot().0, source_before.0);
         assert!(app
             .frame_due_work_at(due)
             .iter()
@@ -347,28 +363,33 @@ fn command_badge_coalesces_current_owner_and_preserves_later_work() {
     let now = Instant::now();
     let due = now + Duration::from_secs(3);
     for index in 0..2 {
-        app.windows
+        app.registry
+            .windows
             .get_mut(&child)
             .unwrap()
             .tabs
             .set_command_status(index, CommandStatus::Done { exit: Some(0), until: due });
     }
-    app.windows.get_mut(&main).unwrap().tabs.set_command_status(
+    app.registry.windows.get_mut(&main).unwrap().tabs.set_command_status(
         0,
         CommandStatus::Done { exit: Some(1), until: due + Duration::from_secs(30) },
     );
-    app.windows.get_mut(&child).unwrap().redraw.request_in_flight = true;
+    app.registry.windows.get_mut(&child).unwrap().redraw.request_in_flight = true;
     app.redraw_due = app.frame_due_work_at(now);
     app.redraw_due.push(DueWork { owner: None, cause: DueCause::Memory, deadline: due });
     app.service_redraw_due(due);
-    assert!(app.windows[&child].redraw.request_in_flight);
-    assert!(app.windows[&child].tabs.tabs().iter().all(|tab| tab.command == CommandStatus::Idle));
-    assert!(!app.windows[&main].redraw.has_pending());
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
+    assert!(app.registry.windows[&child]
+        .tabs
+        .tabs()
+        .iter()
+        .all(|tab| tab.command == CommandStatus::Idle));
+    assert!(!app.registry.windows[&main].redraw.has_pending());
     assert_eq!(app.redraw_due.len(), 1);
     assert_eq!(app.redraw_due[0].owner, Some(main));
-    let settled = app.windows[&child].redraw.snapshot();
+    let settled = app.registry.windows[&child].redraw.snapshot();
     app.service_redraw_due(due);
-    assert_eq!(app.windows[&child].redraw.snapshot().0, settled.0);
+    assert_eq!(app.registry.windows[&child].redraw.snapshot().0, settled.0);
 }
 
 /// An inactive Running badge must not lose a newly eligible transition between painting and folding.
@@ -377,29 +398,33 @@ fn command_badge_transition_after_newly_eligible_paint_survives_the_fold() {
     let (mut app, main, child) = owners();
     let started = Instant::now();
     let deadline = started + Duration::from_secs(6);
-    app.windows.get_mut(&child).unwrap().tabs.activate(1);
-    app.windows
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
         .set_command_status(1, CommandStatus::Running(started));
     assert!(app.frame_due_work_at(started).is_empty(), "active Running has no old timer");
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     let painted_at = deadline - Duration::from_millis(1);
-    assert_eq!(app.windows[&child].tabs.tabs()[1].command.clone().badge(painted_at, false), None);
+    assert_eq!(
+        app.registry.windows[&child].tabs.tabs()[1].command.clone().badge(painted_at, false),
+        None
+    );
     let snapshot = app.snapshot_window_redraw_at(child, painted_at).unwrap();
     app.finish_window_redraw(child, &snapshot, FrameSettlement::Presented, painted_at);
-    assert!(!app.windows[&child].redraw.has_pending());
+    assert!(!app.registry.windows[&child].redraw.has_pending());
     let fold_at = deadline + Duration::from_millis(1);
     app.redraw_due = app.refresh_frame_due_work_at(fold_at);
     assert!(
-        app.windows[&child].redraw.request_in_flight
+        app.registry.windows[&child].redraw.request_in_flight
             || app.redraw_due.iter().any(|work| {
                 work.owner == Some(child) && matches!(work.cause, DueCause::CommandBadge { .. })
             }),
         "the newly eligible transition crossed during paint/fold and still requires its owner"
     );
-    assert!(!app.windows[&main].redraw.has_pending());
+    assert!(!app.registry.windows[&main].redraw.has_pending());
 }
 
 /// A restored window can paint Done just before expiry; that newly visible timer must still fire.
@@ -408,17 +433,18 @@ fn command_badge_done_expiry_after_restored_paint_survives_the_fold() {
     let (mut app, main, child) = owners();
     let now = Instant::now();
     let deadline = now + Duration::from_secs(3);
-    app.windows.get_mut(&child).unwrap().hidden = true;
-    app.windows
+    app.registry.windows.get_mut(&child).unwrap().hidden = true;
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
         .set_command_status(1, CommandStatus::Done { exit: Some(0), until: deadline });
     assert!(app.frame_due_work_at(now).is_empty(), "hidden owner has no old timer");
-    app.windows.get_mut(&child).unwrap().hidden = false;
+    app.registry.windows.get_mut(&child).unwrap().hidden = false;
     let painted_at = deadline - Duration::from_millis(1);
     assert_eq!(
-        app.windows[&child].tabs.tabs()[1].command.clone().badge(painted_at, false),
+        app.registry.windows[&child].tabs.tabs()[1].command.clone().badge(painted_at, false),
         Some("✓")
     );
     let snapshot = app.snapshot_window_redraw_at(child, painted_at).unwrap();
@@ -426,13 +452,13 @@ fn command_badge_done_expiry_after_restored_paint_survives_the_fold() {
     let fold_at = deadline + Duration::from_millis(1);
     app.redraw_due = app.refresh_frame_due_work_at(fold_at);
     assert!(
-        app.windows[&child].redraw.request_in_flight
+        app.registry.windows[&child].redraw.request_in_flight
             || app.redraw_due.iter().any(|work| {
                 work.owner == Some(child) && matches!(work.cause, DueCause::CommandBadge { .. })
             }),
         "the just-painted Done badge must not survive indefinitely past its expiry"
     );
-    assert!(!app.windows[&main].redraw.has_pending());
+    assert!(!app.registry.windows[&main].redraw.has_pending());
 }
 
 /// Production captures badge deadlines before both role renders and services them before the next wait.
@@ -479,7 +505,8 @@ fn command_badge_prepaint_capture_is_bounded_across_retry_and_threshold() {
     let (mut app, main, child) = owners();
     let started = Instant::now();
     let deadline = started + Duration::from_secs(6);
-    app.windows
+    app.registry
+        .windows
         .get_mut(&child)
         .unwrap()
         .tabs
@@ -492,14 +519,14 @@ fn command_badge_prepaint_capture_is_bounded_across_retry_and_threshold() {
     }
     let fold_at = deadline + Duration::from_nanos(1);
     app.redraw_due = app.refresh_frame_due_work_at(fold_at);
-    assert!(app.windows[&child].redraw.request_in_flight);
-    let requested = app.windows[&child].redraw.snapshot();
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
+    let requested = app.registry.windows[&child].redraw.snapshot();
     for offset in 2..5 {
         app.redraw_due = app.refresh_frame_due_work_at(deadline + Duration::from_nanos(offset));
         assert!(app.redraw_due.is_empty(), "no expired deadline may spin the loop");
-        assert_eq!(app.windows[&child].redraw.snapshot().0, requested.0);
+        assert_eq!(app.registry.windows[&child].redraw.snapshot().0, requested.0);
     }
-    assert!(!app.windows[&main].redraw.has_pending());
+    assert!(!app.registry.windows[&main].redraw.has_pending());
 }
 
 /// Native occlusion cancels captured badge wakes and restores only the current owner's future transition.
@@ -516,20 +543,20 @@ fn command_badge_native_occlusion_recomputes_both_owner_roles_without_assembly()
             } else {
                 CommandStatus::Done { exit: Some(0), until: deadline }
             };
-            let window = app.windows.get_mut(&owner).unwrap();
+            let window = app.registry.windows.get_mut(&owner).unwrap();
             window.tabs.activate(0);
             window.tabs.set_command_status(1, status);
             window.mark_redraw(RedrawCause::Chrome);
             let pending = window.redraw.snapshot();
-            let peer_before = app.windows[&peer].redraw.snapshot();
+            let peer_before = app.registry.windows[&peer].redraw.snapshot();
             app.redraw_due = app.frame_due_work_at(now);
             assert_eq!(app.redraw_due.len(), 1);
             app.handle_window_occlusion(owner, true);
             assert!(app.redraw_due.is_empty());
             assert!(app.frame_due_work_at(now).is_empty());
             assert_eq!(gated_collector_calls(&mut app, owner, now), 0);
-            assert_eq!(app.windows[&owner].redraw.snapshot().0, pending.0);
-            assert!(!app.windows[&owner].redraw.request_in_flight);
+            assert_eq!(app.registry.windows[&owner].redraw.snapshot().0, pending.0);
+            assert!(!app.registry.windows[&owner].redraw.request_in_flight);
             app.handle_window_occlusion(owner, false);
             let restored = app.frame_due_work_at(deadline - Duration::from_nanos(1));
             assert_eq!(restored.len(), 1);
@@ -537,8 +564,8 @@ fn command_badge_native_occlusion_recomputes_both_owner_roles_without_assembly()
             assert_eq!(restored[0].deadline, deadline);
             app.redraw_due = restored;
             app.service_redraw_due(deadline);
-            assert!(app.windows[&owner].redraw.request_in_flight);
-            assert_eq!(app.windows[&peer].redraw.snapshot().0, peer_before.0);
+            assert!(app.registry.windows[&owner].redraw.request_in_flight);
+            assert_eq!(app.registry.windows[&peer].redraw.snapshot().0, peer_before.0);
             let frame = app.snapshot_window_redraw_at(owner, deadline).unwrap();
             app.finish_window_redraw(owner, &frame, FrameSettlement::Presented, deadline);
             assert!(app.frame_due_work_at(deadline).is_empty());
@@ -554,7 +581,8 @@ fn command_badge_backend_occlusion_retains_chrome_without_a_frame_deadline() {
         let (owner, peer) = if child_owner { (child, main) } else { (main, child) };
         let now = Instant::now();
         let deadline = now + Duration::from_secs(3);
-        app.windows
+        app.registry
+            .windows
             .get_mut(&owner)
             .unwrap()
             .tabs
@@ -566,7 +594,7 @@ fn command_badge_backend_occlusion_retains_chrome_without_a_frame_deadline() {
             FrameSettlement::SurfaceRetry(SurfaceRetryReason::Occluded),
             now,
         );
-        let pending = app.windows[&owner].redraw.snapshot();
+        let pending = app.registry.windows[&owner].redraw.snapshot();
         assert_eq!(gated_collector_calls(&mut app, owner, deadline), 0);
         let next = app.frame_due_work_at(now);
         assert!(!next.iter().any(|work| matches!(work.cause, DueCause::CommandBadge { .. })));
@@ -579,13 +607,13 @@ fn command_badge_backend_occlusion_retains_chrome_without_a_frame_deadline() {
         #[cfg(not(target_os = "macos"))]
         assert!(next.is_empty());
         app.service_redraw_due(deadline);
-        assert_eq!(app.windows[&owner].tabs.tabs()[1].command, CommandStatus::Idle);
+        assert_eq!(app.registry.windows[&owner].tabs.tabs()[1].command, CommandStatus::Idle);
         assert_eq!(
-            app.windows[&owner].redraw.snapshot().0[RedrawCause::Chrome as usize],
+            app.registry.windows[&owner].redraw.snapshot().0[RedrawCause::Chrome as usize],
             pending.0[RedrawCause::Chrome as usize] + 1
         );
-        assert!(!app.windows[&owner].redraw.request_in_flight);
-        assert!(!app.windows[&peer].redraw.has_pending());
+        assert!(!app.registry.windows[&owner].redraw.request_in_flight);
+        assert!(!app.registry.windows[&peer].redraw.has_pending());
         assert_eq!(gated_collector_calls(&mut app, owner, deadline), 0);
     }
 }
@@ -599,16 +627,18 @@ fn two_window_input_output_permutations_settle_only_the_snapshot_owner() {
         app.mark_window_redraw(main, RedrawCause::Input);
         app.mark_window_redraw(child, RedrawCause::Input);
         for id in [main, child] {
-            let pane = app.windows[&id].tab_states[0].active_pane;
-            app.windows[&id].panes[&pane].output_generation.fetch_add(1, Ordering::Release);
+            let pane = app.registry.windows[&id].tab_states[0].active_pane;
+            app.registry.windows[&id].panes[&pane]
+                .output_generation
+                .fetch_add(1, Ordering::Release);
         }
         let (first, other) = if child_first { (child, main) } else { (main, child) };
         let first_snapshot = app.snapshot_window_redraw(first).unwrap();
         app.finish_window_redraw(first, &first_snapshot, FrameSettlement::Presented, now);
-        assert!(!app.windows[&first].redraw.input_pending());
-        assert!(app.windows[&other].redraw.input_pending());
-        assert!(!app.windows[&first].visible_output_advanced());
-        assert!(app.windows[&other].visible_output_advanced());
+        assert!(!app.registry.windows[&first].redraw.input_pending());
+        assert!(app.registry.windows[&other].redraw.input_pending());
+        assert!(!app.registry.windows[&first].visible_output_advanced());
+        assert!(app.registry.windows[&other].visible_output_advanced());
     }
 }
 
@@ -616,8 +646,8 @@ fn two_window_input_output_permutations_settle_only_the_snapshot_owner() {
 #[test]
 fn output_and_input_arriving_after_collector_snapshot_remain_pending() {
     let (mut app, main, _) = owners();
-    let pane = app.windows[&main].tab_states[0].active_pane;
-    let published = Arc::clone(&app.windows[&main].panes[&pane].output_generation);
+    let pane = app.registry.windows[&main].tab_states[0].active_pane;
+    let published = Arc::clone(&app.registry.windows[&main].panes[&pane].output_generation);
     app.mark_window_redraw(main, RedrawCause::Input);
     let sources = app
         .main_visible_frame_sources(sonicterm_ui::pane::Rect::new(0.0, 0.0, 100.0, 100.0))
@@ -625,26 +655,26 @@ fn output_and_input_arriving_after_collector_snapshot_remain_pending() {
         .unwrap();
     let held = sources.try_collect(|| app.snapshot_window_redraw(main)).ok().unwrap();
     let snapshot = held.snapshot.as_ref().unwrap().clone();
-    assert!(app.windows[&main].panes[&pane].parser.try_lock().is_none());
+    assert!(app.registry.windows[&main].panes[&pane].parser.try_lock().is_none());
     published.fetch_add(1, Ordering::Release);
     app.mark_window_redraw(main, RedrawCause::Input);
     drop(held);
     drop(sources);
     app.finish_window_redraw(main, &snapshot, FrameSettlement::Cached, Instant::now());
-    assert!(app.windows[&main].redraw.input_pending());
-    assert!(app.windows[&main].visible_output_advanced());
+    assert!(app.registry.windows[&main].redraw.input_pending());
+    assert!(app.registry.windows[&main].visible_output_advanced());
 }
 
 /// Moving the real PaneState keeps its output Arc and observed identity instead of inventing a window counter.
 #[test]
 fn pane_transfer_preserves_generation_arc_and_unobserved_output() {
     let (mut app, main, child) = owners();
-    let pane_id = app.windows[&main].tab_states[0].active_pane;
-    let arc = Arc::clone(&app.windows[&main].panes[&pane_id].output_generation);
+    let pane_id = app.registry.windows[&main].tab_states[0].active_pane;
+    let arc = Arc::clone(&app.registry.windows[&main].panes[&pane_id].output_generation);
     arc.fetch_add(3, Ordering::Release);
-    let pane = app.windows.get_mut(&main).unwrap().panes.remove(&pane_id).unwrap();
-    app.windows.get_mut(&child).unwrap().panes.insert(pane_id, pane);
-    let destination = app.windows.get_mut(&child).unwrap();
+    let pane = app.registry.windows.get_mut(&main).unwrap().panes.remove(&pane_id).unwrap();
+    app.registry.windows.get_mut(&child).unwrap().panes.insert(pane_id, pane);
+    let destination = app.registry.windows.get_mut(&child).unwrap();
     destination.tab_states[0].tree = sonicterm_ui::pane::PaneTree::leaf(pane_id);
     destination.tab_states[0].active_pane = pane_id;
     destination.tabs.activate(0);
@@ -661,7 +691,7 @@ fn pane_transfer_preserves_generation_arc_and_unobserved_output() {
 #[test]
 fn pane_generation_vectors_do_not_alias_or_create_hidden_output_heartbeats() {
     let (mut app, _, child) = owners();
-    let state = app.windows.get_mut(&child).unwrap();
+    let state = app.registry.windows.get_mut(&child).unwrap();
     state.tabs.activate(0);
     let visible = state.tab_states[0].active_pane;
     let hidden = state.tab_states[1].active_pane;
@@ -691,7 +721,7 @@ fn mixed_monitor_deadlines_follow_each_owner() {
         app.frame_period = main_period;
         app.monitor_frame_period = main_period;
         for (id, period) in [(main, main_period), (child, child_period)] {
-            let state = app.windows.get_mut(&id).unwrap();
+            let state = app.registry.windows.get_mut(&id).unwrap();
             state.redraw = WindowRedrawState {
                 monitor_period: period,
                 deferred: true,
@@ -716,15 +746,15 @@ fn mixed_monitor_deadlines_follow_each_owner() {
         app.redraw_due = due;
         app.service_redraw_due(now + fast_period - Duration::from_nanos(1));
         for id in [main, child] {
-            assert!(!app.windows[&id].redraw.request_in_flight);
-            assert_eq!(app.windows[&id].redraw.snapshot().0, [0; CAUSES]);
+            assert!(!app.registry.windows[&id].redraw.request_in_flight);
+            assert_eq!(app.registry.windows[&id].redraw.snapshot().0, [0; CAUSES]);
         }
 
         app.redraw_due = app.frame_due_work();
         app.service_redraw_due(now + fast_period);
-        assert!(app.windows[&fast].redraw.request_in_flight);
-        assert!(!app.windows[&slow].redraw.request_in_flight);
-        let fast_causes = app.windows[&fast].redraw.snapshot().0;
+        assert!(app.registry.windows[&fast].redraw.request_in_flight);
+        assert!(!app.registry.windows[&slow].redraw.request_in_flight);
+        let fast_causes = app.registry.windows[&fast].redraw.snapshot().0;
         let due = app.frame_due_work();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].owner, Some(slow));
@@ -732,15 +762,15 @@ fn mixed_monitor_deadlines_follow_each_owner() {
         assert_eq!(due[0].deadline, now + slow_period);
         app.redraw_due = due;
         app.service_redraw_due(now + fast_period);
-        assert_eq!(app.windows[&fast].redraw.snapshot().0, fast_causes);
-        assert!(!app.windows[&slow].redraw.request_in_flight);
+        assert_eq!(app.registry.windows[&fast].redraw.snapshot().0, fast_causes);
+        assert!(!app.registry.windows[&slow].redraw.request_in_flight);
 
         app.redraw_due = app.frame_due_work();
         app.service_redraw_due(now + slow_period);
         let mut expected_causes = [0; CAUSES];
         expected_causes[RedrawCause::Expose as usize] = 1;
         for id in [main, child] {
-            let state = &app.windows[&id];
+            let state = &app.registry.windows[&id];
             assert!(state.redraw.request_in_flight);
             assert_eq!(state.redraw.snapshot().0, expected_causes);
             assert_eq!(state.last_render, now);
@@ -761,7 +791,7 @@ fn owner_monitor_pacing_preserves_hardware_software_ime_and_contention() {
                 app.software_render_degrade = software;
                 let now = Instant::now();
                 for id in [main, child] {
-                    let state = app.windows.get_mut(&id).unwrap();
+                    let state = app.registry.windows.get_mut(&id).unwrap();
                     state.redraw.monitor_period = period;
                     state.last_render = now;
                     state.stream_clock = now;
@@ -780,11 +810,11 @@ fn owner_monitor_pacing_preserves_hardware_software_ime_and_contention() {
                     !software
                 );
                 app.defer_window_lock_contention(child, true, now);
-                let floor = app.windows[&child].retry_not_before.unwrap();
+                let floor = app.registry.windows[&child].retry_not_before.unwrap();
                 app.mark_window_redraw(child, RedrawCause::Input);
                 assert!(!app.begin_window_redraw(child, now + Duration::from_micros(1)));
                 app.defer_window_lock_contention(child, false, now + Duration::from_micros(2));
-                assert_eq!(app.windows[&child].retry_not_before, Some(floor));
+                assert_eq!(app.registry.windows[&child].retry_not_before, Some(floor));
             }
         }
     }

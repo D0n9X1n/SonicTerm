@@ -25,7 +25,7 @@ fn tool_and_prose_paths_resolve_real_files_in_each_window() {
     }
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main path boundaries");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["path boundaries"]);
     // File URIs use a slash-prefixed drive path; the reveal URI encoder only accepts POSIX-shaped input.
     let uri_path = if cfg!(windows) {
@@ -35,9 +35,9 @@ fn tool_and_prose_paths_resolve_real_files_in_each_window() {
     };
     let cwd = local_file_uri(&uri_path).unwrap();
     for window in [main, child] {
-        let pane = *app.windows[&window].panes.keys().next().unwrap();
-        app.windows[&window].panes[&pane].parser.lock().resize(120, 24);
-        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        let pane = *app.registry.windows[&window].panes.keys().next().unwrap();
+        app.registry.windows[&window].panes[&pane].parser.lock().resize(120, 24);
+        app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
             winit::keyboard::ModifiersState::SUPER
         } else {
             winit::keyboard::ModifiersState::CONTROL
@@ -85,15 +85,21 @@ fn tool_and_prose_paths_resolve_real_files_in_each_window() {
         assert_eq!(target.explicit_path_text().as_deref(), Some(missing));
         let ResolvedCellTarget::Path(key) = target.target else { panic!("filesystem target") };
         let request =
-            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+            app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
         let result =
             PathProbeResult { request, selection: None, failure: Some("path-error-missing") };
-        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        assert!(app
+            .registry
+            .windows
+            .get_mut(&window)
+            .unwrap()
+            .path_probe
+            .accept(&result, Some(&key)));
         // A path that names no file is an ordinary click: no toast, no copy on a repeated click.
         for _ in 0..2 {
             assert!(!app.activate_target_at(window, pane, 0, 10));
             assert_eq!(app.test_clipboard_text.as_deref(), Some("preserved"));
-            assert!(app.windows[&window].notification.is_none());
+            assert!(app.registry.windows[&window].notification.is_none());
         }
     }
     std::fs::remove_dir_all(root).unwrap();
@@ -118,11 +124,11 @@ fn punctuated_wrapped_paths_resolve_real_files_in_each_window() {
     let cwd = local_file_uri(&uri_path).unwrap();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main punctuation");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child punctuation"]);
     for window in [main, child] {
-        let pane = *app.windows[&window].panes.keys().next().unwrap();
-        app.windows[&window].panes[&pane].parser.lock().resize(120, 24);
+        let pane = *app.registry.windows[&window].panes.keys().next().unwrap();
+        app.registry.windows[&window].panes[&pane].parser.lock().resize(120, 24);
         for suffix in ["", ":97", ":97:4", ":97–100"] {
             let display = format!("{path}{suffix}");
             for (left, right) in [("(", ")"), ("[", "]"), ("{", "}"), ("Read(", ")")] {
@@ -185,7 +191,7 @@ fn prose_path_feedback_excludes_neighboring_words() {
     let cwd = if cfg!(windows) { "file:///C:/work" } else { "file:///work" };
     let row = ".github/scripts/validate_release.py and focused tests/test_release_validation.py. Require stable";
     let text = format!("\x1b]7;{cwd}\x1b\\{row}");
-    app.windows[&window].panes[&pane].parser.lock().resize(120, 24);
+    app.registry.windows[&window].panes[&pane].parser.lock().resize(120, 24);
     assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
     for path in [".github/scripts/validate_release.py", "tests/test_release_validation.py"] {
         let col = row.find(path).unwrap() as u16 + 1;
@@ -206,14 +212,14 @@ fn target_failure_notification_is_window_local() {
     let first = app.__test_seed_child_window(&["first"]);
     let second = app.__test_seed_child_window(&["second"]);
     let pane = app.__test_child_pane_ids(first).unwrap()[0];
-    app.frontmost_window = Some(second);
+    app.registry.frontmost_window = Some(second);
     app.test_clipboard_text = Some("previous".into());
     app.report_failed_target(first, pane, "file manager unavailable\n", "/test/file");
-    let message = &app.windows[&first].notification.as_ref().unwrap().message;
+    let message = &app.registry.windows[&first].notification.as_ref().unwrap().message;
     assert!(message.contains("file manager unavailable\\u{a}"));
-    assert!(app.windows[&second].notification.is_none());
+    assert!(app.registry.windows[&second].notification.is_none());
     app.report_failed_target(second, pane, "late failure", "/stale/file");
-    assert!(app.windows[&second].notification.is_none());
+    assert!(app.registry.windows[&second].notification.is_none());
 }
 
 /// Probe rejection keeps missing and blocked distinct; equal-length present candidates resolve to the earlier start.
@@ -342,7 +348,7 @@ fn local_link_wrap_keeps_complete_hover_span() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["wrapped local"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(10, 4);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(10, 4);
     let uri = if cfg!(windows) { "C://work/main.rs:7" } else { "/tmp/main.rs:7" };
     let output = format!("\x1b]8;;{uri}\x1b\\abcdefghijklmnop\x1b]8;;\x1b\\");
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
@@ -359,7 +365,7 @@ fn local_link_without_complete_highlight_still_has_a_probe() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["clipped local"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 12);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 12);
     let uri = if cfg!(windows) { "C://work/main.rs:7" } else { "/tmp/main.rs:7" };
     let output = format!("\x1b]8;;{uri}\x1b\\{}\x1b]8;;\x1b\\", "x".repeat(44));
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
@@ -441,7 +447,7 @@ fn hyperlink_preview_preserves_targets_for_all_labels() {
         let pane = app.__test_child_pane_ids(window).unwrap()[0];
         let output = format!("\x1b]8;;{uri}\x1b\\{label}\x1b]8;;\x1b\\");
         assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
             winit::keyboard::ModifiersState::SUPER
         } else {
             winit::keyboard::ModifiersState::CONTROL
@@ -460,12 +466,12 @@ fn hyperlink_preview_covers_wrapped_and_repeated_occurrences() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["wrapped"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(12, 8);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(12, 8);
     let output = format!(
         "\x1b]8;id=same;{uri}\x1b\\{uri}\x1b]8;;\x1b\\\r\n\x1b]8;id=same;{uri}\x1b\\Docs\x1b]8;;\x1b\\"
     );
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -501,11 +507,11 @@ fn hyperlink_preview_preserves_unknown_and_unavailable_targets() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["bounded"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 12);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 12);
     let uri = "vscode://file/C:/very/long/notes.txt";
     let output = format!("\x1b]8;;{uri}\x1b\\{uri}\x1b]8;;\x1b\\");
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -515,7 +521,8 @@ fn hyperlink_preview_preserves_unknown_and_unavailable_targets() {
     assert_eq!(preview.uri, uri);
     assert!(!preview.available);
     assert_eq!(preview.pointer, (15.0, 20.0));
-    app.windows.get_mut(&window).unwrap().modifiers = winit::keyboard::ModifiersState::empty();
+    app.registry.windows.get_mut(&window).unwrap().modifiers =
+        winit::keyboard::ModifiersState::empty();
     assert!(!app.activate_target_at(window, pane, 0, 1));
 }
 
@@ -532,14 +539,14 @@ fn hyperlink_preview_replacement_and_invalidation_are_window_local() {
         let preview =
             app.cell_target_at(first, pane, 0, 1).unwrap().preview(true, (1.0, 1.0)).unwrap();
         assert_eq!(preview.uri, uri);
-        app.windows.get_mut(&first).unwrap().link_preview = Some(preview.clone());
-        app.windows.get_mut(&second).unwrap().link_preview = Some(preview);
+        app.registry.windows.get_mut(&first).unwrap().link_preview = Some(preview.clone());
+        app.registry.windows.get_mut(&second).unwrap().link_preview = Some(preview);
     }
     app.clear_target_hover(first);
-    assert!(app.windows[&first].link_preview.is_none());
-    assert!(app.windows[&second].link_preview.is_some());
-    app.windows.get_mut(&second).unwrap().invalidate_path_hover();
-    assert!(app.windows[&second].link_preview.is_none());
+    assert!(app.registry.windows[&first].link_preview.is_none());
+    assert!(app.registry.windows[&second].link_preview.is_some());
+    app.registry.windows.get_mut(&second).unwrap().invalidate_path_hover();
+    assert!(app.registry.windows[&second].link_preview.is_none());
     assert!(app.__test_advance_child_pane_parser(first, pane, b"\r\x1b[2Kplain"));
     assert!(app.cell_target_at(first, pane, 0, 1).is_none());
 }
@@ -550,7 +557,7 @@ fn hyperlink_preview_missing_registry_entry_is_inert() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["missing"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane]
+    app.registry.windows[&window].panes[&pane]
         .parser
         .lock()
         .grid_mut()
@@ -685,7 +692,7 @@ fn multiplexer_local_link_binds_every_fragment() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["multiplexer local"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(10, 4);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(10, 4);
     let uri = if cfg!(windows) { "C://work/main.rs:7" } else { "/tmp/main.rs:7" };
     let link = format!("\x1b]8;;{uri}\x1b\\");
     let output = format!("\x1b[?1049h\x1b[1;5H{link}abcdef\x1b[2;1H{link}ghij\x1b]8;;\x1b\\");

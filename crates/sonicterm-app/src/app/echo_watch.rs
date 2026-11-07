@@ -707,7 +707,7 @@ impl super::App {
         }
         let next_token = self.diagnostics.next_echo_arm;
         let Some(window) =
-            self.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
+            self.registry.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
         else {
             // When: no window holds pane_id, there is no watch to arm.
             return ArmOutcome::NoPane;
@@ -746,7 +746,7 @@ impl super::App {
             return TakeOutcome::GateOff;
         }
         let Some(window) =
-            self.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
+            self.registry.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
         else {
             // When: no `window` has pane_id in its `panes`, its record is unreachable.
             return TakeOutcome::NoPane;

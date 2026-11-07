@@ -52,7 +52,7 @@ fn assert_window_name_paste_matrix(menu: bool) {
                 [(false, false), (false, true), (true, false), (true, true)]
             {
                 configure_window_name_underlay(&mut app, &windows, owner, read_only, search_open);
-                app.windows.get_mut(&owner).unwrap().custom_window_name = "你é好".into();
+                app.registry.windows.get_mut(&owner).unwrap().custom_window_name = "你é好".into();
                 app.start_rename_window(owner);
                 assert_eq!(
                     app.interaction.palette_attached_window,
@@ -61,14 +61,16 @@ fn assert_window_name_paste_matrix(menu: bool) {
                 assert_eq!(app.interaction.window_rename_target, app.window_key(owner));
                 app.interaction.command_palette.apply_text_edit(TextEdit::MoveStart);
                 app.interaction.command_palette.apply_text_edit(TextEdit::MoveForward);
-                app.frontmost_window = focus;
+                app.registry.frontmost_window = focus;
                 app.__test_set_memory_clipboard("界");
                 let searches = window_name_search_snapshot(&app, &windows);
-                let modes: Vec<_> =
-                    windows.iter().map(|(id, _)| app.windows[id].copy_mode.clone()).collect();
+                let modes: Vec<_> = windows
+                    .iter()
+                    .map(|(id, _)| app.registry.windows[id].copy_mode.clone())
+                    .collect();
                 app.wait_for_input_queues();
                 // Settle only the overlay owner's prior request before dispatching fresh input.
-                let previous = app.windows[&owner].capture_redraw_snapshot();
+                let previous = app.registry.windows[&owner].capture_redraw_snapshot();
                 app.finish_window_redraw(
                     owner,
                     &previous,
@@ -83,7 +85,7 @@ fn assert_window_name_paste_matrix(menu: bool) {
                     "menu={menu} owner={owner_index} read_only={read_only} search={search_open}"
                 );
                 assert!(
-                    app.windows[&owner].redraw.input_pending(),
+                    app.registry.windows[&owner].redraw.input_pending(),
                     "accepted name input must invalidate its overlay"
                 );
                 assert_eq!(app.interaction.command_palette.cursor(), "你界".len());
@@ -95,16 +97,16 @@ fn assert_window_name_paste_matrix(menu: bool) {
                 assert_eq!(window_name_search_snapshot(&app, &windows), searches);
                 assert_eq!(captures, (Vec::new(), Vec::new()), "rename paste reached a PTY");
                 for ((id, _), mode) in windows.iter().zip(&modes) {
-                    assert_eq!(&app.windows[id].copy_mode, mode);
-                    assert!(app.windows[id].notification.is_none());
+                    assert_eq!(&app.registry.windows[id].copy_mode, mode);
+                    assert!(app.registry.windows[id].notification.is_none());
                 }
-                assert_eq!(app.windows[&owner].custom_window_name, "你é好");
-                assert_eq!(app.frontmost_window, focus);
+                assert_eq!(app.registry.windows[&owner].custom_window_name, "你é好");
+                assert_eq!(app.registry.frontmost_window, focus);
                 // Submission uses the captured WindowKey, not the newer focus used for this Enter.
-                app.frontmost_window = Some(other);
+                app.registry.frontmost_window = Some(other);
                 assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter)));
-                assert_eq!(app.windows[&owner].custom_window_name, "你界é好");
-                assert_eq!(app.windows[&other].custom_window_name, "");
+                assert_eq!(app.registry.windows[&owner].custom_window_name, "你界é好");
+                assert_eq!(app.registry.windows[&other].custom_window_name, "");
                 assert!(!app.interaction.command_palette.is_open());
                 assert_eq!(app.interaction.window_rename_target, None);
             }
@@ -134,9 +136,10 @@ fn real_pty_window_name_paste_rejects_chunks_without_fallback() {
                         read_only,
                         search_open,
                     );
-                    app.windows.get_mut(&owner).unwrap().custom_window_name = "Keep".into();
+                    app.registry.windows.get_mut(&owner).unwrap().custom_window_name =
+                        "Keep".into();
                     app.start_rename_window(owner);
-                    app.frontmost_window = Some(if menu { owner } else { other });
+                    app.registry.frontmost_window = Some(if menu { owner } else { other });
                     let searches = window_name_search_snapshot(&app, &windows);
                     let payloads = [
                         (Some("bad\nchunk".into()), WindowNameError::ControlCharacter),
@@ -166,13 +169,13 @@ fn real_pty_window_name_paste_rejects_chunks_without_fallback() {
                         );
                         assert_eq!(window_name_search_snapshot(&app, &windows), searches);
                         assert_eq!(captures, (Vec::new(), Vec::new()), "rejected paste leaked");
-                        assert_eq!(app.windows[&owner].custom_window_name, "Keep");
+                        assert_eq!(app.registry.windows[&owner].custom_window_name, "Keep");
                         assert!(app.interaction.command_palette.is_open());
                     }
                     // Escape discards the rejected edit rather than saving a partial name.
                     assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape)));
                     assert!(!app.interaction.command_palette.is_open());
-                    assert_eq!(app.windows[&owner].custom_window_name, "Keep");
+                    assert_eq!(app.registry.windows[&owner].custom_window_name, "Keep");
                 }
             }
         }
@@ -195,10 +198,10 @@ fn real_pty_window_name_paste_during_composition_is_consumed() {
                 [(false, false), (false, true), (true, false), (true, true)]
             {
                 configure_window_name_underlay(&mut app, &windows, owner, read_only, search_open);
-                app.windows.get_mut(&owner).unwrap().custom_window_name = "Keep".into();
+                app.registry.windows.get_mut(&owner).unwrap().custom_window_name = "Keep".into();
                 app.start_rename_window(owner);
-                app.windows.get_mut(&owner).unwrap().ime.handle_preedit("compose", None);
-                app.frontmost_window = Some(if menu { owner } else { other });
+                app.registry.windows.get_mut(&owner).unwrap().ime.handle_preedit("compose", None);
+                app.registry.frontmost_window = Some(if menu { owner } else { other });
                 app.__test_set_memory_clipboard("must stay local");
                 let searches = window_name_search_snapshot(&app, &windows);
                 app.wait_for_input_queues();
@@ -206,10 +209,10 @@ fn real_pty_window_name_paste_during_composition_is_consumed() {
                 let captures = (app.__test_drain_pty_writes(), submitted.take());
                 assert_eq!(app.interaction.command_palette.query(), "Keep");
                 assert_eq!(app.interaction.command_palette.window_name_error(), None);
-                assert!(app.windows[&owner].ime.is_composing());
+                assert!(app.registry.windows[&owner].ime.is_composing());
                 assert_eq!(window_name_search_snapshot(&app, &windows), searches);
                 assert_eq!(captures, (Vec::new(), Vec::new()), "composing paste leaked");
-                app.windows.get_mut(&owner).unwrap().ime.cancel();
+                app.registry.windows.get_mut(&owner).unwrap().ime.cancel();
                 app.cancel_window_rename(owner);
             }
         }
@@ -229,27 +232,27 @@ fn real_pty_window_name_paste_respects_another_live_source() {
         let (other, _) = windows[(owner_index + 1) % windows.len()];
         for menu in [true, false] {
             configure_window_name_underlay(&mut app, &windows, owner, false, true);
-            app.windows.get_mut(&owner).unwrap().custom_window_name = "Keep".into();
+            app.registry.windows.get_mut(&owner).unwrap().custom_window_name = "Keep".into();
             app.start_rename_window(owner);
             app.__test_set_memory_clipboard(" search");
             // Menu resolves focus at drain time; explicit actions must ignore the cached owner.
             let focus = Some(if menu { other } else { owner });
-            app.frontmost_window = focus;
+            app.registry.frontmost_window = focus;
             app.wait_for_input_queues();
             dispatch_window_name_test_paste(&mut app, other, menu);
             let captures = (app.__test_drain_pty_writes(), submitted.take());
             assert_eq!(app.interaction.command_palette.query(), "Keep");
             assert_eq!(app.interaction.window_rename_target, app.window_key(owner));
             assert_eq!(
-                app.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
+                app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
                 "underlay"
             );
             assert_eq!(
-                app.windows[&other].tab_states[0].search.as_ref().unwrap().query,
+                app.registry.windows[&other].tab_states[0].search.as_ref().unwrap().query,
                 "peer search"
             );
             assert_eq!(captures, (Vec::new(), Vec::new()));
-            assert_eq!(app.frontmost_window, focus);
+            assert_eq!(app.registry.frontmost_window, focus);
             app.cancel_window_rename(owner);
         }
     }
@@ -267,30 +270,36 @@ fn real_pty_window_name_paste_after_owner_close_or_hide_keeps_live_routing() {
         let (owner, _) = windows[owner_index];
         let (other, _) = windows[(owner_index + 1) % windows.len()];
         configure_window_name_underlay(&mut app, &windows, owner, false, true);
-        app.windows.get_mut(&owner).unwrap().custom_window_name = "Keep".into();
+        app.registry.windows.get_mut(&owner).unwrap().custom_window_name = "Keep".into();
         app.start_rename_window(owner);
         app.__test_set_memory_clipboard("live");
         if owner_index == 0 {
             app.hide_main_window();
-            assert!(app.windows[&owner].hidden);
+            assert!(app.registry.windows[&owner].hidden);
         } else {
             app.release_child_window_registries(owner);
-            let removed = app.windows.remove(&owner).unwrap();
+            let removed = app.registry.windows.remove(&owner).unwrap();
             let handled = app.run_action_for_window(&Action::PasteFromClipboard, owner);
             let captures = (app.__test_drain_pty_writes(), submitted.take());
             // Return PTY custody before any assertion so InputTestApp also cleans a failing test.
-            app.windows.insert(owner, removed);
+            app.registry.windows.insert(owner, removed);
             assert!(!handled, "a closed explicit source must not fall back to main");
             assert_eq!(captures, (Vec::new(), Vec::new()));
         }
         assert!(!app.interaction.command_palette.is_open());
         assert_eq!(app.interaction.window_rename_target, None);
-        app.frontmost_window = Some(other);
+        app.registry.frontmost_window = Some(other);
         app.wait_for_input_queues();
         dispatch_window_name_test_paste(&mut app, other, true);
-        assert_eq!(app.windows[&other].tab_states[0].search.as_ref().unwrap().query, "peerlive");
-        assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "underlay");
-        assert_eq!(app.windows[&owner].custom_window_name, "Keep");
+        assert_eq!(
+            app.registry.windows[&other].tab_states[0].search.as_ref().unwrap().query,
+            "peerlive"
+        );
+        assert_eq!(
+            app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
+            "underlay"
+        );
+        assert_eq!(app.registry.windows[&owner].custom_window_name, "Keep");
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
         assert!(!app.interaction.command_palette.is_open());
     }
@@ -312,18 +321,18 @@ fn real_pty_window_name_paste_without_modal_preserves_normal_routes() {
                 [(false, false), (false, true), (true, false), (true, true)]
             {
                 configure_window_name_underlay(&mut app, &windows, owner, read_only, search_open);
-                app.frontmost_window = Some(if menu { owner } else { other });
+                app.registry.frontmost_window = Some(if menu { owner } else { other });
                 app.__test_set_memory_clipboard("plain");
                 app.wait_for_input_queues();
                 dispatch_window_name_test_paste(&mut app, owner, menu);
                 let captures = (app.__test_drain_pty_writes(), submitted.take());
                 if search_open {
                     assert_eq!(
-                        app.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
+                        app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
                         "underlayplain"
                     );
                 } else {
-                    assert!(app.windows[&owner].tab_states[0].search.is_none());
+                    assert!(app.registry.windows[&owner].tab_states[0].search.is_none());
                 }
                 if read_only || search_open {
                     assert_eq!(captures, (Vec::new(), Vec::new()));
@@ -333,7 +342,7 @@ fn real_pty_window_name_paste_without_modal_preserves_normal_routes() {
                 }
                 assert!(!app.interaction.command_palette.is_open());
                 assert_eq!(
-                    app.windows[&other].tab_states[0].search.as_ref().unwrap().query,
+                    app.registry.windows[&other].tab_states[0].search.as_ref().unwrap().query,
                     "peer"
                 );
             }
@@ -377,7 +386,7 @@ fn real_pty_hidden_search_consumes_explicit_clipboard_without_effect() {
     let (main, _) = windows[0];
     set_search_paste_query(&mut app, main, "needle");
     {
-        let window = app.windows.get_mut(&main).unwrap();
+        let window = app.registry.windows.get_mut(&main).unwrap();
         let search = window.tab_states[window.tabs.active_index()].search.as_mut().unwrap();
         // Keep the anchor at zero so an unguarded copy would have field text to leak.
         search.set_cursor(0);
@@ -386,9 +395,9 @@ fn real_pty_hidden_search_consumes_explicit_clipboard_without_effect() {
     }
     app.__test_set_memory_clipboard("sentinel");
     app.hide_main_window();
-    assert!(app.windows[&main].hidden);
+    assert!(app.registry.windows[&main].hidden);
     let snapshot = |app: &App| {
-        let window = &app.windows[&main];
+        let window = &app.registry.windows[&main];
         window.tab_states[window.tabs.active_index()]
             .search
             .as_ref()
@@ -443,9 +452,9 @@ fn configure_window_name_underlay(
 ) {
     for (id, _) in windows {
         set_search_paste_query(app, *id, if *id == owner { "underlay" } else { "peer" });
-        app.windows.get_mut(id).unwrap().copy_mode = None;
+        app.registry.windows.get_mut(id).unwrap().copy_mode = None;
     }
-    let window = app.windows.get_mut(&owner).unwrap();
+    let window = app.registry.windows.get_mut(&owner).unwrap();
     window.copy_mode = read_only.then(|| CopyModeState::read_only_at((0, 0)));
     if !search_open {
         window.tab_states[0].search = None;
@@ -475,7 +484,7 @@ fn window_name_search_snapshot(
     windows
         .iter()
         .map(|(id, _)| {
-            let window = &app.windows[id];
+            let window = &app.registry.windows[id];
             window.tab_states[window.tabs.active_index()]
                 .search
                 .as_ref()
@@ -502,7 +511,7 @@ fn real_pty_search_paste_explicit_source_matrix() {
         let mut inactive_search = SearchState::new();
         inactive_search.set_query("inactive", parser.lock().grid());
         inactive_tab.search = Some(inactive_search);
-        let window = app.windows.get_mut(&source_window).unwrap();
+        let window = app.registry.windows.get_mut(&source_window).unwrap();
         window.panes.insert(inactive, PaneState::new(parser, None));
         window.tabs.insert(0, Tab::new("inactive"));
         window.tab_states.insert(0, inactive_tab);
@@ -511,7 +520,7 @@ fn real_pty_search_paste_explicit_source_matrix() {
         app.pane_by_id(bracketed).unwrap().parser.lock().advance(b"\x1b[?2004h");
         app.interaction.broadcast =
             BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
-        app.frontmost_window = Some(other_window);
+        app.registry.frontmost_window = Some(other_window);
         app.__test_set_memory_clipboard("le");
         let submitted = PtySubmissions::start();
 
@@ -519,26 +528,27 @@ fn real_pty_search_paste_explicit_source_matrix() {
         for (read_only, search_open) in [(false, true), (true, false), (false, false), (true, true)]
         {
             set_search_paste_query(&mut app, source_window, "need");
-            let window = app.windows.get_mut(&source_window).unwrap();
+            let window = app.registry.windows.get_mut(&source_window).unwrap();
             window.copy_mode = read_only.then(|| CopyModeState::read_only_at((0, 0)));
             if !search_open {
                 window.tab_states[1].search = None;
             }
             let modes: Vec<_> =
-                windows.iter().map(|(id, _)| app.windows[id].copy_mode.clone()).collect();
+                windows.iter().map(|(id, _)| app.registry.windows[id].copy_mode.clone()).collect();
             app.wait_for_input_queues();
             assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
             let attempts = app.__test_drain_pty_writes();
             let accepted = submitted.take();
             if search_open {
-                let search = app.windows[&source_window].tab_states[1].search.as_ref().unwrap();
+                let search =
+                    app.registry.windows[&source_window].tab_states[1].search.as_ref().unwrap();
                 assert_eq!(search.query, "needle", "source={source_index} read_only={read_only}");
                 assert_eq!(search.cursor(), "needle".len());
                 assert_eq!(search.matches.len(), 7);
                 assert_eq!(search.current, Some(1));
                 assert_eq!(search.requested_scroll_row, None);
             } else {
-                assert!(app.windows[&source_window].tab_states[1].search.is_none());
+                assert!(app.registry.windows[&source_window].tab_states[1].search.is_none());
             }
             if read_only || search_open {
                 assert_eq!((attempts, accepted), (Vec::new(), Vec::new()));
@@ -558,11 +568,11 @@ fn real_pty_search_paste_explicit_source_matrix() {
                 assert_eq!(accepted, expected);
             }
             assert_eq!(
-                app.windows[&source_window].tab_states[0].search.as_ref().unwrap().query,
+                app.registry.windows[&source_window].tab_states[0].search.as_ref().unwrap().query,
                 "inactive"
             );
             for ((id, pane), mode) in windows.iter().zip(&modes) {
-                let window = &app.windows[id];
+                let window = &app.registry.windows[id];
                 assert_eq!(&window.copy_mode, mode);
                 assert_eq!(window.panes[pane].viewport_top_abs, Some(3));
                 assert!(window.notification.is_none());
@@ -574,7 +584,7 @@ fn real_pty_search_paste_explicit_source_matrix() {
                     assert_eq!(search.current, None);
                 }
             }
-            assert_eq!(app.frontmost_window, Some(other_window));
+            assert_eq!(app.registry.frontmost_window, Some(other_window));
         }
     }
 }
@@ -592,11 +602,11 @@ fn real_pty_search_paste_missing_pane_never_broadcasts() {
         let (other_window, _) = windows[(source_index + 1) % 3];
         app.interaction.broadcast =
             BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
-        app.frontmost_window = Some(other_window);
+        app.registry.frontmost_window = Some(other_window);
         app.__test_set_memory_clipboard("probe");
         let submitted = PtySubmissions::start();
         // Prove that the same source and live peers admit terminal paste before removing only the source pane.
-        app.windows.get_mut(&source_window).unwrap().tab_states[0].search = None;
+        app.registry.windows.get_mut(&source_window).unwrap().tab_states[0].search = None;
         app.wait_for_input_queues();
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
         let peers: std::collections::BTreeSet<_> =
@@ -607,29 +617,30 @@ fn real_pty_search_paste_missing_pane_never_broadcasts() {
         assert_eq!(submitted.take(), expected);
         set_search_paste_query(&mut app, source_window, "keep");
         app.wait_for_input_queues();
-        let removed = app.windows.get_mut(&source_window).unwrap().panes.remove(&source).unwrap();
-        assert_eq!(app.windows[&source_window].tab_states[0].active_pane, source);
+        let removed =
+            app.registry.windows.get_mut(&source_window).unwrap().panes.remove(&source).unwrap();
+        assert_eq!(app.registry.windows[&source_window].tab_states[0].active_pane, source);
         assert_eq!(app.__test_broadcast_source(), Some(source));
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
         let attempts = app.__test_drain_pty_writes();
         let accepted = submitted.take();
         // Restore custody before assertions so InputTestApp owns teardown even when the regression fails.
-        app.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
+        app.registry.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
         for (id, pane) in windows {
             assert_eq!(
-                app.windows[&id].tab_states[0].search.as_ref().unwrap().query,
+                app.registry.windows[&id].tab_states[0].search.as_ref().unwrap().query,
                 if id == source_window { "keep" } else { "other" }
             );
-            assert_eq!(app.windows[&id].panes[&pane].viewport_top_abs, Some(3));
-            assert!(app.windows[&id].copy_mode.is_none());
-            assert!(app.windows[&id].notification.is_none());
+            assert_eq!(app.registry.windows[&id].panes[&pane].viewport_top_abs, Some(3));
+            assert!(app.registry.windows[&id].copy_mode.is_none());
+            assert!(app.registry.windows[&id].notification.is_none());
         }
         assert_eq!(
             (attempts, accepted),
             (Vec::new(), Vec::new()),
             "source={source_index}: an open search owns the paste even without its active pane"
         );
-        assert_eq!(app.frontmost_window, Some(other_window));
+        assert_eq!(app.registry.frontmost_window, Some(other_window));
     }
 }
 
@@ -647,10 +658,10 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
         let (other_window, _) = windows[(source_index + 1) % 3];
         app.interaction.broadcast =
             BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
-        app.frontmost_window = Some(other_window);
+        app.registry.frontmost_window = Some(other_window);
         let submitted = PtySubmissions::start();
         // Successful delivery to these same peers proves that empty captures below are not disconnected-PTY artifacts.
-        app.windows.get_mut(&source_window).unwrap().tab_states[0].search = None;
+        app.registry.windows.get_mut(&source_window).unwrap().tab_states[0].search = None;
         app.__test_set_memory_clipboard("probe");
         app.wait_for_input_queues();
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
@@ -661,10 +672,10 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
         assert_eq!(app.__test_drain_pty_writes(), expected);
         assert_eq!(submitted.take(), expected);
         app.wait_for_input_queues();
-        app.windows.get_mut(&source_window).unwrap().copy_mode =
+        app.registry.windows.get_mut(&source_window).unwrap().copy_mode =
             Some(CopyModeState::read_only_at((0, 0)));
         set_search_paste_query(&mut app, source_window, "你🙂好");
-        let window = app.windows.get_mut(&source_window).unwrap();
+        let window = app.registry.windows.get_mut(&source_window).unwrap();
         let parser = window.panes[&source].parser.lock();
         let search = window.tab_states[0].search.as_mut().unwrap();
         search.apply_text_edit(TextEdit::MoveStart, parser.grid());
@@ -672,7 +683,7 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
         drop(parser);
         app.__test_set_memory_clipboard("é\r\n\x1b\x7f");
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
-        let search = app.windows[&source_window].tab_states[0].search.as_ref().unwrap();
+        let search = app.registry.windows[&source_window].tab_states[0].search.as_ref().unwrap();
         assert_eq!(
             search.query, "你é🙂好",
             "source={source_index}: READONLY search accepts clipboard text at its caret"
@@ -688,7 +699,8 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
             app.test_clipboard_text = text.map(str::to_owned);
             app.clipboard = None;
             assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
-            let search = app.windows[&source_window].tab_states[0].search.as_ref().unwrap();
+            let search =
+                app.registry.windows[&source_window].tab_states[0].search.as_ref().unwrap();
             assert_eq!(search.query, "你é🙂好");
             assert_eq!(search.cursor(), "你é".len());
             assert_eq!(search.matches.len(), 7);
@@ -698,35 +710,42 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
         }
         app.__test_set_memory_clipboard("discard");
         for read_only in [true, false] {
-            app.windows.get_mut(&source_window).unwrap().copy_mode =
+            app.registry.windows.get_mut(&source_window).unwrap().copy_mode =
                 read_only.then(|| CopyModeState::read_only_at((0, 0)));
-            let removed =
-                app.windows.get_mut(&source_window).unwrap().panes.remove(&source).unwrap();
+            let removed = app
+                .registry
+                .windows
+                .get_mut(&source_window)
+                .unwrap()
+                .panes
+                .remove(&source)
+                .unwrap();
             // Leave both active_pane and the armed AllTabs source stale; no live-source broadcast check may hide a leak.
-            assert_eq!(app.windows[&source_window].tab_states[0].active_pane, source);
+            assert_eq!(app.registry.windows[&source_window].tab_states[0].active_pane, source);
             assert_eq!(app.__test_broadcast_source(), Some(source));
             assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
             let captures = (app.__test_drain_pty_writes(), submitted.take());
-            app.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
+            app.registry.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
             assert_eq!(
                 captures,
                 (Vec::new(), Vec::new()),
                 "source={source_index} missing-pane read_only={read_only}"
             );
-            let search = app.windows[&source_window].tab_states[0].search.as_ref().unwrap();
+            let search =
+                app.registry.windows[&source_window].tab_states[0].search.as_ref().unwrap();
             assert_eq!(search.query, "你é🙂好");
             assert_eq!(search.cursor(), "你é".len());
             assert_eq!(search.matches.len(), 7);
             assert_eq!(search.current, Some(1));
             for (id, _) in windows {
                 assert_eq!(
-                    app.windows[&id].tab_states[0].search.as_ref().unwrap().query,
+                    app.registry.windows[&id].tab_states[0].search.as_ref().unwrap().query,
                     if id == source_window { "你é🙂好" } else { "other" }
                 );
-                assert!(app.windows[&id].notification.is_none());
+                assert!(app.registry.windows[&id].notification.is_none());
             }
             assert_eq!(
-                app.windows[&source_window]
+                app.registry.windows[&source_window]
                     .copy_mode
                     .as_ref()
                     .is_some_and(CopyModeState::is_read_only),
@@ -735,18 +754,18 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
         }
         // An explicit removed window is refused rather than using cached focus or main's open search.
         let closed = app.__test_seed_child_window(&["closed"]);
-        app.windows.remove(&closed);
+        app.registry.windows.remove(&closed);
         assert!(!app.run_action_for_window(&Action::PasteFromClipboard, closed));
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
         for (id, pane) in windows {
             assert_eq!(
-                app.windows[&id].tab_states[0].search.as_ref().unwrap().query,
+                app.registry.windows[&id].tab_states[0].search.as_ref().unwrap().query,
                 if id == source_window { "你é🙂好" } else { "other" }
             );
-            assert_eq!(app.windows[&id].panes[&pane].viewport_top_abs, Some(3));
-            assert!(app.windows[&id].notification.is_none());
+            assert_eq!(app.registry.windows[&id].panes[&pane].viewport_top_abs, Some(3));
+            assert!(app.registry.windows[&id].notification.is_none());
         }
-        assert_eq!(app.frontmost_window, Some(other_window));
+        assert_eq!(app.registry.frontmost_window, Some(other_window));
     }
 }
 

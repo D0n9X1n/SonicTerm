@@ -164,7 +164,7 @@ pub struct StartupLoads {
 
 impl App {
     pub(super) fn refresh_all_window_minimums(&mut self) {
-        for window in self.windows.values_mut() {
+        for window in self.registry.windows.values_mut() {
             super::apply_window_state_minimum(window);
         }
     }
@@ -178,7 +178,7 @@ impl App {
         // Config is only applied on an explicit user reload, so it must
         // render immediately rather than at the next vsync deadline.
         self.mark_all_window_inputs();
-        self.warm_window_pool.clear();
+        self.registry.warm_window_pool.clear();
         let assets = sonicterm_cfg::assets::asset_dir();
 
         // Theme. Re-read unconditionally: the theme lives in its own file, so
@@ -204,19 +204,19 @@ impl App {
                     if let Some(renderer) = self.main_renderer_mut() {
                         renderer.set_theme(&theme);
                     }
-                    for child in self.windows.values_mut() {
+                    for child in self.registry.windows.values_mut() {
                         if let Some(renderer) = child.renderer.as_mut() {
                             renderer.set_theme(&theme);
                         }
                     }
                     self.theme = theme;
-                    for child in self.windows.values() {
+                    for child in self.registry.windows.values() {
                         propagate_theme_to_pane_parsers(&child.panes, &self.theme);
                     }
                     // Theme swap changes presentation (colors) without
                     // mutating cell contents — mark every pane dirty so
                     // the renderer re-shapes with the new palette.
-                    for child in self.windows.values() {
+                    for child in self.registry.windows.values() {
                         // When: child.renderer is None for test-seeded entries, which
                         // never present a frame, so the palette dirty rows go unread.
                         if child.renderer.is_none() {
@@ -249,10 +249,10 @@ impl App {
             }
             // Cell metrics changed → resize each pane to its own PaneRect,
             // never to the whole window's dimensions.
-            // main is in self.windows so the loop below
+            // main is in self.registry.windows so the loop below
             // covers main + every torn-out child. Each owns its own
             // GpuRenderer + pane rects.
-            for child in self.windows.values_mut() {
+            for child in self.registry.windows.values_mut() {
                 {
                     let Some(renderer) = child.renderer.as_mut() else {
                         // When: child.renderer is None for test-seeded entries; skip so
@@ -314,7 +314,7 @@ impl App {
             renderer.set_cursor_shape(new_cfg.terminal.cursor_shape);
             renderer.set_cursor_blink(new_cfg.terminal.cursor_blink);
         }
-        for child in self.windows.values_mut() {
+        for child in self.registry.windows.values_mut() {
             if let Some(renderer) = child.renderer.as_mut() {
                 renderer.set_cursor_shape(new_cfg.terminal.cursor_shape);
                 renderer.set_cursor_blink(new_cfg.terminal.cursor_blink);
@@ -348,7 +348,7 @@ impl App {
                 renderer.set_padding(pad);
             }
             // the loop below covers main + every child.
-            for child in self.windows.values_mut() {
+            for child in self.registry.windows.values_mut() {
                 {
                     let Some(renderer) = child.renderer.as_mut() else {
                         // When: child.renderer is None for test-seeded entries; skip so
@@ -394,7 +394,7 @@ impl App {
             if let Some(renderer) = self.main_renderer_mut() {
                 renderer.set_theme_with_opacity(&theme_snapshot, new_cfg.appearance.opacity);
             }
-            for child in self.windows.values_mut() {
+            for child in self.registry.windows.values_mut() {
                 if let Some(renderer) = child.renderer.as_mut() {
                     renderer.set_theme_with_opacity(&theme_snapshot, new_cfg.appearance.opacity);
                 }
@@ -406,7 +406,7 @@ impl App {
             if let Some(renderer) = self.main_renderer_mut() {
                 renderer.set_scrollbar_mode(new_cfg.appearance.scrollbar);
             }
-            for child in self.windows.values_mut() {
+            for child in self.registry.windows.values_mut() {
                 if let Some(renderer) = child.renderer.as_mut() {
                     renderer.set_scrollbar_mode(new_cfg.appearance.scrollbar);
                 }
@@ -418,7 +418,7 @@ impl App {
             if let Some(renderer) = self.main_renderer_mut() {
                 renderer.set_subpixel_aa_mode(new_cfg.font.subpixel_aa);
             }
-            for child in self.windows.values_mut() {
+            for child in self.registry.windows.values_mut() {
                 if let Some(renderer) = child.renderer.as_mut() {
                     renderer.set_subpixel_aa_mode(new_cfg.font.subpixel_aa);
                 }
@@ -430,7 +430,7 @@ impl App {
             if let Some(renderer) = self.main_renderer_mut() {
                 renderer.set_panel_padding(new_cfg.appearance.panel_padding);
             }
-            for child in self.windows.values_mut() {
+            for child in self.registry.windows.values_mut() {
                 if let Some(renderer) = child.renderer.as_mut() {
                     renderer.set_panel_padding(new_cfg.appearance.panel_padding);
                 }
@@ -456,7 +456,7 @@ impl App {
                 );
                 renderer.set_software_render_degrade(degrade);
             }
-            for child in self.windows.values_mut() {
+            for child in self.registry.windows.values_mut() {
                 if let Some(renderer) = child.renderer.as_mut() {
                     let degrade = super::should_degrade_for_software_render(
                         new_cfg.appearance.software_render_mode,
@@ -507,7 +507,7 @@ impl App {
             if let Some(renderer) = self.main_renderer_mut() {
                 renderer.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
             }
-            for child in self.windows.values_mut() {
+            for child in self.registry.windows.values_mut() {
                 if let Some(renderer) = child.renderer.as_mut() {
                     renderer.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
                 }
@@ -583,7 +583,7 @@ impl App {
             || new_cfg.terminal.effective_clickable_path_max_chars()
                 != self.config.terminal.effective_clickable_path_max_chars()
         {
-            for window in self.windows.values_mut() {
+            for window in self.registry.windows.values_mut() {
                 window.invalidate_path_hover();
             }
         }
@@ -596,7 +596,7 @@ impl App {
             // When: `scrollback` changed, re-apply it to every terminal pane; report panes keep their own size.
             let limit = new_cfg.terminal.scrollback;
             tracing::info!("live-reload: scrollback -> {limit} rows");
-            for child in self.windows.values_mut() {
+            for child in self.registry.windows.values_mut() {
                 if child.role.is_report() {
                     // When: `child.role` is a report, its history is sized to the report, not the setting.
                     continue;
@@ -619,7 +619,7 @@ impl App {
         if let Some(window) = self.main_window() {
             crate::app::frame_counters::request_native_redraw(window);
         }
-        for child in self.windows.values() {
+        for child in self.registry.windows.values() {
             // When: child.renderer is None for test-seeded entries, which carry no
             // window either, so child.request_redraw would already do nothing.
             if child.renderer.is_none() {
@@ -656,20 +656,20 @@ impl App {
         if let Some(renderer) = self.main_renderer_mut() {
             renderer.set_theme(&theme);
         }
-        for child in self.windows.values_mut() {
+        for child in self.registry.windows.values_mut() {
             if let Some(renderer) = child.renderer.as_mut() {
                 renderer.set_theme(&theme);
             }
         }
         self.theme = theme;
         self.config.theme = name.to_string();
-        for child in self.windows.values() {
+        for child in self.registry.windows.values() {
             propagate_theme_to_pane_parsers(&child.panes, &self.theme);
         }
         // Theme swap changes presentation (colors) without mutating
         // cell contents — mark every pane dirty so the renderer
         // re-shapes with the new palette.
-        for child in self.windows.values() {
+        for child in self.registry.windows.values() {
             // When: child.renderer is None for test-seeded entries, where nothing
             // will ever consume the dirty rows mark_all_panes_dirty would set.
             if child.renderer.is_none() {
@@ -680,7 +680,7 @@ impl App {
         if let Some(window) = self.main_window() {
             crate::app::frame_counters::request_native_redraw(window);
         }
-        for child in self.windows.values() {
+        for child in self.registry.windows.values() {
             // When: child.renderer is None for test-seeded entries, whose window is
             // None too, so skipping keeps this sweep to windows that present frames.
             if child.renderer.is_none() {
@@ -747,13 +747,13 @@ impl App {
         if let Some(renderer) = self.main_renderer_mut() {
             renderer.set_font(&family, size, line_h, weight_scale);
         }
-        for child in self.windows.values_mut() {
+        for child in self.registry.windows.values_mut() {
             if let Some(renderer) = child.renderer.as_mut() {
                 renderer.set_font(&family, size, line_h, weight_scale);
             }
         }
         self.mark_all_window_inputs();
-        for child in self.windows.values() {
+        for child in self.registry.windows.values() {
             // When: child.renderer is None only for test-seeded entries, where no
             // renderer will consume the dirty rows and request_redraw is a no-op.
             if child.renderer.is_none() {
@@ -823,7 +823,7 @@ impl App {
         let visible = self.tab_bar_visible;
         tracing::info!("tab bar visible -> {visible}");
         // the loop below covers main + every child.
-        for child in self.windows.values_mut() {
+        for child in self.registry.windows.values_mut() {
             let changed = {
                 let Some(renderer) = child.renderer.as_mut() else {
                     // When: renderer is None for test-seeded entries, which hold no
@@ -855,7 +855,7 @@ impl App {
         if let Some(window) = self.main_window() {
             crate::app::frame_counters::request_native_redraw(window);
         }
-        for child in self.windows.values() {
+        for child in self.registry.windows.values() {
             // When: renderer is None only for test-seeded entries, which also carry
             // no window, so child.request_redraw would already be a no-op.
             if child.renderer.is_none() {

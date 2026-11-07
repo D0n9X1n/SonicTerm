@@ -88,7 +88,7 @@ impl super::super::App {
     /// draws, the active tab's leaves or only its zoomed pane. A hidden pane's flush stays
     /// pending until a redraw shows it. The tree is walked in place, allocating nothing.
     pub(in crate::app) fn note_redraw_requested(&mut self, id: winit::window::WindowId) {
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: the window is gone, there is nothing to count.
             return;
         };
@@ -125,6 +125,7 @@ impl super::super::App {
         };
         let elapsed_us = micros_between(started, Instant::now());
         let live = self
+            .registry
             .windows
             .get_mut(&id)
             .and_then(|window| window.redraw.frame_counters.as_deref_mut());
@@ -153,12 +154,12 @@ impl super::super::App {
         // A window an earlier dispatch closed without recording its time is finalized now.
         app.finish_closing();
         app.dispatching = Some(id);
-        self.windows.get(&id).is_some_and(|window| window.redraw.frame_counters.is_some())
+        self.registry.windows.get(&id).is_some_and(|window| window.redraw.frame_counters.is_some())
     }
 
     /// Count one serviced output event (`PaneOutput` or `RequestRedraw`) for window `id`.
     pub(in crate::app) fn note_user_request_redraw(&mut self, id: winit::window::WindowId) {
-        let window = self.windows.get_mut(&id);
+        let window = self.registry.windows.get_mut(&id);
         if let Some(counters) =
             window.and_then(|window| window.redraw.frame_counters.as_deref_mut())
         {

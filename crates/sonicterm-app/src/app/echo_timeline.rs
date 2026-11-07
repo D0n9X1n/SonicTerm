@@ -683,19 +683,19 @@ impl super::App {
 
     /// The render marker of window `id`'s watched dispatch in progress.
     pub(super) fn render_marker(&self, id: WindowId) -> Option<RenderMarker> {
-        self.windows.get(&id).and_then(|window| window.redraw.timeline.render_marker())
+        self.registry.windows.get(&id).and_then(|window| window.redraw.timeline.render_marker())
     }
 
     /// Record the entry of window `id`'s `RedrawRequested` dispatch when its timeline has an owner.
     pub(super) fn note_dispatch_entry(&mut self, id: WindowId) {
-        if let Some(window) = self.windows.get_mut(&id) {
+        if let Some(window) = self.registry.windows.get_mut(&id) {
             window.redraw.timeline.note_dispatch_entry();
         }
     }
 
     /// Record the return of window `id`'s watched dispatch, if one is in progress.
     pub(super) fn note_dispatch_return(&mut self, id: WindowId) {
-        if let Some(window) = self.windows.get_mut(&id) {
+        if let Some(window) = self.registry.windows.get_mut(&id) {
             window.redraw.timeline.note_dispatch_return();
         }
     }

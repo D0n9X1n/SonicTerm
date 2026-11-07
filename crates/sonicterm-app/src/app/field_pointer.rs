@@ -160,9 +160,10 @@ impl App {
     /// The palette is modal over its host window's search; the colour picker's
     /// title row is not an editable field.
     pub(super) fn field_pointer_target(&self, window_id: WindowId) -> Option<FieldTarget> {
-        let window = self.windows.get(&window_id).filter(|window| !window.hidden)?;
+        let window = self.registry.windows.get(&window_id).filter(|window| !window.hidden)?;
         if self.interaction.command_palette.is_open()
-            && self.interaction.palette_attached_window.or(self.main_window_id) == Some(window_id)
+            && self.interaction.palette_attached_window.or(self.registry.main_window_id)
+                == Some(window_id)
         {
             // When: the palette is open on `window_id`, only its query may own a field gesture.
             let mode = self.interaction.command_palette.mode();
@@ -174,7 +175,7 @@ impl App {
                 CommandPaletteMode::RenameWindow => {
                     self.interaction
                         .window_rename_target
-                        .and_then(|key| self.window_keys.resolve(key))
+                        .and_then(|key| self.registry.window_keys.resolve(key))
                         == Some(window_id)
                 }
                 CommandPaletteMode::Commands
@@ -204,7 +205,7 @@ impl App {
             FieldTarget::Palette { .. } => self.interaction.command_palette.set_cursor(offset),
             FieldTarget::Search(_) => {
                 // When: `target` is the search field, the offset edits that window's active search.
-                let Some(window) = self.windows.get_mut(&window_id) else {
+                let Some(window) = self.registry.windows.get_mut(&window_id) else {
                     // When: the source window closed, there is no search to edit.
                     return;
                 };
@@ -229,7 +230,7 @@ impl App {
     fn field_pointer_press(&mut self, window_id: WindowId, resolve: FieldHitResolver) -> bool {
         if let Some(source) = self
             .field_capture_window()
-            .filter(|source| self.windows.get(source).is_none_or(|window| window.hidden))
+            .filter(|source| self.registry.windows.get(source).is_none_or(|window| window.hidden))
         {
             // The capture's window is gone or hidden and can never deliver its release, so its
             // gesture must not block this press.
@@ -254,13 +255,13 @@ impl App {
             }
         }
         // Debts of windows that closed without a close event can never be paid.
-        let windows = &self.windows;
+        let windows = &self.registry.windows;
         self.interaction.field_owed_releases.retain(|owed| windows.contains_key(owed));
         let Some(target) = self.field_pointer_target(window_id) else {
             // When: `field_pointer_target` finds no editable field in `window_id`, the press is not ours.
             return false;
         };
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: the window vanished between lookups, there is nothing to press.
             return false;
         };
@@ -364,7 +365,7 @@ impl App {
                 }
             }
         }
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: the window closed mid-drag, nothing more can be selected.
             return true;
         };
@@ -423,7 +424,7 @@ impl App {
         point: (f32, f32),
         mode: FieldHitMode,
     ) -> FieldHit {
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: the window closed, there is no presented field to hit.
             return FieldHit::Outside;
         };

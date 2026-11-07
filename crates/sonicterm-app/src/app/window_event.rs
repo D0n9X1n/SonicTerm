@@ -79,7 +79,7 @@ impl App {
             // When: win_id is an unpromoted warm window, it owns no input scheduling state.
             return;
         }
-        if !self.windows.contains_key(&win_id) {
+        if !self.registry.windows.contains_key(&win_id) {
             // When: win_id is stale, no sibling can inherit its input cause.
             return;
         }
@@ -93,7 +93,7 @@ impl App {
         }
         // Main and child windows share one refresh, before the child dispatch below.
         self.refresh_monitor_for_event(win_id, &event);
-        if let Some(window) = self.windows.get_mut(&win_id) {
+        if let Some(window) = self.registry.windows.get_mut(&win_id) {
             if matches!(
                 event,
                 WindowEvent::KeyboardInput { .. }
@@ -119,7 +119,7 @@ impl App {
                 | WindowEvent::ScaleFactorChanged { .. }
                 | WindowEvent::Focused(false)
         ) {
-            if let Some(window) = self.windows.get_mut(&win_id) {
+            if let Some(window) = self.registry.windows.get_mut(&win_id) {
                 window.invalidate_path_hover();
             }
         }
@@ -164,11 +164,13 @@ impl App {
         }
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
-        // the main window also lives in `self.windows`
+        // the main window also lives in `self.registry.windows`
         // now (shadow entry, `Some(main_window_id)`), but its events
         // must continue to flow through the legacy `App.*` paths
         // below. Skip the main window's id explicitly.
-        if self.windows.contains_key(&win_id) && Some(win_id) != self.main_window_id {
+        if self.registry.windows.contains_key(&win_id)
+            && Some(win_id) != self.registry.main_window_id
+        {
             // When: windows contains win_id and main_window_id differs, delegate to child state.
             self.handle_child_window_event(event_loop, win_id, event);
             return;
@@ -274,9 +276,9 @@ impl App {
 
             WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, mut inner_size_writer } => {
                 // When: ScaleFactorChanged arrives, synchronously bind native and renderer geometry to one physical target.
-                if let Some(id) = self.main_window_id {
+                if let Some(id) = self.registry.main_window_id {
                     // When: main_window_id identifies the live main window, update exactly that state.
-                    if let Some(window) = self.windows.get_mut(&id) {
+                    if let Some(window) = self.registry.windows.get_mut(&id) {
                         // When: windows still contains id, apply the shared transition before winit commits WM_DPICHANGED.
                         let _ = crate::app::apply_window_dpi_transition(
                             window,
@@ -341,6 +343,7 @@ impl App {
         // The bar holds its widths while a tab gesture runs in any window or this window's own
         // pointer rests on it.
         let tab_bar_band = self
+            .registry
             .windows
             .get(&win_id)
             .and_then(|window| window.renderer.as_ref())
@@ -354,9 +357,9 @@ impl App {
         let pty_burst = self.main().is_some_and(WindowState::visible_output_advanced);
         let mut timing = crate::app::render_timing::RenderTiming::start("main");
         self.pending_redraw = false;
-        let main_id_opt = self.main_window_id;
+        let main_id_opt = self.registry.main_window_id;
         if let Some(id) = main_id_opt {
-            if let Some(window) = self.windows.get_mut(&id) {
+            if let Some(window) = self.registry.windows.get_mut(&id) {
                 window.tabs.clear_expired_command_badges(Instant::now());
             }
         }
@@ -366,7 +369,7 @@ impl App {
         let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
             .then(|| std::sync::Arc::clone(&self.services.fg_probes));
         if let Some(id) = main_id_opt {
-            if let Some(window) = self.windows.get_mut(&id) {
+            if let Some(window) = self.registry.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(
                     &mut window.tabs,
                     &window.tab_states,
@@ -568,16 +571,16 @@ impl App {
         // An owned handle for the watched dispatch's render pair; it holds no lock or borrow.
         let render_marker = self.render_marker(win_id);
         // Borrow-split: pull the renderer out via direct
-        // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
+        // map-lookup on `self.registry.windows` (NOT through `main_renderer_mut`,
         // which would borrow all of `self`). That keeps
         // `self.interaction.command_palette`, `self.ime` available for the
         // disjoint mut borrows the render call needs in the same
         // expression scope.
         // panes live in the main `WindowState` too, so they're
         // pulled from the same field-disjoint split borrow.
-        let main_id_opt = self.main_window_id;
+        let main_id_opt = self.registry.main_window_id;
         let counts_selection = self.counts_selection();
-        let mut ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
+        let mut ws_opt = main_id_opt.and_then(|id| self.registry.windows.get_mut(&id));
         if let Some(main) = ws_opt.as_deref_mut() {
             // The collector validated the actual active position before taking any lock.
             invalidate_selection_for_content(

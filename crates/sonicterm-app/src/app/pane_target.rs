@@ -84,7 +84,7 @@ pub(crate) enum TargetError {
 impl App {
     /// The window and tab that hold `pane_id`, searching the main window and every child.
     pub(crate) fn locate_pane(&self, pane_id: u64) -> Option<PaneLocation> {
-        self.windows.iter().find_map(|(window_id, window)| {
+        self.registry.windows.iter().find_map(|(window_id, window)| {
             if !window.panes.contains_key(&pane_id) {
                 // When: this window's `panes` lack `pane_id`, the pane lives elsewhere.
                 return None;
@@ -96,14 +96,14 @@ impl App {
             Some(PaneLocation {
                 window_id: *window_id,
                 tab_index,
-                is_main: Some(*window_id) == self.main_window_id,
+                is_main: Some(*window_id) == self.registry.main_window_id,
             })
         })
     }
 
     /// Whether `pane_id`'s window is in READONLY, frontmost or not.
     pub(crate) fn pane_window_read_only(&self, pane_id: u64) -> bool {
-        self.windows.values().any(|window| {
+        self.registry.windows.values().any(|window| {
             window.panes.contains_key(&pane_id)
                 && window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
         })
@@ -124,7 +124,7 @@ impl App {
             // When: the anchor's window is in READONLY, no helper is opened in it.
             return Err(TargetError::ReadOnly);
         }
-        let window = self.windows.get(&location.window_id).ok_or(TargetError::PaneGone)?;
+        let window = self.registry.windows.get(&location.window_id).ok_or(TargetError::PaneGone)?;
         // The cwd is cloned under the parser lock, which drops before any spawn. It is inherited
         // before a program is set, because `inherit_cwd` leaves command launches alone.
         let anchor_cwd = window.panes.get(&anchor).and_then(|pane| {
@@ -178,7 +178,7 @@ impl App {
             // When: `is_main` holds for the anchor's `location`, the main spawn path runs at `size`.
             return Ok(self.spawn_pane_sized(pane_id, launch, size));
         }
-        let child = self.windows.get(&location.window_id).ok_or(TargetError::PaneGone)?;
+        let child = self.registry.windows.get(&location.window_id).ok_or(TargetError::PaneGone)?;
         match (child.renderer.as_ref(), child.window.as_ref()) {
             (Some(renderer), Some(window)) => {
                 let (cols, rows) = size.unwrap_or_else(|| renderer.cells());
@@ -210,7 +210,7 @@ impl App {
         pane: PaneState,
         title: Option<String>,
     ) -> Result<(), TargetError> {
-        let Some(window) = self.windows.get_mut(&location.window_id) else {
+        let Some(window) = self.registry.windows.get_mut(&location.window_id) else {
             // When: the window closed while the pane spawned, its PTY still needs retirement.
             self.retire_pane(pane);
             return Err(TargetError::PaneGone);
@@ -248,8 +248,8 @@ impl App {
     /// so a pane added to a hidden tab wraps at its real width before anyone reads it. The
     /// visible tab also takes the window's usual topology refresh.
     fn size_tab_panes(&mut self, window_id: WindowId, tab_index: usize) {
-        let is_main = Some(window_id) == self.main_window_id;
-        let Some(window) = self.windows.get(&window_id) else {
+        let is_main = Some(window_id) == self.registry.main_window_id;
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: `windows` no longer holds `window_id`, there is nothing to size.
             return;
         };
@@ -275,7 +275,7 @@ impl App {
             if visible {
                 self.resize_visible_panes();
             }
-        } else if let Some(window) = self.windows.get_mut(&window_id) {
+        } else if let Some(window) = self.registry.windows.get_mut(&window_id) {
             // When: `windows` still holds the child, it owns the new pane now, visible or not.
             window.reconcile_pane_owners();
             if visible {
@@ -295,7 +295,7 @@ impl App {
         placement: Placement,
         pane_id: u64,
     ) -> Option<(u16, u16)> {
-        let window = self.windows.get(&location.window_id)?;
+        let window = self.registry.windows.get(&location.window_id)?;
         let geometry = self.window_geometry(location.window_id)?;
         // A split is measured in a copy of the anchor's tab tree; a new tab is the pane alone.
         let tree = match placement {
@@ -324,8 +324,8 @@ impl App {
 
     /// A window's layout inputs: the headless test seam, or its renderer's cell size and padding.
     fn window_geometry(&self, window_id: WindowId) -> Option<WindowGeometry<'_>> {
-        let window = self.windows.get(&window_id)?;
-        let (seam, renderer) = if Some(window_id) == self.main_window_id {
+        let window = self.registry.windows.get(&window_id)?;
+        let (seam, renderer) = if Some(window_id) == self.registry.main_window_id {
             (self.test_viewport_override, self.main_renderer())
         } else {
             // When: `window_id` is a child, its own `test_pane_viewport` and `renderer` apply.

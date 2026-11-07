@@ -67,7 +67,7 @@ fn source_window_selects_only_its_active_pane_and_never_waits() {
         format!("\x1b]7;file://localhost{prefix}/main\x07").as_bytes(),
     );
     let pane_ids: Vec<_> =
-        app.windows[&child].tab_states.iter().map(|tab| tab.active_pane).collect();
+        app.registry.windows[&child].tab_states.iter().map(|tab| tab.active_pane).collect();
     for (pane, name) in pane_ids.iter().zip(["child", "other"]) {
         app.__test_advance_child_pane_parser(
             child,
@@ -75,31 +75,31 @@ fn source_window_selects_only_its_active_pane_and_never_waits() {
             format!("\x1b]7;file://localhost{prefix}/{name}\x07").as_bytes(),
         );
     }
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     let expected = if cfg!(windows) { r"C:\child" } else { "/child" };
-    let selected = PaneLaunch::from_window(app.windows.get(&child), "host");
+    let selected = PaneLaunch::from_window(app.registry.windows.get(&child), "host");
     assert_eq!(selected.cwd, Some(PathBuf::from(expected)));
     assert_ne!(selected.cwd, PaneLaunch::from_window(app.main(), "host").cwd);
     // Same-tab splits must use active_pane, not the first tree leaf or another tab.
-    let window = app.windows.get_mut(&child).unwrap();
+    let window = app.registry.windows.get_mut(&child).unwrap();
     let inactive = window.tab_states.remove(1).active_pane;
     let tab = &mut window.tab_states[0];
     assert!(tab.tree.split(tab.active_pane, sonicterm_cfg::keymap::Direction::Right, inactive));
     tab.active_pane = inactive;
     let other = if cfg!(windows) { r"C:\other" } else { "/other" };
     assert_eq!(
-        PaneLaunch::from_window(app.windows.get(&child), "host").cwd,
+        PaneLaunch::from_window(app.registry.windows.get(&child), "host").cwd,
         Some(PathBuf::from(other))
     );
-    app.windows.get_mut(&child).unwrap().tab_states[0].active_pane = pane_ids[0];
-    let parser = app.windows[&child].panes[&pane_ids[0]].parser.clone();
+    app.registry.windows.get_mut(&child).unwrap().tab_states[0].active_pane = pane_ids[0];
+    let parser = app.registry.windows[&child].panes[&pane_ids[0]].parser.clone();
     let guard = parser.lock();
-    assert_eq!(PaneLaunch::from_window(app.windows.get(&child), "host").cwd, None);
+    assert_eq!(PaneLaunch::from_window(app.registry.windows.get(&child), "host").cwd, None);
     drop(guard);
     parser.lock().advance(b"\x1b]7;file://remote/tmp\x07");
-    assert_eq!(PaneLaunch::from_window(app.windows.get(&child), "host").cwd, None);
+    assert_eq!(PaneLaunch::from_window(app.registry.windows.get(&child), "host").cwd, None);
     parser.lock().advance(b"\x1b]7;file://localhost/bad%xx\x07");
-    assert_eq!(PaneLaunch::from_window(app.windows.get(&child), "host").cwd, None);
+    assert_eq!(PaneLaunch::from_window(app.registry.windows.get(&child), "host").cwd, None);
 }
 
 #[test]

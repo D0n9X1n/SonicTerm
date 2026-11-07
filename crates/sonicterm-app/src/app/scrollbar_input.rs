@@ -338,7 +338,7 @@ impl App {
         press_x: f32,
         press_y: f32,
     ) -> HitOutcome {
-        let Some(child) = self.windows.get(&win_id) else {
+        let Some(child) = self.registry.windows.get(&win_id) else {
             // When: windows has no entry for win_id, so there is no child
             // state to hit-test the press against.
             return HitOutcome::Miss;
@@ -404,7 +404,7 @@ impl App {
         cursor_x: f32,
         cursor_y: f32,
     ) -> Option<(u64, u64)> {
-        let child = self.windows.get(&win_id)?;
+        let child = self.registry.windows.get(&win_id)?;
         let state = child.scrollbar_drag.as_ref()?;
         Some((state.pane_id, apply_drag_at(state, Point::new(cursor_x, cursor_y))))
     }
@@ -412,7 +412,7 @@ impl App {
     /// Page the active pane's scrollbar in the child window `win_id`.
     pub(crate) fn scrollbar_track_page_in_child(&mut self, win_id: WindowId, forward: bool) {
         let (active_id, viewport_rows, total_rows, view_top, at) = {
-            let Some(child) = self.windows.get(&win_id) else {
+            let Some(child) = self.registry.windows.get(&win_id) else {
                 // When: windows has no entry for win_id, so there is no child
                 // pane to page.
                 return;
@@ -463,7 +463,7 @@ impl App {
         at: ViewportBaseline,
     ) {
         let mode = self.config.appearance.scrollbar;
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: windows has no entry for win_id, so there is no child pane
             // to write view_top into.
             return;

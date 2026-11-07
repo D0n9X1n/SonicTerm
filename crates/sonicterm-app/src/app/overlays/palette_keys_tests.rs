@@ -12,7 +12,7 @@ fn native_mac_deletion_stays_in_the_attached_palette_editor() {
     use winit::keyboard::ModifiersState;
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     app.__test_enable_pty_write_log();
     for (owner, other) in [(main, child), (child, main)] {
@@ -28,11 +28,11 @@ fn native_mac_deletion_stays_in_the_attached_palette_editor() {
                 } else {
                     app.interaction.command_palette.set_query(before);
                 }
-                app.windows.get_mut(&owner).unwrap().modifiers = mods;
-                app.frontmost_window = Some(other);
+                app.registry.windows.get_mut(&owner).unwrap().modifiers = mods;
+                app.registry.frontmost_window = Some(other);
                 assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Backspace)));
                 assert_eq!(app.interaction.command_palette.query(), after);
-                assert_eq!(app.frontmost_window, Some(other));
+                assert_eq!(app.registry.frontmost_window, Some(other));
                 assert!(app.__test_drain_pty_writes().is_empty());
                 app.interaction.command_palette.close();
             }
@@ -46,7 +46,7 @@ fn modified_backspace_never_falls_through_to_plain_palette_deletion() {
     use winit::keyboard::ModifiersState;
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     app.__test_enable_pty_write_log();
     for owner in [main, child] {
@@ -57,18 +57,18 @@ fn modified_backspace_never_falls_through_to_plain_palette_deletion() {
             } else {
                 app.interaction.command_palette.set_query("keep é");
             }
-            app.windows.get_mut(&owner).unwrap().modifiers =
+            app.registry.windows.get_mut(&owner).unwrap().modifiers =
                 ModifiersState::CONTROL | ModifiersState::ALT;
             assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Backspace)));
             assert_eq!(app.interaction.command_palette.query(), "keep é");
-            app.windows.get_mut(&owner).unwrap().modifiers = ModifiersState::CONTROL;
-            app.windows.get_mut(&owner).unwrap().ime.handle_preedit("ni", None);
+            app.registry.windows.get_mut(&owner).unwrap().modifiers = ModifiersState::CONTROL;
+            app.registry.windows.get_mut(&owner).unwrap().ime.handle_preedit("ni", None);
             assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Backspace)));
             assert_eq!(app.interaction.command_palette.query(), "keep é");
             assert!(app.__test_drain_pty_writes().is_empty());
-            app.windows.get_mut(&owner).unwrap().ime.cancel();
+            app.registry.windows.get_mut(&owner).unwrap().ime.cancel();
             // Shift alone retains plain deletion when the modifier outlives a typed capital.
-            app.windows.get_mut(&owner).unwrap().modifiers = ModifiersState::SHIFT;
+            app.registry.windows.get_mut(&owner).unwrap().modifiers = ModifiersState::SHIFT;
             assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Backspace)));
             assert_eq!(app.interaction.command_palette.query(), "keep ");
             assert!(app.__test_drain_pty_writes().is_empty());
@@ -83,7 +83,7 @@ fn modified_backspace_never_falls_through_to_plain_palette_deletion() {
 fn about_palette_opens_the_about_window() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     for (owner, other) in [(main, child), (child, main)] {
         app.about.open_requested = false;
@@ -96,7 +96,7 @@ fn about_palette_opens_the_about_window() {
         assert!(!app.interaction.command_palette.is_open());
         assert_eq!(app.interaction.palette_attached_window, None);
         assert!(app.about.open_requested, "the About window opens on the next event-loop turn");
-        assert!(app.windows[&owner].notification.is_none());
+        assert!(app.registry.windows[&owner].notification.is_none());
         assert!(app.__test_drain_pty_writes().is_empty());
     }
 }
@@ -107,8 +107,8 @@ fn about_palette_opens_the_about_window() {
 fn about_palette_preserves_readonly_and_reopens_normally() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let window_id = app.main_window_id.unwrap();
-    app.windows.get_mut(&window_id).unwrap().copy_mode =
+    let window_id = app.registry.main_window_id.unwrap();
+    app.registry.windows.get_mut(&window_id).unwrap().copy_mode =
         Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at((0, 0)));
     app.run_action_for_window(&Action::OpenCommandPalette, window_id);
     app.__test_set_palette_query("version");
@@ -126,7 +126,7 @@ fn about_palette_preserves_readonly_and_reopens_normally() {
     assert!(!app.interaction.command_palette.is_open());
     assert!(app.about.open_requested);
     assert_eq!(app.__test_main_notification_message(), None);
-    assert!(app.windows[&window_id].copy_mode.as_ref().unwrap().is_read_only());
+    assert!(app.registry.windows[&window_id].copy_mode.as_ref().unwrap().is_read_only());
     assert!(app.__test_drain_pty_writes().is_empty());
     app.run_action_for_window(&Action::OpenCommandPalette, window_id);
     assert!(app.interaction.command_palette.is_open());
@@ -143,7 +143,7 @@ fn go_to_tab_activates_stable_identity_in_its_attached_window() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("target");
     let child = app.__test_seed_child_window(&["target", "peer"]);
-    let target = app.windows[&child].tabs.tabs()[0].id;
+    let target = app.registry.windows[&child].tabs.tabs()[0].id;
     app.__test_set_frontmost_window(Some(child));
     assert!(app.run_action(&Action::OpenCommandPalette));
     app.__test_set_palette_query("target");
@@ -151,13 +151,13 @@ fn go_to_tab_activates_stable_identity_in_its_attached_window() {
         app.interaction.command_palette.current().is_some(),
         "the tab target must be searchable"
     );
-    let child_state = app.windows.get_mut(&child).unwrap();
+    let child_state = app.registry.windows.get_mut(&child).unwrap();
     child_state.tabs.reorder(0, 1);
     child_state.tab_states.swap(0, 1);
     child_state.tabs.activate(0);
-    app.__test_set_frontmost_window(app.main_window_id);
+    app.__test_set_frontmost_window(app.registry.main_window_id);
     assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter)));
-    assert_eq!(app.windows[&child].tabs.active().unwrap().id, target);
+    assert_eq!(app.registry.windows[&child].tabs.active().unwrap().id, target);
     assert_eq!(app.main_tabs().unwrap().tabs()[0].title, "target");
     assert!(!app.__test_palette_open());
 }
@@ -168,13 +168,13 @@ fn go_to_tab_closed_target_does_not_activate_a_replacement() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["same", "same", "other"]);
-    let target = app.windows[&child].tabs.tabs()[0].id;
-    let active = app.windows[&child].tabs.active().unwrap().id;
+    let target = app.registry.windows[&child].tabs.tabs()[0].id;
+    let active = app.registry.windows[&child].tabs.active().unwrap().id;
     app.__test_set_frontmost_window(Some(child));
     assert!(app.run_action(&Action::OpenCommandPalette));
     app.__test_set_palette_query("Go to Tab 1: same");
     assert!(app.interaction.command_palette.current().is_some());
-    let child_state = app.windows.get_mut(&child).unwrap();
+    let child_state = app.registry.windows.get_mut(&child).unwrap();
     child_state.tabs.close(target);
     child_state.tab_states.remove(0);
     app.refresh_command_palette_context();
@@ -184,7 +184,7 @@ fn go_to_tab_closed_target_does_not_activate_a_replacement() {
     );
     assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter)));
     assert!(app.__test_palette_open());
-    assert_eq!(app.windows[&child].tabs.active().unwrap().id, active);
+    assert_eq!(app.registry.windows[&child].tabs.active().unwrap().id, active);
     assert!(app.interaction.command_palette.current().is_none());
 }
 
@@ -195,7 +195,7 @@ fn go_to_tab_vanished_child_never_activates_main() {
     app.__test_seed_tab("same target");
     let main_tab = app.main_tabs().unwrap().active().unwrap().id;
     let child = app.__test_seed_child_window(&["same target"]);
-    let child_tab = app.windows[&child].tabs.active().unwrap().id;
+    let child_tab = app.registry.windows[&child].tabs.active().unwrap().id;
     app.__test_set_frontmost_window(Some(child));
     assert!(app.run_action(&Action::OpenCommandPalette));
     app.__test_set_palette_query("same target");

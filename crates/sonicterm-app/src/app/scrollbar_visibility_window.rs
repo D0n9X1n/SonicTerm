@@ -59,7 +59,7 @@ impl App {
             // window has no fade to drive, so its hover flags stay untouched.
             return false;
         }
-        let Some(child) = self.windows.get(&win_id) else {
+        let Some(child) = self.registry.windows.get(&win_id) else {
             // When: windows no longer holds win_id the torn-out window closed
             // before this cursor move was handled.
             return false;
@@ -74,7 +74,8 @@ impl App {
         let rects: Vec<(u64, f32, f32, f32, f32)> =
             pane_rects.iter().map(|(id, rect)| (*id, rect.x, rect.y, rect.w, rect.h)).collect();
         let mode = self.config.appearance.scrollbar;
-        self.windows
+        self.registry
+            .windows
             .get_mut(&win_id)
             .map(|child| child.update_scrollbar_hover(&rects, cursor, mode, Instant::now()))
             .unwrap_or(false)
@@ -98,12 +99,13 @@ impl App {
     ) -> bool {
         let mode = self.config.appearance.scrollbar;
         let changed = self
+            .registry
             .windows
             .get_mut(&win_id)
             .map(|child| child.clear_scrollbar_hover_states(mode, Instant::now()))
             .unwrap_or(false);
         if changed {
-            if let Some(child) = self.windows.get(&win_id) {
+            if let Some(child) = self.registry.windows.get(&win_id) {
                 child.request_window_redraw();
             }
         }

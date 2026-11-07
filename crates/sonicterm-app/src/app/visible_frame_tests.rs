@@ -17,7 +17,7 @@ pub(super) fn fixture(child: bool, zoom: bool) -> (App, WindowId, u64, u64, u64)
         app.__test_seed_child_window(&["visible", "inactive"])
     } else {
         app.__test_seed_tab("inactive");
-        app.main_window_id.unwrap()
+        app.registry.main_window_id.unwrap()
     };
     let right = next_pane_id();
     let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
@@ -26,7 +26,7 @@ pub(super) fn fixture(child: bool, zoom: bool) -> (App, WindowId, u64, u64, u64)
         Arc::clone(&app.capture_staging_pool),
     )));
     let pane = PaneState::new_with_media_pool(parser, None, &app.inline_media_pool);
-    let state = app.windows.get_mut(&window).unwrap();
+    let state = app.registry.windows.get_mut(&window).unwrap();
     state.tabs.activate(0);
     let left = state.tab_states[0].active_pane;
     let inactive = state.tab_states[1].active_pane;
@@ -73,7 +73,7 @@ pub(super) fn assemble(
     held: &mut HeldVisibleFrame<'_>,
     callback: impl FnOnce(&mut [PaneRender<'_>]),
 ) {
-    let state = app.windows.get_mut(&window).unwrap();
+    let state = app.registry.windows.get_mut(&window).unwrap();
     let viewports = sources.reconcile_viewports(&mut state.panes, &held.guards).unwrap();
     let mut panes = pane_renders(
         &mut held.guards,
@@ -111,7 +111,7 @@ pub(super) fn present_receipts(
         .collect();
     drop(held);
     let tickets = sources.bind(receipts);
-    app.windows.get_mut(&window).unwrap().pending_receipts = tickets;
+    app.registry.windows.get_mut(&window).unwrap().pending_receipts = tickets;
 }
 
 /// The window's next collection through the production helper: reconcile, then apply its receipts.
@@ -122,23 +122,23 @@ pub(super) fn collect_next(
 ) -> Result<(), FrameUnavailable> {
     let sources = sources(app, window, child)?;
     let mut held = sources.try_collect(|| {})?;
-    let state = app.windows.get_mut(&window).unwrap();
+    let state = app.registry.windows.get_mut(&window).unwrap();
     sources.reconcile_and_apply_receipts(state, &mut held.guards).map(|_| ())
 }
 
 /// The dirty rows of `pane` in `window`.
 pub(super) fn dirty(app: &App, window: WindowId, pane: u64) -> Vec<usize> {
-    app.windows[&window].panes[&pane].parser.lock().grid().dirty_rows().collect()
+    app.registry.windows[&window].panes[&pane].parser.lock().grid().dirty_rows().collect()
 }
 
 /// Every row of `pane`'s grid, as `dirty` reports a fully dirty pane.
 pub(super) fn all_rows(app: &App, window: WindowId, pane: u64) -> Vec<usize> {
-    (0..usize::from(app.windows[&window].panes[&pane].parser.lock().grid().rows)).collect()
+    (0..usize::from(app.registry.windows[&window].panes[&pane].parser.lock().grid().rows)).collect()
 }
 
 /// The window's `dirt_ack_dropped` count.
 pub(super) fn dropped(app: &App, window: WindowId) -> u64 {
-    app.windows[&window]
+    app.registry.windows[&window]
         .redraw
         .frame_counters
         .as_ref()
@@ -147,7 +147,7 @@ pub(super) fn dropped(app: &App, window: WindowId) -> u64 {
 
 /// Turn on the window's frame counters and mark every visible pane dirty.
 pub(super) fn counted_and_dirty(app: &mut App, window: WindowId, panes: &[u64]) {
-    let state = app.windows.get_mut(&window).unwrap();
+    let state = app.registry.windows.get_mut(&window).unwrap();
     state.redraw.frame_counters = Some(Box::default());
     for pane in panes {
         state.panes[pane].parser.lock().grid_mut().mark_all_dirty();
@@ -170,10 +170,10 @@ pub(super) fn suppress(app: &mut App, window: WindowId, child: bool, mode: &str,
     match (mode, child) {
         ("hide", false) if suppressed => app.hide_main_window(),
         ("hide", false) => app.show_main_window(),
-        ("hide", true) => app.windows.get_mut(&window).unwrap().hidden = suppressed,
-        ("park", _) => app.windows.get_mut(&window).unwrap().redraw.parked = suppressed,
+        ("hide", true) => app.registry.windows.get_mut(&window).unwrap().hidden = suppressed,
+        ("park", _) => app.registry.windows.get_mut(&window).unwrap().redraw.parked = suppressed,
         _ => {
-            app.windows.get_mut(&window).unwrap().redraw.stopped_generation =
+            app.registry.windows.get_mut(&window).unwrap().redraw.stopped_generation =
                 suppressed.then_some(1)
         }
     }
@@ -199,7 +199,7 @@ pub(super) fn present_pane_receipts(
         .collect();
     drop(held);
     let tickets = sources.bind(receipts);
-    app.windows.get_mut(&window).unwrap().pending_receipts = tickets;
+    app.registry.windows.get_mut(&window).unwrap().pending_receipts = tickets;
 }
 
 /// The viewport slot that draws live row `live_row` of a `rows`-row view whose top is
@@ -362,7 +362,7 @@ fn frames_share_an_unchanged_pane_image_list_and_keep_their_own() {
         assert!(Arc::ptr_eq(before, after), "an unchanged pane's list is shared, not copied");
     }
     let held = lists(&mut app, &sources);
-    app.windows[&window].panes[&right].inline_images.lock().push(held[1][0].clone());
+    app.registry.windows[&window].panes[&right].inline_images.lock().push(held[1][0].clone());
     assert!(held.iter().all(|list| list.len() == 1), "the collected frame kept its lists");
     let next = lists(&mut app, &sources);
     assert_eq!(

@@ -115,7 +115,7 @@ impl App {
                 return false;
             }
         };
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: window_id is gone, no field can own its clipboard action.
             return false;
         };
@@ -155,13 +155,15 @@ impl App {
             | CommandPaletteMode::FontFamily => true,
             CommandPaletteMode::RenameTab => self.tab_edit_target_window() == Some(window_id),
             CommandPaletteMode::RenameWindow => {
-                self.interaction.window_rename_target.and_then(|key| self.window_keys.resolve(key))
+                self.interaction
+                    .window_rename_target
+                    .and_then(|key| self.registry.window_keys.resolve(key))
                     == Some(window_id)
             }
             CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => false,
         };
         if !editable
-            || self.windows.get(&window_id).is_none_or(|window| window.hidden)
+            || self.registry.windows.get(&window_id).is_none_or(|window| window.hidden)
             || self.palette_ime_is_composing()
         {
             // When: the editor is modal, its captured target is stale or hidden, or IME composes, consume without effect.

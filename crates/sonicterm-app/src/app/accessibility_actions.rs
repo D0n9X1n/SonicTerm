@@ -31,13 +31,13 @@ impl App {
         let inputs = self.accessible_inputs(window_id)?;
         let view = self.accessible_view(&[StatusSegmentId::Health], &inputs);
         let (severity, text) = health_state(&view, &self.i18n);
-        Some((severity, text, self.windows.get(&window_id)?.tabs.last_mark().0))
+        Some((severity, text, self.registry.windows.get(&window_id)?.tabs.last_mark().0))
     }
 
     /// Move strip focus in `window_id` to presented segment `id`. The strip takes the window's keys,
     /// so an active IME composition ends with its preedit; the ring is drawn on the next frame.
     pub(in crate::app) fn set_status_focus(&mut self, window_id: WindowId, id: StatusSegmentId) {
-        let Self { windows, accessibility, .. } = self;
+        let Self { registry: crate::app::WindowRegistry { windows, .. }, accessibility, .. } = self;
         let Some(window) = windows.get_mut(&window_id) else {
             // When: `windows` has no `window_id`, there is no strip to focus.
             return;
@@ -63,7 +63,7 @@ impl App {
     /// frame through the dispatch record when the ring changed.
     pub(super) fn apply_focus_ring(&mut self, window_id: WindowId) {
         let strong = self.config.accessibility.strong_focus;
-        let Self { windows, accessibility, .. } = self;
+        let Self { registry: crate::app::WindowRegistry { windows, .. }, accessibility, .. } = self;
         let Some(state) = accessibility.get_mut(&window_id) else {
             // When: `accessibility` has no entry, the window draws no ring.
             return;
@@ -115,7 +115,7 @@ impl App {
     /// End `window_id`'s strip focus for a pointer press outside the strip, before any other press
     /// handling sees it.
     pub(in crate::app) fn end_status_focus_outside(&mut self, window_id: WindowId) {
-        let inside = self.windows.get(&window_id).is_some_and(|window| {
+        let inside = self.registry.windows.get(&window_id).is_some_and(|window| {
             let pointer_y = window.cursor_pos.1 as f32;
             window.status_strip.as_ref().is_some_and(|strip| strip.contains(pointer_y))
         });
@@ -131,7 +131,7 @@ impl App {
             // When: `status_line_shown` is false, there is no strip to focus.
             return;
         }
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: `windows` has no `window_id`, there is no strip to focus.
             return;
         };
@@ -158,7 +158,7 @@ impl App {
         key: &Key,
         repeat: bool,
     ) -> bool {
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: `windows` has no `window_id`, no strip owns the key.
             return false;
         };
@@ -255,6 +255,7 @@ impl App {
         id: StatusSegmentId,
     ) {
         let click: Option<SegmentClick> = self
+            .registry
             .windows
             .get(&window_id)
             .and_then(|window| window.status_strip.as_ref())

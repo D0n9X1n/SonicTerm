@@ -5,7 +5,7 @@ use super::*;
 impl App {
     pub(in crate::app) fn expire_notifications(&mut self, now: Instant) -> Option<Instant> {
         let mut next: Option<Instant> = None;
-        for window in self.windows.values_mut() {
+        for window in self.registry.windows.values_mut() {
             let Some(expires_at) =
                 window.notification.as_ref().and_then(|bubble| bubble.expires_at)
             else {
@@ -34,7 +34,8 @@ impl App {
     /// Service due scrollbar idle deadlines in every window that may present,
     /// Snap and Fade alike; returns the windows that need a frame for it.
     pub(in crate::app) fn expire_due_scrollbar_idle(&mut self, now: Instant) -> Vec<WindowId> {
-        self.windows
+        self.registry
+            .windows
             .iter_mut()
             .filter(|(_, window)| window.frame_deadlines_allowed())
             .filter_map(|(window_id, window)| {
@@ -81,10 +82,15 @@ impl App {
         if self.services.runtime_smoke.as_ref().is_some_and(|smoke| smoke.needs_fresh_window()) {
             // When: smoke needs a fresh HWND, disable replenishment rather than accidentally adopting another spare.
             self.config.window.warm_window_pool = 0;
-            self.warm_window_pool.clear();
-            let request = self.window_request(self.main_window_id);
+            self.registry.warm_window_pool.clear();
+            let request = self.window_request(self.registry.main_window_id);
             self.create_new_terminal_window(event_loop, request);
-            let child = self.windows.keys().copied().find(|id| Some(*id) != self.main_window_id);
+            let child = self
+                .registry
+                .windows
+                .keys()
+                .copied()
+                .find(|id| Some(*id) != self.registry.main_window_id);
             let Some(child) = child else {
                 // When: child is absent after creation, the fresh native lifecycle has failed.
                 if let Some(smoke) = self.services.runtime_smoke.as_mut() {
@@ -93,7 +99,7 @@ impl App {
                 event_loop.exit();
                 return;
             };
-            let native = self.windows.get(&child).and_then(|window| window.window.clone());
+            let native = self.registry.windows.get(&child).and_then(|window| window.window.clone());
             if native
                 .as_ref()
                 .is_none_or(|native| !self.smoke_check_native_title(native, "#3 shell 1"))
@@ -104,6 +110,7 @@ impl App {
                 return;
             }
             let baseline = self
+                .registry
                 .windows
                 .get(&child)
                 .and_then(|window| window.renderer.as_ref())
@@ -134,7 +141,7 @@ impl App {
                 self.services.runtime_smoke.as_ref().map(|smoke| smoke.renderer_baseline());
             let snapshot = self.build_memory_snapshot();
             let warm_reported = snapshot.renderers.iter().any(|renderer| renderer.role == "warm");
-            let warm_count = self.warm_window_pool.len();
+            let warm_count = self.registry.warm_window_pool.len();
             let live_count = sonicterm_gpu::core::live_renderer_count();
             if baseline.is_some_and(|baseline| {
                 warm_count == 1 && warm_reported && live_count == baseline + 2
@@ -145,19 +152,20 @@ impl App {
                     live_count,
                     "runtime smoke warm renderer created and reported"
                 );
-                let expected_child = self.warm_window_pool.last().map(|warm| warm.window.id());
-                let main_id = self.main_window_id;
+                let expected_child =
+                    self.registry.warm_window_pool.last().map(|warm| warm.window.id());
+                let main_id = self.registry.main_window_id;
                 self.new_tab("runtime smoke warm child");
                 let child = main_id.and_then(|id| {
-                    let index = self.windows.get(&id)?.tabs.active_index();
+                    let index = self.registry.windows.get(&id)?.tabs.active_index();
                     self.tear_out_tab(event_loop, index);
-                    self.windows.keys().copied().find(|child| Some(*child) != main_id)
+                    self.registry.windows.keys().copied().find(|child| Some(*child) != main_id)
                 });
                 if let Some(child) = child {
                     // When: `child` exists after tear-out, verify it adopted the exact warm window before presenting.
                     let adopted_live_count = sonicterm_gpu::core::live_renderer_count();
                     if expected_child != Some(child)
-                        || !self.warm_window_pool.is_empty()
+                        || !self.registry.warm_window_pool.is_empty()
                         || baseline.is_none_or(|baseline| adopted_live_count != baseline + 2)
                     {
                         // When: `expected_child`, `warm_window_pool`, or `adopted_live_count` disagrees with `baseline`, adoption failed.
@@ -167,7 +175,8 @@ impl App {
                         event_loop.exit();
                         return;
                     }
-                    let native = self.windows.get(&child).and_then(|state| state.window.clone());
+                    let native =
+                        self.registry.windows.get(&child).and_then(|state| state.window.clone());
                     if native.as_ref().is_none_or(|native| {
                         !self.smoke_check_native_title(native, "#2 runtime smoke warm child")
                     }) || !self.smoke_exercise_window_name(child)
@@ -177,6 +186,7 @@ impl App {
                         return;
                     }
                     let present_baseline = self
+                        .registry
                         .windows
                         .get(&child)
                         .and_then(|window| window.renderer.as_ref())
@@ -344,7 +354,7 @@ impl App {
         if let Some(pending) = self.pending_osc52_reassert.as_ref() {
             due.push(DueWork { owner: None, cause: DueCause::Osc52, deadline: pending.due });
         }
-        for (id, window) in &self.windows {
+        for (id, window) in &self.registry.windows {
             #[cfg(target_os = "macos")]
             if let Some(deadline) = window.surface_probe_deadline() {
                 due.push(DueWork { owner: Some(*id), cause: DueCause::SurfaceProbe, deadline });
@@ -394,7 +404,7 @@ impl App {
             ) {
                 due.push(DueWork { owner: Some(*id), cause: DueCause::Scrollbar, deadline });
             }
-            if Some(*id) == self.main_window_id {
+            if Some(*id) == self.registry.main_window_id {
                 let cursor = window
                     .tab_states
                     .get(window.tabs.active_index())

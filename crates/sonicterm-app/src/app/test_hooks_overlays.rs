@@ -156,7 +156,8 @@ impl App {
     /// Test-only: read a child window notification bubble message.
     #[doc(hidden)]
     pub fn __test_child_notification_message(&self, id: WindowId) -> Option<&str> {
-        self.windows
+        self.registry
+            .windows
             .get(&id)
             .and_then(|child| child.notification.as_ref())
             .map(|bubble| bubble.message.as_str())
@@ -208,7 +209,7 @@ impl App {
             // there is no session for the query to land in.
             return false;
         }
-        let Some(child) = self.windows.get_mut(&id) else {
+        let Some(child) = self.registry.windows.get_mut(&id) else {
             // When: `windows` no longer tracks this id, so the child vanished
             // between opening search and installing the query.
             return false;
@@ -247,13 +248,13 @@ impl App {
             // search term is untouched and the key is reported unhandled.
             return false;
         };
-        let target = id.or(self.main_window_id);
+        let target = id.or(self.registry.main_window_id);
         let Some(target) = target else {
             // When: neither the supplied id nor `main_window_id` yields a
             // `target`, so no window owns the search this edit would change.
             return false;
         };
-        let Some(window) = self.windows.get_mut(&target) else {
+        let Some(window) = self.registry.windows.get_mut(&target) else {
             // When: `windows` no longer tracks `target`, so the window closed
             // between resolving it and applying the edit.
             return false;
@@ -286,8 +287,8 @@ impl App {
     /// Test-only: read main or child search query and caret.
     #[doc(hidden)]
     pub fn __test_search_query_cursor(&self, id: Option<WindowId>) -> Option<(&str, usize)> {
-        let target = id.or(self.main_window_id)?;
-        let window = self.windows.get(&target)?;
+        let target = id.or(self.registry.main_window_id)?;
+        let window = self.registry.windows.get(&target)?;
         let search = window.tab_states.get(window.tabs.active_index())?.search.as_ref()?;
         Some((search.query.as_str(), search.cursor()))
     }
@@ -364,18 +365,18 @@ impl App {
     /// Test-only: set the synthetic main window's selection.
     #[doc(hidden)]
     pub fn __test_set_main_selection(&mut self, selection: Option<Selection>) -> bool {
-        let Some(id) = self.main_window_id else {
+        let Some(id) = self.registry.main_window_id else {
             // When: `main_window_id` is unset, so no main window exists to carry
             // the selection.
             return false;
         };
-        let Some(window) = self.windows.get(&id) else {
+        let Some(window) = self.registry.windows.get(&id) else {
             // When: `windows` no longer tracks this id, so the content state the
             // selection binds to cannot be read.
             return false;
         };
         let selection = Self::bind_test_selection(window, selection);
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: the window disappeared between binding and assignment, so the
             // bound selection has nowhere to be stored.
             return false;
@@ -391,13 +392,13 @@ impl App {
         id: WindowId,
         selection: Option<Selection>,
     ) -> bool {
-        let Some(window) = self.windows.get(&id) else {
+        let Some(window) = self.registry.windows.get(&id) else {
             // When: `windows` tracks no entry for this id, so the content state
             // the selection binds to cannot be read.
             return false;
         };
         let selection = Self::bind_test_selection(window, selection);
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: the window disappeared between binding and assignment, so the
             // bound selection has nowhere to be stored.
             return false;
@@ -412,13 +413,13 @@ impl App {
     /// window is tracked but has no selection.
     #[doc(hidden)]
     pub fn __test_window_selection(&self, id: WindowId) -> Option<Option<Selection>> {
-        self.windows.get(&id).map(|state| state.selection)
+        self.registry.windows.get(&id).map(|state| state.selection)
     }
 
     /// Test-only: seed child IME preedit state.
     #[doc(hidden)]
     pub fn __test_set_child_ime_preedit(&mut self, id: WindowId, text: &str) -> bool {
-        let Some(child) = self.windows.get_mut(&id) else {
+        let Some(child) = self.registry.windows.get_mut(&id) else {
             // When: `windows` tracks no entry for this id, so no child holds the
             // IME state this preedit would seed.
             return false;
@@ -430,7 +431,7 @@ impl App {
     /// Test-only: read whether a child IME composition is active.
     #[doc(hidden)]
     pub fn __test_child_ime_composing(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).map(|child| child.ime.is_composing())
+        self.registry.windows.get(&id).map(|child| child.ime.is_composing())
     }
 
     /// Test-only: query, selection and caret of the field that owns `id`'s pointer input.
@@ -448,7 +449,7 @@ impl App {
                 self.interaction.command_palette.cursor(),
             )),
             field_pointer::FieldTarget::Search(_) => {
-                let window = self.windows.get(&id)?;
+                let window = self.registry.windows.get(&id)?;
                 let search = window.tab_states.get(window.tabs.active_index())?.search.as_ref()?;
                 Some((search.query.clone(), search.selected_range(), search.cursor()))
             }
@@ -461,7 +462,7 @@ impl App {
         &self,
         id: WindowId,
     ) -> Option<sonicterm_gpu::field_geometry::FieldRect> {
-        let window = self.windows.get(&id)?;
+        let window = self.registry.windows.get(&id)?;
         let renderer = window.renderer.as_ref()?;
         let preedit = window.ime.preedit();
         match self.field_pointer_target(id)? {
@@ -493,7 +494,7 @@ impl App {
     /// presented caret, or `"terminal"`; it calls the same selector both redraw paths call.
     #[doc(hidden)]
     pub fn __test_field_ime_anchor(&self, id: WindowId) -> ImeAnchorReading {
-        let Some(window) = self.windows.get(&id) else {
+        let Some(window) = self.registry.windows.get(&id) else {
             // When: `id` is not tracked, no renderer can anchor IME.
             return ("terminal", None);
         };
@@ -501,7 +502,7 @@ impl App {
             // When: the window has no renderer, nothing was presented and the terminal path applies.
             return ("terminal", None);
         };
-        let palette_here = if Some(id) == self.main_window_id {
+        let palette_here = if Some(id) == self.registry.main_window_id {
             self.interaction.palette_attached_window.is_none()
         } else {
             // When: `id` is a child window, the palette is here only while attached to `id`.
@@ -556,7 +557,7 @@ impl App {
             }
             Some(field_pointer::FieldTarget::Search(_)) => {
                 // When: `id` hosts the search field, collapse that search's selection onto its caret.
-                let Some(window) = self.windows.get_mut(&id) else {
+                let Some(window) = self.registry.windows.get_mut(&id) else {
                     // When: `id` closed after the target lookup, there is no search to collapse.
                     return false;
                 };
@@ -581,12 +582,12 @@ impl App {
         &mut self,
         id: WindowId,
     ) -> Option<&mut sonicterm_gpu::core::GpuRenderer> {
-        self.windows.get_mut(&id)?.renderer.as_mut()
+        self.registry.windows.get_mut(&id)?.renderer.as_mut()
     }
 
     /// Test-only: a tracked window's custom name, as the window-rename editor commits it.
     #[doc(hidden)]
     pub fn __test_window_custom_name(&self, id: WindowId) -> Option<&str> {
-        self.windows.get(&id).map(|window| window.custom_window_name.as_str())
+        self.registry.windows.get(&id).map(|window| window.custom_window_name.as_str())
     }
 }

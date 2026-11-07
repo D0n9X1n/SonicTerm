@@ -215,6 +215,7 @@ impl App {
         diagnostics: sonicterm_io::pty::PtyInputDiagnostics,
     ) {
         let window_id = self
+            .registry
             .windows
             .iter()
             .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id));
@@ -241,7 +242,7 @@ impl App {
         let not_sent = super::status_line::not_sent_reason(&reason);
         let now = self.dispatch_now();
         self.note_input(window_id, sonicterm_ui::status_line::InputState::NotSent(not_sent), now);
-        let kind = if Some(window_id) == self.main_window_id {
+        let kind = if Some(window_id) == self.registry.main_window_id {
             super::FrontmostKind::Main
         } else {
             // When: `window_id` differs from `main_window_id`, route the notification to that child rather than the frontmost window.
@@ -294,6 +295,7 @@ impl App {
     /// requests one `StatusLine` frame only when the shown value changed.
     pub(super) fn handle_font_fallback_ready(&mut self, window_id: WindowId, notice_id: u64) {
         let wake = self
+            .registry
             .windows
             .get_mut(&window_id)
             .and_then(|window| window.renderer.as_mut())
@@ -312,9 +314,9 @@ impl App {
     }
 
     pub(super) fn handle_clear_shape_cache(&mut self) {
-        // main window lives in `self.windows` with `renderer=Some`,
+        // main window lives in `self.registry.windows` with `renderer=Some`,
         // so a single iteration covers main + all torn-out children.
-        for child in self.windows.values_mut() {
+        for child in self.registry.windows.values_mut() {
             if let Some(renderer) = child.renderer.as_mut() {
                 renderer.clear_shape_cache();
                 child.request_window_redraw();
@@ -385,11 +387,11 @@ impl App {
 
     /// Name the main window, as the rename command does, and update its native title.
     pub(super) fn set_main_window_name(&mut self, name: &str) {
-        let Some(id) = self.main_window_id else {
+        let Some(id) = self.registry.main_window_id else {
             // When: `main_window_id` is unset there is no window to name.
             return;
         };
-        let Some(window) = self.windows.get_mut(&id) else {
+        let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `windows` no longer holds the main id, the title has no target.
             return;
         };
@@ -644,7 +646,7 @@ impl App {
         // (`App::__test_synthetic_main`); production `do_resumed` is
         // the authoritative source for `main_window_id`.
         self.retire_previous_main();
-        self.main_window_id = Some(main_id);
+        self.registry.main_window_id = Some(main_id);
         let checks_started = std::time::Instant::now();
         self.record_startup_load_errors();
         self.note_startup(checks_started, |spans| &mut spans.load_checks_ns);
@@ -768,9 +770,10 @@ impl App {
             // When: a breadcrumb_recorder is installed; Ready marks the end of
             // startup so a later hang is placed before or after the first frame.
             use sonicterm_logging::breadcrumbs::{BreadcrumbEvent, LifecycleEvent};
-            let windows = u32::try_from(self.windows.len()).unwrap_or(u32::MAX);
+            let windows = u32::try_from(self.registry.windows.len()).unwrap_or(u32::MAX);
             let panes = u32::try_from(
-                self.windows
+                self.registry
+                    .windows
                     .values()
                     .fold(0usize, |total, window| total.saturating_add(window.panes.len())),
             )

@@ -11,13 +11,15 @@ impl App {
         &self,
         id: WindowId,
     ) -> Option<((u32, u32), (u32, u32))> {
-        Some(self.windows.get(&id)?.renderer.as_ref()?.__test_image_atlas_dimensions())
+        Some(self.registry.windows.get(&id)?.renderer.as_ref()?.__test_image_atlas_dimensions())
     }
 
     /// Test seam: the bytes the window renderer's own reading reports for its image atlas.
     #[doc(hidden)]
     pub fn __test_window_image_atlas_bytes(&self, id: WindowId) -> Option<usize> {
-        Some(self.windows.get(&id)?.renderer.as_ref()?.retained_amounts().image_atlas.bytes)
+        Some(
+            self.registry.windows.get(&id)?.renderer.as_ref()?.retained_amounts().image_atlas.bytes,
+        )
     }
 
     /// Test seam: every part the window renderer's own reading reports, so a test can account for
@@ -27,19 +29,19 @@ impl App {
         &self,
         id: WindowId,
     ) -> Option<sonicterm_gpu::core::RendererRetention> {
-        Some(self.windows.get(&id)?.renderer.as_ref()?.retained_amounts())
+        Some(self.registry.windows.get(&id)?.renderer.as_ref()?.retained_amounts())
     }
 
     /// Test seam: when the window's promoted image atlas may be released, through the app's adapter.
     #[doc(hidden)]
     pub fn __test_window_image_atlas_release_deadline(&self, id: WindowId) -> Option<Instant> {
-        self.windows.get(&id)?.image_atlas_release_deadline()
+        self.registry.windows.get(&id)?.image_atlas_release_deadline()
     }
 
     /// Test seam: the frame-family state that decides whether the release is collected, for failure messages.
     #[doc(hidden)]
     pub fn __test_window_release_blockers(&self, id: WindowId) -> String {
-        let Some(window) = self.windows.get(&id) else {
+        let Some(window) = self.registry.windows.get(&id) else {
             // When: `windows` tracks no entry for `id`, so there is no state to describe.
             return String::from("unknown window");
         };
@@ -79,7 +81,8 @@ impl App {
         pane_id: u64,
         images: Vec<sonicterm_render_model::InlineImage>,
     ) -> bool {
-        let Some(pane) = self.windows.get(&window).and_then(|state| state.panes.get(&pane_id))
+        let Some(pane) =
+            self.registry.windows.get(&window).and_then(|state| state.panes.get(&pane_id))
         else {
             // When: neither `window` nor its `panes` resolve `pane_id`, so no images can be stored.
             return false;

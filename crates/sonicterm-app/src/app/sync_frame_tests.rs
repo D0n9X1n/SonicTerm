@@ -20,11 +20,11 @@ fn held_owners() -> (App, WindowId, WindowId, Instant) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.force_frame_counters_on().expect("no window exists yet");
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child", "background"]);
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     for id in [main, child] {
-        let window = app.windows.get_mut(&id).unwrap();
+        let window = app.registry.windows.get_mut(&id).unwrap();
         window.last_render = base - Duration::from_secs(1);
         window.stream_clock = base - Duration::from_secs(1);
         window.redraw.last_present = Some(base - Duration::from_secs(1));
@@ -38,14 +38,14 @@ fn held_owners() -> (App, WindowId, WindowId, Instant) {
 
 /// The pane shown by tab `tab_index` of window `id`.
 fn pane_of(app: &App, id: WindowId, tab_index: usize) -> u64 {
-    app.windows[&id].tab_states[tab_index].active_pane
+    app.registry.windows[&id].tab_states[tab_index].active_pane
 }
 
 /// Split window `id`'s active tab and add a parser-only pane; returns its id.
 fn add_visible_pane(app: &mut App, id: WindowId) -> u64 {
     let parser = sonicterm_vt::vt::Parser::new(sonicterm_grid::grid::Grid::new(80, 24));
     let new_id = crate::app::next_pane_id();
-    let window = app.windows.get_mut(&id).unwrap();
+    let window = app.registry.windows.get_mut(&id).unwrap();
     let tab = window.tabs.active_index();
     let focus = window.tab_states[tab].active_pane;
     assert!(window.tab_states[tab].tree.split(
@@ -60,7 +60,7 @@ fn add_visible_pane(app: &mut App, id: WindowId) -> u64 {
 /// Publish an open update of `epoch` on the pane, holding until `deadline`, as its worker would:
 /// the tagged deadline first, then the word with the pane's current reset count.
 fn hold(app: &App, id: WindowId, pane: u64, epoch: u64, deadline: Instant) {
-    let pane = &app.windows[&id].panes[&pane];
+    let pane = &app.registry.windows[&id].panes[&pane];
     let resets = pane.sync_resets.load(Ordering::Relaxed);
     pane.sync_deadline_word.store(pack_sync_deadline(epoch, deadline), Ordering::Relaxed);
     pane.sync_word.store(sync_word_of(SyncState { set: true, epoch, resets }), Ordering::Release);
@@ -68,7 +68,7 @@ fn hold(app: &App, id: WindowId, pane: u64, epoch: u64, deadline: Instant) {
 
 /// Publish the end of the pane's open update: the set bit clears and one reset is counted.
 fn release(app: &App, id: WindowId, pane: u64) {
-    let pane = &app.windows[&id].panes[&pane];
+    let pane = &app.registry.windows[&id].panes[&pane];
     let resets = pane.sync_resets.fetch_add(1, Ordering::Relaxed) + 1;
     let epoch = read_published_sync(&pane.sync_word, &pane.sync_deadline_word).epoch;
     pane.sync_word.store(sync_word_of(SyncState { set: false, epoch, resets }), Ordering::Release);
@@ -90,7 +90,7 @@ fn attempt(
         app.finish_window_redraw(id, &snapshot, outcome, at);
         // Streaming pacing allows one frame per period from this attempt; it is not under test, so
         // the clocks move back and only the synchronized-output rule can hold the next attempt.
-        let window = app.windows.get_mut(&id).unwrap();
+        let window = app.registry.windows.get_mut(&id).unwrap();
         window.last_render = at - Duration::from_secs(1);
         window.stream_clock = at - Duration::from_secs(1);
     }
@@ -104,7 +104,7 @@ fn at_ms(base: Instant, millis: u64) -> Instant {
 
 /// The window's counted Sync deferrals.
 fn defer_sync(app: &App, id: WindowId) -> u64 {
-    app.windows[&id].redraw.frame_counters.as_deref().unwrap().defer_sync
+    app.registry.windows[&id].redraw.frame_counters.as_deref().unwrap().defer_sync
 }
 
 /// The deadline of the window's armed Frame wake, if any.
@@ -130,8 +130,11 @@ fn a_held_visible_pane_defers_every_unforced_frame_until_its_deadline() {
                 !attempt(&mut app, owner, cause, base, FrameSettlement::Presented),
                 "{cause:?}"
             );
-            assert_eq!(app.windows[&owner].redraw.deferred_rule, Some(DeferRule::Sync));
-            assert!(app.windows[&owner].redraw.attempt_causes.is_none(), "nothing collected");
+            assert_eq!(app.registry.windows[&owner].redraw.deferred_rule, Some(DeferRule::Sync));
+            assert!(
+                app.registry.windows[&owner].redraw.attempt_causes.is_none(),
+                "nothing collected"
+            );
         }
         assert_eq!(defer_sync(&app, owner), 3);
         assert_eq!(frame_wake(&app, owner, base), Some(at_ms(base, 100)));
@@ -217,7 +220,7 @@ fn overlapping_and_renewed_updates_are_capped_at_150_ms_of_stretch() {
         at_ms(base, 150),
         FrameSettlement::Presented
     ));
-    assert_eq!(app.windows[&main].redraw.sync_stretch_start, None);
+    assert_eq!(app.registry.windows[&main].redraw.sync_stretch_start, None);
     assert!(!attempt(
         &mut app,
         main,
@@ -245,7 +248,7 @@ fn overlapping_and_renewed_updates_are_capped_at_150_ms_of_stretch() {
     // A failed attempt at the cap keeps the stretch, so the retry is admitted too.
     let failed = FrameSettlement::Retry(RedrawCause::AtlasRetry);
     assert!(attempt(&mut app, main, RedrawCause::Output, at_ms(base, 150), failed));
-    assert_eq!(app.windows[&main].redraw.sync_stretch_start, Some(base));
+    assert_eq!(app.registry.windows[&main].redraw.sync_stretch_start, Some(base));
     assert!(attempt(
         &mut app,
         main,
@@ -262,12 +265,16 @@ fn overlapping_and_renewed_updates_are_capped_at_150_ms_of_stretch() {
 #[test]
 fn only_the_must_run_causes_are_forced_through_a_hold() {
     let forced: [(&str, fn(&mut App, WindowId)); 5] = [
-        ("first frame", |app, id| app.windows.get_mut(&id).unwrap().redraw.last_present = None),
+        ("first frame", |app, id| {
+            app.registry.windows.get_mut(&id).unwrap().redraw.last_present = None
+        }),
         ("visibility", |app, id| app.mark_window_redraw(id, RedrawCause::Visibility)),
         ("device recovered", |app, id| app.mark_window_redraw(id, RedrawCause::DeviceRecovered)),
-        ("resize", |app, id| app.windows.get_mut(&id).unwrap().redraw.resize_pending = true),
+        ("resize", |app, id| {
+            app.registry.windows.get_mut(&id).unwrap().redraw.resize_pending = true
+        }),
         ("surface recovery", |app, id| {
-            app.windows.get_mut(&id).unwrap().redraw.surface_recovery_pending = true;
+            app.registry.windows.get_mut(&id).unwrap().redraw.surface_recovery_pending = true;
         }),
     ];
     for (name, force) in forced {
@@ -287,7 +294,7 @@ fn only_the_must_run_causes_are_forced_through_a_hold() {
 
     let (mut app, main, _, base) = held_owners();
     hold(&app, main, pane_of(&app, main, 0), 1, at_ms(base, 100));
-    app.windows.get_mut(&main).unwrap().redraw.resize_pending = true;
+    app.registry.windows.get_mut(&main).unwrap().redraw.resize_pending = true;
     let failures = [
         FrameSettlement::Retry(RedrawCause::AtlasRetry),
         FrameSettlement::SurfaceRetry(SurfaceRetryReason::Timeout),
@@ -295,11 +302,11 @@ fn only_the_must_run_causes_are_forced_through_a_hold() {
     ];
     for (step, outcome) in failures.into_iter().enumerate() {
         let at = at_ms(base, 40 * step as u64);
-        app.windows.get_mut(&main).unwrap().redraw.timeout_pending = false;
+        app.registry.windows.get_mut(&main).unwrap().redraw.timeout_pending = false;
         assert!(attempt(&mut app, main, RedrawCause::Expose, at, outcome), "{outcome:?}");
-        assert!(app.windows[&main].redraw.resize_pending, "{outcome:?} keeps the resize");
+        assert!(app.registry.windows[&main].redraw.resize_pending, "{outcome:?} keeps the resize");
     }
-    app.windows.get_mut(&main).unwrap().redraw.timeout_pending = false;
+    app.registry.windows.get_mut(&main).unwrap().redraw.timeout_pending = false;
     assert!(attempt(
         &mut app,
         main,
@@ -307,7 +314,7 @@ fn only_the_must_run_causes_are_forced_through_a_hold() {
         at_ms(base, 130),
         FrameSettlement::Presented
     ));
-    assert!(!app.windows[&main].redraw.resize_pending);
+    assert!(!app.registry.windows[&main].redraw.resize_pending);
 
     for reason in [
         SurfaceRetryReason::Outdated,
@@ -315,7 +322,7 @@ fn only_the_must_run_causes_are_forced_through_a_hold() {
         SurfaceRetryReason::SurfaceLost,
     ] {
         let (mut app, main, _, base) = held_owners();
-        app.windows.get_mut(&main).unwrap().redraw.last_present = None;
+        app.registry.windows.get_mut(&main).unwrap().redraw.last_present = None;
         assert!(attempt(
             &mut app,
             main,
@@ -323,9 +330,9 @@ fn only_the_must_run_causes_are_forced_through_a_hold() {
             base,
             FrameSettlement::SurfaceRetry(reason)
         ));
-        app.windows.get_mut(&main).unwrap().redraw.last_present = Some(base);
+        app.registry.windows.get_mut(&main).unwrap().redraw.last_present = Some(base);
         hold(&app, main, pane_of(&app, main, 0), 1, at_ms(base, 100));
-        assert!(app.windows[&main].redraw.surface_recovery_pending, "{reason:?}");
+        assert!(app.registry.windows[&main].redraw.surface_recovery_pending, "{reason:?}");
         assert!(attempt(
             &mut app,
             main,
@@ -333,13 +340,16 @@ fn only_the_must_run_causes_are_forced_through_a_hold() {
             at_ms(base, 1),
             FrameSettlement::Presented
         ));
-        assert!(!app.windows[&main].redraw.surface_recovery_pending, "{reason:?}");
+        assert!(!app.registry.windows[&main].redraw.surface_recovery_pending, "{reason:?}");
     }
     let (mut app, main, _, base) = held_owners();
-    app.windows.get_mut(&main).unwrap().redraw.last_present = None;
+    app.registry.windows.get_mut(&main).unwrap().redraw.last_present = None;
     let timeout = FrameSettlement::SurfaceRetry(SurfaceRetryReason::Timeout);
     assert!(attempt(&mut app, main, RedrawCause::Expose, base, timeout));
-    assert!(!app.windows[&main].redraw.surface_recovery_pending, "a surface timeout is not forced");
+    assert!(
+        !app.registry.windows[&main].redraw.surface_recovery_pending,
+        "a surface timeout is not forced"
+    );
 }
 
 /// A held pane in a background tab neither holds its window (visible output is admitted) nor,
@@ -350,9 +360,11 @@ fn a_held_background_pane_neither_holds_nor_wakes_its_window() {
     let background = pane_of(&app, child, 1);
     hold(&app, child, background, 1, at_ms(base, 100));
     assert!(attempt(&mut app, child, RedrawCause::Output, base, FrameSettlement::Presented));
-    *app.windows[&child].panes[&background].redraw_target.lock() = Some(child);
+    *app.registry.windows[&child].panes[&background].redraw_target.lock() = Some(child);
     release(&app, child, background);
-    app.windows[&child].panes[&background].output_generation.fetch_add(1, Ordering::Release);
+    app.registry.windows[&child].panes[&background]
+        .output_generation
+        .fetch_add(1, Ordering::Release);
     let before = crate::app::window_state::window_redraw_requests();
     app.service_output_event(
         crate::app::output_event::OutputEvent::Pane { window_id: child, pane_id: background },
@@ -371,7 +383,7 @@ fn typed_echo_inside_an_update_waits_at_most_150_ms() {
     hold(&app, main, first, 1, at_ms(base, 400));
     hold(&app, main, second, 1, at_ms(base, 500));
     assert!(!attempt(&mut app, main, RedrawCause::Input, base, FrameSettlement::Settled));
-    assert!(app.windows[&main].redraw.input_pending());
+    assert!(app.registry.windows[&main].redraw.input_pending());
     assert!(!attempt(
         &mut app,
         main,
@@ -386,7 +398,10 @@ fn typed_echo_inside_an_update_waits_at_most_150_ms() {
         at_ms(base, 150),
         FrameSettlement::Settled
     ));
-    assert!(!app.windows[&main].redraw.input_pending(), "the admitted attempt consumed the input");
+    assert!(
+        !app.registry.windows[&main].redraw.input_pending(),
+        "the admitted attempt consumed the input"
+    );
 }
 
 /// A no-draw update (`Settled` or `Cached`) spends its reset credit, so the next update's first
@@ -400,7 +415,7 @@ fn a_no_draw_update_spends_its_reset_credit() {
         hold(&app, main, pane, 1, at_ms(base, 400));
         release(&app, main, pane);
         assert!(attempt(&mut app, main, RedrawCause::Output, base, spent), "{spent:?}");
-        assert_eq!(app.windows[&main].panes[&pane].presented_sync_resets, 1);
+        assert_eq!(app.registry.windows[&main].panes[&pane].presented_sync_resets, 1);
         hold(&app, main, pane, 2, at_ms(base, 400));
         assert!(!attempt(
             &mut app,
@@ -409,7 +424,7 @@ fn a_no_draw_update_spends_its_reset_credit() {
             at_ms(base, 1),
             FrameSettlement::Presented
         ));
-        assert_eq!(app.windows[&main].redraw.deferred_rule, Some(DeferRule::Sync));
+        assert_eq!(app.registry.windows[&main].redraw.deferred_rule, Some(DeferRule::Sync));
     }
     let (mut app, main, _, base) = held_owners();
     let pane = pane_of(&app, main, 0);
@@ -418,7 +433,7 @@ fn a_no_draw_update_spends_its_reset_credit() {
     hold(&app, main, pane, 2, at_ms(base, 400));
     let failed = FrameSettlement::Retry(RedrawCause::AtlasRetry);
     assert!(attempt(&mut app, main, RedrawCause::Output, base, failed));
-    assert_eq!(app.windows[&main].panes[&pane].presented_sync_resets, 0);
+    assert_eq!(app.registry.windows[&main].panes[&pane].presented_sync_resets, 0);
     assert!(attempt(
         &mut app,
         main,
@@ -441,7 +456,7 @@ fn an_offscreen_only_noop_ends_the_stretch_and_a_failure_keeps_it() {
     let (mut app, main, _, base) = held_owners();
     let pane = pane_of(&app, main, 0);
     {
-        let state = app.windows.get_mut(&main).unwrap().panes.get_mut(&pane).unwrap();
+        let state = app.registry.windows.get_mut(&main).unwrap().panes.get_mut(&pane).unwrap();
         let history: String = (0..124).map(|row| format!("history {row}\r\n")).collect();
         state.parser.lock().advance(history.as_bytes());
         state.pin_viewport_top(Some(90));
@@ -452,10 +467,17 @@ fn an_offscreen_only_noop_ends_the_stretch_and_a_failure_keeps_it() {
     assert!(!attempt(&mut app, main, RedrawCause::Output, base, noop));
     let timeout = FrameSettlement::SurfaceRetry(SurfaceRetryReason::Timeout);
     assert!(attempt(&mut app, main, RedrawCause::Output, at_ms(base, 150), timeout));
-    assert_eq!(app.windows[&main].redraw.sync_stretch_start, Some(base), "a failure keeps it");
-    app.windows.get_mut(&main).unwrap().redraw.timeout_pending = false;
+    assert_eq!(
+        app.registry.windows[&main].redraw.sync_stretch_start,
+        Some(base),
+        "a failure keeps it"
+    );
+    app.registry.windows.get_mut(&main).unwrap().redraw.timeout_pending = false;
     assert!(attempt(&mut app, main, RedrawCause::Output, at_ms(base, 200), noop));
-    assert_eq!(app.windows[&main].redraw.sync_stretch_start, None, "the Noop ends the stretch");
+    assert_eq!(
+        app.registry.windows[&main].redraw.sync_stretch_start, None,
+        "the Noop ends the stretch"
+    );
     assert!(!attempt(&mut app, main, RedrawCause::Output, at_ms(base, 210), noop));
     assert!(!attempt(&mut app, main, RedrawCause::Output, at_ms(base, 359), noop));
     assert!(attempt(&mut app, main, RedrawCause::Output, at_ms(base, 360), noop));
@@ -471,16 +493,16 @@ fn the_recheck_under_the_guards_abandons_a_newly_held_frame() {
     app.mark_window_redraw(main, RedrawCause::Output);
     assert!(app.begin_window_redraw(main, base));
     let _snapshot = app.snapshot_window_redraw_at(main, base).unwrap();
-    let parser = app.windows[&main].panes[&pane].parser.clone();
+    let parser = app.registry.windows[&main].panes[&pane].parser.clone();
     parser.lock().advance(b"\x1b[?2026hrow");
     hold(&app, main, pane, 1, at_ms(base, 100));
     let (last_render, stream_clock, retry) = {
-        let window = &app.windows[&main];
+        let window = &app.registry.windows[&main];
         (window.last_render, window.stream_clock, window.retry_not_before)
     };
     let states = vec![(pane, parser.lock().synchronized_output())];
     assert!(app.abandon_synchronized_frame(main, &states, at_ms(base, 1)));
-    let window = &app.windows[&main];
+    let window = &app.registry.windows[&main];
     assert_eq!(
         (window.last_render, window.stream_clock, window.retry_not_before),
         (last_render, stream_clock, retry)
@@ -521,7 +543,7 @@ fn only_a_changed_resize_forces_a_frame_through_a_hold() {
     for (outcome, forced) in cases {
         let (mut app, main, _, base) = held_owners();
         hold(&app, main, pane_of(&app, main, 0), 1, at_ms(base, 100));
-        app.windows.get_mut(&main).unwrap().redraw.note_resize(outcome);
+        app.registry.windows.get_mut(&main).unwrap().redraw.note_resize(outcome);
         let admitted =
             attempt(&mut app, main, RedrawCause::Expose, base, FrameSettlement::Presented);
         assert_eq!(admitted, forced, "{outcome:?}");
@@ -554,7 +576,7 @@ fn the_pane_worker_hook_holds_an_update_and_releases_it_once() {
     assert!(worker.batch(b"\x1b[?2026h", base).is_empty());
     assert!(worker.batch(b"row", at_ms(base, 1)).is_empty());
     let published = {
-        let pane = &app.windows[&main].panes[&pane];
+        let pane = &app.registry.windows[&main].panes[&pane];
         read_published_sync(&pane.sync_word, &pane.sync_deadline_word)
     };
     assert!(published.set);
@@ -572,7 +594,7 @@ fn an_aliased_deadline_extends_a_hold_only_up_to_the_cap() {
     let pane = pane_of(&app, main, 0);
     hold(&app, main, pane, 1, at_ms(base, 100));
     let aliased = pack_sync_deadline(1 + (1 << 16), at_ms(base, 400));
-    app.windows[&main].panes[&pane].sync_deadline_word.store(aliased, Ordering::Relaxed);
+    app.registry.windows[&main].panes[&pane].sync_deadline_word.store(aliased, Ordering::Relaxed);
     assert!(!attempt(&mut app, main, RedrawCause::Output, base, FrameSettlement::Presented));
     let past_true_deadline = at_ms(base, 120);
     assert!(!attempt(
@@ -646,7 +668,7 @@ fn a_dpi_resize_keeps_its_obligation_through_a_same_size_resized() {
         let (mut app, main, child, base) = held_owners();
         let owner = if child_owner { child } else { main };
         hold(&app, owner, pane_of(&app, owner, 0), 1, at_ms(base, 100));
-        let redraw = &mut app.windows.get_mut(&owner).unwrap().redraw;
+        let redraw = &mut app.registry.windows.get_mut(&owner).unwrap().redraw;
         redraw.note_resize(ResizeOutcome::Changed);
         redraw.note_resize(ResizeOutcome::Unchanged);
         assert!(redraw.resize_pending, "child={child_owner}");
@@ -671,17 +693,20 @@ fn a_surface_timeout_keeps_an_unspent_reset_credit() {
     let snapshot = app.snapshot_window_redraw_at(main, base).unwrap();
     let timeout = FrameSettlement::SurfaceRetry(SurfaceRetryReason::Timeout);
     app.finish_window_redraw(main, &snapshot, timeout, base);
-    assert_eq!(app.windows[&main].panes[&pane].presented_sync_resets, 0, "the credit is unspent");
+    assert_eq!(
+        app.registry.windows[&main].panes[&pane].presented_sync_resets, 0,
+        "the credit is unspent"
+    );
     assert!(!app.begin_window_redraw(main, at_ms(base, 1)));
-    assert_eq!(app.windows[&main].redraw.deferred_rule, Some(DeferRule::Timeout));
+    assert_eq!(app.registry.windows[&main].redraw.deferred_rule, Some(DeferRule::Timeout));
     let retry_at = at_ms(base, 20);
     assert!(app.begin_window_redraw(main, retry_at), "past the floor the retry is still released");
     let snapshot = app.snapshot_window_redraw_at(main, retry_at).unwrap();
     app.finish_window_redraw(main, &snapshot, FrameSettlement::Presented, retry_at);
-    assert_eq!(app.windows[&main].panes[&pane].presented_sync_resets, 1);
+    assert_eq!(app.registry.windows[&main].panes[&pane].presented_sync_resets, 1);
     app.mark_window_redraw(main, RedrawCause::Expose);
     assert!(!app.begin_window_redraw(main, at_ms(base, 60)), "the spent credit no longer releases");
-    assert_eq!(app.windows[&main].redraw.deferred_rule, Some(DeferRule::Sync));
+    assert_eq!(app.registry.windows[&main].redraw.deferred_rule, Some(DeferRule::Sync));
 }
 
 /// A contention abort keeps the resize obligation, on both roles: with `resize_pending` armed and
@@ -696,10 +721,10 @@ fn a_contention_abort_keeps_the_resize_obligation() {
         let owner = if child_owner { child } else { main };
         let pane = pane_of(&app, owner, 0);
         hold(&app, owner, pane, 1, at_ms(base, 5_000));
-        app.windows.get_mut(&owner).unwrap().redraw.resize_pending = true;
+        app.registry.windows.get_mut(&owner).unwrap().redraw.resize_pending = true;
         app.mark_window_redraw(owner, RedrawCause::Expose);
         assert!(app.begin_window_redraw(owner, base), "child={child_owner}: forced");
-        let parser = app.windows[&owner].panes[&pane].parser.clone();
+        let parser = app.registry.windows[&owner].panes[&pane].parser.clone();
         let busy = parser.lock();
         let outer = Rect::new(0.0, 0.0, 800.0, 600.0);
         let sources = if child_owner {
@@ -715,8 +740,11 @@ fn a_contention_abort_keeps_the_resize_obligation() {
         drop(sources);
         drop(busy);
         app.visible_frame_unavailable(owner, why, false, base);
-        assert!(app.windows[&owner].redraw.resize_pending, "child={child_owner}: kept");
-        assert!(app.windows[&owner].retry_not_before.is_some(), "child={child_owner}: retry armed");
+        assert!(app.registry.windows[&owner].redraw.resize_pending, "child={child_owner}: kept");
+        assert!(
+            app.registry.windows[&owner].retry_not_before.is_some(),
+            "child={child_owner}: retry armed"
+        );
         assert!(
             attempt(
                 &mut app,
@@ -727,7 +755,10 @@ fn a_contention_abort_keeps_the_resize_obligation() {
             ),
             "child={child_owner}: the retry is forced through the hold"
         );
-        assert!(!app.windows[&owner].redraw.resize_pending, "child={child_owner}: presented");
+        assert!(
+            !app.registry.windows[&owner].redraw.resize_pending,
+            "child={child_owner}: presented"
+        );
         assert!(
             !attempt(
                 &mut app,
@@ -744,7 +775,7 @@ fn a_contention_abort_keeps_the_resize_obligation() {
 /// The state an abandoned frame must leave untouched: pending receipts, the pane's dirty rows,
 /// pending and unsettled causes, the last present, both pacing clocks and the retry floor.
 fn untouched_state(app: &App, id: WindowId, pane: u64) -> String {
-    let window = &app.windows[&id];
+    let window = &app.registry.windows[&id];
     let receipts: Vec<_> =
         window.pending_receipts.iter().map(|ticket| format!("{:?}", ticket.receipt)).collect();
     let dirty: Vec<usize> = window.panes[&pane].parser.lock().grid().dirty_rows().collect();
@@ -782,7 +813,7 @@ fn the_recheck_abandons_a_held_frame_on_both_roles_without_touching_state() {
             .unwrap_or_else(|_| panic!("child={child_owner}: a valid layout"))
         };
         // A presented frame left pending receipts; new output dirtied rows after it.
-        app.windows[&owner].panes[&pane].parser.lock().advance(b"first\r\n");
+        app.registry.windows[&owner].panes[&pane].parser.lock().advance(b"first\r\n");
         let sources = collect_sources(&mut app);
         let held = sources.try_collect(|| ()).ok().unwrap();
         let receipts = held
@@ -794,19 +825,19 @@ fn the_recheck_abandons_a_held_frame_on_both_roles_without_touching_state() {
         drop(held);
         let tickets = sources.bind(receipts);
         drop(sources);
-        let window = app.windows.get_mut(&owner).unwrap();
+        let window = app.registry.windows.get_mut(&owner).unwrap();
         window.pending_receipts = tickets;
         window.retry_not_before = Some(at_ms(base, 40));
         assert!(!window.pending_receipts.is_empty(), "child={child_owner}: receipts pending");
 
         app.mark_window_redraw(owner, RedrawCause::Output);
-        app.windows.get_mut(&owner).unwrap().retry_not_before = None;
+        app.registry.windows.get_mut(&owner).unwrap().retry_not_before = None;
         assert!(
             app.begin_window_redraw(owner, base),
             "child={child_owner}: admitted before the DECSET"
         );
-        app.windows.get_mut(&owner).unwrap().retry_not_before = Some(at_ms(base, 40));
-        app.windows[&owner].panes[&pane].parser.lock().advance(b"\x1b[?2026hpainted row");
+        app.registry.windows.get_mut(&owner).unwrap().retry_not_before = Some(at_ms(base, 40));
+        app.registry.windows[&owner].panes[&pane].parser.lock().advance(b"\x1b[?2026hpainted row");
         hold(&app, owner, pane, 1, at_ms(base, 100));
         let before = untouched_state(&app, owner, pane);
         assert!(before.contains("dirty=[0"), "child={child_owner}: rows are dirty: {before}");
@@ -823,7 +854,7 @@ fn the_recheck_abandons_a_held_frame_on_both_roles_without_touching_state() {
         drop(sources);
         assert_eq!(untouched_state(&app, owner, pane), before, "child={child_owner}");
         assert_eq!(defer_sync(&app, owner), 1, "child={child_owner}");
-        assert_eq!(app.windows[&owner].redraw.deferred_rule, Some(DeferRule::Sync));
+        assert_eq!(app.registry.windows[&owner].redraw.deferred_rule, Some(DeferRule::Sync));
     }
     for source in [
         concat!(
@@ -855,7 +886,7 @@ fn an_admitted_attempt_names_why_each_pane_was_shown() {
     let pane = pane_of(&app, main, 0);
     let open = SyncState { set: true, epoch: 1, resets: 0 };
     let admission =
-        |app: &App, state: SyncState| app.windows[&main].sync_admission(pane, state, base);
+        |app: &App, state: SyncState| app.registry.windows[&main].sync_admission(pane, state, base);
     assert_eq!(admission(&app, SyncState { set: false, ..open }), Some(SyncAdmission::Closed));
     assert_eq!(admission(&app, open), Some(SyncAdmission::Timeout), "the deadline passed");
     assert_eq!(
@@ -863,22 +894,22 @@ fn an_admitted_attempt_names_why_each_pane_was_shown() {
         Some(SyncAdmission::Credit),
         "an unpresented reset"
     );
-    app.windows.get_mut(&main).unwrap().redraw.sync_stretch_start =
+    app.registry.windows.get_mut(&main).unwrap().redraw.sync_stretch_start =
         Some(at_ms(base, 0) - Duration::from_millis(200));
     assert_eq!(
         admission(&app, SyncState { resets: 1, ..open }),
         Some(SyncAdmission::Timeout),
         "the cap passes before the credit is read"
     );
-    app.windows.get_mut(&main).unwrap().redraw.resize_pending = true;
+    app.registry.windows.get_mut(&main).unwrap().redraw.resize_pending = true;
     assert_eq!(admission(&app, open), Some(SyncAdmission::Forced(ForcedCause::Resize)));
-    app.windows.get_mut(&main).unwrap().redraw.last_present = None;
+    app.registry.windows.get_mut(&main).unwrap().redraw.last_present = None;
     assert_eq!(
         admission(&app, open),
         Some(SyncAdmission::Forced(ForcedCause::First)),
         "first wins"
     );
-    assert_eq!(app.windows[&main].sync_admission(pane + 1_000, open, base), None);
+    assert_eq!(app.registry.windows[&main].sync_admission(pane + 1_000, open, base), None);
     let names: Vec<&str> = [
         SyncAdmission::Closed,
         SyncAdmission::Forced(ForcedCause::First),

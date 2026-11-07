@@ -29,7 +29,7 @@ impl App {
         };
         // The palette names its main-window attachment `None`, as every other page does.
         self.interaction.palette_attached_window =
-            attached.filter(|id| Some(*id) != self.main_window_id);
+            attached.filter(|id| Some(*id) != self.registry.main_window_id);
         let current = self.config.font.family.clone();
         let (title, rows) = self.font_family_page(&current);
         let footer = self.i18n.translate("font-picker-footer");
@@ -88,7 +88,7 @@ impl App {
     /// Close the picker. `keep` applies the highlighted family; otherwise the font the picker
     /// opened with comes back.
     pub(in crate::app) fn close_font_family_picker(&mut self, keep: bool) {
-        let source = self.interaction.palette_attached_window.or(self.main_window_id);
+        let source = self.interaction.palette_attached_window.or(self.registry.main_window_id);
         let original = self.font_picker_original.take();
         if keep {
             self.preview_font_family();

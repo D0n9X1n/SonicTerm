@@ -23,15 +23,15 @@ fn app_with_tabs(titles: &[&str]) -> (App, WindowId) {
     for title in titles {
         app.__test_seed_tab(title);
     }
-    let main = app.main_window_id.unwrap();
-    app.window_keys.intern(main);
-    app.windows.get_mut(&main).unwrap().native_title = NativeTitleState::default();
+    let main = app.registry.main_window_id.unwrap();
+    app.registry.window_keys.intern(main);
+    app.registry.windows.get_mut(&main).unwrap().native_title = NativeTitleState::default();
     (app, main)
 }
 
 /// The main window's native title state, for reading what was written.
 fn state(app: &App, id: WindowId) -> &NativeTitleState {
-    &app.windows[&id].native_title
+    &app.registry.windows[&id].native_title
 }
 
 #[test]
@@ -79,13 +79,13 @@ fn an_unnamed_window_follows_its_active_tab() {
     let now = Instant::now();
     let _ = app.sync_native_title(main, now, false);
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 second"));
-    app.windows.get_mut(&main).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&main).unwrap().tabs.activate(0);
     let _ = app.sync_native_title(main, now + Duration::from_secs(1), false);
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 first"));
-    app.windows.get_mut(&main).unwrap().tabs.set_active_custom_title("Build");
+    app.registry.windows.get_mut(&main).unwrap().tabs.set_active_custom_title("Build");
     let _ = app.sync_native_title(main, now + Duration::from_secs(2), false);
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 Build"));
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     while !window.tabs.is_empty() {
         let id = window.tabs.active().unwrap().id;
         window.tabs.close(id);
@@ -100,10 +100,10 @@ fn a_window_name_beats_the_tab_and_clearing_it_returns_the_tab() {
     let (mut app, main) = app_with_tabs(&["shell"]);
     let now = Instant::now();
     let _ = app.sync_native_title(main, now, false);
-    app.windows.get_mut(&main).unwrap().custom_window_name = "Work".to_owned();
+    app.registry.windows.get_mut(&main).unwrap().custom_window_name = "Work".to_owned();
     let _ = app.sync_native_title(main, now, true);
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 Work"));
-    app.windows.get_mut(&main).unwrap().custom_window_name.clear();
+    app.registry.windows.get_mut(&main).unwrap().custom_window_name.clear();
     let _ = app.sync_native_title(main, now, true);
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 shell"));
     assert_eq!(app.native_window_title(main).as_deref(), Some("#1 shell"));
@@ -129,7 +129,7 @@ fn rapid_changes_are_throttled_and_the_last_one_lands() {
     let _ = app.sync_native_title(main, start, false);
     let mut deadline = None;
     for step in 1..=5_u32 {
-        app.windows.get_mut(&main).unwrap().tabs.set_active_title(format!("step {step}"));
+        app.registry.windows.get_mut(&main).unwrap().tabs.set_active_title(format!("step {step}"));
         deadline =
             app.sync_native_title(main, start + Duration::from_millis(10 * u64::from(step)), false);
     }
@@ -146,7 +146,7 @@ fn the_event_loop_pass_reports_the_earliest_pending_title() {
     let (mut app, main) = app_with_tabs(&["shell"]);
     let start = Instant::now();
     assert_eq!(app.sync_native_titles(start), None);
-    app.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
+    app.registry.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
     assert_eq!(app.sync_native_titles(start), Some(start + NATIVE_TITLE_MIN_INTERVAL));
 }
 
@@ -154,14 +154,14 @@ fn the_event_loop_pass_reports_the_earliest_pending_title() {
 fn report_and_unnumbered_windows_are_left_alone() {
     // A report window keeps its fixed name, and a window with no number has no numbered title.
     let (mut app, main) = app_with_tabs(&["shell"]);
-    app.windows.get_mut(&main).unwrap().role = crate::app::WindowRole::MemoryReport;
+    app.registry.windows.get_mut(&main).unwrap().role = crate::app::WindowRole::MemoryReport;
     assert_eq!(app.sync_native_title(main, Instant::now(), true), None);
     assert_eq!(state(&app, main).writes, 0);
     let mut unnumbered = App::new(Theme::default(), Config::default(), Keymap::default());
     unnumbered.__test_seed_tab("shell");
-    let id = unnumbered.main_window_id.unwrap();
-    unnumbered.window_keys.remove(id);
-    unnumbered.windows.get_mut(&id).unwrap().native_title = NativeTitleState::default();
+    let id = unnumbered.registry.main_window_id.unwrap();
+    unnumbered.registry.window_keys.remove(id);
+    unnumbered.registry.windows.get_mut(&id).unwrap().native_title = NativeTitleState::default();
     assert_eq!(unnumbered.sync_native_title(id, Instant::now(), true), None);
     assert_eq!(state(&unnumbered, id).writes, 0);
 }
@@ -190,7 +190,7 @@ fn dragging_a_tab_out_retitles_the_source_window_after_its_next_tab() {
     let now = Instant::now();
     let _ = app.sync_native_titles(now);
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 dragged"));
-    app.windows.get_mut(&child).unwrap().test_pane_viewport =
+    app.registry.windows.get_mut(&child).unwrap().test_pane_viewport =
         Some((sonicterm_ui::pane::Rect { x: 0.0, y: 0.0, w: 800.0, h: 500.0 }, 10.0, 20.0));
     app.transfer_tab(None, 1, Some(child), 1).unwrap();
     assert_eq!(app.sync_native_titles(now + Duration::from_millis(1)), None);
@@ -229,7 +229,7 @@ fn a_launch_title_beats_the_tab_like_a_rename() {
     let (mut app, main) = app_with_tabs(&["shell"]);
     app.set_main_window_name("Build box");
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 Build box"));
-    app.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
+    app.registry.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
     let _ = app.sync_native_titles(Instant::now() + Duration::from_secs(1));
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 Build box"));
 }
@@ -241,11 +241,11 @@ fn each_window_keeps_its_own_interval() {
     let child = app.__test_seed_child_window(&["other"]);
     let start = Instant::now();
     let _ = app.sync_native_titles(start);
-    app.windows.get_mut(&main).unwrap().tabs.set_active_title("main retitled");
+    app.registry.windows.get_mut(&main).unwrap().tabs.set_active_title("main retitled");
     let main_due = app.sync_native_titles(start + Duration::from_millis(100));
     assert_eq!(main_due, Some(start + NATIVE_TITLE_MIN_INTERVAL));
     let child_at = start + Duration::from_millis(400);
-    app.windows.get_mut(&child).unwrap().tabs.set_active_title("child retitled");
+    app.registry.windows.get_mut(&child).unwrap().tabs.set_active_title("child retitled");
     assert_eq!(app.sync_native_titles(child_at), None, "both are now due or free");
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 main retitled"));
     assert_eq!(state(&app, child).applied.as_deref(), Some("#2 child retitled"));
@@ -257,7 +257,7 @@ fn a_waiting_title_is_not_composed_again_before_its_deadline() {
     let (mut app, main) = app_with_tabs(&["shell"]);
     let start = Instant::now();
     let _ = app.sync_native_title(main, start, false);
-    app.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
+    app.registry.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
     let due = app.sync_native_title(main, start + Duration::from_millis(10), false);
     for step in 2..10 {
         let at = start + Duration::from_millis(10 * step);
@@ -276,13 +276,13 @@ fn a_waiting_title_arms_a_wake_that_delivers_it_without_a_frame() {
     let (mut app, main) = app_with_tabs(&["shell"]);
     let start = Instant::now();
     assert!(app.native_title_wake(start).is_none());
-    app.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
+    app.registry.windows.get_mut(&main).unwrap().tabs.set_active_title("vim");
     let wake = app.native_title_wake(start + Duration::from_millis(5)).expect("a wake is armed");
     assert_eq!(wake.cause, crate::app::redraw::DueCause::NativeTitle);
     assert_eq!(wake.deadline, start + NATIVE_TITLE_MIN_INTERVAL);
     app.redraw_due = vec![wake];
     app.service_redraw_due(wake.deadline);
-    assert!(!app.windows[&main].redraw.request_in_flight, "a title wake is never a frame");
+    assert!(!app.registry.windows[&main].redraw.request_in_flight, "a title wake is never a frame");
     assert!(app.native_title_wake(wake.deadline).is_none());
     assert_eq!(state(&app, main).applied.as_deref(), Some("#1 vim"));
 }

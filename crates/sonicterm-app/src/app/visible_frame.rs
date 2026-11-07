@@ -399,7 +399,7 @@ impl App {
         &mut self,
         outer: Rect,
     ) -> Result<VisibleFrameSources, FrameUnavailable> {
-        let id = self.main_window_id.ok_or(FrameUnavailable::NoLayout)?;
+        let id = self.registry.main_window_id.ok_or(FrameUnavailable::NoLayout)?;
         self.window_visible_frame_sources(id, outer)
     }
 
@@ -417,7 +417,7 @@ impl App {
         id: WindowId,
         outer: Rect,
     ) -> Result<VisibleFrameSources, FrameUnavailable> {
-        let window = self.windows.get(&id).ok_or(FrameUnavailable::NoLayout)?;
+        let window = self.registry.windows.get(&id).ok_or(FrameUnavailable::NoLayout)?;
         let mut sources = VisibleFrameSources::capture(window, outer)?;
         // A counting App times each frame's guard custody; otherwise no handle is cloned.
         sources.counted =
@@ -442,7 +442,7 @@ impl App {
     ) {
         match why {
             FrameUnavailable::Contended { images, .. } => {
-                let window = self.windows.get_mut(&id);
+                let window = self.registry.windows.get_mut(&id);
                 if let Some(counters) =
                     window.and_then(|window| window.redraw.frame_counters.as_deref_mut())
                 {
@@ -452,7 +452,7 @@ impl App {
                 self.defer_window_lock_contention(id, was_dirty, now)
             }
             FrameUnavailable::NoLayout => {
-                if let Some(window) = self.windows.get_mut(&id) {
+                if let Some(window) = self.registry.windows.get_mut(&id) {
                     let snapshot = window
                         .redraw
                         .attempt_causes
@@ -461,13 +461,13 @@ impl App {
                     window.redraw.settle(snapshot, super::redraw::FrameSettlement::Settled, now);
                 }
                 // Closing tabs have no frame, no diagnostic, and no pending collection retry.
-                if self.main_window_id == Some(id) {
+                if self.registry.main_window_id == Some(id) {
                     self.pending_redraw = false;
                 }
                 self.pending_redraw_windows.remove(&id);
             }
             FrameUnavailable::StructuralInvalid(reason) => {
-                if let Some(window) = self.windows.get_mut(&id) {
+                if let Some(window) = self.registry.windows.get_mut(&id) {
                     let snapshot = window
                         .redraw
                         .attempt_causes
@@ -478,7 +478,7 @@ impl App {
                         tracing::warn!(target: "frame_collection", ?id, ?reason, "invalid visible frame topology; assembly skipped");
                     }
                 }
-                if self.main_window_id == Some(id) {
+                if self.registry.main_window_id == Some(id) {
                     self.pending_redraw = false;
                 }
                 self.pending_redraw_windows.remove(&id);

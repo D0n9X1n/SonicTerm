@@ -173,7 +173,8 @@ pub(super) fn retained_bytes(pane: &PaneState) -> usize {
 ///
 /// These tests are in-crate, so nothing has to be made public to drive them.
 pub(super) fn seeded_pane(app: &App, window: WindowId, pane_id: u64) -> &PaneState {
-    app.windows
+    app.registry
+        .windows
         .get(&window)
         .and_then(|state| state.panes.get(&pane_id))
         .expect("the seeded pane exists")
@@ -807,7 +808,7 @@ pub(super) fn run_live_scheduler(
     let mut app = app_with_private_pools();
     app.__test_set_dispatch_clock(fake_now);
     let pane_id = app.__test_seed_tab("covered");
-    let main = app.main_window_id.ok_or("the seeded main window")?;
+    let main = app.registry.main_window_id.ok_or("the seeded main window")?;
     let (window, renderer) = live_renderer(event_loop, true, "live-scheduler")?;
     if !app.__test_attach_window_renderer(main, window, renderer) {
         return Err(String::from("the renderer attaches"));
@@ -915,7 +916,7 @@ pub(super) fn run_live_scheduler(
     let (spare_window, spare_renderer) = live_renderer(event_loop, false, "live-scheduler-spare")?;
     let spare = spare_window.id();
     let spare_before = spare_renderer.retained_amounts();
-    app.warm_window_pool.push(crate::app::WarmWindow {
+    app.registry.warm_window_pool.push(crate::app::WarmWindow {
         window: spare_window,
         renderer: spare_renderer,
         created_at: Instant::now(),
@@ -927,7 +928,7 @@ pub(super) fn run_live_scheduler(
     if app.test_scheduler_trims.iter().any(|(decided, _)| *decided == spare) {
         return Err(String::from("the pass never visits a warm spare"));
     }
-    let spare_after = &app.warm_window_pool[0].renderer;
+    let spare_after = &app.registry.warm_window_pool[0].renderer;
     if spare_after.retained_amounts() != spare_before || spare_after.__frame_texture_trimmed() {
         return Err(String::from("the warm spare's renderer is untouched"));
     }

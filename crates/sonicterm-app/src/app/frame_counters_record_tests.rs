@@ -86,14 +86,15 @@ fn a_counting_apps_windows_count_outcomes_and_contention_on_their_paths() {
     let mut app = app_under_filter("warn");
     app.force_frame_counters_on().unwrap();
     app.__test_synthetic_main();
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     let now = Instant::now();
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     let snapshot = window.redraw.snapshot();
     window.redraw.settle(snapshot, FrameSettlement::Presented, now);
     let contended = FrameUnavailable::Contended { pane_id: 1, images: true };
     app.visible_frame_unavailable(main, contended, false, now);
-    let counters = app.windows[&main].redraw.frame_counters.as_deref().expect("counting window");
+    let counters =
+        app.registry.windows[&main].redraw.frame_counters.as_deref().expect("counting window");
     let counted = (
         counters.presented,
         counters.contention_images,
@@ -103,8 +104,8 @@ fn a_counting_apps_windows_count_outcomes_and_contention_on_their_paths() {
     assert_eq!(counted, (1, 1, 0, 1));
     let mut silent = app_under_filter("warn");
     silent.__test_synthetic_main();
-    let silent_main = silent.main_window_id.unwrap();
-    assert!(silent.windows[&silent_main].redraw.frame_counters.is_none());
+    let silent_main = silent.registry.main_window_id.unwrap();
+    assert!(silent.registry.windows[&silent_main].redraw.frame_counters.is_none());
 }
 
 #[test]
@@ -161,12 +162,13 @@ fn a_counting_apps_window_counts_requests_redraws_and_handler_time() {
     let mut app = app_under_filter("warn");
     app.force_frame_counters_on().unwrap();
     app.__test_synthetic_main();
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     app.note_user_request_redraw(main);
     app.note_redraw_requested(main);
     app.note_window_handler(main, Instant::now() - Duration::from_millis(5), true);
     app.request_owner_redraw(main, crate::app::redraw::RedrawCause::Output);
-    let counters = app.windows[&main].redraw.frame_counters.as_deref().expect("counting window");
+    let counters =
+        app.registry.windows[&main].redraw.frame_counters.as_deref().expect("counting window");
     assert_eq!(
         (counters.user_request_redraw, counters.redraw_requested, counters.handler.count()),
         (1, 1, 1)
@@ -235,15 +237,15 @@ fn a_closed_windows_totals_move_to_closed_windows_and_late_vt_counts_still_appea
     let mut app = app_under_filter("warn");
     app.force_frame_counters_on().unwrap();
     app.__test_synthetic_main();
-    let main = app.main_window_id.expect("synthetic main");
-    let window = app.windows.get_mut(&main).unwrap();
+    let main = app.registry.main_window_id.expect("synthetic main");
+    let window = app.registry.windows.get_mut(&main).unwrap();
     let snapshot = window.redraw.snapshot();
     window.redraw.settle(snapshot, FrameSettlement::Presented, Instant::now());
     let pane = app.pane_frame_counters().expect("gate on");
     let open = app.frame_counters_snapshot().expect("counting app");
     assert_eq!(open.windows.len(), 1);
     assert_eq!(open.windows[0].1.count("presented"), Some(1));
-    let mut removed = app.windows.remove(&main).unwrap();
+    let mut removed = app.registry.windows.remove(&main).unwrap();
     app.retire_window_counters(main, &mut removed);
     pane.vt.note_batch();
     let closed = app.frame_counters_snapshot().expect("counting app");
@@ -297,7 +299,7 @@ fn every_window_removal_retires_its_counters() {
         ("child_tabs.rs", to_lf(include_str!("child_tabs.rs"))),
         ("session.rs", to_lf(include_str!("session.rs"))),
     ] {
-        let removals = source.matches("self.windows.remove(").count();
+        let removals = source.matches("self.registry.windows.remove(").count();
         assert_eq!(source.matches("self.retire_window_counters(").count(), removals, "{name}");
     }
 }
@@ -335,12 +337,25 @@ fn refused_redraws_after_the_line_interval_build_no_record() {
     let mut app = app_under_filter("warn");
     app.force_frame_counters_on().unwrap();
     app.__test_synthetic_main();
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     let start = Instant::now();
     let counters = |app: &App| -> u64 {
-        app.windows[&main].redraw.frame_counters.as_deref().expect("counting").records_built
+        app.registry.windows[&main]
+            .redraw
+            .frame_counters
+            .as_deref()
+            .expect("counting")
+            .records_built
     };
-    app.windows.get_mut(&main).unwrap().redraw.frame_counters.as_deref_mut().unwrap().attempts += 1;
+    app.registry
+        .windows
+        .get_mut(&main)
+        .unwrap()
+        .redraw
+        .frame_counters
+        .as_deref_mut()
+        .unwrap()
+        .attempts += 1;
     app.emit_frame_lines_at(Some((main, true)), start);
     assert_eq!(counters(&app), 1, "the attempt authorized one line");
     for second in 2..6 {
@@ -355,9 +370,9 @@ fn a_first_interval_with_no_activity_authorizes_no_redraw_line() {
     let mut app = app_under_filter("warn");
     app.force_frame_counters_on().unwrap();
     app.__test_synthetic_main();
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     app.emit_frame_lines_at(Some((main, true)), Instant::now() + Duration::from_secs(2));
-    let counters = app.windows[&main].redraw.frame_counters.as_deref().expect("counting");
+    let counters = app.registry.windows[&main].redraw.frame_counters.as_deref().expect("counting");
     assert_eq!(counters.records_built, 0, "a zero-activity redraw built a record");
 }
 
@@ -375,7 +390,7 @@ fn with_the_gate_off_the_production_hooks_write_nothing() {
     // write no tally when the App's gate is off; only the seal is set.
     let mut app = app_under_filter("warn");
     app.__test_synthetic_main();
-    let main = app.main_window_id.expect("synthetic main");
+    let main = app.registry.main_window_id.expect("synthetic main");
     {
         let _dispatch = app.frame_dispatch_scope();
         assert!(app.frame_clock_start().is_none(), "no clock read");
@@ -392,8 +407,8 @@ fn with_the_gate_off_the_production_hooks_write_nothing() {
     }
     assert_eq!(current_tally(), (0, 0), "no tally written");
     assert!(app.pane_frame_counters().is_none());
-    assert!(app.windows[&main].redraw.frame_counters.is_none());
-    assert!(app.windows[&main].panes.values().all(|pane| pane.frame_counters.is_none()));
+    assert!(app.registry.windows[&main].redraw.frame_counters.is_none());
+    assert!(app.registry.windows[&main].panes.values().all(|pane| pane.frame_counters.is_none()));
     assert!(app.frame_counters_snapshot().is_none());
     assert_eq!(app.force_frame_counters_on(), Err(FrameCountersTooLate), "sealed");
 }

@@ -73,12 +73,12 @@ impl App {
             _ => None,
         });
         // The checklist takes the window's keys, so strip focus there ends and its ring clears.
-        if let Some(focused) = attached.or(self.main_window_id) {
+        if let Some(focused) = attached.or(self.registry.main_window_id) {
             self.end_status_focus(focused);
         }
         // The palette names its main-window attachment `None`, as every other page does.
         self.interaction.palette_attached_window =
-            attached.filter(|id| Some(*id) != self.main_window_id);
+            attached.filter(|id| Some(*id) != self.registry.main_window_id);
         let rows = self.status_segment_rows();
         let title = self.i18n.translate("status-checklist-title");
         let footer = self.i18n.translate("status-checklist-footer");

@@ -82,7 +82,7 @@ pub struct WindowState {
     /// cannot silently register a phantom owner that never closes.
     ///
     /// An [`OwnerGuard`] for the same reason the pane's is: the window is
-    /// removed from `self.windows` at three sites across two files, and the
+    /// removed from `self.registry.windows` at three sites across two files, and the
     /// close has to be a property of ownership rather than something each of
     /// them remembers.
     ///
@@ -642,7 +642,7 @@ impl WindowState {
     /// short-circuit cleanly. This matters because the deferred
     /// `pending_os_teardown` drain (see [`App::cancel_drag_session`]
     /// and `App::drain_pending_os_teardown`) iterates a snapshot of
-    /// `self.windows.keys()`, and a tear-out spawn that just landed
+    /// `self.registry.windows.keys()`, and a tear-out spawn that just landed
     /// may have produced a `WindowState` whose renderer
     /// is still being constructed. Both fields are flipped together —
     /// callers MUST NOT split them, or the headless-test marker stops

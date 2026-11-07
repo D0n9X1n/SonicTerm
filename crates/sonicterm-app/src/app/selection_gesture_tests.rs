@@ -46,7 +46,7 @@ fn split_pane(app: &mut App, window: WindowId, focus: u64, dir: Direction) -> u6
     let parser = Parser::new_with_staging_pool(Grid::new(20, 3), None, pool);
     let shared = Arc::new(Mutex::new(parser));
     let pane = PaneState::new_with_media_pool(shared, None, &app.inline_media_pool);
-    let state = app.windows.get_mut(&window).unwrap();
+    let state = app.registry.windows.get_mut(&window).unwrap();
     state.panes.insert(pane_id, pane);
     assert!(state.tab_states[0].tree.split(focus, dir, pane_id));
     pane_id
@@ -54,9 +54,9 @@ fn split_pane(app: &mut App, window: WindowId, focus: u64, dir: Direction) -> u6
 
 /// Split the first tab of `window` into `left | right` 20×3 panes with distinct text.
 fn split_window(app: &mut App, window: WindowId) -> (u64, u64) {
-    let left = app.windows[&window].tab_states[0].active_pane;
+    let left = app.registry.windows[&window].tab_states[0].active_pane;
     let right = split_pane(app, window, left, Direction::Right);
-    let state = &app.windows[&window];
+    let state = &app.registry.windows[&window];
     fill(state, left, 20, 3, "left one\r\nleft two");
     fill(state, right, 20, 3, "right one\r\nright two");
     (left, right)
@@ -65,7 +65,7 @@ fn split_window(app: &mut App, window: WindowId) -> (u64, u64) {
 /// Split `focus` toward `dir` with a 20×2 pane whose rows read `<name> one`, `<name> two`.
 fn named_pane(app: &mut App, window: WindowId, focus: u64, dir: Direction, name: &str) -> u64 {
     let pane = split_pane(app, window, focus, dir);
-    fill(&app.windows[&window], pane, 20, 2, &format!("{name} one\r\n{name} two"));
+    fill(&app.registry.windows[&window], pane, 20, 2, &format!("{name} one\r\n{name} two"));
     pane
 }
 
@@ -90,8 +90,8 @@ struct Crossing {
 
 /// Build `topology` in `window`'s first tab from 20×2 panes named by their text.
 fn build(app: &mut App, window: WindowId, topology: Topology) -> Crossing {
-    let west = app.windows[&window].tab_states[0].active_pane;
-    fill(&app.windows[&window], west, 20, 2, "west one\r\nwest two");
+    let west = app.registry.windows[&window].tab_states[0].active_pane;
+    fill(&app.registry.windows[&window], west, 20, 2, "west one\r\nwest two");
     let west_layout = layout(west, 0.0, 0.0, 20, 2);
     match topology {
         Topology::Horizontal => {
@@ -119,7 +119,7 @@ fn build(app: &mut App, window: WindowId, topology: Topology) -> Crossing {
 
 /// Activate tab `idx` of `window` through the production tab-activation path.
 fn activate(app: &mut App, window: WindowId, idx: usize) {
-    if Some(window) == app.main_window_id {
+    if Some(window) == app.registry.main_window_id {
         app.__test_invoke_activate_main_tab(idx);
     } else {
         // When: `window` is a child, its own tab bar takes the activation.
@@ -135,7 +135,7 @@ fn two_tab_window(app: &mut App, in_child: bool) -> (WindowId, u64) {
     } else {
         // When: `in_child` is false, the main window takes the second tab.
         app.__test_seed_tab("b");
-        app.main_window_id.unwrap()
+        app.registry.main_window_id.unwrap()
     };
     activate(app, window, 0);
     let (left, _) = split_window(app, window);
@@ -150,7 +150,7 @@ fn app_window(in_child: bool) -> (App, WindowId) {
         app.__test_seed_child_window(&["child"])
     } else {
         // When: `in_child` is false, the seeded main window is the test window.
-        app.main_window_id.unwrap()
+        app.registry.main_window_id.unwrap()
     };
     (app, window)
 }
@@ -276,7 +276,7 @@ fn cross_pane_drags_keep_the_press_pane_text_for_every_split_and_click_count() {
                 let (mut app, window) = app_window(in_child);
                 let crossing = build(&mut app, window, topology);
                 let case = format!("{topology:?} x{click_count} child={in_child}");
-                let state = app.windows.get_mut(&window).unwrap();
+                let state = app.registry.windows.get_mut(&window).unwrap();
                 assert!(state.begin_local_selection(crossing.press, (0, 5), click_count));
                 // Focus moving to another pane must not retarget the held gesture.
                 let other = crossing.layouts.iter().find(|pane| pane.id != crossing.press);
@@ -312,7 +312,7 @@ fn resize_that_removes_the_pressed_cell_cancels_before_the_first_extension() {
             let (left, _) = split_window(&mut app, window);
             // The layout was drawn before the resize, so it still reports the old size.
             let drawn = [layout(left, 0.0, 0.0, 20, 3)];
-            let state = app.windows.get_mut(&window).unwrap();
+            let state = app.registry.windows.get_mut(&window).unwrap();
             assert!(state.begin_local_selection(left, press, 1));
             let pressed = state.selection;
             state.panes[&left].parser.lock().resize(shrunk.0, shrunk.1);
@@ -332,7 +332,7 @@ fn motion_past_a_shrunk_grid_clamps_to_its_last_cell() {
         let (mut app, window) = app_window(in_child);
         let (left, _) = split_window(&mut app, window);
         let drawn = [layout(left, 0.0, 0.0, 20, 3)];
-        let state = app.windows.get_mut(&window).unwrap();
+        let state = app.registry.windows.get_mut(&window).unwrap();
         state.panes[&left].parser.lock().resize(20, 2);
         assert!(state.begin_local_selection(left, (0, 0), 1));
         let found = |_: &WindowState, id: u64| drawn.iter().find(|pane| pane.id == id).copied();
@@ -350,14 +350,20 @@ fn resize_before_the_first_move_cancels_even_when_the_pressed_address_resolves()
     for in_child in [false, true] {
         for grow_back in [false, true] {
             let (mut app, window) = app_window(in_child);
-            let pane = app.windows[&window].tab_states[0].active_pane;
-            let parser = app.windows[&window].panes[&pane].parser.clone();
+            let pane = app.registry.windows[&window].tab_states[0].active_pane;
+            let parser = app.registry.windows[&window].panes[&pane].parser.clone();
             parser.lock().grid_mut().set_scrollback_limit(100);
-            fill(&app.windows[&window], pane, 20, 5, "row 0\r\nrow 1\r\nrow 2\r\nrow 3\r\nrow 4");
+            fill(
+                &app.registry.windows[&window],
+                pane,
+                20,
+                5,
+                "row 0\r\nrow 1\r\nrow 2\r\nrow 3\r\nrow 4",
+            );
             let identity = |grid: &Grid| (grid.scrollback_evicted(), grid.screen_epoch());
             let before = identity(parser.lock().grid());
             let drawn = [layout(pane, 0.0, 0.0, 20, 5)];
-            let state = app.windows.get_mut(&window).unwrap();
+            let state = app.registry.windows.get_mut(&window).unwrap();
             assert!(state.begin_local_selection(pane, (4, 2), 1));
             let pressed = state.selection;
             {
@@ -393,7 +399,7 @@ fn press_through_a_stale_layout_keeps_the_previous_selection() {
                 let (mut app, window) = app_window(in_child);
                 let (left, _) = split_window(&mut app, window);
                 let drawn = layout(left, 0.0, 0.0, 20, 3);
-                let state = app.windows.get_mut(&window).unwrap();
+                let state = app.registry.windows.get_mut(&window).unwrap();
                 assert!(state.begin_local_selection(left, (0, 0), 1));
                 assert!(state.extend_local_selection_to_cell((1, 4)));
                 // Releasing the button ends the gesture; the finished selection remains.
@@ -416,8 +422,8 @@ fn busy_parser_at_press_installs_no_gesture_and_keeps_the_selection() {
     for in_child in [false, true] {
         let (mut app, window) = app_window(in_child);
         let (left, _) = split_window(&mut app, window);
-        let parser = app.windows[&window].panes[&left].parser.clone();
-        let state = app.windows.get_mut(&window).unwrap();
+        let parser = app.registry.windows[&window].panes[&left].parser.clone();
+        let state = app.registry.windows.get_mut(&window).unwrap();
         assert!(state.begin_local_selection(left, (0, 0), 1));
         let existing = state.selection;
         // The press path latches an anchor-less local gesture before the anchor is bound.
@@ -440,7 +446,7 @@ fn inactive_pane_local_press_commits_focus_only_after_snapshot_admission() {
     for in_child in [false, true] {
         let (mut app, window) = app_window(in_child);
         let (left, right) = split_window(&mut app, window);
-        let state = app.windows.get_mut(&window).unwrap();
+        let state = app.registry.windows.get_mut(&window).unwrap();
         assert_eq!(state.tab_states[0].active_pane, left);
         assert!(state.begin_local_selection(left, (0, 0), 3));
         state.pointer_gesture = None;
@@ -515,7 +521,7 @@ fn local_press_rejects_a_zoomed_away_pane_without_changing_focus() {
     for in_child in [false, true] {
         let (mut app, window) = app_window(in_child);
         let (left, right) = split_window(&mut app, window);
-        let state = app.windows.get_mut(&window).unwrap();
+        let state = app.registry.windows.get_mut(&window).unwrap();
         assert!(state.begin_local_selection(left, (0, 0), 3));
         let previous = state.selection;
         state.tab_states[0].tree.toggle_zoom(left);
@@ -532,7 +538,7 @@ fn eviction_during_a_drag_rebases_or_cancels_the_gesture() {
     for in_child in [false, true] {
         let (mut app, window) = app_window(in_child);
         let (left, _) = split_window(&mut app, window);
-        let parser = app.windows[&window].panes[&left].parser.clone();
+        let parser = app.registry.windows[&window].panes[&left].parser.clone();
         {
             let mut parser = parser.lock();
             parser.grid_mut().set_scrollback_limit(10);
@@ -542,7 +548,7 @@ fn eviction_during_a_drag_rebases_or_cancels_the_gesture() {
             }
         }
         let pressed_text = row_text(parser.lock().grid(), 10);
-        let state = app.windows.get_mut(&window).unwrap();
+        let state = app.registry.windows.get_mut(&window).unwrap();
         assert!(state.begin_local_selection(left, (0, 0), 1));
         for line in 16..18 {
             parser.lock().advance(format!("line {line:03}\r\n").as_bytes());
@@ -567,7 +573,7 @@ fn production_motion_cancels_a_gesture_whose_pane_is_gone_without_a_layout() {
     for in_child in [false, true] {
         let (mut app, window) = app_window(in_child);
         let (left, _) = split_window(&mut app, window);
-        let state = app.windows.get_mut(&window).unwrap();
+        let state = app.registry.windows.get_mut(&window).unwrap();
         assert!(state.begin_local_selection(left, (0, 0), 1));
         assert!(!state.extend_local_selection(10.0, 10.0), "no renderer has drawn yet");
         assert!(state.pointer_gesture.is_some(), "a missing layout alone only skips the move");
@@ -584,10 +590,14 @@ fn tab_round_trip_without_motion_cancels_the_held_gesture() {
     for in_child in [false, true] {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let (window, left) = two_tab_window(&mut app, in_child);
-        assert!(app.windows.get_mut(&window).unwrap().begin_local_selection(left, (0, 0), 1));
+        assert!(app.registry.windows.get_mut(&window).unwrap().begin_local_selection(
+            left,
+            (0, 0),
+            1
+        ));
         activate(&mut app, window, 1);
         activate(&mut app, window, 0);
-        let state = app.windows.get_mut(&window).unwrap();
+        let state = app.registry.windows.get_mut(&window).unwrap();
         assert!(!state.extend_local_selection(10.0, 10.0));
         assert_eq!(state.pointer_gesture, None, "A to B and back to A cancels the gesture");
     }
@@ -600,14 +610,18 @@ fn closing_the_pressed_tab_while_the_button_is_held_cancels_the_drag() {
     for in_child in [false, true] {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let (window, left) = two_tab_window(&mut app, in_child);
-        assert!(app.windows.get_mut(&window).unwrap().begin_local_selection(left, (0, 0), 1));
+        assert!(app.registry.windows.get_mut(&window).unwrap().begin_local_selection(
+            left,
+            (0, 0),
+            1
+        ));
         if in_child {
             assert!(app.__test_invoke_close_tab_at_in_child(window, 0));
         } else {
             // When: `in_child` is false, the main window closes the tab through `close_tab_at`.
             app.close_tab_at(0);
         }
-        let state = app.windows.get_mut(&window).unwrap();
+        let state = app.registry.windows.get_mut(&window).unwrap();
         assert!(!state.extend_local_selection(10.0, 10.0));
         assert_eq!(state.pointer_gesture, None, "closing the press tab cancels the gesture");
         let selected_pane = state.selection.and_then(|selection| selection.pane_id);

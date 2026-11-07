@@ -21,7 +21,7 @@ type LinkLog = std::rc::Rc<RefCell<FakeLinkLog>>;
 /// Install a recording fake link on `id` and return its log.
 fn install_fake_link(app: &mut App, id: WindowId) -> LinkLog {
     let log = std::rc::Rc::new(RefCell::new(FakeLinkLog::default()));
-    app.windows.get_mut(&id).unwrap().display_link.source =
+    app.registry.windows.get_mut(&id).unwrap().display_link.source =
         Some(Box::new(FakeLink(std::rc::Rc::clone(&log))));
     log
 }
@@ -37,7 +37,7 @@ fn linked_owner(child_owner: bool) -> (App, WindowId, LinkLog, Instant) {
 
 /// This window's redraw state.
 fn redraw_of(app: &App, id: WindowId) -> &WindowRedrawState {
-    &app.windows[&id].redraw
+    &app.registry.windows[&id].redraw
 }
 
 /// The generation the native target would read now.
@@ -106,7 +106,7 @@ fn link_counts(app: &App, id: WindowId) -> (u64, u64, u64) {
 
 /// A busy visible parser on the owner's active pane.
 fn busy_parser(app: &App, id: WindowId) -> FrameUnavailable {
-    let window = &app.windows[&id];
+    let window = &app.registry.windows[&id];
     let pane_id = window.tab_states[window.tabs.active_index()].active_pane;
     FrameUnavailable::Contended { pane_id, images: false }
 }
@@ -179,12 +179,12 @@ fn suppress(app: &mut App, id: WindowId, which: Suppression, at: Instant) {
                 Suppression::Stopped => FrameSettlement::Stopped(7),
                 _ => FrameSettlement::SurfaceRetry(SurfaceRetryReason::Occluded),
             };
-            let redraw = &mut app.windows.get_mut(&id).unwrap().redraw;
+            let redraw = &mut app.registry.windows.get_mut(&id).unwrap().redraw;
             let snapshot = redraw.snapshot();
             redraw.settle(snapshot, outcome, at);
         }
         Suppression::Park => {
-            let redraw = &mut app.windows.get_mut(&id).unwrap().redraw;
+            let redraw = &mut app.registry.windows.get_mut(&id).unwrap().redraw;
             let snapshot = redraw.snapshot();
             redraw.park(snapshot);
         }
@@ -199,9 +199,11 @@ fn restore(app: &mut App, id: WindowId, which: Suppression) {
         Suppression::NativeOcclusion | Suppression::BackendOcclusion => {
             app.handle_window_occlusion(id, false);
         }
-        Suppression::Stopped => app.windows.get_mut(&id).unwrap().redraw.stopped_generation = None,
+        Suppression::Stopped => {
+            app.registry.windows.get_mut(&id).unwrap().redraw.stopped_generation = None
+        }
         Suppression::Park => app.mark_window_redraw(id, RedrawCause::Topology),
-        Suppression::Hide => app.windows.get_mut(&id).unwrap().hidden = false,
+        Suppression::Hide => app.registry.windows.get_mut(&id).unwrap().hidden = false,
         Suppression::Degrade => app.set_software_render_degrade(false),
     }
 }
@@ -332,7 +334,7 @@ fn a_streaming_deferral_admits_on_a_tick_or_at_the_two_period_ceiling() {
             };
             assert_eq!(redraw_of(&app, owner).pacing, None, "{label}");
             complete_at(&mut app, owner, admitted_at, FrameSettlement::Presented);
-            let window = &app.windows[&owner];
+            let window = &app.registry.windows[&owner];
             assert_eq!(window.last_render, admitted_at, "{label}");
             assert_eq!(window.stream_clock, admitted_at, "{label}");
             assert_eq!(window.redraw.last_present, Some(admitted_at), "{label}");
@@ -370,8 +372,8 @@ fn a_permit_from_before_occlusion_is_not_used_after_it() {
         assert!(admit_at(&mut app, owner, at_ms(base, 12)));
         assert_eq!(link_counts(&app, owner), (2, 1, 0), "child: {child_owner}");
         complete_at(&mut app, owner, at_ms(base, 12), FrameSettlement::Presented);
-        assert_eq!(app.windows[&owner].last_render, at_ms(base, 12));
-        assert_eq!(app.windows[&owner].stream_clock, at_ms(base, 12));
+        assert_eq!(app.registry.windows[&owner].last_render, at_ms(base, 12));
+        assert_eq!(app.registry.windows[&owner].stream_clock, at_ms(base, 12));
     }
 }
 
@@ -560,7 +562,7 @@ fn every_link_mode_admission_is_classified_exactly_once() {
                 2 => app.mark_window_redraw(owner, RedrawCause::Expose),
                 3 => fire(&mut app, owner),
                 4 | 5 => {
-                    let window = &app.windows[&owner];
+                    let window = &app.registry.windows[&owner];
                     let link = window.redraw.pacing == Some(PacingMode::Link);
                     let streaming =
                         window.visible_output_advanced() || !window.redraw.input_pending();
@@ -639,7 +641,7 @@ fn link_installed_windows_keep_every_other_rule() {
             app.set_software_render_degrade(true);
             let period = Duration::from_micros(if composing { 83_333 } else { 25_000 });
             if composing {
-                app.windows.get_mut(&owner).unwrap().ime.handle_preedit("中", None);
+                app.registry.windows.get_mut(&owner).unwrap().ime.handle_preedit("中", None);
             }
             assert!(!admit_output(&mut app, owner, at_ms(base, 1)));
             assert_eq!(about_to_wait(&mut app, owner, at_ms(base, 1)), vec![base + period]);
@@ -712,7 +714,7 @@ fn a_sync_hold_stops_the_link_and_keeps_the_mode() {
             assert!(!admit_output(&mut app, owner, at_ms(base, 1)));
             about_to_wait(&mut app, owner, at_ms(base, 1));
             let held = redraw_of(&app, owner).link_live.expect("the link runs");
-            let redraw = &mut app.windows.get_mut(&owner).unwrap().redraw;
+            let redraw = &mut app.registry.windows.get_mut(&owner).unwrap().redraw;
             redraw.deferred_rule = Some(crate::app::frame_counters::DeferRule::Sync);
             assert!(redraw.sync_hold(), "{label}: a deferred window under Sync is held");
             set_fake_now(at_ms(base, 2));
@@ -818,13 +820,13 @@ fn the_preferred_period_follows_the_window_monitor_period() {
         let base = test_base();
         let (mut app, main, child) = paced_owners(base);
         let owner = if child_owner { child } else { main };
-        let window = app.windows.get_mut(&owner).unwrap();
+        let window = app.registry.windows.get_mut(&owner).unwrap();
         window.redraw.monitor_rate_override = Some(Some(60_000));
         window.refresh_monitor_period();
         let log = std::rc::Rc::new(RefCell::new(FakeLinkLog::default()));
         app.install_display_link(owner, Box::new(FakeLink(std::rc::Rc::clone(&log))));
         assert_eq!(log.borrow().periods, vec![hz_60], "installation (child: {child_owner})");
-        let window = app.windows.get_mut(&owner).unwrap();
+        let window = app.registry.windows.get_mut(&owner).unwrap();
         window.redraw.monitor_rate_override = Some(Some(120_000));
         window.refresh_monitor_period();
         assert_eq!(log.borrow().periods, vec![hz_60, hz_120], "60 to 120 Hz");
@@ -848,9 +850,9 @@ fn an_early_wake_keeps_a_held_window_off_the_link() {
         about_to_wait(&mut app, owner, at_ms(base, 1));
         let held = redraw_of(&app, owner).link_live.expect("the link runs");
         // A window that has presented once is not forced as a first frame.
-        app.windows.get_mut(&owner).unwrap().redraw.last_present = Some(base);
+        app.registry.windows.get_mut(&owner).unwrap().redraw.last_present = Some(base);
         {
-            let window = &app.windows[&owner];
+            let window = &app.registry.windows[&owner];
             let pane = &window.panes[&window.tab_states[window.tabs.active_index()].active_pane];
             let state = sonicterm_vt::vt::SyncState { set: true, epoch: 1, resets: 0 };
             let deadline = base + Duration::from_secs(10);

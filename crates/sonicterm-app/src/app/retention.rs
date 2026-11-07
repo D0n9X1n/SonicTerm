@@ -471,7 +471,7 @@ impl super::App {
     /// Skips a pane whose parser lock is contended: a pane actively parsing is
     /// by definition not stalled.
     fn reclaim_stalled_captures(&mut self) {
-        for window in self.windows.values_mut() {
+        for window in self.registry.windows.values_mut() {
             for (pane_id, pane) in window.panes.iter_mut() {
                 let Some(mut parser) = pane.parser.try_lock() else {
                     // When: try_lock finds parser contended, so the pane is parsing
@@ -524,9 +524,9 @@ impl super::App {
     }
 
     fn charge_pane_owners(&mut self) {
-        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        let window_ids: Vec<WindowId> = self.registry.windows.keys().copied().collect();
         for window_id in window_ids {
-            let Some(window) = self.windows.get(&window_id) else {
+            let Some(window) = self.registry.windows.get(&window_id) else {
                 // When: window_id came from a snapshot taken before this walk; a
                 // window closed since then has no panes left to charge.
                 continue;
@@ -535,6 +535,7 @@ impl super::App {
 
             for pane_id in pane_ids {
                 let Some(pane) = self
+                    .registry
                     .windows
                     .get(&window_id)
                     .and_then(|window_state| window_state.panes.get(&pane_id))
@@ -555,6 +556,7 @@ impl super::App {
                 };
 
                 let Some(pane) = self
+                    .registry
                     .windows
                     .get_mut(&window_id)
                     .and_then(|window_state| window_state.panes.get_mut(&pane_id))
@@ -580,7 +582,7 @@ impl super::App {
     fn trim_over_ceiling_inline_media(&mut self) {
         let reclaimed = trim_panes_over_pool_ceiling(
             &self.inline_media_pool,
-            self.windows.values().flat_map(|window| window.panes.values()),
+            self.registry.windows.values().flat_map(|window| window.panes.values()),
         );
         if reclaimed > 0 {
             tracing::warn!(
@@ -707,9 +709,10 @@ impl super::App {
                 // When: a breadcrumb_recorder is installed; these counts persist so
                 // a later hang report names the last known state.
                 use sonicterm_logging::breadcrumbs::BreadcrumbEvent;
-                let windows = u32::try_from(self.windows.len()).unwrap_or(u32::MAX);
+                let windows = u32::try_from(self.registry.windows.len()).unwrap_or(u32::MAX);
                 let panes = u32::try_from(
-                    self.windows
+                    self.registry
+                        .windows
                         .values()
                         .fold(0usize, |total, window| total.saturating_add(window.panes.len())),
                 )
@@ -753,6 +756,7 @@ impl super::App {
         }
 
         let labelled: Vec<(String, &PaneState)> = self
+            .registry
             .windows
             .iter()
             .flat_map(|(win_id, window)| {

@@ -72,7 +72,7 @@ fn hard_break_with_indent_never_joins_fragments() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let output = format!("{head}\r\n    nicTerm/issues/1349");
     let (window, pane) = wrapped_url_pane(&mut app, 80, 10, output.as_bytes());
-    assert!(!app.windows[&window].panes[&pane]
+    assert!(!app.registry.windows[&window].panes[&pane]
         .parser
         .lock()
         .grid()
@@ -95,7 +95,7 @@ fn incomplete_wrap_chains_stay_inert() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let (window, pane) = wrapped_url_pane(&mut app, 10, 3, ISSUE_URI.as_bytes());
     {
-        let parser = app.windows[&window].panes[&pane].parser.lock();
+        let parser = app.registry.windows[&window].panes[&pane].parser.lock();
         let grid = parser.grid();
         let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, None);
         assert!(view_top > 0);
@@ -168,7 +168,7 @@ fn hardwrapped_parenthesized_url_resolves_complete_destination() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let (window, pane) = hardwrap_pane(&mut app, 39, &lines);
     assert!(
-        !app.windows[&window].panes[&pane]
+        !app.registry.windows[&window].panes[&pane]
             .parser
             .lock()
             .grid()
@@ -202,8 +202,8 @@ fn hardwrapped_preview_tracks_complete_fresh_destination() {
     app.config.terminal.clickable_local_targets = false;
     app.config.terminal.clickable_bare_names = false;
     let (window, pane) = hardwrap_pane(&mut app, 39, &lines);
-    app.frontmost_window = Some(window);
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.frontmost_window = Some(window);
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -211,7 +211,7 @@ fn hardwrapped_preview_tracks_complete_fresh_destination() {
     for (row, col) in [(0, 20), (1, 5)] {
         let target = app.cell_target_at(window, pane, row, col);
         app.apply_target_hover(window, target);
-        let state = &app.windows[&window];
+        let state = &app.registry.windows[&window];
         assert_eq!(state.link_preview.as_ref().expect("modifier preview").uri, ISSUE_URI);
         let hover = state.hovered_url.as_ref().expect("underline input");
         assert_eq!(hover.url, ISSUE_URI);
@@ -221,8 +221,8 @@ fn hardwrapped_preview_tracks_complete_fresh_destination() {
     let target = app.cell_target_at(window, pane, 0, 20);
     assert!(target.is_none());
     app.apply_target_hover(window, target);
-    assert!(app.windows[&window].link_preview.is_none());
-    assert!(app.windows[&window].hovered_url.is_none());
+    assert!(app.registry.windows[&window].link_preview.is_none());
+    assert!(app.registry.windows[&window].hovered_url.is_none());
 }
 
 /// Percent-escapes, query text, and a hyphen sitting exactly at the cut survive joining byte-for-byte.
@@ -313,7 +313,7 @@ fn hardwrap_requires_path_slash_before_query_or_fragment() {
 fn hardwrap_never_shadows_a_softwrapped_chain() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let (window, pane) = wrapped_url_pane(&mut app, 12, 10, format!("x ({ISSUE_URI})").as_bytes());
-    assert!(app.windows[&window].panes[&pane]
+    assert!(app.registry.windows[&window].panes[&pane]
         .parser
         .lock()
         .grid()
@@ -347,7 +347,7 @@ fn hardwrap_unequal_indent_stays_inert() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let (window, pane) = hardwrap_pane(&mut app, 30, &lines);
     assert!(app.cell_target_at(window, pane, 0, 5).is_none());
-    let parser = app.windows[&window].panes[&pane].parser.lock();
+    let parser = app.registry.windows[&window].panes[&pane].parser.lock();
     assert!(
         matches!(
             hardwrap_uri_at_cell(parser.grid(), 0, AbsoluteCell { row: 2, col: 5 }),

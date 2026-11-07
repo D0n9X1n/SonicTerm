@@ -559,6 +559,7 @@ pub(super) fn inline_media_contention_marks_the_snapshot_partial() {
     let window = app.__test_seed_child_window(&["one"]);
     let pane_id = app.__test_child_pane_ids(window).expect("child exists")[0];
     let held = app
+        .registry
         .windows
         .get(&window)
         .and_then(|window| window.panes.get(&pane_id))
@@ -665,7 +666,8 @@ pub(super) fn a_checkpoint_sample_is_the_periodic_line_plus_four_tags() {
 pub(super) fn a_contended_pane_makes_the_checkpoint_sample_partial() {
     let (mut app, window, pane_id) = app_with_one_pane();
     let parser = Arc::clone(
-        &app.windows
+        &app.registry
+            .windows
             .get(&window)
             .and_then(|window| window.panes.get(&pane_id))
             .expect("pane")
@@ -727,6 +729,7 @@ pub(super) fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
     chunk.resize(512 * 1024, b'A');
     {
         let pane = app
+            .registry
             .windows
             .get_mut(&window)
             .and_then(|state| state.panes.get_mut(&pane_id))
@@ -749,7 +752,7 @@ pub(super) fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
     let mut next_id = 0u64;
     for _ in 0..64 {
         next_id += 1;
-        decode_image(&app.windows[&window].panes[&pane_id], next_id, IMAGE_BYTES);
+        decode_image(&app.registry.windows[&window].panes[&pane_id], next_id, IMAGE_BYTES);
     }
     let mut crowd = Vec::new();
     while pool.bytes() <= MAX_PROCESS_INLINE_MEDIA_BYTES && crowd.len() < 256 {
@@ -772,7 +775,7 @@ pub(super) fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
     );
     let media_bytes = |app: &super::super::App| {
         crate::app::media::retained_inline_media(
-            &app.windows[&window].panes[&pane_id].inline_images.lock(),
+            &app.registry.windows[&window].panes[&pane_id].inline_images.lock(),
         )
         .bytes
     };
@@ -802,7 +805,7 @@ pub(super) fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
         Some(1),
         "the capture was not reclaimed"
     );
-    let pane = &app.windows[&window].panes[&pane_id];
+    let pane = &app.registry.windows[&window].panes[&pane_id];
     assert_eq!(
         pane.capture_stall_samples,
         super::super::retention::STALL_SAMPLES_BEFORE_CANCEL - 1,

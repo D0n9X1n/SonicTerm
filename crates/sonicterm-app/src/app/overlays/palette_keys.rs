@@ -18,7 +18,7 @@ impl App {
 
     fn command_palette_modifiers(&self) -> ModifiersState {
         match self.interaction.palette_attached_window {
-            Some(id) => self.windows.get(&id).map(|window| window.modifiers),
+            Some(id) => self.registry.windows.get(&id).map(|window| window.modifiers),
             None => self.main().map(|window| window.modifiers),
         }
         .unwrap_or_else(ModifiersState::empty)
@@ -56,7 +56,7 @@ impl App {
                     return true;
                 }
                 if let Some(owner) =
-                    self.interaction.palette_attached_window.or(self.main_window_id)
+                    self.interaction.palette_attached_window.or(self.registry.main_window_id)
                 {
                     // Rejected, empty, or unavailable clipboard text still belongs to the field, never a PTY.
                     self.run_field_clipboard_action(&action, owner);
@@ -97,7 +97,7 @@ impl App {
             // swallow every key so a half-formed CJK sequence cannot also navigate.
             if matches!(*logical_key, Key::Named(NamedKey::Escape)) {
                 if let Some(window) = match self.interaction.palette_attached_window {
-                    Some(id) => self.windows.get_mut(&id),
+                    Some(id) => self.registry.windows.get_mut(&id),
                     None => self.main_mut(),
                 } {
                     window.ime.cancel();
@@ -212,7 +212,8 @@ impl App {
                     true
                 }
                 Key::Named(NamedKey::Enter) => {
-                    let source = self.interaction.palette_attached_window.or(self.main_window_id);
+                    let source =
+                        self.interaction.palette_attached_window.or(self.registry.main_window_id);
                     self.apply_selected_tab_color();
                     self.interaction.command_palette.close();
                     self.interaction.palette_attached_window = None;
@@ -254,7 +255,8 @@ impl App {
             // When: matches! selects RenameTab or RenameWindow, consume keys locally instead of dispatching terminal commands.
             match logical_key {
                 Key::Named(NamedKey::Escape) => {
-                    let source = self.interaction.palette_attached_window.or(self.main_window_id);
+                    let source =
+                        self.interaction.palette_attached_window.or(self.registry.main_window_id);
                     self.interaction.command_palette.close();
                     self.interaction.window_rename_target = None;
                     self.interaction.tab_edit_target = None;
@@ -271,7 +273,8 @@ impl App {
                         return true;
                     }
                     let title = self.interaction.command_palette.query().trim().to_string();
-                    let source = self.interaction.palette_attached_window.or(self.main_window_id);
+                    let source =
+                        self.interaction.palette_attached_window.or(self.registry.main_window_id);
                     self.interaction.command_palette.close();
                     self.interaction.palette_attached_window = None;
                     // A closed or moved tab keeps its name; the title never lands on another tab.
@@ -345,7 +348,7 @@ impl App {
                         return true;
                     };
                     let source_window =
-                        self.interaction.palette_attached_window.or(self.main_window_id);
+                        self.interaction.palette_attached_window.or(self.registry.main_window_id);
                     let action = match action {
                         sonicterm_ui::command_palette::PaletteEntry::Command(action) => action,
                         sonicterm_ui::command_palette::PaletteEntry::About => {
@@ -359,8 +362,11 @@ impl App {
                         sonicterm_ui::command_palette::PaletteEntry::Tab { id, .. } => {
                             // When: `Tab` supplies `id`, resolve it in the captured source before closing the palette.
                             let target = source_window.and_then(|window_id| {
-                                let window =
-                                    self.windows.get(&window_id).filter(|window| !window.hidden)?;
+                                let window = self
+                                    .registry
+                                    .windows
+                                    .get(&window_id)
+                                    .filter(|window| !window.hidden)?;
                                 window
                                     .tabs
                                     .tabs()
@@ -393,7 +399,7 @@ impl App {
                         // When: matches finds RenameTab the palette stays open as
                         // a rename editor seeded with the active tab title.
                         let body = source_window
-                            .and_then(|id| self.windows.get(&id))
+                            .and_then(|id| self.registry.windows.get(&id))
                             .and_then(|window| window.tabs.active_title_body())
                             .unwrap_or_default();
                         self.interaction.command_palette.start_rename_tab(body);
@@ -406,7 +412,7 @@ impl App {
                         // When: matches finds UpdateTabColor the palette switches
                         // to the tab color picker instead of closing.
                         let title = source_window
-                            .and_then(|id| self.windows.get(&id))
+                            .and_then(|id| self.registry.windows.get(&id))
                             .and_then(|window| window.tabs.active_title_body())
                             .unwrap_or_default();
                         let choices = theme_tab_color_choices(&self.theme);

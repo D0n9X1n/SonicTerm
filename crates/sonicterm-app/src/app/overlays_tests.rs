@@ -10,11 +10,11 @@ fn reopening_tab_selector_in_another_window_selects_its_first_tab() {
     // A fresh selector must discard the previous window's selected TabId, in both directions.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child", "peer"]);
     for window in [main, child, main, child] {
         app.open_tab_selector(window);
-        let expected = app.windows[&window].tabs.tabs()[0].id;
+        let expected = app.registry.windows[&window].tabs.tabs()[0].id;
         assert!(
             matches!(app.interaction.command_palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == expected)
         );
@@ -27,7 +27,7 @@ fn palette_input_is_owned_by_its_attached_window_only() {
     // Focus changes must not let main, child, or sibling IME edits mutate another window's palette.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     let sibling = app.__test_seed_child_window(&["sibling"]);
     for owner in [main, child, sibling] {
@@ -54,7 +54,7 @@ fn palette_pointer_event_preserves_existing_gesture_ownership() {
     use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane = app.__test_seed_tab("main");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     app.open_tab_selector(window_id);
     let release = WindowEvent::MouseInput {
         device_id: DeviceId::dummy(),
@@ -159,7 +159,7 @@ fn palette_context_keeps_its_attached_window_and_rejects_vanished_tabs() {
     let child = app.__test_seed_child_window(&["one", "two"]);
     app.__test_set_frontmost_window(Some(child));
     assert!(app.run_action(&Action::OpenCommandPalette));
-    app.__test_set_frontmost_window(app.main_window_id);
+    app.__test_set_frontmost_window(app.registry.main_window_id);
     app.__test_set_palette_query("Activate Tab 2");
     assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::ArrowLeft)));
     assert_eq!(
@@ -182,9 +182,9 @@ fn readonly_palette_cannot_close_a_tab_or_enter_a_mutating_submode() {
     let child = app.__test_seed_child_window(&["one", "two"]);
     app.__test_set_frontmost_window(Some(child));
     assert!(app.run_action(&Action::OpenCommandPalette));
-    app.windows.get_mut(&child).unwrap().copy_mode =
+    app.registry.windows.get_mut(&child).unwrap().copy_mode =
         Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at((0, 0)));
-    app.__test_set_frontmost_window(app.main_window_id);
+    app.__test_set_frontmost_window(app.registry.main_window_id);
     for query in ["Close Tab", "Rename Active Tab", "Update Tab Color"] {
         app.__test_set_palette_query(query);
         assert!(app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter)));
@@ -193,6 +193,6 @@ fn readonly_palette_cannot_close_a_tab_or_enter_a_mutating_submode() {
             app.interaction.command_palette.mode(),
             sonicterm_ui::command_palette::CommandPaletteMode::Commands
         );
-        assert_eq!(app.windows.get(&child).unwrap().tabs.len(), 2);
+        assert_eq!(app.registry.windows.get(&child).unwrap().tabs.len(), 2);
     }
 }

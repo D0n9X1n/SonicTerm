@@ -8,7 +8,7 @@ fn terminal_windows_carry_a_dormant_adapter_and_build_nothing_before_activation(
     // Every terminal window has state under its id; with no assistive technology connected a
     // committed strip, a sample and a flush build no tree and retain no values.
     let (mut app, window_id) = app_with_window();
-    let main = app.main_window_id.expect("the seed made a main window");
+    let main = app.registry.main_window_id.expect("the seed made a main window");
     assert!(app.accessibility.contains_key(&main));
     assert!(!access(&app, window_id).has_adapter(), "headless windows have no platform adapter");
     present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
@@ -173,7 +173,10 @@ fn a_collection_that_presents_nothing_keeps_the_committed_strip() {
     let (mut app, window_id) = app_with_window();
     present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
     app.observe_status_pane(window_id, Default::default());
-    assert!(app.windows[&window_id].status_strip.is_some(), "the committed layout is kept");
+    assert!(
+        app.registry.windows[&window_id].status_strip.is_some(),
+        "the committed layout is kept"
+    );
 }
 
 #[test]
@@ -252,7 +255,7 @@ fn an_assertive_announcement_is_never_overwritten_by_a_polite_one() {
     activate(&mut app, window_id, start);
     let _ = app.sync_status_line(start);
     // Tab 2 is active in the seeded window, and an active tab takes no mark.
-    app.windows.get_mut(&window_id).unwrap().tabs.mark(0, |marks| marks.bell = true);
+    app.registry.windows.get_mut(&window_id).unwrap().tabs.mark(0, |marks| marks.bell = true);
     app.set_config_reload_error(Some(&anyhow::anyhow!("bad key")));
     let wake = app.flush_accessibility(start + Duration::from_secs(1));
     let first = announced(&app, window_id).unwrap();
@@ -274,7 +277,7 @@ fn a_request_resolved_before_its_pane_was_replaced_is_dropped() {
     let mem = segment_node(StatusSegmentId::Mem).0;
     let target = access(&app, window_id).resolve(mem);
     assert!(target.is_some(), "the handler resolves the node against the published targets");
-    app.windows.get_mut(&window_id).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&window_id).unwrap().tabs.activate(0);
     let _ = app.flush_accessibility(Instant::now());
     app.handle_accessibility_request(window_id, AccessibilityRequest::Click { node: mem, target });
     assert!(app.status_line_shown(), "the click resolved before the pane change is dropped");
@@ -327,11 +330,11 @@ fn a_reader_that_reaches_a_warm_spare_is_served_on_promotion() {
     // recorded and served by the first flush after it.
     let (mut app, window_id) = app_with_window();
     present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
-    let promoted = app.windows.remove(&window_id).expect("the seeded window");
+    let promoted = app.registry.windows.remove(&window_id).expect("the seeded window");
     app.handle_accessibility_request(window_id, AccessibilityRequest::InitialTree);
     assert!(access(&app, window_id).active, "the request is recorded on the spare's entry");
     assert!(access(&app, window_id).sent.is_empty());
-    app.windows.insert(window_id, promoted);
+    app.registry.windows.insert(window_id, promoted);
     let _ = app.flush_accessibility(Instant::now());
     assert!(node(&last_tree(&app, window_id), STRIP_NODE).is_some(), "served on promotion");
     let events = body(
@@ -395,10 +398,10 @@ fn any_press_outside_the_strip_ends_strip_focus_first() {
     present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
     for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
         app.focus_status_line(window_id);
-        app.windows.get_mut(&window_id).unwrap().cursor_pos = (10.0, 510.0);
+        app.registry.windows.get_mut(&window_id).unwrap().cursor_pos = (10.0, 510.0);
         let _ = app.route_shared_pointer(window_id, &press(MouseButton::Middle));
         assert_eq!(access(&app, window_id).focus, Some(StatusSegmentId::Mem), "inside keeps it");
-        app.windows.get_mut(&window_id).unwrap().cursor_pos = (10.0, 100.0);
+        app.registry.windows.get_mut(&window_id).unwrap().cursor_pos = (10.0, 100.0);
         let _ = app.route_shared_pointer(window_id, &press(button));
         assert_eq!(access(&app, window_id).focus, None, "{button:?} outside ends it");
     }
@@ -466,7 +469,8 @@ fn the_retained_model_is_charged_to_the_window_owner_and_stays_bounded() {
     // disconnect; however many transitions arrive, it keeps at most one per segment.
     let (mut app, window_id) = app_with_window();
     present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
-    let owner = app.windows[&window_id].owner.as_ref().map(|guard| guard.id()).expect("owner");
+    let owner =
+        app.registry.windows[&window_id].owner.as_ref().map(|guard| guard.id()).expect("owner");
     let charged = |app: &App| {
         app.__test_owner_snapshot(owner).unwrap().owner_class_bytes
             [ResourceClass::AccessibilityTree]

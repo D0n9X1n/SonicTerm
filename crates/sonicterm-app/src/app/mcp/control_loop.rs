@@ -153,6 +153,7 @@ impl App {
             return refusal.reply();
         }
         let bracketed = self
+            .registry
             .windows
             .values()
             .find_map(|window| window.panes.get(&pane_id))
@@ -199,6 +200,7 @@ impl App {
     fn authorize_writable(&self, control: McpControl, pane_id: u64) -> Result<(), Refusal> {
         self.authorize_control(control, pane_id, false)?;
         let running = self
+            .registry
             .windows
             .values()
             .find_map(|window| window.panes.get(&pane_id))
@@ -229,7 +231,7 @@ impl App {
             // When: `locate_pane` finds no tab for the pane, nothing closes.
             return Refusal::PaneGone.reply();
         };
-        let Some(window) = self.windows.get(&location.window_id) else {
+        let Some(window) = self.registry.windows.get(&location.window_id) else {
             // When: the pane's window is gone, nothing closes.
             return Refusal::PaneGone.reply();
         };

@@ -10,25 +10,28 @@ pub(super) use std::sync::Arc;
 pub(super) fn owners() -> (App, WindowId, WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child", "background"]);
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     (app, main, child)
 }
 
 /// One attempt for `cause` ending in `outcome` moves both clocks and is followed by a paced repeat.
 pub(super) fn assert_paced_repeat(cause: RedrawCause, outcome: FrameSettlement) {
     let (mut app, main, _) = owners();
-    let pane = app.windows[&main].tab_states[0].active_pane;
-    app.windows[&main].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
+    let pane = app.registry.windows[&main].tab_states[0].active_pane;
+    app.registry.windows[&main].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
     let now = Instant::now();
     app.mark_window_redraw(main, cause);
     let snapshot = app.snapshot_window_redraw(main).unwrap();
     app.finish_window_redraw(main, &snapshot, outcome, now);
-    assert_eq!(app.windows[&main].last_render, now);
-    assert_eq!(app.windows[&main].stream_clock, now, "{outcome:?} paces streaming from itself");
-    assert!(!app.windows[&main].redraw.input_pending());
-    assert!(app.windows[&main].panes[&pane].parser.lock().grid().dirty_count() > 0);
+    assert_eq!(app.registry.windows[&main].last_render, now);
+    assert_eq!(
+        app.registry.windows[&main].stream_clock, now,
+        "{outcome:?} paces streaming from itself"
+    );
+    assert!(!app.registry.windows[&main].redraw.input_pending());
+    assert!(app.registry.windows[&main].panes[&pane].parser.lock().grid().dirty_count() > 0);
     assert!(app.frame_due_work().is_empty(), "dirt or retained causes alone never arm a timer");
     assert!(
         !app.begin_window_redraw(main, now + Duration::from_micros(1)),
@@ -40,16 +43,16 @@ pub(super) fn assert_paced_repeat(cause: RedrawCause, outcome: FrameSettlement) 
 pub(super) fn topology_owners() -> (App, WindowId, WindowId) {
     let (mut app, main, child) = owners();
     app.__test_seed_tab("main survivor");
-    app.windows.get_mut(&main).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&main).unwrap().tabs.activate(0);
     app.__test_set_main_pane_viewport(Rect::new(0.0, 0.0, 800.0, 480.0), 10.0, 20.0);
-    app.windows.get_mut(&child).unwrap().test_pane_viewport =
+    app.registry.windows.get_mut(&child).unwrap().test_pane_viewport =
         Some((Rect::new(0.0, 0.0, 800.0, 480.0), 10.0, 20.0));
     (app, main, child)
 }
 
 /// Enter the same parked scheduler state as a rejected collector, without manufacturing invalid pane geometry.
 pub(super) fn park_owner(app: &mut App, id: WindowId) -> u64 {
-    let window = app.windows.get_mut(&id).unwrap();
+    let window = app.registry.windows.get_mut(&id).unwrap();
     let snapshot = window.redraw.snapshot();
     window.redraw.park(snapshot);
     window.redraw.request_in_flight = false;
@@ -62,7 +65,7 @@ pub(super) fn gated_collector_calls(app: &mut App, owner: WindowId, now: Instant
         return 0;
     }
     let rect = Rect::new(0.0, 0.0, 800.0, 480.0);
-    let sources = if Some(owner) == app.main_window_id {
+    let sources = if Some(owner) == app.registry.main_window_id {
         app.main_visible_frame_sources(rect)
     } else {
         app.child_visible_frame_sources(owner, rect)
@@ -80,9 +83,9 @@ pub(super) fn surface_probe_errors_rearm_without_consuming_frame_or_output_ident
         let (mut app, main, child) = owners();
         let (owner, other) = if child_owner { (child, main) } else { (main, child) };
         let now = Instant::now();
-        let pane = app.windows[&owner].tab_states[0].active_pane;
-        app.windows[&owner].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
-        app.windows[&owner].panes[&pane].output_generation.fetch_add(7, Ordering::Release);
+        let pane = app.registry.windows[&owner].tab_states[0].active_pane;
+        app.registry.windows[&owner].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
+        app.registry.windows[&owner].panes[&pane].output_generation.fetch_add(7, Ordering::Release);
         let snapshot = app.snapshot_window_redraw(owner).unwrap();
         app.finish_window_redraw(
             owner,
@@ -90,11 +93,11 @@ pub(super) fn surface_probe_errors_rearm_without_consuming_frame_or_output_ident
             FrameSettlement::SurfaceRetry(SurfaceRetryReason::Occluded),
             now,
         );
-        let pending = app.windows[&owner].redraw.snapshot();
-        let other_before = app.windows[&other].redraw.snapshot();
+        let pending = app.registry.windows[&owner].redraw.snapshot();
+        let other_before = app.registry.windows[&other].redraw.snapshot();
         for tick in 1..=3 {
             let at = now + SURFACE_PROBE_PERIOD * tick;
-            let window = app.windows.get_mut(&owner).unwrap();
+            let window = app.registry.windows.get_mut(&owner).unwrap();
             window.finish_surface_probe(Err(anyhow::anyhow!("surface creation failed")), true, at);
             assert_eq!(window.surface_probe_deadline(), Some(at + SURFACE_PROBE_PERIOD));
             assert!(window.redraw.backend_occluded);
@@ -111,7 +114,7 @@ pub(super) fn surface_probe_errors_rearm_without_consuming_frame_or_output_ident
                 (DueCause::SurfaceProbe, at + SURFACE_PROBE_PERIOD)
             );
             assert_eq!(gated_collector_calls(&mut app, owner, at), 0);
-            assert_eq!(app.windows[&other].redraw.snapshot().0, other_before.0);
+            assert_eq!(app.registry.windows[&other].redraw.snapshot().0, other_before.0);
         }
     }
 }
@@ -123,7 +126,7 @@ pub(super) fn surface_probe_errors_do_not_rearm_suppressed_or_unusable_owners() 
     for mode in 0..5 {
         let (mut app, main, _) = owners();
         let now = Instant::now();
-        let window = app.windows.get_mut(&main).unwrap();
+        let window = app.registry.windows.get_mut(&main).unwrap();
         window.redraw.backend_occluded = true;
         window.redraw.surface_probe_at = Some(now);
         match mode {
@@ -182,7 +185,7 @@ pub(super) fn production_occlusion_order_retained_invalidation_and_device_preced
     let start = events.find("pub(super) fn do_window_event(").unwrap();
     let route = &events[start..];
     let warm = route.find("self.is_warm_window_id(win_id)").unwrap();
-    let stale = route.find("!self.windows.contains_key(&win_id)").unwrap();
+    let stale = route.find("!self.registry.windows.contains_key(&win_id)").unwrap();
     let occluded = route.find("self.handle_window_occlusion(win_id, *occluded)").unwrap();
     let child = route.find("self.handle_child_window_event(").unwrap();
     assert!(warm < stale && stale < occluded && occluded < child);
@@ -253,7 +256,7 @@ pub(super) fn validated_device_recovery_clears_only_backend_occlusion() {
         let (mut app, main, _) = owners();
         let stopped = sonicterm_gpu::device_errors::DeviceErrorState::new().snapshot();
         let replacement = sonicterm_gpu::device_errors::DeviceErrorState::new().snapshot();
-        let window = app.windows.get_mut(&main).unwrap();
+        let window = app.registry.windows.get_mut(&main).unwrap();
         window.redraw.stopped_generation = Some(stopped.generation);
         window.redraw.backend_occluded = true;
         window.redraw.native_occluded = native;
@@ -270,7 +273,7 @@ pub(super) fn validated_device_recovery_clears_only_backend_occlusion() {
 pub(super) fn arm_settled_fade_scrollbar(app: &mut App, owner: WindowId, active: Instant) -> u64 {
     use crate::app::scrollbar_visibility::{note_activity, retarget, ScrollbarVisState};
     app.config.appearance.scrollbar = sonicterm_cfg::config::ScrollbarMode::Auto;
-    let window = app.windows.get_mut(&owner).unwrap();
+    let window = app.registry.windows.get_mut(&owner).unwrap();
     let pane = window.tab_states[window.tabs.active_index()].active_pane;
     let mut vis = ScrollbarVisState::new(active);
     note_activity(&mut vis, active);
@@ -303,22 +306,22 @@ pub(super) fn an_animated_idle_deadline_is_serviced_once_and_spares_a_later_owne
         arm_settled_fade_scrollbar(&mut app, child, active + Duration::from_millis(100));
     let deadline = active + idle;
     assert_eq!(scrollbar_due(&app, main, active), vec![deadline]);
-    let child_before = app.windows[&child].scrollbar_vis.clone();
+    let child_before = app.registry.windows[&child].scrollbar_vis.clone();
     app.redraw_due = app.frame_due_work_at(active);
     app.service_redraw_due(deadline - Duration::from_nanos(1));
-    assert!(!app.windows[&main].redraw.request_in_flight);
+    assert!(!app.registry.windows[&main].redraw.request_in_flight);
     app.service_redraw_due(deadline);
-    let vis = app.windows[&main].scrollbar_vis[&main_pane];
-    assert!(app.windows[&main].redraw.request_in_flight, "one frame starts the fade");
+    let vis = app.registry.windows[&main].scrollbar_vis[&main_pane];
+    assert!(app.registry.windows[&main].redraw.request_in_flight, "one frame starts the fade");
     assert_eq!((vis.alpha, vis.target, vis.idle_consumed), (1.0, 0.0, true));
     assert!(scrollbar_due(&app, main, deadline).is_empty(), "the deadline cannot re-fire");
-    assert_eq!(app.windows[&child].scrollbar_vis, child_before);
-    assert!(!app.windows[&child].redraw.request_in_flight);
+    assert_eq!(app.registry.windows[&child].scrollbar_vis, child_before);
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
     assert_eq!(
         scrollbar_due(&app, child, deadline),
         vec![active + Duration::from_millis(100) + idle]
     );
-    assert!(!app.windows[&child].scrollbar_vis[&child_pane].idle_consumed);
+    assert!(!app.registry.windows[&child].scrollbar_vis[&child_pane].idle_consumed);
 }
 
 #[test]
@@ -331,8 +334,10 @@ pub(super) fn hidden_occluded_and_parked_owners_contribute_no_idle_deadline() {
         arm_settled_fade_scrollbar(&mut app, main, active);
         assert_eq!(scrollbar_due(&app, main, active).len(), 1, "{state}: visible baseline");
         match state {
-            "hidden" => app.windows.get_mut(&main).unwrap().hidden = true,
-            "occluded" => app.windows.get_mut(&main).unwrap().redraw.native_occluded = true,
+            "hidden" => app.registry.windows.get_mut(&main).unwrap().hidden = true,
+            "occluded" => {
+                app.registry.windows.get_mut(&main).unwrap().redraw.native_occluded = true
+            }
             _ => {
                 park_owner(&mut app, main);
             }
@@ -354,7 +359,7 @@ pub(super) fn activity_or_a_hold_after_collection_makes_the_expiry_a_no_op() {
         app.redraw_due = app.frame_due_work_at(active);
         let fresh = deadline - Duration::from_millis(50);
         let mode = sonicterm_cfg::config::ScrollbarMode::Auto;
-        let window = app.windows.get_mut(&main).unwrap();
+        let window = app.registry.windows.get_mut(&main).unwrap();
         match case {
             "activity" => window.note_scrollbar_activity(pane, mode, fresh),
             "hover" => {
@@ -396,9 +401,9 @@ pub(super) fn activity_or_a_hold_after_collection_makes_the_expiry_a_no_op() {
                 );
             }
         }
-        let before = app.windows[&main].scrollbar_vis[&pane];
+        let before = app.registry.windows[&main].scrollbar_vis[&pane];
         app.service_redraw_due(deadline);
-        let window = &app.windows[&main];
+        let window = &app.registry.windows[&main];
         assert_eq!(window.scrollbar_vis[&pane], before, "{case}: no target change");
         assert_eq!(window.scrollbar_vis[&pane].target, 1.0, "{case}");
         assert!(!window.redraw.request_in_flight, "{case}: no frame request");
@@ -415,7 +420,7 @@ pub(super) fn an_overdue_expiry_after_an_earlier_retarget_requests_the_fade_fram
     let active = now.checked_sub(Duration::from_secs(2)).unwrap();
     let pane = arm_settled_fade_scrollbar(&mut app, main, active);
     let mode = sonicterm_cfg::config::ScrollbarMode::Auto;
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     let vis = window.scrollbar_vis.get_mut(&pane).unwrap();
     assert!(crate::app::scrollbar_visibility::retarget(vis, mode, false, now));
     window.redraw.request_in_flight = false;
@@ -425,7 +430,7 @@ pub(super) fn an_overdue_expiry_after_an_earlier_retarget_requests_the_fade_fram
         .iter()
         .any(|work| work.owner == Some(main) && work.cause == DueCause::Scrollbar));
     app.service_redraw_due(now);
-    let window = &app.windows[&main];
+    let window = &app.registry.windows[&main];
     assert!(window.scrollbar_vis[&pane].idle_consumed);
     assert_eq!(window.scrollbar_vis[&pane].alpha, 1.0);
     assert!(window.redraw.request_in_flight, "the still-fading owner gets its frame");
@@ -435,7 +440,7 @@ pub(super) fn an_overdue_expiry_after_an_earlier_retarget_requests_the_fade_fram
 /// promoted, with its 30 s deadline at `deadline`.
 pub(super) fn idle_release_owner(deadline: Instant) -> (App, WindowId) {
     let (mut app, main, _child) = owners();
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     let snapshot = window.redraw.snapshot();
     window.redraw.settle(snapshot, FrameSettlement::Settled, deadline);
     window.redraw.deferred = false;
@@ -454,7 +459,7 @@ pub(super) fn release_work(app: &App, now: Instant) -> Vec<WindowId> {
 }
 
 pub(super) fn releases(app: &App, id: WindowId) -> u32 {
-    app.windows[&id].test_image_atlas_release.as_ref().unwrap().releases
+    app.registry.windows[&id].test_image_atlas_release.as_ref().unwrap().releases
 }
 
 /// A release is collected only for an idle, visible window at or after its deadline; every frame-family
@@ -463,8 +468,10 @@ pub(super) fn releases(app: &App, id: WindowId) -> u32 {
 pub(super) fn image_atlas_release_requires_an_idle_visible_window() {
     let now = Instant::now();
     let (app, main) = idle_release_owner(now);
-    assert!(app.windows[&main].image_atlas_release_eligible(now));
-    assert!(!app.windows[&main].image_atlas_release_eligible(now - Duration::from_millis(1)));
+    assert!(app.registry.windows[&main].image_atlas_release_eligible(now));
+    assert!(
+        !app.registry.windows[&main].image_atlas_release_eligible(now - Duration::from_millis(1))
+    );
     assert_eq!(release_work(&app, now), vec![main], "the deadline is collected for the wake");
     let blockers: [(&str, fn(&mut WindowState)); 6] = [
         ("deferred", |window| window.redraw.deferred = true),
@@ -476,8 +483,11 @@ pub(super) fn image_atlas_release_requires_an_idle_visible_window() {
     ];
     for (name, block) in blockers {
         let (mut app, main) = idle_release_owner(now);
-        block(app.windows.get_mut(&main).unwrap());
-        assert!(!app.windows[&main].image_atlas_release_eligible(now), "{name} must block");
+        block(app.registry.windows.get_mut(&main).unwrap());
+        assert!(
+            !app.registry.windows[&main].image_atlas_release_eligible(now),
+            "{name} must block"
+        );
         assert!(release_work(&app, now).is_empty(), "{name} must not be collected");
         app.redraw_due =
             vec![DueWork { owner: Some(main), cause: DueCause::ImageAtlasRelease, deadline: now }];
@@ -496,8 +506,8 @@ pub(super) fn an_eligible_release_runs_once_without_a_frame() {
     app.service_redraw_due(now);
     assert_eq!(releases(&app, main), 1);
     assert_eq!(super::super::window_state::window_redraw_requests(), requests, "no native request");
-    assert!(!app.windows[&main].redraw.request_in_flight);
-    assert!(!app.windows[&main].redraw.has_pending(), "no repaint cause was marked");
+    assert!(!app.registry.windows[&main].redraw.request_in_flight);
+    assert!(!app.registry.windows[&main].redraw.has_pending(), "no repaint cause was marked");
     assert!(release_work(&app, now).is_empty(), "the released atlas arms no deadline");
     app.service_redraw_due(now);
     assert_eq!(releases(&app, main), 1);
@@ -510,14 +520,14 @@ pub(super) fn work_pending_between_collection_and_service_defers_the_release() {
     let now = Instant::now();
     let (mut app, main) = idle_release_owner(now);
     app.redraw_due = app.frame_due_work_at(now);
-    app.windows.get_mut(&main).unwrap().mark_redraw(RedrawCause::Output);
+    app.registry.windows.get_mut(&main).unwrap().mark_redraw(RedrawCause::Output);
     app.service_redraw_due(now);
     assert_eq!(releases(&app, main), 0);
     assert!(
         !app.redraw_due.iter().any(|work| work.cause == DueCause::ImageAtlasRelease),
         "a blocked release is dropped, so it cannot spin"
     );
-    let window = app.windows.get_mut(&main).unwrap();
+    let window = app.registry.windows.get_mut(&main).unwrap();
     let snapshot = window.redraw.snapshot();
     window.redraw.settle(snapshot, FrameSettlement::Presented, now);
     assert_eq!(release_work(&app, now), vec![main], "collected again once eligible");
@@ -528,22 +538,22 @@ pub(super) fn counting_owners() -> (App, WindowId, WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.force_frame_counters_on().expect("no window exists yet");
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child", "background"]);
-    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
     (app, main, child)
 }
 
 /// Move both of a window's pacing clocks back, so pacing does not depend on when the test built it.
 pub(super) fn backdate_clocks(app: &mut App, id: WindowId, at: Instant) {
-    let window = app.windows.get_mut(&id).unwrap();
+    let window = app.registry.windows.get_mut(&id).unwrap();
     window.last_render = at;
     window.stream_clock = at;
 }
 
 /// Publish one completed output batch on the window's visible active pane.
 pub(super) fn publish_visible_output(app: &App, id: WindowId) {
-    let window = &app.windows[&id];
+    let window = &app.registry.windows[&id];
     let pane = window.tab_states[window.tabs.active_index()].active_pane;
     window.panes[&pane].output_generation.fetch_add(1, Ordering::Release);
 }
@@ -569,7 +579,8 @@ pub(super) fn defer_count(
     rule: super::super::frame_counters::DeferRule,
 ) -> u64 {
     use super::super::frame_counters::DeferRule;
-    let counters = app.windows[&id].redraw.frame_counters.as_deref().expect("counting App");
+    let counters =
+        app.registry.windows[&id].redraw.frame_counters.as_deref().expect("counting App");
     match rule {
         DeferRule::Timeout => counters.defer_timeout,
         DeferRule::Contention => counters.defer_contention,
@@ -643,7 +654,7 @@ pub(super) fn unchanged_non_input_passes_stay_one_per_period() {
                 app.mark_window_redraw(main, RedrawCause::Input);
                 input_events += 1;
             }
-            let carries_input = app.windows[&main].redraw.input_pending();
+            let carries_input = app.registry.windows[&main].redraw.input_pending();
             if !app.begin_window_redraw(main, at) {
                 continue;
             }
@@ -658,8 +669,12 @@ pub(super) fn unchanged_non_input_passes_stay_one_per_period() {
                 output_admitted += 1;
             }
         }
-        let exempt =
-            app.windows[&main].redraw.frame_counters.as_deref().unwrap().stream_clock_exempt;
+        let exempt = app.registry.windows[&main]
+            .redraw
+            .frame_counters
+            .as_deref()
+            .unwrap()
+            .stream_clock_exempt;
         assert!(output_admitted <= bound, "{output_admitted} > {bound}");
         assert!(exempt <= input_events, "exempt attempts never outnumber input events");
         assert_eq!(exempt > 0, with_input, "the exemption is exercised only with input");
@@ -708,13 +723,13 @@ pub(super) fn outcomes_that_advance_the_streaming_clock() {
             let now = Instant::now() + Duration::from_secs(1);
             backdate_clocks(&mut app, owner, now - Duration::from_secs(1));
             if retry_armed {
-                app.windows.get_mut(&owner).unwrap().retry_not_before =
+                app.registry.windows.get_mut(&owner).unwrap().retry_not_before =
                     Some(now + Duration::from_secs(1));
             }
             app.mark_window_redraw(owner, cause);
             let snapshot = app.snapshot_window_redraw_at(owner, now).unwrap();
             app.finish_window_redraw(owner, &snapshot, outcome, now);
-            let window = &app.windows[&owner];
+            let window = &app.registry.windows[&owner];
             let case = format!(
                 "child={child_owner} {cause:?} {outcome:?} retry={retry_armed} software={software}"
             );
@@ -743,7 +758,7 @@ pub(super) fn degraded_software_keeps_its_cadence_after_a_keypress() {
                 Duration::from_micros(25_000)
             };
             if composing {
-                app.windows.get_mut(&main).unwrap().ime.handle_preedit("中", None);
+                app.registry.windows.get_mut(&main).unwrap().ime.handle_preedit("中", None);
             }
             let at = Instant::now() + Duration::from_secs(1);
             backdate_clocks(&mut app, main, at - Duration::from_secs(1));

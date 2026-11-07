@@ -27,9 +27,10 @@ fn hardwrap_bounds_and_offscreen_stay_inert() {
     let lines = hardwrap_lines(30, "x (", LONG_URI, &[2, 2], ')');
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let (window, pane) = hardwrap_pane_sized(&mut app, 30, 2, &lines);
-    app.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().viewport_top_abs = Some(0);
+    app.registry.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().viewport_top_abs =
+        Some(0);
     {
-        let parser = app.windows[&window].panes[&pane].parser.lock();
+        let parser = app.registry.windows[&window].panes[&pane].parser.lock();
         assert_eq!(GpuRenderer::resolved_view_top_abs_legacy(parser.grid(), Some(0)), 0);
         assert!(parser.grid().row_at_abs(2).unwrap().iter().any(|cell| cell.ch == ')'));
     }
@@ -40,7 +41,7 @@ fn hardwrap_bounds_and_offscreen_stay_inert() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let (window, pane) = hardwrap_pane_sized(&mut app, 30, 2, &lines);
     let view_top = {
-        let parser = app.windows[&window].panes[&pane].parser.lock();
+        let parser = app.registry.windows[&window].panes[&pane].parser.lock();
         GpuRenderer::resolved_view_top_abs_legacy(parser.grid(), None)
     };
     assert!(view_top > 0, "opener must have scrolled above the viewport");
@@ -96,7 +97,7 @@ fn zsh_redrawn_wrapped_home_path_resolves_from_both_rows() {
     app.home_dir = Some(root.clone());
     let window = app.__test_seed_child_window(&["zsh"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(40, 4);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(40, 4);
     // Bytes zsh sends at 40 columns: the wrapping space, CR + EL0, the repainted continuation
     // row, then syntax highlighting rewriting `echo` on the row above.
     let typed = "> echo 同步时会将客户端设置写入 ~/.claud \r\x1b[Ke\re.json，并将权限\
@@ -287,10 +288,10 @@ fn inferred_joins_cannot_reach_an_incomplete_recorded_chain() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["incomplete"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, 3);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, 3);
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
     {
-        let parser = app.windows[&window].panes[&pane].parser.lock();
+        let parser = app.registry.windows[&window].panes[&pane].parser.lock();
         assert!(parser.grid().row(0).soft_wrapped_from_previous(), "row 0 keeps its unproven wrap");
     }
     assert!(app.cell_target_at(window, pane, 0, 2).is_none());
@@ -397,7 +398,7 @@ fn detection_reads_no_row_outside_the_displayed_frame() {
         output.push_str("\r\n");
     }
     let (app, window, pane) = pane_after(20, 4, &output);
-    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let parser = Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
     let guard = parser.lock();
     let history_rows = guard.grid().scrollback_len() as u64;
     assert!(history_rows > 8, "the fixture scrolls rows into history");
@@ -420,7 +421,7 @@ fn detection_reads_no_row_outside_the_displayed_frame() {
         pane_border(21, 4)
     );
     let (app, window, pane) = pane_after(41, 4, &screen);
-    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let parser = Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
     let guard = parser.lock();
     for row in 0..4 {
         for col in 0..41 {
@@ -452,7 +453,7 @@ fn a_bottom_edge_target_of_a_scrolled_back_view_is_refused_without_reading_below
     ] {
         let output = format!("one\r\ntwo\r\n{line}\r\nnext\r\nfour\r\nfive\r\nsix\r\nseven");
         let (app, window, pane) = pane_after(20, 3, &output);
-        let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+        let parser = Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
         let guard = parser.lock();
         let path_row = absolute_row_starting_with(guard.grid(), &line[..10]);
         assert!(path_row + 2 < guard.grid().scrollback_len() as u64, "{label}: in history");
@@ -472,7 +473,7 @@ fn a_bottom_edge_target_of_a_scrolled_back_view_is_refused_without_reading_below
     }
     // On the live view no row exists below the bottom row, so the bottom-row target stays.
     let (app, window, pane) = pane_after(20, 3, &format!("one\r\ntwo\r\n{notes_path}"));
-    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let parser = Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
     let guard = parser.lock();
     let target =
         app.cell_target_from_parser(window, pane, 2, 3, &guard, None).expect("live bottom row");

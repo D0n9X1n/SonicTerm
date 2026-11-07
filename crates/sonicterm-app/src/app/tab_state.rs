@@ -40,7 +40,7 @@ impl App {
         &mut self,
         index: usize,
     ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
-        self.detach_from_child(self.main_window_id?, index)
+        self.detach_from_child(self.registry.main_window_id?, index)
     }
 
     /// Attach and activate a main-window tab, returning all live state if it cannot be admitted.
@@ -51,7 +51,7 @@ impl App {
         state: TabState,
         panes: HashMap<u64, PaneState>,
     ) -> Result<(), Box<TabAttachmentError>> {
-        let Some(target) = self.main_window_id else {
+        let Some(target) = self.registry.main_window_id else {
             // When: main_window_id is absent, return custody instead of dropping the caller's PTYs.
             return Err(Box::new(TabAttachmentError {
                 error: TransferError::TargetMissing,
@@ -69,7 +69,7 @@ impl App {
         source: WindowId,
         index: usize,
     ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
-        let window = self.windows.get_mut(&source)?;
+        let window = self.registry.windows.get_mut(&source)?;
         let tab = window.tabs.tabs().get(index)?.clone();
         let state = window.tab_states.get(index)?;
         let leaves = state.tree.leaves();
@@ -103,9 +103,10 @@ impl App {
         &self,
         target: WindowId,
     ) -> Result<(), TransferError> {
-        let window = self.windows.get(&target).ok_or(TransferError::TargetMissing)?;
+        let window = self.registry.windows.get(&target).ok_or(TransferError::TargetMissing)?;
         let test_geometry = window.test_pane_viewport.is_some()
-            || (self.main_window_id == Some(target) && self.test_viewport_override.is_some());
+            || (self.registry.main_window_id == Some(target)
+                && self.test_viewport_override.is_some());
         if window.renderer.is_none() && !test_geometry {
             // When: `window.renderer` and explicit test geometry are absent, retain the source instead of inventing a destination size.
             return Err(TransferError::TargetNotReady);
@@ -195,7 +196,7 @@ impl App {
                 // When: active/visible identity or leaf custody disagrees, do not invent a pane or discard live state.
                 return Err(TransferError::InvalidTopology);
             }
-            let window = self.windows.get_mut(&target).expect("validated destination");
+            let window = self.registry.windows.get_mut(&target).expect("validated destination");
             if window.tabs.tabs().iter().any(|existing| existing.id == tab.id)
                 || panes.keys().any(|id| window.panes.contains_key(id))
             {
@@ -218,14 +219,15 @@ impl App {
                 return Err(Box::new(TabAttachmentError { error, tab, state, panes }));
             }
         };
-        let window = self.windows.get_mut(&target).expect("synchronous prepared destination");
+        let window =
+            self.registry.windows.get_mut(&target).expect("synchronous prepared destination");
         for pane in panes.values() {
             *pane.redraw_target.lock() = Some(target);
         }
         window.panes.extend(panes);
         window.tabs = tabs;
         window.tab_states.insert(index, state);
-        if self.main_window_id == Some(target) {
+        if self.registry.main_window_id == Some(target) {
             self.resize_visible_panes();
         } else {
             // When: target is not main_window_id, complete geometry against the destination child's own renderer.

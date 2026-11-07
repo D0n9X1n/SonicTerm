@@ -13,7 +13,7 @@ fn app_with_main_and_child() -> (App, u64, WindowId, u64) {
 
 fn install_alt_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64) {
     let selection = {
-        let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+        let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
         let mut parser = pane.parser.lock();
         let grid = parser.grid_mut();
         grid.enter_alt_screen();
@@ -29,18 +29,18 @@ fn install_alt_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64
         }
         .with_content_fingerprint(grid)
     };
-    app.windows.get_mut(&window).unwrap().selection = Some(selection);
+    app.registry.windows.get_mut(&window).unwrap().selection = Some(selection);
 }
 
 fn install_primary_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64) {
     let (seq, is_alt, evicted) = {
-        let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+        let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
         let parser = pane.parser.lock();
         let grid = parser.grid();
         (grid.content_seq(), grid.is_alt(), grid.scrollback_evicted())
     };
     assert!(!is_alt, "primary selection fixture must stay on the primary screen");
-    app.windows.get_mut(&window).unwrap().selection = Some(Selection {
+    app.registry.windows.get_mut(&window).unwrap().selection = Some(Selection {
         start: (row, 0),
         end: (row, 3),
         anchored: true,
@@ -53,7 +53,7 @@ fn install_primary_selection(app: &mut App, window: WindowId, pane_id: u64, row:
 }
 
 fn write_row(app: &App, window: WindowId, pane_id: u64, row: u16, character: char) {
-    let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+    let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
     let mut parser = pane.parser.lock();
     let grid = parser.grid_mut();
     grid.goto(row, 0);
@@ -61,17 +61,17 @@ fn write_row(app: &App, window: WindowId, pane_id: u64, row: u16, character: cha
 }
 
 fn clear_pane_dirty(app: &App, window: WindowId, pane_id: u64) {
-    let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+    let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
     pane.parser.lock().grid_mut().clear_dirty();
 }
 
 fn pane_dirty_count(app: &App, window: WindowId, pane_id: u64) -> usize {
-    let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+    let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
     pane.parser.lock().grid().dirty_count()
 }
 
 fn run_invalidation(app: &mut App, window: WindowId, pane_id: u64) -> bool {
-    let window = app.windows.get_mut(&window).unwrap();
+    let window = app.registry.windows.get_mut(&window).unwrap();
     let pane = window.panes.get(&pane_id).unwrap();
     let parser = pane.parser.lock();
     invalidate_selection_for_content(
@@ -90,7 +90,8 @@ fn ed3_rebases_live_selections_and_rejects_historical_anchors_in_both_windows() 
         let main = app.__test_main_window_id().expect("synthetic main window");
         for (window, pane_id) in [(main, main_pane), (child, child_pane)] {
             {
-                let pane = app.windows.get_mut(&window).unwrap().panes.get_mut(&pane_id).unwrap();
+                let pane =
+                    app.registry.windows.get_mut(&window).unwrap().panes.get_mut(&pane_id).unwrap();
                 pane.viewport_top_abs = Some(1);
                 let mut parser = pane.parser.lock();
                 parser.grid_mut().resize(4, 2);
@@ -103,9 +104,9 @@ fn ed3_rebases_live_selections_and_rejects_historical_anchors_in_both_windows() 
             }
             let absolute_row = if select_history { 0 } else { 2 };
             install_primary_selection(&mut app, window, pane_id, absolute_row);
-            app.windows.get_mut(&window).unwrap().select_anchor = (absolute_row, 1);
+            app.registry.windows.get_mut(&window).unwrap().select_anchor = (absolute_row, 1);
             {
-                let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+                let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
                 let mut parser = pane.parser.lock();
                 let sequence = parser.grid().content_seq();
                 let revision = parser.grid().revision();
@@ -120,7 +121,7 @@ fn ed3_rebases_live_selections_and_rejects_historical_anchors_in_both_windows() 
                 assert_eq!(parser.grid().dirty_count(), 2);
             }
             assert_eq!(run_invalidation(&mut app, window, pane_id), select_history);
-            let state = app.windows.get(&window).unwrap();
+            let state = app.registry.windows.get(&window).unwrap();
             if select_history {
                 assert!(state.selection.is_none());
             } else {
@@ -144,7 +145,7 @@ fn main_and_child_clear_when_selected_alt_content_changes() {
 
         assert!(run_invalidation(&mut app, window, pane));
         assert!(
-            app.windows.get(&window).unwrap().selection.is_none(),
+            app.registry.windows.get(&window).unwrap().selection.is_none(),
             "{window:?} must not leave stale selected text copyable"
         );
     }
@@ -159,16 +160,16 @@ fn main_and_child_preserve_selection_across_same_value_repaints() {
         write_row(&app, window, pane, 4, 'x');
         install_alt_selection(&mut app, window, pane, 4);
         let same = {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane).unwrap();
             pane.parser.lock().grid().row(4)[0].clone()
         };
         {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane).unwrap();
             pane.parser.lock().grid_mut().row_mut(4)[0] = same;
         }
 
         assert!(!run_invalidation(&mut app, window, pane));
-        assert!(app.windows.get(&window).unwrap().selection.is_some());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_some());
     }
 }
 
@@ -183,7 +184,7 @@ fn main_and_child_preserve_selection_when_alt_wheel_changes_no_rows() {
         // Models a wheel event ignored at a TUI scroll boundary: no grid row
         // changed after the selection baseline, so the selection must survive.
         assert!(!run_invalidation(&mut app, window, pane));
-        assert!(app.windows.get(&window).unwrap().selection.is_some());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_some());
     }
 }
 
@@ -198,7 +199,7 @@ fn main_and_child_preserve_selection_for_unrelated_alt_updates() {
 
         assert!(!run_invalidation(&mut app, window, pane));
         assert!(
-            app.windows.get(&window).unwrap().selection.is_some(),
+            app.registry.windows.get(&window).unwrap().selection.is_some(),
             "{window:?} must keep a selection while an unrelated TUI row updates"
         );
     }
@@ -223,7 +224,7 @@ fn valid_alt_copy_clears_main_and_child_selection_after_writing_exact_text() {
         app.copy_selection_for_kind(kind);
 
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("s"));
-        assert!(app.windows.get(&window).unwrap().selection.is_none());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_none());
         assert!(
             pane_dirty_count(&app, window, pane) > 0,
             "{window:?} must repaint cleared highlight"
@@ -251,7 +252,7 @@ fn clipboard_failure_preserves_valid_alt_selection_clipboard_and_clean_rows() {
         app.copy_selection_for_kind(kind);
 
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("original"));
-        assert!(app.windows.get(&window).unwrap().selection.is_some());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_some());
         assert_eq!(pane_dirty_count(&app, window, pane), 0);
     }
 }
@@ -273,7 +274,7 @@ fn stale_alt_copy_clears_before_write_and_preserves_clipboard() {
         app.copy_selection_for_kind(kind);
 
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("unchanged"));
-        assert!(app.windows.get(&window).unwrap().selection.is_none());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_none());
     }
 }
 
@@ -297,7 +298,7 @@ fn unrelated_alt_update_still_copies_then_clears_selection() {
         app.copy_selection_for_kind(kind);
 
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("s"));
-        assert!(app.windows.get(&window).unwrap().selection.is_none());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_none());
         assert!(
             pane_dirty_count(&app, window, pane) > 0,
             "{window:?} must repaint cleared highlight"
@@ -323,7 +324,7 @@ fn successful_primary_copy_keeps_main_and_child_selection() {
         app.copy_selection_for_kind(kind);
 
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("p"));
-        assert!(app.windows.get(&window).unwrap().selection.is_some());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_some());
         assert_eq!(pane_dirty_count(&app, window, pane), 0);
     }
 }
@@ -336,7 +337,7 @@ fn main_and_child_continue_dragging_from_rebased_anchor_after_history_eviction()
 
     for (window, pane_id) in [(main, main_pane), (child, child_pane)] {
         let selection = {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             let mut parser = pane.parser.lock();
             let grid = parser.grid_mut();
             grid.set_scrollback_limit(1);
@@ -358,12 +359,12 @@ fn main_and_child_continue_dragging_from_rebased_anchor_after_history_eviction()
             .with_content_fingerprint(grid)
         };
         {
-            let state = app.windows.get_mut(&window).unwrap();
+            let state = app.registry.windows.get_mut(&window).unwrap();
             state.selection = Some(selection);
             state.select_anchor = (1, 0);
         }
         {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             let mut parser = pane.parser.lock();
             let grid = parser.grid_mut();
             grid.goto(1, 0);
@@ -372,9 +373,10 @@ fn main_and_child_continue_dragging_from_rebased_anchor_after_history_eviction()
         }
 
         assert!(!run_invalidation(&mut app, window, pane_id));
-        let anchor = app.windows.get(&window).unwrap().select_anchor;
+        let anchor = app.registry.windows.get(&window).unwrap().select_anchor;
         assert_eq!(anchor, (0, 0));
         let continued = app
+            .registry
             .windows
             .get(&window)
             .unwrap()
@@ -391,7 +393,7 @@ fn main_and_child_rebase_primary_selection_after_history_eviction() {
 
     for (window, pane_id) in [(main, main_pane), (child, child_pane)] {
         {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             let mut parser = pane.parser.lock();
             let grid = parser.grid_mut();
             grid.set_scrollback_limit(1);
@@ -402,11 +404,11 @@ fn main_and_child_rebase_primary_selection_after_history_eviction() {
             grid.scroll_up(1);
         }
         let (seq, evicted) = {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             let parser = pane.parser.lock();
             (parser.grid().content_seq(), parser.grid().scrollback_evicted())
         };
-        app.windows.get_mut(&window).unwrap().selection = Some(Selection {
+        app.registry.windows.get_mut(&window).unwrap().selection = Some(Selection {
             start: (1, 0),
             end: (1, 0),
             anchored: true,
@@ -417,7 +419,7 @@ fn main_and_child_rebase_primary_selection_after_history_eviction() {
             content_fingerprint: None,
         });
         {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             let mut parser = pane.parser.lock();
             let grid = parser.grid_mut();
             grid.goto(1, 0);
@@ -426,7 +428,7 @@ fn main_and_child_rebase_primary_selection_after_history_eviction() {
         }
 
         assert!(!run_invalidation(&mut app, window, pane_id));
-        let selection = app.windows.get(&window).unwrap().selection.unwrap();
+        let selection = app.registry.windows.get(&window).unwrap().selection.unwrap();
         assert_eq!((selection.start.0, selection.end.0), (0, 0));
     }
 }
@@ -440,7 +442,7 @@ fn copy_before_redraw_uses_rebased_primary_text() {
         [(FrontmostKind::Main, main, main_pane), (FrontmostKind::Child(child), child, child_pane)]
     {
         {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             let mut parser = pane.parser.lock();
             let grid = parser.grid_mut();
             grid.set_scrollback_limit(1);
@@ -451,11 +453,11 @@ fn copy_before_redraw_uses_rebased_primary_text() {
             grid.scroll_up(1);
         }
         let (seq, evicted) = {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             let parser = pane.parser.lock();
             (parser.grid().content_seq(), parser.grid().scrollback_evicted())
         };
-        app.windows.get_mut(&window).unwrap().selection = Some(Selection {
+        app.registry.windows.get_mut(&window).unwrap().selection = Some(Selection {
             start: (1, 0),
             end: (1, 0),
             anchored: true,
@@ -466,7 +468,7 @@ fn copy_before_redraw_uses_rebased_primary_text() {
             content_fingerprint: None,
         });
         {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             let mut parser = pane.parser.lock();
             let grid = parser.grid_mut();
             grid.goto(1, 0);
@@ -491,11 +493,11 @@ fn copy_before_redraw_rejects_a_selected_primary_row_rewritten_then_scrolled() {
     {
         write_row(&app, window, pane_id, 0, 'A');
         let (seq, evicted) = {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             let parser = pane.parser.lock();
             (parser.grid().content_seq(), parser.grid().scrollback_evicted())
         };
-        app.windows.get_mut(&window).unwrap().selection = Some(Selection {
+        app.registry.windows.get_mut(&window).unwrap().selection = Some(Selection {
             start: (0, 0),
             end: (0, 0),
             anchored: true,
@@ -507,7 +509,7 @@ fn copy_before_redraw_rejects_a_selected_primary_row_rewritten_then_scrolled() {
         });
         write_row(&app, window, pane_id, 0, 'X');
         {
-            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
             pane.parser.lock().grid_mut().scroll_up(1);
         }
         app.__test_set_memory_clipboard("unchanged");
@@ -515,7 +517,7 @@ fn copy_before_redraw_rejects_a_selected_primary_row_rewritten_then_scrolled() {
         app.copy_selection_for_kind(kind);
 
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("unchanged"));
-        assert!(app.windows.get(&window).unwrap().selection.is_none());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_none());
     }
 }
 
@@ -552,7 +554,7 @@ fn both_redraw_paths_invalidate_before_rendering() {
 
 /// Feed PTY bytes through the pane's parser, the way the VT worker does.
 fn feed(app: &App, window: WindowId, pane_id: u64, bytes: &[u8]) {
-    let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+    let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
     pane.parser.lock().advance(bytes);
 }
 
@@ -566,7 +568,7 @@ fn install_region_selection(
     end: (u64, u16),
 ) {
     let selection = {
-        let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+        let pane = app.registry.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
         let parser = pane.parser.lock();
         let grid = parser.grid();
         Selection { start, end, anchored: true, ..Selection::new(0, 0) }
@@ -578,7 +580,7 @@ fn install_region_selection(
             )
             .with_content_fingerprint(grid)
     };
-    app.windows.get_mut(&window).unwrap().selection = Some(selection);
+    app.registry.windows.get_mut(&window).unwrap().selection = Some(selection);
 }
 
 /// Parser output that wraps at the pane width copies as one line in main and
@@ -601,7 +603,7 @@ fn main_and_child_copy_parser_soft_wraps_as_one_line() {
 
         let expected = format!("{wrapped}\nnext");
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some(expected.as_str()));
-        assert!(app.windows.get(&window).unwrap().selection.is_some());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_some());
     }
 }
 
@@ -626,7 +628,7 @@ fn parser_line_feed_clearing_an_interior_wrap_mark_invalidates_before_copy() {
         app.copy_selection_for_kind(kind);
 
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("unchanged"));
-        assert!(app.windows.get(&window).unwrap().selection.is_none());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_none());
     }
 }
 
@@ -653,7 +655,7 @@ fn unchanged_interior_wrap_marks_keep_a_wrapped_selection_copyable() {
         app.copy_selection_for_kind(kind);
 
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some(&wrapped[80..]));
-        assert!(app.windows.get(&window).unwrap().selection.is_some());
+        assert!(app.registry.windows.get(&window).unwrap().selection.is_some());
     }
 }
 
@@ -693,12 +695,12 @@ fn a_copied_cursor_publishes_todays_ime_area() {
 fn pane_rect_for_matches_the_full_child_layout() {
     let (mut app, _main_pane, child, child_pane) = app_with_main_and_child();
     let outer = sonicterm_ui::pane::Rect::new(0.0, 24.0, 900.0, 600.0);
-    let window = app.windows.get_mut(&child).unwrap();
+    let window = app.registry.windows.get_mut(&child).unwrap();
     window.test_pane_viewport = Some((outer, 10.0, 20.0));
     let tree = &mut window.tab_states[window.tabs.active_index()].tree;
     tree.split(child_pane, sonicterm_types::Direction::Right, 9_001);
     tree.split(9_001, sonicterm_types::Direction::Down, 9_002);
-    let window = &app.windows[&child];
+    let window = &app.registry.windows[&child];
     let layout = App::compute_pane_rects_for(window);
     assert_eq!(layout.len(), 3);
     for (pane_id, rect) in layout {

@@ -14,7 +14,7 @@ fn app_with_about() -> (App, u64, WindowId) {
 
 /// The About pane's id.
 fn about_pane(app: &App, about_id: WindowId) -> u64 {
-    let window = &app.windows[&about_id];
+    let window = &app.registry.windows[&about_id];
     window.tab_states[window.tabs.active_index()].active_pane
 }
 
@@ -32,8 +32,8 @@ fn opening_about_twice_reuses_one_window() {
     app.show_about();
     assert!(!app.about.open_requested, "an open window is focused, not requested again");
     assert_eq!(app.about_window_id(), Some(about_id));
-    assert_eq!(app.frontmost_window, Some(about_id));
-    let windows = app.windows.values().filter(|window| window.role == WindowRole::About);
+    assert_eq!(app.registry.frontmost_window, Some(about_id));
+    let windows = app.registry.windows.values().filter(|window| window.role == WindowRole::About);
     assert_eq!(windows.count(), 1);
 }
 
@@ -47,12 +47,13 @@ fn copy_reports_the_real_clipboard_result() {
     assert!(view.text.contains("[ Copy ]") && !view.copy_text.contains("[ Copy ]"));
     assert!(app.copy_about());
     assert_eq!(app.test_clipboard_text.as_deref(), Some(view.copy_text.as_str()));
-    let bubble = app.windows[&about_id].notification.clone().expect("copied notification");
+    let bubble = app.registry.windows[&about_id].notification.clone().expect("copied notification");
     assert_eq!(bubble.level, sonicterm_ui::overlays::NotificationLevel::Info);
     assert_eq!(bubble.message, "Copied About details");
     app.test_clipboard_write_failure = true;
     assert!(!app.copy_about());
-    let bubble = app.windows[&about_id].notification.clone().expect("failure notification");
+    let bubble =
+        app.registry.windows[&about_id].notification.clone().expect("failure notification");
     assert_eq!(bubble.level, sonicterm_ui::overlays::NotificationLevel::Warning);
     assert_eq!(bubble.message, "Could not copy About details");
 }
@@ -99,7 +100,7 @@ fn about_is_excluded_from_terminal_counts_drop_targets_and_broadcast() {
     assert!(WindowRole::About.is_report(), "drop targets and tab drags skip report windows");
     assert!(!WindowRole::Terminal.is_report());
     let second = app.__test_seed_tab("second");
-    app.frontmost_window = app.main_window_id;
+    app.registry.frontmost_window = app.registry.main_window_id;
     app.__test_set_active_pane(0, main_pane);
     app.toggle_broadcast(BroadcastScope::AllTabs);
     let receivers = app.__test_broadcast_receivers();
@@ -107,7 +108,7 @@ fn about_is_excluded_from_terminal_counts_drop_targets_and_broadcast() {
     assert!(!receivers.contains(&about_pane(&app, about_id)));
     assert!(app.run_action(&Action::CloseTab));
     assert!(app.run_action(&Action::CloseTab));
-    assert!(app.windows.contains_key(&about_id));
+    assert!(app.registry.windows.contains_key(&about_id));
     assert!(app.pending_exit, "the last terminal close requests exit despite About");
 }
 
@@ -115,7 +116,7 @@ fn about_is_excluded_from_terminal_counts_drop_targets_and_broadcast() {
 #[test]
 fn keys_and_pastes_in_about_never_reach_a_pty() {
     let (mut app, _, about_id) = app_with_about();
-    assert!(app.windows[&about_id].panes.values().all(|pane| pane.pty.is_none()));
+    assert!(app.registry.windows[&about_id].panes.values().all(|pane| pane.pty.is_none()));
     app.__test_enable_pty_write_log();
     app.test_clipboard_text = Some("rm -rf /\n".to_string());
     assert!(app.run_action_for_window(&Action::PasteFromClipboard, about_id));
@@ -180,7 +181,7 @@ fn theme_and_keymap_rows_show_the_active_ones_and_their_reload_errors() {
 
 /// The text of view row `row` of the About pane, as it is drawn now.
 fn drawn_row(app: &App, about_id: WindowId, row: u16) -> String {
-    let pane = &app.windows[&about_id].panes[&about_pane(app, about_id)];
+    let pane = &app.registry.windows[&about_id].panes[&about_pane(app, about_id)];
     let parser = pane.parser.lock();
     let grid = parser.grid();
     let abs = pane.resolved_view_top(grid) + u64::from(row);
@@ -228,14 +229,14 @@ fn a_click_on_the_drawn_button_copies_in_a_scrolled_view() {
     assert_eq!(drawn_button(&app, about_id, 6), None, "the view starts at the top");
     let pane_id = about_pane(&app, about_id);
     let scrollbar = app.config.appearance.scrollbar;
-    let window = app.windows.get_mut(&about_id).unwrap();
+    let window = app.registry.windows.get_mut(&about_id).unwrap();
     super::super::child_window::scroll_child_pane(window, pane_id, i32::MAX, scrollbar);
     let (row, col) = drawn_button(&app, about_id, 6).expect("the bottom view shows the button");
     assert!(app.about_copy_at(row, col), "a click on the drawn button copies");
     let copied = app.about.view.as_ref().map(|view| view.copy_text.clone());
     assert_eq!(app.test_clipboard_text, copied);
     app.test_clipboard_text = Some(String::new());
-    let window = app.windows.get_mut(&about_id).unwrap();
+    let window = app.registry.windows.get_mut(&about_id).unwrap();
     super::super::child_window::scroll_child_pane(window, pane_id, i32::MIN, scrollbar);
     assert!(!app.about_copy_at(row, col), "at the top that cell is a report row");
     assert_eq!(app.test_clipboard_text.as_deref(), Some(""));
@@ -329,7 +330,7 @@ fn a_refresh_updates_the_about_tree() {
 
 /// Resize the About pane's grid to `cols` by `rows`, as a font, reload or window change does.
 fn resize_about_pane(app: &App, about_id: WindowId, cols: u16, rows: u16) {
-    let pane = &app.windows[&about_id].panes[&about_pane(app, about_id)];
+    let pane = &app.registry.windows[&about_id].panes[&about_pane(app, about_id)];
     pane.parser.lock().grid_mut().resize(cols, rows);
 }
 

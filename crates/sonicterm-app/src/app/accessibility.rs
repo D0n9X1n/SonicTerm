@@ -473,7 +473,11 @@ impl App {
 
     /// Hand `event` to `window_id`'s adapter before the App handles it, a warm spare's included.
     pub(super) fn forward_accessibility_event(&mut self, window_id: WindowId, event: &WindowEvent) {
-        let Self { windows, warm_window_pool, accessibility, .. } = self;
+        let Self {
+            registry: crate::app::WindowRegistry { windows, warm_window_pool, .. },
+            accessibility,
+            ..
+        } = self;
         let Some(state) = accessibility.get_mut(&window_id) else {
             // When: `accessibility` has no entry for `window_id`, the window has no adapter.
             return;
@@ -497,6 +501,7 @@ impl App {
     /// The presented segments of `window_id`, left to right.
     fn committed_ids(&self, window_id: WindowId) -> Vec<StatusSegmentId> {
         let mut segments: Vec<(f32, StatusSegmentId)> = self
+            .registry
             .windows
             .get(&window_id)
             .and_then(|window| window.status_strip.as_ref())
@@ -509,7 +514,7 @@ impl App {
     /// What `window_id`'s tree exposes now: the last presented strip, less sensitive segments while
     /// they are hidden, nothing while the strip is off or not exposed, and the focused pane.
     fn exposed_structure(&self, window_id: WindowId) -> Structure {
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: `windows` has no `window_id`, nothing is exposed.
             return Structure::default();
         };
@@ -541,7 +546,11 @@ impl App {
     /// entries whose window and spare are gone, then bring each connected or strip-focused window
     /// up to date. Returns when the next queued announcement becomes ready.
     pub(super) fn flush_accessibility(&mut self, now: Instant) -> Option<Instant> {
-        let Self { windows, warm_window_pool, accessibility, .. } = self;
+        let Self {
+            registry: crate::app::WindowRegistry { windows, warm_window_pool, .. },
+            accessibility,
+            ..
+        } = self;
         accessibility.retain(|window_id, _| {
             windows.contains_key(window_id)
                 || warm_window_pool.iter().any(|warm| warm.window.id() == *window_id)
@@ -565,6 +574,7 @@ impl App {
     /// Send About window `window_id`'s tree while a reader is connected and its rows changed.
     fn flush_about_accessibility(&mut self, window_id: WindowId) {
         let title = self
+            .registry
             .windows
             .get(&window_id)
             .map(|window| window.custom_window_name.clone())
@@ -632,7 +642,7 @@ impl App {
         }
         let shown = self.status_line_shown();
         let settings = self.status_accessibility().clone();
-        let Some(window) = self.windows.get(&window_id) else {
+        let Some(window) = self.registry.windows.get(&window_id) else {
             // When: `windows` has no `window_id`, a warm spare waits for its promotion.
             return None;
         };
@@ -676,8 +686,11 @@ impl App {
         let strip = accessible_strip(&committed, &view, self.status_hide_sensitive(), &self.i18n);
         let (severity, health_text) = health_state(&view, &self.i18n);
         // Marks are detected where a tab gets them: the bar counts each new one.
-        let (mark_seq, last_mark) =
-            self.windows.get(&window_id).map_or((0, None), |window| window.tabs.last_mark());
+        let (mark_seq, last_mark) = self
+            .registry
+            .windows
+            .get(&window_id)
+            .map_or((0, None), |window| window.tabs.last_mark());
         let (previous_health, previous_text, seen_mark, baseline) = self
             .accessibility
             .get(&window_id)
@@ -705,7 +718,7 @@ impl App {
                 due.push((StatusSegmentId::Alerts, phrase, false));
             }
         }
-        let window = self.windows.get(&window_id)?;
+        let window = self.registry.windows.get(&window_id)?;
         let native_size = window.window.as_ref().map(|native| native.inner_size());
         let width = native_size.map_or_else(
             || committed.iter().map(|segment| segment.left_px + segment.width).fold(0.0, f32::max),
@@ -789,7 +802,12 @@ impl App {
 
     /// Charge `window_id`'s retained model to the window's owner in the governor.
     fn charge_accessibility(&mut self, window_id: WindowId) {
-        let Self { windows, accessibility, governor, .. } = self;
+        let Self {
+            registry: crate::app::WindowRegistry { windows, .. },
+            accessibility,
+            governor,
+            ..
+        } = self;
         let Some(owner) = windows
             .get(&window_id)
             .and_then(|window| window.owner.as_ref())

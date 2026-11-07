@@ -114,7 +114,7 @@ pub(super) fn replay_recording(columns: u16, recording: &[u8]) -> (App, WindowId
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["multiplexer"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(columns, 12);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(columns, 12);
     assert!(app.__test_advance_child_pane_parser(window, pane, recording));
     (app, window, pane)
 }
@@ -127,7 +127,7 @@ pub(super) fn locate_url_pieces(
     pane: u64,
     pieces: &[String],
 ) -> Vec<sonicterm_render_model::inputs::HoveredUrlSpan> {
-    let parser = app.windows[&window].panes[&pane].parser.lock();
+    let parser = app.registry.windows[&window].panes[&pane].parser.lock();
     let grid = parser.grid();
     let mut found = Vec::new();
     let mut next_row = 0;
@@ -260,7 +260,7 @@ pub(super) fn captured_label(
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["label"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
     app.cell_target_at(window, pane, row, col).unwrap().label
 }

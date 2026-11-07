@@ -9,7 +9,7 @@ fn window_name_paste_is_atomic_and_never_reaches_broadcast() {
     // Paste through the explicit-source action must reject malformed chunks without forwarding even one byte to panes.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     app.start_rename_window(main);
     app.__test_set_memory_clipboard("工作");
     assert!(app.run_action_for_window(&Action::PasteFromClipboard, main));

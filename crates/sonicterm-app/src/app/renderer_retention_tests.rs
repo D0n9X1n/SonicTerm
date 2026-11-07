@@ -266,7 +266,7 @@ fn the_reporter_runs_only_on_a_taken_sample() {
 /// Every renderer is reported, not only the ones a user can see.
 ///
 /// A warm renderer is fully constructed and holds the same full-size glyph
-/// atlas as a visible one, so a reporter walking only `self.windows` omits a
+/// atlas as a visible one, so a reporter walking only `self.registry.windows` omits a
 /// live multi-megabyte buffer per pooled entry — and omits it silently, which
 /// is the exact shape of the defect this module exists to close. Worse, the
 /// omission misleads: a user summing the visible lines gets a figure below what
@@ -283,9 +283,9 @@ fn both_the_visible_windows_and_the_warm_pool_are_reported() {
     let body_start = SOURCE.find("fn log_renderer_retention").expect("the reporter must exist");
     let body = &SOURCE[body_start..];
 
-    assert!(body.contains("&self.windows"), "the reporter must walk the visible windows");
+    assert!(body.contains("&self.registry.windows"), "the reporter must walk the visible windows");
     assert!(
-        body.contains("self.warm_window_pool"),
+        body.contains("self.registry.warm_window_pool"),
         "the reporter must walk the warm pool: a pooled renderer holds a full-size glyph atlas, \
          and omitting it reports less memory than the process holds while pointing the reader at \
          a window they cannot close"

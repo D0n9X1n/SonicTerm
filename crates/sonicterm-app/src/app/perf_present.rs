@@ -72,8 +72,8 @@ impl super::App {
             // When: `frame_counters` is None or its `watches` is empty, the attempt records nothing.
             return Vec::new();
         };
-        let Some(window) = self.windows.get(&id) else {
-            // When: `self.windows` no longer holds `id`, the window closed and has no frame to record.
+        let Some(window) = self.registry.windows.get(&id) else {
+            // When: `self.registry.windows` no longer holds `id`, the window closed and has no frame to record.
             return Vec::new();
         };
         guarded

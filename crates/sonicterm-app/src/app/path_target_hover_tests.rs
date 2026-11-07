@@ -44,7 +44,7 @@ fn one_dependency_row_change_detects_once_then_reuses() {
 fn same_cell_motion_and_modifier_changes_hit_the_cache_and_still_apply() {
     let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
     assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
-    let active = |app: &App| app.windows[&window].hovered_url.as_ref().unwrap().active();
+    let active = |app: &App| app.registry.windows[&window].hovered_url.as_ref().unwrap().active();
     frame_hover(&mut app, window, pane, (0, 3));
     assert!(!active(&app));
     set_open_modifier(&mut app, window, true);
@@ -86,7 +86,7 @@ fn probe_completion_and_same_value_repaint_keep_the_cached_authorization() {
     frame_hover(&mut app, window, pane, (0, 3));
     assert_eq!(hover_counts(&app), (2, 1, 1), "the completion's frame reuses the detection");
     assert_eq!(drained_probes(&mailbox), 0, "and submits no duplicate probe");
-    assert!(app.windows[&window].path_probe.authorized(&key, true));
+    assert!(app.registry.windows[&window].path_probe.authorized(&key, true));
     let repaint = format!("\x1b[1;1H{text}");
     assert!(app.__test_advance_child_pane_parser(window, pane, repaint.as_bytes()));
     frame_hover(&mut app, window, pane, (0, 3));
@@ -96,7 +96,10 @@ fn probe_completion_and_same_value_repaint_keep_the_cached_authorization() {
         other => panic!("a path target, not {other:?}"),
     };
     assert_eq!(fresh, key, "the recomputed key is equal");
-    assert!(app.windows[&window].path_probe.authorized(&key, true), "authorization stands");
+    assert!(
+        app.registry.windows[&window].path_probe.authorized(&key, true),
+        "authorization stands"
+    );
     assert_eq!(drained_probes(&mailbox), 0);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -109,14 +112,14 @@ fn each_detection_input_invalidates_the_cache() {
     type Change = fn(&mut App, WindowId, u64);
     let changes: [(&str, Change); 10] = [
         ("resize", |app, window, pane| {
-            app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(41, 4);
+            app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().resize(41, 4);
         }),
         ("alt-screen enter", |app, window, pane| {
             assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[?1049h"));
         }),
         ("cursor leave", |app, window, _| app.clear_target_hover(window)),
         ("pane hover invalidation", |app, window, _| {
-            app.windows.get_mut(&window).unwrap().invalidate_path_hover();
+            app.registry.windows.get_mut(&window).unwrap().invalidate_path_hover();
         }),
         ("clickable_local_targets", |app, _, _| {
             app.config.terminal.clickable_local_targets ^= true;
@@ -134,7 +137,7 @@ fn each_detection_input_invalidates_the_cache() {
             assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[1;30Hz"));
         }),
         ("history clear", |app, window, pane| {
-            app.windows[&window].panes[&pane].parser.lock().grid_mut().clear_scrollback();
+            app.registry.windows[&window].panes[&pane].parser.lock().grid_mut().clear_scrollback();
         }),
     ];
     for (label, change) in changes {
@@ -168,13 +171,16 @@ fn alt_screen_exit_invalidates_the_cache() {
     frame_hover(&mut app, window, pane, (0, 3));
     assert_eq!(hover_counts(&app), (2, 1, 1), "warm on the alternate screen");
     assert_eq!(
-        app.windows[&window].hovered_url.as_ref().unwrap().url,
+        app.registry.windows[&window].hovered_url.as_ref().unwrap().url,
         "https://alternate.example/"
     );
     assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[?1049l"));
     frame_hover(&mut app, window, pane, (0, 3));
     assert_eq!(hover_counts(&app), (3, 2, 1), "the exit detects again");
-    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://primary.example/");
+    assert_eq!(
+        app.registry.windows[&window].hovered_url.as_ref().unwrap().url,
+        "https://primary.example/"
+    );
 }
 
 /// With history full and the view scrolled back, a line of output evicts the oldest history row:
@@ -183,23 +189,30 @@ fn alt_screen_exit_invalidates_the_cache() {
 #[test]
 fn history_eviction_while_scrolled_back_invalidates_the_cache() {
     let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
-    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let parser = Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
     parser.lock().grid_mut().set_scrollback_limit(10);
     let lines: String = (0..20).map(|line| format!("https://example.com/{line:02}\r\n")).collect();
     assert!(app.__test_advance_child_pane_parser(window, pane, lines.as_bytes()));
     let evicted_before = parser.lock().grid().scrollback_evicted();
     assert!(evicted_before > 0, "the fixture fills history");
-    app.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().pin_viewport_top(Some(2));
+    app.registry
+        .windows
+        .get_mut(&window)
+        .unwrap()
+        .panes
+        .get_mut(&pane)
+        .unwrap()
+        .pin_viewport_top(Some(2));
     frame_hover(&mut app, window, pane, (0, 3));
     frame_hover(&mut app, window, pane, (0, 3));
     assert_eq!(hover_counts(&app), (2, 1, 1), "warm while scrolled back");
-    let hovered = app.windows[&window].hovered_url.as_ref().unwrap().url.clone();
+    let hovered = app.registry.windows[&window].hovered_url.as_ref().unwrap().url.clone();
     assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/new\r\n"));
     assert_eq!(parser.lock().grid().scrollback_evicted(), evicted_before + 1, "one row evicted");
     frame_hover(&mut app, window, pane, (0, 3));
     assert_eq!(hover_counts(&app), (3, 2, 1), "the eviction detects again");
     assert_eq!(
-        app.windows[&window].hovered_url.as_ref().unwrap().url,
+        app.registry.windows[&window].hovered_url.as_ref().unwrap().url,
         hovered,
         "the anchored view still shows, and resolves, the same row"
     );
@@ -219,27 +232,36 @@ fn the_child_frame_path_uses_the_cache_and_a_tab_transfer_invalidates_it() {
     for id in [window, target] {
         assert!(app.__test_set_child_pane_viewport(id, viewport, 10.0, 20.0));
     }
-    let child = &app.windows[&window];
+    let child = &app.registry.windows[&window];
     assert_eq!(child.tabs.active_index(), 1, "the last seeded tab is active");
     let pane = child.tab_states[1].active_pane;
-    for pane_state in app.windows[&window].panes.values() {
+    for pane_state in app.registry.windows[&window].panes.values() {
         pane_state.parser.lock().grid_mut().resize(40, 4);
     }
     assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
     // The pointer rests on row 0, column 3 of the pointed pane.
-    app.windows.get_mut(&window).unwrap().cursor_pos = (35.0, 10.0);
+    app.registry.windows.get_mut(&window).unwrap().cursor_pos = (35.0, 10.0);
     let frame = |app: &mut App| {
-        let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+        let parser = Arc::clone(&app.registry.windows[&window].panes[&pane].parser);
         let guard = parser.lock();
         app.refresh_target_hover_from_parsers(window, [(pane, &*guard)]);
     };
     frame(&mut app);
     frame(&mut app);
     assert_eq!(hover_counts(&app), (2, 1, 1), "the frame path reuses the cache");
-    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://example.com/");
+    assert_eq!(
+        app.registry.windows[&window].hovered_url.as_ref().unwrap().url,
+        "https://example.com/"
+    );
     app.transfer_tab(Some(window), 0, Some(target), 1).expect("the inactive tab moves");
-    assert_eq!(app.windows[&window].tab_states[0].active_pane, pane, "the pointed tab stays");
-    assert!(app.windows[&window].hover_detection.is_empty(), "the transfer cleared the cache");
+    assert_eq!(
+        app.registry.windows[&window].tab_states[0].active_pane, pane,
+        "the pointed tab stays"
+    );
+    assert!(
+        app.registry.windows[&window].hover_detection.is_empty(),
+        "the transfer cleared the cache"
+    );
     frame(&mut app);
     frame(&mut app);
     assert_eq!(hover_counts(&app), (4, 2, 2), "detects once after the transfer, then reuses");
@@ -276,7 +298,7 @@ fn rewriting_an_authorized_path_revokes_it_through_the_cache() {
     });
     frame_hover(&mut app, window, pane, (0, 3));
     assert_eq!(hover_counts(&app), (2, 1, 1), "the completion's frame reuses the detection");
-    assert!(app.windows[&window].path_probe.authorized(&first_key, true));
+    assert!(app.registry.windows[&window].path_probe.authorized(&first_key, true));
     let submitted_before = app.frame_counters.as_ref().unwrap().hover.probes_submitted;
 
     let rewrite = format!("\x1b[1;1H{second_text}\x1b[K");
@@ -284,7 +306,7 @@ fn rewriting_an_authorized_path_revokes_it_through_the_cache() {
     frame_hover(&mut app, window, pane, (0, 3));
     assert_eq!(hover_counts(&app), (3, 2, 1), "the rewritten row detects again");
     assert!(
-        !app.windows[&window].path_probe.authorized(&first_key, true),
+        !app.registry.windows[&window].path_probe.authorized(&first_key, true),
         "the old path's key is no longer authorized"
     );
     let second_request = mailbox.take_next().expect("the new path submits a probe");
@@ -341,7 +363,7 @@ fn rewriting_an_authorized_relative_path_revokes_it_through_the_cache() {
     });
     frame_hover(&mut app, window, pane, (0, 3));
     assert_eq!(hover_counts(&app), (2, 1, 1), "the completion's frame reuses the detection");
-    assert!(app.windows[&window].path_probe.authorized(&first_key, true));
+    assert!(app.registry.windows[&window].path_probe.authorized(&first_key, true));
     let submitted_before = app.frame_counters.as_ref().unwrap().hover.probes_submitted;
 
     let rewrite = format!("\x1b[1;1H{second_text}\x1b[K");
@@ -349,7 +371,7 @@ fn rewriting_an_authorized_relative_path_revokes_it_through_the_cache() {
     frame_hover(&mut app, window, pane, (0, 3));
     assert_eq!(hover_counts(&app), (3, 2, 1), "the rewritten row detects again");
     assert!(
-        !app.windows[&window].path_probe.authorized(&first_key, true),
+        !app.registry.windows[&window].path_probe.authorized(&first_key, true),
         "the old path's key is no longer authorized"
     );
     let second_request = mailbox.take_next().expect("the new path submits a probe");
@@ -377,7 +399,7 @@ fn the_cache_is_one_entry_per_window_keyed_by_cell_pane_and_view() {
     let output: &[u8] = b"one\r\ntwo\r\nhttps://example.com/\r\nfour\r\nfive\r\nsix";
     assert!(app.__test_advance_child_pane_parser(first, first_pane, output));
     for pane in &panes {
-        app.windows[&second].panes[pane].parser.lock().grid_mut().resize(40, 4);
+        app.registry.windows[&second].panes[pane].parser.lock().grid_mut().resize(40, 4);
         assert!(app.__test_advance_child_pane_parser(second, *pane, output));
     }
     frame_hover(&mut app, first, first_pane, (0, 3));
@@ -410,7 +432,10 @@ fn an_osc8_link_with_the_same_label_and_a_new_destination_detects_again() {
         link("https://a.example/").as_bytes()
     ));
     frame_hover(&mut app, window, pane, (0, 2));
-    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://a.example/");
+    assert_eq!(
+        app.registry.windows[&window].hovered_url.as_ref().unwrap().url,
+        "https://a.example/"
+    );
     assert!(app.__test_advance_child_pane_parser(
         window,
         pane,
@@ -418,7 +443,10 @@ fn an_osc8_link_with_the_same_label_and_a_new_destination_detects_again() {
     ));
     frame_hover(&mut app, window, pane, (0, 2));
     assert_eq!(hover_counts(&app), (2, 2, 0));
-    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://b.example/");
+    assert_eq!(
+        app.registry.windows[&window].hovered_url.as_ref().unwrap().url,
+        "https://b.example/"
+    );
 }
 
 /// Span mapping by binary search returns what the linear scans it replaced return, on a recorded-

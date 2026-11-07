@@ -8,7 +8,10 @@ drag/tear-out, and the platform shell abstractions.
 
 ## Key files
 - `src/app/mod.rs` - `App` and the window-registration
-  chokepoint. `user_event.rs` owns typed events and `application_handler.rs` forwards callbacks.
+  chokepoint. `App`'s state is split across four owners, visible only inside `app`:
+  `WindowRegistry` (`registry`, `window_registry_state.rs`), `RuntimeServices` (`services`,
+  `runtime_services.rs`), `InteractionState` (`interaction`, `interaction.rs`) and
+  `DiagnosticsState` (`diagnostics`, `diagnostics.rs`). `user_event.rs` owns typed events and `application_handler.rs` forwards callbacks.
   Window, pane, session, input, and effect orchestration live in
   `window_state.rs`, `window_registry.rs`, `pane_state.rs`, `session.rs`,
   `input_dispatch.rs`, and `effects.rs`.

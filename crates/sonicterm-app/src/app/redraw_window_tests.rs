@@ -10,14 +10,14 @@ pub(super) fn a_coinciding_frame_deadline_skips_the_release() {
     let now = Instant::now();
     for frame_first in [true, false] {
         let (mut app, main) = idle_release_owner(now);
-        app.windows.get_mut(&main).unwrap().redraw.deferred = true;
+        app.registry.windows.get_mut(&main).unwrap().redraw.deferred = true;
         let frame = DueWork { owner: Some(main), cause: DueCause::Frame, deadline: now };
         let release =
             DueWork { owner: Some(main), cause: DueCause::ImageAtlasRelease, deadline: now };
         app.redraw_due = if frame_first { vec![frame, release] } else { vec![release, frame] };
         app.service_redraw_due(now);
         assert_eq!(releases(&app, main), 0, "frame_first={frame_first}");
-        assert!(app.windows[&main].redraw.request_in_flight, "the frame is requested");
+        assert!(app.registry.windows[&main].redraw.request_in_flight, "the frame is requested");
     }
 }
 
@@ -28,8 +28,14 @@ pub(super) fn a_stale_release_firing_does_nothing() {
     let now = Instant::now();
     for deadline in [None, Some(now + Duration::from_secs(1))] {
         let (mut app, main) = idle_release_owner(now);
-        app.windows.get_mut(&main).unwrap().test_image_atlas_release.as_mut().unwrap().deadline =
-            deadline;
+        app.registry
+            .windows
+            .get_mut(&main)
+            .unwrap()
+            .test_image_atlas_release
+            .as_mut()
+            .unwrap()
+            .deadline = deadline;
         app.redraw_due =
             vec![DueWork { owner: Some(main), cause: DueCause::ImageAtlasRelease, deadline: now }];
         app.service_redraw_due(now);
@@ -43,7 +49,7 @@ pub(super) fn a_stale_release_firing_does_nothing() {
 pub(super) fn an_image_atlas_release_leaves_the_pane_media_charge_unchanged() {
     let now = Instant::now();
     let (mut app, main) = idle_release_owner(now);
-    let pane_id = *app.windows[&main].panes.keys().next().unwrap();
+    let pane_id = *app.registry.windows[&main].panes.keys().next().unwrap();
     let image = sonicterm_render_model::InlineImage {
         scroll_mark: 0,
         id: 1,
@@ -89,39 +95,39 @@ pub(super) fn background_tab_output_requests_no_frame_but_a_badge_change_request
     use crate::app::output_event::OutputEvent;
     use std::sync::atomic::Ordering;
     let (mut app, _, child) = owners();
-    let pane = app.windows[&child].tab_states[1].active_pane;
-    let state = &app.windows[&child].panes[&pane];
+    let pane = app.registry.windows[&child].tab_states[1].active_pane;
+    let state = &app.registry.windows[&child].panes[&pane];
     state.output_generation.fetch_add(1, Ordering::Release);
     state.output_outstanding.store(true, Ordering::Release);
-    let causes = app.windows[&child].redraw.snapshot();
+    let causes = app.registry.windows[&child].redraw.snapshot();
     let before = crate::app::window_state::window_redraw_requests();
 
     app.service_output_event(OutputEvent::Pane { window_id: child, pane_id: pane }, Instant::now());
 
     assert_eq!(crate::app::window_state::window_redraw_requests(), before, "no native request");
-    assert_eq!(app.windows[&child].redraw.snapshot(), causes, "no cause marked");
-    assert!(!app.windows[&child].redraw.request_in_flight);
-    assert!(!app.windows[&child].panes[&pane].output_outstanding.load(Ordering::Acquire));
+    assert_eq!(app.registry.windows[&child].redraw.snapshot(), causes, "no cause marked");
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
+    assert!(!app.registry.windows[&child].panes[&pane].output_outstanding.load(Ordering::Acquire));
 
     let now = Instant::now();
-    let state = &app.windows[&child].panes[&pane];
+    let state = &app.registry.windows[&child].panes[&pane];
     state.command_events.lock().push(crate::app::PaneCommandEvent {
         event: sonicterm_vt::vt::CommandEvent::CmdEnd(Some(0)),
         at: now,
         duration: None,
     });
     state.output_outstanding.store(true, Ordering::Release);
-    let output = app.windows[&child].redraw.cause_generation(RedrawCause::Output);
+    let output = app.registry.windows[&child].redraw.cause_generation(RedrawCause::Output);
 
     app.service_output_event(OutputEvent::Pane { window_id: child, pane_id: pane }, now);
 
     assert_eq!(crate::app::window_state::window_redraw_requests(), before + 1, "one request");
-    assert!(app.windows[&child].redraw.request_in_flight);
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
     assert!(
-        app.windows[&child].redraw.cause_generation(RedrawCause::Chrome)
+        app.registry.windows[&child].redraw.cause_generation(RedrawCause::Chrome)
             > causes.0[RedrawCause::Chrome as usize]
     );
-    assert_eq!(app.windows[&child].redraw.cause_generation(RedrawCause::Output), output);
+    assert_eq!(app.registry.windows[&child].redraw.cause_generation(RedrawCause::Output), output);
 }
 
 /// An explicit request for a window whose output is settled (as the harness sends after clearing
@@ -130,22 +136,22 @@ pub(super) fn background_tab_output_requests_no_frame_but_a_badge_change_request
 pub(super) fn explicit_request_with_settled_output_requests_one_output_frame() {
     use crate::app::output_event::OutputEvent;
     let (mut app, _, child) = owners();
-    let pane = app.windows[&child].tab_states[0].active_pane;
-    let state = &app.windows[&child].panes[&pane];
+    let pane = app.registry.windows[&child].tab_states[0].active_pane;
+    let state = &app.registry.windows[&child].panes[&pane];
     assert_eq!(
         state.output_generation.load(std::sync::atomic::Ordering::Acquire),
         state.observed_output_generation
     );
-    if let Some(renderer) = app.windows.get_mut(&child).unwrap().renderer.as_mut() {
+    if let Some(renderer) = app.registry.windows.get_mut(&child).unwrap().renderer.as_mut() {
         renderer.invalidate_retained_frame();
     }
-    let output = app.windows[&child].redraw.cause_generation(RedrawCause::Output);
+    let output = app.registry.windows[&child].redraw.cause_generation(RedrawCause::Output);
     let before = crate::app::window_state::window_redraw_requests();
 
     app.service_output_event(OutputEvent::Explicit(child), Instant::now());
 
     assert_eq!(crate::app::window_state::window_redraw_requests(), before + 1);
-    assert!(app.windows[&child].redraw.cause_generation(RedrawCause::Output) > output);
+    assert!(app.registry.windows[&child].redraw.cause_generation(RedrawCause::Output) > output);
 }
 
 /// A hardware keypress frame that presented nothing must not delay the shell's echo by one period.
@@ -182,7 +188,7 @@ pub(super) fn echo_after_a_settled_keypress_is_not_paced_from_the_keypress() {
             "the echo is admitted at once (child: {child_owner})"
         );
         assert_eq!(defer_count(&app, owner, DeferRule::Streaming), 0);
-        let counters = app.windows[&owner].redraw.frame_counters.as_deref().unwrap();
+        let counters = app.registry.windows[&owner].redraw.frame_counters.as_deref().unwrap();
         assert_eq!(counters.stream_clock_exempt, 1, "only the keypress kept the streaming clock");
     }
 }
@@ -247,7 +253,8 @@ pub(super) fn frame_deadlines_match_admission_for_every_rule() {
                     FrameSettlement::Presented,
                     start,
                 );
-                app.windows.get_mut(&main).unwrap().retry_not_before = Some(start + period * 2);
+                app.registry.windows.get_mut(&main).unwrap().retry_not_before =
+                    Some(start + period * 2);
                 (DeferRule::Contention, start + period * 2, start + Duration::from_millis(1))
             }
         };

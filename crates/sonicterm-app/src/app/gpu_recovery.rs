@@ -319,7 +319,8 @@ impl App {
             // When: `disconnected` is false, choose a surviving native surface without opening a per-window device.
             self.main_renderer()
                 .or_else(|| {
-                    self.windows
+                    self.registry
+                        .windows
                         .iter()
                         .filter_map(|(id, window)| {
                             window.renderer.as_ref().map(|renderer| (id, renderer))
@@ -327,7 +328,7 @@ impl App {
                         .min_by_key(|(id, _)| *id)
                         .map(|(_, renderer)| renderer)
                 })
-                .or_else(|| self.warm_window_pool.first().map(|warm| &warm.renderer))
+                .or_else(|| self.registry.warm_window_pool.first().map(|warm| &warm.renderer))
                 .ok_or_else(|| anyhow::anyhow!("no window remains for GPU recovery"))
                 .and_then(|renderer| renderer.recovery_request(event_loop))
         };
@@ -425,16 +426,17 @@ impl App {
         let (context, surface) = candidate.into_parts();
         let mut surface = Some(surface);
         let mut windows: Vec<_> = self
+            .registry
             .windows
             .iter()
             .filter_map(|(id, window)| window.renderer.as_ref().map(|_| *id))
             .collect();
         windows.sort_unstable();
-        let live = windows.len() + self.warm_window_pool.len();
+        let live = windows.len() + self.registry.warm_window_pool.len();
         let prepared = (|| -> anyhow::Result<Vec<(RendererOwner, PreparedRebind)>> {
             let mut prepared = Vec::with_capacity(live);
             for &id in &windows {
-                let renderer = self.windows[&id]
+                let renderer = self.registry.windows[&id]
                     .renderer
                     .as_ref()
                     .expect("renderer population is stable inside the callback");
@@ -449,7 +451,7 @@ impl App {
                     )?,
                 ));
             }
-            for (index, warm) in self.warm_window_pool.iter().enumerate() {
+            for (index, warm) in self.registry.warm_window_pool.iter().enumerate() {
                 let owned_surface =
                     (requested_window == Some(warm.window.id())).then(|| surface.take()).flatten();
                 prepared.push((
@@ -472,11 +474,14 @@ impl App {
                 for (owner, prepared) in prepared {
                     let renderer = match owner {
                         RendererOwner::Window(id) => self
+                            .registry
                             .windows
                             .get_mut(&id)
                             .and_then(|window| window.renderer.as_mut())
                             .expect("prepared renderer is still owned"),
-                        RendererOwner::Warm(index) => &mut self.warm_window_pool[index].renderer,
+                        RendererOwner::Warm(index) => {
+                            &mut self.registry.warm_window_pool[index].renderer
+                        }
                     };
                     match renderer.commit_rebind(prepared) {
                         Ok(gate) => {
@@ -510,8 +515,10 @@ impl App {
                     .expect("retirement names the previous committed context");
                 if let Some(renderer) = self
                     .main_renderer()
-                    .or_else(|| self.windows.values().find_map(|window| window.renderer.as_ref()))
-                    .or_else(|| self.warm_window_pool.first().map(|warm| &warm.renderer))
+                    .or_else(|| {
+                        self.registry.windows.values().find_map(|window| window.renderer.as_ref())
+                    })
+                    .or_else(|| self.registry.warm_window_pool.first().map(|warm| &warm.renderer))
                 {
                     let degrade = super::should_degrade_for_software_render(
                         self.config.appearance.software_render_mode,
@@ -524,8 +531,11 @@ impl App {
                     );
                 }
                 for id in windows {
-                    let window =
-                        self.windows.get_mut(&id).expect("committed renderer is still owned");
+                    let window = self
+                        .registry
+                        .windows
+                        .get_mut(&id)
+                        .expect("committed renderer is still owned");
                     window.retry_not_before = None;
                     // A fast commit may precede the old generation's first stopped redraw.
                     window.redraw.stopped_generation.get_or_insert(retired_generation);

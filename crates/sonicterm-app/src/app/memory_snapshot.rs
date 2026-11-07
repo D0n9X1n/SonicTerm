@@ -568,7 +568,7 @@ impl super::App {
         let mut panes_contended = 0usize;
         let mut measures = Vec::new();
 
-        for (window_id, window) in &self.windows {
+        for (window_id, window) in &self.registry.windows {
             for (pane_id, pane) in &window.panes {
                 let retention = super::retention::measure_pane(pane);
                 match retention {
@@ -584,7 +584,7 @@ impl super::App {
 
         let mut renderers = Vec::new();
         let mut visible_allocator_candidates = Vec::new();
-        for (window_id, window) in &self.windows {
+        for (window_id, window) in &self.registry.windows {
             let Some(renderer) = window.renderer.as_ref() else {
                 // When: this window has no renderer yet, omit a zero summary that would look like measured retention.
                 continue;
@@ -602,7 +602,7 @@ impl super::App {
             visible_allocator_candidates.push((label, renderer));
         }
         let mut warm_allocator_candidates = Vec::new();
-        for (index, warm) in self.warm_window_pool.iter().enumerate() {
+        for (index, warm) in self.registry.warm_window_pool.iter().enumerate() {
             let label = format!("{index}");
             renderers.push(summarize(
                 label.clone(),
@@ -613,7 +613,7 @@ impl super::App {
             warm_allocator_candidates.push((label, &warm.renderer));
         }
 
-        let main_label = self.main_window_id.map(|window_id| format!("{window_id:?}"));
+        let main_label = self.registry.main_window_id.map(|window_id| format!("{window_id:?}"));
         let main_allocator = main_label.as_deref().zip(self.main_renderer());
         let visible_allocator_refs = visible_allocator_candidates
             .iter()
@@ -687,7 +687,7 @@ impl super::App {
     pub(super) fn build_graphics_reading(&self) -> GraphicsReading {
         let mut renderers = Vec::new();
         let mut visible = Vec::new();
-        for (window_id, window) in &self.windows {
+        for (window_id, window) in &self.registry.windows {
             let Some(renderer) = window.renderer.as_ref() else {
                 // When: this window has no renderer yet, it has requested nothing.
                 continue;
@@ -700,7 +700,7 @@ impl super::App {
             });
             visible.push((label, renderer));
         }
-        for (index, warm) in self.warm_window_pool.iter().enumerate() {
+        for (index, warm) in self.registry.warm_window_pool.iter().enumerate() {
             renderers.push(RendererGraphics {
                 label: format!("{index}"),
                 role: "warm",
@@ -712,7 +712,7 @@ impl super::App {
             .or_else(|| {
                 visible.iter().min_by(|left, right| left.0.cmp(&right.0)).map(|entry| entry.1)
             })
-            .or_else(|| self.warm_window_pool.first().map(|warm| &warm.renderer));
+            .or_else(|| self.registry.warm_window_pool.first().map(|warm| &warm.renderer));
         let dxgi_adapter = authoritative
             .and_then(sonicterm_gpu::core::GpuRenderer::dxgi_adapter_ids)
             .map(|(vendor, device)| DxgiAdapterIds { vendor, device });

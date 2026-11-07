@@ -49,8 +49,8 @@ impl App {
     /// Record the active tab of `window_id` as the only tab a rename or color editor may change.
     pub(super) fn capture_tab_edit_target(&mut self, window_id: Option<WindowId>) {
         self.interaction.tab_edit_target = window_id.and_then(|id| {
-            let window = self.window_keys.get(id)?;
-            let tab = self.windows.get(&id)?.tabs.active()?.id;
+            let window = self.registry.window_keys.get(id)?;
+            let tab = self.registry.windows.get(&id)?.tabs.active()?.id;
             Some(TabEditTarget { window, tab })
         });
     }
@@ -68,8 +68,11 @@ impl App {
             // When: no target was captured, no editor opened for a tab and nothing may change.
             return;
         };
-        let Some(window) =
-            self.window_keys.resolve(target.window).and_then(|id| self.windows.get_mut(&id))
+        let Some(window) = self
+            .registry
+            .window_keys
+            .resolve(target.window)
+            .and_then(|id| self.registry.windows.get_mut(&id))
         else {
             // When: resolve finds no live window, the captured tab closed with it.
             return;
@@ -82,8 +85,9 @@ impl App {
     /// Live window that still holds the captured edit tab, or `None` once it closed or moved.
     pub(in crate::app) fn tab_edit_target_window(&self) -> Option<WindowId> {
         let target = self.interaction.tab_edit_target?;
-        let id = self.window_keys.resolve(target.window)?;
-        self.windows
+        let id = self.registry.window_keys.resolve(target.window)?;
+        self.registry
+            .windows
             .get(&id)
             .filter(|window| window.tabs.tabs().iter().any(|tab| tab.id == target.tab))
             .map(|_| id)
@@ -98,7 +102,7 @@ impl App {
         let captured = self
             .interaction
             .tab_edit_target
-            .and_then(|target| self.window_keys.resolve(target.window));
+            .and_then(|target| self.registry.window_keys.resolve(target.window));
         if editing_tab && captured == Some(id) {
             self.interaction.command_palette.close();
             self.interaction.tab_edit_target = None;
@@ -116,7 +120,7 @@ impl App {
             _ => None,
         };
         self.capture_tab_edit_target(
-            self.interaction.palette_attached_window.or(self.main_window_id),
+            self.interaction.palette_attached_window.or(self.registry.main_window_id),
         );
         self.update_command_palette_ime_cursor_area();
         self.request_redraw_for_overlay(self.interaction.palette_attached_window);
@@ -125,7 +129,7 @@ impl App {
     pub(super) fn active_tab_title_body(&self) -> Option<String> {
         match self.frontmost_kind() {
             FrontmostKind::Child(id) => {
-                self.windows.get(&id).and_then(|window| window.tabs.active_title_body())
+                self.registry.windows.get(&id).and_then(|window| window.tabs.active_title_body())
             }
             _ => self.main_tabs().and_then(|tabs| tabs.active_title_body()),
         }
@@ -141,7 +145,7 @@ impl App {
             _ => None,
         };
         self.capture_tab_edit_target(
-            self.interaction.palette_attached_window.or(self.main_window_id),
+            self.interaction.palette_attached_window.or(self.registry.main_window_id),
         );
         self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }

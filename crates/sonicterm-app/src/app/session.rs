@@ -141,6 +141,13 @@ impl App {
         let pty_reaper = reaper_driver::ReaperDriver::new(governor.clone())
             .expect("native PTY teardown driver could not start");
         Self {
+            registry: crate::app::WindowRegistry {
+                windows: HashMap::new(),
+                main_window_id: None,
+                frontmost_window: None,
+                window_keys: crate::window_key_boundary::WindowKeyRegistry::new(),
+                warm_window_pool: Vec::new(),
+            },
             interaction: InteractionState {
                 command_palette,
                 palette_attached_window: None,
@@ -221,13 +228,10 @@ impl App {
             #[cfg(test)]
             test_scheduler_trims: Vec::new(),
             governor,
-            windows: HashMap::new(),
             session_finished: None,
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
             dispatch_redraws: super::redraw::DispatchRedraws::default(),
             accessibility: Default::default(),
-            main_window_id: None,
-            frontmost_window: None,
             theme_loader: None,
             keymap_loader: None,
             event_loop_proxy,
@@ -245,7 +249,6 @@ impl App {
             pending_redraw: false,
             pending_redraw_windows: HashSet::new(),
             redraw_due: Vec::new(),
-            warm_window_pool: Vec::new(),
             i18n,
             os_drag_sink: None,
             default_handlers: default_handlers::DefaultHandlersState::default(),
@@ -258,7 +261,6 @@ impl App {
             on_window_ready: None,
             test_viewport_override: None,
             machine,
-            window_keys: crate::window_key_boundary::WindowKeyRegistry::new(),
         }
     }
 
@@ -273,6 +275,7 @@ impl App {
         // Agents lose the endpoint before their panes go, so no request races the teardown.
         self.services.mcp_server = None;
         let panes: Vec<_> = self
+            .registry
             .windows
             .values_mut()
             .flat_map(|window| std::mem::take(&mut window.panes).into_values())
@@ -286,18 +289,18 @@ impl App {
     }
 
     pub(super) fn retire_previous_main(&mut self) {
-        if let Some(previous_id) = self.main_window_id.take() {
+        if let Some(previous_id) = self.registry.main_window_id.take() {
             self.cancel_window_rename(previous_id);
             self.cancel_tab_edit(previous_id);
             self.accessibility.remove(&previous_id);
-            if let Some(mut previous) = self.windows.remove(&previous_id) {
+            if let Some(mut previous) = self.registry.windows.remove(&previous_id) {
                 self.retire_window_counters(previous_id, &mut previous);
                 for pane in std::mem::take(&mut previous.panes).into_values() {
                     self.retire_pane(pane);
                 }
                 self.release_owners_of(&mut previous);
             }
-            self.window_keys.remove(previous_id);
+            self.registry.window_keys.remove(previous_id);
         }
     }
 
@@ -328,7 +331,7 @@ impl App {
             // A watched pane's retirement disarms it and frees its diagnostic buffers now, whatever
             // worker handles survive, and ends a window timeline it owned.
             counters.echo.retire();
-            for window in self.windows.values_mut() {
+            for window in self.registry.windows.values_mut() {
                 window.redraw.timeline.end_for_watch(&counters.echo);
             }
         }
@@ -447,7 +450,7 @@ impl App {
     #[cfg(test)]
     pub(crate) fn with_inline_media_pool(mut self, pool: Arc<media::InlineMediaPool>) -> Self {
         debug_assert!(
-            self.windows.values().all(|window| window.panes.is_empty()),
+            self.registry.windows.values().all(|window| window.panes.is_empty()),
             "inject the inline-media pool before any pane exists"
         );
         self.inline_media_pool = pool;
@@ -461,7 +464,7 @@ impl App {
     #[cfg(test)]
     pub(crate) fn with_capture_staging_pool(mut self, pool: Arc<CaptureStagingPool>) -> Self {
         debug_assert!(
-            self.windows.values().all(|window| window.panes.is_empty()),
+            self.registry.windows.values().all(|window| window.panes.is_empty()),
             "inject the capture staging pool before any pane exists"
         );
         self.capture_staging_pool = pool;

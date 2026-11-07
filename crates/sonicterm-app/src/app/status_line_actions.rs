@@ -12,14 +12,17 @@ impl App {
         pointer_x: f32,
         pointer_y: f32,
     ) -> bool {
-        let hit = self.windows.get(&window_id).and_then(|window| window.status_strip.as_ref()).map(
-            |strip| {
+        let hit = self
+            .registry
+            .windows
+            .get(&window_id)
+            .and_then(|window| window.status_strip.as_ref())
+            .map(|strip| {
                 let click = strip
                     .segment_at(pointer_x, pointer_y)
                     .and_then(|segment| segment.click.clone());
                 (strip.contains(pointer_y), click)
-            },
-        );
+            });
         let Some((true, click)) = hit else {
             // When: `hit` is None or outside the band, the press is outside the strip: strip focus
             // ends and routing continues.
@@ -162,7 +165,9 @@ impl App {
     // Ordering: output_counting and output_bytes are Relaxed; a rate needs only an eventual total.
     pub(in crate::app) fn sample_out(&mut self, now: Instant) {
         let settings = self.status_line.resolved.out;
-        let Self { windows, status_line: state, .. } = self;
+        let Self {
+            registry: crate::app::WindowRegistry { windows, .. }, status_line: state, ..
+        } = self;
         let mut deltas: HashMap<u64, u64> = HashMap::new();
         for window in windows.values() {
             for (pane_id, pane) in &window.panes {
@@ -205,7 +210,9 @@ impl App {
     /// its recording.
     pub(super) fn sample_frames(&mut self, now: Instant) {
         let previous = self.status_line.frame_last.replace(now);
-        let Self { windows, status_line: state, .. } = self;
+        let Self {
+            registry: crate::app::WindowRegistry { windows, .. }, status_line: state, ..
+        } = self;
         state.frame_shown.retain(|window_id, _| windows.contains_key(window_id));
         for (window_id, window) in windows.iter_mut() {
             let recorded = window.redraw.presented_frames.replace((0, 0));
@@ -241,7 +248,7 @@ impl App {
             // When: frame_last was None and frame_shown is empty, nothing was recording.
             return;
         }
-        for window in self.windows.values_mut() {
+        for window in self.registry.windows.values_mut() {
             window.redraw.presented_frames = None;
         }
         self.status_line.frame_shown.clear();
@@ -268,7 +275,7 @@ impl App {
             // When: out_last is None and out_prev is empty, nothing was counting.
             return;
         }
-        for window in self.windows.values() {
+        for window in self.registry.windows.values() {
             for pane in window.panes.values() {
                 pane.output_counting.store(false, std::sync::atomic::Ordering::Relaxed);
             }
@@ -299,7 +306,7 @@ impl App {
             "No font SonicTerm can find covers {listed}. Install fonts covering these \
              characters or choose another [font].family in sonicterm.toml."
         );
-        let kind = if Some(window_id) == self.main_window_id {
+        let kind = if Some(window_id) == self.registry.main_window_id {
             super::super::FrontmostKind::Main
         } else {
             // When: window_id is not the main window, the notification goes to that child.
@@ -323,7 +330,9 @@ impl App {
             return;
         }
         let held_after = Duration::from_millis(self.status_line.resolved.input.held_after_ms);
-        let Self { windows, status_line: state, .. } = self;
+        let Self {
+            registry: crate::app::WindowRegistry { windows, .. }, status_line: state, ..
+        } = self;
         let mut failed = Vec::new();
         state.held.retain(|pane_id, watch| {
             let found = windows.iter().find_map(|(window_id, window)| {
@@ -389,6 +398,7 @@ impl App {
     /// Record `input` for the window that holds `pane_id`; nothing when no window does.
     pub(in crate::app) fn note_pane_input(&mut self, pane_id: u64, input: InputState) {
         let window_id = self
+            .registry
             .windows
             .iter()
             .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id));
@@ -432,7 +442,7 @@ impl App {
             // When: no clip record is shown, there is no source to go to.
             return;
         };
-        let target = self.windows.iter().find_map(|(window_id, window)| {
+        let target = self.registry.windows.iter().find_map(|(window_id, window)| {
             window
                 .tab_states
                 .iter()
@@ -443,13 +453,15 @@ impl App {
             // When: target is None, no window holds pane_id: the source tab has closed.
             return;
         };
-        if Some(window_id) == self.main_window_id {
+        if Some(window_id) == self.registry.main_window_id {
             self.activate_main_tab(index);
         } else {
             // When: window_id is not the main window, it is a torn-out child.
             self.activate_tab_in_child(window_id, index);
         }
-        if let Some(window) = self.windows.get(&window_id).and_then(|state| state.window.as_ref()) {
+        if let Some(window) =
+            self.registry.windows.get(&window_id).and_then(|state| state.window.as_ref())
+        {
             window.focus_window();
         }
     }
@@ -464,11 +476,13 @@ impl App {
                 .find(|index| window.tabs.tabs()[*index].marks.is_marked())
         };
         let here = self
+            .registry
             .windows
             .get(&window_id)
             .and_then(|window| next_marked(window, window.tabs.active_index()));
         let target = here.map(|index| (window_id, index)).or_else(|| {
-            self.windows
+            self.registry
+                .windows
                 .iter()
                 .filter(|(other, window)| {
                     **other != window_id && window.role == super::super::WindowRole::Terminal
@@ -481,7 +495,7 @@ impl App {
             // When: target is None, no window has a marked tab.
             return;
         };
-        if Some(target_window) == self.main_window_id {
+        if Some(target_window) == self.registry.main_window_id {
             self.activate_main_tab(index);
         } else {
             // When: target_window is not the main window, it is a torn-out child.
@@ -489,7 +503,7 @@ impl App {
         }
         if target_window != window_id {
             if let Some(window) =
-                self.windows.get(&target_window).and_then(|state| state.window.as_ref())
+                self.registry.windows.get(&target_window).and_then(|state| state.window.as_ref())
             {
                 window.focus_window();
             }
@@ -505,7 +519,7 @@ impl App {
 
     /// Return `window_id`'s focused pane to the bottom of its history.
     pub(super) fn scroll_window_to_bottom(&mut self, window_id: WindowId) {
-        let Some(window) = self.windows.get_mut(&window_id) else {
+        let Some(window) = self.registry.windows.get_mut(&window_id) else {
             // When: the window closed after the press, there is nothing to scroll.
             return;
         };

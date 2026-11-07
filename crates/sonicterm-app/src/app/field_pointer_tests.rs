@@ -28,7 +28,7 @@ fn target_len(app: &App, window_id: WindowId, target: FieldTarget) -> usize {
     match target {
         FieldTarget::Palette { .. } => app.interaction.command_palette.query().len(),
         FieldTarget::Search(_) => {
-            let window = &app.windows[&window_id];
+            let window = &app.registry.windows[&window_id];
             window.tab_states[window.tabs.active_index()]
                 .search
                 .as_ref()
@@ -75,7 +75,7 @@ fn left(state: ElementState) -> WindowEvent {
 
 /// Move the recorded pointer, as `record_window_pointer` does before handlers run.
 fn move_to(app: &mut App, window_id: WindowId, pointer_x: f64) -> WindowEvent {
-    app.windows.get_mut(&window_id).unwrap().cursor_pos = (pointer_x, 20.0);
+    app.registry.windows.get_mut(&window_id).unwrap().cursor_pos = (pointer_x, 20.0);
     WindowEvent::CursorMoved {
         device_id: DeviceId::dummy(),
         position: PhysicalPosition::new(pointer_x, 20.0),
@@ -90,7 +90,7 @@ fn palette_app(query: &str) -> (App, WindowId) {
     reset_fake();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     app.interaction.command_palette.open();
     app.interaction.command_palette.set_query(query);
     (app, window_id)
@@ -101,8 +101,8 @@ fn search_app(query: &str) -> (App, WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("first");
     app.__test_seed_tab("second");
-    let window_id = app.main_window_id.unwrap();
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     let active = window.tabs.active_index();
     let mut search = SearchState::new();
     search.query = query.to_string();
@@ -111,7 +111,7 @@ fn search_app(query: &str) -> (App, WindowId) {
 }
 
 fn search_of(app: &App, window_id: WindowId) -> &SearchState {
-    let window = &app.windows[&window_id];
+    let window = &app.registry.windows[&window_id];
     window.tab_states[window.tabs.active_index()].search.as_ref().unwrap()
 }
 
@@ -159,7 +159,8 @@ fn palette_reverse_drag_keeps_the_press_anchor() {
 fn shift_press_extends_from_the_existing_caret() {
     let (mut app, window_id) = palette_app("abcdef");
     app.interaction.command_palette.set_cursor(1);
-    app.windows.get_mut(&window_id).unwrap().modifiers = winit::keyboard::ModifiersState::SHIFT;
+    app.registry.windows.get_mut(&window_id).unwrap().modifiers =
+        winit::keyboard::ModifiersState::SHIFT;
     move_to(&mut app, window_id, 140.0);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
     assert_eq!(app.interaction.command_palette.selected_range(), Some(1..4));
@@ -180,10 +181,10 @@ fn press_outside_the_field_is_not_consumed() {
 fn held_window_gestures_keep_their_events() {
     let (mut app, window_id) = palette_app("abc");
     move_to(&mut app, window_id, 120.0);
-    app.windows.get_mut(&window_id).unwrap().mouse_down = true;
+    app.registry.windows.get_mut(&window_id).unwrap().mouse_down = true;
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Pressed)));
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Released)));
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     window.mouse_down = false;
     window.pressed_tab = Some(0);
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Pressed)));
@@ -318,7 +319,7 @@ fn search_drag_is_bound_to_its_tab() {
     assert!(dispatch(&mut app, window_id, &drag));
     assert_eq!(search_of(&app, window_id).selected_range(), Some(1..3));
 
-    let window = app.windows.get_mut(&window_id).unwrap();
+    let window = app.registry.windows.get_mut(&window_id).unwrap();
     let other = if window.tabs.active_index() == 0 { 1 } else { 0 };
     window.tabs.activate(other);
     let mut other_search = SearchState::new();
@@ -429,15 +430,15 @@ fn closed_rename_tab_mid_drag_stops_editing() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("first");
     app.__test_seed_tab("second");
-    let window_id = app.main_window_id.unwrap();
+    let window_id = app.registry.main_window_id.unwrap();
     app.start_rename_active_tab();
     assert_eq!(app.interaction.command_palette.query(), "second");
     move_to(&mut app, window_id, 110.0);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
     assert_eq!(app.interaction.command_palette.cursor(), 1);
-    let active = app.windows[&window_id].tabs.active_index();
+    let active = app.registry.windows[&window_id].tabs.active_index();
     app.close_tab_at(active);
-    assert_eq!(app.windows[&window_id].tabs.len(), 1, "the sibling tab remains");
+    assert_eq!(app.registry.windows[&window_id].tabs.len(), 1, "the sibling tab remains");
     assert!(app.interaction.command_palette.is_open(), "the editor is still showing");
     let drag = move_to(&mut app, window_id, 150.0);
     assert!(dispatch(&mut app, window_id, &drag), "the held button's motion stays consumed");
@@ -502,7 +503,7 @@ fn lost_release_does_not_block_another_windows_field() {
     let (mut app, window_id) = palette_app("abcdef");
     let child = app.__test_seed_child_window(&["child"]);
     {
-        let window = app.windows.get_mut(&child).unwrap();
+        let window = app.registry.windows.get_mut(&child).unwrap();
         let active = window.tabs.active_index();
         let mut search = SearchState::new();
         search.query = "needle".to_string();
@@ -542,7 +543,7 @@ fn reaped_child_drops_its_field_capture() {
     let (mut app, window_id) = search_app("needle");
     let child = app.__test_seed_child_window(&["child"]);
     {
-        let window = app.windows.get_mut(&child).unwrap();
+        let window = app.registry.windows.get_mut(&child).unwrap();
         let active = window.tabs.active_index();
         let mut search = SearchState::new();
         search.query = "haystack".to_string();
@@ -557,7 +558,7 @@ fn reaped_child_drops_its_field_capture() {
     ));
 
     app.handle_pane_process_exited(child_pane, sonicterm_types::PaneExitStatus::Code(0));
-    assert!(!app.windows.contains_key(&child), "the empty child window is reaped");
+    assert!(!app.registry.windows.contains_key(&child), "the empty child window is reaped");
     assert_eq!(
         app.interaction.field_pointer_capture, None,
         "the reaped child's capture is dropped"
@@ -591,7 +592,7 @@ fn hidden_source_drag_does_not_block_another_window() {
     let (mut app, window_id) = search_app("needle");
     let child = app.__test_seed_child_window(&["child"]);
     {
-        let window = app.windows.get_mut(&child).unwrap();
+        let window = app.registry.windows.get_mut(&child).unwrap();
         let active = window.tabs.active_index();
         let mut search = SearchState::new();
         search.query = "haystack".to_string();
@@ -599,7 +600,7 @@ fn hidden_source_drag_does_not_block_another_window() {
     }
     move_to(&mut app, window_id, 110.0);
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
-    app.windows.get_mut(&window_id).unwrap().hidden = true;
+    app.registry.windows.get_mut(&window_id).unwrap().hidden = true;
     move_to(&mut app, child, 110.0);
     assert!(dispatch(&mut app, child, &left(ElementState::Pressed)), "child press is not blocked");
     assert!(app.interaction.field_owed_releases.is_empty(), "the hidden window keeps no debt");

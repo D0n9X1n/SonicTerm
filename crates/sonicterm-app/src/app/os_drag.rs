@@ -441,7 +441,7 @@ impl App {
                 self.interaction.os_drag_pending.clone(),
                 self.interaction.os_drag_bars.clone(),
             )
-            .with_main_window(self.main_window_id)
+            .with_main_window(self.registry.main_window_id)
         })
     }
 
@@ -514,7 +514,7 @@ impl App {
     /// path right after `Renderer::render`.
     pub fn publish_child_window_tab_bar(&self, id: WindowId) {
         use sonicterm_ui::tabbar_view::TabBarLayout;
-        let Some(child) = self.windows.get(&id) else {
+        let Some(child) = self.registry.windows.get(&id) else {
             // When: `id` tracks no window, so there is no child tab bar to
             // publish geometry for.
             return;
@@ -564,13 +564,13 @@ impl App {
                 // When: `ReturnToOriginalBar` keeps the captured tab in place, no topology mutation is owed.
             }
             crate::tab_drag::DragAction::ReorderTab { to } => {
-                if let Some(window) = self.windows.get_mut(&session.source_window) {
+                if let Some(window) = self.registry.windows.get_mut(&session.source_window) {
                     window.reorder_tab(index, to);
                 }
             }
             crate::tab_drag::DragAction::MergeIntoWindow(target) => {
                 // When: MergeIntoWindow selects target, preserve the transfer refusal instead of reporting a completed drag.
-                let moved = if self.main_window_id == Some(session.source_window) {
+                let moved = if self.registry.main_window_id == Some(session.source_window) {
                     self.merge_main_into_child(index, target)
                 } else {
                     // When: session.source_window is not main_window_id, keep child-specific source close policy.
@@ -585,7 +585,7 @@ impl App {
                 tear_out(self, session.source_window, index);
             }
         }
-        if let Some(window) = self.windows.get(&session.source_window) {
+        if let Some(window) = self.registry.windows.get(&session.source_window) {
             window.request_window_redraw();
         }
         true
@@ -685,7 +685,7 @@ impl App {
             // discarded on arrival.
             workers.cancel_window(window_id);
         }
-        self.window_keys.remove(window_id);
+        self.registry.window_keys.remove(window_id);
         self.interaction.os_drag_bars.remove(Some(window_id));
         if let Some(backend) = self.interaction.os_drag_backend.as_mut() {
             if let Err(error) = backend.unregister_window(window_id) {
@@ -739,8 +739,8 @@ impl App {
                 // source side, but the *target* may legitimately be the
                 // main window. Detect that by comparing against the
                 // App's `window` field.
-                let src_opt = (self.main_window_id != Some(src_win)).then_some(src_win);
-                let tgt_opt = target_window.filter(|id| Some(*id) != self.main_window_id);
+                let src_opt = (self.registry.main_window_id != Some(src_win)).then_some(src_win);
+                let tgt_opt = target_window.filter(|id| Some(*id) != self.registry.main_window_id);
                 if let Err(error) = self.transfer_tab(src_opt, src_idx, tgt_opt, target_slot) {
                     tracing::warn!(target: "sonicterm_app::app", e = ?error, "os_drag_session: transfer_tab refused — cancelling");
                     self.cancel_drag_session();
@@ -819,7 +819,7 @@ impl App {
         let mut had = false;
         // (defensive): snapshot window-id keys BEFORE the
         // mutation loop. The loop body calls `clear_drag_chip` /
-        // `request_redraw`, neither of which mutate `self.windows`
+        // `request_redraw`, neither of which mutate `self.registry.windows`
         // today, but a future per-window handler (or a winit reentrant
         // callback on Windows under heavy load) could
         // insert/remove a window mid-iteration. Iterating a snapshot of
@@ -828,12 +828,12 @@ impl App {
         // all-windows loop runs UNCONDITIONALLY — never short-circuit, so a
         // second invocation after the session is re-armed still clears
         // every window.
-        let ids: Vec<_> = self.windows.keys().copied().collect();
+        let ids: Vec<_> = self.registry.windows.keys().copied().collect();
         // Invoke the test-only
         // post-snapshot hook AFTER `ids` is collected but BEFORE the
         // iteration body starts. The `take()` releases the hook so it
         // never re-fires, and (more importantly) leaves no live borrow
-        // on `self` — the closure can freely mutate `self.windows`,
+        // on `self` — the closure can freely mutate `self.registry.windows`,
         // which is the exact race we need to exercise to prove the
         // `get_mut(&id).else { continue }` arm below fires. Always
         // `None` in production (the setter is `__test_*`-gated).
@@ -851,7 +851,7 @@ impl App {
         // refresh. Iterate every WindowState (main + children) and wipe
         // the lot.
         for id in ids {
-            let Some(window) = self.windows.get_mut(&id) else {
+            let Some(window) = self.registry.windows.get_mut(&id) else {
                 // When: `windows` dropped `id` between the snapshot and this
                 // iteration, so its residue is already gone with the window.
                 continue;

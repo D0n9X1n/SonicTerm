@@ -41,17 +41,21 @@ impl App {
         // The bar holds its widths while a tab gesture runs in any window or this window's own
         // pointer rests on it.
         let tab_bar_band = self
+            .registry
             .windows
             .get(&win_id)
             .and_then(|window| window.renderer.as_ref())
             .and_then(|renderer| renderer.tab_bar_band());
         let hold_tab_widths = self.tab_widths_held_in(win_id, tab_bar_band);
         // A burst or strip-only frame reads the cache only; other frames set demand, never probe.
-        let status_only =
-            self.windows.get(&win_id).is_some_and(|child| child.redraw.status_only_attempt());
+        let status_only = self
+            .registry
+            .windows
+            .get(&win_id)
+            .is_some_and(|child| child.redraw.status_only_attempt());
         let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
             .then(|| std::sync::Arc::clone(&self.services.fg_probes));
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so this child closed and
             // has no frame left to render.
             return;
@@ -137,7 +141,7 @@ impl App {
             frame.guards.iter().map(|(id, parser, _)| (*id, &**parser)),
         );
         let counts_selection = self.counts_selection();
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: windows no longer contains win_id, discard its collected frame instead of presenting retained hover.
             return;
         };
@@ -410,7 +414,7 @@ impl App {
                 // stamps the dispatch clock and writes both clocks, pane generations and the surface probe.
                 self.complete_window_redraw(win_id, snapshot, settlement);
             }
-            let Some(child) = self.windows.get_mut(&win_id) else {
+            let Some(child) = self.registry.windows.get_mut(&win_id) else {
                 // When: completion found `win_id` gone, no child remains to anchor IME or a drag bar.
                 return;
             };
@@ -444,7 +448,7 @@ impl App {
                     drop(sources);
                     let _ = child;
                     let released = self.close_child_window(win_id);
-                    self.warm_window_pool.clear();
+                    self.registry.warm_window_pool.clear();
                     let complete = self
                         .services
                         .runtime_smoke

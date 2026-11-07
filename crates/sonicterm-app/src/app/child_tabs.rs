@@ -39,10 +39,10 @@ impl App {
         // stale ids) so tests can pin that child-window cleanup routed through
         // this contract rather than a raw `windows.remove`.
         self.diagnostics.reap_call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some(child) = self.windows.get(&win_id) {
+        if let Some(child) = self.registry.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 self.accessibility.remove(&win_id);
-                if let Some(mut removed) = self.windows.remove(&win_id) {
+                if let Some(mut removed) = self.registry.windows.remove(&win_id) {
                     self.retire_window_counters(win_id, &mut removed);
                     for pane in std::mem::take(&mut removed.panes).into_values() {
                         self.retire_pane(pane);
@@ -82,7 +82,7 @@ impl App {
         }
     }
     pub(super) fn hide_main_window(&mut self) {
-        if let Some(id) = self.main_window_id {
+        if let Some(id) = self.registry.main_window_id {
             self.cancel_window_rename(id);
             self.cancel_tab_edit(id);
         }
@@ -99,7 +99,7 @@ impl App {
         tracing::info!(
             target: "sonicterm_app::app::child_window",
             "main window hidden (drained); windows={}",
-            self.windows.len()
+            self.registry.windows.len()
         );
     }
     pub(super) fn show_main_window(&mut self) {
@@ -185,11 +185,11 @@ impl App {
         // mutable borrow ends before we spawn the VT thread (which
         // captures clones), then re-borrow to install the new tab.
         let launch = super::pane_launch::PaneLaunch::from_window(
-            self.windows.get(&win_id),
+            self.registry.windows.get(&win_id),
             &self.local_hostname,
         );
         let (cols, rows, child_window) = {
-            let Some(child) = self.windows.get_mut(&win_id) else {
+            let Some(child) = self.registry.windows.get_mut(&win_id) else {
                 // When: `windows` no longer holds `win_id`, so the recorded child
                 // is gone and the caller falls back to the main App's `new_tab`.
                 return false;
@@ -210,7 +210,7 @@ impl App {
         let pane_id = next_pane_id();
         let pane_state =
             self.spawn_pane_state_for_child(pane_id, cols, rows, child_window.clone(), &launch);
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: windows lost win_id, retire the uninstalled pane instead of closing its native transport inline.
             self.retire_pane(pane_state);
             return false;
@@ -250,7 +250,7 @@ impl App {
     /// on success.
     pub(super) fn close_active_tab_in_child(&mut self, win_id: WindowId) -> bool {
         let idx = {
-            let Some(child) = self.windows.get(&win_id) else {
+            let Some(child) = self.registry.windows.get(&win_id) else {
                 // When: `windows` no longer holds `win_id`, so the recorded child
                 // is gone and the caller falls back to the main-window default.
                 return false;
@@ -272,7 +272,7 @@ impl App {
     /// single-pane child window as a ghost frame.
     pub(super) fn close_tab_at_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
         let (drained, retired) = {
-            let Some(child) = self.windows.get_mut(&win_id) else {
+            let Some(child) = self.registry.windows.get_mut(&win_id) else {
                 // When: `windows` no longer holds `win_id`, so the recorded child
                 // is gone and there is no tab list to close from.
                 return false;
@@ -308,7 +308,7 @@ impl App {
     /// iTerm2/wezterm rule: > 1 pane → close the focused pane only,
     /// else → close the whole tab.
     pub(super) fn close_active_pane_or_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -360,7 +360,7 @@ impl App {
 
     /// Advance the active tab in the child window.
     pub(super) fn next_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -373,7 +373,7 @@ impl App {
 
     /// Step back one tab in the child window.
     pub(super) fn prev_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -386,7 +386,7 @@ impl App {
 
     /// Activate a specific tab index in the child window.
     pub(super) fn activate_tab_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -399,7 +399,7 @@ impl App {
 
     /// Activate the last tab in the child window.
     pub(super) fn activate_last_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -430,7 +430,7 @@ impl App {
     /// Split the active pane of the given child window in `dir`. Returns
     /// `true` on success.
     pub(super) fn split_active_pane_in_child(&mut self, win_id: WindowId, dir: Direction) -> bool {
-        let Some(child) = self.windows.get(&win_id) else {
+        let Some(child) = self.registry.windows.get(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -463,7 +463,7 @@ impl App {
                 // mid-construction and cell metrics cannot be trusted yet.
                 return false;
             };
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: windows lost win_id, retire the uninstalled native pane through the shared driver.
             self.retire_pane(pane_state);
             return false;
@@ -494,7 +494,7 @@ impl App {
     /// tab has only one pane left, degrades to closing the tab (same
     /// iTerm2/wezterm rule as the main-window `close_active_pane`).
     pub(super) fn close_active_pane_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -542,7 +542,7 @@ impl App {
     /// Move pane focus in the given direction within the active tab of
     /// the given child window.
     pub(super) fn focus_pane_dir_in_child(&mut self, win_id: WindowId, dir: Direction) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -565,7 +565,7 @@ impl App {
 
     /// Toggle zoom on the active pane in the given child window.
     pub(super) fn toggle_active_pane_zoom_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -593,7 +593,7 @@ impl App {
         win_id: WindowId,
         dir: Direction,
     ) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else {
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
@@ -617,7 +617,7 @@ impl App {
     /// precedence the child render path applies.
     #[doc(hidden)]
     pub fn __test_child_ime_candidate_anchor_kind(&self, win_id: WindowId) -> Option<&'static str> {
-        let child = self.windows.get(&win_id)?;
+        let child = self.registry.windows.get(&win_id)?;
         if self.interaction.command_palette.is_open()
             && self.interaction.palette_attached_window == Some(win_id)
         {

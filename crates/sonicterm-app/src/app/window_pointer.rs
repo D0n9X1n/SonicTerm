@@ -35,7 +35,7 @@ impl App {
             window.splitter_hover = None;
             window.cursor_pos = (-1.0, -1.0);
         }
-        if let Some(window_id) = self.main_window_id {
+        if let Some(window_id) = self.registry.main_window_id {
             self.clear_target_hover(window_id);
         }
         if let Some(main_window) = self.main_window() {
@@ -136,9 +136,10 @@ impl App {
         // A held tab's drag session follows the pointer and draws its chip against the main
         // bar as laid out; while the button is down the drop target follows across windows.
         let held_tab_layout = self.main_held_tab_layout();
-        if let Some(main_id) = self.main_window_id {
+        if let Some(main_id) = self.registry.main_window_id {
             // When: `main_window_id` names the main window, whose held tab this move may drive.
             let motion = self
+                .registry
                 .windows
                 .get_mut(&main_id)
                 .map(|window| {
@@ -244,7 +245,7 @@ impl App {
             let splitter_hover = self.refresh_splitter_hover(cursor_x, cursor_y);
             if !splitter_hover {
                 self.refresh_hovered_url();
-            } else if let Some(window_id) = self.main_window_id {
+            } else if let Some(window_id) = self.registry.main_window_id {
                 // When: splitter hover owns the pointer in `window_id`, clear any terminal target beneath it.
                 self.clear_target_hover(window_id);
             }
@@ -629,7 +630,7 @@ impl App {
                         .or(geometry_pane);
                     if let Some((_, row, col)) = pixel_target {
                         // When: `pixel_target` identifies a rendered cell, pair its coordinates with the same-snapshot pane before activation.
-                        let opened = self.main_window_id.zip(clicked_pane).is_some_and(
+                        let opened = self.registry.main_window_id.zip(clicked_pane).is_some_and(
                             |(window_id, pane_id)| {
                                 self.activate_target_at(window_id, pane_id, row, col)
                             },

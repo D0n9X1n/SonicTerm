@@ -27,9 +27,9 @@ fn operational_redraw_effects_use_only_the_named_live_window() {
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
-    let main = app.main_window_id.unwrap();
-    let main_key = app.window_keys.get(main).unwrap();
-    let child_key = app.window_keys.get(child).unwrap();
+    let main = app.registry.main_window_id.unwrap();
+    let main_key = app.registry.window_keys.get(main).unwrap();
+    let child_key = app.registry.window_keys.get(child).unwrap();
     let before = app.diagnostics.redraw_request_count.load(Ordering::SeqCst);
     for window in [child_key, main_key] {
         app.dispatch_effects(smallvec::smallvec![sonicterm_app_core::AppEffect::Render {
@@ -38,7 +38,7 @@ fn operational_redraw_effects_use_only_the_named_live_window() {
         }]);
     }
     assert_eq!(app.diagnostics.redraw_request_count.load(Ordering::SeqCst), before + 2);
-    app.windows.remove(&child);
+    app.registry.windows.remove(&child);
     app.dispatch_effects(smallvec::smallvec![sonicterm_app_core::AppEffect::Render {
         window: child_key,
         reason: sonicterm_app_core::RedrawReason::Layout
@@ -56,10 +56,10 @@ fn stale_reducer_topology_does_not_quit_live_windows() {
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
-    let key = app.window_keys.get(child).unwrap();
+    let key = app.registry.window_keys.get(child).unwrap();
     app.dispatch_intent(sonicterm_app_core::AppIntent::WindowCloseRequested { window: key });
     assert!(!app.pending_exit);
-    assert_eq!(app.windows.len(), 2);
+    assert_eq!(app.registry.windows.len(), 2);
 }
 
 #[test]
@@ -67,13 +67,13 @@ fn missing_explicit_action_source_cannot_fall_back_to_main() {
     // A queued action for a closed child is not authority to mutate whichever window now has focus.
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     app.__test_seed_tab("main");
-    let main = app.main_window_id.unwrap();
-    let active = app.windows[&main].tabs.active().unwrap().id;
+    let main = app.registry.main_window_id.unwrap();
+    let active = app.registry.windows[&main].tabs.active().unwrap().id;
     let missing = WindowId::from(7);
     assert!(!app.run_action_for_window(&Action::NewTab, missing));
     assert!(!app.run_action_for_window(&Action::CloseTab, missing));
-    assert_eq!(app.windows[&main].tabs.len(), 1);
-    assert_eq!(app.windows[&main].tabs.active().unwrap().id, active);
+    assert_eq!(app.registry.windows[&main].tabs.len(), 1);
+    assert_eq!(app.registry.windows[&main].tabs.active().unwrap().id, active);
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn explicit_window_input_uses_its_active_pane_not_a_zero_sentinel() {
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     let main_pane = app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
-    let child_pane = app.windows[&child].tab_states[0].active_pane;
+    let child_pane = app.registry.windows[&child].tab_states[0].active_pane;
     let key = app.window_key(child).unwrap();
     app.__test_enable_pty_write_log();
     app.dispatch_intent(sonicterm_app_core::AppIntent::ImeCommit {
@@ -91,7 +91,7 @@ fn explicit_window_input_uses_its_active_pane_not_a_zero_sentinel() {
     });
     assert_eq!(app.__test_pty_write_log(), [(child_pane, b"text".to_vec())]);
     assert_ne!(child_pane, main_pane);
-    app.windows.remove(&child);
+    app.registry.windows.remove(&child);
     app.dispatch_intent(sonicterm_app_core::AppIntent::ImeCommit {
         window: key,
         text: "discard".into(),

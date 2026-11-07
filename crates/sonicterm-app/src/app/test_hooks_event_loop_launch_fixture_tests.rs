@@ -276,7 +276,7 @@ fn gpu_device_state_change_checks_each_owner_without_repeating_a_usable_recovery
     );
     let event = redraw.split_once("pub(super) fn request_device_state_redraws(").unwrap().1;
     let event = event.split_once("pub(super) fn request_recovered_window(").unwrap().0;
-    assert!(event.contains("self.windows.keys().copied().collect()"));
+    assert!(event.contains("self.registry.windows.keys().copied().collect()"));
     let recovery = event.find("!self.request_recovered_window(id)").unwrap();
     let stopped = event.find("!renderer.device_accepts_gpu_work()").unwrap();
     let request = event.find("window.request_window_redraw()").unwrap();
@@ -294,7 +294,7 @@ fn a_fallback_wake_without_a_live_renderer_does_nothing() {
     app.handle_font_fallback_ready(child, 1);
     let closed = WindowId::dummy();
     app.handle_font_fallback_ready(closed, 1);
-    let window = &app.windows[&child];
+    let window = &app.registry.windows[&child];
     assert!(!window.redraw.has_pending());
     assert!(!window.redraw.request_in_flight);
     assert_eq!(crate::app::window_state::window_redraw_requests(), before);
@@ -307,8 +307,8 @@ fn a_due_fallback_wake_requests_one_frame_for_a_visible_window() {
     let (mut app, child) = app_with_child_window();
     let before = crate::app::window_state::window_redraw_requests();
     app.request_font_fallback_frame(child, true);
-    assert!(app.windows[&child].redraw.has_pending());
-    assert!(app.windows[&child].redraw.request_in_flight);
+    assert!(app.registry.windows[&child].redraw.has_pending());
+    assert!(app.registry.windows[&child].redraw.request_in_flight);
     assert_eq!(crate::app::window_state::window_redraw_requests(), before + 1);
     app.request_font_fallback_frame(child, true);
     assert_eq!(crate::app::window_state::window_redraw_requests(), before + 1);
@@ -318,11 +318,11 @@ fn a_due_fallback_wake_requests_one_frame_for_a_visible_window() {
 #[test]
 fn a_due_fallback_wake_only_marks_a_hidden_window() {
     let (mut app, child) = app_with_child_window();
-    app.windows.get_mut(&child).unwrap().hidden = true;
+    app.registry.windows.get_mut(&child).unwrap().hidden = true;
     let before = crate::app::window_state::window_redraw_requests();
     app.request_font_fallback_frame(child, true);
-    assert!(app.windows[&child].redraw.has_pending());
-    assert!(!app.windows[&child].redraw.request_in_flight);
+    assert!(app.registry.windows[&child].redraw.has_pending());
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
     assert_eq!(crate::app::window_state::window_redraw_requests(), before);
 }
 
@@ -332,8 +332,8 @@ fn a_fallback_wake_that_is_not_due_does_nothing() {
     let (mut app, child) = app_with_child_window();
     let before = crate::app::window_state::window_redraw_requests();
     app.request_font_fallback_frame(child, false);
-    assert!(!app.windows[&child].redraw.has_pending());
-    assert!(!app.windows[&child].redraw.request_in_flight);
+    assert!(!app.registry.windows[&child].redraw.has_pending());
+    assert!(!app.registry.windows[&child].redraw.request_in_flight);
     assert_eq!(crate::app::window_state::window_redraw_requests(), before);
 }
 
@@ -408,7 +408,10 @@ fn clear_shape_cache_clears_and_redraws_every_window_with_a_renderer() {
             }
         }
         let revision = |app: &App, id: WindowId| {
-            app.windows[&id].renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::style_rev)
+            app.registry.windows[&id]
+                .renderer
+                .as_ref()
+                .map(sonicterm_gpu::core::GpuRenderer::style_rev)
         };
         let before = [revision(&app, first), revision(&app, second)];
         let requests_before = crate::app::window_state::window_redraw_requests();

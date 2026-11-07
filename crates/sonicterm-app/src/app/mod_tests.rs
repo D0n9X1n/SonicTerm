@@ -34,6 +34,7 @@ fn finish_session_drains_every_window_and_is_idempotent() {
     app.main_mut().unwrap().hidden = true;
     app.reconcile_pane_owners();
     let owners: Vec<_> = app
+        .registry
         .windows
         .values()
         .flat_map(|window| {
@@ -42,8 +43,11 @@ fn finish_session_drains_every_window_and_is_idempotent() {
         .collect();
 
     assert!(app.finish_session());
-    assert!(app.windows.values().all(|window| window.panes.is_empty()));
-    assert!(app.windows.contains_key(&child), "native windows remain owned until App drop");
+    assert!(app.registry.windows.values().all(|window| window.panes.is_empty()));
+    assert!(
+        app.registry.windows.contains_key(&child),
+        "native windows remain owned until App drop"
+    );
     assert!(owners.into_iter().all(|owner| !app.__test_owner_is_open(owner)));
     assert!(app.finish_session(), "a repeated finish returns the cached disposition");
     assert_eq!(app.services.pty_reaper.path_counts(), (0, 0));
@@ -75,9 +79,9 @@ fn real_pty_close_paths_take_no_fallback() {
             .with_capture_staging_pool(CaptureStagingPool::new())
             .with_inline_media_pool(media::InlineMediaPool::new());
         let main_pane = app.__test_seed_tab("main");
-        let main = app.main_window_id.unwrap();
+        let main = app.registry.main_window_id.unwrap();
         let child = app.__test_seed_child_window(&["child"]);
-        let child_pane = app.windows[&child].tab_states[0].active_pane;
+        let child_pane = app.registry.windows[&child].tab_states[0].active_pane;
         let in_child = route.ends_with("child");
         let (window, pane) = if in_child { (child, child_pane) } else { (main, main_pane) };
         if matches!(route, "pane-main" | "pane-child" | "pane-or-tab-child") {
@@ -88,16 +92,17 @@ fn real_pty_close_paths_take_no_fallback() {
                 Arc::clone(&app.capture_staging_pool),
             )));
             let extra_pane = PaneState::new_with_media_pool(parser, None, &app.inline_media_pool);
-            let state = app.windows.get_mut(&window).unwrap();
+            let state = app.registry.windows.get_mut(&window).unwrap();
             assert!(state.tab_states[0].tree.split(pane, Direction::Right, extra));
             state.panes.insert(extra, extra_pane);
         }
         attach_idle_pty(&mut app, window, pane);
         app.reconcile_pane_owners();
-        assert!(app.windows[&window].panes[&pane].reap_slot.is_some(), "{route}");
-        let probe = app.windows[&window].panes[&pane].pty.as_ref().unwrap().child_exit_probe();
-        let pid = app.windows[&window].panes[&pane].pty.as_ref().unwrap().pid().unwrap();
-        let pane_owner = app.windows[&window].panes[&pane].owner.as_ref().unwrap().id();
+        assert!(app.registry.windows[&window].panes[&pane].reap_slot.is_some(), "{route}");
+        let probe =
+            app.registry.windows[&window].panes[&pane].pty.as_ref().unwrap().child_exit_probe();
+        let pid = app.registry.windows[&window].panes[&pane].pty.as_ref().unwrap().pid().unwrap();
+        let pane_owner = app.registry.windows[&window].panes[&pane].owner.as_ref().unwrap().id();
         match route {
             "pty-main" | "pty-child" => {
                 assert!(app.close_pty_pane(pane));
@@ -108,8 +113,8 @@ fn real_pty_close_paths_take_no_fallback() {
                 assert!(app.close_child_window(child));
             }
             "straggler-child" => {
-                app.windows.get_mut(&child).unwrap().tabs = TabBar::new();
-                app.windows.get_mut(&child).unwrap().tab_states.clear();
+                app.registry.windows.get_mut(&child).unwrap().tabs = TabBar::new();
+                app.registry.windows.get_mut(&child).unwrap().tab_states.clear();
                 app.reap_empty_child(child);
             }
             "tab-child" => {
@@ -131,7 +136,8 @@ fn real_pty_close_paths_take_no_fallback() {
             }
             "replaced-main" => app.retire_previous_main(),
             "uninstalled" => {
-                let detached = app.windows.get_mut(&window).unwrap().remove_pane(pane).unwrap();
+                let detached =
+                    app.registry.windows.get_mut(&window).unwrap().remove_pane(pane).unwrap();
                 app.retire_pane(detached);
             }
             _ => unreachable!(),
@@ -158,12 +164,12 @@ fn real_pty_uninstalled_main_tab_uses_reaper() {
     let mut app = App::new(Theme::default(), config, Keymap::default())
         .with_capture_staging_pool(CaptureStagingPool::new())
         .with_inline_media_pool(media::InlineMediaPool::new());
-    assert!(app.main_window_id.is_none());
+    assert!(app.registry.main_window_id.is_none());
     app.new_tab_with_launch("uninstalled", pane_launch::PaneLaunch::default());
     let paths = app.services.pty_reaper.path_counts();
     assert!(app.finish_session(), "uninstalled native transport did not settle");
     assert_eq!(paths, (1, 0));
-    assert!(app.windows.is_empty());
+    assert!(app.registry.windows.is_empty());
 }
 
 /// Non-AppKit platforms keep the stored-scale contract for their pre-transition native extents.
@@ -270,9 +276,9 @@ fn broadcast_render_flags_include_fixed_source_and_exclude_unrelated_panes() {
         app.run_action_for_window(&Action::ToggleBroadcast { scope: BroadcastScope::Tab }, child)
     );
     assert!(flags(&app, child).iter().all(|(_, marked)| *marked));
-    assert_eq!(flags(&app, app.main_window_id.unwrap()), vec![(main, false)]);
+    assert_eq!(flags(&app, app.registry.main_window_id.unwrap()), vec![(main, false)]);
     assert_eq!(app.broadcast_receivers(), std::collections::BTreeSet::from([sibling]));
-    app.windows.get_mut(&child).unwrap().tab_states[0].active_pane = sibling;
+    app.registry.windows.get_mut(&child).unwrap().tab_states[0].active_pane = sibling;
     assert!(flags(&app, child).iter().all(|(_, marked)| *marked));
     assert_eq!(app.__test_broadcast_source(), Some(source));
     app.__test_enable_pty_write_log();
@@ -281,7 +287,7 @@ fn broadcast_render_flags_include_fixed_source_and_exclude_unrelated_panes() {
     assert_eq!(writes.len(), 2);
     assert_eq!(writes.iter().filter(|(id, _)| *id == source).count(), 1);
     assert_eq!(writes.iter().filter(|(id, _)| *id == sibling).count(), 1);
-    app.windows.get_mut(&child).unwrap().tab_states[0].active_pane = source;
+    app.registry.windows.get_mut(&child).unwrap().tab_states[0].active_pane = source;
     assert!(
         app.run_action_for_window(&Action::ToggleBroadcast { scope: BroadcastScope::Tab }, child)
     );
@@ -296,7 +302,7 @@ fn broadcast_render_flags_cover_all_windows_and_clear_after_source_closes() {
     let child = app.__test_seed_child_window(&["child"]);
     assert!(app
         .run_action_for_window(&Action::ToggleBroadcast { scope: BroadcastScope::AllTabs }, child));
-    for window in [app.main_window_id.unwrap(), child] {
+    for window in [app.registry.main_window_id.unwrap(), child] {
         assert!(app
             .__test_child_broadcast_render_flags(window)
             .unwrap()
@@ -307,7 +313,7 @@ fn broadcast_render_flags_cover_all_windows_and_clear_after_source_closes() {
     assert!(app.__test_broadcast_source().is_some(), "a live source must remain armed");
     assert!(app.close_child_window(child));
     assert_eq!(
-        app.__test_child_broadcast_render_flags(app.main_window_id.unwrap()).unwrap(),
+        app.__test_child_broadcast_render_flags(app.registry.main_window_id.unwrap()).unwrap(),
         vec![(main, false)]
     );
     app.clear_closed_broadcast_source();
@@ -323,7 +329,7 @@ fn broadcast_render_flags_mark_single_source_without_receivers() {
     assert!(app.run_action(&Action::ToggleBroadcast { scope: BroadcastScope::Tab }));
     assert!(app.broadcast_receivers().is_empty());
     assert_eq!(
-        app.__test_child_broadcast_render_flags(app.main_window_id.unwrap()).unwrap(),
+        app.__test_child_broadcast_render_flags(app.registry.main_window_id.unwrap()).unwrap(),
         vec![(source, true)]
     );
 }
@@ -338,9 +344,9 @@ fn pane_resize_helpers_restore_fullscreen_scrolling_after_margin_reset() {
             let window_id = if child {
                 app.__test_seed_child_window(&["child"])
             } else {
-                app.main_window_id.unwrap()
+                app.registry.main_window_id.unwrap()
             };
-            let pane_id = app.windows[&window_id].tab_states[0].active_pane;
+            let pane_id = app.registry.windows[&window_id].tab_states[0].active_pane;
             let parser = app.pane_by_id(pane_id).unwrap().parser.clone();
             parser.lock().advance(b"\x1b[r");
             let viewport = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, rows as f32 * 10.0);
@@ -373,10 +379,10 @@ fn broadcast_panes_keep_scrollback_and_independent_viewports_after_resize() {
         scope: sonicterm_cfg::keymap::BroadcastScope::AllTabs,
     }));
     assert!(app.terminal_key_targets(main_pane).contains(&child_pane));
-    for (window, pane) in [(app.main_window_id.unwrap(), main_pane), (child, child_pane)] {
+    for (window, pane) in [(app.registry.main_window_id.unwrap(), main_pane), (child, child_pane)] {
         let parser = app.pane_by_id(pane).unwrap().parser.clone();
         parser.lock().advance(b"\x1b[r");
-        resize_all_panes(&app.windows[&window].panes, 80, 12);
+        resize_all_panes(&app.registry.windows[&window].panes, 80, 12);
         parser.lock().advance(b"\x1b[12;1Hone\r\ntwo\r\nthree\r\n");
         assert_eq!(parser.lock().grid().scrollback_len(), 3);
     }
@@ -411,11 +417,12 @@ fn history_search_commit_starts_at_current_viewport_in_main_and_child() {
         let window = if child {
             app.__test_seed_child_window(&["child"])
         } else {
-            app.main_window_id.unwrap()
+            app.registry.main_window_id.unwrap()
         };
-        let pane_id = app.windows[&window].tab_states[0].active_pane;
+        let pane_id = app.registry.windows[&window].tab_states[0].active_pane;
         {
-            let pane = app.windows.get_mut(&window).unwrap().panes.get_mut(&pane_id).unwrap();
+            let pane =
+                app.registry.windows.get_mut(&window).unwrap().panes.get_mut(&pane_id).unwrap();
             let mut parser = pane.parser.lock();
             parser.resize(40, 3);
             for row in 0..21 {
@@ -434,7 +441,7 @@ fn history_search_commit_starts_at_current_viewport_in_main_and_child() {
             app.open_search();
         }
         assert!(app.search_handle_ime_commit(window, "needle"));
-        let state = &app.windows[&window];
+        let state = &app.registry.windows[&window];
         let search = state.tab_states[0].search.as_ref().unwrap();
         assert_eq!(search.matches.len(), 7);
         assert_eq!(search.current, Some(4));
@@ -503,7 +510,7 @@ fn native_drag_keeps_the_pressed_tab_after_an_earlier_tab_closes() {
         app.__test_seed_tab("A");
         app.__test_seed_tab("B");
         app.__test_seed_tab("C");
-        let main = app.main_window_id.unwrap();
+        let main = app.registry.main_window_id.unwrap();
         let source =
             if source_is_main { main } else { app.__test_seed_child_window(&["A", "B", "C"]) };
         let pressed = app.tab_id_at(source, 1).unwrap();
@@ -529,7 +536,7 @@ fn native_drag_cancels_when_the_pressed_tab_has_closed() {
     app.__test_seed_tab("A");
     app.__test_seed_tab("B");
     app.__test_seed_tab("C");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let survivor = app.tab_id_at(main, 2).unwrap();
     app.__test_set_os_drag_source(Some((main, 1)));
     drop(app.detach_from_child(main, 1));
@@ -554,7 +561,7 @@ fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes(
                 app.__test_seed_tab("A");
                 app.__test_seed_tab("B");
                 app.__test_seed_tab("C");
-                let main = app.main_window_id.unwrap();
+                let main = app.registry.main_window_id.unwrap();
                 let source = if source_is_main {
                     main
                 } else {
@@ -568,23 +575,24 @@ fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes(
                     10.0,
                 );
                 let pressed = app.tab_id_at(source, 1).unwrap();
-                let pane = app.windows[&source].tab_states[1].active_pane;
+                let pane = app.registry.windows[&source].tab_states[1].active_pane;
                 app.__test_set_os_drag_source(Some((source, 1)));
                 match mutation {
                     0 => drop(app.detach_from_child(source, 0)),
                     1 => drop(app.detach_from_child(source, 1)),
                     2 => {
-                        assert!(app.windows.get_mut(&source).unwrap().reorder_tab(1, 2));
+                        assert!(app.registry.windows.get_mut(&source).unwrap().reorder_tab(1, 2));
                     }
                     _ => {
-                        app.windows.remove(&source);
+                        app.registry.windows.remove(&source);
                     }
                 }
-                let before: Vec<_> = app.windows.get(&source).map_or_else(Vec::new, |window| {
-                    (0..window.tabs.len())
-                        .map(|tab_index| window.tabs.tabs()[tab_index].id)
-                        .collect()
-                });
+                let before: Vec<_> =
+                    app.registry.windows.get(&source).map_or_else(Vec::new, |window| {
+                        (0..window.tabs.len())
+                            .map(|tab_index| window.tabs.tabs()[tab_index].id)
+                            .collect()
+                    });
                 let outcome = if cancelled {
                     os_drag::DragOutcome::Cancelled
                 } else {
@@ -600,18 +608,22 @@ fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes(
                 assert!(app.interaction.os_drag_source.is_none());
                 assert!(app.pending_tear_out.is_none());
                 let transferred = !cancelled && matches!(mutation, 0 | 2);
-                assert_eq!(app.windows[&target].tabs.len(), if transferred { 2 } else { 1 });
-                assert_eq!(app.windows[&target].panes.contains_key(&pane), transferred);
+                assert_eq!(
+                    app.registry.windows[&target].tabs.len(),
+                    if transferred { 2 } else { 1 }
+                );
+                assert_eq!(app.registry.windows[&target].panes.contains_key(&pane), transferred);
                 if transferred {
                     assert_eq!(app.tab_id_at(target, 0), Some(pressed));
                 }
                 let expected: Vec<_> =
                     before.into_iter().filter(|id| !transferred || *id != pressed).collect();
-                let after: Vec<_> = app.windows.get(&source).map_or_else(Vec::new, |window| {
-                    (0..window.tabs.len())
-                        .map(|tab_index| window.tabs.tabs()[tab_index].id)
-                        .collect()
-                });
+                let after: Vec<_> =
+                    app.registry.windows.get(&source).map_or_else(Vec::new, |window| {
+                        (0..window.tabs.len())
+                            .map(|tab_index| window.tabs.tabs()[tab_index].id)
+                            .collect()
+                    });
                 assert_eq!(after, expected);
             }
         }
@@ -628,7 +640,7 @@ fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
                 app.__test_seed_tab("A");
                 app.__test_seed_tab("B");
                 app.__test_seed_tab("C");
-                let main = app.main_window_id.unwrap();
+                let main = app.registry.main_window_id.unwrap();
                 let source = if source_is_main {
                     main
                 } else {
@@ -642,7 +654,7 @@ fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
                     10.0,
                 );
                 let pressed = app.tab_id_at(source, 1).unwrap();
-                let pressed_pane = app.windows[&source].tab_states[1].active_pane;
+                let pressed_pane = app.registry.windows[&source].tab_states[1].active_pane;
                 let session = crate::tab_drag::DragSession::new(source, pressed, (0.0, 0.0));
                 match mutation {
                     0 => {
@@ -652,10 +664,10 @@ fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
                         drop(app.detach_from_child(source, 1));
                     }
                     2 => {
-                        app.windows.get_mut(&source).unwrap().reorder_tab(1, 2);
+                        app.registry.windows.get_mut(&source).unwrap().reorder_tab(1, 2);
                     }
                     _ => {
-                        app.windows.remove(&source);
+                        app.registry.windows.remove(&source);
                     }
                 }
                 let action =
@@ -678,13 +690,15 @@ fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
                         0 => {
                             assert_eq!(app.tab_id_at(source, 1), Some(pressed));
                             assert_eq!(
-                                app.windows[&source].tab_states[1].active_pane,
+                                app.registry.windows[&source].tab_states[1].active_pane,
                                 pressed_pane
                             );
                         }
                         1 => {
                             assert_eq!(app.tab_id_at(target, 0), Some(pressed));
-                            assert!(app.windows[&target].panes.contains_key(&pressed_pane));
+                            assert!(app.registry.windows[&target]
+                                .panes
+                                .contains_key(&pressed_pane));
                         }
                         _ => {
                             let (tab, state, panes) = torn.as_ref().unwrap();
@@ -694,7 +708,7 @@ fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
                         }
                     }
                 } else {
-                    assert_eq!(app.windows[&target].tabs.len(), 1);
+                    assert_eq!(app.registry.windows[&target].tabs.len(), 1);
                     assert!(torn.is_none());
                 }
             }
@@ -709,7 +723,7 @@ fn transferred_nested_tabs_resize_visible_leaves_and_preserve_zoom_hidden_sizes(
         for zoomed in [false, true] {
             let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
             app.__test_seed_tab("main");
-            let main = app.main_window_id.unwrap();
+            let main = app.registry.main_window_id.unwrap();
             let child = app.__test_seed_child_window(&["child"]);
             let sibling = app.__test_seed_child_window(&["sibling"]);
             let (source, target) = match route {
@@ -746,7 +760,7 @@ fn transferred_nested_tabs_resize_visible_leaves_and_preserve_zoom_hidden_sizes(
             let layout = tree.layout(outer);
             let tab = sonicterm_ui::tabs::Tab::new("incoming");
             let tab_id = tab.id;
-            let window = app.windows.get_mut(&source).unwrap();
+            let window = app.registry.windows.get_mut(&source).unwrap();
             window.tabs.insert(0, tab);
             window.tab_states.insert(0, TabState::new(tree, ids[1]));
             window.panes.extend(panes);
@@ -756,7 +770,7 @@ fn transferred_nested_tabs_resize_visible_leaves_and_preserve_zoom_hidden_sizes(
             app.transfer_tab(source_kind, 0, target_kind, 1).unwrap();
 
             assert_eq!(app.tab_id_at(target, 1), Some(tab_id));
-            assert_eq!(app.windows[&target].tabs.active_index(), 1);
+            assert_eq!(app.registry.windows[&target].tabs.active_index(), 1);
             let mut expected_calls: Vec<_> = layout
                 .iter()
                 .map(|(id, rect)| {
@@ -768,7 +782,7 @@ fn transferred_nested_tabs_resize_visible_leaves_and_preserve_zoom_hidden_sizes(
             expected_calls.sort_unstable();
             assert_eq!(actual, expected_calls, "route={route}, zoomed={zoomed}");
             for id in ids {
-                let parser = app.windows[&target].panes[&id].parser.lock();
+                let parser = app.registry.windows[&target].panes[&id].parser.lock();
                 let expected = expected_calls
                     .iter()
                     .find(|call| call.0 == id)
@@ -778,14 +792,14 @@ fn transferred_nested_tabs_resize_visible_leaves_and_preserve_zoom_hidden_sizes(
             }
             if zoomed {
                 calls.lock().clear();
-                assert!(app.windows.get_mut(&target).unwrap().tab_states[1]
+                assert!(app.registry.windows.get_mut(&target).unwrap().tab_states[1]
                     .tree
                     .toggle_zoom(ids[1]));
                 if target == main {
                     app.resize_visible_panes();
                 } else {
                     super::child_window::resize_visible_panes_in_child(
-                        app.windows.get_mut(&target).unwrap(),
+                        app.registry.windows.get_mut(&target).unwrap(),
                     );
                 }
                 let mut expected: Vec<_> = split_layout
@@ -860,7 +874,7 @@ fn composed_topology_changes_preserve_geometry_owners_and_input_identity() {
     // Main and child operation chains must settle the same derived state before a later transfer uses it.
     let outer = sonicterm_ui::pane::Rect::new(0.0, 40.0, 1200.0, 600.0);
     let assert_window = |app: &App, id: WindowId| {
-        let window = &app.windows[&id];
+        let window = &app.registry.windows[&id];
         assert_eq!(window.tabs.len(), window.tab_states.len());
         let mut leaves: Vec<_> =
             window.tab_states.iter().flat_map(|tab| tab.tree.leaves()).collect();
@@ -901,16 +915,18 @@ fn composed_topology_changes_preserve_geometry_owners_and_input_identity() {
         let mut app = App::new(Theme::default(), config, Keymap::default());
         app.__test_seed_tab("first");
         app.__test_seed_tab("second");
-        let main = app.main_window_id.unwrap();
+        let main = app.registry.main_window_id.unwrap();
         let child = app.__test_seed_child_window(&["first", "second"]);
         app.__test_set_main_pane_viewport(outer, 10.0, 20.0);
         app.__test_set_child_pane_viewport(child, outer, 10.0, 20.0);
         app.resize_visible_panes();
-        super::child_window::resize_visible_panes_in_child(app.windows.get_mut(&child).unwrap());
+        super::child_window::resize_visible_panes_in_child(
+            app.registry.windows.get_mut(&child).unwrap(),
+        );
         let (source, target) = if child_source { (child, main) } else { (main, child) };
-        let tab = app.windows[&source].tabs.active().unwrap().id;
+        let tab = app.registry.windows[&source].tabs.active().unwrap().id;
         let area = sonicterm_ui::ime::ImeCursorArea {
-            pane_id: app.windows[&source].tab_states[0].active_pane,
+            pane_id: app.registry.windows[&source].tab_states[0].active_pane,
             position: (10, 40),
             size: (10, 20),
         };
@@ -924,23 +940,29 @@ fn composed_topology_changes_preserve_geometry_owners_and_input_identity() {
             Action::NextTab,
             Action::PrevTab,
         ] {
-            let window = app.windows.get_mut(&source).unwrap();
+            let window = app.registry.windows.get_mut(&source).unwrap();
             window.ime_cursor_throttle.should_update(area);
             assert!(!window.ime_cursor_throttle.should_update(area));
             assert!(app.run_action_for_window(&action, source));
-            assert!(app.windows.get_mut(&source).unwrap().ime_cursor_throttle.should_update(area));
+            assert!(app
+                .registry
+                .windows
+                .get_mut(&source)
+                .unwrap()
+                .ime_cursor_throttle
+                .should_update(area));
             assert_window(&app, source);
             assert_window(&app, target);
         }
         let index = app.tab_index_of_id(source, tab).unwrap();
-        assert!(app.windows.get_mut(&source).unwrap().reorder_tab(index, 1 - index));
-        assert_eq!(app.windows[&source].tabs.active().unwrap().id, tab);
+        assert!(app.registry.windows.get_mut(&source).unwrap().reorder_tab(index, 1 - index));
+        assert_eq!(app.registry.windows[&source].tabs.active().unwrap().id, tab);
         assert_window(&app, source);
         app.__test_charge_pane_owners();
         let before = app.governor.snapshot(app.governor.root_owner()).unwrap().process_amount;
         let index = app.tab_index_of_id(source, tab).unwrap();
         app.transfer_tab(Some(source), index, Some(target), 1).unwrap();
-        assert_eq!(app.windows[&target].tabs.active().unwrap().id, tab);
+        assert_eq!(app.registry.windows[&target].tabs.active().unwrap().id, tab);
         assert_window(&app, source);
         assert_window(&app, target);
         assert_eq!(

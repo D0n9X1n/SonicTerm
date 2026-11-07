@@ -493,6 +493,7 @@ impl super::super::App {
     pub fn frame_counters_snapshot(&self) -> Option<FrameCountersSnapshot> {
         let app = self.frame_counters.as_ref()?;
         let windows = self
+            .registry
             .windows
             .iter()
             .filter_map(|(id, window)| {

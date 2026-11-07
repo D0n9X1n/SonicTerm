@@ -13,14 +13,14 @@ fn real_pty_transfer_preserves_native_teardown_reservation() {
         .with_capture_staging_pool(CaptureStagingPool::new())
         .with_inline_media_pool(media::InlineMediaPool::new());
     let pane = app.__test_seed_tab("source");
-    let main = app.main_window_id.unwrap();
+    let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["destination"]);
     attach_idle_pty(&mut app, main, pane);
     app.reconcile_pane_owners();
-    let pid = app.windows[&main].panes[&pane].pty.as_ref().unwrap().pid().unwrap();
+    let pid = app.registry.windows[&main].panes[&pane].pty.as_ref().unwrap().pid().unwrap();
     assert!(app.__test_move_pane_between_windows(main, child, pane));
-    assert!(app.windows[&child].panes[&pane].reap_slot.is_some());
-    assert_eq!(app.windows[&child].panes[&pane].pty.as_ref().unwrap().pid(), Some(pid));
+    assert!(app.registry.windows[&child].panes[&pane].reap_slot.is_some());
+    assert_eq!(app.registry.windows[&child].panes[&pane].pty.as_ref().unwrap().pid(), Some(pid));
     assert_eq!(app.services.pty_reaper.path_counts(), (0, 0));
     assert!(app.finish_session());
     assert_eq!(app.services.pty_reaper.path_counts(), (1, 0));
@@ -154,11 +154,12 @@ fn real_pty_alltabs_keyboard_excludes_readonly_receivers() {
             let (_, source) = windows[source_index];
             let (protected_window, protected) = windows[(source_index + 1) % 3];
             let (_, peer) = windows[(source_index + 2) % 3];
-            app.windows.get_mut(&protected_window).unwrap().copy_mode = Some(if read_only {
-                CopyModeState::read_only_at((0, 0))
-            } else {
-                CopyModeState::new_at((0, 0))
-            });
+            app.registry.windows.get_mut(&protected_window).unwrap().copy_mode =
+                Some(if read_only {
+                    CopyModeState::read_only_at((0, 0))
+                } else {
+                    CopyModeState::new_at((0, 0))
+                });
             app.interaction.broadcast =
                 BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
             app.wait_for_input_queues();
@@ -214,7 +215,7 @@ fn real_pty_alltabs_byte_fanout_excludes_readonly_receivers() {
         let (_, source) = windows[source_index];
         let (protected_window, _) = windows[(source_index + 1) % 3];
         let (_, peer) = windows[(source_index + 2) % 3];
-        app.windows.get_mut(&protected_window).unwrap().copy_mode =
+        app.registry.windows.get_mut(&protected_window).unwrap().copy_mode =
             Some(CopyModeState::read_only_at((0, 0)));
         app.interaction.broadcast =
             BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
@@ -238,8 +239,8 @@ fn real_pty_intent_ime_and_paste_respect_readonly_admission() {
             for ime in [false, true] {
                 let (mut app, windows) = input_test_windows();
                 let (target, pane) = windows[target_index];
-                app.frontmost_window = Some(windows[(target_index + 1) % 3].0);
-                app.windows.get_mut(&target).unwrap().copy_mode = match copy_kind {
+                app.registry.frontmost_window = Some(windows[(target_index + 1) % 3].0);
+                app.registry.windows.get_mut(&target).unwrap().copy_mode = match copy_kind {
                     "copy" => Some(CopyModeState::new_at((0, 0))),
                     "readonly" => Some(CopyModeState::read_only_at((0, 0))),
                     _ => None,

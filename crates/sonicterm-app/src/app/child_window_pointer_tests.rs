@@ -28,10 +28,10 @@ fn child_motion_over_each_panes_gutter_belongs_to_the_scrollbar() {
     assert!(app.__test_child_split_active_right(child));
     app.__test_enable_pty_write_log();
     let tracking = PointerModes::new(MouseTracking::AnyMotion, true, false, false);
-    for pane in app.windows[&child].panes.values() {
+    for pane in app.registry.windows[&child].panes.values() {
         pane.pointer_input.store(tracking.bits(), Ordering::Relaxed);
     }
-    let rects = App::compute_pane_rects_for(&app.windows[&child]);
+    let rects = App::compute_pane_rects_for(&app.registry.windows[&child]);
     assert_eq!(rects.len(), 2);
     let gutter = crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX;
     for (pane_id, rect) in rects {

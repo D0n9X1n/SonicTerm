@@ -74,8 +74,8 @@ fn list_paths_resolve_members_before_literals() {
     let cwd = local_file_uri(&uri_path).unwrap();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane = app.__test_seed_tab("list");
-    let window = app.main_window_id.unwrap();
-    app.windows[&window].panes[&pane].parser.lock().resize(60, 3);
+    let window = app.registry.main_window_id.unwrap();
+    app.registry.windows[&window].panes[&pane].parser.lock().resize(60, 3);
     assert!(app.__test_advance_child_pane_parser(
         window,
         pane,
@@ -182,14 +182,14 @@ fn prose_relative_paths_require_local_pane_cwd() {
             let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
             app.local_hostname = "local.invalid".into();
             let pane = app.__test_seed_tab("relative prose");
-            let window = app.main_window_id.unwrap();
+            let window = app.registry.main_window_id.unwrap();
             let cwd_path = if cfg!(windows) { "/C:/work/child" } else { "/work/child" };
             let mut output = String::new();
             if let Some(authority) = authority {
                 output = format!("\x1b]7;file://{authority}{cwd_path}\x1b\\");
             }
             output.push_str(&format!("{path}，正文"));
-            app.windows[&window].panes[&pane].parser.lock().advance(output.as_bytes());
+            app.registry.windows[&window].panes[&pane].parser.lock().advance(output.as_bytes());
             let snapshot = app.cell_target_at(window, pane, 0, 3);
             if authority == Some("") {
                 let ResolvedCellTarget::Path(key) = snapshot.expect("local CWD candidate").target
@@ -235,8 +235,8 @@ fn report_paths_use_exact_spaced_pane_directory() {
     let cwd = local_file_uri(&uri_path).unwrap();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane = app.__test_seed_tab("report");
-    let window = app.main_window_id.unwrap();
-    app.windows[&window].panes[&pane].parser.lock().resize(160, 4);
+    let window = app.registry.main_window_id.unwrap();
+    app.registry.windows[&window].panes[&pane].parser.lock().resize(160, 4);
     for (row, extension) in ["md", "html"].into_iter().enumerate() {
         let relative = format!(
             "reports/investigate-online-issue/20260918T180000Z-skills-classification-flight.{extension}"
@@ -267,7 +267,7 @@ fn failed_path_diagnostics_preserve_clicked_pane_identity() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["first", "second"]);
     let panes = app.__test_child_pane_ids(window).unwrap();
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -285,10 +285,16 @@ fn failed_path_diagnostics_preserve_clicked_pane_identity() {
         let target = app.cell_target_at(window, pane, 0, 3).unwrap();
         let ResolvedCellTarget::Path(key) = target.target else { panic!("path") };
         let request =
-            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+            app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
         let result =
             PathProbeResult { request, selection: None, failure: Some("path-error-missing") };
-        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        assert!(app
+            .registry
+            .windows
+            .get_mut(&window)
+            .unwrap()
+            .path_probe
+            .accept(&result, Some(&key)));
         // A confirmed-missing auto-detected target logs its pane identity, then stays an ordinary click.
         let log = capture_path_diagnostics(sonicterm_logging::LogLevel::Debug, || {
             assert!(!app.activate_target_at(window, pane, 0, 3));
@@ -325,7 +331,7 @@ fn failed_path_diagnostics_remain_opt_in() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["diagnostics"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -357,25 +363,25 @@ fn failed_click_copies_target_without_error_text() {
     app.test_clipboard_text = Some("previous".into());
     app.report_failed_target(window, pane, "file not found", "C:\\work\\main.rs");
     assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
-    let message = &app.windows[&window].notification.as_ref().unwrap().message;
+    let message = &app.registry.windows[&window].notification.as_ref().unwrap().message;
     assert!(message.contains("C:\\work\\main.rs"));
     assert!(message.contains(&app.i18n.translate("path-error-copy-again")));
     assert!(app.copy_confirmed_failure(window, pane, "C:\\work\\main.rs"));
     assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
-    assert!(app.windows[&window]
+    assert!(app.registry.windows[&window]
         .notification
         .as_ref()
         .unwrap()
         .message
         .contains(&app.i18n.translate("path-error-copied")));
-    let message = &app.windows[&window].notification.as_ref().unwrap().message;
+    let message = &app.registry.windows[&window].notification.as_ref().unwrap().message;
     assert_eq!(message.lines().next(), Some(app.i18n.translate("path-error-copied").as_str()));
     assert!(message.lines().nth(2).unwrap().contains("file not found"));
     app.test_clipboard_write_failure = true;
     app.report_failed_target(window, pane, "blocked", "another path");
     assert!(app.copy_confirmed_failure(window, pane, "another path"));
     assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
-    assert!(app.windows[&window]
+    assert!(app.registry.windows[&window]
         .notification
         .as_ref()
         .unwrap()
@@ -392,8 +398,8 @@ fn local_click_requires_authorization_and_copy_confirmation() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["click"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.frontmost_window = Some(window);
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.frontmost_window = Some(window);
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -405,29 +411,41 @@ fn local_click_requires_authorization_and_copy_confirmation() {
     let target = app.cell_target_at(window, pane, 0, 1).unwrap();
     let ResolvedCellTarget::Path(key) = target.target else { panic!("local target") };
     assert!(app.activate_target_at(window, pane, 0, 1));
-    assert!(app.windows[&window].notification.as_ref().unwrap().message.contains(path));
-    app.windows.get_mut(&window).unwrap().notification = None;
+    assert!(app.registry.windows[&window].notification.as_ref().unwrap().message.contains(path));
+    app.registry.windows.get_mut(&window).unwrap().notification = None;
     assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
-    let request = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    let request =
+        app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
     let missing = PathProbeResult {
         request: request.clone(),
         selection: None,
         failure: Some("path-error-missing"),
     };
-    assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&missing, Some(&key)));
+    assert!(app.registry.windows.get_mut(&window).unwrap().path_probe.accept(&missing, Some(&key)));
     assert!(app.activate_target_at(window, pane, 0, 1));
-    assert!(app.windows[&window].notification.as_ref().unwrap().message.contains(path));
-    app.windows.get_mut(&window).unwrap().notification = None;
+    assert!(app.registry.windows[&window].notification.as_ref().unwrap().message.contains(path));
+    app.registry.windows.get_mut(&window).unwrap().notification = None;
     let openable = openable_result(request);
-    assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&openable, Some(&key)));
+    assert!(app
+        .registry
+        .windows
+        .get_mut(&window)
+        .unwrap()
+        .path_probe
+        .accept(&openable, Some(&key)));
     let resolved = key.candidates[0].resolved_path.to_string_lossy().into_owned();
     assert!(app.activate_target_at(window, pane, 0, 1));
     assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
-    assert!(app.windows[&window].notification.as_ref().unwrap().message.contains(&resolved));
+    assert!(app.registry.windows[&window]
+        .notification
+        .as_ref()
+        .unwrap()
+        .message
+        .contains(&resolved));
     assert!(app.activate_target_at(window, pane, 0, 1));
     assert_eq!(app.test_clipboard_text.as_deref(), Some(resolved.as_str()));
     app.report_failed_target(window, pane, "failed", &resolved);
-    app.windows.get_mut(&window).unwrap().notification = None;
+    app.registry.windows.get_mut(&window).unwrap().notification = None;
     assert!(!app.copy_confirmed_failure(window, pane, &resolved));
     app.report_failed_target(window, pane, "failed", &resolved);
     assert!(!app.copy_confirmed_failure(window, pane, "different"));
@@ -441,7 +459,7 @@ fn unverified_plain_text_click_has_no_side_effects() {
     let window = app.__test_seed_child_window(&["plain"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
     app.test_clipboard_text = Some("previous".into());
-    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+    app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
         winit::keyboard::ModifiersState::CONTROL
@@ -456,13 +474,19 @@ fn unverified_plain_text_click_has_no_side_effects() {
     let ResolvedCellTarget::Path(key) = target.target else { panic!("bare candidates") };
     assert!(!app.activate_target_at(window, pane, 0, col));
     for reason in ["path-error-missing", "path-error-blocked"] {
-        app.windows.get_mut(&window).unwrap().path_probe.invalidate();
+        app.registry.windows.get_mut(&window).unwrap().path_probe.invalidate();
         let request =
-            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+            app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
         let result = PathProbeResult { request, selection: None, failure: Some(reason) };
-        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        assert!(app
+            .registry
+            .windows
+            .get_mut(&window)
+            .unwrap()
+            .path_probe
+            .accept(&result, Some(&key)));
         assert!(!app.activate_target_at(window, pane, 0, col));
-        assert!(app.windows[&window].notification.is_none());
+        assert!(app.registry.windows[&window].notification.is_none());
         assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
     }
 }

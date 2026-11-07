@@ -74,7 +74,8 @@ impl App {
     /// Whether any window has a pressed or dragged tab. A drag can end on any
     /// window's bar, so every bar holds its tab widths until it is released.
     pub(super) fn tab_gesture_active(&self) -> bool {
-        self.windows
+        self.registry
+            .windows
             .values()
             .any(|window| window.pressed_tab.is_some() || window.drag_session.is_some())
     }
@@ -83,7 +84,8 @@ impl App {
     /// widths this frame: while any window has a pressed or dragged tab, or
     /// while `window`'s own recorded pointer rests on the bar.
     pub(super) fn tab_widths_held_in(&self, window: WindowId, band: Option<(f32, f32)>) -> bool {
-        let pointer = self.windows.get(&window).map_or((-1.0, -1.0), |state| state.cursor_pos);
+        let pointer =
+            self.registry.windows.get(&window).map_or((-1.0, -1.0), |state| state.cursor_pos);
         tab_widths_held(self.tab_gesture_active(), pointer_rests_on_bar(pointer, band))
     }
 
@@ -101,7 +103,7 @@ impl App {
             }
         };
         let tab_gesture_active = self.tab_gesture_active();
-        let Some(state) = self.windows.get_mut(&window) else {
+        let Some(state) = self.registry.windows.get_mut(&window) else {
             // When: `windows` no longer holds `window`, so it has no pointer to record.
             return;
         };
@@ -120,7 +122,8 @@ impl App {
 
     /// Windows whose bar holds a measured tab width it has not laid out yet.
     pub(super) fn windows_with_held_tab_widths(&self) -> Vec<WindowId> {
-        self.windows
+        self.registry
+            .windows
             .iter()
             .filter(|(_, window)| window.tabs.has_held_content_widths())
             .map(|(id, _)| *id)
@@ -136,7 +139,7 @@ impl App {
             return;
         }
         for id in self.windows_with_held_tab_widths() {
-            if let Some(window) = self.windows.get(&id) {
+            if let Some(window) = self.registry.windows.get(&id) {
                 window.request_window_redraw();
             }
         }

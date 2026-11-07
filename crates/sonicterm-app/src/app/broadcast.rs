@@ -52,7 +52,8 @@ impl App {
 
     /// The window that holds `pane_id`, if any.
     pub(crate) fn window_of_pane(&self, pane_id: u64) -> Option<WindowId> {
-        self.windows
+        self.registry
+            .windows
             .iter()
             .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id))
     }
@@ -88,7 +89,7 @@ impl App {
         source_pane: u64,
     ) -> std::collections::BTreeSet<u64> {
         let mut receivers = std::collections::BTreeSet::new();
-        for window in self.windows.values() {
+        for window in self.registry.windows.values() {
             if window.role.is_report() {
                 // When: the window is a report (Memory Usage or About), its pane has no shell and is never a receiver.
                 continue;
