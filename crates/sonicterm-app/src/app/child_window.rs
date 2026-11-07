@@ -175,7 +175,7 @@ impl App {
     pub(super) fn close_child_window(&mut self, win_id: WindowId) -> bool {
         // The adapter goes before the native window it hooks.
         self.accessibility.remove(&win_id);
-        let Some(mut removed) = self.registry.windows.remove(&win_id) else {
+        let Some(mut removed) = self.registry.remove_window(win_id) else {
             // When: `windows.remove(&win_id)` is `None`, no child resources remain to release.
             return false;
         };

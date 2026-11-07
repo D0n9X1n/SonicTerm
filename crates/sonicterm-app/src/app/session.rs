@@ -142,7 +142,7 @@ impl App {
             .expect("native PTY teardown driver could not start");
         Self {
             registry: crate::app::WindowRegistry {
-                windows: HashMap::new(),
+                windows: WindowMap::default(),
                 main_window_id: None,
                 frontmost_window: None,
                 window_keys: crate::window_key_boundary::WindowKeyRegistry::new(),
@@ -286,7 +286,7 @@ impl App {
             self.cancel_window_rename(previous_id);
             self.cancel_tab_edit(previous_id);
             self.accessibility.remove(&previous_id);
-            if let Some(mut previous) = self.registry.windows.remove(&previous_id) {
+            if let Some(mut previous) = self.registry.remove_window(previous_id) {
                 self.retire_window_counters(previous_id, &mut previous);
                 for pane in std::mem::take(&mut previous.panes).into_values() {
                     self.retire_pane(pane);

@@ -667,7 +667,7 @@ impl App {
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
         self.accessibility.remove(&id);
         self.release_window_owner(id);
-        self.registry.windows.remove(&id).is_some()
+        self.registry.remove_window(id).is_some()
     }
 
     /// Test-only: drop a window without the explicit owner release first.
@@ -681,7 +681,7 @@ impl App {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
     pub fn __test_drop_window_without_release(&mut self, id: WindowId) -> bool {
-        self.registry.windows.remove(&id).is_some()
+        self.registry.remove_window(id).is_some()
     }
 
     /// Test-only: install a callback

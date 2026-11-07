@@ -75,8 +75,13 @@ flowchart LR
   Reg --> Win["WindowState：标签页、窗格、渲染器"]
 ```
 
-`WindowRegistry` 持有 `HashMap<WindowId, WindowState>` 和 `main_window_id`；窗格属于持有它的
-那个窗口的 `WindowState`，所有按窗格 id 的查找都经过注册表的 `pane_by_id`。主窗口和拆出的窗口
+`WindowRegistry` 持有窗口表和 `main_window_id`；窗格属于持有它的那个窗口的 `WindowState`，
+所有按窗格 id 的查找都经过注册表（`pane`、`window_of_pane`，以及给出窗口与标签页的
+`locate_pane`）。窗口表是一个 `WindowMap`：应用可以读取它并原地修改某个窗口，但只有注册表的
+`insert_window` 和 `remove_window` 能添加或移除窗口，且两者在 debug 构建中都会检查没有窗格同时
+属于两个窗口。只有 `App::insert_window_registered` 调用 `insert_window`，它同时注册窗口的
+governor owner；`scripts/check-window-owner-registration.sh` 强制这一点。窗格在窗口之间移动仍经过
+`WindowState` 自身的 `panes` 与 `tab_states`。主窗口和拆出的窗口
 使用同一种 `WindowState` 表示。这些所有者只在 `app` 模块内可见；`App` 的公开方法保持不变。
 少数字段仍留在 `App` 上：帧计数器（在重绘路径上与窗口和命令面板一同借用）、重绘调度、配置、
 主题和键位。字体状态与报告窗口状态有各自的所有者：`FontState` 与 `ReportWindows`。

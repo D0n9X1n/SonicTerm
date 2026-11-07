@@ -189,10 +189,7 @@ fn pty_input_rejected_event(
 impl App {
     /// Admit a new user gesture unless the pane's owning window is READONLY.
     pub(super) fn admits_new_user_input(&self, pane_id: u64) -> bool {
-        !self.registry.windows.values().any(|window| {
-            window.panes.contains_key(&pane_id)
-                && window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
-        })
+        !self.pane_window_read_only(pane_id)
     }
 
     pub(super) fn terminal_key_targets(&self, source_pane: u64) -> BTreeSet<u64> {

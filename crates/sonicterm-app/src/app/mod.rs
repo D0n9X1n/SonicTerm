@@ -324,7 +324,7 @@ pub(in crate::app) use runtime_services::RuntimeServices;
 mod interaction;
 pub(in crate::app) use interaction::InteractionState;
 mod window_registry_state;
-pub(in crate::app) use window_registry_state::WindowRegistry;
+pub(in crate::app) use window_registry_state::{WindowMap, WindowRegistry};
 mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
@@ -650,7 +650,7 @@ impl App {
             // When: `window.role` is not a report, intern a window number; its title is written below.
             self.registry.window_keys.intern(id);
         }
-        self.registry.windows.insert(id, window);
+        self.registry.insert_window(id, window);
         let _ = self.sync_native_title(id, Instant::now(), true);
         // The link takes the period the refresh above just read; only macOS installs one.
         self.install_native_display_link(id);

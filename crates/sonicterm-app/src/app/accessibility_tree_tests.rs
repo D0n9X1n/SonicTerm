@@ -330,11 +330,11 @@ fn a_reader_that_reaches_a_warm_spare_is_served_on_promotion() {
     // recorded and served by the first flush after it.
     let (mut app, window_id) = app_with_window();
     present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
-    let promoted = app.registry.windows.remove(&window_id).expect("the seeded window");
+    let promoted = app.registry.remove_window(window_id).expect("the seeded window");
     app.handle_accessibility_request(window_id, AccessibilityRequest::InitialTree);
     assert!(access(&app, window_id).active, "the request is recorded on the spare's entry");
     assert!(access(&app, window_id).sent.is_empty());
-    app.registry.windows.insert(window_id, promoted);
+    app.registry.insert_window(window_id, promoted);
     let _ = app.flush_accessibility(Instant::now());
     assert!(node(&last_tree(&app, window_id), STRIP_NODE).is_some(), "served on promotion");
     let events = body(

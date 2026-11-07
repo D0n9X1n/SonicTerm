@@ -171,7 +171,7 @@ fn child_split_without_window_or_tab_leaves_topology_empty() {
     assert!(child.tab_states.is_empty());
     assert!(child.panes.is_empty());
 
-    app.registry.windows.remove(&child_id);
+    app.registry.remove_window(child_id);
     assert!(!app.split_active_pane_in_child(child_id, Direction::Right));
     assert!(!app.registry.windows.contains_key(&child_id));
 }

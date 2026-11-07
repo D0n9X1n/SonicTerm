@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Refuses any insertion into `self.registry.windows` outside the single chokepoint that
-# registers the window's governor owner.
+# Refuses any `self.registry.insert_window` call outside the single chokepoint that
+# registers the window's governor owner. The window map itself has no public insert, so
+# `WindowRegistry::insert_window` is the only way in.
 #
 # A window inserted without an owner is absent from hierarchy accounting
 # entirely, not merely uncharged, and nothing later recovers it: both
@@ -25,7 +26,7 @@ CHOKEPOINT="insert_window_registered"
 
 # `crates` without a trailing slash: BSD grep emits `crates//foo` when given
 # `crates/`, which would break the path comparisons below.
-hits=$(grep -rn --include='*.rs' 'self\.registry\.windows\.insert(' crates || true)
+hits=$(grep -rn --include='*.rs' 'self\.registry\.insert_window(' crates || true)
 
 # No insertion at all means the chokepoint has moved or been deleted, not that
 # the invariant holds. Reporting OK there is how a guard survives the removal of

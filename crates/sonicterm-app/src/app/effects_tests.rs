@@ -38,7 +38,7 @@ fn operational_redraw_effects_use_only_the_named_live_window() {
         }]);
     }
     assert_eq!(app.redraw_request_count.load(Ordering::SeqCst), before + 2);
-    app.registry.windows.remove(&child);
+    app.registry.remove_window(child);
     app.dispatch_effects(smallvec::smallvec![sonicterm_app_core::AppEffect::Render {
         window: child_key,
         reason: sonicterm_app_core::RedrawReason::Layout
@@ -91,7 +91,7 @@ fn explicit_window_input_uses_its_active_pane_not_a_zero_sentinel() {
     });
     assert_eq!(app.__test_pty_write_log(), [(child_pane, b"text".to_vec())]);
     assert_ne!(child_pane, main_pane);
-    app.registry.windows.remove(&child);
+    app.registry.remove_window(child);
     app.dispatch_intent(sonicterm_app_core::AppIntent::ImeCommit {
         window: key,
         text: "discard".into(),

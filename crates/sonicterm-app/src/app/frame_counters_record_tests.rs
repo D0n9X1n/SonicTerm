@@ -250,7 +250,7 @@ fn a_closed_windows_totals_move_to_closed_windows_and_late_vt_counts_still_appea
     let open = app.frame_counters_snapshot().expect("counting app");
     assert_eq!(open.windows.len(), 1);
     assert_eq!(open.windows[0].1.count("presented"), Some(1));
-    let mut removed = app.registry.windows.remove(&main).unwrap();
+    let mut removed = app.registry.remove_window(main).unwrap();
     app.retire_window_counters(main, &mut removed);
     pane.vt.note_batch();
     let closed = app.frame_counters_snapshot().expect("counting app");
@@ -304,7 +304,7 @@ fn every_window_removal_retires_its_counters() {
         ("child_tabs.rs", to_lf(include_str!("child_tabs.rs"))),
         ("session.rs", to_lf(include_str!("session.rs"))),
     ] {
-        let removals = source.matches("self.registry.windows.remove(").count();
+        let removals = source.matches("self.registry.remove_window(").count();
         assert_eq!(source.matches("self.retire_window_counters(").count(), removals, "{name}");
     }
 }

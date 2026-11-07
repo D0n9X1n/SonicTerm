@@ -584,7 +584,7 @@ fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes(
                         assert!(app.registry.windows.get_mut(&source).unwrap().reorder_tab(1, 2));
                     }
                     _ => {
-                        app.registry.windows.remove(&source);
+                        app.registry.remove_window(source);
                     }
                 }
                 let before: Vec<_> =
@@ -667,7 +667,7 @@ fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
                         app.registry.windows.get_mut(&source).unwrap().reorder_tab(1, 2);
                     }
                     _ => {
-                        app.registry.windows.remove(&source);
+                        app.registry.remove_window(source);
                     }
                 }
                 let action =

@@ -355,7 +355,7 @@ fn a_suppressed_window_keeps_its_pending_set_until_its_next_collection() {
             present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
             let parser = Arc::clone(&app.registry.windows[&window].panes[&left].parser);
             let tickets_and_others = Arc::weak_count(&parser);
-            drop(app.registry.windows.remove(&window));
+            drop(app.registry.remove_window(window));
             assert!(Arc::weak_count(&parser) < tickets_and_others, "closing drops the tickets");
         }
     }

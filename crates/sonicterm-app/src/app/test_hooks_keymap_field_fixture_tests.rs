@@ -242,7 +242,7 @@ fn stale_keyboard_quit_cannot_arm_a_live_window() {
     app.__test_seed_tab("main");
     let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["removed"]);
-    app.registry.windows.remove(&child);
+    app.registry.remove_window(child);
     app.registry.frontmost_window = Some(main);
 
     assert!(!app.on_quit_chord_pressed(child, false));

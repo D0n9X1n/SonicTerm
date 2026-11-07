@@ -42,7 +42,7 @@ impl App {
         if let Some(child) = self.registry.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 self.accessibility.remove(&win_id);
-                if let Some(mut removed) = self.registry.windows.remove(&win_id) {
+                if let Some(mut removed) = self.registry.remove_window(win_id) {
                     self.retire_window_counters(win_id, &mut removed);
                     for pane in std::mem::take(&mut removed.panes).into_values() {
                         self.retire_pane(pane);

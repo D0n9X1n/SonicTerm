@@ -79,9 +79,15 @@ flowchart LR
   Reg --> Win["WindowState: tabs, panes, renderer"]
 ```
 
-`WindowRegistry` holds `HashMap<WindowId, WindowState>` and `main_window_id`; a
-pane belongs to the one window whose `WindowState` holds it, and every lookup by
-pane id goes through the registry's `pane_by_id`. The main window and torn-out
+`WindowRegistry` holds the window map and `main_window_id`; a pane belongs to the
+one window whose `WindowState` holds it, and every lookup by pane id goes through
+the registry (`pane`, `window_of_pane`, `locate_pane` for its window and tab). The
+map is a `WindowMap`: the app reads it and changes a window in place, but only the
+registry's `insert_window` and `remove_window` add or drop one, and in debug builds
+both check that no pane belongs to two windows. `insert_window` is called only from
+`App::insert_window_registered`, which also registers the window's governor owner;
+`scripts/check-window-owner-registration.sh` enforces that. Moving panes between
+windows still goes through `WindowState`'s own `panes` and `tab_states`. The main window and torn-out
 windows use the same `WindowState` representation. The owners are visible only
 inside the `app` module; the public `App` methods stay as they were. A few fields
 stay on `App` itself: frame counters (borrowed beside windows and the palette on

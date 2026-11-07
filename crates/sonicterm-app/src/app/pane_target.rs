@@ -84,29 +84,20 @@ pub(crate) enum TargetError {
 impl App {
     /// The window and tab that hold `pane_id`, searching the main window and every child.
     pub(crate) fn locate_pane(&self, pane_id: u64) -> Option<PaneLocation> {
-        self.registry.windows.iter().find_map(|(window_id, window)| {
-            if !window.panes.contains_key(&pane_id) {
-                // When: this window's `panes` lack `pane_id`, the pane lives elsewhere.
-                return None;
-            }
-            let tab_index = window
-                .tab_states
-                .iter()
-                .position(|tab_state| tab_state.tree.contains_pane(pane_id))?;
-            Some(PaneLocation {
-                window_id: *window_id,
-                tab_index,
-                is_main: Some(*window_id) == self.registry.main_window_id,
-            })
+        let slot = self.registry.locate_pane(pane_id)?;
+        Some(PaneLocation {
+            window_id: slot.window_id,
+            tab_index: slot.tab_index,
+            is_main: Some(slot.window_id) == self.registry.main_window_id,
         })
     }
 
     /// Whether `pane_id`'s window is in READONLY, frontmost or not.
     pub(crate) fn pane_window_read_only(&self, pane_id: u64) -> bool {
-        self.registry.windows.values().any(|window| {
-            window.panes.contains_key(&pane_id)
-                && window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
-        })
+        self.registry
+            .window_of_pane(pane_id)
+            .and_then(|window_id| self.registry.windows[&window_id].copy_mode.as_ref())
+            .is_some_and(CopyModeState::is_read_only)
     }
 
     /// Open a helper pane beside `anchor` without moving the user's focus: a split in the

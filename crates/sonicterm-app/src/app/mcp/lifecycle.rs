@@ -297,11 +297,11 @@ impl App {
     /// is ordered, and only this pane's handles are cloned. `None` when no terminal window holds
     /// the pane or it is mid-teardown.
     pub(crate) fn mcp_resolve_pane(&self, pane_id: u64) -> Option<PaneEntry> {
-        let window = self
-            .registry
-            .windows
-            .values()
-            .find(|window| !window.role.is_report() && window.panes.contains_key(&pane_id))?;
+        let window = &self.registry.windows[&self.registry.window_of_pane(pane_id)?];
+        if window.role.is_report() {
+            // When: the `window` holding the pane is a report window, it is no terminal pane.
+            return None;
+        }
         Self::mcp_entry(window, None, pane_id)
     }
 
@@ -309,14 +309,14 @@ impl App {
     /// agree.
     #[cfg(test)]
     pub(crate) fn mcp_pane_metadata(&self, pane_id: u64) -> Option<PaneMetadata> {
-        let (window_id, window) =
-            self.registry.windows.iter().find(|(_, window)| {
-                !window.role.is_report() && window.panes.contains_key(&pane_id)
-            })?;
-        let window_index = self.mcp_window_order().iter().position(|id| id == window_id)?;
-        let tab_index =
-            window.tab_states.iter().position(|tab_state| tab_state.tree.contains_pane(pane_id))?;
-        Self::mcp_entry(window, Some((window_index, tab_index)), pane_id)?.metadata
+        let slot = self.registry.locate_pane(pane_id)?;
+        let window = &self.registry.windows[&slot.window_id];
+        if window.role.is_report() {
+            // When: the `window` holding the pane is a report window, it is no terminal pane.
+            return None;
+        }
+        let window_index = self.mcp_window_order().iter().position(|id| *id == slot.window_id)?;
+        Self::mcp_entry(window, Some((window_index, slot.tab_index)), pane_id)?.metadata
     }
 
     /// One pane's entry, cloning only its own shared handles; `None` when `pane_id` is a leaf

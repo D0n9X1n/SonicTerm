@@ -278,11 +278,11 @@ fn real_pty_window_name_paste_after_owner_close_or_hide_keeps_live_routing() {
             assert!(app.registry.windows[&owner].hidden);
         } else {
             app.release_child_window_registries(owner);
-            let removed = app.registry.windows.remove(&owner).unwrap();
+            let removed = app.registry.remove_window(owner).unwrap();
             let handled = app.run_action_for_window(&Action::PasteFromClipboard, owner);
             let captures = (app.__test_drain_pty_writes(), submitted.take());
             // Return PTY custody before any assertion so InputTestApp also cleans a failing test.
-            app.registry.windows.insert(owner, removed);
+            app.registry.insert_window(owner, removed);
             assert!(!handled, "a closed explicit source must not fall back to main");
             assert_eq!(captures, (Vec::new(), Vec::new()));
         }
@@ -754,7 +754,7 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
         }
         // An explicit removed window is refused rather than using cached focus or main's open search.
         let closed = app.__test_seed_child_window(&["closed"]);
-        app.registry.windows.remove(&closed);
+        app.registry.remove_window(closed);
         assert!(!app.run_action_for_window(&Action::PasteFromClipboard, closed));
         assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
         for (id, pane) in windows {

@@ -865,7 +865,7 @@ pub(super) fn run_stopped_growth(
     if app.begin_window_redraw(id, Instant::now()) {
         return Err("a stopped window starts no frame".into());
     }
-    let mut removed = app.registry.windows.remove(&id).ok_or("the window is tracked")?;
+    let mut removed = app.registry.remove_window(id).ok_or("the window is tracked")?;
     app.retire_window_counters(id, &mut removed);
     let closed = app.frame_counters_snapshot().ok_or("counting app")?.closed_windows;
     let reported = (
