@@ -699,7 +699,7 @@ impl App {
         size: Option<(u16, u16)>,
     ) -> PaneState {
         #[cfg(test)]
-        self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
+        self.testing.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
         let (cols, rows) = size.unwrap_or_else(|| {
             self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((80, 24))
         });

@@ -348,7 +348,7 @@ fn native_focus_cleanup_is_idempotent_for_main_and_child_without_parser_locks() 
     let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     let child_pane = app.__test_child_pane_ids(child).unwrap()[0];
-    app.pty_write_log_enabled = true;
+    app.testing.pty_write_log_enabled = true;
     for (window_id, pane_id) in [(main, main_pane), (child, child_pane)] {
         let parser = app.pane_by_id(pane_id).unwrap().parser.clone();
         parser.lock().advance(b"\x1b[?9001h");
@@ -383,7 +383,7 @@ fn native_focus_cleanup_is_idempotent_for_main_and_child_without_parser_locks() 
         assert!(app.registry.windows[&window_id].pty_pressed_keys.is_empty());
     }
     assert_eq!(
-        *app.test_pty_writes.lock(),
+        *app.testing.test_pty_writes.lock(),
         vec![
             (main_pane, b"\x1b[13;28;0;0;0;1_".to_vec()),
             (child_pane, b"\x1b[13;28;0;0;0;1_".to_vec()),
@@ -416,10 +416,10 @@ fn native_focus_cleanup_groups_all_held_keys_into_one_pane_admission() {
             )]),
         );
     }
-    app.pty_write_log_enabled = true;
+    app.testing.pty_write_log_enabled = true;
     app.release_window_native_keys(window_id);
     app.release_window_native_keys(window_id);
-    assert_eq!(*app.test_pty_writes.lock(), vec![(pane_id, b"\x1b[65;30;0;0;0;1_\x1b[66;48;0;0;0;1_\x1b[67;46;0;0;0;1_\x1b[68;32;0;0;0;1_\x1b[69;18;0;0;0;1_".to_vec())]);
+    assert_eq!(*app.testing.test_pty_writes.lock(), vec![(pane_id, b"\x1b[65;30;0;0;0;1_\x1b[66;48;0;0;0;1_\x1b[67;46;0;0;0;1_\x1b[68;32;0;0;0;1_\x1b[69;18;0;0;0;1_".to_vec())]);
 }
 
 /// Accepted Windows PTY input fixes one foreground-process probe deadline.
@@ -519,13 +519,13 @@ fn windows_osc52_reassertion_is_bounded_and_supersedable() {
         .expect("a successful Windows OSC 52 write schedules one reassertion")
         .due;
 
-    app.test_clipboard_text = Some("old".into());
+    app.testing.test_clipboard_text = Some("old".into());
     app.reassert_osc52_clipboard_if_due(due);
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("Copilot selection"));
     assert!(app.pending_osc52_reassert.is_none(), "the retry is one-shot");
 
     app.handle_clipboard_write("stale OSC 52".into());
-    app.test_clipboard_text = Some("newer external copy".into());
+    app.testing.test_clipboard_text = Some("newer external copy".into());
     app.reassert_osc52_clipboard_if_due(due + std::time::Duration::from_secs(1));
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("newer external copy"));
 

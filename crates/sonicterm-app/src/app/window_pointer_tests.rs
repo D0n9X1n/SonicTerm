@@ -351,7 +351,7 @@ fn main_pointer_handlers_route_by_published_modes_while_the_parser_is_held() {
     for ((modes, motion), wheel) in published_cases().into_iter().zip(wheel_bytes) {
         let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
         let pane_id = app.__test_seed_tab("main");
-        app.test_viewport_override =
+        app.testing.test_viewport_override =
             Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
         app.__test_enable_pty_write_log();
         let pane = &app.main().unwrap().panes[&pane_id];
@@ -461,7 +461,7 @@ fn main_wheel_follows_modes_published_from_parser_batches() {
     for (name, batches, wheel, viewport) in parser_mode_cases() {
         let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
         let pane_id = app.__test_seed_tab("main");
-        app.test_viewport_override =
+        app.testing.test_viewport_override =
             Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
         app.__test_enable_pty_write_log();
         let window = app.main_mut().unwrap();

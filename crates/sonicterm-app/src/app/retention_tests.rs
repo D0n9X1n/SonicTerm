@@ -776,10 +776,11 @@ pub(super) fn pass_at(
     secs: u64,
     window_id: WindowId,
 ) -> Option<TrimDecision> {
-    app.test_scheduler_trims.clear();
+    app.testing.test_scheduler_trims.clear();
     app.diagnostics.last_retention_sample = None;
     app.sample_pane_retention(base + Duration::from_secs(secs));
-    app.test_scheduler_trims
+    app.testing
+        .test_scheduler_trims
         .iter()
         .find(|(decided, _)| *decided == window_id)
         .map(|(_, decision)| *decision)
@@ -925,7 +926,7 @@ pub(super) fn run_live_scheduler(
         return Err(String::from("the hook skips a warm spare"));
     }
     let _ = pass_at(&mut app, base, 200, main);
-    if app.test_scheduler_trims.iter().any(|(decided, _)| *decided == spare) {
+    if app.testing.test_scheduler_trims.iter().any(|(decided, _)| *decided == spare) {
         return Err(String::from("the pass never visits a warm spare"));
     }
     let spare_after = &app.registry.warm_window_pool[0].renderer;

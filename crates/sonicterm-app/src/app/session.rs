@@ -212,30 +212,19 @@ impl App {
             },
             keymap,
             clipboard: Clipboard::new().ok(),
+            // No event-loop proxy ⇒ headless/test construction ⇒ record PTY writes for assertions.
+            // Production always passes `Some(proxy)`, so the ledger stays off and costs nothing.
+            testing: super::test_support_state::TestSupportState {
+                pty_write_log_enabled: event_loop_proxy.is_none(),
+                ..Default::default()
+            },
             #[cfg(target_os = "windows")]
             pending_osc52_reassert: None,
-            test_clipboard_text: None,
-            test_clipboard_files: None,
-            #[cfg(any(test, feature = "test-support"))]
-            test_clipboard_write_failure: false,
-            test_pty_writes: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(test)]
-            test_pane_launches: std::cell::RefCell::new(Vec::new()),
-            #[cfg(test)]
-            test_pty_write_sources: std::cell::RefCell::new(Vec::new()),
-            // No event-loop proxy ⇒ headless/test construction ⇒ record PTY
-            // writes for assertions. Production always passes `Some(proxy)`,
-            // so the ledger stays disabled and adds no per-write cost.
-            pty_write_log_enabled: event_loop_proxy.is_none(),
             pending_new_window: None,
             reports: Default::default(),
             pending_tear_out: None,
             pending_os_teardown: false,
-            #[cfg(any(test, feature = "test-support"))]
-            test_post_snapshot_hook: None,
             pending_exit: false,
-            #[cfg(test)]
-            test_scheduler_trims: Vec::new(),
             governor,
             session_finished: None,
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
@@ -264,7 +253,6 @@ impl App {
             quit_hold: quit_hold::QuitHold::new(),
             on_resumed: None,
             on_window_ready: None,
-            test_viewport_override: None,
             machine,
         }
     }

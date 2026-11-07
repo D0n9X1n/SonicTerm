@@ -34,13 +34,14 @@ fn app_with_user_and_agent_panes() -> (App, u64, u64) {
         pane.pty = Some(pty);
         pane.agent_owned = pane_id == agent;
     }
-    app.pty_write_log_enabled = true;
+    app.testing.pty_write_log_enabled = true;
     (app, user, agent)
 }
 
 /// The bytes written to `pane_id` so far.
 fn written(app: &App, pane_id: u64) -> Vec<u8> {
-    app.test_pty_writes
+    app.testing
+        .test_pty_writes
         .lock()
         .iter()
         .filter(|(id, _)| *id == pane_id)
@@ -100,7 +101,7 @@ fn send_text_wraps_a_paste_when_the_pane_asked() {
         LoopReply::Written(3, _)
     ));
     assert_eq!(written(&app, agent), b"ls\r");
-    app.test_pty_writes.lock().clear();
+    app.testing.test_pty_writes.lock().clear();
     let parser = std::sync::Arc::clone(&app.main().unwrap().panes[&agent].parser);
     parser.lock().advance(b"\x1b[?2004h");
     app.mcp_send_text(McpControl::Agent, agent, "ls", true);
@@ -114,7 +115,7 @@ fn send_keys_follow_the_pane_modes() {
     let keys = keys::parse_keys(&["Up".to_owned(), "Ctrl+C".to_owned()]).unwrap();
     app.mcp_send_keys(McpControl::Agent, agent, &keys);
     assert_eq!(written(&app, agent), b"\x1b[A\x03");
-    app.test_pty_writes.lock().clear();
+    app.testing.test_pty_writes.lock().clear();
     let pane = &app.main().unwrap().panes[&agent];
     pane.parser.lock().advance(b"\x1b[?1h");
     // The VT worker publishes keyboard modes in production; the test publishes them by hand.

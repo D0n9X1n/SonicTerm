@@ -282,7 +282,7 @@ fn main_tab_and_split_inherit_exact_active_pane_cwd() {
             app.new_tab("new");
         }
         let expected = if cfg!(windows) { r"C:\work\source" } else { "/work/source" };
-        let launches = app.test_pane_launches.borrow();
+        let launches = app.testing.test_pane_launches.borrow();
         assert_eq!(launches.len(), 1);
         assert_eq!(launches[0].1.cwd, Some(std::path::PathBuf::from(expected)));
     }

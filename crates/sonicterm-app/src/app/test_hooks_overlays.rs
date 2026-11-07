@@ -34,18 +34,21 @@ impl App {
         self.interaction.command_palette.is_open()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: command palette query text.
     #[doc(hidden)]
     pub fn __test_palette_query(&self) -> &str {
         self.interaction.command_palette.query()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: command palette caret byte offset.
     #[doc(hidden)]
     pub fn __test_palette_cursor(&self) -> usize {
         self.interaction.command_palette.cursor()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: replace the command-palette query and refresh its selection.
     #[doc(hidden)]
     pub fn __test_set_palette_query(&mut self, query: &str) {
@@ -93,6 +96,7 @@ impl App {
         self.interaction.command_palette.start_rename_tab(title);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: drive command-palette key handling by logical key.
     #[doc(hidden)]
     pub fn __test_command_palette_handle_key(&mut self, key: &winit::keyboard::Key) -> bool {
@@ -184,6 +188,7 @@ impl App {
         self.open_search_in_child(id)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: open main search and install a known query.
     #[doc(hidden)]
     pub fn __test_set_main_search_query(&mut self, query: &str) -> bool {
@@ -213,6 +218,7 @@ impl App {
         true
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: install a known query in an open child search field.
     #[doc(hidden)]
     pub fn __test_set_child_search_query(&mut self, id: WindowId, query: &str) -> bool {
@@ -297,6 +303,7 @@ impl App {
         true
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: read main or child search query and caret.
     #[doc(hidden)]
     pub fn __test_search_query_cursor(&self, id: Option<WindowId>) -> Option<(&str, usize)> {
@@ -319,28 +326,29 @@ impl App {
         true
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: install an in-memory clipboard buffer. This avoids depending
     /// on the OS clipboard in headless integration tests while exercising the
     /// same `set_clipboard_text` / `paste_clipboard` dispatch paths.
     #[doc(hidden)]
     pub fn __test_set_memory_clipboard(&mut self, text: &str) {
         // Installed text replaces any copied-file override, as a native text copy would.
-        self.test_clipboard_text = Some(text.to_string());
-        self.test_clipboard_files = None;
+        self.testing.test_clipboard_text = Some(text.to_string());
+        self.testing.test_clipboard_files = None;
     }
 
     /// Test-only: read the in-memory clipboard buffer if installed.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
     pub fn __test_memory_clipboard(&self) -> Option<String> {
-        self.test_clipboard_text.clone()
+        self.testing.test_clipboard_text.clone()
     }
 
     /// Test-only: make clipboard writes fail before either clipboard seam changes.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_clipboard_write_failure(&mut self, enabled: bool) {
-        self.test_clipboard_write_failure = enabled;
+        self.testing.test_clipboard_write_failure = enabled;
     }
 
     /// Test-only: exercise file-drop path paste routing without a platform drop event.

@@ -156,7 +156,7 @@ fn real_pty_window_name_paste_rejects_chunks_without_fallback() {
                             // Empty or unavailable input must not erase an earlier rejection.
                             app.interaction.command_palette.input_window_name("\n");
                         }
-                        app.test_clipboard_text = text;
+                        app.testing.test_clipboard_text = text;
                         app.clipboard = None;
                         app.wait_for_input_queues();
                         dispatch_window_name_test_paste(&mut app, owner, menu);
@@ -696,7 +696,7 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
 
         for text in [Some(""), Some("\r\n\t\x1b\x7f"), None] {
             // None removes both sources of clipboard data rather than falling back to the user's native clipboard.
-            app.test_clipboard_text = text.map(str::to_owned);
+            app.testing.test_clipboard_text = text.map(str::to_owned);
             app.clipboard = None;
             assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
             let search =

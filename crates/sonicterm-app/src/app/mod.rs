@@ -202,6 +202,7 @@ mod font_catalog;
 mod font_state;
 mod frame_counters;
 mod guard_correlation;
+mod test_support_state;
 pub use guard_correlation::{
     AbandonedSectionV1, GuardCorrelationTakeV1, GuardCorrelationV1, LossIntervalV1, PaneSectionsV1,
     PendingSectionV1, SectionRecordV1, SpanBatchV1, SpanRecordV1,
@@ -437,6 +438,10 @@ pub struct App {
     /// Process privilege observed once by the native binary before window creation.
     pub(super) process_privilege: crate::ProcessPrivilege,
     pub(super) config: Config,
+    /// Test-only seams: clipboard overrides, the PTY write ledger, and test observations. Release
+    /// builds hold only the fields production or the perf harness still reads.
+    #[doc(hidden)]
+    pub testing: test_support_state::TestSupportState,
     /// Where configuration comes from: normalizer, theme and keymap loaders, smoke config path and
     /// startup load outcomes.
     pub(in crate::app) configs: config_state::ConfigState,
@@ -457,42 +462,6 @@ pub struct App {
     #[cfg(target_os = "windows")]
     /// One delayed OSC 52 write that survives a failing clipboard helper's cleanup.
     pub(super) pending_osc52_reassert: Option<PendingOsc52Reassert>,
-    /// Test-only in-memory clipboard override for integration tests that need
-    /// to observe copy/paste routing without depending on a desktop clipboard
-    /// service. `None` means production arboard behavior; `Some(_)` means reads
-    /// and writes use this buffer instead.
-    #[doc(hidden)]
-    pub(super) test_clipboard_text: Option<String>,
-    /// Test-only copied-file list standing in for the native clipboard's file
-    /// list. Installing either test override keeps every read off the desktop
-    /// clipboard; `None` here then means no files are on the clipboard.
-    #[doc(hidden)]
-    pub(super) test_clipboard_files: Option<Vec<std::path::PathBuf>>,
-    /// Test-only clipboard write rejection injected at the production write
-    /// boundary. Disabled in every constructor so ordinary runs retain the real
-    /// clipboard behavior and the in-memory success seam remains opt-in.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) test_clipboard_write_failure: bool,
-    /// Test-only PTY write ledger. `write_to_pane` records every boundary write
-    /// here before resolving the pane to a real PTY, so headless tests can assert
-    /// which pane an action targeted without constructing a process-backed PTY.
-    #[doc(hidden)]
-    pub(super) test_pty_writes: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
-    /// Unit-test observation of actual PTY spawn inputs; absent from production builds.
-    #[cfg(test)]
-    test_pane_launches: std::cell::RefCell<Vec<(u64, pane_launch::PaneLaunch)>>,
-    /// Unit-test record of each logged PTY write's pane and producer source, so tests can check attribution.
-    #[cfg(test)]
-    test_pty_write_sources: std::cell::RefCell<Vec<(u64, PtyInputSource)>>,
-    /// Whether the PTY write ledger above is actually recorded. `false` in
-    /// production so `dispatch_pty_write_effect` does no lock/clone/push per
-    /// write (the ledger would otherwise grow unbounded for the whole
-    /// session —). Set `true` when the app is built without an
-    /// event-loop proxy (headless/test construction) so existing tests keep
-    /// capturing writes with no per-test opt-in.
-    #[doc(hidden)]
-    pub(super) pty_write_log_enabled: bool,
     // `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
@@ -518,29 +487,11 @@ pub struct App {
     /// when drained — this flag controls only WHEN it runs, not
     /// WHETHER, so the cleanup stays idempotent.
     pub(super) pending_os_teardown: bool,
-    /// Test-only callback fired
-    /// inside [`Self::cancel_drag_session`] AFTER the `self.registry.windows.keys()`
-    /// snapshot is collected but BEFORE the per-id iteration body runs.
-    /// Lets a regression test
-    /// mutate `self.registry.windows` in the exact race window that the
-    /// `get_mut(&id).else { continue }` arm is designed to tolerate.
-    /// Consumed (`take()`-d) at the call site so the closure is invoked
-    /// at most once per `cancel_drag_session` run and the mutable
-    /// borrow on `self.registry.windows` is not held while it runs. Compiled only
-    /// under `cfg(test)` or `test-support`, so release builds carry neither the
-    /// field nor the call; an integration test installs it through
-    /// `App::__test_set_post_snapshot_hook`.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) test_post_snapshot_hook: Option<Box<dyn FnOnce(&mut App) + Send>>,
     /// Deferred app-exit request, set by a quit action or by a close that
     /// leaves no active terminal window. `do_about_to_wait` drains it by
     /// calling `event_loop.exit()`; the flag exists because those paths have
     /// no `ActiveEventLoop` handle.
     pub(super) pending_exit: bool,
-    /// Unit-test observation of every scheduler trim decision, in pass order.
-    #[cfg(test)]
-    pub(super) test_scheduler_trims: Vec<(WindowId, retention::TrimDecision)>,
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
     /// Process-wide resource governor and its owner hierarchy.
@@ -650,16 +601,6 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    /// Test-only viewport override. When
-    /// `Some((outer, cell_w, cell_h))`, [`Self::compute_active_pane_rects`]
-    /// uses `outer` instead of fetching the renderer's logical size and
-    /// [`Self::resize_visible_panes`] uses `(cell_w, cell_h)` instead of
-    /// the renderer's `cell_size()`. Lets tests exercise the production
-    /// `close_active_pane` path (Grid + PtyHandle resize wiring) without
-    /// a live wgpu surface. Stays `None` in release builds whose tests
-    /// don't touch it.
-    #[doc(hidden)]
-    pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
     /// Compatibility reducer observations; live topology decisions and native effect targets belong to App.
     pub(crate) machine: sonicterm_app_core::AppStateMachine,
 }

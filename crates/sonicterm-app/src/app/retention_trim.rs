@@ -88,7 +88,7 @@ impl super::super::App {
         for window_id in window_ids {
             let decision = self.trim_window_if_eligible(window_id, now, TrimRule::After30s);
             #[cfg(test)]
-            self.test_scheduler_trims.push((window_id, decision));
+            self.testing.test_scheduler_trims.push((window_id, decision));
             #[cfg(not(test))]
             let _ = decision;
         }

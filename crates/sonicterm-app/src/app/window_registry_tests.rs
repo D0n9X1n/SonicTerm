@@ -129,7 +129,8 @@ fn registry_invariants_hold_across_lifecycle_sequences() {
                 }
                 _ => {
                     // Alternate the main viewport's width, so every resize changes the visible grids.
-                    let current = app.test_viewport_override.map_or(800.0, |(outer, _, _)| outer.w);
+                    let current =
+                        app.testing.test_viewport_override.map_or(800.0, |(outer, _, _)| outer.w);
                     let width_px = if current == 800.0 { 600.0 } else { 800.0 };
                     let before = app.compute_active_pane_rects();
                     assert!(app.__test_set_main_pane_viewport(geometry(width_px), 10.0, 10.0));

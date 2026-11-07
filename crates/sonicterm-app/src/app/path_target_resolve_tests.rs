@@ -360,14 +360,14 @@ fn failed_click_copies_target_without_error_text() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["copy failure"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.test_clipboard_text = Some("previous".into());
+    app.testing.test_clipboard_text = Some("previous".into());
     app.report_failed_target(window, pane, "file not found", "C:\\work\\main.rs");
-    assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some("previous"));
     let message = &app.registry.windows[&window].notification.as_ref().unwrap().message;
     assert!(message.contains("C:\\work\\main.rs"));
     assert!(message.contains(&app.i18n.translate("path-error-copy-again")));
     assert!(app.copy_confirmed_failure(window, pane, "C:\\work\\main.rs"));
-    assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
     assert!(app.registry.windows[&window]
         .notification
         .as_ref()
@@ -377,19 +377,19 @@ fn failed_click_copies_target_without_error_text() {
     let message = &app.registry.windows[&window].notification.as_ref().unwrap().message;
     assert_eq!(message.lines().next(), Some(app.i18n.translate("path-error-copied").as_str()));
     assert!(message.lines().nth(2).unwrap().contains("file not found"));
-    app.test_clipboard_write_failure = true;
+    app.testing.test_clipboard_write_failure = true;
     app.report_failed_target(window, pane, "blocked", "another path");
     assert!(app.copy_confirmed_failure(window, pane, "another path"));
-    assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
     assert!(app.registry.windows[&window]
         .notification
         .as_ref()
         .unwrap()
         .message
         .contains(&app.i18n.translate("path-error-copy-failed")));
-    app.test_clipboard_write_failure = false;
+    app.testing.test_clipboard_write_failure = false;
     app.report_failed_target(window, u64::MAX, "late error", "stale path");
-    assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
 }
 
 /// Only current actionable paths notify; retrying the same visible failure copies without opening again.
@@ -404,7 +404,7 @@ fn local_click_requires_authorization_and_copy_confirmation() {
     } else {
         winit::keyboard::ModifiersState::CONTROL
     };
-    app.test_clipboard_text = Some("previous".into());
+    app.testing.test_clipboard_text = Some("previous".into());
     let path = if cfg!(windows) { "C:/work/file.txt" } else { "/work/file.txt" };
     let output = format!("\x1b]8;;{path}\x1b\\file\x1b]8;;\x1b\\");
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
@@ -413,7 +413,7 @@ fn local_click_requires_authorization_and_copy_confirmation() {
     assert!(app.activate_target_at(window, pane, 0, 1));
     assert!(app.registry.windows[&window].notification.as_ref().unwrap().message.contains(path));
     app.registry.windows.get_mut(&window).unwrap().notification = None;
-    assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some("previous"));
     let request =
         app.registry.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
     let missing = PathProbeResult {
@@ -435,7 +435,7 @@ fn local_click_requires_authorization_and_copy_confirmation() {
         .accept(&openable, Some(&key)));
     let resolved = key.candidates[0].resolved_path.to_string_lossy().into_owned();
     assert!(app.activate_target_at(window, pane, 0, 1));
-    assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some("previous"));
     assert!(app.registry.windows[&window]
         .notification
         .as_ref()
@@ -443,7 +443,7 @@ fn local_click_requires_authorization_and_copy_confirmation() {
         .message
         .contains(&resolved));
     assert!(app.activate_target_at(window, pane, 0, 1));
-    assert_eq!(app.test_clipboard_text.as_deref(), Some(resolved.as_str()));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some(resolved.as_str()));
     app.report_failed_target(window, pane, "failed", &resolved);
     app.registry.windows.get_mut(&window).unwrap().notification = None;
     assert!(!app.copy_confirmed_failure(window, pane, &resolved));
@@ -458,7 +458,7 @@ fn unverified_plain_text_click_has_no_side_effects() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["plain"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.test_clipboard_text = Some("previous".into());
+    app.testing.test_clipboard_text = Some("previous".into());
     app.registry.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
     } else {
@@ -487,7 +487,7 @@ fn unverified_plain_text_click_has_no_side_effects() {
             .accept(&result, Some(&key)));
         assert!(!app.activate_target_at(window, pane, 0, col));
         assert!(app.registry.windows[&window].notification.is_none());
-        assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
+        assert_eq!(app.testing.test_clipboard_text.as_deref(), Some("previous"));
     }
 }
 

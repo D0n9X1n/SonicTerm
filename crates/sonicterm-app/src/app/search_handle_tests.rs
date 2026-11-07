@@ -226,7 +226,7 @@ fn search_paste_updates_main_and_child_counter_without_pty_delivery() {
         } else {
             app.open_search();
         }
-        app.test_clipboard_text = Some("nee\r\ndle\x1b\x7f".into());
+        app.testing.test_clipboard_text = Some("nee\r\ndle\x1b\x7f".into());
         app.__test_enable_pty_write_log();
         let kind = if child {
             super::super::FrontmostKind::Child(window)

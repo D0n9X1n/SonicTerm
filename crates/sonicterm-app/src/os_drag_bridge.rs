@@ -103,6 +103,7 @@ pub fn __test_drain_tabs() -> Vec<TabPayload> {
     drain_tab_payloads()
 }
 
+#[cfg(any(test, feature = "test-support"))]
 /// Test bridge: same as [`drain_file_drops`] but reachable from
 /// integration tests in other crates. Hidden from docs.
 #[doc(hidden)]

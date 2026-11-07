@@ -80,10 +80,12 @@ cargo build -p sonicterm-app
 ```
 
 ## Guardrails
-- A new `__test_*` hook or `test_*` App field that only this crate's unit or integration tests read
-  carries `#[cfg(any(test, feature = "test-support"))]`; one an example, another crate or
-  production calls stays ungated and is listed in `UNGATED_HOOKS`/`UNGATED_FIELDS`
-  (`src/app/mod_test_support_tests.rs`). Check `cargo clippy -p sonicterm-app --lib` too: only
+- A new `__test_*` hook or `test_*` App field that only tests read carries
+  `#[cfg(any(test, feature = "test-support"))]`. `sonicterm-mac` and `sonicterm-windows` enable the
+  feature in their dev-dependencies, so their tests and examples may call gated hooks. One this
+  crate's examples (the perf harness builds against older bases), another crate's production
+  code, or this crate's production code calls stays ungated and is listed in
+  `UNGATED_HOOKS`/`UNGATED_FIELDS` (`src/app/mod_test_support_tests.rs`). Check `cargo clippy -p sonicterm-app --lib` too: only
   that build has the feature off.
 - All pane destruction uses `retire_pane`; transfers preserve the PTY and its
   `ReapSlot`. Reserved native waits run only through the one `ReaperDriver`.

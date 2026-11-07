@@ -118,7 +118,7 @@ fn every_control_tool_refuses_out_of_scope_without_side_effects() {
     let (program, args) = idle_program();
     attach(&mut app, user, program, args, false);
     attach(&mut app, agent, program, args, true);
-    app.pty_write_log_enabled = true;
+    app.testing.pty_write_log_enabled = true;
     let tools = |pane: u64| {
         [
             ("create_pane", json!({ "anchor_pane_id": pane.to_string(), "placement": "tab" })),
@@ -149,7 +149,7 @@ fn every_control_tool_refuses_out_of_scope_without_side_effects() {
             assert_eq!(result["isError"], true, "{label}: {result}");
             assert_eq!(result["structuredContent"]["error"], code, "{label}");
             assert_eq!(topology(&app), shape, "{label} changed the layout");
-            assert!(app.test_pty_writes.lock().is_empty(), "{label} wrote");
+            assert!(app.testing.test_pty_writes.lock().is_empty(), "{label} wrote");
         }
     }
 }

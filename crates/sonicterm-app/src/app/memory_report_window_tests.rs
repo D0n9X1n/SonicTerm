@@ -10,7 +10,7 @@ use super::*;
 /// A headless app with one main tab named `zsh` and an open report window.
 fn app_with_report() -> (App, u64, WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.test_clipboard_text = Some(String::new());
+    app.testing.test_clipboard_text = Some(String::new());
     let main_pane = app.__test_seed_tab("zsh");
     let report_id = app.__test_open_memory_report_window();
     (app, main_pane, report_id)
@@ -59,7 +59,7 @@ fn copy_all_copies_exactly_the_rendered_report() {
     assert!(rendered.contains("\"zsh\""));
     app.registry.frontmost_window = Some(report_id);
     assert!(app.run_action(&Action::CopyMemoryReport));
-    assert_eq!(app.test_clipboard_text.as_deref(), Some(rendered.as_str()));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some(rendered.as_str()));
     let parser =
         app.registry.windows[&report_id].panes[&report_pane(&app, report_id)].parser.clone();
     let first_row = {
@@ -78,7 +78,7 @@ fn keys_and_pastes_in_the_report_never_reach_a_pty() {
     let (mut app, _, report_id) = app_with_report();
     assert!(app.registry.windows[&report_id].panes.values().all(|pane| pane.pty.is_none()));
     app.__test_enable_pty_write_log();
-    app.test_clipboard_text = Some("rm -rf /\n".to_string());
+    app.testing.test_clipboard_text = Some("rm -rf /\n".to_string());
     assert!(app.run_action_for_window(&Action::PasteFromClipboard, report_id));
     app.handle_memory_report_key(report_id, &["x".to_string()], false);
     assert!(app.__test_pty_write_log().is_empty());
@@ -112,7 +112,7 @@ fn copy_in_the_report_takes_the_report_selection() {
     app.registry.windows.get_mut(&report_id).unwrap().selection = Some(selection);
     app.registry.frontmost_window = Some(report_id);
     assert!(app.run_action(&Action::CopyToClipboard));
-    assert_eq!(app.test_clipboard_text.as_deref(), Some(expected.as_str()));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some(expected.as_str()));
     assert!(!expected.contains("main text"));
 }
 
@@ -246,7 +246,7 @@ fn report_keys_run_only_after_composition_search_and_copy_mode() {
 /// A headless app whose report sampler is held by the test, so each walk answers on request.
 fn app_with_manual_report() -> (App, WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.test_clipboard_text = Some(String::new());
+    app.testing.test_clipboard_text = Some(String::new());
     app.__test_seed_tab("zsh");
     app.reports.memory_report.manual_sampler = true;
     let report_id = app.__test_open_memory_report_window();

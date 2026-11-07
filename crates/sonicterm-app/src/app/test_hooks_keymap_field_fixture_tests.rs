@@ -112,7 +112,7 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
 
         // Empty, control-only, and unreadable clipboards are consumed without any fallback delivery.
         for text in [Some(""), Some("\r\n\x1b\x7f"), None] {
-            app.test_clipboard_text = text.map(str::to_owned);
+            app.testing.test_clipboard_text = text.map(str::to_owned);
             app.clipboard = None;
             app.wait_for_input_queues();
             assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));

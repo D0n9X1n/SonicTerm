@@ -480,7 +480,7 @@ fn a_queued_terminal_launch_reaches_spawn_pane_exactly() {
     app.seed_initial_tabs();
 
     assert_eq!(app.__test_tab_count(), 1, "the launch replaces the default shell tab");
-    let recorded = app.test_pane_launches.borrow().clone();
+    let recorded = app.testing.test_pane_launches.borrow().clone();
     assert_eq!(recorded.len(), 1);
     let pane_launch = &recorded[0].1;
     assert_eq!(pane_launch.command, launch.command);
@@ -581,7 +581,7 @@ fn a_notice_only_cold_start_opens_the_shell_and_shows_the_notice() {
         Some("Link not opened: secret\u{FFFD}[2J"),
         "the notice is shown with control characters replaced"
     );
-    assert!(app.test_pane_launches.borrow()[0].1.command.is_none());
+    assert!(app.testing.test_pane_launches.borrow()[0].1.command.is_none());
 }
 
 /// A notice beside a tab launch adds no shell tab, and a running app's drain opens none for it.

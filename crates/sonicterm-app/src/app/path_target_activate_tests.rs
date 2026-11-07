@@ -80,7 +80,7 @@ fn tool_and_prose_paths_resolve_real_files_in_each_window() {
         let missing = "crates/sonicterm-app/src/app/missing.rs";
         let output = format!("\x1b[2J\x1b[HUpdate({missing})");
         assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-        app.test_clipboard_text = Some("preserved".into());
+        app.testing.test_clipboard_text = Some("preserved".into());
         let target = app.cell_target_at(window, pane, 0, 10).unwrap();
         assert_eq!(target.explicit_path_text().as_deref(), Some(missing));
         let ResolvedCellTarget::Path(key) = target.target else { panic!("filesystem target") };
@@ -98,7 +98,7 @@ fn tool_and_prose_paths_resolve_real_files_in_each_window() {
         // A path that names no file is an ordinary click: no toast, no copy on a repeated click.
         for _ in 0..2 {
             assert!(!app.activate_target_at(window, pane, 0, 10));
-            assert_eq!(app.test_clipboard_text.as_deref(), Some("preserved"));
+            assert_eq!(app.testing.test_clipboard_text.as_deref(), Some("preserved"));
             assert!(app.registry.windows[&window].notification.is_none());
         }
     }
@@ -213,7 +213,7 @@ fn target_failure_notification_is_window_local() {
     let second = app.__test_seed_child_window(&["second"]);
     let pane = app.__test_child_pane_ids(first).unwrap()[0];
     app.registry.frontmost_window = Some(second);
-    app.test_clipboard_text = Some("previous".into());
+    app.testing.test_clipboard_text = Some("previous".into());
     app.report_failed_target(first, pane, "file manager unavailable\n", "/test/file");
     let message = &app.registry.windows[&first].notification.as_ref().unwrap().message;
     assert!(message.contains("file manager unavailable\\u{a}"));

@@ -7,7 +7,7 @@ use sonicterm_ui::pane::Rect;
 
 fn test_app() -> App {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.test_viewport_override = Some((Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
+    app.testing.test_viewport_override = Some((Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
     app
 }
 

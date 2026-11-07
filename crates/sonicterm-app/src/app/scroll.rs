@@ -132,7 +132,7 @@ impl App {
             return renderer.pixel_to_pane_cell(cursor_x, cursor_y);
         }
         #[cfg(test)]
-        if let Some((_, cell_width_px, cell_height_px)) = self.test_viewport_override {
+        if let Some((_, cell_width_px, cell_height_px)) = self.testing.test_viewport_override {
             // When: `test_viewport_override` is set and no renderer exists, resolve on its uniform grid.
             return super::window_event::headless_pane_cell(
                 &self.compute_active_pane_rects(),

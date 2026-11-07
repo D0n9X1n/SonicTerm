@@ -110,17 +110,19 @@ impl App {
         self.broadcast_receivers()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: clear the PTY write ledger before a broadcast assertion.
     #[doc(hidden)]
     pub fn __test_enable_pty_write_log(&mut self) {
-        self.pty_write_log_enabled = true;
-        self.test_pty_writes.lock().clear();
+        self.testing.pty_write_log_enabled = true;
+        self.testing.test_pty_writes.lock().clear();
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: snapshot logged `(pane_id, bytes)` PTY writes.
     #[doc(hidden)]
     pub fn __test_pty_write_log(&self) -> Vec<(u64, Vec<u8>)> {
-        self.test_pty_writes.lock().clone()
+        self.testing.test_pty_writes.lock().clone()
     }
 
     /// Test-only: drive the same write + broadcast fan-out as normal input.
@@ -177,7 +179,7 @@ impl App {
         cell_h: f32,
     ) -> bool {
         self.__test_synthetic_main();
-        self.test_viewport_override = Some((outer, cell_w, cell_h));
+        self.testing.test_viewport_override = Some((outer, cell_w, cell_h));
         true
     }
 
@@ -310,7 +312,7 @@ impl App {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
     pub fn __test_drain_pty_writes(&self) -> Vec<(u64, Vec<u8>)> {
-        std::mem::take(&mut *self.test_pty_writes.lock())
+        std::mem::take(&mut *self.testing.test_pty_writes.lock())
     }
 
     /// Test-only: feed bytes into a child pane's parser.

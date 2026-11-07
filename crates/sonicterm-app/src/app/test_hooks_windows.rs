@@ -312,6 +312,7 @@ impl App {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: read back the current `frontmost_window`.
     #[doc(hidden)]
     pub fn __test_frontmost_window(&self) -> Option<WindowId> {
@@ -695,7 +696,7 @@ impl App {
     where
         F: FnOnce(&mut App) + Send + 'static,
     {
-        self.test_post_snapshot_hook = Some(Box::new(hook));
+        self.testing.test_post_snapshot_hook = Some(Box::new(hook));
     }
 
     /// Test-only: seed a synthetic tab with one pane that has no PTY

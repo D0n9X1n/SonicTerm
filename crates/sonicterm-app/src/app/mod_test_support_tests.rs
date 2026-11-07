@@ -13,35 +13,23 @@ const UNGATED_HOOKS: &[&str] = &[
     "__test_attach_window_renderer",
     "__test_child_pane_ids",
     "__test_child_pane_parser",
-    "__test_command_palette_handle_key",
-    "__test_drain_files",
-    "__test_enable_pty_write_log",
-    "__test_frontmost_window",
     "__test_invoke_activate_main_tab",
     "__test_invoke_reap_empty_child",
     "__test_main_window_id",
     "__test_palette_attached_window",
-    "__test_palette_cursor",
     "__test_palette_open",
-    "__test_palette_query",
     "__test_pane_grid_size",
     "__test_pane_worker",
     "__test_publish_input_modes",
     "__test_publish_pane_output",
-    "__test_pty_write_log",
     "__test_resize_visible_panes",
     "__test_sample_pane_retention_now",
-    "__test_search_query_cursor",
     "__test_seed_child_window",
     "__test_seed_counting_tab",
     "__test_seed_tab",
-    "__test_set_child_search_query",
     "__test_set_frontmost_window",
     "__test_set_main_pane_viewport",
-    "__test_set_main_search_query",
-    "__test_set_memory_clipboard",
     "__test_set_next_echo_arm",
-    "__test_set_palette_query",
     "__test_set_window_last_render",
     "__test_synthetic_main",
     "__test_window_active_tab_title",
@@ -64,7 +52,10 @@ fn rust_sources(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(St
         if path.is_dir() {
             // When: `path` is a directory, descend so nested modules are scanned too.
             rust_sources(root, &path, out);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+        } else if path.extension().is_some_and(|extension| extension == "rs")
+            || path.file_name().is_some_and(|name| name == "Cargo.toml")
+        {
+            // When: `path` is Rust source, or a manifest the audit reads for dev features.
             let relative = path.strip_prefix(root).expect("inside the root");
             let text = std::fs::read_to_string(&path).expect("readable source");
             out.push((relative.to_string_lossy().replace('\\', "/"), text));
@@ -97,6 +88,35 @@ fn is_test_gated(lines: &[&str], line_index: usize) -> bool {
         .map(|line| line.trim())
         .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
         .any(|line| line == TEST_SUPPORT_GATE || line == "#[cfg(test)]")
+}
+
+/// Whether `path` is a dev target (a test or example, or code only tests compile) of a crate whose
+/// `Cargo.toml` among `sources` enables `sonicterm-app`'s `test-support` in its dev-dependencies.
+/// The perf harness example is excluded: it builds against older bases without the feature.
+fn builds_with_test_support(sources: &[(String, String)], path: &str) -> bool {
+    let mut parts = path.splitn(3, '/');
+    let (Some("crates"), Some(krate), Some(rest)) = (parts.next(), parts.next(), parts.next())
+    else {
+        // When: `path` is not inside a crate directory, no manifest applies.
+        return false;
+    };
+    if krate == "sonicterm-app" {
+        // When: the `krate` is this one, its own examples build without the feature (perf base).
+        return false;
+    }
+    let dev_target =
+        rest.starts_with("examples/") || rest.starts_with("tests/") || rest.ends_with("_tests.rs");
+    let manifest = format!("crates/{krate}/Cargo.toml");
+    dev_target
+        && sources.iter().any(|(source, text)| {
+            *source == manifest
+                && text.split("[dev-dependencies]").nth(1).is_some_and(|dev| {
+                    let section = dev.split("\n[").next().unwrap_or(dev);
+                    section.lines().any(|line| {
+                        line.starts_with("sonicterm-app") && line.contains("\"test-support\"")
+                    })
+                })
+        })
 }
 
 /// `(name, file, gated)` for each `fn __test_*` defined in the non-test `sources`.
@@ -139,11 +159,13 @@ fn test_support_audit(
         }
     }
     // A call is any `name(` in real code that is not the definition itself, made from a file
-    // that compiles without the feature (anything but unit and integration tests). Each file
+    // that compiles without the feature: anything but this crate's unit and integration tests,
+    // and anything but the dev targets of a crate whose manifest turns the feature on. Each file
     // is blanked once, since the scan covers the whole workspace for every hook.
     let featureless: Vec<(&str, String)> = sources
         .iter()
         .filter(|(path, _)| !is_test_file(path) && !path.starts_with("crates/sonicterm-app/tests/"))
+        .filter(|(path, _)| !builds_with_test_support(sources, path))
         .filter(|(_, text)| text.contains("__test_"))
         .map(|(path, text)| (path.as_str(), code_views(text).1))
         .collect();
@@ -258,4 +280,13 @@ fn the_test_support_audit_reports_each_violation() {
     let leaked = test_support_audit(&covered, &["__test_orphan", "__test_loose"], &["test_flag"]);
     assert_eq!(leaked.len(), 2, "{leaked:#?}");
     assert!(leaked.iter().any(|problem| problem.contains("gated __test_listed is called from")));
+    // That crate's manifest turning the feature on for its dev targets makes the call legal.
+    covered.push((
+        "crates/sonicterm-mac/Cargo.toml".to_owned(),
+        "[dependencies]\nsonicterm-app.workspace = true\n\n[dev-dependencies]\nsonicterm-app = \
+         { workspace = true, features = [\"test-support\"] }\n"
+            .to_owned(),
+    ));
+    let enabled = test_support_audit(&covered, &["__test_orphan", "__test_loose"], &["test_flag"]);
+    assert_eq!(enabled.len(), 1, "{enabled:#?}");
 }

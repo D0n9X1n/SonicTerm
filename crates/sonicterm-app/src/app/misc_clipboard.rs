@@ -11,7 +11,7 @@ pub(in crate::app) const NATIVE_CLIPBOARD_FILE_LIST: bool =
 impl App {
     #[cfg(target_os = "windows")]
     pub(in crate::app) fn clipboard_text_for_reassert(&mut self) -> Option<String> {
-        if let Some(text) = self.test_clipboard_text.as_ref() {
+        if let Some(text) = self.testing.test_clipboard_text.as_ref() {
             // When: test_clipboard_text contains text, expose the test clipboard snapshot.
             return Some(text.clone());
         }
@@ -29,16 +29,17 @@ impl App {
             return false;
         }
         #[cfg(any(test, feature = "test-support"))]
-        if self.test_clipboard_write_failure {
+        if self.testing.test_clipboard_write_failure {
             // When: `test_clipboard_write_failure` is true, reject at the set_text
             // boundary without changing the in-memory or system clipboard.
             return false;
         }
-        if self.test_clipboard_text.is_some() || self.test_clipboard_files.is_some() {
+        if self.testing.test_clipboard_text.is_some() || self.testing.test_clipboard_files.is_some()
+        {
             // When: test_clipboard_text or test_clipboard_files is set, keep the copy off the system clipboard;
             // like a native copy, the text replaces any copied file list.
-            self.test_clipboard_text = Some(text.clone());
-            self.test_clipboard_files = None;
+            self.testing.test_clipboard_text = Some(text.clone());
+            self.testing.test_clipboard_files = None;
             return true;
         }
         let Some(clipboard) = self.clipboard.as_mut() else {
@@ -81,11 +82,11 @@ impl App {
     /// A missing handle or a failed native read returns `None`, which every
     /// paste route treats as nothing to paste rather than an error to surface.
     pub(in crate::app) fn read_clipboard_text(&mut self) -> Option<String> {
-        if let Some(text) = self.test_clipboard_text.clone() {
+        if let Some(text) = self.testing.test_clipboard_text.clone() {
             // When: test_clipboard_text is installed, it stands in for the native clipboard.
             return Some(text);
         }
-        if self.test_clipboard_files.is_some() {
+        if self.testing.test_clipboard_files.is_some() {
             // When: test_clipboard_files is the only override, the test clipboard holds no text and the desktop one is never read.
             return None;
         }
@@ -97,9 +98,10 @@ impl App {
     /// Returns an empty list when the clipboard holds no files, the native read fails, or the
     /// platform's file list is not trusted, so callers fall back to text.
     pub(in crate::app) fn read_clipboard_files(&mut self) -> Vec<std::path::PathBuf> {
-        if self.test_clipboard_text.is_some() || self.test_clipboard_files.is_some() {
+        if self.testing.test_clipboard_text.is_some() || self.testing.test_clipboard_files.is_some()
+        {
             // When: test_clipboard_text or test_clipboard_files is installed, the test clipboard holds only test_clipboard_files.
-            return self.test_clipboard_files.clone().unwrap_or_default();
+            return self.testing.test_clipboard_files.clone().unwrap_or_default();
         }
         if !NATIVE_CLIPBOARD_FILE_LIST {
             // When: NATIVE_CLIPBOARD_FILE_LIST is false, the backend's file list can drop or misread entries, so keep text paste.

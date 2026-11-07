@@ -326,7 +326,7 @@ impl App {
     fn window_geometry(&self, window_id: WindowId) -> Option<WindowGeometry<'_>> {
         let window = self.registry.windows.get(&window_id)?;
         let (seam, renderer) = if Some(window_id) == self.registry.main_window_id {
-            (self.test_viewport_override, self.main_renderer())
+            (self.testing.test_viewport_override, self.main_renderer())
         } else {
             // When: `window_id` is a child, its own `test_pane_viewport` and `renderer` apply.
             (window.test_pane_viewport, window.renderer.as_ref())

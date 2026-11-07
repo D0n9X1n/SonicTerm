@@ -567,7 +567,7 @@ fn main_window_strip_consumes_press_and_wheel() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("main");
     let main_id = app.registry.main_window_id.unwrap();
-    app.test_viewport_override =
+    app.testing.test_viewport_override =
         Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
     app.__test_enable_pty_write_log();
     publish_mouse_reporting(&app.main().unwrap().panes[&pane_id]);
