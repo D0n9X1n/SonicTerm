@@ -7,12 +7,14 @@ impl App {
     /// Test-only: `true` if `win_id` has a deferred redraw queued in
     /// [`Self::pending_redraw_windows`] (the child-window coalescing latch).
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_redraw_deferred(&self, win_id: WindowId) -> bool {
         self.pending_redraw_windows.contains(&win_id)
     }
 
     /// Test-only: report whether any live window has unconsumed owner-local input.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_input_dirty(&self) -> bool {
         self.registry.windows.values().any(|window| window.redraw.input_pending())
     }
@@ -20,6 +22,7 @@ impl App {
     /// Test-only: read the main window's `hidden` latch via the unified
     /// accessor.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_hidden(&self) -> bool {
         self.main_is_hidden()
     }
@@ -27,6 +30,7 @@ impl App {
     /// Test-only: drive the production `hide_main_window` path from
     /// integration tests (the helper itself is `pub(super)`).
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_hide_main_window(&mut self) {
         self.hide_main_window();
     }
@@ -34,6 +38,7 @@ impl App {
     /// Test-only: read the deferred-exit flag, which a quit action or a close
     /// that leaves no active terminal window sets.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pending_exit(&self) -> bool {
         self.pending_exit
     }
@@ -42,6 +47,7 @@ impl App {
     /// post-merge drain-policy tests can simulate the "main already
     /// retired" state without driving a real winit close event.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_main_hidden(&mut self, hidden: bool) {
         self.__test_synthetic_main();
         if let Some(main) = self.main_mut() {
@@ -51,12 +57,14 @@ impl App {
 
     /// Test-only: how many tabs the named child window currently owns.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_tab_count(&self, id: WindowId) -> Option<usize> {
         self.registry.windows.get(&id).map(|child| child.tabs.len())
     }
 
     /// Test-only: set the last cursor position for a synthetic child window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_child_cursor_pos(
         &mut self,
         id: WindowId,
@@ -170,6 +178,7 @@ impl App {
     /// [`Self::cancel_drag_session`] clears EVERY window's state, not
     /// just the main one.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_pressed_tab(&self, id: WindowId) -> Option<Option<usize>> {
         self.registry.windows.get(&id).map(|child| child.pressed_tab)
     }
@@ -179,6 +188,7 @@ impl App {
     /// `None` when `id` names no tracked window, which distinguishes an
     /// unknown window from one with no button held.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_mouse_down(&self, id: WindowId) -> Option<bool> {
         self.registry.windows.get(&id).map(|window| window.mouse_down)
     }
@@ -187,6 +197,7 @@ impl App {
     ///
     /// `None` when `id` names no tracked window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_has_drag_session(&self, id: WindowId) -> Option<bool> {
         self.registry.windows.get(&id).map(|window| window.drag_session.is_some())
     }
@@ -195,6 +206,7 @@ impl App {
     ///
     /// `None` when `id` names no tracked window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_has_drag_target(&self, id: WindowId) -> Option<bool> {
         self.registry.windows.get(&id).map(|window| window.drag_target.is_some())
     }
@@ -208,6 +220,7 @@ impl App {
     /// renderer call, so the assertion fails if the per-window iteration
     /// is ever removed.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_window_drag_chip_marker(&mut self, id: WindowId, present: bool) -> bool {
         if let Some(window) = self.registry.windows.get_mut(&id) {
             window.test_drag_chip_marker = Some(present);
@@ -224,20 +237,23 @@ impl App {
     /// `Some(true)` ⇒ marker set & not yet cleared by cancel;
     /// `Some(false)` ⇒ marker was set and cancel ran on this window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_drag_chip_marker(&self, id: WindowId) -> Option<bool> {
         self.registry.windows.get(&id).and_then(|window| window.test_drag_chip_marker)
     }
 
     /// Test-only convenience: same as
-    /// [`Self::__test_set_window_drag_chip_marker`] but for the
+    /// `Self::__test_set_window_drag_chip_marker` but for the
     /// synthetic main window (id from [`synthetic_main_window_id`]).
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_main_drag_chip_marker(&mut self, present: bool) -> bool {
         self.__test_set_window_drag_chip_marker(synthetic_main_window_id(), present)
     }
 
     /// Test-only convenience: read the main window's drag-chip marker.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_drag_chip_marker(&self) -> Option<bool> {
         self.__test_window_drag_chip_marker(synthetic_main_window_id())
     }
@@ -247,6 +263,7 @@ impl App {
     /// `drag_session` — without driving a real winit pointer event
     /// sequence. Returns true on success.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_seed_child_drag_residue(
         &mut self,
         id: WindowId,
@@ -277,6 +294,7 @@ impl App {
     /// this kept the old name so the existing regression tests don't
     /// need touching, but it now drives the unified tracker.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_focused_child(&mut self, id: Option<WindowId>) {
         self.__test_synthetic_main();
         self.registry.frontmost_window = id;
@@ -286,6 +304,7 @@ impl App {
     /// returns `Some(id)` when `frontmost_window` points
     /// at a non-main entry, mirroring the old `focused_child` semantics.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_focused_child(&self) -> Option<WindowId> {
         match self.frontmost_kind() {
             FrontmostKind::Child(id) => Some(id),
@@ -332,6 +351,7 @@ impl App {
     /// Test seam: run `hook` at the start of each of a window's presentations; returning true
     /// stops its device there. `false` when the window has no renderer.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_window_present_hook(
         &mut self,
         id: WindowId,
@@ -349,18 +369,21 @@ impl App {
 
     /// Test seam: how many receipts wait in a window's pending set.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_pending_receipts(&self, id: WindowId) -> Option<usize> {
         Some(self.registry.windows.get(&id)?.pending_receipts.len())
     }
 
     /// Test seam: the frames a window's renderer has presented successfully.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_successful_frames(&self, id: WindowId) -> Option<u64> {
         Some(self.registry.windows.get(&id)?.renderer.as_ref()?.successful_frame_count())
     }
 
     /// Test seam: the terminal IME area a window last published, as position and size.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_ime_area(&self, id: WindowId) -> Option<((i32, i32), (u32, u32))> {
         let area = self.registry.windows.get(&id)?.ime_cursor_throttle.last()?;
         Some((area.position, area.size))
@@ -368,6 +391,7 @@ impl App {
 
     /// Test seam: the dirty rows of a pane's grid in a window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_pane_dirty_rows(&self, id: WindowId, pane_id: u64) -> Option<Vec<usize>> {
         let pane = self.registry.windows.get(&id)?.panes.get(&pane_id)?;
         Some(pane.parser.lock().grid().dirty_rows().collect())
@@ -375,6 +399,7 @@ impl App {
 
     /// Test seam: stop a window's device outside any frame, as a loss between frames would.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_stop_window_device(&mut self, id: WindowId) -> bool {
         let Some(renderer) =
             self.registry.windows.get_mut(&id).and_then(|state| state.renderer.as_mut())
@@ -389,12 +414,14 @@ impl App {
     /// Test seam: the characters a window's last drawn frame showed as tofu, so a test can
     /// redraw until non-blocking font fallback has resolved the ones it inspects.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_missing_tofu(&self, id: WindowId) -> Option<Vec<char>> {
         Some(self.registry.windows.get(&id)?.renderer.as_ref()?.last_missing_tofu().to_vec())
     }
 
     /// Test seam: the pane targeted by a window's real renderer flash state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_pane_focus_flash_target(&self, id: WindowId) -> Option<u64> {
         self.registry.windows.get(&id)?.renderer.as_ref()?.__test_pane_focus_flash_target()
     }
@@ -405,6 +432,7 @@ impl App {
     /// when the window is unknown, has no renderer, or the frame is absent.
     #[cfg(target_os = "windows")]
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_software_frame_pixel_bgra(
         &self,
         id: WindowId,
@@ -421,6 +449,7 @@ impl App {
 
     /// Test seam: replace the dispatch clock that every pacing read goes through.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_dispatch_clock(&mut self, clock: fn() -> Instant) {
         self.dispatch_clock = clock;
     }
@@ -430,6 +459,7 @@ impl App {
     /// Bypasses runtime detection so a test can exercise software-render
     /// pacing on a machine that has a working GPU.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_software_render_degrade(&mut self, degrade: bool) {
         self.set_software_render_degrade(degrade);
     }
@@ -438,12 +468,14 @@ impl App {
     ///
     /// Lets a test assert that a redraw was coalesced rather than drawn.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_redraw_deferred(&self) -> bool {
         self.pending_redraw
     }
 
     /// Test seam: observe a window's frame timestamp independently of its contention deadline.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_last_render(&self, id: WindowId) -> Option<Instant> {
         self.registry.windows.get(&id).map(|window| window.last_render)
     }
@@ -471,6 +503,7 @@ impl App {
     /// geometry against production's planned active-pane origin. Returns `None`
     /// before layout or after its geometry is invalidated.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_cell_geometry(&self, id: WindowId) -> Option<(f32, f32, f32)> {
         let window = self.registry.windows.get(&id)?;
         let renderer = window.renderer.as_ref()?;
@@ -482,12 +515,14 @@ impl App {
 
     /// Test-only: read whether the main window is in read-only copy mode.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_read_only(&self) -> bool {
         self.main().and_then(|main| main.copy_mode.as_ref()).is_some_and(|mode| mode.is_read_only())
     }
 
     /// Test-only: read whether a child window is in read-only copy mode.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_read_only(&self, id: WindowId) -> Option<bool> {
         self.registry
             .windows
@@ -497,6 +532,7 @@ impl App {
 
     /// Test-only: seed the headless renderer-focus marker for a child window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_child_renderer_focus_marker(&mut self, id: WindowId, focused: bool) -> bool {
         let Some(child) = self.registry.windows.get_mut(&id) else {
             // When: `windows` tracks no entry for this id, so no child carries the
@@ -509,6 +545,7 @@ impl App {
 
     /// Test-only: read the headless renderer-focus marker for a child window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_renderer_focus_marker(&self, id: WindowId) -> Option<bool> {
         self.registry.windows.get(&id).and_then(|child| child.test_renderer_focus_marker)
     }
@@ -516,6 +553,7 @@ impl App {
     /// Test-only: invoke the child focus transition handler without constructing
     /// a winit `ActiveEventLoop`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_handle_child_focus_changed(&mut self, id: WindowId, focused: bool) {
         self.handle_window_focus_changed(id, focused);
     }
@@ -537,12 +575,14 @@ impl App {
     /// `ActiveEventLoop` and so can't run in a unit test). The flag
     /// is the testable seam.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pending_new_window(&self) -> bool {
         self.pending_new_window.is_some()
     }
 
     /// Test seam for deferred in-process tear-out requests.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pending_tear_out(&self) -> Option<(WindowId, usize, Option<(i32, i32)>)> {
         self.pending_tear_out.as_ref().map(|tear_out| {
             (tear_out.source_window, tear_out.source_tab_idx, tear_out.drop_screen_pos)
@@ -552,6 +592,7 @@ impl App {
     /// test seam: read the `pending_os_teardown` flag set
     /// by `handle_os_drag_ended` on the `DroppedOnEmpty` branch.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pending_os_teardown(&self) -> bool {
         self.pending_os_teardown
     }
@@ -560,6 +601,7 @@ impl App {
     /// the race test can simulate the `DroppedOnEmpty` branch without
     /// forging a full OS-drag pending state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_pending_os_teardown(&mut self, pending: bool) {
         self.pending_os_teardown = pending;
     }
@@ -569,6 +611,7 @@ impl App {
     /// drain doesn't create windows; only the window-create drain
     /// does).
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_drain_pending_os_teardown(&mut self) {
         self.drain_pending_os_teardown();
     }
@@ -583,6 +626,7 @@ impl App {
     /// expected this to be "number of torn-out child terminal windows"
     /// keep meaning "number of torn-out child terminal windows".
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_windows_len(&self) -> usize {
         self.registry.windows.len().saturating_sub(self.shadow_main_count())
     }
@@ -601,6 +645,7 @@ impl App {
     /// window's bar) is impossible: the threshold trip would clear the
     /// gesture before the user ever reaches a sibling bar.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_drag_target(
         &mut self,
         target: Option<crate::tab_drag::DropTarget<WindowId>>,
@@ -617,6 +662,7 @@ impl App {
     /// vanished. Returns `true` if the window existed and was removed,
     /// `false` otherwise.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
         self.accessibility.remove(&id);
         self.release_window_owner(id);
@@ -625,13 +671,14 @@ impl App {
 
     /// Test-only: drop a window without the explicit owner release first.
     ///
-    /// [`Self::__test_remove_window`] calls `release_window_owner`, which takes
+    /// `Self::__test_remove_window` calls `release_window_owner`, which takes
     /// each pane's owner in the right order before the window is removed. That
     /// hides what the struct does on its own, and the struct has to be right:
     /// a window removed from the map without that call, or held in the map
     /// until the process tears down, closes its owners purely by field drop
     /// order. This models that path.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_drop_window_without_release(&mut self, id: WindowId) -> bool {
         self.registry.windows.remove(&id).is_some()
     }
@@ -643,6 +690,7 @@ impl App {
     /// `get_mut(&id).else { continue }` race-tolerance branch by
     /// removing (or inserting) a window in between.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_post_snapshot_hook<F>(&mut self, hook: F)
     where
         F: FnOnce(&mut App) + Send + 'static,
@@ -746,6 +794,7 @@ impl App {
 
     /// Test-only: pending OS-drag payload count.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pending_os_drag_payload_count(&self) -> usize {
         self.interaction.pending_os_drag_payloads.len()
     }
@@ -754,6 +803,7 @@ impl App {
     /// been inserted. Mirrors the production `do_resumed` drain point without
     /// constructing a real winit window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_drain_pending_os_drag_payloads(&mut self) {
         self.drain_pending_os_drag_payloads();
     }
@@ -761,12 +811,14 @@ impl App {
     /// Test-only: install an `OsDragSink` so [`Self::try_os_drag_handoff`]
     /// can be exercised without going through the platform entry point.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_os_drag_sink(&mut self, sink: Arc<dyn crate::os_drag::OsDragSink>) {
         self.os_drag_sink = Some(sink);
     }
 
     /// Test-only: install a mock [`os_drag::OsTabDragBackend`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {
         self.interaction.os_drag_backend = Some(backend);
     }
@@ -775,6 +827,7 @@ impl App {
     /// so tests can drive [`Self::handle_os_drag_ended`] without
     /// constructing a real [`winit::event_loop::EventLoopProxy`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_os_drag_pending(&self) -> Arc<os_drag::PendingDragOutcome> {
         self.interaction.os_drag_pending.clone()
     }
@@ -784,6 +837,7 @@ impl App {
     /// drive the dispatcher directly without first calling
     /// `begin_os_tab_drag`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_os_drag_source(&mut self, source: Option<(WindowId, usize)>) {
         self.interaction.os_drag_source = source
             .and_then(|(window, index)| self.tab_id_at(window, index).map(|tab| (window, tab)));
@@ -795,6 +849,7 @@ impl App {
     /// internal implementation: `true` = source-tab was detached,
     /// `false` = source tab preserved.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_try_os_drag_handoff(&mut self, index: usize) -> bool {
         self.try_os_drag_handoff(index)
     }
@@ -805,6 +860,7 @@ impl App {
     /// crosses tear-out threshold → eventually drops on sibling
     /// window" without needing a live winit `ActiveEventLoop`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pressed_tab(&self) -> Option<usize> {
         self.main().and_then(|main| main.pressed_tab)
     }
@@ -814,6 +870,7 @@ impl App {
     /// Reports `false` when no main window exists, so a caller sees the same
     /// "nothing held" answer either way.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_mouse_down(&self) -> bool {
         self.main().map(|main| main.mouse_down).unwrap_or(false)
     }
@@ -823,6 +880,7 @@ impl App {
     /// Seeds a synthetic main window first, so a test can drive tab-press
     /// behavior without a live winit window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_pressed_tab(&mut self, pressed_tab: Option<usize>) {
         self.__test_synthetic_main();
         if let Some(main) = self.main_mut() {
@@ -835,6 +893,7 @@ impl App {
     /// Seeds a synthetic main window first, so drag gestures can be driven
     /// without real pointer events.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_mouse_down(&mut self, mouse_down: bool) {
         self.__test_synthetic_main();
         if let Some(main) = self.main_mut() {

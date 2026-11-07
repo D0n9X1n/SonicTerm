@@ -41,6 +41,7 @@ impl App {
     /// `WindowState::cursor_pos`, provide `test_viewport_override`, then call
     /// this to exercise the same production state update and scrollbar wake.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_refresh_scrollbar_hover_from_cursor(&mut self) -> bool {
         self.refresh_scrollbar_hover_from_cursor()
     }
@@ -93,6 +94,7 @@ impl App {
         changed
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn clear_scrollbar_hover_in_child(
         &mut self,
         win_id: winit::window::WindowId,

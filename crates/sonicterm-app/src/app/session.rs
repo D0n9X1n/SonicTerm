@@ -208,6 +208,7 @@ impl App {
             pending_osc52_reassert: None,
             test_clipboard_text: None,
             test_clipboard_files: None,
+            #[cfg(any(test, feature = "test-support"))]
             test_clipboard_write_failure: false,
             test_pty_writes: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
@@ -223,6 +224,7 @@ impl App {
             about: Default::default(),
             pending_tear_out: None,
             pending_os_teardown: false,
+            #[cfg(any(test, feature = "test-support"))]
             test_post_snapshot_hook: None,
             pending_exit: false,
             #[cfg(test)]

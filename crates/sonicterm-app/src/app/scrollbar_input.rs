@@ -490,6 +490,7 @@ impl App {
 
     /// Test-only inspector for the live scrollbar-drag state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_scrollbar_drag(&self) -> Option<ScrollbarDragState> {
         self.main().and_then(|main| main.scrollbar_drag)
     }

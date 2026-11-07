@@ -43,6 +43,11 @@ STEPS = (
          ("rust",), _CORE_CHECKS),
     gate_model.Step("clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"),
          gate_model.HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=gate_model.WindowsPolicy.COMPILE_ONLY),
+    # The workspace lint builds sonicterm-app with its self-enabled test-support feature; this is the
+    # one lint of the library as release binaries compile it, with every gated test hook absent.
+    gate_model.Step("app-library-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--lib", "--", "-D", "warnings"),
+         gate_model.HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=gate_model.WindowsPolicy.COMPILE_ONLY),
     # perf-counters marks only that the App has the counter API, and perf-hook-checkpoint-memory and
     # perf-hook-trim that it has the checkpoint memory and covered-window trim hooks; the perf_scenarios
     # example is their sole reader, so every host lints that example with them as well as without them.

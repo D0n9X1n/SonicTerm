@@ -616,6 +616,7 @@ impl App {
     /// candidate area — `"palette"`, `"search"` or `"terminal"` — mirroring the
     /// precedence the child render path applies.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_ime_candidate_anchor_kind(&self, win_id: WindowId) -> Option<&'static str> {
         let child = self.registry.windows.get(&win_id)?;
         if self.interaction.command_palette.is_open()

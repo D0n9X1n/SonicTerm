@@ -74,6 +74,7 @@ pub(crate) fn drain() -> Vec<Action> {
 /// Test bridge: same as [`drain`] but reachable from integration tests
 /// in other crates. Hidden from docs.
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn __test_drain() -> Vec<Action> {
     drain()
 }

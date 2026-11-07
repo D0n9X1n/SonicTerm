@@ -28,6 +28,7 @@ impl App {
             // so leave the previous contents intact.
             return false;
         }
+        #[cfg(any(test, feature = "test-support"))]
         if self.test_clipboard_write_failure {
             // When: `test_clipboard_write_failure` is true, reject at the set_text
             // boundary without changing the in-memory or system clipboard.

@@ -421,13 +421,14 @@ impl super::App {
     /// to zero, because a busy pane holds *more* memory than an idle one and
     /// zeroing it would understate the process at the worst moment.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_charge_pane_owners(&mut self) {
         self.charge_pane_owners();
     }
 
     /// Test-only: enter the **gated** production sampling path.
     ///
-    /// Distinct from [`Self::__test_charge_pane_owners`], which calls the
+    /// Distinct from `Self::__test_charge_pane_owners`, which calls the
     /// charging step directly. Production reaches charging only through
     /// `sample_pane_retention`, whose `enabled!(target: "memory", …)` gate is
     /// the part that was closed in every shipped session. A test that enters

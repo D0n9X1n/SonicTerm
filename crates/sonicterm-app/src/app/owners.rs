@@ -322,6 +322,7 @@ impl App {
         drop(window.owner.take());
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn release_window_owner(&mut self, id: WindowId) {
         let Some(window) = self.registry.windows.get_mut(&id) else {
             // When: `id` no longer resolves, so the map exposes no guards to

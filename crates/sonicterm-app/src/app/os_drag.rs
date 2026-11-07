@@ -419,7 +419,7 @@ impl App {
     /// Install the platform OS handoff backend. `sonicterm-mac` supplies its
     /// pasteboard publisher; `sonicterm-windows` supplies OLE `DoDragDrop`.
     /// Tests use it via
-    /// [`Self::__test_set_os_drag_backend`] to inject a mock.
+    /// `Self::__test_set_os_drag_backend` to inject a mock.
     #[doc(hidden)]
     pub fn set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {
         self.interaction.os_drag_backend = Some(backend);
@@ -835,8 +835,9 @@ impl App {
         // never re-fires, and (more importantly) leaves no live borrow
         // on `self` — the closure can freely mutate `self.registry.windows`,
         // which is the exact race we need to exercise to prove the
-        // `get_mut(&id).else { continue }` arm below fires. Always
-        // `None` in production (the setter is `__test_*`-gated).
+        // `get_mut(&id).else { continue }` arm below fires. Release builds
+        // compile none of it: the field and this call need `test-support`.
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(hook) = self.test_post_snapshot_hook.take() {
             hook(self);
         }

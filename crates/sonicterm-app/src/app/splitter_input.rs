@@ -226,6 +226,7 @@ impl App {
     /// Test-only: prove the child splitter hit-test is reachable with headless
     /// viewport geometry.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_splitter_hit_axis(
         &self,
         win_id: WindowId,
@@ -239,6 +240,7 @@ impl App {
     /// whether hover state or cursor shape changed, so the no-button hover path
     /// is reachable with headless viewport geometry.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_refresh_child_splitter_hover(
         &mut self,
         win_id: WindowId,
@@ -250,6 +252,7 @@ impl App {
 
     /// Test-only: read child splitter-hover state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_splitter_hover(
         &self,
         win_id: WindowId,

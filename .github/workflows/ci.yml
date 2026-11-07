@@ -144,6 +144,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The workspace lint enables sonicterm-app's test-support feature through its self dev-dependency;
+      # this lints the library as release binaries compile it, with every gated test hook absent.
+      - name: Lint the app library without test support
+        run: cargo clippy --locked -p sonicterm-app --lib -- -D warnings
+
       # perf-counters only marks that the App has the counter API, and perf-hook-checkpoint-memory and
       # perf-hook-trim that it has the checkpoint memory and covered-window trim hooks; the perf_scenarios
       # example is their sole reader, so each host lints that example with them.
@@ -637,6 +642,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The workspace lint enables sonicterm-app's test-support feature through its self dev-dependency;
+      # this lints the library as release binaries compile it, with every gated test hook absent.
+      - name: Lint the app library without test support
+        run: cargo clippy --locked -p sonicterm-app --lib -- -D warnings
 
       # perf-counters only marks that the App has the counter API, and perf-hook-checkpoint-memory and
       # perf-hook-trim that it has the checkpoint memory and covered-window trim hooks; the perf_scenarios
@@ -1444,6 +1454,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The workspace lint enables sonicterm-app's test-support feature through its self dev-dependency;
+      # this lints the library as release binaries compile it, with every gated test hook absent.
+      - name: Lint the app library without test support
+        run: cargo clippy --locked -p sonicterm-app --lib -- -D warnings
 
       # perf-counters only marks that the App has the counter API, and perf-hook-checkpoint-memory and
       # perf-hook-trim that it has the checkpoint memory and covered-window trim hooks; the perf_scenarios

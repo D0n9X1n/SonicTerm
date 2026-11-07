@@ -752,6 +752,17 @@ workspace package 版本并验证 release asset 工具。它不会重复源码�
 验证，以及安装布局中的 DMG 应用和 Linux package smoke。Release Rust target build 不读写 Rust cache；Windows job 可以恢复由普通 CI 立即发布的
 vcpkg binary cache。
 
+测试插桩不进入 release 二进制。`sonicterm-app` 的 `test-support` feature 用
+`#[cfg(any(test, feature = "test-support"))]` 屏蔽所有只被本 crate unit 与 integration
+测试读取的 `__test_*` hook 和 App 的 `test_*` 字段。该 crate 通过对自身的 dev-dependency
+开启这个 feature，所以只有它自己的测试和 example 构建能看到；`sonicterm-mac`、
+`sonicterm-windows` 或 `sonicterm-linux` 的 release 构建不会编译这些条目。被 example、
+其他 crate 或生产代码调用的 hook 保持不屏蔽，因为这些构建永远拿不到该 feature（性能对比还会把
+example 叠加到较旧的 base 上）。源码测试
+`test_hooks_are_gated_unless_an_example_or_production_reads_them` 会在以下情况失败：
+某个 hook 或字段未被屏蔽且没有列出理由；某个列出的 hook 已没有非测试调用者；库外代码调用了
+被屏蔽的 hook。
+
 ### 源码与检查索引
 
 | 契约 | 主要源码或检查 |

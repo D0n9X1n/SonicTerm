@@ -1074,6 +1074,20 @@ release builds, native binary smokes, package validation, MSI metadata validatio
 and installed-DMG and Linux package smokes. Release Rust target builds do not read or write Rust caches; the Windows
 job may restore the vcpkg binary cache published immediately by normal CI.
 
+Test instrumentation stays out of release binaries. `sonicterm-app`'s
+`test-support` feature gates every `__test_*` hook and `test_*` App field that
+only its unit and integration tests read, with
+`#[cfg(any(test, feature = "test-support"))]`. The crate turns the feature on
+through a dev-dependency on itself, so only its own test and example builds see
+it; a release build of `sonicterm-mac`, `sonicterm-windows` or `sonicterm-linux`
+compiles none of those items. Hooks that an example, another crate, or
+production code calls stay ungated, because those builds never get the feature
+(the perf comparison also overlays the example onto an older base). The source
+test `test_hooks_are_gated_unless_an_example_or_production_reads_them` fails
+when a hook or field is ungated without a listed reason, when a listed hook has
+no remaining non-test caller, or when code outside the library calls a gated
+hook.
+
 ### Source and check map
 
 | Contract | Primary source or check |

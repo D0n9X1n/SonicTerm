@@ -8,6 +8,7 @@ impl App {
     /// Lets a test drive command-status and badge behavior from synthetic
     /// events instead of waiting on real process transitions.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_push_pane_command_event(
         &mut self,
         pane_id: u64,
@@ -24,6 +25,7 @@ impl App {
     ///
     /// `None` when no main window or no tab sits at `tab_idx`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_command_status_for_tab(&self, tab_idx: usize) -> Option<CommandStatus> {
         self.main_tab_states()?.get(tab_idx).map(|tab| tab.command.clone())
     }
@@ -33,6 +35,7 @@ impl App {
     /// Badge text depends on whether the tab is the active one, so this
     /// resolves activeness the same way the tab bar does.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_tab_badge(&self, tab_idx: usize, now: Instant) -> Option<&'static str> {
         let tabs = self.main_tabs()?;
         tabs.tabs()
@@ -43,6 +46,7 @@ impl App {
     /// Test-only mirror of the normal KeyboardInput dispatch order: try every
     /// keymap spelling before encoding bytes for PTY forwarding.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_dispatch_key_or_encode_pty(
         &mut self,
         key: &winit::keyboard::Key,
@@ -57,6 +61,7 @@ impl App {
     /// without requiring a live `ActiveEventLoop`.
     // Ordering: keyboard_input loads Relaxed as one self-contained modes, Kitty, and epoch snapshot.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_dispatch_key_or_encode_pty_with_drain(
         &mut self,
         key: &winit::keyboard::Key,
@@ -90,6 +95,7 @@ impl App {
 
     /// Test-only: active broadcast source pane, if broadcast is enabled.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_broadcast_source(&self) -> Option<u64> {
         match self.interaction.broadcast {
             BroadcastState::On { source_pane, .. } => Some(source_pane),
@@ -99,6 +105,7 @@ impl App {
 
     /// Test-only: receiver panes under the current broadcast state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_broadcast_receivers(&self) -> std::collections::BTreeSet<u64> {
         self.broadcast_receivers()
     }
@@ -118,6 +125,7 @@ impl App {
 
     /// Test-only: drive the same write + broadcast fan-out as normal input.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_write_to_pane_with_broadcast(&mut self, pane_id: u64, bytes: Vec<u8>) {
         self.write_to_pane(pane_id, bytes.clone(), PtyInputSource::Keyboard);
         self.broadcast_from(pane_id, bytes, PtyInputSource::Keyboard);
@@ -126,6 +134,7 @@ impl App {
     /// Test-only: child render pane ids with the broadcast participant flag that
     /// would be passed into `sonicterm_render_model::PaneRender`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_broadcast_render_flags(&self, id: WindowId) -> Option<Vec<(u64, bool)>> {
         let child = self.registry.windows.get(&id)?;
         let tab_idx = child.tabs.active_index();
@@ -136,6 +145,7 @@ impl App {
 
     /// Test-only: how many panes the named child window currently owns.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_pane_count(&self, id: WindowId) -> Option<usize> {
         self.registry.windows.get(&id).map(|child| child.panes.len())
     }
@@ -188,6 +198,7 @@ impl App {
     /// Test-only: install the headless per-window pane-viewport seam on a child
     /// so the split/close resize wiring runs without a renderer.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_child_pane_viewport(
         &mut self,
         id: WindowId,
@@ -207,12 +218,14 @@ impl App {
     /// Test-only: split the active pane of the named child window to the right,
     /// driving the same `split_active_pane_in_child` path the keymap uses.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_split_active_right(&mut self, id: WindowId) -> bool {
         self.split_active_pane_in_child(id, sonicterm_cfg::keymap::Direction::Right)
     }
 
     /// Test-only: grid (cols, rows) of a specific pane in the named child.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_pane_grid_size(&self, id: WindowId, pane_id: u64) -> Option<(u16, u16)> {
         let pane = self.registry.windows.get(&id)?.panes.get(&pane_id)?;
         let parser = pane.parser.lock();
@@ -222,6 +235,7 @@ impl App {
 
     /// Test-only: the active pane id in the named child's active tab.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_active_pane(&self, id: WindowId) -> Option<u64> {
         let child = self.registry.windows.get(&id)?;
         let tab_idx = child.tabs.active_index();
@@ -233,6 +247,7 @@ impl App {
     /// Used to assert wheel-scroll / view_top jumps light the auto-hide bar
     /// on torn-out windows the same way they do on the main window.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_scrollbar_active(&self, id: WindowId, pane_id: u64) -> Option<bool> {
         let visibility = self.registry.windows.get(&id)?.scrollbar_vis.get(&pane_id)?;
         let idle_ms = match visibility.last_active {
@@ -244,6 +259,7 @@ impl App {
 
     /// Test-only: whether the child pane is currently marked as right-edge hovered.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_scrollbar_near_edge(&self, id: WindowId, pane_id: u64) -> Option<bool> {
         self.registry
             .windows
@@ -255,6 +271,7 @@ impl App {
 
     /// Test-only: clear child scrollbar hover state, mirroring CursorLeft.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_clear_child_scrollbar_hover(&mut self, id: WindowId) -> bool {
         self.clear_scrollbar_hover_in_child(id)
     }
@@ -263,6 +280,7 @@ impl App {
     /// production path the scrollbar uses (`set_child_pane_view_top`), so a
     /// test can drive a scroll and observe the visibility side effect.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_set_pane_view_top(
         &mut self,
         id: WindowId,
@@ -283,18 +301,21 @@ impl App {
     /// Test-only: refresh a child window's scrollbar hover state from its last
     /// cursor position, mirroring the production CursorMoved branch.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_refresh_child_scrollbar_hover_from_cursor(&mut self, id: WindowId) -> bool {
         self.refresh_scrollbar_hover_from_cursor_in_child(id)
     }
 
     /// Test-only: drain the PTY write ledger populated by `write_to_pane`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_drain_pty_writes(&self) -> Vec<(u64, Vec<u8>)> {
         std::mem::take(&mut *self.test_pty_writes.lock())
     }
 
     /// Test-only: feed bytes into a child pane's parser.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_advance_child_pane_parser(
         &self,
         id: WindowId,
@@ -315,6 +336,7 @@ impl App {
 
     /// Test-only: clear all dirty row flags for a child pane.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_clear_child_pane_dirty(&self, id: WindowId, pane_id: u64) -> bool {
         let Some(pane) = self.registry.windows.get(&id).and_then(|child| child.panes.get(&pane_id))
         else {
@@ -328,6 +350,7 @@ impl App {
 
     /// Test-only: count dirty rows for a child pane.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_pane_dirty_count(&self, id: WindowId, pane_id: u64) -> Option<usize> {
         let pane = self.registry.windows.get(&id)?.panes.get(&pane_id)?;
         Some(pane.parser.lock().grid().dirty_count())
@@ -337,6 +360,7 @@ impl App {
     /// because the helper is `pub(super)` and tests live outside the
     /// `app` module tree.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_close_active_tab_in_child(&mut self, id: WindowId) -> bool {
         self.close_active_tab_in_child(id)
     }
@@ -345,30 +369,35 @@ impl App {
     /// per-index helper the close-button (×) hit-test path uses in a
     /// torn-out child window's tab bar.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_close_tab_at_in_child(&mut self, id: WindowId, idx: usize) -> bool {
         self.close_tab_at_in_child(id, idx)
     }
 
     /// Test-only invoker for [`Self::close_active_pane_or_tab_in_child`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_close_active_pane_or_tab_in_child(&mut self, id: WindowId) -> bool {
         self.close_active_pane_or_tab_in_child(id)
     }
 
     /// Test-only invoker for [`Self::next_tab_in_child`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_next_tab_in_child(&mut self, id: WindowId) -> bool {
         self.next_tab_in_child(id)
     }
 
     /// Test-only invoker for [`Self::prev_tab_in_child`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_prev_tab_in_child(&mut self, id: WindowId) -> bool {
         self.prev_tab_in_child(id)
     }
 
     /// Test-only: the active pane of each tab of window `id`, in tab order.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_tab_panes(&self, id: WindowId) -> Option<Vec<u64>> {
         self.registry
             .windows
@@ -437,12 +466,14 @@ impl App {
 
     /// Test-only invoker for [`Self::activate_tab_in_child`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_activate_tab_in_child(&mut self, id: WindowId, idx: usize) -> bool {
         self.activate_tab_in_child(id, idx)
     }
 
     /// Test-only invoker for [`Self::split_active_pane_in_child`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_split_active_pane_in_child(
         &mut self,
         id: WindowId,
@@ -453,6 +484,7 @@ impl App {
 
     /// Test-only invoker for [`Self::close_active_pane_in_child`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_close_active_pane_in_child(&mut self, id: WindowId) -> bool {
         self.close_active_pane_in_child(id)
     }
@@ -464,12 +496,14 @@ impl App {
     /// sibling's Grid + PtyHandle — without a live wgpu renderer.
     /// See `crates/sonicterm-app/tests/per_pane_resize.rs`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_close_active_pane(&mut self) {
         self.close_active_pane();
     }
 
     /// Test-only invoker for [`Self::focus_pane_dir_in_child`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_focus_pane_dir_in_child(
         &mut self,
         id: WindowId,
@@ -480,12 +514,14 @@ impl App {
 
     /// Test-only invoker for [`Self::toggle_active_pane_zoom_in_child`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_toggle_active_pane_zoom_in_child(&mut self, id: WindowId) -> bool {
         self.toggle_active_pane_zoom_in_child(id)
     }
 
     /// Test-only invoker for [`Self::resize_active_split_in_child`].
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_resize_active_split_in_child(
         &mut self,
         id: WindowId,
@@ -496,6 +532,7 @@ impl App {
 
     /// Test-only: count of tabs in the main App.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_tab_count(&self) -> usize {
         self.main_tabs().map(|tabs| tabs.len()).unwrap_or(0)
     }
@@ -541,6 +578,7 @@ impl App {
     /// tests exercise tab/pane bookkeeping with a reply-capable parser but
     /// without spawning shells.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_seed_tab_with_reply(
         &mut self,
         title: &str,
@@ -566,6 +604,7 @@ impl App {
     /// current theme defaults. Mirrors the production spawn path without
     /// requiring a live PTY or reply-forwarder thread.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_seed_pane_theme_colors(&mut self, pane_id: u64) -> bool {
         let Some(pane) = self.main().and_then(|main| main.panes.get(&pane_id)) else {
             // When: `pane_id` resolves to no pane, so there is no parser whose
@@ -595,6 +634,7 @@ impl App {
     /// Test-only: read-only access to the internal panes map so tests
     /// can assert "this pane id is gone after detach".
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pane_ids(&self) -> Vec<u64> {
         self.main().map(|main| main.panes.keys().copied().collect()).unwrap_or_default()
     }
@@ -603,6 +643,7 @@ impl App {
     /// scrollback-scroll wiring tests to assert wheel + Scroll-keymap
     /// dispatch actually mutates the canonical field.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pane_viewport_top_abs(&self, pane_id: u64) -> Option<Option<u64>> {
         self.main()?.panes.get(&pane_id).map(|pane| pane.viewport_top_abs)
     }
@@ -611,6 +652,7 @@ impl App {
     /// returns the resulting `scrollback_len()`. Each line is 4 chars +
     /// CRLF so callers can predict the row count.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_grow_pane_scrollback(&self, pane_id: u64, line_count: u32) -> u64 {
         let Some(pane) = self.main().and_then(|main| main.panes.get(&pane_id)) else {
             // When: `pane_id` resolves to no pane, so no scrollback was grown and
@@ -629,6 +671,7 @@ impl App {
 
     /// Test-only: viewport rows of a pane.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pane_viewport_rows(&self, pane_id: u64) -> Option<u16> {
         let pane = self.main()?.panes.get(&pane_id)?;
         Some(pane.parser.lock().grid().rows)
@@ -648,6 +691,7 @@ impl App {
     /// assert that splitting a pane plus the click-to-focus path
     /// actually flips the focused leaf.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_active_pane_in_tab(&self, tab_idx: usize) -> Option<u64> {
         self.main_tab_states()?.get(tab_idx).map(|tab| tab.active_pane)
     }
@@ -657,6 +701,7 @@ impl App {
     /// caller; tests exercise the same state transition without
     /// driving a synthetic winit `MouseInput` event.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_active_pane(&mut self, tab_idx: usize, pane_id: u64) -> bool {
         if let Some(tab) =
             self.main_tab_states_mut().and_then(|tab_states| tab_states.get_mut(tab_idx))
@@ -673,12 +718,14 @@ impl App {
     /// Test-only: drive `split_active(Direction::Right)`. Mirrors the
     /// `Action::SplitRight` dispatch but skips the `Action` round-trip.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_split_active_right(&mut self) {
         self.split_active(sonicterm_cfg::keymap::Direction::Right);
     }
 
     /// Test-only: tab count.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_tab_count(&self) -> usize {
         self.main_tabs().map(|tabs| tabs.len()).unwrap_or(0)
     }
@@ -689,6 +736,7 @@ impl App {
     /// `Action::CloseActivePaneOrTab` shrinks the active tab's pane
     /// tree rather than the tab bar when the tab still has > 1 pane.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pane_count_in_tab(&self, tab_idx: usize) -> Option<usize> {
         self.main_tab_states()?.get(tab_idx).map(|tab| tab.tree.leaf_count())
     }
@@ -697,6 +745,7 @@ impl App {
     /// so a test can assert the per-pane redraw indirection survives
     /// state transfers.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pane_redraw_target(&self, id: u64) -> Option<Arc<Mutex<Option<WindowId>>>> {
         self.main()?.panes.get(&id).map(|pane| pane.redraw_target.clone())
     }
@@ -704,6 +753,7 @@ impl App {
     /// Test-only: install or clear a pane's PTY handle so tear-out tests
     /// can verify ownership moves without spawning a real shell.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_pane_pty(&mut self, id: u64, pty: Option<PtyHandle>) -> bool {
         let Some(pane) = self.main_mut().and_then(|main| main.panes.get_mut(&id)) else {
             // When: `id` resolves to no pane, so the supplied `pty` has no owner
@@ -716,6 +766,7 @@ impl App {
 
     /// Test-only: report whether a pane still has a PTY handle.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_pane_pty_present(&self, id: u64) -> Option<bool> {
         self.main()?.panes.get(&id).map(|pane| pane.pty.is_some())
     }

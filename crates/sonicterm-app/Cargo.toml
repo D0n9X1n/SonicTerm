@@ -100,6 +100,9 @@ tempfile = "3"
 # adapters. A dev-dependency rather than a dependency: the app reaches wgpu
 # through `sonicterm-gpu` and must not gain a direct one.
 wgpu.workspace = true
+# Turns on `test-support` for this crate's own unit tests, integration tests and examples
+# only: dev-dependency features never reach the release binaries under resolver 2.
+sonicterm-app = { path = ".", features = ["test-support"] }
 # Drives that test's asynchronous adapter enumeration to completion.
 pollster.workspace = true
 
@@ -137,6 +140,9 @@ perf-echo-trace = ["perf-counters"]
 # Marks that this tree's App has the covered-window trim hook (App::__trim_covered_now); only the
 # perf_scenarios example calls it, so the same harness source also builds against a tree without it.
 perf-hook-trim = []
+# Test-only App instrumentation read by unit and integration tests and by no example. Enabled
+# by the self dev-dependency above, so release builds of the platform binaries never compile it.
+test-support = []
 
 # AppKit objects exist only on the main thread, so the native display-link test owns its main.
 [[test]]

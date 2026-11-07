@@ -211,6 +211,7 @@ impl App {
     // Ordering: redraw_request_count fetch_add is Relaxed; the counter is only
     // incremented, never loaded, so it publishes no other memory.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_drain_menubar_actions(&mut self) {
         let mut ran_any = false;
         for action in crate::menubar_bridge::drain() {

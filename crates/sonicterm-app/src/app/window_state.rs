@@ -209,9 +209,9 @@ pub struct WindowState {
     pub pending_tear_out_timing: Option<TearOutTiming>,
     /// Test-only mirror of the renderer's `drag_chip` overlay.
     /// Production code leaves this `None`. Headless tests use
-    /// [`App::__test_set_window_drag_chip_marker`] to flip it `Some(true)`
+    /// `App::__test_set_window_drag_chip_marker` to flip it `Some(true)`
     /// before calling [`App::cancel_drag_session`], then assert it is
-    /// `Some(false)` afterward via [`App::__test_window_drag_chip_marker`].
+    /// `Some(false)` afterward via `App::__test_window_drag_chip_marker`.
     /// `cancel_drag_session` flips this in lock-step with the real
     /// `renderer.set_drag_chip(None)` call (when `Some(_)`), so the test
     /// observes the SAME loop iteration the production path runs — if

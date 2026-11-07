@@ -374,7 +374,7 @@ class CustodyPolicyTests(unittest.TestCase):
     def test_compile_cleanup_policy_is_explicit_and_narrow(self):
         # Only these reviewed standalone compilation steps may accept forced owned cleanup.
         self.assertEqual({step.id for step in gate_catalog.STEPS if step.windows_policy == gate_model.WindowsPolicy.COMPILE_ONLY},
-                         {"clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
+                         {"clippy", "app-library-clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
                           "perf-scenarios-echo-trace-clippy", "perf-scenarios-harness-api-clippy",
                           "perf-scenarios-harness-api-echo-trace-clippy", "doc",
                           "doc-resource-features", "release-windows", "windows-perf-build"})

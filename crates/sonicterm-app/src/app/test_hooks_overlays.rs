@@ -5,6 +5,7 @@ use super::*;
 
 /// IME anchor kind (`"field"`, `"pending"`, `"terminal"`) with the candidate area's
 /// physical position and size when a presented caret anchors it.
+#[cfg(any(test, feature = "test-support"))]
 type ImeAnchorReading = (&'static str, Option<((i32, i32), (u32, u32))>);
 
 impl App {
@@ -14,6 +15,7 @@ impl App {
     /// (cmd+1, cmd+2, cmd+Right, cmd+Left) actually resolve to their
     /// expected Action variants.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_keymap_lookup(&self, keys: &str) -> Option<Action> {
         self.keymap.lookup(keys).cloned()
     }
@@ -54,6 +56,7 @@ impl App {
     /// Test-only: drive command-palette core editing without constructing a
     /// platform-private winit `KeyEvent`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_command_palette_text_edit(
         &mut self,
         key: &winit::keyboard::Key,
@@ -85,6 +88,7 @@ impl App {
 
     /// Test-only: enter tab-rename mode with a known value.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_start_rename_tab(&mut self, title: &str) {
         self.interaction.command_palette.start_rename_tab(title);
     }
@@ -97,6 +101,7 @@ impl App {
 
     /// Test-only: drive command-palette IME handling.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_command_palette_handle_ime(&mut self, event: &winit::event::Ime) -> bool {
         self.command_palette_handle_ime(event)
     }
@@ -104,6 +109,7 @@ impl App {
     /// Test-only: describe where the main window will anchor the OS IME
     /// candidate area.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_ime_candidate_anchor_kind(&self) -> &'static str {
         if self.interaction.command_palette.is_open()
             && self.interaction.palette_attached_window.is_none()
@@ -118,6 +124,7 @@ impl App {
 
     /// Test-only: read the main window notification bubble message.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_notification_message(&self) -> Option<&str> {
         self.main()
             .and_then(|main| main.notification.as_ref())
@@ -126,6 +133,7 @@ impl App {
 
     /// Test-only: whether the main notification is ongoing.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_main_notification_ongoing(&self) -> Option<bool> {
         self.main()
             .and_then(|main| main.notification.as_ref())
@@ -134,6 +142,7 @@ impl App {
 
     /// Test-only: install a notification with a specific expiration.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_show_notification_until(
         &mut self,
         kind: FrontmostKind,
@@ -146,6 +155,7 @@ impl App {
 
     /// Test-only: run notification expiry and return the next wake time.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_expire_notifications(
         &mut self,
         now: std::time::Instant,
@@ -155,6 +165,7 @@ impl App {
 
     /// Test-only: read a child window notification bubble message.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_notification_message(&self, id: WindowId) -> Option<&str> {
         self.registry
             .windows
@@ -168,6 +179,7 @@ impl App {
     /// integration tests can assert the stale-id no-op contract for
     /// overlay routing.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_invoke_open_search_in_child(&mut self, id: WindowId) -> bool {
         self.open_search_in_child(id)
     }
@@ -237,6 +249,7 @@ impl App {
     /// Test-only: apply a core edit to main or child search through the same
     /// shared state operation used by production routing.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_search_text_edit(
         &mut self,
         id: Option<WindowId>,
@@ -295,6 +308,7 @@ impl App {
 
     /// Test-only: seed main IME preedit state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_main_ime_preedit(&mut self, text: &str) -> bool {
         let Some(main) = self.main_mut() else {
             // When: `main_mut` resolves nothing, so no window holds the IME state
@@ -317,18 +331,21 @@ impl App {
 
     /// Test-only: read the in-memory clipboard buffer if installed.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_memory_clipboard(&self) -> Option<String> {
         self.test_clipboard_text.clone()
     }
 
     /// Test-only: make clipboard writes fail before either clipboard seam changes.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_clipboard_write_failure(&mut self, enabled: bool) {
         self.test_clipboard_write_failure = enabled;
     }
 
     /// Test-only: exercise file-drop path paste routing without a platform drop event.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_paste_file_paths_for_kind(
         &mut self,
         kind: FrontmostKind,
@@ -339,6 +356,7 @@ impl App {
 
     /// Bind an unbound headless selection to a synthetic window's active pane,
     /// matching production mouse selection creation.
+    #[cfg(any(test, feature = "test-support"))]
     fn bind_test_selection(
         window: &WindowState,
         selection: Option<Selection>,
@@ -364,6 +382,7 @@ impl App {
 
     /// Test-only: set the synthetic main window's selection.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_main_selection(&mut self, selection: Option<Selection>) -> bool {
         let Some(id) = self.registry.main_window_id else {
             // When: `main_window_id` is unset, so no main window exists to carry
@@ -387,6 +406,7 @@ impl App {
 
     /// Test-only: set a synthetic child window's selection.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_child_selection(
         &mut self,
         id: WindowId,
@@ -412,12 +432,14 @@ impl App {
     /// The outer `None` means `id` is unknown; the inner `None` means the
     /// window is tracked but has no selection.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_selection(&self, id: WindowId) -> Option<Option<Selection>> {
         self.registry.windows.get(&id).map(|state| state.selection)
     }
 
     /// Test-only: seed child IME preedit state.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_set_child_ime_preedit(&mut self, id: WindowId, text: &str) -> bool {
         let Some(child) = self.registry.windows.get_mut(&id) else {
             // When: `windows` tracks no entry for this id, so no child holds the
@@ -430,6 +452,7 @@ impl App {
 
     /// Test-only: read whether a child IME composition is active.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_child_ime_composing(&self, id: WindowId) -> Option<bool> {
         self.registry.windows.get(&id).map(|child| child.ime.is_composing())
     }
@@ -438,6 +461,7 @@ impl App {
     ///
     /// Uses the same ownership rule as field pointer routing; `None` when no editable field owns `id`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_state(
         &self,
         id: WindowId,
@@ -458,6 +482,7 @@ impl App {
 
     /// Test-only: the presented caret of the field that owns `id`, from the renderer getter production uses.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_caret_rect(
         &self,
         id: WindowId,
@@ -478,6 +503,7 @@ impl App {
 
     /// Test-only: map a physical point through the production field hit resolver for `id`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_hit(
         &self,
         id: WindowId,
@@ -493,6 +519,7 @@ impl App {
     /// Returns `"field"` with the candidate area, `"pending"` when a field owns IME without a
     /// presented caret, or `"terminal"`; it calls the same selector both redraw paths call.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_ime_anchor(&self, id: WindowId) -> ImeAnchorReading {
         let Some(window) = self.registry.windows.get(&id) else {
             // When: `id` is not tracked, no renderer can anchor IME.
@@ -527,6 +554,7 @@ impl App {
 
     /// Test-only: the window holding a field pointer capture and whether it is still dragging.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_pointer_capture(&self) -> Option<(WindowId, bool)> {
         match self.interaction.field_pointer_capture? {
             field_pointer::FieldPointerCapture::Dragging { window_id, .. } => {
@@ -538,6 +566,7 @@ impl App {
 
     /// Test-only: whether `id` owes the release of a cancelled field gesture, held or parked.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_field_owes_release(&self, id: WindowId) -> bool {
         self.interaction.field_owed_releases.contains(&id)
             || matches!(
@@ -548,6 +577,7 @@ impl App {
 
     /// Test-only: collapse the field selection that owns `id` onto its caret, keeping the caret.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_collapse_field_selection(&mut self, id: WindowId) -> bool {
         match self.field_pointer_target(id) {
             Some(field_pointer::FieldTarget::Palette { .. }) => {
@@ -587,6 +617,7 @@ impl App {
 
     /// Test-only: a tracked window's custom name, as the window-rename editor commits it.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn __test_window_custom_name(&self, id: WindowId) -> Option<&str> {
         self.registry.windows.get(&id).map(|window| window.custom_window_name.as_str())
     }

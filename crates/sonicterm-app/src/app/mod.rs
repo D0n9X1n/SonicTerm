@@ -17,9 +17,12 @@ use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonicterm_cfg::{
     config::{BackdropKind, Config, SoftwareRenderMode},
-    keymap::{Action, BroadcastScope, Keymap},
+    keymap::{BroadcastScope, Keymap},
     theme::Theme,
 };
+// Only the gated test hooks name `Action` through `use super::*`.
+#[cfg(any(test, feature = "test-support"))]
+use sonicterm_cfg::keymap::Action;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_resource::ResourceGovernor;
@@ -474,6 +477,7 @@ pub struct App {
     /// boundary. Disabled in every constructor so ordinary runs retain the real
     /// clipboard behavior and the in-memory success seam remains opt-in.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) test_clipboard_write_failure: bool,
     /// Test-only PTY write ledger. `write_to_pane` records every boundary write
     /// here before resolving the pane to a real PTY, so headless tests can assert
@@ -529,13 +533,12 @@ pub struct App {
     /// `get_mut(&id).else { continue }` arm is designed to tolerate.
     /// Consumed (`take()`-d) at the call site so the closure is invoked
     /// at most once per `cancel_drag_session` run and the mutable
-    /// borrow on `self.registry.windows` is not held while it runs. Production
-    /// cost is one extra `Option::take()` per `cancel_drag_session`
-    /// invocation (always `None` outside tests) — gated by
-    /// `#[doc(hidden)]` rather than `#[cfg(test)]` so an integration test,
-    /// which compiles the crate without `cfg(test)`, can install it through
+    /// borrow on `self.registry.windows` is not held while it runs. Compiled only
+    /// under `cfg(test)` or `test-support`, so release builds carry neither the
+    /// field nor the call; an integration test installs it through
     /// `App::__test_set_post_snapshot_hook`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) test_post_snapshot_hook: Option<Box<dyn FnOnce(&mut App) + Send>>,
     /// Deferred app-exit request, set by a quit action or by a close that
     /// leaves no active terminal window. `do_about_to_wait` drains it by
@@ -609,7 +612,7 @@ pub struct App {
     pub(super) software_render_degrade: bool,
     /// The one clock every pacing read goes through: redraw admission and completion for both window
     /// roles, collection contention, the display-link tick and the wait fold. `Instant::now` in
-    /// production; a test installs a fake through [`Self::__test_set_dispatch_clock`].
+    /// production; a test installs a fake through `Self::__test_set_dispatch_clock`.
     pub(super) dispatch_clock: fn() -> Instant,
     /// Legacy observation of main pacing deferral; owner redraw state, not this flag, arms deadlines.
     pub(super) pending_redraw: bool,
@@ -806,6 +809,10 @@ mod close_baseline_tests;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;
+
+#[cfg(test)]
+#[path = "mod_test_support_tests.rs"]
+mod test_support_tests;
 
 mod user_event;
 pub use user_event::UserEvent;

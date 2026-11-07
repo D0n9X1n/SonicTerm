@@ -98,6 +98,7 @@ pub(crate) fn drain_file_drops() -> Vec<(WindowId, Vec<PathBuf>)> {
 /// Test bridge: same as [`drain_tab_payloads`] but reachable from
 /// integration tests in other crates. Hidden from docs.
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn __test_drain_tabs() -> Vec<TabPayload> {
     drain_tab_payloads()
 }

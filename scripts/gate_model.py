@@ -115,7 +115,7 @@ class WindowsPolicy(str, Enum):
     COMPILE_ONLY = "compile-only"
 
 
-_COMPILE_ONLY_STEPS = frozenset(("clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
+_COMPILE_ONLY_STEPS = frozenset(("clippy", "app-library-clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
                                  "perf-scenarios-echo-trace-clippy", "perf-scenarios-harness-api-clippy",
                                  "perf-scenarios-harness-api-echo-trace-clippy", "doc",
                                  "doc-resource-features", "release-windows", "windows-perf-build",
