@@ -365,7 +365,7 @@ fn a_first_interval_with_no_activity_authorizes_no_redraw_line() {
 fn the_gate_seal_is_plain_event_loop_state() {
     // Pane creation runs with the gate off too, so sealing must not be an atomic store.
     let app = app_under_filter("warn");
-    let seal = std::any::type_name_of_val(&app.frame_counters_sealed);
+    let seal = std::any::type_name_of_val(&app.diagnostics.frame_counters_sealed);
     assert_eq!(seal, std::any::type_name::<std::cell::Cell<bool>>());
 }
 

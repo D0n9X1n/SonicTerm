@@ -304,8 +304,10 @@ mod search_handle;
 mod selection_gesture;
 pub use selection_gesture::next_click_count;
 use selection_gesture::{PointerCell, PointerGesture, PointerGestureOwner};
+mod diagnostics;
 mod session;
 mod shell_token;
+pub(crate) use diagnostics::DiagnosticsState;
 mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
@@ -382,6 +384,8 @@ pub(super) struct PendingOsc52Reassert {
 
 #[doc(hidden)]
 pub struct App {
+    /// Diagnostic and accounting state: counters, retention and trim samples, breadcrumbs.
+    pub(super) diagnostics: DiagnosticsState,
     pub(super) theme: Theme,
     /// Pool each pane charges its inline media to: the process-default pool in
     /// production, or a private pool a test injects with
@@ -532,36 +536,9 @@ pub struct App {
     /// calling `event_loop.exit()`; the flag exists because those paths have
     /// no `ActiveEventLoop` handle.
     pub(super) pending_exit: bool,
-    /// When pane retention was last sampled for the memory log.
-    ///
-    /// `None` until the first sample. Gating on elapsed time rather than
-    /// sampling every idle turn keeps a measurement that walks every pane off
-    /// the path that governs idle CPU.
-    pub(super) last_retention_sample: Option<std::time::Instant>,
-    /// Covered-window trims performed since startup; the latest trim's number.
-    pub(super) trim_seq: u64,
-    /// What requested the latest trim; `None` until the first one.
-    pub(super) last_trim_source: Option<retention::TrimSource>,
     /// Unit-test observation of every scheduler trim decision, in pass order.
     #[cfg(test)]
     pub(super) test_scheduler_trims: Vec<(WindowId, retention::TrimDecision)>,
-    /// The preceding cycle's totals, so a snapshot can report movement.
-    ///
-    /// `None` until the first sample has been taken, which is what makes the
-    /// first snapshot's deltas report `unavailable` rather than `+0` — the
-    /// latter claims the process did not move, which is a measurement nobody
-    /// made.
-    ///
-    /// Only the totals are retained rather than the whole snapshot: the
-    /// per-renderer breakdown is a string per renderer, and holding it between
-    /// samples would keep it alive for the life of the session to serve a
-    /// report that never reads it.
-    pub(super) last_memory_totals: Option<memory_snapshot::MemoryTotals>,
-    /// Nonblocking recorder for bounded postmortem breadcrumbs.
-    ///
-    /// The platform binary owns the writer thread; the app only holds this cheap
-    /// sender and never performs filesystem IO on the event-loop path.
-    pub(super) breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
     pub(super) command_palette: CommandPalette,
     /// Which window the (single, modal) command palette is attached to.
     /// `None` means it is closed OR attached to the main window; `Some(id)`
@@ -612,17 +589,11 @@ pub struct App {
     session_finished: Option<bool>,
     /// This App's frame and lock counters; `Some` only when its gate is on, fixed for its lifetime.
     pub(super) frame_counters: Option<frame_counters::AppFrameCounters>,
-    /// Set by the first window or pane; the gate can no longer be forced on after it.
-    pub(super) frame_counters_sealed: std::cell::Cell<bool>,
     /// The windows asked for a frame in the current dispatch; see [`redraw::DispatchRedraws`].
     pub(super) dispatch_redraws: redraw::DispatchRedraws,
-    /// Trees sent to assistive technology since start; stays 0 while none is connected.
-    pub(super) accessibility_tree_builds: u64,
     /// Each terminal window's adapter and strip focus by window id, warm spares included.
     pub(super) accessibility:
         std::collections::HashMap<WindowId, accessibility::WindowAccessibility>,
-    /// The token the next `arm_echo_watch` issues; starts at 1, so 0 never names an arming.
-    pub(super) next_echo_arm: u64,
     /// Id of the main window. Set in `do_resumed` once the main `Window` is
     /// created and its [`WindowState`] is inserted into [`Self::windows`].
     ///
@@ -785,23 +756,6 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    /// Test-only redraw request counter. Every
-    /// production code path that calls `window.request_redraw()` after
-    /// a `run_action` dispatch also bumps this counter in lock-step.
-    /// Tests assert against this rather than the live winit window
-    /// (which has no public introspection API). Stays at zero in
-    /// release builds whose tests don't touch it.
-    #[doc(hidden)]
-    pub redraw_request_count: std::sync::atomic::AtomicUsize,
-    /// Test-only counter incremented on every call to
-    /// [`Self::reap_empty_child`]. Lets tests
-    /// distinguish "child window cleanup went through the unified reap
-    /// contract" from "a direct `windows.remove` happened" — both would
-    /// shrink the `windows` map, but only the former nulls out straggler
-    /// `redraw_target`s and fires the reap trace. Stays at zero in
-    /// release builds whose tests don't touch it.
-    #[doc(hidden)]
-    pub reap_call_count: std::sync::atomic::AtomicUsize,
     /// Test-only viewport override. When
     /// `Some((outer, cell_w, cell_h))`, [`Self::compute_active_pane_rects`]
     /// uses `outer` instead of fetching the renderer's logical size and
@@ -835,7 +789,7 @@ impl App {
     /// Panes already in `window` are adopted by this call. A window populated
     /// after insertion instead reconciles when those panes arrive.
     pub(super) fn insert_window_registered(&mut self, id: WindowId, mut window: WindowState) {
-        self.frame_counters_sealed.set(true);
+        self.diagnostics.frame_counters_sealed.set(true);
         if let Some(app) = self.frame_counters.as_mut() {
             // the App's gate is on, every registered window and its renderer count.
             if window.redraw.frame_counters.is_none() {

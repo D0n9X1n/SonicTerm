@@ -776,7 +776,7 @@ pub(super) fn pass_at(
     window_id: WindowId,
 ) -> Option<TrimDecision> {
     app.test_scheduler_trims.clear();
-    app.last_retention_sample = None;
+    app.diagnostics.last_retention_sample = None;
     app.sample_pane_retention(base + Duration::from_secs(secs));
     app.test_scheduler_trims
         .iter()
@@ -847,8 +847,13 @@ pub(super) fn run_live_scheduler(
     if !renderer.__frame_texture_trimmed() {
         return Err(String::from("the renderer's frame texture was trimmed"));
     }
-    if (app.trim_seq, app.last_trim_source) != (1, Some(TrimSource::Scheduler)) {
-        return Err(format!("one scheduler trim: {:?}", (app.trim_seq, app.last_trim_source)));
+    if (app.diagnostics.trim_seq, app.diagnostics.last_trim_source)
+        != (1, Some(TrimSource::Scheduler))
+    {
+        return Err(format!(
+            "one scheduler trim: {:?}",
+            (app.diagnostics.trim_seq, app.diagnostics.last_trim_source)
+        ));
     }
     // The window's trim state reaches the App's own snapshot: its renderer summary says trimmed and
     // carries the released request size, and a tagged checkpoint line names the scheduler's trim.
@@ -887,8 +892,13 @@ pub(super) fn run_live_scheduler(
         return Err(format!("the checkpoint's renderer entry carries the trim: {breakdown}"));
     }
     let later = pass_at(&mut app, base, 60, main);
-    if later != Some(TrimDecision::Skipped(TrimSkip::AlreadyTrimmed)) || app.trim_seq != 1 {
-        return Err(format!("one trim per covered stretch: {later:?}, trim_seq {}", app.trim_seq));
+    if later != Some(TrimDecision::Skipped(TrimSkip::AlreadyTrimmed))
+        || app.diagnostics.trim_seq != 1
+    {
+        return Err(format!(
+            "one trim per covered stretch: {later:?}, trim_seq {}",
+            app.diagnostics.trim_seq
+        ));
     }
 
     // Shown, drawn and covered again, then a pass with no subscriber installed: still trimmed.

@@ -191,7 +191,7 @@ fn the_memory_deadline_is_one_interval_after_the_last_sample() {
     let mut app = app_with_main_window();
     let sampled_at = Instant::now();
 
-    app.last_retention_sample = Some(sampled_at);
+    app.diagnostics.last_retention_sample = Some(sampled_at);
 
     assert_eq!(
         app.memory_sample_deadline(),
@@ -207,13 +207,13 @@ fn idle_memory_sampling_rearms_after_each_sample_without_redrawing() {
     let interval = crate::app::retention::RETENTION_SAMPLE_INTERVAL;
     let first_sample = Instant::now();
 
-    app.last_retention_sample = Some(first_sample);
+    app.diagnostics.last_retention_sample = Some(first_sample);
     let first_wake = app.memory_sample_deadline();
     assert_eq!(first_wake, Some(first_sample + interval));
     assert!(wake_is_memory_only(None, first_wake));
 
     let second_sample = first_wake.expect("the first sample arms a wake");
-    app.last_retention_sample = Some(second_sample);
+    app.diagnostics.last_retention_sample = Some(second_sample);
     let second_wake = app.memory_sample_deadline();
     assert_eq!(second_wake, Some(first_sample + interval + interval));
     assert!(wake_is_memory_only(None, second_wake));
@@ -226,7 +226,10 @@ fn idle_memory_sampling_rearms_after_each_sample_without_redrawing() {
 #[test]
 fn no_memory_deadline_is_armed_before_the_first_sample() {
     let app = app_with_main_window();
-    assert_eq!(app.last_retention_sample, None, "test setup: a fresh app has not sampled");
+    assert_eq!(
+        app.diagnostics.last_retention_sample, None,
+        "test setup: a fresh app has not sampled"
+    );
     assert_eq!(app.memory_sample_deadline(), None);
 }
 

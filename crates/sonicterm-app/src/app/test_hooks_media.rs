@@ -94,9 +94,9 @@ impl App {
     /// inside the interval does nothing. Returns whether the pass was due and ran.
     #[doc(hidden)]
     pub fn __test_sample_pane_retention_at(&mut self, now: Instant) -> bool {
-        let before = self.last_retention_sample;
+        let before = self.diagnostics.last_retention_sample;
         self.sample_pane_retention(now);
-        self.last_retention_sample != before
+        self.diagnostics.last_retention_sample != before
     }
 
     /// Test seam: `renderer_total_bytes` from the last emitted aggregate memory snapshot.
@@ -104,6 +104,6 @@ impl App {
     /// `None` until a sample has emitted one, which needs the `memory` target enabled at INFO.
     #[doc(hidden)]
     pub fn __test_last_sampled_renderer_bytes(&self) -> Option<usize> {
-        self.last_memory_totals.map(|totals| totals.renderer_bytes)
+        self.diagnostics.last_memory_totals.map(|totals| totals.renderer_bytes)
     }
 }

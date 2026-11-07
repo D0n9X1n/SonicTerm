@@ -636,8 +636,11 @@ impl super::App {
             panes_sampled,
             panes_contended,
             renderers,
-            trim_seq: self.trim_seq,
-            trim_source: self.last_trim_source.map(super::retention::TrimSource::as_str),
+            trim_seq: self.diagnostics.trim_seq,
+            trim_source: self
+                .diagnostics
+                .last_trim_source
+                .map(super::retention::TrimSource::as_str),
             allocator,
             live_renderers: sonicterm_gpu::core::live_renderer_count(),
             live_fg_probe_workers: self.fg_probes.live_workers(),
@@ -665,7 +668,7 @@ impl super::App {
         let snapshot = self.build_memory_snapshot();
         emit_graphics_memory_snapshot(
             &snapshot,
-            self.last_memory_totals,
+            self.diagnostics.last_memory_totals,
             Some(CheckpointTag { index, label, attempt }),
             &self.build_graphics_reading(),
         );

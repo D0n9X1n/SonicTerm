@@ -773,7 +773,7 @@ impl App {
                 state.resolved_before_send = resolve_target(&state.targets, node);
             }
             state.send(update);
-            self.accessibility_tree_builds += 1;
+            self.diagnostics.accessibility_tree_builds += 1;
             self.note_status_line(|counters| counters.tree_builds += 1);
         }
         if restructured {

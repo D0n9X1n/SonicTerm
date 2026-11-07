@@ -14,7 +14,7 @@ fn terminal_windows_carry_a_dormant_adapter_and_build_nothing_before_activation(
     present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
     let _ = app.sync_status_line(Instant::now());
     let _ = app.flush_accessibility(Instant::now());
-    assert_eq!(app.accessibility_tree_builds, 0);
+    assert_eq!(app.diagnostics.accessibility_tree_builds, 0);
     assert!(access(&app, window_id).sent.is_empty());
     assert_eq!(access(&app, window_id).retained_items(), 0, "a dormant window keeps nothing");
 }

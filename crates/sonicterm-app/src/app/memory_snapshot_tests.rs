@@ -783,17 +783,20 @@ pub(super) fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
     );
 
     let cadence = Some(Instant::now() - Duration::from_secs(5));
-    app.last_retention_sample = cadence;
-    app.last_memory_totals = Some(app.build_memory_snapshot().totals());
-    let totals = app.last_memory_totals;
+    app.diagnostics.last_retention_sample = cadence;
+    app.diagnostics.last_memory_totals = Some(app.build_memory_snapshot().totals());
+    let totals = app.diagnostics.last_memory_totals;
     let pool_bytes = pool.bytes();
 
     let _events = capture(|| {
         app.__perf_checkpoint_memory(0, "end", 1);
     });
 
-    assert_eq!(app.last_retention_sample, cadence, "the periodic cadence is not reset");
-    assert_eq!(app.last_memory_totals, totals, "the next periodic delta keeps its baseline");
+    assert_eq!(app.diagnostics.last_retention_sample, cadence, "the periodic cadence is not reset");
+    assert_eq!(
+        app.diagnostics.last_memory_totals, totals,
+        "the next periodic delta keeps its baseline"
+    );
     assert_eq!(
         app.__test_pane_capture_count(window, pane_id),
         Some(1),
@@ -856,8 +859,8 @@ pub(super) fn a_checkpoint_line_carries_the_trim_state_and_a_periodic_line_does_
 
     // The test window has no renderer, so the App's trim state and the trimmed renderer's summary
     // are set as a trim would set them.
-    app.trim_seq = 3;
-    app.last_trim_source = Some(super::super::retention::TrimSource::Hook);
+    app.diagnostics.trim_seq = 3;
+    app.diagnostics.last_trim_source = Some(super::super::retention::TrimSource::Hook);
     let mut snapshot = app.build_memory_snapshot();
     snapshot.renderers.push(RendererSummary {
         label: format!("{window:?}"),

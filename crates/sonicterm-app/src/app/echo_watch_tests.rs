@@ -191,7 +191,7 @@ fn gate_off_arm_and_take_return_gate_off_and_allocate_nothing() {
     assert_eq!(app.arm_echo_watch(pane_id, target()), ArmOutcome::GateOff);
     assert_eq!(app.take_echo_watch(pane_id, ArmToken(1)), TakeOutcome::GateOff);
     assert!(app.pane_by_id(pane_id).expect("seeded pane").frame_counters.is_none());
-    assert_eq!(app.next_echo_arm, 1, "no token was issued");
+    assert_eq!(app.diagnostics.next_echo_arm, 1, "no token was issued");
 }
 
 /// A pane removed while its worker's handles survive keeps its watch alive through them; the App
@@ -234,7 +234,7 @@ fn the_arm_clock_is_read_once_after_admission_and_never_on_refusal() {
     assert_eq!(off.arm_echo_watch_with(off_pane, target(), clock), ArmOutcome::GateOff);
     let (mut app, pane_id) = counting_app();
     assert_eq!(app.arm_echo_watch_with(u64::MAX, target(), clock), ArmOutcome::NoPane);
-    let saved = app.next_echo_arm;
+    let saved = app.diagnostics.next_echo_arm;
     app.__test_set_next_echo_arm(u64::MAX);
     assert_eq!(app.arm_echo_watch_with(pane_id, target(), clock), ArmOutcome::Exhausted);
     assert_eq!(reads.get(), 0, "no refusal reads the clock");

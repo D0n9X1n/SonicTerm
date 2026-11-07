@@ -77,9 +77,9 @@ impl super::super::App {
         }
         window.redraw.trimmed = true;
         window.redraw.trim_released_requested_bytes = report.gpu_released_requested_bytes;
-        self.trim_seq += 1;
-        self.last_trim_source = Some(rule.source());
-        TrimDecision::Trimmed { trim_seq: self.trim_seq }
+        self.diagnostics.trim_seq += 1;
+        self.diagnostics.last_trim_source = Some(rule.source());
+        TrimDecision::Trimmed { trim_seq: self.diagnostics.trim_seq }
     }
 
     /// The retention pass's trim: every live window covered for 30 s gives back what it can rebuild.

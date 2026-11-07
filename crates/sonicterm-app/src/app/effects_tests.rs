@@ -30,14 +30,14 @@ fn operational_redraw_effects_use_only_the_named_live_window() {
     let main = app.main_window_id.unwrap();
     let main_key = app.window_keys.get(main).unwrap();
     let child_key = app.window_keys.get(child).unwrap();
-    let before = app.redraw_request_count.load(Ordering::SeqCst);
+    let before = app.diagnostics.redraw_request_count.load(Ordering::SeqCst);
     for window in [child_key, main_key] {
         app.dispatch_effects(smallvec::smallvec![sonicterm_app_core::AppEffect::Render {
             window,
             reason: sonicterm_app_core::RedrawReason::Layout
         }]);
     }
-    assert_eq!(app.redraw_request_count.load(Ordering::SeqCst), before + 2);
+    assert_eq!(app.diagnostics.redraw_request_count.load(Ordering::SeqCst), before + 2);
     app.windows.remove(&child);
     app.dispatch_effects(smallvec::smallvec![sonicterm_app_core::AppEffect::Render {
         window: child_key,
@@ -47,7 +47,7 @@ fn operational_redraw_effects_use_only_the_named_live_window() {
         window: sonicterm_types::WindowKey::new(0),
         reason: sonicterm_app_core::RedrawReason::Layout
     }]);
-    assert_eq!(app.redraw_request_count.load(Ordering::SeqCst), before + 2);
+    assert_eq!(app.diagnostics.redraw_request_count.load(Ordering::SeqCst), before + 2);
 }
 
 #[test]

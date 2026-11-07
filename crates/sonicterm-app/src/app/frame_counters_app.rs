@@ -11,7 +11,7 @@ impl super::super::App {
     /// Returns [`FrameCountersTooLate`] once the App has created a window or a pane.
     #[doc(hidden)]
     pub fn force_frame_counters_on(&mut self) -> Result<(), FrameCountersTooLate> {
-        if self.frame_counters_sealed.get() {
+        if self.diagnostics.frame_counters_sealed.get() {
             // When: `frame_counters_sealed` is set, a window or pane exists and may have read the gate.
             return Err(FrameCountersTooLate);
         }
@@ -179,7 +179,7 @@ impl super::super::App {
     /// The counter handles for a pane being created; `None` when the gate is off. The first
     /// pane seals the gate with a plain write to event-loop-owned state.
     pub(in crate::app) fn pane_frame_counters(&self) -> Option<PaneFrameCounters> {
-        self.frame_counters_sealed.set(true);
+        self.diagnostics.frame_counters_sealed.set(true);
         // The gate is now fixed, so the foreground worker's statistics are too.
         self.fg_probes.seal_stats(
             self.frame_counters.as_ref().map(|counters| Arc::clone(&counters.fg_worker)),

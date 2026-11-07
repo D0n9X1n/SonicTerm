@@ -705,7 +705,7 @@ impl super::App {
             // When: `frame_counters` is None, the gate is off; no pane has a watch and none is allocated.
             return ArmOutcome::GateOff;
         }
-        let next_token = self.next_echo_arm;
+        let next_token = self.diagnostics.next_echo_arm;
         let Some(window) =
             self.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
         else {
@@ -734,7 +734,7 @@ impl super::App {
             valid_permit,
         );
         watch.arm_with(ArmToken(token), target, clock(), timeline);
-        self.next_echo_arm = next;
+        self.diagnostics.next_echo_arm = next;
         ArmOutcome::Armed(ArmToken(token))
     }
 
@@ -776,7 +776,7 @@ impl super::App {
     /// Test-only: the next token `arm_echo_watch` issues.
     #[doc(hidden)]
     pub fn __test_set_next_echo_arm(&mut self, next: u64) {
-        self.next_echo_arm = next;
+        self.diagnostics.next_echo_arm = next;
     }
 
     /// Whether `pane_id` is drawn by the main window's active tab.

@@ -6,7 +6,7 @@ impl App {
     // Ordering: redraw_request_count uses Relaxed as a plain tally of redraw
     // requests; it guards no other data, so no happens-before edge is required.
     pub(super) fn request_scrollbar_redraw(&self) {
-        self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.diagnostics.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(main) = self.main() {
             main.request_window_redraw();
         }

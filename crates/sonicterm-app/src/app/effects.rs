@@ -252,7 +252,7 @@ impl App {
             return false;
         };
         window.request_window_redraw();
-        self.redraw_request_count.fetch_add(1, Ordering::SeqCst);
+        self.diagnostics.redraw_request_count.fetch_add(1, Ordering::SeqCst);
         true
     }
 

@@ -437,7 +437,7 @@ impl super::App {
     /// Clears the rate limiter so the sample is due.
     #[doc(hidden)]
     pub fn __test_sample_pane_retention_now(&mut self) -> bool {
-        self.last_retention_sample = None;
+        self.diagnostics.last_retention_sample = None;
         self.sample_pane_retention(Instant::now())
     }
 
@@ -620,7 +620,7 @@ impl super::App {
         // the ledger backs a tripwire and the log lines back a growth curve
         // across a session, and both answer questions on a scale of minutes.
         // A control loop that had to act within a frame could not read this.
-        if !retention_sample_due(&mut self.last_retention_sample, now) {
+        if !retention_sample_due(&mut self.diagnostics.last_retention_sample, now) {
             // When: retention_sample_due says the interval has not elapsed; this
             // pass walks every pane and reclaims, so it is far too costly per wake.
             return false;
@@ -691,19 +691,19 @@ impl super::App {
         // cycle. The breadcrumb recorder is nonblocking; filesystem IO remains on
         // its worker thread.
         let info_enabled = tracing::enabled!(target: "memory", tracing::Level::INFO);
-        if info_enabled || self.breadcrumb_recorder.is_some() {
+        if info_enabled || self.diagnostics.breadcrumb_recorder.is_some() {
             // When: info_enabled or a breadcrumb_recorder exists; the snapshot is
             // built once here and shared, so neither consumer builds it twice.
             let snapshot = self.build_memory_snapshot();
             if info_enabled {
                 memory_snapshot::emit_memory_snapshot_with_graphics(
                     &snapshot,
-                    self.last_memory_totals,
+                    self.diagnostics.last_memory_totals,
                     &self.build_graphics_reading(),
                 );
-                self.last_memory_totals = Some(snapshot.totals());
+                self.diagnostics.last_memory_totals = Some(snapshot.totals());
             }
-            if let Some(recorder) = &self.breadcrumb_recorder {
+            if let Some(recorder) = &self.diagnostics.breadcrumb_recorder {
                 // When: a breadcrumb_recorder is installed; these counts persist so
                 // a later hang report names the last known state.
                 use sonicterm_logging::breadcrumbs::BreadcrumbEvent;

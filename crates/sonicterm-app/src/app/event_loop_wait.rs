@@ -299,7 +299,8 @@ impl App {
     /// at a different rate depending on whether anyone was watching, and those
     /// passes free memory a user gets back either way.
     pub(super) fn memory_sample_deadline(&self) -> Option<Instant> {
-        self.last_retention_sample
+        self.diagnostics
+            .last_retention_sample
             .map(|last| last + crate::app::retention::RETENTION_SAMPLE_INTERVAL)
     }
 

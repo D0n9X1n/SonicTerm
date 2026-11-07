@@ -141,6 +141,18 @@ impl App {
         let pty_reaper = reaper_driver::ReaperDriver::new(governor.clone())
             .expect("native PTY teardown driver could not start");
         Self {
+            diagnostics: DiagnosticsState {
+                frame_counters_sealed: std::cell::Cell::new(false),
+                accessibility_tree_builds: 0,
+                next_echo_arm: 1,
+                breadcrumb_recorder: None,
+                redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
+                reap_call_count: std::sync::atomic::AtomicUsize::new(0),
+                last_retention_sample: None,
+                trim_seq: 0,
+                last_trim_source: None,
+                last_memory_totals: None,
+            },
             theme,
             inline_media_pool: media::InlineMediaPool::process_default(),
             capture_staging_pool: CaptureStagingPool::process_default(),
@@ -183,13 +195,8 @@ impl App {
             pending_os_teardown: false,
             test_post_snapshot_hook: None,
             pending_exit: false,
-            last_retention_sample: None,
-            trim_seq: 0,
-            last_trim_source: None,
             #[cfg(test)]
             test_scheduler_trims: Vec::new(),
-            last_memory_totals: None,
-            breadcrumb_recorder: None,
             command_palette,
             palette_attached_window: None,
             window_rename_target: None,
@@ -203,11 +210,8 @@ impl App {
             pty_reaper,
             session_finished: None,
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
-            frame_counters_sealed: std::cell::Cell::new(false),
             dispatch_redraws: super::redraw::DispatchRedraws::default(),
-            accessibility_tree_builds: 0,
             accessibility: Default::default(),
-            next_echo_arm: 1,
             main_window_id: None,
             frontmost_window: None,
             pending_os_drag_payloads: Vec::new(),
@@ -248,8 +252,6 @@ impl App {
             quit_hold: quit_hold::QuitHold::new(),
             on_resumed: None,
             on_window_ready: None,
-            redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
-            reap_call_count: std::sync::atomic::AtomicUsize::new(0),
             test_viewport_override: None,
             machine,
             window_keys: crate::window_key_boundary::WindowKeyRegistry::new(),
@@ -337,7 +339,7 @@ impl App {
         &mut self,
         recorder: sonicterm_logging::breadcrumbs::BreadcrumbRecorder,
     ) {
-        self.breadcrumb_recorder = Some(recorder);
+        self.diagnostics.breadcrumb_recorder = Some(recorder);
     }
 
     /// Reports [`Config::quit_on_last_window_close`] on macOS and `true`

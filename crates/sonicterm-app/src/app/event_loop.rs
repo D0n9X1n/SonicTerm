@@ -566,7 +566,7 @@ impl App {
         );
         self.set_software_render_degrade(degrade);
         renderer.set_software_render_degrade(self.software_render_degrade);
-        if let Some(recorder) = &self.breadcrumb_recorder {
+        if let Some(recorder) = &self.diagnostics.breadcrumb_recorder {
             // When: a breadcrumb_recorder is installed; the adapter class is only
             // knowable once the renderer exists, so it is recorded here.
             use sonicterm_logging::breadcrumbs::{
@@ -763,7 +763,7 @@ impl App {
         }
         self.drain_pending_os_drag_payloads();
 
-        if let Some(recorder) = &self.breadcrumb_recorder {
+        if let Some(recorder) = &self.diagnostics.breadcrumb_recorder {
             // When: a breadcrumb_recorder is installed; Ready marks the end of
             // startup so a later hang is placed before or after the first frame.
             use sonicterm_logging::breadcrumbs::{BreadcrumbEvent, LifecycleEvent};
