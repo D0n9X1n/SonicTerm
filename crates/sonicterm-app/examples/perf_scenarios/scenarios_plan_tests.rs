@@ -642,8 +642,8 @@ fn program_settles_past_the_held_input_watch_it_arms() {
 
 /// S13's variants differ only in pane count, not pane size: both flood role 0 with `SustainedFlood`, whose script
 /// never sleeps (`DateLoop` sleeps 10 ms a line and leaves the parser idle), and type into idle role 1.
-/// `sustained-4` builds a 2x2 grid by splitting the right column, refocusing left, then splitting it,
-/// and returns focus to role 1 (top right) for typing.
+/// `sustained-4` stacks four equal rows: halve, halve the top half, then the bottom half, and step
+/// focus back up to role 1, the typing pane.
 #[test]
 fn s13_runs_the_same_sustained_flood_in_two_and_four_panes() {
     for host in [Host::Posix, Host::Windows] {
@@ -654,18 +654,18 @@ fn s13_runs_the_same_sustained_flood_in_two_and_four_panes() {
             assert_eq!(four.roles[0], Workload::SustainedFlood);
             assert_eq!(&four.roles[1..], [Workload::IdleShell; 3]);
             assert_eq!(two.setup, [SetupAction::SplitDown]);
-            // Both layouts are two panes tall; default is one pane wide, sustained-4 two, so every
-            // pane has the same requested grid.
-            assert_eq!((two.window_cols, two.window_rows), (Some(75), Some(40)));
-            assert_eq!((four.window_cols, four.window_rows), (Some(150), Some(40)));
+            // Both stack full-width panes; the window is as many 10-row panes tall as it holds.
+            assert_eq!((two.window_cols, two.window_rows), (Some(120), Some(20)));
+            assert_eq!((four.window_cols, four.window_rows), (Some(120), Some(40)));
             assert_eq!(
                 four.setup,
                 [
-                    SetupAction::SplitRight,
                     SetupAction::SplitDown,
-                    SetupAction::FocusPane(Direction::Left),
+                    SetupAction::FocusPane(Direction::Up),
                     SetupAction::SplitDown,
-                    SetupAction::FocusPane(Direction::Right),
+                    SetupAction::FocusPane(Direction::Down),
+                    SetupAction::FocusPane(Direction::Down),
+                    SetupAction::SplitDown,
                     SetupAction::FocusPane(Direction::Up),
                 ]
             );

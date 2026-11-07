@@ -13,14 +13,15 @@ use super::{
 #[cfg(any(target_os = "macos", windows, test))]
 use sonicterm_cfg::keymap::Direction;
 
-/// Columns each S13 pane requests; the window is one (`default`) or two (`sustained-4`) panes wide.
-/// A window has a minimum width (about 84 columns on a macOS host), so the one-column layout's panes
-/// can come out wider; the comparison checks the panes' actual grids.
+/// Columns of every S13 window and so of every S13 pane, which spans the window's width. A host may
+/// size the window differently (a macOS host gave 135 columns and 17 or 34 rows), but both variants
+/// then scale alike, so every pane still matches: 135x8 in both there. The comparison checks it.
 #[cfg(any(target_os = "macos", windows, test))]
-pub(crate) const S13_PANE_COLS: u16 = 75;
-/// Rows of every S13 window: two panes tall, below the macOS runner's 43-row screen clamp.
+pub(crate) const S13_WINDOW_COLS: u16 = 120;
+/// Rows each S13 pane requests; the window stacks two (`default`) or four (`sustained-4`) of them,
+/// so the 40-row 4-pane window stays below the macOS runner's 43-row screen clamp.
 #[cfg(any(target_os = "macos", windows, test))]
-pub(crate) const S13_WINDOW_ROWS: u16 = 40;
+pub(crate) const S13_PANE_ROWS: u16 = 10;
 
 /// The plan for `id` and `variant` on `host`, or `None` when the catalog does not list them.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -327,13 +328,13 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 end,
             ],
         ),
-        // The flood starts at GO and never ends; typing lands in idle role 1 (below the flood in `default`, at
-        // the top right in `sustained-4`). `sustained-4`
-        // splits the right column, then the left one, so all four panes have the same size, and refocuses
-        // the top-right pane. The
+        // The flood starts at GO and never ends; typing lands in idle role 1, the pane below the flood.
+        // The
         // `tail` hold after typing shows the flood still running at the end of sampling; `idle` then
         // keeps memory's `end` reading at GO + 60 s (5 s short) like every other plan.
         ("S13", _) => {
+            // Every pane spans the window's full width, stacked: the panes differ from the 2-pane
+            // layout only in count, never in width, and `window_rows` doubles with the pane count.
             let (roles, setup) = if variant == "sustained-4" {
                 (
                     vec![
@@ -343,12 +344,15 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                         Workload::IdleShell,
                     ],
                     vec![
-                        SetupAction::SplitRight,
+                        // Halve, then halve the top half and the bottom half: four equal rows, the
+                        // flood (role 0) on top. Each split focuses the pane it opens, so focus ends
+                        // on the bottom row and one step up returns it to role 1, the typing pane.
                         SetupAction::SplitDown,
-                        SetupAction::FocusPane(Direction::Left),
+                        SetupAction::FocusPane(Direction::Up),
                         SetupAction::SplitDown,
-                        // Roles 0 and 1 are the top row; focus returns to role 1, the typing target.
-                        SetupAction::FocusPane(Direction::Right),
+                        SetupAction::FocusPane(Direction::Down),
+                        SetupAction::FocusPane(Direction::Down),
+                        SetupAction::SplitDown,
                         SetupAction::FocusPane(Direction::Up),
                     ],
                 )
@@ -436,17 +440,11 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         // the strip on, so both refs measure the same grid and the presenter variants stay alike.
         window_rows: match spec.id {
             "S1" | "S12" if variant != "atlas-retry" => Some(STRIP_SAFE_ROWS),
-            // Both S13 layouts are two panes tall: every pane is half the window's height.
-            "S13" => Some(S13_WINDOW_ROWS),
+            // S13 stacks two or four full-width panes, so the window is that many panes tall.
+            "S13" => Some(if variant == "sustained-4" { 4 } else { 2 } * S13_PANE_ROWS),
             _ => None,
         },
-        // S13/default is one column of two panes and sustained-4 two columns, so the default
-        // window is half as wide and every pane in both variants has the same grid.
-        window_cols: (spec.id == "S13").then_some(if variant == "sustained-4" {
-            2 * S13_PANE_COLS
-        } else {
-            S13_PANE_COLS
-        }),
+        window_cols: (spec.id == "S13").then_some(S13_WINDOW_COLS),
         focused: true,
         roles,
         setup,

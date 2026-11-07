@@ -582,7 +582,8 @@ struct Probe {
     atlas_recovery: Option<serde_json::Value>,
     /// S13: the flooding pane's progress through `typing` and `tail`, observed every
     /// [`crate::contention::OBSERVE_EVERY_MS`]; `None` for every other scenario.
-    flood_watch: Option<(Instant, Instant, crate::contention::FloodWatch)>,
+    /// The running phase's start and last look, then the watch itself.
+    flood_watch: Option<(Option<(Instant, Option<Instant>)>, crate::contention::FloodWatch)>,
     /// S13: each role pane's grid, read as `typing` ended.
     role_grids: Vec<Option<(u16, u16)>>,
     /// Dispatch-timeline recorder storage, reused from sample to sample; empty until a sample is armed.

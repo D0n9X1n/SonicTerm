@@ -3,65 +3,101 @@
 //!
 //! The flood's liveness is observed on the flooding pane itself, not inferred from process-wide
 //! byte totals: an early burst followed by a stall would satisfy a total yet leave most typing
-//! samples measured against an idle parser.
+//! samples measured against an idle parser. Progress is accounted over each measured phase's whole
+//! span, from its start to its end: a stretch with no reading that showed new lines (before the
+//! first, between two, after the last, or covered only by busy reads) counts against it.
 
 use serde_json::{json, Value};
 
-/// The longest the flooding pane may go without a new scrolled line inside a measured phase; a
-/// live `yes` scrolls thousands of lines in this time, so a longer gap means the flood stalled.
+/// The longest stretch of a measured phase that may pass without a reading showing new lines; a
+/// live `yes` scrolls thousands of lines in this time, so a longer stretch means the flood stalled
+/// or went unobserved.
 pub(crate) const MAX_FLOOD_GAP_MS: u64 = 1_000;
 /// How often the probe looks at the flooding pane while a measured phase runs.
 pub(crate) const OBSERVE_EVERY_MS: u64 = 100;
 /// The longest one look waits for the flooding pane's parser: the frame collection's own budget.
 pub(crate) const OBSERVE_WAIT: std::time::Duration = std::time::Duration::from_millis(2);
 
-/// The flooding pane's progress through the measured phases: each observation's time and the
-/// pane's monotonic scrolled-line count, read only when its parser was free.
+/// One measured phase's flood progress, in ms since the phase began.
+#[derive(Clone, Debug, PartialEq)]
+struct PhaseWatch {
+    /// The phase's name.
+    name: &'static str,
+    /// Each look's time and the scrolled-line count it read, `None` when the parser was busy.
+    looks: Vec<(u64, Option<u64>)>,
+    /// When the phase ended; `None` while it runs.
+    ended_ms: Option<u64>,
+}
+
+impl PhaseWatch {
+    /// The longest stretch from the phase's start to its end with no reading that advanced: the
+    /// first reading only sets the baseline, so the stretch before the first advance counts too.
+    fn longest_gap_ms(&self) -> Option<u64> {
+        let end_ms = self.ended_ms?;
+        let mut last_progress_ms = 0;
+        let mut last_lines: Option<u64> = None;
+        let mut longest = 0;
+        for &(at_ms, lines) in &self.looks {
+            let Some(lines) = lines else { continue };
+            if last_lines.is_some_and(|previous| lines > previous) {
+                // When: this reading shows new lines since the last one, the stretch ends here.
+                longest = longest.max(at_ms - last_progress_ms);
+                last_progress_ms = at_ms;
+            }
+            last_lines = Some(lines);
+        }
+        Some(longest.max(end_ms.saturating_sub(last_progress_ms)))
+    }
+}
+
+/// The flooding pane's progress through every measured phase.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct FloodWatch {
-    /// `(ms since the first observation, lines scrolled)`, in order.
-    observations: Vec<(u64, u64)>,
-    /// Observations skipped because the parser was busy; they are not stalls.
-    busy: u64,
+    phases: Vec<PhaseWatch>,
 }
 
 impl FloodWatch {
-    /// Record one observation at `elapsed_ms`; `lines` is `None` when the parser was busy.
-    pub(crate) fn observe(&mut self, elapsed_ms: u64, lines: Option<u64>) {
-        match lines {
-            Some(lines) => self.observations.push((elapsed_ms, lines)),
-            None => self.busy += 1,
+    /// A measured phase named `name` begins; later looks belong to it until [`Self::end`].
+    pub(crate) fn begin(&mut self, name: &'static str) {
+        self.phases.push(PhaseWatch { name, looks: Vec::new(), ended_ms: None });
+    }
+
+    /// Record one look at `at_ms` into the running phase; `lines` is `None` when the parser was busy.
+    pub(crate) fn observe(&mut self, at_ms: u64, lines: Option<u64>) {
+        if let Some(phase) = self.phases.last_mut().filter(|phase| phase.ended_ms.is_none()) {
+            phase.looks.push((at_ms, lines));
         }
     }
 
-    /// The longest interval in which the count did not advance, in ms: from the last observation
-    /// that advanced (or the first) to the next that advanced, or to the last observation.
-    pub(crate) fn longest_stall_ms(&self) -> Option<u64> {
-        let (mut stall_start, mut last_lines) = *self.observations.first()?;
-        let mut longest = 0;
-        for &(at_ms, lines) in &self.observations[1..] {
-            longest = longest.max(at_ms - stall_start);
-            if lines > last_lines {
-                // When: the pane scrolled since the last advance, the stall ends here.
-                stall_start = at_ms;
-                last_lines = lines;
-            }
+    /// The running phase ends at `at_ms`.
+    pub(crate) fn end(&mut self, at_ms: u64) {
+        if let Some(phase) = self.phases.last_mut().filter(|phase| phase.ended_ms.is_none()) {
+            phase.ended_ms = Some(at_ms);
         }
-        Some(longest)
     }
 
-    /// The JSON record: observation and busy counts, total lines and the longest stall.
+    /// The longest unprogressed stretch over every ended phase; `None` before any phase ended.
+    pub(crate) fn longest_gap_ms(&self) -> Option<u64> {
+        self.phases.iter().filter_map(PhaseWatch::longest_gap_ms).max()
+    }
+
+    /// The JSON record: per phase, its length, looks, busy looks and longest unprogressed stretch.
     pub(crate) fn to_json(&self) -> Value {
-        let lines = match (self.observations.first(), self.observations.last()) {
-            (Some(first), Some(last)) => last.1.saturating_sub(first.1),
-            _ => 0,
-        };
-        json!({
-            "observations": self.observations.len(),
-            "busy": self.busy,
-            "lines": lines,
-            "longest_stall_ms": self.longest_stall_ms(),
-        })
+        let phases: Vec<Value> = self
+            .phases
+            .iter()
+            .map(|phase| {
+                let busy = phase.looks.iter().filter(|(_, lines)| lines.is_none()).count();
+                json!({
+                    "name": phase.name,
+                    "duration_ms": phase.ended_ms,
+                    "looks": phase.looks.len(),
+                    "busy": busy,
+                    "longest_gap_ms": phase.longest_gap_ms(),
+                })
+            })
+            .collect();
+        json!({ "phases": phases, "longest_gap_ms": self.longest_gap_ms() })
     }
 }
 

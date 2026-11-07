@@ -5,11 +5,12 @@ The rule was fixed before any CI run measured S13:
 
 - Each variant needs at least `MIN_SAMPLES` credited typing samples, every run's window counters
   (the miss attribution included), and the flood alive throughout `typing` and `tail`: the harness
-  observes the flooding pane's own scrolled-line count every 100 ms, and no run may go longer than
-  its `max_flood_gap_ms` without progress (`vt.parse_bytes` of at least `MIN_FLOOD_BYTES` per phase
-  is a second, coarse floor). The flooding and typing panes of both variants must have the same
-  rows, and columns within `COLUMN_TOLERANCE`, so pane count is the main difference. Otherwise there is
-  no verdict.
+  observes the flooding pane's own scrolled-line count every 100 ms of `typing` and `tail`, and in
+  each phase, from its start to its end, no stretch may pass `max_flood_gap_ms` without a reading
+  that advanced: an unobserved prefix or suffix, busy-only looks and a stall all count (`vt.parse_bytes`
+  of at least `MIN_FLOOD_BYTES` per phase is a second, coarse floor). The flooding and typing panes
+  of both variants must have exactly the same grid, so pane count is the only difference.
+  Otherwise there is no verdict.
 - `unchanged` holds when the 4-pane p95 is within `P95_TOLERANCE` of the 2-pane p95, and every failed
   collection in the 4-pane variant (parser, image and budget-expired misses together) is under
   `FAILURE_LIMIT` of its collections. Otherwise the verdict is `not unchanged`, which asks for the
@@ -35,12 +36,6 @@ FAILURE_LIMIT = 0.01
 # A stopped flood leaves the busy parser idle and the comparison meaningless; a live `yes` writes many
 # megabytes in a 5 s hold, so 1 MiB per phase is a floor, not an estimate of throughput.
 MIN_FLOOD_BYTES = 1 << 20
-# At least half the harness's looks at the flooding pane must read it, so its gaps cover the phases.
-MIN_FLOOD_READS_SHARE = 0.5
-# Pane rows must match exactly; columns within this share. The one-column layout's window cannot shrink
-# below a minimum width (84 columns where the 2x2 layout's panes got 73 on a macOS host), and a row's
-# parse and render work depends on its count far more than its width, so rows are held exact.
-COLUMN_TOLERANCE = 0.20
 FAILURE_FIELDS = ("contention_parser", "contention_images", "contention_budget_expired")
 LIVENESS_PHASES = ("typing", "tail")
 UNCHANGED = "unchanged"
@@ -112,15 +107,21 @@ def variant_evidence(results: Iterable[dict]) -> dict:
                     problems.append(f"run {index}'s flood stopped: {name} parsed {parsed} bytes")
         contention = result.get("contention")
         flood = contention.get("flood") if isinstance(contention, dict) else None
-        stall, limit = (flood or {}).get("longest_stall_ms"), (contention or {}).get("max_flood_gap_ms")
-        seen, busy = (flood or {}).get("observations"), (flood or {}).get("busy")
-        if not all(isinstance(value, int) for value in (stall, limit, seen, busy)):
+        limit = (contention or {}).get("max_flood_gap_ms")
+        watched = {phase.get("name"): phase for phase in (flood or {}).get("phases") or []
+                   if isinstance(phase, dict)}
+        if not isinstance(limit, int):
             problems.append(f"run {index} has no flood progress record")
-        elif seen < MIN_FLOOD_READS_SHARE * (seen + busy):
-            # A pane read too rarely cannot show progress through the phase, whatever its gaps.
-            problems.append(f"run {index} read the flooding pane {seen} of {seen + busy} times")
-        elif stall > limit:
-            problems.append(f"run {index}'s flood stalled for {stall} ms (limit {limit} ms)")
+        for name in LIVENESS_PHASES:
+            phase = watched.get(name)
+            gap = (phase or {}).get("longest_gap_ms")
+            if not isinstance(gap, int) or not isinstance((phase or {}).get("duration_ms"), int):
+                # Every measured phase must have been watched from its start to its end.
+                problems.append(f"run {index} did not watch the flood through {name}")
+            elif isinstance(limit, int) and gap > limit:
+                # The gap spans the phase's start to its end: unobserved, busy-only and stalled
+                # stretches all count, so a missing prefix or suffix fails like a stall.
+                problems.append(f"run {index}'s flood showed no progress for {gap} ms in {name} (limit {limit} ms)")
         grids = (contention or {}).get("role_grids")
         if isinstance(grids, list) and len(grids) >= 2 and all(isinstance(grid, list) for grid in grids[:2]):
             pane_grids.append((tuple(grids[0]), tuple(grids[1])))
@@ -141,11 +142,8 @@ def verdict(two: dict, four: dict) -> tuple[str, str]:
     # Pane count must be the only difference: every run's flooding and typing panes share one grid,
     # within a cell of rounding at the split.
     grids = [grid for evidence in (two, four) for pair in evidence["pane_grids"] for grid in pair]
-    if not problems and grids:
-        rows_differ = len({grid[1] for grid in grids}) > 1
-        widest, narrowest = max(grid[0] for grid in grids), min(grid[0] for grid in grids)
-        if rows_differ or widest > narrowest * (1 + COLUMN_TOLERANCE):
-            problems.append(f"pane grids differ: {sorted(set(grids))}")
+    if not problems and len(set(grids)) > 1:
+        problems.append(f"pane grids differ: {sorted(set(grids))}")
     if problems:
         return NO_VERDICT, "; ".join(problems)
     two_p95, four_p95 = percentile_95(two["samples"]), percentile_95(four["samples"])

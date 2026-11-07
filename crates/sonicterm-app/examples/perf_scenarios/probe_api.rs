@@ -259,7 +259,7 @@ impl Probe {
             contention: self
                 .flood_watch
                 .as_ref()
-                .map(|(_, _, watch)| crate::contention::record(&self.role_grids, watch)),
+                .map(|(_, watch)| crate::contention::record(&self.role_grids, watch)),
             native_focus_events_dropped: self.native_focus_dropped,
             native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,

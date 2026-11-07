@@ -8,18 +8,20 @@ import unittest
 import perf_contention_verdict as verdict_rule
 
 
-def run(samples, collections=1_000, parser=0, images=0, budget=0, flood=(8 << 20, 8 << 20), stall_ms=100,
-        grids=((140, 16), (140, 16)), busy=0):
-    """One counters result: `samples` latencies, its typing window's misses, per-phase flood bytes, the
-    flooding pane's longest stall and the flooding and typing panes' grids."""
+def run(samples, collections=1_000, parser=0, images=0, budget=0, flood=(8 << 20, 8 << 20), gap_ms=100,
+        grids=((120, 10), (120, 10)), watched=("typing", "tail")):
+    """One counters result: `samples` latencies, its typing window's misses, per-phase flood bytes, each
+    watched phase's longest unprogressed stretch, and the flooding and typing panes' grids."""
     counts = [0] * 16
     counts[0] = collections
     window = {"contention_parser": parser, "contention_images": images, "contention_budget_expired": budget,
               "parser_lock_wait_us": {"unit": "us", "bounds": [], "counts": counts, "sum_us": 0}}
     phases = [{"name": "typing", "frame_counters": {"window": window, "vt": {"parse_bytes": flood[0]}}},
               {"name": "tail", "frame_counters": {"window": {}, "vt": {"parse_bytes": flood[1]}}}]
+    flood_phases = [{"name": name, "duration_ms": 30_000, "looks": 300, "busy": 0, "longest_gap_ms": gap_ms}
+                    for name in watched]
     contention = {"role_grids": [list(grid) for grid in grids], "max_flood_gap_ms": 1_000,
-                  "flood": {"observations": 100, "busy": busy, "lines": 1_000_000, "longest_stall_ms": stall_ms}}
+                  "flood": {"phases": flood_phases}}
     return {"latency": {"samples": [{"latency_ms": value} for value in samples]}, "phases": phases,
             "contention": contention}
 
@@ -82,43 +84,36 @@ class ContentionVerdictTests(unittest.TestCase):
         self.assertIn("flood stopped", why)
         self.assertEqual(verdict_rule.verdict(two, evidence())[0], verdict_rule.NO_VERDICT)
 
-    def test_a_flood_that_stalls_between_bursts_gives_no_verdict(self):
-        # Byte totals alone pass a flood that bursts early and then stops; the pane's own progress
-        # record catches the stall, so such a run never supports a verdict.
+    def test_a_flood_without_progress_for_over_a_second_gives_no_verdict(self):
+        # The harness accounts each phase from its start to its end, so a stall, an unobserved prefix
+        # or suffix, or busy-only looks all arrive here as one long gap, and none supports a verdict.
         two = evidence(run([10.0] * 300))
-        stalled = evidence(run([10.0] * 300, flood=(8 << 20, 8 << 20), stall_ms=2_900))
+        stalled = evidence(run([10.0] * 300, gap_ms=4_000))
         outcome, why = verdict_rule.verdict(two, stalled)
         self.assertEqual(outcome, verdict_rule.NO_VERDICT)
-        self.assertIn("stalled for 2900 ms", why)
+        self.assertIn("no progress for 4000 ms", why)
         unrecorded = run([10.0] * 300)
         del unrecorded["contention"]
         self.assertEqual(verdict_rule.verdict(two, evidence(unrecorded))[0], verdict_rule.NO_VERDICT)
 
-    def test_unequal_pane_grids_give_no_verdict(self):
-        # Pane count must be the only difference between the variants: a 4-pane run whose panes
-        # are half the 2-pane panes' height confounds size with count.
-        two = evidence(run([10.0] * 300, grids=((140, 32), (140, 32))))
-        four = evidence(run([10.0] * 300, grids=((140, 16), (140, 16))))
-        outcome, why = verdict_rule.verdict(two, four)
-        self.assertEqual(outcome, verdict_rule.NO_VERDICT)
-        self.assertIn("pane grids differ", why)
-
-    def test_columns_may_differ_slightly_but_rows_may_not(self):
-        # The measured pair: a minimum window width left the 2-pane layout 84 columns, the 2x2 one 73.
-        two = evidence(run([10.0] * 300, grids=((84, 16), (84, 16))))
-        near = evidence(run([10.0] * 300, grids=((73, 16), (73, 16))))
-        self.assertEqual(verdict_rule.verdict(two, near)[0], verdict_rule.UNCHANGED)
-        far = evidence(run([10.0] * 300, grids=((60, 16), (60, 16))))
-        self.assertEqual(verdict_rule.verdict(two, far)[0], verdict_rule.NO_VERDICT)
-        taller = evidence(run([10.0] * 300, grids=((84, 17), (84, 17))))
-        self.assertEqual(verdict_rule.verdict(two, taller)[0], verdict_rule.NO_VERDICT)
-
-    def test_a_flooding_pane_read_too_rarely_gives_no_verdict(self):
+    def test_each_measured_phase_must_be_watched(self):
+        # A run whose monitor never covered `tail` cannot show the flood was alive there.
         two = evidence(run([10.0] * 300))
-        rarely = evidence(run([10.0] * 300, busy=150))
-        outcome, why = verdict_rule.verdict(two, rarely)
+        half = evidence(run([10.0] * 300, watched=("typing",)))
+        outcome, why = verdict_rule.verdict(two, half)
         self.assertEqual(outcome, verdict_rule.NO_VERDICT)
-        self.assertIn("read the flooding pane 100 of 250 times", why)
+        self.assertIn("did not watch the flood through tail", why)
+
+    def test_pane_grids_must_match_exactly(self):
+        # Pane count must be the only difference between the variants; any size difference, even a
+        # few columns, leaves no verdict rather than a tolerance that could hide a pane-count cost.
+        two = evidence(run([10.0] * 300, grids=((120, 10), (120, 10))))
+        for grids in (((120, 20), (120, 20)), ((110, 10), (110, 10)), ((120, 11), (120, 11))):
+            other = evidence(run([10.0] * 300, grids=grids))
+            outcome, why = verdict_rule.verdict(two, other)
+            self.assertEqual(outcome, verdict_rule.NO_VERDICT, grids)
+            self.assertIn("pane grids differ", why)
+        self.assertEqual(verdict_rule.verdict(two, evidence(run([10.0] * 300)))[0], verdict_rule.UNCHANGED)
 
     def test_rows_appear_only_when_s13_ran(self):
         self.assertEqual(verdict_rule.verdict_rows({}), [])
