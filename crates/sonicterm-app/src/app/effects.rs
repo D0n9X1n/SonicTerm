@@ -264,13 +264,28 @@ impl App {
     /// state is read only by tests. So only structural intents (tabs, panes, windows, focus) are
     /// observed; high-frequency input such as cursor motion is not, because nothing reads it.
     pub(super) fn observe_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
+        // Only intents the App's handlers already carried out are reported; one the App must
+        // execute would be silently dropped here.
+        debug_assert_eq!(
+            intent.authority(),
+            sonicterm_app_core::IntentAuthority::Observes,
+            "{intent:?} must go through dispatch_intent"
+        );
         // Compatibility reducer state is observational; its synthetic effects never mutate live topology.
         let _ = self.machine.handle(intent);
     }
 
-    /// Execute supported explicit-target work; retain lifecycle reports as non-operational compatibility observations.
+    /// Execute an intent the App drives ([`IntentAuthority::Drives`]); one the App only observes
+    /// goes to the compatibility reducer unexecuted.
+    ///
+    /// [`IntentAuthority::Drives`]: sonicterm_app_core::IntentAuthority::Drives
     pub fn dispatch_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
-        use sonicterm_app_core::{AppEffect, AppIntent};
+        use sonicterm_app_core::{AppEffect, AppIntent, IntentAuthority};
+        if intent.authority() == IntentAuthority::Observes {
+            // When: the intent's `authority` is Observes, the App's handlers own that behavior.
+            self.observe_intent(intent);
+            return;
+        }
         match intent {
             AppIntent::PtyWrite { pane, bytes } => {
                 self.write_to_pane(pane.0, bytes.to_vec(), PtyInputSource::StateMachine);
@@ -340,7 +355,11 @@ impl App {
                 self.dispatch_effects(smallvec::smallvec![AppEffect::OpenURL { url }])
             }
             AppIntent::Exit => self.pending_exit = true,
-            other => self.observe_intent(other),
+            other => {
+                // Every Drives intent has an arm above; app-core's exhaustive `authority` and the
+                // contract test keep the two lists equal.
+                debug_assert!(false, "{other:?} is classified Drives but has no dispatch arm");
+            }
         }
     }
 }

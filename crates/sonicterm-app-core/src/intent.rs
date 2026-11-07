@@ -245,3 +245,95 @@ pub enum AppIntent {
     /// 63 — User requested application exit.
     Exit,
 }
+
+/// Whether the live App acts on an intent or only reports it to the compatibility reducer.
+///
+/// The App's own handlers do the real work for windows, tabs, panes, focus, selection, search and
+/// the palette; the reducer only models them for tests. A few intents arrive through
+/// `App::dispatch_intent` from outside those handlers (a PTY write, an exit, a paste, a click),
+/// and the App executes those itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentAuthority {
+    /// `App::dispatch_intent` executes it against live state.
+    Drives,
+    /// The App's handlers already did the work; the intent only updates the reducer's model.
+    Observes,
+}
+
+impl AppIntent {
+    /// Whether the live App executes this intent or only observes it. Exhaustive on purpose: a new
+    /// variant does not compile until it is classified here.
+    #[must_use]
+    pub fn authority(&self) -> IntentAuthority {
+        match self {
+            Self::PtyWrite { .. }
+            | Self::PtyExit { .. }
+            | Self::PtyBurst { .. }
+            | Self::ForegroundProcChanged { .. }
+            | Self::RedrawRequested { .. }
+            | Self::Key { pressed: true, .. }
+            | Self::ImeStart { .. }
+            | Self::ImeEnd { .. }
+            | Self::ImePreedit { .. }
+            | Self::ImeCommit { .. }
+            | Self::HoverUrl { .. }
+            | Self::ScrollUp { .. }
+            | Self::ScrollDown { .. }
+            | Self::ScrollPageUp { .. }
+            | Self::ScrollPageDown { .. }
+            | Self::ScrollToTop { .. }
+            | Self::ScrollToBottom { .. }
+            | Self::ScrollToCursor { .. }
+            | Self::MouseWheel { .. }
+            | Self::Paste { .. }
+            | Self::ClickUrl { .. }
+            | Self::Exit => IntentAuthority::Drives,
+            Self::NewWindow { .. }
+            | Self::WindowCloseRequested { .. }
+            | Self::WindowFocused { .. }
+            | Self::WindowBlurred { .. }
+            | Self::WindowResized { .. }
+            | Self::WindowMoved { .. }
+            | Self::NewTab { .. }
+            | Self::CloseTab { .. }
+            | Self::NextTab { .. }
+            | Self::PrevTab { .. }
+            | Self::GoToTab { .. }
+            | Self::TearOutTab { .. }
+            | Self::SplitPane { .. }
+            | Self::ClosePane { .. }
+            | Self::ResizePane { .. }
+            | Self::FocusPaneLeft { .. }
+            | Self::FocusPaneRight { .. }
+            | Self::FocusPaneUp { .. }
+            | Self::FocusPaneDown { .. }
+            | Self::Key { pressed: false, .. }
+            | Self::MouseButton { .. }
+            | Self::MouseMove { .. }
+            | Self::SelectionStart { .. }
+            | Self::SelectionExtend { .. }
+            | Self::SelectionEnd { .. }
+            | Self::ClearSelection { .. }
+            | Self::CopySelection { .. }
+            | Self::OpenSearch { .. }
+            | Self::SearchQuery { .. }
+            | Self::SearchStep { .. }
+            | Self::CloseSearch { .. }
+            | Self::ToggleCommandPalette { .. }
+            | Self::PaletteFilter { .. }
+            | Self::PaletteStep { .. }
+            | Self::PaletteSubmit { .. }
+            | Self::OsDragOutcome(..)
+            | Self::FilesDropped { .. }
+            | Self::ConfigChanged { .. }
+            | Self::ApplyTheme { .. }
+            | Self::FontSizeDelta { .. }
+            | Self::SetBroadcastScope { .. }
+            | Self::Tick { .. } => IntentAuthority::Observes,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "intent_tests.rs"]
+mod intent_tests;

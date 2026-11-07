@@ -107,8 +107,19 @@ topology: it is a compatibility and test model, and only tests read its state.
 `App::observe_intent` updates it with structural intents (tabs, panes, windows,
 focus) and discards their effects; high-frequency input such as cursor motion is
 not reported, because nothing reads it. Making the reducer authoritative would
-be a separate behavioral migration. `App::dispatch_intent` handles supported
-explicit-target work separately.
+be a separate behavioral migration. Which intents the live App executes is
+stated in one place, `AppIntent::authority()` in app-core, an exhaustive match a
+new variant cannot skip:
+
+| Authority | Intents | Who acts |
+| --- | --- | --- |
+| `Drives` | PTY write, exit, burst and foreground change; redraw request; key press; IME start, preedit, commit and end; URL hover and click; scrolling and the wheel; paste; exit | `App::dispatch_intent` executes each against live state. |
+| `Observes` | window, tab and pane lifecycle and focus; key release; mouse buttons and motion; selection; search; command palette; OS drag and file drop; config, theme and font size; broadcast scope; tick | The App's own handlers already did the work; the intent only updates the reducer's model. |
+
+`dispatch_intent` sends an `Observes` intent straight to the reducer, and
+`observe_intent` debug-asserts that it never receives a `Drives` one, so a driven
+intent cannot be silently dropped; a test dispatches every `Drives` intent on a
+live App.
 Missing, removed, or zero window keys never select main or frontmost. Native
 input goes to its source window's active pane through the bounded PTY queue.
 See [Runtime Lifecycle](Runtime-Lifecycle) for the state/intent/effect inventory
