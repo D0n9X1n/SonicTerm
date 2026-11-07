@@ -48,7 +48,10 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
         spec("S6", "pointer motion", &["default", "flood", "selection-drag", "rest"], 300, 240),
         &[("rest", 2)],
     ),
-    spec("S7", "scrollback wheel", &["default"], 420, 360),
+    // S7 is the longest variant (about 1.5 min a run on macOS, 21 min of a 14-run short comparison)
+    // and alone set the PR pipeline's critical path past its 35-minute budget, before and with this
+    // catalog's S13; 3 short runs a side keep it inside. A release comparison runs it uncapped.
+    capped(spec("S7", "scrollback wheel", &["default"], 420, 360), &[("default", 3)]),
     spec("S8", "search", &["default"], 300, 240),
     spec("S9", "emoji and CJK text", &["default"], 300, 240),
     spec("S10", "full-screen redraw", &["default", "sync"], 300, 240),

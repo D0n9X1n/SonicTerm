@@ -775,7 +775,7 @@ S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line、S12、S12/status
 S2、S10/sync、S6/rest、S13 与 S13/sustained-4；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，其中 macOS 分配根据实测阶段成本重新均衡，35 分钟余量仍由 exact-head 计时验证；Windows 的 S7 还运行 S1/status-line 与 S12/status-line。
 各平台包含 S9 的分片（macOS 的 S9-S10sync，Windows 的 S9-S10）还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
 lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
-裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S2/flood` 每侧上限 2 次，`S11/release`、`S1/status-line`、`S12/status-line`、`S13/default` 与 `S13/sustained-4` 上限 1 次，
+裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S7` 每侧上限 3 次（仅它就使关键路径超过 35 分钟），`S2/flood` 每侧上限 2 次，`S11/release`、`S1/status-line`、`S12/status-line`、`S13/default` 与 `S13/sustained-4` 上限 1 次，
 `S11/gdi`、`S11/wgpu`、`S1/atlas-retry` 与 `S6/rest` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 35 分钟内：release 对比完整运行它。
 带 `perf-frame-texture` 时，S11 的 `end` 检查点记录 `frame_texture_bytes`：head 在 GDI 下为 4 B，未声明该 feature 的 base
 为 `n/a`。S9 与 S12 的 `end` 检查点记录渲染器的字形完整性：每次呈现 `Full` 帧时，渲染器保存一份证书，包含该帧的场景

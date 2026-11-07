@@ -1174,8 +1174,8 @@ S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, with the macOS
 S9-S10sync, Windows S9-S10) also runs S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
 `laps` field; the other entries pass no laps flags), and each platform's table
 gives its own `fallback_receive` verdict. A bare scenario ID selects only its default
-variant, so every variant is named explicitly. Under `--short`, `S2/flood` is
-capped at 2 runs per side, `S11/release`, `S1/status-line`, `S12/status-line`, `S13/default` and `S13/sustained-4` at 1, and `S11/gdi`, `S11/wgpu`,
+variant, so every variant is named explicitly. Under `--short`, `S7` is capped at 3 runs per side (it alone set
+the critical path past 35 minutes), `S2/flood` at 2, `S11/release`, `S1/status-line`, `S12/status-line`, `S13/default` and `S13/sustained-4` at 1, and `S11/gdi`, `S11/wgpu`,
 `S1/atlas-retry` and `S6/rest` at 2. The `S2/flood` cap only keeps the pull-request comparison within 35 minutes:
 a release comparison runs it in full. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
