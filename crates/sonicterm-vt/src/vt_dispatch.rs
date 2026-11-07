@@ -642,8 +642,16 @@ impl Perform for Performer {
                 //   C → command output start
                 //   D [; exit_code] → command finished
                 let kind = params.get(1).and_then(|param| param.first().copied());
-                let Some(authenticated) = self.admit_shell_marker(params.get(2..).unwrap_or(&[]))
-                else {
+                let admitted = self.admit_shell_marker(params.get(2..).unwrap_or(&[]));
+                // The newest marker decides the observed state, a dropped one included: a nested
+                // shell's tokenless markers mean the shell in front is not the verified one.
+                self.shell_state = if admitted == Some(true) {
+                    super::ShellIntegrationState::Verified
+                } else {
+                    // Not authenticated: admitted without a token, or refused.
+                    super::ShellIntegrationState::Unverified
+                };
+                let Some(authenticated) = admitted else {
                     // When: `admit_shell_marker` refused the marker (a wrong token, or tokenless
                     // after the pane authenticated), it changes neither the grid nor the events.
                     tracing::debug!(target: "vt", "dropped an unauthenticated OSC 133 marker");

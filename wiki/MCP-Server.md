@@ -255,7 +255,13 @@ eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+, in ~/.bashrc
 It adds its hooks beside any existing ones, so it can stay alongside another
 OSC 133 integration. Once it is loaded, though, markers from a nested shell or
 an ssh session in that pane carry no token and are dropped, so `run_command`
-works only at the pane's own shell. PowerShell has no SonicTerm integration yet, so
+works only at the pane's own shell. `list_panes` and `read_pane` report what the
+newest marker said as `shell_integration_state`: `verified` (it carried the
+pane's token), `unverified` (it had no valid token, as from a nested shell, ssh
+or a program printing markers, whether admitted or dropped), or `none` (no marker
+yet). It is observed marker evidence, not proof of which program is running; the
+older boolean `shell_integration` keeps its meaning (the newest prompt marked its
+input start). PowerShell has no SonicTerm integration yet, so
 on Windows `exit_verified` stays `false`. The secret guards against output from
 files, remote hosts and programs that never saw the shell's environment. A program
 running in the pane as you, which could read the shell's memory, is out of scope:

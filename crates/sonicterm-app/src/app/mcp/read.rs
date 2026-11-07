@@ -109,6 +109,8 @@ pub(crate) struct ReadSnapshot {
     /// The row output is written to next, the cursor's, when the read was taken; `None` for a
     /// busy read. Rows above it can no longer change in appended output.
     pub(crate) writable_row: Option<RowToken>,
+    /// What the newest shell marker said about the running shell; `None` while the parser was busy.
+    pub(crate) shell_state: Option<sonicterm_vt::vt::ShellIntegrationState>,
 }
 
 /// Read `mode` from `parser` within `limits`, holding the parser for one bounded attempt only.
@@ -122,7 +124,9 @@ pub(crate) fn read_pane(
         // When: `try_lock_for` misses within `PARSER_WAIT`, the read returns busy and truncated.
         return ReadSnapshot { truncated: true, busy: true, ..ReadSnapshot::default() };
     };
-    snapshot(guard.grid(), mode, limits)
+    let mut read = snapshot(guard.grid(), mode, limits);
+    read.shell_state = Some(guard.shell_integration_state());
+    read
 }
 
 /// Copy `mode` out of `grid` within `limits`; the caller holds the parser.

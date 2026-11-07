@@ -37,6 +37,7 @@ impl Performer {
             grid,
             shell_token: None,
             shell_authenticated: false,
+            shell_state: super::ShellIntegrationState::None,
             shell_input_seen: None,
             fg: Color::Default,
             bg: Color::Default,

@@ -215,6 +215,9 @@ eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+，写入 ~/.bashr
 
 它把自己的钩子加在已有钩子旁边，因此可以与其他 OSC 133 集成并存。但一旦加载，该窗格中嵌套 shell
 或 ssh 会话发出的标记都不带密钥，会被丢弃，所以 `run_command` 只能在窗格自己的 shell 中使用。
+`list_panes` 与 `read_pane` 以 `shell_integration_state` 报告最新标记的情况：`verified`（带有窗格密钥）、`unverified`
+（没有有效密钥，例如来自嵌套 shell、ssh 或打印标记的程序，无论被接受还是被丢弃）或 `none`（尚无标记）。
+它是观察到的标记证据，并不能证明当前运行的是哪个程序；旧的布尔字段 `shell_integration` 含义不变（最新提示符标记了输入起点）。
 PowerShell 目前还没有 SonicTerm 集成，因此在 Windows 上 `exit_verified` 始终为 `false`。该密钥用于防范
 来自文件、远程主机以及从未见过 shell 环境的程序的输出。以你的身份在窗格中运行、能读取 shell 内存的
 程序不在防范范围内：它本就拥有 agent 的权限。

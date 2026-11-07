@@ -362,3 +362,25 @@ fn a_busy_list_stops_probing_after_its_budget() {
     assert!(panes.iter().any(|pane| pane["details"] == "skipped"), "no pane was skipped");
     assert!(panes.iter().all(|pane| pane["details"] == "skipped" || pane["busy"] == true));
 }
+
+/// `read_pane` and `list_panes` report the observed shell state beside the existing boolean:
+/// `none` before any marker, `unverified` for a tokenless one.
+#[test]
+fn reads_report_the_shell_integration_state() {
+    let entry = test_entry(20, 4, 100);
+    let (_, fresh) = read_with_generation(&entry, ReadMode::Tail, ReadLimits::clamped(None, None));
+    assert_eq!(fresh["shell_integration_state"], "none");
+    entry.parser.lock().advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    let (_, marked) = read_with_generation(&entry, ReadMode::Tail, ReadLimits::clamped(None, None));
+    assert_eq!(marked["shell_integration_state"], "unverified");
+    let mut listed = entry.clone();
+    listed.metadata = Some(crate::app::mcp::PaneMetadata {
+        window_index: 0,
+        tab_index: 0,
+        active: true,
+        readonly: false,
+    });
+    let summary = pane_summary(&listed, Instant::now() + LIST_BUDGET);
+    assert_eq!(summary["shell_integration_state"], "unverified");
+    assert_eq!(summary["shell_integration"], true, "the boolean keeps its meaning");
+}

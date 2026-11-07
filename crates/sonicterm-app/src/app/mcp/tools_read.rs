@@ -85,6 +85,7 @@ pub(crate) fn tool_list() -> Value {
                     "current_generation": { "type": "integer" },
                     "truncated": { "type": "boolean" },
                     "busy": { "type": "boolean" },
+                    "shell_integration_state": { "enum": ["verified", "unverified", "none", null] },
                     "exit_code": { "type": ["integer", "null"] },
                     "error": { "type": "string" },
                     "message": { "type": "string" },
@@ -264,6 +265,7 @@ fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
     pane["alt_screen"] = json!(grid.is_alt());
     pane["shell_integration"] =
         json!(grid.newest_prompt().is_some_and(|region| region.input_start.is_some()));
+    pane["shell_integration_state"] = json!(guard.shell_integration_state().as_str());
     pane["exited"] = json!(entry.exit_status.get().is_some());
     pane
 }
@@ -342,6 +344,7 @@ pub(crate) fn snapshot_json(snapshot: &ReadSnapshot, entry: &PaneEntry, generati
         "exit_code": snapshot.exit_code,
         "output_truncated": snapshot.output_truncated,
         "no_command": snapshot.no_command,
+        "shell_integration_state": snapshot.shell_state.map(|state| state.as_str()),
     })
 }
 
