@@ -223,85 +223,47 @@ impl App {
             .map(|renderer| renderer.cell_size().1)
             .filter(|height| *height > 0.0)
             .unwrap_or(16.0);
-        let lines_per_tick: f32 = 3.0;
-        let delta_lines_f: f32 = match delta {
-            MouseScrollDelta::LineDelta(_, vertical_ticks) => -vertical_ticks * lines_per_tick,
-            MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32) / cell_h,
+        let lines = super::wheel_plan::wheel_lines(delta, cell_h);
+        let Some(pane_id) = child_pane_at_cursor(child, cursor_x, cursor_y) else {
+            // When: no `pane_id` is under the cursor, the wheel has nothing to move.
+            return;
         };
-        let delta_lines = if delta_lines_f >= 0.0 {
-            delta_lines_f.ceil() as i32
-        } else {
-            // When: `delta_lines_f` is negative, so rounding must go away
-            // from zero to keep a small upward tick from vanishing.
-            delta_lines_f.floor() as i32
+        let cell = child_pane_cell_at(child, cursor_x, cursor_y).map(|(_, row, col)| (row, col));
+        // All four modes come from one published byte; no parser lock.
+        let modes = child.panes.get(&pane_id).map(|pane| {
+            let modes = pane.pointer_modes();
+            (modes.is_alt(), modes.tracking(), modes.sgr(), modes.application_cursor())
+        });
+        let (alt_screen, tracking, sgr, application_cursor) =
+            modes.unwrap_or((false, sonicterm_vt::vt::MouseTracking::Off, false, false));
+        let target = super::wheel_plan::WheelTarget {
+            tracking,
+            alt_screen,
+            sgr,
+            application_cursor,
+            readonly: child
+                .copy_mode
+                .as_ref()
+                .is_some_and(sonicterm_ui::copy_mode::CopyModeState::is_read_only),
+            cell,
         };
-        if delta_lines != 0 {
-            if let Some(pane_id) = child_pane_at_cursor(child, cursor_x, cursor_y) {
-                let cell =
-                    child_pane_cell_at(child, cursor_x, cursor_y).map(|(_, row, col)| (row, col));
-                let (is_alt, tracking, sgr, app_cursor) = child
-                    .panes
-                    .get(&pane_id)
-                    .map(|pane| {
-                        // All four modes come from one published byte; no parser lock.
-                        let modes = pane.pointer_modes();
-                        (modes.is_alt(), modes.tracking(), modes.sgr(), modes.application_cursor())
-                    })
-                    .unwrap_or((false, sonicterm_vt::vt::MouseTracking::Off, false, false));
-                // READONLY forbids both mouse reports and alternate-screen arrows from new wheel gestures.
-                let route = if child
-                    .copy_mode
-                    .as_ref()
-                    .is_some_and(sonicterm_ui::copy_mode::CopyModeState::is_read_only)
-                {
-                    super::window_event::WheelRoute::LocalScrollback
-                } else {
-                    // When: copy_mode is not READONLY, preserve tracking and screen-specific wheel routing.
-                    super::window_event::wheel_route(tracking, is_alt)
-                };
-                if route == super::window_event::WheelRoute::MouseReport {
-                    let up = delta_lines < 0;
-                    let (col1, row1) =
-                        cell.map(|(row, col)| (col as u32 + 1, row as u32 + 1)).unwrap_or((1, 1));
-                    let count = delta_lines.unsigned_abs() as usize;
-                    let payload =
-                        super::window_event::wheel_report_bytes(sgr, up, col1, row1, count);
-                    if let Some(pane) = child.panes.get_mut(&pane_id) {
-                        Self::queue_pane_input(
-                            pty_event_proxy.as_ref(),
-                            pane,
-                            pane_id,
-                            super::PtyInputSource::Wheel,
-                            payload,
-                        );
-                    }
-                } else if route == super::window_event::WheelRoute::CursorKeys {
-                    // When: route is CursorKeys, untracked alternate-screen motion becomes terminal arrows.
-                    let up = delta_lines < 0;
-                    let seq: &[u8] = match (app_cursor, up) {
-                        (true, true) => b"\x1bOA",
-                        (true, false) => b"\x1bOB",
-                        (false, true) => b"\x1b[A",
-                        (false, false) => b"\x1b[B",
-                    };
-                    let count = delta_lines.unsigned_abs() as usize;
-                    let mut payload = Vec::with_capacity(seq.len() * count);
-                    for _ in 0..count {
-                        payload.extend_from_slice(seq);
-                    }
-                    if let Some(pane) = child.panes.get_mut(&pane_id) {
-                        Self::queue_pane_input(
-                            pty_event_proxy.as_ref(),
-                            pane,
-                            pane_id,
-                            super::PtyInputSource::Wheel,
-                            payload,
-                        );
-                    }
-                } else {
-                    // When: route is LocalScrollback, move the untracked primary-screen viewport.
-                    scroll_child_pane(child, pane_id, delta_lines, scrollbar_mode);
+        match super::wheel_plan::plan_wheel(lines, target) {
+            super::wheel_plan::WheelPlan::None => {
+                // When: the plan is None, the motion rounded to no lines.
+            }
+            super::wheel_plan::WheelPlan::Input(payload) => {
+                if let Some(pane) = child.panes.get_mut(&pane_id) {
+                    Self::queue_pane_input(
+                        pty_event_proxy.as_ref(),
+                        pane,
+                        pane_id,
+                        super::PtyInputSource::Wheel,
+                        payload,
+                    );
                 }
+            }
+            super::wheel_plan::WheelPlan::Scroll(lines) => {
+                scroll_child_pane(child, pane_id, lines, scrollbar_mode);
             }
         }
     }

@@ -351,6 +351,7 @@ mod warm_window_pool;
 pub use warm_window_pool::{
     warm_window_pool_may_spawn, warm_window_pool_should_spawn, warm_window_pool_target, WarmWindow,
 };
+mod wheel_plan;
 mod window_event;
 mod window_keyboard;
 mod window_pointer;
