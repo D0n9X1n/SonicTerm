@@ -811,7 +811,7 @@ mod template;
 
 #[path = "config_mcp.rs"]
 mod mcp;
-pub use mcp::{McpConfig, McpControl};
+pub use mcp::{McpConfig, McpControl, McpRead};
 
 pub use persist::FamilySave;
 #[cfg(test)]

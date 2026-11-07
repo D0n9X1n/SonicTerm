@@ -41,7 +41,7 @@ fn install_server(app: &mut App, config: McpConfig) -> Arc<McpShared> {
 
 /// The `[mcp]` values with the server on at `control`.
 fn enabled(control: McpControl) -> McpConfig {
-    McpConfig { enabled: true, control }
+    McpConfig { enabled: true, control, ..McpConfig::default() }
 }
 
 /// A queued `ListPanes` request with this admitting `generation` and `deadline`.

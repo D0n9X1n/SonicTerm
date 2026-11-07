@@ -272,7 +272,8 @@ to. It is off by default; while it is off nothing listens and no endpoint exists
 | Key | Default | Behavior |
 | --- | --- | --- |
 | `enabled` | `false` | Starts the server. Saving `true` and reloading starts it at once; saving `false` stops it, ends every connection and removes its endpoint. |
-| `control` | `"agent"` | Which panes control tools may act on: `"off"` (none), `"agent"` (panes an agent created) or `"any"` (every pane). Read tools work on every pane whenever the server runs. A reload that changes it drops every request already queued. Any other value fails the load. |
+| `control` | `"agent"` | Which panes control tools may act on: `"off"` (none), `"agent"` (panes an agent created) or `"any"` (every pane). A reload that changes it drops every request already queued. Any other value fails the load. |
+| `read` | `"any"`; a new config file sets `"agent"` | Which panes read tools may see: `"agent"` (panes an agent created) or `"any"` (every pane). A config without the key reads every pane, so upgrades never narrow it. A reload that changes it drops queued requests and ends a running `wait_for`. Any other value fails the load. |
 
 A reload that leaves `[mcp]` unchanged keeps the server and its connections, so
 a running `wait_for` continues. [MCP Server](MCP-Server) shows how to connect

@@ -27,14 +27,18 @@ flowchart LR
 # Nothing listens while this is off.
 enabled = false
 # Control tools act on: "off" (none), "agent" (panes an agent created),
-# or "any" (every pane). Read tools work on every pane when enabled.
+# or "any" (every pane).
 control = "agent"
+# Read tools see: "agent" (panes an agent created) or "any" (every pane).
+# A config without this line reads every pane.
+read = "agent"
 ```
 
 | Key | 默认值 | 取值 |
 | --- | --- | --- |
 | `enabled` | `false` | `true` 运行服务器；`false` 停止服务器。 |
 | `control` | `"agent"` | `"off"`、`"agent"` 或 `"any"`；见下文“控制范围”。 |
+| `read` | `"any"`（新配置文件中为 `"agent"`） | `"agent"` 或 `"any"`；见下文“读取范围”。 |
 
 开启方法：
 
@@ -101,7 +105,7 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 
 ## 控制范围
 
-`[mcp] control` 决定控制类工具可以作用于什么。服务器运行时，读取类工具对所有窗格可用。
+`[mcp] control` 决定控制类工具可以作用于什么；`[mcp] read` 决定读取类工具可以看到什么（见“读取范围”）。
 
 | `control` | 控制类工具可作用于 |
 | --- | --- |
@@ -111,6 +115,24 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 
 无论范围如何，READONLY 窗口中的窗格总被拒绝。含有 agent 窗格的标签页在标题前显示紫色圆环标记。
 重载时修改 `control` 会丢弃所有已排队的请求。
+
+## 读取范围
+
+`[mcp] read` 决定 `list_panes`、`read_pane` 和 `wait_for` 可以看到哪些窗格。
+
+| `read` | 读取类工具可看到 |
+| --- | --- |
+| `"agent"` | 只有 agent 创建的窗格；其他窗格以 `out_of_scope` 拒绝，且不出现在 `list_panes` 中 |
+| `"any"` | 所有窗格 |
+
+没有 `read` 的配置保持原有行为 `"any"`，因此升级永远不会收窄现有设置。SonicTerm 首次启动时写入的
+配置文件设置 `read = "agent"`，因此除非你允许，agent 无法读取无关的 SSH 或日志窗格。若希望 agent
+读取你自己的窗格（例如启动它的那个窗格），请使用 `"any"`。
+
+哪些窗格属于 agent 只由 SonicTerm 自己的记录决定，从不取决于客户端：桥接程序的前导消息会把 agent
+所在窗格作为 `self_pane_id` 的默认值，但在 `"agent"` 下无法解锁任何窗格。`run_command` 会在运行中
+返回它所执行命令的输出；这由 `control` 决定，而不是 `read`。重载时修改 `read` 会丢弃所有已排队的
+请求，并结束正在进行的 `wait_for`。
 
 窗格文本是不可信输入：程序可以打印意在操纵 agent 的文本。服务器告知 agent 从不执行窗格文本中的
 指令，但除非 agent 必须操作你自己的窗格，请将 `control` 保持为 `"agent"`。

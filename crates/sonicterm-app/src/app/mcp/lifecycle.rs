@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use sonicterm_cfg::config::{McpConfig, McpControl};
+use sonicterm_cfg::config::{McpConfig, McpControl, McpRead};
 use sonicterm_resource::CommittedReservation;
 use sonicterm_types::{OwnerKind, ResourceAmount, ResourceClass};
 
@@ -61,13 +61,21 @@ impl App {
             return;
         }
         if let Some(server) = self.mcp_server.as_mut() {
-            // When: a `server` runs and only the control level changed, queued requests are revoked.
+            // When: a `server` runs and only the control level or read scope changed, queued
+            // requests and running waits are revoked.
             server.shared.set_control(wanted.control);
+            server.shared.set_read(wanted.read);
             server.config = wanted;
-            tracing::info!(target: "mcp", control = wanted.control.as_str(), "control level changed");
+            tracing::info!(
+                target: "mcp",
+                control = wanted.control.as_str(),
+                read = wanted.read.as_str(),
+                "control level changed"
+            );
             return;
         }
         let shared = McpShared::new(wanted.control, self.event_loop_proxy.clone());
+        shared.set_read(wanted.read);
         match super::start_listener(&shared) {
             Ok((endpoint, guard)) => {
                 tracing::info!(target: "mcp", control = wanted.control.as_str(), "control server started");
@@ -160,8 +168,15 @@ impl App {
             return LoopReply::Refused("revoked", "the request was dropped before it ran".into());
         }
         let control = shared.control();
+        // Read tools see only agent-created panes under `read = "agent"`; `agent_owned` is
+        // SonicTerm's own record, so nothing a client sends can widen it.
+        let readable = |entry: &PaneEntry| shared.read() == McpRead::Any || entry.agent_owned;
         match &request.call {
-            LoopCall::ListPanes => LoopReply::Panes(self.mcp_pane_entries()),
+            LoopCall::ListPanes => {
+                let mut entries = self.mcp_pane_entries();
+                entries.retain(readable);
+                LoopReply::Panes(entries)
+            }
             LoopCall::Notice { text } => {
                 self.show_notification_for_kind(
                     self.frontmost_kind(),
@@ -182,7 +197,11 @@ impl App {
             }
             LoopCall::ClosePane { pane_id } => self.mcp_close_pane(control, *pane_id),
             LoopCall::ResolvePane { pane_id } => match self.mcp_resolve_pane(*pane_id) {
-                Some(entry) => LoopReply::Pane(entry),
+                Some(entry) if readable(&entry) => LoopReply::Pane(entry),
+                Some(_) => LoopReply::Refused(
+                    "out_of_scope",
+                    format!("pane {pane_id} is outside [mcp] read = \"agent\""),
+                ),
                 None => LoopReply::Refused("pane_gone", format!("no pane {pane_id}")),
             },
         }

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::Value;
-use sonicterm_cfg::config::McpControl;
+use sonicterm_cfg::config::{McpControl, McpRead};
 use sonicterm_vt::vt::Parser;
 use winit::event_loop::EventLoopProxy;
 
@@ -190,6 +190,8 @@ pub(crate) struct McpShared {
     pub(crate) generation: AtomicU64,
     /// The control level, as [`McpControl`]'s discriminant.
     pub(crate) control: AtomicU8,
+    /// Whether read tools are limited to agent-created panes (`[mcp] read = "agent"`).
+    pub(crate) read_agent_only: AtomicBool,
     /// Set to stop the listener and every connection.
     pub(crate) stopped: AtomicBool,
     /// Whether a wake-up is already queued, so a burst of requests wakes the loop once.
@@ -212,6 +214,7 @@ impl McpShared {
             inbox: Mutex::new(Vec::new()),
             generation: AtomicU64::new(1),
             control: AtomicU8::new(control_code(control)),
+            read_agent_only: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             proxy: Mutex::new(proxy),
@@ -225,6 +228,24 @@ impl McpShared {
     // Ordering: control Acquire pairs with the Release store in `set_control`; the level is read alone.
     pub(crate) fn control(&self) -> McpControl {
         control_from_code(self.control.load(Ordering::Acquire))
+    }
+
+    /// The current read scope.
+    // Ordering: read_agent_only Acquire pairs with the Release store in `set_read`; read alone.
+    pub(crate) fn read(&self) -> McpRead {
+        // When: `read_agent_only` is set the scope is `Agent`, else `Any`.
+        if self.read_agent_only.load(Ordering::Acquire) {
+            McpRead::Agent
+        } else {
+            McpRead::Any
+        }
+    }
+
+    /// Change the read scope and revoke every queued request and running wait.
+    // Ordering: read_agent_only Release publishes the scope before the generation AcqRel bump.
+    pub(crate) fn set_read(&self, read: McpRead) {
+        self.read_agent_only.store(read == McpRead::Agent, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Change the control level and revoke every queued request.
@@ -788,3 +809,7 @@ pub(crate) fn read_reply_line(reader: &mut impl std::io::BufRead) -> Option<Valu
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod mcp_tests;
+
+#[cfg(test)]
+#[path = "mcp_read_scope_tests.rs"]
+mod mcp_read_scope_tests;

@@ -11,10 +11,36 @@ pub struct McpConfig {
     pub enabled: bool,
     /// Which panes control tools may act on.
     pub control: McpControl,
+    /// Which panes read tools may see. A missing key is `"any"`, so existing configurations keep
+    /// working; the template a new config file starts from sets `"agent"`.
+    pub read: McpRead,
+}
+
+/// Which panes the read tools (`list_panes`, `read_pane`, `wait_for`) may see. Pane identity
+/// comes only from SonicTerm's own records (`agent_owned`), never from anything a client says.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpRead {
+    /// Only panes an agent created.
+    Agent,
+    /// Every pane.
+    #[default]
+    Any,
+}
+
+impl McpRead {
+    /// The config spelling, for logs and templates.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Any => "any",
+        }
+    }
 }
 
 /// Which panes the control tools (`create_pane`, `run_command`, `send_text`, `send_keys`,
-/// `close_pane`) may act on. Read tools work on every pane whenever the server is enabled.
+/// `close_pane`) may act on; [`McpRead`] sets what the read tools may see.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum McpControl {

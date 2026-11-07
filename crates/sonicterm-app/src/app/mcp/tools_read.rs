@@ -29,8 +29,10 @@ pub(crate) fn tool_list() -> Value {
     let mut tools = vec![
         json!({
             "name": "list_panes",
-            "description": "List every SonicTerm pane: ids, titles, working directories, sizes, \
-                            and which pane this agent runs in (self_pane_id).",
+            "description": "List the SonicTerm panes this agent may read: ids, titles, working \
+                            directories, sizes, and which pane this agent runs in (self_pane_id). \
+                            Under read 'agent' only panes an agent created are listed and readable; \
+                            any other pane is refused as out_of_scope.",
             "inputSchema": { "type": "object", "properties": {} },
             "outputSchema": {
                 "type": "object",
@@ -38,6 +40,7 @@ pub(crate) fn tool_list() -> Value {
                     "self_pane_id": { "type": ["string", "null"] },
                     "instance_pid": { "type": "integer" },
                     "control": { "enum": ["off", "agent", "any"] },
+                    "read": { "enum": ["agent", "any"] },
                     "panes": { "type": "array", "items": { "type": "object" } },
                     "error": { "type": "string" },
                     "message": { "type": "string" },
@@ -204,6 +207,7 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
             "self_pane_id": self_pane.map(|id| id.to_string()),
             "instance_pid": std::process::id(),
             "control": super::lifecycle::control_name(shared.control()),
+            "read": shared.read().as_str(),
             "panes": panes,
         }),
     )

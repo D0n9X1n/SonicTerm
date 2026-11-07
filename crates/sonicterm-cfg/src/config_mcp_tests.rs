@@ -8,7 +8,10 @@ use crate::config::Config;
 #[test]
 fn mcp_defaults_to_off_with_agent_control() {
     let config = Config::default();
-    assert_eq!(config.mcp, McpConfig { enabled: false, control: McpControl::Agent });
+    assert_eq!(
+        config.mcp,
+        McpConfig { enabled: false, control: McpControl::Agent, ..McpConfig::default() }
+    );
     let parsed: Config = toml::from_str("").expect("empty config");
     assert_eq!(parsed.mcp, McpConfig::default());
 }
@@ -19,7 +22,7 @@ fn every_control_value_parses() {
     for control in [McpControl::Off, McpControl::Agent, McpControl::Any] {
         let text = format!("[mcp]\nenabled = true\ncontrol = \"{}\"\n", control.as_str());
         let parsed: Config = toml::from_str(&text).expect("valid [mcp]");
-        assert_eq!(parsed.mcp, McpConfig { enabled: true, control });
+        assert_eq!(parsed.mcp, McpConfig { enabled: true, control, ..McpConfig::default() });
     }
 }
 
@@ -29,4 +32,36 @@ fn every_control_value_parses() {
 fn an_unknown_value_or_key_fails_the_load() {
     assert!(toml::from_str::<Config>("[mcp]\ncontrol = \"all\"\n").is_err());
     assert!(toml::from_str::<Config>("[mcp]\nenable = true\n").is_err());
+}
+
+/// A config with no `read` key keeps today's behavior, so an existing configuration is never
+/// narrowed by an upgrade: read tools see every pane.
+#[test]
+fn a_missing_read_key_reads_every_pane() {
+    let parsed: Config = toml::from_str("[mcp]\nenabled = true\ncontrol = \"agent\"\n").unwrap();
+    assert_eq!(parsed.mcp.read, McpRead::Any);
+    assert_eq!(McpConfig::default().read, McpRead::Any);
+}
+
+/// Each read value parses from its lowercase spelling and round-trips through `as_str`; an
+/// unknown one fails the load rather than being read as either.
+#[test]
+fn every_read_value_parses_and_an_unknown_one_fails() {
+    for read in [McpRead::Agent, McpRead::Any] {
+        let text = format!("[mcp]\nread = \"{}\"\n", read.as_str());
+        let parsed: Config = toml::from_str(&text).expect("valid [mcp] read");
+        assert_eq!(parsed.mcp.read, read);
+    }
+    assert!(toml::from_str::<Config>("[mcp]\nread = \"off\"\n").is_err());
+}
+
+/// A new config file starts from the template, which limits read tools to agent-created panes;
+/// the template still parses, and only its `read` line differs from the defaults.
+#[test]
+fn the_new_config_template_reads_agent_panes_only() {
+    let template = crate::config::default_config_template();
+    assert!(template.contains("\nread = \"agent\"\n"), "the template sets read");
+    let parsed: Config = toml::from_str(&template).expect("the template parses");
+    assert_eq!(parsed.mcp.read, McpRead::Agent);
+    assert!(!parsed.mcp.enabled, "the server stays off by default");
 }

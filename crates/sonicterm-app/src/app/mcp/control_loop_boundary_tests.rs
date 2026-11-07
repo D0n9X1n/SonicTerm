@@ -32,7 +32,7 @@ fn app() -> App {
 /// Install a running server at `control` that binds nothing.
 fn install(app: &mut App, control: McpControl) -> Arc<McpShared> {
     let shared = McpShared::new(control, None);
-    let config = McpConfig { enabled: true, control };
+    let config = McpConfig { enabled: true, control, ..McpConfig::default() };
     app.config.mcp = config;
     let owner = app.register_mcp_owner();
     app.mcp_server = Some(McpServer {
