@@ -13,9 +13,9 @@ use winit::{
 
 use super::tab_gesture::{TabMotion, TabPress, TabRelease};
 use super::window_event::{
-    native_scrollbar_owns_pointer, no_button_motion_report, pointer_route_bytes,
-    pointer_scrollbar_content_rect, route_pressed_pointer_motion, take_pointer_release,
-    wheel_report_bytes, wheel_route, PointerMotionRoute, PointerReportKind, WheelRoute,
+    no_button_motion_report, pointer_route_bytes, route_pressed_pointer_motion,
+    take_pointer_release, wheel_report_bytes, wheel_route, PointerMotionRoute, PointerReportKind,
+    WheelRoute,
 };
 use super::{
     pane_id_at_point, App, FrontmostKind, PointerCell, PointerGestureOwner, PtyInputSource,
@@ -271,32 +271,11 @@ impl App {
                             )
                         })
                     });
-                    let (content, gutter_width) = self.main_renderer().map_or(
-                        (pane, crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX),
-                        |renderer| {
-                            let content = pointer_scrollbar_content_rect(
-                                pane,
-                                [
-                                    renderer.padding_left_px(),
-                                    renderer.padding_right_px(),
-                                    renderer.padding_top_px(),
-                                    renderer.padding_bottom_px(),
-                                ],
-                                renderer.cell_size(),
-                            );
-                            (
-                                content,
-                                crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX
-                                    * renderer.scale_factor(),
-                            )
-                        },
-                    );
-                    Some(native_scrollbar_owns_pointer(
+                    Some(super::window_event::pane_scrollbar_owns_pointer(
                         self.config.appearance.scrollbar,
-                        content,
-                        cursor_x,
-                        cursor_y,
-                        gutter_width,
+                        pane,
+                        self.main_renderer().map(super::window_event::ScrollbarMetrics::of),
+                        (cursor_x, cursor_y),
                         edge_active,
                         visible,
                     ))

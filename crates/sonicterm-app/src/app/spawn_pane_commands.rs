@@ -12,8 +12,7 @@ impl App {
             // When: `tab_states` has no active tab, refuse before creating a speculative PTY.
             return;
         };
-        if !tab.tree.leaves().contains(&tab.active_pane)
-            || !window.panes.contains_key(&tab.active_pane)
+        if !tab.tree.contains_pane(tab.active_pane) || !window.panes.contains_key(&tab.active_pane)
         {
             // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
             return;

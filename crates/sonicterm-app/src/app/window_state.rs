@@ -560,7 +560,7 @@ impl WindowState {
         let tab_idx = self.tabs.active_index();
         let tab = self.tab_states.get_mut(tab_idx)?;
         if tab.active_pane == pane_id
-            || !tab.tree.leaves().contains(&pane_id)
+            || !tab.tree.contains_pane(pane_id)
             || !self.panes.contains_key(&pane_id)
             || tab.tree.zoomed_pane_id().is_some_and(|zoomed| zoomed != pane_id)
         {

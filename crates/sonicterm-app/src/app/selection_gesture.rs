@@ -216,7 +216,7 @@ impl WindowState {
     ) -> Option<(SelectionAnchor, Selection)> {
         let tab = (self.tabs.active()?.id, self.tabs.activation());
         let tab_state = self.tab_states.get(self.tabs.active_index())?;
-        if !tab_state.tree.leaves().contains(&pane_id)
+        if !tab_state.tree.contains_pane(pane_id)
             || tab_state.tree.zoomed_pane_id().is_some_and(|zoomed| zoomed != pane_id)
         {
             // When: pane_id is absent or zoom hides it, no visible press may change focus or selection.
@@ -333,7 +333,7 @@ impl WindowState {
         active_tab == Some(anchor.tab_id)
             && self.tabs.activation() == anchor.tab_activation
             && self.panes.contains_key(&anchor.pane_id)
-            && tab.is_some_and(|tab| tab.tree.leaves().contains(&anchor.pane_id))
+            && tab.is_some_and(|tab| tab.tree.contains_pane(anchor.pane_id))
     }
 
     /// Drop a local gesture so later motion cannot extend; the selection is kept.

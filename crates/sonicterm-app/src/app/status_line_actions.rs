@@ -436,7 +436,7 @@ impl App {
             window
                 .tab_states
                 .iter()
-                .position(|tab| tab.tree.leaves().contains(&pane_id))
+                .position(|tab| tab.tree.contains_pane(pane_id))
                 .map(|index| (*window_id, index))
         });
         let Some((window_id, index)) = target else {

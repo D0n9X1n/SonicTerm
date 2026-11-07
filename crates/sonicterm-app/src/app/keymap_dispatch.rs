@@ -423,7 +423,7 @@ impl App {
                     let tab_index = main.map(|window| window.tabs.active_index()).unwrap_or(0);
                     let pane_count = main
                         .and_then(|window| window.tab_states.get(tab_index))
-                        .map(|tab| tab.tree.leaves().len())
+                        .map(|tab| tab.tree.leaf_count())
                         .unwrap_or(0);
                     (tab_index, pane_count)
                 };

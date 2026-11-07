@@ -318,10 +318,10 @@ mod window_event_tests;
 #[path = "window_event_pointer.rs"]
 mod pointer;
 pub(super) use pointer::{
-    cancel_pointer_gesture, native_scrollbar_owns_pointer, no_button_motion_report,
-    pointer_route_bytes, pointer_scrollbar_content_rect, route_pressed_pointer_motion,
-    take_focus_loss_pointer_release, take_pointer_release, terminal_repeat_targets,
-    wheel_report_bytes, wheel_route,
+    cancel_pointer_gesture, no_button_motion_report, pane_scrollbar_owns_pointer,
+    pointer_route_bytes, route_pressed_pointer_motion, take_focus_loss_pointer_release,
+    take_pointer_release, terminal_repeat_targets, wheel_report_bytes, wheel_route,
+    ScrollbarMetrics,
 };
 #[path = "window_event_redraw.rs"]
 mod redraw;

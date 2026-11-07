@@ -46,7 +46,7 @@ impl PaneLaunch {
     pub(super) fn from_window(window: Option<&WindowState>, local_hostname: &str) -> Self {
         let cwd = window.and_then(|window| {
             let tab = window.tab_states.get(window.tabs.active_index())?;
-            if !tab.tree.leaves().contains(&tab.active_pane) {
+            if !tab.tree.contains_pane(tab.active_pane) {
                 // When: active_pane is not a live tab leaf, stale focus cannot supply a launch directory.
                 return None;
             }

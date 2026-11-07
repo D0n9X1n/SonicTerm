@@ -123,7 +123,7 @@ impl App {
             return false;
         }
         let Some(tab_idx) =
-            window.tab_states.iter().position(|tab| tab.tree.leaves().contains(&pane_id))
+            window.tab_states.iter().position(|tab| tab.tree.contains_pane(pane_id))
         else {
             // When: no tab holds pane_id, it is between tabs.
             return false;

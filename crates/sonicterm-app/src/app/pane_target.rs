@@ -92,7 +92,7 @@ impl App {
             let tab_index = window
                 .tab_states
                 .iter()
-                .position(|tab_state| tab_state.tree.leaves().contains(&pane_id))?;
+                .position(|tab_state| tab_state.tree.contains_pane(pane_id))?;
             Some(PaneLocation {
                 window_id: *window_id,
                 tab_index,

@@ -319,7 +319,7 @@ impl App {
             // pane tree nor a tab for this action to close.
             return false;
         };
-        let pane_count = tab_state.tree.leaves().len();
+        let pane_count = tab_state.tree.leaf_count();
         if pane_count <= 1 {
             // When: `pane_count` is the last leaf, so closing it means closing
             // the tab. Drop the borrows so the tab path can re-borrow.
@@ -439,9 +439,7 @@ impl App {
             // When: `tab_states` has no active tab, refuse before creating a speculative PTY.
             return false;
         };
-        if !tab.tree.leaves().contains(&tab.active_pane)
-            || !child.panes.contains_key(&tab.active_pane)
-        {
+        if !tab.tree.contains_pane(tab.active_pane) || !child.panes.contains_key(&tab.active_pane) {
             // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
             return false;
         }

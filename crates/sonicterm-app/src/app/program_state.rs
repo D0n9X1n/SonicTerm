@@ -353,8 +353,7 @@ impl App {
             return;
         }
         let Some((window_id, tab_index)) = self.windows.iter().find_map(|(id, window)| {
-            let index =
-                window.tab_states.iter().position(|tab| tab.tree.leaves().contains(&pane_id))?;
+            let index = window.tab_states.iter().position(|tab| tab.tree.contains_pane(pane_id))?;
             Some((*id, index))
         }) else {
             // When: no window holds pane_id, the pane closed before its notification arrived.

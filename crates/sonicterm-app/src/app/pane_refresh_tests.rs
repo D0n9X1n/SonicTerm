@@ -685,3 +685,24 @@ fn a_copied_cursor_publishes_todays_ime_area() {
     assert_eq!(publish(copied), expected);
     assert_eq!(publish((grid.cursor.row, grid.cursor.col)), expected);
 }
+
+/// The child pointer path asks for one pane's rect; `pane_rect_for` returns exactly what the full
+/// `compute_pane_rects_for` layout gives each pane of the child's active tab, after splits, and
+/// `None` for a pane that is not there.
+#[test]
+fn pane_rect_for_matches_the_full_child_layout() {
+    let (mut app, _main_pane, child, child_pane) = app_with_main_and_child();
+    let outer = sonicterm_ui::pane::Rect::new(0.0, 24.0, 900.0, 600.0);
+    let window = app.windows.get_mut(&child).unwrap();
+    window.test_pane_viewport = Some((outer, 10.0, 20.0));
+    let tree = &mut window.tab_states[window.tabs.active_index()].tree;
+    tree.split(child_pane, sonicterm_types::Direction::Right, 9_001);
+    tree.split(9_001, sonicterm_types::Direction::Down, 9_002);
+    let window = &app.windows[&child];
+    let layout = App::compute_pane_rects_for(window);
+    assert_eq!(layout.len(), 3);
+    for (pane_id, rect) in layout {
+        assert_eq!(App::pane_rect_for(window, pane_id), Some(rect), "pane {pane_id}");
+    }
+    assert_eq!(App::pane_rect_for(window, 123_456), None);
+}

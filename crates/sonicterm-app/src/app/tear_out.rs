@@ -332,7 +332,7 @@ impl App {
                 return None;
             }
             let tab = &window.tab_states[index];
-            if !tab.tree.leaves().contains(&tab.active_pane)
+            if !tab.tree.contains_pane(tab.active_pane)
                 || tab.tree.zoomed_pane_id().is_some_and(|id| id != tab.active_pane)
             {
                 // When: the source tab's active/visible identity is invalid, refuse before any custody is detached.

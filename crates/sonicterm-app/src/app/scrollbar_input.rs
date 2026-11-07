@@ -350,8 +350,7 @@ impl App {
             return HitOutcome::Miss;
         };
         let active_id = tab.active_pane;
-        let pane_rects = App::compute_pane_rects_for(child);
-        let Some((_, ui_rect)) = pane_rects.iter().find(|(id, _)| *id == active_id) else {
+        let Some(ui_rect) = App::pane_rect_for(child, active_id) else {
             // When: pane_rects holds no rect for active_id, so there is no bar
             // geometry to test the press against.
             return HitOutcome::Miss;

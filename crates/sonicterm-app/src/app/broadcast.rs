@@ -101,7 +101,7 @@ impl App {
                         .tab_states
                         .iter()
                         .enumerate()
-                        .find(|(_, tab)| tab.tree.leaves().contains(&source_pane))
+                        .find(|(_, tab)| tab.tree.contains_pane(source_pane))
                     {
                         // When: a tab's `leaves` hold `source_pane`, so that tab's
                         // panes are the receiver set for this window.

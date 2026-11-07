@@ -236,16 +236,34 @@ impl App {
             // When: `renderer` is absent, logical size and insets are unavailable.
             return Vec::new();
         };
+        tab_state.tree.layout(Self::pane_area(renderer))
+    }
+
+    /// The window-pixel area a tab's panes tile: the surface less the tab bar and title band.
+    fn pane_area(renderer: &GpuRenderer) -> sonicterm_ui::pane::Rect {
         let (width_px, height_px) = renderer.logical_size();
         let top = (renderer.top_inset() - renderer.padding_top_px()).max(0.0);
         let bottom = renderer.bottom_inset();
-        let outer = sonicterm_ui::pane::Rect::new(
+        sonicterm_ui::pane::Rect::new(
             0.0,
             top,
             width_px.max(0.0),
             (height_px - top - bottom).max(0.0),
-        );
-        tab_state.tree.layout(outer)
+        )
+    }
+
+    /// The rect [`Self::compute_pane_rects_for`] gives `pane_id` in `child`'s active tab, laying out
+    /// only the splits that contain it; `None` when it is not visible there.
+    pub(crate) fn pane_rect_for(
+        child: &WindowState,
+        pane_id: u64,
+    ) -> Option<sonicterm_ui::pane::Rect> {
+        let tab_state = child.tab_states.get(child.tabs.active_index())?;
+        let outer = match child.test_pane_viewport.map(|(outer, _, _)| outer) {
+            Some(outer) => outer,
+            None => Self::pane_area(child.renderer.as_ref()?),
+        };
+        tab_state.tree.pane_rect(outer, pane_id)
     }
 }
 

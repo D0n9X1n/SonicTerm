@@ -482,7 +482,7 @@ impl App {
                         Some(owner) if owner == *window_id => window
                             .tab_states
                             .iter()
-                            .position(|tab| tab.tree.leaves().contains(&record.pane_id))
+                            .position(|tab| tab.tree.contains_pane(record.pane_id))
                             .map_or(ClipSource::OtherWindow, |index| ClipSource::Tab(index + 1)),
                         Some(_) => ClipSource::OtherWindow,
                         None => ClipSource::Closed,

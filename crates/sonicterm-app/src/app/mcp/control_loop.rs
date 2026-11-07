@@ -236,7 +236,7 @@ impl App {
             return Refusal::PaneGone.reply();
         };
         let leaves =
-            window.tab_states.get(location.tab_index).map_or(0, |tab| tab.tree.leaves().len());
+            window.tab_states.get(location.tab_index).map_or(0, |tab| tab.tree.leaf_count());
         let last_tab = location.is_main && window.tab_states.len() == 1 && leaves == 1;
         if last_tab {
             // When: it is the main window's `last_tab`, closing it would quit SonicTerm.

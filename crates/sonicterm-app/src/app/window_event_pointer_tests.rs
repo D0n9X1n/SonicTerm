@@ -339,18 +339,60 @@ fn keyboard_and_modifier_transitions_preserve_path_probe_authorization() {
 
 #[test]
 fn main_and_child_no_button_paths_share_scrollbar_ownership() {
-    // Both runtime paths must call the same gutter predicate so Always and Auto
-    // scrollbar ownership cannot drift between main and torn-out windows.
+    // Both runtime paths must call the same gutter calculation, padding and scale included, so
+    // Always and Auto scrollbar ownership cannot drift between main and torn-out windows.
+    // The main sources include the helper's own definition, so one call means two matches.
     assert_eq!(
-        MAIN_SOURCES.matches("native_scrollbar_owns_pointer(").count(),
+        MAIN_SOURCES.matches("pane_scrollbar_owns_pointer(").count(),
         2,
-        "main source must define and call the shared ownership helper",
+        "the main window must define and call the shared ownership calculation once",
     );
     assert_eq!(
-        CHILD_SOURCES.matches("native_scrollbar_owns_pointer(").count(),
+        CHILD_SOURCES.matches("pane_scrollbar_owns_pointer(").count(),
         1,
-        "child source must call the shared ownership helper once",
+        "the child window must call the shared ownership calculation once",
     );
+    // Only the shared calculation reads the gutter width; neither window derives its own.
+    let width_reads = |source: &str| source.matches("scrollbar_input::SCROLLBAR_WIDTH_PX").count();
+    assert_eq!(width_reads(MAIN_SOURCES), 1, "main computes its own gutter width");
+    assert_eq!(width_reads(CHILD_SOURCES), 0, "child computes its own gutter width");
+}
+
+/// The shared calculation places the gutter where the renderer draws the bar: inside the
+/// padded content, at the scaled width, and against the content's right edge even when the pane
+/// width leaves a fractional cell; without a renderer it uses the outer rect at the logical width.
+#[test]
+fn the_shared_gutter_calculation_follows_padding_scale_and_remainders() {
+    let pane = sonicterm_ui::pane::Rect::new(100.0, 40.0, 405.5, 300.0);
+    let metrics = ScrollbarMetrics { insets: [8.0, 6.0, 4.0, 2.0], cell: (9.0, 18.0), scale: 2.0 };
+    let width = crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX * metrics.scale;
+    let content_right = pane.x + pane.w - metrics.insets[1];
+    let row_y = pane.y + 50.0;
+    let owns = |metrics: Option<ScrollbarMetrics>, pixel_x: f32| {
+        pane_scrollbar_owns_pointer(
+            ScrollbarMode::Always,
+            pane,
+            metrics,
+            (pixel_x, row_y),
+            false,
+            false,
+        )
+    };
+    assert!(owns(Some(metrics), content_right - 0.5), "just inside the padded right edge");
+    assert!(owns(Some(metrics), content_right - width + 0.5), "the scaled gutter's left edge");
+    assert!(!owns(Some(metrics), content_right - width - 0.5), "left of the scaled gutter");
+    assert!(!owns(Some(metrics), content_right + 0.5), "in the right padding, outside the bar");
+    let logical = crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX;
+    assert!(owns(None, pane.x + pane.w - logical + 0.5), "headless: the outer rect's gutter");
+    assert!(!owns(None, pane.x + pane.w - logical - 0.5));
+    assert!(!pane_scrollbar_owns_pointer(
+        ScrollbarMode::Never,
+        pane,
+        Some(metrics),
+        (content_right - 0.5, row_y),
+        true,
+        true
+    ));
 }
 
 #[test]

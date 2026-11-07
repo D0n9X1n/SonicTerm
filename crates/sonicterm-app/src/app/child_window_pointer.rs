@@ -317,9 +317,7 @@ impl App {
         } else {
             // When: `child.mouse_down` is false, child chrome may suppress no-button terminal motion.
             let scrollbar_owned = pointer_cell.is_some_and(|cell| {
-                let pane = App::compute_pane_rects_for(child)
-                    .into_iter()
-                    .find_map(|(id, rect)| (id == cell.pane_id).then_some(rect));
+                let pane = App::pane_rect_for(child, cell.pane_id);
                 pane.is_some_and(|pane| {
                     let (edge_active, visible) =
                         child.scrollbar_vis.get(&cell.pane_id).map_or((false, false), |state| {
@@ -328,32 +326,11 @@ impl App {
                                 state.alpha > crate::app::scrollbar_visibility::ALPHA_EMIT_FLOOR,
                             )
                         });
-                    let (content, gutter_width) = child.renderer.as_ref().map_or(
-                        (pane, crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX),
-                        |renderer| {
-                            let content = super::window_event::pointer_scrollbar_content_rect(
-                                pane,
-                                [
-                                    renderer.padding_left_px(),
-                                    renderer.padding_right_px(),
-                                    renderer.padding_top_px(),
-                                    renderer.padding_bottom_px(),
-                                ],
-                                renderer.cell_size(),
-                            );
-                            (
-                                content,
-                                crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX
-                                    * renderer.scale_factor(),
-                            )
-                        },
-                    );
-                    super::window_event::native_scrollbar_owns_pointer(
+                    super::window_event::pane_scrollbar_owns_pointer(
                         config.appearance.scrollbar,
-                        content,
-                        position.x as f32,
-                        position.y as f32,
-                        gutter_width,
+                        pane,
+                        child.renderer.as_ref().map(super::window_event::ScrollbarMetrics::of),
+                        (position.x as f32, position.y as f32),
                         edge_active,
                         visible,
                     )
@@ -669,3 +646,7 @@ fn child_pane_at_cursor(child: &WindowState, cursor_x: f32, cursor_y: f32) -> Op
     }
     None
 }
+
+#[cfg(test)]
+#[path = "child_window_pointer_tests.rs"]
+mod child_window_pointer_tests;

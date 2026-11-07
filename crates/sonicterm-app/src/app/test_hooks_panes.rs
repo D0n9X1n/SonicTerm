@@ -683,7 +683,7 @@ impl App {
     /// tree rather than the tab bar when the tab still has > 1 pane.
     #[doc(hidden)]
     pub fn __test_pane_count_in_tab(&self, tab_idx: usize) -> Option<usize> {
-        self.main_tab_states()?.get(tab_idx).map(|tab| tab.tree.leaves().len())
+        self.main_tab_states()?.get(tab_idx).map(|tab| tab.tree.leaf_count())
     }
 
     /// Test-only: borrow the redraw target Arc for a given pane id,

@@ -182,3 +182,64 @@ fn rectangle_contains_uses_half_open_edges() {
     assert!(!rect.contains(40.0, 30.0));
     assert!(!rect.contains(20.0, 60.0));
 }
+
+#[test]
+fn leaf_queries_match_the_allocating_leaf_list() {
+    // `contains_pane`, `leaf_count` and `for_each_leaf` replace `leaves()` where only membership,
+    // a count or a walk is needed; on seeded random split trees they agree with `leaves()` exactly,
+    // order included, for present and absent ids.
+    let mut seed: u64 = 0x5eed_0e00;
+    let mut next = |bound: u64| {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % bound
+    };
+    let directions = [Direction::Left, Direction::Right, Direction::Up, Direction::Down];
+    for _ in 0..200 {
+        let mut tree = PaneTree::leaf(1);
+        for new_id in 2..2 + next(12) {
+            let leaves = tree.leaves();
+            let focus = leaves[next(leaves.len() as u64) as usize];
+            tree.split(focus, directions[next(4) as usize], new_id);
+        }
+        let leaves = tree.leaves();
+        let mut walked = Vec::new();
+        tree.for_each_leaf(&mut |id| walked.push(id));
+        assert_eq!(walked, leaves, "the walk keeps leaves() order");
+        assert_eq!(tree.leaf_count(), leaves.len());
+        for id in 0..20 {
+            assert_eq!(tree.contains_pane(id), leaves.contains(&id), "id {id} in {leaves:?}");
+        }
+    }
+}
+
+#[test]
+fn pane_rect_matches_the_full_layout() {
+    // `pane_rect` lays out only the splits that contain one pane; on seeded random trees, with and
+    // without a zoomed pane, it returns exactly the rect `layout` gives that pane, and `None` for
+    // a pane `layout` does not show.
+    let mut seed: u64 = 0x5eed_0e01;
+    let mut next = |bound: u64| {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % bound
+    };
+    let directions = [Direction::Left, Direction::Right, Direction::Up, Direction::Down];
+    let outer = Rect::new(3.0, 17.0, 1_280.0, 720.0);
+    for _ in 0..200 {
+        let mut tree = PaneTree::leaf(1);
+        for new_id in 2..2 + next(12) {
+            let leaves = tree.leaves();
+            let focus = leaves[next(leaves.len() as u64) as usize];
+            tree.split(focus, directions[next(4) as usize], new_id);
+        }
+        if next(3) == 0 {
+            // When: one in three trees zooms a pane, which hides every sibling from the layout.
+            let leaves = tree.leaves();
+            tree.toggle_zoom(leaves[next(leaves.len() as u64) as usize]);
+        }
+        let layout = tree.layout(outer);
+        for id in 0..20 {
+            let expected = layout.iter().find_map(|(pane, rect)| (*pane == id).then_some(*rect));
+            assert_eq!(tree.pane_rect(outer, id), expected, "pane {id} in {layout:?}");
+        }
+    }
+}
