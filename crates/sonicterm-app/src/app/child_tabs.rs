@@ -506,7 +506,7 @@ impl App {
             return false;
         };
         let focus = tab_state.active_pane;
-        if matches!(tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
+        if matches!(*tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
             // When: `matches` finds a lone `Leaf` holding `focus`, so closing the
             // pane closes the whole tab rather than one split.
 

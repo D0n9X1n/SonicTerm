@@ -316,7 +316,7 @@ impl App {
         // A split is measured in a copy of the anchor's tab tree; a new tab is the pane alone.
         let tree = match placement {
             Placement::Right | Placement::Down => {
-                let mut tree = window.tab_states.get(location.tab_index)?.tree.clone();
+                let mut tree = window.tab_states.get(location.tab_index)?.tree.tree().clone();
                 let direction =
                     if placement == Placement::Right { Direction::Right } else { Direction::Down };
                 tree.split(anchor, direction, pane_id).then_some(())?;

@@ -431,6 +431,12 @@ frame/cache identity. See [Rendering and Fonts](Rendering-and-Fonts) for the
 exact operations; [Architecture Internals](Architecture-Internals) defines when
 dirty rows may be acknowledged.
 
+Each tab keeps the last validated visible layout of its pane tree. The tree changes
+only through methods that draw a fresh layout revision from one process-wide
+sequence, so frame collection reuses the layout while the revision, the window's
+pane area and the active pane are unchanged and every leaf, hidden ones included,
+is still a live pane; any split, close, zoom or divider move recomputes it.
+
 ### What happens when the pane closes
 
 Dropping `PtyHandle` cancels I/O and terminates the child, then performs bounded

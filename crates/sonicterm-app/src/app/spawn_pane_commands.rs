@@ -78,7 +78,7 @@ impl App {
                     return;
                 };
                 let focus = tab_state.active_pane;
-                if matches!(tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
+                if matches!(*tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
                     (Some(tab_index), None)
                 } else {
                     // When: matches finds no focused PaneTree::Leaf, close only the split pane.

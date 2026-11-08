@@ -670,7 +670,7 @@ fn seed_tree(app: &mut App, child: bool, topology: Topology) -> Result<(WindowId
     }
     // Keep one tab/state pair while making the first press switch from the foreign pane.
     state.tabs.activate(0);
-    state.tab_states[0].tree = tree;
+    state.tab_states[0].tree = tree.into();
     state.tab_states[0].active_pane = panes[1];
     state.tab_states.truncate(1);
     let extras: Vec<_> = state.tabs.tabs().iter().skip(1).map(|tab| tab.id).collect();

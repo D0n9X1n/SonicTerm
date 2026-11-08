@@ -315,7 +315,7 @@ fn structural_invalidity_is_not_contention_in_either_role() {
                     LayoutInvalid::MissingPane(left)
                 }
                 1 => {
-                    tab.tree = PaneTree::leaf(right);
+                    tab.tree = PaneTree::leaf(right).into();
                     assert!(tab.tree.split(right, Direction::Right, right));
                     LayoutInvalid::DuplicatePane(right)
                 }

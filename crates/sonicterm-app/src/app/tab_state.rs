@@ -289,7 +289,9 @@ pub fn refresh_active_tab_title(
 /// Per-tab state. The `TabBar` keeps title/order; this struct tracks the
 /// pane tree and the focused leaf inside the tab.
 pub struct TabState {
-    pub tree: PaneTree,
+    /// The pane tree; changed only through its own methods, each of which draws a fresh layout
+    /// revision.
+    pub tree: super::tab_tree::TabTree,
     pub active_pane: u64,
     pub search: Option<SearchState>,
     pub command: CommandStatus,
@@ -302,13 +304,13 @@ impl TabState {
     /// freshly created tab reports nothing running until its shell says so.
     #[doc(hidden)]
     pub fn new(tree: PaneTree, active_pane: u64) -> Self {
-        Self { tree, active_pane, search: None, command: CommandStatus::Idle }
+        Self { tree: tree.into(), active_pane, search: None, command: CommandStatus::Idle }
     }
 }
 
 impl sonicterm_ui::broadcast::BroadcastTab for TabState {
     fn pane_tree(&self) -> &PaneTree {
-        &self.tree
+        self.tree.tree()
     }
 }
 

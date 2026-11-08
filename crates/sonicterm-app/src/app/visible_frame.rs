@@ -183,36 +183,42 @@ impl VisibleFrameSources {
             .tab_states
             .get(tab_index)
             .ok_or(FrameUnavailable::StructuralInvalid(LayoutInvalid::MissingTabState))?;
-        let layout = validate_layout(
-            &tab.tree.leaves(),
-            tab.tree.layout(outer),
-            tab.active_pane,
-            tab.tree.zoomed_pane_id(),
-            |id| window.panes.contains_key(&id),
-        )
-        .map_err(FrameUnavailable::StructuralInvalid)?;
-        let mut entries = Vec::with_capacity(layout.rects.len());
-        for (id, rect) in layout.rects {
-            // Lookup is exact, not filter_map: a missing pane never becomes a partial frame.
-            let pane = window
-                .panes
-                .get(&id)
-                .ok_or(FrameUnavailable::StructuralInvalid(LayoutInvalid::MissingPane(id)))?;
-            entries.push(VisibleSource {
-                id,
-                rect,
-                parser: Arc::clone(&pane.parser),
-                images: Arc::clone(&pane.inline_images),
-                viewport_top_abs: pane.viewport_top_abs,
-                viewport_anchor: pane.viewport_anchor,
-            });
-        }
+        let exists = |id| window.panes.contains_key(&id);
+        // An unchanged tab lends its validated layout; the tree is walked only after a change.
+        let compute = |tree: &sonicterm_ui::pane::PaneTree| {
+            let leaves = tree.leaves();
+            let rects = tree.layout(outer);
+            let zoom = tree.zoomed_pane_id();
+            let valid = validate_layout(&leaves, rects, tab.active_pane, zoom, exists)?;
+            Ok(super::tab_tree::CachedLayout::new(leaves, valid.rects, valid.active_pos))
+        };
+        let (entries, active_pos) = tab
+            .tree
+            .visit_layout(outer, tab.active_pane, exists, compute, |layout| {
+                let mut entries = Vec::with_capacity(layout.rects.len());
+                for (id, rect) in &layout.rects {
+                    // Lookup is exact, not filter_map: a missing pane never becomes a partial frame.
+                    let pane = window.panes.get(id).ok_or(FrameUnavailable::StructuralInvalid(
+                        LayoutInvalid::MissingPane(*id),
+                    ))?;
+                    entries.push(VisibleSource {
+                        id: *id,
+                        rect: *rect,
+                        parser: Arc::clone(&pane.parser),
+                        images: Arc::clone(&pane.inline_images),
+                        viewport_top_abs: pane.viewport_top_abs,
+                        viewport_anchor: pane.viewport_anchor,
+                    });
+                }
+                Ok((entries, layout.active_pos))
+            })
+            .map_err(FrameUnavailable::StructuralInvalid)??;
         Ok(Self {
             entries,
             counted: None,
             spans: None,
             tab_index,
-            active_pos: layout.active_pos,
+            active_pos,
             note: std::cell::Cell::new(None),
             #[cfg(test)]
             image_visits: Default::default(),
