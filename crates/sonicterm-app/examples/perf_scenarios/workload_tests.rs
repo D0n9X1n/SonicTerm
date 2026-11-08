@@ -214,6 +214,14 @@ pub(super) const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S11 default short", "9bb8ae50215767c464d3dd168affa108a8e612b217550906f338ff08b7c0e1c8"),
     ("S11 gdi full", "3ef47a844e901b2836f77ef6548fec78807d345f49524228a3e7430490d79514"),
     ("S11 gdi short", "acf8b3247fa585a29ae4c9053c54efee75f915a4689030839321e3de6c0da29e"),
+    (
+        "S11 kitty-placeholders full",
+        "53dea4ce6437052d9f5364e89461eef9e200056012c67700dde36ac9258eba32",
+    ),
+    (
+        "S11 kitty-placeholders short",
+        "a060f1f0f3327af735da51debe17d19ccff594cc9819895343996a236c275a18",
+    ),
     ("S11 release full", "f5981966ea5a6a183762ddb9fe889e4ef928844ff8fb0b5eae1c5d4d3f407976"),
     ("S11 release short", "94ed4514566191948541725f67102a38b054bc59180cb9cc7cec12a9693b933f"),
     ("S11 wgpu full", "e56affac6c4b15036336ee85f66be0005408fe978c738fddfa8eb6c30b8d2895"),
@@ -232,12 +240,14 @@ pub(super) const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S13 wide-32 short", "732cbc635fd2e79c8eb3fae5c1d299c3b277925c2219287f203665f00bd138a5"),
     ("S13 wide-8 full", "a9bc577a491d856541906e59bcde576435ab888ab8bb7e4ed2709ba3726c1583"),
     ("S13 wide-8 short", "2e3ce7f0863f8337b1cdf5c40ebc377d36f4cc09e9db528d13e36226571b2797"),
-    ("S2 spawn full", "62d4bfc9f65d6230a052b0e3357af560f4a6c5c855fecb5f7c67e56cca742846"),
-    ("S2 spawn short", "16c9aa8f766e17c4b828800f79d8727f95576c8e3a973504b70e2e33b26b1d85"),
     ("S2 default full", "b8794652682021a93564b1a2821feb8336f918626dde0156749fc8245abf8864"),
     ("S2 default short", "0a29f4e7229a367ab9f687772abb28d8120420f2bcad9592f26e7cbd7a5accba"),
     ("S2 flood full", "c80b829c203c03d8a7bd02df240c39996c067ae4b80f88b02ad6576712eb477f"),
     ("S2 flood short", "f8b4bbf8f0aea9ed8b93f7a311af9e2608a04b0170bd69941e5a27ba6e6f54de"),
+    ("S2 glide full", "69898199a309b6c5383ce0eafd98358e62789d342af33bc24d5bc1c46ff72548"),
+    ("S2 glide short", "aa9835dbaf68d2b99c045092d793073b00bc675d10d57f9b33ec5551ae69a763"),
+    ("S2 spawn full", "62d4bfc9f65d6230a052b0e3357af560f4a6c5c855fecb5f7c67e56cca742846"),
+    ("S2 spawn short", "16c9aa8f766e17c4b828800f79d8727f95576c8e3a973504b70e2e33b26b1d85"),
     ("S3 default full", "12b8b7fc1ddecb3119b906641ae11d5533bbfaa7ee48cd85cb58409fd7bac939"),
     ("S3 default short", "454ba851ad2ac3038d87c74b973a4f65173d6e2a597bf28867204871a21c562e"),
     ("S3 history full", "325c6fee112a3018cd2454f5376d619f37c85cfc317803c588229962b4d0aa79"),
@@ -270,9 +280,9 @@ pub(super) const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
 
 /// SHA-256 of every distinct fixture, keyed by file and length or by frame set.
 pub(super) const FIXTURE_PINS: &[(&str, &str)] = &[
+    ("atlas-retry.txt 3430", "9d6de336ba30247c36ca1c68bc7217727464395eb0870f437cebce368f26ef39"),
     ("bulk.txt 5242880", "1c45218ab8edc05eb5964253bffd8809540e4b0f0e19c3918b821be59818a5c7"),
     ("bulk.txt 52428800", "6329aefe7c851b9410cf38309a0c5279e508b928f5cbb86610c8767f0b5f6d7e"),
-    ("atlas-retry.txt 3430", "9d6de336ba30247c36ca1c68bc7217727464395eb0870f437cebce368f26ef39"),
     ("burst.osc 29780550", "c3575a0ab9815915cf785d724592d054d5706aee0ddb171c8f1b42110f63e2d0"),
     ("burst.txt 80000", "36d61b46b79b7fd3aed9510e0c71e450c9e9ba858b3ad3032279be95fa4083af"),
     ("dense.txt 17500", "1891903144eaf328e9013124afb2253fe5ba9948e0eb29b84b824fb9cde3fa36"),
@@ -296,6 +306,10 @@ pub(super) const FIXTURE_PINS: &[(&str, &str)] = &[
     ("history.txt 97500", "a23f9a80a94d5bce790e812b1ecdf5626f5c0e2ecdfdd856908663cdd7dc8a94"),
     ("image.sixel 377", "5811aa986380a75e770fa445490d45057bf949b5d52d6108995a05d0b7c7c0f0"),
     ("inline.osc 461289", "06c2d2935c10dfc293a38ec38149c97a1e97c90501694c5e75cb14d904476f2c"),
+    (
+        "kitty-placeholders.apc 112796",
+        "bb1278893dd30eeaf10b9184a65924b0eaf3df8f767e4fd0ab84edceb9543cb5",
+    ),
     (
         "linked-history.txt 1443893",
         "5ced320f01d3e8aa0c77f067e7c1966e07098a8dc142ed9ee3a37627ccf1b4cf",
@@ -531,6 +545,18 @@ pub(super) fn windows_config_names_the_harness_as_the_shell() {
          [terminal]\nshell = '/tmp/perf-test/workload/role.sh'\nscrollback = 1000\n"
     );
     assert_eq!(config_toml(&idle, SCRATCH, false), posix);
+    // S2/glide's config is S2/default's plus smooth cursor animation, which the strict loader accepts.
+    let glide = plan("S2", "glide", false).unwrap();
+    let glide_config = config_toml(&glide, SCRATCH, false);
+    let typing = config_toml(&plan("S2", "default", false).unwrap(), SCRATCH, false);
+    assert_eq!(glide_config, format!("{typing}cursor_animation = \"smooth\"\n"));
+    let dir = std::env::temp_dir().join(format!("perf-glide-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, &glide_config).unwrap();
+    let loaded = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
+    assert_eq!(loaded.terminal.cursor_animation, sonicterm_cfg::config::CursorAnimation::Smooth);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

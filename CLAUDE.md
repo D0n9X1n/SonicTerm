@@ -384,7 +384,7 @@ a reproduction.
     declares `run_caps` takes min(requested, cap) runs per side in every set
     (`S7` 3, `S2/flood` 2, `S1/atlas-retry` 2, `S6/rest` 2, `S11/release` 1, `S1/status-line` 1,
     `S12/status-line` 1, `S13/default` 1 and `S13/sustained-4` 1 on both platforms, `S11/gdi` and
-    `S11/wgpu` 2 on Windows),
+    `S11/wgpu` 2 on Windows, `S2/glide` 1 and `S11/kitty-placeholders` 2 on macOS),
     its rows read `(runs N of M)`, and release runs are uncapped. One macOS job
     builds both refs once; three macOS
     shards measure its binaries, bound to the run, attempt and manifest digest;

@@ -35,7 +35,10 @@ ALL_SCENARIOS = ["S1", "S1/atlas-retry", "S1/status-line", "S2", "S2/flood", "S3
                  "S6/selection-drag", "S6/rest", "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12", "S12/status-line", "S13",
                  "S13/sustained-4"]
 # The variants only one platform's shards add: S11/release on both (capped at 1), the presenter controls on Windows.
-PLATFORM_SCENARIOS = {"macOS": ["S11/release"], "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
+# S2/glide and S11/kitty-placeholders are macOS-only: Windows CI presents in software, where the cursor never
+# glides, and kitty graphics are not routed through ConPTY there.
+PLATFORM_SCENARIOS = {"macOS": ["S11/release", "S2/glide", "S11/kitty-placeholders"],
+                      "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
 
 _YAML_ENTRY = re.compile(r"(?P<key>[A-Za-z0-9_.-]+)\s*:(?:\s+(?P<value>.*))?$")

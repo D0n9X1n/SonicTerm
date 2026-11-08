@@ -218,12 +218,14 @@ jobs:
       # S6/selection-drag and the counters-only S1/atlas-retry. Run 42375734702 still measured 36.7 min with S7 at
       # 20.9 (base and head alike; the last earlier PR run, 41234583335, was 46.4 min on the same path), so S7 takes
       # 3 short runs a side in every set (--list run_caps), about 6 min less; a release comparison runs it uncapped.
+      # Run 42480729616 measured S7-S4 at 1,293 s against the critical S10-S11release's 1,616 s, so S2/glide (one
+      # short run a side) and S11/kitty-placeholders (two), about 4 min together, fit its 323 s of slack plus margin.
       matrix:
         include:
           - platform: macOS
             runner: macos-15
             shard: S7-S4
-            scenarios: S7 S4 S1/atlas-retry S8 S6/selection-drag
+            scenarios: S7 S4 S1/atlas-retry S8 S6/selection-drag S2/glide S11/kitty-placeholders
             laps: ""
             release_scenarios: ""
           - platform: macOS

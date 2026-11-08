@@ -242,24 +242,28 @@ fn image_release_variant_waits_for_media_free_holds_and_reshows() {
 #[test]
 fn run_caps_list_only_where_a_scenario_declares_them() {
     // `--list` carries `run_caps` only for S1, S2, S6, S11 and S12: S1/atlas-retry at 2, S2/flood at 2
-    // (it rebalances the PR budget; a release comparison runs it in full), S6/rest at 2, S11/release at
-    // 1, the Windows presenter variants at 2, and both status-line variants at 1.
+    // (it rebalances the PR budget; a release comparison runs it in full), S2/glide at 1, S6/rest at 2,
+    // S11/release at 1, the Windows presenter variants and S11/kitty-placeholders at 2, and both
+    // status-line variants at 1.
     assert_eq!(find("S1").unwrap().run_caps, [("atlas-retry", 2), ("status-line", 1)]);
     assert_eq!(find("S12").unwrap().run_caps, [("status-line", 1)]);
     assert_eq!(find("S6").unwrap().run_caps, [("rest", 2)]);
-    assert_eq!(find("S2").unwrap().variants, ["default", "flood", "spawn"]);
-    assert_eq!(find("S2").unwrap().run_caps, [("flood", 2)]);
+    assert_eq!(find("S2").unwrap().variants, ["default", "flood", "spawn", "glide"]);
+    assert_eq!(find("S2").unwrap().run_caps, [("flood", 2), ("glide", 1)]);
     assert_eq!(
         find("S11").unwrap().variants,
-        ["default", "gdi", "wgpu", "release", "burst", "burst-text"]
+        ["default", "gdi", "wgpu", "release", "burst", "burst-text", "kitty-placeholders"]
     );
-    assert_eq!(find("S11").unwrap().run_caps, [("release", 1), ("gdi", 2), ("wgpu", 2)]);
+    assert_eq!(
+        find("S11").unwrap().run_caps,
+        [("release", 1), ("gdi", 2), ("wgpu", 2), ("kitty-placeholders", 2)]
+    );
     let value: serde_json::Value = serde_json::from_str(&list_json()).unwrap();
     for entry in value["scenarios"].as_array().unwrap() {
         if entry["id"] == "S1" {
             assert_eq!(entry["run_caps"], serde_json::json!({"atlas-retry": 2, "status-line": 1}));
         } else if entry["id"] == "S2" {
-            assert_eq!(entry["run_caps"], serde_json::json!({"flood": 2}));
+            assert_eq!(entry["run_caps"], serde_json::json!({"flood": 2, "glide": 1}));
         } else if entry["id"] == "S6" {
             assert_eq!(entry["run_caps"], serde_json::json!({"rest": 2}));
         } else if entry["id"] == "S12" {
@@ -272,7 +276,9 @@ fn run_caps_list_only_where_a_scenario_declares_them() {
             });
             assert_eq!(entry["run_caps"], caps);
         } else if entry["id"] == "S11" {
-            assert_eq!(entry["run_caps"], serde_json::json!({"release": 1, "gdi": 2, "wgpu": 2}));
+            let caps =
+                serde_json::json!({"release": 1, "gdi": 2, "wgpu": 2, "kitty-placeholders": 2});
+            assert_eq!(entry["run_caps"], caps);
         } else {
             assert!(entry.get("run_caps").is_none(), "{}", entry["id"]);
         }

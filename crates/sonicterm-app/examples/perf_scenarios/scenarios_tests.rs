@@ -85,8 +85,9 @@ pub(super) fn catalog_lists_thirteen_scenarios_with_their_variants() {
         find("S13").unwrap().variants,
         ["default", "sustained-4", "wide-8", "wide-16", "wide-32"]
     );
-    // S2/spawn is the release-only typing run that opens a tab every tenth character.
-    assert_eq!(find("S2").unwrap().variants, ["default", "flood", "spawn"]);
+    // S2/spawn is the release-only typing run that opens a tab every tenth character; S2/glide
+    // types with the cursor gliding.
+    assert_eq!(find("S2").unwrap().variants, ["default", "flood", "spawn", "glide"]);
     // S3/history and S3/resize are the release-only flood into budget-filling history and the
     // resizes over a flooded history.
     assert_eq!(find("S3").unwrap().variants, ["default", "history", "resize"]);
@@ -187,7 +188,8 @@ pub(super) fn trailing_idle_phase_appears_only_where_the_plan_ends_early() {
         // S11's burst variants do after their print.
         let long_on_its_own = matches!(plan.scenario, "S1" | "S3" | "S4" | "S5" | "S11" | "S12")
             && !(plan.scenario == "S1" && plan.variant == "atlas-retry")
-            && !(plan.scenario == "S11" && plan.variant.starts_with("burst"));
+            && !(plan.scenario == "S11"
+                && (plan.variant.starts_with("burst") || plan.variant == "kitty-placeholders"));
         let last_phase = plan
             .steps
             .iter()
@@ -361,6 +363,9 @@ pub(super) const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S11/burst-text", "print", "transition", Some("sentinel-parsed")),
     ("S11/default", "idle", "hold", None),
     ("S11/default", "image", "transition", Some("image-registered-then-presented")),
+    ("S11/kitty-placeholders", "idle", "hold", None),
+    ("S11/kitty-placeholders", "print", "transition", Some("sentinel-parsed")),
+    ("S11/kitty-placeholders", "typing", "sustained", None),
     ("S11/gdi", "idle", "hold", None),
     ("S11/gdi", "image", "transition", Some("image-registered-then-presented")),
     ("S11/release", "image", "transition", Some("image-registered-then-presented")),
@@ -394,6 +399,8 @@ pub(super) const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S13/wide-32", "typing", "sustained", None),
     ("S2/default", "idle", "hold", None),
     ("S2/default", "typing", "sustained", None),
+    ("S2/glide", "idle", "hold", None),
+    ("S2/glide", "typing", "sustained", None),
     ("S2/spawn", "idle", "hold", None),
     ("S2/spawn", "typing", "sustained", None),
     ("S2/flood", "idle", "hold", None),

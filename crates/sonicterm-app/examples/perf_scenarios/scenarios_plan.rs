@@ -150,7 +150,7 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             vec![],
             vec![Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000)))), end],
         ),
-        ("S2", "default" | "spawn") => (
+        ("S2", "default" | "spawn" | "glide") => (
             vec![Workload::IdleShell],
             vec![],
             vec![
@@ -328,6 +328,29 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         }
         // burst prints ten large inline PNGs between text on one pane and burst-text the same text
         // alone, so the difference between their print phases is what decoding cost that pane.
+        // kitty-placeholders prints its images, placements and placeholder rows, then types 50
+        // characters below them, so every typing frame decodes the rows and resolves their runs.
+        ("S11", "kitty-placeholders") => (
+            vec![Workload::PrintThenShell(Fixture::KittyPlaceholders)],
+            vec![],
+            vec![
+                print(vec![0]),
+                Step::Phase(driven(
+                    "typing",
+                    PhaseKind::Sustained,
+                    Driver::Typing {
+                        role: 0,
+                        chars: 50,
+                        per_second: 10,
+                        settle_ms: 2_000,
+                        spawn_every: 0,
+                    },
+                    PhaseEnd::DriverDone,
+                )),
+                idle,
+                end,
+            ],
+        ),
         ("S11", "burst" | "burst-text") => (
             vec![Workload::PrintThenShell(if variant == "burst" {
                 Fixture::ImageBurst
@@ -543,6 +566,7 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         }),
         trim_experiment: (spec.id == "S12" && short).then_some(TRIM_EXPERIMENT),
         status_line: variant == "status-line",
+        cursor_glide: variant == "glide",
     })
 }
 

@@ -86,11 +86,13 @@ pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> St
     let cols = plan.window_cols.map_or(GRID_COLS, usize::from);
     // A status-line run bounds presents by their causes, so the cursor must not blink there.
     let blink = if plan.status_line { "cursor_blink = false\n" } else { "" };
+    // A base without cursor animation ignores the key, so both sides run the same config.
+    let glide = if plan.cursor_glide { "cursor_animation = \"smooth\"\n" } else { "" };
     let mut config = format!(
         "[window]\ncols = {cols}\nrows = {rows}\n\n\
          [font]\nfamily = \"{FONT_FAMILY}\"\nsize = {FONT_SIZE}\n\n\
          [logging]\nlevel = \"{level}\"\n\n\
-         [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n{blink}"
+         [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n{blink}{glide}"
     );
     if plan.status_line {
         // A base without the status line ignores the table, so both sides run the same config.

@@ -637,6 +637,7 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | 变体 | 负载 |
 | --- | --- |
 | `S2/flood` | S3 的输出洪流在第一个窗格中运行，同时 S2 的输入发往一个分屏窗格的 shell。 |
+| `S2/glide` | 仅在 macOS 上运行，每侧一次短运行。S2 的输入，临时配置中设置 `cursor_animation = "smooth"`，因此每次回显都让光标滑动到新单元格。计数器组的 `damage_permille_sum` 除以 `damaged_frames` 就是滑动帧重绘的表面占比。 |
 | `S2/spawn` | 仅用于 release 对比，仅在 macOS 上运行。S2 的输入，每输入十个字符就通过 `Action::NewTab` 打开一个标签页，再以 `Action::ActivateTab(0)` 回到输入窗格，因此每个窗格都在该字符回显待定时于事件循环上创建。计数器组以 `pane_create_ms` 报告每次创建；回显 p95 与 p99 相对 `S2` 的差，就是创建窗格给输入带来的代价。 |
 | `S6/flood` | 在 S3 的输出洪流期间进行 S6 的指针扫动。 |
 | `S6/selection-drag` | 在一屏静态密集文本上反复按下、在网格上移动并释放，持续 10 秒，只在网格区域内进行。 |
@@ -652,6 +653,7 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | `S13/wide-8`、`S13/wide-16`、`S13/wide-32` | 仅用于 release 对比（macOS smoke 也会打开 `wide-8`，作为功能检查）。每个 S13 布局的行还报告 `typing` 阶段 VT 的 `parser_lock_wait_us` 与 `parse_us` 的 p95（以桶上界表示），基线早于这些字段时为 `n/a`；二者都不参与判定。这里不采样溢出文件的磁盘占用：harness 也要在上一个 release 上构建，而那里没有溢出预算池；内存使用报告和 `pty queues` 日志行会给出它。与 `S13/default` 相同的洪泛、输入与阶段，但窗格排成四列宽、2、4 或 8 行高的等分网格，每个窗格 30 列 × 5 行，窗口 120 列（至多 40 行，低于 macOS runner 的高度限制），只用拆分和方向焦点移动构建，并以焦点停在角色 1 结束。S13 表格增加 `Scaling` 行：除非某个布局有 1% 或以上的收集失败，或其 p95 每翻倍增长超过 10%，否则为 `scales`；记录的窗格数不是 8、16 或 32、任一窗格与任一布局的其他窗格相差超过一格（主机可能以不同大小显示窗口，只要每个布局得到相同的窗格；某台 macOS 主机得到 31x3）、样本少于 200 或洪泛停止时给出 `no verdict`，因此翻倍的只有窗格数。结果只作报告，从不作为发布门禁。 |
 | `S3/history` | 仅用于 release 对比，仅在 macOS 上运行。S3 的输出洪流，`[terminal] scrollback = 100000`，超过每个窗格的单元格预算所能容纳的行数，因此只由预算限制历史，洪流期间每次预算裁剪都会运行。其结果记录 `scrollback_rows_retained`，即洪流结束时窗格保留的历史深度。 |
 | `S3/resize` | 仅用于 release 对比，仅在 macOS 上运行。S3 的输出洪流，`[terminal] scrollback = 10000`，由每个窗格的单元格预算限制（`scrollback_rows_retained` 记录保留的深度），之后是 `resize` 阶段：以 10 Hz 进行 20 次原生窗口尺寸调整，交替变窄 80 px 再恢复，每次都是窗口以 `Resized` 回应的真实 `request_inner_size`，因此每次网格尺寸调整都会遍历洪流留下的历史。计数器组以 `resize_hold_us` 报告每次调整的解析器锁持有时间。 |
+| `S11/kitty-placeholders` | 仅在 macOS 上运行，每侧两次短运行。一个窗格传输 128 张 8×8 kitty 图像，每张虚拟放置四次，并以 64 行、每段四个单元格的 Unicode 占位符绘制这 512 个放置；随后添加放置直到窗格的 1,024 上限，再发一个被上限拒绝的放置（所有命令都静默），然后在这些行下方输入 50 个字符。每个输入帧都解码这些行并解析每一段；计数器组的 `kitty_store_hold` 覆盖到达上限的命令。 |
 | `S11/burst`、`S11/burst-text` | 仅用于 release 对比，仅在 macOS 上运行。`burst` 在一个窗格中打印十张约 2.2 MiB 的 OSC 1337 内联 PNG，每张之后是 100 行编号文本；第一张宽 2,048 像素，超过 1,024 像素的渲染上限，因此其解码还会缩放。`burst-text` 只打印同样的文本行。计数器组报告 `media_decode_dus` 和解码计数；print 阶段的完成时间与 `burst-text` 的差，就是解码给该窗格文本带来的代价。解码 p95 达到 8 ms 或以上（低于 8 ms 的次数少于 `ceil(0.95 × media_decode_attempts)`），或 print 阶段比 `burst-text` 慢 25% 以上，就需要有界的解码工作线程。 |
 
 pull request 性能流水线在 macOS 和 Windows 上按名称运行 `S2/flood`、`S6/flood`、

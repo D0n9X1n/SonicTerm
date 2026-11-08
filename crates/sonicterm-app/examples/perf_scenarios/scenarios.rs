@@ -39,7 +39,12 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     // comparison is never capped, so its full-length runs remain the variant's complete evidence.
     // S2/spawn types as S2/default does and opens a tab every tenth character, so the echo samples
     // around each pane creation show what it cost typing; the workflow runs it for a release tag.
-    capped(spec("S2", "typing latency", &["default", "flood", "spawn"], 300, 240), &[("flood", 2)]),
+    // S2/glide types as S2/default does with `cursor_animation = "smooth"`, so every echo glides the
+    // cursor and the counters' damage figures show what a glide frame repaints; one short run a side.
+    capped(
+        spec("S2", "typing latency", &["default", "flood", "spawn", "glide"], 300, 240),
+        &[("flood", 2), ("glide", 1)],
+    ),
     // S3/history floods with the deepest history a user can configure, so the per-pane cell budget,
     // not the row limit, decides retention and every budget trim reads history's running totals. The
     // performance workflow runs it and S3/resize only for a release tag.
@@ -65,15 +70,17 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     spec("S10", "full-screen redraw", &["default", "sync"], 300, 240),
     capped(
         // S11/burst and S11/burst-text time inline-image decoding against the same text alone; the
-        // performance workflow runs them on macOS only for a release tag.
+        // performance workflow runs them on macOS only for a release tag. S11/kitty-placeholders
+        // draws 512 kitty placeholder runs over 128 images, fills the 1,024-placement cap, then types
+        // under them, so each typing frame resolves every run; macOS only, two short runs a side.
         spec(
             "S11",
             "inline image tab switch",
-            &["default", "gdi", "wgpu", "release", "burst", "burst-text"],
+            &["default", "gdi", "wgpu", "release", "burst", "burst-text", "kitty-placeholders"],
             420,
             300,
         ),
-        &[("release", 1), ("gdi", 2), ("wgpu", 2)],
+        &[("release", 1), ("gdi", 2), ("wgpu", 2), ("kitty-placeholders", 2)],
     ),
     // S12/status-line is the covered window with the status line on, one short run per side.
     capped(
@@ -264,6 +271,9 @@ pub(crate) enum Fixture {
     ImageBurst,
     /// S11/burst-text: the same lines with no images, the burst's text-only baseline.
     ImageBurstText,
+    /// S11/kitty-placeholders: 128 kitty images, 512 virtual placements drawn by placeholder runs
+    /// over 64 rows, then 512 more placements to the 1,024 cap and one the cap refuses.
+    KittyPlaceholders,
 }
 
 /// A production action that opens the next role's pane or arranges tabs before GO.
@@ -719,6 +729,8 @@ pub(crate) struct Plan {
     /// Whether the scratch config turns the status line on; its phases are checked by
     /// [`status_line_progress`].
     pub(crate) status_line: bool,
+    /// Whether the scratch config sets `cursor_animation = "smooth"`, so the cursor glides.
+    pub(crate) cursor_glide: bool,
 }
 
 #[cfg(any(target_os = "macos", windows, test))]
