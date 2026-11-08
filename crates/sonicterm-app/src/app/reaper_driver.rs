@@ -586,3 +586,8 @@ impl Drop for ReaperDriver {
 #[cfg(test)]
 #[path = "reaper_driver_tests.rs"]
 mod reaper_driver_tests;
+
+// The mass-close suite retires real Unix PTYs; its helpers would be dead code elsewhere.
+#[cfg(all(test, unix))]
+#[path = "reaper_driver_mass_close_tests.rs"]
+mod reaper_driver_mass_close_tests;

@@ -311,11 +311,11 @@ fn structural_invalidity_is_not_contention_in_either_role() {
             let tab = &mut state.tab_states[0];
             let reason = match defect {
                 0 => {
-                    state.panes.remove(&left);
+                    state.panes.remove_for_test(&left);
                     LayoutInvalid::MissingPane(left)
                 }
                 1 => {
-                    tab.tree = PaneTree::leaf(right);
+                    tab.tree = PaneTree::leaf(right).into();
                     assert!(tab.tree.split(right, Direction::Right, right));
                     LayoutInvalid::DuplicatePane(right)
                 }

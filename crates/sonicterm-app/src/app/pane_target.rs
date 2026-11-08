@@ -228,7 +228,7 @@ impl App {
     ) -> Result<(), TargetError> {
         let Some(window) = self.registry.windows.get_mut(&location.window_id) else {
             // When: the window closed while the pane spawned, its PTY still needs retirement.
-            self.retire_pane(pane);
+            self.retire_pane(DetachedPane::unattached(pane_id, pane));
             return Err(TargetError::PaneGone);
         };
         let tab_index = match placement {
@@ -238,12 +238,12 @@ impl App {
                     if placement == Placement::Right { Direction::Right } else { Direction::Down };
                 let Some(tab_state) = window.tab_states.get_mut(location.tab_index) else {
                     // When: `tab_states` has no `tab_index` for the anchor, the pane has no place to go.
-                    self.retire_pane(pane);
+                    self.retire_pane(DetachedPane::unattached(pane_id, pane));
                     return Err(TargetError::PaneGone);
                 };
                 if !tab_state.tree.split(anchor, direction, pane_id) {
                     // When: the tree refuses the split, the layout stays and the pane is retired.
-                    self.retire_pane(pane);
+                    self.retire_pane(DetachedPane::unattached(pane_id, pane));
                     return Err(TargetError::Unavailable);
                 }
                 location.tab_index
@@ -255,7 +255,7 @@ impl App {
                 index
             }
         };
-        window.panes.insert(pane_id, pane);
+        window.panes.attach_new(pane_id, pane);
         self.size_tab_panes(location.window_id, tab_index);
         Ok(())
     }
@@ -316,7 +316,7 @@ impl App {
         // A split is measured in a copy of the anchor's tab tree; a new tab is the pane alone.
         let tree = match placement {
             Placement::Right | Placement::Down => {
-                let mut tree = window.tab_states.get(location.tab_index)?.tree.clone();
+                let mut tree = window.tab_states.get(location.tab_index)?.tree.tree().clone();
                 let direction =
                     if placement == Placement::Right { Direction::Right } else { Direction::Down };
                 tree.split(anchor, direction, pane_id).then_some(())?;

@@ -417,6 +417,11 @@ impl Probe {
                 let seconds = seen.saturating_duration_since(go_at).as_secs_f64();
                 self.throughput = Some(Throughput { bytes, seconds });
             }
+            // A flood asking for more history than the cell budget holds records the depth kept.
+            if self.plan.scrollback_rows > 1_000 && self.scrollback_rows_retained.is_none() {
+                self.scrollback_rows_retained =
+                    self.sentinel_roles.first().and_then(|role| self.retained_history(*role));
+            }
         }
         if let Some(reason) = self.delivery_blocked() {
             // When: delivery_blocked names a reason, the caller finishes the run, which transports this phase.
@@ -484,6 +489,11 @@ impl Probe {
                 }
                 DriverState::Commit(commit) => {
                     commit.sent >= commit.steps.len() && now >= commit.settle_end()
+                }
+                // One interval after the last resize, so its frame can present inside the phase.
+                DriverState::Resize(resize) => {
+                    resize.sent >= resize.total
+                        && now >= resize.started + resize.interval * resize.total
                 }
                 _ => true,
             },

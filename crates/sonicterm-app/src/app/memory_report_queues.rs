@@ -11,6 +11,8 @@ pub(crate) struct QueueSection {
     pub(crate) totals: QueueTotals,
     /// The reaper's synchronous fallback timing so far.
     pub(crate) fallback: FallbackTiming,
+    /// The process-wide spill pool: file bytes charged now, and its budget.
+    pub(crate) spill_files: (u64, u64),
 }
 
 impl QueueSection {
@@ -31,6 +33,14 @@ impl QueueSection {
                 queues.writer_in_flight_bytes,
                 queues.reply_resident_bytes,
                 queues.reply_spill_bytes
+            ),
+            format!(
+                "  reply spill files {} B of the {} B process budget (file length, consumed prefixes included)",
+                self.spill_files.0, self.spill_files.1
+            ),
+            format!(
+                "  reply spill compactions {}, longest {} us; longest wait for a spool lock {} us",
+                queues.reply_compactions, queues.reply_compact_us_max, queues.reply_lock_wait_us_max
             ),
             format!(
                 "  teardown fallbacks {} ({} over 50 ms), longest {} us, total {} us",

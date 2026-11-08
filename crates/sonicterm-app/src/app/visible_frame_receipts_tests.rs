@@ -131,8 +131,8 @@ fn a_switched_away_pane_keeps_its_dirt_until_it_is_drawn_again() {
 
         present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
         let state = app.registry.windows.get_mut(&window).unwrap();
-        let removed = state.remove_pane(right);
-        assert!(removed.is_some());
+        let removed = state.remove_pane(right).expect("the right pane leaves");
+        drop(removed.into_state_for_test());
         assert!(state.pending_receipts.iter().all(|ticket| ticket.receipt.pane_id != right));
         assert_eq!(state.pending_receipts.len(), 1);
     }

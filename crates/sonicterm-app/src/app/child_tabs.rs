@@ -11,7 +11,7 @@ use sonicterm_vt::vt::Parser;
 use winit::window::{Window, WindowId};
 
 use super::child_window::resize_visible_panes_in_child;
-use super::{next_pane_id, App, PaneState, TabState};
+use super::{next_pane_id, App, DetachedPane, PaneState, TabState};
 
 impl App {
     pub(super) fn merge_child_into_target(
@@ -44,7 +44,7 @@ impl App {
                 self.accessibility.remove(&win_id);
                 if let Some(mut removed) = self.registry.remove_window(win_id) {
                     self.retire_window_counters(win_id, &mut removed);
-                    for pane in std::mem::take(&mut removed.panes).into_values() {
+                    for pane in removed.panes.detach_all() {
                         self.retire_pane(pane);
                     }
                     // Close the governor owners before the state drops.
@@ -212,10 +212,10 @@ impl App {
             self.spawn_pane_state_for_child(pane_id, cols, rows, child_window.clone(), &launch);
         let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: windows lost win_id, retire the uninstalled pane instead of closing its native transport inline.
-            self.retire_pane(pane_state);
+            self.retire_pane(DetachedPane::unattached(pane_id, pane_state));
             return false;
         };
-        child.panes.insert(pane_id, pane_state);
+        child.panes.attach_new(pane_id, pane_state);
         let tab_number = child.tabs.len() + 1;
         child.tabs.push(Tab::new(format!("shell {tab_number}")));
         child.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
@@ -465,23 +465,23 @@ impl App {
             };
         let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: windows lost win_id, retire the uninstalled native pane through the shared driver.
-            self.retire_pane(pane_state);
+            self.retire_pane(DetachedPane::unattached(new_id, pane_state));
             return false;
         };
         let tab_idx = child.tabs.active_index();
         let Some(tab_state) = child.tab_states.get_mut(tab_idx) else {
             // When: tab_states lacks tab_idx, preserve the layout and retire the uninstalled pane.
-            self.retire_pane(pane_state);
+            self.retire_pane(DetachedPane::unattached(new_id, pane_state));
             return false;
         };
         let focus = tab_state.active_pane;
         if !tab_state.tree.split(focus, dir, new_id) {
             // When: tree.split refuses focus, new_id has no UI owner but its native transport still needs retirement.
-            self.retire_pane(pane_state);
+            self.retire_pane(DetachedPane::unattached(new_id, pane_state));
             return false;
         }
         tab_state.active_pane = new_id;
-        child.panes.insert(new_id, pane_state);
+        child.panes.attach_new(new_id, pane_state);
         resize_visible_panes_in_child(child);
         if let Some(renderer) = child.renderer.as_mut() {
             renderer.flash_pane_focus(new_id);
@@ -506,7 +506,7 @@ impl App {
             return false;
         };
         let focus = tab_state.active_pane;
-        if matches!(tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
+        if matches!(*tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
             // When: `matches` finds a lone `Leaf` holding `focus`, so closing the
             // pane closes the whole tab rather than one split.
 

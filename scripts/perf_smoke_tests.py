@@ -28,9 +28,30 @@ import perf_watcher_tests
 import perf_windows_tests
 
 
+def wide_contention(panes=8, grid=(30, 5), advanced=(12, 4)):
+    """An S13/wide-8 result's contention receipts: `panes` role grids of `grid`, and each watched
+    phase's advanced readings."""
+    phases = [{"name": name, "duration_ms": 1_000, "looks": 10, "busy": 0, "advanced": count, "longest_gap_ms": 100}
+              for name, count in zip(("typing", "tail"), advanced)]
+    return {"role_grids": [list(grid)] * panes, "flood": {"phases": phases}, "max_flood_gap_ms": 1_000}
+
+
+def wide_result(**contention):
+    """A valid S13/wide-8 result with its receipts and one typing sample."""
+    return perf_result_tests.valid_result(contention=wide_contention(**contention),
+                                          latency={"samples": [{"latency_ms": 9.0}]})
+
+
 def outcome_of(kind):
     """Build a factory that answers a smoke plan with an outcome of the named kind."""
     def build(plan):
+        if kind == "valid" and plan.scenario.id == "S13":
+            # A wide run is valid only with the receipts the smoke checks.
+            return perf_outcomes_tests.make_outcome(plan=plan, result=wide_result())
+        if kind.startswith("wide:"):
+            # A valid wide run whose receipts show a broken layout or flood, named after the colon.
+            broken = {"seven": {"panes": 7}, "stalled": {"advanced": (12, 0)}}[kind.split(":", 1)[1]]
+            return perf_outcomes_tests.make_outcome(plan=plan, result=wide_result(**broken))
         killed = {"sent": True, "problem": None, "pid": perf_watcher_tests.HARNESS_PID}
         occlusion = perf_result_tests.valid_result(status="invalid", exit_code=3, notes=["native occlusion change"])
         if kind == "valid" and plan.kill_at_go:
@@ -85,8 +106,34 @@ def outcome_of(kind):
     return build
 
 
+class WideReceiptTests(unittest.TestCase):
+    """The wide layout's receipt check: no timing, no threshold, only what the run recorded."""
+
+    def test_a_working_wide_run_has_no_problem(self):
+        self.assertEqual(perf_smoke.wide_receipt_problems(wide_result()), [])
+
+    def test_each_broken_receipt_is_named(self):
+        # Seven panes, unequal grids past a split's rounding, all-busy or unchanged readings (advanced 0),
+        # and no typing sample are each a problem; a one-cell rounding difference is not.
+        seven = perf_smoke.wide_receipt_problems(wide_result(panes=7))
+        self.assertTrue(any("7 role pane grids" in problem for problem in seven), seven)
+        uneven = wide_result()
+        uneven["contention"]["role_grids"][3] = [28, 5]
+        self.assertTrue(any("grids differ" in problem for problem in perf_smoke.wide_receipt_problems(uneven)))
+        rounded = wide_result()
+        rounded["contention"]["role_grids"][3] = [31, 4]
+        self.assertEqual(perf_smoke.wide_receipt_problems(rounded), [])
+        stalled = perf_smoke.wide_receipt_problems(wide_result(advanced=(0, 3)))
+        self.assertTrue(any("never advanced in typing" in problem for problem in stalled), stalled)
+        no_samples = wide_result()
+        no_samples["latency"] = None
+        self.assertTrue(any("no typing sample" in problem for problem in perf_smoke.wide_receipt_problems(no_samples)))
+        self.assertTrue(perf_smoke.wide_receipt_problems(None), "a missing result has no receipts")
+
+
 class SmokeTests(unittest.TestCase):
-    SCENARIOS = {"S1": perf_watcher_tests.IDLE_SCENARIO, "S3": perf_scenarios.Scenario("S3", ("default",), "Flood", 120, 30)}
+    SCENARIOS = {"S1": perf_watcher_tests.IDLE_SCENARIO, "S3": perf_scenarios.Scenario("S3", ("default",), "Flood", 120, 30),
+                 "S13": perf_scenarios.Scenario("S13", ("default", "wide-8"), "Contention", 120, 30)}
 
     def run_cases(self, answers, host_platform="darwin", scenarios=None):
         """Drive the smoke's cases on `host_platform`; each case name answers from its queue of outcome kinds."""
@@ -116,10 +163,10 @@ class SmokeTests(unittest.TestCase):
                                               f"{perf_watcher_tests.STARTUP_OCCLUSION_REASON}"), reasons)
 
     def test_three_valid_cases_pass(self):
-        # S1, S3 and the deadline case each need one valid run; no timing is asserted.
+        # S1, S3, the deadline case and, on macOS, S13/wide-8 each need one valid run; no timing is asserted.
         code, reasons, calls = self.run_cases({})
         self.assertEqual((code, reasons), (0, []))
-        self.assertEqual(calls, ["S1", "S3", "S1-deadline"])
+        self.assertEqual(calls, ["S1", "S3", "S1-deadline", "S13/wide-8"])
 
     def test_an_occlusion_is_retried_within_the_bound(self):
         # An environmental invalidation retries; the case passes once a run is valid.
@@ -146,6 +193,16 @@ class SmokeTests(unittest.TestCase):
                 self.assertTrue(reasons)
         code, _reasons, calls = self.run_cases({"S1-deadline": ["survivor"]})
         self.assertEqual((code, calls), (1, ["S1", "S3", "S1-deadline"]))
+
+    def test_a_wide_run_without_its_receipts_fails(self):
+        # Seven panes, or a flood that never advanced in a watched phase, fail the smoke at once, though
+        # the run itself was valid: the layout or the flood is broken.
+        for kind, word in (("wide:seven", "7 role pane grids"), ("wide:stalled", "never advanced in tail")):
+            with self.subTest(kind=kind):
+                code, reasons, calls = self.run_cases({"S13/wide-8": [kind]})
+                self.assertEqual(code, 1)
+                self.assertEqual(calls[-1], "S13/wide-8")
+                self.assertTrue(any(word in reason for reason in reasons), reasons)
 
     def test_startup_occlusion_after_the_retries_is_blocked(self):
         # A window that never reaches the screen is retried within the bound, then the smoke reports BLOCKED.
@@ -255,9 +312,9 @@ class SmokeTests(unittest.TestCase):
         # Windows adds the wgpu presenter and a role program's exit; macOS keeps its three cases.
         def listed(platform_name):
             return [(case.name, case.expected) for case in perf_smoke.smoke_case_list(platform_name)]
-        darwin = [("S1", "valid"), ("S3", "valid"), ("S1-deadline", "valid")]
-        self.assertEqual(listed("darwin"), darwin)
-        self.assertEqual(listed("win32"), darwin + [("S1/wgpu", "valid"), ("S1/role-exit", "invalid")])
+        common = [("S1", "valid"), ("S3", "valid"), ("S1-deadline", "valid")]
+        self.assertEqual(listed("darwin"), common + [("S13/wide-8", "valid")])
+        self.assertEqual(listed("win32"), common + [("S1/wgpu", "valid"), ("S1/role-exit", "invalid")])
         # Each case's variant must be one the harness lists, or the smoke fails before any run.
         code, reasons, calls = self.run_cases({}, host_platform="win32")
         self.assertEqual((code, calls), (1, []))

@@ -38,8 +38,8 @@ fn inserting_a_window_that_shares_a_pane_is_caught() {
     let mut removed = app.registry.remove_window(child).expect("the child window");
     let shared = app.__test_seed_tab("shared");
     let main = app.registry.main_window_id.unwrap();
-    let pane = app.registry.windows.get_mut(&main).unwrap().panes.remove(&shared).unwrap();
-    removed.panes.insert(main_pane, pane);
+    let pane = app.registry.windows.get_mut(&main).unwrap().panes.remove_for_test(&shared).unwrap();
+    removed.panes.insert_for_test(main_pane, pane);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         app.registry.insert_window(child, removed);
     }));
@@ -48,7 +48,9 @@ fn inserting_a_window_that_shares_a_pane_is_caught() {
         assert!(outcome.is_err(), "debug builds refuse a pane two windows own");
     }
     // Drop the copy so the App's teardown sees each pane once.
-    std::mem::forget(app.registry.windows.get_mut(&child).unwrap().panes.remove(&main_pane));
+    std::mem::forget(
+        app.registry.windows.get_mut(&child).unwrap().panes.remove_for_test(&main_pane),
+    );
 }
 
 /// `remove_window` hands back the window it dropped, panes included, and the map no longer has it.

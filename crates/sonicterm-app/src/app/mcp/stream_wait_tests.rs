@@ -86,9 +86,50 @@ fn text_overwritten_on_screen_still_matches_the_stream() {
     assert_eq!(result["source"], "stream");
     let screen: String = entry.parser.lock().grid().row(0).iter().map(|cell| cell.ch).collect();
     assert!(!screen.contains("step 1"), "the screen shows only the rewrite: {screen:?}");
-    // The hold is released without the lock; the parser frees the ring at its next batch.
-    publish(&handles, b"");
+    // The parser was free when the wait ended, so it freed the ring itself, with no batch after.
     assert!(entry.parser.lock().output_tap_since(0).is_none(), "the wait released its tap");
+    let _ = handles;
+}
+
+/// A wait that ends while the parser is held keeps the ring (it never waits for the lock), and a
+/// silent pane gets it back at the next successful retention probe, with no output in between.
+/// A second hold, as another wait would keep, survives the probe until it is dropped.
+#[test]
+fn a_silent_pane_frees_its_tap_without_another_batch() {
+    let (mut app, entry, _handles) = pane();
+    let other = entry.parser.lock().arm_output_tap();
+    let shared = McpShared::new(sonicterm_cfg::config::McpControl::Agent, None);
+    let entry_for_wait = entry.clone();
+    let condition = stream("never", Duration::from_millis(150));
+    let waiter = std::thread::spawn(move || {
+        let scope = scope(&shared);
+        wait(&shared, &entry_for_wait, &condition, &scope)["structuredContent"].clone()
+    });
+    // The wait arms its own hold first; then the parser is held until the wait has ended.
+    let armed_by = Instant::now() + Duration::from_secs(5);
+    loop {
+        let readers = entry.parser.lock().output_tap_readers();
+        if readers == 2 {
+            break;
+        }
+        assert!(Instant::now() < armed_by, "the wait armed its tap");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let held = entry.parser.lock();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !waiter.is_finished() {
+        assert!(Instant::now() < deadline, "the wait ended while the parser was held");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(held);
+    assert_eq!(waiter.join().unwrap()["reason"], "timeout");
+    assert_eq!(entry.parser.lock().output_tap_readers(), 1, "only the other hold is left");
+    app.__test_force_retention_sample();
+    assert!(entry.parser.lock().output_tap_since(0).is_some(), "a live hold survives the probe");
+    drop(other);
+    // Nothing is printed; the retention probe alone frees the idle tap.
+    app.__test_force_retention_sample();
+    assert!(entry.parser.lock().output_tap_since(0).is_none(), "the probe freed the idle tap");
 }
 
 /// A pattern whose two ends arrive 5 KiB apart, in separate publications, matches.

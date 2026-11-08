@@ -100,7 +100,8 @@ pub(crate) struct WindowIdentity {
     pub status_hash: u64,
     pub viewport_top_abs: Option<u64>,
     pub cursor_shape: u8,
-    pub cursor_blink: bool,
+    /// The terminal cursor is in its blink's off phase, so it draws nothing; a cursor-class field.
+    pub cursor_blink_off: bool,
     pub window_focused: bool,
     pub pane_focus_flash_bucket: u8,
     pub hover_tab: u32,
@@ -115,6 +116,8 @@ pub(crate) struct WindowIdentity {
     pub renderer_hash: u64,
     pub overlay_active: bool,
     pub cursor_cell: Option<CursorCell>,
+    /// The cursor's sampled glide position while it glides; `None` when it rests on its cell.
+    pub cursor_glide: Option<crate::cursor_glide::GlideCell>,
 }
 
 /// Structural pane identity preserves order, revision, requested viewport, and resolved projection.

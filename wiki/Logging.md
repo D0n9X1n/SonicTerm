@@ -84,8 +84,10 @@ peer of another user, a connection over the limit, and a control server owner
 that could not register. At `info` it adds `control server started`, `control
 server stopped`, `control level changed`, `agent connected` with the client's
 self-reported name, `agent disconnected`, and one `tool call` line per call with
-`tool`, `pane`, `client`, `ok`, `in_bytes`, `out_bytes` and `elapsed_ms`. Arguments, pane text and regexes are
-never logged.
+`tool`, `pane`, `client`, `ok`, `in_bytes`, `out_bytes` and `elapsed_ms`. `in_bytes` and `out_bytes`
+are wire lengths, the request line and the reply line as sent, newline excluded, measured from the
+bytes the server already holds; the Memory figure for a call's arguments is their serialized length,
+a different number. Arguments, pane text and regexes are never logged.
 
 `wgpu`, `naga`, `sonicterm-vt`, and `sonicterm-grid` remain warning-oriented in
 the configured filters. Very hot font-shaper dumps are `trace`; no configured
@@ -508,6 +510,7 @@ coalesced flushes.
 | `about_to_wait` | ms histogram | each `about_to_wait` dispatch |
 | `user_event` | ms histogram | each `user_event` dispatch |
 | `new_events` | ms histogram | each `new_events` dispatch |
+| `pane_create` | ms histogram (`pane_create_ms` in perf results) | each new tab or split pane created after startup on the event loop, from its PTY and process to its VT worker |
 | `ui_parser_locks` | count | event-loop-thread locks of a pane's parser |
 | `ui_guard_custody_ns` | count (ns) | summed time a frame held any parser guard, from the first guard acquired to the last released, over every collection that took a guard, early failures included |
 | `ui_guard_custodies` | count | collections that took at least one parser guard |
@@ -556,6 +559,11 @@ or whose worker finishes after it, still adds to it.
 | `flushes_coalesced` | count | flushes that found an earlier flush still pending, which keeps its time |
 | `flushes_suppressed` | count | targeted flushes that sent no event because the pane's output event was still outstanding; a send the event loop refused is not counted |
 | `sync_timeouts` | count | synchronized updates (DEC 2026) a worker released at the 150 ms bound rather than at their reset |
+| `media_decode` | µs histogram (`dus`; `media_decode_dus` in perf results) | inline-image decode attempts on the workers, on buckets 1, 2, 4, 7.999, 16, 32, 64 and 128 ms, so a decode under 8 ms never shares a bucket with one at or above it |
+| `media_decode_attempts` | count | decode attempts: Sixel, iTerm2 and kitty transmits and queries, malformed payloads and decodes the store refused; kitty place and delete decode nothing |
+| `media_decode_under_8ms` | count | attempts that took under 8 ms. The decode p95 is at least 8 ms exactly when this is less than `ceil(0.95 × media_decode_attempts)` |
+| `media_decoded`, `media_decode_failed`, `media_refused_after_decode` | count | each attempt's outcome: kept (or a query answered `OK`), not decodable, or decoded and then refused by the store |
+| `resize_hold` | µs histogram (`resize_hold_us` in perf results) | how long the event loop held a pane's parser lock to resize its grid, one sample per pane per resize |
 
 No identity holds between `flushes`, `flushes_untargeted`, `flushes_coalesced`,
 and the `flush_to_redraw` count. A pane that closes drops its pending timestamp,
@@ -1017,7 +1025,10 @@ session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
                   pty_output_bytes=<bytes> pty_input_bytes=<bytes>
 pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
            writer_in_flight_bytes=<bytes> reply_resident_bytes=<bytes>
-           reply_spill_disk_bytes=<bytes> teardown_fallbacks=<count>
+           reply_spill_disk_bytes=<bytes> reply_spill_file_bytes=<bytes>
+           reply_spill_budget_bytes=<bytes> reply_compactions=<count>
+           reply_compact_longest_us=<us> reply_lock_wait_longest_us=<us>
+           teardown_fallbacks=<count>
            teardown_fallbacks_slow=<count> teardown_fallback_longest_us=<us>
            teardown_fallback_total_us=<us>
 ```
@@ -1029,7 +1040,14 @@ counted once as it leaves the queue), the allocation of the resident reply tier
 replies spilled to disk (`reply_spill_disk_bytes`, never part of
 `resident_bytes`). The reply figures are each pane's spool counters as of its last
 send or pop, read without the spool's lock, so a pane whose storage is stalled
-cannot hold up the event loop's sample. The teardown fields report the reaper's synchronous fallback:
+cannot hold up the event loop's sample. `reply_spill_file_bytes` is the process spill budget's
+charged file length across every pane (consumed prefixes included), against
+`reply_spill_budget_bytes`. `reply_compactions` counts spill compactions across panes and
+`reply_compact_longest_us` is the longest; `reply_lock_wait_longest_us` is the longest a reply
+send waited for its spool's lock (spool-lock contention: the writer's read, another sender or a
+compaction; measured only when the lock was already taken). A compaction past 50 ms also logs
+`PTY reply spill compaction was slow` once per pane at `warn` on `sonicterm::pty`, with
+`compact_ms`. The teardown fields report the reaper's synchronous fallback:
 how many ran, how many blocked longer than 50 ms, the longest and the total. A
 fallback past 50 ms also logs `synchronous PTY teardown fallback blocked the event
 loop` at `warn` with `owner` and `blocked_ms`.

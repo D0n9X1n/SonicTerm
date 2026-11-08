@@ -397,7 +397,7 @@ Orca 通过 D-Bus 上的 AT-SPI 访问每个终端窗口的 accesskit 适配器�
 | 平台 | 显示位置 | 范围 | 显示内容 |
 | --- | --- | --- | --- |
 | Windows | `ITaskbarList3` 任务栏按钮 | 每个窗口：该窗口活动标签页中获得焦点的窗格 | 正常、错误（红色）、不确定、暂停（黄色）、无 |
-| macOS | `NSDockTile` 徽标 | 整个应用 | `56%`、错误为 `!`、不确定为 `…`、暂停为 `‖`；只有文字，因为 AppKit 没有自定义图块视图就无法显示程序坞进度条 |
+| macOS | `NSDockTile` 徽标 | 整个应用 | `56%`、错误为 `!`、不确定为 `…`、暂停为 `‖`；进度为 0% 的普通报告不显示徽标，因为程序从 0% 开始，`0%` 徽标看起来像警示；只有文字，因为 AppKit 没有自定义图块视图就无法显示程序坞进度条 |
 | Linux | 针对 `application://com.d0n9x1n.SonicTerm.desktop` 的 `com.canonical.Unity.LauncherEntry.Update` | 整个应用 | `progress`、`progress-visible`，错误时 `urgent`；不确定时隐藏进度条。实现了它的程序坞会显示（KDE Plasma、Dash to Dock、Ubuntu Dock）；没有监听者时没有可见效果 |
 
 在两个整个应用范围的位置上，显示的是任意终端窗口中任意窗格最近更新的有效报告。
@@ -499,7 +499,7 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 | --- | --- |
 | `list_panes` | 以 `instance_pid` 给出 SonicTerm 的进程 id，然后是所有窗口中的所有窗格，主窗口在前：id、窗口与标签页序号、是否活动、是否 READONLY、是否由 agent 创建、调用方视角的 `owner`（`you`、`other_agent`、`orphaned` 或 `user`）；并以一次有时限的锁读取标题、工作目录、尺寸、备用屏幕状态、shell 集成，以及进程是否已退出。这些探测在整个调用中共享一个 50 ms 预算（`LIST_BUDGET`），每次最多等待 5 ms：预算用完后才轮到的窗格以 `"details": "skipped"` 列出且不含实时字段，结果中 `"partial": true`。只指定一个窗格的工具只解析该窗格的句柄，不计算窗口顺序。 |
 | `read_pane` | `screen`（可见行）、`tail`（最新的行，软换行已合并）或 `last_command`（最近完成的 shell 命令的输出——从 OSC 133 C 所在行到 D 到达的位置——以及退出码，全屏程序运行时也能找到）。文本保留组合字符和软换行处的空格。受 `max_lines`（默认 120，至多 1,000）和 `max_bytes`（默认 16 KiB，至多 64 KiB）限制；`end_row` 是最后一行的标记。 |
-| `wait_for` | 等到 `regex` 匹配 `after_row` 之后的某行、输出在 `quiet_ms` 内保持安静，或进程退出，受 `timeout_ms`（默认 30 s，至多 120 s）限制；窗格关闭则以 `pane_closed` 结束。只有在 `after_row` 之后开始的行才计入，因此软换行追加到旧行上的文本不算。屏幕上已有的匹配会立即结束等待；来自另一个屏幕的标记以 `stale_row` 拒绝。等待期间写入且仍被保留的每一行都会检查；`missed_output` 表示有行在检查前已离开回滚缓冲区，`truncated` 表示有一行太长、无法完整检查，`scan_complete: false` 表示结束时仍有未扫描的行，`screen_changed` 表示主屏幕与备用屏幕之间发生过切换。 使用 `source: "stream"`（默认 `"screen"`）时，正则改为匹配等待开始后窗格打印的文本，由解析器的输出 tap 在流式等待持有期间记录：程序之后用 `\r` 覆盖或已滚出的文本仍可匹配。tap 保留最新的 64 Ki 个字符（`OUTPUT_TAP_CHARS`），每个 LF 记为一个换行；若它丢弃了等待期间打印的文本，结果给出 `context_truncated: true`。流式等待需要正则，拒绝 `after_row`，以流中的 `offset` 而非行报告匹配，并在结束时撤销 tap；未启用的 tap 不记录任何内容。 |
+| `wait_for` | 等到 `regex` 匹配 `after_row` 之后的某行、输出在 `quiet_ms` 内保持安静，或进程退出，受 `timeout_ms`（默认 30 s，至多 120 s）限制；窗格关闭则以 `pane_closed` 结束。只有在 `after_row` 之后开始的行才计入，因此软换行追加到旧行上的文本不算。屏幕上已有的匹配会立即结束等待；来自另一个屏幕的标记以 `stale_row` 拒绝。等待期间写入且仍被保留的每一行都会检查；`missed_output` 表示有行在检查前已离开回滚缓冲区，`truncated` 表示有一行太长、无法完整检查，`scan_complete: false` 表示结束时仍有未扫描的行，`screen_changed` 表示主屏幕与备用屏幕之间发生过切换。 使用 `source: "stream"`（默认 `"screen"`）时，正则改为匹配等待开始后窗格打印的文本，由解析器的输出 tap 在流式等待持有期间记录：程序之后用 `\r` 覆盖或已滚出的文本仍可匹配。tap 保留最新的 64 Ki 个字符（`OUTPUT_TAP_CHARS`），每个 LF 记为一个换行；若它丢弃了等待期间打印的文本，结果给出 `context_truncated: true`。每次检查在持有解析器锁时只复制上次检查之后打印的字符；释放锁之后，等待保留自开始以来 tap 仍持有的文本，并且仅在该文本变化时重新搜索全部内容，因此锚点、单词边界和多行模式的匹配结果与搜索整个流完全一致。流式等待需要正则，拒绝 `after_row`，以流中的 `offset` 而非行报告匹配，并在结束时撤销 tap；未启用的 tap 不记录任何内容。最后一个等待结束时若解析器空闲，环形缓冲立即释放，否则在下一次发现其空闲的保留探测时释放，因此之后不再输出的窗格不会一直占用它。 |
 
 控制类工具（`create_pane`、`send_text`、`send_keys`、`run_command`、`close_pane`）和
 `[mcp] control` 范围见 [MCP 服务器](MCP-Server-zh-CN)。每个工具在事件循环上执行时都会再次按范围检查。

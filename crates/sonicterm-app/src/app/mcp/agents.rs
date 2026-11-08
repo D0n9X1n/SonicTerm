@@ -7,7 +7,8 @@
 //! so a disconnect walks no panes and a create racing a disconnect is orphaned by construction.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use sonicterm_cfg::config::{McpControl, McpCreateAnchor, McpIsolation, McpRead};
@@ -150,19 +151,30 @@ impl From<McpControl> for Access {
 pub(crate) struct LiveSessions {
     /// The connected sessions; held only for one insert, remove or lookup.
     live: Mutex<HashSet<AgentSessionId>>,
+    /// Each session's resume token, kept past its close while it may own panes.
+    pub(crate) tokens: super::claims::ResumeRegistry,
 }
 
 impl LiveSessions {
-    /// Start a session and return its fresh id.
+    /// Start a session with no call slot and return its fresh id, for tests.
+    #[cfg(test)]
     pub(crate) fn open(&self) -> AgentSessionId {
+        self.open_connection(None)
+    }
+
+    /// Start a connection's session, whose calls set `in_flight` while they run, and mint its
+    /// resume token.
+    pub(crate) fn open_connection(&self, in_flight: Option<Arc<AtomicBool>>) -> AgentSessionId {
         let session = AgentSessionId::next();
         self.live.lock().insert(session);
+        self.tokens.connect(session, in_flight);
         session
     }
 
-    /// End `session`; its panes read as orphaned from now on.
+    /// End `session`; its panes read as orphaned from now on, claimable with its token.
     pub(crate) fn close(&self, session: AgentSessionId) {
         self.live.lock().remove(&session);
+        self.tokens.disconnect(session);
     }
 
     /// Whether `session` is still connected.

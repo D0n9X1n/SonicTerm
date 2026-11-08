@@ -271,7 +271,7 @@ impl App {
             .registry
             .windows
             .values_mut()
-            .flat_map(|window| std::mem::take(&mut window.panes).into_values())
+            .flat_map(|window| window.panes.detach_all())
             .collect();
         for pane in panes {
             self.retire_pane(pane);
@@ -288,7 +288,7 @@ impl App {
             self.accessibility.remove(&previous_id);
             if let Some(mut previous) = self.registry.remove_window(previous_id) {
                 self.retire_window_counters(previous_id, &mut previous);
-                for pane in std::mem::take(&mut previous.panes).into_values() {
+                for pane in previous.panes.detach_all() {
                     self.retire_pane(pane);
                 }
                 self.release_owners_of(&mut previous);
@@ -316,7 +316,8 @@ impl App {
         }
     }
 
-    pub(super) fn retire_pane(&mut self, mut pane: PaneState) {
+    pub(super) fn retire_pane(&mut self, pane: super::DetachedPane) {
+        let mut pane = pane.into_retired();
         // Closed first, so an MCP wait on this pane ends with `pane_closed` instead of its timeout.
         pane.change_signal.close();
         *pane.redraw_target.lock() = None;

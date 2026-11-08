@@ -718,6 +718,8 @@ fn percent_to_u8(percent: u32) -> u8 {
 mod media_kitty;
 #[path = "media_store.rs"]
 mod media_store;
+#[cfg(test)]
+pub(super) use media_kitty::MAX_KITTY_PLACEMENTS;
 pub(super) use media_kitty::{apply_kitty, kitty_source_size, KittyOp};
 pub use media_store::InlineImageStore;
 

@@ -764,6 +764,7 @@ impl App {
             queues: super::memory_report_queues::QueueSection {
                 totals: self.pty_queue_totals(),
                 fallback: self.services.pty_reaper.fallback_timing(),
+                spill_files: super::retention_queues::process_spill_files(),
             },
         }
     }
@@ -888,7 +889,7 @@ fn report_window_state(
         renderer,
         tabs,
         tab_states,
-        panes,
+        panes: super::PaneMap::founding(panes),
         cursor_pos: (0.0, 0.0),
         mouse_down: false,
         pointer_gesture: None,
@@ -915,6 +916,7 @@ fn report_window_state(
         dpi_scale: 1.0,
         ime: ImeState::new(),
         ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
+        cursor_blink: crate::app::cursor_blink::CursorBlink::new(std::time::Instant::now()),
         hovered_url: None,
         link_preview: None,
         path_probe: super::path_target::PathProbeState::default(),

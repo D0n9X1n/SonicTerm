@@ -452,3 +452,99 @@ fn grapheme_extras_move_the_reported_figure() {
          ({light} at 8 marks, {heavy} at 24)"
     );
 }
+
+/// History's running totals stay equal to a walk over its rows through every way history changes
+/// outside a resize: scrolls past the limit (eviction and recycled rows), linked and blank rows
+/// (trimmed and clustered storage), a lowered limit, a budget trim, a capacity shrink, clearing,
+/// and the saved primary's own history across an alternate-screen stay.
+#[test]
+fn history_totals_track_every_history_change() {
+    let check = |grid: &Grid, context: &str| {
+        assert!(grid.scrollback.totals_match_rows(), "{context}: history totals drifted");
+        if let Some(primary) = grid.alt_screen.as_deref() {
+            assert!(primary.scrollback.totals_match_rows(), "{context}: saved primary drifted");
+        }
+    };
+    let mut grid = Grid::new(20, 4);
+    grid.set_scrollback_limit(30);
+    let link = Some(crate::hyperlink::HyperlinkId(3));
+    for line in 0..80 {
+        for column in 0..(line % 21) {
+            let linked = if column % 3 == 0 { link } else { None };
+            grid.put_char_linked('x', Color::Default, Color::Default, CellFlags::empty(), linked);
+        }
+        grid.carriage_return();
+        grid.linefeed();
+        check(&grid, &format!("after line {line}"));
+    }
+    grid.set_scrollback_limit(12);
+    check(&grid, "after lowering the limit");
+    grid.enter_alt_screen();
+    for _ in 0..10 {
+        grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+        grid.linefeed();
+    }
+    check(&grid, "on the alternate screen");
+    grid.resize(9, 3);
+    check(&grid, "after a resize under the alternate screen");
+    grid.leave_alt_screen();
+    check(&grid, "after leaving the alternate screen");
+    grid.enforce_retained_capacity_budget();
+    check(&grid, "after a budget check");
+    grid.trim_scrollback_to_reported_budget(0);
+    check(&grid, "after a budget trim");
+    grid.scrollback.shrink_rows();
+    check(&grid, "after shrinking history rows");
+    grid.clear_scrollback();
+    check(&grid, "after clearing history");
+    assert_eq!(grid.scrollback.totals(), crate::history::RowCost::default());
+}
+
+/// The figures retention reports equal a full walk of every row: `retained_amount` and
+/// `retained_amount_by_region` read history's running totals, and must report exactly what summing
+/// the rows reports, on both screens.
+#[test]
+fn reported_amounts_equal_a_full_walk() {
+    let walk = |grid: &Grid| -> (usize, usize) {
+        let rows = grid.visible.iter().chain(grid.scrollback.iter());
+        let saved = grid
+            .alt_screen
+            .as_deref()
+            .into_iter()
+            .flat_map(|primary| primary.visible.iter().chain(primary.scrollback.iter()));
+        let all: Vec<&Line> = rows.chain(saved).collect();
+        (
+            all.iter().map(|row| row.approx_capacity_byte_size()).sum(),
+            all.iter().map(|row| row.fat_attribute_bytes()).sum(),
+        )
+    };
+    let mut grid = Grid::new(16, 3);
+    grid.set_scrollback_limit(40);
+    for line in 0..60 {
+        let link = (line % 2 == 0).then_some(crate::hyperlink::HyperlinkId(1));
+        for _ in 0..(line % 17) {
+            grid.put_char_linked('q', Color::Default, Color::Default, CellFlags::empty(), link);
+        }
+        grid.carriage_return();
+        grid.linefeed();
+    }
+    grid.enter_alt_screen();
+    let (capacity, fat) = walk(&grid);
+    let prompts = grid.prompts.capacity() * std::mem::size_of::<PromptRegion>();
+    let expected = capacity + fat + prompts + grid.container_bytes();
+    assert_eq!(grid.retained_amount().bytes, expected, "alternate: retained_amount");
+    let regions = grid.retained_amount_by_region();
+    let total = regions.visible.bytes + regions.history.bytes + regions.alternate.bytes;
+    assert_eq!(total, expected, "alternate: regions sum to the walk");
+    grid.leave_alt_screen();
+    let (capacity, fat) = walk(&grid);
+    let prompts = grid.prompts.capacity() * std::mem::size_of::<PromptRegion>();
+    let expected = capacity + fat + prompts + grid.container_bytes();
+    assert_eq!(grid.retained_amount().bytes, expected, "primary: retained_amount");
+    let history_walk: usize = grid
+        .scrollback
+        .iter()
+        .map(|row| row.approx_capacity_byte_size() + row.fat_attribute_bytes())
+        .sum();
+    assert_eq!(grid.retained_amount_by_region().history.bytes, history_walk, "primary: history");
+}

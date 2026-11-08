@@ -96,6 +96,17 @@ clickable_bare_names = true
     assert!(cfg.terminal.clickable_bare_names);
 }
 
+/// The cursor jumps by default; `smooth` parses, the template documents the default, and an
+/// unknown value is refused rather than read as `none`.
+#[test]
+fn cursor_animation_defaults_to_none_and_parses_smooth() {
+    assert_eq!(Config::default().terminal.cursor_animation, CursorAnimation::None);
+    assert!(default_config_template().contains("cursor_animation = \"none\""));
+    let parsed: Config = toml::from_str("[terminal]\ncursor_animation = \"smooth\"\n").unwrap();
+    assert_eq!(parsed.terminal.cursor_animation, CursorAnimation::Smooth);
+    assert!(toml::from_str::<Config>("[terminal]\ncursor_animation = \"bounce\"\n").is_err());
+}
+
 #[test]
 fn default_cursor_does_not_blink() {
     let cfg = Config::default();

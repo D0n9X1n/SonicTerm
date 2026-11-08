@@ -1,6 +1,6 @@
 //! Narrow class damage on a real wgpu renderer, read back from its retained frame.
 //!
-//! Setters keep the key: a cursor-shape, cursor-blink or window-focus change leaves the retained
+//! Setters keep the key: a cursor-shape, blink-phase or window-focus change leaves the retained
 //! frame key set, so the next frame is not a first frame and damages only its class.
 //!
 //! Retained-pixel parity: each narrowed case presents with damage smaller than the surface, and
@@ -383,7 +383,7 @@ fn rows_differ(first: &[u8], second: &[u8], width_px: u32, top: f32, bottom: f32
     start < end && first[start..end] != second[start..end]
 }
 
-/// Test 6: the cursor-shape, cursor-blink and focus setters keep the frame key, so the next
+/// Test 6: the cursor-shape, blink-phase and focus setters keep the frame key, so the next
 /// frame is not a first frame, and its damage is only the setter's class: the cursor row for
 /// shape and blink, and the cursor row through the bottom tab band for focus.
 fn setters_keep_the_key(renderer: &mut GpuRenderer, layout: &Layout) -> Result<(), String> {
@@ -394,8 +394,24 @@ fn setters_keep_the_key(renderer: &mut GpuRenderer, layout: &Layout) -> Result<(
     let cases: [(&str, Setter, bool); 6] = [
         ("cursor shape", |renderer| renderer.set_cursor_shape(CursorShape::Bar), false),
         ("cursor shape back", |renderer| renderer.set_cursor_shape(CursorShape::Block), false),
-        ("cursor blink", |renderer| renderer.set_cursor_blink(true), false),
-        ("cursor blink back", |renderer| renderer.set_cursor_blink(false), false),
+        // The blink's off phase hides the cursor; its return draws it again. Blinking itself must
+        // be on for a phase to apply, so the off case turns it on first.
+        (
+            "cursor blink off",
+            |renderer| {
+                renderer.set_cursor_blink(true);
+                renderer.set_cursor_blink_off(true);
+            },
+            false,
+        ),
+        (
+            "cursor blink on",
+            |renderer| {
+                renderer.set_cursor_blink_off(false);
+                renderer.set_cursor_blink(false);
+            },
+            false,
+        ),
         ("window unfocused", |renderer| renderer.set_window_focused(false), true),
         ("window focused", |renderer| renderer.set_window_focused(true), true),
     ];

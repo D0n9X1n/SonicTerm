@@ -12,7 +12,7 @@ This page explains what those figures count; protocol and atlas details are in
 | Owner | Exact bound | Behavior at the bound |
 | --- | --- | --- |
 | Grid geometry | axis ≤ 4,096; one visible screen ≤ 524,288 cells; visible + history + saved primary ≤ 1,048,576 cells | dimensions and requested history are clamped |
-| Grid retained storage | `MAX_GRID_CELLS × size_of::<Cell>()`, about 24 MiB on the current build, shared by visible/history/saved primary; a history row is charged its stored cells, not its width | compact row capacity, then drop oldest history in 64-row blocks; scroll-path checks are amortized every 512 rows |
+| Grid retained storage | `MAX_GRID_CELLS × size_of::<Cell>()`, about 24 MiB on the current build, shared by visible/history/saved primary; a history row is charged its stored cells, not its width | compact row capacity, then drop oldest history in 64-row blocks; scroll-path checks are amortized every 512 rows, and read history's running totals instead of summing its rows |
 | Cell combining extras | 64 UTF-8 bytes per cell | additional zero-width data is not retained |
 | OSC 8 registry | 16,384 links, 8 KiB per URI, 1 KiB per client id, 8 MiB of shared strings and tables | reclaim entries no retained cell references, then admit; otherwise refuse the new link |
 | Escape sequence | 1 MiB | discard through its terminator |
@@ -23,7 +23,7 @@ This page explains what those figures count; protocol and atlas details are in
 | Encoded image dimensions | pixels ≤ 2,048² and declared width/height ≤ 8,192; a larger image inside the budget is downscaled to 1,024 px on its long side | reject before decode |
 | Rendered image dimensions | width/height ≤ 1,024; BGRA8 ≤ 4 MiB | resize iTerm2/kitty images; Sixel decodes into the bounded buffer |
 | PTY input | one fixed 64-byte pending pointer-motion slot per pane; four queued UI messages, 16 MiB each; reply FIFO uses 64 KiB RAM including framing, ≤32 KiB writer output, ≤32 KiB + 4 B read scratch, ≤32 KiB app reply-batch payload, and <32 KiB parser-dispatch payload (growable vectors may retain spare capacity) | UI refuses with bytes intact; replies spill to private temporary storage without waiting for native input capacity |
-| Reply spill disk | 16 MiB of unconsumed records per pane (`SPILL_BUDGET_BYTES`); a consumed prefix of at least 1 MiB and half the file is compacted away, so the file stays below 32 MiB plus one record | refuse the one reply past the budget (`ReplyBudgetExceeded`, counted, warned once per backlog) and keep the spool; delete on drain, writer exit, or pane teardown; storage errors explicitly fail reply delivery while output/exit observation continues |
+| Reply spill disk | 16 MiB of unconsumed records per pane (`SPILL_BUDGET_BYTES`); a consumed prefix of at least 1 MiB and half the file is compacted away, so the file stays below 32 MiB plus one record. Every pane's spill file length (consumed prefixes included) also counts against one process budget of 256 MiB (`PROCESS_SPILL_BUDGET_BYTES`); when it is full, a pane with a consumed prefix of at least 1 MiB compacts it first. This is file-length accounting, not exact filesystem allocation | refuse the one reply past either budget (`ReplyBudgetExceeded`, counted, warned once per backlog) and keep the spool; delete on drain, writer exit, or pane teardown; storage errors explicitly fail reply delivery while output/exit observation continues |
 | PTY output | 64 queued chunks plus one blocked sender chunk, each backed by a 64 KiB reader ring; structural worst case 4.0625 MiB. Each chunk is 64 B on 64-bit targets (const-asserted), 16 B of it the optional read stamp. Chunk timestamp-storage subtotal: 1,024 B per PTY in the 64 reserved channel slots, stamped or not, plus 16 B each for the blocked sender's chunk and the chunk the VT worker holds, 1,056 B; freed with the PTY. Whether a PTY stamps its reads is chosen at its creation (while the pane's counter gate is on) and fixed for the reader's lifetime, as an immutable boolean the reader owns; its layout contribution is not covered by that subtotal | block the reader and apply OS backpressure |
 | S2 echo watch | one per pane while the counter gate is on: 232 B measured on 64-bit macOS, const-asserted ≤ 256 B (`ECHO_WATCH_MAX_BYTES`), not charged to the pane ledger; freed with the pane and its worker's handles | fixed size; a re-arm replaces the record |
 | S2 echo timeline | per window, inline in its redraw state: 104 B, of which 40 B are accepted-tick metadata and 64 B the owner slot. Per window owner, from its arm: a 1,640 B slot record, whose 64 events of 24 B are 1,536 B (const-asserted) plus 104 B of metadata, and a 4,120 B flood ring, whose 256 entries of 16 B are 4,096 B (const-asserted) plus 24 B. The owner's take copies at most 4,096 B of flood entries (256 × 16 B) into the record, whose 32 B `FrozenFlood` metadata, comprising the 24 B vector header and eviction metadata, sits in its metadata, and frees the ring; the transfer builds at most 2,048 B of events (64 × 32 B), moves them, the copied entries and an 88 B `EchoTimelineV1` to the caller, and frees the record, so the App keeps nothing. Sizes other than the const-asserted arrays are measured on 64-bit macOS, not guaranteed. An owner that ends early, by a re-arm, the pane leaving the window or retiring, or the window closing, frees its ring and an unfrozen record; a frozen record not yet transferred lasts until the pane is re-armed or retired | the 65th event sets `overflow` and is dropped; the 257th flood entry evicts the oldest and records its `loop_seq`; a non-owner arming records nothing |
@@ -79,7 +79,10 @@ most one row allocation per row.
 `CSI 3 J` releases active primary history and excess history-container capacity
 without lowering either configured history limit. It resets the budget-check
 cadence only for that explicit erasure; ordinary FIFO row reuse retains the
-512-scroll cadence. History-prefix removal updates exact eviction identity and
+512-scroll cadence. History keeps running totals of its rows' reserved, live and
+rare-attribute bytes, updated wherever a row enters, leaves or changes, so a
+budget check or a reported figure reads them instead of summing every history
+row; only the visible rows are walked. History-prefix removal updates exact eviction identity and
 prompt coordinates, including prompts stored with the saved primary. Shrinking
 columns repairs only a clipped wide lead at each new row edge, preserving
 compact runs and existing capacity hysteresis rather than flattening history.
@@ -120,6 +123,15 @@ caller return. Its time on the retiring thread is recorded, and one longer than
 50 ms is warned about (see `pty queues` on [Logging](Logging)). Sink entries retain capacity until process exit, so `QueueFull`
 can persist for the rest of the process. Terminal disposal preserves incomplete
 native payloads and their accounting instead of running unsafe destructors.
+
+A mass close is where the fallback runs most. On Unix a unit test closes 32 real
+PTYs against a driver that admits two tasks and holds their runs, so no capacity is
+recycled: exactly two are admitted and thirty fall back, each close is counted on
+one path, the fallbacks' summed blocked time stays within thirty native tail bounds,
+and once the runs are released the admitted tasks settle and the root's reaper work
+returns to zero. In ordinary use the fallback count, slow count, longest and total
+blocked time, and the blocked-time histogram, are in the memory log's `pty queues`
+line and the Memory Usage report's `PTY QUEUES` section.
 
 The type system also defines `SharedFont`, `SharedRaster`, `SharedAtlas`,
 `LocalPty`, and mux owner kinds, but the GUI does not register those nodes.
@@ -516,7 +528,7 @@ selection is never wiped while you make or copy it. Pressing `R` always shows a 
 | `SAMPLE` | Panes measured and panes skipped because their lock was held (`busy, skipped`), so a partial total is never shown as the whole session. |
 | `WINDOWS / RENDERERS` | Each window's renderer by part (glyph atlas with size, entries and fit, row caches, scratch buffers), the report window's own renderer, and any warm renderer. Under each renderer, `GPU requested` lists its requested GPU bytes and resource count by class: surface, frame texture, glyph atlas, image atlas and present buffers. |
 | `PANES` | Each pane by tab title, split into grid visible, history and alternate, parser, hyperlinks, inline media, and PTY output and input. The per-pane rows sum to the pane total. |
-| `PTY QUEUES` | Every pane's PTY queues summed: bytes in memory (input waiting in the channel, the message the writer is writing, and the resident reply tier's allocation, which a drain keeps) and reply spill on disk, shown apart. Then the reaper's synchronous teardown fallbacks: how many, how many blocked past 50 ms, the longest and the total, and once any ran, their blocked times in power-of-four microsecond buckets. Each pane's figures are read without taking its queue's lock. |
+| `PTY QUEUES` | Every pane's PTY queues summed: bytes in memory (input waiting in the channel, the message the writer is writing, and the resident reply tier's allocation, which a drain keeps) and reply spill on disk, shown apart. A `reply spill files` line shows the process budget's charged file bytes against its size, and a `reply spill compactions` line their count, the longest, and the longest wait for a spool lock. Then the reaper's synchronous teardown fallbacks: how many, how many blocked past 50 ms, the longest and the total, and once any ran, their blocked times in power-of-four microsecond buckets. Each pane's figures are read without taking its queue's lock. |
 | `THREADS` | Thread count and names. Threads share the process's memory and hold none of their own. |
 | `CHILD PROCESSES` | Each pane shell and its descendants with the OS figure for each (`footprint`, `private` or `RSS`), at most 64 descendants per pane. These are separate processes, not part of SonicTerm's footprint. A process that left its shell's tree, such as a daemonized tmux server, is not listed, and WSL or remote processes are not visible. |
 

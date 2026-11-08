@@ -191,10 +191,15 @@ fn real_pty_search_field_copy_uses_query_selection_only() {
         search.extend_to("你é".len());
         let (matches, current) = (search.matches.len(), search.current);
         // Copy needs no active pane or grid lock, and READONLY still permits it.
-        let removed = window.panes.remove(&source).unwrap();
+        let removed = window.panes.remove_for_test(&source).unwrap();
         window.copy_mode = Some(CopyModeState::read_only_at((0, 0)));
         assert!(app.run_action_for_window(&Action::CopyToClipboard, source_window));
-        app.registry.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
+        app.registry
+            .windows
+            .get_mut(&source_window)
+            .unwrap()
+            .panes
+            .insert_for_test(source, removed);
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("é"));
         let search = app.registry.windows[&source_window].tab_states[0].search.as_ref().unwrap();
         assert_eq!(search.selected_text(), Some("é"));

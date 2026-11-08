@@ -74,6 +74,11 @@ impl App {
             return;
         }
         self.service_gpu_recovery(event_loop, Instant::now());
+        // MCP requests a budgeted drain left queued wake the loop again only now, after this turn's
+        // native input and redraws, so agents' calls never hold input back for longer than a slice.
+        if let Some(server) = self.services.mcp_server.as_ref() {
+            server.shared.wake_for_backlog();
+        }
         self.clear_closed_broadcast_source();
         self.drain_winit_file_drops();
         // A report that waited for a selection or copy mode is shown once neither holds the pane.
@@ -336,7 +341,6 @@ impl App {
     }
 
     /// Collect typed frame and maintenance deadlines without erasing their window identity.
-    // Ordering: cursor_visible Relaxed reads only choose whether a blink deadline exists.
     pub(in crate::app) fn frame_due_work_at(
         &self,
         now: Instant,
@@ -404,23 +408,23 @@ impl App {
             ) {
                 due.push(DueWork { owner: Some(*id), cause: DueCause::Scrollbar, deadline });
             }
-            if Some(*id) == self.registry.main_window_id {
-                let cursor = window
-                    .tab_states
-                    .get(window.tabs.active_index())
-                    .and_then(|tab| window.panes.get(&tab.active_pane))
-                    .is_some_and(|pane| {
-                        pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed)
-                    });
-                if cursor {
-                    if let Some(deadline) = window
-                        .renderer
-                        .as_ref()
-                        .and_then(|renderer| renderer.next_blink_redraw_at())
-                    {
-                        due.push(DueWork { owner: Some(*id), cause: DueCause::Cursor, deadline });
-                    }
+            // Main and child windows blink alike; a window that does not blink, or whose blink
+            // rests, contributes no deadline.
+            if super::super::cursor_blink::window_blinks(window) {
+                if let Some(deadline) = window.cursor_blink.deadline(now) {
+                    due.push(DueWork { owner: Some(*id), cause: DueCause::Cursor, deadline });
                 }
+            }
+            // A gliding cursor's next frame is armed once and kept until a frame is collected, so
+            // unrelated events never slide it and a deferred frame never makes it due at once.
+            if window.renderer.as_ref().is_some_and(|renderer| renderer.cursor_gliding()) {
+                let period = super::super::effective_frame_period(
+                    self.software_render_degrade,
+                    window.ime.is_composing(),
+                    window.redraw.monitor_period,
+                );
+                let deadline = window.cursor_blink.glide_deadline(now, window.last_render, period);
+                due.push(DueWork { owner: Some(*id), cause: DueCause::Cursor, deadline });
             }
         }
         due

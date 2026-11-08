@@ -247,9 +247,12 @@ fn run_caps_list_only_where_a_scenario_declares_them() {
     assert_eq!(find("S1").unwrap().run_caps, [("atlas-retry", 2), ("status-line", 1)]);
     assert_eq!(find("S12").unwrap().run_caps, [("status-line", 1)]);
     assert_eq!(find("S6").unwrap().run_caps, [("rest", 2)]);
-    assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
+    assert_eq!(find("S2").unwrap().variants, ["default", "flood", "spawn"]);
     assert_eq!(find("S2").unwrap().run_caps, [("flood", 2)]);
-    assert_eq!(find("S11").unwrap().variants, ["default", "gdi", "wgpu", "release"]);
+    assert_eq!(
+        find("S11").unwrap().variants,
+        ["default", "gdi", "wgpu", "release", "burst", "burst-text"]
+    );
     assert_eq!(find("S11").unwrap().run_caps, [("release", 1), ("gdi", 2), ("wgpu", 2)]);
     let value: serde_json::Value = serde_json::from_str(&list_json()).unwrap();
     for entry in value["scenarios"].as_array().unwrap() {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::history::RowCost;
 
 impl Grid {
     /// Bytes retained by cell storage across primary and alternate screens.
@@ -12,21 +13,56 @@ impl Grid {
     /// [`Self::fat_attribute_bytes`] for the per-cell boxes it excludes, and
     /// [`Self::retained_amount`] for the total a governor is charged.
     fn retained_cell_bytes(&self) -> usize {
-        let primary_bytes = self
-            .visible
-            .iter()
-            .chain(self.scrollback.iter())
-            .map(Line::approx_capacity_byte_size)
-            .sum::<usize>();
-        let saved_primary_bytes = self.alt_screen.as_ref().map_or(0, |primary| {
-            primary
-                .visible
-                .iter()
-                .chain(primary.scrollback.iter())
-                .map(Line::approx_capacity_byte_size)
-                .sum::<usize>()
-        });
-        primary_bytes.saturating_add(saved_primary_bytes)
+        self.screens_cost().capacity
+    }
+
+    /// The summed [`RowCost`] of this screen's rows and any saved primary's. History is read from
+    /// its running totals in O(1); only the visible rows, which are bounded, are walked.
+    fn screens_cost(&self) -> RowCost {
+        let saved =
+            self.alt_screen.as_ref().map_or(RowCost::default(), |primary| primary.screen_cost());
+        let own = self.screen_cost();
+        RowCost {
+            capacity: own.capacity.saturating_add(saved.capacity),
+            fat: own.fat.saturating_add(saved.fat),
+            live: own.live.saturating_add(saved.live),
+        }
+    }
+
+    /// The summed [`RowCost`] of this screen's visible rows and history, not any saved primary's.
+    fn screen_cost(&self) -> RowCost {
+        self.debug_check_history_totals();
+        let history = self.scrollback.totals();
+        let visible = self.visible_cost();
+        RowCost {
+            capacity: visible.capacity.saturating_add(history.capacity),
+            fat: visible.fat.saturating_add(history.fat),
+            live: visible.live.saturating_add(history.live),
+        }
+    }
+
+    /// The summed [`RowCost`] of the visible rows, walked: they are at most one screen.
+    fn visible_cost(&self) -> RowCost {
+        self.visible.iter().map(RowCost::of).fold(RowCost::default(), |sum, cost| RowCost {
+            capacity: sum.capacity + cost.capacity,
+            fat: sum.fat + cost.fat,
+            live: sum.live + cost.live,
+        })
+    }
+
+    /// In debug builds, every 64th read recomputes history's totals from its rows and asserts they
+    /// match, so a mutation that bypassed them fails a debug run. Release builds read the totals.
+    // Ordering: HISTORY_CHECKS Relaxed; the counter only spaces the checks out.
+    fn debug_check_history_totals(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let checks = HISTORY_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Only every 64th read pays for the walk.
+            debug_assert!(
+                !checks.is_multiple_of(64) || self.scrollback.totals_match_rows(),
+                "history totals drifted from its rows"
+            );
+        }
     }
 
     /// Heap bytes held by cells' rare-attribute boxes across every screen.
@@ -45,21 +81,7 @@ impl Grid {
     /// on the retention sampling timer, not on a transition the user drives by
     /// launching `vim`.
     fn fat_attribute_bytes(&self) -> usize {
-        let primary = self
-            .visible
-            .iter()
-            .chain(self.scrollback.iter())
-            .map(Line::fat_attribute_bytes)
-            .sum::<usize>();
-        let saved = self.alt_screen.as_ref().map_or(0, |screen| {
-            screen
-                .visible
-                .iter()
-                .chain(screen.scrollback.iter())
-                .map(Line::fat_attribute_bytes)
-                .sum::<usize>()
-        });
-        primary.saturating_add(saved)
+        self.screens_cost().fat
     }
 
     /// Bytes held by the row containers themselves, rather than by cells.
@@ -177,26 +199,24 @@ impl Grid {
         // by which rows they hold, and attributing a shared allocation to the
         // parts that share it would be inventing a split the allocator does
         // not have.
+        let visible_rows = self.visible_cost();
         let visible = ResourceAmount {
-            bytes: self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>()
-                + self.visible.iter().map(Line::fat_attribute_bytes).sum::<usize>()
+            bytes: visible_rows.capacity
+                + visible_rows.fat
                 + self.prompts.capacity() * std::mem::size_of::<PromptRegion>()
                 + self.container_bytes(),
             items: self.visible.len(),
         };
+        self.debug_check_history_totals();
+        let history_rows = self.scrollback.totals();
         let history = ResourceAmount {
-            bytes: self.scrollback.iter().map(Line::approx_capacity_byte_size).sum::<usize>()
-                + self.scrollback.iter().map(Line::fat_attribute_bytes).sum::<usize>(),
+            bytes: history_rows.capacity + history_rows.fat,
             items: self.scrollback.len(),
         };
         let alternate = self.alt_screen.as_ref().map_or_else(ResourceAmount::default, |saved| {
-            let rows = saved.visible.iter().chain(saved.scrollback.iter());
+            let rows = saved.screen_cost();
             ResourceAmount {
-                bytes: rows
-                    .clone()
-                    .map(Line::approx_capacity_byte_size)
-                    .sum::<usize>()
-                    .saturating_add(rows.map(Line::fat_attribute_bytes).sum::<usize>()),
+                bytes: rows.capacity.saturating_add(rows.fat),
                 items: saved.visible.len().saturating_add(saved.scrollback.len()),
             }
         });
@@ -231,9 +251,7 @@ impl Grid {
         for row in &mut self.visible {
             row.shrink_capacity_to_fit();
         }
-        for row in &mut self.scrollback {
-            row.shrink_capacity_to_fit();
-        }
+        self.scrollback.shrink_rows();
         // Compaction reclaims capacity slack. When the overage is not slack it
         // reclaims nothing, and the check above would fire on every mutation
         // while the grid stayed over budget.
@@ -253,9 +271,7 @@ impl Grid {
             for row in &mut primary.visible {
                 row.shrink_capacity_to_fit();
             }
-            for row in &mut primary.scrollback {
-                row.shrink_capacity_to_fit();
-            }
+            primary.scrollback.shrink_rows();
         }
     }
 
@@ -270,9 +286,9 @@ impl Grid {
     /// be finite. `bounded_scrollback_rows` already bounds it — by cell count,
     /// which understates a row carrying rare-attribute boxes by up to 2.7x.
     ///
-    /// Drops in blocks rather than one row at a time: each check walks every
-    /// row to recompute the figure, so per-row trimming would be quadratic in a
-    /// large scrollback.
+    /// Drops in blocks rather than one row at a time. Each check reads
+    /// history's running totals and walks only the visible rows, so a block
+    /// costs the rows it drops.
     pub(super) fn trim_scrollback_to_reported_budget(&mut self, budget_bytes: usize) {
         // A grid with no history cannot trim, and one already inside the budget
         // has nothing to do.
@@ -317,18 +333,18 @@ impl Grid {
     /// steady state — measured at one change across eight adjacent steps —
     /// while a drag that ends materially smaller still returns its memory.
     fn capacity_excess_is_material(&self) -> bool {
-        let live = self
-            .visible
-            .iter()
-            .chain(self.scrollback.iter())
-            .map(Line::approx_byte_size)
-            .sum::<usize>();
+        let live = self.screen_cost().live;
         let reserved = self.retained_cell_bytes();
         let excess = reserved.saturating_sub(live);
 
         excess >= CAPACITY_EXCESS_FLOOR_BYTES && excess > live / CAPACITY_EXCESS_DIVISOR
     }
 }
+
+/// Reads of history's totals in debug builds, so the oracle in `debug_check_history_totals` walks
+/// history only on every 64th.
+#[cfg(debug_assertions)]
+static HISTORY_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 #[path = "grid_retention_tests.rs"]

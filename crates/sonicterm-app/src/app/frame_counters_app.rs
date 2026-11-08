@@ -64,6 +64,15 @@ impl super::super::App {
         }
     }
 
+    /// Record a pane creation that started at `started`, when the gate is on.
+    pub(in crate::app) fn note_pane_create(&mut self, started: Instant) {
+        if let Some(counters) = self.frame_counters.as_mut() {
+            // The gate is on, so the creation's time is recorded.
+            let elapsed_us = Instant::now().saturating_duration_since(started).as_micros();
+            counters.pane_create.record_us(u64::try_from(elapsed_us).unwrap_or(u64::MAX));
+        }
+    }
+
     /// Apply `update` to the hover counters, when the gate is on; nothing runs when it is off.
     pub(in crate::app) fn note_hover(&mut self, update: impl FnOnce(&mut HoverCounters)) {
         if let Some(counters) = self.frame_counters.as_mut() {

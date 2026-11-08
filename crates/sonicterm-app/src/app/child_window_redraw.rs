@@ -176,6 +176,14 @@ impl App {
             ));
             palette.set_tabs(&child.tabs, &self.i18n);
         }
+        // One blink phase and glide permission per frame, before the active pane is borrowed.
+        super::cursor_blink::sample_frame_cursor(
+            child,
+            &frame.guards[active_pos].1,
+            active_id,
+            frame_viewports.active.is_none(),
+            config.terminal.cursor_animation == sonicterm_cfg::config::CursorAnimation::Smooth,
+        );
         if let Some(pane) = child.panes.get_mut(&active_id) {
             // When: `panes` holds `active_id`, use the validated `active_pos` for title and overlays.
             invalidate_selection_for_content(

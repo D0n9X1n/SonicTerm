@@ -23,8 +23,19 @@ pub(super) fn sum_queues(footprints: impl IntoIterator<Item = PtyQueueFootprint>
         totals.footprint.writer_in_flight_bytes += pane.writer_in_flight_bytes;
         totals.footprint.reply_resident_bytes += pane.reply_resident_bytes;
         totals.footprint.reply_spill_bytes += pane.reply_spill_bytes;
+        totals.footprint.reply_compactions += pane.reply_compactions;
+        totals.footprint.reply_compact_us_max =
+            totals.footprint.reply_compact_us_max.max(pane.reply_compact_us_max);
+        totals.footprint.reply_lock_wait_us_max =
+            totals.footprint.reply_lock_wait_us_max.max(pane.reply_lock_wait_us_max);
         totals
     })
+}
+
+/// The process-wide reply spill pool: file bytes charged now across every pane, and its budget.
+pub(super) fn process_spill_files() -> (u64, u64) {
+    let pool = sonicterm_io::SpillPool::process_default();
+    (pool.charged(), pool.capacity())
 }
 
 impl super::App {
@@ -52,6 +63,11 @@ impl super::App {
             writer_in_flight_bytes = totals.footprint.writer_in_flight_bytes,
             reply_resident_bytes = totals.footprint.reply_resident_bytes,
             reply_spill_disk_bytes = totals.footprint.reply_spill_bytes,
+            reply_spill_file_bytes = process_spill_files().0,
+            reply_spill_budget_bytes = process_spill_files().1,
+            reply_compactions = totals.footprint.reply_compactions,
+            reply_compact_longest_us = totals.footprint.reply_compact_us_max,
+            reply_lock_wait_longest_us = totals.footprint.reply_lock_wait_us_max,
             teardown_fallbacks = fallback.count,
             teardown_fallbacks_slow = fallback.slow,
             teardown_fallback_longest_us = fallback.longest_us,

@@ -80,3 +80,20 @@ fn the_record_lists_role_grids_and_each_phase() {
     assert_eq!(value["flood"]["phases"][0]["duration_ms"], 1_000);
     assert_eq!(value["max_flood_gap_ms"], MAX_FLOOD_GAP_MS);
 }
+
+/// `advanced` counts readings that showed more lines than the reading before them: busy looks and
+/// repeated unchanged readings add nothing, and the first reading is only the baseline.
+#[test]
+fn advanced_counts_readings_past_the_previous_one() {
+    let mut watch = FloodWatch::default();
+    phase(
+        &mut watch,
+        "typing",
+        &[(0, Some(10)), (100, None), (200, Some(10)), (300, Some(25)), (400, Some(40))],
+        500,
+    );
+    phase(&mut watch, "tail", &[(0, Some(40)), (100, Some(40)), (200, None)], 300);
+    let record = watch.to_json();
+    assert_eq!(record["phases"][0]["advanced"], 2);
+    assert_eq!(record["phases"][1]["advanced"], 0, "unchanged and busy readings never advance");
+}

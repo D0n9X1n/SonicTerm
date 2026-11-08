@@ -33,7 +33,11 @@ enclosing deadline, while bounded unsettled samples still reach the summaries.
 
 For ordinary and stalled scenarios it uses the same shell, one pane, and 20
 samples per scenario. Setup, settlement and cleanup remain bounded within the
-isolated child's deadline; summaries use nearest-rank percentiles.
+isolated child's deadline; summaries use nearest-rank percentiles. Each
+scenario also reports a `measure=spawn` summary: how long opening the PTY and
+starting its process took on the calling thread, which is the event loop when a
+user or an agent opens a pane. A local Apple Silicon run gave p50 2.5 ms and p95
+4.8 ms; the Windows job's line gives ConPTY's figure.
 Every `PTY_CLOSE_BASELINE` sample and p50/p95/max summary distinguishes the
 `close_pty_pane` caller's blocking time from an independent process observer's
 settlement time, both starting at close. The caller is the headless App-owning
@@ -540,17 +544,24 @@ tests. The target-only launcher leaves dependency flags unchanged; every feature
 `macos-perf-smoke` checks the comparison tooling, not performance. It runs
 `python3 scripts/perf-compare.py --smoke`, which builds the current tree's
 `perf_scenarios` example in debug, with no base ref, worktree, or release build,
-and runs three short cases with the harness's `--short`, each in a fresh process
+and runs short cases with the harness's `--short`, each in a fresh process
 with its own scratch directory and the repository root as its working directory,
 where the App finds the tracked fonts:
 
 1. S1;
 2. S3;
-3. S1, killed like a run at its deadline as soon as its session has started.
+3. S1, killed like a run at its deadline as soon as its session has started;
+4. on macOS, S13/wide-8: eight equal panes, one flooding while another is typed into.
 
 With `--short`, every hold lasts 5 s, each scenario's closing idle phase lasts
 until at least 5 s after its workload starts instead of 60 s, and S3 floods
-`head -n 200000` and a 5 MB file. The first two cases pass when their results
+`head -n 200000` and a 5 MB file. S13/wide-8 also passes only when its result's own receipts show the layout and the
+flood worked, with no timing and no threshold: eight `role_grids` equal within one
+cell per axis (a split's rounding), a `contention.flood` phase record for `typing`
+and `tail` whose `advanced` count (readings that showed more scrolled lines than the
+reading before them) is at least 1 in each, and at least one typing sample. The
+receipts are recorded without frame counters, which the smoke's debug build lacks.
+It adds about a minute to each macOS smoke run. The first two cases pass when their results
 match the result schema, focus is safe under the rule below, and cleanup leaves
 no process. When the App reports that the configured primary font failed to
 load, the smoke fails at once. The killed case passes only when `run_step`

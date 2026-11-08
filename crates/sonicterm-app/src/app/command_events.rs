@@ -80,7 +80,7 @@ impl App {
 /// segment; returns whether that mark appeared.
 #[doc(hidden)]
 pub fn poll_command_events_for_tab_state(
-    panes: &mut HashMap<u64, PaneState>,
+    panes: &mut crate::app::PaneMap,
     tab_states: &mut [TabState],
     tabs: &mut TabBar,
     config: &Config,

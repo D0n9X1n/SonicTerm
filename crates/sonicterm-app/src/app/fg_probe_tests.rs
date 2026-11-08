@@ -225,7 +225,7 @@ fn drain_drops_mismatched_exited_and_closed_results_as_stale() {
             _ => {
                 // Keep the registration so the stored result outlives the pane, as a pane closed
                 // between the worker's write and the drain leaves it.
-                let mut closed = window.panes.remove(&pane_id).unwrap();
+                let mut closed = window.panes.remove_for_test(&pane_id).unwrap();
                 std::mem::forget(closed.fg_probe.take());
             }
         }

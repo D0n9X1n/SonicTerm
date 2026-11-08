@@ -176,6 +176,7 @@ enum DriverState {
     AtlasRetry(Box<AtlasRetryDriver>),
     Park(Park),
     Commit(Commit),
+    Resize(Resize),
 }
 
 /// S1/atlas-retry: the episode machine, what is armed for its next frame, and the scene it settled on.
@@ -301,6 +302,8 @@ struct Typing {
     role: usize,
     pane: u64,
     chars: u32,
+    /// Opens a tab after every this many characters; 0 never does.
+    spawn_every: u32,
     interval: Duration,
     settle: Duration,
     /// Where typing starts, once the prompt is in the grid.
@@ -376,6 +379,19 @@ struct Drag {
 /// How long before a status-line `select` phase ends its drag goes quiet: the pass that injects
 /// one tick per wake lags the 120 Hz schedule, so the last move can otherwise present a frame late.
 const STATUS_LINE_DRAG_SETTLE: Duration = Duration::from_millis(300);
+
+/// S3/resize: native window resizes, alternately narrower and back.
+struct Resize {
+    interval: Duration,
+    started: Instant,
+    sent: u32,
+    total: u32,
+    /// The window's inner size when the driver started, in physical pixels; even steps return to it.
+    width_px: u32,
+    height_px: u32,
+    /// How much narrower odd steps make the window, in physical pixels.
+    delta_px: u32,
+}
 
 /// S7 wheel: line ticks up through the retained history, then back down.
 struct Wheel {

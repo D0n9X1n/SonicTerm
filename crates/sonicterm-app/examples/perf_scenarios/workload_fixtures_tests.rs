@@ -169,3 +169,36 @@ fn written_fixtures_match_their_pins() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn image_burst_holds_ten_decodable_pngs_and_its_twin_the_same_text() {
+    // S11/burst's comparison against S11/burst-text is valid only if the text is identical and the
+    // burst adds exactly ten OSC 1337 images, the first past the 1,024-pixel cap so it resizes.
+    const OSC_START: &[u8] = b"\x1b]1337;File=";
+    let burst = image_burst(true);
+    let text = image_burst(false);
+    let osc_count = burst.windows(OSC_START.len()).filter(|window| *window == OSC_START).count();
+    assert_eq!(osc_count, BURST_IMAGES);
+    let mut stripped = Vec::new();
+    let mut rest = burst.as_slice();
+    let mut widths = Vec::new();
+    while let Some(start) = rest.windows(OSC_START.len()).position(|window| window == OSC_START) {
+        stripped.extend_from_slice(&rest[..start]);
+        let end = start + rest[start..].iter().position(|byte| *byte == 0x07).unwrap();
+        let payload_start = start + rest[start..end].iter().position(|byte| *byte == b':').unwrap();
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(&rest[payload_start + 1..end])
+            .unwrap();
+        // About 2 MiB each, and the IHDR width, big-endian at bytes 16..20.
+        assert!((2_000_000..2_400_000).contains(&png.len()), "{} bytes", png.len());
+        widths.push(u32::from_be_bytes(png[16..20].try_into().unwrap()));
+        // Skip the BEL and the newline the OSC ends with.
+        rest = &rest[end + 2..];
+    }
+    stripped.extend_from_slice(rest);
+    assert_eq!(stripped, text, "the burst's text is its twin's");
+    assert_eq!(widths[0], 2_048);
+    assert!(widths[1..].iter().all(|width_px| *width_px == 1_024));
+    assert_eq!(text.iter().filter(|byte| **byte == b'\n').count(), 1_000);
+}

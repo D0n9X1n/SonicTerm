@@ -474,20 +474,24 @@ class WindowsComparisonLegTests(unittest.TestCase):
         self.assertNotIn("timeout-minutes", (Path(__file__).resolve().parent.parent / ".github" / "workflows"
                                              / "perf.yml").read_text(encoding="utf-8"))
 
-    def test_only_a_release_run_adds_s13s_wide_layouts(self):
-        # Every entry carries release_scenarios: S13's three wide layouts on the shard holding S13, empty
-        # elsewhere; the comparison step appends them only when the run is not short, so a pull request
-        # never runs them and its 35-minute budget is untouched.
+    def test_only_a_release_run_adds_the_release_only_scenarios(self):
+        # Every entry carries release_scenarios: S13's three wide layouts on the shard holding S13 and, on
+        # macOS, S3/history, S3/resize, S11/burst and S11/burst-text on the shard holding S3 and S11 and
+        # S2/spawn on the one holding S2, empty elsewhere; the comparison step appends them
+        # only when the run is not short, so a pull request never runs them and its 35-minute budget is
+        # untouched.
         wide = ["S13/wide-8", "S13/wide-16", "S13/wide-32"]
-        for job_id in ("compare-macos", "compare-windows"):
+        expected_by_job = {"compare-macos": sorted(wide + ["S3/history", "S3/resize", "S11/burst", "S11/burst-text", "S2/spawn"]), "compare-windows": sorted(wide)}
+        for job_id, expected in expected_by_job.items():
             with self.subTest(job=job_id):
                 entries = self.matrix(job_id)
                 self.assertTrue(all("release_scenarios" in entry for entry in entries))
-                holders = {entry["shard"]: entry["release_scenarios"].split() for entry in entries
-                           if entry["release_scenarios"]}
-                self.assertEqual(list(holders.values()), [wide])
-                holder = next(entry for entry in entries if entry["release_scenarios"])
-                self.assertIn("S13", holder["scenarios"].split())
+                release_only = [name for entry in entries for name in entry["release_scenarios"].split()]
+                self.assertEqual(sorted(release_only), expected)
+                # Each release-only variant runs on the shard that holds its scenario's PR variants.
+                for entry in entries:
+                    for name in entry["release_scenarios"].split():
+                        self.assertIn(name.split("/")[0], entry["scenarios"].split(), name)
                 step = next(step for step in perf_workflow_fixture.load_perf_workflow()["jobs"][job_id]["steps"]
                             if step.get("name") == "Compare the base and the head")
                 self.assertEqual(step["env"]["RELEASE_SCENARIOS"], "${{ matrix.release_scenarios }}")

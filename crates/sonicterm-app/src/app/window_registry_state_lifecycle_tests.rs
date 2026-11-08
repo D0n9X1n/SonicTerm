@@ -86,7 +86,7 @@ fn split(app: &mut App, window: WindowId, pane: u64) -> bool {
     if !tab.tree.split(pane, Direction::Right, new_id) {
         return false;
     }
-    target.panes.insert(new_id, state);
+    target.panes.insert_for_test(new_id, state);
     app.reattribute_pane_owners();
     true
 }

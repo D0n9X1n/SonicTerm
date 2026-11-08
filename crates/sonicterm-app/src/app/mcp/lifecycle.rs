@@ -167,6 +167,11 @@ impl App {
     /// so the figure lags by at most one interval, like every other charge.
     // Ordering: connections Acquire reads the live count; it is a sampled gauge.
     pub(crate) fn charge_mcp_connections(&mut self) {
+        if let Some(shared) =
+            self.services.mcp_server.as_ref().map(|server| Arc::clone(&server.shared))
+        {
+            self.prune_resume_tokens(&shared.sessions.tokens);
+        }
         let Some(server) = self.services.mcp_server.as_mut() else {
             // When: no `mcp_server` runs, there is nothing to charge.
             return;
@@ -201,15 +206,23 @@ impl App {
             // When: no `mcp_server` runs, a late wake-up has nothing to answer.
             return;
         };
-        for request in shared.take_requests() {
-            if matches!(request.call, LoopCall::Notice { .. }) {
-                // A taken notice frees its slot whether it is shown or dropped as revoked.
-                shared.notice_shown();
-            }
-            let reply = self.answer_mcp_request(&shared, &request);
-            // A full or disconnected reply channel means the waiter already gave up.
-            let _ = request.reply.try_send(reply);
-        }
+        // The drain yields after its budget, so input events interleave with many agents' calls;
+        // what it did not reach goes back ahead of anything that arrived meanwhile.
+        let budget = super::dispatch::drain_budget();
+        let requests = shared.take_requests();
+        let rest = super::dispatch::drain_within(
+            requests,
+            budget,
+            super::dispatch::clock_now,
+            |request| {
+                let reply = self.answer_mcp_request(&shared, &request);
+                // A notice frees its slot once handled, shown or dropped as revoked.
+                super::dispatch::notice_handled(&shared, &request);
+                // A full or disconnected reply channel means the waiter already gave up.
+                let _ = request.reply.try_send(reply);
+            },
+        );
+        shared.requeue_front(rest);
     }
 
     /// Recheck a request against the server's current state, then do its work.
@@ -253,6 +266,9 @@ impl App {
                 self.mcp_run_start(access, *pane_id, command)
             }
             LoopCall::ClosePane { pane_id } => self.mcp_close_pane(access, *pane_id),
+            LoopCall::ClaimPanes { resume, own } => {
+                self.mcp_claim_panes(&shared.sessions.tokens, access, resume, own)
+            }
             LoopCall::ResolvePane { pane_id } => match self.mcp_resolve_pane(*pane_id) {
                 Some(entry) if readable(&entry) => LoopReply::Pane(entry),
                 Some(_) => LoopReply::Refused(

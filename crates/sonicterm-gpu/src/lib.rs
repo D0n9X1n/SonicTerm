@@ -89,6 +89,7 @@ pub mod outline_ink;
 #[doc(hidden)]
 pub mod completeness;
 
+mod cursor_glide;
 mod frame_plan;
 /// Per-row ink records that decide which rows a partial frame must emit.
 mod row_ink;

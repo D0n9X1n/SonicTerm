@@ -670,7 +670,7 @@ fn seed_tree(app: &mut App, child: bool, topology: Topology) -> Result<(WindowId
     }
     // Keep one tab/state pair while making the first press switch from the foreign pane.
     state.tabs.activate(0);
-    state.tab_states[0].tree = tree;
+    state.tab_states[0].tree = tree.into();
     state.tab_states[0].active_pane = panes[1];
     state.tab_states.truncate(1);
     let extras: Vec<_> = state.tabs.tabs().iter().skip(1).map(|tab| tab.id).collect();
@@ -678,7 +678,7 @@ fn seed_tree(app: &mut App, child: bool, topology: Topology) -> Result<(WindowId
         state.tabs.close(id);
     }
     if !matches!(topology, Topology::Nested) {
-        state.panes.remove(&panes[2]);
+        ensure!(app.__test_detach_pane(id, panes[2]), "the foreign pane leaves the window");
     }
     Ok((id, panes[..if matches!(topology, Topology::Nested) { 3 } else { 2 }].to_vec()))
 }

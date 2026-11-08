@@ -320,8 +320,22 @@ pub struct TerminalConfig {
     pub cursor_blink: bool,
     /// Cursor shape.
     pub cursor_shape: CursorShape,
+    /// How the cursor moves between cells; see [`CursorAnimation`].
+    pub cursor_animation: CursorAnimation,
     /// Whether programs may write the clipboard with OSC 52; see [`Osc52Policy`].
     pub osc52: Osc52Policy,
+}
+
+/// How the cursor moves from one cell to another.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorAnimation {
+    /// The cursor jumps to its new cell.
+    #[default]
+    None,
+    /// The cursor glides to its new cell over 90 ms, easing out; long jumps, other panes and
+    /// streaming output still jump.
+    Smooth,
 }
 
 /// Whether OSC 52 clipboard writes from programs in a pane reach the system clipboard. Reads are
@@ -578,6 +592,7 @@ impl Default for TerminalConfig {
             clickable_path_max_chars: DEFAULT_CLICKABLE_PATH_CHARS,
             cursor_blink: false,
             cursor_shape: CursorShape::default(),
+            cursor_animation: CursorAnimation::default(),
             osc52: Osc52Policy::default(),
         }
     }

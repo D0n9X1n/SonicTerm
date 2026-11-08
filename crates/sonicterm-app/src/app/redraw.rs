@@ -265,10 +265,7 @@ pub(super) struct DueWork {
 }
 
 /// Record captured pane identities through a field-split borrow, not the whole window.
-pub(super) fn settle_pane_generations(
-    panes: &mut HashMap<u64, super::PaneState>,
-    snapshot: &FrameSnapshot,
-) {
+pub(super) fn settle_pane_generations(panes: &mut crate::app::PaneMap, snapshot: &FrameSnapshot) {
     for captured in &snapshot.panes {
         if let Some(pane) = panes.get_mut(&captured.id) {
             pane.observed_output_generation = captured.generation;

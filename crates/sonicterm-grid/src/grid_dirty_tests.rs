@@ -176,7 +176,9 @@ fn every_dirty_mutation_advances_the_dirty_generation_and_clearing_does_not() {
     advances("clear_soft_wraps_in_visible_range", &mut wrapped(), &|grid| {
         grid.clear_soft_wraps_in_visible_range(0, 6)
     });
-    advances("clear_all_soft_wraps", &mut wrapped(), &|grid| grid.clear_all_soft_wraps());
+    advances("clear_soft_wraps_and_resize_history", &mut wrapped(), &|grid| {
+        grid.clear_soft_wraps_and_resize_history(None)
+    });
     advances("resize", &mut clean(), &|grid| grid.resize(8, 4));
     let mut alternate = clean();
     advances("enter_alt_screen", &mut alternate, &|grid| grid.enter_alt_screen());

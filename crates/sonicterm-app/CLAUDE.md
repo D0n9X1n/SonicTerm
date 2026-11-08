@@ -10,7 +10,10 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/mod.rs` - `App` and the window-registration
   chokepoint. `App`'s state is split across six owners, visible only inside `app`:
   `WindowRegistry` (`registry`, `window_registry_state.rs`; its `WindowMap` has no public insert or
-  remove, so windows come and go only through the checked `insert_window`/`remove_window`), `RuntimeServices` (`services`,
+  remove, so windows come and go only through the checked `insert_window`/`remove_window`; each
+  window's `panes` is a `PaneMap`, `window_registry_panes.rs`, whose panes join only through
+  `attach`/`attach_new` and leave only as a `DetachedPane` that `retire_pane` or `attach` must
+  consume), `RuntimeServices` (`services`,
   `runtime_services.rs`), `InteractionState` (`interaction`, `interaction.rs`),
   `DiagnosticsState` (`diagnostics`, `diagnostics.rs`), `FontState` (`fonts`, `font_state.rs`: font
   sizes, families, catalog) and `ReportWindows` (`reports`, `report_windows.rs`: Memory Usage,

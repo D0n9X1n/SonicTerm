@@ -236,10 +236,11 @@ fn copy_navigation_keeps_unicode_and_missing_source_state() {
         app.handle_window_copy_key(owner, &Key::Named(NamedKey::ArrowLeft));
         assert_eq!(app.registry.windows[&owner].copy_mode.as_ref(), Some(&copy));
         app.registry.windows.get_mut(&owner).unwrap().tab_states = tabs;
-        let pane = app.registry.windows.get_mut(&owner).unwrap().panes.remove(&pane_id).unwrap();
+        let pane =
+            app.registry.windows.get_mut(&owner).unwrap().panes.remove_for_test(&pane_id).unwrap();
         app.handle_window_copy_key(owner, &Key::Named(NamedKey::ArrowLeft));
         assert_eq!(app.registry.windows[&owner].copy_mode.as_ref(), Some(&copy));
-        app.registry.windows.get_mut(&owner).unwrap().panes.insert(pane_id, pane);
+        app.registry.windows.get_mut(&owner).unwrap().panes.insert_for_test(pane_id, pane);
     }
 }
 
@@ -472,7 +473,7 @@ fn window_ime_missing_owner_or_search_pane_never_falls_back() {
         let window = app.registry.windows.get_mut(&owner).unwrap();
         window.tab_states[0].search = Some(SearchState::new());
         let pane_id = window.tab_states[0].active_pane;
-        let pane = window.panes.remove(&pane_id).unwrap();
+        let pane = window.panes.remove_for_test(&pane_id).unwrap();
         app.handle_window_ime(owner, Ime::Commit("retain".into()));
         assert!(app.registry.windows[&owner].tab_states[0]
             .search
@@ -482,7 +483,7 @@ fn window_ime_missing_owner_or_search_pane_never_falls_back() {
             .is_empty());
         assert!(app.registry.windows.get_mut(&owner).unwrap().ime.take_commits().is_empty());
         assert!(app.__test_drain_pty_writes().is_empty());
-        app.registry.windows.get_mut(&owner).unwrap().panes.insert(pane_id, pane);
+        app.registry.windows.get_mut(&owner).unwrap().panes.insert_for_test(pane_id, pane);
         app.handle_window_ime(owner, Ime::Commit("next".into()));
         assert_eq!(
             app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap().query,

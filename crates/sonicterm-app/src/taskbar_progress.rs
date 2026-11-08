@@ -38,10 +38,15 @@ pub trait TaskbarProgressBackend {
 }
 
 /// The Dock badge text for `report`: the percent, `!` for an error, `…` while indeterminate and
-/// `‖` while paused; `None` clears the badge.
+/// `‖` while paused; `None` clears the badge. A normal report at 0% clears it too: programs start
+/// their progress there, and a red `0%` on the Dock reads as an alert while saying nothing.
 pub fn badge_text(report: Option<ProgressReport>) -> Option<String> {
     let report = report?;
     Some(match report.state {
+        ProgressState::Normal if report.percent == 0 => {
+            // When: a normal report is at 0%, nothing has progressed yet, so show no badge.
+            return None;
+        }
         ProgressState::Normal => format!("{}%", report.percent),
         ProgressState::Error => "!".to_owned(),
         ProgressState::Indeterminate => "…".to_owned(),

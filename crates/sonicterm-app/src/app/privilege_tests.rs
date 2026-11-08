@@ -116,7 +116,7 @@ fn inactive_tab_foreground_privilege_refreshes_without_moving_focus_or_changing_
     regular.fg_proc_cache = Some((now, process("pwsh", false)));
     let mut background = PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(80, 24)))), None);
     background.fg_proc_cache = Some((now, process("gsudo", true)));
-    let mut panes = HashMap::from([(10, regular), (20, background)]);
+    let mut panes = crate::app::PaneMap::founding(HashMap::from([(10, regular), (20, background)]));
     let tab_states =
         vec![TabState::new(PaneTree::leaf(10), 10), TabState::new(PaneTree::leaf(20), 20)];
     let mut tabs = sonicterm_ui::tabs::TabBar::new();
@@ -210,7 +210,8 @@ fn agent_markers_follow_the_panes_each_frame() {
     let mut helper = pane();
     helper.creator =
         crate::app::mcp::agents::PaneOwner::Agent(crate::app::mcp::agents::AgentSessionId::next());
-    let mut panes = HashMap::from([(10, pane()), (20, pane()), (21, helper)]);
+    let mut panes =
+        crate::app::PaneMap::founding(HashMap::from([(10, pane()), (20, pane()), (21, helper)]));
     let mut split = PaneTree::leaf(20);
     assert!(split.split(20, sonicterm_cfg::keymap::Direction::Right, 21));
     let tab_states = vec![TabState::new(PaneTree::leaf(10), 10), TabState::new(split, 20)];
@@ -223,7 +224,7 @@ fn agent_markers_follow_the_panes_each_frame() {
     assert!(tabs.tabs()[1].agent, "a split holding the agent's pane marks its tab");
     assert_eq!(tabs.tabs()[1].title, "#2 user");
 
-    panes.remove(&21);
+    panes.remove_for_test(&21);
     assert!(refresh_window_tab_privileges(&mut tabs, &tab_states, &mut panes, None, now));
     assert!(!tabs.tabs()[1].agent, "the marker goes with the last agent pane");
 }

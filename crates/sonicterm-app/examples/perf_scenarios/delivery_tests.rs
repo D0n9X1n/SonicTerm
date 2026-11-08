@@ -120,6 +120,10 @@ fn limit_exceeds_every_replayed_plan() {
     for scenario in ["S3", "S9", "S10", "S11"] {
         for variant in find(scenario).unwrap().variants {
             for short in [false, true] {
+                if scenario == "S11" && variant.starts_with("burst") {
+                    // The burst variants run only in macOS release comparisons, never replayed.
+                    continue;
+                }
                 let plan = plan_for(scenario, variant, short, Host::Windows).unwrap();
                 if !keeps_output(plan.roles[0]) {
                     assert_eq!(scenario, "S3", "{scenario}/{variant} keeps no output");

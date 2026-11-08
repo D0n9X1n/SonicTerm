@@ -38,8 +38,12 @@ cargo test -p sonicterm-grid
 - Scrollback is bounded twice: by the configured row count and by retained
   bytes. Rows carrying hyperlinks, combining marks, or non-default underlines
   cost more than plain text, so the byte budget can bite first. Enforcement
-  runs on the scroll path, amortized — keep it amortized, since the check
-  walks every row and per-scroll would make a long `cat` quadratic.
+  runs on the scroll path, amortized every 512 rows. History is a `History`
+  (`history.rs`) that keeps running totals of its rows' reserved, live and
+  rare-attribute bytes; its rows change only through `push_back`,
+  `drain_front`, `update_each` and `shrink_rows`, which keep the totals exact,
+  so a check reads them and walks only the visible rows. A debug build
+  re-sums history on every 64th read and asserts the totals match.
 - Rows are stored `Flat`, `Cluster` or `Trimmed`; read them through `iter`,
   `get` and `get_range`, never `as_vec`/`as_flat_slice`, which panic on the
   other forms. Only the scroll eject path creates `Trimmed` (`try_trim`);

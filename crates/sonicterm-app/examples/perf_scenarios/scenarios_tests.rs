@@ -47,6 +47,7 @@ pub(super) fn driver_ms(plan: &Plan, driver: Driver) -> u64 {
         Driver::Commit { steps, settle_ms } => {
             steps.last().map_or(0, |step| step.after_ms) + settle_ms
         }
+        Driver::Resize { steps, hertz, .. } => u64::from(steps) * 1_000 / u64::from(hertz),
         Driver::None | Driver::Sweep { .. } | Driver::Drag { .. } | Driver::Park { .. } => 0,
     }
 }
@@ -84,7 +85,11 @@ pub(super) fn catalog_lists_thirteen_scenarios_with_their_variants() {
         find("S13").unwrap().variants,
         ["default", "sustained-4", "wide-8", "wide-16", "wide-32"]
     );
-    assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
+    // S2/spawn is the release-only typing run that opens a tab every tenth character.
+    assert_eq!(find("S2").unwrap().variants, ["default", "flood", "spawn"]);
+    // S3/history and S3/resize are the release-only flood into budget-filling history and the
+    // resizes over a flooded history.
+    assert_eq!(find("S3").unwrap().variants, ["default", "history", "resize"]);
     assert_eq!(find("S6").unwrap().variants, ["default", "flood", "selection-drag", "rest"]);
     assert_eq!(find("S10").unwrap().variants, ["default", "sync"]);
     // The presenter variants and the role program's exit are Windows runs; the catalog lists them everywhere.
@@ -178,9 +183,11 @@ pub(super) fn every_plan_ends_with_a_safe_end_checkpoint() {
 pub(super) fn trailing_idle_phase_appears_only_where_the_plan_ends_early() {
     // Plans that already pass 60 s after GO end with their own last phase; the rest idle to it.
     for plan in all_plans() {
-        // S1/atlas-retry ends when its episodes do, well before GO + 60 s, so it idles to it.
+        // S1/atlas-retry ends when its episodes do, well before GO + 60 s, so it idles to it, as
+        // S11's burst variants do after their print.
         let long_on_its_own = matches!(plan.scenario, "S1" | "S3" | "S4" | "S5" | "S11" | "S12")
-            && !(plan.scenario == "S1" && plan.variant == "atlas-retry");
+            && !(plan.scenario == "S1" && plan.variant == "atlas-retry")
+            && !(plan.scenario == "S11" && plan.variant.starts_with("burst"));
         let last_phase = plan
             .steps
             .iter()
@@ -238,10 +245,18 @@ pub(super) fn idle_and_streaming_plans_hold_for_their_named_durations() {
     assert_eq!(phase(&background, "stream").end, PhaseEnd::Hold(60_000));
     for plan in all_plans() {
         assert!(plan.focused, "{} receives Focused(true) before GO", plan.scenario);
-        // S1/status-line keeps 10,000 rows so its linked history passes the byte budget.
-        let long =
-            plan.scenario == "S7" || (plan.scenario == "S1" && plan.variant == "status-line");
-        let expected_rows = if long { 10_000 } else { 1_000 };
+        // S1/status-line keeps 10,000 rows so its linked history passes the byte budget, S3/resize
+        // keeps them for its resizes to pass over, and S3/history asks for more than the budget holds.
+        let long = plan.scenario == "S7"
+            || (plan.scenario == "S1" && plan.variant == "status-line")
+            || (plan.scenario == "S3" && plan.variant == "resize");
+        let expected_rows = if plan.scenario == "S3" && plan.variant == "history" {
+            100_000
+        } else if long {
+            10_000
+        } else {
+            1_000
+        };
         assert_eq!(plan.scrollback_rows, expected_rows, "{}", plan.scenario);
     }
 }
@@ -252,14 +267,16 @@ pub(super) fn typing_plans_type_two_hundred_characters_at_ten_per_second() {
     let typing = plan("S2", "default", false).unwrap();
     assert_eq!(typing.roles, [Workload::IdleShell]);
     assert_eq!(phase_names(&typing), ["typing", "idle"]);
-    let driver = Driver::Typing { role: 0, chars: 200, per_second: 10, settle_ms: 2_000 };
+    let driver =
+        Driver::Typing { role: 0, chars: 200, per_second: 10, settle_ms: 2_000, spawn_every: 0 };
     assert_eq!(phase(&typing, "typing").driver, driver);
     assert_eq!(phase(&typing, "typing").end, PhaseEnd::DriverDone);
     let flood = plan("S2", "flood", false).unwrap();
     let flooding = Workload::Flood { lines: 2_000_000, bulk_bytes: 50 << 20 };
     assert_eq!(flood.roles, [flooding, Workload::IdleShell]);
     assert_eq!(flood.setup, [SetupAction::SplitRight]);
-    let typed_into_split = Driver::Typing { role: 1, chars: 200, per_second: 10, settle_ms: 2_000 };
+    let typed_into_split =
+        Driver::Typing { role: 1, chars: 200, per_second: 10, settle_ms: 2_000, spawn_every: 0 };
     assert_eq!(phase(&flood, "typing").driver, typed_into_split);
     // --short shortens holds, not the number of latency samples.
     assert_eq!(phase(&plan("S2", "default", true).unwrap(), "typing").driver, driver);
@@ -338,6 +355,10 @@ pub(super) const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S10/default", "stream", "sustained", None),
     ("S10/sync", "idle", "hold", None),
     ("S10/sync", "stream", "sustained", None),
+    ("S11/burst", "idle", "hold", None),
+    ("S11/burst", "print", "transition", Some("sentinel-parsed")),
+    ("S11/burst-text", "idle", "hold", None),
+    ("S11/burst-text", "print", "transition", Some("sentinel-parsed")),
     ("S11/default", "idle", "hold", None),
     ("S11/default", "image", "transition", Some("image-registered-then-presented")),
     ("S11/gdi", "idle", "hold", None),
@@ -373,10 +394,17 @@ pub(super) const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S13/wide-32", "typing", "sustained", None),
     ("S2/default", "idle", "hold", None),
     ("S2/default", "typing", "sustained", None),
+    ("S2/spawn", "idle", "hold", None),
+    ("S2/spawn", "typing", "sustained", None),
     ("S2/flood", "idle", "hold", None),
     ("S2/flood", "typing", "sustained", None),
     ("S3/default", "flood", "sustained", None),
     ("S3/default", "idle", "hold", None),
+    ("S3/history", "flood", "sustained", None),
+    ("S3/history", "idle", "hold", None),
+    ("S3/resize", "flood", "sustained", None),
+    ("S3/resize", "resize", "sustained", None),
+    ("S3/resize", "idle", "hold", None),
     ("S4/default", "stream", "sustained", None),
     ("S5/default", "stream", "hold", None),
     ("S5/gdi", "stream", "hold", None),

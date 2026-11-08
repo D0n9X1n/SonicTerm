@@ -53,7 +53,7 @@ fn add_visible_pane(app: &mut App, id: WindowId) -> u64 {
         sonicterm_cfg::keymap::Direction::Right,
         new_id
     ));
-    window.panes.insert(new_id, PaneState::new(Arc::new(Mutex::new(parser)), None));
+    window.panes.insert_for_test(new_id, PaneState::new(Arc::new(Mutex::new(parser)), None));
     new_id
 }
 

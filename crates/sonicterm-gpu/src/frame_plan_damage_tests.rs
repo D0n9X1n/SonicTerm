@@ -190,7 +190,7 @@ fn cursor_class_changes_damage_only_the_cursor_row() {
             after.window.cursor_cell = None;
         },
         |after| after.window.cursor_shape = 1,
-        |after| after.window.cursor_blink = true,
+        |after| after.window.cursor_blink_off = true,
     ];
     for change in changes {
         let mut after = cursor_facts();
@@ -207,6 +207,33 @@ fn cursor_class_changes_damage_only_the_cursor_row() {
         };
         let plan = transition(cursor_facts(), after, live_pane(7, 1));
         assert_eq!(plan.damage, PixelRect { x: 0, y: 10, w: 100, h: 40 });
+    }
+}
+
+/// A gliding cursor crosses rows and columns between frames, so a frame that starts, continues or
+/// ends a glide damages the whole active pane, never just the cursor's row.
+#[test]
+fn a_glide_frame_damages_the_active_pane() {
+    let glide = Some(crate::cursor_glide::GlideCell::at(0, 1, 1));
+    let starting = |after: &mut FrameFacts| after.window.cursor_glide = glide;
+    let mut gliding = cursor_facts();
+    gliding.window.cursor_glide = glide;
+    for (before, after) in [
+        (cursor_facts(), {
+            let mut facts = cursor_facts();
+            starting(&mut facts);
+            facts
+        }),
+        (gliding.clone(), cursor_facts()),
+    ] {
+        let plan = transition(before, after, live_pane(7, 1));
+        assert!(plan.change.cursor && !plan.change.full);
+        let row = row_rect(1);
+        assert!(
+            plan.damage.h > row.h,
+            "the glide damages more than the cursor row: {:?}",
+            plan.damage
+        );
     }
 }
 
@@ -463,8 +490,12 @@ fn each_window_field_has_exactly_its_class() {
         ),
         (|window| window.cursor_visible = true, narrow(|class| class.cursor = true)),
         (|window| window.cursor_shape = 1, narrow(|class| class.cursor = true)),
-        (|window| window.cursor_blink = true, narrow(|class| class.cursor = true)),
+        (|window| window.cursor_blink_off = true, narrow(|class| class.cursor = true)),
         (|window| window.cursor_cell = cursor_at(0), narrow(|class| class.cursor = true)),
+        (
+            |window| window.cursor_glide = Some(crate::cursor_glide::GlideCell::at(0, 1, 1)),
+            narrow(|class| class.cursor = true),
+        ),
         (|window| window.window_focused = true, narrow(|class| class.focus = true)),
         (|window| window.tab_hash = 1, narrow(|class| class.tab_band = true)),
         (|window| window.hover_tab = 1, narrow(|class| class.tab_band = true)),
@@ -558,7 +589,7 @@ fn identity_destructures_name_every_field() {
         status_hash: _,
         viewport_top_abs: _,
         cursor_shape: _,
-        cursor_blink: _,
+        cursor_blink_off: _,
         window_focused: _,
         pane_focus_flash_bucket: _,
         hover_tab: _,
@@ -573,6 +604,7 @@ fn identity_destructures_name_every_field() {
         renderer_hash: _,
         overlay_active: _,
         cursor_cell: _,
+        cursor_glide: _,
     } = WindowIdentity::default();
     let PaneIdentity {
         id: _,

@@ -114,11 +114,15 @@ impl Grid {
             for row in &mut self.visible {
                 row.resize(cols as usize, Cell::default());
             }
-            for row in &mut self.scrollback {
-                row.resize(cols as usize, Cell::default());
-            }
             if saved.cols != self.cols {
-                self.content_changed_scrollback_all();
+                // One pass resizes and restamps history; no wrap is cleared here, so a pass that
+                // changed only the height leaves history untouched.
+                let seq = self.content_seq.saturating_add(1).min(MAX_LINE_CONTENT_SEQ);
+                Self::fused_history_pass(&mut self.scrollback, Some(cols as usize), seq);
+                if !self.scrollback.is_empty() {
+                    // The pass stamped history with `seq`; claim it.
+                    self.content_seq = seq;
+                }
             }
             if (rows as usize) > self.visible.len() {
                 while self.visible.len() < rows as usize {
@@ -148,7 +152,6 @@ impl Grid {
             // When: dimensions are unchanged, preserve storage and revision without reflowing rows.
             return;
         }
-        self.clear_all_soft_wraps();
         self.scrollback_limit = if self.is_alt() {
             0
         } else {
@@ -170,15 +173,7 @@ impl Grid {
         for row in &mut self.visible {
             row.resize(cols as usize, Cell::default());
         }
-        // keep scrollback consistent with the new column count.
-        // `Line::resize` is now Cluster-preserving, so uniform blank
-        // scrollback rows (the bulk of typical scrollback) stay compressed.
-        if cols != self.cols {
-            for row in &mut self.scrollback {
-                row.resize(cols as usize, Cell::default());
-            }
-            self.content_changed_scrollback_all();
-        }
+        let history_cols = (cols != self.cols).then_some(cols as usize);
         if rows > self.rows {
             for _ in self.rows..rows {
                 self.visible.push_back(make_row(cols));
@@ -194,6 +189,11 @@ impl Grid {
         self.dirty_rows.resize(rows as usize, true);
         self.dirty_stamps.resize(rows as usize, 0);
         self.row_content_seq.resize(rows as usize, self.content_seq);
+        // One pass over history clears every wrap boundary and, on a column change, resizes each
+        // row and restamps it. It runs after the drain, so evicted rows are never walked, and after
+        // the row metadata matches the new height. `Line::resize` is Cluster-preserving and O(1)
+        // for a Trimmed row, so uniform blank history (the bulk of it) stays compressed and cheap.
+        self.clear_soft_wraps_and_resize_history(history_cols);
         self.mark_all();
         self.content_changed_all();
         if let Some(alt) = self.alt_screen.as_mut() {
@@ -208,3 +208,7 @@ impl Grid {
 #[cfg(test)]
 #[path = "grid_screens_tests.rs"]
 mod grid_screens_tests;
+
+#[cfg(test)]
+#[path = "grid_screens_resize_tests.rs"]
+mod grid_screens_resize_tests;

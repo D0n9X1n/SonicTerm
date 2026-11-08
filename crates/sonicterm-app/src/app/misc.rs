@@ -297,14 +297,16 @@ impl App {
         launch: super::pane_launch::PaneLaunch,
     ) {
         let pane_id = next_pane_id();
+        let create_started = std::time::Instant::now();
         let pane = self.spawn_pane(pane_id, &launch);
+        self.note_pane_create(create_started);
         if let Some(main) = self.main_mut() {
-            main.panes.insert(pane_id, pane);
+            main.panes.attach_new(pane_id, pane);
             main.tabs.push(Tab::new(title));
             main.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         } else {
             // When: main_mut has no destination, retire the spawned pane rather than dropping native custody inline.
-            self.retire_pane(pane);
+            self.retire_pane(crate::app::DetachedPane::unattached(pane_id, pane));
         }
         self.resize_visible_panes();
     }
@@ -475,6 +477,8 @@ impl App {
             self.note_pane_input(source_pane, InputState::Blocked(1));
             return (0, Vec::new());
         }
+        // A paste restarts the source window's blink shown, even into a program that echoes nothing.
+        let _ = self.note_cursor_activity(source_pane);
         let mut destinations = vec![source_pane];
         if matches!(self.interaction.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
         {

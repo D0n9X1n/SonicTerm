@@ -65,6 +65,7 @@ fn pinned() -> PinnedRun {
         prompt_after_end: false,
         output_authenticated: false,
         end_authenticated: false,
+        exit_source: None,
     }
 }
 

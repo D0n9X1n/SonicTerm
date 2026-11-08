@@ -10,7 +10,7 @@ use std::time::Duration;
 use super::*;
 
 /// The pwsh to test: `SONICTERM_TEST_PWSH` when set, else `pwsh` on `PATH`.
-fn pwsh() -> Option<String> {
+pub(super) fn pwsh() -> Option<String> {
     let candidate = std::env::var("SONICTERM_TEST_PWSH").unwrap_or_else(|_| "pwsh".to_owned());
     let found = Command::new(&candidate)
         .args(["-NoLogo", "-NoProfile", "-Command", "exit 0"])
@@ -23,7 +23,7 @@ fn pwsh() -> Option<String> {
 
 /// Run `pwsh` interactively in a pseudo-terminal, load `snippet` from a file, type each of
 /// `lines` (raw bytes, so a test can send Ctrl+C), and return everything it wrote.
-fn drive_pwsh(pwsh: &str, prehook: &str, snippet: &str, lines: &[&[u8]]) -> String {
+pub(super) fn drive_pwsh(pwsh: &str, prehook: &str, snippet: &str, lines: &[&[u8]]) -> String {
     let (mut controller, terminal) = open_pty();
     set_window_size(&terminal);
     let stdio = |fd: &OwnedFd| Stdio::from(fd.try_clone().expect("dup the terminal side"));
@@ -140,6 +140,26 @@ fn an_interactive_pwsh_emits_tokened_markers_in_order() {
         ends,
         [Some(3), Some(3), Some(0), Some(1), None, None, Some(1), Some(0), Some(0), Some(0)],
         "the D statuses: {found:?}"
+    );
+    // Each D names which reading gave its code: the child's native code, PowerShell's own
+    // failure, `$?` holding, and none for a D with no code.
+    let sources: Vec<Option<&str>> =
+        found.iter().filter(|marker| marker.starts_with('D')).map(|end| source(end)).collect();
+    assert_eq!(
+        sources,
+        [
+            Some("native"),
+            Some("native"),
+            Some("status"),
+            Some("powershell"),
+            None,
+            None,
+            Some("powershell"),
+            Some("status"),
+            Some("status"),
+            Some("status"),
+        ],
+        "the D sources: {found:?}"
     );
     assert!(output.contains("seen=[3]"), "a command saw a changed $LASTEXITCODE: {output:?}");
     // The cancelled line's D follows its prompt's A B with no C between: `run_command` reads it

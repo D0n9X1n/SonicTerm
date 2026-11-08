@@ -68,3 +68,35 @@ fn the_last_dropped_hold_frees_the_tap_at_the_next_batch() {
     parser.advance(b"y");
     assert_eq!(parser.output_tap_since(0), None);
 }
+
+/// An incremental read appends only what was printed since `next`, and its offsets chain: each
+/// read's `end` is the next read's `from`.
+#[test]
+fn an_append_read_copies_only_new_text() {
+    let mut parser = parser();
+    let hold = parser.arm_output_tap();
+    parser.advance(b"one ");
+    let mut out = String::new();
+    let first = parser.output_tap_append(hold.start, &mut out).unwrap();
+    assert_eq!((out.as_str(), first.from, first.end, first.gap), ("one ", 0, 4, false));
+    parser.advance("två\n".as_bytes());
+    out.clear();
+    let second = parser.output_tap_append(first.end, &mut out).unwrap();
+    assert_eq!((out.as_str(), second.from, second.end), ("två\n", 4, 8));
+    out.clear();
+    let idle = parser.output_tap_append(second.end, &mut out).unwrap();
+    assert_eq!((out.as_str(), idle.from, idle.end), ("", 8, 8), "nothing new, nothing copied");
+}
+
+/// When the ring dropped text at `next`, the read clears the caller's text, refills it from the
+/// oldest retained character and reports the gap.
+#[test]
+fn an_append_read_past_a_gap_restarts_from_the_retained_ring() {
+    let mut parser = parser();
+    let hold = parser.arm_output_tap_with_capacity(8);
+    parser.advance(b"abcdefghijkl");
+    let mut out = String::from("stale");
+    let read = parser.output_tap_append(hold.start, &mut out).unwrap();
+    assert!(read.gap);
+    assert_eq!((out.as_str(), read.from, read.end, read.retained_start), ("efghijkl", 4, 12, 4));
+}

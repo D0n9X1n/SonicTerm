@@ -708,3 +708,30 @@ fn pane_rect_for_matches_the_full_child_layout() {
     }
     assert_eq!(App::pane_rect_for(window, 123_456), None);
 }
+
+/// A resize records its parser hold once per pane only while the counters are on: a pane with
+/// counters gets one `resize_hold` sample per resize, and a pane without them records nothing.
+#[test]
+fn a_resize_records_its_parser_hold_only_with_counters() {
+    let stats = std::sync::Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let pool = crate::app::media::InlineMediaPool::new();
+    let pane_with = |counted: bool| {
+        let parser = std::sync::Arc::new(parking_lot::Mutex::new(sonicterm_vt::vt::Parser::new(
+            sonicterm_grid::grid::Grid::new(10, 4),
+        )));
+        let mut pane = PaneState::new_with_media_pool(parser, None, &pool);
+        pane.frame_counters = counted.then(|| {
+            crate::app::frame_counters::PaneFrameCounters::new(std::sync::Arc::clone(&stats))
+        });
+        pane
+    };
+    let panes: HashMap<u64, PaneState> = [(1, pane_with(true)), (2, pane_with(false))].into();
+    let rect = sonicterm_ui::pane::Rect::new(0.0, 0.0, 200.0, 100.0);
+    for width_px in [200.0, 160.0] {
+        let rects = [(1, sonicterm_ui::pane::Rect { w: width_px, ..rect }), (2, rect)];
+        resize_panes_to_rects(&panes, &rects, 10.0, 20.0, [0.0; 4]);
+    }
+    // Two resizes of the counted pane; the uncounted pane shares the stats and adds nothing.
+    assert_eq!(stats.resize_hold.snapshot().count(), 2);
+    assert_eq!(panes[&1].parser.lock().grid().cols, 16);
+}

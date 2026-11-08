@@ -21,7 +21,7 @@ pub struct TabAttachmentError {
     /// Unchanged pane tree, focus, zoom, and tab-local state.
     pub state: TabState,
     /// Live panes, PTYs, and original charges retained on refusal.
-    pub panes: HashMap<u64, PaneState>,
+    pub panes: super::DetachedPanes,
 }
 
 impl std::fmt::Debug for TabAttachmentError {
@@ -39,7 +39,7 @@ impl App {
     pub fn detach_tab_state(
         &mut self,
         index: usize,
-    ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
+    ) -> Option<(Tab, TabState, super::DetachedPanes)> {
         self.detach_from_child(self.registry.main_window_id?, index)
     }
 
@@ -49,7 +49,7 @@ impl App {
         index: usize,
         tab: Tab,
         state: TabState,
-        panes: HashMap<u64, PaneState>,
+        panes: super::DetachedPanes,
     ) -> Result<(), Box<TabAttachmentError>> {
         let Some(target) = self.registry.main_window_id else {
             // When: main_window_id is absent, return custody instead of dropping the caller's PTYs.
@@ -68,7 +68,7 @@ impl App {
         &mut self,
         source: WindowId,
         index: usize,
-    ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
+    ) -> Option<(Tab, TabState, super::DetachedPanes)> {
         let window = self.registry.windows.get_mut(&source)?;
         let tab = window.tabs.tabs().get(index)?.clone();
         let state = window.tab_states.get(index)?;
@@ -77,12 +77,11 @@ impl App {
             // When: leaves names an id absent from window.panes, refuse before detaching a partial tab.
             return None;
         }
-        let mut panes = HashMap::with_capacity(leaves.len());
+        let mut panes = super::DetachedPanes::default();
         let state = window.tab_states.remove(index);
         window.tabs.close(tab.id);
         for id in leaves {
-            let pane = window.remove_pane(id).expect("validated live leaf");
-            panes.insert(id, pane);
+            panes.push(window.remove_pane(id).expect("validated live leaf"));
         }
         Some((tab, state, panes))
     }
@@ -94,7 +93,7 @@ impl App {
         index: usize,
         tab: Tab,
         state: TabState,
-        panes: HashMap<u64, PaneState>,
+        panes: super::DetachedPanes,
     ) -> Result<(), Box<TabAttachmentError>> {
         self.attach_to_window(target, index, tab, state, panes)
     }
@@ -116,7 +115,7 @@ impl App {
 
     pub(super) fn transfer_pane_owners(
         &self,
-        panes: &mut HashMap<u64, PaneState>,
+        panes: &mut super::DetachedPanes,
         target: Option<ResourceOwnerId>,
     ) -> Result<(), TransferError> {
         let Some(target) = target else {
@@ -133,8 +132,8 @@ impl App {
             }
             return Ok(());
         };
-        let mut ids: Vec<_> = panes.keys().copied().collect();
-        ids.sort_unstable();
+        // Held ascending by id, so owners are created in a stable order.
+        let ids: Vec<_> = panes.keys().copied().collect();
         let mut provisional = HashMap::with_capacity(ids.len());
         for id in ids {
             let pane = &panes[&id];
@@ -161,7 +160,7 @@ impl App {
         }
         let transfers = panes
             .iter_mut()
-            .filter_map(|(id, pane)| provisional.get(id).map(|owner| (pane, owner.id())))
+            .filter_map(|(id, pane)| provisional.get(&id).map(|owner| (pane, owner.id())))
             .flat_map(|(pane, owner)| pane.charges.values_mut().map(move |charge| (charge, owner)));
         sonicterm_resource::CommittedReservation::transfer_many(transfers).map_err(|error| {
             tracing::warn!(
@@ -183,7 +182,7 @@ impl App {
         index: usize,
         tab: Tab,
         state: TabState,
-        mut panes: HashMap<u64, PaneState>,
+        mut panes: super::DetachedPanes,
     ) -> Result<(), Box<TabAttachmentError>> {
         let prepare = (|| {
             self.validate_transfer_destination(target)?;
@@ -224,7 +223,8 @@ impl App {
         for pane in panes.values() {
             *pane.redraw_target.lock() = Some(target);
         }
-        window.panes.extend(panes);
+        let refused = window.panes.attach_set(panes);
+        assert_eq!(refused.len(), 0, "the moved ids were checked absent above");
         window.tabs = tabs;
         window.tab_states.insert(index, state);
         if self.registry.main_window_id == Some(target) {
@@ -289,7 +289,9 @@ pub fn refresh_active_tab_title(
 /// Per-tab state. The `TabBar` keeps title/order; this struct tracks the
 /// pane tree and the focused leaf inside the tab.
 pub struct TabState {
-    pub tree: PaneTree,
+    /// The pane tree; changed only through its own methods, each of which draws a fresh layout
+    /// revision.
+    pub tree: super::tab_tree::TabTree,
     pub active_pane: u64,
     pub search: Option<SearchState>,
     pub command: CommandStatus,
@@ -302,13 +304,13 @@ impl TabState {
     /// freshly created tab reports nothing running until its shell says so.
     #[doc(hidden)]
     pub fn new(tree: PaneTree, active_pane: u64) -> Self {
-        Self { tree, active_pane, search: None, command: CommandStatus::Idle }
+        Self { tree: tree.into(), active_pane, search: None, command: CommandStatus::Idle }
     }
 }
 
 impl sonicterm_ui::broadcast::BroadcastTab for TabState {
     fn pane_tree(&self) -> &PaneTree {
-        &self.tree
+        self.tree.tree()
     }
 }
 

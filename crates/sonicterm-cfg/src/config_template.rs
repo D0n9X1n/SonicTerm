@@ -132,6 +132,8 @@ clickable_path_max_chars = {clickable_path_max_chars}
 # Cursor behavior. Shape: "block", "bar", or "underline".
 cursor_blink = false
 cursor_shape = "block"
+# Cursor movement: "none" jumps, "smooth" glides to the new cell over 90 ms.
+cursor_animation = "none"
 # Programs may set the clipboard with OSC 52: "allow" or "deny".
 osc52 = "allow"
 

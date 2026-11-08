@@ -32,6 +32,13 @@ struct PhaseWatch {
 }
 
 impl PhaseWatch {
+    /// How many readings showed more lines than the reading before them: the flood's progress
+    /// counted with no timing, so a functional check can assert it ran without a timing bound.
+    fn advanced(&self) -> usize {
+        let readings: Vec<u64> = self.looks.iter().filter_map(|&(_, lines)| lines).collect();
+        readings.windows(2).filter(|pair| pair[1] > pair[0]).count()
+    }
+
     /// The longest stretch from the phase's start to its end with no reading that advanced: the
     /// first reading only sets the baseline, so the stretch before the first advance counts too.
     fn longest_gap_ms(&self) -> Option<u64> {
@@ -95,6 +102,7 @@ impl FloodWatch {
                     "duration_ms": phase.ended_ms,
                     "looks": phase.looks.len(),
                     "busy": busy,
+                    "advanced": phase.advanced(),
                     "longest_gap_ms": phase.longest_gap_ms(),
                 })
             })

@@ -204,7 +204,7 @@ fn a_removed_pane_keeps_its_slot_until_the_worker_handle_drops() {
         app.pane_by_id(pane_id).expect("seeded pane"),
     );
     let weak = Arc::downgrade(&watch_of(&app, pane_id));
-    let removed = app.main_mut().and_then(|main| main.panes.remove(&pane_id));
+    let removed = app.main_mut().and_then(|main| main.panes.remove_for_test(&pane_id));
     drop(removed.expect("the pane was in the main window"));
     assert_eq!(app.take_echo_watch(pane_id, token), TakeOutcome::NoPane);
     assert!(weak.upgrade().is_some(), "the worker's handles still own the watch");

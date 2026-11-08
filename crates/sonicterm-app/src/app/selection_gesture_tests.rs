@@ -47,7 +47,7 @@ fn split_pane(app: &mut App, window: WindowId, focus: u64, dir: Direction) -> u6
     let shared = Arc::new(Mutex::new(parser));
     let pane = PaneState::new_with_media_pool(shared, None, &app.inline_media_pool);
     let state = app.registry.windows.get_mut(&window).unwrap();
-    state.panes.insert(pane_id, pane);
+    state.panes.insert_for_test(pane_id, pane);
     assert!(state.tab_states[0].tree.split(focus, dir, pane_id));
     pane_id
 }
@@ -577,7 +577,7 @@ fn production_motion_cancels_a_gesture_whose_pane_is_gone_without_a_layout() {
         assert!(state.begin_local_selection(left, (0, 0), 1));
         assert!(!state.extend_local_selection(10.0, 10.0), "no renderer has drawn yet");
         assert!(state.pointer_gesture.is_some(), "a missing layout alone only skips the move");
-        drop(state.panes.remove(&left));
+        drop(state.panes.remove_for_test(&left));
         assert!(!state.extend_local_selection(10.0, 10.0));
         assert_eq!(state.pointer_gesture, None, "a gone press pane cancels without a layout");
     }

@@ -159,6 +159,121 @@ pub(super) fn method_calls(source: &str, names: &[&str]) -> Option<usize> {
     Some(counter.count)
 }
 
+/// Finds ways around the pane-membership API: writing a window's `panes` directly, or replacing a
+/// pane's state in place, outside test-only items. It sees only the patterns syn can name: a
+/// receiver spelled `.panes`, a `get_mut` call, and a `mem` function by its path.
+struct MembershipBypass {
+    /// Each bypass found, as a short description.
+    found: Vec<String>,
+    /// How many enclosing items are test-only.
+    gated_depth: usize,
+}
+
+impl MembershipBypass {
+    /// Whether `expr` ends in a `.panes` field, as `window.panes` or `self.registry.x.panes`.
+    fn is_panes(expr: &syn::Expr) -> bool {
+        let expr = match expr {
+            syn::Expr::Reference(reference) => reference.expr.as_ref(),
+            other => other,
+        };
+        matches!(expr, syn::Expr::Field(field) if matches!(&field.member, syn::Member::Named(name) if name == "panes"))
+    }
+
+    /// Whether `expr` is a `get_mut(..)` call, whose result is a pane's state when on `panes`.
+    fn is_get_mut(expr: &syn::Expr) -> bool {
+        let expr = match expr {
+            syn::Expr::Reference(reference) => reference.expr.as_ref(),
+            other => other,
+        };
+        let expr = match expr {
+            syn::Expr::MethodCall(call) if call.method == "unwrap" || call.method == "expect" => {
+                call.receiver.as_ref()
+            }
+            other => other,
+        };
+        matches!(expr, syn::Expr::MethodCall(call) if call.method == "get_mut" && Self::is_panes(&call.receiver))
+    }
+
+    /// Run the visit inside `attributes`' test gate.
+    fn gated(&mut self, attributes: &[syn::Attribute], inner: impl FnOnce(&mut Self)) {
+        let gated = usize::from(requires_test(attributes));
+        self.gated_depth += gated;
+        inner(self);
+        self.gated_depth -= gated;
+    }
+}
+
+impl<'ast> Visit<'ast> for MembershipBypass {
+    fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
+        if self.gated_depth == 0 && Self::is_panes(&assign.left) {
+            self.found.push("assigns `.panes`".into());
+        }
+        syn::visit::visit_expr_assign(self, assign);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        let name = call.method.to_string();
+        if self.gated_depth == 0
+            && Self::is_panes(&call.receiver)
+            && ["insert", "remove", "drain", "clear", "extend", "retain", "entry"]
+                .contains(&name.as_str())
+        {
+            self.found.push(format!("calls `.panes.{name}`"));
+        }
+        if self.gated_depth == 0 && name == "into_retired" {
+            self.found.push("calls `into_retired`".into());
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = call.func.as_ref() {
+            let last = path.path.segments.last().map(|segment| segment.ident.to_string());
+            let mem = path.path.segments.iter().any(|segment| segment.ident == "mem")
+                || path.path.segments.len() == 1;
+            let name = last.unwrap_or_default();
+            let first = call.args.first();
+            if self.gated_depth == 0 && mem && ["take", "replace", "swap"].contains(&name.as_str())
+            {
+                if first.is_some_and(Self::is_panes) {
+                    self.found.push(format!("`mem::{name}` on `.panes`"));
+                }
+                if first.is_some_and(Self::is_get_mut) {
+                    self.found.push(format!("`mem::{name}` on a pane's `get_mut`"));
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        self.gated(&item.attrs, |visitor| syn::visit::visit_item_impl(visitor, item));
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        self.gated(&item.attrs, |visitor| syn::visit::visit_item_fn(visitor, item));
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        self.gated(&item.attrs, |visitor| syn::visit::visit_impl_item_fn(visitor, item));
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        self.gated(&item.attrs, |visitor| syn::visit::visit_item_mod(visitor, item));
+    }
+}
+
+/// Each way `source` goes around the pane-membership API outside test-only items: assigning or
+/// `mem::take`/`replace`/`swap` on `.panes`, a raw `.panes.insert`/`remove`/`drain`/`clear`
+/// (and `extend`, `retain`, `entry`), `mem::replace`/`swap` on a pane's `get_mut`, and any
+/// `into_retired` call. `None` when `source` does not parse.
+pub(super) fn pane_membership_bypasses(source: &str) -> Option<Vec<String>> {
+    let file = syn::parse_file(source).ok()?;
+    let mut visitor = MembershipBypass { found: Vec::new(), gated_depth: 0 };
+    visitor.visit_file(&file);
+    Some(visitor.found)
+}
+
 /// Every `fn` (free or in an `impl`) and named struct field in `source`, with whether it is
 /// compiled only for tests. `None` when `source` does not parse.
 pub(super) fn source_items(source: &str) -> Option<Vec<SourceItem>> {

@@ -13,10 +13,13 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
+
+use crate::reply_spill_pool::{SpillCharge, SpillPool};
 
 const RAM_BYTES: usize = 64 * 1024;
 const CHUNK_BYTES: usize = 32 * 1024;
@@ -36,16 +39,35 @@ const COMPACT_CHUNK_BYTES: usize = 64 * 1024;
 /// is at most 32 KiB and remains indivisible when interleaved with UI input.
 /// Admission may perform synchronous file I/O, but never waits for native PTY
 /// capacity: one record write plus, amortised, one copy of each live byte per compaction.
-/// Live spilled bytes are capped at [`SPILL_BUDGET_BYTES`]; a submission past the cap fails with
-/// a [`ReplyBudgetExceeded`] error ([`is_budget_refusal`]), is dropped alone, and leaves the spool
-/// usable.
+/// Live spilled bytes are capped at [`SPILL_BUDGET_BYTES`], and every spool's file length counts
+/// against one shared [`SpillPool`]; a submission past either fails with a [`ReplyBudgetExceeded`]
+/// error ([`is_budget_refusal`]), is dropped alone, and leaves the spool usable.
 /// Writer reads use at most 32 KiB plus a header of scratch and a 32 KiB output.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PtyReplySender {
     state: Arc<Mutex<SpoolState>>,
     closed: Arc<AtomicBool>,
     wake: Sender<()>,
     stats: Arc<SpoolCounters>,
+    /// Read only when a send finds the lock taken; the spool's compactions read the same clock.
+    clock: SpoolClock,
+}
+
+impl std::fmt::Debug for PtyReplySender {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("PtyReplySender").field("stats", &self.stats).finish_non_exhaustive()
+    }
+}
+
+/// The clock a spool times its rare paths with: compaction, and a send that found the lock taken.
+type SpoolClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// A compaction slower than this logs one warning per pane.
+const SLOW_COMPACTION: Duration = Duration::from_millis(50);
+
+/// Whole microseconds in `duration`, saturating.
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 /// Backlog counters shared by every clone of one pane's sender.
@@ -60,6 +82,14 @@ struct SpoolCounters {
     /// Bytes the resident tier holds allocated after the last operation (its capacity, which
     /// outlives a drain), published like `live_bytes`.
     resident_bytes: AtomicU64,
+    /// Compactions run, their summed and longest duration in microseconds.
+    compactions: AtomicU64,
+    compact_us_total: AtomicU64,
+    compact_us_max: AtomicU64,
+    /// The longest a send waited for the spool lock, whoever held it, in microseconds.
+    send_lock_wait_us_max: AtomicU64,
+    /// Whether this pane already warned about a slow compaction.
+    warned_slow_compaction: AtomicBool,
 }
 
 impl SpoolCounters {
@@ -101,14 +131,39 @@ pub struct ReplySpoolStats {
     /// Bytes the resident tier holds allocated now, in memory: its capacity, which a drain does not
     /// return, so it can exceed the records it holds.
     pub resident_bytes: u64,
+    /// Compactions run so far.
+    pub compactions: u64,
+    /// Their summed duration, in microseconds.
+    pub compact_us_total: u64,
+    /// The longest one, in microseconds.
+    pub compact_us_max: u64,
+    /// The longest a send waited for the spool lock (spool-lock contention: the writer's pop,
+    /// another sender or a compaction), in microseconds; 0 when no send ever found it taken.
+    pub send_lock_wait_us_max: u64,
 }
 
-#[derive(Debug)]
 struct SpoolState {
     ram: VecDeque<u8>,
     spill: Option<Spill>,
     closed: Arc<AtomicBool>,
     failure: Option<Arc<io::Error>>,
+    /// The disk budget this spool's file draws from.
+    pool: Arc<SpillPool>,
+    /// The clock compactions are timed with.
+    clock: SpoolClock,
+    /// The duration of a compaction this operation ran, taken by `send` to record outside the lock.
+    last_compaction: Option<Duration>,
+}
+
+impl std::fmt::Debug for SpoolState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SpoolState")
+            .field("ram_len", &self.ram.len())
+            .field("spill", &self.spill)
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -116,6 +171,8 @@ struct Spill {
     file: File,
     read: u64,
     written: u64,
+    /// The file length charged to the pool. Declared last, so the file closes before the refund.
+    charge: SpillCharge,
 }
 
 pub(crate) struct ReplyReader {
@@ -125,14 +182,24 @@ pub(crate) struct ReplyReader {
 
 impl PtyReplySender {
     /// Admit one complete submission; oversize, storage failure, and closed-writer errors remain explicit.
-    // Ordering: closed SeqCst pairs with close; dropped_replies and peak_live_bytes are Relaxed
-    // diagnostic counters that publish no other data.
+    // Ordering: closed SeqCst pairs with close; dropped_replies, peak_live_bytes and
+    // send_lock_wait_us_max are Relaxed diagnostic counters that publish no other data.
     pub fn send(&self, bytes: Vec<u8>) -> io::Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             // When: closed is published, reject without waiting on an in-flight storage operation.
             return Err(io::Error::from(io::ErrorKind::BrokenPipe));
         }
-        let mut state = self.state.lock();
+        // The clock is read only when the lock was already taken, so an uncontended send reads none.
+        let mut state = match self.state.try_lock() {
+            Some(state) => state,
+            None => {
+                let before = (self.clock)();
+                let state = self.state.lock();
+                let waited = micros((self.clock)().saturating_duration_since(before));
+                self.stats.send_lock_wait_us_max.fetch_max(waited, Ordering::Relaxed);
+                state
+            }
+        };
         let result = state.append(&bytes);
         let result = state.finish_operation(result);
         if result.as_ref().is_err_and(is_budget_refusal) {
@@ -140,6 +207,11 @@ impl PtyReplySender {
         }
         self.stats.peak_live_bytes.fetch_max(state.live_spill_bytes(), Ordering::Relaxed);
         self.stats.publish(&state);
+        let compaction = state.last_compaction.take();
+        drop(state);
+        if let Some(took) = compaction {
+            self.record_compaction(took);
+        }
         // One pending hint is sufficient; notifications must not backpressure admission.
         let _ = self.wake.try_send(());
         result
@@ -147,15 +219,41 @@ impl PtyReplySender {
 
     /// The backlog counters as of the last send or pop. Read without the spool lock, so a sampler
     /// on the event loop never waits on a send or pop blocked in file I/O.
-    // Ordering: dropped_replies, peak_live_bytes, live_bytes and resident_bytes load Relaxed; gauges
-    // only, each published Relaxed under the spool lock by SpoolCounters::publish.
+    // Ordering: dropped_replies, peak_live_bytes, live_bytes, resident_bytes, compactions,
+    // compact_us_total, compact_us_max and send_lock_wait_us_max load Relaxed; gauges only.
     pub fn stats(&self) -> ReplySpoolStats {
         ReplySpoolStats {
             dropped_replies: self.stats.dropped_replies.load(Ordering::Relaxed),
             peak_live_bytes: self.stats.peak_live_bytes.load(Ordering::Relaxed),
             live_bytes: self.stats.live_bytes.load(Ordering::Relaxed),
             resident_bytes: self.stats.resident_bytes.load(Ordering::Relaxed),
+            compactions: self.stats.compactions.load(Ordering::Relaxed),
+            compact_us_total: self.stats.compact_us_total.load(Ordering::Relaxed),
+            compact_us_max: self.stats.compact_us_max.load(Ordering::Relaxed),
+            send_lock_wait_us_max: self.stats.send_lock_wait_us_max.load(Ordering::Relaxed),
         }
+    }
+
+    /// Count one compaction that took `took`, after the spool lock was released, and warn once per
+    /// pane when it passed [`SLOW_COMPACTION`]; returns whether this call warned.
+    // Ordering: compactions, compact_us_total, compact_us_max Relaxed statistics; warned_slow_compaction
+    // AcqRel swap, so exactly one sender warns.
+    fn record_compaction(&self, took: Duration) -> bool {
+        let took_us = micros(took);
+        self.stats.compactions.fetch_add(1, Ordering::Relaxed);
+        self.stats.compact_us_total.fetch_add(took_us, Ordering::Relaxed);
+        self.stats.compact_us_max.fetch_max(took_us, Ordering::Relaxed);
+        let warn = took > SLOW_COMPACTION
+            && !self.stats.warned_slow_compaction.swap(true, Ordering::AcqRel);
+        if warn {
+            // This compaction passed SLOW_COMPACTION and the pane had not warned before.
+            tracing::warn!(
+                target: "sonicterm::pty",
+                compact_ms = took.as_millis() as u64,
+                "PTY reply spill compaction was slow; later ones are counted, not logged"
+            );
+        }
+        warn
     }
 
     /// Cancel admission without locks or file I/O; the native writer owns final storage cleanup.
@@ -171,11 +269,20 @@ impl Spill {
     /// halving, so the cost is amortised constant per admitted byte, and the file stays below
     /// twice [`SPILL_BUDGET_BYTES`] plus one record. One compaction copies at most the live bytes,
     /// under the budget, while the spool lock is held, so the writer's next `pop` can wait for it.
-    fn compact_if_due(&mut self) -> io::Result<()> {
+    fn compact_if_due(&mut self, clock: &SpoolClock) -> io::Result<Option<Duration>> {
         if self.read < COMPACT_MIN_BYTES || self.read * 2 < self.written {
             // When: `self.read` is under COMPACT_MIN_BYTES or under half of `self.written`, compaction is not due.
-            return Ok(());
+            return Ok(None);
         }
+        self.compact(clock).map(Some)
+    }
+
+    /// Move the live bytes to the start of the file and truncate it, refunding the removed prefix
+    /// to the pool only once the truncation succeeded. Under pool pressure this runs with a prefix
+    /// of at least 1 MiB that may be under half the file, so it copies up to the live backlog
+    /// (16 MiB) to free 1 MiB: at most 16 bytes copied per byte consumed.
+    fn compact(&mut self, clock: &SpoolClock) -> io::Result<Duration> {
+        let started = clock();
         let live = self.written - self.read;
         let mut buffer = vec![0; COMPACT_CHUNK_BYTES];
         let mut moved = 0;
@@ -191,7 +298,8 @@ impl Spill {
         self.file.set_len(live)?;
         self.read = 0;
         self.written = live;
-        Ok(())
+        self.charge.shrink_to(live);
+        Ok(clock().saturating_duration_since(started))
     }
 }
 
@@ -270,13 +378,32 @@ impl SpoolState {
             // nothing is written, so the spool stays usable and older records keep their order.
             return Err(io::Error::new(io::ErrorKind::QuotaExceeded, ReplyBudgetExceeded));
         }
+        let pool = Arc::clone(&self.pool);
+        let clock = Arc::clone(&self.clock);
+        let mut compaction = None;
         let result = (|| {
             if self.spill.is_none() {
-                // Allocate a private anonymous file only after resident capacity is exhausted.
-                self.spill = Some(Spill { file: tempfile::tempfile()?, read: 0, written: 0 });
+                // Allocate a private anonymous file only after resident capacity is exhausted; its
+                // charge starts empty, so a failed creation leaves nothing to refund.
+                let file = tempfile::tempfile()?;
+                self.spill =
+                    Some(Spill { file, read: 0, written: 0, charge: SpillCharge::new(pool) });
             }
             let spill = self.spill.as_mut().expect("spill was initialized");
-            spill.compact_if_due()?;
+            compaction = spill.compact_if_due(&clock)?;
+            if !spill.charge.grow(record_len as u64) {
+                // When: the shared pool cannot `grow` this file by the record, a large consumed
+                // prefix is compacted away first; a small one is never worth a full copy.
+                if spill.read < (record_len as u64).max(COMPACT_MIN_BYTES) {
+                    // When: `spill.read` is under the record and COMPACT_MIN_BYTES, refuse at once.
+                    return Ok(false);
+                }
+                compaction = Some(spill.compact(&clock)?);
+                if !spill.charge.grow(record_len as u64) {
+                    // When: compaction freed too little for the pool to `grow` it, refuse the record.
+                    return Ok(false);
+                }
+            }
             let end = spill
                 .written
                 .checked_add(record_len as u64)
@@ -286,9 +413,20 @@ impl SpoolState {
             write(&mut spill.file, bytes)?;
             // Only complete records become visible; partial writes latch failure and remove the file.
             spill.written = end;
-            Ok(())
+            Ok(true)
         })();
-        result.map_err(|error| self.fail(error))
+        self.last_compaction = compaction;
+        match result {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                // A spill created for this record and still empty is dropped, refunding nothing.
+                if self.spill.as_ref().is_some_and(|spill| spill.written == 0) {
+                    self.spill = None;
+                }
+                Err(io::Error::new(io::ErrorKind::QuotaExceeded, ReplyBudgetExceeded))
+            }
+            Err(error) => Err(self.fail(error)),
+        }
     }
 
     fn pop(&mut self) -> io::Result<Option<Vec<u8>>> {
@@ -357,8 +495,28 @@ impl SpoolState {
     }
 }
 
-/// Create the producer and sole reader with a bounded wake hint.
+/// Create the producer and sole reader with a bounded wake hint, drawing on the process pool.
+/// Unit tests draw on a private unlimited pool instead, so tests running at once never refuse
+/// each other's spill; a test of the budget passes its own pool to [`reply_spool_with_pool`].
 pub(crate) fn reply_spool() -> (PtyReplySender, ReplyReader) {
+    #[cfg(test)]
+    let pool = SpillPool::new(u64::MAX);
+    #[cfg(not(test))]
+    let pool = SpillPool::process_default();
+    reply_spool_with_pool(pool)
+}
+
+/// [`reply_spool`] drawing on `pool` instead of the process pool, so a test sees only its own
+/// spools.
+pub(crate) fn reply_spool_with_pool(pool: Arc<SpillPool>) -> (PtyReplySender, ReplyReader) {
+    reply_spool_with(pool, Arc::new(Instant::now))
+}
+
+/// [`reply_spool_with_pool`] timing its rare paths with `clock`, so a test can control durations.
+pub(crate) fn reply_spool_with(
+    pool: Arc<SpillPool>,
+    clock: SpoolClock,
+) -> (PtyReplySender, ReplyReader) {
     let (wake, rx) = crossbeam_channel::bounded(1);
     let closed = Arc::new(AtomicBool::new(false));
     let sender = PtyReplySender {
@@ -367,10 +525,14 @@ pub(crate) fn reply_spool() -> (PtyReplySender, ReplyReader) {
             spill: None,
             closed: closed.clone(),
             failure: None,
+            pool,
+            clock: Arc::clone(&clock),
+            last_compaction: None,
         })),
         closed,
         wake,
         stats: Arc::default(),
+        clock,
     };
     (sender.clone(), ReplyReader { sender, wake: rx })
 }
@@ -411,3 +573,11 @@ impl Drop for ReplyReader {
 #[cfg(test)]
 #[path = "reply_spool_tests.rs"]
 mod reply_spool_tests;
+
+#[cfg(test)]
+#[path = "reply_spool_pool_tests.rs"]
+mod reply_spool_pool_tests;
+
+#[cfg(test)]
+#[path = "reply_spool_timing_tests.rs"]
+mod reply_spool_timing_tests;

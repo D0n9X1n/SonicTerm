@@ -166,10 +166,11 @@ fn scrollback_limit_releases_outer_high_water_capacity() {
     let mut grid = Grid::new(1, 1);
     grid.scrollback_requested_limit = 4096;
     grid.scrollback_limit = 4096;
-    grid.scrollback = VecDeque::with_capacity(4096);
+    let mut rows = VecDeque::with_capacity(4096);
     for _ in 0..4096 {
-        grid.scrollback.push_back(Line::flat_filled(1, Cell::default()));
+        rows.push_back(Line::flat_filled(1, Cell::default()));
     }
+    grid.scrollback = crate::history::History::from_rows(rows);
 
     grid.set_scrollback_limit(8);
 

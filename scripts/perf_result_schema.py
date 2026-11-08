@@ -165,15 +165,24 @@ FRAME_COUNTER_FIELDS = {
              # startup step times from the wgpu adapter to its first pane; a base older shows n/a.
              "status_line_full_passes", "startup_window_ns", "startup_adapter_install_ns", "startup_renderer_ns",
              "startup_load_checks_ns", "startup_pane_spawn_ns"),
-            # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
-            ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
-             "fg_worker_probe_us")),
+            # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker;
+            # pane_create_ms times each pane created after startup, a base older than it shows n/a.
+            ("about_to_wait_ms", "user_event_ms", "new_events_ms", "pane_create_ms", "ui_parser_wait_us",
+             "fg_probe_us", "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced", "flushes_suppressed",
             # sync_timeouts counts synchronized updates released at the 150 ms bound; a base older than it shows n/a.
             "sync_timeouts",
             # The workers' parser-lock wait summed in ns, and the sections it sums over; a base older shows n/a.
-            "parser_lock_wait_ns", "parser_sections"),
-           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
+            "parser_lock_wait_ns", "parser_sections",
+            # Inline-image decode attempts on the workers, the attempts under 8 ms (p95 is at least 8 ms
+            # when they number fewer than ceil(0.95 x attempts)) and each outcome; a base older than
+            # them shows n/a.
+            "media_decode_attempts", "media_decode_under_8ms", "media_decoded",
+            "media_decode_failed", "media_refused_after_decode"),
+           # media_decode_dus is the decode-duration histogram on its own buckets (a 7.999 ms bound).
+           # resize_hold_us is the parser hold of each event-loop grid resize.
+           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us", "media_decode_dus",
+            "resize_hold_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   # damage_waste_permille_sum is the union rect's share minus what its parts cover, over
                   # damaged_frames; a base older than it shows n/a.
@@ -201,9 +210,10 @@ FRAME_COUNTER_FIELDS = {
                   "tab_title_reuses", "tab_title_prepares", "chrome_run_reuses", "chrome_run_prepares"),
                  ("assembly_us", "atlas_growth_to_present_ms")),
 }
-HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}
+HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000],
+                    "dus": [1000, 2000, 4000, 7999, 16000, 32000, 64000, 128000]}
 # A histogram's `sum_us` is an exact integer in microseconds whatever its unit; this converts it to the unit.
-MICROSECONDS_PER_UNIT = {"ms": 1000, "us": 1}
+MICROSECONDS_PER_UNIT = {"ms": 1000, "us": 1, "dus": 1}
 
 
 def frame_counter_state(data: Mapping) -> object:

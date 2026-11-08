@@ -70,7 +70,8 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 监听器无法启动、拒绝其他用户的连接、连接数超限，以及控制服务器 owner 无法注册。`info` 级别另外记录
 `control server started`、`control server stopped`、`control level changed`、带客户端自报名称的
 `agent connected`、`agent disconnected`，以及每次调用一行的 `tool call`（含 `tool`、`pane`、`client`、`ok`、`in_bytes`、`out_bytes`
-和 `elapsed_ms`）。参数、窗格文本和正则表达式从不写入日志。
+和 `elapsed_ms`）。`in_bytes` 与 `out_bytes` 是线上长度：发送的请求行与回复行的字节数，不含换行符，取自服务器
+已持有的字节；内存统计中调用参数的数字是其序列化长度，两者不同。参数、窗格文本和正则表达式从不写入日志。
 
 配置过滤器始终把 `wgpu`、`naga`、`sonicterm-vt` 和 `sonicterm-grid` 保持在 warning
 级别。字体塑形热路径的海量输出位于 `trace`，任何配置级别都不会启用；只有专门排查该
@@ -405,6 +406,7 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `about_to_wait` | 毫秒直方图 | 每次 `about_to_wait` 分发 |
 | `user_event` | 毫秒直方图 | 每次 `user_event` 分发 |
 | `new_events` | 毫秒直方图 | 每次 `new_events` 分发 |
+| `pane_create` | 毫秒直方图（perf 结果中为 `pane_create_ms`） | 启动后在事件循环上创建的每个新标签页或分屏窗格，从其 PTY 与进程到其 VT 工作线程 |
 | `ui_parser_locks` | 次数 | 事件循环线程对窗格解析器加锁的次数 |
 | `ui_guard_custody_ns` | 次数（ns） | 一帧持有任一解析器守卫的累计时间，从获取第一个守卫到释放最后一个，覆盖所有取得过守卫的收集，包括提前失败的 |
 | `ui_guard_custodies` | 次数 | 至少取得一个解析器守卫的收集次数 |
@@ -449,6 +451,11 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `flushes_coalesced` | 次数 | 发现更早的 flush 仍待处理的 flush；更早的那次保留其时间 |
 | `flushes_suppressed` | 次数 | 有目标、但因窗格的输出事件仍未处理而未发送事件的 flush；事件循环拒收的发送不计入 |
 | `sync_timeouts` | 次数 | 工作线程在 150 ms 时限而非重置时释放的同步更新（DEC 2026） |
+| `media_decode` | µs 直方图（`dus`；性能结果中为 `media_decode_dus`） | 工作线程上的内联图像解码尝试，桶为 1、2、4、7.999、16、32、64 和 128 ms，因此低于 8 ms 的解码不会与达到或超过 8 ms 的解码落入同一个桶 |
+| `media_decode_attempts` | 次数 | 解码尝试：Sixel、iTerm2 与 kitty 的传输和查询、格式错误的负载，以及存储拒绝的解码；kitty 放置和删除不解码 |
+| `media_decode_under_8ms` | 次数 | 耗时低于 8 ms 的尝试。当它小于 `ceil(0.95 × media_decode_attempts)` 时，解码 p95 恰好至少为 8 ms |
+| `media_decoded`、`media_decode_failed`、`media_refused_after_decode` | 次数 | 每次尝试的结果：被保留（或查询回答 `OK`）、无法解码，或解码后被存储拒绝 |
+| `resize_hold` | 微秒直方图（perf 结果中为 `resize_hold_us`） | 事件循环为调整窗格网格尺寸而持有其解析器锁的时间，每次调整每个窗格一个样本 |
 
 `flushes`、`flushes_untargeted`、`flushes_coalesced` 与 `flush_to_redraw` 的计数之间没有恒等关系。
 关闭的窗格会丢弃其待处理时间戳，而且各计数器并非作为一次快照读取，因此要分别解读。
@@ -821,7 +828,10 @@ session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
                   pty_output_bytes=<bytes> pty_input_bytes=<bytes>
 pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
            writer_in_flight_bytes=<bytes> reply_resident_bytes=<bytes>
-           reply_spill_disk_bytes=<bytes> teardown_fallbacks=<count>
+           reply_spill_disk_bytes=<bytes> reply_spill_file_bytes=<bytes>
+           reply_spill_budget_bytes=<bytes> reply_compactions=<count>
+           reply_compact_longest_us=<us> reply_lock_wait_longest_us=<us>
+           teardown_fallbacks=<count>
            teardown_fallbacks_slow=<count> teardown_fallback_longest_us=<us>
            teardown_fallback_total_us=<us>
 ```
@@ -829,7 +839,7 @@ pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
 `pty queues` 以同一节奏汇总所有窗格的 PTY 队列：通道中等待的输入、writer 正在写入的消息（用户输入或一轮回复，
 离开队列时只计一次）、常驻回复层的已分配内存（即其容量，排空后仍保留，因此可能大于其中的回复），以及溢出到磁盘的回复
 （`reply_spill_disk_bytes`，从不计入 `resident_bytes`）。回复相关数值是各窗格的回复缓冲在其最近一次发送或取出时的计数，
-读取时不获取缓冲的锁，因此存储停滞的窗格不会拖住事件循环的采样。teardown 字段报告回收器的同步回退：运行次数、阻塞超过 50 ms 的次数、最长耗时与总耗时。
+读取时不获取缓冲的锁，因此存储停滞的窗格不会拖住事件循环的采样。`reply_spill_file_bytes` 是进程溢出预算在所有窗格上已计入的文件长度（含已消费前缀），与 `reply_spill_budget_bytes` 对照。`reply_compactions` 统计所有窗格的溢出压缩次数，`reply_compact_longest_us` 为其中最长的一次；`reply_lock_wait_longest_us` 是一次回复发送等待其暂存区锁的最长时间（暂存区锁竞争：writer 的读取、其他发送者或压缩；只在锁已被占用时测量）。超过 50 ms 的压缩还会在 `sonicterm::pty` 上以 `warn` 级别、每个窗格只记录一次 `PTY reply spill compaction was slow`，包含 `compact_ms`。teardown 字段报告回收器的同步回退：运行次数、阻塞超过 50 ms 的次数、最长耗时与总耗时。
 超过 50 ms 的回退还会在 `warn` 级别记录 `synchronous PTY teardown fallback blocked the event loop`，包含
 `owner` 与 `blocked_ms`。
 

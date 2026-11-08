@@ -81,6 +81,8 @@ impl Section {
 pub(crate) enum Unit {
     Millis,
     Micros,
+    /// Microseconds on the decode buckets, 1 ms to 128 ms with a 7.999 ms bound.
+    Decode,
 }
 
 impl Unit {
@@ -89,6 +91,7 @@ impl Unit {
         match self {
             Self::Millis => "ms",
             Self::Micros => "us",
+            Self::Decode => "dus",
         }
     }
 
@@ -97,6 +100,7 @@ impl Unit {
         match self {
             Self::Millis => &[4, 7, 9, 12, 17, 25, 34, 50, 100],
             Self::Micros => &[10, 50, 100, 500, 1_000, 5_000],
+            Self::Decode => &[1_000, 2_000, 4_000, 7_999, 16_000, 32_000, 64_000, 128_000],
         }
     }
 }
@@ -211,6 +215,7 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     histogram(Section::App, "about_to_wait_ms", Unit::Millis, "about_to_wait"),
     histogram(Section::App, "user_event_ms", Unit::Millis, "user_event"),
     histogram(Section::App, "new_events_ms", Unit::Millis, "new_events"),
+    histogram(Section::App, "pane_create_ms", Unit::Millis, "pane_create"),
     histogram(Section::App, "ui_parser_wait_us", Unit::Micros, "ui_parser_wait"),
     histogram(Section::App, "fg_probe_us", Unit::Micros, "fg_probe"),
     histogram(Section::App, "fg_worker_probe_us", Unit::Micros, "fg_worker_probe"),
@@ -223,9 +228,16 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::VtParser, "sync_timeouts"),
     count(Section::VtParser, "parser_lock_wait_ns"),
     count(Section::VtParser, "parser_sections"),
+    count(Section::VtParser, "media_decode_attempts"),
+    count(Section::VtParser, "media_decode_under_8ms"),
+    count(Section::VtParser, "media_decoded"),
+    count(Section::VtParser, "media_decode_failed"),
+    count(Section::VtParser, "media_refused_after_decode"),
     histogram(Section::VtParser, "parser_lock_wait_us", Unit::Micros, "parser_lock_wait"),
     histogram(Section::VtParser, "parser_lock_hold_us", Unit::Micros, "parser_lock_hold"),
     histogram(Section::VtParser, "parse_us", Unit::Micros, "parse"),
+    histogram(Section::VtParser, "media_decode_dus", Unit::Decode, "media_decode"),
+    histogram(Section::VtParser, "resize_hold_us", Unit::Micros, "resize_hold"),
     count(Section::Renderer, "vertex_bytes"),
     count(Section::Renderer, "index_bytes"),
     count(Section::Renderer, "damage_permille_sum"),

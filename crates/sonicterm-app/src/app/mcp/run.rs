@@ -212,7 +212,13 @@ impl App {
             return Err(Refusal::InputBusy);
         }
         let seq = {
-            let mut parser = crate::app::frame_counters::lock_parser(&entry.parser);
+            // Bounded, so a parser the VT worker holds cannot stall the event loop: the start is
+            // refused as `parser_busy` and the agent retries.
+            let mut parser = crate::app::frame_counters::try_lock_parser_for(
+                &entry.parser,
+                super::read::PARSER_WAIT,
+            )
+            .ok_or(Refusal::ParserBusy)?;
             let seq = check_prompt(parser.grid(), last_typing)?;
             // This run holds the pane's reservation, so a pin still here is one an earlier run's
             // drop could not release without waiting.
@@ -225,14 +231,38 @@ impl App {
         };
         let mut line = command.as_bytes().to_vec();
         line.push(b'\r');
-        if let Err(error) = self.write_agent_input(pane_id, line, PtyInputSource::AgentRun) {
-            // When: `write_agent_input` returned an `error`, the pin is released and nothing ran.
-            crate::app::frame_counters::lock_parser(&entry.parser).grid_mut().unpin_run();
+        #[cfg(test)]
+        let refused_write = AFTER_PIN.with_borrow(|hook| hook.as_ref().is_some_and(|hook| hook()));
+        #[cfg(not(test))]
+        let refused_write = false;
+        let written = if refused_write {
+            Err(crate::app::pane_target::TargetError::InputBusy)
+        } else {
+            // When: `refused_write` is false, the line is written to the pane.
+            self.write_agent_input(pane_id, line, PtyInputSource::AgentRun)
+        };
+        if let Err(error) = written {
+            // When: `written` is an `error`, nothing ran, so the run's pin is released.
+            // A parser still busy keeps it; only this run's `seq` reads it, and the next start unpins.
+            if let Some(mut parser) = crate::app::frame_counters::try_lock_parser_for(
+                &entry.parser,
+                super::read::PARSER_WAIT,
+            ) {
+                parser.grid_mut().unpin_run();
+            }
             return Err(Refusal::from(error));
         }
         tracing::info!(target: "mcp", pane = pane_id, "agent run started");
         Ok(seq)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's action once a start has pinned its run and before it writes; returning `true`
+    /// refuses the write, to drive the cleanup branch.
+    pub(crate) static AFTER_PIN: std::cell::RefCell<Option<Box<dyn Fn() -> bool>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// How a run ended.
@@ -296,6 +326,9 @@ pub(crate) struct RunOutcome {
     pub(crate) output_truncated: bool,
     /// The exit code came from authenticated shell markers; see [`exit_verified`].
     pub(crate) exit_verified: bool,
+    /// Where the exit code came from, per [`exit_code_source`]; `None` when no final record was
+    /// read (the run did not complete, or the parser stayed busy at the finish).
+    pub(crate) exit_code_source: Option<&'static str>,
 }
 
 /// Check the pinned record until the run ends, then read its result. Between checks the wait
@@ -422,6 +455,21 @@ pub(crate) fn exit_verified(run: &PinnedRun) -> bool {
     run.output_authenticated && run.end_authenticated
 }
 
+/// What `run_command` says a completed `run`'s exit code rests on: `unverified` when the markers
+/// were not authenticated, whatever they carry; `unknown` when the authenticated D had no code;
+/// otherwise the source the D named, or `reported` when it named none this build knows.
+pub(crate) fn exit_code_source(run: &PinnedRun) -> &'static str {
+    if !exit_verified(run) {
+        // When: the markers are not `exit_verified`, nothing they carry is trusted.
+        return "unverified";
+    }
+    if run.exit.flatten().is_none() {
+        // When: `run.exit` flattens to no code, the authenticated D names no source.
+        return "unknown";
+    }
+    run.exit_source.map_or("reported", sonicterm_grid::grid::ExitSource::as_str)
+}
+
 /// How long [`finish`] may wait for the parser: [`FINISH_WAIT`] normally, and only what is left of
 /// the [`CLOSE_DRAIN`](super::tools_read::CLOSE_DRAIN) once the pane was seen closed, so a closed
 /// pane's run returns within that one bound however busy its parser stays.
@@ -442,6 +490,7 @@ fn finish(started: &RunStarted, state: RunState, wait: Duration) -> RunOutcome {
         truncated: false,
         output_truncated: false,
         exit_verified: false,
+        exit_code_source: None,
     };
     let Some(mut parser) = started.entry.parser.try_lock_for(wait) else {
         // When: the parser stayed busy past `wait`, the output cannot be read in time.
@@ -460,6 +509,7 @@ fn finish(started: &RunStarted, state: RunState, wait: Duration) -> RunOutcome {
         // When: the `state` is `NotStarted`, no command printed anything.
         return outcome;
     }
+    outcome.exit_code_source = Some(exit_code_source(&run));
     let live = parser.grid();
     // The run's rows live on the screen it was pinned on: the saved primary while an alternate
     // screen is up. A run pinned on an alternate screen that has closed has no rows left.
@@ -492,3 +542,11 @@ fn finish(started: &RunStarted, state: RunState, wait: Duration) -> RunOutcome {
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod run_tests;
+
+#[cfg(test)]
+#[path = "run_exit_source_tests.rs"]
+mod run_exit_source_tests;
+
+#[cfg(test)]
+#[path = "run_bounded_lock_tests.rs"]
+mod run_bounded_lock_tests;

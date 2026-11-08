@@ -36,7 +36,7 @@ impl WindowIdentity {
             status_hash,
             viewport_top_abs,
             cursor_shape,
-            cursor_blink,
+            cursor_blink_off,
             window_focused,
             pane_focus_flash_bucket,
             hover_tab,
@@ -51,6 +51,7 @@ impl WindowIdentity {
             renderer_hash,
             overlay_active,
             cursor_cell,
+            cursor_glide,
         } = self;
         let Self {
             selection: previous_selection,
@@ -68,7 +69,7 @@ impl WindowIdentity {
             status_hash: previous_status_hash,
             viewport_top_abs: previous_viewport_top_abs,
             cursor_shape: previous_cursor_shape,
-            cursor_blink: previous_cursor_blink,
+            cursor_blink_off: previous_cursor_blink_off,
             window_focused: previous_window_focused,
             pane_focus_flash_bucket: previous_pane_focus_flash_bucket,
             hover_tab: previous_hover_tab,
@@ -83,6 +84,7 @@ impl WindowIdentity {
             renderer_hash: previous_renderer_hash,
             overlay_active: previous_overlay_active,
             cursor_cell: previous_cursor_cell,
+            cursor_glide: previous_cursor_glide,
         } = previous;
         ChangeClass {
             full: copy_mode != previous_copy_mode
@@ -110,8 +112,9 @@ impl WindowIdentity {
             status_band: status_hash != previous_status_hash,
             cursor: cursor_visible != previous_cursor_visible
                 || cursor_shape != previous_cursor_shape
-                || cursor_blink != previous_cursor_blink
-                || cursor_cell != previous_cursor_cell,
+                || cursor_blink_off != previous_cursor_blink_off
+                || cursor_cell != previous_cursor_cell
+                || cursor_glide != previous_cursor_glide,
             focus: window_focused != previous_window_focused,
             selection: selection != previous_selection,
             scrollbar: false,

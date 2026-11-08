@@ -104,7 +104,8 @@ fn closing_an_unattributed_sample_disarms_its_watch() {
 #[cfg(feature = "perf-echo-trace")]
 #[test]
 fn open_typing_sample_arms_for_s2_default_and_flood() {
-    for variant in ["default", "flood"] {
+    // S2/spawn's samples are split too, so a pane creation's cost shows in the echo stages.
+    for variant in ["default", "flood", "spawn"] {
         let (mut probe, _) = typing_probe("S2", variant);
         probe.open_typing_sample(Instant::now);
         let arm = probe.open_sample.as_ref().expect("open").arm;

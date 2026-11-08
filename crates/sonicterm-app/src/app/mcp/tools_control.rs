@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use super::claims::ResumeToken;
 use super::jsonrpc::{tool_error, tool_result};
 use super::run::{wait_run, DEFAULT_RUN_WAIT, MAX_RUN_WAIT};
 use super::tools_read::pane_id_arg;
@@ -52,6 +53,7 @@ pub(crate) fn control_tools() -> Vec<Value> {
             "outputSchema": output(json!({
                 "pane_id": { "type": "string" },
                 "started": { "type": "boolean" },
+                "resume_token": { "type": "string" },
             })),
             "annotations": { "destructiveHint": false },
         }),
@@ -98,7 +100,13 @@ pub(crate) fn control_tools() -> Vec<Value> {
                             carrying the pane's secret vouched for the exit code: SonicTerm's \
                             shell integration sends them, but so could a program the shell's \
                             startup files ran before loading it. When false the code was read \
-                            from terminal output that any program in the pane could have printed.",
+                            from terminal output that any program in the pane could have printed. \
+                            exit_code_source says what the code rests on: native, powershell or \
+                            status as SonicTerm's integration named it, reported for an \
+                            authenticated D naming no known source, unverified for \
+                            unauthenticated markers, unknown for an authenticated D with no code, \
+                            and null when the run did not complete or its final record could not \
+                            be read.",
             "inputSchema": {
                 "type": "object",
                 "required": ["pane_id", "command"],
@@ -114,6 +122,9 @@ pub(crate) fn control_tools() -> Vec<Value> {
                 },
                 "exit_code": { "type": ["integer", "null"] },
                 "exit_verified": { "type": "boolean" },
+                "exit_code_source": {
+                    "enum": ["native", "powershell", "status", "reported", "unverified", "unknown", null],
+                },
                 "generation": { "type": "integer" },
                 "output_incomplete": { "type": "boolean" },
                 "output": {
@@ -139,6 +150,32 @@ pub(crate) fn control_tools() -> Vec<Value> {
             "outputSchema": output(json!({ "pane_id": { "type": "string" } })),
             "annotations": { "destructiveHint": true },
         }),
+        json!({
+            "name": "session_token",
+            "description": "This session's resume token, a bearer secret: anyone holding it can \
+                            claim this session's panes after it disconnects. Keep it private. A \
+                            revoked result means a reload issued a fresh token; read it again.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "outputSchema": output(json!({ "resume_token": { "type": "string" } })),
+            "annotations": { "destructiveHint": false, "readOnlyHint": true },
+        }),
+        json!({
+            "name": "claim_panes",
+            "description": "Take back the panes an earlier, disconnected session of this agent \
+                            created, named by that session's resume_token. own_token is this \
+                            session's current token (from session_token), proving it was received \
+                            before ownership moves; the old token stops working.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["resume_token", "own_token"],
+                "properties": {
+                    "resume_token": { "type": "string" },
+                    "own_token": { "type": "string" },
+                },
+            },
+            "outputSchema": output(json!({ "claimed": { "type": "integer", "minimum": 0 } })),
+            "annotations": { "destructiveHint": false },
+        }),
     ]
 }
 
@@ -155,6 +192,8 @@ pub(crate) fn call(
         "send_keys" => send_keys(shared, arguments, scope),
         "run_command" => run_command(shared, arguments, scope),
         "close_pane" => close_pane(shared, arguments, scope),
+        "session_token" => session_token(shared, scope),
+        "claim_panes" => claim_panes(shared, arguments, scope),
         _ => {
             // When: the `name` is no control tool, the read tools answer for it.
             return None;
@@ -223,10 +262,12 @@ fn create_pane(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Valu
     match shared.ask(LoopCall::CreatePane { anchor, placement, launch }, scope) {
         LoopReply::Created(created) => {
             let started = created.launch == LaunchOutcome::Started;
-            tool_result(
-                &format!("created pane {}", created.pane_id),
-                json!({ "pane_id": created.pane_id.to_string(), "started": started }),
-            )
+            let mut result = json!({ "pane_id": created.pane_id.to_string(), "started": started });
+            // The token that claims this pane later; absent when the session has none.
+            if let Some(token) = shared.sessions.tokens.token_of(scope.session) {
+                result["resume_token"] = json!(token.to_hex());
+            }
+            tool_result(&format!("created pane {}", created.pane_id), result)
         }
         other => reply_error(other),
     }
@@ -355,6 +396,7 @@ fn run_command(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Valu
             "state": outcome.state.as_str(),
             "exit_code": outcome.exit_code,
             "exit_verified": outcome.exit_verified,
+            "exit_code_source": outcome.exit_code_source,
             "generation": generation,
             // The returned lines may be missing some of the command's output.
             "output_incomplete": outcome.truncated || outcome.output_truncated,
@@ -375,6 +417,29 @@ fn close_pane(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value
     };
     match shared.ask(LoopCall::ClosePane { pane_id }, scope) {
         LoopReply::Closed => tool_result("closed", json!({ "pane_id": pane_id.to_string() })),
+        other => reply_error(other),
+    }
+}
+
+/// `session_token`: the caller's own resume token, or `unavailable` when it has none.
+fn session_token(shared: &McpShared, scope: &CallScope) -> Value {
+    match shared.sessions.tokens.token_of(scope.session) {
+        Some(token) => tool_result("resume token", json!({ "resume_token": token.to_hex() })),
+        None => tool_error("unavailable", "this session has no resume token"),
+    }
+}
+
+/// `claim_panes`.
+fn claim_panes(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
+    let token = |key: &str| arguments.get(key).and_then(Value::as_str).and_then(ResumeToken::parse);
+    let (Some(resume), Some(own)) = (token("resume_token"), token("own_token")) else {
+        // When: either token is missing or not 32 hex digits, nothing moves.
+        return invalid("resume_token and own_token must be 32 hex digits");
+    };
+    match shared.ask(LoopCall::ClaimPanes { resume, own }, scope) {
+        LoopReply::Claimed(count) => {
+            tool_result(&format!("claimed {count} panes"), json!({ "claimed": count }))
+        }
         other => reply_error(other),
     }
 }

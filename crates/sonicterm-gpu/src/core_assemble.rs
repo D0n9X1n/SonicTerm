@@ -186,6 +186,17 @@ impl GpuRenderer {
         let cursor_pane = panes.iter().find(|pane| pane.is_active).unwrap_or(&panes[0]);
         let cursor_live_top = cursor_pane.grid.scrollback_len() as u64;
         let cursor_view_top = viewport_top_abs.unwrap_or(cursor_live_top).min(cursor_live_top);
+        let drawn_cell = drawn_cursor_cell(
+            &*cursor_pane.grid,
+            cursor_pane.id,
+            cursor_view_top,
+            cursor_visible,
+            self.window_focused,
+            read_only_mode,
+        );
+        // One glide position per frame, sampled before the key so the key, the drawing and the
+        // damage share it. A hidden or blinked-off cursor, or one in an overlay, does not glide.
+        let cursor_glide = self.sample_cursor_glide(drawn_cell, cursor_pane, now, overlay_active);
         // Records are read only when a partial plan is possible: never on the degraded path, on a
         // first frame, or on the forced-Full pass of a fallback.
         let partial_possible =
@@ -213,7 +224,7 @@ impl GpuRenderer {
                     },
                     viewport_top_abs,
                     cursor_shape: self.cursor_shape as u8,
-                    cursor_blink: self.cursor_blink,
+                    cursor_blink_off: self.cursor_blink_off,
                     window_focused: self.window_focused,
                     pane_focus_flash_bucket,
                     hover_tab: hover_tab_idx,
@@ -232,14 +243,8 @@ impl GpuRenderer {
                     style_rev: self.style_rev,
                     renderer_hash,
                     overlay_active,
-                    cursor_cell: drawn_cursor_cell(
-                        &*cursor_pane.grid,
-                        cursor_pane.id,
-                        cursor_view_top,
-                        cursor_visible,
-                        self.window_focused,
-                        read_only_mode,
-                    ),
+                    cursor_cell: drawn_cell,
+                    cursor_glide,
                 },
                 cell_w: self.cell_w,
                 cell_h: self.cell_h,

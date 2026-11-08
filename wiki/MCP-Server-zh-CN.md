@@ -153,9 +153,25 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 | `"shared"`（默认） | 所有 agent 创建的窗格，无论由哪个会话创建，包括孤立窗格 |
 | `"session"` | 只有发起调用的会话创建的窗格；其他会话的窗格以 `out_of_scope` 拒绝，且不出现在 `list_panes` 中 |
 
-窗格比它的会话存活得更久。在 `"session"` 下，孤立窗格在你关闭它之前不能被任何 agent 控制或读取：
-重新连接的桥接程序是一个新会话，不会重新获得它，因为 `self_pane_id` 不是凭据。`"any"` 范围不受
-影响。
+窗格比它的会话存活得更久。在 `"session"` 下，孤立窗格在被认领或被你关闭之前不能被任何 agent 控制
+或读取：重新连接的桥接程序是一个新会话，不会自动重新获得它，因为 `self_pane_id` 不是凭据。`"any"`
+范围不受影响。
+
+要取回自己的窗格，agent 需保存其会话的**恢复令牌**：`session_token` 返回它，`create_pane` 也以
+`resume_token` 再次给出。重新连接后，agent 调用 `claim_panes`，以该令牌作为 `resume_token`，以新会话
+自己的令牌（来自 `session_token`）作为 `own_token`。事件循环在一步之内把旧会话创建的所有窗格转给新
+会话，并删除旧令牌；此后被认领的窗格只由新会话的令牌覆盖。认领需要开启 `control`；READONLY 不会拒绝
+它，因为只转移归属，之后的每次写入仍会被拒绝。旧会话仍在连接或仍在完成某个调用时，以 `session_live`
+拒绝；令牌错误或已用过，或 `own_token` 错误时，以 `not_found` 拒绝，且两者没有区别。回复丢失的认领
+也已转移了窗格：它们会列为 `you`，之后的会话可用认领者的令牌认领它们。
+
+该令牌是持有即可使用的秘密，只保存在 SonicTerm 的内存中，从不写入日志：任何持有它的人（包括记录
+agent 对话的任何东西）都能用它认领，其能力与以你的身份运行的进程相同。没有令牌的会话（操作系统随机源
+失败）从 `session_token` 得到 `unavailable`，其窗格无法被认领。更改 `control`、`read`、`isolation` 或
+`create_anchor` 的重新加载，或服务器停止，会丢弃所有已断开会话的令牌，因此在 `"session"` 下它们的窗格
+将无法被认领；同时为每个仍在连接的会话发放新令牌：任何 `revoked` 结果之后都应重新读取
+`session_token`。只更改 `max_connections` 的重新加载保留所有令牌。已断开会话不再拥有任何窗格后，其
+令牌即被遗忘。
 
 `[mcp] create_anchor` 决定在 `control = "agent"` 下 `create_pane` 可以在哪些窗格旁打开辅助窗格。
 `"any"`（默认）表示所有窗格，因为辅助窗格从不向其锚点输入；`"agent"` 只允许该会话可控制的窗格，
@@ -170,7 +186,8 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 读取类工具是 `list_panes`、`read_pane` 和 `wait_for`。它们的参数、上限和加锁方式见
 [平台集成](Platform-Integration-zh-CN)。
 
-控制类工具在事件循环上执行时会再次按 `control` 检查：
+事件循环每次最多用 2 ms 处理排队的请求，因此多个 agent 同时调用也不会挡住输入：一次处理未轮到的请求
+会排回到之后到达的请求之前，在下一次唤醒时按顺序处理。单个请求耗时更长时仍会运行完毕。控制类工具在事件循环上执行时会再次按 `control` 检查：
 
 | 工具 | 作用 |
 | --- | --- |
@@ -179,11 +196,15 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 | `send_keys` | 发送具名按键（`Enter`、`Tab`、`Escape`、方向键、`Home`、`End`、`PageUp`、`PageDown`、`F1`–`F12`、单个字符），每个可加 `Ctrl+`、`Alt+` 或 `Shift+` 前缀，并按窗格的键盘模式编码。至多 64 个键；有一个未知名称则什么都不发送。与 `send_text` 一样报告 `delivery`。 |
 | `run_command` | 在窗格的 shell 提示符处运行一条命令并等待结束，返回其输出和 shell 报告的退出码（`completed`，`exit_verified` 表示 SonicTerm 自己的 shell 集成是否为其担保）；若 shell 未运行任何命令就结束了该提示符则返回 `not_started`，若在其输出开始前有他人输入则返回 `interfered`，记录被淘汰或 shell 退出则返回 `lost`，窗格先被关闭则返回 `pane_closed`，超时（默认 60 s，至多 600 s）则返回 `running`。 |
 | `close_pane` | 关闭一个窗格；标签页的唯一窗格会关闭该标签页。主窗口的最后一个标签页永不关闭。 |
+| `session_token` | 返回本会话的恢复令牌；见上文“Agent 会话”一节。 |
+| `claim_panes` | 给定已断开会话的 `resume_token` 和本会话自己的 `own_token`，把该会话的窗格转给本会话；报告转移了多少个。 |
 
 `run_command` 需要 shell 集成：shell 必须用 OSC 133 `A`、`B`、`C`、`D` 标记提示符，WezTerm、
 iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有输入的文本、输入队列不为空，或上一条
 命令运行期间有人输入，它会拒绝。这项检查只能尽力而为，因为终端无法看到 shell 已读取了什么，所以
-请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。
+请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。它不会在繁忙的窗格上等待：窗格的输出
+解析器被占用超过 5 ms 时，启动会以 `parser_busy` 拒绝（可重试），这与 `busy`（已有运行或命令占用该窗格）
+不同。
 
 ### 等待如何结束
 
@@ -195,7 +216,7 @@ iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有�
 | `quiet` | `wait_for` | 输出在 `quiet_ms` 内保持安静，且所有行都已扫描。 |
 | `exited` | `wait_for` | 窗格的进程已退出（使用 `exit` 时）。 |
 | `timeout` | `wait_for` | 先到达超时。 |
-| `completed` | `run_command` | 命令已运行并结束；见 `exit_code` 与 `exit_verified`。 |
+| `completed` | `run_command` | 命令已运行并结束；见 `exit_code`、`exit_verified` 与 `exit_code_source`。 |
 | `not_started` | `run_command` | shell 未运行任何命令就结束了提示符。 |
 | `interfered` | `run_command` | 在命令输出开始前有他人输入。 |
 | `lost` | `run_command` | 运行记录先被淘汰，或 shell 先退出。 |
@@ -232,6 +253,19 @@ OSC 133 标记与命令自身的输出走同一条数据流，因此窗格中的
 - 直接运行某个程序启动的窗格（`-e` 或 `--command`、在 SonicTerm 中打开的链接或可执行文件）不会得到密钥：没有 shell 集成
   能对该程序隐藏密钥，因此它的标记永远不会被验证。
 
+`run_command` 还会报告 `exit_code_source`，说明已完成运行的退出码依据什么。SonicTerm 的集成在每个 `D`
+中用 `sonicterm_src=` 给出它；这是 SonicTerm 自己的键，其他终端会将其作为未知参数跳过：
+
+| `exit_code_source` | 含义 |
+| --- | --- |
+| `status` | shell 的 `$?`（zsh、bash），或成功的 PowerShell 行。 |
+| `native` | 来自原生程序的 PowerShell `$LASTEXITCODE`。 |
+| `powershell` | PowerShell 自身的失败，报告为 1。 |
+| `reported` | 经过验证但未给出本版本已知来源的 `D`，例如较旧的或第三方的集成。 |
+| `unverified` | 该运行的标记未经验证（`exit_verified: false`），无论它们携带什么。 |
+| `unknown` | 经过验证但不带退出码的 `D`（`exit_code: null`）。 |
+| `null` | 运行未完成，或无法读取其最终记录（其解析器一直繁忙）。 |
+
 在 shell 的启动文件中加载该集成，**并放在任何会启动程序的行之前**。在它运行之前，密钥一直在 shell 的
 环境中，因此启动文件先运行的程序（提示符工具、版本管理器、后台 agent 或终端复用器）会继承它，并可能在当时
 或之后伪造经过验证的标记。SonicTerm 无法区分这类程序与 shell，因此 `exit_verified` 的可信程度取决于在该集成
@@ -250,8 +284,11 @@ PowerShell 集成需要 PSReadLine，PowerShell 7 会在每个交互式控制台
 因此 `run_command` 会拒绝该窗格（`no_shell_integration`），而不是等待标记。它包装 `prompt`（D、A，以及在你的
 提示符文本之后的 B）和 PSReadLine 的 `PSConsoleHostReadLine`：ReadLine 返回一行已接受的输入时写出 C，因此多行
 `{` 代码块只算一次，用 Ctrl+C 取消的行不会运行任何内容。脚本只读取 `$LASTEXITCODE`，因此每条命令看到的值
-与没有集成时相同。该行成功时 D 的退出码为 0。失败的行若只包含 cmdlet，就不可能运行原生程序，因此退出码为 1，
-即使之前有原生命令失败也是如此。其他失败的行：产生了新的 PowerShell 错误且 `$LASTEXITCODE` 为 0 或未设置时为 1；
+与没有集成时相同。该行成功时 D 的退出码为 0，成功的行从不解析。失败的行在运行之后才解析，每个命令名按当时的
+含义解析。失败的行若只包含 cmdlet，就不可能运行原生程序，因此退出码为 1，即使之前有原生命令失败也是如此。
+超过 16,384 个 UTF-16 码元、包含超过 64 条命令，或定义、设置别名或移除命令（`function`、`Set-Alias`、`New-Alias`、
+`Remove-Alias`、`Import-Module`，或 `function:`、`alias:` 路径）的行，被视为可能运行过原生程序，因为它运行时
+这些名称的含义无法确定。其他失败的行：产生了新的 PowerShell 错误且 `$LASTEXITCODE` 为 0 或未设置时为 1；
 `$LASTEXITCODE` 非零且没有产生新错误时取该原生退出码。两者都有的行，例如
 `Get-Item missing -ErrorAction SilentlyContinue; sh -c 'exit 4'`，以不带退出码的 D 结束，即使原生退出码与上一次
 相同也是如此：无法知道最后失败的是哪条语句，因此 `run_command` 报告 `completed` 且 `exit_code: null`，而不是

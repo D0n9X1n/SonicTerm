@@ -36,11 +36,16 @@ impl App {
             return false;
         };
         let Some(window) = self.registry.windows.get_mut(&destination) else {
-            // When: `destination` no longer resolves, so the already-removed pane
-            // has nowhere to land and drops with its PTY.
+            // When: `destination` no longer resolves, the already-removed pane has nowhere to
+            // land and is retired.
+            self.retire_pane(pane);
             return false;
         };
-        window.panes.insert(pane_id, pane);
+        if let Err(pane) = window.panes.attach(pane) {
+            // When: `destination` already holds the id, the moved pane is retired rather than lost.
+            self.retire_pane(pane);
+            return false;
+        }
         self.reattribute_pane_owners();
         true
     }

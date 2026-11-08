@@ -282,15 +282,13 @@ fn a_read_reports_the_generation_it_contains_at_least() {
             racing.output_generation.fetch_add(1, Ordering::Release);
         }));
     });
-    let (snapshot, structured) =
+    let (_snapshot, structured) =
         read_with_generation(&entry, ReadMode::Tail, ReadLimits::clamped(None, None));
     READ_HOOK.with_borrow_mut(|hook| *hook = None);
     assert_eq!(structured["generation"], 1);
     assert_eq!(structured["current_generation"], 2);
-    assert!(
-        snapshot.lines.iter().any(|line| line.text == "during"),
-        "at least: later text may show"
-    );
+    let lines = structured["lines"].as_array().unwrap();
+    assert!(lines.iter().any(|line| line == "during"), "at least: later text may show");
 }
 
 /// `wait_for` reports the generation its last inspection covered, not whatever was current when it

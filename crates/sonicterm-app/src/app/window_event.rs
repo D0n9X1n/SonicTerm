@@ -94,6 +94,7 @@ impl App {
         // Main and child windows share one refresh, before the child dispatch below.
         self.refresh_monitor_for_event(win_id, &event);
         if let Some(window) = self.registry.windows.get_mut(&win_id) {
+            // When: the source `window` is live, input marks its redraw and may restart its blink.
             if matches!(
                 event,
                 WindowEvent::KeyboardInput { .. }
@@ -109,6 +110,16 @@ impl App {
                     | WindowEvent::Focused(_)
             ) {
                 window.mark_redraw(super::redraw::RedrawCause::Input);
+            }
+            if matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::Ime(_)
+                    | WindowEvent::Focused(true)
+            ) {
+                // When: matches finds a key, IME or Focused(true) event, restart the blink shown;
+                // the redraw marked above already carries a hidden cursor back on.
+                let _ = window.cursor_blink.activity(Instant::now());
             }
         }
         if matches!(
@@ -618,6 +629,15 @@ impl App {
                 );
                 self.interaction.command_palette.set_tabs(&main.tabs, &self.i18n);
             }
+            // One blink phase and glide permission per frame, before the renderer is borrowed.
+            super::cursor_blink::sample_frame_cursor(
+                main,
+                &frame.guards[active_pos].1,
+                active_id,
+                frame_viewports.active.is_none(),
+                self.config.terminal.cursor_animation
+                    == sonicterm_cfg::config::CursorAnimation::Smooth,
+            );
         }
         #[allow(clippy::type_complexity)]
         let (
@@ -638,7 +658,7 @@ impl App {
             Option<&mut GpuRenderer>,
             Option<&mut sonicterm_ui::tabs::TabBar>,
             Option<&mut Vec<TabState>>,
-            Option<&mut std::collections::HashMap<u64, crate::app::PaneState>>,
+            Option<&mut crate::app::PaneMap>,
             bool,
             Option<&mut Instant>,
             Option<&Selection>,

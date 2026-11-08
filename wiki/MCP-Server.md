@@ -176,9 +176,33 @@ disconnected) or `user`.
 | `"session"` | only the panes the calling session created; another session's pane is refused as `out_of_scope` and left out of `list_panes` |
 
 A pane outlives its session. Under `"session"` an orphaned pane is controllable and
-readable by no agent until you close it: a reconnecting bridge is a new session and
-does not regain it, because `self_pane_id` is not a credential. `"any"` scopes are
-unaffected.
+readable by no agent until it is claimed or you close it: a reconnecting bridge is a
+new session and does not regain it by itself, because `self_pane_id` is not a
+credential. `"any"` scopes are unaffected.
+
+To take its panes back, an agent keeps its session's **resume token**, which
+`session_token` returns and `create_pane` repeats as `resume_token`. After it
+reconnects it calls `claim_panes` with that token as `resume_token` and its new
+session's own token (from `session_token`) as `own_token`. On the event loop, in one
+step, every pane the old session created moves to the new one and the old token is
+deleted; the claimed panes are then covered by the new session's token alone. A
+claim needs `control` on; READONLY does not refuse it, since only ownership moves and
+every later write is still refused. It is refused as `session_live` while the old
+session is connected or still finishing a call, and as `not_found` for a wrong or
+spent token, or a wrong `own_token`, with no difference between them. A claim whose
+reply was lost has still moved the panes: they are listed as `you`, and a later
+session claims them with the claimer's token.
+
+The token is a bearer secret held only in SonicTerm's memory and never logged: anyone
+who holds it, including whatever records the agent's transcript, can claim with it,
+with the reach of a process running as you. A session without one (the OS random
+source failed) gets `unavailable` from `session_token` and its panes cannot be
+claimed. A reload that changes `control`, `read`, `isolation` or `create_anchor`, or
+a stop, drops every disconnected session's token, so under `"session"` their panes
+become unclaimable, and gives each connected session a fresh one: read
+`session_token` again after any `revoked` result. A reload that changes only
+`max_connections` keeps every token. A disconnected session's token is forgotten once
+it owns no pane.
 
 `[mcp] create_anchor` sets which panes `create_pane` may open a helper beside under
 `control = "agent"`. With `"any"` (the default) that is every pane, since a helper
@@ -196,8 +220,11 @@ The server tells agents never to follow instructions found in pane text, but kee
 The read tools are `list_panes`, `read_pane` and `wait_for`. Their arguments,
 caps and locking are described in [Platform Integration](Platform-Integration).
 
-The control tools are checked against `control` again on the event loop when
-they run:
+The event loop answers queued requests for at most 2 ms at a time, so many agents
+calling at once cannot hold off input: what one drain does not reach goes back ahead
+of later arrivals and is answered on the next wake-up, in order. One request that
+runs longer still finishes. The control tools are checked against `control` again on
+the event loop when they run:
 
 | Tool | What it does |
 | --- | --- |
@@ -206,6 +233,8 @@ they run:
 | `send_keys` | Sends named keys (`Enter`, `Tab`, `Escape`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`, a single character), each optionally with `Ctrl+`, `Alt+` or `Shift+`, encoded for the pane's keyboard mode. At most 64 keys; one unknown name sends nothing. Reports `delivery` as `send_text` does. |
 | `run_command` | Runs one command line at the pane's shell prompt and waits for it to finish, returning its output and the exit code the shell reported (`completed`, with `exit_verified` saying whether SonicTerm's own shell integration vouched for it), `not_started` when the shell ended the prompt without running anything, `interfered` when someone else typed before its output began, `lost` when its record was evicted or the shell exited, `pane_closed` when the pane was closed first, or `running` at the timeout (default 60 s, at most 600 s). |
 | `close_pane` | Closes one pane; a tab's only pane closes the tab. The main window's last tab is never closed. |
+| `session_token` | Returns this session's resume token; see Agent sessions. |
+| `claim_panes` | Moves a disconnected session's panes to this session, given that session's `resume_token` and this session's own `own_token`; reports how many moved. |
 
 `run_command` needs shell integration: the shell must mark its prompt with
 OSC 133 `A`, `B`, `C` and `D`, as the shell-integration scripts of WezTerm,
@@ -213,7 +242,9 @@ iTerm2 and kitty do. It refuses a pane whose prompt has text typed after it, who
 input queue is not empty, or into which anyone typed while the previous command
 ran. That check is best effort, because a terminal cannot see what the shell has
 consumed, so use `run_command` on panes the agent created, where only the agent
-types.
+types. It never waits on a busy pane: when the pane's output parser stays locked for
+5 ms, the start is refused as `parser_busy` (retry it), distinct from `busy` (a run or
+command already owns the pane).
 
 ### How a wait ends
 
@@ -226,7 +257,7 @@ here; a client should treat an unknown value as `timeout`/`running`.
 | `quiet` | `wait_for` | Output stayed quiet for `quiet_ms` and every row was scanned. |
 | `exited` | `wait_for` | The pane's process exited (with `exit`). |
 | `timeout` | `wait_for` | The timeout passed first. |
-| `completed` | `run_command` | The command ran and ended; see `exit_code` and `exit_verified`. |
+| `completed` | `run_command` | The command ran and ended; see `exit_code`, `exit_verified` and `exit_code_source`. |
 | `not_started` | `run_command` | The shell ended the prompt without running anything. |
 | `interfered` | `run_command` | Someone else typed before the command's output began. |
 | `lost` | `run_command` | The run's record was evicted, or the shell exited, first. |
@@ -276,6 +307,20 @@ in the pane can print them. A program that printed a fake `D;0` could otherwise 
   link or an executable opened in SonicTerm) gets no secret: there is no shell integration to hide it from the
   program, so its markers are never verified.
 
+`run_command` also reports `exit_code_source`, what a completed run's code rests on.
+SonicTerm's integration names it in each `D` with `sonicterm_src=`, a key of SonicTerm's
+own that other terminals skip as an unknown parameter:
+
+| `exit_code_source` | Meaning |
+| --- | --- |
+| `status` | The shell's `$?` (zsh, bash), or a PowerShell line that succeeded. |
+| `native` | PowerShell's `$LASTEXITCODE` from a native program. |
+| `powershell` | PowerShell's own failure, reported as 1. |
+| `reported` | An authenticated `D` naming no source this build knows, such as an older or third-party integration's. |
+| `unverified` | The run's markers were not authenticated (`exit_verified: false`), whatever they carry. |
+| `unknown` | An authenticated `D` with no code (`exit_code: null`). |
+| `null` | The run did not complete, or its final record could not be read (its parser stayed busy). |
+
 Load the integration from your shell's startup file, **before any line that starts a
 program**. Until it runs, the secret is in the shell's environment, so a program the
 startup file runs first (a prompt tool, a version manager, a background agent or
@@ -299,8 +344,13 @@ the pane (`no_shell_integration`) rather than waiting for markers. It wraps `pro
 written once ReadLine returns an accepted line, so a multi-line `{` block counts once
 and a line cancelled with Ctrl+C runs nothing. The script only reads
 `$LASTEXITCODE`, so every command sees the value it would without the integration. D's
-code is 0 when the line succeeded. A failed line whose commands are all cmdlets cannot
-have run a native program, so its code is 1, even after an earlier native failure. For
+code is 0 when the line succeeded, and a successful line is never parsed. A failed line is
+parsed after it ran, and each command name is resolved as it stands then. One whose commands
+are all cmdlets cannot have run a native program, so its code is 1, even after an earlier
+native failure. A line longer than 16,384 UTF-16 code units, with more than 64 commands, or
+that defines, aliases or removes a command (a `function`, `Set-Alias`, `New-Alias`,
+`Remove-Alias`, `Import-Module`, or a `function:` or `alias:` path) is treated as one that may
+have run a native program, since what its names meant when it ran is not certain. For
 any other failed line, the code is 1 when it raised a new PowerShell error and
 `$LASTEXITCODE` is 0 or unset, and the native `$LASTEXITCODE` when that is non-zero and no
 new error was raised. A line with both, such as

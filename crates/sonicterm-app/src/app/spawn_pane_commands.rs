@@ -20,7 +20,9 @@ impl App {
         let launch =
             super::super::pane_launch::PaneLaunch::from_window(Some(window), &self.local_hostname);
         let new_id = next_pane_id();
+        let create_started = std::time::Instant::now();
         let mut new_pane = Some(self.spawn_pane(new_id, &launch));
+        self.note_pane_create(create_started);
         let did_split = 'install: {
             let Some(window) = self.main_mut() else {
                 // When: main_mut has no destination, leave the spawned pane outside the window for retirement.
@@ -42,12 +44,12 @@ impl App {
                 }
             };
             if split_ok {
-                window.panes.insert(new_id, new_pane.take().expect("uninstalled split pane"));
+                window.panes.attach_new(new_id, new_pane.take().expect("uninstalled split pane"));
             }
             split_ok
         };
         if let Some(pane) = new_pane {
-            self.retire_pane(pane);
+            self.retire_pane(crate::app::DetachedPane::unattached(new_id, pane));
         }
         if did_split {
             // Own the new pane now rather than on the next 30-second sample:
@@ -78,7 +80,7 @@ impl App {
                     return;
                 };
                 let focus = tab_state.active_pane;
-                if matches!(tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
+                if matches!(*tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
                     (Some(tab_index), None)
                 } else {
                     // When: matches finds no focused PaneTree::Leaf, close only the split pane.
