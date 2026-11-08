@@ -683,7 +683,7 @@ pub use dispatch::clock_epoch;
 use dispatch::{constructor_epoch_cell, micros_between, take_pending_native};
 pub(crate) use dispatch::{
     consume_flush, epoch_in, flush_clock_ns, lock_parser, note_native_request,
-    note_untargeted_flush, publish_flush,
+    note_untargeted_flush, publish_flush, try_lock_parser_for,
 };
 #[path = "frame_counters_record.rs"]
 mod record;
@@ -789,6 +789,29 @@ pub(crate) fn lock_counted<'parser, Value>(
     }
     let before_lock = clock();
     let guard = parser.lock();
+    let wait_us = micros_between(before_lock, clock());
+    TALLY.with(|cell| {
+        let mut tally = cell.borrow_mut();
+        tally.wait.record_us(wait_us);
+        tally.locks += 1;
+    });
+    guard
+}
+
+/// [`lock_counted`] bounded by `wait`: the guard, or `None` when the parser stayed busy for `wait`.
+/// A counting dispatch records the wait whether or not the lock was taken; outside one it is
+/// exactly `try_lock_for`.
+pub(crate) fn try_lock_counted<'parser, Value>(
+    parser: &'parser Mutex<Value>,
+    wait: std::time::Duration,
+    clock: &mut impl FnMut() -> Instant,
+) -> Option<MutexGuard<'parser, Value>> {
+    if !COUNTING.with(Cell::get) {
+        // When: `COUNTING` is false, no counting dispatch is open; no clock is read, nothing written.
+        return parser.try_lock_for(wait);
+    }
+    let before_lock = clock();
+    let guard = parser.try_lock_for(wait);
     let wait_us = micros_between(before_lock, clock());
     TALLY.with(|cell| {
         let mut tally = cell.borrow_mut();

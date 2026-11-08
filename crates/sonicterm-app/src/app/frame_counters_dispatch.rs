@@ -106,6 +106,16 @@ pub(crate) fn lock_parser<Value>(parser: &Mutex<Value>) -> MutexGuard<'_, Value>
     lock_counted(parser, &mut Instant::now)
 }
 
+/// [`lock_parser`] bounded by `wait`: `None` when the parser stayed busy that long, so an
+/// event-loop caller can refuse instead of stalling. Inside a counting dispatch the wait is timed
+/// whether or not the lock was taken.
+pub(crate) fn try_lock_parser_for<Value>(
+    parser: &Mutex<Value>,
+    wait: std::time::Duration,
+) -> Option<MutexGuard<'_, Value>> {
+    super::try_lock_counted(parser, wait, &mut Instant::now)
+}
+
 /// This thread's undrained `(locks, waits)`.
 #[cfg(test)]
 pub(super) fn current_tally() -> (u64, u64) {

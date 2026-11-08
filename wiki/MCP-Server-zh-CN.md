@@ -183,7 +183,9 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 `run_command` 需要 shell 集成：shell 必须用 OSC 133 `A`、`B`、`C`、`D` 标记提示符，WezTerm、
 iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有输入的文本、输入队列不为空，或上一条
 命令运行期间有人输入，它会拒绝。这项检查只能尽力而为，因为终端无法看到 shell 已读取了什么，所以
-请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。
+请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。它不会在繁忙的窗格上等待：窗格的输出
+解析器被占用超过 5 ms 时，启动会以 `parser_busy` 拒绝（可重试），这与 `busy`（已有运行或命令占用该窗格）
+不同。
 
 ### 等待如何结束
 

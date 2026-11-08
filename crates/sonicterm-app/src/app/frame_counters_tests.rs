@@ -247,7 +247,8 @@ pub(super) fn plain_locks(text: &str, exempt: &[std::ops::Range<usize>]) -> Vec<
 
 /// Problems with `sources`' parser locks: a plain `lock()` whose file and receiver are not in
 /// the verified non-parser inventory (outside the `exempt` functions), a per-file `lock_parser`
-/// count that differs from its inventory, or an inventory entry nothing matches any more.
+/// (or bounded `try_lock_parser_for`) count that differs from its inventory, or an inventory entry
+/// nothing matches any more.
 pub(super) fn parser_lock_audit(
     sources: &[(String, String)],
     non_parser: &[(&str, &str, usize)],
@@ -267,7 +268,10 @@ pub(super) fn parser_lock_audit(
         for (line, receiver) in plain_locks(text, &ranges) {
             seen.entry((file.clone(), receiver)).or_default().push(line);
         }
-        let converted = without_line_comments(text).matches("lock_parser(").count();
+        // A bounded `try_lock_parser_for` is counted the same way, so it counts as converted too.
+        let code = without_line_comments(text);
+        let converted =
+            code.matches("lock_parser(").count() + code.matches("try_lock_parser_for(").count();
         let listed =
             pane_parser.iter().find(|(listed, _)| listed == file).map_or(0, |entry| entry.1);
         if converted != listed {
@@ -375,7 +379,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("bin/pty_multi_round_helper.rs", "stdout", 1),
 ];
 
-/// Every pane-parser lock the event-loop thread takes, by file; each goes through lock_parser.
+/// Every pane-parser lock the event-loop thread takes, by file; each goes through lock_parser or
+/// its bounded form try_lock_parser_for.
 pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     // The About pane's column count, read for its layout and for the resize check, and its text feed.
     ("app/about_window.rs", 3),
@@ -394,6 +399,7 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/pane_state.rs", 1),
     ("app/pane_target.rs", 1),
     ("app/mcp/control_loop.rs", 2),
+    // run_command's start: the prompt check and pin, and the unpin after a refused write, both bounded.
     ("app/mcp/run.rs", 2),
     ("app/scroll.rs", 1),
     // Handing a new pane's parser the shell token its shell was given.

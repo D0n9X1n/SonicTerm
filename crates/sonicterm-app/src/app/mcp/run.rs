@@ -212,7 +212,13 @@ impl App {
             return Err(Refusal::InputBusy);
         }
         let seq = {
-            let mut parser = crate::app::frame_counters::lock_parser(&entry.parser);
+            // Bounded, so a parser the VT worker holds cannot stall the event loop: the start is
+            // refused as `parser_busy` and the agent retries.
+            let mut parser = crate::app::frame_counters::try_lock_parser_for(
+                &entry.parser,
+                super::read::PARSER_WAIT,
+            )
+            .ok_or(Refusal::ParserBusy)?;
             let seq = check_prompt(parser.grid(), last_typing)?;
             // This run holds the pane's reservation, so a pin still here is one an earlier run's
             // drop could not release without waiting.
@@ -225,14 +231,38 @@ impl App {
         };
         let mut line = command.as_bytes().to_vec();
         line.push(b'\r');
-        if let Err(error) = self.write_agent_input(pane_id, line, PtyInputSource::AgentRun) {
-            // When: `write_agent_input` returned an `error`, the pin is released and nothing ran.
-            crate::app::frame_counters::lock_parser(&entry.parser).grid_mut().unpin_run();
+        #[cfg(test)]
+        let refused_write = AFTER_PIN.with_borrow(|hook| hook.as_ref().is_some_and(|hook| hook()));
+        #[cfg(not(test))]
+        let refused_write = false;
+        let written = if refused_write {
+            Err(crate::app::pane_target::TargetError::InputBusy)
+        } else {
+            // When: `refused_write` is false, the line is written to the pane.
+            self.write_agent_input(pane_id, line, PtyInputSource::AgentRun)
+        };
+        if let Err(error) = written {
+            // When: `written` is an `error`, nothing ran, so the run's pin is released.
+            // A parser still busy keeps it; only this run's `seq` reads it, and the next start unpins.
+            if let Some(mut parser) = crate::app::frame_counters::try_lock_parser_for(
+                &entry.parser,
+                super::read::PARSER_WAIT,
+            ) {
+                parser.grid_mut().unpin_run();
+            }
             return Err(Refusal::from(error));
         }
         tracing::info!(target: "mcp", pane = pane_id, "agent run started");
         Ok(seq)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's action once a start has pinned its run and before it writes; returning `true`
+    /// refuses the write, to drive the cleanup branch.
+    pub(crate) static AFTER_PIN: std::cell::RefCell<Option<Box<dyn Fn() -> bool>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// How a run ended.
@@ -492,3 +522,7 @@ fn finish(started: &RunStarted, state: RunState, wait: Duration) -> RunOutcome {
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod run_tests;
+
+#[cfg(test)]
+#[path = "run_bounded_lock_tests.rs"]
+mod run_bounded_lock_tests;

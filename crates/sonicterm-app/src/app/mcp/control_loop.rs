@@ -29,6 +29,8 @@ pub(crate) enum Refusal {
     OtherSession,
     /// Another agent run owns the pane, or its command is still running.
     Busy,
+    /// The pane's parser stayed busy past the bounded wait; retrying soon may succeed.
+    ParserBusy,
     /// The pane shows no shell integration (no OSC 133 B).
     NoShellIntegration,
     /// Something is typed at the prompt, or typing arrived while the previous command ran.
@@ -49,6 +51,7 @@ impl Refusal {
             Self::PaneGone => "pane_gone",
             Self::InputBusy => "input_busy",
             Self::Busy => "busy",
+            Self::ParserBusy => "parser_busy",
             Self::NoShellIntegration => "no_shell_integration",
             Self::DraftPresent => "draft_present",
             Self::Unavailable => "unavailable",
@@ -68,6 +71,7 @@ impl Refusal {
             Self::PaneGone => "no pane has that id",
             Self::InputBusy => "the pane's input queue is busy",
             Self::Busy => "an agent run owns the pane or its command is still running",
+            Self::ParserBusy => "the pane's parser stayed busy; try again",
             Self::NoShellIntegration => "the pane shows no shell prompt marks (OSC 133)",
             Self::DraftPresent => {
                 "text is typed at the prompt, or typing arrived during the last command"

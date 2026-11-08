@@ -213,7 +213,9 @@ iTerm2 and kitty do. It refuses a pane whose prompt has text typed after it, who
 input queue is not empty, or into which anyone typed while the previous command
 ran. That check is best effort, because a terminal cannot see what the shell has
 consumed, so use `run_command` on panes the agent created, where only the agent
-types.
+types. It never waits on a busy pane: when the pane's output parser stays locked for
+5 ms, the start is refused as `parser_busy` (retry it), distinct from `busy` (a run or
+command already owns the pane).
 
 ### How a wait ends
 
