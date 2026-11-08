@@ -12,7 +12,7 @@ This page explains what those figures count; protocol and atlas details are in
 | Owner | Exact bound | Behavior at the bound |
 | --- | --- | --- |
 | Grid geometry | axis ≤ 4,096; one visible screen ≤ 524,288 cells; visible + history + saved primary ≤ 1,048,576 cells | dimensions and requested history are clamped |
-| Grid retained storage | `MAX_GRID_CELLS × size_of::<Cell>()`, about 24 MiB on the current build, shared by visible/history/saved primary; a history row is charged its stored cells, not its width | compact row capacity, then drop oldest history in 64-row blocks; scroll-path checks are amortized every 512 rows |
+| Grid retained storage | `MAX_GRID_CELLS × size_of::<Cell>()`, about 24 MiB on the current build, shared by visible/history/saved primary; a history row is charged its stored cells, not its width | compact row capacity, then drop oldest history in 64-row blocks; scroll-path checks are amortized every 512 rows, and read history's running totals instead of summing its rows |
 | Cell combining extras | 64 UTF-8 bytes per cell | additional zero-width data is not retained |
 | OSC 8 registry | 16,384 links, 8 KiB per URI, 1 KiB per client id, 8 MiB of shared strings and tables | reclaim entries no retained cell references, then admit; otherwise refuse the new link |
 | Escape sequence | 1 MiB | discard through its terminator |
@@ -79,7 +79,10 @@ most one row allocation per row.
 `CSI 3 J` releases active primary history and excess history-container capacity
 without lowering either configured history limit. It resets the budget-check
 cadence only for that explicit erasure; ordinary FIFO row reuse retains the
-512-scroll cadence. History-prefix removal updates exact eviction identity and
+512-scroll cadence. History keeps running totals of its rows' reserved, live and
+rare-attribute bytes, updated wherever a row enters, leaves or changes, so a
+budget check or a reported figure reads them instead of summing every history
+row; only the visible rows are walked. History-prefix removal updates exact eviction identity and
 prompt coordinates, including prompts stored with the saved primary. Shrinking
 columns repairs only a clipped wide lead at each new row edge, preserving
 compact runs and existing capacity hysteresis rather than flattening history.

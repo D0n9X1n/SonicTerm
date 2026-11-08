@@ -151,6 +151,13 @@ fn assert_same(fused: &Grid, reference: &Grid, before: (&[u64], &[u64]), context
         "{context}: revision advanced on one side only"
     );
     assert_eq!(fused.retained_amount(), reference.retained_amount(), "{context}: retained");
+    // History's running totals equal a fresh walk on both sides, so every step a script takes,
+    // eviction and alternate-screen swaps included, keeps them exact.
+    assert!(fused.scrollback.totals_match_rows(), "{context}: fused history totals drifted");
+    assert!(
+        reference.scrollback.totals_match_rows(),
+        "{context}: reference history totals drifted"
+    );
     assert_eq!(fused.scrollback_heap_bytes(), reference.scrollback_heap_bytes(), "{context}: heap");
     match (fused.alt_screen.as_deref(), reference.alt_screen.as_deref()) {
         (Some(fused_primary), Some(reference_primary)) => {

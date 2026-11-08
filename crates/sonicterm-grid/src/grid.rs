@@ -11,6 +11,7 @@ pub use sonicterm_types::{Cell, CellFlags, Color, Pos, UnderlineStyle};
 // what it retains, it does not own the resource contract.
 use sonicterm_types::ResourceAmount;
 
+use crate::history::History;
 use crate::hyperlink::HyperlinkId;
 use crate::line::{Line, MAX_LINE_CONTENT_SEQ};
 
@@ -222,7 +223,7 @@ pub struct Grid {
     /// and `IntoIterator`, so all existing callers compile untouched.
     visible: VecDeque<Line>,
     /// Scrollback buffer (oldest at front).
-    scrollback: VecDeque<Line>,
+    scrollback: History,
     /// User-requested history depth before applying the total cell budget.
     scrollback_requested_limit: usize,
     scrollback_limit: usize,
@@ -323,7 +324,7 @@ impl Grid {
             cols,
             rows,
             visible,
-            scrollback: VecDeque::new(),
+            scrollback: History::default(),
             scrollback_requested_limit,
             scrollback_limit,
             cursor: Pos::default(),
@@ -533,11 +534,8 @@ impl Grid {
     }
 }
 
-fn compact_scrollback_capacity(scrollback: &mut VecDeque<Line>) {
-    let len = scrollback.len();
-    if scrollback.capacity() > len && (len == 0 || scrollback.capacity() >= len.saturating_mul(2)) {
-        scrollback.shrink_to_fit();
-    }
+fn compact_scrollback_capacity(scrollback: &mut History) {
+    scrollback.compact_spine();
 }
 
 fn make_row(cols: u16) -> Line {

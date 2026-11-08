@@ -6,6 +6,7 @@
 #![warn(clippy::min_ident_chars)]
 
 pub mod grid;
+mod history;
 pub mod hyperlink;
 pub mod line;
 

@@ -302,14 +302,13 @@ impl Grid {
     /// resize it to `history_cols` if given, and stamp it with `seq` when either changed it.
     /// Returns whether any wrap was cleared.
     pub(super) fn fused_history_pass(
-        scrollback: &mut std::collections::VecDeque<Line>,
+        scrollback: &mut History,
         history_cols: Option<usize>,
         seq: u64,
     ) -> bool {
-        let mut cleared = false;
-        for row in scrollback.iter_mut() {
+        // `update_each` recounts each row after the change, so the history's totals stay exact.
+        let cleared = scrollback.update_each(|row| {
             let unwrapped = row.set_soft_wrapped_from_previous(false);
-            cleared |= unwrapped;
             if let Some(cols) = history_cols {
                 // The columns changed, so every row is resized and restamped.
                 row.resize(cols, Cell::default());
@@ -318,7 +317,8 @@ impl Grid {
                 // When: `unwrapped` without a column change, only that row's identity moves.
                 row.set_content_seq(seq);
             }
-        }
+            unwrapped
+        });
         #[cfg(test)]
         HISTORY_PASSES.with(|passes| passes.set(passes.get() + 1));
         cleared

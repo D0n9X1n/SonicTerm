@@ -1,5 +1,6 @@
 //! The resize code as it was before history moved to one fused pass, kept only as the reference the
-//! differential tests compare the fused resize against. Nothing outside tests calls it.
+//! differential tests compare the fused resize against. Nothing outside tests calls it. Its history
+//! loops go through `History::update_each`, the one way to change history rows in place.
 
 use super::*;
 
@@ -41,9 +42,10 @@ impl Grid {
             for row in &mut self.visible {
                 row.resize(cols as usize, Cell::default());
             }
-            for row in &mut self.scrollback {
+            self.scrollback.update_each(|row| {
                 row.resize(cols as usize, Cell::default());
-            }
+                false
+            });
             if saved.cols != self.cols {
                 self.reference_content_changed_scrollback_all();
             }
@@ -99,9 +101,10 @@ impl Grid {
         // `Line::resize` is now Cluster-preserving, so uniform blank
         // scrollback rows (the bulk of typical scrollback) stay compressed.
         if cols != self.cols {
-            for row in &mut self.scrollback {
+            self.scrollback.update_each(|row| {
                 row.resize(cols as usize, Cell::default());
-            }
+                false
+            });
             self.reference_content_changed_scrollback_all();
         }
         if rows > self.rows {
@@ -144,11 +147,12 @@ impl Grid {
                 self.mark_row(index as u16);
             }
         }
-        for row in &mut self.scrollback {
+        self.scrollback.update_each(|row| {
             if row.set_soft_wrapped_from_previous(false) {
                 row.set_content_seq(seq);
             }
-        }
+            false
+        });
         self.bump();
     }
 
@@ -158,8 +162,9 @@ impl Grid {
             return;
         }
         let seq = self.next_content_seq();
-        for row in &mut self.scrollback {
+        self.scrollback.update_each(|row| {
             row.set_content_seq(seq);
-        }
+            false
+        });
     }
 }

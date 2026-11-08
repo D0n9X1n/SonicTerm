@@ -27,7 +27,7 @@ impl Grid {
         self.scrollback_evicted = self.scrollback_evicted.saturating_add(removed);
         self.rebase_prompts_after_drain(removed);
         // Returning the drain lets the scroll path reuse an evicted row without allocating a replacement.
-        self.scrollback.drain(..count)
+        self.scrollback.drain_front(count)
     }
 
     /// Number of rows currently stored in the scrollback buffer.
@@ -71,7 +71,7 @@ impl Grid {
     /// so it counts reserved `Vec::capacity()` bytes and container overhead.
     #[doc(hidden)]
     pub fn scrollback_approx_bytes(&self) -> usize {
-        self.scrollback.iter().map(|row| row.approx_byte_size()).sum()
+        self.scrollback.totals().live
     }
 
     /// Return the number of row slots reserved by the scrollback container.
@@ -92,7 +92,7 @@ impl Grid {
         std::mem::size_of::<std::collections::VecDeque<Line>>()
             + self.scrollback_capacity() * std::mem::size_of::<Line>()
             + self.scrollback.len() * std::mem::size_of::<Vec<Cell>>()
-            + self.scrollback.iter().map(|row| row.approx_capacity_byte_size()).sum::<usize>()
+            + self.scrollback.totals().capacity
     }
 
     /// Set the maximum number of scrollback rows retained. When the new
