@@ -164,6 +164,7 @@ fn a_placeholder_only_pane_has_renderable_media() {
     let mut placements = Vec::new();
     push_pane_placements(
         &mut placements,
+        &mut Default::default(),
         &images,
         std::iter::once((0, grid.row(0))),
         (0.0, 0.0),
@@ -191,6 +192,7 @@ fn a_pane_without_virtual_placements_is_not_scanned() {
     );
     push_pane_placements(
         &mut placements,
+        &mut Default::default(),
         &images,
         rows,
         (0.0, 0.0),
@@ -249,7 +251,8 @@ fn an_unchanged_frame_returns_before_any_placeholder_scan() {
     let source = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let unchanged = source.find("return Ok(Assembled::Unchanged {").expect("unchanged fast path");
     let image_phase = source.find("self.assemble_inline_images(").expect("image phase call");
-    let hash = source.find("kitty_placeholders::inline_media_hash(").expect("media hash");
+    // The hash is computed, or reused from the media revisions, before planning.
+    let hash = source.find("self.media_identity.figures(panes)").expect("media hash");
     assert!(hash < unchanged && unchanged < image_phase);
     let phase = source.find("pub(super) fn assemble_inline_images(").expect("image phase");
     let phase_body = &source[phase..phase + source[phase..].find("\n    }\n").expect("phase end")];
@@ -270,6 +273,7 @@ fn anchored_rect(show: KittyShow, scroll_mark: u64, scroll: AnchorScroll) -> (f3
     let mut placements = Vec::new();
     push_pane_placements(
         &mut placements,
+        &mut Default::default(),
         std::slice::from_ref(&image),
         std::iter::empty(),
         (100.0, 50.0),

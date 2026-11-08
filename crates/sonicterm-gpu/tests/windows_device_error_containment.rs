@@ -94,6 +94,7 @@ fn render(renderer: &mut GpuRenderer, grid: &mut Grid) -> Result<(), String> {
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
         inline_images: Default::default(),
+        inline_media_revision: 0,
     }];
     let tabs = TabBar::new();
     renderer
@@ -128,6 +129,7 @@ fn render_outcome(renderer: &mut GpuRenderer, grid: &mut Grid) -> PresentOutcome
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
         inline_images: Default::default(),
+        inline_media_revision: 0,
     }];
     let tabs = TabBar::new();
     let fonts = renderer.begin_frame_fonts();

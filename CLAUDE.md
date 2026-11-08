@@ -384,7 +384,7 @@ a reproduction.
     declares `run_caps` takes min(requested, cap) runs per side in every set
     (`S7` 3, `S2/flood` 2, `S1/atlas-retry` 2, `S6/rest` 2, `S11/release` 1, `S1/status-line` 1,
     `S12/status-line` 1, `S13/default` 1 and `S13/sustained-4` 1 on both platforms, `S11/gdi` and
-    `S11/wgpu` 2 on Windows),
+    `S11/wgpu` 2 on Windows, `S2/glide` 1 and `S11/kitty-placeholders` 2 on macOS),
     its rows read `(runs N of M)`, and release runs are uncapped. One macOS job
     builds both refs once; three macOS
     shards measure its binaries, bound to the run, attempt and manifest digest;
@@ -513,9 +513,16 @@ a reproduction.
   The checker excludes vendored, generated, preserved-upstream, build, and
   ordinary test contexts from non-safety rules; unsafe constructs still require
   `// SAFETY:` in test code.
-- **Comments describe behavior, not history.** Explain what the code does and
-  the problem it solves; do not cite issue/PR/Epic numbers or reviewer names
-  in comments, log strings, or panic messages.
+- **Comments describe behavior, not history.** Say what the code does and why;
+  nothing else. Do not cite issue/PR/Epic numbers, reviewer names, CI run ids,
+  measured timings or sizes from a particular run, or what the code used to do
+  ("before the fold", "the old scan", "used to clone") in comments, test names,
+  log strings, panic messages, workflow and script comments, or wiki text. A
+  test oracle is described by its role ("one scan per question, the oracle"),
+  not by its age. A fact about the environment stays only as the requirement
+  it imposes ("a macOS host can clamp the window to 125x30"), never as a
+  measurement. Run numbers, evidence and history belong in the commit message,
+  PR description or issue.
 - **Names say what they hold.** Variables, parameters, closures, loop bindings,
   fields, functions and constants are never one character, a letter followed
   by digits, or two letters outside `allowed-idents-below-min-chars` in

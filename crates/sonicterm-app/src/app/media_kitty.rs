@@ -72,6 +72,8 @@ pub(in crate::app) fn kitty_source_size(event: &MediaEvent) -> Option<(u32, u32)
 }
 
 /// What the worker does with one kitty event once its pixels, if any, are decoded.
+// Clone only in tests: the differential test applies one operation to two stores.
+#[cfg_attr(test, derive(Clone))]
 pub(in crate::app) enum KittyOp {
     /// Store `image` under the command's id and show it as the command asks; the size is the
     /// transmitted one, or `None` to use the decoded size.
@@ -96,12 +98,25 @@ fn show_for(command: &KittyCommand) -> KittyShow {
     }
 }
 
-/// Kitty placements (entries that are not plain uploads) in `images`.
-fn placement_count(images: &[InlineImage]) -> usize {
-    images
-        .iter()
-        .filter(|entry| matches!(entry.kitty, Some(tag) if tag.show != KittyShow::Upload))
-        .count()
+/// Whether `entry` is a kitty placement: a tagged entry that is not a plain upload.
+fn is_placement(entry: &InlineImage) -> bool {
+    matches!(entry.kitty, Some(tag) if tag.show != KittyShow::Upload)
+}
+
+/// Count `images` visited by one scan, so a test can pin how many entries an operation reads.
+#[cfg(test)]
+fn note_visits(visited: usize) {
+    SCAN_VISITS.with(|visits| visits.set(visits.get() + visited));
+}
+
+/// Without tests, scans are not counted.
+#[cfg(not(test))]
+fn note_visits(_visited: usize) {}
+
+#[cfg(test)]
+thread_local! {
+    /// Store entries the operations on this thread have read, for the scan-count tests.
+    pub(super) static SCAN_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Apply one kitty operation to a pane's images, returning the reply message and the entries
@@ -115,17 +130,16 @@ pub(in crate::app) fn apply_kitty(
             // When: operation is Transmit, the image replaces every entry of its id before it is tagged and stored.
             let show = show_for(&command);
             // A displayed transmit adds a placement; at the cap it is refused unless it replaces one of its own.
-            let replaced_placements = images
+            // One pass counts every placement and the ones this transmit replaces.
+            note_visits(images.len());
+            let (placements, replaced_placements) = images
                 .iter()
-                .filter(|entry| {
-                    let tag = tag_of(entry);
-                    command.image_id != 0
-                        && tag.image_id == command.image_id
-                        && tag.show != KittyShow::Upload
-                })
-                .count();
-            if show != KittyShow::Upload
-                && placement_count(images) - replaced_placements >= MAX_KITTY_PLACEMENTS
+                .filter(|entry| is_placement(entry))
+                .fold((0usize, 0usize), |(placements, replaced), entry| {
+                    let own = command.image_id != 0 && tag_of(entry).image_id == command.image_id;
+                    (placements + 1, replaced + usize::from(own))
+                });
+            if show != KittyShow::Upload && placements - replaced_placements >= MAX_KITTY_PLACEMENTS
             {
                 // When: show adds a placement and placement_count minus replaced_placements is at the cap, it is refused.
                 return (Some("ENOSPC:too many placements"), vec![image]);
@@ -152,26 +166,38 @@ pub(in crate::app) fn apply_kitty(
         }
         KittyOp::Place(command, row, col, scroll_mark) => {
             // When: operation is Place, a stored entry of the id is cloned into a new placement.
-            let Some(source) = images
-                .iter()
-                .find(|entry| tag_of(entry).image_id == command.image_id && command.image_id != 0)
-            else {
-                // When: no stored entry has image_id, kitty answers ENOENT and places nothing.
-                return (Some("ENOENT:no such image"), Vec::new());
-            };
-            let source_px = tag_of(source).source_px;
-            let mut placed = source.clone();
             let replaces = |entry: &InlineImage| {
                 let tag = tag_of(entry);
                 tag.image_id == command.image_id
                     && (tag.show == KittyShow::Upload
                         || (command.placement_id != 0 && tag.placement_id == command.placement_id))
             };
+            // One pass finds the first stored entry of the id, counts placements, and notes whether
+            // this placement replaces one (which keeps the count) rather than adding one.
+            note_visits(images.len());
+            let mut source = None;
+            let mut placements = 0usize;
+            let mut replaces_placement = false;
+            for entry in images.iter() {
+                if source.is_none()
+                    && command.image_id != 0
+                    && tag_of(entry).image_id == command.image_id
+                {
+                    source = Some(entry);
+                }
+                if is_placement(entry) {
+                    placements += 1;
+                    replaces_placement |= replaces(entry);
+                }
+            }
+            let Some(source) = source else {
+                // When: source is None, no stored entry has image_id: kitty answers ENOENT and places nothing.
+                return (Some("ENOENT:no such image"), Vec::new());
+            };
+            let source_px = tag_of(source).source_px;
+            let mut placed = source.clone();
             // Only replacing an existing placement keeps the count; placing an upload adds one.
-            let replaces_placement = images
-                .iter()
-                .any(|entry| replaces(entry) && tag_of(entry).show != KittyShow::Upload);
-            if !replaces_placement && placement_count(images) >= MAX_KITTY_PLACEMENTS {
+            if !replaces_placement && placements >= MAX_KITTY_PLACEMENTS {
                 // When: replaces_placement is false and placement_count is at the cap, the new placement is refused.
                 return (Some("ENOSPC:too many placements"), Vec::new());
             }
@@ -222,16 +248,19 @@ fn delete(images: &mut Vec<InlineImage>, command: &KittyCommand) -> Vec<InlineIm
             && tag.show != KittyShow::Upload
             && (command.placement_id == 0 || tag.placement_id == command.placement_id)
     });
-    let still_placed = images.iter().any(|entry| {
-        let tag = tag_of(entry);
-        tag.image_id == id && tag.show != KittyShow::Upload
-    });
+    // One pass over what remains answers both questions: is any placement of id left, and is any
+    // entry of id left at all. `has_upload` is read only when no placement is left, so then every
+    // entry it saw is an upload.
+    note_visits(images.len());
+    let (still_placed, has_upload) = images
+        .iter()
+        .filter(|entry| tag_of(entry).image_id == id)
+        .fold((false, false), |(placed, _), entry| (placed || is_placement(entry), true));
     // With free set and no placement of id left, the stored upload is freed too; without free, it is kept.
     if free && !still_placed {
         removed.extend(take_where(images, |entry| tag_of(entry).image_id == id));
     } else if !still_placed {
         // When: still_placed is false without free, the data stays as an unshown upload.
-        let has_upload = images.iter().any(|entry| tag_of(entry).image_id == id);
         if let (false, Some(mut kept)) = (has_upload, removed.pop()) {
             let source_px = tag_of(&kept).source_px;
             kept.kitty = Some(KittyTag {
@@ -261,6 +290,7 @@ fn take_where(
     images: &mut Vec<InlineImage>,
     mut predicate: impl FnMut(&InlineImage) -> bool,
 ) -> Vec<InlineImage> {
+    note_visits(images.len());
     let (taken, kept): (Vec<InlineImage>, Vec<InlineImage>) =
         std::mem::take(images).into_iter().partition(|entry| predicate(entry));
     *images = kept;
@@ -270,3 +300,11 @@ fn take_where(
 #[cfg(test)]
 #[path = "media_kitty_tests.rs"]
 mod media_kitty_tests;
+
+#[cfg(test)]
+#[path = "media_kitty_reference.rs"]
+mod media_kitty_reference;
+
+#[cfg(test)]
+#[path = "media_kitty_fold_tests.rs"]
+mod media_kitty_fold_tests;

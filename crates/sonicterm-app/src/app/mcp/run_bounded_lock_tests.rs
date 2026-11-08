@@ -71,8 +71,14 @@ impl Drop for HeldParser {
     }
 }
 
-/// A held parser makes the start return `parser_busy` well inside 50 ms, distinct from `busy`, with
-/// the run reservation free again and nothing written; once the parser is free the run starts.
+/// How long a refusal may take. The code waits `PARSER_WAIT` (5 ms); the rest is scheduling delay
+/// on a host loaded by the whole suite, so the bound is generous. A blocking lock would instead
+/// wait until the test drops its holder, which it does only after the assert, so it still fails.
+const REFUSAL_BOUND: Duration = Duration::from_millis(500);
+
+/// A held parser makes the start return `parser_busy`, distinct from `busy`, after its bounded
+/// parser wait instead of blocking until the parser is released, with the run reservation free
+/// again and nothing written; once the parser is free the run starts.
 #[test]
 fn a_busy_parser_refuses_the_start_within_its_bound() {
     let (mut app, agent) = agent_pane_at_a_prompt();
@@ -82,7 +88,7 @@ fn a_busy_parser_refuses_the_start_within_its_bound() {
     let reply = app.mcp_run_start(McpControl::Agent.into(), agent, "ls");
     let elapsed = started.elapsed();
     assert!(matches!(reply, LoopReply::Refused("parser_busy", _)), "{elapsed:?}");
-    assert!(elapsed < Duration::from_millis(50), "the start waited {elapsed:?}");
+    assert!(elapsed < REFUSAL_BOUND, "the start waited {elapsed:?}");
     let entry = app.mcp_resolve_pane(agent).unwrap();
     assert!(!entry.agent_run.load(Ordering::Acquire), "the reservation was released");
     assert!(written(&app, agent).is_empty(), "nothing was written");
@@ -113,7 +119,7 @@ fn a_refused_write_returns_within_the_bound_and_the_next_start_replaces_the_pin(
     let elapsed = started.elapsed();
     AFTER_PIN.set(None);
     assert!(matches!(reply, LoopReply::Refused("input_busy", _)), "{elapsed:?}");
-    assert!(elapsed < Duration::from_millis(50), "the cleanup waited {elapsed:?}");
+    assert!(elapsed < REFUSAL_BOUND, "the cleanup waited {elapsed:?}");
     let entry = app.mcp_resolve_pane(agent).unwrap();
     assert!(!entry.agent_run.load(Ordering::Acquire), "the reservation was released");
     assert!(written(&app, agent).is_empty(), "nothing was admitted");

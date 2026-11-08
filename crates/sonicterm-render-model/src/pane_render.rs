@@ -119,6 +119,10 @@ pub struct PaneRender<'a> {
     /// Decoded inline media images anchored to this pane's grid, shared with the pane's store: a
     /// frame of an unchanged pane holds the same list the previous frame did, copying nothing.
     pub inline_images: Arc<Vec<InlineImage>>,
+    /// The revision `inline_images` was read at: the store draws a new one at every change, and no
+    /// two lists share one, so a renderer may reuse what it derived from a revision it has seen.
+    /// 0 means untracked, and the renderer recomputes.
+    pub inline_media_revision: u64,
 }
 
 /// A frame's panes, lent to the renderer once. The renderer assembles the frame inside `lend`'s

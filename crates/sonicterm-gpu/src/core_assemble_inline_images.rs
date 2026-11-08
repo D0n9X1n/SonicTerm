@@ -20,7 +20,12 @@ impl GpuRenderer {
             surface_height_px: sh,
             ..
         } = geometry;
-        let frame_scratch::FrameScratch { images: image_glyph_instances, .. } = scratch;
+        let frame_scratch::FrameScratch {
+            images: image_glyph_instances,
+            image_sort,
+            placeholder_index,
+            ..
+        } = scratch;
         // Anchored images first, then each pane's placeholder runs, in pane order. Placeholder runs
         // feed the same atlas promotion, newest-first residency and painter order as anchored images.
         let mut inline_image_placements: Vec<InlineImagePlacement<'_>> = Vec::new();
@@ -31,6 +36,7 @@ impl GpuRenderer {
                 .filter_map(|(slot, abs_row)| Some((slot, pv.grid.row_at_abs(abs_row)?)));
             kitty_placeholders::push_pane_placements(
                 &mut inline_image_placements,
+                placeholder_index,
                 pv.inline_images,
                 rows,
                 (pv.origin_x, pv.origin_y),
@@ -61,14 +67,13 @@ impl GpuRenderer {
         {
             self.reset_image_atlas();
         }
-        let skipped_inline_images = emit_inline_image_instances(
+        let skipped_inline_images = emit_inline_image_instances_with(
             &mut self.image_atlas,
             &mut *image_glyph_instances,
+            image_sort,
             &inline_image_placements,
-            cell_w,
-            cell_h,
-            sw,
-            sh,
+            (cell_w, cell_h),
+            (sw, sh),
         );
         report_inline_image_pressure(
             inline_media_changed,

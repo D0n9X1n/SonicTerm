@@ -367,6 +367,7 @@ impl AppFrameCounters {
             ("parse", vt.parse.snapshot()),
             ("media_decode", vt.media.duration.snapshot()),
             ("resize_hold", vt.resize_hold.snapshot()),
+            ("kitty_store_hold", vt.kitty_store_hold.snapshot()),
             ("ui_parser_wait", dispatch.wait.snapshot()),
             ("fg_probe", Histogram::new(HistogramUnit::Micros)),
             ("fg_worker_probe", self.fg_worker.probe.snapshot()),

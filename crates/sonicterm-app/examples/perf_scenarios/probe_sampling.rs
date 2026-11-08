@@ -95,6 +95,7 @@ impl PhaseMeter {
             frame_counters,
             updates: self.updates,
             s10_attribution: None,
+            kitty_receipt: None,
             guard_correlation: None,
             guard_correlation_transport_ns: None,
         }
@@ -204,6 +205,7 @@ impl Probe {
             #[cfg(test)]
             forced_delivery_problem: None,
             attribution: None,
+            kitty_receipt: None,
             role_panes: Vec::new(),
             park_entry: None,
             exited_panes: Vec::new(),

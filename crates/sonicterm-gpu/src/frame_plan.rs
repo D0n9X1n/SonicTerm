@@ -788,7 +788,7 @@ mod damage;
 mod identity;
 #[cfg(test)]
 pub(crate) use damage::pane_scrollbar_identity;
-use damage::{add_class_damage, resolve_recolor, slot_damage};
+use damage::{add_class_damage, resolve_recolor, row_strip};
 pub(crate) use damage::{
     dirty_rows_damage_rect_with_ink_pad, pane_damage_rect_with_ink_pad, pane_scrollbar_geometry,
 };

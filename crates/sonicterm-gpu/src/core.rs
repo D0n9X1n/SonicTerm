@@ -216,6 +216,8 @@ pub struct GpuRenderer {
     image_atlas: GlyphAtlas,
     image_upload: AtlasUpload,
     retained_inline_media_bytes: usize,
+    /// The last frame's media figures, reused while no pane's media changed.
+    media_identity: media_identity::MediaIdentityCache,
     /// Consecutive frames this window has drawn with no renderable inline
     /// media. Promotion of the image atlas is one-way without this: a window
     /// that shows a single image holds the full-size allocation for its whole
@@ -379,6 +381,9 @@ pub struct GpuRenderer {
     /// Test seam: a glyph `(x, y, w, h)` surface-pixel rectangle and color appended before the
     /// cursor recolors; only `__inject_test_glyph` sets it, so production keeps `None`.
     injected_test_glyph: Option<((f32, f32, f32, f32), [f32; 4])>,
+    /// Test seam: the instant the cursor glide samples at instead of the clock; only
+    /// `__pin_glide_clock` sets it, so production keeps `None`.
+    pinned_glide_clock: Option<Instant>,
     /// Test seam: a glyph `(x, y, w, h)` and color attached to the row at `(pane, slot)`, drawn
     /// only when that row is emitted; only `__inject_row_glyph` sets it, so production keeps `None`.
     injected_row_glyph: Option<InjectedRowGlyph>,
@@ -615,6 +620,8 @@ mod assemble_tabs;
 mod assemble_transients;
 #[path = "core_assembly_context.rs"]
 mod assembly_context;
+#[path = "core_media_identity.rs"]
+mod media_identity;
 use assembly_context::{AssemblyFields, AssemblyGeometry, AssemblyPaneView, AssemblyUi};
 
 #[path = "core_contracts.rs"]
@@ -860,7 +867,9 @@ use row_shaping::color_to_chrome;
 mod inline_images;
 #[path = "core_kitty_placeholders.rs"]
 mod kitty_placeholders;
+#[cfg(test)]
 use inline_images::emit_inline_image_instances;
+use inline_images::emit_inline_image_instances_with;
 use inline_images::report_inline_image_pressure;
 use inline_images::InlineImagePlacement;
 

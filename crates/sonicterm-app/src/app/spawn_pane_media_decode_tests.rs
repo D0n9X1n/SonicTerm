@@ -90,3 +90,21 @@ fn a_pane_without_counters_records_nothing() {
     assert_eq!(pane.inline_images.lock().len(), 1, "the image is stored");
     assert!(handles.frame_counters.is_none());
 }
+
+/// Every kitty command applied to the store records one `kitty_store_hold` sample, a query (which
+/// never takes the store) records none, and a pane without counters records nothing.
+#[test]
+fn each_kitty_store_command_records_its_hold() {
+    let stats = Arc::new(VtFrameStats::default());
+    let (_pane, handles) = counting_worker_handles(&stats);
+    let payload = png_payload();
+    run(&handles, format!("\x1b_Ga=t,f=100,i=4,q=2;{payload}\x1b\\").as_bytes());
+    run(&handles, b"\x1b_Ga=p,i=4,q=2\x1b\\");
+    run(&handles, b"\x1b_Ga=d,d=I,i=4,q=2\x1b\\");
+    assert_eq!(stats.kitty_store_hold.snapshot().count(), 3, "transmit, place and delete");
+    run(&handles, format!("\x1b_Ga=q,f=100,i=9,q=2;{payload}\x1b\\").as_bytes());
+    assert_eq!(stats.kitty_store_hold.snapshot().count(), 3, "a query never takes the store");
+    let (_quiet, uncounted) = pane_and_worker_handles();
+    run(&uncounted, format!("\x1b_Ga=t,f=100,i=4,q=2;{payload}\x1b\\").as_bytes());
+    assert_eq!(stats.kitty_store_hold.snapshot().count(), 3);
+}

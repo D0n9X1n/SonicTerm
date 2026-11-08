@@ -221,6 +221,8 @@ pub(crate) struct VtFrameStats {
     pub(crate) media: super::media_decode_stats::DecodeStats,
     /// Holds of a pane's parser lock while the event loop resized its grid.
     pub(crate) resize_hold: AtomicHistogram,
+    /// Holds of a pane's image store while one kitty command was applied to it.
+    pub(crate) kitty_store_hold: AtomicHistogram,
 }
 
 impl Default for VtFrameStats {
@@ -240,6 +242,7 @@ impl Default for VtFrameStats {
             parser_sections: AtomicU64::new(0),
             media: super::media_decode_stats::DecodeStats::default(),
             resize_hold: AtomicHistogram::new(HistogramUnit::Micros),
+            kitty_store_hold: AtomicHistogram::new(HistogramUnit::Micros),
         }
     }
 }

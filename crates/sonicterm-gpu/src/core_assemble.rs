@@ -41,19 +41,9 @@ impl GpuRenderer {
         let now = Instant::now();
         let broadcast_participant_ids: Vec<u64> =
             panes.iter().filter(|pane| pane.is_broadcast_participant).map(|pane| pane.id).collect();
-        // Kitty placements share a pixel buffer and `id`; each buffer is counted once.
-        let retained_inline_media_bytes = {
-            let mut seen = std::collections::HashSet::new();
-            panes
-                .iter()
-                .flat_map(|pane| pane.inline_images.iter())
-                .filter(|image| seen.insert(image.id))
-                .fold(0usize, |total, image| total.saturating_add(image.bgra.len()))
-        };
+        // Reused while every pane's media revision matches the last frame's.
+        let (retained_inline_media_bytes, inline_media_hash) = self.media_identity.figures(panes);
         self.retained_inline_media_bytes = retained_inline_media_bytes;
-        let inline_media_hash = kitty_placeholders::inline_media_hash(
-            panes.iter().map(|pane| (pane.id, pane.inline_images.as_slice())),
-        );
 
         // Advance the atlas frame counter so LRU eviction can
         // distinguish glyphs touched this frame from cold ones. Cheap
@@ -196,7 +186,9 @@ impl GpuRenderer {
         );
         // One glide position per frame, sampled before the key so the key, the drawing and the
         // damage share it. A hidden or blinked-off cursor, or one in an overlay, does not glide.
-        let cursor_glide = self.sample_cursor_glide(drawn_cell, cursor_pane, now, overlay_active);
+        let glide_now = self.pinned_glide_clock.unwrap_or(now);
+        let cursor_glide =
+            self.sample_cursor_glide(drawn_cell, cursor_pane, glide_now, overlay_active);
         // Records are read only when a partial plan is possible: never on the degraded path, on a
         // first frame, or on the forced-Full pass of a fallback.
         let partial_possible =

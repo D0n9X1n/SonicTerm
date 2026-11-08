@@ -255,6 +255,7 @@ fn frame(renderer: &mut GpuRenderer, layout: &Layout, scene: &mut Scene) -> Pres
         is_broadcast_participant: false,
         scrollbar_alpha: scene.scrollbar_alpha,
         inline_images: Default::default(),
+        inline_media_revision: 0,
     }];
     renderer.render_with_outcome(
         &fonts,
@@ -576,6 +577,7 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     for (name, case) in [
         ("setters keep the key", setters_keep_the_key as fn(&mut GpuRenderer, &Layout) -> _),
         ("retained-pixel parity", retained_pixel_parity),
+        ("glide parity", glide::glide_parity),
     ] {
         if let Err(error) = case(&mut renderer, &layout) {
             failures.push(format!("{name}: {error}"));
@@ -600,3 +602,6 @@ fn windows_class_damage_on_a_real_renderer() {
     event_loop.run_app(&mut probe).expect("class damage event loop");
     probe.outcome.expect("resumed runs").unwrap_or_else(|error| panic!("{error}"));
 }
+
+#[path = "support/windows_class_damage_glide.rs"]
+mod glide;

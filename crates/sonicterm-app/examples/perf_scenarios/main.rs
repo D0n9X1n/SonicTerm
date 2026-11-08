@@ -24,6 +24,8 @@ mod digest;
 mod dispatch_timeline;
 #[cfg(any(target_os = "macos", windows, test))]
 mod guard_transport;
+#[cfg(any(target_os = "macos", windows, test))]
+mod kitty_receipt;
 #[cfg(any(target_os = "macos", windows))]
 mod probe;
 #[cfg(any(target_os = "macos", windows, test))]

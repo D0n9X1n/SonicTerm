@@ -460,6 +460,7 @@ pub(super) fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
             frame_counters: None,
             updates: None,
             s10_attribution: None,
+            kitty_receipt: None,
             guard_correlation: None,
             guard_correlation_transport_ns: None,
         }],

@@ -564,6 +564,7 @@ or whose worker finishes after it, still adds to it.
 | `media_decode_under_8ms` | count | attempts that took under 8 ms. The decode p95 is at least 8 ms exactly when this is less than `ceil(0.95 × media_decode_attempts)` |
 | `media_decoded`, `media_decode_failed`, `media_refused_after_decode` | count | each attempt's outcome: kept (or a query answered `OK`), not decodable, or decoded and then refused by the store |
 | `resize_hold` | µs histogram (`resize_hold_us` in perf results) | how long the event loop held a pane's parser lock to resize its grid, one sample per pane per resize |
+| `kitty_store_hold` | µs histogram (`kitty_store_hold_us` in perf results) | how long a worker held a pane's image store to apply one kitty command and trim, one sample per kitty transmit, place or delete |
 
 No identity holds between `flushes`, `flushes_untargeted`, `flushes_coalesced`,
 and the `flush_to_redraw` count. A pane that closes drops its pending timestamp,
@@ -1110,7 +1111,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `vertex_scratch_items` | 1 while the vertex buffer holds an allocation, else 0 | — |
 | `row_ink_bytes` | the `RowInk` part: the allocated buckets of the per-row ink table (where each presented row drew, per pane and slot) plus one frame's staging buffer | bounded by the visible rows; a pane that shrinks or closes releases its records at the next presented frame |
 | `row_ink_items` | committed per-row ink records, one per visible row | — |
-| `frame_scratch_bytes` | the `FrameScratch` part: the per-frame draw vectors (glyphs, quads, overlays, images, row spans, underlines, staging indices, tofu, pane rects, column edges and row keys) the renderer keeps between assembled frames | every restoration clears each vector and holds it within its cap (16,384,000 bytes in total); only a completed assembly also shrinks a vector to twice its use once over four times that use and over 1 MiB and drops column-edge slots above its peak, so a failed or retried frame keeps its warm capacity; zero while a frame holds it |
+| `frame_scratch_bytes` | the `FrameScratch` part: the per-frame draw vectors (glyphs, quads, overlays, images, image sort orders, the kitty placeholder index, the media revision list, row spans, underlines, staging indices, tofu, pane rects, column edges and row keys) the renderer keeps between assembled frames | every restoration clears each vector and holds it within its cap (17,826,816 bytes in total); only a completed assembly also shrinks a vector to twice its use once over four times that use and over 1 MiB and drops column-edge slots above its peak, so a failed or retried frame keeps its warm capacity; zero while a frame holds it |
 | `frame_scratch_items` | scratch vectors that hold an allocation | — |
 | `chrome_cache_bytes` | the `ChromeCache` part: the 64-slot tab-title table and the 32-slot chrome-run table, each kept run's text and glyphs, and the kept UI palette's color strings | bounded by the fixed tables and their admission limits (256 text bytes, 512 glyphs) and by a 4 KiB palette allowance (a larger palette is derived again on every request, never kept); a font change, scale change or `clear_shape_cache` empties both run tables |
 | `chrome_cache_items` | kept tab titles plus kept chrome runs | — |

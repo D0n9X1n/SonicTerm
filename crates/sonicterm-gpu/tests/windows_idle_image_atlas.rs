@@ -174,6 +174,7 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
         } else {
             Vec::new()
         }),
+        inline_media_revision: 0,
     }];
     renderer
         .render(

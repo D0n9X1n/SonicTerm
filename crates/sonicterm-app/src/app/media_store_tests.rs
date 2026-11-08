@@ -27,8 +27,8 @@ fn snapshots_of_an_unchanged_list_share_one_allocation() {
     // Two frames of an idle pane hold the very same list, so collection copies no entries.
     let store = InlineImageStore::default();
     store.lock().push(image(1));
-    let first = store.try_snapshot().unwrap();
-    let second = store.try_snapshot().unwrap();
+    let first = store.try_snapshot().unwrap().images;
+    let second = store.try_snapshot().unwrap().images;
     assert!(Arc::ptr_eq(&first, &second));
 }
 
@@ -38,10 +38,10 @@ fn a_write_after_a_snapshot_leaves_the_held_frame_unchanged() {
     // collected, and the next snapshot sees the new image in a new allocation.
     let store = InlineImageStore::default();
     store.lock().push(image(1));
-    let held = store.try_snapshot().unwrap();
+    let held = store.try_snapshot().unwrap().images;
     store.lock().push(image(2));
     assert_eq!(held.iter().map(|entry| entry.id).collect::<Vec<_>>(), vec![1]);
-    let next = store.try_snapshot().unwrap();
+    let next = store.try_snapshot().unwrap().images;
     assert_eq!(next.iter().map(|entry| entry.id).collect::<Vec<_>>(), vec![1, 2]);
     assert!(!Arc::ptr_eq(&held, &next));
     assert!(Arc::ptr_eq(&held.first().unwrap().bgra, &next.first().unwrap().bgra), "pixels shared");
@@ -52,9 +52,9 @@ fn a_write_with_no_frame_alive_edits_in_place() {
     // With every snapshot dropped, a write reuses the list's own allocation instead of copying.
     let store = InlineImageStore::default();
     store.lock().push(image(1));
-    let before = Arc::as_ptr(&store.try_snapshot().unwrap());
+    let before = Arc::as_ptr(&store.try_snapshot().unwrap().images);
     store.lock().push(image(2));
-    let after = store.try_snapshot().unwrap();
+    let after = store.try_snapshot().unwrap().images;
     assert_eq!(Arc::as_ptr(&after), before, "no snapshot was alive, so nothing was copied");
     assert_eq!(after.len(), 2);
 }
@@ -79,13 +79,13 @@ fn writes_under_one_held_snapshot_copy_the_list_once() {
     for id in 0..64 {
         store.lock().push(image(id));
     }
-    let held = store.try_snapshot().unwrap();
+    let held = store.try_snapshot().unwrap().images;
     store.lock().push(image(64));
-    let after_first = Arc::as_ptr(&store.try_snapshot().unwrap());
+    let after_first = Arc::as_ptr(&store.try_snapshot().unwrap().images);
     for id in 65..128 {
         store.lock().push(image(id));
     }
-    let after_many = store.try_snapshot().unwrap();
+    let after_many = store.try_snapshot().unwrap().images;
     assert_eq!(Arc::as_ptr(&after_many), after_first, "only the first write copied the list");
     assert_eq!(held.len(), 64, "the held frame kept its own list");
     assert_eq!(after_many.len(), 128);
@@ -106,7 +106,7 @@ fn writes_copy_the_list_at_most_once_per_held_snapshot() {
     }
     let images: Vec<InlineImage> = (100..116).map(image).collect();
     // A held snapshot: the first write copies the 8 entries, later writes edit that copy.
-    let held = store.try_snapshot().unwrap();
+    let held = store.try_snapshot().unwrap().images;
     let counter = crate::lib_tests::CountAllocations::start();
     for entry in images.iter().take(8).cloned() {
         store.lock().push(entry);
@@ -124,5 +124,28 @@ fn writes_copy_the_list_at_most_once_per_held_snapshot() {
     // One allocation for the copy, at most a few for growth; never one per write.
     assert!((1..=4).contains(&with_snapshot), "{with_snapshot} allocations for 8 writes");
     assert!(without_snapshot <= 2, "{without_snapshot} allocations with no snapshot held");
-    assert_eq!(store.try_snapshot().unwrap().len(), 24);
+    assert_eq!(store.try_snapshot().unwrap().images.len(), 24);
+}
+
+/// A snapshot's revision names exactly its list: an unchanged store keeps its revision, every
+/// mutable access draws a new one (even when the list is edited in place under the same `Arc`
+/// pointer, which pointer equality cannot see), and two stores never share a revision.
+#[test]
+fn every_write_draws_a_revision_no_list_shares() {
+    let store = InlineImageStore::default();
+    let first = store.try_snapshot().unwrap().revision;
+    assert_ne!(first, 0, "0 is never drawn; it means untracked");
+    assert_eq!(store.try_snapshot().unwrap().revision, first, "no write, same revision");
+    // With no snapshot held, the write edits in place: same pointer, new revision.
+    let before = Arc::as_ptr(&store.try_snapshot().unwrap().images);
+    store.lock().push(image(1));
+    let after = store.try_snapshot().unwrap();
+    assert_eq!(Arc::as_ptr(&after.images), before, "edited in place");
+    assert!(after.revision > first, "a new revision despite the same pointer");
+    // A read through the guard is not a write.
+    let read = store.lock().len();
+    assert_eq!(read, 1);
+    assert_eq!(store.try_snapshot().unwrap().revision, after.revision);
+    let other = InlineImageStore::default();
+    assert_ne!(other.try_snapshot().unwrap().revision, after.revision, "stores never share one");
 }

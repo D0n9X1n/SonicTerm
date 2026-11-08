@@ -7,6 +7,7 @@ pub(super) use sonicterm_cfg::{
     theme::Theme,
 };
 pub(super) use sonicterm_grid::grid::{CellFlags, Color, Grid};
+use sonicterm_render_model::InlineImage;
 pub(super) use sonicterm_ui::pane::PaneTree;
 pub(super) use std::{sync::Barrier, time::Duration};
 
@@ -346,8 +347,9 @@ impl ParserAcquire for ReleaseAfterFailedProbe {
 }
 
 /// Through the real collection and the real `HeldFrameSource::lend` the renderer receives: two
-/// frames of an unchanged pane hand the renderer the same image list (no entries copied), and an
-/// image the decoder adds after a frame was collected leaves that frame's list as collected.
+/// frames of an unchanged pane hand the renderer the same image list (no entries copied) under the
+/// same nonzero revision, and an image the decoder adds after a frame was collected leaves that
+/// frame's list and revision as collected while the next frame carries a new revision.
 #[test]
 fn frames_share_an_unchanged_pane_image_list_and_keep_their_own() {
     let (mut app, window, _left, right, _inactive) = fixture(false, false);
@@ -367,22 +369,30 @@ fn frames_share_an_unchanged_pane_image_list_and_keep_their_own() {
             scrollbar_alpha: &alpha,
         };
         source.lend(|panes| {
-            panes.iter().map(|pane| Arc::clone(&pane.inline_images)).collect::<Vec<_>>()
+            panes
+                .iter()
+                .map(|pane| (pane.inline_media_revision, Arc::clone(&pane.inline_images)))
+                .collect::<Vec<_>>()
         })
     };
     let first = lists(&mut app, &sources);
     let second = lists(&mut app, &sources);
     assert_eq!(first.len(), 2, "both visible panes");
-    for (before, after) in first.iter().zip(&second) {
+    for ((before_revision, before), (after_revision, after)) in first.iter().zip(&second) {
         assert!(Arc::ptr_eq(before, after), "an unchanged pane's list is shared, not copied");
+        assert_ne!(*before_revision, 0, "a production pane's media is tracked");
+        assert_eq!(before_revision, after_revision, "an unchanged pane keeps its revision");
     }
     let held = lists(&mut app, &sources);
-    app.registry.windows[&window].panes[&right].inline_images.lock().push(held[1][0].clone());
-    assert!(held.iter().all(|list| list.len() == 1), "the collected frame kept its lists");
+    app.registry.windows[&window].panes[&right].inline_images.lock().push(held[1].1[0].clone());
+    assert!(held.iter().all(|(_, list)| list.len() == 1), "the collected frame kept its lists");
+    assert_eq!(held[1].0, first[1].0, "and its revision");
     let next = lists(&mut app, &sources);
     assert_eq!(
-        next.iter().map(|list| list.len()).sum::<usize>(),
+        next.iter().map(|(_, list)| list.len()).sum::<usize>(),
         3,
         "the next frame sees the new image"
     );
+    assert_ne!(next[1].0, held[1].0, "under a new revision");
+    assert_eq!(next[0].0, held[0].0, "the untouched pane keeps its revision");
 }

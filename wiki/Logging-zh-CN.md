@@ -456,6 +456,7 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `media_decode_under_8ms` | 次数 | 耗时低于 8 ms 的尝试。当它小于 `ceil(0.95 × media_decode_attempts)` 时，解码 p95 恰好至少为 8 ms |
 | `media_decoded`、`media_decode_failed`、`media_refused_after_decode` | 次数 | 每次尝试的结果：被保留（或查询回答 `OK`）、无法解码，或解码后被存储拒绝 |
 | `resize_hold` | 微秒直方图（perf 结果中为 `resize_hold_us`） | 事件循环为调整窗格网格尺寸而持有其解析器锁的时间，每次调整每个窗格一个样本 |
+| `kitty_store_hold` | 微秒直方图（perf 结果中为 `kitty_store_hold_us`） | 工作线程为应用一条 kitty 命令并裁剪而持有窗格图片存储的时间，每次 kitty transmit、place 或 delete 一个样本 |
 
 `flushes`、`flushes_untargeted`、`flushes_coalesced` 与 `flush_to_redraw` 的计数之间没有恒等关系。
 关闭的窗格会丢弃其待处理时间戳，而且各计数器并非作为一次快照读取，因此要分别解读。
@@ -899,7 +900,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `vertex_scratch_items` | 顶点缓冲持有分配时为 1，否则为 0 | — |
 | `row_ink_bytes` | `RowInk` 部分：逐行墨迹表（每个已呈现行按窗格与槽位记录的绘制范围）已分配的桶，加上一帧的暂存缓冲 | 受可见行数限制；窗格缩小或关闭后，下一帧呈现时释放其记录 |
 | `row_ink_items` | 已提交的逐行墨迹记录数，每个可见行一条 | — |
-| `frame_scratch_bytes` | `FrameScratch` 部分：渲染器在已组装帧之间保留的逐帧绘制向量（字形、quad、叠加层、图像、行范围、下划线、暂存索引、缺字方框、窗格矩形、列边界与行键） | 每次归还都清空每个向量并限制在其上限内（合计 16,384,000 字节）；只有完成的组装才在超过用量四倍且超过 1 MiB 时把向量收缩到用量的两倍，并丢弃超出峰值的列边界槽位，因此失败或重试的帧保留已预热的容量；帧持有期间为零 |
+| `frame_scratch_bytes` | `FrameScratch` 部分：渲染器在已组装帧之间保留的逐帧绘制向量（字形、quad、叠加层、图像、图像排序顺序、kitty 占位符索引、媒体修订列表、行范围、下划线、暂存索引、缺字方框、窗格矩形、列边界与行键） | 每次归还都清空每个向量并限制在其上限内（合计 17,826,816 字节）；只有完成的组装才在超过用量四倍且超过 1 MiB 时把向量收缩到用量的两倍，并丢弃超出峰值的列边界槽位，因此失败或重试的帧保留已预热的容量；帧持有期间为零 |
 | `frame_scratch_items` | 持有分配的暂存向量数 | — |
 | `chrome_cache_bytes` | `ChromeCache` 部分：64 槽标签标题表与 32 槽界面文本段表、每个保留段的文本与字形，以及保留的界面调色板颜色字符串 | 受固定表与准入上限（256 字节文本、512 个字形）以及 4 KiB 调色板余量约束（更大的调色板每次请求都重新派生，从不保留）；字体变更、缩放变更或 `clear_shape_cache` 会清空两张文本段表 |
 | `chrome_cache_items` | 保留的标签标题数加保留的界面文本段数 | — |

@@ -166,6 +166,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
                 is_broadcast_participant: false,
                 scrollbar_alpha: 0.0,
                 inline_images: Default::default(),
+                inline_media_revision: 0,
             },
             PaneRender {
                 id: 2,
@@ -177,6 +178,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
                 is_broadcast_participant: false,
                 scrollbar_alpha: 0.0,
                 inline_images: Default::default(),
+                inline_media_revision: 0,
             },
         ];
         render(&mut renderer, &mut panes, &theme)?;

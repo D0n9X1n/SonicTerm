@@ -349,6 +349,7 @@ fn frame_with_receipts(
             is_broadcast_participant: false,
             scrollbar_alpha: 0.0,
             inline_images: Arc::new(pane.images.clone()),
+            inline_media_revision: 0,
         })
         .collect();
     let released = renderer.render_releasing(

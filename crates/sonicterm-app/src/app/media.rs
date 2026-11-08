@@ -721,7 +721,7 @@ mod media_store;
 #[cfg(test)]
 pub(super) use media_kitty::MAX_KITTY_PLACEMENTS;
 pub(super) use media_kitty::{apply_kitty, kitty_source_size, KittyOp};
-pub use media_store::InlineImageStore;
+pub use media_store::{InlineImageStore, MediaSnapshot};
 
 #[cfg(test)]
 #[path = "media_tests.rs"]

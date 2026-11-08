@@ -317,6 +317,13 @@ impl GpuRenderer {
     pub fn __inject_test_glyph(&mut self, glyph: Option<((f32, f32, f32, f32), [f32; 4])>) {
         self.injected_test_glyph = glyph;
     }
+
+    /// Test hook: sample the cursor glide at `at` instead of the clock, so a retried or repeated
+    /// frame draws the same glide position; `None` returns to the clock.
+    #[doc(hidden)]
+    pub fn __pin_glide_clock(&mut self, at: Option<Instant>) {
+        self.pinned_glide_clock = at;
+    }
 }
 
 impl GpuRenderer {

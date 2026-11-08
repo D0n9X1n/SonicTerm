@@ -136,7 +136,14 @@ impl GpuRenderer {
             software_frame: self.software_frame_retained_amount(),
             vertex_scratch: self.upload_staging_retained(),
             row_ink: self.row_ink.retained_amount(),
-            frame_scratch: self.frame_scratch.retained_amount(),
+            frame_scratch: {
+                // The media revision list is renderer working state kept beside the scratch.
+                let mut scratch = self.frame_scratch.retained_amount();
+                let revisions = self.media_identity.retained_bytes();
+                scratch.bytes += revisions;
+                scratch.items += usize::from(revisions > 0);
+                scratch
+            },
             chrome_cache: ResourceAmount {
                 bytes: self.chrome_caches.retained_bytes(),
                 items: self.chrome_caches.items(),
@@ -236,6 +243,7 @@ impl GpuRenderer {
         self.glyph_upload.release_scratch();
         self.image_upload.release_scratch();
         self.frame_scratch.release_held();
+        self.media_identity.release();
         self.chrome_caches.release_runs();
         self.release_image_atlas_for_trim();
         self.last_frame_key = None;

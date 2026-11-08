@@ -8,6 +8,8 @@ It holds no shape-result cache.
 ## Key files
 - `shape.rs` - the ASCII fast-path predicate (generic over owned or borrowed cells), `RunStyle` and `ShapedGlyph`.
 - `glyph_atlas.rs` - atlas pages and glyph placement.
+- `glyph_atlas_pixels.rs` - tile insertion: owned `RasterTile`s and borrowed BGRA image pixels
+  share one row copy; the borrowed insert refuses a wrong-length slice before reserving a slot.
 - `row_glyph_cache.rs` - content-keyed row glyph cache: position-free records, pins, staged slots, quotas and budgets.
 - `face_content.rs` - a face's content identity: the namespaced SHA-256 of the bytes it was loaded from.
 - `recording_image.rs` - the runner image each platform's helper rows were recorded on, and

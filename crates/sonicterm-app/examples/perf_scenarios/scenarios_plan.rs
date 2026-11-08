@@ -6,9 +6,9 @@ use super::SCENARIOS;
 use super::{
     driven, entered, find, timed, Act, Driver, Fixture, FreshAfter, Host, PhaseEnd, PhaseKind,
     PhaseSpec, Plan, Presentation, SetupAction, Step, Workload, GLYPHS_POSIX_STEPS,
-    GLYPHS_WINDOWS_STEPS, HELD_POSIX_STEPS, HELD_WINDOWS_STEPS, PROGRAM_POSIX_STEPS,
-    PROGRAM_SETTLE_MS, PROGRAM_WINDOWS_STEPS, REST_PATH_ROW, REST_TAIL_ROW, SETTLE_MS,
-    STRIP_SAFE_ROWS, TRIM_EXPERIMENT,
+    GLYPHS_WINDOWS_STEPS, HELD_POSIX_STEPS, HELD_WINDOWS_STEPS, KITTY_CAP_STEPS,
+    PROGRAM_POSIX_STEPS, PROGRAM_SETTLE_MS, PROGRAM_WINDOWS_STEPS, REST_PATH_ROW, REST_TAIL_ROW,
+    SETTLE_MS, STRIP_SAFE_ROWS, TRIM_EXPERIMENT,
 };
 #[cfg(any(target_os = "macos", windows, test))]
 use sonicterm_cfg::keymap::Direction;
@@ -150,7 +150,7 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             vec![],
             vec![Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000)))), end],
         ),
-        ("S2", "default" | "spawn") => (
+        ("S2", "default" | "spawn" | "glide") => (
             vec![Workload::IdleShell],
             vec![],
             vec![
@@ -328,6 +328,36 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         }
         // burst prints ten large inline PNGs between text on one pane and burst-text the same text
         // alone, so the difference between their print phases is what decoding cost that pane.
+        // kitty-placeholders prints its images, placements and placeholder rows, types 50 characters
+        // below them, so every typing frame decodes the rows and resolves their runs, then fills the
+        // placement cap from the shell and has one placement refused.
+        ("S11", "kitty-placeholders") => (
+            vec![Workload::PrintThenShell(Fixture::KittyPlaceholders)],
+            vec![],
+            vec![
+                print(vec![0]),
+                Step::Phase(driven(
+                    "typing",
+                    PhaseKind::Sustained,
+                    Driver::Typing {
+                        role: 0,
+                        chars: 50,
+                        per_second: 10,
+                        settle_ms: 2_000,
+                        spawn_every: 0,
+                    },
+                    PhaseEnd::DriverDone,
+                )),
+                Step::Phase(driven(
+                    "cap",
+                    PhaseKind::Sustained,
+                    Driver::Commit { steps: KITTY_CAP_STEPS, settle_ms: 2_000 },
+                    PhaseEnd::DriverDone,
+                )),
+                idle,
+                end,
+            ],
+        ),
         ("S11", "burst" | "burst-text") => (
             vec![Workload::PrintThenShell(if variant == "burst" {
                 Fixture::ImageBurst
@@ -543,6 +573,7 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         }),
         trim_experiment: (spec.id == "S12" && short).then_some(TRIM_EXPERIMENT),
         status_line: variant == "status-line",
+        cursor_glide: variant == "glide",
     })
 }
 
