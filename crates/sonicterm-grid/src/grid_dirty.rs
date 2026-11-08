@@ -262,14 +262,32 @@ impl Grid {
         self.bump();
     }
 
-    pub(super) fn clear_all_soft_wraps(&mut self) {
+    /// Clear every soft-wrap boundary, in history and on screen, and resize every history row to
+    /// `history_cols` when the columns changed, in one pass over history. Stamps exactly the rows
+    /// the separate passes did: every history row on a column change, otherwise only rows whose
+    /// wrap was cleared. The revision advances only when a wrap was cleared.
+    pub(super) fn clear_soft_wraps_and_resize_history(&mut self, history_cols: Option<usize>) {
+        let wrap_seq = self.content_seq.saturating_add(1).min(MAX_LINE_CONTENT_SEQ);
+        let history_cleared =
+            Self::fused_history_pass(&mut self.scrollback, history_cols, wrap_seq);
+        let stamped_history =
+            history_cleared || (history_cols.is_some() && !self.scrollback.is_empty());
+        if stamped_history {
+            // The pass stamped with the sequence it previewed; claim it now.
+            self.content_seq = wrap_seq;
+        }
         let visible_has_wrap = self.visible.iter().any(Line::soft_wrapped_from_previous);
-        let history_has_wrap = self.scrollback.iter().any(Line::soft_wrapped_from_previous);
-        if !visible_has_wrap && !history_has_wrap {
-            // When: `!visible_has_wrap && !history_has_wrap`, leave wrap and content identities unchanged.
+        if !visible_has_wrap && !history_cleared {
+            // When: neither `visible_has_wrap` nor `history_cleared`, wrap identities are unchanged.
             return;
         }
-        let seq = self.next_content_seq();
+        // Visible rows share the sequence history already claimed, or draw their own.
+        let seq = if stamped_history {
+            wrap_seq
+        } else {
+            // When: `stamped_history` is false, history drew no sequence for visible rows to share.
+            self.next_content_seq()
+        };
         for index in 0..self.visible.len() {
             if self.visible[index].set_soft_wrapped_from_previous(false) {
                 self.visible[index].set_content_seq(seq);
@@ -277,12 +295,33 @@ impl Grid {
                 self.mark_row(index as u16);
             }
         }
-        for row in &mut self.scrollback {
-            if row.set_soft_wrapped_from_previous(false) {
+        self.bump();
+    }
+
+    /// The history half of [`Self::clear_soft_wraps_and_resize_history`]: clear each row's wrap,
+    /// resize it to `history_cols` if given, and stamp it with `seq` when either changed it.
+    /// Returns whether any wrap was cleared.
+    pub(super) fn fused_history_pass(
+        scrollback: &mut std::collections::VecDeque<Line>,
+        history_cols: Option<usize>,
+        seq: u64,
+    ) -> bool {
+        let mut cleared = false;
+        for row in scrollback.iter_mut() {
+            let unwrapped = row.set_soft_wrapped_from_previous(false);
+            cleared |= unwrapped;
+            if let Some(cols) = history_cols {
+                // The columns changed, so every row is resized and restamped.
+                row.resize(cols, Cell::default());
+                row.set_content_seq(seq);
+            } else if unwrapped {
+                // When: `unwrapped` without a column change, only that row's identity moves.
                 row.set_content_seq(seq);
             }
         }
-        self.bump();
+        #[cfg(test)]
+        HISTORY_PASSES.with(|passes| passes.set(passes.get() + 1));
+        cleared
     }
 
     #[inline]
@@ -317,17 +356,6 @@ impl Grid {
         }
     }
 
-    pub(super) fn content_changed_scrollback_all(&mut self) {
-        if self.scrollback.is_empty() {
-            // When: `self.scrollback.is_empty()`, avoid advancing the sequence for no history row.
-            return;
-        }
-        let seq = self.next_content_seq();
-        for row in &mut self.scrollback {
-            row.set_content_seq(seq);
-        }
-    }
-
     /// This grid's wrapping revision for coarse rendered-state change detection.
     ///
     /// A fresh grid starts at zero. Mutation paths that affect rendered terminal
@@ -344,6 +372,12 @@ impl Grid {
     pub(super) fn bump(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Fused history passes on this thread, so a test can count walks over history per resize.
+    pub(crate) static HISTORY_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

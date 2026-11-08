@@ -574,5 +574,9 @@ pub use grid_prompts::{CommandSpan, ExitSource, PinnedRun, RowToken};
 mod grid_test_support;
 
 #[cfg(test)]
+#[path = "grid_resize_reference.rs"]
+mod grid_resize_reference;
+
+#[cfg(test)]
 #[path = "grid_tests.rs"]
 mod grid_tests;
