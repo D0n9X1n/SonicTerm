@@ -308,7 +308,7 @@ pub(super) const FIXTURE_PINS: &[(&str, &str)] = &[
     ("inline.osc 461289", "06c2d2935c10dfc293a38ec38149c97a1e97c90501694c5e75cb14d904476f2c"),
     (
         "kitty-placeholders.apc 99892",
-        "f04f05e2e7c8e6013052e9c030fc01bfb9b9cb5422f39437326bb2fd279ee46b",
+        "7e32b5dca869f756c7bb206152e8a2555446be912639093ebb08c78ff6bc5f94",
     ),
     (
         "linked-history.txt 1443893",

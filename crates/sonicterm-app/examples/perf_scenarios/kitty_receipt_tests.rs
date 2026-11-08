@@ -88,14 +88,22 @@ fn grid_receipt(parser: &Parser, images: &[InlineImage], phase: &str) -> KittyRe
 fn the_print_fixture_holds_its_receipt_on_the_smallest_grid() {
     // On a 125x30 grid, with the READY line above the fixture and the sentinel and a prompt below
     // it, every one of the 512 runs must still be visible and name a placement the pane holds; rows
-    // scrolled off the top would leave fewer runs to resolve.
+    // scrolled off the top would leave fewer runs to resolve. The print phase must also be able
+    // to end: the probe must find the sentinel.
     let mut bytes = b"READY 0\n".to_vec();
     bytes.extend(crate::workload::kitty_placeholders());
-    bytes.extend_from_slice(b"PERF_DONE 0 0000000000000000\n$ ");
+    let sentinel = crate::workload::sentinel_line(0, "0123456789abcdef");
+    bytes.extend(format!("{sentinel}\n% ").bytes());
     let (parser, commands) = parse(&bytes, RUNNER_COLS, RUNNER_ROWS);
     let cap = crate::workload::KITTY_PLACEMENT_CAP as usize;
     let images = store_from(&commands, cap);
     assert_eq!(Some(grid_receipt(&parser, &images, "print")), expected("print"));
+    // The print phase ends when the probe finds the sentinel at the start of a row near the
+    // cursor, so the fixture must end its last row, full or not, with a newline.
+    let workload =
+        crate::scenarios::Workload::PrintThenShell(crate::scenarios::Fixture::KittyPlaceholders);
+    let posix = crate::scenarios::Host::Posix;
+    assert!(crate::record::sentinel_row(parser.grid(), &sentinel, workload, posix).is_some());
 }
 
 #[test]

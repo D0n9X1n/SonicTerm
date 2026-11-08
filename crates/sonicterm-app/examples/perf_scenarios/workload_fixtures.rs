@@ -359,7 +359,10 @@ pub(crate) fn kitty_placeholders() -> Vec<u8> {
             out.push(*column_mark);
         }
         out.push_str("\x1b[39;59m");
-        out.push(if (run + 1) % KITTY_RUNS_PER_ROW == 0 { '\n' } else { ' ' });
+        // A row ends at its last run, and so does the last row, full or not, so the sentinel the
+        // role prints next starts a row of its own, where the probe looks for it.
+        let row_ends = (run + 1) % KITTY_RUNS_PER_ROW == 0 || run + 1 == KITTY_DRAWN_PLACEMENTS;
+        out.push(if row_ends { '\n' } else { ' ' });
     }
     out.into_bytes()
 }
