@@ -252,8 +252,11 @@ PowerShell 集成需要 PSReadLine，PowerShell 7 会在每个交互式控制台
 因此 `run_command` 会拒绝该窗格（`no_shell_integration`），而不是等待标记。它包装 `prompt`（D、A，以及在你的
 提示符文本之后的 B）和 PSReadLine 的 `PSConsoleHostReadLine`：ReadLine 返回一行已接受的输入时写出 C，因此多行
 `{` 代码块只算一次，用 Ctrl+C 取消的行不会运行任何内容。脚本只读取 `$LASTEXITCODE`，因此每条命令看到的值
-与没有集成时相同。该行成功时 D 的退出码为 0。失败的行若只包含 cmdlet，就不可能运行原生程序，因此退出码为 1，
-即使之前有原生命令失败也是如此。其他失败的行：产生了新的 PowerShell 错误且 `$LASTEXITCODE` 为 0 或未设置时为 1；
+与没有集成时相同。该行成功时 D 的退出码为 0，成功的行从不解析。失败的行在运行之后才解析，每个命令名按当时的
+含义解析。失败的行若只包含 cmdlet，就不可能运行原生程序，因此退出码为 1，即使之前有原生命令失败也是如此。
+超过 16,384 个 UTF-16 码元、包含超过 64 条命令，或定义、设置别名或移除命令（`function`、`Set-Alias`、`New-Alias`、
+`Remove-Alias`、`Import-Module`，或 `function:`、`alias:` 路径）的行，被视为可能运行过原生程序，因为它运行时
+这些名称的含义无法确定。其他失败的行：产生了新的 PowerShell 错误且 `$LASTEXITCODE` 为 0 或未设置时为 1；
 `$LASTEXITCODE` 非零且没有产生新错误时取该原生退出码。两者都有的行，例如
 `Get-Item missing -ErrorAction SilentlyContinue; sh -c 'exit 4'`，以不带退出码的 D 结束，即使原生退出码与上一次
 相同也是如此：无法知道最后失败的是哪条语句，因此 `run_command` 报告 `completed` 且 `exit_code: null`，而不是

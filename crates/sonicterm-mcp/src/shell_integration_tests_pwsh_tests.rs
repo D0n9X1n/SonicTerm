@@ -10,7 +10,7 @@ use std::time::Duration;
 use super::*;
 
 /// The pwsh to test: `SONICTERM_TEST_PWSH` when set, else `pwsh` on `PATH`.
-fn pwsh() -> Option<String> {
+pub(super) fn pwsh() -> Option<String> {
     let candidate = std::env::var("SONICTERM_TEST_PWSH").unwrap_or_else(|_| "pwsh".to_owned());
     let found = Command::new(&candidate)
         .args(["-NoLogo", "-NoProfile", "-Command", "exit 0"])
@@ -23,7 +23,7 @@ fn pwsh() -> Option<String> {
 
 /// Run `pwsh` interactively in a pseudo-terminal, load `snippet` from a file, type each of
 /// `lines` (raw bytes, so a test can send Ctrl+C), and return everything it wrote.
-fn drive_pwsh(pwsh: &str, prehook: &str, snippet: &str, lines: &[&[u8]]) -> String {
+pub(super) fn drive_pwsh(pwsh: &str, prehook: &str, snippet: &str, lines: &[&[u8]]) -> String {
     let (mut controller, terminal) = open_pty();
     set_window_size(&terminal);
     let stdio = |fd: &OwnedFd| Stdio::from(fd.try_clone().expect("dup the terminal side"));

@@ -301,8 +301,13 @@ the pane (`no_shell_integration`) rather than waiting for markers. It wraps `pro
 written once ReadLine returns an accepted line, so a multi-line `{` block counts once
 and a line cancelled with Ctrl+C runs nothing. The script only reads
 `$LASTEXITCODE`, so every command sees the value it would without the integration. D's
-code is 0 when the line succeeded. A failed line whose commands are all cmdlets cannot
-have run a native program, so its code is 1, even after an earlier native failure. For
+code is 0 when the line succeeded, and a successful line is never parsed. A failed line is
+parsed after it ran, and each command name is resolved as it stands then. One whose commands
+are all cmdlets cannot have run a native program, so its code is 1, even after an earlier
+native failure. A line longer than 16,384 UTF-16 code units, with more than 64 commands, or
+that defines, aliases or removes a command (a `function`, `Set-Alias`, `New-Alias`,
+`Remove-Alias`, `Import-Module`, or a `function:` or `alias:` path) is treated as one that may
+have run a native program, since what its names meant when it ran is not certain. For
 any other failed line, the code is 1 when it raised a new PowerShell error and
 `$LASTEXITCODE` is 0 or unset, and the native `$LASTEXITCODE` when that is non-zero and no
 new error was raised. A line with both, such as

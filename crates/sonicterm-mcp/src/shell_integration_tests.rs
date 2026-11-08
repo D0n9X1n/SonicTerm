@@ -252,3 +252,7 @@ fn an_interactive_bash_emits_tokened_markers_in_order() {
 #[cfg(test)]
 #[path = "shell_integration_tests_pwsh_tests.rs"]
 mod shell_integration_tests_pwsh_tests;
+
+#[cfg(test)]
+#[path = "shell_integration_tests_pwsh_parse_tests.rs"]
+mod shell_integration_tests_pwsh_parse_tests;
