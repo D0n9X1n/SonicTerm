@@ -12,8 +12,9 @@ import perf_latency_schema
 TIMELINE_SCHEMA = 1
 # The echo-timeline schemas this script can validate, as a harness declares them in `--list`.
 ECHO_TIMELINE_SCHEMAS = (1,)
-# The variants whose credited samples carry an echo timeline under the declared schema: split_in_scope's.
-TIMELINE_SCOPE = (("S2", "default"), ("S2", "flood"))
+# The variants whose credited samples carry an echo timeline under the declared schema: split_in_scope's
+# (record_latency.rs), which a test reads from the harness source so the two never drift.
+TIMELINE_SCOPE = (("S2", "default"), ("S2", "flood"), ("S2", "spawn"))
 TIMELINE_PART_NAMES = ("input_to_parse", "parse_to_publication", "publication_to_frame_request",
                        "frame_request_to_entry", "entry_to_render", "render", "render_exit_to_credited_end")
 TIMELINE_AVAILABILITIES = ("recorded", "unavailable", "rejected")

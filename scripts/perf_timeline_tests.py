@@ -4,7 +4,9 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import re
 import unittest
+from pathlib import Path
 
 import perf_build_tests
 import perf_counter_rows
@@ -368,6 +370,8 @@ class EchoTimelineTests(perf_driver_tests.CompareHarness, unittest.TestCase):
         problems = timeline_problems(timeline_latency([timeline_sample(timeline())], coverage=None),
                                      scope=("S1", "default"))
         self.assertTrue(any("timeline-out-of-scope" in problem for problem in problems), problems)
+        # S2/spawn types into its pane while tabs open, so its samples carry a timeline too.
+        self.assertEqual(timeline_problems(in_scope, scope=("S2", "spawn")), [])
         problems = timeline_problems(in_scope, scope=("S1", "default"))
         self.assertTrue(any("echo_timeline_coverage is" in problem for problem in problems), problems)
         missing = timeline_latency([timeline_sample(None)])
@@ -551,6 +555,18 @@ class EchoTimelineTests(perf_driver_tests.CompareHarness, unittest.TestCase):
         unavailable = perf_timeline_schema.timeline_coverage([timeline("unavailable")])
         self.assertEqual(perf_counter_rows.timeline_coverage_verdict(coverage(5, 5), unavailable),
                          "unavailable (head recorded no timeline)")
+
+    def test_the_scope_is_the_harness_split_in_scope(self):
+        # The harness arms an echo timeline exactly for split_in_scope's variants; a variant it arms that the
+        # schema refuses fails every run of it, so both lists are read and must be equal.
+        source = (Path(__file__).resolve().parent.parent / "crates" / "sonicterm-app" / "examples"
+                  / "perf_scenarios" / "record_latency.rs").read_text(encoding="utf-8")
+        body = source[source.index("pub(crate) fn split_in_scope"):]
+        body = body[:body.index("\n}")]
+        scenario = re.search(r'scenario == "([^"]+)"', body).group(1)
+        variants = re.findall(r'"([^"]+)"', body[body.index("matches!"):])
+        self.assertEqual(perf_timeline_schema.TIMELINE_SCOPE, tuple((scenario, variant) for variant in variants))
+        self.assertEqual(perf_counter_rows.TIMELINE_LABELS, tuple(f"{scenario}/{variant}" for variant in variants))
 
 
 GUARD_NONCE = "0123456789abcdef0123456789abcdef"
