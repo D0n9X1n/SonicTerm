@@ -302,7 +302,7 @@ def split_rows(label: str, base: perf_metrics.SideRuns, head: perf_metrics.SideR
 
 
 # The scenarios whose credited samples carry an echo timeline: split_in_scope's variants.
-TIMELINE_LABELS = ("S2/default", "S2/flood")
+TIMELINE_LABELS = tuple("/".join(label) for label in perf_timeline_schema.TIMELINE_SCOPE)
 # The timeline rows' labels, in order, and each row's population.
 TIMELINE_ROWS = (
     ("echo timeline recorded / credited", "recorded"),
