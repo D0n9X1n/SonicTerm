@@ -4,6 +4,7 @@
 use sonicterm_vt::vt::{KittyAction, KittyCommand, MediaProtocol};
 
 use super::super::media::{apply_kitty, kitty_source_size, KittyOp};
+use super::super::media_decode_stats::{DecodeOutcome, DecodeTimer};
 use super::*;
 
 /// A cursor move the host owes the parser after an image it now holds.
@@ -79,16 +80,40 @@ pub(super) fn apply_batch_media<Decode>(
 where
     Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
 {
+    let stats = handles.frame_counters.as_ref().map(|counters| &counters.vt.media);
+    let mut timer = DecodeTimer::new(stats, Instant::now);
+    apply_batch_media_timed(handles, media_events, decode_media, &mut timer)
+}
+
+/// [`apply_batch_media`] with the decode timer passed in, so a test can inject its clock. Every
+/// decode attempt is timed and recorded with its outcome; place and delete decode nothing.
+pub(super) fn apply_batch_media_timed<Decode, Now>(
+    handles: &PaneVtHandles,
+    media_events: Vec<MediaEvent>,
+    decode_media: &mut Decode,
+    timer: &mut DecodeTimer<'_, Now>,
+) -> (Vec<u8>, Vec<ImageCursorMove>)
+where
+    Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
+    Now: FnMut() -> Instant,
+{
     let mut replies = Vec::new();
     let mut moves = Vec::new();
     let mut staged = Vec::new();
+    // The elapsed time of the transmit being applied, recorded once the store answers it.
+    let mut transmit_elapsed = None;
     for media in media_events {
         let command = (media.protocol == MediaProtocol::Kitty)
             .then(|| KittyCommand::parse(media.metadata.as_bytes()).ok())
             .flatten();
         let Some(command) = command else {
             // When: command is None, the event is Sixel, iTerm2 or an untyped kitty payload, drawn at its cursor.
-            if let Some(image) = decode_media(&media) {
+            let (decoded, elapsed) = timer.time(|| decode_media(&media));
+            // Staging keeps the newest image, so a decoded ordinary image is never refused here.
+            let outcome =
+                if decoded.is_some() { DecodeOutcome::Decoded } else { DecodeOutcome::Failed };
+            timer.record(elapsed, outcome);
+            if let Some(image) = decoded {
                 // Staged trimming always keeps the newest image, so this one is held.
                 moves.extend(ordinary_image_move(&media, &image));
                 staged.push(image);
@@ -102,18 +127,26 @@ where
         let operation = match command.action {
             KittyAction::Query => {
                 // When: action is Query, the image is decoded to validate it and then dropped unstored.
-                let message =
-                    if decode_media(&media).is_some() { "OK" } else { "EBADPNG:cannot decode" };
+                let (decoded, elapsed) = timer.time(|| decode_media(&media));
+                let (message, outcome) = match decoded {
+                    Some(_) => ("OK", DecodeOutcome::Decoded),
+                    None => ("EBADPNG:cannot decode", DecodeOutcome::Failed),
+                };
+                timer.record(elapsed, outcome);
                 push_reply(&mut replies, &command, message);
                 continue;
             }
             KittyAction::Transmit | KittyAction::TransmitAndDisplay => {
                 // When: action is Transmit or TransmitAndDisplay, the pixels are decoded here, outside every lock.
-                let Some(image) = decode_media(&media) else {
-                    // When: decode_media fails, nothing is stored and the client hears why.
+                let (decoded, elapsed) = timer.time(|| decode_media(&media));
+                let Some(image) = decoded else {
+                    // When: decoded is None, the decode failed: nothing is stored and the client hears why.
+                    timer.record(elapsed, DecodeOutcome::Failed);
                     push_reply(&mut replies, &command, "EBADPNG:cannot decode");
                     continue;
                 };
+                // Its outcome is known once the store answers, below.
+                transmit_elapsed = elapsed;
                 KittyOp::Transmit(command.clone(), image, kitty_source_size(&media))
             }
             KittyAction::Place => {
@@ -122,6 +155,7 @@ where
             KittyAction::Delete => KittyOp::Delete(command.clone()),
         };
         merge_staged(handles, &mut staged);
+        let transmitted = matches!(operation, KittyOp::Transmit(..));
         let (message, removed) = {
             let mut images = handles.inline_images.lock();
             let (message, mut removed) = apply_kitty(&mut images, operation);
@@ -142,6 +176,15 @@ where
             (message, removed)
         };
         drop(removed);
+        if transmitted {
+            // A decoded transmit the store did not answer `OK` was refused after its decode.
+            let outcome = if message == Some("OK") {
+                DecodeOutcome::Decoded
+            } else {
+                DecodeOutcome::RefusedAfterDecode
+            };
+            timer.record(transmit_elapsed.take(), outcome);
+        }
         if let Some(message) = message {
             push_reply(&mut replies, &command, message);
         }
@@ -170,6 +213,10 @@ fn push_reply(replies: &mut Vec<u8>, command: &KittyCommand, message: &str) {
         replies.extend_from_slice(&reply);
     }
 }
+
+#[cfg(test)]
+#[path = "spawn_pane_media_decode_tests.rs"]
+mod spawn_pane_media_decode_tests;
 
 #[cfg(test)]
 #[path = "spawn_pane_media_tests.rs"]

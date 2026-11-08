@@ -165,11 +165,17 @@ pub(super) const CONTRACT: &[(&str, &[&str])] = &[
             "flushes_coalesced",
             "flushes_suppressed",
             "sync_timeouts",
+            "media_decode_attempts",
+            "media_decode_under_8ms",
+            "media_decoded",
+            "media_decode_failed",
+            "media_refused_after_decode",
             "parser_lock_wait_ns",
             "parser_sections",
             "parser_lock_wait_us",
             "parser_lock_hold_us",
             "parse_us",
+            "media_decode_dus",
         ],
     ),
     (
@@ -244,7 +250,8 @@ pub(super) fn every_contract_field_serializes_present_and_zero_with_the_right_hi
         assert_eq!(listed, expected, "{section}");
         for name in *names {
             let value = &fields[*name];
-            let unit = name.rsplit('_').next().filter(|suffix| ["ms", "us"].contains(suffix));
+            let unit =
+                name.rsplit('_').next().filter(|suffix| ["ms", "us", "dus"].contains(suffix));
             let is_histogram = unit.is_some() && value.is_object();
             if !is_histogram {
                 assert_eq!(value, &json!(0), "{section}.{name}");
@@ -254,10 +261,10 @@ pub(super) fn every_contract_field_serializes_present_and_zero_with_the_right_hi
             let mut keys: Vec<&str> = histogram.keys().map(String::as_str).collect();
             keys.sort_unstable();
             assert_eq!(keys, ["bounds", "counts", "sum_us", "unit"], "{name}");
-            let bounds: &[u64] = if unit == Some("ms") {
-                &[4, 7, 9, 12, 17, 25, 34, 50, 100]
-            } else {
-                &[10, 50, 100, 500, 1_000, 5_000]
+            let bounds: &[u64] = match unit {
+                Some("ms") => &[4, 7, 9, 12, 17, 25, 34, 50, 100],
+                Some("dus") => &[1_000, 2_000, 4_000, 7_999, 16_000, 32_000, 64_000, 128_000],
+                _ => &[10, 50, 100, 500, 1_000, 5_000],
             };
             assert_eq!(histogram["unit"], json!(unit), "{name}");
             assert_eq!(histogram["bounds"], json!(bounds), "{name}");
@@ -265,12 +272,13 @@ pub(super) fn every_contract_field_serializes_present_and_zero_with_the_right_hi
             assert_eq!(histogram["sum_us"], json!(0), "{name}");
         }
     }
-    // Every field ending in _ms or _us is a histogram; the names above with those suffixes
-    // are exactly the fifteen contract histograms (the retired event-loop fg_probe_us beside the
-    // worker's fg_worker_probe_us, the renderer's atlas_growth_to_present_ms, and the window's
-    // per-collection parser_lock_wait_us); row_cache_invalidate_us is a plain sum.
+    // Every field ending in _ms, _us or _dus is a histogram; the names above with those suffixes
+    // are exactly the sixteen contract histograms (the retired event-loop fg_probe_us beside the
+    // worker's fg_worker_probe_us, the renderer's atlas_growth_to_present_ms, the window's
+    // per-collection parser_lock_wait_us and the workers' media_decode_dus); row_cache_invalidate_us
+    // is a plain sum.
     let histograms = FIELDS.iter().filter(|field| matches!(field.kind, FieldKind::Histogram(_)));
-    assert_eq!(histograms.count(), 15);
+    assert_eq!(histograms.count(), 16);
 }
 
 #[test]
@@ -710,6 +718,12 @@ pub(super) const NEWER_SOURCES: &[&str] = &[
     "startup_renderer_ns",
     "startup_load_checks_ns",
     "startup_pane_spawn_ns",
+    "media_decode",
+    "media_decode_attempts",
+    "media_decode_under_8ms",
+    "media_decoded",
+    "media_decode_failed",
+    "media_refused_after_decode",
 ];
 
 /// The fixture perf-compare's attempt-split test reads, written by this harness.

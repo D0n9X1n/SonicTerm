@@ -326,6 +326,7 @@ pub(in crate::app) use interaction::InteractionState;
 mod window_registry_state;
 pub(in crate::app) use window_registry_state::{WindowMap, WindowRegistry};
 mod cursor_blink;
+mod media_decode_stats;
 mod tab_tree;
 mod window_registry_panes;
 pub use window_registry_panes::{DetachedPane, DetachedPanes, PaneMap};

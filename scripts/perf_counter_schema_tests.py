@@ -39,8 +39,10 @@ COUNTER_CONTRACT = {
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced",
-            "flushes_suppressed", "sync_timeouts", "parser_lock_wait_ns", "parser_sections"),
-           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
+            "flushes_suppressed", "sync_timeouts", "parser_lock_wait_ns", "parser_sections",
+            "media_decode_attempts", "media_decode_under_8ms", "media_decoded",
+            "media_decode_failed", "media_refused_after_decode"),
+           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us", "media_decode_dus")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   "damage_waste_permille_sum", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
@@ -65,6 +67,8 @@ COUNTER_CONTRACT = {
 CONTRACT_FIELD_COUNT = sum(len(counts) + len(histograms) for counts, histograms in COUNTER_CONTRACT.values())
 MILLISECOND_BOUNDS = [4, 7, 9, 12, 17, 25, 34, 50, 100]
 MICROSECOND_BOUNDS = [10, 50, 100, 500, 1000, 5000]
+# The decode histogram's microsecond buckets, with a 7,999 bound under the 8 ms threshold.
+DECODE_BOUNDS = [1000, 2000, 4000, 7999, 16000, 32000, 64000, 128000]
 
 
 def frame_counters(values=None):
@@ -78,7 +82,7 @@ def frame_counters(values=None):
         body = {name: values.get(f"{section}.{name}", 0) for name in counts}
         for name in histograms:
             unit = name.rsplit("_", 1)[1]
-            bounds = MILLISECOND_BOUNDS if unit == "ms" else MICROSECOND_BOUNDS
+            bounds = {"ms": MILLISECOND_BOUNDS, "dus": DECODE_BOUNDS}.get(unit, MICROSECOND_BOUNDS)
             buckets, total_us = values.get(f"{section}.{name}", ([0] * (len(bounds) + 1), 0))
             body[name] = {"unit": unit, "bounds": list(bounds), "counts": list(buckets), "sum_us": total_us}
         sections[section] = body

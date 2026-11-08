@@ -16,6 +16,9 @@ use parking_lot::{Mutex, MutexGuard};
 const MILLIS_BOUNDS: [u64; 9] = [4, 7, 9, 12, 17, 25, 34, 50, 100];
 /// Upper bounds of the microsecond buckets; a larger value lands in the overflow bucket.
 const MICROS_BOUNDS: [u64; 6] = [10, 50, 100, 500, 1_000, 5_000];
+/// Upper bounds of the media decode buckets, in microseconds. 7,999 is a bound so a decode under
+/// the 8 ms investigation threshold never shares a bucket with one at or above it.
+const DECODE_BOUNDS: [u64; 8] = [1_000, 2_000, 4_000, 7_999, 16_000, 32_000, 64_000, 128_000];
 /// Bucket slots: the longer bound list plus its overflow bucket.
 const BUCKETS: usize = MILLIS_BOUNDS.len() + 1;
 /// Least spacing between two lines from one source.
@@ -28,6 +31,8 @@ pub(crate) enum HistogramUnit {
     Millis,
     /// Microsecond buckets, for lock waits, holds and parses.
     Micros,
+    /// Microsecond buckets from 1 ms to 128 ms, for inline-image decodes.
+    Decode,
 }
 
 /// Where a maximum or p95 lies: at or below a bucket bound, or in the overflow bucket.
@@ -212,6 +217,8 @@ pub(crate) struct VtFrameStats {
     pub(crate) parser_lock_wait_ns: AtomicU64,
     /// Parser sections recorded; the count `parser_lock_wait_ns` sums over.
     pub(crate) parser_sections: AtomicU64,
+    /// Inline-image decodes the workers ran, with their outcomes.
+    pub(crate) media: super::media_decode_stats::DecodeStats,
 }
 
 impl Default for VtFrameStats {
@@ -229,6 +236,7 @@ impl Default for VtFrameStats {
             sync_timeouts: AtomicU64::new(0),
             parser_lock_wait_ns: AtomicU64::new(0),
             parser_sections: AtomicU64::new(0),
+            media: super::media_decode_stats::DecodeStats::default(),
         }
     }
 }

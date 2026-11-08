@@ -172,8 +172,14 @@ FRAME_COUNTER_FIELDS = {
             # sync_timeouts counts synchronized updates released at the 150 ms bound; a base older than it shows n/a.
             "sync_timeouts",
             # The workers' parser-lock wait summed in ns, and the sections it sums over; a base older shows n/a.
-            "parser_lock_wait_ns", "parser_sections"),
-           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
+            "parser_lock_wait_ns", "parser_sections",
+            # Inline-image decode attempts on the workers, the attempts under 8 ms (p95 is at least 8 ms
+            # when they number fewer than ceil(0.95 x attempts)) and each outcome; a base older than
+            # them shows n/a.
+            "media_decode_attempts", "media_decode_under_8ms", "media_decoded",
+            "media_decode_failed", "media_refused_after_decode"),
+           # media_decode_dus is the decode-duration histogram on its own buckets (a 7.999 ms bound).
+           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us", "media_decode_dus")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   # damage_waste_permille_sum is the union rect's share minus what its parts cover, over
                   # damaged_frames; a base older than it shows n/a.
@@ -201,9 +207,10 @@ FRAME_COUNTER_FIELDS = {
                   "tab_title_reuses", "tab_title_prepares", "chrome_run_reuses", "chrome_run_prepares"),
                  ("assembly_us", "atlas_growth_to_present_ms")),
 }
-HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}
+HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000],
+                    "dus": [1000, 2000, 4000, 7999, 16000, 32000, 64000, 128000]}
 # A histogram's `sum_us` is an exact integer in microseconds whatever its unit; this converts it to the unit.
-MICROSECONDS_PER_UNIT = {"ms": 1000, "us": 1}
+MICROSECONDS_PER_UNIT = {"ms": 1000, "us": 1, "dus": 1}
 
 
 def frame_counter_state(data: Mapping) -> object:

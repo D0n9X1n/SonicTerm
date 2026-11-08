@@ -558,6 +558,10 @@ or whose worker finishes after it, still adds to it.
 | `flushes_coalesced` | count | flushes that found an earlier flush still pending, which keeps its time |
 | `flushes_suppressed` | count | targeted flushes that sent no event because the pane's output event was still outstanding; a send the event loop refused is not counted |
 | `sync_timeouts` | count | synchronized updates (DEC 2026) a worker released at the 150 ms bound rather than at their reset |
+| `media_decode` | µs histogram (`dus`; `media_decode_dus` in perf results) | inline-image decode attempts on the workers, on buckets 1, 2, 4, 7.999, 16, 32, 64 and 128 ms, so a decode under 8 ms never shares a bucket with one at or above it |
+| `media_decode_attempts` | count | decode attempts: Sixel, iTerm2 and kitty transmits and queries, malformed payloads and decodes the store refused; kitty place and delete decode nothing |
+| `media_decode_under_8ms` | count | attempts that took under 8 ms. The decode p95 is at least 8 ms exactly when this is less than `ceil(0.95 × media_decode_attempts)` |
+| `media_decoded`, `media_decode_failed`, `media_refused_after_decode` | count | each attempt's outcome: kept (or a query answered `OK`), not decodable, or decoded and then refused by the store |
 
 No identity holds between `flushes`, `flushes_untargeted`, `flushes_coalesced`,
 and the `flush_to_redraw` count. A pane that closes drops its pending timestamp,

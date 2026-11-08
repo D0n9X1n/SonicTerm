@@ -314,6 +314,11 @@ impl AppFrameCounters {
             ("fg_worker_probes", &self.fg_worker.probes),
             ("fg_worker_panes", &self.fg_worker.panes),
             ("fg_results_stale", &self.fg_worker.stale),
+            ("media_decode_attempts", &vt.media.attempts),
+            ("media_decode_under_8ms", &vt.media.under_threshold),
+            ("media_decoded", &vt.media.decoded),
+            ("media_decode_failed", &vt.media.failed),
+            ("media_refused_after_decode", &vt.media.refused_after_decode),
         ] {
             record.push_count(name, value.load(Ordering::Relaxed));
         }
@@ -360,6 +365,7 @@ impl AppFrameCounters {
             ("parser_lock_wait", vt.parser_lock_wait.snapshot()),
             ("parser_lock_hold", vt.parser_lock_hold.snapshot()),
             ("parse", vt.parse.snapshot()),
+            ("media_decode", vt.media.duration.snapshot()),
             ("ui_parser_wait", dispatch.wait.snapshot()),
             ("fg_probe", Histogram::new(HistogramUnit::Micros)),
             ("fg_worker_probe", self.fg_worker.probe.snapshot()),

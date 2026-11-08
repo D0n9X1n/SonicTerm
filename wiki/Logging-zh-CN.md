@@ -450,6 +450,10 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `flushes_coalesced` | 次数 | 发现更早的 flush 仍待处理的 flush；更早的那次保留其时间 |
 | `flushes_suppressed` | 次数 | 有目标、但因窗格的输出事件仍未处理而未发送事件的 flush；事件循环拒收的发送不计入 |
 | `sync_timeouts` | 次数 | 工作线程在 150 ms 时限而非重置时释放的同步更新（DEC 2026） |
+| `media_decode` | µs 直方图（`dus`；性能结果中为 `media_decode_dus`） | 工作线程上的内联图像解码尝试，桶为 1、2、4、7.999、16、32、64 和 128 ms，因此低于 8 ms 的解码不会与达到或超过 8 ms 的解码落入同一个桶 |
+| `media_decode_attempts` | 次数 | 解码尝试：Sixel、iTerm2 与 kitty 的传输和查询、格式错误的负载，以及存储拒绝的解码；kitty 放置和删除不解码 |
+| `media_decode_under_8ms` | 次数 | 耗时低于 8 ms 的尝试。当它小于 `ceil(0.95 × media_decode_attempts)` 时，解码 p95 恰好至少为 8 ms |
+| `media_decoded`、`media_decode_failed`、`media_refused_after_decode` | 次数 | 每次尝试的结果：被保留（或查询回答 `OK`）、无法解码，或解码后被存储拒绝 |
 
 `flushes`、`flushes_untargeted`、`flushes_coalesced` 与 `flush_to_redraw` 的计数之间没有恒等关系。
 关闭的窗格会丢弃其待处理时间戳，而且各计数器并非作为一次快照读取，因此要分别解读。

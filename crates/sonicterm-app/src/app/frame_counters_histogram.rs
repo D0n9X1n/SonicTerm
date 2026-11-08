@@ -7,13 +7,14 @@ impl HistogramUnit {
         match self {
             Self::Millis => &MILLIS_BOUNDS,
             Self::Micros => &MICROS_BOUNDS,
+            Self::Decode => &DECODE_BOUNDS,
         }
     }
 
     pub(super) fn micros_per_unit(self) -> u64 {
         match self {
             Self::Millis => 1_000,
-            Self::Micros => 1,
+            Self::Micros | Self::Decode => 1,
         }
     }
 
@@ -21,6 +22,8 @@ impl HistogramUnit {
         match self {
             Self::Millis => "ms",
             Self::Micros => "us",
+            // Microseconds on their own bounds, so a reader never applies the `us` bounds to them.
+            Self::Decode => "dus",
         }
     }
 
@@ -93,7 +96,7 @@ impl Histogram {
     }
 
     /// The unit, bounds, used bucket counts (overflow last) and exact sum, borrowed.
-    pub(super) fn buckets(&self) -> HistogramBuckets<'_> {
+    pub(crate) fn buckets(&self) -> HistogramBuckets<'_> {
         let bounds = self.unit.bounds();
         HistogramBuckets {
             unit: self.unit.suffix(),
