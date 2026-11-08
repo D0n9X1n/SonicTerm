@@ -33,7 +33,11 @@ enclosing deadline, while bounded unsettled samples still reach the summaries.
 
 For ordinary and stalled scenarios it uses the same shell, one pane, and 20
 samples per scenario. Setup, settlement and cleanup remain bounded within the
-isolated child's deadline; summaries use nearest-rank percentiles.
+isolated child's deadline; summaries use nearest-rank percentiles. Each
+scenario also reports a `measure=spawn` summary: how long opening the PTY and
+starting its process took on the calling thread, which is the event loop when a
+user or an agent opens a pane. A local Apple Silicon run gave p50 2.5 ms and p95
+4.8 ms; the Windows job's line gives ConPTY's figure.
 Every `PTY_CLOSE_BASELINE` sample and p50/p95/max summary distinguishes the
 `close_pty_pane` caller's blocking time from an independent process observer's
 settlement time, both starting at close. The caller is the headless App-owning

@@ -64,12 +64,18 @@ fn pty_close_baseline() {
     for scenario in ["ordinary", "stalled"] {
         let mut close_samples = Vec::new();
         let mut native_samples = Vec::new();
+        let mut spawn_samples = Vec::new();
         for sample in 1..=SAMPLES {
             let (close, native) =
                 measure_close(scenario, sample).expect("run real PTY baseline case");
             close_samples.push(close);
             native_samples.push(native);
+            if let Some(elapsed) = LAST_SPAWN.take() {
+                spawn_samples.push(Sample { elapsed, censored: false });
+            }
         }
+        // How long opening the PTY and starting its process takes on this host's thread.
+        report_summary(scenario, "spawn", spawn_samples);
         report_summary(scenario, "close_call", close_samples);
         report_summary(scenario, "native_settlement", native_samples);
     }
@@ -253,6 +259,11 @@ fn summary_preserves_censored_count_and_bounds() {
     assert!(summary.contains("p95_ms=>4000.000 max_ms=>4000.000"), "{summary}");
 }
 
+thread_local! {
+    /// How long the last baseline pane's PTY spawn took on this thread.
+    static LAST_SPAWN: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
 fn measure_close(scenario: &str, sample: usize) -> Result<(Sample, Sample)> {
     pty_test_support::phase(sample as u64, "baseline-setup");
     let (mut app, pane, processes, slave) = prepare_pane(scenario)?;
@@ -427,6 +438,8 @@ fn prepare_pane_with_ready_output(
     let app_inspection = ProcessInspection::open(std::process::id())?;
     #[cfg(windows)]
     let fixture_started = fixture_birth_boundary();
+    // The spawn is timed on the calling thread, as the event loop runs it today.
+    let spawn_started = Instant::now();
     #[cfg(windows)]
     let pty = PtyHandle::spawn_with_args("cmd.exe", &["/D".into(), "/Q".into()], 80, 24)?;
     #[cfg(unix)]
@@ -436,6 +449,7 @@ fn prepare_pane_with_ready_output(
         80,
         24,
     )?;
+    LAST_SPAWN.set(Some(spawn_started.elapsed()));
     let shell = pty.pid().context("new baseline shell PID")?;
     pty_test_support::record_process(shell, true);
     let mut processes = vec![NativeProcess::open(shell, "shell")?];

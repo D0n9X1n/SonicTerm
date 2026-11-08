@@ -23,7 +23,9 @@
 失败，并在总期限到达时清理子进程树；有界但未完成的样本仍可输出汇总。
 
 ordinary 与 stalled 场景使用相同 shell、一个 pane，每场景 20 个样本。
-设置、settlement 和清理仍受隔离子进程期限约束，汇总使用 nearest-rank 百分位。
+设置、settlement 和清理仍受隔离子进程期限约束，汇总使用 nearest-rank 百分位。每个场景还给出
+`measure=spawn` 汇总：在调用线程上打开 PTY 并启动其进程所用的时间；用户或 agent 打开窗格时，该线程就是
+事件循环。本地 Apple Silicon 运行得到 p50 2.5 ms、p95 4.8 ms；Windows job 的这一行给出 ConPTY 的数字。
 每条 `PTY_CLOSE_BASELINE` 样本及 p50/p95/max 汇总区分 `close_pty_pane` 调用线程的阻塞时间，
 与独立进程观察者记录的 settlement 时间，两者都从 close 开始计时。调用者是无窗口的 App
 所属测试线程，不是运行中的原生事件循环。Windows 填满 ConPTY 输出队列；Unix 由 shell
