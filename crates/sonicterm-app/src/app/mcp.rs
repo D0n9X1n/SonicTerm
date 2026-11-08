@@ -44,6 +44,8 @@ pub(crate) mod read;
 pub(crate) mod run;
 #[path = "mcp/scan.rs"]
 pub(crate) mod scan;
+#[path = "mcp/stream_scan.rs"]
+pub(crate) mod stream_scan;
 #[path = "mcp/stream_wait.rs"]
 pub(crate) mod stream_wait;
 #[path = "mcp/tools_control.rs"]

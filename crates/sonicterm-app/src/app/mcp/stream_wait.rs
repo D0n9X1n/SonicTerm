@@ -110,6 +110,7 @@ fn run(
     let _waiter = shared.register_waiter(&entry.change_signal);
     let mut truncated = false;
     let mut checked_to = start;
+    let mut scan = super::stream_scan::StreamScan::new(start);
     let mut last_change = started;
     let mut closed_since: Option<Instant> = None;
     // The output generation the last successful read started from; `None` before the first.
@@ -140,30 +141,28 @@ fn run(
             return end(WaitReason::Revoked, truncated, unread(inspected));
         }
         // The tap is read before the exit is checked, so text printed before the exit matches.
+        // Only the characters since the last read are copied under the lock; the search runs
+        // after it is released.
         let read = entry
             .parser
             .try_lock_for(super::read::PARSER_WAIT)
-            .and_then(|parser| parser.output_tap_since(start));
+            .and_then(|parser| scan.read(&parser));
         let parser_busy = read.is_none();
         if let Some(read) = read {
             // When: the `read` of the tap succeeded, everything up to `generation` was checked.
             inspected = Some(generation);
-            truncated |= read.truncated;
-            if read.end != checked_to {
+            scan.absorb(read);
+            truncated = scan.truncated();
+            if scan.end() != checked_to {
                 last_change = Instant::now();
-                checked_to = read.end;
+                checked_to = scan.end();
             }
-            if let Some(found) = condition.regex.find(&read.text) {
+            if let Some(found) = scan.find(&condition.regex) {
                 // When: the regex `found` a match in the text printed since the wait began.
-                let line_start = read.text[..found.start()].rfind('\n').map_or(0, |at| at + 1);
-                let line_end = read.text[found.end()..]
-                    .find('\n')
-                    .map_or(read.text.len(), |at| found.end() + at);
-                let offset = read.from + read.text[..found.start()].chars().count() as u64;
                 return StreamOutcome {
                     reason: WaitReason::Matched,
-                    line: Some(read.text[line_start..line_end].to_owned()),
-                    offset: Some(offset),
+                    line: Some(found.line),
+                    offset: Some(found.offset),
                     exit_code: None,
                     context_truncated: truncated,
                     unread: false,

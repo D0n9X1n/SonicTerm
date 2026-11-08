@@ -10,10 +10,12 @@ use std::sync::Arc;
 pub const OUTPUT_TAP_CHARS: usize = 64 * 1024;
 
 /// The printed text of one parser while at least one reader has it armed.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct OutputTap {
     /// The newest printed characters, a line feed for each LF, VT or FF.
     ring: VecDeque<char>,
+    /// The most characters `ring` keeps: [`OUTPUT_TAP_CHARS`], or a test's smaller ring.
+    capacity: usize,
     /// Characters pushed since the tap was created; the ring's last character is at `end - 1`.
     end: u64,
     /// Readers holding the tap armed. A reader releases its hold without the parser lock; the
@@ -39,10 +41,26 @@ impl Drop for TapHold {
     }
 }
 
+impl Default for OutputTap {
+    fn default() -> Self {
+        Self::with_capacity(OUTPUT_TAP_CHARS)
+    }
+}
+
 impl OutputTap {
+    /// An empty tap keeping at most `capacity` characters.
+    fn with_capacity(capacity: usize) -> Self {
+        Self { ring: VecDeque::new(), capacity, end: 0, readers: Arc::default() }
+    }
+
+    /// The offset of the oldest character the ring still holds.
+    fn retained_start(&self) -> u64 {
+        self.end - self.ring.len() as u64
+    }
+
     /// Record one printed character, dropping the oldest when the ring is full.
     pub(crate) fn push(&mut self, character: char) {
-        if self.ring.len() == OUTPUT_TAP_CHARS {
+        if self.ring.len() == self.capacity {
             self.ring.pop_front();
         }
         self.ring.push_back(character);
@@ -96,7 +114,7 @@ impl super::Parser {
     /// the tap is not armed.
     pub fn output_tap_since(&self, start: u64) -> Option<TapText> {
         let tap = self.performer.tap.as_ref()?;
-        let retained_from = tap.end - tap.ring.len() as u64;
+        let retained_from = tap.retained_start();
         let from = start.max(retained_from).min(tap.end);
         let skip = (from - retained_from) as usize;
         Some(TapText {
@@ -106,6 +124,47 @@ impl super::Parser {
             truncated: retained_from > start,
         })
     }
+
+    /// Append to `out` only the characters printed at or after `next` that the tap still holds:
+    /// the work under the parser lock is the new text, never the whole ring. When the ring already
+    /// dropped text at `next` (a gap), `out` is cleared first and receives the whole retained
+    /// ring, so stale text can never survive in front of it. `None` when the tap is not armed.
+    pub fn output_tap_append(&self, next: u64, out: &mut String) -> Option<TapAppend> {
+        let tap = self.performer.tap.as_ref()?;
+        let retained_start = tap.retained_start();
+        let gap = retained_start > next;
+        if gap {
+            // The ring dropped text at `next`, so the caller's earlier text is obsolete.
+            out.clear();
+        }
+        let from = next.max(retained_start).min(tap.end);
+        out.extend(tap.ring.iter().skip((from - retained_start) as usize));
+        Some(TapAppend { from, end: tap.end, retained_start, gap })
+    }
+
+    /// [`Self::arm_output_tap`] on a fresh tap keeping only `capacity` characters, so a test can
+    /// drive the ring past its size with little text. An armed tap keeps its capacity.
+    #[doc(hidden)]
+    pub fn arm_output_tap_with_capacity(&mut self, capacity: usize) -> TapHold {
+        if self.performer.tap.is_none() {
+            self.performer.tap = Some(Box::new(OutputTap::with_capacity(capacity)));
+        }
+        self.arm_output_tap()
+    }
+}
+
+/// What one incremental read of the tap appended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TapAppend {
+    /// The offset of the first character appended.
+    pub from: u64,
+    /// The offset just past the last character appended: where the next read starts.
+    pub end: u64,
+    /// The offset of the oldest character the ring holds.
+    pub retained_start: u64,
+    /// The ring had already dropped text at the read's start, so the caller's buffer was cleared
+    /// and refilled from `retained_start`.
+    pub gap: bool,
 }
 
 #[cfg(test)]
