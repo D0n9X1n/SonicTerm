@@ -54,15 +54,17 @@ impl MediaIdentityCache {
             self.release();
             return (self.retained_bytes, self.hash);
         }
-        // The revision list is reused in place, so a changed frame allocates only when it grows.
+        // The revision list is reused in place, so a changed frame allocates only when it grows,
+        // and then to exactly the panes it holds: `extend` alone may double past the cap.
         self.revisions.clear();
+        self.revisions.reserve_exact(panes.len());
         self.revisions.extend(panes.iter().map(|pane| (pane.id, pane.inline_media_revision)));
         self.valid = true;
         (self.retained_bytes, self.hash)
     }
 
-    /// Bytes the revision list reserves; at most `MEDIA_REVISIONS_CAP_BYTES`, since `extend` from an
-    /// exact-size iterator reserves exactly the panes it holds.
+    /// Bytes the revision list reserves; at most `MEDIA_REVISIONS_CAP_BYTES`, since it is only ever
+    /// grown with `reserve_exact` to at most `MAX_TRACKED_PANES` pairs.
     pub(super) fn retained_bytes(&self) -> usize {
         self.revisions.capacity().saturating_mul(std::mem::size_of::<(u64, u64)>())
     }

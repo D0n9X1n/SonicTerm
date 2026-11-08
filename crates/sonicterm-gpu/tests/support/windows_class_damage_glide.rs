@@ -5,23 +5,29 @@ use std::time::{Duration, Instant};
 use super::*;
 
 /// One glide state a case presents: the cursor's target cell and the glide clock's offset from the
-/// case's start, or `None` for a hidden cursor that cancels the glide.
-type GlideStep = (&'static str, Option<(u16, u16)>, u64);
+/// case's start, or `None` for a hidden cursor that cancels the glide, and whether the frame must
+/// draw the cursor mid-glide.
+type GlideStep = (&'static str, Option<(u16, u16)>, u64, bool);
 
-/// A glide from the parked cursor down two rows, sampled twice mid-way, then landed and cancelled:
-/// every frame damages only the rows its sample crosses and equals a full repaint.
-const DOWN_AND_LAND: [GlideStep; 4] = [
-    ("start", Some((CURSOR_ROW + 2, CURSOR_COL + 4)), 20),
-    ("mid-way", Some((CURSOR_ROW + 2, CURSOR_COL + 4)), 50),
-    ("landed", Some((CURSOR_ROW + 2, CURSOR_COL + 4)), 400),
-    ("cancelled", None, 400),
+/// A glide from the parked cursor down two rows, sampled twice mid-way and landed; then a second
+/// glide back up, cancelled mid-way by hiding the cursor, which erases the fractional sample's ink,
+/// and the cursor shown again on its cell: every frame damages only the rows its samples cross and
+/// equals a full repaint.
+const DOWN_AND_LAND: [GlideStep; 7] = [
+    ("start", Some((CURSOR_ROW + 2, CURSOR_COL + 4)), 20, true),
+    ("mid-way", Some((CURSOR_ROW + 2, CURSOR_COL + 4)), 50, true),
+    ("landed", Some((CURSOR_ROW + 2, CURSOR_COL + 4)), 400, false),
+    ("back start", Some((CURSOR_ROW, CURSOR_COL)), 420, true),
+    ("back mid-way", Some((CURSOR_ROW, CURSOR_COL)), 445, true),
+    ("cancelled mid-way", None, 450, false),
+    ("shown again", Some((CURSOR_ROW, CURSOR_COL)), 900, false),
 ];
 
 /// A glide up onto the wide row's first CJK character, two columns wide, then landed.
 const ONTO_WIDE: [GlideStep; 3] = [
-    ("onto wide start", Some((WIDE_ROW, 0)), 20),
-    ("onto wide mid-way", Some((WIDE_ROW, 0)), 45),
-    ("onto wide landed", Some((WIDE_ROW, 0)), 400),
+    ("onto wide start", Some((WIDE_ROW, 0)), 20, true),
+    ("onto wide mid-way", Some((WIDE_ROW, 0)), 45, true),
+    ("onto wide landed", Some((WIDE_ROW, 0)), 400, false),
 ];
 
 /// Present each of `steps` on `scene` with the glide clock pinned, and require every frame narrow
@@ -36,7 +42,8 @@ fn glide_steps(
     let start = Instant::now();
     renderer.__pin_glide_clock(Some(start));
     baseline(renderer, layout, scene)?;
-    for (step, target, offset_ms) in steps {
+    for (step, target, offset_ms, gliding) in steps {
+        let name = format!("{case}: {step}");
         renderer.__pin_glide_clock(Some(start + Duration::from_millis(*offset_ms)));
         match target {
             Some((row, col)) => {
@@ -45,15 +52,38 @@ fn glide_steps(
             }
             None => scene.cursor_visible = false,
         }
-        narrow_matches_full(renderer, layout, scene, &format!("{case}: {step}"))?;
+        let (damage, ..) = narrow_matches_full(renderer, layout, scene, &name)?;
+        // The full twin re-samples the same pinned instant, so the glide state is this frame's.
+        check(
+            renderer.cursor_gliding() == *gliding,
+            &format!("{name}: the cursor {} mid-glide", if *gliding { "is" } else { "is not" }),
+        )?;
+        // The previous and current samples cross at most four rows, plus each strip's ink pad of
+        // about one font height: well under half of this pane, which whole-pane damage, the
+        // behaviour this narrows, would cover entirely.
+        check(
+            damage.damage.h < layout.pane.h / 2,
+            &format!("{name}: damage {:?} spans only the glide's rows", damage.damage),
+        )?;
     }
     scene.cursor_visible = true;
     Ok(())
 }
 
-/// Test 9: a smooth cursor glide's frames, mid-way, landing and cancelled, on the primary and the
-/// alternate screen, for every cursor shape and onto a wide cell, each equal to a full repaint.
+/// Test 9: a smooth cursor glide's frames, mid-way, landing and cancelled mid-way, on the primary
+/// and the alternate screen, for every cursor shape and onto a wide cell, at a fractional cell
+/// height: each frame glides when it should, damages only the glide's rows, and equals a full
+/// repaint. A preedit or any other overlay disables the glide and repaints the whole surface
+/// (`overlay_active` in `core_assemble.rs`), so it needs no narrow case.
 pub(super) fn glide_parity(renderer: &mut GpuRenderer, layout: &Layout) -> Result<(), String> {
+    // The compressed pitch makes the cell height fractional, so samples land between pixel rows.
+    check(
+        layout.cell_h.fract() != 0.0,
+        &format!(
+            "the cell height {} is fractional, so glide edges fall between pixels",
+            layout.cell_h
+        ),
+    )?;
     renderer.set_cursor_glide_allowed(true);
     let mut failures = Vec::new();
     for shape in [CursorShape::Block, CursorShape::Bar, CursorShape::Underline] {

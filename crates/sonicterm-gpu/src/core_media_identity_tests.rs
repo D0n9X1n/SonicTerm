@@ -228,3 +228,29 @@ fn the_revision_list_stays_within_its_cap() {
     cache.figures(&panes);
     assert_eq!(recomputes(), start + 1, "and the next frame recomputes");
 }
+
+/// A list already allocated for fewer panes grows to exactly the panes it holds, so growing one
+/// pane at a time from 40 up to the 64-pane limit never reserves more than the cap; doubling growth
+/// would reserve 80 pairs (1,280 bytes) from 41 panes on.
+#[test]
+fn growing_from_an_allocated_list_stays_within_the_cap() {
+    let mut grids: Vec<Grid> = (0..MAX_TRACKED_PANES).map(|_| Grid::new(4, 2)).collect();
+    let mut cache = MediaIdentityCache::default();
+    let mut grid_iter = grids.iter_mut();
+    let mut panes: Vec<PaneRender<'_>> = Vec::new();
+    for count in 1..=MAX_TRACKED_PANES {
+        let grid = grid_iter.next().unwrap();
+        panes.push(pane(count as u64, grid, vec![], count as u64));
+        if count < 40 {
+            // When: count is below 40, the list is still being filled to the starting size.
+            continue;
+        }
+        cache.figures(&panes);
+        assert_eq!(
+            cache.retained_bytes(),
+            count * std::mem::size_of::<(u64, u64)>(),
+            "{count} panes reserve exactly {count} pairs"
+        );
+        assert!(cache.retained_bytes() <= crate::core::frame_scratch::MEDIA_REVISIONS_CAP_BYTES);
+    }
+}
