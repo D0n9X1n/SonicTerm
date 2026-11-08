@@ -42,12 +42,13 @@ pub(super) fn add_class_damage(dirt: &mut DamageParts, inputs: ClassDamageInputs
         }
     }
     if change.cursor || change.focus {
-        // When: change.cursor or change.focus is set, the drawn cursor's old and new cells, its
-        // glide samples and last frame's recolored glyphs are repainted.
+        // When: change.cursor or change.focus is set, the cursor's rows, its glide rows and last
+        // frame's recolored glyphs repaint.
         for cell in [previous.window.cursor_cell, key.window.cursor_cell].into_iter().flatten() {
             match panes.iter().find(|pane| pane.id == cell.pane_id) {
                 Some(pane) => {
-                    if let Some(rect) = slot_damage(pane, cell.slot, geometry) {
+                    // The cursor moves no content, so its row is enough on either screen.
+                    if let Some(rect) = row_strip(pane, cell.slot, geometry) {
                         dirt.add_clipped(rect, surface);
                     }
                 }
@@ -116,6 +117,28 @@ pub(super) fn add_class_damage(dirt: &mut DamageParts, inputs: ClassDamageInputs
             }
         }
     }
+}
+
+/// The ink-padded strip one viewport slot of `pane` draws, on either screen. Class damage that
+/// moves no content (the cursor, its glide) and row emission use it; content damage on the
+/// alternate screen widens to the whole pane through [`slot_damage`].
+pub(super) fn row_strip(
+    pane: &PlannedPane,
+    slot: u16,
+    geometry: DamageGeometry,
+) -> Option<PixelRect> {
+    dirty_rows_damage_rect_with_ink_pad(
+        [usize::from(slot)],
+        pane.full_rect,
+        pane.layout.x,
+        pane.layout.y,
+        pane.cols,
+        geometry.cell_w,
+        geometry.cell_h,
+        geometry.vertical_ink_pad,
+        geometry.surface.w,
+        geometry.surface.h,
+    )
 }
 
 /// The damage one viewport slot of `pane` occupies: the ink-padded row, or the whole clipped

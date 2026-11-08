@@ -381,6 +381,9 @@ pub struct GpuRenderer {
     /// Test seam: a glyph `(x, y, w, h)` surface-pixel rectangle and color appended before the
     /// cursor recolors; only `__inject_test_glyph` sets it, so production keeps `None`.
     injected_test_glyph: Option<((f32, f32, f32, f32), [f32; 4])>,
+    /// Test seam: the instant the cursor glide samples at instead of the clock; only
+    /// `__pin_glide_clock` sets it, so production keeps `None`.
+    pinned_glide_clock: Option<Instant>,
     /// Test seam: a glyph `(x, y, w, h)` and color attached to the row at `(pane, slot)`, drawn
     /// only when that row is emitted; only `__inject_row_glyph` sets it, so production keeps `None`.
     injected_row_glyph: Option<InjectedRowGlyph>,

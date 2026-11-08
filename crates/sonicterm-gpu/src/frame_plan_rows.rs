@@ -253,8 +253,9 @@ pub(super) fn partial_emit_rows(
             // When: `emit[index]` is set, the dirty slot is assembled whatever its record says.
             continue;
         }
-        let strip_meets =
-            slot_damage(pane, slot, geometry).is_some_and(|strip| meets(strip, damage));
+        // The row's own strip, on either screen: an alternate-screen pane with dirt is damaged
+        // whole, so every strip meets it, and cursor-only damage emits only the rows it reaches.
+        let strip_meets = row_strip(pane, slot, geometry).is_some_and(|strip| meets(strip, damage));
         let record_meets = pane.row_ink.get(index).copied().flatten().is_some_and(|record| {
             meets(record, damage) || reach.iter().flatten().any(|target| meets(record, *target))
         });

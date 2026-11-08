@@ -186,7 +186,9 @@ impl GpuRenderer {
         );
         // One glide position per frame, sampled before the key so the key, the drawing and the
         // damage share it. A hidden or blinked-off cursor, or one in an overlay, does not glide.
-        let cursor_glide = self.sample_cursor_glide(drawn_cell, cursor_pane, now, overlay_active);
+        let glide_now = self.pinned_glide_clock.unwrap_or(now);
+        let cursor_glide =
+            self.sample_cursor_glide(drawn_cell, cursor_pane, glide_now, overlay_active);
         // Records are read only when a partial plan is possible: never on the degraded path, on a
         // first frame, or on the forced-Full pass of a fallback.
         let partial_possible =

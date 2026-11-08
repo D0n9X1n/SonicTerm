@@ -277,16 +277,31 @@ fn glide_damage_covers_every_drawn_cursor_rect() {
     }
 }
 
-/// On the alternate screen the cursor cell still damages the whole pane, so a glide there damages
-/// it all as before; a sample whose pane is not planned damages the surface through its cell.
+/// The cursor moves no content, so on the alternate screen too a cursor or glide frame damages
+/// only the rows it crosses, and emits only the rows whose strip or ink meets that damage; a
+/// sample whose pane is not planned damages the surface through its cell.
 #[test]
-fn alternate_screen_and_unplanned_glides_keep_their_wide_damage() {
+fn alternate_screen_glides_damage_rows_and_unplanned_ones_the_surface() {
     let mut alt = live_pane(7, 1);
     alt.is_alt = true;
     let mut gliding = cursor_facts();
+    gliding.window.cursor_cell = cursor_at(2);
     gliding.window.cursor_glide = glide_at(24);
-    let plan = transition(cursor_facts(), gliding.clone(), alt);
+    let plan = transition(cursor_facts(), gliding.clone(), alt.clone());
+    assert!(plan.change.cursor && !plan.change.full);
+    assert_eq!(plan.damage, row_rect(1).union(row_rect(2)), "rows 1 and 2, not the pane");
+    // With every row's ink recorded the frame is partial and emits only the rows it damages.
+    let first = FramePlan::build(cursor_facts(), [alt.clone()], None);
+    let recorded = seeded(&cursor_facts(), &first, alt.clone());
+    let plan = FramePlan::build(gliding.clone(), [recorded], Some(&first.key));
+    assert_eq!(plan.mode, RenderMode::Partial);
+    assert_eq!(plan.panes[0].emit_rows, vec![false, true, true, false], "only those rows emit");
+
+    // Content dirt on the alternate screen still damages, and so emits, the whole pane.
+    let dirty = PaneMetadata { dirty_rows: vec![3], ..alt };
+    let plan = transition(cursor_facts(), gliding.clone(), dirty);
     assert_eq!(plan.damage, plan.panes[0].full_clip.expect("drawn pane"));
+    assert!(plan.panes[0].emit_rows.iter().all(|emit| *emit), "every row emits");
 
     let mut elsewhere = gliding;
     elsewhere.window.cursor_cell = Some(CursorCell { pane_id: 99, slot: 1, col: 2, span: 1 });
@@ -519,7 +534,8 @@ fn conservative_rules_keep_whole_surface_or_whole_pane_damage() {
     toggled.window.cursor_cell = None;
     let plan = transition(cursor_facts(), toggled, alternate);
     assert_eq!(plan.mode, RenderMode::Full);
-    assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 100, h: 84 });
+    // A cursor change moves no content, so the alternate screen damages only its row.
+    assert_eq!(plan.damage, row_rect(1));
 
     let first = FramePlan::build(cursor_facts(), [live_pane(7, 1)], None);
     assert_eq!(first.damage, surface);

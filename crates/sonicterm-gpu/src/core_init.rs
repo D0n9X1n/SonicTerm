@@ -559,6 +559,7 @@ impl GpuRenderer {
             last_recolor: crate::cursor::RecolorRecord::default(),
             last_tab_ink: crate::cursor::RecolorBounds::Empty,
             injected_test_glyph: None,
+            pinned_glide_clock: None,
             injected_row_glyph: None,
             fault_surface_acquire: None,
             row_ink: crate::row_ink::RowInkTable::default(),
