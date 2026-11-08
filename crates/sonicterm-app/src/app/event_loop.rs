@@ -85,6 +85,17 @@ fn wake_is_foreground_probe_only(
     })
 }
 
+/// What became of one OSC 52 clipboard write the VT worker accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum ClipWriteOutcome {
+    /// The native clipboard took the text.
+    Written,
+    /// The native clipboard refused it.
+    Failed,
+    /// `[terminal] osc52 = "deny"` refused it before the clipboard was touched.
+    Denied,
+}
+
 impl App {
     pub(super) fn do_user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
@@ -154,8 +165,8 @@ impl App {
             }
             UserEvent::ClipboardWrite { pane_id, text } => {
                 let bytes = text.len();
-                let written = self.handle_clipboard_write(text);
-                self.note_clip_write(pane_id, bytes, written);
+                let outcome = self.handle_clipboard_write(text);
+                self.note_clip_write(pane_id, bytes, outcome);
             }
             UserEvent::ClipboardAttempts { pane_id, attempts } => {
                 self.note_clip_attempts(pane_id, attempts, Instant::now());
@@ -255,8 +266,17 @@ impl App {
         );
     }
 
-    /// Apply one accepted OSC 52 write; returns whether the native clipboard took it.
-    pub(super) fn handle_clipboard_write(&mut self, text: String) -> bool {
+    /// Apply one accepted OSC 52 write under the live `[terminal] osc52` policy, checked here at the
+    /// side effect so a write queued before a reload to `"deny"` is refused too.
+    pub(super) fn handle_clipboard_write(&mut self, text: String) -> ClipWriteOutcome {
+        if self.config.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
+            // When: the `osc52` policy is Deny, the clipboard is never touched.
+            tracing::debug!(
+                bytes = text.len(),
+                "OSC 52 clipboard write denied by [terminal] osc52"
+            );
+            return ClipWriteOutcome::Denied;
+        }
         #[cfg(target_os = "windows")]
         let (previous_text, reassert_text) = (self.clipboard_text_for_reassert(), text.clone());
         let written = self.set_clipboard_text(text);
@@ -269,7 +289,12 @@ impl App {
                 due: Instant::now() + super::OSC52_CLIPBOARD_REASSERT_DELAY,
             });
         }
-        written
+        if written {
+            ClipWriteOutcome::Written
+        } else {
+            // When: not `written`, the native clipboard refused the write; it is reported as failed.
+            ClipWriteOutcome::Failed
+        }
     }
 
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {
@@ -508,7 +533,7 @@ impl App {
             &self.theme,
             sonicterm_gpu::core::RendererSettings {
                 font_family: &self.config.font.family,
-                font_dirs: &self.font_dirs,
+                font_dirs: &self.fonts.font_dirs,
                 font_size: self.config.font.size,
                 line_height_mult: self.config.font.line_height,
                 font_weight_scale: self.config.font.effective_weight_scale(),
@@ -649,6 +674,7 @@ impl App {
         self.registry.main_window_id = Some(main_id);
         let checks_started = std::time::Instant::now();
         self.record_startup_load_errors();
+        self.show_mcp_read_notice_if_due();
         self.note_startup(checks_started, |spans| &mut spans.load_checks_ns);
         // Both pacing clocks start at one instant, so neither paces a new window differently.
         let created_at = std::time::Instant::now();

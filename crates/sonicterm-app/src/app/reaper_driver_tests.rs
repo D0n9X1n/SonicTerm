@@ -59,8 +59,12 @@ impl DriverFixture {
         let (report_tx, result) = crossbeam_channel::bounded(1);
         let cancel = CancelSource::new();
         let token = cancel.token();
-        let schedule =
-            Arc::new(DriverSchedule { run_budget, recheck_interval, runs: AtomicUsize::new(0) });
+        let schedule = Arc::new(DriverSchedule {
+            run_budget,
+            recheck_interval,
+            runs: AtomicUsize::new(0),
+            hold: Arc::default(),
+        });
         let shared = Arc::clone(&supervisor);
         let worker_schedule = Arc::clone(&schedule);
         let worker = thread::spawn(move || {

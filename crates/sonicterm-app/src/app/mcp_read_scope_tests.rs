@@ -29,8 +29,9 @@ fn app_with_client_under(
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let user = app.__test_seed_tab("user");
     let agent = app.__test_seed_tab("agent");
-    app.main_mut().unwrap().panes.get_mut(&agent).unwrap().agent_owned = true;
-    app.config.mcp = McpConfig { enabled: true, control, read };
+    app.main_mut().unwrap().panes.get_mut(&agent).unwrap().creator =
+        crate::app::mcp::agents::PaneOwner::Agent(crate::app::mcp::agents::AgentSessionId::next());
+    app.config.mcp = McpConfig { enabled: true, control, read: Some(read), ..McpConfig::default() };
     let shared = McpShared::new(control, None);
     shared.set_read(read);
     let owner = app.register_mcp_owner();
@@ -41,6 +42,7 @@ fn app_with_client_under(
         config: app.config.mcp,
         charges: std::collections::HashMap::new(),
         owner,
+        read_notice_due: false,
     });
     let (client, transport) = connection();
     spawn_connection(&shared, transport);
@@ -49,7 +51,7 @@ fn app_with_client_under(
 
 /// Send `request` on `client` from a helper thread and let `app` answer the loop requests it
 /// queues until the reply arrives; returns the reply and the client back.
-fn exchange(app: &mut App, mut client: Client, request: Value) -> (Value, Client) {
+pub(super) fn exchange(app: &mut App, mut client: Client, request: Value) -> (Value, Client) {
     let worker = std::thread::spawn(move || {
         client.send(&request);
         let reply = client.reply();
@@ -65,7 +67,7 @@ fn exchange(app: &mut App, mut client: Client, request: Value) -> (Value, Client
 }
 
 /// The pane ids a `list_panes` reply carries.
-fn listed(reply: &Value) -> Vec<String> {
+pub(super) fn listed(reply: &Value) -> Vec<String> {
     reply["result"]["structuredContent"]["panes"]
         .as_array()
         .map(|panes| {
@@ -75,7 +77,7 @@ fn listed(reply: &Value) -> Vec<String> {
 }
 
 /// The tool error code in a reply, if the call was refused.
-fn refusal(reply: &Value) -> Option<String> {
+pub(super) fn refusal(reply: &Value) -> Option<String> {
     reply["result"]["structuredContent"]["error"].as_str().map(str::to_owned)
 }
 
@@ -155,7 +157,7 @@ fn tightening_read_on_reload_revokes_a_running_wait() {
         app.drain_mcp_requests();
         std::thread::sleep(Duration::from_millis(5));
     }
-    app.config.mcp.read = McpRead::Agent;
+    app.config.mcp.read = Some(McpRead::Agent);
     app.reconcile_mcp();
     let deadline = Instant::now() + Duration::from_secs(5);
     while !worker.is_finished() {

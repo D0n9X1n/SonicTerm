@@ -130,6 +130,7 @@ fn fixture() -> MemoryReport {
             },
         ],
         roots: vec![RootRow { label: "tab 1 pane 1".to_string(), pid: Some(100), start: None }],
+        queues: Default::default(),
         os: OsFigures::Sampled(OsSample {
             footprint: ProcessFootprint {
                 current: MemoryMetric::Bytes(900 * MIB as u64),
@@ -212,6 +213,10 @@ PANES
     grid visible / history / alternate    0.5 MB / 1.0 MB / 0.0 MB
     parser / hyperlinks / inline media    0.2 MB / 0.0 MB / 0.0 MB
     pty output / input                    0.0 MB / 0.0 MB
+
+PTY QUEUES (0 pane(s)): 0 B in memory, 0 B on disk
+  input queued 0 B, writer in flight 0 B, reply tier allocated 0 B, reply spill 0 B (disk)
+  teardown fallbacks 0 (0 over 50 ms), longest 0 us, total 0 us
 
 THREADS                   3 threads share the process's memory; a thread holds none of its own
   sonic-pty-reader x2, main

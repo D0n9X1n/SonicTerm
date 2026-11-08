@@ -10,6 +10,7 @@ use regex::RegexBuilder;
 use serde_json::{json, Value};
 use sonicterm_grid::grid::RowToken;
 
+use super::agents::OwnerView;
 use super::jsonrpc::{tool_error, tool_result};
 use super::read::{read_pane, ReadLimits, ReadLine, ReadMode, ReadSnapshot, PARSER_WAIT};
 use super::{CallScope, Caller, LoopCall, LoopReply, McpShared, PaneEntry};
@@ -21,6 +22,11 @@ pub(crate) const WAIT_POLL: Duration = Duration::from_millis(50);
 /// the pane's change signal; this bound is for revocation (a closed client, a stopped or changed
 /// server), which the pane does not announce.
 pub(crate) const WAIT_RECHECK: Duration = Duration::from_millis(250);
+/// The total time `list_panes` spends waiting for busy parsers across every pane.
+pub(crate) const LIST_BUDGET: Duration = Duration::from_millis(50);
+/// How long a wait keeps scanning a closed pane's published output (a busy parser or a scan
+/// backlog) before it reports `pane_closed` with the rest unscanned.
+pub(crate) const CLOSE_DRAIN: Duration = Duration::from_secs(1);
 /// The default and largest `wait_for` timeouts.
 pub(crate) const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 /// The largest timeout a caller may ask for.
@@ -46,6 +52,7 @@ pub(crate) fn tool_list() -> Value {
                     "instance_pid": { "type": "integer" },
                     "control": { "enum": ["off", "agent", "any"] },
                     "read": { "enum": ["agent", "any"] },
+                    "partial": { "type": "boolean" },
                     "panes": { "type": "array", "items": { "type": "object" } },
                     "error": { "type": "string" },
                     "message": { "type": "string" },
@@ -76,8 +83,10 @@ pub(crate) fn tool_list() -> Value {
                     "lines": { "type": "array", "items": { "type": "string" } },
                     "end_row": { "type": ["string", "null"] },
                     "generation": { "type": "integer" },
+                    "current_generation": { "type": "integer" },
                     "truncated": { "type": "boolean" },
                     "busy": { "type": "boolean" },
+                    "shell_integration_state": { "enum": ["verified", "unverified", "none", null] },
                     "exit_code": { "type": ["integer", "null"] },
                     "error": { "type": "string" },
                     "message": { "type": "string" },
@@ -93,7 +102,10 @@ pub(crate) fn tool_list() -> Value {
                             checked against every retained line written during the wait, not \
                             only the newest; missed_output true means some left scrollback \
                             unchecked, and truncated true means a line too long to check whole \
-                            was skipped, so a timeout does not prove no match.",
+                            was skipped, so a timeout does not prove no match. source \"stream\" \
+                            matches the text printed since the wait began instead, including \
+                            text later overwritten by \\r; it needs a regex and refuses \
+                            after_row, and context_truncated true means older text was dropped.",
             "inputSchema": {
                 "type": "object",
                 "required": ["pane_id"],
@@ -104,20 +116,26 @@ pub(crate) fn tool_list() -> Value {
                     "quiet_ms": { "type": "integer", "minimum": 1 },
                     "exit": { "type": "boolean" },
                     "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 120000 },
+                    "source": { "enum": ["screen", "stream"] },
                 },
             },
             "outputSchema": {
                 "type": "object",
                 "properties": {
-                    "reason": { "enum": ["matched", "quiet", "exited", "timeout", "revoked"] },
+                    "reason": { "enum": ["matched", "quiet", "exited", "timeout", "revoked", "pane_closed"] },
+                    "source": { "type": "string" },
+                    "offset": { "type": "integer" },
+                    "context_truncated": { "type": "boolean" },
                     "line": { "type": "string" },
                     "row": { "type": "string" },
                     "exit_code": { "type": "integer" },
-                    "generation": { "type": "integer" },
+                    "generation": { "type": ["integer", "null"] },
+                    "current_generation": { "type": "integer" },
                     "missed_output": { "type": "boolean" },
                     "truncated": { "type": "boolean" },
                     "screen_changed": { "type": "boolean" },
                     "scan_complete": { "type": "boolean" },
+                    "output_incomplete": { "type": "boolean" },
                     "error": { "type": "string" },
                     "message": { "type": "string" },
                 },
@@ -203,7 +221,19 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
             return tool_error("internal", "unexpected reply");
         }
     };
-    let panes: Vec<Value> = entries.iter().map(pane_summary).collect();
+    // One budget for every parser probe, so many busy panes cannot stretch the call: once it is
+    // spent, later panes are listed without their live details.
+    let budget_ends = Instant::now() + LIST_BUDGET;
+    let live = |session| shared.sessions.contains(session);
+    let panes: Vec<Value> = entries
+        .iter()
+        .map(|entry| {
+            let mut pane = pane_summary(entry, budget_ends);
+            pane["owner"] = json!(OwnerView::of(entry.creator, scope.session, live).as_str());
+            pane
+        })
+        .collect();
+    let partial = panes.iter().any(|pane| pane["details"] == "skipped");
     let summary = format!("{} pane(s)", panes.len());
     let self_pane = caller.self_pane.filter(|id| entries.iter().any(|entry| entry.pane_id == *id));
     tool_result(
@@ -213,23 +243,34 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
             "instance_pid": std::process::id(),
             "control": super::lifecycle::control_name(shared.control()),
             "read": shared.read().as_str(),
+            "partial": partial,
             "panes": panes,
         }),
     )
 }
 
-/// One pane's entry in `list_panes`.
-// Only this pane's parser is taken, once, with a bounded wait.
-fn pane_summary(entry: &PaneEntry) -> Value {
+/// One pane's entry in `list_panes`. Its parser is taken once, waiting at most until
+/// `budget_ends` and never longer than [`PARSER_WAIT`]; a pane reached after the budget is listed
+/// with `"details": "skipped"` and no live fields.
+fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
+    // The loop always fills the position for `list_panes`; an entry without one lists nulls
+    // rather than failing the whole call.
+    let metadata = entry.metadata;
     let mut pane = json!({
         "pane_id": entry.pane_id.to_string(),
-        "window_index": entry.window_index,
-        "tab_index": entry.tab_index,
-        "active": entry.active,
-        "readonly": entry.readonly,
-        "agent_owned": entry.agent_owned,
+        "window_index": metadata.map(|position| position.window_index),
+        "tab_index": metadata.map(|position| position.tab_index),
+        "active": metadata.map(|position| position.active),
+        "readonly": metadata.map(|position| position.readonly),
+        "agent_owned": entry.creator.is_agent(),
     });
-    let Some(guard) = entry.parser.try_lock_for(PARSER_WAIT) else {
+    let wait = budget_ends.saturating_duration_since(Instant::now()).min(PARSER_WAIT);
+    if wait.is_zero() {
+        // When: the `wait` is zero because the list's `budget_ends` passed, details are skipped.
+        pane["details"] = json!("skipped");
+        return pane;
+    }
+    let Some(guard) = entry.parser.try_lock_for(wait) else {
         // When: `try_lock_for` misses, the pane is listed without its live details.
         pane["busy"] = json!(true);
         return pane;
@@ -242,6 +283,7 @@ fn pane_summary(entry: &PaneEntry) -> Value {
     pane["alt_screen"] = json!(grid.is_alt());
     pane["shell_integration"] =
         json!(grid.newest_prompt().is_some_and(|region| region.input_start.is_some()));
+    pane["shell_integration_state"] = json!(guard.shell_integration_state().as_str());
     pane["exited"] = json!(entry.exit_status.get().is_some());
     pane
 }
@@ -268,18 +310,44 @@ fn read_pane_tool(shared: &McpShared, arguments: &Value, scope: &CallScope) -> V
         arguments.get("max_lines").and_then(Value::as_u64),
         arguments.get("max_bytes").and_then(Value::as_u64),
     );
-    let snapshot = read_pane(&entry.parser, mode, limits);
+    let (snapshot, structured) = read_with_generation(&entry, mode, limits);
     let summary = format!(
         "{} line(s){}",
         snapshot.lines.len(),
         if snapshot.truncated { ", truncated" } else { "" }
     );
-    tool_result(&summary, snapshot_json(&snapshot, &entry))
+    tool_result(&summary, structured)
 }
 
-/// A read's structured result.
+/// Read `entry` and build its structured result. The generation is loaded before the read: every
+/// batch published up to it is in the snapshot. Parsing precedes publication, so the snapshot may
+/// also hold later text: "at least", never "exactly".
 // Ordering: output_generation Acquire pairs with the VT worker's Release publish after each batch.
-pub(crate) fn snapshot_json(snapshot: &ReadSnapshot, entry: &PaneEntry) -> Value {
+pub(crate) fn read_with_generation(
+    entry: &PaneEntry,
+    mode: ReadMode,
+    limits: ReadLimits,
+) -> (ReadSnapshot, Value) {
+    let generation = entry.output_generation.load(Ordering::Acquire);
+    #[cfg(test)]
+    READ_HOOK.with_borrow(|hook| hook.as_ref().map(|hook| hook()));
+    let snapshot = read_pane(&entry.parser, mode, limits);
+    let structured = snapshot_json(&snapshot, entry, generation);
+    (snapshot, structured)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run between `read_pane_tool`'s generation load and its read, so a test can publish a batch
+    /// at exactly that point.
+    pub(crate) static READ_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A read's structured result: `generation` was loaded before the read (the snapshot holds at
+/// least every batch up to it) and `current_generation` after it.
+// Ordering: output_generation Acquire pairs with the VT worker's Release publish after each batch.
+pub(crate) fn snapshot_json(snapshot: &ReadSnapshot, entry: &PaneEntry, generation: u64) -> Value {
     json!({
         "pane_id": entry.pane_id.to_string(),
         "lines": snapshot.lines.iter().map(|line| line.text.clone()).collect::<Vec<_>>(),
@@ -287,12 +355,14 @@ pub(crate) fn snapshot_json(snapshot: &ReadSnapshot, entry: &PaneEntry) -> Value
         "cursor": { "row": snapshot.cursor.0, "col": snapshot.cursor.1 },
         "size": { "cols": snapshot.size.0, "rows": snapshot.size.1 },
         "alt_screen": snapshot.alt_screen,
-        "generation": entry.output_generation.load(Ordering::Acquire),
+        "generation": generation,
+        "current_generation": entry.output_generation.load(Ordering::Acquire),
         "truncated": snapshot.truncated,
         "busy": snapshot.busy,
         "exit_code": snapshot.exit_code,
         "output_truncated": snapshot.output_truncated,
         "no_command": snapshot.no_command,
+        "shell_integration_state": snapshot.shell_state.map(|state| state.as_str()),
     })
 }
 
@@ -328,17 +398,25 @@ pub(crate) enum WaitReason {
     Timeout,
     /// The client went away or the server stopped or changed.
     Revoked,
+    /// The pane was closed before the condition was met; its earlier output was scanned first.
+    PaneClosed,
 }
 
 impl WaitReason {
+    /// Every reason, for the documentation check.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 6] =
+        [Self::Matched, Self::Quiet, Self::Exited, Self::Timeout, Self::Revoked, Self::PaneClosed];
+
     /// The reason's spelling in results.
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Matched => "matched",
             Self::Quiet => "quiet",
             Self::Exited => "exited",
             Self::Timeout => "timeout",
             Self::Revoked => "revoked",
+            Self::PaneClosed => "pane_closed",
         }
     }
 }
@@ -361,6 +439,17 @@ fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
             return error;
         }
     };
+    let stream = match super::stream_wait::wants_stream(arguments) {
+        Ok(stream) => stream,
+        Err(error) => {
+            // When: `source` named neither screen nor stream, its tool `error` is the result.
+            return error;
+        }
+    };
+    if stream {
+        // When: a `stream` wait was asked for, it runs on the output tap instead of the rows.
+        return stream_wait_for(shared, &entry, arguments, regex, scope);
+    }
     let after = match after_row_arg(arguments) {
         Ok(after) => after,
         Err(error) => {
@@ -374,20 +463,25 @@ fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
         // When: no `regex`, `quiet` or `watch_exit` condition was given, there is nothing to wait on.
         return tool_error("invalid_arguments", "give regex, quiet_ms or exit");
     }
-    let timeout = arguments
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .map_or(DEFAULT_WAIT, |millis| Duration::from_millis(millis).min(MAX_WAIT));
-    let condition =
-        WaitCondition { regex, after, quiet, watch_exit, timeout, recheck: WAIT_RECHECK };
+    let timeout = wait_timeout(arguments);
+    #[cfg(test)]
+    let recheck = shared.recheck_override.lock().unwrap_or(WAIT_RECHECK);
+    #[cfg(not(test))]
+    let recheck = WAIT_RECHECK;
+    let condition = WaitCondition { regex, after, quiet, watch_exit, timeout, recheck };
     let outcome = wait_until(shared, &entry, &condition, scope);
     let mut structured = json!({
         "reason": outcome.reason.as_str(),
-        "generation": entry.output_generation.load(Ordering::Acquire),
+        // The counter the last inspection started from, and the counter when the wait answered: a
+        // match or a timeout says nothing about batches after `generation`.
+        "generation": outcome.inspected_generation,
+        "current_generation": entry.output_generation.load(Ordering::Acquire),
         "missed_output": outcome.missed_output,
         "truncated": outcome.truncated,
         "screen_changed": outcome.screen_changed,
         "scan_complete": outcome.scan_complete,
+        // Some output written during the wait was not checked, so a non-match proves nothing.
+        "output_incomplete": outcome.missed_output || outcome.truncated || !outcome.scan_complete,
     });
     if let Some((line, row)) = outcome.matched {
         structured["line"] = json!(line);
@@ -401,6 +495,41 @@ fn wait_for(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
         return tool_error("stale_row", "after_row belongs to the other screen");
     }
     tool_result(outcome.reason.as_str(), structured)
+}
+
+/// `wait_for` with `source: "stream"`: a regex is required and `after_row` is refused, since tap
+/// offsets are not rows.
+fn stream_wait_for(
+    shared: &McpShared,
+    entry: &PaneEntry,
+    arguments: &Value,
+    regex: Option<regex::Regex>,
+    scope: &CallScope,
+) -> Value {
+    let Some(regex) = regex else {
+        // When: no `regex` was given, a stream wait has nothing to look for.
+        return tool_error("invalid_arguments", "source \"stream\" needs a regex");
+    };
+    if arguments.get("after_row").is_some() {
+        // When: `after_row` `is_some`, its row token has no meaning in the printed stream.
+        return tool_error("invalid_arguments", "after_row applies only to source \"screen\"");
+    }
+    let condition = super::stream_wait::StreamCondition {
+        regex,
+        watch_exit: arguments.get("exit").and_then(Value::as_bool).unwrap_or(false),
+        quiet: arguments.get("quiet_ms").and_then(Value::as_u64).map(Duration::from_millis),
+        timeout: wait_timeout(arguments),
+        recheck: WAIT_RECHECK,
+    };
+    super::stream_wait::wait(shared, entry, &condition, scope)
+}
+
+/// The `timeout_ms` argument, defaulted and capped.
+fn wait_timeout(arguments: &Value) -> Duration {
+    arguments
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_WAIT, |millis| Duration::from_millis(millis).min(MAX_WAIT))
 }
 
 /// The `regex` argument compiled within the size limits, `None` when absent.
@@ -467,6 +596,10 @@ pub(crate) struct WaitOutcome {
     /// Every row written so far was scanned. `false` when a wait ended (by a match, timeout, exit
     /// or revocation) with rows still unscanned on either screen, so those rows are unknown.
     pub(crate) scan_complete: bool,
+    /// The output generation the wait's last completed regex inspection started from. Rows up to
+    /// it may still be unscanned when `scan_complete` is false. `None` when no inspection completed
+    /// (no regex, or the parser stayed busy).
+    pub(crate) inspected_generation: Option<u64>,
 }
 
 /// Wait until `condition` holds, the client goes away, the server stops or changes since the
@@ -501,6 +634,8 @@ pub(crate) fn wait_until_observed(
 ) -> WaitOutcome {
     let mut after_first_look = Some(after_first_look);
     let started = Instant::now();
+    // Registered for the whole wait, so a revocation wakes it rather than its next recheck.
+    let _waiter = shared.register_waiter(&entry.change_signal);
     // Output movement and regex inspection are tracked apart: a busy parser defers the match, but
     // the movement still resets the quiet timer.
     let mut observed_generation = None;
@@ -509,7 +644,9 @@ pub(crate) fn wait_until_observed(
     // Where the forward scan resumes once the first inspection has read the tail.
     let mut cursor = super::scan::ScanCursors::default();
     let mut flags = ScanFlags::default();
-    let outcome = |reason, flags: ScanFlags, backlog: bool| WaitOutcome {
+    // When the wait first saw the pane closed; the final drain is bounded from then.
+    let mut closed_since: Option<Instant> = None;
+    let outcome = |reason, flags: ScanFlags, backlog: bool, inspected: Option<u64>| WaitOutcome {
         reason,
         matched: None,
         exit_code: None,
@@ -518,6 +655,7 @@ pub(crate) fn wait_until_observed(
         truncated: flags.truncated,
         screen_changed: flags.screen_changed,
         scan_complete: !backlog,
+        inspected_generation: inspected,
     };
     let pending = |inspected: Option<u64>, cursor: &super::scan::ScanCursors| {
         let current = entry.output_generation.load(Ordering::Acquire);
@@ -528,16 +666,22 @@ pub(crate) fn wait_until_observed(
         WAIT_CHECKS.with(|checks| checks.set(checks.get() + 1));
         // Read before anything is inspected, so a change during the checks below moves past it.
         let seen = entry.change_signal.sequence();
+        // Read before the generation: output published before this close was seen is below the
+        // generation loaded next, so it is scanned before `pane_closed` can be reported.
+        let closed = entry.change_signal.is_closed();
+        if closed && closed_since.is_none() {
+            closed_since = Some(Instant::now());
+        }
         if scope.revoked(shared) {
             // When: the call `scope` was `revoked` (closed, stopped or changed), the wait stops.
             let unscanned = pending(inspected_generation, &cursor);
-            return outcome(WaitReason::Revoked, flags, unscanned);
+            return outcome(WaitReason::Revoked, flags, unscanned, inspected_generation);
         }
         let exit_status = entry.exit_status.get().filter(|_| condition.watch_exit);
         if let Some(status) = exit_status {
             // When: `watch_exit` is on and the `exit_status` cell is set, the process exited.
             let unscanned = pending(inspected_generation, &cursor);
-            let mut done = outcome(WaitReason::Exited, flags, unscanned);
+            let mut done = outcome(WaitReason::Exited, flags, unscanned, inspected_generation);
             done.exit_code = match status {
                 sonicterm_types::PaneExitStatus::Code(code) => Some(i64::from(*code)),
                 _ => None,
@@ -562,6 +706,7 @@ pub(crate) fn wait_until_observed(
                 done.missed_output |= flags.missed;
                 done.truncated |= flags.truncated;
                 done.screen_changed |= flags.screen_changed;
+                done.inspected_generation = Some(generation);
                 return done;
             }
             // A busy parser leaves the generation uninspected, so the next check reads again.
@@ -570,7 +715,8 @@ pub(crate) fn wait_until_observed(
                 observe_wait(WaitEvent::Busy);
             }
             if !matches!(checked, Some(TailCheck::Busy)) {
-                inspected_generation = Some(generation);
+                // A wait without a regex inspects nothing, so it reports no generation.
+                inspected_generation = checked.is_some().then_some(generation);
                 if let Some(observer) = after_first_look.take() {
                     observer();
                 }
@@ -580,15 +726,24 @@ pub(crate) fn wait_until_observed(
         // Quiet means output stopped and every row was checked: rows a regex has not checked yet
         // hold it off, so a match still being scanned is not reported as quiet.
         let unscanned = pending(inspected_generation, &cursor);
+        // Between computing `unscanned` and the close decision, a test publishes and closes here.
+        #[cfg(test)]
+        CLOSE_CHECK_HOOK.with_borrow(|hook| hook.as_ref().map(|hook| hook()));
+        let drained = closed_since.is_some_and(|since| now.duration_since(since) >= CLOSE_DRAIN);
+        if closed && (!unscanned || drained) {
+            // When: the pane was `closed` before this check and its output is scanned, or the
+            // `CLOSE_DRAIN` ran out with rows still `unscanned`, no condition can still be met.
+            return outcome(WaitReason::PaneClosed, flags, unscanned, inspected_generation);
+        }
         if !unscanned
             && condition.quiet.is_some_and(|quiet| now.duration_since(last_change) >= quiet)
         {
             // When: no output arrived for `quiet` and nothing is left to scan, the pane is quiet.
-            return outcome(WaitReason::Quiet, flags, false);
+            return outcome(WaitReason::Quiet, flags, false, inspected_generation);
         }
         if now.duration_since(started) >= condition.timeout {
             // When: the `timeout` passed first, the wait ends without a match.
-            return outcome(WaitReason::Timeout, flags, unscanned);
+            return outcome(WaitReason::Timeout, flags, unscanned, inspected_generation);
         }
         let timeout_at = started + condition.timeout;
         if unscanned {
@@ -610,6 +765,10 @@ pub(crate) fn wait_until_observed(
 
 #[cfg(test)]
 thread_local! {
+    /// Run between a check's `unscanned` computation and its close decision, so a test can publish
+    /// and close a pane at exactly that point.
+    pub(crate) static CLOSE_CHECK_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
     /// How many checks this thread's waits ran, so a test counts an idle wait's wakeups.
     pub(crate) static WAIT_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Where this thread's waits report their events, so a test synchronizes on them, not sleeps.
@@ -696,6 +855,7 @@ pub(crate) fn inspect(
         truncated: false,
         screen_changed: false,
         scan_complete: true,
+        inspected_generation: None,
     };
     if cursors.is_empty() && after.is_none() {
         // When: no cursor yet and no `after`, the first look reads the tail, then starts the scan.
@@ -798,6 +958,7 @@ fn match_tail(
         truncated: false,
         screen_changed: false,
         scan_complete: true,
+        inspected_generation: None,
     };
     if after.is_some_and(|after| snapshot.alt_screen != after.alt && !snapshot.busy) {
         // When: `after` names the other screen than `alt_screen`, the token cannot apply.

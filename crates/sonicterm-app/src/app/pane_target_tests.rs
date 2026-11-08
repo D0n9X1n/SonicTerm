@@ -45,7 +45,7 @@ fn a_split_in_a_background_tab_keeps_focus_and_takes_its_own_size() {
     assert_eq!(window.tab_states[1].active_pane, active);
     assert_eq!(window.tab_states[0].active_pane, anchor, "the anchor keeps its tab's focus");
     assert!(window.tab_states[0].tree.leaves().contains(&created.pane_id));
-    assert!(window.panes[&created.pane_id].agent_owned);
+    assert!(window.panes[&created.pane_id].creator.is_agent());
     // The background tab's 800 px is split in two, so each 10 px-cell pane is 40 columns wide.
     let grid_cols = window.panes[&created.pane_id].parser.lock().grid().cols;
     assert_eq!(grid_cols, 40, "sized from the hidden tab's layout, not the 80-column spawn size");
@@ -112,12 +112,12 @@ fn readonly_in_a_background_window_refuses_input_and_helpers() {
     let child_pane = app.registry.windows[&child].tab_states[0].active_pane;
     app.registry.windows.get_mut(&child).expect("child").copy_mode =
         Some(CopyModeState::read_only_at((0, 0)));
-    app.pty_write_log_enabled = true;
+    app.testing.pty_write_log_enabled = true;
     assert_eq!(
         app.write_agent_input(child_pane, b"rm -rf\r".to_vec(), PtyInputSource::Agent),
         Err(TargetError::ReadOnly)
     );
-    assert!(app.test_pty_writes.lock().is_empty(), "nothing was queued");
+    assert!(app.testing.test_pty_writes.lock().is_empty(), "nothing was queued");
     assert_eq!(
         app.create_pane_at(child_pane, Placement::Right, AgentLaunch::default()),
         Err(TargetError::ReadOnly)
@@ -139,7 +139,7 @@ fn an_agent_launch_is_held_and_names_its_pane() {
     assert_eq!(created.launch, LaunchOutcome::Failed, "the program cannot start");
     let pane = &app.main().expect("main").panes[&created.pane_id];
     assert!(pane.hold_on_exit, "an agent program is held after it exits");
-    let launches = app.test_pane_launches.borrow();
+    let launches = app.testing.test_pane_launches.borrow();
     let (_, recorded) = launches.iter().find(|(id, _)| *id == created.pane_id).expect("launched");
     assert!(recorded.command.is_some() && recorded.hold);
     let opts = app.pane_spawn_opts(created.pane_id, recorded, false);
@@ -180,7 +180,7 @@ fn agent_ownership_survives_a_tab_transfer() {
     app.transfer_tab(None, 2, Some(child), 1).expect("the helper tab moves");
     let location = app.locate_pane(created.pane_id).expect("still live");
     assert_eq!(location.window_id, child);
-    assert!(app.registry.windows[&child].panes[&created.pane_id].agent_owned);
+    assert!(app.registry.windows[&child].panes[&created.pane_id].creator.is_agent());
 }
 
 /// The helper's grid starts at its split size, so a program that reads its size at launch never
@@ -198,7 +198,7 @@ fn a_helper_starts_at_its_split_size_and_inherits_the_anchor_cwd() {
     // The split gives each pane 400 of the 800 px at 10 px cells: 40 x 24.
     assert_eq!(app.target_cells(location, anchor, Placement::Right, u64::MAX), Some((40, 24)));
     let created = app.create_pane_at(anchor, Placement::Right, launch).expect("installed");
-    let launches = app.test_pane_launches.borrow();
+    let launches = app.testing.test_pane_launches.borrow();
     let (_, recorded) = launches.iter().find(|(id, _)| *id == created.pane_id).expect("launched");
     assert_eq!(recorded.cwd.as_deref(), Some(dir.as_path()), "the anchor's directory is inherited");
 }

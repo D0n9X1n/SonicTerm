@@ -126,8 +126,10 @@ class DefaultTests(unittest.TestCase):
         self.assertEqual(smoke.sleeper_argv("windows"), ["ping", "-t", "127.0.0.1"])
 
     def test_config_enables_or_disables_only_the_mcp_section(self):
-        # The scratch config turns the server on with agent scope, or off for the no-endpoint run.
-        self.assertEqual(smoke.config_text(True), '[mcp]\nenabled = true\ncontrol = "agent"\n')
+        # The scratch config turns the server on with agent control and any-pane reads (the first
+        # check lists the startup pane), or off for the no-endpoint run.
+        self.assertEqual(smoke.config_text(True),
+                         '[mcp]\nenabled = true\ncontrol = "agent"\nread = "any"\n')
         self.assertIn("enabled = false", smoke.config_text(False))
 
 

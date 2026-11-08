@@ -189,10 +189,7 @@ fn pty_input_rejected_event(
 impl App {
     /// Admit a new user gesture unless the pane's owning window is READONLY.
     pub(super) fn admits_new_user_input(&self, pane_id: u64) -> bool {
-        !self.registry.windows.values().any(|window| {
-            window.panes.contains_key(&pane_id)
-                && window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
-        })
+        !self.pane_window_read_only(pane_id)
     }
 
     pub(super) fn terminal_key_targets(&self, source_pane: u64) -> BTreeSet<u64> {
@@ -327,8 +324,8 @@ impl App {
         // Test-only ledger: skipped entirely in production so we don't
         // lock+clone+push on every PTY write (— unbounded
         // growth + per-keystroke overhead over a long session).
-        if self.pty_write_log_enabled {
-            self.test_pty_writes.lock().push((pane_id, bytes.clone()));
+        if self.testing.pty_write_log_enabled {
+            self.testing.test_pty_writes.lock().push((pane_id, bytes.clone()));
             #[cfg(test)]
             self.record_test_write_source(pane_id, source);
         }
@@ -353,7 +350,7 @@ impl App {
     /// Unit-test ledger of each logged write's producer source, kept apart from the shared byte log.
     #[cfg(test)]
     fn record_test_write_source(&self, pane_id: u64, source: PtyInputSource) {
-        self.test_pty_write_sources.borrow_mut().push((pane_id, source));
+        self.testing.test_pty_write_sources.borrow_mut().push((pane_id, source));
     }
 
     /// Deliver an explicitly targeted PTY effect through the same bounded queue as native input.

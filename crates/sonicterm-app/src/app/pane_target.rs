@@ -81,43 +81,55 @@ pub(crate) enum TargetError {
     Unavailable,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's action while a helper is being created, after its pane exists and before it is
+    /// installed with its owner, to pin a disconnect racing the create.
+    pub(crate) static CREATE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl App {
     /// The window and tab that hold `pane_id`, searching the main window and every child.
     pub(crate) fn locate_pane(&self, pane_id: u64) -> Option<PaneLocation> {
-        self.registry.windows.iter().find_map(|(window_id, window)| {
-            if !window.panes.contains_key(&pane_id) {
-                // When: this window's `panes` lack `pane_id`, the pane lives elsewhere.
-                return None;
-            }
-            let tab_index = window
-                .tab_states
-                .iter()
-                .position(|tab_state| tab_state.tree.contains_pane(pane_id))?;
-            Some(PaneLocation {
-                window_id: *window_id,
-                tab_index,
-                is_main: Some(*window_id) == self.registry.main_window_id,
-            })
+        let slot = self.registry.locate_pane(pane_id)?;
+        Some(PaneLocation {
+            window_id: slot.window_id,
+            tab_index: slot.tab_index,
+            is_main: Some(slot.window_id) == self.registry.main_window_id,
         })
     }
 
     /// Whether `pane_id`'s window is in READONLY, frontmost or not.
     pub(crate) fn pane_window_read_only(&self, pane_id: u64) -> bool {
-        self.registry.windows.values().any(|window| {
-            window.panes.contains_key(&pane_id)
-                && window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
-        })
+        self.registry
+            .window_of_pane(pane_id)
+            .and_then(|window_id| self.registry.windows[&window_id].copy_mode.as_ref())
+            .is_some_and(CopyModeState::is_read_only)
     }
 
-    /// Open a helper pane beside `anchor` without moving the user's focus: a split in the
-    /// anchor's tab, or a new tab in its window. The pane is agent-owned; a program it runs is
-    /// held after it exits so its output and status stay readable. A missing anchor or a
-    /// READONLY window changes nothing.
+    /// [`Self::create_pane_for`] a fresh agent session, for tests that need only one agent.
+    #[cfg(test)]
     pub(crate) fn create_pane_at(
         &mut self,
         anchor: u64,
         placement: Placement,
         agent_launch: AgentLaunch,
+    ) -> Result<CreatedPane, TargetError> {
+        let session = crate::app::mcp::agents::AgentSessionId::next();
+        self.create_pane_for(anchor, placement, agent_launch, session)
+    }
+
+    /// Open a helper pane beside `anchor` without moving the user's focus: a split in the
+    /// anchor's tab, or a new tab in its window. The pane is owned by agent `session`; a program
+    /// it runs is held after it exits so its output and status stay readable. A missing anchor or
+    /// a READONLY window changes nothing.
+    pub(crate) fn create_pane_for(
+        &mut self,
+        anchor: u64,
+        placement: Placement,
+        agent_launch: AgentLaunch,
+        session: crate::app::mcp::agents::AgentSessionId,
     ) -> Result<CreatedPane, TargetError> {
         let location = self.locate_pane(anchor).ok_or(TargetError::PaneGone)?;
         if self.pane_window_read_only(anchor) {
@@ -150,7 +162,10 @@ impl App {
         // whole-window size first.
         let size = self.target_cells(location, anchor, placement, pane_id);
         let mut pane = self.spawn_target_pane(location, pane_id, &launch, size)?;
-        pane.agent_owned = true;
+        // Between spawning and recording the owner, a test ends the creating session here.
+        #[cfg(test)]
+        CREATE_HOOK.with_borrow(|hook| hook.as_ref().map(|hook| hook()));
+        pane.creator = crate::app::mcp::agents::PaneOwner::Agent(session);
         let outcome =
             if pane.pty.is_some() { LaunchOutcome::Started } else { LaunchOutcome::Failed };
         self.install_target_pane(location, anchor, placement, pane_id, pane, agent_launch.title)?;
@@ -158,6 +173,7 @@ impl App {
             target: "mcp",
             pane = pane_id,
             anchor,
+            session = session.get(),
             ?placement,
             started = outcome == LaunchOutcome::Started,
             "agent pane created"
@@ -326,7 +342,7 @@ impl App {
     fn window_geometry(&self, window_id: WindowId) -> Option<WindowGeometry<'_>> {
         let window = self.registry.windows.get(&window_id)?;
         let (seam, renderer) = if Some(window_id) == self.registry.main_window_id {
-            (self.test_viewport_override, self.main_renderer())
+            (self.testing.test_viewport_override, self.main_renderer())
         } else {
             // When: `window_id` is a child, its own `test_pane_viewport` and `renderer` apply.
             (window.test_pane_viewport, window.renderer.as_ref())

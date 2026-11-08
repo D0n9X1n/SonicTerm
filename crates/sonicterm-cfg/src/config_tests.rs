@@ -332,3 +332,14 @@ fn only_a_named_family_sets_the_font_family() {
     let template: Config = toml::from_str(&default_config_template()).unwrap();
     assert_eq!(template.font.family, DEFAULT_FONT_FAMILY);
 }
+
+/// `[terminal] osc52` defaults to `"allow"`, parses `"deny"`, and refuses any other value.
+#[test]
+fn osc52_policy_defaults_to_allow_and_parses_deny() {
+    use crate::config::Osc52Policy;
+    assert_eq!(Config::default().terminal.osc52, Osc52Policy::Allow);
+    let parsed: Config = toml::from_str("[terminal]\nosc52 = \"deny\"\n").unwrap();
+    assert_eq!(parsed.terminal.osc52, Osc52Policy::Deny);
+    assert!(toml::from_str::<Config>("[terminal]\nosc52 = \"ask\"\n").is_err());
+    assert!(crate::config::default_config_template().contains("\nosc52 = \"allow\"\n"));
+}

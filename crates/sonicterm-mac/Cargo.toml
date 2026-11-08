@@ -54,6 +54,8 @@ name = "sonicterm-mac"
 path = "src/main.rs"
 
 [dev-dependencies]
+# Tests and examples here drive the App through hooks only test builds compile.
+sonicterm-app = { workspace = true, features = ["test-support"] }
 roxmltree = "0.21"
 winit.workspace = true
 sonicterm-gpu.workspace = true

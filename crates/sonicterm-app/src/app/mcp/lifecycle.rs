@@ -6,11 +6,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use sonicterm_cfg::config::{McpConfig, McpControl, McpRead};
+use sonicterm_cfg::config::{McpConfig, McpControl};
 use sonicterm_resource::CommittedReservation;
 use sonicterm_types::{OwnerKind, ResourceAmount, ResourceClass};
 
-use super::{LoopCall, LoopReply, LoopRequest, McpShared, PaneEntry};
+use super::{LoopCall, LoopReply, LoopRequest, McpShared, PaneEntry, PaneMetadata};
 use crate::app::owners::{tracking_only_owner_limits, OwnerGuard};
 use crate::app::{App, CopyModeState, WindowId};
 
@@ -29,7 +29,14 @@ pub(crate) struct McpServer {
     pub(crate) charges: HashMap<ResourceClass, CommittedReservation>,
     /// The governor's process-level `Mcp` owner; `None` when it could not register.
     pub(crate) owner: Option<OwnerGuard>,
+    /// `[mcp] read` is not set and the user has not been told yet what that now means.
+    pub(crate) read_notice_due: bool,
 }
+
+/// What an unset `[mcp] read` now means, shown once each time the server starts without it.
+pub(crate) const READ_UNSET_NOTICE: &str =
+    "[mcp] read is not set: agents now see only agent-created \
+panes. Set read = \"any\" to restore the previous default.";
 
 // Lifecycle: McpServer drop calls stop on the listener and every connection; then
 // `_endpoint_guard` removes the socket file, and `charges` and `owner` drop in order.
@@ -61,21 +68,39 @@ impl App {
             return;
         }
         if let Some(server) = self.services.mcp_server.as_mut() {
-            // When: a `server` runs and only the control level or read scope changed, queued
-            // requests and running waits are revoked.
-            server.shared.set_control(wanted.control);
-            server.shared.set_read(wanted.read);
+            // When: a `server` runs and some `[mcp]` value changed; only `control` or `read`
+            // revokes requests, and the connection limit applies to new connections alone.
+            let previous = server.config;
+            server.shared.set_connection_limit(wanted.max_connections());
+            // The scope in force, with the default resolved: an unset key and an explicit
+            // "agent" read the same panes, so switching between them revokes nothing.
+            let scope = McpConfig::read;
+            if previous.control != wanted.control || scope(&previous) != scope(&wanted) {
+                server.shared.set_control(wanted.control);
+                server.shared.set_read(wanted.read());
+            }
+            if (previous.isolation, previous.create_anchor)
+                != (wanted.isolation, wanted.create_anchor)
+            {
+                // A changed `isolation` or `create_anchor` revokes calls admitted under the old
+                // scope, as a `control` change does.
+                server.shared.set_agent_scope(wanted.isolation, wanted.create_anchor);
+            }
             server.config = wanted;
             tracing::info!(
                 target: "mcp",
                 control = wanted.control.as_str(),
-                read = wanted.read.as_str(),
+                read = wanted.read().as_str(),
+                isolation = wanted.isolation.as_str(),
+                create_anchor = wanted.create_anchor.as_str(),
                 "control level changed"
             );
             return;
         }
         let shared = McpShared::new(wanted.control, self.event_loop_proxy.clone());
-        shared.set_read(wanted.read);
+        shared.set_read(wanted.read());
+        shared.set_agent_scope(wanted.isolation, wanted.create_anchor);
+        shared.set_connection_limit(wanted.max_connections());
         match super::start_listener(&shared) {
             Ok((endpoint, guard)) => {
                 tracing::info!(target: "mcp", control = wanted.control.as_str(), "control server started");
@@ -87,12 +112,42 @@ impl App {
                     config: wanted,
                     charges: HashMap::new(),
                     owner,
+                    read_notice_due: wanted.read.is_none(),
                 });
+                if wanted.read.is_none() {
+                    // The default changed under the user: say so in the log now and in a
+                    // notification once a window can show it.
+                    tracing::warn!(target: "mcp", "{READ_UNSET_NOTICE}");
+                }
+                self.show_mcp_read_notice_if_due();
             }
             Err(error) => {
                 tracing::warn!(target: "mcp", %error, "control server could not start");
             }
         }
+    }
+
+    /// Show [`READ_UNSET_NOTICE`] once a main window exists to show it, if the running server
+    /// started without `[mcp] read`. Called when the server starts and when the first main window
+    /// appears, so a server started before any window still tells the user.
+    pub(crate) fn show_mcp_read_notice_if_due(&mut self) {
+        if self.registry.main_window_id.is_none() {
+            // When: no `main_window_id` yet, the notice waits for the first main window.
+            return;
+        }
+        let Some(server) = self.services.mcp_server.as_mut() else {
+            // When: no `mcp_server` runs, there is nothing to announce.
+            return;
+        };
+        if !std::mem::take(&mut server.read_notice_due) {
+            // When: `read_notice_due` was not set or was already taken, nothing more is said.
+            return;
+        }
+        self.show_notification_for_kind(
+            self.frontmost_kind(),
+            sonicterm_ui::overlays::NotificationLevel::Info,
+            READ_UNSET_NOTICE.to_string(),
+        );
     }
 
     /// Register the governor's `Mcp` owner below the process root. A server that cannot register
@@ -169,10 +224,10 @@ impl App {
             // `deadline` passed, the request is dropped unrun.
             return LoopReply::Refused("revoked", "the request was dropped before it ran".into());
         }
-        let control = shared.control();
-        // Read tools see only agent-created panes under `read = "agent"`; `agent_owned` is
-        // SonicTerm's own record, so nothing a client sends can widen it.
-        let readable = |entry: &PaneEntry| shared.read() == McpRead::Any || entry.agent_owned;
+        let access = shared.access(request.session);
+        // Read tools see only the panes the session's `"agent"` scope reaches under
+        // `read = "agent"`; the creator is SonicTerm's own record, so nothing a client sends widens it.
+        let readable = |entry: &PaneEntry| access.reads(shared.read(), entry.creator);
         match &request.call {
             LoopCall::ListPanes => {
                 let mut entries = self.mcp_pane_entries();
@@ -188,21 +243,24 @@ impl App {
                 LoopReply::Panes(Vec::new())
             }
             LoopCall::CreatePane { anchor, placement, launch } => {
-                self.mcp_create_pane(control, *anchor, *placement, launch.clone())
+                self.mcp_create_pane(access, *anchor, *placement, launch.clone())
             }
             LoopCall::SendText { pane_id, text, submit } => {
-                self.mcp_send_text(control, *pane_id, text, *submit)
+                self.mcp_send_text(access, *pane_id, text, *submit)
             }
-            LoopCall::SendKeys { pane_id, keys } => self.mcp_send_keys(control, *pane_id, keys),
+            LoopCall::SendKeys { pane_id, keys } => self.mcp_send_keys(access, *pane_id, keys),
             LoopCall::RunStart { pane_id, command } => {
-                self.mcp_run_start(control, *pane_id, command)
+                self.mcp_run_start(access, *pane_id, command)
             }
-            LoopCall::ClosePane { pane_id } => self.mcp_close_pane(control, *pane_id),
+            LoopCall::ClosePane { pane_id } => self.mcp_close_pane(access, *pane_id),
             LoopCall::ResolvePane { pane_id } => match self.mcp_resolve_pane(*pane_id) {
                 Some(entry) if readable(&entry) => LoopReply::Pane(entry),
                 Some(_) => LoopReply::Refused(
                     "out_of_scope",
-                    format!("pane {pane_id} is outside [mcp] read = \"agent\""),
+                    format!(
+                        "pane {pane_id} is outside [mcp] read = \"agent\" (the default); set \
+                         read = \"any\" to let agents read every pane"
+                    ),
                 ),
                 None => LoopReply::Refused("pane_gone", format!("no pane {pane_id}")),
             },
@@ -212,6 +270,8 @@ impl App {
     /// Every window in the order agents see them: main first, then children in creation order.
     /// A pane's `window_index` is its window's position here, for the list and for one pane alike.
     fn mcp_window_order(&self) -> Vec<WindowId> {
+        #[cfg(test)]
+        WINDOW_ORDERS.with(|orders| orders.set(orders.get() + 1));
         let mut windows: Vec<WindowId> = self.registry.windows.keys().copied().collect();
         windows.sort_by_key(|id| {
             let is_main = Some(*id) == self.registry.main_window_id;
@@ -232,46 +292,70 @@ impl App {
             }
             for (tab_index, tab_state) in window.tab_states.iter().enumerate() {
                 tab_state.tree.for_each_leaf(&mut |pane_id| {
-                    entries.extend(Self::mcp_entry(window, window_index, tab_index, pane_id));
+                    entries.extend(Self::mcp_entry(
+                        window,
+                        Some((window_index, tab_index)),
+                        pane_id,
+                    ));
                 });
             }
         }
         entries
     }
 
-    /// The entry for `pane_id` alone, exactly as [`Self::mcp_pane_entries`] would list it, without
-    /// building the others: one window's tabs are searched, and only this pane's handles cloned.
-    /// `None` when no terminal window holds the pane or it is mid-teardown.
+    /// The handles for `pane_id` alone, without its UI position: one window is found, no window
+    /// is ordered, and only this pane's handles are cloned. `None` when no terminal window holds
+    /// the pane or it is mid-teardown.
     pub(crate) fn mcp_resolve_pane(&self, pane_id: u64) -> Option<PaneEntry> {
-        let (window_id, window) =
-            self.registry.windows.iter().find(|(_, window)| {
-                !window.role.is_report() && window.panes.contains_key(&pane_id)
-            })?;
-        let window_index = self.mcp_window_order().iter().position(|id| id == window_id)?;
-        let tab_index =
-            window.tab_states.iter().position(|tab_state| tab_state.tree.contains_pane(pane_id))?;
-        Self::mcp_entry(window, window_index, tab_index, pane_id)
+        let window = &self.registry.windows[&self.registry.window_of_pane(pane_id)?];
+        if window.role.is_report() {
+            // When: the `window` holding the pane is a report window, it is no terminal pane.
+            return None;
+        }
+        Self::mcp_entry(window, None, pane_id)
+    }
+
+    /// The UI position `list_panes` would report for `pane_id`, for tests that check both paths
+    /// agree.
+    #[cfg(test)]
+    pub(crate) fn mcp_pane_metadata(&self, pane_id: u64) -> Option<PaneMetadata> {
+        let slot = self.registry.locate_pane(pane_id)?;
+        let window = &self.registry.windows[&slot.window_id];
+        if window.role.is_report() {
+            // When: the `window` holding the pane is a report window, it is no terminal pane.
+            return None;
+        }
+        let window_index = self.mcp_window_order().iter().position(|id| *id == slot.window_id)?;
+        Self::mcp_entry(window, Some((window_index, slot.tab_index)), pane_id)?.metadata
     }
 
     /// One pane's entry, cloning only its own shared handles; `None` when `pane_id` is a leaf
     /// whose pane is already gone, as during teardown.
     fn mcp_entry(
         window: &crate::app::WindowState,
-        window_index: usize,
-        tab_index: usize,
+        position: Option<(usize, usize)>,
         pane_id: u64,
     ) -> Option<PaneEntry> {
         let pane = window.panes.get(&pane_id)?;
-        let tab_state = window.tab_states.get(tab_index)?;
+        let metadata = match position {
+            Some((window_index, tab_index)) => {
+                let tab_state = window.tab_states.get(tab_index)?;
+                Some(PaneMetadata {
+                    window_index,
+                    tab_index,
+                    active: tab_index == window.tabs.active_index()
+                        && tab_state.active_pane == pane_id,
+                    readonly: window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only),
+                })
+            }
+            None => None,
+        };
         #[cfg(test)]
         ENTRIES_BUILT.with(|built| built.set(built.get() + 1));
         Some(PaneEntry {
             pane_id,
-            window_index,
-            tab_index,
-            active: tab_index == window.tabs.active_index() && tab_state.active_pane == pane_id,
-            readonly: window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only),
-            agent_owned: pane.agent_owned,
+            metadata,
+            creator: pane.creator,
             parser: Arc::clone(&pane.parser),
             output_generation: Arc::clone(&pane.output_generation),
             exit_status: Arc::clone(&pane.exit_status),
@@ -286,6 +370,9 @@ impl App {
 thread_local! {
     /// Entries built on this thread, so a test can tell resolving one pane from listing them all.
     pub(crate) static ENTRIES_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Window orderings computed on this thread, so a test can tell that resolving one pane ordered
+    /// no windows.
+    pub(crate) static WINDOW_ORDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

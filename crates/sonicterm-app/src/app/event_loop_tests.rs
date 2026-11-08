@@ -310,7 +310,7 @@ pub(super) fn contention_retry_is_nonstarving_per_window_across_frame_policies()
                 }
                 assert_eq!(app.wake_deadline(None), None);
                 app.defer_window_lock_contention(id, false, due);
-                app.registry.windows.remove(&id);
+                app.registry.remove_window(id);
                 assert_eq!(app.wake_deadline(None), None);
             }
         }

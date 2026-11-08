@@ -6,7 +6,7 @@ use super::*;
 /// A headless app with one main tab named `zsh` and an open About window.
 fn app_with_about() -> (App, u64, WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.test_clipboard_text = Some(String::new());
+    app.testing.test_clipboard_text = Some(String::new());
     let main_pane = app.__test_seed_tab("zsh");
     let about_id = app.__test_open_about_window();
     (app, main_pane, about_id)
@@ -25,12 +25,12 @@ fn opening_about_twice_reuses_one_window() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("zsh");
     app.show_about();
-    assert!(app.about.open_requested, "the first open waits for the event loop");
+    assert!(app.reports.about.open_requested, "the first open waits for the event loop");
     assert!(app.about_window_id().is_none());
     let about_id = app.__test_open_about_window();
-    assert!(!app.about.open_requested);
+    assert!(!app.reports.about.open_requested);
     app.show_about();
-    assert!(!app.about.open_requested, "an open window is focused, not requested again");
+    assert!(!app.reports.about.open_requested, "an open window is focused, not requested again");
     assert_eq!(app.about_window_id(), Some(about_id));
     assert_eq!(app.registry.frontmost_window, Some(about_id));
     let windows = app.registry.windows.values().filter(|window| window.role == WindowRole::About);
@@ -42,15 +42,15 @@ fn opening_about_twice_reuses_one_window() {
 #[test]
 fn copy_reports_the_real_clipboard_result() {
     let (mut app, _, about_id) = app_with_about();
-    let view = app.about.view.clone().expect("the window was filled");
+    let view = app.reports.about.view.clone().expect("the window was filled");
     assert!(view.text.starts_with(&format!("SonicTerm {}", env!("CARGO_PKG_VERSION"))));
     assert!(view.text.contains("[ Copy ]") && !view.copy_text.contains("[ Copy ]"));
     assert!(app.copy_about());
-    assert_eq!(app.test_clipboard_text.as_deref(), Some(view.copy_text.as_str()));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some(view.copy_text.as_str()));
     let bubble = app.registry.windows[&about_id].notification.clone().expect("copied notification");
     assert_eq!(bubble.level, sonicterm_ui::overlays::NotificationLevel::Info);
     assert_eq!(bubble.message, "Copied About details");
-    app.test_clipboard_write_failure = true;
+    app.testing.test_clipboard_write_failure = true;
     assert!(!app.copy_about());
     let bubble =
         app.registry.windows[&about_id].notification.clone().expect("failure notification");
@@ -65,15 +65,15 @@ fn the_copy_key_and_button_copy() {
     let (mut app, _, about_id) = app_with_about();
     let chord = super::super::memory_report::COPY_ALL_CHORD.to_owned();
     app.handle_about_key(about_id, &[chord], false);
-    let copy_text = app.about.view.as_ref().map(|view| view.copy_text.clone());
-    assert_eq!(app.test_clipboard_text, copy_text);
+    let copy_text = app.reports.about.view.as_ref().map(|view| view.copy_text.clone());
+    assert_eq!(app.testing.test_clipboard_text, copy_text);
     let (row, col) = drawn_button(&app, about_id, 40).expect("the button is drawn");
-    app.test_clipboard_text = Some(String::new());
+    app.testing.test_clipboard_text = Some(String::new());
     assert!(!app.about_copy_at(row, col + 8), "past the button");
     assert!(!app.about_copy_at(row - 1, col), "the row above");
-    assert_eq!(app.test_clipboard_text.as_deref(), Some(""));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some(""));
     assert!(app.about_copy_at(row, col + 7), "the button's last cell");
-    assert_eq!(app.test_clipboard_text, copy_text);
+    assert_eq!(app.testing.test_clipboard_text, copy_text);
 }
 
 /// Contract: Esc and Cmd+W (close pane or tab) close the About window, never quit, and leave the
@@ -83,7 +83,7 @@ fn escape_and_close_close_about_without_quitting() {
     let (mut app, _, about_id) = app_with_about();
     app.handle_about_key(about_id, &["escape".to_owned()], false);
     assert!(app.about_window_id().is_none());
-    assert!(app.about.view.is_none(), "no stale text survives the window");
+    assert!(app.reports.about.view.is_none(), "no stale text survives the window");
     let about_id = app.__test_open_about_window();
     assert!(app.run_action_for_window(&Action::CloseActivePaneOrTab, about_id));
     assert!(app.about_window_id().is_none());
@@ -118,7 +118,7 @@ fn keys_and_pastes_in_about_never_reach_a_pty() {
     let (mut app, _, about_id) = app_with_about();
     assert!(app.registry.windows[&about_id].panes.values().all(|pane| pane.pty.is_none()));
     app.__test_enable_pty_write_log();
-    app.test_clipboard_text = Some("rm -rf /\n".to_string());
+    app.testing.test_clipboard_text = Some("rm -rf /\n".to_string());
     assert!(app.run_action_for_window(&Action::PasteFromClipboard, about_id));
     app.handle_about_key(about_id, &["x".to_string()], false);
     assert!(app.__test_pty_write_log().is_empty());
@@ -129,7 +129,7 @@ fn keys_and_pastes_in_about_never_reach_a_pty() {
 #[test]
 fn the_config_row_follows_the_last_load_result() {
     let (mut app, _, _) = app_with_about();
-    app.runtime_config_path = Some(std::path::PathBuf::from("/nonexistent/sonicterm.toml"));
+    app.configs.runtime_config_path = Some(std::path::PathBuf::from("/nonexistent/sonicterm.toml"));
     assert_eq!(app.collect_about_facts().config_status, ConfigStatus::Missing);
     let error = anyhow::anyhow!("TOML parse error at line 3, column 1");
     app.set_config_reload_error(Some(&error));
@@ -148,7 +148,7 @@ fn the_about_action_opens_about() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("zsh");
     assert!(app.run_action(&Action::ShowAbout));
-    assert!(app.about.open_requested);
+    assert!(app.reports.about.open_requested);
 }
 
 /// Contract: a reload that names a theme and a keymap that do not exist keeps the active ones,
@@ -161,14 +161,14 @@ fn theme_and_keymap_rows_show_the_active_ones_and_their_reload_errors() {
     let path = dir.join("sonicterm.toml");
     std::fs::write(&path, "").unwrap();
     let (mut app, _, _) = app_with_about();
-    app.runtime_config_path = Some(path.clone());
+    app.configs.runtime_config_path = Some(path.clone());
     let (theme, keymap) = (app.theme.name.clone(), app.keymap.meta.name.clone());
     assert!(!theme.is_empty() && !keymap.is_empty());
     std::fs::write(&path, "theme = \"no-such-theme\"\nkeymap = \"no-such-keymap\"\n").unwrap();
     app.force_reload_config();
     assert_eq!((app.theme.name.as_str(), app.keymap.meta.name.as_str()), (&*theme, &*keymap));
     app.show_about();
-    let text = app.about.view.as_ref().expect("About is filled").text.clone();
+    let text = app.reports.about.view.as_ref().expect("About is filled").text.clone();
     let row = |label: &str| {
         text.lines().find(|line| line.starts_with(label)).unwrap_or_default().to_owned()
     };
@@ -205,17 +205,17 @@ fn drawn_button(app: &App, about_id: WindowId, rows: u16) -> Option<(u16, u16)> 
 #[test]
 fn a_click_on_the_drawn_button_copies_when_rows_wrap() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.test_clipboard_text = Some(String::new());
+    app.testing.test_clipboard_text = Some(String::new());
     app.__test_seed_tab("zsh");
     let error = anyhow::anyhow!("TOML parse error at line 3: {}", "x".repeat(150));
     app.set_config_reload_error(Some(&error));
     let about_id = app.__test_open_about_window_sized(80, 24);
-    let view = app.about.view.clone().expect("About is filled");
+    let view = app.reports.about.view.clone().expect("About is filled");
     assert!(view.width > 80, "a row is wider than the pane");
     let (row, col) = drawn_button(&app, about_id, 24).expect("the button is drawn whole");
     assert!(!app.about_copy_at(row, col.saturating_sub(1)), "beside the button is text");
     assert!(app.about_copy_at(row, col), "a click on the drawn button copies");
-    assert_eq!(app.test_clipboard_text.as_deref(), Some(view.copy_text.as_str()));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some(view.copy_text.as_str()));
 }
 
 /// Contract: Copy follows the scrolled view. Scrolled to the bottom, the button is drawn on another
@@ -223,7 +223,7 @@ fn a_click_on_the_drawn_button_copies_when_rows_wrap() {
 #[test]
 fn a_click_on_the_drawn_button_copies_in_a_scrolled_view() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.test_clipboard_text = Some(String::new());
+    app.testing.test_clipboard_text = Some(String::new());
     app.__test_seed_tab("zsh");
     let about_id = app.__test_open_about_window_sized(100, 6);
     assert_eq!(drawn_button(&app, about_id, 6), None, "the view starts at the top");
@@ -233,13 +233,13 @@ fn a_click_on_the_drawn_button_copies_in_a_scrolled_view() {
     super::super::child_window::scroll_child_pane(window, pane_id, i32::MAX, scrollbar);
     let (row, col) = drawn_button(&app, about_id, 6).expect("the bottom view shows the button");
     assert!(app.about_copy_at(row, col), "a click on the drawn button copies");
-    let copied = app.about.view.as_ref().map(|view| view.copy_text.clone());
-    assert_eq!(app.test_clipboard_text, copied);
-    app.test_clipboard_text = Some(String::new());
+    let copied = app.reports.about.view.as_ref().map(|view| view.copy_text.clone());
+    assert_eq!(app.testing.test_clipboard_text, copied);
+    app.testing.test_clipboard_text = Some(String::new());
     let window = app.registry.windows.get_mut(&about_id).unwrap();
     super::super::child_window::scroll_child_pane(window, pane_id, i32::MIN, scrollbar);
     assert!(!app.about_copy_at(row, col), "at the top that cell is a report row");
-    assert_eq!(app.test_clipboard_text.as_deref(), Some(""));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some(""));
 }
 
 /// Connect an assistive technology to About window `about_id` and flush, as the event loop would.
@@ -304,8 +304,8 @@ fn the_about_copy_node_copies() {
     connect_reader(&mut app, about_id);
     let request = AccessibilityRequest::Click { node: ABOUT_COPY_NODE.0, target: None };
     app.handle_accessibility_request(about_id, request);
-    let copied = app.about.view.as_ref().map(|view| view.copy_text.clone());
-    assert_eq!(app.test_clipboard_text, copied);
+    let copied = app.reports.about.view.as_ref().map(|view| view.copy_text.clone());
+    assert_eq!(app.testing.test_clipboard_text, copied);
 }
 
 /// Contract: reading the facts again with R updates what a screen reader reads.
@@ -338,10 +338,10 @@ fn resize_about_pane(app: &App, about_id: WindowId, cols: u16, rows: u16) {
 fn assert_button_whole_at_edge(app: &mut App, about_id: WindowId, cols: u16, case: &str) {
     let (row, col) = drawn_button(app, about_id, 24).unwrap_or_else(|| panic!("{case}: not drawn"));
     assert_eq!(col + 8, cols, "{case}: right-aligned inside {cols} columns");
-    app.test_clipboard_text = Some(String::new());
+    app.testing.test_clipboard_text = Some(String::new());
     assert!(app.about_copy_at(row, col), "{case}: a click on the button copies");
-    let copied = app.about.view.as_ref().map(|view| view.copy_text.clone());
-    assert_eq!(app.test_clipboard_text, copied, "{case}");
+    let copied = app.reports.about.view.as_ref().map(|view| view.copy_text.clone());
+    assert_eq!(app.testing.test_clipboard_text, copied, "{case}");
 }
 
 /// Contract: a font zoom in either direction resizes the pane without a window resize, and About
@@ -376,7 +376,7 @@ fn copy_stays_whole_after_a_reload_changes_the_font_size() {
     std::fs::write(&path, "").unwrap();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("zsh");
-    app.runtime_config_path = Some(path.clone());
+    app.configs.runtime_config_path = Some(path.clone());
     let error = anyhow::anyhow!("TOML parse error at line 3: {}", "x".repeat(150));
     app.set_config_reload_error(Some(&error));
     let about_id = app.__test_open_about_window_sized(80, 24);

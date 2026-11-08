@@ -63,13 +63,30 @@ pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>
         send_reply,
     );
     if nonempty {
-        handles.output_generation.fetch_add(1, Ordering::Release);
         // The batch's parser and media guards were released inside `process_pane_vt_batch_with`,
         // so a woken waiter's first read never blocks on this worker.
-        handles.change_signal.notify();
+        publish_grid_change(&handles.output_generation, &handles.change_signal);
     }
+}
+
+/// Publish one completed change to a pane's grid: bump its output generation, then wake every
+/// waiter. Every grid write a reader can wait for goes through here, the VT worker's batches and
+/// the app's own status lines alike, with no parser guard held so a woken reader never blocks.
+/// The two never overlap: the app writes a pane's status line only on the exit event its worker
+/// posts after its last batch, so the worker's echo watch can still predict its own next value.
+// Ordering: output_generation Release pairs with every reader's Acquire load of it.
+pub(in crate::app) fn publish_grid_change(
+    output_generation: &AtomicU64,
+    change_signal: &crate::app::PaneSignal,
+) {
+    output_generation.fetch_add(1, Ordering::Release);
+    change_signal.notify();
 }
 
 #[cfg(test)]
 #[path = "spawn_pane_vt_tests.rs"]
 mod spawn_pane_vt_tests;
+
+#[cfg(test)]
+#[path = "spawn_pane_vt_fuzz_tests.rs"]
+mod spawn_pane_vt_fuzz_tests;

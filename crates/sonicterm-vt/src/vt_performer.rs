@@ -37,6 +37,7 @@ impl Performer {
             grid,
             shell_token: None,
             shell_authenticated: false,
+            shell_state: super::ShellIntegrationState::None,
             shell_input_seen: None,
             fg: Color::Default,
             bg: Color::Default,
@@ -79,6 +80,7 @@ impl Performer {
             scroll_bottom: None,
             fast_path_ready: true,
             last_printed_char: None,
+            tap: None,
             dcs_capture: None,
             staging_pool,
             kitty_transfer: None,
@@ -235,6 +237,10 @@ impl Performer {
             fill,
         );
         self.last_printed_char = Some(character);
+        if let Some(tap) = self.tap.as_mut() {
+            // A stream reader armed the `tap`: the printed character is recorded too.
+            tap.push(character);
+        }
     }
 
     pub(super) fn clear_decrqss(&mut self) {

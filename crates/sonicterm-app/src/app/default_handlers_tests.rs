@@ -115,7 +115,7 @@ fn startup_and_reload_never_call_the_backend() {
     let scratch = tempfile::tempdir().unwrap();
     let config_path = scratch.path().join("sonicterm.toml");
     std::fs::write(&config_path, "").unwrap();
-    app.runtime_config_path = Some(config_path);
+    app.configs.runtime_config_path = Some(config_path);
     app.force_reload_config();
     let calls = calls.lock().unwrap();
     assert_eq!(calls.plans, 0);

@@ -551,7 +551,7 @@ impl ModifierSelectionProbe {
             .unwrap();
         let mut app = App::new(Default::default(), Default::default(), Default::default());
         app.clipboard = None;
-        app.test_clipboard_text = Some("clipboard sentinel".into());
+        app.testing.test_clipboard_text = Some("clipboard sentinel".into());
         app.keymap = Keymap::parse_resilient("[meta]\nname = \"selection\"\nversion = \"1.0\"\n[[binding]]\nkeys = \"ctrl+shift+c\"\naction = \"copy_to_clipboard\"\n", "native selection fixture").unwrap();
         app.__test_enable_pty_write_log();
         let main_pane = app.__test_seed_tab("modifier-main");
@@ -771,8 +771,8 @@ impl ModifierSelectionProbe {
             if copy_chord {
                 assert_eq!(writes.len(), writes_before, "copy shortcut never leaks terminal input");
                 if down {
-                    assert_eq!(self.app.test_clipboard_text.as_deref(), Some("selected"));
-                    self.app.test_clipboard_text = Some("clipboard sentinel".into());
+                    assert_eq!(self.app.testing.test_clipboard_text.as_deref(), Some("selected"));
+                    self.app.testing.test_clipboard_text = Some("clipboard sentinel".into());
                 }
             } else {
                 assert_eq!(writes.len(), writes_before + 1);
@@ -802,6 +802,6 @@ impl ModifierSelectionProbe {
         if !copy_chord {
             self.completed += 1;
         }
-        assert_eq!(self.app.test_clipboard_text.as_deref(), Some("clipboard sentinel"));
+        assert_eq!(self.app.testing.test_clipboard_text.as_deref(), Some("clipboard sentinel"));
     }
 }

@@ -244,7 +244,8 @@ took 21 minutes of its shard's scenarios and that shard set the critical path:
 `S7-S4` runs S7, S4, atlas-retry, S8 and S6/selection-drag;
 `S9-S10sync` runs S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line, S12,
 S12/status-line and S3;
-`S10-S11release` runs S10, S11/release, S2, S2/flood, S6/flood, S13 and S13/sustained-4. All three start
+`S10-S11release` runs S10, S11/release, S2, S2/flood, S6/flood, S13 and S13/sustained-4, and for a release tag
+also S13's wide layouts (`release_scenarios`; Windows adds them to its S13 shard the same way). All three start
 when the binaries land: this repository runs at most five macOS jobs at once, and CI
 holds two (core gates, which also runs the aarch64 smoke, and the Intel smoke). The
 35-minute PR budget includes queues; exact-head CI timing, not local estimates,

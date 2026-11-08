@@ -127,6 +127,8 @@ pub(crate) struct MemoryReport {
     pub(crate) os: OsFigures,
     /// The OS graphics figure and every renderer's requested GPU bytes, from the same cycle.
     pub(crate) graphics: GraphicsReading,
+    /// Every pane's PTY queues and the reaper's fallback timing, from the same cycle.
+    pub(crate) queues: super::memory_report_queues::QueueSection,
 }
 
 /// Replace every control character in text from outside SonicTerm with a space.
@@ -222,6 +224,10 @@ impl MemoryReport {
         self.render_accounting(&mut text);
         self.render_windows(&mut text);
         self.render_panes(&mut text);
+        for line in self.queues.lines() {
+            push_line(&mut text, &line);
+        }
+        push_line(&mut text, "");
         self.render_threads(&mut text);
         self.render_children(&mut text);
         text

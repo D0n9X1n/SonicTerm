@@ -328,6 +328,10 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/reaper_driver.rs", "state", 2),
     ("app/reaper_driver.rs", "observations", 2),
     ("app/reaper_driver.rs", "paths", 3),
+    // The synchronous fallback's timing record, taken after the native drop returns.
+    ("app/reaper_driver.rs", "fallback_timing", 2),
+    // The test-only run gate's flag, a plain bool behind its condvar.
+    ("app/reaper_driver.rs", "held", 2),
     ("app/window_setup/windows.rs", "brushes", 1),
     ("app/media.rs", "charge", 3),
     ("app/command_events.rs", "command_events", 1),
@@ -340,6 +344,11 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/mcp.rs", "inbox", 3),
     ("app/mcp.rs", "proxy", 1),
     ("app/mcp.rs", "writer", 1),
+    // The MCP server's list of sleeping waits' pane signals: weak pointers, never a parser.
+    ("app/mcp.rs", "waiters", 4),
+    ("app/mcp/agents.rs", "live", 3),
+    // A test's replacement recheck interval, read once per `wait_for`.
+    ("app/mcp/tools_read.rs", "recheck_override", 1),
     ("app/os_drag.rs", "snapshots", 6),
     ("app/os_drag.rs", "moved", 2),
     ("app/os_drag.rs", "ended", 3),
@@ -357,8 +366,10 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/spawn_pane_media.rs", "inline_images", 2),
     // The image store's own lock and snapshot: its mutex guards image entries, never a parser.
     ("app/media_store.rs", "images", 1),
-    // A pane's change signal: its mutex guards one counter, never a parser.
-    ("app/pane_signal.rs", "sequence", 3),
+    // A pane's change signal: its mutex guards a counter and the closed flag, never a parser.
+    ("app/pane_signal.rs", "state", 5),
+    // A test's per-signal park notifier, read while a wait parks; never a parser.
+    ("app/pane_signal.rs", "park_notifier", 1),
     ("app/guard_correlation.rs", "state", 5),
     ("bin/pty_multi_round_helper.rs", "stdin", 1),
     ("bin/pty_multi_round_helper.rs", "stdout", 1),
@@ -857,7 +868,7 @@ pub(super) fn run_stopped_growth(
     if app.begin_window_redraw(id, Instant::now()) {
         return Err("a stopped window starts no frame".into());
     }
-    let mut removed = app.registry.windows.remove(&id).ok_or("the window is tracked")?;
+    let mut removed = app.registry.remove_window(id).ok_or("the window is tracked")?;
     app.retire_window_counters(id, &mut removed);
     let closed = app.frame_counters_snapshot().ok_or("counting app")?.closed_windows;
     let reported = (

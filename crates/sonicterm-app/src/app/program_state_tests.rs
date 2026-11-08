@@ -503,7 +503,7 @@ fn reloading_taskbar_progress_off_clears_at_once() {
     let start = Instant::now();
     feed_pane(&mut app, &worker, b"\x1b]9;4;1;40\x07");
     app.sync_taskbar_progress(start);
-    app.runtime_config_path = Some(path);
+    app.configs.runtime_config_path = Some(path);
     app.force_reload_config();
     assert!(!app.config.notifications.taskbar_progress);
     assert_eq!(app.sync_taskbar_progress(start + Duration::from_millis(1)), None);

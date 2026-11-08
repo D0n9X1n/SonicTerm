@@ -93,13 +93,15 @@ fn native_pasteboard_paste_action_reaches_real_pty() {
     let mut seed = arboard::Clipboard::new().expect("native pasteboard");
     let (mut app, window, pane) = input_test_app();
     assert!(app.clipboard.is_some(), "App holds a native pasteboard handle");
-    assert!(app.test_clipboard_text.is_none() && app.test_clipboard_files.is_none());
+    assert!(
+        app.testing.test_clipboard_text.is_none() && app.testing.test_clipboard_files.is_none()
+    );
     app.__test_enable_pty_write_log();
     let paste = |app: &mut InputTestApp| {
         app.wait_for_input_queues();
         let submitted = PtySubmissions::start();
         assert!(app.run_action_for_window(&action, window));
-        let sources = std::mem::take(&mut *app.test_pty_write_sources.borrow_mut());
+        let sources = std::mem::take(&mut *app.testing.test_pty_write_sources.borrow_mut());
         (submitted.take(), sources)
     };
 

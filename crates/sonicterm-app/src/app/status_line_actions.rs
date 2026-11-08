@@ -65,12 +65,17 @@ impl App {
     }
 
     /// Record the native result of an accepted OSC 52 write from `pane_id`, `bytes` long.
-    pub(in crate::app) fn note_clip_write(&mut self, pane_id: u64, bytes: usize, written: bool) {
-        let outcome = if written {
-            ClipOutcome::Written(bytes as u64)
-        } else {
-            // When: written is false, the native clipboard refused the accepted text.
-            ClipOutcome::Failed
+    pub(in crate::app) fn note_clip_write(
+        &mut self,
+        pane_id: u64,
+        bytes: usize,
+        outcome: super::super::event_loop::ClipWriteOutcome,
+    ) {
+        use super::super::event_loop::ClipWriteOutcome;
+        let outcome = match outcome {
+            ClipWriteOutcome::Written => ClipOutcome::Written(bytes as u64),
+            ClipWriteOutcome::Failed => ClipOutcome::Failed,
+            ClipWriteOutcome::Denied => ClipOutcome::Denied,
         };
         self.status_line.clip_write.insert(pane_id, outcome);
     }

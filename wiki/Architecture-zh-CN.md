@@ -61,7 +61,7 @@ crate 中身份不变的类型。
 
 ### 权威运行时状态
 
-`App` 协调事件循环并应用已完成的操作。其状态由四个所有者持有，每个都是 `App` 的字段：
+`App` 协调事件循环并应用已完成的操作。其状态由六个所有者持有，每个都是 `App` 的字段：
 
 ```mermaid
 flowchart LR
@@ -70,14 +70,24 @@ flowchart LR
   App --> Run["RuntimeServices（services）：前台进程探测、MCP 服务器、PTY 回收器、GPU 恢复、字体目录 worker、运行时冒烟"]
   App --> Int["InteractionState（interaction）：命令面板、编辑目标、字段指针捕获、系统拖放、广播"]
   App --> Diag["DiagnosticsState（diagnostics）：计数器、保留与裁剪采样、面包屑"]
+  App --> Fonts["FontState（fonts）：字体目录、配置的字号、粗细与字体族、字体目录与选择器"]
+  App --> Reports["ReportWindows（reports）：内存用量与关于窗口的状态"]
   Reg --> Win["WindowState：标签页、窗格、渲染器"]
 ```
 
-`WindowRegistry` 持有 `HashMap<WindowId, WindowState>` 和 `main_window_id`；窗格属于持有它的
-那个窗口的 `WindowState`，所有按窗格 id 的查找都经过注册表的 `pane_by_id`。主窗口和拆出的窗口
+`WindowRegistry` 持有窗口表和 `main_window_id`；窗格属于持有它的那个窗口的 `WindowState`，
+所有按窗格 id 的查找都经过注册表（`pane`、`window_of_pane`，以及给出窗口与标签页的
+`locate_pane`）。窗口表是一个 `WindowMap`：应用可以读取它并原地修改某个窗口，但只有注册表的
+`insert_window` 和 `remove_window` 能添加或移除窗口，且两者在 debug 构建中都会检查没有窗格同时
+属于两个窗口。只有 `App::insert_window_registered` 调用 `insert_window`，它同时注册窗口的
+governor owner；`scripts/check-window-owner-registration.sh` 强制这一点。窗格在窗口之间移动仍经过
+`WindowState` 自身的 `panes` 与 `tab_states`。一个带种子的状态机测试
+（`window_registry_state_lifecycle_tests.rs`）以随机顺序执行拆分、关闭、标签页转移、拆出、等待、输出和退出，
+并在每一步后检查：每个窗格只属于一个窗口，`locate_pane` 与逐一扫描一致，每个已退役窗格的信号已关闭，
+每个存活窗格都持有一个打开的 governor owner；`SONICTERM_LIFECYCLE_SEED` 可再加一个种子。主窗口和拆出的窗口
 使用同一种 `WindowState` 表示。这些所有者只在 `app` 模块内可见；`App` 的公开方法保持不变。
 少数字段仍留在 `App` 上：帧计数器（在重绘路径上与窗口和命令面板一同借用）、重绘调度、配置、
-主题、键位和字体。
+主题和键位。字体状态与报告窗口状态有各自的所有者：`FontState` 与 `ReportWindows`。
 
 键盘、IME、焦点和修饰键事件在主/子窗口呈现路径分流前，先查找来源窗口身份。共享输入
 所有权不替代每窗格终端协议协商或原生平台元数据。原生拖放所有者也在创建窗口前，根据
@@ -97,7 +107,15 @@ flowchart LR
 `AppStateMachine` 保存不依赖后端的兼容观察值，不决定实时 GUI 拓扑：它是兼容与测试模型，
 只有测试会读取其状态。`App::observe_intent` 用结构性意图（标签页、窗格、窗口、焦点）更新它
 并丢弃效果；光标移动等高频输入不会上报，因为没有任何地方读取它。让归约器成为权威来源将是另一项
-行为迁移。`App::dispatch_intent` 单独处理受支持的显式目标工作。缺失、已移除或零窗口 key 不会选择主窗口或最前窗口。原生输入通过有界 PTY
+行为迁移。实时 App 执行哪些意图只在一处说明：app-core 中的 `AppIntent::authority()`，它是穷尽匹配，新变体无法遗漏：
+
+| 权限 | 意图 | 由谁执行 |
+| --- | --- | --- |
+| `Drives` | PTY 写入、退出、突发与前台进程变化；重绘请求；按键按下；IME 开始、预编辑、提交与结束；URL 悬停与点击；滚动与滚轮；粘贴；退出 | `App::dispatch_intent` 在实时状态上执行每一项。 |
+| `Observes` | 窗口、标签页与窗格的生命周期与焦点；按键释放；鼠标按键与移动；选区；搜索；命令面板；系统拖放与文件拖入；配置、主题与字号；广播范围；tick | App 自己的处理函数已完成工作；该意图只更新归约器的模型。 |
+
+`dispatch_intent` 把 `Observes` 意图直接交给归约器；`observe_intent` 在调试构建中断言从不收到 `Drives` 意图，因此被驱动的意图不会被悄悄丢弃；
+有一个测试会在实时 App 上分派每个 `Drives` 意图。缺失、已移除或零窗口 key 不会选择主窗口或最前窗口。原生输入通过有界 PTY
 队列发送给源窗口的活动窗格。完整状态/意图/效果清单，以及记录效果与原生完成的区别，见
 [运行时生命周期](Runtime-Lifecycle-zh-CN)。
 

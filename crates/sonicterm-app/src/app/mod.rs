@@ -193,13 +193,16 @@ pub use echo_watch::{
 };
 mod effects;
 use effects::close_owner;
+mod config_state;
 mod event_loop;
 mod fg_probe;
 mod field_input;
 mod field_pointer;
 mod font_catalog;
+mod font_state;
 mod frame_counters;
 mod guard_correlation;
+mod test_support_state;
 pub use guard_correlation::{
     AbandonedSectionV1, GuardCorrelationTakeV1, GuardCorrelationV1, LossIntervalV1, PaneSectionsV1,
     PendingSectionV1, SectionRecordV1, SpanBatchV1, SpanRecordV1,
@@ -239,6 +242,7 @@ mod locale;
 mod mcp;
 mod media;
 mod memory_report;
+mod memory_report_queues;
 mod memory_report_window;
 pub mod memory_snapshot;
 mod misc;
@@ -293,6 +297,7 @@ mod program_state;
 use privilege::refresh_window_tab_privileges;
 mod quit_hold;
 mod reaper_driver;
+mod reaper_fallback;
 mod redraw_target;
 mod runtime_smoke;
 pub use runtime_smoke::{RuntimeSmokeFailure, RuntimeSmokeScenario, RuntimeSmokeSpec};
@@ -301,6 +306,7 @@ mod redraw;
 mod render_timing;
 pub mod renderer_retention;
 pub mod retention;
+mod retention_queues;
 pub use retention::{TrimDecision, TrimSkip};
 mod scroll;
 pub mod scrollbar_input;
@@ -318,12 +324,14 @@ pub(in crate::app) use runtime_services::RuntimeServices;
 mod interaction;
 pub(in crate::app) use interaction::InteractionState;
 mod window_registry_state;
-pub(in crate::app) use window_registry_state::WindowRegistry;
+pub(in crate::app) use window_registry_state::{WindowMap, WindowRegistry};
 mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
 pub(crate) use shared_gpu::{font_fallback_waker, gpu_device_state_waker};
+mod reply_delivery;
+mod report_windows;
 mod spawn_pane;
 mod splitter_input;
 mod sync_clock;
@@ -350,6 +358,7 @@ mod warm_window_pool;
 pub use warm_window_pool::{
     warm_window_pool_may_spawn, warm_window_pool_should_spawn, warm_window_pool_target, WarmWindow,
 };
+mod wheel_plan;
 mod window_event;
 mod window_keyboard;
 mod window_pointer;
@@ -432,40 +441,15 @@ pub struct App {
     /// Process privilege observed once by the native binary before window creation.
     pub(super) process_privilege: crate::ProcessPrivilege,
     pub(super) config: Config,
-    /// Native-platform capability policy applied before config affects app state.
-    pub(crate) config_normalizer: ConfigNormalizer,
-    /// Packaged font directories retained for every renderer and live font rebuild.
-    pub(super) font_dirs: Vec<PathBuf>,
-    /// Font size the loaded config asked for, in logical px. `ResetFontSize`
-    /// returns here rather than to the compile-time default, so Cmd+0 restores
-    /// the user's configured size instead of a value they never chose.
-    ///
-    /// Tracks the config this session has *loaded*, not the file on disk.
-    /// Editing `sonicterm.toml` does not move it — the background watcher may
-    /// apply other settings from that edit, but the reset target stays where
-    /// the session started. Only an explicit `ReloadConfig` moves it.
-    pub(super) configured_font_size: f32,
-    /// Monochrome-text `weight_scale` the loaded config asked for. Follows the
-    /// same rule as [`Self::configured_font_size`]: `ResetFontWeight` returns
-    /// here, and only an explicit reload moves it.
-    pub(super) configured_weight_scale: f32,
-    /// Font family this session started with: the loaded config's `[font] family`, or the platform
-    /// default the font catalog adopted when the config names none. Only an explicit reload, or a
-    /// save, moves it after that.
-    pub(super) configured_font_family: String,
-    /// Installed monospace families, enumerated once per process off the UI thread.
-    pub(super) font_catalog: font_catalog::FontCatalog,
-    /// Enumerates installed monospace families for the catalog worker; tests inject a counter.
-    pub(super) font_enumerator: font_catalog::FontEnumerator,
-    /// The live family when the font picker opened, restored when the picker is cancelled.
-    pub(super) font_picker_original: Option<String>,
-    /// Moves on every reload, save and picker choice of the font family, so a catalog report the
-    /// worker started before one of them is recognised as stale and adopts nothing.
-    pub(super) font_family_generation: u64,
-    /// Test recorder: each renderer-less window and the font request `apply_live_font` delivered to
-    /// it, through the seam that delivers a renderer's.
-    #[cfg(test)]
-    pub(in crate::app) live_font_log: Vec<(winit::window::WindowId, live_font::LiveFontRequest)>,
+    /// Test-only seams: clipboard overrides, the PTY write ledger, and test observations. Release
+    /// builds hold only the fields production or the perf harness still reads.
+    #[doc(hidden)]
+    pub testing: test_support_state::TestSupportState,
+    /// Where configuration comes from: normalizer, theme and keymap loaders, smoke config path and
+    /// startup load outcomes.
+    pub(in crate::app) configs: config_state::ConfigState,
+    /// Font sizes, families and the installed-font catalog: what font controls reset to and read.
+    pub(in crate::app) fonts: font_state::FontState,
     pub(super) keymap: Keymap,
     // The main window holds no state of its own here. Its renderer, tabs,
     // tab states, panes, selection, modifiers, copy mode, last render, cursor
@@ -481,42 +465,6 @@ pub struct App {
     #[cfg(target_os = "windows")]
     /// One delayed OSC 52 write that survives a failing clipboard helper's cleanup.
     pub(super) pending_osc52_reassert: Option<PendingOsc52Reassert>,
-    /// Test-only in-memory clipboard override for integration tests that need
-    /// to observe copy/paste routing without depending on a desktop clipboard
-    /// service. `None` means production arboard behavior; `Some(_)` means reads
-    /// and writes use this buffer instead.
-    #[doc(hidden)]
-    pub(super) test_clipboard_text: Option<String>,
-    /// Test-only copied-file list standing in for the native clipboard's file
-    /// list. Installing either test override keeps every read off the desktop
-    /// clipboard; `None` here then means no files are on the clipboard.
-    #[doc(hidden)]
-    pub(super) test_clipboard_files: Option<Vec<std::path::PathBuf>>,
-    /// Test-only clipboard write rejection injected at the production write
-    /// boundary. Disabled in every constructor so ordinary runs retain the real
-    /// clipboard behavior and the in-memory success seam remains opt-in.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) test_clipboard_write_failure: bool,
-    /// Test-only PTY write ledger. `write_to_pane` records every boundary write
-    /// here before resolving the pane to a real PTY, so headless tests can assert
-    /// which pane an action targeted without constructing a process-backed PTY.
-    #[doc(hidden)]
-    pub(super) test_pty_writes: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
-    /// Unit-test observation of actual PTY spawn inputs; absent from production builds.
-    #[cfg(test)]
-    test_pane_launches: std::cell::RefCell<Vec<(u64, pane_launch::PaneLaunch)>>,
-    /// Unit-test record of each logged PTY write's pane and producer source, so tests can check attribution.
-    #[cfg(test)]
-    test_pty_write_sources: std::cell::RefCell<Vec<(u64, PtyInputSource)>>,
-    /// Whether the PTY write ledger above is actually recorded. `false` in
-    /// production so `dispatch_pty_write_effect` does no lock/clone/push per
-    /// write (the ledger would otherwise grow unbounded for the whole
-    /// session —). Set `true` when the app is built without an
-    /// event-loop proxy (headless/test construction) so existing tests keep
-    /// capturing writes with no per-test opt-in.
-    #[doc(hidden)]
-    pub(super) pty_write_log_enabled: bool,
     // `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
@@ -524,10 +472,8 @@ pub struct App {
     // path was deleted as the last of the per-window migration.
     /// Requested logical dimensions survive focus changes until native window creation can run.
     pub(super) pending_new_window: Option<WindowRequest>,
-    /// The Memory Usage report's pending open, refresh generation and last rendered text.
-    pub(super) memory_report: memory_report_window::MemoryReportState,
-    /// The About window's pending open, shown text and last config load error.
-    pub(super) about: about_window::AboutState,
+    /// The report windows (Memory Usage and About): their pending opens and shown text.
+    pub(in crate::app) reports: report_windows::ReportWindows,
     /// Deferred in-process tab tear-out request from either drag/drop or the
     /// Move Tab to New Window action. Drained only while an ActiveEventLoop is
     /// available so every path uses the same native-window constructor.
@@ -544,29 +490,11 @@ pub struct App {
     /// when drained — this flag controls only WHEN it runs, not
     /// WHETHER, so the cleanup stays idempotent.
     pub(super) pending_os_teardown: bool,
-    /// Test-only callback fired
-    /// inside [`Self::cancel_drag_session`] AFTER the `self.registry.windows.keys()`
-    /// snapshot is collected but BEFORE the per-id iteration body runs.
-    /// Lets a regression test
-    /// mutate `self.registry.windows` in the exact race window that the
-    /// `get_mut(&id).else { continue }` arm is designed to tolerate.
-    /// Consumed (`take()`-d) at the call site so the closure is invoked
-    /// at most once per `cancel_drag_session` run and the mutable
-    /// borrow on `self.registry.windows` is not held while it runs. Compiled only
-    /// under `cfg(test)` or `test-support`, so release builds carry neither the
-    /// field nor the call; an integration test installs it through
-    /// `App::__test_set_post_snapshot_hook`.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) test_post_snapshot_hook: Option<Box<dyn FnOnce(&mut App) + Send>>,
     /// Deferred app-exit request, set by a quit action or by a close that
     /// leaves no active terminal window. `do_about_to_wait` drains it by
     /// calling `event_loop.exit()`; the flag exists because those paths have
     /// no `ActiveEventLoop` handle.
     pub(super) pending_exit: bool,
-    /// Unit-test observation of every scheduler trim decision, in pass order.
-    #[cfg(test)]
-    pub(super) test_scheduler_trims: Vec<(WindowId, retention::TrimDecision)>,
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
     /// Process-wide resource governor and its owner hierarchy.
@@ -590,11 +518,6 @@ pub struct App {
     /// Each terminal window's adapter and strip focus by window id, warm spares included.
     pub(super) accessibility:
         std::collections::HashMap<WindowId, accessibility::WindowAccessibility>,
-    /// Optional theme loader, set by `run_with`. Used to reload a theme
-    /// by name live.
-    pub(crate) theme_loader: Option<ThemeLoader>,
-    /// Optional keymap loader, set by `run_with`.
-    pub(crate) keymap_loader: Option<KeymapLoader>,
     /// Proxy used to wake the idle event loop. `None` in tests that
     /// construct `App` directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
@@ -602,8 +525,6 @@ pub struct App {
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Current native home captured once for deterministic `~/` target resolution.
     pub(super) home_dir: Option<PathBuf>,
-    /// Explicit config path used by an isolated runtime smoke; ordinary runs use the user path.
-    pub(super) runtime_config_path: Option<PathBuf>,
     /// Local hostname used to reject foreign-authority OSC 7 snapshots.
     pub(super) local_hostname: String,
     /// Minimum interval between two successive frames. Defaults to 1/60s
@@ -662,8 +583,6 @@ pub struct App {
     pub(super) tab_bar_visible: bool,
     /// Status line strip: session toggles, memory sampler, reload errors and per-window pane facts.
     pub(super) status_line: status_line::StatusLineState,
-    /// Startup config, theme and keymap load outcomes, until the first main window records them.
-    pub(super) startup_loads: Option<config_apply::StartupLoads>,
     /// Program-reported progress for the taskbar, Dock or launcher, and the program toast.
     pub(super) program: program_state::ProgramState,
     /// Quit confirmation guard for the Cmd+Q chord. A single press arms it and
@@ -685,16 +604,6 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    /// Test-only viewport override. When
-    /// `Some((outer, cell_w, cell_h))`, [`Self::compute_active_pane_rects`]
-    /// uses `outer` instead of fetching the renderer's logical size and
-    /// [`Self::resize_visible_panes`] uses `(cell_w, cell_h)` instead of
-    /// the renderer's `cell_size()`. Lets tests exercise the production
-    /// `close_active_pane` path (Grid + PtyHandle resize wiring) without
-    /// a live wgpu surface. Stays `None` in release builds whose tests
-    /// don't touch it.
-    #[doc(hidden)]
-    pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
     /// Compatibility reducer observations; live topology decisions and native effect targets belong to App.
     pub(crate) machine: sonicterm_app_core::AppStateMachine,
 }
@@ -741,7 +650,7 @@ impl App {
             // When: `window.role` is not a report, intern a window number; its title is written below.
             self.registry.window_keys.intern(id);
         }
-        self.registry.windows.insert(id, window);
+        self.registry.insert_window(id, window);
         let _ = self.sync_native_title(id, Instant::now(), true);
         // The link takes the period the refresh above just read; only macOS installs one.
         self.install_native_display_link(id);
@@ -820,6 +729,8 @@ mod pty_test_support;
 
 #[cfg(test)]
 mod source_scan_support;
+#[cfg(test)]
+mod source_syntax_support;
 
 #[cfg(all(test, any(windows, unix)))]
 #[path = "mod_close_baseline_tests.rs"]

@@ -152,6 +152,9 @@ pending 不是文件不存在的证据。事件包含可能敏感的路径，但
 生产终端回复在解析器与副作用锁外进入独立 FIFO，使用 64 KiB 内存和私有临时文件溢出存储。
 UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理。存储或原生失败会锁存，并以
 `terminal reply delivery failed` 报告一次，包含窗格标识与字节数；输出、重绘和退出观察继续。
+因窗格 16 MiB 溢出预算已满而被拒绝的回复不算失败：它被丢弃并计数，每段积压的第一次丢弃在
+`warn` 级别记录 `terminal replies dropped: the program is not reading its input`，包含
+`pane_id`、`rejected_bytes`、`dropped` 与 `peak_live_bytes`；程序恢复读取后，后续回复照常交付。
 原生 writer 与暂存读取错误独立记录。正常销毁会释放暂存文件，不产生拒绝通知。
 存储与交付限制见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。
 
@@ -816,7 +819,19 @@ session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
                   grid_history_bytes=<bytes> grid_alternate_bytes=<bytes> parser_bytes=<bytes>
                   hyperlink_bytes=<bytes> inline_media_bytes=<bytes>
                   pty_output_bytes=<bytes> pty_input_bytes=<bytes>
+pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
+           writer_in_flight_bytes=<bytes> reply_resident_bytes=<bytes>
+           reply_spill_disk_bytes=<bytes> teardown_fallbacks=<count>
+           teardown_fallbacks_slow=<count> teardown_fallback_longest_us=<us>
+           teardown_fallback_total_us=<us>
 ```
+
+`pty queues` 以同一节奏汇总所有窗格的 PTY 队列：通道中等待的输入、writer 正在写入的消息（用户输入或一轮回复，
+离开队列时只计一次）、常驻回复层的已分配内存（即其容量，排空后仍保留，因此可能大于其中的回复），以及溢出到磁盘的回复
+（`reply_spill_disk_bytes`，从不计入 `resident_bytes`）。回复相关数值是各窗格的回复缓冲在其最近一次发送或取出时的计数，
+读取时不获取缓冲的锁，因此存储停滞的窗格不会拖住事件循环的采样。teardown 字段报告回收器的同步回退：运行次数、阻塞超过 50 ms 的次数、最长耗时与总耗时。
+超过 50 ms 的回退还会在 `warn` 级别记录 `synchronous PTY teardown fallback blocked the event loop`，包含
+`owner` 与 `blocked_ms`。
 
 八个接缝互不重叠，相加等于 `total_bytes`：
 
@@ -829,7 +844,7 @@ session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
 | `hyperlink_bytes` | 驻留的 OSC 8 URI 与 id 字符串 | 无需处理；有上限，引用离开保留历史后回收 |
 | `inline_media_bytes` | 窗格保留的已解码内联图像 | 减少图像或关闭图像较多的窗格 |
 | `pty_output_bytes` | 已排队或传输中的本地 PTY 输出 | 等待输出排空 |
-| `pty_input_bytes` | 等待送往 shell 的输入，通常是大段粘贴 | 等待 shell 读取 |
+| `pty_input_bytes` | 等待送往 shell 或正在写入的输入（通常是大段粘贴），以及常驻的解析器回复；溢出到磁盘的回复不计入 | 等待 shell 读取 |
 
 先读 `largest_seam`，再比较至少五次连续采样。数值很大但保持平稳，与每次采样都增长
 不是同一问题。窗格标签包含窗口 id 和窗格 id；标签页移动后窗格 id 不变，窗口 id 会变。

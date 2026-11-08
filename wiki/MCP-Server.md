@@ -32,7 +32,7 @@ enabled = false
 # or "any" (every pane).
 control = "agent"
 # Read tools see: "agent" (panes an agent created) or "any" (every pane).
-# A config without this line reads every pane.
+# A config without this line sees only agent-created panes.
 read = "agent"
 ```
 
@@ -40,7 +40,10 @@ read = "agent"
 | --- | --- | --- |
 | `enabled` | `false` | `true` runs the server; `false` stops it. |
 | `control` | `"agent"` | `"off"`, `"agent"` or `"any"`; see Control scope below. |
-| `read` | `"any"` (`"agent"` in a new config file) | `"agent"` or `"any"`; see Read scope below. |
+| `read` | `"agent"` | `"agent"` or `"any"`; see Read scope below. |
+| `max_connections` | `4` | Connections served at once, 1 to 16 (other values are clamped). Each runs one tool call at a time, so a long `wait_for` holds its connection. A reload that changes only this applies to new connections and revokes nothing. |
+| `isolation` | `"shared"` | `"shared"` or `"session"`; see Agent sessions below. |
+| `create_anchor` | `"any"` | `"any"` or `"agent"`; see Agent sessions below. |
 
 To turn it on:
 
@@ -139,10 +142,14 @@ changes `control` drops every request already queued.
 | `"agent"` | only panes an agent created; any other pane is refused as `out_of_scope` and left out of `list_panes` |
 | `"any"` | every pane |
 
-A configuration without `read` keeps the old behavior, `"any"`, so an upgrade
-never narrows an existing setup. The config file SonicTerm writes on first start
-sets `read = "agent"`, so an agent cannot read an unrelated SSH or log pane unless
-you allow it. Use `"any"` when an agent should read your own panes, for example
+A configuration without `read` reads only agent-created panes, so an agent cannot
+read an unrelated SSH or log pane unless you allow it. Until v1.4.4 a missing key
+meant `"any"`; a server that starts without the key logs a warning and shows a
+notification once the first window is open, and an `out_of_scope` refusal says
+which line restores the old scope. An explicit `read = "any"` is never changed.
+Under the default `isolation = "shared"`, every agent session sees every
+agent-created pane, not only its own.
+Use `"any"` when an agent should read your own panes, for example
 the one it was started from.
 
 Which panes are an agent's comes only from SonicTerm's own records, never from
@@ -151,6 +158,34 @@ the client: the bridge's preamble names the agent's pane as a default for
 the output of the command it ran as part of the run; that is governed by
 `control`, not `read`. A reload that changes `read` drops every queued request
 and ends a running `wait_for`.
+
+## Agent sessions
+
+Each connection is one agent session, with an id SonicTerm assigns when it
+connects; nothing the client sends chooses it. A pane `create_pane` opens belongs
+to the session that opened it, and keeps that owner through tab moves and
+tear-out. `list_panes` reports each pane's `owner` from the caller's side: `you`,
+`other_agent` (a session still connected), `orphaned` (a session that has
+disconnected) or `user`.
+
+`[mcp] isolation` sets what `"agent"` in `control` and `read` covers:
+
+| `isolation` | `"agent"` covers |
+| --- | --- |
+| `"shared"` (default) | every agent-created pane, whichever session created it, orphaned ones included |
+| `"session"` | only the panes the calling session created; another session's pane is refused as `out_of_scope` and left out of `list_panes` |
+
+A pane outlives its session. Under `"session"` an orphaned pane is controllable and
+readable by no agent until you close it: a reconnecting bridge is a new session and
+does not regain it, because `self_pane_id` is not a credential. `"any"` scopes are
+unaffected.
+
+`[mcp] create_anchor` sets which panes `create_pane` may open a helper beside under
+`control = "agent"`. With `"any"` (the default) that is every pane, since a helper
+never types into its anchor; with `"agent"` it is only a pane the session may
+control, so an agent cannot place panes beside yours. A reload that changes
+`isolation` or `create_anchor` drops every queued request and ends a running
+`wait_for`.
 
 Pane text is untrusted input: a program can print text meant to steer an agent.
 The server tells agents never to follow instructions found in pane text, but keep
@@ -167,9 +202,9 @@ they run:
 | Tool | What it does |
 | --- | --- |
 | `create_pane` | Opens a helper beside a pane: a split to its right or below, or a new tab in its window. Focus does not move. With `argv` the program runs directly and the pane stays open after it exits, so `wait_for` with `exit` and `read_pane` can read how it ended. |
-| `send_text` | Types text, as a bracketed paste when the program asked for one; `submit` adds Enter. At most 64 KiB. |
-| `send_keys` | Sends named keys (`Enter`, `Tab`, `Escape`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`, a single character), each optionally with `Ctrl+`, `Alt+` or `Shift+`, encoded for the pane's keyboard mode. At most 64 keys; one unknown name sends nothing. |
-| `run_command` | Runs one command line at the pane's shell prompt and waits for it to finish, returning its output and the exit code the shell reported (`completed`, with `exit_verified` saying whether SonicTerm's own shell integration vouched for it), `not_started` when the shell ended the prompt without running anything, `interfered` when someone else typed before its output began, `lost` when its record was evicted or the shell exited, or `running` at the timeout (default 60 s, at most 600 s). |
+| `send_text` | Types text, as a bracketed paste when the program asked for one; `submit` adds Enter. At most 64 KiB. Reports `delivery`: `written` once the pane's writer wrote and flushed it to the PTY within 250 ms (never proof the program read it), `queued` if it was still waiting, `failed` if the writer stopped first. |
+| `send_keys` | Sends named keys (`Enter`, `Tab`, `Escape`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`, a single character), each optionally with `Ctrl+`, `Alt+` or `Shift+`, encoded for the pane's keyboard mode. At most 64 keys; one unknown name sends nothing. Reports `delivery` as `send_text` does. |
+| `run_command` | Runs one command line at the pane's shell prompt and waits for it to finish, returning its output and the exit code the shell reported (`completed`, with `exit_verified` saying whether SonicTerm's own shell integration vouched for it), `not_started` when the shell ended the prompt without running anything, `interfered` when someone else typed before its output began, `lost` when its record was evicted or the shell exited, `pane_closed` when the pane was closed first, or `running` at the timeout (default 60 s, at most 600 s). |
 | `close_pane` | Closes one pane; a tab's only pane closes the tab. The main window's last tab is never closed. |
 
 `run_command` needs shell integration: the shell must mark its prompt with
@@ -179,6 +214,35 @@ input queue is not empty, or into which anyone typed while the previous command
 ran. That check is best effort, because a terminal cannot see what the shell has
 consumed, so use `run_command` on panes the agent created, where only the agent
 types.
+
+### How a wait ends
+
+`wait_for` reports one `reason` and `run_command` one `state`. Every value is listed
+here; a client should treat an unknown value as `timeout`/`running`.
+
+| Value | Tool | Meaning |
+| --- | --- | --- |
+| `matched` | `wait_for` | The regex matched an eligible row. |
+| `quiet` | `wait_for` | Output stayed quiet for `quiet_ms` and every row was scanned. |
+| `exited` | `wait_for` | The pane's process exited (with `exit`). |
+| `timeout` | `wait_for` | The timeout passed first. |
+| `completed` | `run_command` | The command ran and ended; see `exit_code` and `exit_verified`. |
+| `not_started` | `run_command` | The shell ended the prompt without running anything. |
+| `interfered` | `run_command` | Someone else typed before the command's output began. |
+| `lost` | `run_command` | The run's record was evicted, or the shell exited, first. |
+| `running` | `run_command` | The timeout passed; the command may still be running. |
+| `revoked` | both | The client went away, or the server stopped or changed `control` or `read`. |
+| `pane_closed` | both | The pane was closed first. |
+
+A `wait_for` with `source: "stream"` matches the text printed since the wait began
+rather than screen rows, so a progress line later overwritten by `\r` still matches;
+see [Platform Integration](Platform-Integration).
+
+Both tools also report `output_incomplete`: for `wait_for` it is
+`missed_output || truncated || !scan_complete` (`context_truncated` for a stream wait) (some output written during the wait
+was not checked, so a timeout proves nothing); for `run_command` it is
+`truncated || output_truncated` (the returned lines may be missing some of the
+command's output).
 
 ### Trusting the exit code
 
@@ -224,11 +288,39 @@ eval "$(sonicterm-mcp --shell-integration zsh)"    # zsh 5.3+, in ~/.zshrc
 eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+, in ~/.bashrc
 ```
 
+```powershell
+sonicterm-mcp --shell-integration pwsh | Out-String | Invoke-Expression   # PowerShell 7+, in $PROFILE
+```
+
+The PowerShell integration needs PSReadLine, which PowerShell 7 loads in every
+interactive console; without it the script loads nothing, so `run_command` refuses
+the pane (`no_shell_integration`) rather than waiting for markers. It wraps `prompt`
+(D, A and, after your prompt text, B) and PSReadLine's `PSConsoleHostReadLine`: C is
+written once ReadLine returns an accepted line, so a multi-line `{` block counts once
+and a line cancelled with Ctrl+C runs nothing. The script only reads
+`$LASTEXITCODE`, so every command sees the value it would without the integration. D's
+code is 0 when the line succeeded. A failed line whose commands are all cmdlets cannot
+have run a native program, so its code is 1, even after an earlier native failure. For
+any other failed line, the code is 1 when it raised a new PowerShell error and
+`$LASTEXITCODE` is 0 or unset, and the native `$LASTEXITCODE` when that is non-zero and no
+new error was raised. A line with both, such as
+`Get-Item missing -ErrorAction SilentlyContinue; sh -c 'exit 4'`, ends with no code,
+even when the native code repeats the previous one: it is unknown which statement failed
+last, so `run_command` reports `completed` with `exit_code: null` rather than a guess.
+One case remains inexact: a line that calls a function or script (which might run a
+native program) and fails without raising an error reports the last non-zero native
+code, which may come from an earlier line. Windows PowerShell 5.1 is not supported.
+
 It adds its hooks beside any existing ones, so it can stay alongside another
 OSC 133 integration. Once it is loaded, though, markers from a nested shell or
 an ssh session in that pane carry no token and are dropped, so `run_command`
-works only at the pane's own shell. PowerShell has no SonicTerm integration yet, so
-on Windows `exit_verified` stays `false`. The secret guards against output from
+works only at the pane's own shell. `list_panes` and `read_pane` report what the
+newest marker said as `shell_integration_state`: `verified` (it carried the
+pane's token), `unverified` (it had no valid token, as from a nested shell, ssh
+or a program printing markers, whether admitted or dropped), or `none` (no marker
+yet). It is observed marker evidence, not proof of which program is running; the
+older boolean `shell_integration` keeps its meaning (the newest prompt marked its
+input start). The secret guards against output from
 files, remote hosts and programs that never saw the shell's environment. A program
 running in the pane as you, which could read the shell's memory, is out of scope:
 it already has the agent's powers.

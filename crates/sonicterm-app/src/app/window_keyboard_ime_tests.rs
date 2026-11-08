@@ -175,7 +175,7 @@ fn unknown_focus_and_modifiers_never_mutate_main_or_emit_input() {
     app.__test_seed_tab("main");
     let main = app.registry.main_window_id.unwrap();
     let removed = app.__test_seed_child_window(&["removed"]);
-    app.registry.windows.remove(&removed);
+    app.registry.remove_window(removed);
     app.registry.frontmost_window = Some(main);
     app.registry.windows.get_mut(&main).unwrap().ime.handle_preedit("keep", None);
     app.__test_enable_pty_write_log();
@@ -456,7 +456,7 @@ fn window_ime_missing_owner_or_search_pane_never_falls_back() {
     app.__test_seed_tab("main");
     let main = app.registry.main_window_id.unwrap();
     let removed = app.__test_seed_child_window(&["removed"]);
-    app.registry.windows.remove(&removed);
+    app.registry.remove_window(removed);
     app.run_action_for_window(&Action::OpenCommandPalette, main);
     app.__test_enable_pty_write_log();
     for target in [removed, WindowId::from(0)] {

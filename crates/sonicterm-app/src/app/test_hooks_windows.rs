@@ -312,6 +312,7 @@ impl App {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Test-only: read back the current `frontmost_window`.
     #[doc(hidden)]
     pub fn __test_frontmost_window(&self) -> Option<WindowId> {
@@ -666,7 +667,7 @@ impl App {
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
         self.accessibility.remove(&id);
         self.release_window_owner(id);
-        self.registry.windows.remove(&id).is_some()
+        self.registry.remove_window(id).is_some()
     }
 
     /// Test-only: drop a window without the explicit owner release first.
@@ -680,7 +681,7 @@ impl App {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
     pub fn __test_drop_window_without_release(&mut self, id: WindowId) -> bool {
-        self.registry.windows.remove(&id).is_some()
+        self.registry.remove_window(id).is_some()
     }
 
     /// Test-only: install a callback
@@ -695,7 +696,7 @@ impl App {
     where
         F: FnOnce(&mut App) + Send + 'static,
     {
-        self.test_post_snapshot_hook = Some(Box::new(hook));
+        self.testing.test_post_snapshot_hook = Some(Box::new(hook));
     }
 
     /// Test-only: seed a synthetic tab with one pane that has no PTY

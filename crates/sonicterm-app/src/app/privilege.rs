@@ -42,7 +42,7 @@ pub(super) fn refresh_window_agent_tabs(
             .tree
             .leaves()
             .iter()
-            .any(|pane_id| panes.get(pane_id).is_some_and(|pane| pane.agent_owned));
+            .any(|pane_id| panes.get(pane_id).is_some_and(|pane| pane.creator.is_agent()));
         changed |= tabs.set_agent(tab_idx, agent);
     }
     changed

@@ -112,7 +112,7 @@ fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
 
         // Empty, control-only, and unreadable clipboards are consumed without any fallback delivery.
         for text in [Some(""), Some("\r\n\x1b\x7f"), None] {
-            app.test_clipboard_text = text.map(str::to_owned);
+            app.testing.test_clipboard_text = text.map(str::to_owned);
             app.clipboard = None;
             app.wait_for_input_queues();
             assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
@@ -242,7 +242,7 @@ fn stale_keyboard_quit_cannot_arm_a_live_window() {
     app.__test_seed_tab("main");
     let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["removed"]);
-    app.registry.windows.remove(&child);
+    app.registry.remove_window(child);
     app.registry.frontmost_window = Some(main);
 
     assert!(!app.on_quit_chord_pressed(child, false));

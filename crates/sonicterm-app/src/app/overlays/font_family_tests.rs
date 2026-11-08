@@ -11,7 +11,8 @@ fn picker_app(family: &str) -> (App, winit::window::WindowId) {
     let mut config = Config::default();
     config.font.family = family.into();
     let mut app = App::new(Theme::default(), config, Keymap::default());
-    app.font_catalog = FontCatalog::Ready(vec!["Menlo".into(), "Monaco".into(), "Rec Mono".into()]);
+    app.fonts.font_catalog =
+        FontCatalog::Ready(vec!["Menlo".into(), "Monaco".into(), "Rec Mono".into()]);
     let child = app.__test_seed_child_window(&["work"]);
     (app, child)
 }
@@ -75,7 +76,7 @@ fn picker_labels_exist_in_every_locale() {
 #[test]
 fn an_open_picker_fills_in_when_the_catalog_lands() {
     let (mut app, child) = picker_app("Menlo");
-    app.font_catalog = FontCatalog::Loading;
+    app.fonts.font_catalog = FontCatalog::Loading;
     assert!(app.run_action_for_window(&Action::ChooseFontFamily, child));
     assert_eq!(labels(&app), ["✓ Menlo"]);
     app.interaction.command_palette.input_str("e");
@@ -124,10 +125,10 @@ fn preview_and_escape_reach_every_window() {
     let zoomed = app.live_font_request();
     let strip_scale = app.current_status_line().font_scale.as_f32();
     let received = |app: &App, window| -> Vec<LiveFontRequest> {
-        let log = app.live_font_log.iter().filter(|(id, _)| *id == window);
+        let log = app.fonts.live_font_log.iter().filter(|(id, _)| *id == window);
         log.map(|(_, request)| request.clone()).collect()
     };
-    app.live_font_log.clear();
+    app.fonts.live_font_log.clear();
     assert!(app.run_action_for_window(&Action::ChooseFontFamily, first));
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowDown));
     let previewing = LiveFontRequest { family: "Monaco".into(), ..zoomed.clone() };
@@ -138,7 +139,7 @@ fn preview_and_escape_reach_every_window() {
             "{window:?} previews"
         );
     }
-    app.live_font_log.clear();
+    app.fonts.live_font_log.clear();
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape));
     for window in [first, second] {
         assert_eq!(

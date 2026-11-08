@@ -42,7 +42,7 @@ impl App {
         if let Some(child) = self.registry.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 self.accessibility.remove(&win_id);
-                if let Some(mut removed) = self.registry.windows.remove(&win_id) {
+                if let Some(mut removed) = self.registry.remove_window(win_id) {
                     self.retire_window_counters(win_id, &mut removed);
                     for pane in std::mem::take(&mut removed.panes).into_values() {
                         self.retire_pane(pane);
@@ -151,7 +151,7 @@ impl App {
         }
         let redraw_target = Arc::new(Mutex::new(Some(child_window.id())));
         #[cfg(test)]
-        self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
+        self.testing.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
         // The gate is read before the PTY exists, so its reader stamps reads from the first one.
         let frame_counters = self.pane_frame_counters();
         let mut shell_opts = self.pane_spawn_opts(pane_id, launch, frame_counters.is_some());

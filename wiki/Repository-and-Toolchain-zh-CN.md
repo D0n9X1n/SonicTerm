@@ -143,6 +143,20 @@ python3 scripts/native-dependency-delta.py --with-tests
 以及新增文件都会被报告。`native-dependency-delta` gate 步骤会连同其离线测试一起运行它，
 并且需要网络，因此 CI 在 `tooling` 中运行。`native-dependencies.py` 保持离线，从不读取归档。
 
+同一工具还会报告上游是否有更新的发布版本。每次发布前运行：
+
+```sh
+python3 scripts/native-dependency-delta.py --latest
+```
+
+每个清单条目都声明一个 `latest_source`：`git-tags` 提供方、上游仓库 URL，以及只匹配稳定
+版本 tag 的模式，因此 `beta`、`rc` 等预发布 tag 永远不计入。该模式必须能把固定的 `tag`
+读回为固定的 `version`；离线测试对每个库都检查这一点。它对每个库运行一次
+`git ls-remote --tags`，超过 60 s 或输出超过 1 MiB 即被终止，并打印 `current`、`update`
+或 `ahead`，附上固定版本、最新稳定 tag 和本地修改数量；失败时打印 `error` 及原因。
+清单加载成功后它总以 0 退出：新版本只是需要审查的提示，不是缺陷，也没有任何定时任务运行它。
+`update` 行是下面更新流程的起点；它从不修改清单。
+
 每次以单个库为单位进行可审查的更新：
 
 1. 阅读官方发布和安全公告，包括新版本引入的回归。验证发布者/来源和可用签名或独立

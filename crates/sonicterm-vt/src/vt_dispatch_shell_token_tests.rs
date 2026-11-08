@@ -171,3 +171,26 @@ fn input_after_the_latch_keeps_the_pane_verified() {
     let events = parser.advance(&mark("A", &[]));
     assert!(!has_command_event(&events), "the latch still drops tokenless markers");
 }
+
+/// The observed shell state follows the newest marker: none before any, verified after the pane's
+/// own tokened marker, unverified when a nested shell's tokenless marker arrives (dropped, but
+/// observed), and verified again when the outer shell's next tokened marker returns.
+#[test]
+fn the_shell_state_follows_the_newest_marker() {
+    let mut parser = tokened();
+    assert_eq!(parser.shell_integration_state(), ShellIntegrationState::None);
+    let good = token_param(TOKEN);
+    parser.advance(&mark("A", &[&good]));
+    assert_eq!(parser.shell_integration_state(), ShellIntegrationState::Verified);
+    // A nested shell or an SSH session marks its prompt without the pane's token.
+    parser.advance(&mark("A", &[]));
+    assert_eq!(parser.shell_integration_state(), ShellIntegrationState::Unverified);
+    assert!(parser.shell_markers_authenticated(), "the latch itself is unchanged");
+    parser.advance(&mark("D", &["0", &good]));
+    assert_eq!(parser.shell_integration_state(), ShellIntegrationState::Verified);
+    // A pane with no token sees only unverified markers.
+    let mut plain = Parser::new(Grid::new(30, 6));
+    plain.advance(&mark("A", &[]));
+    assert_eq!(plain.shell_integration_state(), ShellIntegrationState::Unverified);
+    assert_eq!(ShellIntegrationState::Unverified.as_str(), "unverified");
+}

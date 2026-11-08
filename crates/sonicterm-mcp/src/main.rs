@@ -26,15 +26,17 @@ const USAGE: &str = "\
 sonicterm-mcp: connect an MCP client to a running SonicTerm
 
 Usage: sonicterm-mcp [--endpoint <path-or-pipe>]
-       sonicterm-mcp --shell-integration <zsh|bash>
+       sonicterm-mcp --shell-integration <zsh|bash|pwsh>
 
 The endpoint is, in order: --endpoint, $SONICTERM_CONTROL (set in every SonicTerm pane), or the
 only running SonicTerm with [mcp] enabled = true. stdin and stdout carry MCP JSON-RPC lines.
 
---shell-integration prints SonicTerm's own OSC 133 shell integration for zsh (5.3+) or bash (4.4+).
+--shell-integration prints SonicTerm's own OSC 133 shell integration for zsh (5.3+), bash (4.4+)
+or PowerShell 7+ with PSReadLine (pwsh).
 Load it from your shell's startup file, before any line that starts a program, so run_command
 can verify exit codes:
   eval \"$(sonicterm-mcp --shell-integration zsh)\"
+  sonicterm-mcp --shell-integration pwsh | Out-String | Invoke-Expression
 ";
 
 /// What the command line asked for.
@@ -60,9 +62,10 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             "--help" | "-h" => return Ok(Command::Help),
             "--endpoint" => endpoint = Some(rest.next().ok_or("--endpoint needs a value")?.clone()),
             "--shell-integration" => {
-                let name = rest.next().ok_or("--shell-integration needs zsh or bash")?;
-                let shell = shell_integration::Shell::from_name(name)
-                    .ok_or_else(|| format!("no shell integration for {name:?}; use zsh or bash"))?;
+                let name = rest.next().ok_or("--shell-integration needs zsh, bash or pwsh")?;
+                let shell = shell_integration::Shell::from_name(name).ok_or_else(|| {
+                    format!("no shell integration for {name:?}; use zsh, bash or pwsh")
+                })?;
                 return Ok(Command::ShellIntegration(shell));
             }
             other => return Err(format!("unknown argument {other:?}")),

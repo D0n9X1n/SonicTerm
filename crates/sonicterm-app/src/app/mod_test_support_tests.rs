@@ -13,35 +13,23 @@ const UNGATED_HOOKS: &[&str] = &[
     "__test_attach_window_renderer",
     "__test_child_pane_ids",
     "__test_child_pane_parser",
-    "__test_command_palette_handle_key",
-    "__test_drain_files",
-    "__test_enable_pty_write_log",
-    "__test_frontmost_window",
     "__test_invoke_activate_main_tab",
     "__test_invoke_reap_empty_child",
     "__test_main_window_id",
     "__test_palette_attached_window",
-    "__test_palette_cursor",
     "__test_palette_open",
-    "__test_palette_query",
     "__test_pane_grid_size",
     "__test_pane_worker",
     "__test_publish_input_modes",
     "__test_publish_pane_output",
-    "__test_pty_write_log",
     "__test_resize_visible_panes",
     "__test_sample_pane_retention_now",
-    "__test_search_query_cursor",
     "__test_seed_child_window",
     "__test_seed_counting_tab",
     "__test_seed_tab",
-    "__test_set_child_search_query",
     "__test_set_frontmost_window",
     "__test_set_main_pane_viewport",
-    "__test_set_main_search_query",
-    "__test_set_memory_clipboard",
     "__test_set_next_echo_arm",
-    "__test_set_palette_query",
     "__test_set_window_last_render",
     "__test_synthetic_main",
     "__test_window_active_tab_title",
@@ -64,7 +52,10 @@ fn rust_sources(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(St
         if path.is_dir() {
             // When: `path` is a directory, descend so nested modules are scanned too.
             rust_sources(root, &path, out);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+        } else if path.extension().is_some_and(|extension| extension == "rs")
+            || path.file_name().is_some_and(|name| name == "Cargo.toml")
+        {
+            // When: `path` is Rust source, or a manifest the audit reads for dev features.
             let relative = path.strip_prefix(root).expect("inside the root");
             let text = std::fs::read_to_string(&path).expect("readable source");
             out.push((relative.to_string_lossy().replace('\\', "/"), text));
@@ -88,34 +79,49 @@ fn is_test_file(path: &str) -> bool {
         || (stem.starts_with("test_hooks_") && stem.contains("fixture"))
 }
 
-/// Whether the attribute and doc lines directly above `line_index` carry a cfg that requires
-/// `test` (the feature gate or a plain `cfg(test)`).
-fn is_test_gated(lines: &[&str], line_index: usize) -> bool {
-    lines[..line_index]
-        .iter()
-        .rev()
-        .map(|line| line.trim())
-        .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
-        .any(|line| line == TEST_SUPPORT_GATE || line == "#[cfg(test)]")
+/// Whether `path` is a dev target (a test or example, or code only tests compile) of a crate whose
+/// `Cargo.toml` among `sources` enables `sonicterm-app`'s `test-support` in its dev-dependencies.
+/// The perf harness example is excluded: it builds against older bases without the feature.
+fn builds_with_test_support(sources: &[(String, String)], path: &str) -> bool {
+    let mut parts = path.splitn(3, '/');
+    let (Some("crates"), Some(krate), Some(rest)) = (parts.next(), parts.next(), parts.next())
+    else {
+        // When: `path` is not inside a crate directory, no manifest applies.
+        return false;
+    };
+    if krate == "sonicterm-app" {
+        // When: the `krate` is this one, its own examples build without the feature (perf base).
+        return false;
+    }
+    let dev_target =
+        rest.starts_with("examples/") || rest.starts_with("tests/") || rest.ends_with("_tests.rs");
+    let manifest = format!("crates/{krate}/Cargo.toml");
+    dev_target
+        && sources.iter().any(|(source, text)| {
+            *source == manifest
+                && text.split("[dev-dependencies]").nth(1).is_some_and(|dev| {
+                    let section = dev.split("\n[").next().unwrap_or(dev);
+                    section.lines().any(|line| {
+                        line.starts_with("sonicterm-app") && line.contains("\"test-support\"")
+                    })
+                })
+        })
 }
 
-/// `(name, file, gated)` for each `fn __test_*` defined in the non-test `sources`.
+/// `(name, file, gated)` for each `fn __test_*` defined in the non-test `sources`, read from each
+/// file's syntax tree, so a gate on an enclosing `impl` or module counts and a name in a comment
+/// or string does not.
 fn hook_definitions(sources: &[(String, String)]) -> Vec<(String, String, bool)> {
     let mut hooks = Vec::new();
-    let library = sources.iter().filter(|(path, _)| path.starts_with(LIBRARY));
+    let library =
+        sources.iter().filter(|(path, _)| path.starts_with(LIBRARY) && path.ends_with(".rs"));
     for (path, text) in library.filter(|(path, _)| !is_test_file(path)) {
-        let lines: Vec<&str> = text.lines().collect();
-        for (index, line) in lines.iter().enumerate() {
-            if line.trim_start().starts_with("//") {
-                // When: the `line` is a comment, a `fn __test_` in its prose defines nothing.
-                continue;
+        let items = super::source_syntax_support::source_items(text)
+            .unwrap_or_else(|| panic!("{path} parses"));
+        for item in items.into_iter().filter(|item| item.owner.is_none()) {
+            if item.name.starts_with("__test_") {
+                hooks.push((item.name, path.clone(), item.test_only));
             }
-            let Some(after_fn) = line.split("fn __test_").nth(1) else { continue };
-            let tail: String = after_fn
-                .chars()
-                .take_while(|character| character.is_alphanumeric() || *character == '_')
-                .collect();
-            hooks.push((format!("__test_{tail}"), path.clone(), is_test_gated(&lines, index)));
         }
     }
     hooks
@@ -139,21 +145,40 @@ fn test_support_audit(
         }
     }
     // A call is any `name(` in real code that is not the definition itself, made from a file
-    // that compiles without the feature (anything but unit and integration tests). Each file
+    // that compiles without the feature: anything but this crate's unit and integration tests,
+    // and anything but the dev targets of a crate whose manifest turns the feature on. Each file
     // is blanked once, since the scan covers the whole workspace for every hook.
-    let featureless: Vec<(&str, String)> = sources
+    // Each file's calls are read from its syntax tree: a call inside a test-only fn, impl or
+    // module does not count, and a definition is not a call. A file that does not parse (a
+    // fixture snippet) falls back to its blanked text.
+    let featureless: Vec<(&str, &str, String)> = sources
         .iter()
+        // `is_test_file` names this library's own tests; the perf harness's `*_tests.rs` belong to
+        // its example target, which builds without the feature, so they are featureless callers.
         .filter(|(path, _)| !is_test_file(path) && !path.starts_with("crates/sonicterm-app/tests/"))
-        .filter(|(_, text)| text.contains("__test_"))
-        .map(|(path, text)| (path.as_str(), code_views(text).1))
+        .filter(|(path, _)| !builds_with_test_support(sources, path))
+        .filter(|(path, text)| path.ends_with(".rs") && text.contains("__test_"))
+        .map(|(path, text)| (path.as_str(), text.as_str(), code_views(text).1))
         .collect();
     let featureless_callers = |name: &str| -> Vec<&str> {
         let call = format!("{name}(");
         let definition = format!("fn {call}");
         featureless
             .iter()
-            .filter(|(_, bare)| bare.matches(&call).count() > bare.matches(&definition).count())
-            .map(|(path, _)| *path)
+            .filter(|(path, text, bare)| {
+                // An example's own unit tests are `cfg(test)` yet build without the feature, so
+                // their calls count; elsewhere only calls outside test-only items do.
+                let example_tests = path.starts_with("crates/sonicterm-app/examples/")
+                    && path.ends_with("_tests.rs");
+                match super::source_syntax_support::method_calls(text, &[name]) {
+                    Some(_) if example_tests => {
+                        bare.matches(&call).count() > bare.matches(&definition).count()
+                    }
+                    Some(count) => count > 0,
+                    None => bare.matches(&call).count() > bare.matches(&definition).count(),
+                }
+            })
+            .map(|(path, _, _)| *path)
             .collect()
     };
     for listed in ungated_hooks {
@@ -177,22 +202,33 @@ fn test_support_audit(
             problems.push(format!("{path}: gated {name} is called from {callers:?}"));
         }
     }
-    let (_, mod_text) = sources
+    // Test state lives on the App and in its test-support owner; both are audited.
+    let owners = ["App", "TestSupportState"];
+    let fields: Vec<_> = sources
         .iter()
-        .find(|(path, _)| path == "crates/sonicterm-app/src/app/mod.rs")
-        .expect("the App definition is scanned");
-    let lines: Vec<&str> = mod_text.lines().collect();
-    let start = lines.iter().position(|line| line.starts_with("pub struct App {")).expect("App");
-    let end = start + lines[start..].iter().position(|line| *line == "}").expect("App closes");
-    for (index, line) in lines.iter().enumerate().take(end).skip(start) {
-        let field = line.trim().trim_start_matches("pub(super) ").trim_start_matches("pub ");
-        let Some((name, _)) = field.split_once(':') else { continue };
+        .filter(|(path, _)| {
+            path == "crates/sonicterm-app/src/app/mod.rs"
+                || path == "crates/sonicterm-app/src/app/test_support_state.rs"
+        })
+        .flat_map(|(path, text)| {
+            super::source_syntax_support::source_items(text)
+                .unwrap_or_else(|| panic!("{path} parses"))
+        })
+        .collect();
+    assert!(
+        fields.iter().any(|item| item.owner.as_deref() == Some("App")),
+        "the App definition is scanned"
+    );
+    for field in fields.iter().filter(|item| owners.contains(&item.owner.as_deref().unwrap_or("")))
+    {
+        let name = field.name.as_str();
         if !(name.starts_with("test_") || name == "pty_write_log_enabled") {
             continue;
         }
-        if !is_test_gated(&lines, index) && !ungated_fields.contains(&name) {
+        if !field.test_only && !ungated_fields.contains(&name) {
             // When: an ungated `test_*` field is not listed, release builds would carry it unseen.
-            problems.push(format!("App::{name} is ungated, unlisted"));
+            let owner = field.owner.as_deref().unwrap_or("App");
+            problems.push(format!("{owner}::{name} is ungated, unlisted"));
         }
     }
     problems
@@ -258,4 +294,46 @@ fn the_test_support_audit_reports_each_violation() {
     let leaked = test_support_audit(&covered, &["__test_orphan", "__test_loose"], &["test_flag"]);
     assert_eq!(leaked.len(), 2, "{leaked:#?}");
     assert!(leaked.iter().any(|problem| problem.contains("gated __test_listed is called from")));
+    // That crate's manifest turning the feature on for its dev targets makes the call legal.
+    covered.push((
+        "crates/sonicterm-mac/Cargo.toml".to_owned(),
+        "[dependencies]\nsonicterm-app.workspace = true\n\n[dev-dependencies]\nsonicterm-app = \
+         { workspace = true, features = [\"test-support\"] }\n"
+            .to_owned(),
+    ));
+    let enabled = test_support_audit(&covered, &["__test_orphan", "__test_loose"], &["test_flag"]);
+    assert_eq!(enabled.len(), 1, "{enabled:#?}");
+}
+
+/// The audit reads ownership and cfg from the syntax tree: an ungated field moved into
+/// `TestSupportState` is still reported, and a call made only from a test-only `impl` is not a
+/// production caller, so a listed hook with no other caller is reported as removable.
+#[test]
+fn the_audit_follows_moved_fields_and_test_only_impls() {
+    let app = "pub struct App {\n    pub(super) config: u8,\n}\nimpl App {\n    pub fn __test_listed() {}\n}\n"
+        .to_owned();
+    let state = "pub struct TestSupportState {\n    pub test_moved: bool,\n}\n".to_owned();
+    let caller = format!(
+        "{TEST_SUPPORT_GATE}\nimpl Probe {{\n    fn run(app: &App) {{ app.__test_listed(); }}\n}}\n"
+    );
+    let sources = vec![
+        ("crates/sonicterm-app/src/app/mod.rs".to_owned(), app),
+        ("crates/sonicterm-app/src/app/test_support_state.rs".to_owned(), state),
+        ("crates/sonicterm-app/examples/probe.rs".to_owned(), caller),
+    ];
+    let problems = test_support_audit(&sources, &["__test_listed"], &[]);
+    assert!(problems
+        .iter()
+        .any(|problem| problem.contains("TestSupportState::test_moved is ungated")));
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("__test_listed has no example or production caller")),
+        "{problems:#?}"
+    );
+    // The same call outside the gated impl keeps the hook listed.
+    let mut ungated = sources.clone();
+    ungated[2].1 = "fn run(app: &App) { app.__test_listed(); }\n".to_owned();
+    let problems = test_support_audit(&ungated, &["__test_listed"], &["test_moved"]);
+    assert!(problems.is_empty(), "{problems:#?}");
 }

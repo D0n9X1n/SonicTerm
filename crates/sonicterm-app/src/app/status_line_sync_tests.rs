@@ -149,7 +149,7 @@ fn retiring_a_pane_forgets_its_status_records() {
     app.force_frame_counters_on().expect("no window or pane exists yet");
     let pane_id = app.__test_seed_tab("source");
     let main_id = app.registry.main_window_id.unwrap();
-    app.note_clip_write(pane_id, 5, true);
+    app.note_clip_write(pane_id, 5, crate::app::event_loop::ClipWriteOutcome::Written);
     app.status_line.history_ack.insert(pane_id, 7);
     app.status_line.size_seen.insert(pane_id, 1);
     let pane =
@@ -312,7 +312,7 @@ fn a_saved_choice_survives_a_reload_with_no_choice_left() {
     assert!(!text.contains("preset"), "preset is never written: {text}");
     assert!(app.status_line.overrides.is_empty(), "the save satisfied every choice");
     assert_eq!(app.status_line.resolved, shown, "the strip did not change");
-    app.runtime_config_path = Some(path.clone());
+    app.configs.runtime_config_path = Some(path.clone());
     app.force_reload_config();
     let _ = app.sync_status_line(Instant::now());
     assert_eq!(app.status_line.resolved, shown, "a reload after the save changes nothing");
@@ -360,7 +360,7 @@ fn restoring_the_file_after_a_save_takes_effect_on_reload() {
     app.save_current_settings_to(&path).expect("save");
     assert!(std::fs::read_to_string(&path).unwrap().contains("cpu"));
     std::fs::write(&path, original).unwrap();
-    app.runtime_config_path = Some(path.clone());
+    app.configs.runtime_config_path = Some(path.clone());
     app.force_reload_config();
     let _ = app.sync_status_line(Instant::now());
     assert!(app.status_line.resolved.segment(StatusSegmentId::Cpu).is_none(), "the reload applied");
@@ -548,7 +548,7 @@ fn startup_load_errors_come_from_the_startup_loads() {
     assert!(config_error.is_some(), "an invalid table fails the startup load");
     std::fs::write(&path, "").unwrap();
     let mut app = app_with_strip(true);
-    app.runtime_config_path = Some(path.clone());
+    app.configs.runtime_config_path = Some(path.clone());
     app.set_startup_loads(crate::app::StartupLoads { config: config_error, ..Default::default() });
     app.record_startup_load_errors();
     assert!(app.status_line.config_error.is_some(), "the startup failure shows, not a reread");
@@ -567,7 +567,7 @@ fn main_window_strip_consumes_press_and_wheel() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("main");
     let main_id = app.registry.main_window_id.unwrap();
-    app.test_viewport_override =
+    app.testing.test_viewport_override =
         Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
     app.__test_enable_pty_write_log();
     publish_mouse_reporting(&app.main().unwrap().panes[&pane_id]);

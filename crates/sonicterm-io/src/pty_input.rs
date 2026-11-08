@@ -1,5 +1,19 @@
 use super::*;
 
+thread_local! {
+    /// The ordinal of the last user-input message this thread admitted, so a caller reads its own
+    /// write's ticket rather than whichever admission happened last on any thread.
+    static LAST_ADMITTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The delivery ticket of the last user-input message this thread admitted: the ordinal its
+/// admission took. Read it right after a successful send; a later admission on this thread
+/// replaces it, and one on another thread never does.
+#[must_use]
+pub fn last_admitted_ticket() -> u64 {
+    LAST_ADMITTED.with(std::cell::Cell::get)
+}
+
 impl PtyWriterProgress {
     /// Progress for a writer whose admitted input marks `input_seen`.
     pub(super) fn with_input_seen(input_seen: Option<Arc<AtomicBool>>) -> Self {
@@ -14,8 +28,8 @@ impl PtyWriterProgress {
             in_flight_bytes: AtomicUsize::new(0),
             completed_messages: AtomicU64::new(0),
             admission: Mutex::new(()),
-            input_admitted: AtomicU32::new(0),
-            input_completed: AtomicU32::new(0),
+            input_admitted: AtomicU64::new(0),
+            input_completed: AtomicU64::new(0),
             admitted_at: std::array::from_fn(|_| AtomicU64::new(0)),
             input_seen: None,
             writer_on: AtomicU8::new(WRITER_ON_IDLE),
@@ -36,7 +50,7 @@ impl PtyWriterProgress {
         }
         let previous = self.input_admitted.load(Ordering::Relaxed);
         let ordinal = previous.wrapping_add(1);
-        let tag = u64::from(ordinal & INPUT_ORDINAL_MASK);
+        let tag = ordinal & u64::from(INPUT_ORDINAL_MASK);
         self.admitted_at[ordinal as usize % INPUT_SLOTS]
             .store((tag << 44) | self.elapsed_millis(), Ordering::Release);
         self.input_admitted.store(ordinal, Ordering::Release);
@@ -44,6 +58,10 @@ impl PtyWriterProgress {
         if sent.is_err() {
             // A refused send returns its ordinal, so ordinals stay in channel order.
             self.input_admitted.store(previous, Ordering::Release);
+        } else {
+            // When: `sent` succeeded, this admission's own ordinal, taken under the lock, is the
+            // sender's ticket.
+            LAST_ADMITTED.with(|last| last.set(ordinal));
         }
         sent
     }
@@ -60,8 +78,9 @@ impl PtyWriterProgress {
     // pairing with their Release stores.
     pub(super) fn input_progress(&self) -> PtyInputProgress {
         let terminal = self.terminal.load(Ordering::Acquire);
-        let completed = self.input_completed.load(Ordering::Acquire);
-        let admitted = self.input_admitted.load(Ordering::Acquire);
+        // Diagnostics keep their 2^20 projection; the wide counters only matter for receipts.
+        let completed = self.input_completed.load(Ordering::Acquire) as u32;
+        let admitted = self.input_admitted.load(Ordering::Acquire) as u32;
         let outstanding = admitted.wrapping_sub(completed) & INPUT_ORDINAL_MASK;
         if terminal != TERMINAL_RUNNING {
             // When: terminal is not running, every outstanding admission is lost.
@@ -77,7 +96,7 @@ impl PtyWriterProgress {
         let oldest = completed.wrapping_add(1);
         let stamp = self.admitted_at[oldest as usize % INPUT_SLOTS].load(Ordering::Acquire);
         let on_reply = self.writer_on.load(Ordering::Acquire) == WRITER_ON_REPLY;
-        if self.input_completed.load(Ordering::Acquire) != completed
+        if self.input_completed.load(Ordering::Acquire) as u32 != completed
             || (stamp >> 44) as u32 != oldest & INPUT_ORDINAL_MASK
         {
             // When: input_completed moved or the slot's tag is another ordinal, the sample raced.

@@ -1082,12 +1082,15 @@ only its unit and integration tests read, with
 `#[cfg(any(test, feature = "test-support"))]`. The crate turns the feature on
 through a dev-dependency on itself, so only its own test and example builds see
 it; a release build of `sonicterm-mac`, `sonicterm-windows` or `sonicterm-linux`
-compiles none of those items. Hooks that an example, another crate, or
-production code calls stay ungated, because those builds never get the feature
-(the perf comparison also overlays the example onto an older base). The source
-test `test_hooks_are_gated_unless_an_example_or_production_reads_them` fails
-when a hook or field is ungated without a listed reason, when a listed hook has
-no remaining non-test caller, or when code outside the library calls a gated
+compiles none of those items. `sonicterm-mac` and `sonicterm-windows` turn the
+feature on in their own dev-dependencies, so their tests and examples may call
+gated hooks too. Hooks that this crate's examples (the perf comparison overlays
+the harness onto an older base, so it never gets the feature), another crate's
+production code, or this crate's production code call stay ungated. The source
+test `test_hooks_are_gated_unless_an_example_or_production_reads_them` reads each
+crate's `Cargo.toml` to tell which callers build with the feature, and fails when
+a hook or field is ungated without a listed reason, when a listed hook has no
+remaining caller built without the feature, or when such a caller uses a gated
 hook.
 
 ### Source and check map

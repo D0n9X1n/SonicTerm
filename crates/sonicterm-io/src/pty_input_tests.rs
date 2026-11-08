@@ -200,10 +200,11 @@ fn refused_admission_rolls_back_and_a_stale_slot_is_raced() {
     assert_eq!(progress.input_progress(), PtyInputProgress::Raced, "the slot holds ordinal 9");
 }
 
-/// Ordinals compare modulo 2^20, across both the 2^20 and the u32 wrap, on the right slot.
+/// Diagnostic ordinals compare modulo 2^20, across the 2^20 and the old u32 boundary, on the
+/// right slot; the wide counters underneath keep counting past both.
 #[test]
 fn input_ordinals_wrap_onto_their_own_slot() {
-    for start in [INPUT_ORDINAL_MASK, u32::MAX] {
+    for start in [u64::from(INPUT_ORDINAL_MASK), u64::from(u32::MAX)] {
         let progress = PtyWriterProgress::new();
         progress.input_admitted.store(start, Ordering::Release);
         progress.input_completed.store(start, Ordering::Release);
@@ -221,7 +222,7 @@ fn input_ordinals_wrap_onto_their_own_slot() {
 #[test]
 fn concurrent_producers_get_ordinals_in_channel_order() {
     let progress = Arc::new(PtyWriterProgress::new());
-    let (tx, rx) = crossbeam_channel::bounded::<u32>(64);
+    let (tx, rx) = crossbeam_channel::bounded::<u64>(64);
     let producers: Vec<_> = (0..2)
         .map(|_| {
             let (progress, tx) = (Arc::clone(&progress), tx.clone());
@@ -241,7 +242,7 @@ fn concurrent_producers_get_ordinals_in_channel_order() {
     for producer in producers {
         producer.join().unwrap();
     }
-    let ordinals: Vec<u32> = rx.try_iter().collect();
+    let ordinals: Vec<u64> = rx.try_iter().collect();
     assert_eq!(ordinals, (1..=32).collect::<Vec<_>>());
 }
 
@@ -301,4 +302,81 @@ fn only_real_input_marks_a_live_pty_as_typed_into() {
         }
         assert!(seen.load(Ordering::SeqCst), "through_sender {through_sender}: input is typing");
     }
+}
+
+/// A delivery receipt is the admitted count, compared whole: past the old u32 boundary a later
+/// ticket is still later, a message is `Queued` until the writer completes it, then `Written`, and
+/// a writer that stops first makes it `Failed`.
+#[test]
+fn delivery_receipts_cross_the_old_u32_boundary() {
+    let progress = Arc::new(PtyWriterProgress::new());
+    let below = u64::from(u32::MAX) - 1;
+    progress.input_admitted.store(below, Ordering::Release);
+    progress.input_completed.store(below, Ordering::Release);
+    let probe = crate::pty::PtyDeliveryProbe::for_tests(Arc::clone(&progress));
+    let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
+    for _ in 0..3 {
+        try_queue_pty_input((&tx, &AtomicUsize::new(0)), &progress, b"a".to_vec(), true).unwrap();
+    }
+    let ticket = crate::pty::last_admitted_ticket();
+    assert_eq!(ticket, below + 3, "the ticket kept counting past u32::MAX");
+    assert_eq!(probe.status(ticket), PtyDelivery::Queued);
+    progress.input_completed.fetch_add(2, Ordering::Release);
+    assert_eq!(probe.status(ticket), PtyDelivery::Queued, "one message is still pending");
+    progress.input_completed.fetch_add(1, Ordering::Release);
+    assert_eq!(probe.status(ticket), PtyDelivery::Written);
+    try_queue_pty_input((&tx, &AtomicUsize::new(0)), &progress, b"b".to_vec(), true).unwrap();
+    let later = crate::pty::last_admitted_ticket();
+    progress.record_terminal(TERMINAL_FAILED_WRITE);
+    assert_eq!(probe.status(later), PtyDelivery::Failed);
+    assert_eq!(probe.status(ticket), PtyDelivery::Written, "what was written stays written");
+}
+
+/// Each sender's ticket is its own admission's ordinal: a later admission on another thread does
+/// not move it, so another producer's failure cannot mark this write `Failed`.
+#[test]
+fn a_ticket_belongs_to_the_admitting_write() {
+    let progress = Arc::new(PtyWriterProgress::new());
+    let probe = crate::pty::PtyDeliveryProbe::for_tests(Arc::clone(&progress));
+    let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
+    try_queue_pty_input((&tx, &AtomicUsize::new(0)), &progress, b"a".to_vec(), true).unwrap();
+    let mine = crate::pty::last_admitted_ticket();
+    // Another producer admits B before this sender reads anything more.
+    let other = {
+        let (progress, tx) = (Arc::clone(&progress), tx.clone());
+        std::thread::spawn(move || {
+            try_queue_pty_input((&tx, &AtomicUsize::new(0)), &progress, b"b".to_vec(), true)
+                .unwrap();
+            crate::pty::last_admitted_ticket()
+        })
+        .join()
+        .unwrap()
+    };
+    assert_eq!((mine, other), (1, 2));
+    assert_eq!(crate::pty::last_admitted_ticket(), mine, "another thread's admission left it");
+    // A completes; the writer then fails on B. A is still written.
+    progress.input_completed.fetch_add(1, Ordering::Release);
+    progress.record_terminal(TERMINAL_FAILED_WRITE);
+    assert_eq!(probe.status(mine), PtyDelivery::Written);
+    assert_eq!(probe.status(other), PtyDelivery::Failed);
+}
+
+/// A write that completes while the writer stops, between `status`'s two loads, is `Written`: the
+/// end is read first, so a completion published before it is never missed.
+#[test]
+fn a_completion_racing_the_writer_end_is_written() {
+    let progress = Arc::new(PtyWriterProgress::new());
+    let probe = crate::pty::PtyDeliveryProbe::for_tests(Arc::clone(&progress));
+    let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
+    try_queue_pty_input((&tx, &AtomicUsize::new(0)), &progress, b"a".to_vec(), true).unwrap();
+    let ticket = crate::pty::last_admitted_ticket();
+    let racing = Arc::clone(&progress);
+    crate::pty::BETWEEN_STATUS_LOADS.set(Some(Box::new(move || {
+        // The writer flushes the message and then records its end.
+        racing.input_completed.fetch_add(1, Ordering::Release);
+        racing.record_terminal(TERMINAL_FAILED_WRITE);
+    })));
+    let status = probe.status(ticket);
+    crate::pty::BETWEEN_STATUS_LOADS.set(None);
+    assert_eq!(status, PtyDelivery::Written);
 }

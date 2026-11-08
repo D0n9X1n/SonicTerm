@@ -132,6 +132,8 @@ clickable_path_max_chars = {clickable_path_max_chars}
 # Cursor behavior. Shape: "block", "bar", or "underline".
 cursor_blink = false
 cursor_shape = "block"
+# Programs may set the clipboard with OSC 52: "allow" or "deny".
+osc52 = "allow"
 
 [logging]
 # Logs are written to {config_dir}/logs/sonicterm.log.
@@ -212,8 +214,16 @@ enabled = false
 # or "any" (every pane).
 control = "agent"
 # Read tools see: "agent" (panes an agent created) or "any" (every pane).
-# A config without this line reads every pane.
+# A config without this line sees only agent-created panes.
 read = "agent"
+# Connections served at once (1-16). Each runs one tool call at a time.
+max_connections = 4
+# What "agent" above covers: "shared" (every agent's panes) or "session"
+# (only panes the calling connection created).
+isolation = "shared"
+# Panes create_pane may open a helper beside under control = "agent":
+# "any" (every pane) or "agent" (only panes the agent may control).
+create_anchor = "any"
 "#,
         config_dir = default_config_dir()
             .map(|dir| dir.display().to_string())

@@ -192,7 +192,7 @@ fn closing_the_owner_window_releases_the_timeline_while_a_worker_handle_survives
     let handles = PaneVtHandles::from_pane_state(app.pane_by_id(pane_id).expect("child pane"));
     let watch = watch_of(&app, pane_id);
     let weak = Arc::downgrade(&watch);
-    drop(app.registry.windows.remove(&child).expect("child window"));
+    drop(app.registry.remove_window(child).expect("child window"));
     assert_eq!(watch.peek_timeline(), "absent", "the closed window's owner released it");
     assert!(weak.upgrade().is_some(), "the worker handle still owns the watch");
     assert_eq!(

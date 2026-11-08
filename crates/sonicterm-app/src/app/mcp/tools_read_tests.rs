@@ -266,3 +266,121 @@ fn pane_ids_are_read_from_strings_or_numbers() {
     assert_eq!(pane_id_arg(&json!({ "pane_id": "x" })), None);
     assert_eq!(pane_id_arg(&json!({})), None);
 }
+
+/// `read_pane`'s `generation` is loaded before the read, so a batch published between the load
+/// and the read shows in the lines and in `current_generation`, never as a `generation` the
+/// snapshot does not contain.
+#[test]
+fn a_read_reports_the_generation_it_contains_at_least() {
+    let entry = test_entry(20, 4, 100);
+    entry.parser.lock().advance(b"before\r\n");
+    entry.output_generation.fetch_add(1, Ordering::Release);
+    let racing = entry.clone();
+    READ_HOOK.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move || {
+            racing.parser.lock().advance(b"during\r\n");
+            racing.output_generation.fetch_add(1, Ordering::Release);
+        }));
+    });
+    let (snapshot, structured) =
+        read_with_generation(&entry, ReadMode::Tail, ReadLimits::clamped(None, None));
+    READ_HOOK.with_borrow_mut(|hook| *hook = None);
+    assert_eq!(structured["generation"], 1);
+    assert_eq!(structured["current_generation"], 2);
+    assert!(
+        snapshot.lines.iter().any(|line| line.text == "during"),
+        "at least: later text may show"
+    );
+}
+
+/// `wait_for` reports the generation its last inspection covered, not whatever was current when it
+/// answered: a batch published after that inspection, whose own inspection found the parser busy
+/// until the timeout, leaves `generation` behind `current_generation`.
+#[test]
+fn a_wait_reports_the_generation_it_inspected() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    let entry = test_entry(20, 4, 100);
+    entry.parser.lock().advance(b"x\r\n");
+    entry.output_generation.fetch_add(1, Ordering::Release);
+    let later = entry.clone();
+    let condition = WaitCondition {
+        regex: Some(Regex::new("never").unwrap()),
+        after: None,
+        quiet: None,
+        watch_exit: false,
+        timeout: Duration::from_millis(100),
+        recheck: Duration::from_secs(10),
+    };
+    let scope = CallScope::admit(&shared, &Arc::new(AtomicBool::new(false)));
+    let mut holder = None;
+    let outcome = wait_until_observed(&shared, &entry, &condition, &scope, || {
+        // After the first inspection: a new batch is published while another thread holds the
+        // parser past the timeout, so every later inspection is busy.
+        later.output_generation.fetch_add(1, Ordering::Release);
+        let (held, ready) = std::sync::mpsc::channel();
+        let parser = Arc::clone(&later.parser);
+        holder = Some(std::thread::spawn(move || {
+            let _guard = parser.lock();
+            held.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+        }));
+        ready.recv().unwrap();
+    });
+    holder.unwrap().join().unwrap();
+    assert_eq!(outcome.reason, WaitReason::Timeout);
+    assert_eq!(outcome.inspected_generation, Some(1));
+    assert_eq!(entry.output_generation.load(Ordering::Acquire), 2);
+}
+
+/// `list_panes` spends one budget on parser probes: with every parser held, the list returns well
+/// within a few probe waits instead of one per pane, later panes are marked
+/// `"details": "skipped"`, and the result says it is `partial`.
+#[test]
+fn a_busy_list_stops_probing_after_its_budget() {
+    let entries: Vec<PaneEntry> = (0..40)
+        .map(|index| {
+            let mut entry = crate::app::mcp::test_entry(20, 4, 100);
+            entry.pane_id = index;
+            entry.metadata = Some(crate::app::mcp::PaneMetadata {
+                window_index: 0,
+                tab_index: index as usize,
+                active: false,
+                readonly: false,
+            });
+            entry
+        })
+        .collect();
+    let guards: Vec<_> = entries.iter().map(|entry| entry.parser.lock()).collect();
+    let started = Instant::now();
+    let budget_ends = started + LIST_BUDGET;
+    let panes: Vec<Value> = entries.iter().map(|entry| pane_summary(entry, budget_ends)).collect();
+    let elapsed = started.elapsed();
+    drop(guards);
+    // 40 panes at a 5 ms wait each would take 200 ms; the budget bounds the whole list. The bound
+    // is half of that, leaving a loaded CI runner room for oversleeping timed lock attempts.
+    assert!(elapsed < PARSER_WAIT * 40 / 2, "the list took {elapsed:?}");
+    assert!(panes.iter().any(|pane| pane["details"] == "skipped"), "no pane was skipped");
+    assert!(panes.iter().all(|pane| pane["details"] == "skipped" || pane["busy"] == true));
+}
+
+/// `read_pane` and `list_panes` report the observed shell state beside the existing boolean:
+/// `none` before any marker, `unverified` for a tokenless one.
+#[test]
+fn reads_report_the_shell_integration_state() {
+    let entry = test_entry(20, 4, 100);
+    let (_, fresh) = read_with_generation(&entry, ReadMode::Tail, ReadLimits::clamped(None, None));
+    assert_eq!(fresh["shell_integration_state"], "none");
+    entry.parser.lock().advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    let (_, marked) = read_with_generation(&entry, ReadMode::Tail, ReadLimits::clamped(None, None));
+    assert_eq!(marked["shell_integration_state"], "unverified");
+    let mut listed = entry.clone();
+    listed.metadata = Some(crate::app::mcp::PaneMetadata {
+        window_index: 0,
+        tab_index: 0,
+        active: true,
+        readonly: false,
+    });
+    let summary = pane_summary(&listed, Instant::now() + LIST_BUDGET);
+    assert_eq!(summary["shell_integration_state"], "unverified");
+    assert_eq!(summary["shell_integration"], true, "the boolean keeps its meaning");
+}

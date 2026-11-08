@@ -19,6 +19,8 @@ fn shell_names_map_to_snippets() {
     // Only the supported shells are accepted, by their exact names.
     assert_eq!(Shell::from_name("zsh"), Some(Shell::Zsh));
     assert_eq!(Shell::from_name("bash"), Some(Shell::Bash));
+    assert_eq!(Shell::from_name("pwsh"), Some(Shell::Pwsh));
+    assert_eq!(Shell::from_name("powershell"), Some(Shell::Pwsh));
     assert_eq!(Shell::from_name("fish"), None);
     assert_eq!(Shell::from_name("ZSH"), None);
 }
@@ -27,10 +29,14 @@ fn shell_names_map_to_snippets() {
 fn snippets_read_and_unset_the_token_and_never_hold_one() {
     // The token is read at run time and removed from the environment; the printed text is the
     // same in every pane, so it can live in a dotfile.
-    for shell in [Shell::Zsh, Shell::Bash] {
+    for (shell, unset) in [
+        (Shell::Zsh, "unset SONICTERM_SHELL_TOKEN"),
+        (Shell::Bash, "unset SONICTERM_SHELL_TOKEN"),
+        (Shell::Pwsh, "Remove-Item env:SONICTERM_SHELL_TOKEN"),
+    ] {
         let text = shell.snippet();
         assert!(text.contains("SONICTERM_SHELL_TOKEN"), "{shell:?} reads the token");
-        assert!(text.contains("unset SONICTERM_SHELL_TOKEN"), "{shell:?} unsets it");
+        assert!(text.contains(unset), "{shell:?} unsets it");
         assert!(text.contains("sonicterm_token="), "{shell:?} appends it to markers");
         assert!(!text.contains(TOKEN));
     }
@@ -242,3 +248,7 @@ fn an_interactive_bash_emits_tokened_markers_in_order() {
     let after_load = output.rsplit("sonicterm-shellint").next().unwrap_or("");
     assert!(after_load.contains("[theirs]"), "the existing PROMPT_COMMAND stopped running");
 }
+
+#[cfg(test)]
+#[path = "shell_integration_tests_pwsh_tests.rs"]
+mod shell_integration_tests_pwsh_tests;

@@ -86,7 +86,7 @@ fn about_palette_opens_the_about_window() {
     let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     for (owner, other) in [(main, child), (child, main)] {
-        app.about.open_requested = false;
+        app.reports.about.open_requested = false;
         app.__test_set_frontmost_window(Some(owner));
         app.run_action_for_window(&Action::OpenCommandPalette, owner);
         app.__test_set_palette_query("About SonicTerm");
@@ -95,7 +95,10 @@ fn about_palette_opens_the_about_window() {
         assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter)));
         assert!(!app.interaction.command_palette.is_open());
         assert_eq!(app.interaction.palette_attached_window, None);
-        assert!(app.about.open_requested, "the About window opens on the next event-loop turn");
+        assert!(
+            app.reports.about.open_requested,
+            "the About window opens on the next event-loop turn"
+        );
         assert!(app.registry.windows[&owner].notification.is_none());
         assert!(app.__test_drain_pty_writes().is_empty());
     }
@@ -124,7 +127,7 @@ fn about_palette_preserves_readonly_and_reopens_normally() {
     assert_eq!(app.interaction.command_palette.current(), Some(&PaletteEntry::About));
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
     assert!(!app.interaction.command_palette.is_open());
-    assert!(app.about.open_requested);
+    assert!(app.reports.about.open_requested);
     assert_eq!(app.__test_main_notification_message(), None);
     assert!(app.registry.windows[&window_id].copy_mode.as_ref().unwrap().is_read_only());
     assert!(app.__test_drain_pty_writes().is_empty());

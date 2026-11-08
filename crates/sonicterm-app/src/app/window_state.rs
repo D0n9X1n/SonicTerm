@@ -227,7 +227,7 @@ pub struct WindowState {
     #[doc(hidden)]
     pub test_renderer_focus_marker: Option<bool>,
     /// Test-only viewport override for this window's pane layout, mirroring
-    /// [`App::test_viewport_override`] for the MAIN window. When `Some((outer,
+    /// [`App::testing`]'s `test_viewport_override` for the MAIN window. When `Some((outer,
     /// cell_w, cell_h))`, `App::compute_pane_rects_for` uses `outer` instead
     /// of the (absent in headless tests) renderer's logical size, and
     /// `child_window::resize_visible_panes_in_child` uses

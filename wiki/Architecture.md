@@ -65,7 +65,7 @@ The renderer has one declared terminal/UI type seam. `sonicterm-gpu` depends on
 ### Authoritative runtime state
 
 `App` coordinates the event loop and applies completed actions. Its state is held
-by four owners, each a field of `App`:
+by six owners, each a field of `App`:
 
 ```mermaid
 flowchart LR
@@ -74,16 +74,30 @@ flowchart LR
   App --> Run["RuntimeServices (services): foreground probe, MCP server, PTY reaper, GPU recovery, font catalog worker, runtime smoke"]
   App --> Int["InteractionState (interaction): palette, edit targets, field pointer captures, OS drag and drop, broadcast"]
   App --> Diag["DiagnosticsState (diagnostics): counters, retention and trim samples, breadcrumbs"]
+  App --> Fonts["FontState (fonts): font directories, configured size, weight and family, font catalog and picker"]
+  App --> Reports["ReportWindows (reports): Memory Usage and About window state"]
   Reg --> Win["WindowState: tabs, panes, renderer"]
 ```
 
-`WindowRegistry` holds `HashMap<WindowId, WindowState>` and `main_window_id`; a
-pane belongs to the one window whose `WindowState` holds it, and every lookup by
-pane id goes through the registry's `pane_by_id`. The main window and torn-out
+`WindowRegistry` holds the window map and `main_window_id`; a pane belongs to the
+one window whose `WindowState` holds it, and every lookup by pane id goes through
+the registry (`pane`, `window_of_pane`, `locate_pane` for its window and tab). The
+map is a `WindowMap`: the app reads it and changes a window in place, but only the
+registry's `insert_window` and `remove_window` add or drop one, and in debug builds
+both check that no pane belongs to two windows. `insert_window` is called only from
+`App::insert_window_registered`, which also registers the window's governor owner;
+`scripts/check-window-owner-registration.sh` enforces that. Moving panes between
+windows still goes through `WindowState`'s own `panes` and `tab_states`. A seeded
+state-machine test (`window_registry_state_lifecycle_tests.rs`) runs splits, closes, tab
+transfers, tear-outs, waits, output and exits in random order and checks after every
+step that each pane is in one window, `locate_pane` agrees with a scan, each retired
+pane's signal is closed and each live pane holds an open governor owner;
+`SONICTERM_LIFECYCLE_SEED` adds a seed. The main window and torn-out
 windows use the same `WindowState` representation. The owners are visible only
 inside the `app` module; the public `App` methods stay as they were. A few fields
 stay on `App` itself: frame counters (borrowed beside windows and the palette on
-the redraw paths), redraw scheduling, configuration, theme, keymap and fonts.
+the redraw paths), redraw scheduling, configuration, theme and keymap. Font state
+and the report windows' state have their own owners, `FontState` and `ReportWindows`.
 
 Keyboard, IME, focus and modifier events resolve their source identity before
 main/child presentation paths diverge. Shared input ownership does not replace
@@ -107,8 +121,19 @@ topology: it is a compatibility and test model, and only tests read its state.
 `App::observe_intent` updates it with structural intents (tabs, panes, windows,
 focus) and discards their effects; high-frequency input such as cursor motion is
 not reported, because nothing reads it. Making the reducer authoritative would
-be a separate behavioral migration. `App::dispatch_intent` handles supported
-explicit-target work separately.
+be a separate behavioral migration. Which intents the live App executes is
+stated in one place, `AppIntent::authority()` in app-core, an exhaustive match a
+new variant cannot skip:
+
+| Authority | Intents | Who acts |
+| --- | --- | --- |
+| `Drives` | PTY write, exit, burst and foreground change; redraw request; key press; IME start, preedit, commit and end; URL hover and click; scrolling and the wheel; paste; exit | `App::dispatch_intent` executes each against live state. |
+| `Observes` | window, tab and pane lifecycle and focus; key release; mouse buttons and motion; selection; search; command palette; OS drag and file drop; config, theme and font size; broadcast scope; tick | The App's own handlers already did the work; the intent only updates the reducer's model. |
+
+`dispatch_intent` sends an `Observes` intent straight to the reducer, and
+`observe_intent` debug-asserts that it never receives a `Drives` one, so a driven
+intent cannot be silently dropped; a test dispatches every `Drives` intent on a
+live App.
 Missing, removed, or zero window keys never select main or frontmost. Native
 input goes to its source window's active pane through the bounded PTY queue.
 See [Runtime Lifecycle](Runtime-Lifecycle) for the state/intent/effect inventory

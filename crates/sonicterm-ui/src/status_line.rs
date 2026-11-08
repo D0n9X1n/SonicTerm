@@ -460,6 +460,8 @@ pub enum ClipOutcome {
     Written(u64),
     /// Accepted, but the native clipboard write failed.
     Failed,
+    /// Refused by `[terminal] osc52 = "deny"`.
+    Denied,
     /// A clipboard read; reads are never answered.
     ReadRefused,
     /// Another selection than the clipboard.

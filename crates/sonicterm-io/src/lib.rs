@@ -17,7 +17,9 @@ pub mod pty;
 pub mod pty_backend_feasibility;
 mod reply_spool;
 
-pub use reply_spool::PtyReplySender;
+pub use reply_spool::{
+    is_budget_refusal, PtyReplySender, ReplyBudgetExceeded, ReplySpoolStats, SPILL_BUDGET_BYTES,
+};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

@@ -175,8 +175,8 @@ impl App {
             .is_open()
             .then(|| self.interaction.palette_attached_window.or(self.registry.main_window_id))
             .flatten();
-        let font = (self.config.font.size != self.configured_font_size)
-            .then(|| FontInput::from_sizes(self.config.font.size, self.configured_font_size));
+        let font = (self.config.font.size != self.fonts.configured_font_size)
+            .then(|| FontInput::from_sizes(self.config.font.size, self.fonts.configured_font_size));
         let path_check_listed = visible
             && any_eligible
             && self.status_line.resolved.segment(StatusSegmentId::PathCheck).is_some();

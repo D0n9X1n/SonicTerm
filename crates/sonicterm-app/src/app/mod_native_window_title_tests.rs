@@ -25,7 +25,7 @@ fn terminal_window_numbers_survive_transfer_hide_and_never_reuse() {
     app.hide_main_window();
     app.show_main_window();
     assert_eq!(app.native_window_title(child).as_deref(), Some("#2 Work"));
-    app.registry.windows.remove(&child);
+    app.registry.remove_window(child);
     app.release_child_window_registries(child);
     let next = app.__test_seed_child_window(&["new"]);
     assert_eq!(app.native_window_title(next).as_deref(), Some("#3 new"));
@@ -67,7 +67,7 @@ fn closed_rename_target_never_falls_back_to_replacement_main() {
     let main = app.registry.main_window_id.unwrap();
     app.start_rename_window(main);
     app.interaction.command_palette.set_query("stale");
-    app.registry.windows.remove(&main);
+    app.registry.remove_window(main);
     app.registry.window_keys.remove(main);
     app.registry.main_window_id = None;
     app.__test_seed_tab("replacement");

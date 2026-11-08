@@ -91,12 +91,12 @@ fn the_retention_pass_schedules_the_trim_after_thirty_seconds_of_cover() {
     app.handle_window_occlusion(child, false);
 
     let pass = |app: &mut App, secs: u64| {
-        app.test_scheduler_trims.clear();
+        app.testing.test_scheduler_trims.clear();
         app.diagnostics.last_retention_sample = None;
         // The return value reports only the debug walk, which no subscriber here enables; the
         // recorded decisions are what show the pass reached the scheduler.
         app.sample_pane_retention(base + Duration::from_secs(secs));
-        let mut decisions = app.test_scheduler_trims.clone();
+        let mut decisions = app.testing.test_scheduler_trims.clone();
         decisions.sort_by_key(|(window_id, _)| *window_id != main);
         decisions
     };
@@ -145,7 +145,7 @@ fn the_trim_hook_shares_the_scheduler_rules_and_runs_no_retention_pass() {
 
     assert_eq!(app.diagnostics.trim_seq, 0);
     assert_eq!(app.diagnostics.last_trim_source, None);
-    assert!(app.test_scheduler_trims.is_empty(), "the hook is not the scheduler");
+    assert!(app.testing.test_scheduler_trims.is_empty(), "the hook is not the scheduler");
     assert_eq!(app.diagnostics.last_retention_sample, Some(sampled_at), "no retention pass ran");
     let panes_after: Vec<u64> = app.registry.windows[&main].panes.keys().copied().collect();
     assert_eq!(panes_after, panes_before);

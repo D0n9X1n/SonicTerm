@@ -38,7 +38,7 @@ fn operational_redraw_effects_use_only_the_named_live_window() {
         }]);
     }
     assert_eq!(app.redraw_request_count.load(Ordering::SeqCst), before + 2);
-    app.registry.windows.remove(&child);
+    app.registry.remove_window(child);
     app.dispatch_effects(smallvec::smallvec![sonicterm_app_core::AppEffect::Render {
         window: child_key,
         reason: sonicterm_app_core::RedrawReason::Layout
@@ -91,7 +91,7 @@ fn explicit_window_input_uses_its_active_pane_not_a_zero_sentinel() {
     });
     assert_eq!(app.__test_pty_write_log(), [(child_pane, b"text".to_vec())]);
     assert_ne!(child_pane, main_pane);
-    app.registry.windows.remove(&child);
+    app.registry.remove_window(child);
     app.dispatch_intent(sonicterm_app_core::AppIntent::ImeCommit {
         window: key,
         text: "discard".into(),
@@ -182,4 +182,132 @@ fn cursor_motion_skips_the_compatibility_reducer() {
         pos: sonicterm_app_core::LogicalPos { pixel_x: 1.0, pixel_y: 2.0 },
     });
     assert!(app.machine.state().last_mouse_pos.is_some(), "the reducer still observes when told");
+}
+
+/// One example of every `AppIntent` variant, checked against the enum's own syntax tree, so a new
+/// variant fails here until it has an example. Each `Drives` example is dispatched on a live App,
+/// which reaches no fall-through (a debug assertion); each `Observes` one is routed to observation.
+#[test]
+fn every_intent_variant_is_classified_and_dispatched() {
+    use sonicterm_app_core::{
+        AppIntent, BroadcastScope, IntentAuthority, KeyCode, LogicalPos, MouseButton,
+        PaletteChoice, PaneId, PendingDragOutcomeCore, SelectionMode, SplitDir, WindowRole,
+    };
+    use sonicterm_types::{ModKey, Pos, WindowKey};
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane_id = app.__test_seed_tab("driven");
+    let window = WindowKey(1);
+    let pane = PaneId(pane_id);
+    let pos = LogicalPos { pixel_x: 1.0, pixel_y: 2.0 };
+    let examples = vec![
+        AppIntent::NewWindow { role: WindowRole::Primary },
+        AppIntent::WindowCloseRequested { window },
+        AppIntent::WindowFocused { window },
+        AppIntent::WindowBlurred { window },
+        AppIntent::WindowResized { window, cols: 80, rows: 24 },
+        AppIntent::WindowMoved { window, pos },
+        AppIntent::NewTab { window, cwd: None },
+        AppIntent::CloseTab { window, idx: 0 },
+        AppIntent::NextTab { window },
+        AppIntent::PrevTab { window },
+        AppIntent::GoToTab { window, idx: 0 },
+        AppIntent::TearOutTab { src_window: window, src_tab: 0 },
+        AppIntent::SplitPane { window, dir: SplitDir::Right },
+        AppIntent::ClosePane { window },
+        AppIntent::ResizePane { window, dir: SplitDir::Left, cells: 1 },
+        AppIntent::FocusPaneLeft { window },
+        AppIntent::FocusPaneRight { window },
+        AppIntent::FocusPaneUp { window },
+        AppIntent::FocusPaneDown { window },
+        AppIntent::PtyBurst { pane, generation: 1 },
+        AppIntent::PtyWrite { pane, bytes: bytes::Bytes::from_static(b"x") },
+        AppIntent::ForegroundProcChanged { pane, name: None },
+        AppIntent::Key { window, code: KeyCode(0), mods: ModKey::empty(), pressed: true },
+        AppIntent::Key { window, code: KeyCode(0), mods: ModKey::empty(), pressed: false },
+        AppIntent::ImeStart { window },
+        AppIntent::ImePreedit { window, text: String::new(), cursor: 0..0 },
+        AppIntent::ImeCommit { window, text: String::new() },
+        AppIntent::ImeEnd { window },
+        AppIntent::MouseButton {
+            window,
+            pressed: true,
+            button: MouseButton::Left,
+            mods: ModKey::empty(),
+            pos,
+        },
+        AppIntent::MouseMove { window, pos },
+        AppIntent::MouseWheel { window, delta_y: 1.0, delta_x: 0.0, mods: ModKey::empty() },
+        AppIntent::HoverUrl { window, url: None },
+        AppIntent::ScrollUp { window, lines: 1 },
+        AppIntent::ScrollDown { window, lines: 1 },
+        AppIntent::ScrollPageUp { window },
+        AppIntent::ScrollPageDown { window },
+        AppIntent::ScrollToTop { window },
+        AppIntent::ScrollToBottom { window },
+        AppIntent::ScrollToCursor { window },
+        AppIntent::SelectionStart {
+            window,
+            anchor: Pos { row: 0, col: 0 },
+            mode: SelectionMode::Cell,
+        },
+        AppIntent::SelectionExtend { window, to: Pos { row: 0, col: 1 } },
+        AppIntent::SelectionEnd { window },
+        AppIntent::ClearSelection { window },
+        AppIntent::CopySelection { window },
+        AppIntent::Paste { window, text: String::new(), bracketed: false },
+        AppIntent::OpenSearch { window },
+        AppIntent::SearchQuery { window, query: String::new() },
+        AppIntent::SearchStep { window, forward: true },
+        AppIntent::CloseSearch { window },
+        AppIntent::ToggleCommandPalette { window },
+        AppIntent::PaletteFilter { window, filter: String::new() },
+        AppIntent::PaletteStep { window, delta: 1 },
+        AppIntent::PaletteSubmit { window, choice: PaletteChoice { id: "none".into() } },
+        AppIntent::OsDragOutcome(PendingDragOutcomeCore { src_window: window, committed: false }),
+        AppIntent::FilesDropped { window, paths: Vec::new() },
+        AppIntent::ClickUrl { window, url: "not a url".into() },
+        AppIntent::ConfigChanged { new: Box::default() },
+        AppIntent::ApplyTheme { name: String::new() },
+        AppIntent::FontSizeDelta { delta: 0 },
+        AppIntent::SetBroadcastScope { scope: BroadcastScope::CurrentTab },
+        AppIntent::RedrawRequested { window },
+        AppIntent::Tick { now: std::time::Instant::now() },
+        AppIntent::PtyExit { pane, status: 0 },
+        AppIntent::Exit,
+    ];
+    // The variant names the enum declares, read from its source.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../sonicterm-app-core/src/intent.rs"),
+    )
+    .expect("intent.rs");
+    let file = syn::parse_file(&source).expect("intent.rs parses");
+    let declared: std::collections::BTreeSet<String> = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Enum(found) if found.ident == "AppIntent" => {
+                Some(found.variants.iter().map(|variant| variant.ident.to_string()).collect())
+            }
+            _ => None,
+        })
+        .expect("enum AppIntent");
+    let name = |intent: &AppIntent| {
+        let debug = format!("{intent:?}");
+        debug.split(|character: char| !character.is_alphanumeric()).next().unwrap_or("").to_owned()
+    };
+    let covered: std::collections::BTreeSet<String> = examples.iter().map(name).collect();
+    assert_eq!(covered, declared, "an example for every AppIntent variant");
+    let mut driven = 0;
+    for intent in examples {
+        match intent.authority() {
+            IntentAuthority::Drives => {
+                driven += 1;
+                app.dispatch_intent(intent);
+            }
+            IntentAuthority::Observes => app.observe_intent(intent),
+        }
+    }
+    assert!(driven > 20, "the driven set is exercised, ClickUrl included");
+    assert!(app.pending_exit);
 }

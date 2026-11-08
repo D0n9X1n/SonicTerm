@@ -594,3 +594,52 @@ fn a_worker_section_unwinding_after_its_lock_is_abandoned_after_the_guard() {
     assert_eq!(pane.abandoned.iter().map(|entry| entry.section_seq).collect::<Vec<_>>(), vec![1]);
     assert!(pane.pending.is_none() && pane.records.is_empty());
 }
+
+/// Every production write into a pane's parser either is the VT worker's batch, which
+/// `publish_pane_vt_batch_with` publishes, or is the app's local status line, whose caller
+/// publishes; the Memory Usage report window writes its own pane, which no MCP reader can name.
+/// A new direct parser write must join this list with its publication, or a `wait_for` on its
+/// pane would skip it.
+#[test]
+fn every_production_parser_write_is_published() {
+    let app_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+    let allowed = [("pane_exit.rs", 1), ("spawn_pane.rs", 1), ("memory_report_window.rs", 2)];
+    let mut found = Vec::new();
+    let mut directories = vec![app_dir.clone()];
+    // Every module under `src/app`, nested ones included, so a write in `mcp/` or `tear_out/` counts.
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path);
+                continue;
+            }
+            let name = path.strip_prefix(&app_dir).unwrap().to_string_lossy().replace('\\', "/");
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !file.ends_with(".rs")
+                || file.ends_with("_tests.rs")
+                || file.starts_with("test_hooks")
+            {
+                // When: the `file` is a test or test hook, its parser writes build fixtures only.
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            // Real method calls only, read from the syntax tree; test-only items do not count.
+            let writes = crate::app::source_syntax_support::method_calls(
+                &source,
+                &["advance", "advance_with_replies"],
+            )
+            .unwrap_or_else(|| panic!("{name} parses"));
+            if writes > 0 {
+                found.push((name, writes));
+            }
+        }
+    }
+    found.sort();
+    let mut expected: Vec<_> =
+        allowed.iter().map(|(name, count)| (name.to_string(), *count)).collect();
+    expected.sort();
+    assert_eq!(found, expected, "a parser write was added or moved; publish it and list it here");
+    let exit = std::fs::read_to_string(app_dir.join("pane_exit.rs")).unwrap();
+    assert!(exit.contains("publish_grid_change(&pane.output_generation, &pane.change_signal)"));
+}

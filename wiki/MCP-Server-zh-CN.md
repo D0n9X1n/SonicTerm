@@ -30,7 +30,7 @@ enabled = false
 # or "any" (every pane).
 control = "agent"
 # Read tools see: "agent" (panes an agent created) or "any" (every pane).
-# A config without this line reads every pane.
+# A config without this line sees only agent-created panes.
 read = "agent"
 ```
 
@@ -38,7 +38,10 @@ read = "agent"
 | --- | --- | --- |
 | `enabled` | `false` | `true` 运行服务器；`false` 停止服务器。 |
 | `control` | `"agent"` | `"off"`、`"agent"` 或 `"any"`；见下文“控制范围”。 |
-| `read` | `"any"`（新配置文件中为 `"agent"`） | `"agent"` 或 `"any"`；见下文“读取范围”。 |
+| `read` | `"agent"` | `"agent"` 或 `"any"`；见下文“读取范围”。 |
+| `max_connections` | `4` | 同时服务的连接数，1 到 16（其他取值会被限制到该范围）。每个连接同一时间只运行一个工具调用，因此较长的 `wait_for` 会占用它的连接。只修改此项的重载只作用于新连接，不撤销任何调用。 |
+| `isolation` | `"shared"` | `"shared"` 或 `"session"`；见下文“Agent 会话”。 |
+| `create_anchor` | `"any"` | `"any"` 或 `"agent"`；见下文“Agent 会话”。 |
 
 开启方法：
 
@@ -125,13 +128,38 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 | `"agent"` | 只有 agent 创建的窗格；其他窗格以 `out_of_scope` 拒绝，且不出现在 `list_panes` 中 |
 | `"any"` | 所有窗格 |
 
-没有 `read` 的配置保持原有行为 `"any"`，因此升级永远不会收窄现有设置。SonicTerm 首次启动时写入的
-配置文件设置 `read = "agent"`，因此除非你允许，agent 无法读取无关的 SSH 或日志窗格。若希望 agent
+没有 `read` 的配置只读取 agent 创建的窗格，因此除非你允许，agent 无法读取无关的 SSH 或日志窗格。
+在 v1.4.4 及之前，缺少该键表示 `"any"`；服务器在没有该键时启动会记录一条警告，并在第一个窗口打开后显示一次通知，
+`out_of_scope` 拒绝信息也会说明恢复旧范围所需的那一行。显式的 `read = "any"` 永远不会被改变。
+在默认的 `isolation = "shared"` 下，每个 agent 会话都能看到所有 agent 创建的窗格，而不只是它自己创建的。若希望 agent
 读取你自己的窗格（例如启动它的那个窗格），请使用 `"any"`。
 
 哪些窗格属于 agent 只由 SonicTerm 自己的记录决定，从不取决于客户端：桥接程序的前导消息会把 agent
 所在窗格作为 `self_pane_id` 的默认值，但在 `"agent"` 下无法解锁任何窗格。`run_command` 会在运行中
 返回它所执行命令的输出；这由 `control` 决定，而不是 `read`。重载时修改 `read` 会丢弃所有已排队的
+请求，并结束正在进行的 `wait_for`。
+
+## Agent 会话
+
+每个连接是一个 agent 会话，其 id 由 SonicTerm 在连接时分配，客户端发送的任何内容都无法选择它。
+`create_pane` 打开的窗格属于打开它的会话，并在标签页移动和拆出后保持该所有者。`list_panes` 从
+调用方角度报告每个窗格的 `owner`：`you`、`other_agent`（仍在连接的会话）、`orphaned`（已断开的
+会话）或 `user`。
+
+`[mcp] isolation` 决定 `control` 与 `read` 中 `"agent"` 的范围：
+
+| `isolation` | `"agent"` 覆盖 |
+| --- | --- |
+| `"shared"`（默认） | 所有 agent 创建的窗格，无论由哪个会话创建，包括孤立窗格 |
+| `"session"` | 只有发起调用的会话创建的窗格；其他会话的窗格以 `out_of_scope` 拒绝，且不出现在 `list_panes` 中 |
+
+窗格比它的会话存活得更久。在 `"session"` 下，孤立窗格在你关闭它之前不能被任何 agent 控制或读取：
+重新连接的桥接程序是一个新会话，不会重新获得它，因为 `self_pane_id` 不是凭据。`"any"` 范围不受
+影响。
+
+`[mcp] create_anchor` 决定在 `control = "agent"` 下 `create_pane` 可以在哪些窗格旁打开辅助窗格。
+`"any"`（默认）表示所有窗格，因为辅助窗格从不向其锚点输入；`"agent"` 只允许该会话可控制的窗格，
+因此 agent 无法在你的窗格旁放置窗格。重载时修改 `isolation` 或 `create_anchor` 会丢弃所有已排队的
 请求，并结束正在进行的 `wait_for`。
 
 窗格文本是不可信输入：程序可以打印意在操纵 agent 的文本。服务器告知 agent 从不执行窗格文本中的
@@ -147,15 +175,39 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 | 工具 | 作用 |
 | --- | --- |
 | `create_pane` | 在某个窗格旁打开辅助窗格：向右或向下拆分，或在其窗口中新开标签页。焦点不移动。给出 `argv` 时直接运行该程序，程序退出后窗格保留，因此可用带 `exit` 的 `wait_for` 和 `read_pane` 读取其结束情况。 |
-| `send_text` | 输入文本；程序要求时以括号粘贴方式发送；`submit` 追加回车。至多 64 KiB。 |
-| `send_keys` | 发送具名按键（`Enter`、`Tab`、`Escape`、方向键、`Home`、`End`、`PageUp`、`PageDown`、`F1`–`F12`、单个字符），每个可加 `Ctrl+`、`Alt+` 或 `Shift+` 前缀，并按窗格的键盘模式编码。至多 64 个键；有一个未知名称则什么都不发送。 |
-| `run_command` | 在窗格的 shell 提示符处运行一条命令并等待结束，返回其输出和 shell 报告的退出码（`completed`，`exit_verified` 表示 SonicTerm 自己的 shell 集成是否为其担保）；若 shell 未运行任何命令就结束了该提示符则返回 `not_started`，若在其输出开始前有他人输入则返回 `interfered`，记录被淘汰或 shell 退出则返回 `lost`，超时（默认 60 s，至多 600 s）则返回 `running`。 |
+| `send_text` | 输入文本；程序要求时以括号粘贴方式发送；`submit` 追加回车。至多 64 KiB。报告 `delivery`：窗格的 writer 在 250 ms 内把它写入并 flush 到 PTY 时为 `written`（从不代表程序已读取），仍在等待时为 `queued`，writer 先停止时为 `failed`。 |
+| `send_keys` | 发送具名按键（`Enter`、`Tab`、`Escape`、方向键、`Home`、`End`、`PageUp`、`PageDown`、`F1`–`F12`、单个字符），每个可加 `Ctrl+`、`Alt+` 或 `Shift+` 前缀，并按窗格的键盘模式编码。至多 64 个键；有一个未知名称则什么都不发送。与 `send_text` 一样报告 `delivery`。 |
+| `run_command` | 在窗格的 shell 提示符处运行一条命令并等待结束，返回其输出和 shell 报告的退出码（`completed`，`exit_verified` 表示 SonicTerm 自己的 shell 集成是否为其担保）；若 shell 未运行任何命令就结束了该提示符则返回 `not_started`，若在其输出开始前有他人输入则返回 `interfered`，记录被淘汰或 shell 退出则返回 `lost`，窗格先被关闭则返回 `pane_closed`，超时（默认 60 s，至多 600 s）则返回 `running`。 |
 | `close_pane` | 关闭一个窗格；标签页的唯一窗格会关闭该标签页。主窗口的最后一个标签页永不关闭。 |
 
 `run_command` 需要 shell 集成：shell 必须用 OSC 133 `A`、`B`、`C`、`D` 标记提示符，WezTerm、
 iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有输入的文本、输入队列不为空，或上一条
 命令运行期间有人输入，它会拒绝。这项检查只能尽力而为，因为终端无法看到 shell 已读取了什么，所以
 请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。
+
+### 等待如何结束
+
+`wait_for` 报告一个 `reason`，`run_command` 报告一个 `state`。下表列出所有取值；客户端遇到未知取值时应按 `timeout`/`running` 处理。
+
+| 取值 | 工具 | 含义 |
+| --- | --- | --- |
+| `matched` | `wait_for` | 正则匹配了符合条件的行。 |
+| `quiet` | `wait_for` | 输出在 `quiet_ms` 内保持安静，且所有行都已扫描。 |
+| `exited` | `wait_for` | 窗格的进程已退出（使用 `exit` 时）。 |
+| `timeout` | `wait_for` | 先到达超时。 |
+| `completed` | `run_command` | 命令已运行并结束；见 `exit_code` 与 `exit_verified`。 |
+| `not_started` | `run_command` | shell 未运行任何命令就结束了提示符。 |
+| `interfered` | `run_command` | 在命令输出开始前有他人输入。 |
+| `lost` | `run_command` | 运行记录先被淘汰，或 shell 先退出。 |
+| `running` | `run_command` | 已超时；命令可能仍在运行。 |
+| `revoked` | 两者 | 客户端离开，或服务器停止、或 `control`、`read` 发生变化。 |
+| `pane_closed` | 两者 | 窗格先被关闭。 |
+
+`source: "stream"` 的 `wait_for` 匹配等待开始后打印的文本而非屏幕行，因此之后被 `\r` 覆盖的进度行仍可匹配；
+见 [平台集成](Platform-Integration-zh-CN)。
+
+两个工具还会报告 `output_incomplete`：对 `wait_for` 为 `missed_output || truncated || !scan_complete`（流式等待为 `context_truncated`）（等待期间写入的部分输出未被检查，因此超时不能证明什么）；
+对 `run_command` 为 `truncated || output_truncated`（返回的行可能缺少命令的部分输出）。
 
 ### 信任退出码
 
@@ -190,9 +242,28 @@ eval "$(sonicterm-mcp --shell-integration zsh)"    # zsh 5.3+，写入 ~/.zshrc
 eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+，写入 ~/.bashrc
 ```
 
+```powershell
+sonicterm-mcp --shell-integration pwsh | Out-String | Invoke-Expression   # PowerShell 7+，写入 $PROFILE
+```
+
+PowerShell 集成需要 PSReadLine，PowerShell 7 会在每个交互式控制台中加载它；没有它时脚本不加载任何内容，
+因此 `run_command` 会拒绝该窗格（`no_shell_integration`），而不是等待标记。它包装 `prompt`（D、A，以及在你的
+提示符文本之后的 B）和 PSReadLine 的 `PSConsoleHostReadLine`：ReadLine 返回一行已接受的输入时写出 C，因此多行
+`{` 代码块只算一次，用 Ctrl+C 取消的行不会运行任何内容。脚本只读取 `$LASTEXITCODE`，因此每条命令看到的值
+与没有集成时相同。该行成功时 D 的退出码为 0。失败的行若只包含 cmdlet，就不可能运行原生程序，因此退出码为 1，
+即使之前有原生命令失败也是如此。其他失败的行：产生了新的 PowerShell 错误且 `$LASTEXITCODE` 为 0 或未设置时为 1；
+`$LASTEXITCODE` 非零且没有产生新错误时取该原生退出码。两者都有的行，例如
+`Get-Item missing -ErrorAction SilentlyContinue; sh -c 'exit 4'`，以不带退出码的 D 结束，即使原生退出码与上一次
+相同也是如此：无法知道最后失败的是哪条语句，因此 `run_command` 报告 `completed` 且 `exit_code: null`，而不是
+猜测一个值。仍有一种情况不精确：调用函数或脚本（它们可能运行原生程序）且失败时未产生错误的行，会报告最后一个
+非零的原生退出码，而它可能来自更早的行。不支持 Windows PowerShell 5.1。
+
 它把自己的钩子加在已有钩子旁边，因此可以与其他 OSC 133 集成并存。但一旦加载，该窗格中嵌套 shell
 或 ssh 会话发出的标记都不带密钥，会被丢弃，所以 `run_command` 只能在窗格自己的 shell 中使用。
-PowerShell 目前还没有 SonicTerm 集成，因此在 Windows 上 `exit_verified` 始终为 `false`。该密钥用于防范
+`list_panes` 与 `read_pane` 以 `shell_integration_state` 报告最新标记的情况：`verified`（带有窗格密钥）、`unverified`
+（没有有效密钥，例如来自嵌套 shell、ssh 或打印标记的程序，无论被接受还是被丢弃）或 `none`（尚无标记）。
+它是观察到的标记证据，并不能证明当前运行的是哪个程序；旧的布尔字段 `shell_integration` 含义不变（最新提示符标记了输入起点）。
+该密钥用于防范
 来自文件、远程主机以及从未见过 shell 环境的程序的输出。以你的身份在窗格中运行、能读取 shell 内存的
 程序不在防范范围内：它本就拥有 agent 的权限。
 

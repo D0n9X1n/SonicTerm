@@ -197,7 +197,7 @@ impl App {
             // layout from and there is nothing to size panes against.
             return Vec::new();
         };
-        let viewport = self.test_viewport_override.map(|(outer, _, _)| outer);
+        let viewport = self.testing.test_viewport_override.map(|(outer, _, _)| outer);
         Self::compute_tab_pane_rects(main, main.tabs.active_index(), viewport, self.main_renderer())
     }
 

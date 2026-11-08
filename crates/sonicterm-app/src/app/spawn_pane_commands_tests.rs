@@ -282,7 +282,7 @@ fn main_tab_and_split_inherit_exact_active_pane_cwd() {
             app.new_tab("new");
         }
         let expected = if cfg!(windows) { r"C:\work\source" } else { "/work/source" };
-        let launches = app.test_pane_launches.borrow();
+        let launches = app.testing.test_pane_launches.borrow();
         assert_eq!(launches.len(), 1);
         assert_eq!(launches[0].1.cwd, Some(std::path::PathBuf::from(expected)));
     }
@@ -623,7 +623,7 @@ fn worker_spawn_roles_publish_their_own_pane_not_an_app_global() {
     let publisher = source.find("fn publish_pane_vt_batch_with<").unwrap();
     let parse = source[publisher..].find("process_pane_vt_batch_with(").unwrap();
     let publish = source[publisher..]
-        .find("handles.output_generation.fetch_add(1, Ordering::Release)")
+        .find("publish_grid_change(&handles.output_generation, &handles.change_signal)")
         .unwrap();
     assert!(parse < publish);
 }

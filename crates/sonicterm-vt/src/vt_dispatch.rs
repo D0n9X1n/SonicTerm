@@ -12,7 +12,13 @@ impl Perform for Performer {
             0x07 => self.events.push(VtEvent::Bell),
             0x08 => self.grid.backspace(),
             0x09 => self.grid.tab(),
-            0x0A..=0x0C => self.advance_hard_line(self.erase_fill_cell(), false),
+            0x0A..=0x0C => {
+                if let Some(tap) = self.tap.as_mut() {
+                    // A stream reader armed the `tap`: a line feed ends the recorded line.
+                    tap.push('\n');
+                }
+                self.advance_hard_line(self.erase_fill_cell(), false);
+            }
             0x0D => self.grid.carriage_return(),
             _ => {
                 // When: byte is an unhandled C0 control, leave cells unchanged while keeping the parser outside ground.
@@ -642,8 +648,16 @@ impl Perform for Performer {
                 //   C → command output start
                 //   D [; exit_code] → command finished
                 let kind = params.get(1).and_then(|param| param.first().copied());
-                let Some(authenticated) = self.admit_shell_marker(params.get(2..).unwrap_or(&[]))
-                else {
+                let admitted = self.admit_shell_marker(params.get(2..).unwrap_or(&[]));
+                // The newest marker decides the observed state, a dropped one included: a nested
+                // shell's tokenless markers mean the shell in front is not the verified one.
+                self.shell_state = if admitted == Some(true) {
+                    super::ShellIntegrationState::Verified
+                } else {
+                    // Not authenticated: admitted without a token, or refused.
+                    super::ShellIntegrationState::Unverified
+                };
+                let Some(authenticated) = admitted else {
                     // When: `admit_shell_marker` refused the marker (a wrong token, or tokenless
                     // after the pane authenticated), it changes neither the grid nor the events.
                     tracing::debug!(target: "vt", "dropped an unauthenticated OSC 133 marker");

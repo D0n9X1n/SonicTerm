@@ -96,6 +96,9 @@ windows = { workspace = true, features = [
 [dev-dependencies]
 # Temporary directories for launch-argument and working-directory tests.
 tempfile = "3"
+# Parses this crate's own source in structural source tests (test-support gates, item cfgs), so
+# they read attributes and items rather than matching text.
+syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
 # For the software-adapter detection test, which enumerates the host's real
 # adapters. A dev-dependency rather than a dependency: the app reaches wgpu
 # through `sonicterm-gpu` and must not gain a direct one.

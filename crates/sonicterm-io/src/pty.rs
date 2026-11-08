@@ -8,7 +8,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
     thread,
@@ -183,10 +183,11 @@ struct PtyWriterProgress {
     /// Held only around one admission and once at writer exit, so ordinal order is channel order
     /// and no admission succeeds after the writer recorded its end.
     admission: Mutex<()>,
-    /// User-input writes admitted, wrapping; compared modulo 2^20.
-    input_admitted: AtomicU32,
-    /// User-input writes completed (flushed), wrapping; parser replies never count.
-    input_completed: AtomicU32,
+    /// User-input writes admitted since the PTY started; never wraps in practice. Progress
+    /// diagnostics compare it modulo 2^20; delivery receipts compare it whole.
+    input_admitted: AtomicU64,
+    /// User-input writes completed (flushed) since the PTY started; parser replies never count.
+    input_completed: AtomicU64,
     /// Per ordinal modulo [`INPUT_SLOTS`]: `(ordinal << 44) | admitted_ms`.
     admitted_at: [AtomicU64; INPUT_SLOTS],
     /// [`ShellSpawnOpts::input_seen`], marked by every admitted input message except a draft.
@@ -195,6 +196,100 @@ struct PtyWriterProgress {
     writer_on: AtomicU8,
     /// Whether and how the writer stopped.
     terminal: AtomicU8,
+}
+
+/// What one PTY's input and reply queues hold, from [`PtyHandle::queue_footprint`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PtyQueueFootprint {
+    /// User input waiting in the channel, in memory.
+    pub input_queued_bytes: u64,
+    /// The message (user input or a reply turn) the writer took and is writing, in memory.
+    pub writer_in_flight_bytes: u64,
+    /// Parser replies in the resident tier, in memory.
+    pub reply_resident_bytes: u64,
+    /// Parser replies spilled to the private temporary file, on disk.
+    pub reply_spill_bytes: u64,
+}
+
+/// One queue footprint from the counters a handle and its senders share.
+// Ordering: queued_bytes and in_flight_bytes Relaxed; accounting snapshots, not synchronization.
+fn queue_footprint(
+    queued_bytes: &AtomicUsize,
+    progress: &PtyWriterProgress,
+    replies: &PtyReplySender,
+) -> PtyQueueFootprint {
+    let reply_stats = replies.stats();
+    PtyQueueFootprint {
+        input_queued_bytes: queued_bytes.load(Ordering::Relaxed) as u64,
+        writer_in_flight_bytes: progress.in_flight_bytes.load(Ordering::Relaxed) as u64,
+        reply_resident_bytes: reply_stats.resident_bytes,
+        reply_spill_bytes: reply_stats.live_bytes,
+    }
+}
+
+impl PtyQueueFootprint {
+    /// Memory the queues hold: queued input, the writer's message, resident replies. Disk is apart.
+    #[must_use]
+    pub fn resident_bytes(&self) -> u64 {
+        self.input_queued_bytes + self.writer_in_flight_bytes + self.reply_resident_bytes
+    }
+}
+
+/// Where an admitted user-input message stands, from [`PtyDeliveryProbe::status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyDelivery {
+    /// The writer wrote and flushed it to the PTY master. Nothing says the program read it.
+    Written,
+    /// It is still queued or being written.
+    Queued,
+    /// The writer stopped before writing it; it will never be written.
+    Failed,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's action between `status`'s two loads, to pin the interleaving with the writer.
+    pub(crate) static BETWEEN_STATUS_LOADS: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Reads a pane's input receipts without the event loop: cloneable, atomics only.
+#[derive(Debug, Clone)]
+pub struct PtyDeliveryProbe {
+    progress: Arc<PtyWriterProgress>,
+}
+
+impl PtyDeliveryProbe {
+    /// A probe over `progress`, for unit tests that drive the counters directly.
+    #[cfg(test)]
+    fn for_tests(progress: Arc<PtyWriterProgress>) -> Self {
+        Self { progress }
+    }
+
+    /// Whether input up to `ticket` (from [`last_admitted_ticket`] on the admitting thread) was
+    /// written, is still pending, or never will be. The writer's end is read before its completion
+    /// count: every completion is published before the end is recorded, so a stopped writer's
+    /// count is final and a write that completed as it stopped is still `Written`.
+    // Ordering: terminal Acquire, then input_completed Acquire; the writer stores completion Release
+    // before record_terminal's Release store of terminal.
+    #[must_use]
+    pub fn status(&self, ticket: u64) -> PtyDelivery {
+        let running = self.progress.terminal.load(Ordering::Acquire) == TERMINAL_RUNNING;
+        #[cfg(test)]
+        BETWEEN_STATUS_LOADS.with_borrow(|hook| hook.as_ref().map(|hook| hook()));
+        if self.progress.input_completed.load(Ordering::Acquire) >= ticket {
+            // When: `input_completed` reached the `ticket`, every message up to it was flushed.
+            return PtyDelivery::Written;
+        }
+        if running {
+            // The writer still runs, so the rest may yet be written.
+            PtyDelivery::Queued
+        } else {
+            // When: not `running`, the writer stopped first; admission had already refused anything
+            // newer.
+            PtyDelivery::Failed
+        }
+    }
 }
 
 /// Owned, cloneable sender for a child process's input channel.
@@ -583,6 +678,12 @@ impl PtyHandle {
         self.writer_progress.input_progress()
     }
 
+    /// A handle another thread can hold to learn whether input it was admitted reached the PTY.
+    #[must_use]
+    pub fn delivery_probe(&self) -> PtyDeliveryProbe {
+        PtyDeliveryProbe { progress: Arc::clone(&self.writer_progress) }
+    }
+
     /// Bytes waiting in this pane's PTY input channel.
     ///
     /// The exact figure, not a slot count times an assumed message size. A
@@ -611,6 +712,14 @@ impl PtyHandle {
     #[must_use]
     pub fn reply_sender(&self) -> PtyReplySender {
         self.replies.clone()
+    }
+
+    /// What this PTY's input and reply queues hold now, memory and disk apart. Each message counts
+    /// once: queued (or in the reply spool) until the writer takes it, then in flight until written.
+    // Ordering: in_flight_bytes Relaxed; an accounting snapshot like queued_input_bytes.
+    #[must_use]
+    pub fn queue_footprint(&self) -> PtyQueueFootprint {
+        queue_footprint(&self.queued_input_bytes, &self.writer_progress, &self.replies)
     }
 
     /// Sample queue occupancy and native writer progress; fields are concurrent observations, not one transaction.
@@ -767,7 +876,7 @@ mod pty_shell;
 #[cfg(all(test, unix))]
 use pty_child::unix_child_exit_pending;
 use pty_child::{publish_exit, terminate_child_for_platform, terminate_child_without_reap};
-pub use pty_input::{max_pty_queued_input_bytes, pty_input_message_allowed};
+pub use pty_input::{last_admitted_ticket, max_pty_queued_input_bytes, pty_input_message_allowed};
 use pty_input::{pty_input_channel, try_queue_pty_input};
 #[cfg(windows)]
 use pty_native::{cancel_io_within, cancel_owned_target};

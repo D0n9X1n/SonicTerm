@@ -376,3 +376,84 @@ fn an_inherited_shell_token_never_reaches_the_child() {
     apply_extra_env(&mut builder, &[(SHELL_TOKEN_ENV.to_owned(), "own".to_owned())]);
     assert_eq!(env_str(&builder, SHELL_TOKEN_ENV), "own");
 }
+
+/// SonicTerm's PowerShell integration under a real ConPTY: a child exiting 3 twice, a failing
+/// cmdlet and a cancelled `{` line each end with their own D (3, 3, 1, then a D without C), every
+/// marker carries the token, and the shell's environment no longer holds it.
+#[cfg(target_os = "windows")]
+#[test]
+fn powershell_integration_marks_commands_under_conpty() {
+    let _live_pty_guard = lock_live_pty_test();
+    let shell = resolve_windows_default_shell_with(
+        || path_lookup("pwsh.exe"),
+        registered_pwsh,
+        windowsapps_store_pwsh,
+        || None,
+    );
+    assert_eq!(shell_file_name(&shell), "pwsh.exe", "PowerShell 7 is required");
+    let script = std::env::temp_dir().join(format!("sonicterm-pwsh-{}.ps1", std::process::id()));
+    std::fs::write(&script, include_str!("../../../scripts/shell-integration.ps1")).unwrap();
+    let token = "0123456789abcdef0123456789abcdef";
+    let opts = ShellSpawnOpts {
+        extra_env: vec![("SONICTERM_SHELL_TOKEN".into(), token.into())],
+        ..ShellSpawnOpts::default()
+    };
+    let load = format!(". '{}'", script.to_string_lossy().replace('\'', "''"));
+    let args = ["-NoLogo", "-NoProfile", "-NoExit", "-Command", &load].map(String::from);
+    let pty = PtyHandle::spawn_with_args_and_opts(&shell, &args, 120, 30, opts).unwrap();
+    let mut output = Vec::new();
+    // Answer each cursor position query PSReadLine sends, as a terminal would, while collecting.
+    let pump = |wait: Duration, output: &mut Vec<u8>| {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            while let Ok(chunk) = pty.out_rx.try_recv() {
+                let queries = chunk.windows(4).filter(|window| window == b"\x1b[6n").count();
+                for _ in 0..queries {
+                    pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).unwrap();
+                }
+                output.extend_from_slice(&chunk);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    pump(Duration::from_secs(8), &mut output);
+    let child = format!("& '{}' -NoProfile -Command 'exit 3'\r", shell.replace('\'', "''"));
+    // A cmdlet error, then a native failure repeating the previous code (3), on one line: which
+    // ended it is unknown, so no code, though `$LASTEXITCODE` did not change.
+    let mixed = format!("Get-Item C:\\no\\such\\path -ErrorAction SilentlyContinue; {child}");
+    let lines: [&[u8]; 7] = [
+        child.as_bytes(),
+        child.as_bytes(),
+        b"Get-Item C:\\no\\such\\path\r",
+        mixed.as_bytes(),
+        b"if ($true) {\r",
+        b"\x03",
+        b"Write-Output ('token' + '-[' + $env:SONICTERM_SHELL_TOKEN + ']')\r",
+    ];
+    for line in lines {
+        pty.send_input_nonblocking(line.to_vec()).unwrap();
+        pump(Duration::from_secs(4), &mut output);
+    }
+    let _ = std::fs::remove_file(&script);
+    let text = String::from_utf8_lossy(&output).replace(token, "<T>");
+    let markers: Vec<&str> = text
+        .split("\x1b]133;")
+        .skip(1)
+        .filter_map(|rest| rest.split('\x07').next())
+        .filter(|marker| marker.ends_with("sonicterm_token=<T>"))
+        .collect();
+    // Each D's code, `None` for a D that carries none.
+    let ends: Vec<Option<i32>> = markers
+        .iter()
+        .filter_map(|marker| marker.strip_prefix('D'))
+        .map(|rest| rest.strip_prefix(';').and_then(|rest| rest.split(';').next()?.parse().ok()))
+        .collect();
+    assert_eq!(
+        ends,
+        [Some(3), Some(3), Some(1), None, Some(0), Some(0)],
+        "D statuses: {markers:?}"
+    );
+    let kinds: String = markers.iter().map(|marker| &marker[..1]).collect();
+    assert!(kinds.contains("ABDAB"), "the cancelled line's D follows no C: {kinds}");
+    assert!(text.contains("token-[]"), "the shell's environment kept the token: {text}");
+}

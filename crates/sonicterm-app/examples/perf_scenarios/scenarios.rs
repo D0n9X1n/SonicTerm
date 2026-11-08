@@ -67,9 +67,17 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     // S13 types into an idle pane beside one that floods without pause: `default` is two side by
     // side, `sustained-4` a 2x2 grid with one flooding. One short run a side per variant keeps the
     // PR budget; a short run types 300 characters, so a two-run counters set holds 600 samples.
+    // `wide-8`, `wide-16` and `wide-32` are equal 4x2, 4x4 and 4x8 grids, one pane flooding; the
+    // performance workflow runs them only for a release tag, so they cost the PR pipeline nothing.
     capped(
-        spec("S13", "sustained multi-pane flood", &["default", "sustained-4"], 300, 240),
-        &[("default", 1), ("sustained-4", 1)],
+        spec(
+            "S13",
+            "sustained multi-pane flood",
+            &["default", "sustained-4", "wide-8", "wide-16", "wide-32"],
+            300,
+            240,
+        ),
+        &[("default", 1), ("sustained-4", 1), ("wide-8", 1), ("wide-16", 1), ("wide-32", 1)],
     ),
 ];
 

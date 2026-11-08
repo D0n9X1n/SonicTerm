@@ -464,7 +464,7 @@ pub(super) fn spawn_pane_workers(
         .name(vt_thread_name.into())
         .spawn(move || {
             let mut command_started: Option<Instant> = None;
-            let mut replies_failed = false;
+            let mut replies = super::reply_delivery::ReplyDelivery::default();
             let mut flush = OutputFlush::new(pane_id, &worker_handles);
             let send_output = || {
                 if let Some(proxy) = redraw_proxy.as_ref() {
@@ -488,18 +488,16 @@ pub(super) fn spawn_pane_workers(
                             &mut flush.sync_latch,
                             redraw_proxy.as_ref(),
                             |reply| {
-                                if replies_failed {
-                                    // When: replies_failed is latched, keep consuming output and observing exit without repeated errors.
+                                if !replies.accepting() {
+                                    // When: `replies` is not accepting after a failure, keep consuming output and observing exit without repeated errors.
                                     return;
                                 }
                                 let rejected_bytes = reply.len();
-                                if let Err(error) = in_tx_reply.send(reply) {
-                                    // Report storage/native failure once without abandoning output or exit observation.
-                                    replies_failed = true;
-                                    if !input_state.is_closing() {
-                                        tracing::warn!(pane_id, rejected_bytes, %error, "terminal reply delivery failed");
-                                    }
-                                }
+                                let result = in_tx_reply.send(reply);
+                                let closing = input_state.is_closing();
+                                replies.report(pane_id, rejected_bytes, &result, closing, || {
+                                    in_tx_reply.stats()
+                                });
                             },
                         );
                         flush.after_batch(&worker_handles, Instant::now(), send_output);
@@ -701,7 +699,7 @@ impl App {
         size: Option<(u16, u16)>,
     ) -> PaneState {
         #[cfg(test)]
-        self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
+        self.testing.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
         let (cols, rows) = size.unwrap_or_else(|| {
             self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((80, 24))
         });
@@ -782,7 +780,9 @@ pub(in crate::app) use output::send_output_redraw;
 use output::{publish_sync_output, send_pane_output};
 #[path = "spawn_pane_vt.rs"]
 mod vt;
-pub(in crate::app) use vt::{process_pane_vt_batch_and_publish, publish_pane_vt_batch_with};
+pub(in crate::app) use vt::{
+    process_pane_vt_batch_and_publish, publish_grid_change, publish_pane_vt_batch_with,
+};
 
 #[path = "spawn_pane_commands.rs"]
 mod commands;
@@ -841,7 +841,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 (counters, echo_before, parsed_at)
             {
                 // the watch was armed at the pre-read, so this section's facts are derived now.
-                // The worker is output_generation's sole writer, so the batch publishes this load plus one.
+                // The worker is output_generation's sole writer while it runs (the app writes only after
+                // the worker reported the exit and stopped), so the batch publishes this load plus one.
                 let section = super::echo_watch::SectionFacts {
                     consumed: result.0,
                     parsed_at,

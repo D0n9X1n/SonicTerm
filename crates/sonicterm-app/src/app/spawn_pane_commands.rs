@@ -223,7 +223,7 @@ impl App {
     }
 
     pub(in crate::app) fn resize_visible_panes(&mut self) {
-        let viewport = self.test_viewport_override;
+        let viewport = self.testing.test_viewport_override;
         if let Some(window) = self.main_mut() {
             window.complete_topology_change(
                 super::super::TopologyChange {

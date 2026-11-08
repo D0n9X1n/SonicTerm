@@ -118,6 +118,8 @@ jobs:
     env:
       # Fail instead of building FreeType without HVF, and fail the PingFang render test instead of skipping.
       SONICTERM_REQUIRE_HVF: "1"
+      # The runner image ships PowerShell 7, so the pwsh shell integration test must run, not skip.
+      SONICTERM_REQUIRE_PWSH: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # The previous-release check resolves the last release tag, so it needs every tag and commit.

@@ -57,6 +57,11 @@ pub(super) struct Client {
 }
 
 impl Client {
+    /// Close the client's end, as a bridge that exits does.
+    pub(super) fn hang_up(&mut self) {
+        self.to_server = None;
+    }
+
     /// Send one JSON value as a line.
     pub(super) fn send(&mut self, value: &Value) {
         let mut line = serde_json::to_vec(value).unwrap();
@@ -446,4 +451,92 @@ fn the_call_slot_is_free_before_the_reply_is_written() {
     assert!(!writes.is_empty(), "the worker wrote the reply");
     assert!(writes.iter().all(|taken| !taken), "the slot was still taken while the reply went out");
     assert!(!in_flight.load(Ordering::Acquire));
+}
+
+/// Start a `wait_for` that never matches on `shared` with a 10 s recheck, through a real connection
+/// and a fake loop, and return once its worker is parked on the pane's signal; the waiter count
+/// tells when it ends. Every end-to-end close below must beat the recheck, so it can only come from a wake.
+fn sleeping_wait() -> (Arc<McpShared>, Client, std::thread::JoinHandle<()>) {
+    let shared = McpShared::new(McpControl::Agent, None);
+    *shared.recheck_override.lock() = Some(Duration::from_secs(10));
+    let entry = test_entry(20, 4, 100);
+    let (notifier, parked) = channel();
+    *entry.change_signal.park_notifier.lock() = Some(notifier);
+    let pane_id = entry.pane_id;
+    let looper = fake_loop(&shared, entry);
+    let (mut client, transport) = connection();
+    spawn_connection(&shared, transport);
+    client.send(&tool(
+        1,
+        "wait_for",
+        json!({ "pane_id": pane_id, "regex": "never", "timeout_ms": 60000 }),
+    ));
+    // Parked means the worker's wait holds the signal's mutex and found nothing changed, so only a
+    // wake can end it before its 10 s recheck.
+    parked.recv_timeout(Duration::from_secs(5)).expect("the connection's wait parked");
+    (shared, client, looper)
+}
+
+/// Whether the connection's wait ended (unregistered) within five seconds, well under its 10 s
+/// recheck.
+fn wait_ended(shared: &McpShared) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if shared.waiter_count() == 0 {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
+/// The client hanging up ends the connection's running wait at once through the reader's close.
+#[test]
+fn a_reader_disconnect_wakes_the_running_wait() {
+    let (shared, mut client, looper) = sleeping_wait();
+    let hung_up = Instant::now();
+    client.to_server = None;
+    assert!(wait_ended(&shared), "the wait outlived its client by {:?}", hung_up.elapsed());
+    assert!(wait_for_connections(&shared, 0), "the connection outlived its client");
+    shared.stop();
+    looper.join().unwrap();
+}
+
+/// A reply the client no longer reads fails to write, which closes the connection and wakes its
+/// running wait at once, though the client never hung up its sending side.
+#[test]
+fn a_writer_failure_wakes_the_running_wait() {
+    let (shared, client, looper) = sleeping_wait();
+    let Client { mut to_server, from_server } = client;
+    drop(from_server);
+    let failed = Instant::now();
+    // The reader answers `ping` itself; writing that answer fails because nobody reads it.
+    let mut line = serde_json::to_vec(&call(2, "ping", json!({}))).unwrap();
+    line.push(b'\n');
+    to_server.as_mut().unwrap().write_all(&line).unwrap();
+    assert!(wait_ended(&shared), "the wait outlived its failed writer by {:?}", failed.elapsed());
+    assert!(wait_for_connections(&shared, 0), "the connection outlived its failed writer");
+    drop(to_server);
+    shared.stop();
+    looper.join().unwrap();
+}
+
+/// A configured limit replaces the default: with `max_connections = 2` the third connection is
+/// closed at once.
+#[test]
+fn a_configured_connection_limit_is_enforced() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    shared.set_connection_limit(2);
+    let mut clients = Vec::new();
+    for _ in 0..2 {
+        let (client, transport) = connection();
+        spawn_connection(&shared, transport);
+        clients.push(client);
+    }
+    assert!(wait_for_connections(&shared, 2));
+    let (mut refused, transport) = connection();
+    spawn_connection(&shared, transport);
+    assert!(refused.sees_eof());
+    assert_eq!(shared.connections.load(Ordering::Acquire), 2);
+    shared.stop();
 }

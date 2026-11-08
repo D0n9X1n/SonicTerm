@@ -49,3 +49,32 @@ fn an_unannounced_wait_ends_at_its_deadline() {
     assert_eq!(signal.wait_past(0, Instant::now() + Duration::from_millis(30)), 0);
     assert!(started.elapsed() >= Duration::from_millis(30));
 }
+
+/// Closing wakes every waiter and is remembered: a later wait past the close returns at once.
+#[test]
+fn closing_wakes_waiters_and_stays_closed() {
+    let signal = Arc::new(PaneSignal::default());
+    let seen = signal.sequence();
+    let waiter = {
+        let signal = Arc::clone(&signal);
+        std::thread::spawn(move || signal.wait_past(seen, Instant::now() + Duration::from_secs(10)))
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    signal.close();
+    assert_eq!(waiter.join().unwrap(), seen + 1);
+    assert!(signal.is_closed());
+    let started = Instant::now();
+    signal.wait_past(seen, Instant::now() + Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+/// A waiter arriving after the close, holding the sequence read *after* it, never sleeps.
+#[test]
+fn a_wait_after_the_close_returns_at_once() {
+    let signal = PaneSignal::default();
+    signal.close();
+    let seen = signal.sequence();
+    let started = Instant::now();
+    signal.wait_past(seen, Instant::now() + Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(1), "a closed signal slept");
+}

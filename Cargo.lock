@@ -3646,6 +3646,7 @@ dependencies = [
  "sonicterm-types",
  "sonicterm-ui",
  "sonicterm-vt",
+ "syn 2.0.119",
  "tempfile",
  "tracing",
  "tracing-subscriber",

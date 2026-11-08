@@ -467,6 +467,7 @@ fn clip_shows_each_outcome_with_its_source() {
     let cases = [
         (ClipOutcome::Written(2_150), 1, tab, "Clip: 2.10 KB by #2", StatusTone::Value),
         (ClipOutcome::Failed, 1, tab, "Clip: ✗ failed by #2", StatusTone::Error),
+        (ClipOutcome::Denied, 1, tab, "Clip: ⚠ write denied by #2", StatusTone::Warn),
         (
             ClipOutcome::ReadRefused,
             1_000,

@@ -225,16 +225,19 @@ jobs:
             shard: S7-S4
             scenarios: S7 S4 S1/atlas-retry S8 S6/selection-drag
             laps: ""
+            release_scenarios: ""
           - platform: macOS
             runner: macos-15
             shard: S9-S10sync
             scenarios: S10/sync S9 S11 S6 S1 S5 S6/rest S1/status-line S12 S12/status-line S3
             laps: S9
+            release_scenarios: ""
           - platform: macOS
             runner: macos-15
             shard: S10-S11release
             scenarios: S10 S11/release S2 S2/flood S6/flood S13 S13/sustained-4
             laps: ""
+            release_scenarios: S13/wide-8 S13/wide-16 S13/wide-32
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
       # itself, not a pull request's merge ref.
@@ -346,12 +349,18 @@ jobs:
           RUN_LENGTH: ${{ steps.refs.outputs.length }}
           SCENARIOS: ${{ matrix.scenarios }}
           LAPS: ${{ matrix.laps }}
+          RELEASE_SCENARIOS: ${{ matrix.release_scenarios }}
           PRODUCER_ATTEMPT: ${{ needs.perf-build-macos.outputs.attempt }}
           PRODUCER_MANIFEST: ${{ needs.perf-build-macos.outputs.manifest_sha256 }}
           PERF_JOB_NAME: ${{ matrix.platform }} before/after comparison (${{ matrix.shard }})
           PERF_SHARD: ${{ matrix.shard }}
         run: |
           read -ra scenarios <<<"$SCENARIOS"
+          # A release comparison (full-length runs) adds the release-only scenarios, S13's wide layouts.
+          if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_SCENARIOS" ]; then
+            read -ra release_scenarios <<<"$RELEASE_SCENARIOS"
+            scenarios+=("${release_scenarios[@]}")
+          fi
           # A pull request fits 35 minutes with short runs and two counters runs; a release runs --runs of each.
           run_flags=(--counters)
           if [ "$RUN_LENGTH" = "short" ]; then
@@ -420,16 +429,19 @@ jobs:
             shard: S7
             scenarios: S7 S1/status-line S12/status-line
             laps: ""
+            release_scenarios: ""
           - platform: Windows
             runner: windows-latest
             shard: S9-S10
             scenarios: S9 S10 S6/flood S6/selection-drag S2/flood
             laps: S9
+            release_scenarios: ""
           - platform: Windows
             runner: windows-latest
             shard: S2-S10sync
             scenarios: S2 S10/sync S6/rest S13 S13/sustained-4
             laps: ""
+            release_scenarios: S13/wide-8 S13/wide-16 S13/wide-32
           - platform: Windows
             runner: windows-latest
             shard: S4-S5-S11
@@ -437,6 +449,7 @@ jobs:
             # (CPU-adapter control) presenter variants twice: 17.5 min before, about 26.4 min projected.
             scenarios: S4 S5 S11 S11/release S11/gdi S11/wgpu
             laps: ""
+            release_scenarios: ""
           - platform: Windows
             runner: windows-latest
             shard: S1-S3-S6-S8-S12
@@ -448,6 +461,7 @@ jobs:
             # exact-head CI run is the measurement.
             scenarios: S1 S3 S6 S8 S12 S1/atlas-retry
             laps: ""
+            release_scenarios: ""
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
       # itself, not a pull request's merge ref.
@@ -545,10 +559,16 @@ jobs:
           RUN_LENGTH: ${{ steps.refs.outputs.length }}
           SCENARIOS: ${{ matrix.scenarios }}
           LAPS: ${{ matrix.laps }}
+          RELEASE_SCENARIOS: ${{ matrix.release_scenarios }}
           PERF_JOB_NAME: ${{ matrix.platform }} before/after comparison (${{ matrix.shard }})
           PERF_SHARD: ${{ matrix.shard }}
         run: |
           read -ra scenarios <<<"$SCENARIOS"
+          # A release comparison (full-length runs) adds the release-only scenarios, S13's wide layouts.
+          if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_SCENARIOS" ]; then
+            read -ra release_scenarios <<<"$RELEASE_SCENARIOS"
+            scenarios+=("${release_scenarios[@]}")
+          fi
           # A pull request fits 35 minutes with short runs and two counters runs; a release runs --runs of each.
           run_flags=(--counters)
           if [ "$RUN_LENGTH" = "short" ]; then

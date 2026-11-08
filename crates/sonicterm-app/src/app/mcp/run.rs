@@ -11,7 +11,6 @@ use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use sonicterm_cfg::config::McpControl;
 use sonicterm_grid::grid::{Grid, PinnedRun};
 
 use super::control_loop::{has_control_character, Refusal};
@@ -26,6 +25,9 @@ pub(crate) const DEFAULT_RUN_WAIT: Duration = Duration::from_secs(60);
 pub(crate) const MAX_RUN_WAIT: Duration = Duration::from_secs(600);
 /// How often the worker reads the pinned record.
 const RUN_POLL: Duration = Duration::from_millis(50);
+/// Longest a run wait sleeps on the pane's change signal before it rechecks typing, which
+/// announces nothing, and revocation, which a missed wake would otherwise leave unseen.
+const RUN_RECHECK: Duration = Duration::from_millis(250);
 
 /// How long `finish` waits for the parser to read a run's output before reporting it truncated.
 const FINISH_WAIT: Duration = Duration::from_millis(250);
@@ -151,7 +153,7 @@ impl App {
     // refused start; run_typed_at SeqCst publishes the reset.
     pub(crate) fn mcp_run_start(
         &mut self,
-        control: McpControl,
+        access: super::agents::Access,
         pane_id: u64,
         command: &str,
     ) -> LoopReply {
@@ -162,7 +164,7 @@ impl App {
                 "the command holds a control character".into(),
             );
         }
-        if let Err(refusal) = self.authorize_control(control, pane_id, false) {
+        if let Err(refusal) = self.authorize_control(access, pane_id, false) {
             // When: `authorize_control` refused the pane, nothing runs.
             return refusal.reply();
         }
@@ -249,9 +251,23 @@ pub(crate) enum RunState {
     Running,
     /// The client went away or the server stopped or changed.
     Revoked,
+    /// The pane was closed before the run ended.
+    PaneClosed,
 }
 
 impl RunState {
+    /// Every state, for the documentation check.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Completed,
+        Self::NotStarted,
+        Self::Interfered,
+        Self::Lost,
+        Self::Running,
+        Self::Revoked,
+        Self::PaneClosed,
+    ];
+
     /// The state's spelling in results.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -261,6 +277,7 @@ impl RunState {
             Self::Lost => "lost",
             Self::Running => "running",
             Self::Revoked => "revoked",
+            Self::PaneClosed => "pane_closed",
         }
     }
 }
@@ -281,8 +298,10 @@ pub(crate) struct RunOutcome {
     pub(crate) exit_verified: bool,
 }
 
-/// Poll the pinned record until the run ends, then read its result. Runs on the connection's
-/// worker, never on the loop; `started` is dropped on return, which frees the pane.
+/// Check the pinned record until the run ends, then read its result. Between checks the wait
+/// sleeps on the pane's change signal, which output (the shell's markers), exit, pane close and
+/// server revocation announce; a busy parser is retried on the short poll. Runs on the
+/// connection's worker, never on the loop; `started` is dropped on return, which frees the pane.
 // Ordering: run_typed_at SeqCst load pairs with claim_typing_stamp's exchange.
 pub(crate) fn wait_run(
     shared: &McpShared,
@@ -290,9 +309,34 @@ pub(crate) fn wait_run(
     timeout: Duration,
     scope: &CallScope,
 ) -> RunOutcome {
+    wait_run_every(shared, started, timeout, scope, RUN_RECHECK)
+}
+
+/// [`wait_run`] with its recheck interval given, so a test can lengthen it past any wake it checks.
+// Ordering: run_typed_at SeqCst load pairs with claim_typing_stamp's exchange.
+pub(crate) fn wait_run_every(
+    shared: &McpShared,
+    started: RunStarted,
+    timeout: Duration,
+    scope: &CallScope,
+    recheck: Duration,
+) -> RunOutcome {
     let deadline = Instant::now() + timeout;
     let entry = &started.entry;
+    let _waiter = shared.register_waiter(&entry.change_signal);
+    // When the run wait first saw the pane closed; a busy parser is retried at most this long.
+    let mut closed_since: Option<Instant> = None;
     loop {
+        #[cfg(test)]
+        RUN_CHECKS.with(|checks| checks.set(checks.get() + 1));
+        // Read before anything is inspected, so a change during the checks moves past it.
+        let seen = entry.change_signal.sequence();
+        // Read before the pinned record: markers published before the close are in the record read
+        // below, so a run that ended before its pane closed is still reported as it ended.
+        let closed = entry.change_signal.is_closed();
+        if closed && closed_since.is_none() {
+            closed_since = Some(Instant::now());
+        }
         let revoked = scope.revoked(shared);
         let pinned = entry
             .parser
@@ -302,16 +346,36 @@ pub(crate) fn wait_run(
         // already visible here, because the stamp is published before the bytes are queued.
         let typed_at = typing_instant(entry.run_typed_at.load(Ordering::SeqCst));
         let exited = entry.exit_status.get().is_some();
+        let busy = pinned.is_none();
         if let Some(state) = run_state(pinned.flatten(), typed_at, exited, revoked) {
             // When: `run_state` decided the run ended, its result is read below.
-            return finish(&started, state);
+            return finish(&started, state, close_budget(closed_since));
         }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        let drained = closed_since
+            .is_some_and(|since| now.duration_since(since) >= super::tools_read::CLOSE_DRAIN);
+        if closed && (!busy || drained) {
+            // When: the pane was `closed` before its record was read and the run had not ended,
+            // or the parser stayed `busy` through the `CLOSE_DRAIN`, the run can no longer end.
+            return finish(&started, RunState::PaneClosed, close_budget(closed_since));
+        }
+        if now >= deadline {
             // When: the `deadline` passed, the run is reported as still running.
-            return finish(&started, RunState::Running);
+            return finish(&started, RunState::Running, close_budget(closed_since));
         }
-        std::thread::sleep(RUN_POLL);
+        if busy {
+            // When: the parser was `busy`, nothing announces its release, so retry on the short poll.
+            std::thread::sleep(RUN_POLL.min(deadline - now));
+            continue;
+        }
+        entry.change_signal.wait_past(seen, deadline.min(now + recheck));
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many checks this thread's run waits made, so a test tells a signalled wake from polling.
+    pub(crate) static RUN_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Whether a run ended, given its pinned record (`None` while the parser was busy or the pin is
@@ -358,10 +422,19 @@ pub(crate) fn exit_verified(run: &PinnedRun) -> bool {
     run.output_authenticated && run.end_authenticated
 }
 
+/// How long [`finish`] may wait for the parser: [`FINISH_WAIT`] normally, and only what is left of
+/// the [`CLOSE_DRAIN`](super::tools_read::CLOSE_DRAIN) once the pane was seen closed, so a closed
+/// pane's run returns within that one bound however busy its parser stays.
+fn close_budget(closed_since: Option<Instant>) -> Duration {
+    closed_since.map_or(FINISH_WAIT, |since| {
+        super::tools_read::CLOSE_DRAIN.saturating_sub(since.elapsed()).min(FINISH_WAIT)
+    })
+}
+
 /// Release the pin and, for a completed run, read its output from the C row to the D row. The
-/// parser wait is bounded; on a miss the output is reported truncated and the drop of `started`
-/// frees the pane.
-fn finish(started: &RunStarted, state: RunState) -> RunOutcome {
+/// parser wait is bounded by `wait`; on a miss the output is reported truncated, and the drop of
+/// `started` frees the pane either way.
+fn finish(started: &RunStarted, state: RunState, wait: Duration) -> RunOutcome {
     let mut outcome = RunOutcome {
         state,
         exit_code: None,
@@ -370,8 +443,8 @@ fn finish(started: &RunStarted, state: RunState) -> RunOutcome {
         output_truncated: false,
         exit_verified: false,
     };
-    let Some(mut parser) = started.entry.parser.try_lock_for(FINISH_WAIT) else {
-        // When: the parser stayed busy past `FINISH_WAIT`, the output cannot be read in time.
+    let Some(mut parser) = started.entry.parser.try_lock_for(wait) else {
+        // When: the parser stayed busy past `wait`, the output cannot be read in time.
         outcome.truncated = state == RunState::Completed;
         return outcome;
     };

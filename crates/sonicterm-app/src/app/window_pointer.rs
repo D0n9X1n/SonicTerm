@@ -14,8 +14,7 @@ use winit::{
 use super::tab_gesture::{TabMotion, TabPress, TabRelease};
 use super::window_event::{
     no_button_motion_report, pointer_route_bytes, route_pressed_pointer_motion,
-    take_pointer_release, wheel_report_bytes, wheel_route, PointerMotionRoute, PointerReportKind,
-    WheelRoute,
+    take_pointer_release, PointerMotionRoute, PointerReportKind,
 };
 use super::{
     pane_id_at_point, App, FrontmostKind, PointerCell, PointerGestureOwner, PtyInputSource,
@@ -313,10 +312,7 @@ impl App {
 
     /// Route one main-window wheel delta to the pane under the cursor.
     pub(super) fn handle_main_mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        // route wheel events to the pane under the cursor.
-        // Default 3 lines per LineDelta tick (matches stock GTK
-        // / Cocoa wheel feel). PixelDelta divides by the live
-        // cell height so trackpad scrolls match font size.
+        // Route the wheel to the pane under the cursor through the rules child windows share.
         let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
         let (cursor_x, cursor_y) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
         if self
@@ -332,80 +328,35 @@ impl App {
             .map(|renderer| renderer.cell_size().1)
             .filter(|height| *height > 0.0)
             .unwrap_or(16.0);
-        let lines_per_tick: f32 = 3.0;
-        let delta_lines_f: f32 = match delta {
-            // winit's vertical delta is positive when scrolling UP (away from
-            // user); we want negative delta_lines for "scroll
-            // back into history".
-            MouseScrollDelta::LineDelta(_x, vertical_lines) => -vertical_lines * lines_per_tick,
-            MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32) / cell_h,
+        let lines = super::wheel_plan::wheel_lines(delta, cell_h);
+        let Some(pane_id) = self.pane_at_cursor(cursor_x, cursor_y) else {
+            // When: no `pane_id` is under the cursor, the wheel has nothing to move.
+            return;
         };
-        // Round away from zero so a tiny trackpad nudge still
-        // produces at least one line of motion.
-        let delta_lines = if delta_lines_f >= 0.0 {
-            // Positive wheel motion rounds upward to preserve a fractional tick.
-            delta_lines_f.ceil() as i32
-        } else {
-            // When: delta_lines_f is negative, round downward to preserve a fractional tick.
-            delta_lines_f.floor() as i32
+        let cell = self.main_pane_cell_at(cursor_x, cursor_y).map(|(_, row, col)| (row, col));
+        // All four modes come from one published byte; no parser lock.
+        let modes = self.main().and_then(|window| window.panes.get(&pane_id)).map(|pane| {
+            let modes = pane.pointer_modes();
+            (modes.is_alt(), modes.tracking(), modes.sgr(), modes.application_cursor())
+        });
+        let (alt_screen, tracking, sgr, application_cursor) =
+            modes.unwrap_or((false, MouseTracking::Off, false, false));
+        let target = super::wheel_plan::WheelTarget {
+            tracking,
+            alt_screen,
+            sgr,
+            application_cursor,
+            readonly: !self.admits_new_user_input(pane_id),
+            cell,
         };
-        if delta_lines != 0 {
-            // Nonzero wheel motion routes to the hovered pane.
-            if let Some(pane_id) = self.pane_at_cursor(cursor_x, cursor_y) {
-                // Tracking owns wheel input on either screen; all four modes come from one published byte, no parser lock.
-                let cell =
-                    self.main_pane_cell_at(cursor_x, cursor_y).map(|(_, row, col)| (row, col));
-                let (is_alt, tracking, sgr, app_cursor) = self
-                    .main()
-                    .and_then(|window| window.panes.get(&pane_id))
-                    .map(|pane| {
-                        let modes = pane.pointer_modes();
-                        (modes.is_alt(), modes.tracking(), modes.sgr(), modes.application_cursor())
-                    })
-                    .unwrap_or((false, MouseTracking::Off, false, false));
-                // READONLY keeps wheel input local even when tracking or an alternate screen requests bytes.
-                let route = if self.admits_new_user_input(pane_id) {
-                    wheel_route(tracking, is_alt)
-                } else {
-                    // When: admits_new_user_input rejects this pane, wheel cannot produce reports or cursor keys.
-                    WheelRoute::LocalScrollback
-                };
-                if route == WheelRoute::MouseReport {
-                    // MouseReport routes negotiated tracking to the PTY before screen-specific fallbacks.
-                    // App wants mouse events: emit one wheel report per
-                    // line of motion at the cell under the cursor.
-                    let up = delta_lines < 0;
-                    let (col1, row1) =
-                        cell.map(|(row, col)| (col as u32 + 1, row as u32 + 1)).unwrap_or((1, 1));
-                    let count = delta_lines.unsigned_abs() as usize;
-                    let payload = wheel_report_bytes(sgr, up, col1, row1, count);
-                    self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
-                } else if route == WheelRoute::CursorKeys {
-                    // When: route is CursorKeys, untracked alternate-screen wheel motion becomes arrows.
-
-                    // Build the arrow sequence: ESC O A/B in
-                    // application-cursor-keys mode, else ESC [ A/B.
-                    // Up when scrolling back into history
-                    // (delta_lines < 0), down otherwise. Emit one
-                    // copy per line of motion.
-                    let up = delta_lines < 0;
-                    let seq: &[u8] = match (app_cursor, up) {
-                        (true, true) => b"\x1bOA",
-                        (true, false) => b"\x1bOB",
-                        (false, true) => b"\x1b[A",
-                        (false, false) => b"\x1b[B",
-                    };
-                    let count = delta_lines.unsigned_abs() as usize;
-                    let mut payload = Vec::with_capacity(seq.len() * count);
-                    for _ in 0..count {
-                        payload.extend_from_slice(seq);
-                    }
-                    self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
-                } else {
-                    // When: route is LocalScrollback, move the untracked primary-screen viewport.
-                    self.scroll_pane(pane_id, delta_lines);
-                }
+        match super::wheel_plan::plan_wheel(lines, target) {
+            super::wheel_plan::WheelPlan::None => {
+                // When: the plan is None, the motion rounded to no lines.
             }
+            super::wheel_plan::WheelPlan::Input(payload) => {
+                self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
+            }
+            super::wheel_plan::WheelPlan::Scroll(lines) => self.scroll_pane(pane_id, lines),
         }
     }
 

@@ -31,6 +31,13 @@ import perf_latency_schema
 SCENARIO = "S13"
 TWO_PANES = "S13/default"
 FOUR_PANES = "S13/sustained-4"
+# The release-only equal grids, in doubling order, with each layout's pane count. Every layout asks
+# for 30x5 panes; a host may size the window differently (a macOS host gave 31x3), so the rule needs
+# every pane of every layout and run to match the others, which keeps the per-pane workload equal.
+WIDE = ("S13/wide-8", "S13/wide-16", "S13/wide-32")
+WIDE_PANES = (8, 16, 32)
+SCALES = "scales"
+DOES_NOT_SCALE = "does not scale"
 MIN_SAMPLES = 200
 P95_TOLERANCE = 0.10
 FAILURE_LIMIT = 0.01
@@ -50,7 +57,9 @@ HEADER = "| " + " | ".join(COLUMNS) + " |\n|" + "---|" * len(COLUMNS) + "\n"
 NOTE = (f"Head counters runs only. Verdict rule, fixed before CI: at least {MIN_SAMPLES} samples per variant; "
         f"`{UNCHANGED}` when the 4-pane p95 is within {P95_TOLERANCE:.0%} of the 2-pane p95 and all failed "
         f"collections (parser, image and budget-expired) are under {FAILURE_LIMIT:.0%} of collections in the "
-        f"4-pane variant; a missing attribution, too few samples or a stopped flood gives `{NO_VERDICT}`.")
+        f"4-pane variant; a missing attribution, too few samples or a stopped flood gives `{NO_VERDICT}`. "
+        f"A release run adds the wide layouts: `{SCALES}` unless one fails {FAILURE_LIMIT:.0%} or more of its "
+        f"collections or its p95 grows more than {P95_TOLERANCE:.0%} per doubling; this is reported, not a gate.")
 
 
 def percentile_95(values: Sequence[float]) -> float:
@@ -76,6 +85,7 @@ def variant_evidence(results: Iterable[dict]) -> dict:
     failures = {name: 0 for name in FAILURE_FIELDS}
     flood_bytes = {name: [] for name in LIVENESS_PHASES}
     pane_grids: list[tuple[tuple, tuple]] = []
+    all_grids: list[list[tuple]] = []
     problems: list[str] = []
     results = list(results)
     if not results:
@@ -126,14 +136,15 @@ def variant_evidence(results: Iterable[dict]) -> dict:
                 # stretches all count, so a missing prefix or suffix fails like a stall.
                 problems.append(f"run {index}'s flood showed no progress for {gap} ms in {name} (limit {limit} ms)")
         grids = (contention or {}).get("role_grids")
-        if isinstance(grids, list) and len(grids) >= 2 and all(isinstance(grid, list) for grid in grids[:2]):
+        if isinstance(grids, list) and len(grids) >= 2 and all(isinstance(grid, list) for grid in grids):
             pane_grids.append((tuple(grids[0]), tuple(grids[1])))
+            all_grids.append([tuple(grid) for grid in grids])
         else:
             problems.append(f"run {index} has no flooding and typing pane grids")
     if len(samples) < MIN_SAMPLES:
         problems.append(f"{len(samples)} samples, below {MIN_SAMPLES}")
     return {"samples": samples, "collections": collections, "failures": failures, "flood_bytes": flood_bytes,
-            "pane_grids": pane_grids, "problems": problems}
+            "pane_grids": pane_grids, "all_grids": all_grids, "problems": problems}
 
 
 def verdict(two: dict, four: dict) -> tuple[str, str]:
@@ -180,11 +191,53 @@ def _row(label: str, evidence: dict) -> list[str]:
             else "n/a", "/".join(minimum)]
 
 
+def scaling_verdict(wide: Sequence[dict]) -> tuple[str, str]:
+    """The release rule on the wide layouts, in doubling order: each needs the evidence a variant
+    needs and equal panes (one cell of rounding per axis); it `scales` unless a layout's failed
+    collections reach `FAILURE_LIMIT` or its p95 grows more than `P95_TOLERANCE` over the layout half
+    its size. A failure is reported, never a release gate: it asks for whole-frame collection to be
+    revisited."""
+    problems = [f"{label}: {problem}" for label, evidence in zip(WIDE, wide) for problem in evidence["problems"]]
+    for label, evidence, panes in zip(WIDE, wide, WIDE_PANES):
+        for grids in evidence["all_grids"]:
+            if len(grids) != panes:
+                problems.append(f"{label}: {len(grids)} panes, not {panes}")
+        if not evidence["problems"] and evidence["collections"] == 0:
+            problems.append(f"{label}: no collection was recorded")
+    # One per-pane workload across every layout and run: pane count is the only thing that doubles.
+    every_grid = [grid for evidence in wide for grids in evidence["all_grids"] for grid in grids]
+    if every_grid and any(abs(grid[axis] - other[axis]) > SPLIT_ROUNDING_CELLS
+                          for grid in every_grid for other in every_grid for axis in (0, 1)):
+        problems.append(f"pane grids differ across the layouts: {sorted(set(every_grid))}")
+    if problems:
+        return NO_VERDICT, "; ".join(problems)
+    reasons = []
+    for label, evidence in zip(WIDE, wide):
+        fraction = sum(evidence["failures"].values()) / evidence["collections"]
+        if fraction >= FAILURE_LIMIT:
+            reasons.append(f"{label}: {fraction:.1%} of collections failed (limit {FAILURE_LIMIT:.0%})")
+    p95s = [percentile_95(evidence["samples"]) for evidence in wide]
+    for (smaller, larger), (before, after) in zip(zip(WIDE, WIDE[1:]), zip(p95s, p95s[1:])):
+        if after > before * (1 + P95_TOLERANCE):
+            reasons.append(f"{larger} p95 {after:.1f} ms grew more than {P95_TOLERANCE:.0%} over {smaller} "
+                           f"{before:.1f} ms")
+    if reasons:
+        return DOES_NOT_SCALE, "; ".join(reasons)
+    return SCALES, "p95 " + " / ".join(f"{value:.1f}" for value in p95s) + " ms across 8, 16 and 32 panes"
+
+
 def verdict_rows(heads: dict[str, Sequence[dict]]) -> list[list[str]]:
-    """The S13 section's rows from each variant's head counters results; empty when S13 did not run."""
-    if TWO_PANES not in heads and FOUR_PANES not in heads:
-        return []
-    two = variant_evidence(heads.get(TWO_PANES, ()))
-    four = variant_evidence(heads.get(FOUR_PANES, ()))
-    outcome, why = verdict(two, four)
-    return [_row(TWO_PANES, two), _row(FOUR_PANES, four), ["Verdict", outcome, why, "", "", "", ""]]
+    """The S13 section's rows from each variant's head counters results; empty when S13 did not run.
+    The wide layouts, which only a release run measures, add their rows and the scaling rule."""
+    rows = []
+    if TWO_PANES in heads or FOUR_PANES in heads:
+        two = variant_evidence(heads.get(TWO_PANES, ()))
+        four = variant_evidence(heads.get(FOUR_PANES, ()))
+        outcome, why = verdict(two, four)
+        rows += [_row(TWO_PANES, two), _row(FOUR_PANES, four), ["Verdict", outcome, why, "", "", "", ""]]
+    if any(label in heads for label in WIDE):
+        wide = [variant_evidence(heads.get(label, ())) for label in WIDE]
+        outcome, why = scaling_verdict(wide)
+        rows += [_row(label, evidence) for label, evidence in zip(WIDE, wide)]
+        rows.append(["Scaling", outcome, why, "", "", "", ""])
+    return rows

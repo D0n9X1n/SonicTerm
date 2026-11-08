@@ -77,4 +77,6 @@ product-icon = "../../assets/icons/exports/sonic.ico"
 winit.workspace = true
 
 [dev-dependencies]
+# Tests and examples here drive the App through hooks only test builds compile.
+sonicterm-app = { workspace = true, features = ["test-support"] }
 roxmltree = "0.21"

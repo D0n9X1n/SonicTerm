@@ -133,7 +133,8 @@ manifest/download 集成检查。
 推送 tag 前：
 
 - 确认 workspace 版本和目标 tag；
-- 运行完整 gate 与原生 release build；
+- 运行 `python3 scripts/native-dependency-delta.py --latest`，并按
+  [仓库与工具链](Repository-and-Toolchain-zh-CN) 中的原生依赖流程审查每个 `update` 行；
 - 对照当前 config、logging、input、palette、rendering、window、platform 和 package 行为，
   检查 README 与所有受影响 Wiki 页面；
 - 启动 package，测试备用屏幕进入/退出、滚动、繁忙窗格、标签页拖出与子进程清理，

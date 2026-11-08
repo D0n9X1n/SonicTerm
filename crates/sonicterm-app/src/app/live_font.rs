@@ -13,7 +13,7 @@ impl App {
     /// Switch the live font family in every window for this session, without saving it.
     pub(super) fn set_font_family(&mut self, family: &str) {
         self.config.font.family = family.to_owned();
-        self.font_family_generation += 1;
+        self.fonts.font_family_generation += 1;
         self.apply_live_font();
         tracing::info!("font family -> {family}");
     }
@@ -41,7 +41,10 @@ impl App {
                 #[cfg(test)]
                 None => {
                     // When: child.renderer is None in a test-seeded window; its recorder takes the delivery.
-                    &mut LiveFontRecorder { window_id: *window_id, log: &mut self.live_font_log }
+                    &mut LiveFontRecorder {
+                        window_id: *window_id,
+                        log: &mut self.fonts.live_font_log,
+                    }
                 }
                 #[cfg(not(test))]
                 None => {

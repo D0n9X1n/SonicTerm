@@ -8,10 +8,13 @@ drag/tear-out, and the platform shell abstractions.
 
 ## Key files
 - `src/app/mod.rs` - `App` and the window-registration
-  chokepoint. `App`'s state is split across four owners, visible only inside `app`:
-  `WindowRegistry` (`registry`, `window_registry_state.rs`), `RuntimeServices` (`services`,
-  `runtime_services.rs`), `InteractionState` (`interaction`, `interaction.rs`) and
-  `DiagnosticsState` (`diagnostics`, `diagnostics.rs`). `user_event.rs` owns typed events and `application_handler.rs` forwards callbacks.
+  chokepoint. `App`'s state is split across six owners, visible only inside `app`:
+  `WindowRegistry` (`registry`, `window_registry_state.rs`; its `WindowMap` has no public insert or
+  remove, so windows come and go only through the checked `insert_window`/`remove_window`), `RuntimeServices` (`services`,
+  `runtime_services.rs`), `InteractionState` (`interaction`, `interaction.rs`),
+  `DiagnosticsState` (`diagnostics`, `diagnostics.rs`), `FontState` (`fonts`, `font_state.rs`: font
+  sizes, families, catalog) and `ReportWindows` (`reports`, `report_windows.rs`: Memory Usage,
+  About). `user_event.rs` owns typed events and `application_handler.rs` forwards callbacks.
   Window, pane, session, input, and effect orchestration live in
   `window_state.rs`, `window_registry.rs`, `pane_state.rs`, `session.rs`,
   `input_dispatch.rs`, and `effects.rs`.
@@ -78,10 +81,12 @@ cargo build -p sonicterm-app
 ```
 
 ## Guardrails
-- A new `__test_*` hook or `test_*` App field that only this crate's unit or integration tests read
-  carries `#[cfg(any(test, feature = "test-support"))]`; one an example, another crate or
-  production calls stays ungated and is listed in `UNGATED_HOOKS`/`UNGATED_FIELDS`
-  (`src/app/mod_test_support_tests.rs`). Check `cargo clippy -p sonicterm-app --lib` too: only
+- A new `__test_*` hook or `test_*` App field that only tests read carries
+  `#[cfg(any(test, feature = "test-support"))]`. `sonicterm-mac` and `sonicterm-windows` enable the
+  feature in their dev-dependencies, so their tests and examples may call gated hooks. One this
+  crate's examples (the perf harness builds against older bases), another crate's production
+  code, or this crate's production code calls stays ungated and is listed in
+  `UNGATED_HOOKS`/`UNGATED_FIELDS` (`src/app/mod_test_support_tests.rs`). Check `cargo clippy -p sonicterm-app --lib` too: only
   that build has the feature off.
 - All pane destruction uses `retire_pane`; transfers preserve the PTY and its
   `ReapSlot`. Reserved native waits run only through the one `ReaperDriver`.
@@ -142,6 +147,11 @@ cargo build -p sonicterm-app
   only first frame, Visibility, DeviceRecovered, `resize_pending` and
   `surface_recovery_pending` force a frame. Both adapters recheck under the guards
   before receipts and abandon a held frame unsettled; the display link never runs for it.
+- Every text write into a pane's parser publishes through `publish_grid_change` (generation, then
+  the pane's `PaneSignal`): the VT worker after each complete batch, the app after a held pane's
+  exit status line. A pane still being built (launch failure) writes before anyone can read it.
+  `retire_pane` closes the signal first; transfers never do. MCP waits register on `McpShared`, which
+  wakes them on stop, `control`/`read` changes and every connection close (`close_connection`).
 - Pane output generations publish after complete batches; the collector Acquire-loads
   identities before locking. Frame completion settles only captured owner generations.
   `last_render` is the attempt clock. On hardware, streaming is paced from `stream_clock`,

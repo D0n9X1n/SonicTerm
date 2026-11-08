@@ -11,17 +11,19 @@
 use std::io::{BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::Value;
-use sonicterm_cfg::config::{McpControl, McpRead};
+use sonicterm_cfg::config::{McpControl, McpCreateAnchor, McpIsolation, McpRead};
 use sonicterm_vt::vt::Parser;
 use winit::event_loop::EventLoopProxy;
 
 use super::UserEvent;
 
+#[path = "mcp/agents.rs"]
+pub(crate) mod agents;
 #[path = "mcp/control_loop.rs"]
 pub(crate) mod control_loop;
 #[cfg(unix)]
@@ -42,6 +44,8 @@ pub(crate) mod read;
 pub(crate) mod run;
 #[path = "mcp/scan.rs"]
 pub(crate) mod scan;
+#[path = "mcp/stream_wait.rs"]
+pub(crate) mod stream_wait;
 #[path = "mcp/tools_control.rs"]
 pub(crate) mod tools_control;
 #[path = "mcp/tools_read.rs"]
@@ -49,8 +53,8 @@ pub(crate) mod tools_read;
 
 pub(crate) use lifecycle::McpServer;
 
-/// The most connections served at once; a further one is refused.
-pub(crate) const MAX_CONNECTIONS: usize = 4;
+/// The default limit on connections served at once (`[mcp] max_connections`).
+pub(crate) const MAX_CONNECTIONS: usize = sonicterm_cfg::config::DEFAULT_MCP_CONNECTIONS as usize;
 /// How long a loop request may take before it is dropped.
 pub(crate) const LOOP_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a reader blocks before it rechecks `closed` and stop flags.
@@ -123,11 +127,10 @@ pub(crate) enum LoopCall {
     },
 }
 
-/// A pane the loop resolved, with handles a connection thread reads without the loop.
-#[derive(Clone)]
-pub(crate) struct PaneEntry {
-    /// The pane's id.
-    pub(crate) pane_id: u64,
+/// Where a pane sits in the UI, which only `list_panes` reports. Computing it orders every
+/// window, so a tool that names one pane never asks for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneMetadata {
     /// The window's position: 0 for the main window, then children in creation order.
     pub(crate) window_index: usize,
     /// The pane's tab index in its window.
@@ -136,8 +139,18 @@ pub(crate) struct PaneEntry {
     pub(crate) active: bool,
     /// Whether the pane's window is in READONLY.
     pub(crate) readonly: bool,
-    /// Whether an agent created the pane.
-    pub(crate) agent_owned: bool,
+}
+
+/// A pane the loop resolved: the handles a connection thread reads without the loop, plus its UI
+/// position when it came from `list_panes`.
+#[derive(Clone)]
+pub(crate) struct PaneEntry {
+    /// The pane's id.
+    pub(crate) pane_id: u64,
+    /// Where the pane sits; `Some` only for `list_panes` entries.
+    pub(crate) metadata: Option<PaneMetadata>,
+    /// Who created the pane; `agent_owned` in tool results is `creator.is_agent()`.
+    pub(crate) creator: agents::PaneOwner,
     /// The pane's parser, read with one bounded attempt.
     pub(crate) parser: Arc<Mutex<Parser>>,
     /// Bumped after each batch of output; read without any lock.
@@ -162,8 +175,9 @@ pub(crate) enum LoopReply {
     Refused(&'static str, String),
     /// [`LoopCall::CreatePane`] opened this pane.
     Created(crate::app::pane_target::CreatedPane),
-    /// A write queued this many bytes.
-    Written(usize),
+    /// A write queued this many bytes; `receipt` is its delivery ticket and the pane's probe, or
+    /// `None` for a pane without a PTY.
+    Written(usize, Option<(u64, sonicterm_io::pty::PtyDeliveryProbe)>),
     /// [`LoopCall::RunStart`] started a run.
     RunStarted(Box<run::RunStarted>),
     /// [`LoopCall::ClosePane`] closed the pane.
@@ -180,6 +194,8 @@ pub(crate) struct LoopRequest {
     pub(crate) deadline: Instant,
     /// Set when the client is gone.
     pub(crate) closed: Arc<AtomicBool>,
+    /// The agent session that asked, whose `"agent"` scopes the loop applies.
+    pub(crate) session: agents::AgentSessionId,
     /// Where the answer goes; the loop only `try_send`s.
     pub(crate) reply: SyncSender<LoopReply>,
 }
@@ -194,19 +210,53 @@ pub(crate) struct McpShared {
     pub(crate) control: AtomicU8,
     /// Whether read tools are limited to agent-created panes (`[mcp] read = "agent"`).
     pub(crate) read_agent_only: AtomicBool,
+    /// `[mcp] isolation` and `create_anchor`, packed by [`agent_scope_code`].
+    agent_scope: AtomicU8,
+    /// Agent sessions still connected; a pane whose creator left reads as orphaned.
+    pub(crate) sessions: agents::LiveSessions,
     /// Set to stop the listener and every connection.
     pub(crate) stopped: AtomicBool,
     /// Whether a wake-up is already queued, so a burst of requests wakes the loop once.
     wake_pending: AtomicBool,
     /// Wakes the event loop; `None` in tests, where the inbox is drained directly.
     proxy: Mutex<Option<EventLoopProxy<UserEvent>>>,
-    /// Live connections, at most [`MAX_CONNECTIONS`].
+    /// Live connections, at most `connection_limit`.
     pub(crate) connections: AtomicU64,
+    /// The most connections served at once; a further one is refused. A change applies to new
+    /// connections only.
+    pub(crate) connection_limit: AtomicU64,
     /// Connection notices queued and not yet shown, at most [`MAX_PENDING_NOTICES`].
     pending_notices: AtomicU64,
     /// Bytes every connection holds right now: partial request lines and replies being written.
     /// The loop charges this figure to the governor's `Mcp` owner.
     pub(crate) buffered_bytes: AtomicU64,
+    /// The change signals of panes a wait is sleeping on, so a revocation wakes the wait at once
+    /// rather than at its next recheck. Entries are weak: a closed pane's signal is not kept.
+    waiters: Mutex<Vec<Weak<crate::app::PaneSignal>>>,
+    /// A test's replacement for `wait_for`'s recheck interval, so an end-to-end test can prove a
+    /// wake came from a signal and not from the recheck.
+    #[cfg(test)]
+    pub(crate) recheck_override: Mutex<Option<Duration>>,
+}
+
+/// A wait's registration in [`McpShared`]'s waiter list; dropping it removes the entry.
+pub(crate) struct WaiterGuard<'shared> {
+    /// Where the entry lives.
+    shared: &'shared McpShared,
+    /// The registered signal, compared by address on removal.
+    signal: Weak<crate::app::PaneSignal>,
+}
+
+// Lifecycle: WaiterGuard removes its signal from the waiter list when the wait ends, however it ends.
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        let mut waiters = self.shared.waiters.lock();
+        // Only this registration goes: another wait on the same pane keeps its own entry.
+        if let Some(index) = waiters.iter().position(|entry| entry.ptr_eq(&self.signal)) {
+            waiters.swap_remove(index);
+        }
+        waiters.retain(|entry| entry.strong_count() > 0);
+    }
 }
 
 impl McpShared {
@@ -217,13 +267,43 @@ impl McpShared {
             generation: AtomicU64::new(1),
             control: AtomicU8::new(control_code(control)),
             read_agent_only: AtomicBool::new(false),
+            agent_scope: AtomicU8::new(agent_scope_code(
+                McpIsolation::Shared,
+                McpCreateAnchor::Any,
+            )),
+            sessions: agents::LiveSessions::default(),
             stopped: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             proxy: Mutex::new(proxy),
             connections: AtomicU64::new(0),
+            connection_limit: AtomicU64::new(MAX_CONNECTIONS as u64),
             pending_notices: AtomicU64::new(0),
             buffered_bytes: AtomicU64::new(0),
+            waiters: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            recheck_override: Mutex::new(None),
         })
+    }
+
+    /// Register a wait sleeping on `signal` until the returned guard drops, so a revocation wakes it.
+    pub(crate) fn register_waiter(&self, signal: &Arc<crate::app::PaneSignal>) -> WaiterGuard<'_> {
+        let signal = Arc::downgrade(signal);
+        self.waiters.lock().push(signal.clone());
+        WaiterGuard { shared: self, signal }
+    }
+
+    /// How many waits are registered right now, so a test knows a wait reached its sleep loop.
+    #[cfg(test)]
+    pub(crate) fn waiter_count(&self) -> usize {
+        self.waiters.lock().len()
+    }
+
+    /// Wake every registered wait so it rechecks its revocation now.
+    pub(crate) fn wake_waiters(&self) {
+        let signals: Vec<_> = self.waiters.lock().iter().filter_map(Weak::upgrade).collect();
+        for signal in signals {
+            signal.notify();
+        }
     }
 
     /// The current control level.
@@ -248,6 +328,37 @@ impl McpShared {
     pub(crate) fn set_read(&self, read: McpRead) {
         self.read_agent_only.store(read == McpRead::Agent, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake_waiters();
+    }
+
+    /// The current `[mcp] isolation` and `create_anchor`.
+    // Ordering: agent_scope Acquire pairs with the Release store in `set_agent_scope`.
+    pub(crate) fn agent_scope(&self) -> (McpIsolation, McpCreateAnchor) {
+        let code = self.agent_scope.load(Ordering::Acquire);
+        let isolation = if code & 1 == 0 { McpIsolation::Shared } else { McpIsolation::Session };
+        let anchor = if code & 2 == 0 { McpCreateAnchor::Any } else { McpCreateAnchor::Agent };
+        (isolation, anchor)
+    }
+
+    /// Change `isolation` and `create_anchor` and revoke every queued request and running wait,
+    /// as a `control` or `read` change does: both narrow or widen what a call may touch.
+    // Ordering: agent_scope Release publishes the scope before the generation AcqRel bump.
+    pub(crate) fn set_agent_scope(&self, isolation: McpIsolation, anchor: McpCreateAnchor) {
+        self.agent_scope.store(agent_scope_code(isolation, anchor), Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake_waiters();
+    }
+
+    /// What `session` may touch right now.
+    pub(crate) fn access(&self, session: agents::AgentSessionId) -> agents::Access {
+        let (isolation, create_anchor) = self.agent_scope();
+        agents::Access { control: self.control(), isolation, create_anchor, session }
+    }
+
+    /// Set the connection limit for connections that arrive from now on; live ones are untouched.
+    // Ordering: connection_limit Release pairs with spawn_connection's Acquire load.
+    pub(crate) fn set_connection_limit(&self, limit: usize) {
+        self.connection_limit.store(limit as u64, Ordering::Release);
     }
 
     /// Change the control level and revoke every queued request.
@@ -255,6 +366,7 @@ impl McpShared {
     pub(crate) fn set_control(&self, control: McpControl) {
         self.control.store(control_code(control), Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake_waiters();
     }
 
     /// Stop the listener and every connection, and revoke every queued request.
@@ -262,6 +374,7 @@ impl McpShared {
     pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake_waiters();
     }
 
     /// Whether the server was stopped.
@@ -286,6 +399,7 @@ impl McpShared {
             generation: scope.generation,
             deadline,
             closed: Arc::clone(closed),
+            session: scope.session,
             reply,
         };
         self.inbox.lock().push(request);
@@ -350,6 +464,8 @@ impl McpShared {
             generation: self.generation.load(Ordering::Acquire),
             deadline: Instant::now() + LOOP_DEADLINE,
             closed: Arc::new(AtomicBool::new(false)),
+            // A notice reads no pane, so the session it carries is never checked.
+            session: agents::AgentSessionId::next(),
             reply,
         });
         let _ = self.wake();
@@ -426,13 +542,29 @@ pub(crate) struct CallScope {
     pub(crate) closed: Arc<AtomicBool>,
     /// The generation that accepted the call.
     pub(crate) generation: u64,
+    /// The connection's agent session.
+    pub(crate) session: agents::AgentSessionId,
 }
 
 impl CallScope {
-    /// Admit a call now, on `shared`, for a connection whose close flag is `closed`.
+    /// Admit a call now, on `shared`, for `session`'s connection whose close flag is `closed`.
     // Ordering: generation Acquire reads the value `set_control` and `stop` publish with AcqRel.
+    pub(crate) fn admit_for(
+        shared: &McpShared,
+        closed: &Arc<AtomicBool>,
+        session: agents::AgentSessionId,
+    ) -> Self {
+        Self {
+            closed: Arc::clone(closed),
+            generation: shared.generation.load(Ordering::Acquire),
+            session,
+        }
+    }
+
+    /// [`Self::admit_for`] a fresh live session, for tests that drive one connection's calls.
+    #[cfg(test)]
     pub(crate) fn admit(shared: &McpShared, closed: &Arc<AtomicBool>) -> Self {
-        Self { closed: Arc::clone(closed), generation: shared.generation.load(Ordering::Acquire) }
+        Self::admit_for(shared, closed, shared.sessions.open())
     }
 
     /// Whether the call was revoked since it was admitted.
@@ -455,10 +587,14 @@ pub(crate) struct Caller {
     pub(crate) initialized: bool,
 }
 
+/// `isolation` and `create_anchor` as one byte: bit 0 is `"session"`, bit 1 is `"agent"`.
+fn agent_scope_code(isolation: McpIsolation, anchor: McpCreateAnchor) -> u8 {
+    u8::from(isolation == McpIsolation::Session) | (u8::from(anchor == McpCreateAnchor::Agent) << 1)
+}
+
 /// Serve one connection until it closes or the server stops: a reader thread parses lines and
 /// answers what needs no app state, and a worker thread runs tool calls one at a time. Returns the
 /// name the client gave in `initialize`, if it did.
-// Ordering: closed Release publishes the close to every waiter that Acquires it.
 pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> Option<String> {
     let closed = Arc::new(AtomicBool::new(false));
     let writer = Arc::new(Mutex::new(transport.writer));
@@ -481,9 +617,13 @@ pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> 
         // When: the worker thread could not start, the connection cannot run tools and closes.
         return None;
     }
-    let calls = CallSlot { queue: calls, in_flight, closed: Arc::clone(&closed) };
+    // The session starts before the first call is admitted and ends with the connection, so a
+    // pane it created reads as orphaned from the moment the client is gone.
+    let session = shared.sessions.open();
+    let calls = CallSlot { queue: calls, in_flight, closed: Arc::clone(&closed), session };
     read_loop(&shared, transport.reader, &writer, &caller, &calls, &closed);
-    closed.store(true, Ordering::Release);
+    close_connection(&shared, &closed);
+    shared.sessions.close(session);
     let client = caller.lock().client.clone();
     client
 }
@@ -544,10 +684,27 @@ pub(crate) struct AdmittedCall {
 
 impl AdmittedCall {
     /// Admit a call now: its scope takes the current generation and its arguments are charged.
+    fn admit_on(shared: &Arc<McpShared>, calls: &CallSlot, id: Value, params: Value) -> Self {
+        Self::admit_scoped(shared, &calls.closed, calls.session, id, params)
+    }
+
+    /// [`Self::admit_on`] for a fresh live session, for tests without a connection's slot.
+    #[cfg(test)]
     fn admit(shared: &Arc<McpShared>, closed: &Arc<AtomicBool>, id: Value, params: Value) -> Self {
+        Self::admit_scoped(shared, closed, shared.sessions.open(), id, params)
+    }
+
+    /// Admit a call for `session` on the connection whose close flag is `closed`.
+    fn admit_scoped(
+        shared: &Arc<McpShared>,
+        closed: &Arc<AtomicBool>,
+        session: agents::AgentSessionId,
+        id: Value,
+        params: Value,
+    ) -> Self {
         let bytes = params.to_string().len();
         shared.hold_bytes(bytes);
-        let scope = CallScope::admit(shared, closed);
+        let scope = CallScope::admit_for(shared, closed, session);
         Self { id, params, scope, shared: Arc::clone(shared), bytes }
     }
 }
@@ -568,6 +725,8 @@ struct CallSlot {
     in_flight: Arc<AtomicBool>,
     /// The connection's close flag, which every admitted call carries.
     closed: Arc<AtomicBool>,
+    /// The connection's agent session, which every admitted call carries.
+    session: agents::AgentSessionId,
 }
 
 impl CallSlot {
@@ -690,7 +849,7 @@ fn answer_request(
         "tools/call" => {
             // When: this `method` claimed the call slot, the worker replies; a failed send means it is
             // gone and the connection is ending.
-            let call = AdmittedCall::admit(shared, &calls.closed, id.clone(), params);
+            let call = AdmittedCall::admit_on(shared, calls, id.clone(), params);
             let _ = calls.queue.try_send(call);
             return None;
         }
@@ -700,7 +859,6 @@ fn answer_request(
 }
 
 /// Write one line to the client; a failed or timed-out write marks the connection closed.
-// Ordering: closed Release publishes the close to the reader and every waiter.
 fn write_line(
     shared: &McpShared,
     writer: &Mutex<Box<dyn Write + Send>>,
@@ -717,16 +875,28 @@ fn write_line(
         .and_then(|()| writer.flush());
     // A failed or timed-out write means the client stopped reading; it is dropped.
     if written.is_err() {
-        closed.store(true, Ordering::Release);
+        drop(writer);
+        close_connection(shared, closed);
     }
 }
 
-/// Run `serve_connection` on a new thread, counting it against [`MAX_CONNECTIONS`]; a connection
-/// past the limit is dropped at once.
-// Ordering: connections AcqRel makes the admit decision and the release atomic.
+/// Mark a connection closed and wake every sleeping wait, so this connection's running call sees
+/// the close at once; the other waits find nothing changed and sleep again. Every path that ends a
+/// connection goes through here.
+// Ordering: closed Release publishes the close to the reader and every waiter that Acquires it.
+pub(crate) fn close_connection(shared: &McpShared, closed: &AtomicBool) {
+    closed.store(true, Ordering::Release);
+    shared.wake_waiters();
+}
+
+/// Run `serve_connection` on a new thread, counting it against the server's `connection_limit`; a
+/// connection past the limit is dropped at once.
+// Ordering: connection_limit Acquire pairs with set_connection_limit's Release; connections AcqRel
+// makes the admit decision and the release atomic.
 pub(crate) fn spawn_connection(shared: &Arc<McpShared>, transport: Transport) {
-    if shared.connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS as u64 {
-        // When: `connections` was already at `MAX_CONNECTIONS`, this one is refused.
+    let limit = shared.connection_limit.load(Ordering::Acquire);
+    if shared.connections.fetch_add(1, Ordering::AcqRel) >= limit {
+        // When: `connections` was already at the `limit`, this one is refused.
         shared.connections.fetch_sub(1, Ordering::AcqRel);
         tracing::warn!(target: "mcp", "agent connection refused: too many connections");
         return;
@@ -783,11 +953,8 @@ pub(crate) fn test_entry(cols: u16, rows: u16, scrollback: usize) -> PaneEntry {
     grid.set_scrollback_limit(scrollback);
     PaneEntry {
         pane_id: 7,
-        window_index: 0,
-        tab_index: 0,
-        active: true,
-        readonly: false,
-        agent_owned: false,
+        metadata: None,
+        creator: agents::PaneOwner::User,
         parser: Arc::new(Mutex::new(Parser::new_with_staging_pool(
             grid,
             None,
@@ -816,3 +983,7 @@ mod mcp_tests;
 #[cfg(test)]
 #[path = "mcp_read_scope_tests.rs"]
 mod mcp_read_scope_tests;
+
+#[cfg(test)]
+#[path = "mcp_isolation_tests.rs"]
+mod mcp_isolation_tests;

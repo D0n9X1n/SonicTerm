@@ -163,8 +163,7 @@ impl ShellRunner {
         if let Some(recorder) = self.breadcrumb_recorder {
             app.set_breadcrumb_recorder(recorder);
         }
-        app.theme_loader = self.theme_loader;
-        app.keymap_loader = self.keymap_loader;
+        app.set_loaders(self.theme_loader, self.keymap_loader);
         if let Some(loads) = self.startup_loads {
             app.set_startup_loads(loads);
         }

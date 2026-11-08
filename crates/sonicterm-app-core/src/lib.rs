@@ -10,6 +10,8 @@
 //! Reducer arms cover every intent family. `sonicterm-app` still owns the
 //! authoritative live window/tab/pane resources; `AppState` is the pure-data
 //! transition and observability model while those resources migrate behind ids.
+//! [`AppIntent::authority`] states which intents the live App executes
+//! ([`IntentAuthority::Drives`]) and which it only reports here.
 
 #![deny(missing_docs)]
 #![warn(clippy::min_ident_chars)]
@@ -23,7 +25,7 @@ mod supporting;
 
 pub use app_state::{AppState, AppStateBuilder};
 pub use effect::{AppEffect, EffectClass, LogLevel};
-pub use intent::{AppIntent, RedrawReason, SelectionMode};
+pub use intent::{AppIntent, IntentAuthority, RedrawReason, SelectionMode};
 pub use state_machine::{AppStateMachine, MAX_CASCADE_DEPTH};
 pub use supporting::{
     BroadcastScope, KeyCode, LogicalPos, LogicalSize, MenuItem, MenuModel, MouseButton,

@@ -30,6 +30,10 @@ impl App {
             return;
         }
         let pending = self.pending_osc52_reassert.take().expect("due reassertion present");
+        if self.config.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
+            // When: a reload set the `osc52` policy to Deny after the write, it is not reasserted.
+            return;
+        }
         let Some(previous_text) = pending.previous_text else {
             // When: previous_text was unavailable, avoid overwriting an unreadable clipboard owner.
             return;

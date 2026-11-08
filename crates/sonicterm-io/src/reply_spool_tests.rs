@@ -148,8 +148,8 @@ fn oversized_submission_is_refused_without_poisoning_storage() {
 }
 
 #[test]
-fn never_empty_spill_retains_consumed_prefix_until_drain() {
-    // Bound RAM honestly: this single-file design does not reclaim consumed disk prefixes until empty.
+fn never_empty_spill_retains_a_small_consumed_prefix() {
+    // A consumed prefix below the compaction minimum stays in the file until it drains or grows.
     let (sender, reader) = reply_spool();
     for _ in 0..4 {
         sender.send(vec![b'a'; CHUNK_BYTES]).unwrap();
@@ -161,4 +161,225 @@ fn never_empty_spill_retains_consumed_prefix_until_drain() {
     let spill = state.spill.as_ref().unwrap();
     assert_eq!(spill.read, (CHUNK_BYTES + HEADER_BYTES) as u64);
     assert_eq!(spill.file.metadata().unwrap().len(), (4 * (CHUNK_BYTES + HEADER_BYTES)) as u64);
+}
+
+/// A program that never reads its input cannot grow the spill past its disk budget: later replies
+/// are refused alone and counted, the spool is not failed, and every admitted record still pops
+/// in order once the reader resumes.
+#[test]
+fn unread_backlog_stops_at_the_disk_budget_without_failing() {
+    let (sender, reader) = reply_spool();
+    let record = (CHUNK_BYTES + HEADER_BYTES) as u64;
+    let mut admitted = 0u32;
+    let mut refused = 0u32;
+    for index in 0..1024u32 {
+        match sender.send(vec![(index % 251) as u8; CHUNK_BYTES]) {
+            Ok(()) => admitted += 1,
+            Err(error) => {
+                assert!(is_budget_refusal(&error), "{error}");
+                refused += 1;
+            }
+        }
+        let state = sender.state.lock();
+        if let Some(spill) = state.spill.as_ref() {
+            assert!(spill.file.metadata().unwrap().len() <= SPILL_BUDGET_BYTES);
+        }
+    }
+    // One record sits in the resident tier; the spill holds as many whole records as the budget allows.
+    assert_eq!(u64::from(admitted), 1 + SPILL_BUDGET_BYTES / record);
+    assert_eq!(admitted + refused, 1024);
+    assert_eq!(sender.stats().dropped_replies, u64::from(refused));
+    assert_eq!(sender.stats().peak_live_bytes, SPILL_BUDGET_BYTES / record * record);
+    for index in 0..admitted {
+        assert_eq!(reader.pop().unwrap().unwrap(), vec![(index % 251) as u8; CHUNK_BYTES]);
+    }
+    assert!(reader.pop().unwrap().is_none());
+    // Drained, the spool admits again.
+    sender.send(vec![7]).unwrap();
+    assert_eq!(reader.pop().unwrap().unwrap(), [7]);
+}
+
+/// A reader that keeps up only partly never lets the file grow without bound: once the consumed
+/// prefix dominates, compaction moves the live records to the front, in order.
+#[test]
+fn a_slow_reader_keeps_the_spill_file_bounded_and_ordered() {
+    let (sender, reader) = reply_spool();
+    let mut next_sent = 0u32;
+    let mut next_read = 0u32;
+    let mut largest_file = 0;
+    // Two sends per read: the backlog grows until the budget refuses, then holds at the budget.
+    for _ in 0..4000 {
+        for _ in 0..2 {
+            if sender.send(vec![(next_sent % 251) as u8; CHUNK_BYTES]).is_ok() {
+                next_sent += 1;
+            }
+        }
+        assert_eq!(reader.pop().unwrap().unwrap(), vec![(next_read % 251) as u8; CHUNK_BYTES]);
+        next_read += 1;
+        if let Some(spill) = sender.state.lock().spill.as_ref() {
+            largest_file = largest_file.max(spill.file.metadata().unwrap().len());
+        }
+    }
+    let record = (CHUNK_BYTES + HEADER_BYTES) as u64;
+    assert!(largest_file <= 2 * SPILL_BUDGET_BYTES + record, "spill file grew to {largest_file}");
+    while let Some(bytes) = reader.pop().unwrap() {
+        assert_eq!(bytes, vec![(next_read % 251) as u8; CHUNK_BYTES]);
+        next_read += 1;
+    }
+    assert_eq!(next_read, next_sent);
+}
+
+/// A failed or dropped reader frees the backlog, and the gauges a held sender reads say so: no
+/// resident ring and no live spill are reported after the storage is gone.
+#[test]
+fn a_failed_or_dropped_reader_zeroes_the_gauges() {
+    for drop_reader in [false, true] {
+        let (sender, reader) = reply_spool();
+        // Past the resident tier, so both the ring and the spill file hold bytes.
+        while sender.stats().live_bytes == 0 {
+            sender.send(vec![1u8; CHUNK_BYTES]).unwrap();
+        }
+        assert!(sender.stats().resident_bytes > 0);
+        if drop_reader {
+            drop(reader);
+        } else {
+            reader.fail(io::Error::other("writer failed"));
+        }
+        let stats = sender.stats();
+        assert_eq!(
+            (stats.live_bytes, stats.resident_bytes),
+            (0, 0),
+            "drop={drop_reader}: {stats:?}"
+        );
+    }
+}
+
+/// `stats` never takes the spool lock, so a sampler is not stuck behind a send or pop blocked in
+/// file I/O; and the resident figure is the allocation a drain keeps, not the bytes still queued.
+#[test]
+fn stats_read_without_the_lock_and_count_retained_capacity() {
+    let (sender, reader) = reply_spool();
+    sender.send(vec![7u8; 100]).unwrap();
+    assert_eq!(reader.pop().unwrap().unwrap(), vec![7u8; 100]);
+    let held = sender.state.lock();
+    let (done, finished) = std::sync::mpsc::channel();
+    let sampler = {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let stats = sender.stats();
+            done.send(()).unwrap();
+            stats
+        })
+    };
+    // The lock is held, as a stalled file operation would hold it; the sample still returns.
+    finished
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("stats did not wait on the lock");
+    drop(held);
+    let stats = sampler.join().unwrap();
+    assert!(stats.resident_bytes >= 104, "the drained ring keeps its allocation: {stats:?}");
+    assert_eq!(stats.live_bytes, 0);
+}
+
+/// A compaction whose file I/O fails latches the spool like any storage failure: the error is
+/// returned, later sends and pops report it, and the storage is released.
+#[test]
+fn a_failed_compaction_latches_the_spool() {
+    let (sender, reader) = reply_spool();
+    let record = (CHUNK_BYTES + HEADER_BYTES) as u64;
+    // Fill past the compaction minimum, then consume more than half so the next spill compacts.
+    let spilled = (2 * COMPACT_MIN_BYTES / record + 2) as usize;
+    for _ in 0..=spilled {
+        sender.send(vec![b'a'; CHUNK_BYTES]).unwrap();
+    }
+    for _ in 0..(spilled * 3 / 4) {
+        reader.pop().unwrap().unwrap();
+    }
+    {
+        let mut state = sender.state.lock();
+        let spill = state.spill.as_mut().unwrap();
+        assert!(spill.read >= COMPACT_MIN_BYTES && spill.read * 2 >= spill.written);
+        // A read-only handle makes the compaction's first write fail.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spill");
+        std::fs::write(&path, vec![0u8; spill.written as usize]).unwrap();
+        spill.file = File::open(&path).unwrap();
+    }
+    let error = sender.send(vec![b'b'; CHUNK_BYTES]).unwrap_err();
+    assert!(!is_budget_refusal(&error));
+    assert_eq!(sender.send(vec![b'c']).unwrap_err().kind(), error.kind());
+    assert_eq!(reader.pop().unwrap_err().kind(), error.kind());
+    assert!(sender.state.lock().spill.is_none());
+}
+
+/// A seeded mix of record sizes, from one byte to a full chunk, with a reader that falls behind
+/// and catches up: every accepted record comes back once, in order and whole (a pop may join
+/// several, never split one); a refusal is the typed budget refusal; live spill never exceeds the
+/// budget; the file never passes twice it.
+#[test]
+fn random_record_sizes_stay_ordered_and_within_the_budget() {
+    let (sender, reader) = reply_spool();
+    let mut seed = 0x0DD5_EED5_u64;
+    let mut random = move |bound: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % bound as u64) as usize
+    };
+    let mut expected = std::collections::VecDeque::new();
+    let mut next_tag = 0u8;
+    let mut largest_file = 0;
+    let mut refused = 0;
+    for round in 0..3000 {
+        // Bursts of sends, then a reader that takes a random share of the backlog. The first
+        // thousand rounds read rarely, so the backlog reaches the budget before it drains.
+        for _ in 0..random(6) {
+            let size = 1 + random(CHUNK_BYTES);
+            let record = vec![next_tag; size];
+            match sender.send(record.clone()) {
+                Ok(()) => {
+                    expected.push_back(record);
+                    next_tag = next_tag.wrapping_add(1);
+                }
+                Err(error) => {
+                    assert!(is_budget_refusal(&error), "round {round}: {error}");
+                    refused += 1;
+                }
+            }
+        }
+        let reads = if round < 1000 { usize::from(random(8) == 0) } else { random(5) };
+        for _ in 0..reads {
+            match reader.pop().unwrap() {
+                Some(bytes) => take_whole_records(&bytes, &mut expected, round),
+                None => assert!(expected.is_empty(), "round {round}: a record went missing"),
+            }
+        }
+        let stats = sender.stats();
+        assert!(stats.live_bytes <= SPILL_BUDGET_BYTES, "round {round}: {stats:?}");
+        if let Some(spill) = sender.state.lock().spill.as_ref() {
+            largest_file = largest_file.max(spill.file.metadata().unwrap().len());
+        }
+    }
+    let record = (CHUNK_BYTES + HEADER_BYTES) as u64;
+    assert!(largest_file <= 2 * SPILL_BUDGET_BYTES + record, "spill file grew to {largest_file}");
+    assert!(refused > 0, "the backlog reached the budget");
+    while let Some(bytes) = reader.pop().unwrap() {
+        take_whole_records(&bytes, &mut expected, usize::MAX);
+    }
+    assert!(expected.is_empty(), "every accepted record was read back");
+}
+
+/// Match one pop's `bytes` against the oldest `expected` records: it must be exactly a run of
+/// whole records, in order, which it removes.
+fn take_whole_records(
+    bytes: &[u8],
+    expected: &mut std::collections::VecDeque<Vec<u8>>,
+    round: usize,
+) {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let record = expected.pop_front().unwrap_or_else(|| panic!("round {round}: extra bytes"));
+        assert!(rest.starts_with(&record), "round {round}: a record was split or reordered");
+        rest = &rest[record.len()..];
+    }
 }

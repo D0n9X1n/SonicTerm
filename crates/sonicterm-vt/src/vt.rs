@@ -47,6 +47,33 @@ pub const SONIC_VERSION: &str = concat!("SonicTerm ", env!("CARGO_PKG_VERSION"))
 /// `kitty `. The word names the graphics protocol SonicTerm answers; no kitty version is claimed.
 pub const XTVERSION_REPLY: &str = concat!("kitty SonicTerm ", env!("CARGO_PKG_VERSION"));
 
+/// What the newest OSC 133 shell marker said about the shell now running in a pane. This is the
+/// marker's authentication as observed, not proof of which program is running: a nested shell or
+/// an SSH session sends markers without the pane's token, and those make the state `Unverified`.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum ShellIntegrationState {
+    /// No shell marker has arrived.
+    #[default]
+    None,
+    /// The newest marker carried the pane's shell token.
+    Verified,
+    /// The newest marker carried no valid token: admitted unauthenticated, or dropped because the
+    /// pane is latched (a nested shell, SSH, or a program printing markers).
+    Unverified,
+}
+
+impl ShellIntegrationState {
+    /// The state's spelling in MCP results.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Verified => "verified",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
 /// Current DEC mouse tracking mode selected by the terminal application.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum MouseTracking {
@@ -474,6 +501,11 @@ impl Parser {
         self.performer.shell_authenticated
     }
 
+    /// What the newest OSC 133 marker, admitted or dropped, said about the running shell.
+    pub fn shell_integration_state(&self) -> ShellIntegrationState {
+        self.performer.shell_state
+    }
+
     /// Borrow the underlying [`Grid`] — used by the renderer to read cells.
     pub fn grid(&self) -> &Grid {
         &self.performer.grid
@@ -544,6 +576,8 @@ struct Performer {
     shell_token: Option<String>,
     /// A marker carried `shell_token`, so tokenless markers are dropped for the parser's life.
     shell_authenticated: bool,
+    /// What the newest shell marker said, including one dropped after the latch.
+    shell_state: ShellIntegrationState,
     /// Set once the pane took input; a token first seen after it never latches the pane.
     shell_input_seen: Option<Arc<AtomicBool>>,
     fg: Color,
@@ -645,6 +679,8 @@ struct Performer {
     /// ECMA-48: REP repeats the GRAPHIC CHARACTER immediately preceding
     /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
+    /// Printed text for stream readers; `None` unless one has armed it.
+    tap: Option<Box<vt_tap::OutputTap>>,
     dcs_capture: Option<MediaCapture>,
     /// Pool this parser's media captures stage in.
     staging_pool: Arc<CaptureStagingPool>,
@@ -711,7 +747,11 @@ mod vt_kitty_cursor;
 
 #[path = "vt_image_cursor.rs"]
 mod vt_image_cursor;
+
+#[path = "vt_tap.rs"]
+mod vt_tap;
 pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
+pub use vt_tap::{TapHold, TapText, OUTPUT_TAP_CHARS};
 
 use vt_capture::parse_iterm2_file_event;
 pub use vt_osc::{parse_osc7_cwd, parse_osc7_cwd_snapshot};
@@ -719,3 +759,7 @@ pub use vt_osc::{parse_osc7_cwd, parse_osc7_cwd_snapshot};
 #[cfg(test)]
 #[path = "vt_test_support.rs"]
 mod vt_test_support;
+
+#[cfg(test)]
+#[path = "vt_fuzz_tests.rs"]
+mod vt_fuzz_tests;

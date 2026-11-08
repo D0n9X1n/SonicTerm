@@ -106,7 +106,7 @@ impl App {
         let window = self.registry.windows.get(&target).ok_or(TransferError::TargetMissing)?;
         let test_geometry = window.test_pane_viewport.is_some()
             || (self.registry.main_window_id == Some(target)
-                && self.test_viewport_override.is_some());
+                && self.testing.test_viewport_override.is_some());
         if window.renderer.is_none() && !test_geometry {
             // When: `window.renderer` and explicit test geometry are absent, retain the source instead of inventing a destination size.
             return Err(TransferError::TargetNotReady);

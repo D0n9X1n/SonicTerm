@@ -172,3 +172,20 @@ fn an_authenticated_run_completes_at_d_and_is_verified() {
     assert!(!exit_verified(&mixed), "a tokenless C with an authenticated D stays unverified");
     assert_eq!(run_state(Some(mixed), None, false, false), None, "and waits for a prompt");
 }
+
+/// A verified D without a code (PowerShell's line that ran both a failing cmdlet and a failing
+/// native command) still completes the run, with no exit code rather than a guessed one.
+#[test]
+fn an_authenticated_d_without_a_code_completes_with_no_exit_code() {
+    let unknown = PinnedRun {
+        output_seen: true,
+        output_at: Some(Instant::now()),
+        exit: Some(None),
+        output_authenticated: true,
+        end_authenticated: true,
+        ..pinned()
+    };
+    assert_eq!(run_state(Some(unknown), None, false, false), Some(RunState::Completed));
+    assert!(exit_verified(&unknown));
+    assert_eq!(unknown.exit.flatten(), None, "the code is unknown, not zero");
+}

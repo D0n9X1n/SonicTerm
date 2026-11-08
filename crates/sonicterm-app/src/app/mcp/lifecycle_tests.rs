@@ -35,6 +35,7 @@ fn install_server(app: &mut App, config: McpConfig) -> Arc<McpShared> {
         config,
         charges: HashMap::new(),
         owner,
+        read_notice_due: false,
     });
     shared
 }
@@ -56,6 +57,7 @@ fn request(
         generation,
         deadline,
         closed: Arc::new(AtomicBool::new(closed)),
+        session: crate::app::mcp::agents::AgentSessionId::next(),
         reply,
     };
     (request, answer)
@@ -170,9 +172,10 @@ fn the_loop_resolves_panes_for_a_connection() {
     };
     let ids: Vec<u64> = entries.iter().map(|entry| entry.pane_id).collect();
     assert_eq!(ids, vec![first, second]);
-    assert_eq!(entries.iter().map(|entry| entry.tab_index).collect::<Vec<_>>(), vec![0, 1]);
+    let positions: Vec<_> = entries.iter().map(|entry| entry.metadata.unwrap()).collect();
+    assert_eq!(positions.iter().map(|position| position.tab_index).collect::<Vec<_>>(), vec![0, 1]);
     let active_tab = app.main_tabs().unwrap().active_index();
-    assert!(entries.iter().all(|entry| entry.active == (entry.tab_index == active_tab)));
+    assert!(positions.iter().all(|position| position.active == (position.tab_index == active_tab)));
 }
 
 /// A request for a pane that does not exist is refused with `pane_gone`.
@@ -184,8 +187,9 @@ fn a_missing_pane_is_gone() {
     shared.inbox.lock().push(LoopRequest {
         call: LoopCall::ResolvePane { pane_id: 999_999 },
         generation: shared.generation.load(Ordering::Acquire),
-        deadline: Instant::now() + Duration::from_secs(5),
+        deadline: std::time::Instant::now() + Duration::from_secs(5),
         closed: Arc::new(AtomicBool::new(false)),
+        session: crate::app::mcp::agents::AgentSessionId::next(),
         reply,
     });
     app.drain_mcp_requests();
@@ -291,7 +295,10 @@ fn resolving_one_pane_matches_its_listed_entry() {
         "the layout has panes in several windows and tabs: {}",
         listed.len()
     );
-    assert!(listed.iter().any(|entry| entry.window_index > 0), "child windows are listed");
+    assert!(
+        listed.iter().any(|entry| entry.metadata.unwrap().window_index > 0),
+        "child windows are listed"
+    );
     // Explicit (window, tab) indices, independent of the ordering helper both paths share.
     let expected = [
         (main_second_tab, 0, 1),
@@ -300,21 +307,24 @@ fn resolving_one_pane_matches_its_listed_entry() {
         (after_pane, 4, 0),
     ];
     for (pane, window_index, tab_index) in expected {
-        let resolved = app.mcp_resolve_pane(pane).expect("a terminal pane resolves");
+        let position = app.mcp_pane_metadata(pane).expect("a terminal pane has a position");
         assert_eq!(
-            (resolved.window_index, resolved.tab_index),
+            (position.window_index, position.tab_index),
             (window_index, tab_index),
-            "pane {pane}"
+            "{pane}"
         );
         let entry = listed.iter().find(|entry| entry.pane_id == pane).expect("listed");
-        assert_eq!((entry.window_index, entry.tab_index), (window_index, tab_index), "pane {pane}");
+        let listed_position = entry.metadata.unwrap();
+        assert_eq!(
+            (listed_position.window_index, listed_position.tab_index),
+            (window_index, tab_index)
+        );
     }
     for entry in &listed {
         let resolved = app.mcp_resolve_pane(entry.pane_id).expect("a listed pane resolves");
-        let pair = |entry: &PaneEntry| {
-            (entry.pane_id, entry.window_index, entry.tab_index, entry.active, entry.readonly)
-        };
-        assert_eq!(pair(&resolved), pair(entry), "pane {}", entry.pane_id);
+        // Resolving one pane computes no position; the position helper agrees with the list.
+        assert!(resolved.metadata.is_none(), "pane {}", entry.pane_id);
+        assert_eq!(app.mcp_pane_metadata(entry.pane_id), entry.metadata, "pane {}", entry.pane_id);
         assert!(Arc::ptr_eq(&resolved.parser, &entry.parser), "the same pane's parser");
     }
     for absent in [report_pane, torn, 987_654] {
@@ -343,4 +353,141 @@ fn resolving_one_pane_builds_only_its_entry() {
     let resolved = app.mcp_resolve_pane(target).expect("a listed pane resolves");
     assert_eq!(built() - before_resolve, 1, "resolving builds only the named pane's entry");
     assert_eq!(resolved.pane_id, target);
+}
+
+/// A server running without `[mcp] read` shows the default-change notice once, only after a main
+/// window exists; later calls show nothing more.
+#[test]
+fn an_unset_read_is_announced_once_after_a_window_exists() {
+    let mut app = test_app();
+    install_server(&mut app, enabled(McpControl::Agent));
+    app.services.mcp_server.as_mut().unwrap().read_notice_due = true;
+    // No main window yet: the notice waits.
+    app.show_mcp_read_notice_if_due();
+    assert!(app.services.mcp_server.as_ref().unwrap().read_notice_due);
+    app.__test_seed_tab("first");
+    app.show_mcp_read_notice_if_due();
+    assert_eq!(app.__test_main_notification_message(), Some(READ_UNSET_NOTICE));
+    assert!(!app.services.mcp_server.as_ref().unwrap().read_notice_due);
+    app.main_mut().unwrap().notification = None;
+    app.show_mcp_read_notice_if_due();
+    assert_eq!(app.__test_main_notification_message(), None, "shown twice");
+}
+
+/// The notice names the actual default (agent-created panes, not "your own"), and an explicit
+/// `read = "any"` is kept: only a missing key reads as `"agent"`.
+#[test]
+fn the_read_notice_wording_and_explicit_any() {
+    assert!(READ_UNSET_NOTICE.contains("agent-created panes"));
+    assert!(READ_UNSET_NOTICE.contains("read = \"any\""));
+    let mut app = test_app();
+    let mut config = enabled(McpControl::Agent);
+    config.read = Some(sonicterm_cfg::config::McpRead::Any);
+    let shared = install_server(&mut app, config);
+    shared.set_read(config.read());
+    assert_eq!(shared.read(), sonicterm_cfg::config::McpRead::Any);
+}
+
+/// The notice through the real lifecycle: a server started by `reconcile_mcp` without `read`
+/// announces once when the first window appears; a reload that changes nothing says nothing more;
+/// stopping and starting again (a restart) announces again; and an explicit `read` is never
+/// announced, at start or on a restart.
+#[cfg(unix)]
+#[test]
+fn the_read_notice_follows_start_reload_restart_and_explicit_keys() {
+    // A fresh private directory the server creates itself, as it does its per-user one.
+    let root = tempfile::tempdir().unwrap();
+    let scratch = root.path().join("sonicterm");
+    crate::app::mcp::endpoint_unix::TEST_ENDPOINT_DIR.set(Some(scratch.clone()));
+    let mut app = test_app();
+    let without_read = McpConfig { enabled: true, read: None, ..McpConfig::default() };
+    app.config.mcp = without_read;
+    app.reconcile_mcp();
+    assert!(app.services.mcp_server.as_ref().expect("started").read_notice_due, "due at start");
+    // The first main window shows it; the event loop calls this as that window appears.
+    app.__test_seed_tab("first");
+    app.show_mcp_read_notice_if_due();
+    assert_eq!(app.__test_main_notification_message(), Some(READ_UNSET_NOTICE));
+    // An unchanged reload keeps the server and says nothing more.
+    app.main_mut().unwrap().notification = None;
+    app.reconcile_mcp();
+    app.show_mcp_read_notice_if_due();
+    assert_eq!(app.__test_main_notification_message(), None, "a reload repeated it");
+    // A restart (stop, then start without the key) announces again, at once since a window exists.
+    app.config.mcp = McpConfig::default();
+    app.reconcile_mcp();
+    app.config.mcp = without_read;
+    app.reconcile_mcp();
+    assert_eq!(app.__test_main_notification_message(), Some(READ_UNSET_NOTICE));
+    // An explicit read, at start or after a restart, is never announced.
+    for read in [sonicterm_cfg::config::McpRead::Agent, sonicterm_cfg::config::McpRead::Any] {
+        app.main_mut().unwrap().notification = None;
+        app.config.mcp = McpConfig::default();
+        app.reconcile_mcp();
+        app.config.mcp = McpConfig { enabled: true, read: Some(read), ..McpConfig::default() };
+        app.reconcile_mcp();
+        assert!(!app.services.mcp_server.as_ref().unwrap().read_notice_due, "{read:?}");
+        assert_eq!(app.__test_main_notification_message(), None, "{read:?} was announced");
+    }
+    app.config.mcp = McpConfig::default();
+    app.reconcile_mcp();
+    crate::app::mcp::endpoint_unix::TEST_ENDPOINT_DIR.set(None);
+}
+
+/// A pane outside the read scope is refused with the fix in the message itself, since a headless
+/// agent never sees the notification.
+#[test]
+fn an_out_of_scope_refusal_names_the_fix() {
+    let mut app = test_app();
+    let pane_id = app.__test_seed_tab("user");
+    let shared = install_server(&mut app, enabled(McpControl::Agent));
+    shared.set_read(sonicterm_cfg::config::McpRead::Agent);
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    shared.inbox.lock().push(crate::app::mcp::LoopRequest {
+        call: crate::app::mcp::LoopCall::ResolvePane { pane_id },
+        generation: shared.generation.load(std::sync::atomic::Ordering::Acquire),
+        deadline: std::time::Instant::now() + Duration::from_secs(5),
+        closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        session: crate::app::mcp::agents::AgentSessionId::next(),
+        reply,
+    });
+    app.drain_mcp_requests();
+    match answer.recv().unwrap() {
+        LoopReply::Refused(code, message) => {
+            assert_eq!(code, "out_of_scope");
+            assert!(message.contains("read = \"any\""), "{message}");
+        }
+        _ => panic!("the user's pane was not refused"),
+    }
+}
+
+/// A tool that names one pane gets its handles without its UI position: no window is ordered and
+/// the entry carries no metadata, while `list_panes` entries always do.
+#[test]
+fn resolving_one_pane_orders_no_windows() {
+    let mut app = test_app();
+    let pane_id = app.__test_seed_tab("one");
+    app.__test_seed_child_window(&["child"]);
+    WINDOW_ORDERS.with(|orders| orders.set(0));
+    let entry = app.mcp_resolve_pane(pane_id).expect("the pane resolves");
+    assert!(entry.metadata.is_none());
+    assert_eq!(WINDOW_ORDERS.with(std::cell::Cell::get), 0, "resolving ordered the windows");
+    assert!(app.mcp_pane_entries().iter().all(|entry| entry.metadata.is_some()));
+}
+
+/// A reload that changes only `max_connections` sets the limit for new connections and revokes
+/// nothing: the generation a running wait was admitted under stays current.
+#[test]
+fn a_connection_limit_reload_revokes_nothing() {
+    let mut app = test_app();
+    let shared = install_server(&mut app, enabled(McpControl::Agent));
+    let before = shared.generation.load(std::sync::atomic::Ordering::Acquire);
+    app.config.mcp.max_connections = 9;
+    app.reconcile_mcp();
+    assert_eq!(shared.generation.load(std::sync::atomic::Ordering::Acquire), before);
+    assert_eq!(shared.connection_limit.load(std::sync::atomic::Ordering::Acquire), 9);
+    // A control change still revokes.
+    app.config.mcp.control = McpControl::Any;
+    app.reconcile_mcp();
+    assert_ne!(shared.generation.load(std::sync::atomic::Ordering::Acquire), before);
 }

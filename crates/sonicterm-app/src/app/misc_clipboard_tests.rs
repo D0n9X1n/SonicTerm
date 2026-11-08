@@ -6,8 +6,9 @@ fn clipboard_files_paste_as_quoted_paths() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane = app.__test_seed_tab("main");
     // Finder also publishes the bare file name as text; the path list must take precedence.
-    app.test_clipboard_text = Some("report one.txt".into());
-    app.test_clipboard_files = Some(vec!["/tmp/report one.txt".into(), "/tmp/it's here".into()]);
+    app.testing.test_clipboard_text = Some("report one.txt".into());
+    app.testing.test_clipboard_files =
+        Some(vec!["/tmp/report one.txt".into(), "/tmp/it's here".into()]);
     app.__test_enable_pty_write_log();
     app.paste_clipboard_for_kind(FrontmostKind::Main);
     assert_eq!(
@@ -21,8 +22,8 @@ fn clipboard_files_paste_as_quoted_paths() {
 fn clipboard_text_without_files_pastes_text() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane = app.__test_seed_tab("main");
-    app.test_clipboard_text = Some("plain text".into());
-    app.test_clipboard_files = Some(Vec::new());
+    app.testing.test_clipboard_text = Some("plain text".into());
+    app.testing.test_clipboard_files = Some(Vec::new());
     app.__test_enable_pty_write_log();
     app.paste_clipboard_for_kind(FrontmostKind::Main);
     assert_eq!(app.__test_drain_pty_writes(), [(pane, b"plain text".to_vec())]);
@@ -33,7 +34,7 @@ fn clipboard_text_without_files_pastes_text() {
 fn clipboard_files_reuse_drop_refusals() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
-    app.test_clipboard_files = Some(vec!["/tmp/ok".into(), "/tmp/bad\nname".into()]);
+    app.testing.test_clipboard_files = Some(vec!["/tmp/ok".into(), "/tmp/bad\nname".into()]);
     app.__test_enable_pty_write_log();
     app.paste_clipboard_for_kind(FrontmostKind::Main);
     assert!(app.__test_drain_pty_writes().is_empty());
@@ -47,8 +48,8 @@ fn clipboard_files_do_not_reach_open_search() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     app.open_search();
-    app.test_clipboard_text = Some("needle".into());
-    app.test_clipboard_files = Some(vec!["/tmp/file".into()]);
+    app.testing.test_clipboard_text = Some("needle".into());
+    app.testing.test_clipboard_files = Some(vec!["/tmp/file".into()]);
     app.__test_enable_pty_write_log();
     app.paste_clipboard_for_kind(FrontmostKind::Main);
     assert!(app.__test_drain_pty_writes().is_empty());
@@ -61,12 +62,12 @@ fn clipboard_files_do_not_reach_open_search() {
 fn clipboard_files_keep_paste_source_attribution() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane = app.__test_seed_tab("main");
-    app.test_clipboard_files = Some(vec!["/tmp/file".into()]);
+    app.testing.test_clipboard_files = Some(vec!["/tmp/file".into()]);
     app.__test_enable_pty_write_log();
     app.paste_clipboard_for_kind(FrontmostKind::Main);
     app.paste_file_paths_for_kind(FrontmostKind::Main, vec!["/tmp/file".into()]);
     assert_eq!(
-        *app.test_pty_write_sources.borrow(),
+        *app.testing.test_pty_write_sources.borrow(),
         [(pane, crate::app::PtyInputSource::Paste), (pane, crate::app::PtyInputSource::FileDrop)]
     );
 }
@@ -78,9 +79,9 @@ fn copy_with_file_override_stays_in_test_clipboard() {
     let pane = app.__test_seed_tab("main");
     // Without a native handle, a write that escaped the test clipboard fails instead of reaching the desktop.
     app.clipboard = None;
-    app.test_clipboard_files = Some(vec!["/tmp/file".into()]);
+    app.testing.test_clipboard_files = Some(vec!["/tmp/file".into()]);
     assert!(app.set_clipboard_text("copied".into()));
-    assert_eq!(app.test_clipboard_text.as_deref(), Some("copied"));
+    assert_eq!(app.testing.test_clipboard_text.as_deref(), Some("copied"));
     assert!(app.read_clipboard_files().is_empty());
     app.__test_enable_pty_write_log();
     app.paste_clipboard_for_kind(FrontmostKind::Main);
@@ -94,10 +95,13 @@ fn memory_clipboard_text_replaces_file_override() {
     let pane = app.__test_seed_tab("main");
     // Without a native handle, any desktop read or write fails rather than touching the user's clipboard.
     app.clipboard = None;
-    app.test_clipboard_files = Some(vec!["/tmp/file".into()]);
+    app.testing.test_clipboard_files = Some(vec!["/tmp/file".into()]);
     app.__test_set_memory_clipboard("plain");
     app.__test_enable_pty_write_log();
     app.paste_clipboard_for_kind(FrontmostKind::Main);
     assert_eq!(app.__test_drain_pty_writes(), [(pane, b"plain".to_vec())]);
-    assert_eq!(*app.test_pty_write_sources.borrow(), [(pane, crate::app::PtyInputSource::Paste)]);
+    assert_eq!(
+        *app.testing.test_pty_write_sources.borrow(),
+        [(pane, crate::app::PtyInputSource::Paste)]
+    );
 }

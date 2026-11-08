@@ -838,7 +838,7 @@ impl App {
         // `get_mut(&id).else { continue }` arm below fires. Release builds
         // compile none of it: the field and this call need `test-support`.
         #[cfg(any(test, feature = "test-support"))]
-        if let Some(hook) = self.test_post_snapshot_hook.take() {
+        if let Some(hook) = self.testing.test_post_snapshot_hook.take() {
             hook(self);
         }
         // clear ALL per-window drag residue, not just

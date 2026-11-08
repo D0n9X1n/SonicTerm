@@ -142,7 +142,7 @@ impl App {
             .expect("native PTY teardown driver could not start");
         Self {
             registry: crate::app::WindowRegistry {
-                windows: HashMap::new(),
+                windows: WindowMap::default(),
                 main_window_id: None,
                 frontmost_window: None,
                 window_keys: crate::window_key_boundary::WindowKeyRegistry::new(),
@@ -191,55 +191,48 @@ impl App {
             capture_staging_pool: CaptureStagingPool::process_default(),
             process_privilege: crate::ProcessPrivilege::default(),
             config,
-            config_normalizer,
-            font_dirs,
-            configured_font_size,
-            configured_weight_scale,
-            configured_font_family,
-            font_catalog: font_catalog::FontCatalog::default(),
-            font_enumerator: sonicterm_gpu::installed_monospace_families,
-            font_picker_original: None,
-            font_family_generation: 0,
-            #[cfg(test)]
-            live_font_log: Vec::new(),
+            configs: super::config_state::ConfigState {
+                config_normalizer,
+                theme_loader: None,
+                keymap_loader: None,
+                runtime_config_path: None,
+                startup_loads: None,
+            },
+            fonts: super::font_state::FontState {
+                font_dirs,
+                configured_font_size,
+                configured_weight_scale,
+                configured_font_family,
+                font_catalog: font_catalog::FontCatalog::default(),
+                font_enumerator: sonicterm_gpu::installed_monospace_families,
+                font_picker_original: None,
+                font_family_generation: 0,
+                #[cfg(test)]
+                live_font_log: Vec::new(),
+            },
             keymap,
             clipboard: Clipboard::new().ok(),
+            // No event-loop proxy ⇒ headless/test construction ⇒ record PTY writes for assertions.
+            // Production always passes `Some(proxy)`, so the ledger stays off and costs nothing.
+            testing: super::test_support_state::TestSupportState {
+                pty_write_log_enabled: event_loop_proxy.is_none(),
+                ..Default::default()
+            },
             #[cfg(target_os = "windows")]
             pending_osc52_reassert: None,
-            test_clipboard_text: None,
-            test_clipboard_files: None,
-            #[cfg(any(test, feature = "test-support"))]
-            test_clipboard_write_failure: false,
-            test_pty_writes: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(test)]
-            test_pane_launches: std::cell::RefCell::new(Vec::new()),
-            #[cfg(test)]
-            test_pty_write_sources: std::cell::RefCell::new(Vec::new()),
-            // No event-loop proxy ⇒ headless/test construction ⇒ record PTY
-            // writes for assertions. Production always passes `Some(proxy)`,
-            // so the ledger stays disabled and adds no per-write cost.
-            pty_write_log_enabled: event_loop_proxy.is_none(),
             pending_new_window: None,
-            memory_report: Default::default(),
-            about: Default::default(),
+            reports: Default::default(),
             pending_tear_out: None,
             pending_os_teardown: false,
-            #[cfg(any(test, feature = "test-support"))]
-            test_post_snapshot_hook: None,
             pending_exit: false,
-            #[cfg(test)]
-            test_scheduler_trims: Vec::new(),
             governor,
             session_finished: None,
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
             dispatch_redraws: super::redraw::DispatchRedraws::default(),
             accessibility: Default::default(),
-            theme_loader: None,
-            keymap_loader: None,
             event_loop_proxy,
             path_workers,
             home_dir,
-            runtime_config_path: None,
             local_hostname,
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
@@ -256,12 +249,10 @@ impl App {
             default_handlers: default_handlers::DefaultHandlersState::default(),
             tab_bar_visible: true,
             status_line: Default::default(),
-            startup_loads: None,
             program: Default::default(),
             quit_hold: quit_hold::QuitHold::new(),
             on_resumed: None,
             on_window_ready: None,
-            test_viewport_override: None,
             machine,
         }
     }
@@ -295,7 +286,7 @@ impl App {
             self.cancel_window_rename(previous_id);
             self.cancel_tab_edit(previous_id);
             self.accessibility.remove(&previous_id);
-            if let Some(mut previous) = self.registry.windows.remove(&previous_id) {
+            if let Some(mut previous) = self.registry.remove_window(previous_id) {
                 self.retire_window_counters(previous_id, &mut previous);
                 for pane in std::mem::take(&mut previous.panes).into_values() {
                     self.retire_pane(pane);
@@ -326,6 +317,8 @@ impl App {
     }
 
     pub(super) fn retire_pane(&mut self, mut pane: PaneState) {
+        // Closed first, so an MCP wait on this pane ends with `pane_closed` instead of its timeout.
+        pane.change_signal.close();
         *pane.redraw_target.lock() = None;
         // The pane already left its window; the next status line sync prunes its records.
         self.status_line.panes_retired = true;

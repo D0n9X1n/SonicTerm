@@ -40,7 +40,8 @@ flowchart TD
 仅供调用方报告其长度；被拒绝的输入从不重试。
 
 每条被接受的用户输入消息在非阻塞发送外的短暂提交锁内获得一个序号（模 2^20），因此序号
-顺序就是通道顺序。writer 只在用户输入消息 flush 成功后才计为完成；解析器回复从不改动序号。
+顺序就是通道顺序。writer 只在用户输入消息 flush 成功后才计为完成（在两个平台上 flush 都不做任何事：Unix 的 writer 是普通文件，
+固定版本的 Windows writer 的 `flush` 立即返回，因此逐条 flush 不增加系统调用）；解析器回复从不改动序号。
 每个序号的提交时间存放在八个槽位之一。`PtyHandle::input_progress()` 不加锁读取这些原子量，
 返回 `Idle`、最早未完成的写入（`Oldest`，含其提交时间以及前面是否有回复）、读取与完成竞争时的
 `Raced`，或 writer 停止后的 `Terminal`。writer 每次退出时都在提交锁内记录原因，因此之后的
@@ -58,7 +59,14 @@ flowchart TD
 
 现有原生 writer 在 UI 输入与总计最多 32 KiB 的完整回复提交之间选择；长度帧保证键盘字节
 不会插入回复内部。每轮回复之后，已就绪的 UI 输入优先获得一次写入机会。两条流各自保持
-字节顺序，但不承诺不同生产者之间的顺序。溢出文件不设磁盘用量上限，已消费前缀保留到排空。
+字节顺序，但不承诺不同生产者之间的顺序。每个窗格未消费的溢出字节上限为 16 MiB
+（`SPILL_BUDGET_BYTES`）：超出上限的回复单独以 `ReplyBudgetExceeded` 错误拒绝、计数并丢弃，暂存区
+仍可接收后续回复。这对应持续查询却从不读取输入的程序；有限突发（例如程序读取前产生
+512 条满长回复）仍可容纳。已消费前缀至少 1 MiB 且至少占文件一半时，未消费记录移到文件开头，
+因此文件始终小于预算的两倍加一条记录，每次提交的代价是一次记录写入加摊销的复制。
+提交仍在 VT worker 上进行：预算限制的是一次提交可写入或复制的字节数，而不是耗时，因此文件系统停顿
+仍会让该窗格的 VT worker 停顿；单独的 IO 线程会为每个窗格增加线程，并打乱失败报告顺序。
+原生文件系统配额错误属于存储失败，而不是预算拒绝。
 排空和 writer 退出会删除文件；窗格销毁立即拒绝新提交。原生 writer 负责最终清理，在事件循环
 线程之外等待正在进行的存储操作返回。
 磁盘耗尽、暂存读写失败及原生 write/flush 错误均显式报告，不保证这些故障下无损交付。
@@ -542,5 +550,6 @@ mouse ownership 与 OSC 52 实际配置见 [终端复用器](Terminal-Multiplexe
 | 窗格工作线程与重绘合并 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | 主窗口/子窗口输入路由 | `crates/sonicterm-app/src/app/{window_event,window_keyboard,window_pointer,child_window,child_window_pointer}.rs` |
 | VT 解析器与模式 | `crates/sonicterm-vt/src/vt.rs` |
+| 带种子的模糊测试 | `crates/sonicterm-vt/src/vt_fuzz_tests.rs`（解析器；`SONICTERM_FUZZ_ITERS` 可提高其 20,000 次迭代）、`crates/sonicterm-io/src/reply_spool_tests.rs`（回复缓冲）、`crates/sonicterm-app/src/app/spawn_pane_vt_fuzz_tests.rs`（经批量发布器的图像片段） |
 | 网格与行存储 | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
 | 选区与复制 | `crates/sonicterm-ui/src/selection.rs`、`crates/sonicterm-app/src/app/misc.rs` |
