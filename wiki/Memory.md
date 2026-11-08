@@ -121,6 +121,15 @@ caller return. Its time on the retiring thread is recorded, and one longer than
 can persist for the rest of the process. Terminal disposal preserves incomplete
 native payloads and their accounting instead of running unsafe destructors.
 
+A mass close is where the fallback runs most. On Unix a unit test closes 32 real
+PTYs against a driver that admits two tasks and holds their runs, so no capacity is
+recycled: exactly two are admitted and thirty fall back, each close is counted on
+one path, the fallbacks' summed blocked time stays within thirty native tail bounds,
+and once the runs are released the admitted tasks settle and the root's reaper work
+returns to zero. In ordinary use the fallback count, slow count, longest and total
+blocked time, and the blocked-time histogram, are in the memory log's `pty queues`
+line and the Memory Usage report's `PTY QUEUES` section.
+
 The type system also defines `SharedFont`, `SharedRaster`, `SharedAtlas`,
 `LocalPty`, and mux owner kinds, but the GUI does not register those nodes.
 
