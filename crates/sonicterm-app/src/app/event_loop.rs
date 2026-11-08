@@ -690,7 +690,7 @@ impl App {
             renderer: Some(renderer),
             tabs: sonicterm_ui::tabs::TabBar::new(),
             tab_states: Vec::new(),
-            panes: std::collections::HashMap::new(),
+            panes: super::PaneMap::default(),
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             pointer_gesture: None,

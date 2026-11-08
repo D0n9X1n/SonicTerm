@@ -287,7 +287,7 @@ fn resolving_one_pane_matches_its_listed_entry() {
     let main_second_tab = app.main().unwrap().tab_states[1].active_pane;
     // A leaf whose pane already left `panes`, as during teardown, is listed by neither path.
     let torn = app.__test_child_active_pane(second_child).unwrap();
-    let removed = app.registry.windows.get_mut(&second_child).unwrap().panes.remove(&torn);
+    let removed = app.registry.windows.get_mut(&second_child).unwrap().panes.remove_for_test(&torn);
     assert!(removed.is_some());
     let listed = app.mcp_pane_entries();
     assert!(

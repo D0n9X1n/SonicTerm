@@ -74,7 +74,7 @@ pub(super) struct DetachedTab {
     prior_active_tab_id: Option<sonicterm_ui::tabs::TabId>,
     tab: Tab,
     state: TabState,
-    panes: HashMap<u64, super::PaneState>,
+    panes: super::DetachedPanes,
 }
 
 impl DetachedTab {
@@ -371,10 +371,8 @@ impl App {
             "a tear-out source cannot disappear during synchronous destination preparation",
         );
         let index = original_index.min(window.tabs.len());
-        for (pane_id, pane) in panes {
-            let displaced = window.panes.insert(pane_id, pane);
-            assert!(displaced.is_none(), "a detached pane id must remain absent until rollback");
-        }
+        let refused = window.panes.attach_set(panes);
+        assert_eq!(refused.len(), 0, "a detached pane id must remain absent until rollback");
         window.tabs.insert(index, tab);
         window.tab_states.insert(index, state);
         let active_index = prior_active_tab_id
@@ -787,7 +785,7 @@ impl App {
             renderer: Some(destination.renderer),
             tabs: child_tabs,
             tab_states,
-            panes: transaction.panes,
+            panes: super::PaneMap::from_detached(transaction.panes),
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             pointer_gesture: None,

@@ -94,7 +94,7 @@ fn real_pty_close_paths_take_no_fallback() {
             let extra_pane = PaneState::new_with_media_pool(parser, None, &app.inline_media_pool);
             let state = app.registry.windows.get_mut(&window).unwrap();
             assert!(state.tab_states[0].tree.split(pane, Direction::Right, extra));
-            state.panes.insert(extra, extra_pane);
+            state.panes.insert_for_test(extra, extra_pane);
         }
         attach_idle_pty(&mut app, window, pane);
         app.reconcile_pane_owners();
@@ -502,6 +502,13 @@ fn terminal_ime_anchor_updates_equal_cells_after_focus_or_geometry_changes() {
     assert_eq!(calls[4].0, winit::dpi::PhysicalPosition::new(19, 71));
 }
 
+/// Drop a test's detached tab and its panes, which own no PTY, on purpose.
+fn discard_tab(detached: Option<(sonicterm_ui::tabs::Tab, TabState, DetachedPanes)>) {
+    if let Some((_, _, panes)) = detached {
+        panes.discard_for_test();
+    }
+}
+
 #[test]
 fn native_drag_keeps_the_pressed_tab_after_an_earlier_tab_closes() {
     // Native completion must resolve the pressed identity, not the tab that inherited its old index.
@@ -515,7 +522,7 @@ fn native_drag_keeps_the_pressed_tab_after_an_earlier_tab_closes() {
             if source_is_main { main } else { app.__test_seed_child_window(&["A", "B", "C"]) };
         let pressed = app.tab_id_at(source, 1).unwrap();
         app.__test_set_os_drag_source(Some((source, 1)));
-        drop(app.detach_from_child(source, 0));
+        discard_tab(app.detach_from_child(source, 0));
         app.interaction
             .os_drag_pending
             .set_ended(os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos: (120, 240) });
@@ -539,7 +546,7 @@ fn native_drag_cancels_when_the_pressed_tab_has_closed() {
     let main = app.registry.main_window_id.unwrap();
     let survivor = app.tab_id_at(main, 2).unwrap();
     app.__test_set_os_drag_source(Some((main, 1)));
-    drop(app.detach_from_child(main, 1));
+    discard_tab(app.detach_from_child(main, 1));
     app.interaction
         .os_drag_pending
         .set_ended(os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos: (120, 240) });
@@ -578,8 +585,8 @@ fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes(
                 let pane = app.registry.windows[&source].tab_states[1].active_pane;
                 app.__test_set_os_drag_source(Some((source, 1)));
                 match mutation {
-                    0 => drop(app.detach_from_child(source, 0)),
-                    1 => drop(app.detach_from_child(source, 1)),
+                    0 => discard_tab(app.detach_from_child(source, 0)),
+                    1 => discard_tab(app.detach_from_child(source, 1)),
                     2 => {
                         assert!(app.registry.windows.get_mut(&source).unwrap().reorder_tab(1, 2));
                     }
@@ -658,10 +665,10 @@ fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
                 let session = crate::tab_drag::DragSession::new(source, pressed, (0.0, 0.0));
                 match mutation {
                     0 => {
-                        drop(app.detach_from_child(source, 0));
+                        discard_tab(app.detach_from_child(source, 0));
                     }
                     1 => {
-                        drop(app.detach_from_child(source, 1));
+                        discard_tab(app.detach_from_child(source, 1));
                     }
                     2 => {
                         app.registry.windows.get_mut(&source).unwrap().reorder_tab(1, 2);
@@ -711,6 +718,7 @@ fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
                     assert_eq!(app.registry.windows[&target].tabs.len(), 1);
                     assert!(torn.is_none());
                 }
+                discard_tab(torn);
             }
         }
     }
@@ -763,7 +771,9 @@ fn transferred_nested_tabs_resize_visible_leaves_and_preserve_zoom_hidden_sizes(
             let window = app.registry.windows.get_mut(&source).unwrap();
             window.tabs.insert(0, tab);
             window.tab_states.insert(0, TabState::new(tree, ids[1]));
-            window.panes.extend(panes);
+            for (id, pane) in panes {
+                window.panes.insert_for_test(id, pane);
+            }
 
             let source_kind = (source != main).then_some(source);
             let target_kind = (target != main).then_some(target);
@@ -851,7 +861,11 @@ fn attaching_a_split_tab_uses_only_final_destination_pane_sizes() {
         let tab = sonicterm_ui::tabs::Tab::new("incoming");
         let expected = state.tree.layout(sonicterm_ui::pane::Rect::new(0.0, 40.0, 1200.0, 600.0));
 
-        app.attach_tab_state(1, tab, state, panes).unwrap();
+        let mut detached = DetachedPanes::default();
+        for (id, pane) in panes {
+            detached.push(DetachedPane::unattached(id, pane));
+        }
+        app.attach_tab_state(1, tab, state, detached).unwrap();
 
         let main = app.main().unwrap();
         assert_eq!(main.tabs.active_index(), 1);

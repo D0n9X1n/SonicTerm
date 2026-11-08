@@ -232,9 +232,33 @@ impl App {
     /// must instead `let ws = self.main_mut()?;` and field-disjoint
     /// split-borrow.
     #[doc(hidden)]
-    pub fn main_panes_mut(&mut self) -> Option<&mut HashMap<u64, PaneState>> {
+    pub fn main_panes_mut(&mut self) -> Option<&mut crate::app::PaneMap> {
         let id = self.registry.main_window_id?;
         Some(&mut self.registry.windows.get_mut(&id)?.panes)
+    }
+
+    /// Detach and retire `pane_id` from the main window's panes while its tab still names it, so
+    /// a test or the perf harness can observe a pane that vanished mid-flight. `false` when the
+    /// main window holds no such pane.
+    #[doc(hidden)]
+    pub fn __test_detach_main_pane(&mut self, pane_id: u64) -> bool {
+        self.registry.main_window_id.is_some_and(|main| self.__test_detach_pane(main, pane_id))
+    }
+
+    /// [`Self::__test_detach_main_pane`] for any window `window_id`.
+    #[doc(hidden)]
+    pub fn __test_detach_pane(&mut self, window_id: WindowId, pane_id: u64) -> bool {
+        let detached = self
+            .registry
+            .windows
+            .get_mut(&window_id)
+            .and_then(|window| window.remove_pane(pane_id));
+        let Some(pane) = detached else {
+            // When: `window_id` holds no `pane_id`, nothing is detached.
+            return false;
+        };
+        self.retire_pane(pane);
+        true
     }
 
     /// borrow the main window's selection

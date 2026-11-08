@@ -311,7 +311,7 @@ impl FrameViewports {
 /// `PaneRender` viewport and the active window's frame viewport come from one
 /// reconcile pass.
 pub(crate) fn reconcile_held_viewports<'a>(
-    panes: &mut HashMap<u64, PaneState>,
+    panes: &mut crate::app::PaneMap,
     held: impl IntoIterator<Item = (u64, &'a Parser)>,
     active_pane: u64,
 ) -> FrameViewports {

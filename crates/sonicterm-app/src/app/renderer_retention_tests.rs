@@ -430,14 +430,24 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
         .flat_map(|(file, source)| {
             source
                 .lines()
-                .filter(|line| line.contains(".panes.remove("))
+                .filter(|line| {
+                    line.contains(".panes.detach(") || line.contains(".panes.detach_all(")
+                })
                 .map(move |text| (*file, text.trim()))
         })
         .collect();
 
     assert_eq!(
         raw,
-        vec![("window_state.rs", "let pane = self.panes.remove(&pane_id)?;")],
+        vec![
+            ("window_state.rs", "let pane = self.panes.detach(pane_id)?;"),
+            // A window going away, or the session ending, detaches every pane with its renderer;
+            // no cache outlives it.
+            ("session.rs", ".flat_map(|window| window.panes.detach_all())"),
+            ("session.rs", "for pane in previous.panes.detach_all() {"),
+            ("child_window.rs", "for pane in removed.panes.detach_all() {"),
+            ("child_tabs.rs", "for pane in removed.panes.detach_all() {"),
+        ],
         "every renderer-owning pane removal must call WindowState::remove_pane: {raw:?}"
     );
     let chokepoint = include_str!("window_state.rs");

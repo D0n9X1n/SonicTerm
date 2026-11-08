@@ -56,7 +56,7 @@ pub(super) fn refresh_window_agent_tabs(
 pub(super) fn refresh_window_tab_privileges(
     tabs: &mut sonicterm_ui::tabs::TabBar,
     tab_states: &[TabState],
-    panes: &mut HashMap<u64, PaneState>,
+    panes: &mut crate::app::PaneMap,
     probes: Option<&fg_probe::ForegroundProbes>,
     now: Instant,
 ) -> bool {
@@ -93,7 +93,7 @@ pub(super) fn refresh_window_tab_privileges(
 pub(super) fn refresh_window_tab_privileges(
     tabs: &mut sonicterm_ui::tabs::TabBar,
     tab_states: &[TabState],
-    panes: &mut HashMap<u64, PaneState>,
+    panes: &mut crate::app::PaneMap,
     probes: Option<&fg_probe::ForegroundProbes>,
     now: Instant,
 ) -> bool {

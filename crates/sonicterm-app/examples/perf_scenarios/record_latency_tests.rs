@@ -410,7 +410,7 @@ fn split_reason_rows_reached_through_the_real_app() {
     let (mut app, pane) = counting_app();
     let remove = |app: &mut sonicterm_app::app::App, _: Option<EchoToken>| {
         let pane = app.main().expect("main").tab_states[0].active_pane;
-        app.main_panes_mut().expect("main").remove(&pane);
+        assert!(app.__test_detach_main_pane(pane));
     };
     assert_eq!(app_reason(&mut app, pane, remove, after), "take-no-pane");
 

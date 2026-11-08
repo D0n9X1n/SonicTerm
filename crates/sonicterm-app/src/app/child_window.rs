@@ -180,7 +180,7 @@ impl App {
             return false;
         };
         self.retire_window_counters(win_id, &mut removed);
-        for pane in std::mem::take(&mut removed.panes).into_values() {
+        for pane in removed.panes.detach_all() {
             self.retire_pane(pane);
         }
         self.release_owners_of(&mut removed);

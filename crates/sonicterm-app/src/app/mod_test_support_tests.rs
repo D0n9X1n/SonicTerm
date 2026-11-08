@@ -13,6 +13,8 @@ const UNGATED_HOOKS: &[&str] = &[
     "__test_attach_window_renderer",
     "__test_child_pane_ids",
     "__test_child_pane_parser",
+    "__test_detach_main_pane",
+    "__test_detach_pane",
     "__test_invoke_activate_main_tab",
     "__test_invoke_reap_empty_child",
     "__test_main_window_id",

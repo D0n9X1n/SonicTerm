@@ -42,12 +42,12 @@ impl App {
                 }
             };
             if split_ok {
-                window.panes.insert(new_id, new_pane.take().expect("uninstalled split pane"));
+                window.panes.attach_new(new_id, new_pane.take().expect("uninstalled split pane"));
             }
             split_ok
         };
         if let Some(pane) = new_pane {
-            self.retire_pane(pane);
+            self.retire_pane(crate::app::DetachedPane::unattached(new_id, pane));
         }
         if did_split {
             // Own the new pane now rather than on the next 30-second sample:

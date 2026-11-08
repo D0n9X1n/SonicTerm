@@ -294,7 +294,7 @@ impl App {
             renderer: Some(renderer),
             tabs,
             tab_states: vec![TabState::new(PaneTree::leaf(pane_id), pane_id)],
-            panes,
+            panes: crate::app::PaneMap::founding(panes),
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             pointer_gesture: None,

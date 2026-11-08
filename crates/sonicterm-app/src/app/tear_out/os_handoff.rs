@@ -80,7 +80,7 @@ impl App {
                 // An acknowledged destination owns the payload; retire source PTYs without changing live in-process transfer behavior.
                 if let Some(index) = self.tab_index_of_id(source_window, source_tab) {
                     if let Some((_, _, panes)) = self.detach_from_child(source_window, index) {
-                        for pane in panes.into_values() {
+                        for pane in panes.into_panes() {
                             self.retire_pane(pane);
                         }
                     }

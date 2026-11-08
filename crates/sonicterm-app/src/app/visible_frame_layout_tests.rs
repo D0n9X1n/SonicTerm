@@ -311,7 +311,7 @@ fn structural_invalidity_is_not_contention_in_either_role() {
             let tab = &mut state.tab_states[0];
             let reason = match defect {
                 0 => {
-                    state.panes.remove(&left);
+                    state.panes.remove_for_test(&left);
                     LayoutInvalid::MissingPane(left)
                 }
                 1 => {

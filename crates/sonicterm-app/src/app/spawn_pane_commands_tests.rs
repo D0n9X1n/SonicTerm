@@ -223,7 +223,7 @@ fn main_split_refusal_preserves_zoom_focus_and_live_panes() {
         app.toggle_active_pane_zoom();
         let window = app.main_mut().expect("main window");
         if missing_live_pane {
-            window.panes.remove(&pane);
+            window.panes.remove_for_test(&pane);
         } else {
             window.tab_states[0].active_pane = u64::MAX;
         }

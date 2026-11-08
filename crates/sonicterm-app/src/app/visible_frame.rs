@@ -21,7 +21,7 @@ use winit::window::WindowId;
 
 use super::{
     viewport_anchor::{reconcile_held_viewports, FrameViewports, ViewportAnchor},
-    App, PaneState, WindowState,
+    App, WindowState,
 };
 
 /// Event-loop-owned topology failures, never a reason to retry on a timer.
@@ -333,7 +333,7 @@ impl VisibleFrameSources {
     /// Resolve the captured viewport anchors against the held grids and commit the same projections.
     pub(super) fn reconcile_viewports(
         &self,
-        panes: &mut HashMap<u64, PaneState>,
+        panes: &mut crate::app::PaneMap,
         guards: &ParserGuards<'_>,
     ) -> Result<FrameViewports, FrameUnavailable> {
         // Validate every destination before committing any projection; event-loop topology is stable here.

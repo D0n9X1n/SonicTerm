@@ -678,7 +678,7 @@ fn seed_tree(app: &mut App, child: bool, topology: Topology) -> Result<(WindowId
         state.tabs.close(id);
     }
     if !matches!(topology, Topology::Nested) {
-        state.panes.remove(&panes[2]);
+        ensure!(app.__test_detach_pane(id, panes[2]), "the foreign pane leaves the window");
     }
     Ok((id, panes[..if matches!(topology, Topology::Nested) { 3 } else { 2 }].to_vec()))
 }

@@ -555,7 +555,8 @@ impl App {
         )));
         let media_pool = Arc::clone(&self.inline_media_pool);
         if let Some(main) = self.main_mut() {
-            main.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
+            main.panes
+                .attach_new(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
             main.tabs.push(Tab::new(title));
             main.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
@@ -595,7 +596,8 @@ impl App {
         )));
         let media_pool = Arc::clone(&self.inline_media_pool);
         if let Some(main) = self.main_mut() {
-            main.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
+            main.panes
+                .attach_new(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
             main.tabs.push(Tab::new(title));
             main.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }

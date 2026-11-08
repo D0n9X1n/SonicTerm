@@ -175,11 +175,11 @@ fn assert_paste_destination_matrix(paths: bool) {
                         .get_mut(&window)
                         .unwrap()
                         .panes
-                        .remove(&pane_id)
+                        .remove_for_test(&pane_id)
                         .unwrap();
                     app.registry.windows.get_mut(&window).unwrap().tab_states.clear();
                     let source_state = app.registry.windows.get_mut(&source_window).unwrap();
-                    source_state.panes.insert(pane_id, pane);
+                    source_state.panes.insert_for_test(pane_id, pane);
                     assert!(source_state.tab_states[0].tree.split(
                         source,
                         Direction::Right,

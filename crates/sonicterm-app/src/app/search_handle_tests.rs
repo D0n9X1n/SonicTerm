@@ -187,13 +187,14 @@ fn source_window_search_commit_retains_missing_pane_state() {
         app.registry.windows.get_mut(&owner).unwrap().tab_states[0].search =
             Some(SearchState::new());
         assert!(app.search_handle_ime_commit(owner, "keep"));
-        let pane = app.registry.windows.get_mut(&owner).unwrap().panes.remove(&pane_id).unwrap();
+        let pane =
+            app.registry.windows.get_mut(&owner).unwrap().panes.remove_for_test(&pane_id).unwrap();
         assert!(!app.search_handle_ime_commit(owner, "discard"));
         assert_eq!(
             app.registry.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
             "keep"
         );
-        app.registry.windows.get_mut(&owner).unwrap().panes.insert(pane_id, pane);
+        app.registry.windows.get_mut(&owner).unwrap().panes.insert_for_test(pane_id, pane);
     }
     assert!(!app.search_handle_ime_commit(WindowId::from(0), "wrong"));
     assert_eq!(app.registry.windows[&main].tab_states[0].search.as_ref().unwrap().query, "keep");

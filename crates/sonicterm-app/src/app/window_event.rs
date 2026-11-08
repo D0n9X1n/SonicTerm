@@ -638,7 +638,7 @@ impl App {
             Option<&mut GpuRenderer>,
             Option<&mut sonicterm_ui::tabs::TabBar>,
             Option<&mut Vec<TabState>>,
-            Option<&mut std::collections::HashMap<u64, crate::app::PaneState>>,
+            Option<&mut crate::app::PaneMap>,
             bool,
             Option<&mut Instant>,
             Option<&Selection>,

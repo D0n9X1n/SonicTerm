@@ -672,8 +672,9 @@ fn pane_transfer_preserves_generation_arc_and_unobserved_output() {
     let pane_id = app.registry.windows[&main].tab_states[0].active_pane;
     let arc = Arc::clone(&app.registry.windows[&main].panes[&pane_id].output_generation);
     arc.fetch_add(3, Ordering::Release);
-    let pane = app.registry.windows.get_mut(&main).unwrap().panes.remove(&pane_id).unwrap();
-    app.registry.windows.get_mut(&child).unwrap().panes.insert(pane_id, pane);
+    let pane =
+        app.registry.windows.get_mut(&main).unwrap().panes.remove_for_test(&pane_id).unwrap();
+    app.registry.windows.get_mut(&child).unwrap().panes.insert_for_test(pane_id, pane);
     let destination = app.registry.windows.get_mut(&child).unwrap();
     destination.tab_states[0].tree = sonicterm_ui::pane::PaneTree::leaf(pane_id);
     destination.tab_states[0].active_pane = pane_id;

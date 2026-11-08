@@ -71,7 +71,7 @@ pub struct WindowState {
     pub renderer: Option<GpuRenderer>,
     pub tabs: TabBar,
     pub tab_states: Vec<TabState>,
-    pub panes: HashMap<u64, PaneState>,
+    pub panes: super::PaneMap,
     /// The receipts of this window's last presented frame, applied to the held grids at its next
     /// successful collection and then emptied; kept unchanged by every other outcome.
     pub(crate) pending_receipts: Vec<super::visible_frame::AckTicket>,
@@ -528,8 +528,8 @@ impl WindowState {
     /// renderer. The renderer performs glyph eviction before quad eviction in one
     /// event-loop-owned mutable call, so retention snapshots cannot observe only
     /// half of the removal.
-    pub(crate) fn remove_pane(&mut self, pane_id: u64) -> Option<PaneState> {
-        let pane = self.panes.remove(&pane_id)?;
+    pub(crate) fn remove_pane(&mut self, pane_id: u64) -> Option<super::DetachedPane> {
+        let pane = self.panes.detach(pane_id)?;
         // A pane leaving this window ends a timeline it owned here, without complete evidence.
         self.redraw.timeline.end_for_pane(pane_id);
         // A removed pane's receipts would fail revalidation anyway; drop them now.

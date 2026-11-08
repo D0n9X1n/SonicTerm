@@ -889,7 +889,7 @@ fn report_window_state(
         renderer,
         tabs,
         tab_states,
-        panes,
+        panes: super::PaneMap::founding(panes),
         cursor_pos: (0.0, 0.0),
         mouse_down: false,
         pointer_gesture: None,

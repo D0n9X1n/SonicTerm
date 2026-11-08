@@ -80,8 +80,16 @@ flowchart LR
 `locate_pane`）。窗口表是一个 `WindowMap`：应用可以读取它并原地修改某个窗口，但只有注册表的
 `insert_window` 和 `remove_window` 能添加或移除窗口，且两者在 debug 构建中都会检查没有窗格同时
 属于两个窗口。只有 `App::insert_window_registered` 调用 `insert_window`，它同时注册窗口的
-governor owner；`scripts/check-window-owner-registration.sh` 强制这一点。窗格在窗口之间移动仍经过
-`WindowState` 自身的 `panes` 与 `tab_states`。一个带种子的状态机测试
+governor owner；`scripts/check-window-owner-registration.sh` 强制这一点。
+
+窗口的窗格归属是一个 `PaneMap`（`window_registry_panes.rs`）。应用可以读取它并原地修改某个窗格自身的
+状态，但窗格只能通过 `attach`（新生成的 id 用 `attach_new`；窗口已持有的 id 会原样退回，而不会被替换）
+加入，只能通过 `detach` 或 `detach_all` 离开，二者返回 `DetachedPane`。该值带有窗格 id，必须经
+`App::retire_pane` 退役或挂到某个窗口上；否则在 debug 构建中丢弃它会失败。在窗口之间转移的标签页以
+`DetachedPanes` 持有其窗格，贯穿分离、被拒绝的挂接与回滚。新窗口的初始窗格来自 `PaneMap::founding`，
+由 `insert_window` 检查。一个语法树审计（`window_registry_panes_tests.rs`）在其他代码直接写入 `.panes`、
+对其 `mem::take`、`replace` 或 `swap`，或在 `retire_pane` 之外调用 `into_retired` 时失败；它按名称而非类型
+读取，因此看不到别名。标签页顺序与窗格树仍在 `WindowState` 的 `tabs` 与 `tab_states` 中。一个带种子的状态机测试
 （`window_registry_state_lifecycle_tests.rs`）以随机顺序执行拆分、关闭、标签页转移、拆出、等待、输出和退出，
 并在每一步后检查：每个窗格只属于一个窗口，`locate_pane` 与逐一扫描一致，每个已退役窗格的信号已关闭，
 每个存活窗格都持有一个打开的 governor owner；`SONICTERM_LIFECYCLE_SEED` 可再加一个种子。主窗口和拆出的窗口

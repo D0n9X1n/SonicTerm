@@ -325,6 +325,8 @@ mod interaction;
 pub(in crate::app) use interaction::InteractionState;
 mod window_registry_state;
 pub(in crate::app) use window_registry_state::{WindowMap, WindowRegistry};
+mod window_registry_panes;
+pub use window_registry_panes::{DetachedPane, DetachedPanes, PaneMap};
 mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};

@@ -175,7 +175,7 @@ fn a_pane_transfer_ends_the_timeline_without_complete_evidence() {
     service(&mut app, main, pane_id);
     let pane =
         app.registry.windows.get_mut(&main).unwrap().remove_pane(pane_id).expect("owner pane");
-    app.registry.windows.get_mut(&child).unwrap().panes.insert(pane_id, pane);
+    app.registry.windows.get_mut(&child).unwrap().panes.attach(pane).map_err(|_| ()).unwrap();
     assert!(app.registry.windows[&main].redraw.timeline.owner.is_none());
     assert_eq!(watch_of(&app, pane_id).peek_timeline(), "absent");
     assert!(matches!(app.take_echo_watch(pane_id, token), TakeOutcome::Trace(_)));
@@ -212,7 +212,7 @@ fn retirement_releases_the_timeline_and_a_stale_writer_changes_nothing() {
     let handles = PaneVtHandles::from_pane_state(app.pane_by_id(pane_id).expect("owner pane"));
     let watch = watch_of(&app, pane_id);
     let pane =
-        app.registry.windows.get_mut(&main).unwrap().panes.remove(&pane_id).expect("owner pane");
+        app.registry.windows.get_mut(&main).unwrap().panes.detach(pane_id).expect("owner pane");
     assert!(
         app.registry.windows[&main].redraw.timeline.owner.is_some(),
         "a bare removal ended nothing"

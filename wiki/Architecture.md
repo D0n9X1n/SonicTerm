@@ -86,8 +86,21 @@ map is a `WindowMap`: the app reads it and changes a window in place, but only t
 registry's `insert_window` and `remove_window` add or drop one, and in debug builds
 both check that no pane belongs to two windows. `insert_window` is called only from
 `App::insert_window_registered`, which also registers the window's governor owner;
-`scripts/check-window-owner-registration.sh` enforces that. Moving panes between
-windows still goes through `WindowState`'s own `panes` and `tab_states`. A seeded
+`scripts/check-window-owner-registration.sh` enforces that.
+
+A window's pane membership is a `PaneMap` (`window_registry_panes.rs`). The app reads
+it and changes a pane's own state in place, but a pane joins only through `attach`
+(or `attach_new` for a freshly spawned id; an id the window already holds is handed
+back, never replaced) and leaves only through `detach` or `detach_all`, which return a
+`DetachedPane`. That value carries its id and must be retired through
+`App::retire_pane` or attached to a window: dropping it otherwise fails in debug
+builds. A tab in transit between windows holds its panes as `DetachedPanes`, through
+detach, a refused attach and rollback. A new window's first panes come from
+`PaneMap::founding`, checked by `insert_window`. A syntax-tree audit
+(`window_registry_panes_tests.rs`) fails when other code writes `.panes` directly,
+`mem::take`s, `replace`s or `swap`s it, or calls `into_retired` outside `retire_pane`;
+it reads names, not types, so it cannot see an alias. Tab order and pane trees stay in
+`WindowState`'s `tabs` and `tab_states`. A seeded
 state-machine test (`window_registry_state_lifecycle_tests.rs`) runs splits, closes, tab
 transfers, tear-outs, waits, output and exits in random order and checks after every
 step that each pane is in one window, `locate_pane` agrees with a scan, each retired

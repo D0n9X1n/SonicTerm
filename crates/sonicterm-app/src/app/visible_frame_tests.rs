@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::PaneState;
 pub(super) use crate::app::{next_pane_id, TabState};
 pub(super) use sonicterm_cfg::{
     config::Config,
@@ -30,7 +31,7 @@ pub(super) fn fixture(child: bool, zoom: bool) -> (App, WindowId, u64, u64, u64)
     state.tabs.activate(0);
     let left = state.tab_states[0].active_pane;
     let inactive = state.tab_states[1].active_pane;
-    state.panes.insert(right, pane);
+    state.panes.insert_for_test(right, pane);
     assert!(state.tab_states[0].tree.split(left, Direction::Right, right));
     state.tab_states[0].active_pane = right;
     if zoom {

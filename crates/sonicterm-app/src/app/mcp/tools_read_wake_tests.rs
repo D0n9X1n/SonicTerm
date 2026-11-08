@@ -252,7 +252,7 @@ fn closing_the_pane_ends_a_sleeping_wait() {
     let waiter = spawn_wait(&entry, regex_wait("never", LONG_RECHECK));
     waiter.until(WaitEvent::Parked);
     let window = app.registry.main_window_id.expect("main window");
-    let pane = app.registry.windows.get_mut(&window).unwrap().panes.remove(&pane_id).unwrap();
+    let pane = app.registry.windows.get_mut(&window).unwrap().panes.detach(pane_id).unwrap();
     app.retire_pane(pane);
     let (reason, elapsed) = waiter.join();
     assert_eq!(reason, WaitReason::PaneClosed);

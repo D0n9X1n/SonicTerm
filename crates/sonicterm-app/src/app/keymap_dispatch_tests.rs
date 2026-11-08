@@ -512,7 +512,7 @@ fn real_pty_search_paste_explicit_source_matrix() {
         inactive_search.set_query("inactive", parser.lock().grid());
         inactive_tab.search = Some(inactive_search);
         let window = app.registry.windows.get_mut(&source_window).unwrap();
-        window.panes.insert(inactive, PaneState::new(parser, None));
+        window.panes.insert_for_test(inactive, PaneState::new(parser, None));
         window.tabs.insert(0, Tab::new("inactive"));
         window.tab_states.insert(0, inactive_tab);
         window.tabs.activate(1);
@@ -617,15 +617,26 @@ fn real_pty_search_paste_missing_pane_never_broadcasts() {
         assert_eq!(submitted.take(), expected);
         set_search_paste_query(&mut app, source_window, "keep");
         app.wait_for_input_queues();
-        let removed =
-            app.registry.windows.get_mut(&source_window).unwrap().panes.remove(&source).unwrap();
+        let removed = app
+            .registry
+            .windows
+            .get_mut(&source_window)
+            .unwrap()
+            .panes
+            .remove_for_test(&source)
+            .unwrap();
         assert_eq!(app.registry.windows[&source_window].tab_states[0].active_pane, source);
         assert_eq!(app.__test_broadcast_source(), Some(source));
         assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
         let attempts = app.__test_drain_pty_writes();
         let accepted = submitted.take();
         // Restore custody before assertions so InputTestApp owns teardown even when the regression fails.
-        app.registry.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
+        app.registry
+            .windows
+            .get_mut(&source_window)
+            .unwrap()
+            .panes
+            .insert_for_test(source, removed);
         for (id, pane) in windows {
             assert_eq!(
                 app.registry.windows[&id].tab_states[0].search.as_ref().unwrap().query,
@@ -718,14 +729,19 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
                 .get_mut(&source_window)
                 .unwrap()
                 .panes
-                .remove(&source)
+                .remove_for_test(&source)
                 .unwrap();
             // Leave both active_pane and the armed AllTabs source stale; no live-source broadcast check may hide a leak.
             assert_eq!(app.registry.windows[&source_window].tab_states[0].active_pane, source);
             assert_eq!(app.__test_broadcast_source(), Some(source));
             assert!(app.run_action_for_window(&Action::PasteFromClipboard, source_window));
             let captures = (app.__test_drain_pty_writes(), submitted.take());
-            app.registry.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
+            app.registry
+                .windows
+                .get_mut(&source_window)
+                .unwrap()
+                .panes
+                .insert_for_test(source, removed);
             assert_eq!(
                 captures,
                 (Vec::new(), Vec::new()),

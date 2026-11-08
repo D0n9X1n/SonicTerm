@@ -87,7 +87,7 @@ fn child_split_refusal_preserves_zoom_focus_and_live_panes() {
         let child = app.registry.windows.get_mut(&child_id).expect("child window");
         let pane = child.tab_states[0].active_pane;
         if missing_live_pane {
-            child.panes.remove(&pane);
+            child.panes.remove_for_test(&pane);
         } else {
             child.tab_states[0].active_pane = u64::MAX;
         }
@@ -132,7 +132,7 @@ fn refused_child_split_actions_never_fall_through_to_main() {
                 let child = app.registry.windows.get_mut(&child_id).expect("child window");
                 let original = child.tab_states[0].active_pane;
                 if missing_live_pane {
-                    child.panes.remove(&original);
+                    child.panes.remove_for_test(&original);
                 } else {
                     child.tab_states[0].active_pane = u64::MAX;
                 }

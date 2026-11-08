@@ -299,12 +299,12 @@ impl App {
         let pane_id = next_pane_id();
         let pane = self.spawn_pane(pane_id, &launch);
         if let Some(main) = self.main_mut() {
-            main.panes.insert(pane_id, pane);
+            main.panes.attach_new(pane_id, pane);
             main.tabs.push(Tab::new(title));
             main.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         } else {
             // When: main_mut has no destination, retire the spawned pane rather than dropping native custody inline.
-            self.retire_pane(pane);
+            self.retire_pane(crate::app::DetachedPane::unattached(pane_id, pane));
         }
         self.resize_visible_panes();
     }

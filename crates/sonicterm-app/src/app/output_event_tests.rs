@@ -312,7 +312,7 @@ fn late_output_event_for_a_retired_pane_does_nothing() {
     *app.registry.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
     worker_batch(&app, child, pane, b"last words");
     let cloned_target = *app.registry.windows[&child].panes[&pane].redraw_target.lock();
-    let retired = app.registry.windows.get_mut(&child).unwrap().panes.remove(&pane).unwrap();
+    let retired = app.registry.windows.get_mut(&child).unwrap().panes.detach(pane).unwrap();
     app.retire_pane(retired);
     let causes = [main, child].map(|id| app.registry.windows[&id].redraw.snapshot());
     let before = native_requests();
