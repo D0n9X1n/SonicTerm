@@ -309,9 +309,10 @@ pub(crate) const KITTY_IMAGES: u32 = 128;
 pub(crate) const KITTY_DRAWN_PLACEMENTS: u32 = 512;
 /// The pane's placement cap, which the `cap` phase fills before one more placement is refused.
 pub(crate) const KITTY_PLACEMENT_CAP: u32 = 1_024;
-/// Placeholder runs per row, each four cells wide and one space apart: 79 columns, so every run
-/// is visible in an 80-column grid, and 32 rows, inside the macOS runner's 43-row window clamp.
-pub(super) const KITTY_RUNS_PER_ROW: u32 = 16;
+/// Placeholder runs per row, each four cells wide and one space apart: 119 columns over 22 rows.
+/// The macOS runner gives this scenario a 125x30 grid (measured in PR CI), so the rows, the READY
+/// line above them, the sentinel, the prompt and the `cap` phase's command line all stay visible.
+pub(super) const KITTY_RUNS_PER_ROW: u32 = 24;
 
 /// The kitty row/column diacritic for `value`.
 fn kitty_mark(value: u32) -> char {
@@ -325,7 +326,7 @@ fn kitty_mark(value: u32) -> char {
 
 /// S11/kitty-placeholders: transmit 128 8x8 RGBA images (ids 1 to 128), place each virtually four
 /// times as a 4x1-cell box (placements 1 to 4) and draw those 512 placements as placeholder runs,
-/// 16 to a row over 32 rows. Every command is quiet (`q=2`), so the fixture prints only the rows.
+/// 24 to a row over 22 rows. Every command is quiet (`q=2`), so the fixture prints only the rows.
 /// The `cap` phase adds the rest of the placements through [`KITTY_CAP_COMMAND`].
 pub(crate) fn kitty_placeholders() -> Vec<u8> {
     use base64::Engine;

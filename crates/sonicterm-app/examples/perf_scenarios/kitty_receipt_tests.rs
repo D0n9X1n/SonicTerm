@@ -7,6 +7,11 @@ use sonicterm_vt::vt::{CaptureStagingPool, KittyAction, KittyCommand, Parser, Vt
 
 use super::*;
 
+/// The grid the macOS runner gives this scenario, read from PR CI's comparison table.
+const RUNNER_COLS: u16 = 125;
+/// Rows of that grid.
+const RUNNER_ROWS: u16 = 30;
+
 /// A one-pixel store entry for buffer `id` tagged with kitty `image_id`, `placement_id` and `show`.
 fn entry(id: u64, image_id: u32, placement_id: u32, show: KittyShow) -> InlineImage {
     InlineImage {
@@ -81,13 +86,13 @@ fn grid_receipt(parser: &Parser, images: &[InlineImage], phase: &str) -> KittyRe
 
 #[test]
 fn the_print_fixture_holds_its_receipt_on_the_smallest_runner_window() {
-    // The macOS runner clamps the window to 43 rows and may give as few as 80 columns: with the
-    // READY line above the fixture and the sentinel and a prompt below it, every one of the 512 runs
-    // must still be visible and name a placement the pane holds.
+    // The macOS runner gives this scenario a 125x30 grid: with the READY line above the fixture and
+    // the sentinel and a prompt below it, every one of the 512 runs must still be visible and name a
+    // placement the pane holds. A 32-row layout lost four rows there (448 runs).
     let mut bytes = b"READY 0\n".to_vec();
     bytes.extend(crate::workload::kitty_placeholders());
     bytes.extend_from_slice(b"PERF_DONE 0 0000000000000000\n$ ");
-    let (parser, commands) = parse(&bytes, 80, 43);
+    let (parser, commands) = parse(&bytes, RUNNER_COLS, RUNNER_ROWS);
     let cap = crate::workload::KITTY_PLACEMENT_CAP as usize;
     let images = store_from(&commands, cap);
     assert_eq!(Some(grid_receipt(&parser, &images, "print")), expected("print"));
@@ -105,7 +110,15 @@ fn the_cap_command_fills_the_cap_and_one_is_refused() {
         }
     }
     bytes.extend_from_slice(b"\x1b_Ga=p,U=1,i=1,p=9,q=2\x1b\\");
-    let (parser, commands) = parse(&bytes, 80, 43);
+    // The sentinel, the prompt with the typed characters, the `cap` command line as the shell echoes
+    // it, and a new prompt follow the rows on screen, as they do on the runner.
+    let line = match crate::scenarios::KITTY_CAP_STEPS[0].text {
+        crate::scenarios::CommitText::Literal(line) => line.trim_start_matches('\u{15}').trim_end(),
+        crate::scenarios::CommitText::Repeat(..) => panic!("the cap step is a literal line"),
+    };
+    let typed = "x".repeat(50);
+    bytes.extend(format!("PERF_DONE 0 0000000000000000\n$ {typed}{line}\n$ ").bytes());
+    let (parser, commands) = parse(&bytes, RUNNER_COLS, RUNNER_ROWS);
     let cap = crate::workload::KITTY_PLACEMENT_CAP as usize;
     let images = store_from(&commands, cap);
     let places = commands.iter().filter(|command| command.action == KittyAction::Place).count();
