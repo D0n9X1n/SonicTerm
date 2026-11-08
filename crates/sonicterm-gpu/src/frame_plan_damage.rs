@@ -42,6 +42,8 @@ pub(super) fn add_class_damage(dirt: &mut DamageParts, inputs: ClassDamageInputs
         }
     }
     if change.cursor || change.focus {
+        // When: change.cursor or change.focus is set, the drawn cursor's old and new cells, its
+        // glide samples and last frame's recolored glyphs are repainted.
         for cell in [previous.window.cursor_cell, key.window.cursor_cell].into_iter().flatten() {
             match panes.iter().find(|pane| pane.id == cell.pane_id) {
                 Some(pane) => {
@@ -57,10 +59,23 @@ pub(super) fn add_class_damage(dirt: &mut DamageParts, inputs: ClassDamageInputs
         if let Some(rect) = resolve_recolor(previous_recolor.bounds, active_clip, surface) {
             dirt.add_clipped(rect, surface);
         }
-        // A gliding cursor crosses rows and columns between its cells; for the few frames of a
-        // glide, and the one that lands, the whole active pane is damaged rather than tracing it.
-        if previous.window.cursor_glide.is_some() || key.window.cursor_glide.is_some() {
-            dirt.add_clipped(active_clip.unwrap_or(surface), surface);
+        // A gliding cursor draws between cells: each frame's sampled position damages the rows
+        // its drawn cell crosses, so the previous sample is erased and the new one drawn. The
+        // landing frame has no sample; its cell is the cursor cell damaged above.
+        for (glide, cell) in [
+            (previous.window.cursor_glide, previous.window.cursor_cell),
+            (key.window.cursor_glide, key.window.cursor_cell),
+        ] {
+            let Some(glide) = glide else {
+                // When: this frame has no glide sample, the cursor drew on its cell, damaged above.
+                continue;
+            };
+            // A glide is sampled only for a drawn cell; an unplanned pane's cell damaged the
+            // whole surface above, so only a planned pane adds rows here.
+            let pane = cell.and_then(|cell| panes.iter().find(|pane| pane.id == cell.pane_id));
+            if let Some(rect) = pane.and_then(|pane| glide_damage(pane, glide, geometry)) {
+                dirt.add_clipped(rect, surface);
+            }
         }
     }
     if change.selection {
@@ -113,6 +128,36 @@ pub(super) fn slot_damage(
     pane_damage_rect_with_ink_pad(
         pane.is_alt,
         [usize::from(slot)],
+        pane.full_rect,
+        pane.layout.x,
+        pane.layout.y,
+        pane.cols,
+        geometry.cell_w,
+        geometry.cell_h,
+        geometry.vertical_ink_pad,
+        geometry.surface.w,
+        geometry.surface.h,
+    )
+}
+
+/// The ink-padded rows of `pane` that a cursor drawn at the glide sample `glide` crosses: from
+/// the row holding its top edge to the row holding its bottom edge, both in whole cells. Every
+/// cursor shape is drawn inside that cell box, and each row is damaged at the pane's full width,
+/// so the sample's column needs no tracing. Damage past the pane is clipped by its rect.
+pub(super) fn glide_damage(
+    pane: &PlannedPane,
+    glide: crate::cursor_glide::GlideCell,
+    geometry: DamageGeometry,
+) -> Option<PixelRect> {
+    let steps = crate::cursor_glide::GlideCell::at(1, 0, 0).row;
+    let first_row = glide.row.div_euclid(steps);
+    // The cell box ends one cell below its top; a top on a row edge stops at that row.
+    let last_row = (glide.row + steps - 1).div_euclid(steps);
+    // A sample stays between two of the pane's cells; the bound only keeps the walk finite, and
+    // one row past the last lets a cursor in the bottom padding be damaged, clipped by the pane.
+    let rows = first_row.max(0)..=last_row.min(i32::from(pane.row_count));
+    dirty_rows_damage_rect_with_ink_pad(
+        rows.map(|row| row as usize),
         pane.full_rect,
         pane.layout.x,
         pane.layout.y,
