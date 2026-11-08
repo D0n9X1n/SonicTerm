@@ -209,6 +209,12 @@ pub struct PtyQueueFootprint {
     pub reply_resident_bytes: u64,
     /// Parser replies spilled to the private temporary file, on disk.
     pub reply_spill_bytes: u64,
+    /// Reply spill compactions run so far.
+    pub reply_compactions: u64,
+    /// The longest of them, in microseconds.
+    pub reply_compact_us_max: u64,
+    /// The longest a reply send waited for its spool's lock, in microseconds.
+    pub reply_lock_wait_us_max: u64,
 }
 
 /// One queue footprint from the counters a handle and its senders share.
@@ -224,6 +230,9 @@ fn queue_footprint(
         writer_in_flight_bytes: progress.in_flight_bytes.load(Ordering::Relaxed) as u64,
         reply_resident_bytes: reply_stats.resident_bytes,
         reply_spill_bytes: reply_stats.live_bytes,
+        reply_compactions: reply_stats.compactions,
+        reply_compact_us_max: reply_stats.compact_us_max,
+        reply_lock_wait_us_max: reply_stats.send_lock_wait_us_max,
     }
 }
 

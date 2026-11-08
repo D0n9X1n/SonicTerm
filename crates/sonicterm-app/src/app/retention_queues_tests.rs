@@ -4,7 +4,8 @@ use sonicterm_io::pty::PtyQueueFootprint;
 
 use super::sum_queues;
 
-/// Four panes' footprints add up per category, and the resident total leaves the disk spill out.
+/// Six panes' footprints add up per category, the resident total leaves the disk spill out, and
+/// compaction counts add while the longest durations take the maximum.
 #[test]
 fn queue_totals_add_per_category_and_keep_disk_apart() {
     let pane = |input: u64, writer: u64, resident: u64, spill: u64| PtyQueueFootprint {
@@ -12,14 +13,27 @@ fn queue_totals_add_per_category_and_keep_disk_apart() {
         writer_in_flight_bytes: writer,
         reply_resident_bytes: resident,
         reply_spill_bytes: spill,
+        ..PtyQueueFootprint::default()
+    };
+    let compacting = PtyQueueFootprint {
+        reply_compactions: 3,
+        reply_compact_us_max: 7_000,
+        reply_lock_wait_us_max: 900,
+        ..pane(0, 0, 0, 0)
     };
     let totals = sum_queues([
         pane(100, 0, 6, 0),
         pane(0, 4096, 0, 0),
         pane(0, 0, 65_536, 1 << 20),
         pane(7, 0, 0, 0),
+        compacting,
+        PtyQueueFootprint { reply_compactions: 2, reply_compact_us_max: 9_000, ..pane(0, 0, 0, 0) },
     ]);
-    assert_eq!(totals.panes, 4);
+    // Compactions add up; the longest compaction and the longest lock wait are the maxima.
+    assert_eq!(totals.footprint.reply_compactions, 5);
+    assert_eq!(totals.footprint.reply_compact_us_max, 9_000);
+    assert_eq!(totals.footprint.reply_lock_wait_us_max, 900);
+    assert_eq!(totals.panes, 6);
     assert_eq!(totals.footprint.input_queued_bytes, 107);
     assert_eq!(totals.footprint.writer_in_flight_bytes, 4096);
     assert_eq!(totals.footprint.reply_resident_bytes, 65_542);

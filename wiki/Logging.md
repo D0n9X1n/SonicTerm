@@ -1018,7 +1018,9 @@ session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
 pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
            writer_in_flight_bytes=<bytes> reply_resident_bytes=<bytes>
            reply_spill_disk_bytes=<bytes> reply_spill_file_bytes=<bytes>
-           reply_spill_budget_bytes=<bytes> teardown_fallbacks=<count>
+           reply_spill_budget_bytes=<bytes> reply_compactions=<count>
+           reply_compact_longest_us=<us> reply_lock_wait_longest_us=<us>
+           teardown_fallbacks=<count>
            teardown_fallbacks_slow=<count> teardown_fallback_longest_us=<us>
            teardown_fallback_total_us=<us>
 ```
@@ -1032,7 +1034,12 @@ replies spilled to disk (`reply_spill_disk_bytes`, never part of
 send or pop, read without the spool's lock, so a pane whose storage is stalled
 cannot hold up the event loop's sample. `reply_spill_file_bytes` is the process spill budget's
 charged file length across every pane (consumed prefixes included), against
-`reply_spill_budget_bytes`. The teardown fields report the reaper's synchronous fallback:
+`reply_spill_budget_bytes`. `reply_compactions` counts spill compactions across panes and
+`reply_compact_longest_us` is the longest; `reply_lock_wait_longest_us` is the longest a reply
+send waited for its spool's lock (spool-lock contention: the writer's read, another sender or a
+compaction; measured only when the lock was already taken). A compaction past 50 ms also logs
+`PTY reply spill compaction was slow` once per pane at `warn` on `sonicterm::pty`, with
+`compact_ms`. The teardown fields report the reaper's synchronous fallback:
 how many ran, how many blocked longer than 50 ms, the longest and the total. A
 fallback past 50 ms also logs `synchronous PTY teardown fallback blocked the event
 loop` at `warn` with `owner` and `blocked_ms`.

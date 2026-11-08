@@ -39,6 +39,10 @@ impl QueueSection {
                 self.spill_files.0, self.spill_files.1
             ),
             format!(
+                "  reply spill compactions {}, longest {} us; longest wait for a spool lock {} us",
+                queues.reply_compactions, queues.reply_compact_us_max, queues.reply_lock_wait_us_max
+            ),
+            format!(
                 "  teardown fallbacks {} ({} over 50 ms), longest {} us, total {} us",
                 fallback.count, fallback.slow, fallback.longest_us, fallback.total_us
             ),
