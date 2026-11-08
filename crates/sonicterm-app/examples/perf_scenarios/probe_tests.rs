@@ -641,6 +641,7 @@ pub(super) fn typing_probe(scenario: &'static str, variant: &'static str) -> (Pr
         role: 0,
         pane,
         chars: 3,
+        spawn_every: 0,
         interval: Duration::from_millis(100),
         settle: Duration::from_millis(100),
         origin: Some((0, 0)),

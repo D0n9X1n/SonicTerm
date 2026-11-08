@@ -231,13 +231,13 @@ jobs:
             shard: S9-S10sync
             scenarios: S10/sync S9 S11 S6 S1 S5 S6/rest S1/status-line S12 S12/status-line S3
             laps: S9
-            release_scenarios: ""
+            release_scenarios: S3/history S3/resize S11/burst S11/burst-text
           - platform: macOS
             runner: macos-15
             shard: S10-S11release
             scenarios: S10 S11/release S2 S2/flood S6/flood S13 S13/sustained-4
             laps: ""
-            release_scenarios: S13/wide-8 S13/wide-16 S13/wide-32
+            release_scenarios: S13/wide-8 S13/wide-16 S13/wide-32 S2/spawn
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
       # itself, not a pull request's merge ref.
@@ -356,7 +356,8 @@ jobs:
           PERF_SHARD: ${{ matrix.shard }}
         run: |
           read -ra scenarios <<<"$SCENARIOS"
-          # A release comparison (full-length runs) adds the release-only scenarios, S13's wide layouts.
+          # A release comparison (full-length runs) adds the release-only scenarios: S13's wide layouts and,
+          # on macOS, S3/history, S3/resize, the S11 image burst with its text-only twin, and S2/spawn.
           if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_SCENARIOS" ]; then
             read -ra release_scenarios <<<"$RELEASE_SCENARIOS"
             scenarios+=("${release_scenarios[@]}")

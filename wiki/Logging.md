@@ -510,6 +510,7 @@ coalesced flushes.
 | `about_to_wait` | ms histogram | each `about_to_wait` dispatch |
 | `user_event` | ms histogram | each `user_event` dispatch |
 | `new_events` | ms histogram | each `new_events` dispatch |
+| `pane_create` | ms histogram (`pane_create_ms` in perf results) | each new tab or split pane created after startup on the event loop, from its PTY and process to its VT worker |
 | `ui_parser_locks` | count | event-loop-thread locks of a pane's parser |
 | `ui_guard_custody_ns` | count (ns) | summed time a frame held any parser guard, from the first guard acquired to the last released, over every collection that took a guard, early failures included |
 | `ui_guard_custodies` | count | collections that took at least one parser guard |
@@ -562,6 +563,7 @@ or whose worker finishes after it, still adds to it.
 | `media_decode_attempts` | count | decode attempts: Sixel, iTerm2 and kitty transmits and queries, malformed payloads and decodes the store refused; kitty place and delete decode nothing |
 | `media_decode_under_8ms` | count | attempts that took under 8 ms. The decode p95 is at least 8 ms exactly when this is less than `ceil(0.95 × media_decode_attempts)` |
 | `media_decoded`, `media_decode_failed`, `media_refused_after_decode` | count | each attempt's outcome: kept (or a query answered `OK`), not decodable, or decoded and then refused by the store |
+| `resize_hold` | µs histogram (`resize_hold_us` in perf results) | how long the event loop held a pane's parser lock to resize its grid, one sample per pane per resize |
 
 No identity holds between `flushes`, `flushes_untargeted`, `flushes_coalesced`,
 and the `flush_to_redraw` count. A pane that closes drops its pending timestamp,

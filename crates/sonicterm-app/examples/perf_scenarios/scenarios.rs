@@ -37,8 +37,16 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     ),
     // S2/flood is capped at 2 short runs to keep the PR comparison within 30 minutes; a release
     // comparison is never capped, so its full-length runs remain the variant's complete evidence.
-    capped(spec("S2", "typing latency", &["default", "flood"], 300, 240), &[("flood", 2)]),
-    spec("S3", "output flood throughput", &["default"], 480, 80),
+    // S2/spawn types as S2/default does and opens a tab every tenth character, so the echo samples
+    // around each pane creation show what it cost typing; the workflow runs it for a release tag.
+    capped(spec("S2", "typing latency", &["default", "flood", "spawn"], 300, 240), &[("flood", 2)]),
+    // S3/history floods with the deepest history a user can configure, so the per-pane cell budget,
+    // not the row limit, decides retention and every budget trim reads history's running totals. The
+    // performance workflow runs it and S3/resize only for a release tag.
+    // S3/resize resizes the window 20 times once the flood has filled the history the cell budget
+    // keeps of 10,000 requested rows, so each resize's parser hold (`resize_hold_us`) includes its
+    // pass over that history.
+    spec("S3", "output flood throughput", &["default", "history", "resize"], 480, 80),
     spec("S4", "visible streaming output", &["default"], 300, 240),
     spec("S5", "background tab streaming", &["default", "gdi", "wgpu"], 300, 240),
     // S6/rest is capped at 2 short runs a side to keep the shards that list it inside the PR budget; the
@@ -56,7 +64,15 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     spec("S9", "emoji and CJK text", &["default"], 300, 240),
     spec("S10", "full-screen redraw", &["default", "sync"], 300, 240),
     capped(
-        spec("S11", "inline image tab switch", &["default", "gdi", "wgpu", "release"], 420, 300),
+        // S11/burst and S11/burst-text time inline-image decoding against the same text alone; the
+        // performance workflow runs them on macOS only for a release tag.
+        spec(
+            "S11",
+            "inline image tab switch",
+            &["default", "gdi", "wgpu", "release", "burst", "burst-text"],
+            420,
+            300,
+        ),
         &[("release", 1), ("gdi", 2), ("wgpu", 2)],
     ),
     // S12/status-line is the covered window with the status line on, one short run per side.
@@ -243,6 +259,11 @@ pub(crate) enum Fixture {
     /// cells cost far more than plain ones, so this history passes the grid's byte budget and
     /// is trimmed below its row limit.
     LinkedHistory,
+    /// S11/burst: ten OSC 1337 inline PNGs of about 2 MiB, each followed by 100 numbered lines;
+    /// the first is wider than the 1,024-pixel render cap, so its decode also resizes.
+    ImageBurst,
+    /// S11/burst-text: the same lines with no images, the burst's text-only baseline.
+    ImageBurstText,
 }
 
 /// A production action that opens the next role's pane or arranges tabs before GO.
@@ -302,7 +323,9 @@ pub(crate) enum Driver {
     /// No input.
     None,
     /// `chars` single-character `Ime::Commit`s into `role`'s pane at `per_second`, then a settle.
-    Typing { role: usize, chars: u32, per_second: u32, settle_ms: u64 },
+    /// With `spawn_every` above 0, every `spawn_every`th character is followed by a new tab and a
+    /// return to the first tab, so a pane is created while that character's echo is pending.
+    Typing { role: usize, chars: u32, per_second: u32, settle_ms: u64, spawn_every: u32 },
     /// Hover-only `CursorMoved` across the tab bar and the grid.
     Sweep { hertz: u32 },
     /// Press, `CursorMoved` and release inside the grid only.
@@ -316,6 +339,9 @@ pub(crate) enum Driver {
     Park { row: u16, col: u16, hertz: u32 },
     /// Each step's text as one `Ime::Commit` into the active pane at its offset, then `settle_ms`.
     Commit { steps: &'static [CommitStep], settle_ms: u64 },
+    /// `steps` native window resizes at `hertz`, alternately `delta_px` narrower and back to the
+    /// starting width, each a real `request_inner_size` the window answers with `Resized`.
+    Resize { steps: u32, hertz: u32, delta_px: u32 },
 }
 
 /// The text one commit step sends.

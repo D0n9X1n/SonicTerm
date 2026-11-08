@@ -165,9 +165,10 @@ FRAME_COUNTER_FIELDS = {
              # startup step times from the wgpu adapter to its first pane; a base older shows n/a.
              "status_line_full_passes", "startup_window_ns", "startup_adapter_install_ns", "startup_renderer_ns",
              "startup_load_checks_ns", "startup_pane_spawn_ns"),
-            # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
-            ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
-             "fg_worker_probe_us")),
+            # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker;
+            # pane_create_ms times each pane created after startup, a base older than it shows n/a.
+            ("about_to_wait_ms", "user_event_ms", "new_events_ms", "pane_create_ms", "ui_parser_wait_us",
+             "fg_probe_us", "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced", "flushes_suppressed",
             # sync_timeouts counts synchronized updates released at the 150 ms bound; a base older than it shows n/a.
             "sync_timeouts",
@@ -179,7 +180,9 @@ FRAME_COUNTER_FIELDS = {
             "media_decode_attempts", "media_decode_under_8ms", "media_decoded",
             "media_decode_failed", "media_refused_after_decode"),
            # media_decode_dus is the decode-duration histogram on its own buckets (a 7.999 ms bound).
-           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us", "media_decode_dus")),
+           # resize_hold_us is the parser hold of each event-loop grid resize.
+           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us", "media_decode_dus",
+            "resize_hold_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   # damage_waste_permille_sum is the union rect's share minus what its parts cover, over
                   # damaged_frames; a base older than it shows n/a.

@@ -107,10 +107,16 @@ pub fn resize_panes_to_rects(
             (content_h / cell_h).floor() as u64,
         );
         let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
+        // The clock is read only while the counters are on, to time the resize's parser hold.
+        let locked_at = pane.frame_counters.as_ref().map(|_| std::time::Instant::now());
         parser.resize(cols, rows);
         // The cell size sizes a kitty image placed without `c` or `r`, and so its cursor move.
         parser.set_cell_pixel_size(cell_w, cell_h);
         drop(parser);
+        if let (Some(counters), Some(locked_at)) = (&pane.frame_counters, locked_at) {
+            let held_us = u64::try_from(locked_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+            counters.vt.resize_hold.record_us(held_us);
+        }
         pane.resize_pty(*id, cols, rows);
     }
 }

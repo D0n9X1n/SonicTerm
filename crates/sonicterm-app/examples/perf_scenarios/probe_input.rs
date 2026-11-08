@@ -11,7 +11,7 @@ impl Probe {
     ) -> DriverState {
         match phase.driver {
             Driver::None => DriverState::None,
-            Driver::Typing { role, chars, per_second, settle_ms } => {
+            Driver::Typing { role, chars, per_second, settle_ms, spawn_every } => {
                 let active = self.active_pane();
                 let Some(pane) =
                     self.role_panes.get(role).copied().filter(|pane| Some(*pane) == active)
@@ -27,6 +27,7 @@ impl Probe {
                     role,
                     pane,
                     chars,
+                    spawn_every,
                     interval: Duration::from_secs(1) / per_second.max(1),
                     settle: Duration::from_millis(settle_ms),
                     origin: None,
@@ -143,6 +144,21 @@ impl Probe {
                     started: Instant::now(),
                     sent: 0,
                     total: ticks_each_way * 2,
+                })
+            }
+            Driver::Resize { steps, hertz, delta_px } => {
+                let Some(size) = self.app.main_window().map(|window| window.inner_size()) else {
+                    self.invalidate(event_loop, "no main window to resize".to_owned());
+                    return DriverState::None;
+                };
+                DriverState::Resize(Resize {
+                    interval: Duration::from_secs(1) / hertz.max(1),
+                    started: Instant::now(),
+                    sent: 0,
+                    total: steps,
+                    width_px: size.width,
+                    height_px: size.height,
+                    delta_px: delta_px.min(size.width / 2),
                 })
             }
         }
@@ -359,6 +375,15 @@ impl Probe {
 }
 
 impl Probe {
+    /// The history rows `role`'s pane kept once its workload finished.
+    pub(super) fn retained_history(&self, role: usize) -> Option<u64> {
+        let pane_id = *self.role_panes.get(role)?;
+        let pane = self.app.main_panes()?.get(&pane_id)?;
+        // The sentinel was seen, so the worker is idle and this short lock does not wait.
+        let retained = pane.parser.lock().grid().scrollback_len();
+        Some(retained as u64)
+    }
+
     /// The history rows `role`'s pane kept, and its center for the wheel's pointer.
     pub(super) fn wheel_setup(&self, role: usize) -> Option<(usize, (f64, f64))> {
         let pane_id = *self.role_panes.get(role)?;
@@ -390,6 +415,9 @@ impl Probe {
             DriverState::AtlasRetry(retry) => retry.due(),
             DriverState::Park(park) => Some(park.started + park.interval * park.ticks),
             DriverState::Commit(commit) => Some(commit.next_due()),
+            DriverState::Resize(resize) => {
+                Some(resize.started + resize.interval * resize.sent.min(resize.total))
+            }
         }
     }
 }
@@ -409,6 +437,7 @@ impl Probe {
             DriverState::AtlasRetry(_) => self.drive_atlas_retry(event_loop, now),
             DriverState::Park(_) => self.inject_park(event_loop),
             DriverState::Commit(_) => self.inject_commit(event_loop),
+            DriverState::Resize(_) => self.inject_resize(),
         }
     }
 }
@@ -437,6 +466,28 @@ impl Probe {
 }
 
 impl Probe {
+    /// Ask the native window for the next step's size; the window's `Resized` reaches the App as
+    /// a user's resize does, so the grid resize runs on the production path.
+    pub(super) fn inject_resize(&mut self) {
+        let DriverState::Resize(resize) = &mut self.driver else {
+            return;
+        };
+        if resize.sent >= resize.total {
+            return;
+        }
+        resize.sent += 1;
+        // Odd steps narrow the window and even steps restore it.
+        let narrowed = resize.sent % 2 == 1;
+        let width_px = resize.width_px - if narrowed { resize.delta_px } else { 0 };
+        let size = winit::dpi::PhysicalSize::new(width_px, resize.height_px);
+        if let Some(window) = self.app.main_window() {
+            // The returned size is advisory; the measurement is the `Resized` the window sends.
+            let _ = window.request_inner_size(size);
+        }
+    }
+}
+
+impl Probe {
     /// Repeat the parked pointer's `CursorMoved` on the same cell.
     pub(super) fn inject_park(&mut self, event_loop: &ActiveEventLoop) {
         let DriverState::Park(park) = &mut self.driver else {
@@ -453,6 +504,27 @@ impl Probe {
     pub(super) fn inject_typing(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(character) = self.open_typing_sample(Instant::now) {
             self.window_input(event_loop, WindowEvent::Ime(Ime::Commit(character.to_string())));
+            self.spawn_after_typing(event_loop);
+        }
+    }
+
+    /// S2/spawn: after every `spawn_every`th character, open a tab through the production action
+    /// and return to the first, so the pane is created while that character's echo is pending.
+    fn spawn_after_typing(&mut self, event_loop: &ActiveEventLoop) {
+        let DriverState::Typing(typing) = &self.driver else {
+            return;
+        };
+        if typing.spawn_every == 0 || typing.typed % typing.spawn_every != 0 {
+            // When: spawning is off or this character is not a multiple of `spawn_every`.
+            return;
+        }
+        if !self.run_action(event_loop, &Action::NewTab)
+            || !self.run_action(event_loop, &Action::ActivateTab(0))
+        {
+            self.invalidate(
+                event_loop,
+                "the App refused the spawn's NewTab or ActivateTab(0)".to_owned(),
+            );
         }
     }
 }

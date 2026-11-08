@@ -51,6 +51,8 @@ const HISTORY_SEED: u64 = 0x5045_5246_0005;
 const EMOJI_SEED: u64 = 0x5045_5246_0006;
 const FRAMES_SEED: u64 = 0x5045_5246_0007;
 const LINKED_SEED: u64 = 0x5045_5246_0008;
+/// Seeds the text between S11/burst's images, and S11/burst-text's same text.
+const BURST_SEED: u64 = 0x5045_5246_0009;
 /// The bulk fixture's repeated block: 8,192 lines of 128 bytes.
 const BLOCK_BYTES: usize = 1 << 20;
 const BULK_LINE_BYTES: usize = 128;

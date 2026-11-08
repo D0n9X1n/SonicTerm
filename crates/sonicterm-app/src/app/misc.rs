@@ -297,7 +297,9 @@ impl App {
         launch: super::pane_launch::PaneLaunch,
     ) {
         let pane_id = next_pane_id();
+        let create_started = std::time::Instant::now();
         let pane = self.spawn_pane(pane_id, &launch);
+        self.note_pane_create(create_started);
         if let Some(main) = self.main_mut() {
             main.panes.attach_new(pane_id, pane);
             main.tabs.push(Tab::new(title));

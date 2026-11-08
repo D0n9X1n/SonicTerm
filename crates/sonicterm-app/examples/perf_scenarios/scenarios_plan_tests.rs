@@ -675,7 +675,8 @@ fn s13_runs_the_same_sustained_flood_in_two_and_four_panes() {
                 _ => None,
             });
             let chars = if short { 300 } else { 600 };
-            let expected = Driver::Typing { role: 1, chars, per_second: 10, settle_ms: 2_000 };
+            let expected =
+                Driver::Typing { role: 1, chars, per_second: 10, settle_ms: 2_000, spawn_every: 0 };
             assert_eq!(typing, Some(expected));
         }
     }

@@ -150,6 +150,7 @@ pub(super) const CONTRACT: &[(&str, &[&str])] = &[
             "about_to_wait_ms",
             "user_event_ms",
             "new_events_ms",
+            "pane_create_ms",
             "ui_parser_wait_us",
             "fg_probe_us",
             "fg_worker_probe_us",
@@ -176,6 +177,7 @@ pub(super) const CONTRACT: &[(&str, &[&str])] = &[
             "parser_lock_hold_us",
             "parse_us",
             "media_decode_dus",
+            "resize_hold_us",
         ],
     ),
     (
@@ -273,12 +275,12 @@ pub(super) fn every_contract_field_serializes_present_and_zero_with_the_right_hi
         }
     }
     // Every field ending in _ms, _us or _dus is a histogram; the names above with those suffixes
-    // are exactly the sixteen contract histograms (the retired event-loop fg_probe_us beside the
+    // are exactly the eighteen contract histograms (the retired event-loop fg_probe_us beside the
     // worker's fg_worker_probe_us, the renderer's atlas_growth_to_present_ms, the window's
-    // per-collection parser_lock_wait_us and the workers' media_decode_dus); row_cache_invalidate_us
-    // is a plain sum.
+    // per-collection parser_lock_wait_us, the workers' media_decode_dus and the event loop's
+    // resize_hold_us, and the event loop's pane_create_ms); row_cache_invalidate_us is a plain sum.
     let histograms = FIELDS.iter().filter(|field| matches!(field.kind, FieldKind::Histogram(_)));
-    assert_eq!(histograms.count(), 16);
+    assert_eq!(histograms.count(), 18);
 }
 
 #[test]
@@ -724,6 +726,8 @@ pub(super) const NEWER_SOURCES: &[&str] = &[
     "media_decoded",
     "media_decode_failed",
     "media_refused_after_decode",
+    "resize_hold",
+    "pane_create",
 ];
 
 /// The fixture perf-compare's attempt-split test reads, written by this harness.

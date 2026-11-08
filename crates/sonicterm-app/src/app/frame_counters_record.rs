@@ -366,10 +366,12 @@ impl AppFrameCounters {
             ("parser_lock_hold", vt.parser_lock_hold.snapshot()),
             ("parse", vt.parse.snapshot()),
             ("media_decode", vt.media.duration.snapshot()),
+            ("resize_hold", vt.resize_hold.snapshot()),
             ("ui_parser_wait", dispatch.wait.snapshot()),
             ("fg_probe", Histogram::new(HistogramUnit::Micros)),
             ("fg_worker_probe", self.fg_worker.probe.snapshot()),
             ("about_to_wait", self.about_to_wait.clone()),
+            ("pane_create", self.pane_create.clone()),
             ("user_event", self.user_event.clone()),
             ("new_events", self.new_events.clone()),
         ] {

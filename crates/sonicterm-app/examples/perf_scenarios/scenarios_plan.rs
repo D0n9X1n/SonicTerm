@@ -50,7 +50,13 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
     let hold = |full_ms: u64| if short { 5_000 } else { full_ms };
     let (flood_lines, bulk_bytes) = if short { (200_000, 5 << 20) } else { (2_000_000, 50 << 20) };
     let flood = Workload::Flood { lines: flood_lines, bulk_bytes };
-    let typing = |role| Driver::Typing { role, chars: 200, per_second: 10, settle_ms: 2_000 };
+    let typing = |role| Driver::Typing {
+        role,
+        chars: 200,
+        per_second: 10,
+        settle_ms: 2_000,
+        spawn_every: 0,
+    };
     let print = |roles: Vec<usize>| {
         Step::Phase(timed("print", PhaseKind::Transition, PhaseEnd::Sentinels(roles)))
     };
@@ -104,7 +110,13 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 Step::Phase(driven(
                     "input",
                     PhaseKind::Sustained,
-                    Driver::Typing { role: 0, chars: 10, per_second: 10, settle_ms: 1_000 },
+                    Driver::Typing {
+                        role: 0,
+                        chars: 10,
+                        per_second: 10,
+                        settle_ms: 1_000,
+                        spawn_every: 0,
+                    },
                     PhaseEnd::DriverDone,
                 )),
                 Step::Phase(driven(
@@ -138,14 +150,25 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             vec![],
             vec![Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000)))), end],
         ),
-        ("S2", "default") => (
+        ("S2", "default" | "spawn") => (
             vec![Workload::IdleShell],
             vec![],
             vec![
                 Step::Phase(driven(
                     "typing",
                     PhaseKind::Sustained,
-                    typing(0),
+                    if variant == "spawn" {
+                        // When: the variant is spawn, a tab opens after every tenth character.
+                        Driver::Typing {
+                            role: 0,
+                            chars: 200,
+                            per_second: 10,
+                            settle_ms: 2_000,
+                            spawn_every: 10,
+                        }
+                    } else {
+                        typing(0)
+                    },
                     PhaseEnd::DriverDone,
                 )),
                 idle,
@@ -172,7 +195,19 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             // `yes` writes two bytes a line; `cat` writes the fixture as it is.
             flood_phase.throughput_bytes = Some(2 * u64::from(flood_lines) + bulk_bytes);
             let rest = Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000))));
-            (vec![flood], vec![], vec![Step::Phase(flood_phase), rest, end])
+            if variant == "resize" {
+                // Twenty resizes at 10 Hz over the history the flood left, 80 px narrower and back.
+                let resize = Driver::Resize { steps: 20, hertz: 10, delta_px: 80 };
+                let resize = Step::Phase(driven(
+                    "resize",
+                    PhaseKind::Sustained,
+                    resize,
+                    PhaseEnd::DriverDone,
+                ));
+                (vec![flood], vec![], vec![Step::Phase(flood_phase), resize, rest, end])
+            } else {
+                (vec![flood], vec![], vec![Step::Phase(flood_phase), rest, end])
+            }
         }
         ("S4", _) => (
             vec![Workload::DateLoop],
@@ -291,6 +326,17 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             };
             (vec![frames], vec![], vec![Step::Phase(stream), idle, end])
         }
+        // burst prints ten large inline PNGs between text on one pane and burst-text the same text
+        // alone, so the difference between their print phases is what decoding cost that pane.
+        ("S11", "burst" | "burst-text") => (
+            vec![Workload::PrintThenShell(if variant == "burst" {
+                Fixture::ImageBurst
+            } else {
+                Fixture::ImageBurstText
+            })],
+            vec![],
+            vec![print(vec![0]), idle, end],
+        ),
         ("S11", "release") => (
             // The image tab is left until a media-free frame presents, held 65 s from that frame
             // (unshortened, since the idle release needs 30 s), then shown again.
@@ -385,7 +431,8 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 (vec![Workload::SustainedFlood, Workload::IdleShell], vec![SetupAction::SplitDown])
             };
             let chars = if short { 300 } else { 600 };
-            let typing = Driver::Typing { role: 1, chars, per_second: 10, settle_ms: 2_000 };
+            let typing =
+                Driver::Typing { role: 1, chars, per_second: 10, settle_ms: 2_000, spawn_every: 0 };
             let steps = vec![
                 Step::Phase(driven("typing", PhaseKind::Sustained, typing, PhaseEnd::DriverDone)),
                 Step::Phase(timed("tail", PhaseKind::Sustained, PhaseEnd::Hold(hold(10_000)))),
@@ -453,7 +500,14 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         timeout_s: if short { spec.short_timeout_s } else { spec.timeout_s },
         // Only S7 asks for more history than the default; the per-pane cell budget clamps it.
         // S1/status-line's linked history needs room to pass the byte budget below the row limit.
-        scrollback_rows: if spec.id == "S7" || (spec.id == "S1" && variant == "status-line") {
+        // S3/history asks for far more than the budget holds, so the budget alone bounds it, and
+        // S3/resize asks for 10,000 rows for every resize to pass over; the budget clamps it too.
+        scrollback_rows: if spec.id == "S3" && variant == "history" {
+            100_000
+        } else if spec.id == "S7"
+            || (spec.id == "S1" && variant == "status-line")
+            || (spec.id == "S3" && variant == "resize")
+        {
             10_000
         } else {
             // When: the plan is neither S7 nor S1/status-line, the default history is enough.

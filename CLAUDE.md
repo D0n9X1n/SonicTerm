@@ -411,7 +411,11 @@ a reproduction.
     runs, `--counters` and the shipping release profile. Put any long or exhaustive perf
     measurement here, not in the PR pipeline: the matrix entry holding S13 also runs its
     release-only wide layouts (`S13/wide-8`, `S13/wide-16`, `S13/wide-32`) through its
-    `release_scenarios` field, whose `Scaling` row is reported, not a gate.
+    `release_scenarios` field, whose `Scaling` row is reported, not a gate, and the macOS
+    entry holding S3 runs `S3/history`, a flood into budget-filling history, `S3/resize`,
+    twenty window resizes over a flooded history, and `S11/burst` against `S11/burst-text`,
+    ten inline PNGs between text against the same text alone; the macOS entry holding S2 runs
+    `S2/spawn`, typing while a tab opens after every tenth character.
   - **Locally:** build and run the functional checks only. The local gate,
     including `macos-perf-smoke` and `windows-perf-smoke`, proves the tooling
     works and asserts no timing.

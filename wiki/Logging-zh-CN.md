@@ -406,6 +406,7 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `about_to_wait` | 毫秒直方图 | 每次 `about_to_wait` 分发 |
 | `user_event` | 毫秒直方图 | 每次 `user_event` 分发 |
 | `new_events` | 毫秒直方图 | 每次 `new_events` 分发 |
+| `pane_create` | 毫秒直方图（perf 结果中为 `pane_create_ms`） | 启动后在事件循环上创建的每个新标签页或分屏窗格，从其 PTY 与进程到其 VT 工作线程 |
 | `ui_parser_locks` | 次数 | 事件循环线程对窗格解析器加锁的次数 |
 | `ui_guard_custody_ns` | 次数（ns） | 一帧持有任一解析器守卫的累计时间，从获取第一个守卫到释放最后一个，覆盖所有取得过守卫的收集，包括提前失败的 |
 | `ui_guard_custodies` | 次数 | 至少取得一个解析器守卫的收集次数 |
@@ -454,6 +455,7 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `media_decode_attempts` | 次数 | 解码尝试：Sixel、iTerm2 与 kitty 的传输和查询、格式错误的负载，以及存储拒绝的解码；kitty 放置和删除不解码 |
 | `media_decode_under_8ms` | 次数 | 耗时低于 8 ms 的尝试。当它小于 `ceil(0.95 × media_decode_attempts)` 时，解码 p95 恰好至少为 8 ms |
 | `media_decoded`、`media_decode_failed`、`media_refused_after_decode` | 次数 | 每次尝试的结果：被保留（或查询回答 `OK`）、无法解码，或解码后被存储拒绝 |
+| `resize_hold` | 微秒直方图（perf 结果中为 `resize_hold_us`） | 事件循环为调整窗格网格尺寸而持有其解析器锁的时间，每次调整每个窗格一个样本 |
 
 `flushes`、`flushes_untargeted`、`flushes_coalesced` 与 `flush_to_redraw` 的计数之间没有恒等关系。
 关闭的窗格会丢弃其待处理时间戳，而且各计数器并非作为一次快照读取，因此要分别解读。

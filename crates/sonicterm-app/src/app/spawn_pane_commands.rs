@@ -20,7 +20,9 @@ impl App {
         let launch =
             super::super::pane_launch::PaneLaunch::from_window(Some(window), &self.local_hostname);
         let new_id = next_pane_id();
+        let create_started = std::time::Instant::now();
         let mut new_pane = Some(self.spawn_pane(new_id, &launch));
+        self.note_pane_create(create_started);
         let did_split = 'install: {
             let Some(window) = self.main_mut() else {
                 // When: main_mut has no destination, leave the spawned pane outside the window for retirement.

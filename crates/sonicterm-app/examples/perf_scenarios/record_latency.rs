@@ -38,11 +38,11 @@ pub(crate) fn attribute_dispatch(observation: &DispatchObservation) -> Attributi
 }
 
 /// Whether a sample of `scenario`/`variant` is split at the flush and armed for its echo timeline: S2's
-/// single idle pane and S2/flood's typing pane beside the flood. Both sides of a comparison arm the same
+/// single idle pane, S2/flood's typing pane beside the flood and S2/spawn's pane while tabs open. Both sides of a comparison arm the same
 /// variants with the same overlaid harness, so the watch's cost is symmetric within a run.
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub(crate) fn split_in_scope(scenario: &str, variant: &str) -> bool {
-    scenario == "S2" && matches!(variant, "default" | "flood")
+    scenario == "S2" && matches!(variant, "default" | "flood" | "spawn")
 }
 
 /// The outcome for a credited sample armed as `arm`: `take` runs only for an armed token.

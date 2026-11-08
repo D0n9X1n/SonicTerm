@@ -891,3 +891,19 @@ pub(super) fn run_stopped_growth(
     }
     Ok(())
 }
+
+#[test]
+pub(super) fn a_new_tab_records_its_creation_only_with_the_counters_on() {
+    // pane_create times each pane created after startup; with the gate off nothing records it.
+    let mut counting = app_under_filter("warn");
+    counting.force_frame_counters_on().unwrap();
+    counting.__test_synthetic_main();
+    counting.new_tab("one");
+    counting.new_tab("two");
+    let created = counting.frame_counters.as_ref().unwrap().pane_create.count();
+    assert_eq!(created, 2);
+    let mut quiet = app_under_filter("warn");
+    quiet.__test_synthetic_main();
+    quiet.new_tab("one");
+    assert!(quiet.frame_counters.is_none());
+}

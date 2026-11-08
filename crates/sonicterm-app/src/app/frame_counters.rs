@@ -219,6 +219,8 @@ pub(crate) struct VtFrameStats {
     pub(crate) parser_sections: AtomicU64,
     /// Inline-image decodes the workers ran, with their outcomes.
     pub(crate) media: super::media_decode_stats::DecodeStats,
+    /// Holds of a pane's parser lock while the event loop resized its grid.
+    pub(crate) resize_hold: AtomicHistogram,
 }
 
 impl Default for VtFrameStats {
@@ -237,6 +239,7 @@ impl Default for VtFrameStats {
             parser_lock_wait_ns: AtomicU64::new(0),
             parser_sections: AtomicU64::new(0),
             media: super::media_decode_stats::DecodeStats::default(),
+            resize_hold: AtomicHistogram::new(HistogramUnit::Micros),
         }
     }
 }
@@ -300,6 +303,8 @@ pub(crate) struct AppFrameCounters {
     pub(crate) user_event: Histogram,
     /// `new_events` dispatch durations.
     pub(crate) new_events: Histogram,
+    /// Creating a pane after startup on the event loop, its PTY, process and VT worker included.
+    pub(crate) pane_create: Histogram,
     /// The `window=app` line's cadence and previous record.
     pub(crate) line: LineState,
     /// Every closed window's totals, merged so the sum never drops; fixed in size.
@@ -429,6 +434,7 @@ impl AppFrameCounters {
             about_to_wait: Histogram::new(HistogramUnit::Millis),
             user_event: Histogram::new(HistogramUnit::Millis),
             new_events: Histogram::new(HistogramUnit::Millis),
+            pane_create: Histogram::new(HistogramUnit::Millis),
             line: LineState::new(Instant::now()),
             closed_windows: CounterRecord::default(),
             windows_registered: 0,
