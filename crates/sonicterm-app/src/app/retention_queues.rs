@@ -27,6 +27,12 @@ pub(super) fn sum_queues(footprints: impl IntoIterator<Item = PtyQueueFootprint>
     })
 }
 
+/// The process-wide reply spill pool: file bytes charged now across every pane, and its budget.
+pub(super) fn process_spill_files() -> (u64, u64) {
+    let pool = sonicterm_io::SpillPool::process_default();
+    (pool.charged(), pool.capacity())
+}
+
 impl super::App {
     /// Every pane's PTY queue footprint, summed: each read is lock-free, so this never waits.
     pub(super) fn pty_queue_totals(&self) -> QueueTotals {
@@ -52,6 +58,8 @@ impl super::App {
             writer_in_flight_bytes = totals.footprint.writer_in_flight_bytes,
             reply_resident_bytes = totals.footprint.reply_resident_bytes,
             reply_spill_disk_bytes = totals.footprint.reply_spill_bytes,
+            reply_spill_file_bytes = process_spill_files().0,
+            reply_spill_budget_bytes = process_spill_files().1,
             teardown_fallbacks = fallback.count,
             teardown_fallbacks_slow = fallback.slow,
             teardown_fallback_longest_us = fallback.longest_us,

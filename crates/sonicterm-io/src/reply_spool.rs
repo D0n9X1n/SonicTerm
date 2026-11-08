@@ -18,6 +18,8 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
+use crate::reply_spill_pool::{SpillCharge, SpillPool};
+
 const RAM_BYTES: usize = 64 * 1024;
 const CHUNK_BYTES: usize = 32 * 1024;
 const HEADER_BYTES: usize = 4;
@@ -36,9 +38,9 @@ const COMPACT_CHUNK_BYTES: usize = 64 * 1024;
 /// is at most 32 KiB and remains indivisible when interleaved with UI input.
 /// Admission may perform synchronous file I/O, but never waits for native PTY
 /// capacity: one record write plus, amortised, one copy of each live byte per compaction.
-/// Live spilled bytes are capped at [`SPILL_BUDGET_BYTES`]; a submission past the cap fails with
-/// a [`ReplyBudgetExceeded`] error ([`is_budget_refusal`]), is dropped alone, and leaves the spool
-/// usable.
+/// Live spilled bytes are capped at [`SPILL_BUDGET_BYTES`], and every spool's file length counts
+/// against one shared [`SpillPool`]; a submission past either fails with a [`ReplyBudgetExceeded`]
+/// error ([`is_budget_refusal`]), is dropped alone, and leaves the spool usable.
 /// Writer reads use at most 32 KiB plus a header of scratch and a 32 KiB output.
 #[derive(Clone, Debug)]
 pub struct PtyReplySender {
@@ -109,6 +111,8 @@ struct SpoolState {
     spill: Option<Spill>,
     closed: Arc<AtomicBool>,
     failure: Option<Arc<io::Error>>,
+    /// The disk budget this spool's file draws from.
+    pool: Arc<SpillPool>,
 }
 
 #[derive(Debug)]
@@ -116,6 +120,8 @@ struct Spill {
     file: File,
     read: u64,
     written: u64,
+    /// The file length charged to the pool. Declared last, so the file closes before the refund.
+    charge: SpillCharge,
 }
 
 pub(crate) struct ReplyReader {
@@ -176,6 +182,14 @@ impl Spill {
             // When: `self.read` is under COMPACT_MIN_BYTES or under half of `self.written`, compaction is not due.
             return Ok(());
         }
+        self.compact()
+    }
+
+    /// Move the live bytes to the start of the file and truncate it, refunding the removed prefix
+    /// to the pool only once the truncation succeeded. Under pool pressure this runs with a prefix
+    /// of at least 1 MiB that may be under half the file, so it copies up to the live backlog
+    /// (16 MiB) to free 1 MiB: at most 16 bytes copied per byte consumed.
+    fn compact(&mut self) -> io::Result<()> {
         let live = self.written - self.read;
         let mut buffer = vec![0; COMPACT_CHUNK_BYTES];
         let mut moved = 0;
@@ -191,6 +205,7 @@ impl Spill {
         self.file.set_len(live)?;
         self.read = 0;
         self.written = live;
+        self.charge.shrink_to(live);
         Ok(())
     }
 }
@@ -270,13 +285,30 @@ impl SpoolState {
             // nothing is written, so the spool stays usable and older records keep their order.
             return Err(io::Error::new(io::ErrorKind::QuotaExceeded, ReplyBudgetExceeded));
         }
+        let pool = Arc::clone(&self.pool);
         let result = (|| {
             if self.spill.is_none() {
-                // Allocate a private anonymous file only after resident capacity is exhausted.
-                self.spill = Some(Spill { file: tempfile::tempfile()?, read: 0, written: 0 });
+                // Allocate a private anonymous file only after resident capacity is exhausted; its
+                // charge starts empty, so a failed creation leaves nothing to refund.
+                let file = tempfile::tempfile()?;
+                self.spill =
+                    Some(Spill { file, read: 0, written: 0, charge: SpillCharge::new(pool) });
             }
             let spill = self.spill.as_mut().expect("spill was initialized");
             spill.compact_if_due()?;
+            if !spill.charge.grow(record_len as u64) {
+                // When: the shared pool cannot `grow` this file by the record, a large consumed
+                // prefix is compacted away first; a small one is never worth a full copy.
+                if spill.read < (record_len as u64).max(COMPACT_MIN_BYTES) {
+                    // When: `spill.read` is under the record and COMPACT_MIN_BYTES, refuse at once.
+                    return Ok(false);
+                }
+                spill.compact()?;
+                if !spill.charge.grow(record_len as u64) {
+                    // When: compaction freed too little for the pool to `grow` it, refuse the record.
+                    return Ok(false);
+                }
+            }
             let end = spill
                 .written
                 .checked_add(record_len as u64)
@@ -286,9 +318,19 @@ impl SpoolState {
             write(&mut spill.file, bytes)?;
             // Only complete records become visible; partial writes latch failure and remove the file.
             spill.written = end;
-            Ok(())
+            Ok(true)
         })();
-        result.map_err(|error| self.fail(error))
+        match result {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                // A spill created for this record and still empty is dropped, refunding nothing.
+                if self.spill.as_ref().is_some_and(|spill| spill.written == 0) {
+                    self.spill = None;
+                }
+                Err(io::Error::new(io::ErrorKind::QuotaExceeded, ReplyBudgetExceeded))
+            }
+            Err(error) => Err(self.fail(error)),
+        }
     }
 
     fn pop(&mut self) -> io::Result<Option<Vec<u8>>> {
@@ -357,8 +399,20 @@ impl SpoolState {
     }
 }
 
-/// Create the producer and sole reader with a bounded wake hint.
+/// Create the producer and sole reader with a bounded wake hint, drawing on the process pool.
+/// Unit tests draw on a private unlimited pool instead, so tests running at once never refuse
+/// each other's spill; a test of the budget passes its own pool to [`reply_spool_with_pool`].
 pub(crate) fn reply_spool() -> (PtyReplySender, ReplyReader) {
+    #[cfg(test)]
+    let pool = SpillPool::new(u64::MAX);
+    #[cfg(not(test))]
+    let pool = SpillPool::process_default();
+    reply_spool_with_pool(pool)
+}
+
+/// [`reply_spool`] drawing on `pool` instead of the process pool, so a test sees only its own
+/// spools.
+pub(crate) fn reply_spool_with_pool(pool: Arc<SpillPool>) -> (PtyReplySender, ReplyReader) {
     let (wake, rx) = crossbeam_channel::bounded(1);
     let closed = Arc::new(AtomicBool::new(false));
     let sender = PtyReplySender {
@@ -367,6 +421,7 @@ pub(crate) fn reply_spool() -> (PtyReplySender, ReplyReader) {
             spill: None,
             closed: closed.clone(),
             failure: None,
+            pool,
         })),
         closed,
         wake,
@@ -411,3 +466,7 @@ impl Drop for ReplyReader {
 #[cfg(test)]
 #[path = "reply_spool_tests.rs"]
 mod reply_spool_tests;
+
+#[cfg(test)]
+#[path = "reply_spool_pool_tests.rs"]
+mod reply_spool_pool_tests;

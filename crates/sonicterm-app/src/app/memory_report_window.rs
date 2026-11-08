@@ -764,6 +764,7 @@ impl App {
             queues: super::memory_report_queues::QueueSection {
                 totals: self.pty_queue_totals(),
                 fallback: self.services.pty_reaper.fallback_timing(),
+                spill_files: super::retention_queues::process_spill_files(),
             },
         }
     }

@@ -54,7 +54,11 @@ cargo build -p sonicterm-io
 - The reply spool caps live spilled bytes at `SPILL_BUDGET_BYTES` (16 MiB). A reply past it fails
   with a `ReplyBudgetExceeded` error (`is_budget_refusal`), is dropped alone and counted (`PtyReplySender::stats`), and
   must not latch failure; every other spool error still latches. Compaction keeps the file below
-  twice the budget plus one record.
+  twice the budget plus one record. Every spool's file length also counts against one shared
+  `SpillPool` (256 MiB, `PROCESS_SPILL_BUDGET_BYTES`), refused the same way. `Spill` owns its
+  `SpillCharge`, declared last so the file closes before the refund; never add a release path
+  outside it. Unit tests get a private unlimited pool from `reply_spool()`; a budget test passes
+  its own to `reply_spool_with_pool`.
 - `ShellSpawnOpts::input_seen` is set before any input message is admitted to the queue,
   through `send_input_nonblocking` or a `PtyInputSender`; only `send_draft_nonblocking` (a
   script draft typed without Enter) and the reply spool leave it clear. The parser stops

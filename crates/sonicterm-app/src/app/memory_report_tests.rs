@@ -216,6 +216,7 @@ PANES
 
 PTY QUEUES (0 pane(s)): 0 B in memory, 0 B on disk
   input queued 0 B, writer in flight 0 B, reply tier allocated 0 B, reply spill 0 B (disk)
+  reply spill files 0 B of the 0 B process budget (file length, consumed prefixes included)
   teardown fallbacks 0 (0 over 50 ms), longest 0 us, total 0 us
 
 THREADS                   3 threads share the process's memory; a thread holds none of its own

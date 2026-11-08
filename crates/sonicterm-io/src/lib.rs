@@ -15,8 +15,10 @@ pub mod proc_info;
 #[allow(clippy::min_ident_chars)]
 pub mod pty;
 pub mod pty_backend_feasibility;
+mod reply_spill_pool;
 mod reply_spool;
 
+pub use reply_spill_pool::{SpillPool, PROCESS_SPILL_BUDGET_BYTES};
 pub use reply_spool::{
     is_budget_refusal, PtyReplySender, ReplyBudgetExceeded, ReplySpoolStats, SPILL_BUDGET_BYTES,
 };

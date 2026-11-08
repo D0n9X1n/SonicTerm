@@ -821,7 +821,8 @@ session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
                   pty_output_bytes=<bytes> pty_input_bytes=<bytes>
 pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
            writer_in_flight_bytes=<bytes> reply_resident_bytes=<bytes>
-           reply_spill_disk_bytes=<bytes> teardown_fallbacks=<count>
+           reply_spill_disk_bytes=<bytes> reply_spill_file_bytes=<bytes>
+           reply_spill_budget_bytes=<bytes> teardown_fallbacks=<count>
            teardown_fallbacks_slow=<count> teardown_fallback_longest_us=<us>
            teardown_fallback_total_us=<us>
 ```
@@ -829,7 +830,7 @@ pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
 `pty queues` 以同一节奏汇总所有窗格的 PTY 队列：通道中等待的输入、writer 正在写入的消息（用户输入或一轮回复，
 离开队列时只计一次）、常驻回复层的已分配内存（即其容量，排空后仍保留，因此可能大于其中的回复），以及溢出到磁盘的回复
 （`reply_spill_disk_bytes`，从不计入 `resident_bytes`）。回复相关数值是各窗格的回复缓冲在其最近一次发送或取出时的计数，
-读取时不获取缓冲的锁，因此存储停滞的窗格不会拖住事件循环的采样。teardown 字段报告回收器的同步回退：运行次数、阻塞超过 50 ms 的次数、最长耗时与总耗时。
+读取时不获取缓冲的锁，因此存储停滞的窗格不会拖住事件循环的采样。`reply_spill_file_bytes` 是进程溢出预算在所有窗格上已计入的文件长度（含已消费前缀），与 `reply_spill_budget_bytes` 对照。teardown 字段报告回收器的同步回退：运行次数、阻塞超过 50 ms 的次数、最长耗时与总耗时。
 超过 50 ms 的回退还会在 `warn` 级别记录 `synchronous PTY teardown fallback blocked the event loop`，包含
 `owner` 与 `blocked_ms`。
 

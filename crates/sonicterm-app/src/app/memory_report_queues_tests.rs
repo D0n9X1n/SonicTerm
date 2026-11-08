@@ -27,8 +27,10 @@ fn the_section_names_every_category_and_the_fallback_buckets() {
             },
         },
         fallback,
+        spill_files: (8_192, 268_435_456),
     };
     let text = section.lines().join("\n");
+    assert!(text.contains("reply spill files 8192 B of the 268435456 B process budget"), "{text}");
     assert!(text.contains("PTY QUEUES (2 pane(s)): 65656 B in memory, 4096 B on disk"), "{text}");
     assert!(
         text.contains("input queued 100 B, writer in flight 20 B, reply tier allocated 65536 B"),
