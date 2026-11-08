@@ -20,11 +20,12 @@ pub(super) fn spawn_reader_thread(
     meter: Arc<QueuedOutputMeter>,
     stamp_reads: bool,
 ) -> PtyIoThread {
-    spawn_reader_thread_with(reader, tx, cancel, meter, stamp_reads, || {})
+    spawn_reader_thread_with(reader, tx, cancel, meter, stamp_reads, || {}, || {})
 }
 
 /// As [`spawn_reader_thread`], with `after_read` run right after each successful nonempty read is
-/// stamped and before the bytes are split, charged or sent; tests delay construction through it.
+/// stamped and before the bytes are split, charged or sent, and `before_refill` run right before a
+/// refill reserves its ring; tests delay construction, or release every view, through them.
 fn spawn_reader_thread_with(
     mut reader: Box<dyn Read + Send>,
     tx: Sender<Incoming>,
@@ -32,13 +33,14 @@ fn spawn_reader_thread_with(
     meter: Arc<QueuedOutputMeter>,
     stamp_reads: bool,
     mut after_read: impl FnMut() + Send + 'static,
+    mut before_refill: impl FnMut() + Send + 'static,
 ) -> PtyIoThread {
     let (done_tx, done) = crossbeam_channel::bounded(1);
     let handle = thread::Builder::new()
         .name("sonic-pty-reader".into())
         .spawn(move || {
             let _active = ActivePtyIoThread::enter();
-            // 64 KiB ring. We `split` the filled prefix into a `Bytes`
+            // 64 KiB ring. We `split_to` the filled prefix into a `Bytes`
             // (refcounted view into the same allocation) on each read and
             // send it downstream. Once consumers drop their `Bytes`, the
             // next `reserve` call reclaims the original allocation in-place
@@ -65,35 +67,36 @@ fn spawn_reader_thread_with(
             // on; upgrading tells us whether this ring is already charged.
             let mut ring_charge: std::sync::Weak<RingCharge> = std::sync::Weak::new();
             loop {
-                if buf.capacity() - buf.len() < READ_HEADROOM {
-                    // If downstream has dropped its `Bytes` views, this
-                    // reclaims the original buffer; otherwise it allocates
-                    // a fresh one and drops our half of the previous ring.
+                // `buf`'s length is the initialized window the next read fills: every byte of it
+                // was zeroed once at a refill or written by an earlier read, and none was handed
+                // out. Refill only when that window is shorter than one PTY chunk.
+                if buf.len() < READ_HEADROOM {
+                    // The short tail holds no data, only bytes never handed out; drop it so a
+                    // `reserve` can reclaim the ring once downstream drops its views, otherwise
+                    // it allocates a fresh one and drops our half of the previous ring.
+                    buf.clear();
+                    before_refill();
                     buf.reserve(RING_CAP);
                     // Either way the bytes we hand out from here belong to a
                     // different ring than the charge above describes.
                     ring_bytes = buf.capacity();
                     ring_charge = std::sync::Weak::new();
+                    // `Read` requires an initialised destination slice (passing `MaybeUninit`
+                    // bytes through a `&mut [u8]` cast is UB even though most impls never read
+                    // from it), so zero the new window once per ring rather than once per read.
+                    let window = buf.capacity();
+                    buf.resize(window, 0);
                 }
-                // Zero-initialise the spare region before handing it to
-                // `Read::read`. `Read` requires an initialised destination
-                // slice (passing `MaybeUninit` bytes via a `&mut [u8]` cast
-                // is UB even though most impls never read from it). The
-                // memset cost on a 64 KiB region is dominated by the syscall
-                // itself; the underlying allocation is still reused across
-                // reads, preserving the zero-alloc steady state.
-                let initial_len = buf.len();
-                let read_cap = buf.capacity() - initial_len;
-                buf.resize(initial_len + read_cap, 0);
                 // When: `reader` data publishes its initialized prefix; EOF or error stops the pump.
-                match reader.read(&mut buf[initial_len..]) {
+                match reader.read(&mut buf[..]) {
                     Ok(0) => break,
                     Ok(n) => {
                         // The stamp is the read's return: taken before any split, charge or send.
                         let read_at = stamp_reads.then(Instant::now);
                         after_read();
-                        buf.truncate(initial_len + n);
-                        let chunk = buf.split().freeze();
+                        // Only the `n` bytes the read reported leave; the rest of the window stays
+                        // initialized in `buf` for the next read to overwrite.
+                        let chunk = buf.split_to(n).freeze();
                         // Reuse this ring's charge if any queued view still
                         // holds it, so one allocation is counted once however
                         // many views come out of it.
@@ -112,9 +115,8 @@ fn spawn_reader_thread_with(
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                        // A signal `Interrupted` the read before it published anything: drop the
-                        // zeroed spare region, or the retry would read into no room and look like EOF.
-                        buf.truncate(initial_len);
+                        // A signal `Interrupted` the read before it published anything; the window
+                        // is unchanged, so the retry reads into the same room.
                         if cancel.try_recv().is_ok() {
                             // When: `cancel` fired, the pane is being torn down, so no retry.
                             break;
