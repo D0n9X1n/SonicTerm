@@ -73,15 +73,23 @@ impl super::Parser {
         TapHold { readers: Arc::clone(&tap.readers), start: tap.end }
     }
 
-    /// Free the tap when its last hold was dropped; the parser calls this at each batch.
+    /// Free the tap when its last hold was dropped. The parser calls this at each batch; a stream
+    /// reader and the app's retention pass call it too, so a pane that prints nothing more after
+    /// its last wait does not keep the ring. It frees nothing while any hold remains.
     // Ordering: readers Acquire pairs with TapHold's Release decrement.
-    pub(super) fn release_idle_tap(&mut self) {
+    pub fn release_idle_tap(&mut self) {
         let idle =
             self.performer.tap.as_ref().is_some_and(|tap| tap.readers.load(Ordering::Acquire) == 0);
         if idle {
             // The last hold was dropped: nothing records and the ring is freed.
             self.performer.tap = None;
         }
+    }
+
+    /// How many holds keep the tap armed; 0 when it is not armed.
+    // Ordering: readers Acquire pairs with TapHold's Release decrement.
+    pub fn output_tap_readers(&self) -> usize {
+        self.performer.tap.as_ref().map_or(0, |tap| tap.readers.load(Ordering::Acquire))
     }
 
     /// The text printed at or after offset `start`, as far as the tap still holds it; `None` when

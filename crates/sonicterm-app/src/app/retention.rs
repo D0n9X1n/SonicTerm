@@ -550,6 +550,12 @@ impl super::App {
                     // is no ledger identity to charge the retention against.
                     continue;
                 };
+                // An output tap whose last wait ended is freed here when the parser is free, so a
+                // silent pane does not keep it until it prints again; a busy parser waits for the
+                // next successful probe.
+                if let Some(mut parser) = pane.parser.try_lock() {
+                    parser.release_idle_tap();
+                }
                 let Some(retention) = measure_pane(pane) else {
                     // When: measure_pane returns None on a contended lock; skipping
                     // leaves this pane's charge at its previous figure.

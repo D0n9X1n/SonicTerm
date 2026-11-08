@@ -70,6 +70,11 @@ pub(crate) fn wait(
     drop(parser);
     let outcome = run(shared, entry, hold.start, condition, scope);
     drop(hold);
+    // The ring is freed now if the parser is free and no other wait holds it; a busy parser
+    // leaves it to its next batch or the retention pass, so this never waits.
+    if let Some(mut parser) = entry.parser.try_lock() {
+        parser.release_idle_tap();
+    }
     let incomplete = outcome.context_truncated || outcome.unread;
     let mut structured = json!({
         "reason": outcome.reason.as_str(),
