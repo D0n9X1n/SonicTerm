@@ -100,7 +100,8 @@ pub(crate) struct WindowIdentity {
     pub status_hash: u64,
     pub viewport_top_abs: Option<u64>,
     pub cursor_shape: u8,
-    pub cursor_blink: bool,
+    /// The terminal cursor is in its blink's off phase, so it draws nothing; a cursor-class field.
+    pub cursor_blink_off: bool,
     pub window_focused: bool,
     pub pane_focus_flash_bucket: u8,
     pub hover_tab: u32,

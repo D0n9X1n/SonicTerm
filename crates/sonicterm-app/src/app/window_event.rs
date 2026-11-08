@@ -94,6 +94,7 @@ impl App {
         // Main and child windows share one refresh, before the child dispatch below.
         self.refresh_monitor_for_event(win_id, &event);
         if let Some(window) = self.registry.windows.get_mut(&win_id) {
+            // When: the source `window` is live, input marks its redraw and may restart its blink.
             if matches!(
                 event,
                 WindowEvent::KeyboardInput { .. }
@@ -109,6 +110,16 @@ impl App {
                     | WindowEvent::Focused(_)
             ) {
                 window.mark_redraw(super::redraw::RedrawCause::Input);
+            }
+            if matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::Ime(_)
+                    | WindowEvent::Focused(true)
+            ) {
+                // When: matches finds a key, IME or Focused(true) event, restart the blink shown;
+                // the redraw marked above already carries a hidden cursor back on.
+                let _ = window.cursor_blink.activity(Instant::now());
             }
         }
         if matches!(
@@ -618,6 +629,18 @@ impl App {
                 );
                 self.interaction.command_palette.set_tabs(&main.tabs, &self.i18n);
             }
+            // One blink phase per frame, sampled before the renderer is borrowed for drawing.
+            let grid = frame.guards[active_pos].1.grid();
+            let cursor = (grid.cursor.row, grid.cursor.col);
+            let shown =
+                super::cursor_blink::window_blinks(main) && frame_viewports.active.is_none();
+            super::cursor_blink::sample_window_blink(
+                main,
+                Instant::now(),
+                active_id,
+                cursor,
+                shown,
+            );
         }
         #[allow(clippy::type_complexity)]
         let (

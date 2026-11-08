@@ -812,6 +812,7 @@ impl App {
             dpi_scale: 1.0,
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
+            cursor_blink: super::cursor_blink::CursorBlink::new(std::time::Instant::now()),
             hovered_url: None,
             link_preview: None,
             path_probe: crate::app::path_target::PathProbeState::default(),

@@ -267,17 +267,12 @@ impl GpuRenderer {
 }
 
 impl GpuRenderer {
-    /// Enable or disable the cursor blink. Resets the blink phase so
-    /// the user always sees a full-brightness cursor immediately after
-    /// flipping the setting (no random mid-cycle pop).
+    /// Enable or disable the cursor blink. Turning it off also shows the cursor, so a reload
+    /// that disables blinking never leaves it hidden in an off phase.
     pub fn set_cursor_blink(&mut self, blink: bool) {
-        if self.cursor_blink == blink {
-            // When: `self.cursor_blink == blink` — returning also preserves
-            // `blink_epoch`, so a reload cannot restart the blink phase.
-            return;
-        }
         self.cursor_blink = blink;
-        self.blink_epoch = Instant::now();
+        // With blinking off, no phase may hide the cursor.
+        self.cursor_blink_off &= blink;
     }
 }
 
@@ -286,40 +281,17 @@ impl GpuRenderer {
     pub fn cursor_blink(&self) -> bool {
         self.cursor_blink
     }
-}
 
-impl GpuRenderer {
-    /// Suggested wall-clock interval between blink-only redraws. The
-    /// app loop schedules a redraw at this cadence whenever the cursor
-    /// is visible AND [`Self::cursor_blink`] is true; otherwise nothing
-    /// new would render and the request would be wasted.
-    pub fn blink_redraw_interval(&self) -> std::time::Duration {
-        ui_cursor::redraw_interval()
+    /// Set the blink phase the app sampled for the next frame: `true` hides the terminal cursor.
+    /// Ignored while blinking is off. The IME anchor and the frame's cursor cell still follow the
+    /// grid cursor, so only the cursor's pixels change.
+    pub fn set_cursor_blink_off(&mut self, off: bool) {
+        self.cursor_blink_off = off && self.cursor_blink;
     }
-}
 
-impl GpuRenderer {
-    /// Wall-clock instant at which the next blink phase bucket begins,
-    /// or `None` when blinking is disabled. The app loop should set
-    /// `ControlFlow::WaitUntil(this)` so the renderer wakes up exactly
-    /// at bucket boundaries instead of busy-looping `request_redraw()`
-    /// after every frame (the project landmine flagged).
-    pub fn next_blink_redraw_at(&self) -> Option<Instant> {
-        // Blink-driven redraws are intentionally disabled in the idle
-        // path. Re-shaping the grid 26×/sec just to fade the cursor
-        // alpha melted the headless CPU bench at 17% — see the
-        // `cursor_phase: 0` comment where `FrameKey` is built. The
-        // cursor still re-evaluates its alpha on every real redraw
-        // (PTY bytes, keys, mouse, resize, focus), which keeps it
-        // visibly pulsing whenever the user is doing anything. Pure
-        // idle leaves the cursor frozen at a fixed (always-visible)
-        // alpha — strictly better than burning CPU on a backgrounded
-        // window. The remaining fields (`cursor_blink`,
-        // `window_focused`, `blink_epoch`) are kept so a future
-        // event-driven re-enable (e.g. only blink for the first 5s
-        // after a keypress) can pick the right starting bucket.
-        let _ = (&self.cursor_blink, &self.window_focused, &self.blink_epoch);
-        None
+    /// Whether the next frame draws the terminal cursor in its blink's off phase.
+    pub fn cursor_blink_off(&self) -> bool {
+        self.cursor_blink_off
     }
 }
 

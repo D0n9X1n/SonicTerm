@@ -176,6 +176,20 @@ impl App {
             ));
             palette.set_tabs(&child.tabs, &self.i18n);
         }
+        // One blink phase per frame, sampled before the active pane is borrowed for drawing.
+        {
+            let grid = frame.guards[active_pos].1.grid();
+            let cursor = (grid.cursor.row, grid.cursor.col);
+            let shown =
+                super::cursor_blink::window_blinks(child) && frame_viewports.active.is_none();
+            super::cursor_blink::sample_window_blink(
+                child,
+                Instant::now(),
+                active_id,
+                cursor,
+                shown,
+            );
+        }
         if let Some(pane) = child.panes.get_mut(&active_id) {
             // When: `panes` holds `active_id`, use the validated `active_pos` for title and overlays.
             invalidate_selection_for_content(

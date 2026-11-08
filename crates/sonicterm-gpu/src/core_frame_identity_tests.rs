@@ -663,6 +663,22 @@ fn cursor_draw_path_calls_the_live_view_predicate() {
     assert_eq!(core.matches("ifview_top==live_top{").count(), 0, "no inline duplicate");
 }
 
+/// The blink's off phase hides only the terminal cursor's pixels: the draw gate reads the sampled
+/// phase, the frame key carries it as a cursor-class field, and the drawn cursor cell (the IME
+/// anchor and the damage rows) does not depend on it. Whitespace is removed before matching.
+#[test]
+fn the_blink_phase_gates_only_the_terminal_cursor_draw() {
+    let core: String = crate::core::CORE_SOURCE.split_whitespace().collect();
+    let gate = "ifcursor_visible&&self.window_focused&&!read_only_mode&&!self.cursor_blink_off{";
+    assert_eq!(core.matches(gate).count(), 1, "the terminal cursor draw reads the blink phase");
+    assert_eq!(core.matches("cursor_blink_off:self.cursor_blink_off,").count(), 1, "the key");
+    let identity = function_body(
+        &crate::core::CORE_SOURCE.replace("\r\n", "\n"),
+        "pub(super) fn drawn_cursor_cell(",
+    );
+    assert!(!identity.contains("blink"), "the drawn cursor cell ignores the blink phase");
+}
+
 /// With clean grids (no row dirt), a renderer whose caches were warmed by the previous frame
 /// draws each pointer operation exactly as a renderer with empty caches, at scales 1, 1.25, 1.5
 /// and 2: glyph instance bytes (position, atlas region, colour, cursor recolour), underline and
@@ -784,8 +800,8 @@ fn cursor_and_focus_setters_keep_the_frame_key() {
         let body = function_body(&source, signature);
         assert!(!body.contains("last_frame_key = None"), "{signature} clears the frame key");
     }
-    // Blink still restarts its phase when the setting changes.
-    assert!(function_body(&source, "    pub fn set_cursor_blink(").contains("self.blink_epoch ="));
+    let blink_phase = function_body(&source, "    pub fn set_cursor_blink_off(");
+    assert!(!blink_phase.contains("last_frame_key = None"), "a blink phase clears the frame key");
 }
 
 /// Production wiring of the damage classes: the identity records the drawn cursor cell, both

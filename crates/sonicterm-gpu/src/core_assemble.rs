@@ -213,7 +213,7 @@ impl GpuRenderer {
                     },
                     viewport_top_abs,
                     cursor_shape: self.cursor_shape as u8,
-                    cursor_blink: self.cursor_blink,
+                    cursor_blink_off: self.cursor_blink_off,
                     window_focused: self.window_focused,
                     pane_focus_flash_bucket,
                     hover_tab: hover_tab_idx,

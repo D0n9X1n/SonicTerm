@@ -530,7 +530,7 @@ impl GpuRenderer {
             bg_rgba,
             cursor_shape: CursorShape::default(),
             cursor_blink: true,
-            blink_epoch: Instant::now(),
+            cursor_blink_off: false,
             window_focused: true,
             inactive_pane_cursors: Vec::new(),
             pane_focus_flash: None,

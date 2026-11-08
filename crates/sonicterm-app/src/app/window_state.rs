@@ -168,6 +168,9 @@ pub struct WindowState {
     /// own IMK runloop traffic independently. Every read path goes through
     /// `self.main()?.ime_cursor_throttle`.
     pub ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle,
+    /// This window's cursor blink clock: restarted by its input and cursor moves, sampled once
+    /// per frame, and the source of its blink deadline.
+    pub(crate) cursor_blink: super::cursor_blink::CursorBlink,
     /// Per-window hovered URL or validated local-path span.
     pub hovered_url: Option<hovered_url::HoveredUrl>,
     /// Modifier-gated destination of the pointed URI.

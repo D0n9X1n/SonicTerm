@@ -341,7 +341,6 @@ impl App {
     }
 
     /// Collect typed frame and maintenance deadlines without erasing their window identity.
-    // Ordering: cursor_visible Relaxed reads only choose whether a blink deadline exists.
     pub(in crate::app) fn frame_due_work_at(
         &self,
         now: Instant,
@@ -409,22 +408,11 @@ impl App {
             ) {
                 due.push(DueWork { owner: Some(*id), cause: DueCause::Scrollbar, deadline });
             }
-            if Some(*id) == self.registry.main_window_id {
-                let cursor = window
-                    .tab_states
-                    .get(window.tabs.active_index())
-                    .and_then(|tab| window.panes.get(&tab.active_pane))
-                    .is_some_and(|pane| {
-                        pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed)
-                    });
-                if cursor {
-                    if let Some(deadline) = window
-                        .renderer
-                        .as_ref()
-                        .and_then(|renderer| renderer.next_blink_redraw_at())
-                    {
-                        due.push(DueWork { owner: Some(*id), cause: DueCause::Cursor, deadline });
-                    }
+            // Main and child windows blink alike; a window that does not blink, or whose blink
+            // rests, contributes no deadline.
+            if super::super::cursor_blink::window_blinks(window) {
+                if let Some(deadline) = window.cursor_blink.deadline(now) {
+                    due.push(DueWork { owner: Some(*id), cause: DueCause::Cursor, deadline });
                 }
             }
         }

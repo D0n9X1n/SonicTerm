@@ -1,90 +1,44 @@
-//! Cursor shape + blink helpers.
+//! Cursor shape and blink timing.
 //!
-//! Kept GPU-free so unit tests can exercise the math without standing up
-//! a wgpu surface. The render path calls [`blink_alpha`] once per frame
-//! and uses [`phase_bucket`] to keep the renderer's `FrameKey`
-//! fast-path coherent — two frames with the same bucket render the same
-//! cursor opacity, so a no-typing/no-output idle session still pegs the
-//! cache and skips work between visible phase transitions.
+//! The blink is two-phase: the cursor is drawn at exactly its theme colour, or not at all, so a
+//! yellow theme never reads as olive mid-fade. It runs only for a while after activity and then
+//! rests solid, so an idle window schedules no blink frames. GPU-free, so the timing is unit-tested
+//! without a surface; the app owns the clock and the renderer receives only the sampled phase.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use sonicterm_cfg::config::CursorShape;
 
-/// One full blink cycle (off → on → off) in milliseconds. Matches the
-/// 600ms cadence specified for v0.6 (close enough to wezterm's default
-/// to feel familiar). The blink no longer drives the redraw schedule —
-/// see `GpuRenderer::next_blink_redraw_at` — so this period only
-/// affects the alpha computed on real redraws.
-pub const BLINK_PERIOD_MS: u64 = 600;
+/// One phase, on or off: half of the xterm and GTK 1,060 ms blink cycle.
+pub const BLINK_PHASE: Duration = Duration::from_millis(530);
 
-/// Historical knob: number of distinct alpha steps per cycle. Since
-/// the blink no longer drives the redraw schedule (the renderer skips
-/// blink-only frames — see `GpuRenderer::next_blink_redraw_at`), this
-/// only quantises the alpha computed on real redraws. Kept for the
-/// public `phase_bucket` helper and existing tests.
-pub const PHASE_BUCKETS: u8 = 16;
+/// How long after the last activity the cursor keeps blinking before it rests solid.
+pub const BLINK_REST_AFTER: Duration = Duration::from_secs(15);
 
-/// Minimum alpha during the trough of the blink. A non-zero floor keeps
-/// the cursor *visible at all times* even mid-blink so the user never
-/// loses their place — this is the wezterm behaviour, not the "fully
-/// disappear" behaviour of legacy xterm.
-#[doc(hidden)]
-pub const BLINK_MIN_ALPHA: f32 = 0.35;
-#[doc(hidden)]
-pub const BLINK_MAX_ALPHA: f32 = 1.0;
-
-/// Compute the current cursor-cell alpha for a blinking cursor.
-///
-/// When `enabled` is `false`, returns [`BLINK_MAX_ALPHA`] (solid).
-/// Otherwise produces a smooth triangular wave with period
-/// [`BLINK_PERIOD_MS`], bounded to `[BLINK_MIN_ALPHA, BLINK_MAX_ALPHA]`.
-///
-/// Triangular (not sine) so the output is exactly representable in
-/// tests and the per-bucket alpha steps are evenly spaced — easier to
-/// reason about when debugging "did my cursor blink this frame?".
-pub fn blink_alpha(elapsed: Duration, enabled: bool) -> f32 {
-    if !enabled {
-        // When: `enabled` is false, keep the cursor fully opaque and independent of wall-clock phase.
-        return BLINK_MAX_ALPHA;
+/// Whether a cursor blinking since `epoch` is drawn at `now`. The first phase after `epoch` is on,
+/// so activity always shows the cursor at once, and from [`BLINK_REST_AFTER`] it stays on.
+pub fn blink_on(epoch: Instant, now: Instant) -> bool {
+    let elapsed = now.saturating_duration_since(epoch);
+    if elapsed >= BLINK_REST_AFTER {
+        // When: `elapsed` reached the rest, the cursor stays solid until the next activity.
+        return true;
     }
-    let half = BLINK_PERIOD_MS / 2;
-    let phase_ms = (elapsed.as_millis() as u64) % BLINK_PERIOD_MS;
-    // Ramp 0..half goes max→min, half..period goes min→max.
-    let frac = if phase_ms < half {
-        phase_ms as f32 / half as f32
-    } else {
-        // When: `phase_ms` is in the second half-cycle, mirror elapsed phase so opacity ramps back toward maximum.
-        1.0 - ((phase_ms - half) as f32 / half as f32)
-    };
-    // frac is in [0,1] going up then down → invert so it starts at max.
-    let down = 1.0 - frac;
-    BLINK_MIN_ALPHA + (BLINK_MAX_ALPHA - BLINK_MIN_ALPHA) * down
+    (elapsed.as_millis() / BLINK_PHASE.as_millis()).is_multiple_of(2)
 }
 
-/// Quantise the current phase into one of [`PHASE_BUCKETS`] discrete
-/// values. Two frames with the same `enabled` setting and the same
-/// bucket index will produce the same cursor pixels, so the FrameKey
-/// can ride this bucket instead of the raw wall-clock and still skip
-/// redundant work in steady state.
-///
-/// Always returns `0` when blinking is disabled so the bucket never
-/// participates in the cache key on a non-blinking cursor.
-pub fn phase_bucket(elapsed: Duration, enabled: bool) -> u8 {
-    if !enabled {
-        // When: `enabled` is false, use one stable bucket so time cannot invalidate the frame cache.
-        return 0;
+/// When the next blink frame is due for a cursor blinking since `epoch`, or `None` once it rests.
+/// The last boundary is the rest itself, so a rest that begins in an off phase still gets the frame
+/// that shows the cursor again.
+pub fn next_blink_deadline(epoch: Instant, now: Instant) -> Option<Instant> {
+    let elapsed = now.saturating_duration_since(epoch);
+    if elapsed >= BLINK_REST_AFTER {
+        // When: `elapsed` reached the rest, no further blink frame is due.
+        return None;
     }
-    let phase_ms = (elapsed.as_millis() as u64) % BLINK_PERIOD_MS;
-    let idx = (phase_ms * PHASE_BUCKETS as u64) / BLINK_PERIOD_MS;
-    (idx as u8) % PHASE_BUCKETS
-}
-
-/// Wall-clock interval the app loop should aim for between blink-only
-/// redraws. Computed from [`BLINK_PERIOD_MS`] and [`PHASE_BUCKETS`] so
-/// bumping one constant updates the schedule automatically.
-pub fn redraw_interval() -> Duration {
-    Duration::from_millis(BLINK_PERIOD_MS / PHASE_BUCKETS as u64)
+    let phase_ms = BLINK_PHASE.as_millis();
+    let next_boundary_ms = (elapsed.as_millis() / phase_ms + 1) * phase_ms;
+    let next_boundary = Duration::from_millis(next_boundary_ms as u64).min(BLINK_REST_AFTER);
+    Some(epoch + next_boundary)
 }
 
 #[cfg(test)]

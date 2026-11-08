@@ -974,7 +974,7 @@ compile until it has a class.
 
 | Class | Fields | Damage |
 | --- | --- | --- |
-| cursor | `cursor_visible`, `cursor_shape`, `cursor_blink`, `cursor_cell` | the old and new drawn-cursor rows, ink-padded, plus the last presented cursor recolor bounds |
+| cursor | `cursor_visible`, `cursor_shape`, `cursor_blink_off`, `cursor_cell` | the old and new drawn-cursor rows, ink-padded, plus the last presented cursor recolor bounds |
 | focus | `window_focused` | the cursor damage and the tab band |
 | tab band | `tab_hash`, `hover_tab`, `close_override`, `process_privileged` | the tab band, padded upward by one native font-cell height, plus the last presented and the current tab-title glyph ink; nothing while the bar is hidden |
 | selection | `selection` | the active pane's rows whose selection quads differ |
@@ -993,8 +993,11 @@ assembly the damage also covers the recolored glyphs: both the previous and the
 current bounds whenever the recolor changed, and the current bounds when only the
 cursor or focus class is set. Recolor bounds that are not finite add the active
 pane, and tab-title ink that is not finite adds the surface. The cursor-shape,
-cursor-blink and focus setters keep the frame key, so these changes reach the
-planner as classes rather than as a first frame.
+cursor-blink, blink-phase and focus setters keep the frame key, so these changes
+reach the planner as classes rather than as a first frame. The app samples the
+blink phase once per frame and hands it to the renderer; an off phase hides only
+the terminal cursor's pixels, while `cursor_cell`, the IME anchor and copy
+mode's cursor are unchanged.
 
 Some changes stay whole-surface or whole-pane:
 

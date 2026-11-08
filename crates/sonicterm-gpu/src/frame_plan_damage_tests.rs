@@ -190,7 +190,7 @@ fn cursor_class_changes_damage_only_the_cursor_row() {
             after.window.cursor_cell = None;
         },
         |after| after.window.cursor_shape = 1,
-        |after| after.window.cursor_blink = true,
+        |after| after.window.cursor_blink_off = true,
     ];
     for change in changes {
         let mut after = cursor_facts();
@@ -463,7 +463,7 @@ fn each_window_field_has_exactly_its_class() {
         ),
         (|window| window.cursor_visible = true, narrow(|class| class.cursor = true)),
         (|window| window.cursor_shape = 1, narrow(|class| class.cursor = true)),
-        (|window| window.cursor_blink = true, narrow(|class| class.cursor = true)),
+        (|window| window.cursor_blink_off = true, narrow(|class| class.cursor = true)),
         (|window| window.cursor_cell = cursor_at(0), narrow(|class| class.cursor = true)),
         (|window| window.window_focused = true, narrow(|class| class.focus = true)),
         (|window| window.tab_hash = 1, narrow(|class| class.tab_band = true)),
@@ -558,7 +558,7 @@ fn identity_destructures_name_every_field() {
         status_hash: _,
         viewport_top_abs: _,
         cursor_shape: _,
-        cursor_blink: _,
+        cursor_blink_off: _,
         window_focused: _,
         pane_focus_flash_bucket: _,
         hover_tab: _,

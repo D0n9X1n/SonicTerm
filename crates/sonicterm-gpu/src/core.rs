@@ -113,7 +113,6 @@ use sonicterm_render_model::boundary::cfg::config::CursorShape;
 use sonicterm_render_model::boundary::ui::{
     command_palette::CommandPalette,
     copy_mode::{CopyModeState, QuickSelectHint, QuickSelectState},
-    cursor as ui_cursor,
     ime::ImeState,
     overlays::{
         search_bar_label, NotificationBubble, NotificationBubbleLayout, NotificationLevel,
@@ -301,14 +300,12 @@ pub struct GpuRenderer {
     /// Visual style of the text cursor (block / bar / underline).
     /// Live-updated from config; see [`Self::set_cursor_shape`].
     cursor_shape: CursorShape,
-    /// Whether the text cursor blinks. When `false` the cursor renders
-    /// at solid alpha and the FrameKey ignores the phase bucket.
+    /// Whether the text cursor blinks (`cursor_blink`). The app owns the blink clock; this only
+    /// lets [`Self::set_cursor_blink_off`] take effect.
     cursor_blink: bool,
-    /// Anchor for the blink phase. Reset on every config change so the
-    /// user sees the cursor at full brightness immediately after they
-    /// toggle the setting (rather than wherever the cycle happened to
-    /// be at the time).
-    blink_epoch: Instant,
+    /// The blink phase the app sampled for the next frame: `true` draws no terminal cursor. It
+    /// enters the frame key, so a phase change plans a cursor-class frame and nothing else.
+    cursor_blink_off: bool,
     /// Whether the OS window currently holds keyboard focus. The text
     /// cursor is hidden while the window is inactive. Defaults to
     /// `true` so a freshly created renderer draws the cursor on the

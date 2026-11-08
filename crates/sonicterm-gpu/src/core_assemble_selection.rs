@@ -127,7 +127,9 @@ impl GpuRenderer {
                 *frame_recolor = frame_recolor.merge(record);
             }
         }
-        if cursor_visible && self.window_focused && !read_only_mode {
+        // An off blink phase hides only the terminal cursor's pixels; copy mode's cursor above
+        // and the frame's cursor cell (the IME anchor) are unaffected.
+        if cursor_visible && self.window_focused && !read_only_mode && !self.cursor_blink_off {
             // Hide the cursor when the viewport is scrolled away from the
             // live region — its absolute row is `scrollback_len + cursor.row`,
             // which sits below the bottom of a scrolled-back view.
