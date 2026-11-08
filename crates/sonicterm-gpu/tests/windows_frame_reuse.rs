@@ -266,6 +266,7 @@ fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
             is_broadcast_participant: false,
             scrollbar_alpha: 0.0,
             inline_images: Default::default(),
+            inline_media_revision: 0,
         })
         .collect();
     let released = renderer.render_releasing(

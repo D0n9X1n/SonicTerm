@@ -496,6 +496,7 @@ impl GpuRenderer {
             image_atlas,
             image_upload,
             retained_inline_media_bytes: 0,
+            media_identity: Default::default(),
             frames_without_inline_media: 0,
             image_upload_rebuild_pending: false,
             inline_media_absent_since: None,

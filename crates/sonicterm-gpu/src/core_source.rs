@@ -89,6 +89,8 @@ pub(crate) const SOURCE: &str = concat!(
     "\n",
     include_str!("core_kitty_placeholders.rs"),
     "\n",
+    include_str!("core_media_identity.rs"),
+    "\n",
     include_str!("core_backgrounds.rs"),
     "\n",
     include_str!("core_row_projection.rs"),

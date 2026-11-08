@@ -153,6 +153,7 @@ fn pane_at(grid: &mut Grid, viewport_top_abs: Option<u64>) -> PaneRender<'_> {
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
         inline_images: Default::default(),
+        inline_media_revision: 0,
     }
 }
 

@@ -7,6 +7,7 @@ pub(super) use sonicterm_cfg::{
     theme::Theme,
 };
 pub(super) use sonicterm_grid::grid::{CellFlags, Color, Grid};
+use sonicterm_render_model::InlineImage;
 pub(super) use sonicterm_ui::pane::PaneTree;
 pub(super) use std::{sync::Barrier, time::Duration};
 

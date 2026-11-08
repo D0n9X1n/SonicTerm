@@ -216,6 +216,8 @@ pub struct GpuRenderer {
     image_atlas: GlyphAtlas,
     image_upload: AtlasUpload,
     retained_inline_media_bytes: usize,
+    /// The last frame's media figures, reused while no pane's media changed.
+    media_identity: media_identity::MediaIdentityCache,
     /// Consecutive frames this window has drawn with no renderable inline
     /// media. Promotion of the image atlas is one-way without this: a window
     /// that shows a single image holds the full-size allocation for its whole
@@ -615,6 +617,8 @@ mod assemble_tabs;
 mod assemble_transients;
 #[path = "core_assembly_context.rs"]
 mod assembly_context;
+#[path = "core_media_identity.rs"]
+mod media_identity;
 use assembly_context::{AssemblyFields, AssemblyGeometry, AssemblyPaneView, AssemblyUi};
 
 #[path = "core_contracts.rs"]

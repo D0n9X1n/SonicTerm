@@ -685,6 +685,7 @@ impl FallbackFixture {
             is_broadcast_participant: false,
             scrollbar_alpha: 0.0,
             inline_images: Default::default(),
+            inline_media_revision: 0,
         }];
         let ended = GpuRenderer::finish_assembly_pass(&mut plan, &panes, pass_end);
         drop(panes);

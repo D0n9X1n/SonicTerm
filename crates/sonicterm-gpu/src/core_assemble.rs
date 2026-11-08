@@ -41,19 +41,9 @@ impl GpuRenderer {
         let now = Instant::now();
         let broadcast_participant_ids: Vec<u64> =
             panes.iter().filter(|pane| pane.is_broadcast_participant).map(|pane| pane.id).collect();
-        // Kitty placements share a pixel buffer and `id`; each buffer is counted once.
-        let retained_inline_media_bytes = {
-            let mut seen = std::collections::HashSet::new();
-            panes
-                .iter()
-                .flat_map(|pane| pane.inline_images.iter())
-                .filter(|image| seen.insert(image.id))
-                .fold(0usize, |total, image| total.saturating_add(image.bgra.len()))
-        };
+        // Reused while every pane's media revision matches the last frame's.
+        let (retained_inline_media_bytes, inline_media_hash) = self.media_identity.figures(panes);
         self.retained_inline_media_bytes = retained_inline_media_bytes;
-        let inline_media_hash = kitty_placeholders::inline_media_hash(
-            panes.iter().map(|pane| (pane.id, pane.inline_images.as_slice())),
-        );
 
         // Advance the atlas frame counter so LRU eviction can
         // distinguish glyphs touched this frame from cold ones. Cheap

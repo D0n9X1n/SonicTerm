@@ -166,6 +166,7 @@ fn render_once(
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
         inline_images: Default::default(),
+        inline_media_revision: 0,
     }];
     renderer.render_with_outcome(
         fonts,
