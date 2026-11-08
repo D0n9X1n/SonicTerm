@@ -8,7 +8,7 @@
 use sonicterm_render_model::kitty_placeholder::{
     anchored_size_px, decode_row, fit_in_box, placement_box, run_slice,
 };
-use sonicterm_render_model::{InlineImage, KittyShow};
+use sonicterm_render_model::{InlineImage, KittyShow, KittyTag};
 
 use super::*;
 
@@ -22,7 +22,9 @@ pub(super) struct PlaceholderSlice {
 }
 
 /// The virtual placement a placeholder cell names: the exact `(image, placement)` pair, or, only
-/// for placement id 0, any virtual placement of the image.
+/// for placement id 0, any virtual placement of the image. Production resolves runs through
+/// [`VirtualIndex`]; this scan is the oracle its tests compare against.
+#[cfg(test)]
 fn find_virtual<'img>(
     images: &'img [InlineImage],
     image_id: u32,
@@ -35,6 +37,7 @@ fn find_virtual<'img>(
         },
         _ => None,
     };
+    note_visits(images.len());
     let mut candidates = images.iter().filter_map(virtual_of);
     if placement_id == 0 {
         candidates.next()
@@ -42,6 +45,64 @@ fn find_virtual<'img>(
         // When: placement_id is nonzero, only that placement serves; another placement of the image never stands in.
         candidates.find(|(_, tag)| tag.placement_id == placement_id)
     }
+}
+
+/// One pane's virtual placements, indexed once so every placeholder run resolves in constant time
+/// instead of scanning the pane's images. Each key keeps its FIRST entry in store order, which is
+/// the entry the scan in `find_virtual` returns.
+struct VirtualIndex<'img> {
+    /// `(image id, placement id)` to its first virtual placement.
+    exact: std::collections::HashMap<(u32, u32), (&'img InlineImage, KittyTag)>,
+    /// Image id to its first virtual placement of any placement id, for placement id 0.
+    any: std::collections::HashMap<u32, (&'img InlineImage, KittyTag)>,
+}
+
+impl<'img> VirtualIndex<'img> {
+    /// Index `images` in one pass.
+    fn new(images: &'img [InlineImage]) -> Self {
+        note_visits(images.len());
+        let mut exact = std::collections::HashMap::new();
+        let mut any = std::collections::HashMap::new();
+        for image in images {
+            let Some(tag) = image.kitty else {
+                // When: the image has no kitty tag, no placeholder can name it.
+                continue;
+            };
+            if !matches!(tag.show, KittyShow::Virtual { .. }) {
+                // When: `matches!` finds tag.show is not Virtual, it is an upload or an anchored placement.
+                continue;
+            }
+            exact.entry((tag.image_id, tag.placement_id)).or_insert((image, tag));
+            any.entry(tag.image_id).or_insert((image, tag));
+        }
+        Self { exact, any }
+    }
+
+    /// The virtual placement a run names, by the rule `find_virtual` states.
+    fn get(&self, image_id: u32, placement_id: u32) -> Option<(&'img InlineImage, KittyTag)> {
+        if placement_id == 0 {
+            self.any.get(&image_id).copied()
+        } else {
+            // When: placement_id is nonzero, only that placement serves.
+            self.exact.get(&(image_id, placement_id)).copied()
+        }
+    }
+}
+
+/// Count images visited by a placeholder lookup, so a test can pin the lookup's cost.
+#[cfg(test)]
+fn note_visits(visited: usize) {
+    LOOKUP_VISITS.with(|visits| visits.set(visits.get() + visited));
+}
+
+/// Without tests, lookups are not counted.
+#[cfg(not(test))]
+fn note_visits(_visited: usize) {}
+
+#[cfg(test)]
+thread_local! {
+    /// Images visited by placeholder lookups on this thread, for the lookup-cost tests.
+    pub(super) static LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Whether `images` holds any virtual placement, so the pane's rows are worth scanning.
@@ -150,10 +211,13 @@ fn slices_for_rows<'img, 'grid>(
 ) -> Vec<(&'img InlineImage, PlaceholderSlice)> {
     let (cell_w, cell_h) = cell_size;
     let mut slices = Vec::new();
+    // Built on the first run, so rows without placeholders cost nothing beyond decoding them.
+    let mut index: Option<VirtualIndex<'img>> = None;
     for (slot, row) in rows {
         let cells = row.iter().enumerate().map(|(col, cell)| (col as u16, cell));
         for run in decode_row(cells) {
-            let Some((image, tag)) = find_virtual(images, run.image_id, run.placement_id) else {
+            let index = index.get_or_insert_with(|| VirtualIndex::new(images));
+            let Some((image, tag)) = index.get(run.image_id, run.placement_id) else {
                 // When: find_virtual matches no placement, the run names a deleted or unknown image and draws nothing.
                 continue;
             };
@@ -223,3 +287,7 @@ pub(super) fn inline_media_hash<'img>(
 #[cfg(test)]
 #[path = "core_kitty_placeholders_tests.rs"]
 mod core_kitty_placeholders_tests;
+
+#[cfg(test)]
+#[path = "core_kitty_placeholders_index_tests.rs"]
+mod core_kitty_placeholders_index_tests;
