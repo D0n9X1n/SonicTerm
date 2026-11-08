@@ -567,7 +567,7 @@ mod grid_retention;
 
 #[path = "grid_prompts.rs"]
 mod grid_prompts;
-pub use grid_prompts::{CommandSpan, PinnedRun, RowToken};
+pub use grid_prompts::{CommandSpan, ExitSource, PinnedRun, RowToken};
 
 #[cfg(test)]
 #[path = "grid_test_support.rs"]

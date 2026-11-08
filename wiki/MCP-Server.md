@@ -228,7 +228,7 @@ here; a client should treat an unknown value as `timeout`/`running`.
 | `quiet` | `wait_for` | Output stayed quiet for `quiet_ms` and every row was scanned. |
 | `exited` | `wait_for` | The pane's process exited (with `exit`). |
 | `timeout` | `wait_for` | The timeout passed first. |
-| `completed` | `run_command` | The command ran and ended; see `exit_code` and `exit_verified`. |
+| `completed` | `run_command` | The command ran and ended; see `exit_code`, `exit_verified` and `exit_code_source`. |
 | `not_started` | `run_command` | The shell ended the prompt without running anything. |
 | `interfered` | `run_command` | Someone else typed before the command's output began. |
 | `lost` | `run_command` | The run's record was evicted, or the shell exited, first. |
@@ -277,6 +277,20 @@ in the pane can print them. A program that printed a fake `D;0` could otherwise 
 - A pane started with a program to run directly (`-e` or `--command`, a
   link or an executable opened in SonicTerm) gets no secret: there is no shell integration to hide it from the
   program, so its markers are never verified.
+
+`run_command` also reports `exit_code_source`, what a completed run's code rests on.
+SonicTerm's integration names it in each `D` with `sonicterm_src=`, a key of SonicTerm's
+own that other terminals skip as an unknown parameter:
+
+| `exit_code_source` | Meaning |
+| --- | --- |
+| `status` | The shell's `$?` (zsh, bash), or a PowerShell line that succeeded. |
+| `native` | PowerShell's `$LASTEXITCODE` from a native program. |
+| `powershell` | PowerShell's own failure, reported as 1. |
+| `reported` | An authenticated `D` naming no source this build knows, such as an older or third-party integration's. |
+| `unverified` | The run's markers were not authenticated (`exit_verified: false`), whatever they carry. |
+| `unknown` | An authenticated `D` with no code (`exit_code: null`). |
+| `null` | The run did not complete, or its final record could not be read (its parser stayed busy). |
 
 Load the integration from your shell's startup file, **before any line that starts a
 program**. Until it runs, the secret is in the shell's environment, so a program the

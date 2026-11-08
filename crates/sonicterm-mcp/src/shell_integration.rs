@@ -40,6 +40,10 @@ impl Shell {
     }
 }
 
+/// Every snippet's D names where its code came from with `sonicterm_src=`, SonicTerm's own key:
+/// `status` for zsh's and bash's `$?` and PowerShell's success, `native` and `powershell` for
+/// PowerShell's two failure readings; a D with no code names none.
+///
 /// zsh: D and A from `precmd` (D first, carrying the status the command left), B once the line
 /// editor starts, C from `preexec`. Hooks are added beside any existing ones, never replacing them.
 /// The token lives only in `__sonicterm_token`: unset first, so no export attribute set on that
@@ -57,7 +61,7 @@ if [[ -o interactive && -n "${SONICTERM_SHELL_TOKEN-}" && -z "${__sonicterm_toke
   __sonicterm_mark() { printf '\e]133;%s;sonicterm_token=%s\a' "$1" "$__sonicterm_token"; }
   __sonicterm_precmd() {
     local __sonicterm_status=$?
-    if (( __sonicterm_ran )); then __sonicterm_mark "D;$__sonicterm_status"; fi
+    if (( __sonicterm_ran )); then __sonicterm_mark "D;$__sonicterm_status;sonicterm_src=status"; fi
     __sonicterm_ran=0
     __sonicterm_mark A
     return $__sonicterm_status
@@ -92,7 +96,7 @@ if [[ $- == *i* && -n "${SONICTERM_SHELL_TOKEN-}" && -z "${__sonicterm_token-}" 
   __sonicterm_prompt() {
     local __sonicterm_status=$? __sonicterm_now="${__sonicterm_number@P}"
     if [[ -n "$__sonicterm_seen" && "$__sonicterm_now" != "$__sonicterm_seen" ]]; then
-      __sonicterm_mark "D;$__sonicterm_status"
+      __sonicterm_mark "D;$__sonicterm_status;sonicterm_src=status"
     fi
     __sonicterm_seen=$__sonicterm_now
     __sonicterm_mark A

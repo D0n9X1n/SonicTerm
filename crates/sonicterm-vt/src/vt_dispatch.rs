@@ -681,7 +681,15 @@ impl Perform for Performer {
                             .get(2)
                             .and_then(|param| std::str::from_utf8(param).ok())
                             .and_then(|text| text.parse::<i32>().ok());
-                        self.grid.record_prompt_end_marked(exit_i32, authenticated);
+                        // The source is read by key, the last one winning, wherever it sits.
+                        let source = params
+                            .get(2..)
+                            .unwrap_or(&[])
+                            .iter()
+                            .rev()
+                            .find_map(|param| param.strip_prefix(super::vt_osc::EXIT_SOURCE_PARAM))
+                            .and_then(sonicterm_grid::grid::ExitSource::from_param);
+                        self.grid.record_prompt_end_sourced(exit_i32, source, authenticated);
                         let exit = exit_i32.and_then(|status| u8::try_from(status).ok());
                         self.events.push(VtEvent::Command(CommandEvent::CmdEnd(exit)));
                     }
@@ -828,3 +836,7 @@ mod vt_dispatch_tests;
 #[cfg(test)]
 #[path = "vt_dispatch_shell_token_tests.rs"]
 mod vt_dispatch_shell_token_tests;
+
+#[cfg(test)]
+#[path = "vt_dispatch_exit_source_tests.rs"]
+mod vt_dispatch_exit_source_tests;

@@ -58,6 +58,14 @@ fn a_run_result_fits_its_schema() {
     for state in [RunState::NotStarted, RunState::Interfered, RunState::Lost, RunState::Revoked] {
         assert!(states.iter().any(|known| known == state.as_str()), "{state:?}");
     }
+    // Every `exit_code_source` value, `null` included, is in the schema's enum.
+    let sources = schema["properties"]["exit_code_source"]["enum"].as_array().unwrap();
+    let values = ["native", "powershell", "status", "reported", "unverified", "unknown"];
+    for value in values.iter().map(|value| json!(value)).chain([Value::Null]) {
+        assert!(sources.contains(&value), "{value}");
+    }
+    assert_eq!(sources.len(), values.len() + 1, "no undocumented value");
+    assert!(sources.contains(&json!(outcome.exit_code_source)));
 }
 
 /// Bad arguments are refused on the worker, before anything is queued for the loop.

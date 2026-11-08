@@ -197,7 +197,7 @@ iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有�
 | `quiet` | `wait_for` | 输出在 `quiet_ms` 内保持安静，且所有行都已扫描。 |
 | `exited` | `wait_for` | 窗格的进程已退出（使用 `exit` 时）。 |
 | `timeout` | `wait_for` | 先到达超时。 |
-| `completed` | `run_command` | 命令已运行并结束；见 `exit_code` 与 `exit_verified`。 |
+| `completed` | `run_command` | 命令已运行并结束；见 `exit_code`、`exit_verified` 与 `exit_code_source`。 |
 | `not_started` | `run_command` | shell 未运行任何命令就结束了提示符。 |
 | `interfered` | `run_command` | 在命令输出开始前有他人输入。 |
 | `lost` | `run_command` | 运行记录先被淘汰，或 shell 先退出。 |
@@ -233,6 +233,19 @@ OSC 133 标记与命令自身的输出走同一条数据流，因此窗格中的
   中的进程只持有自己的密钥。
 - 直接运行某个程序启动的窗格（`-e` 或 `--command`、在 SonicTerm 中打开的链接或可执行文件）不会得到密钥：没有 shell 集成
   能对该程序隐藏密钥，因此它的标记永远不会被验证。
+
+`run_command` 还会报告 `exit_code_source`，说明已完成运行的退出码依据什么。SonicTerm 的集成在每个 `D`
+中用 `sonicterm_src=` 给出它；这是 SonicTerm 自己的键，其他终端会将其作为未知参数跳过：
+
+| `exit_code_source` | 含义 |
+| --- | --- |
+| `status` | shell 的 `$?`（zsh、bash），或成功的 PowerShell 行。 |
+| `native` | 来自原生程序的 PowerShell `$LASTEXITCODE`。 |
+| `powershell` | PowerShell 自身的失败，报告为 1。 |
+| `reported` | 经过验证但未给出本版本已知来源的 `D`，例如较旧的或第三方的集成。 |
+| `unverified` | 该运行的标记未经验证（`exit_verified: false`），无论它们携带什么。 |
+| `unknown` | 经过验证但不带退出码的 `D`（`exit_code: null`）。 |
+| `null` | 运行未完成，或无法读取其最终记录（其解析器一直繁忙）。 |
 
 在 shell 的启动文件中加载该集成，**并放在任何会启动程序的行之前**。在它运行之前，密钥一直在 shell 的
 环境中，因此启动文件先运行的程序（提示符工具、版本管理器、后台 agent 或终端复用器）会继承它，并可能在当时

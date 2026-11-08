@@ -22,6 +22,38 @@ pub struct RowToken {
     pub alt: bool,
 }
 
+/// Which value a shell integration says its D's exit code came from (the `sonicterm_src=` key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitSource {
+    /// A native program's exit status (PowerShell's `$LASTEXITCODE`).
+    Native,
+    /// PowerShell's own failure, reported as 1.
+    PowerShell,
+    /// The POSIX shell's `$?`, or PowerShell's success.
+    Status,
+}
+
+impl ExitSource {
+    /// The source a `sonicterm_src=` value names; `None` for a value this build does not know.
+    pub fn from_param(value: &[u8]) -> Option<Self> {
+        match value {
+            b"native" => Some(Self::Native),
+            b"powershell" => Some(Self::PowerShell),
+            b"status" => Some(Self::Status),
+            _ => None,
+        }
+    }
+
+    /// The name `run_command` reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::PowerShell => "powershell",
+            Self::Status => "status",
+        }
+    }
+}
+
 /// The run an agent is waiting on, recorded independently of the evictable region deque.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PinnedRun {
@@ -50,6 +82,8 @@ pub struct PinnedRun {
     pub output_authenticated: bool,
     /// The run's latest D came from an authenticated shell marker.
     pub end_authenticated: bool,
+    /// Where the latest D says its code came from; `None` when it named no known source.
+    pub exit_source: Option<ExitSource>,
 }
 
 /// A completed command's output span, for reading what the last command printed.
@@ -162,6 +196,17 @@ impl Grid {
     /// [`Self::record_prompt_end`], noting whether the marker was `authenticated`. A later D
     /// replaces an earlier one's exit and trust, so the shell's real D outranks a forged one.
     pub fn record_prompt_end_marked(&mut self, exit_code: Option<i32>, authenticated: bool) {
+        self.record_prompt_end_sourced(exit_code, None, authenticated);
+    }
+
+    /// [`Self::record_prompt_end_marked`] with the `source` the D named, kept beside its code on
+    /// the pinned run: a later D replaces the code, the source and the trust together.
+    pub fn record_prompt_end_sourced(
+        &mut self,
+        exit_code: Option<i32>,
+        source: Option<ExitSource>,
+        authenticated: bool,
+    ) {
         let row = self.cursor_absolute_row();
         let col = self.cursor.col;
         let token = self.row_token(row);
@@ -182,6 +227,7 @@ impl Grid {
             run.end_col = col;
             run.exit = Some(exit_code);
             run.end_authenticated = authenticated;
+            run.exit_source = source;
         }
     }
 
@@ -249,6 +295,7 @@ impl Grid {
             prompt_after_end: false,
             output_authenticated: false,
             end_authenticated: false,
+            exit_source: None,
         });
         true
     }

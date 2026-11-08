@@ -141,6 +141,26 @@ fn an_interactive_pwsh_emits_tokened_markers_in_order() {
         [Some(3), Some(3), Some(0), Some(1), None, None, Some(1), Some(0), Some(0), Some(0)],
         "the D statuses: {found:?}"
     );
+    // Each D names which reading gave its code: the child's native code, PowerShell's own
+    // failure, `$?` holding, and none for a D with no code.
+    let sources: Vec<Option<&str>> =
+        found.iter().filter(|marker| marker.starts_with('D')).map(|end| source(end)).collect();
+    assert_eq!(
+        sources,
+        [
+            Some("native"),
+            Some("native"),
+            Some("status"),
+            Some("powershell"),
+            None,
+            None,
+            Some("powershell"),
+            Some("status"),
+            Some("status"),
+            Some("status"),
+        ],
+        "the D sources: {found:?}"
+    );
     assert!(output.contains("seen=[3]"), "a command saw a changed $LASTEXITCODE: {output:?}");
     // The cancelled line's D follows its prompt's A B with no C between: `run_command` reads it
     // as `not_started`.

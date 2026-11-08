@@ -103,6 +103,8 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 
 /// The OSC 133 parameter a SonicTerm shell integration appends to every marker.
 const SHELL_TOKEN_PARAM: &[u8] = b"sonicterm_token=";
+/// The OSC 133 D parameter naming where its exit code came from; SonicTerm's own key.
+pub(super) const EXIT_SOURCE_PARAM: &[u8] = b"sonicterm_src=";
 
 /// Compare two byte strings in time that depends only on their lengths, so a program probing the
 /// token cannot learn it a byte at a time from how long a marker takes.

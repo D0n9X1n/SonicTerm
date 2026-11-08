@@ -47,16 +47,17 @@ if ($env:SONICTERM_SHELL_TOKEN -and -not (Test-Path variable:global:__sonicterm_
   # value. $native and $fresh are taken before anything else runs. A line that can run no native
   # program failed in PowerShell: 1. Otherwise a new error record means a PowerShell failure, and a
   # non-zero $LASTEXITCODE a native one; when both are present, which statement ended the line is
-  # unknown, so D carries no code (an empty string here) rather than a guess. A non-zero
+  # unknown, so D carries no code rather than a guess. A non-zero
   # $LASTEXITCODE alone is the native code; anything else is 1. Only a failed line is parsed.
+  # It returns D's parameters: the code and, with `sonicterm_src=`, which reading gave it.
   function global:__sonicterm_code([bool]$ok, $native, [bool]$fresh) {
-    if ($ok) { return 0 }
-    if (-not (__sonicterm_may_run_native $global:__sonicterm_line)) { return 1 }
+    if ($ok) { return 'D;0;sonicterm_src=status' }
+    if (-not (__sonicterm_may_run_native $global:__sonicterm_line)) { return 'D;1;sonicterm_src=powershell' }
     $native_failed = $null -ne $native -and $native -ne 0
-    if ($fresh -and $native_failed) { return '' }
-    if ($fresh) { return 1 }
-    if ($native_failed) { return $native }
-    1
+    if ($fresh -and $native_failed) { return 'D' }
+    if ($fresh) { return 'D;1;sonicterm_src=powershell' }
+    if ($native_failed) { return "D;$native;sonicterm_src=native" }
+    'D;1;sonicterm_src=powershell'
   }
   function global:prompt {
     $ok = $?
@@ -66,8 +67,8 @@ if ($env:SONICTERM_SHELL_TOKEN -and -not (Test-Path variable:global:__sonicterm_
       $newest.Exception.GetType().Name -ne 'NativeCommandExitException'
     $marks = ''
     if ($global:__sonicterm_read) {
-      $code = if ($global:__sonicterm_ran) { __sonicterm_code $ok $native $fresh } else { 0 }
-      $marks += if ($code -is [string]) { __sonicterm_mark 'D' } else { __sonicterm_mark "D;$code" }
+      $end = if ($global:__sonicterm_ran) { __sonicterm_code $ok $native $fresh } else { 'D;0;sonicterm_src=status' }
+      $marks += __sonicterm_mark $end
     }
     $global:__sonicterm_read = $false
     $global:__sonicterm_ran = $false

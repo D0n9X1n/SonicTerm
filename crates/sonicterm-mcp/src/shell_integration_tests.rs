@@ -186,6 +186,11 @@ fn tokened(output: &str) -> Vec<String> {
     markers(output).into_iter().filter(|marker| marker.ends_with("sonicterm_token=<T>")).collect()
 }
 
+/// The `sonicterm_src=` value a marker carries, if any.
+fn source(marker: &str) -> Option<&str> {
+    marker.split(';').find_map(|param| param.strip_prefix("sonicterm_src="))
+}
+
 /// A command a child runs to count environment variables holding the token; the pattern is
 /// written in two quoted halves so the echoed command line itself never contains the token.
 const LEAK_PROBE: &str =
@@ -206,6 +211,10 @@ fn check_cycles(shell: &str, output: &str, statuses: &[i32]) {
         .filter_map(|rest| rest.split(';').next()?.parse().ok())
         .collect();
     assert_eq!(ends, statuses, "{shell}: the D statuses: {found:?}");
+    // A POSIX shell's code is always its `$?`, so every D names `status` as its source.
+    for end in found.iter().filter(|marker| marker.starts_with('D')) {
+        assert_eq!(source(end), Some("status"), "{shell}: {end}");
+    }
     assert!(output.contains("leak-0"), "{shell}: the leak probe did not run");
     assert!(!output.contains("leak-1"), "{shell}: a command inherited the token");
 }

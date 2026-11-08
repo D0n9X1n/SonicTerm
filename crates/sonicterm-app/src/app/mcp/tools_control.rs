@@ -98,7 +98,13 @@ pub(crate) fn control_tools() -> Vec<Value> {
                             carrying the pane's secret vouched for the exit code: SonicTerm's \
                             shell integration sends them, but so could a program the shell's \
                             startup files ran before loading it. When false the code was read \
-                            from terminal output that any program in the pane could have printed.",
+                            from terminal output that any program in the pane could have printed. \
+                            exit_code_source says what the code rests on: native, powershell or \
+                            status as SonicTerm's integration named it, reported for an \
+                            authenticated D naming no known source, unverified for \
+                            unauthenticated markers, unknown for an authenticated D with no code, \
+                            and null when the run did not complete or its final record could not \
+                            be read.",
             "inputSchema": {
                 "type": "object",
                 "required": ["pane_id", "command"],
@@ -114,6 +120,9 @@ pub(crate) fn control_tools() -> Vec<Value> {
                 },
                 "exit_code": { "type": ["integer", "null"] },
                 "exit_verified": { "type": "boolean" },
+                "exit_code_source": {
+                    "enum": ["native", "powershell", "status", "reported", "unverified", "unknown", null],
+                },
                 "generation": { "type": "integer" },
                 "output_incomplete": { "type": "boolean" },
                 "output": {
@@ -355,6 +364,7 @@ fn run_command(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Valu
             "state": outcome.state.as_str(),
             "exit_code": outcome.exit_code,
             "exit_verified": outcome.exit_verified,
+            "exit_code_source": outcome.exit_code_source,
             "generation": generation,
             // The returned lines may be missing some of the command's output.
             "output_incomplete": outcome.truncated || outcome.output_truncated,
