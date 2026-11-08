@@ -459,7 +459,7 @@ fn frame_scratch_and_chrome_cache_are_uncharged_renderer_retention() {
     // Both renderer parts are reported, not charged: each records the per-renderer envelope its
     // caps give, and a pane's seam-cap sum carries no term for either.
     for (class, envelope) in
-        [(ResourceClass::FrameScratch, 17_694_720), (ResourceClass::ChromeCache, 1_626_560)]
+        [(ResourceClass::FrameScratch, 17_826_816), (ResourceClass::ChromeCache, 1_626_560)]
     {
         assert_eq!(
             class.coverage(),

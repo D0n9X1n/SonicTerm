@@ -164,6 +164,7 @@ fn a_placeholder_only_pane_has_renderable_media() {
     let mut placements = Vec::new();
     push_pane_placements(
         &mut placements,
+        &mut Default::default(),
         &images,
         std::iter::once((0, grid.row(0))),
         (0.0, 0.0),
@@ -191,6 +192,7 @@ fn a_pane_without_virtual_placements_is_not_scanned() {
     );
     push_pane_placements(
         &mut placements,
+        &mut Default::default(),
         &images,
         rows,
         (0.0, 0.0),
@@ -271,6 +273,7 @@ fn anchored_rect(show: KittyShow, scroll_mark: u64, scroll: AnchorScroll) -> (f3
     let mut placements = Vec::new();
     push_pane_placements(
         &mut placements,
+        &mut Default::default(),
         std::slice::from_ref(&image),
         std::iter::empty(),
         (100.0, 50.0),

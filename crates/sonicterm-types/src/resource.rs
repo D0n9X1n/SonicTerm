@@ -263,9 +263,10 @@ impl ResourceClass {
             }
             // The frame scratch holds each draw vector within its element cap after every pass:
             // glyphs and quads 4 MiB each, seven other draw lists 1 MiB each, two small lists
-            // 64 KiB each, three index lists 256 KiB each and the column edges 1 MiB, in total
+            // 64 KiB each, three index lists 256 KiB each, the column edges 1 MiB, two kitty
+            // placeholder index maps 64 KiB each and the 1 KiB media revision list, in total
             // `FRAME_SCRATCH_CAP` in `sonicterm-gpu`.
-            Self::FrameScratch => ClassCoverage::UnchargedRetention { per_owner_bytes: 17_694_720 },
+            Self::FrameScratch => ClassCoverage::UnchargedRetention { per_owner_bytes: 17_826_816 },
             // The chrome caches hold at most 64 titles and 32 runs at their admission limits
             // (256 text bytes, 512 glyphs) in fixed tables, plus palette strings totalling at most
             // 4 KiB (a larger palette is never kept): `CHROME_CACHE_ENVELOPE_BYTES` in `sonicterm-gpu`.

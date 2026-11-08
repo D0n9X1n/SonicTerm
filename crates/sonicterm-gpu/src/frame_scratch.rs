@@ -50,16 +50,24 @@ pub(crate) const SMALL_CAP_BYTES: usize = 64 * KIB;
 pub(crate) const INDEX_CAP_BYTES: usize = 256 * KIB;
 /// Byte cap of all column-edge slots together, headers included.
 pub(crate) const SNAPPED_CAP_BYTES: usize = MIB;
+/// Byte cap of each kitty placeholder index map, past the 1,152 entries a pane can hold (1,024
+/// placements and 128 uploads).
+pub(crate) const PLACEHOLDER_INDEX_CAP_BYTES: usize = 64 * KIB;
+/// Byte cap of the renderer's media revision list, 64 `(pane id, revision)` pairs, reported with
+/// the scratch.
+pub(crate) const MEDIA_REVISIONS_CAP_BYTES: usize = KIB;
 
-/// The most one renderer's frame scratch retains: the sum of every cap. `sonicterm-types` records
-/// the same figure for the `FrameScratch` class; a test ties the two.
+/// The most one renderer's frame scratch, with its media revision list, retains: the sum of every
+/// cap. `sonicterm-types` records the same figure for the `FrameScratch` class; a test ties the two.
 #[cfg(test)]
 pub(crate) const FRAME_SCRATCH_CAP: usize = GLYPHS_CAP_BYTES
     + QUADS_CAP_BYTES
     + 7 * OVERLAY_CAP_BYTES
     + 2 * SMALL_CAP_BYTES
     + 3 * INDEX_CAP_BYTES
-    + SNAPPED_CAP_BYTES;
+    + SNAPPED_CAP_BYTES
+    + 2 * PLACEHOLDER_INDEX_CAP_BYTES
+    + MEDIA_REVISIONS_CAP_BYTES;
 
 /// Elements of `T` that fit in `cap_bytes`.
 pub(crate) const fn cap_elems<T>(cap_bytes: usize) -> usize {
@@ -134,6 +142,51 @@ pub(crate) fn fill_snapped_slot(
     super::fill_snapped_cell_x(&mut snapped[slot], origin_x, cell_w, cols);
 }
 
+/// Bytes a hash map of `capacity` usable slots of `(K, V)` reserves: hashbrown's bucket count (the
+/// next power of two of 8/7 of the capacity, at least 4) times the entry and its control byte,
+/// plus one control group.
+pub(crate) fn map_bytes<K, V>(capacity: usize) -> usize {
+    if capacity == 0 {
+        // When: capacity is 0, the map has never allocated.
+        return 0;
+    }
+    let buckets = (capacity.saturating_mul(8) / 7).max(4).next_power_of_two();
+    buckets.saturating_mul(std::mem::size_of::<(K, V)>() + 1).saturating_add(16)
+}
+
+/// One pane's virtual kitty placements, indexed for placeholder runs: positions in the pane's
+/// image list, rebuilt for each pane that has runs and kept between frames so a steady frame
+/// allocates no map.
+#[derive(Debug, Default)]
+pub(crate) struct PlaceholderIndexScratch {
+    /// `(image id, placement id)` to the first virtual placement's position.
+    pub(crate) exact: std::collections::HashMap<(u32, u32), usize>,
+    /// Image id to its first virtual placement's position, for placement id 0.
+    pub(crate) any: std::collections::HashMap<u32, usize>,
+}
+
+impl PlaceholderIndexScratch {
+    /// Bytes both maps reserve.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        map_bytes::<(u32, u32), usize>(self.exact.capacity())
+            + map_bytes::<u32, usize>(self.any.capacity())
+    }
+
+    /// Clear both maps and drop any that reserves more than its cap.
+    fn finish(&mut self) {
+        self.exact.clear();
+        self.any.clear();
+        if map_bytes::<(u32, u32), usize>(self.exact.capacity()) > PLACEHOLDER_INDEX_CAP_BYTES {
+            // Over its cap, `exact` is dropped; the next pane rebuilds it.
+            self.exact = std::collections::HashMap::new();
+        }
+        if map_bytes::<u32, usize>(self.any.capacity()) > PLACEHOLDER_INDEX_CAP_BYTES {
+            // Over its cap, `any` is dropped; the next pane rebuilds it.
+            self.any = std::collections::HashMap::new();
+        }
+    }
+}
+
 /// The two orderings inline-image emission sorts each frame, kept so a steady frame allocates
 /// neither: placement indices in atlas-allocation order, and each emitted draw with its painter
 /// order before the painter sort.
@@ -160,6 +213,8 @@ pub(crate) struct FrameScratch {
     pub(crate) images: Vec<ImageInstance>,
     /// Inline-image emission's two sort buffers.
     pub(crate) image_sort: ImageSortScratch,
+    /// The kitty placeholder index of the pane being drawn.
+    pub(crate) placeholder_index: PlaceholderIndexScratch,
     /// Each emitted row's glyph range and ink.
     pub(crate) row_spans: Vec<RowGlyphSpan>,
     /// Underline runs with their pane's origin and columns.
@@ -195,6 +250,7 @@ impl FrameScratch {
         finish_part(&mut self.images, OVERLAY_CAP_BYTES, completed);
         finish_part(&mut self.image_sort.allocation_order, INDEX_CAP_BYTES, completed);
         finish_part(&mut self.image_sort.emitted, OVERLAY_CAP_BYTES, completed);
+        self.placeholder_index.finish();
         finish_part(&mut self.row_spans, OVERLAY_CAP_BYTES, completed);
         finish_part(&mut self.underlines, OVERLAY_CAP_BYTES, completed);
         finish_part(&mut self.underline_owners, INDEX_CAP_BYTES, completed);
@@ -238,6 +294,7 @@ impl FrameScratch {
             reserved(&self.images),
             reserved(&self.image_sort.allocation_order),
             reserved(&self.image_sort.emitted),
+            self.placeholder_index.retained_bytes(),
             reserved(&self.row_spans),
             reserved(&self.underlines),
             reserved(&self.underline_owners),

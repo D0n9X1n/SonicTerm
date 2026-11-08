@@ -245,6 +245,7 @@ fn every_scratch_vector_is_held_within_its_own_cap() {
             allocation_order: oversized(256 * KIB),
             emitted: oversized(MIB),
         },
+        placeholder_index: PlaceholderIndexScratch::default(),
         row_spans: oversized(MIB),
         underlines: oversized(MIB),
         underline_owners: oversized(256 * KIB),

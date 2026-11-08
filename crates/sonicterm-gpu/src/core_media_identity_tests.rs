@@ -106,3 +106,125 @@ fn swapped_panes_with_their_revisions_recompute() {
     assert_eq!(recomputes(), start + 1, "a different pane at a position recomputes");
     assert_ne!(after.1, before.1, "the hash covers pane order");
 }
+
+/// The figures a fresh walk gives, the oracle the cache must always equal.
+fn uncached(panes: &[PaneRender<'_>]) -> (usize, u64) {
+    let mut seen = std::collections::HashSet::new();
+    let bytes = panes
+        .iter()
+        .flat_map(|pane| pane.inline_images.iter())
+        .filter(|image| seen.insert(image.id))
+        .map(|image| image.bgra.len())
+        .sum();
+    let hash = crate::core::kitty_placeholders::inline_media_hash(
+        panes.iter().map(|pane| (pane.id, pane.inline_images.as_slice())),
+    );
+    (bytes, hash)
+}
+
+/// A seeded model of stores and frames: each step mutates some panes' stores (drawing a new
+/// revision, as a store write does), reorders, adds or removes panes, or repeats a frame (a failed
+/// presentation plans the same panes again). Every frame's cached figures equal a fresh walk, and a
+/// frame whose `(id, revision)` list is unchanged walks nothing.
+#[test]
+fn cached_figures_always_equal_a_fresh_walk() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut below = |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % bound
+    };
+    let mut grids: Vec<Grid> = (0..6).map(|_| Grid::new(4, 2)).collect();
+    // Each pane's store: its images and its revision, drawn from one counter like the store's.
+    let mut stores: Vec<(Vec<InlineImage>, u64)> = (0..6).map(|_| (Vec::new(), 0)).collect();
+    let mut next_revision = 1;
+    let mut order: Vec<usize> = vec![0, 1, 2];
+    let mut cache = MediaIdentityCache::default();
+    let mut previous: Option<Vec<(u64, u64)>> = None;
+    for step in 0..2_000 {
+        match below(5) {
+            0 => {
+                // A store write: a new image, sometimes sharing another pane's buffer id.
+                let pane = order[below(order.len() as u64) as usize];
+                let id = if below(3) == 0 { below(4) } else { 100 + step };
+                stores[pane].0.push(image(id, 4 * (1 + below(4) as usize)));
+                stores[pane].1 = next_revision;
+                next_revision += 1;
+            }
+            1 if !order.is_empty() => {
+                // A trim or delete: the oldest image goes.
+                let pane = order[below(order.len() as u64) as usize];
+                if !stores[pane].0.is_empty() {
+                    stores[pane].0.remove(0);
+                    stores[pane].1 = next_revision;
+                    next_revision += 1;
+                }
+            }
+            2 if order.len() > 1 => {
+                let last = order.len() - 1;
+                order.swap(0, last);
+            }
+            3 => {
+                // A pane opens or closes.
+                if order.len() < 6 && below(2) == 0 {
+                    let free = (0..6).find(|pane| !order.contains(pane)).unwrap();
+                    order.push(free);
+                } else if order.len() > 1 {
+                    order.remove(below(order.len() as u64) as usize);
+                }
+            }
+            _ => {}
+        }
+        // A pane never written still draws a real revision, as a new store does.
+        for pane in &order {
+            if stores[*pane].1 == 0 {
+                stores[*pane].1 = next_revision;
+                next_revision += 1;
+            }
+        }
+        let start = recomputes();
+        let mut grid_refs: Vec<Option<&mut Grid>> = grids.iter_mut().map(Some).collect();
+        let panes: Vec<PaneRender<'_>> = order
+            .iter()
+            .map(|slot| {
+                let grid = grid_refs[*slot].take().unwrap();
+                let (images, revision) = &stores[*slot];
+                pane(*slot as u64, grid, images.clone(), *revision)
+            })
+            .collect();
+        let keys: Vec<(u64, u64)> =
+            panes.iter().map(|pane| (pane.id, pane.inline_media_revision)).collect();
+        assert_eq!(cache.figures(&panes), uncached(&panes), "step {step}");
+        let walked = recomputes() - start;
+        assert_eq!(walked, usize::from(previous.as_ref() != Some(&keys)), "step {step}: reuse");
+        previous = Some(keys);
+    }
+}
+
+/// A window with more panes than the list keeps recomputes every frame and keeps no list, so the
+/// cache never reserves more than its cap; a trim drops the list.
+#[test]
+fn the_revision_list_stays_within_its_cap() {
+    let mut grids: Vec<Grid> = (0..=MAX_TRACKED_PANES).map(|_| Grid::new(4, 2)).collect();
+    let mut cache = MediaIdentityCache::default();
+    let mut panes: Vec<PaneRender<'_>> = grids
+        .iter_mut()
+        .enumerate()
+        .map(|(index, grid)| pane(index as u64, grid, vec![image(index as u64, 4)], 7))
+        .collect();
+    let start = recomputes();
+    cache.figures(&panes);
+    cache.figures(&panes);
+    assert_eq!(recomputes(), start + 2, "over the cap, every frame recomputes");
+    assert_eq!(cache.retained_bytes(), 0, "and keeps no list");
+    panes.pop();
+    cache.figures(&panes);
+    assert!(cache.retained_bytes() <= crate::core::frame_scratch::MEDIA_REVISIONS_CAP_BYTES);
+    assert!(cache.retained_bytes() > 0);
+    cache.release();
+    assert_eq!(cache.retained_bytes(), 0, "a trim drops the list");
+    let start = recomputes();
+    cache.figures(&panes);
+    assert_eq!(recomputes(), start + 1, "and the next frame recomputes");
+}
