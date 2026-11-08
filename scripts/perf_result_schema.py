@@ -182,7 +182,7 @@ FRAME_COUNTER_FIELDS = {
            # media_decode_dus is the decode-duration histogram on its own buckets (a 7.999 ms bound).
            # resize_hold_us is the parser hold of each event-loop grid resize.
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us", "media_decode_dus",
-            "resize_hold_us")),
+            "resize_hold_us", "kitty_store_hold_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   # damage_waste_permille_sum is the union rect's share minus what its parts cover, over
                   # damaged_frames; a base older than it shows n/a.

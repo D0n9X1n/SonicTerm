@@ -456,6 +456,7 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `media_decode_under_8ms` | 次数 | 耗时低于 8 ms 的尝试。当它小于 `ceil(0.95 × media_decode_attempts)` 时，解码 p95 恰好至少为 8 ms |
 | `media_decoded`、`media_decode_failed`、`media_refused_after_decode` | 次数 | 每次尝试的结果：被保留（或查询回答 `OK`）、无法解码，或解码后被存储拒绝 |
 | `resize_hold` | 微秒直方图（perf 结果中为 `resize_hold_us`） | 事件循环为调整窗格网格尺寸而持有其解析器锁的时间，每次调整每个窗格一个样本 |
+| `kitty_store_hold` | 微秒直方图（perf 结果中为 `kitty_store_hold_us`） | 工作线程为应用一条 kitty 命令并裁剪而持有窗格图片存储的时间，每次 kitty transmit、place 或 delete 一个样本 |
 
 `flushes`、`flushes_untargeted`、`flushes_coalesced` 与 `flush_to_redraw` 的计数之间没有恒等关系。
 关闭的窗格会丢弃其待处理时间戳，而且各计数器并非作为一次快照读取，因此要分别解读。

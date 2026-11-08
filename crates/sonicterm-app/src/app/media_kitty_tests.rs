@@ -293,5 +293,5 @@ fn the_placement_cap_holds_for_transmits_and_placed_uploads() {
     let _ = apply_kitty(&mut images, KittyOp::Transmit(command("a=t,i=7"), pixels(3, 4), None));
     let (reply, _) = apply_kitty(&mut images, KittyOp::Place(command("a=p,U=1,i=7"), 0, 0, 0));
     assert_eq!(reply, Some("ENOSPC:too many placements"));
-    assert!(placement_count(&images) <= MAX_KITTY_PLACEMENTS);
+    assert!(images.iter().filter(|entry| is_placement(entry)).count() <= MAX_KITTY_PLACEMENTS);
 }

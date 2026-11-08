@@ -158,6 +158,8 @@ where
         let transmitted = matches!(operation, KittyOp::Transmit(..));
         let (message, removed) = {
             let mut images = handles.inline_images.lock();
+            // The clock is read only while the counters are on, to time the store's hold.
+            let locked_at = handles.frame_counters.as_ref().map(|_| Instant::now());
             let (message, mut removed) = apply_kitty(&mut images, operation);
             // Only a stored or placed image moves the cursor; a refusal leaves it where it is. The
             // held entry is the newest, read before the trim may drop it.
@@ -173,6 +175,11 @@ where
                 &mut images,
                 &handles.inline_media_charge,
             ));
+            if let (Some(counters), Some(locked_at)) = (&handles.frame_counters, locked_at) {
+                // Recorded before the guard drops, so the sample is the whole critical section.
+                let held_us = u64::try_from(locked_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+                counters.vt.kitty_store_hold.record_us(held_us);
+            }
             (message, removed)
         };
         drop(removed);

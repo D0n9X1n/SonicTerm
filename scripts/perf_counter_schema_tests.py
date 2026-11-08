@@ -43,7 +43,7 @@ COUNTER_CONTRACT = {
             "media_decode_attempts", "media_decode_under_8ms", "media_decoded",
             "media_decode_failed", "media_refused_after_decode"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us", "media_decode_dus",
-            "resize_hold_us")),
+            "resize_hold_us", "kitty_store_hold_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   "damage_waste_permille_sum", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",

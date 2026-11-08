@@ -238,6 +238,7 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     histogram(Section::VtParser, "parse_us", Unit::Micros, "parse"),
     histogram(Section::VtParser, "media_decode_dus", Unit::Decode, "media_decode"),
     histogram(Section::VtParser, "resize_hold_us", Unit::Micros, "resize_hold"),
+    histogram(Section::VtParser, "kitty_store_hold_us", Unit::Micros, "kitty_store_hold"),
     count(Section::Renderer, "vertex_bytes"),
     count(Section::Renderer, "index_bytes"),
     count(Section::Renderer, "damage_permille_sum"),
