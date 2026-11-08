@@ -629,17 +629,14 @@ impl App {
                 );
                 self.interaction.command_palette.set_tabs(&main.tabs, &self.i18n);
             }
-            // One blink phase per frame, sampled before the renderer is borrowed for drawing.
-            let grid = frame.guards[active_pos].1.grid();
-            let cursor = (grid.cursor.row, grid.cursor.col);
-            let shown =
-                super::cursor_blink::window_blinks(main) && frame_viewports.active.is_none();
-            super::cursor_blink::sample_window_blink(
+            // One blink phase and glide permission per frame, before the renderer is borrowed.
+            super::cursor_blink::sample_frame_cursor(
                 main,
-                Instant::now(),
+                &frame.guards[active_pos].1,
                 active_id,
-                cursor,
-                shown,
+                frame_viewports.active.is_none(),
+                self.config.terminal.cursor_animation
+                    == sonicterm_cfg::config::CursorAnimation::Smooth,
             );
         }
         #[allow(clippy::type_complexity)]

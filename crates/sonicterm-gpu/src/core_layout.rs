@@ -293,6 +293,20 @@ impl GpuRenderer {
     pub fn cursor_blink_off(&self) -> bool {
         self.cursor_blink_off
     }
+
+    /// Allow or forbid the cursor to glide this frame. The app allows it only with
+    /// `cursor_animation = "smooth"`, a focused window, no synchronized update open and no
+    /// sustained output; forbidding it ends any glide at its target. The software presenters never
+    /// glide.
+    pub fn set_cursor_glide_allowed(&mut self, allowed: bool) {
+        // The software degrade (the Windows GDI presenter included) repaints whole frames.
+        self.cursor_glide_allowed = allowed && !self.software_render_degrade;
+    }
+
+    /// Whether the cursor is gliding, so the window schedules its next frame at its pacing.
+    pub fn cursor_gliding(&self) -> bool {
+        self.cursor_glide.gliding()
+    }
 }
 
 impl GpuRenderer {

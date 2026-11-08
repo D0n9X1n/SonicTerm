@@ -57,6 +57,11 @@ pub(super) fn add_class_damage(dirt: &mut DamageParts, inputs: ClassDamageInputs
         if let Some(rect) = resolve_recolor(previous_recolor.bounds, active_clip, surface) {
             dirt.add_clipped(rect, surface);
         }
+        // A gliding cursor crosses rows and columns between its cells; for the few frames of a
+        // glide, and the one that lands, the whole active pane is damaged rather than tracing it.
+        if previous.window.cursor_glide.is_some() || key.window.cursor_glide.is_some() {
+            dirt.add_clipped(active_clip.unwrap_or(surface), surface);
+        }
     }
     if change.selection {
         if let (Some(pane), Some(identity)) = (panes.get(active_index), key.panes.get(active_index))

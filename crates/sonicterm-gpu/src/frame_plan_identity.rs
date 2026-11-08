@@ -51,6 +51,7 @@ impl WindowIdentity {
             renderer_hash,
             overlay_active,
             cursor_cell,
+            cursor_glide,
         } = self;
         let Self {
             selection: previous_selection,
@@ -83,6 +84,7 @@ impl WindowIdentity {
             renderer_hash: previous_renderer_hash,
             overlay_active: previous_overlay_active,
             cursor_cell: previous_cursor_cell,
+            cursor_glide: previous_cursor_glide,
         } = previous;
         ChangeClass {
             full: copy_mode != previous_copy_mode
@@ -111,7 +113,8 @@ impl WindowIdentity {
             cursor: cursor_visible != previous_cursor_visible
                 || cursor_shape != previous_cursor_shape
                 || cursor_blink_off != previous_cursor_blink_off
-                || cursor_cell != previous_cursor_cell,
+                || cursor_cell != previous_cursor_cell
+                || cursor_glide != previous_cursor_glide,
             focus: window_focused != previous_window_focused,
             selection: selection != previous_selection,
             scrollbar: false,

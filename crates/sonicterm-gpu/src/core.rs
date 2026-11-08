@@ -306,6 +306,16 @@ pub struct GpuRenderer {
     /// The blink phase the app sampled for the next frame: `true` draws no terminal cursor. It
     /// enters the frame key, so a phase change plans a cursor-class frame and nothing else.
     cursor_blink_off: bool,
+    /// The terminal cursor's glide between cells (`cursor_animation = "smooth"`).
+    cursor_glide: crate::cursor_glide::CursorGlide,
+    /// Whether the app allows the cursor to glide this frame; see [`Self::set_cursor_glide_allowed`].
+    cursor_glide_allowed: bool,
+    /// What the committed glide position was drawn in: the pane, its screen epoch and grid size,
+    /// its pixel rectangle and the cell size. Any change (another pane or screen, a resize, a split
+    /// moved, a font or DPI change) makes the next move a jump.
+    cursor_glide_basis: Option<(u64, u64, (u16, u16), [i32; 2], [u32; 4])>,
+    /// This frame's sampled glide position, read by the cursor draw; `None` draws on the cell.
+    cursor_glide_frame: Option<crate::cursor_glide::GlideCell>,
     /// Whether the OS window currently holds keyboard focus. The text
     /// cursor is hidden while the window is inactive. Defaults to
     /// `true` so a freshly created renderer draws the cursor on the

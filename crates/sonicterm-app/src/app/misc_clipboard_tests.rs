@@ -105,3 +105,32 @@ fn memory_clipboard_text_replaces_file_override() {
         [(pane, crate::app::PtyInputSource::Paste)]
     );
 }
+
+/// A menu paste, which arrives with no key event, restarts the window's cursor blink, and when the
+/// last frame had hidden the cursor it marks a cursor redraw at once, so pasting into a program
+/// that echoes nothing still shows the cursor.
+#[test]
+fn a_menu_paste_restarts_the_blink_and_shows_a_hidden_cursor() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane = app.__test_seed_tab("main");
+    let main = app.registry.main_window_id.unwrap();
+    let start = Instant::now();
+    let window = app.registry.windows.get_mut(&main).unwrap();
+    // A frame in the blink's off phase recorded the cursor hidden.
+    window.cursor_blink = crate::app::cursor_blink::CursorBlink::new(start);
+    let _ = window.cursor_blink.sample(start, (pane, 0, 0), true);
+    let off =
+        window.cursor_blink.sample(start + sonicterm_ui::cursor::BLINK_PHASE, (pane, 0, 0), true);
+    assert!(off, "the setup hid the cursor");
+    let before = window.redraw.cause_generation(crate::app::redraw::RedrawCause::Cursor);
+    app.testing.test_clipboard_text = Some("quiet".into());
+    app.testing.test_clipboard_files = Some(Vec::new());
+    app.__test_enable_pty_write_log();
+    app.paste_clipboard_for_kind(FrontmostKind::Main);
+    assert_eq!(app.__test_drain_pty_writes(), [(pane, b"quiet".to_vec())]);
+    let window = &app.registry.windows[&main];
+    assert!(
+        window.redraw.cause_generation(crate::app::redraw::RedrawCause::Cursor) > before,
+        "the paste asked for a frame that shows the cursor"
+    );
+}

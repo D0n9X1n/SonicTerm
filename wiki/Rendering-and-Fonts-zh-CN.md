@@ -686,7 +686,7 @@ dual-source blending。透明重置不会累积 alpha，也不会改变损伤范
 
 | 类别 | 字段 | 损伤 |
 | --- | --- | --- |
-| 光标 | `cursor_visible`、`cursor_shape`、`cursor_blink_off`、`cursor_cell` | 新旧两个绘制光标所在行（含墨迹边距），加上最近一次呈现的光标重着色范围 |
+| 光标 | `cursor_visible`、`cursor_shape`、`cursor_blink_off`、`cursor_cell`、`cursor_glide` | 新旧两个绘制光标所在行（含墨迹边距），加上最近一次呈现的光标重着色范围；开始、进行中或结束滑动的帧损伤整个活动窗格 |
 | 焦点 | `window_focused` | 光标损伤加标签栏带 |
 | 标签栏带 | `tab_hash`、`hover_tab`、`close_override`、`process_privileged` | 标签栏带，向上扩展一个原生字体单元高度，再加上最近一次呈现的与当前的标签标题字形墨迹；标签栏隐藏时为空 |
 | 选区 | `selection` | 活动窗格中选区矩形发生变化的行 |

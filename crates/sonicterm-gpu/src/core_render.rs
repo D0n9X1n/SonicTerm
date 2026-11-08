@@ -360,6 +360,8 @@ impl GpuRenderer {
         // Only a presented frame's field geometry is what the user sees and may be hit-tested.
         self.presented_fields
             .settle(field_candidates, matches!(outcome, PresentOutcome::Presented));
+        // Only a presented glide position is on screen, so only it is where the next glide starts.
+        self.cursor_glide.settle(matches!(outcome, PresentOutcome::Presented));
         if !matches!(outcome, PresentOutcome::Presented) {
             // When: `matches!` finds any outcome but `Presented`, no receipt is issued, so its dirty rows stay.
             self.finalize_growth_episodes_if_device_stopped();

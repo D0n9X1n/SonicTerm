@@ -415,6 +415,17 @@ impl App {
                     due.push(DueWork { owner: Some(*id), cause: DueCause::Cursor, deadline });
                 }
             }
+            // A gliding cursor's next frame is armed once and kept until a frame is collected, so
+            // unrelated events never slide it and a deferred frame never makes it due at once.
+            if window.renderer.as_ref().is_some_and(|renderer| renderer.cursor_gliding()) {
+                let period = super::super::effective_frame_period(
+                    self.software_render_degrade,
+                    window.ime.is_composing(),
+                    window.redraw.monitor_period,
+                );
+                let deadline = window.cursor_blink.glide_deadline(now, window.last_render, period);
+                due.push(DueWork { owner: Some(*id), cause: DueCause::Cursor, deadline });
+            }
         }
         due
     }

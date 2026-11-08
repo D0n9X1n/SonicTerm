@@ -152,7 +152,16 @@ impl GpuRenderer {
                     .get(end_col)
                     .map(|r| r - cx)
                     .unwrap_or(self.cell_w * cursor_span as f32);
-                let cy = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
+                let mut cy = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
+                let mut cw = cw;
+                // A gliding cursor draws at its sampled position, in the pane's cell units; at the
+                // glide's end the sample is `None` and the snapped cell edges above apply exactly.
+                let gliding = self.cursor_glide_frame;
+                if let Some(at) = gliding {
+                    cx = active_origin_x + at.col_cells() * self.cell_w;
+                    cy = active_origin_y + at.row_cells() * self.cell_h;
+                    cw = at.span_cells() * self.cell_w;
+                }
                 // Visible preedit moves the terminal cursor to its caret only when search does not own composition.
                 if search.is_none() {
                     if let Some(i) = ime {
@@ -195,19 +204,23 @@ impl GpuRenderer {
                                 ..Default::default()
                             });
                         }
-                        let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
-                            &mut *glyph_instances,
-                            row_spans,
-                            cx,
-                            cy,
-                            cw,
-                            self.cell_h,
-                            sw,
-                            sh,
-                            self.cursor_text_color,
-                        );
-                        crate::frame_stats::note_recolor_glyphs_visited(|| visited);
-                        *frame_recolor = frame_recolor.merge(record);
+                        // Mid-glide the block passes over text without recolouring it; the frame
+                        // that lands on the cell recolours its glyph as a resting block does.
+                        if gliding.is_none() {
+                            let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
+                                &mut *glyph_instances,
+                                row_spans,
+                                cx,
+                                cy,
+                                cw,
+                                self.cell_h,
+                                sw,
+                                sh,
+                                self.cursor_text_color,
+                            );
+                            crate::frame_stats::note_recolor_glyphs_visited(|| visited);
+                            *frame_recolor = frame_recolor.merge(record);
+                        }
                     }
                     CursorShape::Bar => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(

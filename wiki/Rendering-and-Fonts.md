@@ -974,7 +974,7 @@ compile until it has a class.
 
 | Class | Fields | Damage |
 | --- | --- | --- |
-| cursor | `cursor_visible`, `cursor_shape`, `cursor_blink_off`, `cursor_cell` | the old and new drawn-cursor rows, ink-padded, plus the last presented cursor recolor bounds |
+| cursor | `cursor_visible`, `cursor_shape`, `cursor_blink_off`, `cursor_cell`, `cursor_glide` | the old and new drawn-cursor rows, ink-padded, plus the last presented cursor recolor bounds; a frame that starts, continues or ends a glide damages the whole active pane |
 | focus | `window_focused` | the cursor damage and the tab band |
 | tab band | `tab_hash`, `hover_tab`, `close_override`, `process_privileged` | the tab band, padded upward by one native font-cell height, plus the last presented and the current tab-title glyph ink; nothing while the bar is hidden |
 | selection | `selection` | the active pane's rows whose selection quads differ |

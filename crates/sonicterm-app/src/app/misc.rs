@@ -475,6 +475,8 @@ impl App {
             self.note_pane_input(source_pane, InputState::Blocked(1));
             return (0, Vec::new());
         }
+        // A paste restarts the source window's blink shown, even into a program that echoes nothing.
+        let _ = self.note_cursor_activity(source_pane);
         let mut destinations = vec![source_pane];
         if matches!(self.interaction.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
         {

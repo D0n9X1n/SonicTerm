@@ -672,10 +672,10 @@ fn the_blink_phase_gates_only_the_terminal_cursor_draw() {
     let gate = "ifcursor_visible&&self.window_focused&&!read_only_mode&&!self.cursor_blink_off{";
     assert_eq!(core.matches(gate).count(), 1, "the terminal cursor draw reads the blink phase");
     assert_eq!(core.matches("cursor_blink_off:self.cursor_blink_off,").count(), 1, "the key");
-    let identity = function_body(
-        &crate::core::CORE_SOURCE.replace("\r\n", "\n"),
-        "pub(super) fn drawn_cursor_cell(",
-    );
+    // The free function ends at its first closing brace in column zero.
+    let source = crate::core::CORE_SOURCE.replace("\r\n", "\n");
+    let start = source.find("pub(super) fn drawn_cursor_cell(").expect("the function exists");
+    let identity = &source[start..start + source[start..].find("\n}\n").expect("its end")];
     assert!(!identity.contains("blink"), "the drawn cursor cell ignores the blink phase");
 }
 
@@ -813,7 +813,9 @@ fn cursor_and_focus_setters_keep_the_frame_key() {
 fn damage_classes_are_wired_through_the_renderer() {
     let source = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let compact: String = source.split_whitespace().collect();
-    assert!(compact.contains("cursor_cell:drawn_cursor_cell("));
+    // The identity records the cell the draw computes, and the glide sampled from that same cell.
+    assert!(compact.contains("letdrawn_cell=drawn_cursor_cell("));
+    assert!(compact.contains("cursor_cell:drawn_cell,cursor_glide,"));
     assert!(compact.contains("previous_recolor:self.last_recolor,"));
     assert_eq!(compact.matches("frame_recolor=frame_recolor.merge(record);").count(), 2);
     // `assemble_frame` hands both recolor records to the shared pass-end helper, which widens

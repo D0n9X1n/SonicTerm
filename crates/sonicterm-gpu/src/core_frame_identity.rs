@@ -141,6 +141,47 @@ where
     )
 }
 
+impl GpuRenderer {
+    /// This frame's glide position for the terminal cursor drawn at `drawn` in `pane`, at `now`:
+    /// `Some` while it glides, `None` when it draws on its cell. A cursor that is not drawn, is
+    /// blinked off or sits under an overlay does not glide; another pane or screen, new cell
+    /// metrics or a jump over half the pane makes the move a jump.
+    pub(super) fn sample_cursor_glide(
+        &mut self,
+        drawn: Option<CursorCell>,
+        pane: &sonicterm_render_model::PaneRender<'_>,
+        now: Instant,
+        overlay_active: bool,
+    ) -> Option<crate::cursor_glide::GlideCell> {
+        let Some(cell) = drawn.filter(|_| !self.cursor_blink_off) else {
+            // When: no cursor is drawn this frame, it next appears in place, without a glide.
+            self.cursor_glide.hide();
+            self.cursor_glide_basis = None;
+            self.cursor_glide_frame = None;
+            return None;
+        };
+        let target = crate::cursor_glide::GlideCell::at(cell.slot, cell.col, cell.span);
+        let rect = pane.rect_px;
+        let basis = (
+            cell.pane_id,
+            pane.grid.screen_epoch(),
+            (pane.grid.cols, pane.grid.rows),
+            [rect.x, rect.y],
+            [rect.w, rect.h, self.cell_w.to_bits(), self.cell_h.to_bits()],
+        );
+        let moved_basis = self.cursor_glide_basis.is_some_and(|previous| previous != basis);
+        let long = self
+            .cursor_glide
+            .committed()
+            .is_some_and(|from| from.long_jump(target, pane.grid.cols, pane.grid.rows));
+        self.cursor_glide_basis = Some(basis);
+        let allowed = self.cursor_glide_allowed && !overlay_active;
+        let sampled = self.cursor_glide.sample(target, now, allowed, moved_basis || long);
+        self.cursor_glide_frame = sampled;
+        sampled
+    }
+}
+
 #[cfg(test)]
 #[path = "core_frame_identity_tests.rs"]
 mod core_frame_identity_tests;

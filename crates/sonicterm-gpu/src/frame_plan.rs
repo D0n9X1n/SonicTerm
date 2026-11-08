@@ -116,6 +116,8 @@ pub(crate) struct WindowIdentity {
     pub renderer_hash: u64,
     pub overlay_active: bool,
     pub cursor_cell: Option<CursorCell>,
+    /// The cursor's sampled glide position while it glides; `None` when it rests on its cell.
+    pub cursor_glide: Option<crate::cursor_glide::GlideCell>,
 }
 
 /// Structural pane identity preserves order, revision, requested viewport, and resolved projection.
