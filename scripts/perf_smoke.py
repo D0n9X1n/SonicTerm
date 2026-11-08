@@ -16,6 +16,7 @@ import perf_execution
 import perf_focus
 import perf_harness_sources
 import perf_home
+import perf_latency_schema
 import perf_outcomes
 import perf_processes
 import perf_report
@@ -44,6 +45,13 @@ class SmokeCase:
 
 # S1 and S3, then S1 ended exactly as a step deadline ends a run.
 SMOKE_CASES = (SmokeCase("S1"), SmokeCase("S3"), SmokeCase("S1", kill_at_go=True))
+# macOS also opens S13's 8-pane layout, so a broken wide layout fails every PR, not only a release run.
+WIDE_CASE = SmokeCase("S13", "wide-8")
+MACOS_SMOKE_CASES = SMOKE_CASES + (WIDE_CASE,)
+# The wide layout's pane count, the phases its flood is watched through, and the split rounding its grids may differ by.
+WIDE_PANES = 8
+WIDE_WATCHED_PHASES = ("typing", "tail")
+SPLIT_ROUNDING_CELLS = 1
 # Windows adds the wgpu presenter, which must not be degraded, and a role program that exits right
 # after GO, which must end the run invalid with a reason naming its pane.
 WINDOWS_SMOKE_CASES = SMOKE_CASES + (SmokeCase("S1", "wgpu"), SmokeCase("S1", "role-exit", expected="invalid"))
@@ -57,7 +65,38 @@ SMOKE_REPLAY_VARIANT = "sync"
 
 def smoke_case_list(platform_name: str) -> tuple[SmokeCase, ...]:
     """The smoke's cases on this host."""
-    return WINDOWS_SMOKE_CASES if platform_name == "win32" else SMOKE_CASES
+    if platform_name == "win32":
+        return WINDOWS_SMOKE_CASES
+    return MACOS_SMOKE_CASES if platform_name == "darwin" else SMOKE_CASES
+
+
+def wide_receipt_problems(result: Mapping | None) -> list[str]:
+    """What a valid S13/wide-8 run's own receipts fail to show, with no timing and no threshold: eight
+    role panes whose grids are equal within a split's rounding, a flood that advanced past an earlier
+    reading at least once in each watched phase, and at least one typing sample. Every receipt is
+    recorded whether or not frame counters are built in."""
+    contention = (result or {}).get("contention")
+    contention = contention if isinstance(contention, Mapping) else {}
+    problems = []
+    grids = contention.get("role_grids")
+    shaped = isinstance(grids, list) and all(
+        isinstance(grid, list) and len(grid) == 2 and all(isinstance(cells, int) for cells in grid) for grid in grids)
+    if not shaped or len(grids) != WIDE_PANES:
+        problems.append(f"S13/wide-8 recorded {len(grids) if isinstance(grids, list) else 'no'} role pane grids, not {WIDE_PANES}")
+    elif any(max(grid[axis] for grid in grids) - min(grid[axis] for grid in grids) > SPLIT_ROUNDING_CELLS
+             for axis in (0, 1)):
+        problems.append(f"S13/wide-8 pane grids differ: {sorted({tuple(grid) for grid in grids})}")
+    flood = contention.get("flood")
+    phases = {phase.get("name"): phase for phase in (flood or {}).get("phases") or [] if isinstance(phase, Mapping)} \
+        if isinstance(flood, Mapping) else {}
+    for name in WIDE_WATCHED_PHASES:
+        advanced = (phases.get(name) or {}).get("advanced")
+        if not isinstance(advanced, int) or advanced < 1:
+            problems.append(f"S13/wide-8's flood never advanced in {name} (advanced {advanced!r})")
+    samples = perf_latency_schema.latency_values((result or {}).get("latency"))
+    if not samples:
+        problems.append("S13/wide-8 recorded no typing sample")
+    return problems
 
 
 def case_verdict(case: SmokeCase, kind: str, reasons: Sequence[str]) -> tuple[str, list[str]]:
@@ -128,6 +167,11 @@ def smoke_cases(scenarios: Mapping[str, perf_scenarios.Scenario], binary: Path, 
             outcome = run_case(plan, evidence / f"{name.replace('/', '-')}-{attempt}")
             kind, reasons = perf_outcomes.classify_outcome(outcome)
             verdict, reasons = case_verdict(case, kind, reasons)
+            if case == WIDE_CASE and verdict == "pass":
+                # A valid wide run must also show its layout and flood worked; a missing receipt is a failure.
+                receipts = wide_receipt_problems(outcome.result)
+                if receipts:
+                    verdict, reasons = "fail", receipts
             print(f"[perf-smoke] {name} attempt {attempt}: {kind}" + (f": {'; '.join(reasons)}" if reasons else ""),
                   flush=True)
             if host_platform == "win32":

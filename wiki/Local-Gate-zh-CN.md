@@ -369,15 +369,19 @@ S2 回显时间线的 App 访问器只在同时具备 `perf-echo-trace` 与 `per
 
 `macos-perf-smoke` 检查的是对比工具本身，而不是性能。它运行
 `python3 scripts/perf-compare.py --smoke`：以 debug 构建当前树的 `perf_scenarios` example，不使用
-base ref、worktree 或 release 构建，并以 harness 的 `--short` 运行三个简短用例，每个用例都使用新进程
+base ref、worktree 或 release 构建，并以 harness 的 `--short` 运行若干简短用例，每个用例都使用新进程
 和自己的 scratch 目录，并以仓库根目录为工作目录，App 在那里找到已跟踪的字体：
 
 1. S1；
 2. S3；
-3. S1，会话一启动就像到达截止时间的运行那样被终止。
+3. S1，会话一启动就像到达截止时间的运行那样被终止；
+4. 在 macOS 上，S13/wide-8：八个等大的窗格，其中一个持续洪泛，同时向另一个输入。
 
 使用 `--short` 时，每段保持只持续 5 秒，每个场景结尾的空闲期至少持续到负载开始后 5 秒而不是 60 秒，
-S3 则输出 `head -n 200000` 与一个 5 MB 文件。前两个用例在结果符合结果 schema、焦点按下文的规则是安全的、
+S3 则输出 `head -n 200000` 与一个 5 MB 文件。S13/wide-8 还要求结果自身的回执表明布局与洪泛正常，不涉及耗时，也没有阈值：
+八个 `role_grids` 在每个轴上相差不超过一格（拆分的取整），`contention.flood` 中 `typing` 与 `tail` 阶段的
+`advanced` 计数（比前一次读数显示更多已滚动行的读数个数）各至少为 1，且至少有一个输入样本。这些回执不依赖
+帧计数器记录，而 smoke 的 debug 构建没有帧计数器。它使每次 macOS smoke 运行多出约一分钟。前两个用例在结果符合结果 schema、焦点按下文的规则是安全的、
 清理后没有残留进程时通过。App 报告配置的主字体加载失败时，smoke 立即失败。被终止的用例只有在 `run_step`
 于脚本发出 SIGKILL 之后自己回收了 harness（状态为 FAIL、退出码为 `-9`、没有残留的进程组成员），且清理
 完成、没有进程残留时才通过。脚本只在 harness 仍具有被接受时记录的 pid 与启动时间时，才发送该信号。发出

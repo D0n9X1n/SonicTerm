@@ -117,6 +117,7 @@ from perf_comparison_tests import (
 from perf_smoke_tests import (
     outcome_of,
     SmokeTests,
+    WideReceiptTests,
 )
 from perf_sets_tests import (
     RunSetTests,
@@ -488,6 +489,8 @@ from perf_echo_loader_tests import (
 
 from perf_contention_verdict_tests import (
     ContentionVerdictTests,
+    CounterColumnTests,
+    WideScalingTests,
 )
 
 if __name__ == "__main__":

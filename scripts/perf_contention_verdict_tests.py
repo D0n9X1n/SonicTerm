@@ -128,6 +128,32 @@ class ContentionVerdictTests(unittest.TestCase):
         self.assertTrue(all(len(row) == len(verdict_rule.COLUMNS) for row in rows))
 
 
+class CounterColumnTests(unittest.TestCase):
+    """The reported VT lock wait and parse columns, which never enter the verdict."""
+
+    @staticmethod
+    def histogram(counts):
+        return {"unit": "us", "bounds": list(verdict_rule.US_BOUNDS), "counts": counts, "sum_us": 0}
+
+    def test_the_columns_read_the_typing_phase(self):
+        result = run([10.0] * 300)
+        vt = result["phases"][0]["frame_counters"]["vt"]
+        # 100 events: 90 within 10 µs, 10 within 500 µs, so the 95th falls in the 500 µs bucket.
+        vt["parser_lock_wait_us"] = self.histogram([90, 0, 0, 10, 0, 0, 0])
+        vt["parse_us"] = self.histogram([0, 100, 0, 0, 0, 0, 0])
+        row = verdict_rule._row(verdict_rule.TWO_PANES, evidence(result))
+        self.assertEqual(row[7:], ["≤500 µs", "≤50 µs"])
+
+    def test_an_old_base_without_the_fields_reads_n_a(self):
+        # A base older than these fields records none of them: each column is `n/a`, never an error.
+        row = verdict_rule._row(verdict_rule.TWO_PANES, evidence(run([10.0] * 300)))
+        self.assertEqual(row[7:], ["n/a", "n/a"])
+
+    def test_the_bounds_match_the_schema(self):
+        import perf_result_schema
+        self.assertEqual(verdict_rule.US_BOUNDS, tuple(perf_result_schema.HISTOGRAM_BOUNDS["us"]))
+
+
 class WideScalingTests(unittest.TestCase):
     """The release-only scaling rule over S13's wide layouts."""
 

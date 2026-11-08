@@ -52,7 +52,9 @@ UNCHANGED = "unchanged"
 NOT_UNCHANGED = "not unchanged"
 NO_VERDICT = "no verdict"
 COLUMNS = ("Variant", "Samples", "p95 (ms)", "Collections", "Failed (parser/images/budget)", "Failed %",
-           "Flood bytes typing/tail (min)")
+           "Flood bytes typing/tail (min)", "VT lock wait p95", "VT parse p95")
+# The microsecond histogram bucket bounds the VT parser's counters use, as `perf_result_schema` declares.
+US_BOUNDS = (10, 50, 100, 500, 1000, 5000)
 HEADER = "| " + " | ".join(COLUMNS) + " |\n|" + "---|" * len(COLUMNS) + "\n"
 NOTE = (f"Head counters runs only. Verdict rule, fixed before CI: at least {MIN_SAMPLES} samples per variant; "
         f"`{UNCHANGED}` when the 4-pane p95 is within {P95_TOLERANCE:.0%} of the 2-pane p95 and all failed "
@@ -75,6 +77,25 @@ def _phase(result: dict, name: str) -> dict | None:
     return None
 
 
+def _histogram_p95(histograms: Sequence[dict]) -> str:
+    """The pooled histograms' nearest-rank p95 as a bucket bound in µs, `n/a` when none was recorded (a base
+    older than the field) or no event fell in any bucket."""
+    pooled = [0] * (len(US_BOUNDS) + 1)
+    for histogram in histograms:
+        counts = histogram.get("counts") if isinstance(histogram, dict) else None
+        if isinstance(counts, list) and len(counts) == len(pooled):
+            pooled = [total + count for total, count in zip(pooled, counts)]
+    events = sum(pooled)
+    if events == 0:
+        return "n/a"
+    rank, running = (95 * events + 99) // 100, 0
+    for index, count in enumerate(pooled):
+        running += count
+        if running >= rank:
+            return f"≤{US_BOUNDS[index]} µs" if index < len(US_BOUNDS) else f">{US_BOUNDS[-1]} µs"
+    return "n/a"
+
+
 def variant_evidence(results: Iterable[dict]) -> dict:
     """Pool one variant's counters runs: its typing samples, collections, failures and flood liveness.
 
@@ -86,6 +107,9 @@ def variant_evidence(results: Iterable[dict]) -> dict:
     flood_bytes = {name: [] for name in LIVENESS_PHASES}
     pane_grids: list[tuple[tuple, tuple]] = []
     all_grids: list[list[tuple]] = []
+    # Reported, never part of the verdict: the typing phase's VT histograms.
+    lock_waits: list[dict] = []
+    parses: list[dict] = []
     problems: list[str] = []
     results = list(results)
     if not results:
@@ -97,6 +121,9 @@ def variant_evidence(results: Iterable[dict]) -> dict:
         else:
             samples.extend(values)
         typing = _phase(result, "typing")
+        vt = ((typing or {}).get("frame_counters") or {}).get("vt") or {}
+        lock_waits.append(vt.get("parser_lock_wait_us"))
+        parses.append(vt.get("parse_us"))
         window = ((typing or {}).get("frame_counters") or {}).get("window")
         if not isinstance(window, dict) or any(not isinstance(window.get(name), int) for name in FAILURE_FIELDS):
             problems.append(f"run {index} lacks the typing phase's miss attribution")
@@ -144,7 +171,9 @@ def variant_evidence(results: Iterable[dict]) -> dict:
     if len(samples) < MIN_SAMPLES:
         problems.append(f"{len(samples)} samples, below {MIN_SAMPLES}")
     return {"samples": samples, "collections": collections, "failures": failures, "flood_bytes": flood_bytes,
-            "pane_grids": pane_grids, "all_grids": all_grids, "problems": problems}
+            "pane_grids": pane_grids, "all_grids": all_grids, "problems": problems,
+            "lock_wait_p95": _histogram_p95([value for value in lock_waits if value]),
+            "parse_p95": _histogram_p95([value for value in parses if value])}
 
 
 def verdict(two: dict, four: dict) -> tuple[str, str]:
@@ -188,7 +217,7 @@ def _row(label: str, evidence: dict) -> list[str]:
     minimum = [str(min(values)) if values else "n/a" for values in evidence["flood_bytes"].values()]
     return [label, str(len(samples)), f"{percentile_95(samples):.1f}" if samples else "n/a", str(collections),
             "/".join(str(failures[name]) for name in FAILURE_FIELDS), f"{failed / collections:.2%}" if collections
-            else "n/a", "/".join(minimum)]
+            else "n/a", "/".join(minimum), evidence["lock_wait_p95"], evidence["parse_p95"]]
 
 
 def scaling_verdict(wide: Sequence[dict]) -> tuple[str, str]:
@@ -234,10 +263,10 @@ def verdict_rows(heads: dict[str, Sequence[dict]]) -> list[list[str]]:
         two = variant_evidence(heads.get(TWO_PANES, ()))
         four = variant_evidence(heads.get(FOUR_PANES, ()))
         outcome, why = verdict(two, four)
-        rows += [_row(TWO_PANES, two), _row(FOUR_PANES, four), ["Verdict", outcome, why, "", "", "", ""]]
+        rows += [_row(TWO_PANES, two), _row(FOUR_PANES, four), ["Verdict", outcome, why] + [""] * (len(COLUMNS) - 3)]
     if any(label in heads for label in WIDE):
         wide = [variant_evidence(heads.get(label, ())) for label in WIDE]
         outcome, why = scaling_verdict(wide)
         rows += [_row(label, evidence) for label, evidence in zip(WIDE, wide)]
-        rows.append(["Scaling", outcome, why, "", "", "", ""])
+        rows.append(["Scaling", outcome, why] + [""] * (len(COLUMNS) - 3))
     return rows
