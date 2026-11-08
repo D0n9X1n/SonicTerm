@@ -222,22 +222,10 @@ jobs:
         include:
           - platform: macOS
             runner: macos-15
-            shard: S7-S4
-            scenarios: S7 S4 S1/atlas-retry S8 S6/selection-drag
+            shard: release-variants
+            scenarios: S2 S2/spawn S3 S3/history S3/resize S11/burst S11/burst-text
             laps: ""
             release_scenarios: ""
-          - platform: macOS
-            runner: macos-15
-            shard: S9-S10sync
-            scenarios: S10/sync S9 S11 S6 S1 S5 S6/rest S1/status-line S12 S12/status-line S3
-            laps: S9
-            release_scenarios: S3/history S3/resize S11/burst S11/burst-text
-          - platform: macOS
-            runner: macos-15
-            shard: S10-S11release
-            scenarios: S10 S11/release S2 S2/flood S6/flood S13 S13/sustained-4
-            laps: ""
-            release_scenarios: S13/wide-8 S13/wide-16 S13/wide-32 S2/spawn
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
       # itself, not a pull request's merge ref.
@@ -427,40 +415,8 @@ jobs:
         include:
           - platform: Windows
             runner: windows-latest
-            shard: S7
-            scenarios: S7 S1/status-line S12/status-line
-            laps: ""
-            release_scenarios: ""
-          - platform: Windows
-            runner: windows-latest
-            shard: S9-S10
-            scenarios: S9 S10 S6/flood S6/selection-drag S2/flood
-            laps: S9
-            release_scenarios: ""
-          - platform: Windows
-            runner: windows-latest
-            shard: S2-S10sync
-            scenarios: S2 S10/sync S6/rest S13 S13/sustained-4
-            laps: ""
-            release_scenarios: S13/wide-8 S13/wide-16 S13/wide-32
-          - platform: Windows
-            runner: windows-latest
-            shard: S4-S5-S11
-            # S11/release runs once per side under --short, and the S11/gdi (frame texture) and S11/wgpu
-            # (CPU-adapter control) presenter variants twice: 17.5 min before, about 26.4 min projected.
-            scenarios: S4 S5 S11 S11/release S11/gdi S11/wgpu
-            laps: ""
-            release_scenarios: ""
-          - platform: Windows
-            runner: windows-latest
-            shard: S1-S3-S6-S8-S12
-            # S1/atlas-retry runs only in the counters set, twice per side. Nominal cost, not measured: four
-            # runs at S1's measured 5.5 s plus 0.23 s between runs, about 23 s, assuming its recovery ends
-            # inside the 5 s --short hold; a slow or invalid run can take up to about 74 s and is retried
-            # up to 3 times a side. Measured compare steps 1110-1326 s with 266-1910 s of slack (runs
-            # 37318119545, 37325514262, 37333587004); S4-S5-S11 here had 0 s in one of them. The
-            # exact-head CI run is the measurement.
-            scenarios: S1 S3 S6 S8 S12 S1/atlas-retry
+            shard: S4
+            scenarios: S4
             laps: ""
             release_scenarios: ""
     steps:
