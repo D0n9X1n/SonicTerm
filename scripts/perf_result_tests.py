@@ -70,14 +70,18 @@ class ResultSchemaTests(unittest.TestCase):
                 self.assertTrue(perf_result_schema.validate_result(valid_result(**overrides), perf_memory_tests.HARNESS_HASH, 0))
 
     def test_a_kitty_receipt_holds_exactly_its_three_counts(self):
-        # S11/kitty-placeholders records each checked phase's images, placements and runs; a missing,
-        # extra, negative or non-integer count is a broken result, not a receipt.
+        # S11/kitty-placeholders records each checked phase's images, placements, runs and whether the
+        # placements are the planned ones; a missing, extra, negative or non-integer count, or a
+        # non-boolean `exact`, is a broken result, not a receipt.
         phase = valid_result()["phases"][0]
-        good = dict(phase, kitty_receipt={"images": 128, "placements": 512, "runs": 512})
+        good = dict(phase, kitty_receipt={"images": 128, "placements": 512, "runs": 512, "exact": True})
         self.assertEqual(perf_result_schema.validate_result(valid_result(phases=[good]), perf_memory_tests.HARNESS_HASH, 0), [])
-        for receipt in ({"images": 128, "placements": 512}, {"images": 128, "placements": 512, "runs": -1},
-                        {"images": 128, "placements": 512, "runs": 1.5}, [128, 512, 512],
-                        {"images": 128, "placements": 512, "runs": 512, "extra": 0}):
+        for receipt in ({"images": 128, "placements": 512, "exact": True},
+                        {"images": 128, "placements": 512, "runs": -1, "exact": True},
+                        {"images": 128, "placements": 512, "runs": 1.5, "exact": True}, [128, 512, 512],
+                        {"images": 128, "placements": 512, "runs": 512, "exact": "yes"},
+                        {"images": 128, "placements": 512, "runs": 512},
+                        {"images": 128, "placements": 512, "runs": 512, "exact": True, "extra": 0}):
             with self.subTest(receipt=receipt):
                 broken = dict(phase, kitty_receipt=receipt)
                 self.assertTrue(perf_result_schema.validate_result(valid_result(phases=[broken]), perf_memory_tests.HARNESS_HASH, 0))

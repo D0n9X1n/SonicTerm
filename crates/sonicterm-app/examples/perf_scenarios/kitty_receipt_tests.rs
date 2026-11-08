@@ -73,10 +73,10 @@ fn parse(bytes: &[u8], cols: u16, rows: u16) -> (Parser, Vec<KittyCommand>) {
     (parser, commands)
 }
 
-/// The receipt of `parser`'s whole visible grid over `images`.
-fn grid_receipt(parser: &Parser, images: &[InlineImage]) -> KittyReceipt {
+/// The receipt of `parser`'s whole visible grid over `images` against `phase`'s placements.
+fn grid_receipt(parser: &Parser, images: &[InlineImage], phase: &str) -> KittyReceipt {
     let grid = parser.grid();
-    receipt(images, (0..grid.rows).map(|row| grid.row(row)))
+    receipt(images, (0..grid.rows).map(|row| grid.row(row)), placements_per_image(phase))
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn the_print_fixture_holds_its_receipt_on_the_smallest_runner_window() {
     let (parser, commands) = parse(&bytes, 80, 43);
     let cap = crate::workload::KITTY_PLACEMENT_CAP as usize;
     let images = store_from(&commands, cap);
-    assert_eq!(Some(grid_receipt(&parser, &images)), expected("print"));
+    assert_eq!(Some(grid_receipt(&parser, &images, "print")), expected("print"));
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn the_cap_command_fills_the_cap_and_one_is_refused() {
     let images = store_from(&commands, cap);
     let places = commands.iter().filter(|command| command.action == KittyAction::Place).count();
     assert_eq!(places, cap + 1, "one placement is sent past the cap");
-    assert_eq!(Some(grid_receipt(&parser, &images)), expected("cap"));
+    assert_eq!(Some(grid_receipt(&parser, &images, "cap")), expected("cap"));
     // The shell line the plan commits names exactly these placements.
     let line = match crate::scenarios::KITTY_CAP_STEPS[0].text {
         crate::scenarios::CommitText::Literal(line) => line,
@@ -136,6 +136,56 @@ fn a_refused_or_missing_image_changes_the_receipt() {
         bytes.extend("\u{10EEEE}\u{0305}\u{0305}\x1b[39;59m ".bytes());
     }
     let (parser, _) = parse(&bytes, 20, 2);
-    let got = grid_receipt(&parser, &images);
-    assert_eq!(got, KittyReceipt { images: 2, placements: 2, runs: 1 });
+    let got = receipt(&images, (0..2).map(|row| parser.grid().row(row)), 2);
+    assert_eq!(got, KittyReceipt { images: 2, placements: 2, runs: 1, exact: false });
+}
+
+#[test]
+fn only_the_planned_placement_identities_are_exact() {
+    // Totals cannot tell the cap's refusal apart from losing another placement while admitting the
+    // one past it: the identity check can. Each case keeps 1,024 placements and 128 images.
+    let mut placements = Vec::new();
+    for image_id in 1..=crate::workload::KITTY_IMAGES {
+        placements.push(entry(u64::from(image_id), image_id, 0, KittyShow::Upload));
+        for placement_id in 1..=8 {
+            let show = KittyShow::Virtual { cols: 4, rows: 1 };
+            placements.push(entry(u64::from(image_id), image_id, placement_id, show));
+        }
+    }
+    let empty = Grid::new(4, 1);
+    let rows = || (0..1).map(|row| empty.row(row));
+    assert!(receipt(&placements, rows(), 8).exact, "the planned placements are exact");
+    // The one past the cap admitted in place of placement 8 of image 2.
+    let swapped: Vec<InlineImage> = placements
+        .iter()
+        .map(|image| match image.kitty {
+            Some(tag) if tag.image_id == 2 && tag.placement_id == 8 => {
+                entry(1, 1, 9, KittyShow::Virtual { cols: 4, rows: 1 })
+            }
+            _ => image.clone(),
+        })
+        .collect();
+    let got = receipt(&swapped, rows(), 8);
+    assert_eq!((got.placements, got.exact), (1_024, false), "same total, wrong identities");
+    // A placement held twice in place of another is not exact either.
+    let doubled: Vec<InlineImage> = placements
+        .iter()
+        .map(|image| match image.kitty {
+            Some(tag) if tag.image_id == 3 && tag.placement_id == 8 => {
+                entry(3, 3, 7, KittyShow::Virtual { cols: 4, rows: 1 })
+            }
+            _ => image.clone(),
+        })
+        .collect();
+    assert!(!receipt(&doubled, rows(), 8).exact, "a duplicate is not exact");
+}
+
+#[test]
+fn each_phase_expects_its_store_commands() {
+    // `print` answers every transmit and drawn placement; `cap` its 512 placements and the refused
+    // one, so a run that never sent the refused command is caught by the sample count.
+    assert_eq!(store_commands("print"), Some(128 + 512));
+    assert_eq!(store_commands("cap"), Some(513));
+    assert_eq!(store_commands("typing"), None);
+    assert_eq!((placements_per_image("print"), placements_per_image("cap")), (4, 8));
 }

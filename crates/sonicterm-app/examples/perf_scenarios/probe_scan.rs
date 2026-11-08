@@ -305,12 +305,38 @@ impl Probe {
         let parser = pane.parser.lock();
         let images = pane.inline_images.lock();
         let grid = parser.grid();
-        let got = crate::kitty_receipt::receipt(&images, (0..grid.rows).map(|row| grid.row(row)));
+        let per_image = crate::kitty_receipt::placements_per_image(phase.name);
+        let got = crate::kitty_receipt::receipt(
+            &images,
+            (0..grid.rows).map(|row| grid.row(row)),
+            per_image,
+        );
         drop(images);
         drop(parser);
         self.kitty_receipt = Some(got);
-        (got != expected)
-            .then(|| format!("kitty receipt after {}: {got:?}, expected {expected:?}", phase.name))
+        if got != expected {
+            // When: got differs from expected, the pane holds another workload than the plan's.
+            return Some(format!(
+                "kitty receipt after {}: {got:?}, expected {expected:?}",
+                phase.name
+            ));
+        }
+        // With counters on, a tree that times the kitty store records one sample per command it
+        // answers, so the placement past the cap is proved to have reached the store and been
+        // refused rather than never sent.
+        let start = self.meter.as_ref().and_then(|meter| meter.counters_start.clone())?;
+        let delta = self.counter_totals()?.delta_since(&start);
+        let Some(crate::counters::FieldValue::Histogram { counts, .. }) =
+            delta.get("kitty_store_hold_us")
+        else {
+            // When: the tree has no kitty_store_hold histogram (a base before it), nothing is counted.
+            return None;
+        };
+        let answered: u64 = counts.iter().sum();
+        let wanted = crate::kitty_receipt::store_commands(phase.name)?;
+        (answered != wanted).then(|| {
+            format!("kitty store answered {answered} commands in {}, expected {wanted}", phase.name)
+        })
     }
 }
 

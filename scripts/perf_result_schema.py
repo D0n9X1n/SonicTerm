@@ -114,7 +114,8 @@ _PHASE_FIELDS = {
     "updates": lambda value: perf_latency_schema._is_int(value) and value > 0,
     # S11/kitty-placeholders' receipt at the end of `print` and `cap`: the images, placements and
     # resolved runs its pane held; the harness invalidates a run whose receipt is not the plan's.
-    "kitty_receipt": lambda value: isinstance(value, dict) and set(value) == set(KITTY_RECEIPT_KEYS)
+    "kitty_receipt": lambda value: isinstance(value, dict) and set(value) == set(KITTY_RECEIPT_KEYS) | {"exact"}
+    and isinstance(value["exact"], bool)
     and all(perf_latency_schema._is_int(value[key]) and value[key] >= 0 for key in KITTY_RECEIPT_KEYS),
     # The guard-correlation transport and its own time; a harness older than them leaves both out.
     "guard_correlation": lambda value: perf_guard_schema._guard_field_ok(value),
