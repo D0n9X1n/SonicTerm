@@ -864,7 +864,9 @@ use row_shaping::color_to_chrome;
 mod inline_images;
 #[path = "core_kitty_placeholders.rs"]
 mod kitty_placeholders;
+#[cfg(test)]
 use inline_images::emit_inline_image_instances;
+use inline_images::emit_inline_image_instances_with;
 use inline_images::report_inline_image_pressure;
 use inline_images::InlineImagePlacement;
 

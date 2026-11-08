@@ -270,17 +270,18 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   no fixed ceiling, because it follows the frame's vertex count;
 - `frame_scratch_bytes` / `frame_scratch_items`: the renderer's `FrameScratch`
   part, counted in `renderer_total_bytes`. It holds the per-frame draw vectors
-  one assembly pass fills (glyphs, quads, overlay glyphs and quads, images, row
-  spans, underlines, underline owners, staged ranges, tofu, pane rects, column
-  edges and row keys), kept between assembled frames. Every restoration clears
+  one assembly pass fills (glyphs, quads, overlay glyphs and quads, images, the
+  inline-image allocation order and emitted draws, row spans, underlines,
+  underline owners, staged ranges, tofu, pane rects, column edges and row keys),
+  kept between assembled frames. Every restoration clears
   each vector and holds it within its cap: glyphs and quads 4 MiB each; overlay
-  glyphs, overlay quads, images, row spans, underlines and tofu 1 MiB each; pane
-  rects and staged ranges 64 KiB each; underline owners and row keys 256 KiB
-  each; column edges 1 MiB in total, dropping the largest slots first. Only a
+  glyphs, overlay quads, images, emitted image draws, row spans, underlines and
+  tofu 1 MiB each; pane rects and staged ranges 64 KiB each; underline owners,
+  row keys and the image allocation order 256 KiB each; column edges 1 MiB in total, dropping the largest slots first. Only a
   completed assembly also shrinks a vector to twice its use once its capacity is
   over four times that use and over 1 MiB, and drops the column-edge slots above
   its peak. A failed or retried frame's use understates the frame, so it keeps
-  its warm capacity. The class's coverage figure is the sum, 16,384,000 bytes. An unchanged or no-op frame takes no scratch and
+  its warm capacity. The class's coverage figure is the sum, 17,694,720 bytes. An unchanged or no-op frame takes no scratch and
   releases nothing. Items are the vectors that hold an allocation; the figure is
   zero while a frame holds the scratch;
 - `chrome_cache_bytes` / `chrome_cache_items`: the renderer's `ChromeCache`

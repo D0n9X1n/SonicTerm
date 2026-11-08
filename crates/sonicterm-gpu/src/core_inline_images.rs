@@ -73,6 +73,9 @@ impl InlineImagePlacement<'_> {
     }
 }
 
+/// Emit `placements` into `out` with fresh sort buffers; the renderer passes its frame scratch's
+/// buffers to [`emit_inline_image_instances_with`] instead.
+#[cfg(test)]
 pub(super) fn emit_inline_image_instances(
     image_atlas: &mut GlyphAtlas,
     out: &mut Vec<ImageInstance>,
@@ -82,13 +85,42 @@ pub(super) fn emit_inline_image_instances(
     sw: f32,
     sh: f32,
 ) -> usize {
+    let mut sort = frame_scratch::ImageSortScratch::default();
+    let surface = (sw, sh);
+    emit_inline_image_instances_with(
+        image_atlas,
+        out,
+        &mut sort,
+        placements,
+        (cell_w, cell_h),
+        surface,
+    )
+}
+
+/// Make each visible placement's image resident, newest first, and append its draw to `out` in
+/// painter order. Returns how many placements the bounded atlas could not hold. `sort`'s buffers
+/// are cleared and refilled, so a steady frame reuses their capacity.
+pub(super) fn emit_inline_image_instances_with(
+    image_atlas: &mut GlyphAtlas,
+    out: &mut Vec<ImageInstance>,
+    sort: &mut frame_scratch::ImageSortScratch,
+    placements: &[InlineImagePlacement<'_>],
+    cell_size: (f32, f32),
+    surface: (f32, f32),
+) -> usize {
+    let (cell_w, cell_h) = cell_size;
+    let (sw, sh) = surface;
     let mut skipped = 0usize;
-    let mut allocation_order: Vec<&InlineImagePlacement<'_>> = placements.iter().collect();
-    allocation_order.sort_unstable_by_key(|placement| std::cmp::Reverse(placement.image.id));
-    let mut emitted = Vec::with_capacity(placements.len());
+    let frame_scratch::ImageSortScratch { allocation_order, emitted } = sort;
+    allocation_order.clear();
+    allocation_order.extend(0..placements.len());
+    // Equal ids share one atlas tile, so the index tiebreak only makes the order deterministic.
+    allocation_order
+        .sort_unstable_by_key(|index| (std::cmp::Reverse(placements[*index].image.id), *index));
+    emitted.clear();
     // Prefer the globally newest retained images when the bounded atlas
     // cannot hold the entire history, regardless of which pane owns them.
-    for placement in allocation_order {
+    for placement in allocation_order.iter().map(|index| &placements[*index]) {
         let image = placement.image;
         let Some(visible) = placement.visible_rect(cell_w, cell_h, sw, sh) else {
             // When: `visible_rect` is absent, this image cannot contribute pixels or need an atlas tile.
@@ -144,10 +176,15 @@ pub(super) fn emit_inline_image_instances(
         ));
     }
     emitted.sort_unstable_by_key(|(painter_order, _)| *painter_order);
-    out.extend(emitted.into_iter().map(|(_, instance)| instance));
+    // Copied, not drained: the scratch's finish reads each buffer's length as the frame's use.
+    out.extend(emitted.iter().map(|(_, instance)| *instance));
     skipped
 }
 
 #[cfg(test)]
 #[path = "core_inline_images_tests.rs"]
 mod core_inline_images_tests;
+
+#[cfg(test)]
+#[path = "core_inline_images_sort_tests.rs"]
+mod core_inline_images_sort_tests;

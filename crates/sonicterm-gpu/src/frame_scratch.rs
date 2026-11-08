@@ -41,11 +41,12 @@ const KIB: usize = 1024;
 pub(crate) const GLYPHS_CAP_BYTES: usize = 4 * MIB;
 /// Byte cap of the main quad list.
 pub(crate) const QUADS_CAP_BYTES: usize = 4 * MIB;
-/// Byte cap of each overlay list, the image list, row spans, underlines and missing tofu.
+/// Byte cap of each overlay list, the image list, the image sort's emitted list, row spans,
+/// underlines and missing tofu.
 pub(crate) const OVERLAY_CAP_BYTES: usize = MIB;
 /// Byte cap of the pane-rect and staged-range lists.
 pub(crate) const SMALL_CAP_BYTES: usize = 64 * KIB;
-/// Byte cap of the underline-owner and row-key index lists.
+/// Byte cap of the underline-owner, row-key and image allocation-order index lists.
 pub(crate) const INDEX_CAP_BYTES: usize = 256 * KIB;
 /// Byte cap of all column-edge slots together, headers included.
 pub(crate) const SNAPPED_CAP_BYTES: usize = MIB;
@@ -55,9 +56,9 @@ pub(crate) const SNAPPED_CAP_BYTES: usize = MIB;
 #[cfg(test)]
 pub(crate) const FRAME_SCRATCH_CAP: usize = GLYPHS_CAP_BYTES
     + QUADS_CAP_BYTES
-    + 6 * OVERLAY_CAP_BYTES
+    + 7 * OVERLAY_CAP_BYTES
     + 2 * SMALL_CAP_BYTES
-    + 2 * INDEX_CAP_BYTES
+    + 3 * INDEX_CAP_BYTES
     + SNAPPED_CAP_BYTES;
 
 /// Elements of `T` that fit in `cap_bytes`.
@@ -133,6 +134,17 @@ pub(crate) fn fill_snapped_slot(
     super::fill_snapped_cell_x(&mut snapped[slot], origin_x, cell_w, cols);
 }
 
+/// The two orderings inline-image emission sorts each frame, kept so a steady frame allocates
+/// neither: placement indices in atlas-allocation order, and each emitted draw with its painter
+/// order before the painter sort.
+#[derive(Debug, Default)]
+pub(crate) struct ImageSortScratch {
+    /// Placement indices, newest image first.
+    pub(crate) allocation_order: Vec<usize>,
+    /// Each emitted draw with its placement's painter order.
+    pub(crate) emitted: Vec<(usize, ImageInstance)>,
+}
+
 /// The draw vectors one assembly pass fills and presentation reads.
 #[derive(Debug, Default)]
 pub(crate) struct FrameScratch {
@@ -146,6 +158,8 @@ pub(crate) struct FrameScratch {
     pub(crate) overlay_quads: Vec<QuadInstance>,
     /// Inline image draws.
     pub(crate) images: Vec<ImageInstance>,
+    /// Inline-image emission's two sort buffers.
+    pub(crate) image_sort: ImageSortScratch,
     /// Each emitted row's glyph range and ink.
     pub(crate) row_spans: Vec<RowGlyphSpan>,
     /// Underline runs with their pane's origin and columns.
@@ -179,6 +193,8 @@ impl FrameScratch {
         finish_part(&mut self.quads, QUADS_CAP_BYTES, completed);
         finish_part(&mut self.overlay_quads, OVERLAY_CAP_BYTES, completed);
         finish_part(&mut self.images, OVERLAY_CAP_BYTES, completed);
+        finish_part(&mut self.image_sort.allocation_order, INDEX_CAP_BYTES, completed);
+        finish_part(&mut self.image_sort.emitted, OVERLAY_CAP_BYTES, completed);
         finish_part(&mut self.row_spans, OVERLAY_CAP_BYTES, completed);
         finish_part(&mut self.underlines, OVERLAY_CAP_BYTES, completed);
         finish_part(&mut self.underline_owners, INDEX_CAP_BYTES, completed);
@@ -220,6 +236,8 @@ impl FrameScratch {
             reserved(&self.quads),
             reserved(&self.overlay_quads),
             reserved(&self.images),
+            reserved(&self.image_sort.allocation_order),
+            reserved(&self.image_sort.emitted),
             reserved(&self.row_spans),
             reserved(&self.underlines),
             reserved(&self.underline_owners),
