@@ -153,9 +153,25 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 | `"shared"`（默认） | 所有 agent 创建的窗格，无论由哪个会话创建，包括孤立窗格 |
 | `"session"` | 只有发起调用的会话创建的窗格；其他会话的窗格以 `out_of_scope` 拒绝，且不出现在 `list_panes` 中 |
 
-窗格比它的会话存活得更久。在 `"session"` 下，孤立窗格在你关闭它之前不能被任何 agent 控制或读取：
-重新连接的桥接程序是一个新会话，不会重新获得它，因为 `self_pane_id` 不是凭据。`"any"` 范围不受
-影响。
+窗格比它的会话存活得更久。在 `"session"` 下，孤立窗格在被认领或被你关闭之前不能被任何 agent 控制
+或读取：重新连接的桥接程序是一个新会话，不会自动重新获得它，因为 `self_pane_id` 不是凭据。`"any"`
+范围不受影响。
+
+要取回自己的窗格，agent 需保存其会话的**恢复令牌**：`session_token` 返回它，`create_pane` 也以
+`resume_token` 再次给出。重新连接后，agent 调用 `claim_panes`，以该令牌作为 `resume_token`，以新会话
+自己的令牌（来自 `session_token`）作为 `own_token`。事件循环在一步之内把旧会话创建的所有窗格转给新
+会话，并删除旧令牌；此后被认领的窗格只由新会话的令牌覆盖。认领需要开启 `control`；READONLY 不会拒绝
+它，因为只转移归属，之后的每次写入仍会被拒绝。旧会话仍在连接或仍在完成某个调用时，以 `session_live`
+拒绝；令牌错误或已用过，或 `own_token` 错误时，以 `not_found` 拒绝，且两者没有区别。回复丢失的认领
+也已转移了窗格：它们会列为 `you`，之后的会话可用认领者的令牌认领它们。
+
+该令牌是持有即可使用的秘密，只保存在 SonicTerm 的内存中，从不写入日志：任何持有它的人（包括记录
+agent 对话的任何东西）都能用它认领，其能力与以你的身份运行的进程相同。没有令牌的会话（操作系统随机源
+失败）从 `session_token` 得到 `unavailable`，其窗格无法被认领。更改 `control`、`read`、`isolation` 或
+`create_anchor` 的重新加载，或服务器停止，会丢弃所有已断开会话的令牌，因此在 `"session"` 下它们的窗格
+将无法被认领；同时为每个仍在连接的会话发放新令牌：任何 `revoked` 结果之后都应重新读取
+`session_token`。只更改 `max_connections` 的重新加载保留所有令牌。已断开会话不再拥有任何窗格后，其
+令牌即被遗忘。
 
 `[mcp] create_anchor` 决定在 `control = "agent"` 下 `create_pane` 可以在哪些窗格旁打开辅助窗格。
 `"any"`（默认）表示所有窗格，因为辅助窗格从不向其锚点输入；`"agent"` 只允许该会话可控制的窗格，
@@ -179,6 +195,8 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 | `send_keys` | 发送具名按键（`Enter`、`Tab`、`Escape`、方向键、`Home`、`End`、`PageUp`、`PageDown`、`F1`–`F12`、单个字符），每个可加 `Ctrl+`、`Alt+` 或 `Shift+` 前缀，并按窗格的键盘模式编码。至多 64 个键；有一个未知名称则什么都不发送。与 `send_text` 一样报告 `delivery`。 |
 | `run_command` | 在窗格的 shell 提示符处运行一条命令并等待结束，返回其输出和 shell 报告的退出码（`completed`，`exit_verified` 表示 SonicTerm 自己的 shell 集成是否为其担保）；若 shell 未运行任何命令就结束了该提示符则返回 `not_started`，若在其输出开始前有他人输入则返回 `interfered`，记录被淘汰或 shell 退出则返回 `lost`，窗格先被关闭则返回 `pane_closed`，超时（默认 60 s，至多 600 s）则返回 `running`。 |
 | `close_pane` | 关闭一个窗格；标签页的唯一窗格会关闭该标签页。主窗口的最后一个标签页永不关闭。 |
+| `session_token` | 返回本会话的恢复令牌；见上文“Agent 会话”一节。 |
+| `claim_panes` | 给定已断开会话的 `resume_token` 和本会话自己的 `own_token`，把该会话的窗格转给本会话；报告转移了多少个。 |
 
 `run_command` 需要 shell 集成：shell 必须用 OSC 133 `A`、`B`、`C`、`D` 标记提示符，WezTerm、
 iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有输入的文本、输入队列不为空，或上一条

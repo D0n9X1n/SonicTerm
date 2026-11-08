@@ -351,6 +351,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     // The MCP server's list of sleeping waits' pane signals: weak pointers, never a parser.
     ("app/mcp.rs", "waiters", 4),
     ("app/mcp/agents.rs", "live", 3),
+    // The resume-token registry: session records, never a parser.
+    ("app/mcp/claims.rs", "records", 7),
     // A test's replacement recheck interval, read once per `wait_for`.
     ("app/mcp/tools_read.rs", "recheck_override", 1),
     ("app/os_drag.rs", "snapshots", 6),

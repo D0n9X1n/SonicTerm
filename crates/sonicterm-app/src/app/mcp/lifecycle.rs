@@ -167,6 +167,11 @@ impl App {
     /// so the figure lags by at most one interval, like every other charge.
     // Ordering: connections Acquire reads the live count; it is a sampled gauge.
     pub(crate) fn charge_mcp_connections(&mut self) {
+        if let Some(shared) =
+            self.services.mcp_server.as_ref().map(|server| Arc::clone(&server.shared))
+        {
+            self.prune_resume_tokens(&shared.sessions.tokens);
+        }
         let Some(server) = self.services.mcp_server.as_mut() else {
             // When: no `mcp_server` runs, there is nothing to charge.
             return;
@@ -253,6 +258,9 @@ impl App {
                 self.mcp_run_start(access, *pane_id, command)
             }
             LoopCall::ClosePane { pane_id } => self.mcp_close_pane(access, *pane_id),
+            LoopCall::ClaimPanes { resume, own } => {
+                self.mcp_claim_panes(&shared.sessions.tokens, access, resume, own)
+            }
             LoopCall::ResolvePane { pane_id } => match self.mcp_resolve_pane(*pane_id) {
                 Some(entry) if readable(&entry) => LoopReply::Pane(entry),
                 Some(_) => LoopReply::Refused(

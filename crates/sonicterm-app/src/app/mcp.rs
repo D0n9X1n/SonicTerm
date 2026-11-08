@@ -24,6 +24,8 @@ use super::UserEvent;
 
 #[path = "mcp/agents.rs"]
 pub(crate) mod agents;
+#[path = "mcp/claims.rs"]
+pub(crate) mod claims;
 #[path = "mcp/control_loop.rs"]
 pub(crate) mod control_loop;
 #[cfg(unix)]
@@ -127,6 +129,13 @@ pub(crate) enum LoopCall {
         /// The pane to close.
         pane_id: u64,
     },
+    /// Move a closed session's panes to the caller.
+    ClaimPanes {
+        /// The closed session's token.
+        resume: claims::ResumeToken,
+        /// The caller's own token, proving it received it.
+        own: claims::ResumeToken,
+    },
 }
 
 /// Where a pane sits in the UI, which only `list_panes` reports. Computing it orders every
@@ -184,6 +193,8 @@ pub(crate) enum LoopReply {
     RunStarted(Box<run::RunStarted>),
     /// [`LoopCall::ClosePane`] closed the pane.
     Closed,
+    /// [`LoopCall::ClaimPanes`] moved this many panes.
+    Claimed(usize),
 }
 
 /// A request waiting in the inbox.
@@ -330,6 +341,7 @@ impl McpShared {
     pub(crate) fn set_read(&self, read: McpRead) {
         self.read_agent_only.store(read == McpRead::Agent, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.sessions.tokens.reissue();
         self.wake_waiters();
     }
 
@@ -348,6 +360,7 @@ impl McpShared {
     pub(crate) fn set_agent_scope(&self, isolation: McpIsolation, anchor: McpCreateAnchor) {
         self.agent_scope.store(agent_scope_code(isolation, anchor), Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.sessions.tokens.reissue();
         self.wake_waiters();
     }
 
@@ -368,6 +381,7 @@ impl McpShared {
     pub(crate) fn set_control(&self, control: McpControl) {
         self.control.store(control_code(control), Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.sessions.tokens.reissue();
         self.wake_waiters();
     }
 
@@ -376,6 +390,7 @@ impl McpShared {
     pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.sessions.tokens.reissue();
         self.wake_waiters();
     }
 
@@ -621,7 +636,7 @@ pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> 
     }
     // The session starts before the first call is admitted and ends with the connection, so a
     // pane it created reads as orphaned from the moment the client is gone.
-    let session = shared.sessions.open();
+    let session = shared.sessions.open_connection(Some(Arc::clone(&in_flight)));
     let calls = CallSlot { queue: calls, in_flight, closed: Arc::clone(&closed), session };
     read_loop(&shared, transport.reader, &writer, &caller, &calls, &closed);
     close_connection(&shared, &closed);
@@ -947,36 +962,13 @@ pub(crate) fn start_listener(shared: &Arc<McpShared>) -> std::io::Result<(String
     }
 }
 
-/// A resolved pane over a fresh parser with `scrollback` lines of history, as the loop hands one
-/// to a connection.
 #[cfg(test)]
-pub(crate) fn test_entry(cols: u16, rows: u16, scrollback: usize) -> PaneEntry {
-    let mut grid = sonicterm_grid::grid::Grid::new(cols, rows);
-    grid.set_scrollback_limit(scrollback);
-    PaneEntry {
-        pane_id: 7,
-        metadata: None,
-        creator: agents::PaneOwner::User,
-        parser: Arc::new(Mutex::new(Parser::new_with_staging_pool(
-            grid,
-            None,
-            sonicterm_vt::vt::CaptureStagingPool::new(),
-        ))),
-        output_generation: Arc::new(AtomicU64::new(0)),
-        exit_status: Arc::new(OnceLock::new()),
-        change_signal: Arc::default(),
-        run_typed_at: Arc::new(AtomicU64::new(0)),
-        agent_run: Arc::new(AtomicBool::new(false)),
-    }
-}
-
-/// Lines of a `BufRead`, used by the Unix endpoint tests to read replies.
+#[path = "mcp_test_support.rs"]
+mod mcp_test_support;
 #[cfg(all(test, unix))]
-pub(crate) fn read_reply_line(reader: &mut impl std::io::BufRead) -> Option<Value> {
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    serde_json::from_str(line.trim_end()).ok()
-}
+pub(crate) use mcp_test_support::read_reply_line;
+#[cfg(test)]
+pub(crate) use mcp_test_support::test_entry;
 
 #[cfg(test)]
 #[path = "mcp_tests.rs"]

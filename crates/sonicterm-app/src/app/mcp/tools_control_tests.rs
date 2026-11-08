@@ -17,7 +17,8 @@ fn scope(shared: &McpShared) -> CallScope {
     CallScope::admit(shared, &Arc::new(AtomicBool::new(false)))
 }
 
-/// Every control tool is listed; creating is not destructive, the others are.
+/// Every control tool is listed; creating, reading the token and claiming are not destructive,
+/// the others are.
 #[test]
 fn the_tool_list_marks_destructive_tools() {
     let tools = control_tools();
@@ -25,7 +26,9 @@ fn the_tool_list_marks_destructive_tools() {
         let tool = tools.iter().find(|tool| tool["name"] == name).expect(name);
         tool["annotations"]["destructiveHint"].as_bool()
     };
-    assert_eq!(hint("create_pane"), Some(false));
+    for name in ["create_pane", "session_token", "claim_panes"] {
+        assert_eq!(hint(name), Some(false), "{name}");
+    }
     for name in ["send_text", "send_keys", "run_command", "close_pane"] {
         assert_eq!(hint(name), Some(true), "{name}");
     }
