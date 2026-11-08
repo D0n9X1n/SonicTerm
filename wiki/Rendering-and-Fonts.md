@@ -974,7 +974,7 @@ compile until it has a class.
 
 | Class | Fields | Damage |
 | --- | --- | --- |
-| cursor | `cursor_visible`, `cursor_shape`, `cursor_blink_off`, `cursor_cell`, `cursor_glide` | the old and new drawn-cursor rows, ink-padded, plus the last presented cursor recolor bounds; while a glide is drawn, the previous and current sampled cursor positions each damage the ink-padded rows their cell box crosses (a sample between two rows damages both), at the pane's full width; the cursor moves no content, so these are rows on the alternate screen too |
+| cursor | `cursor_visible`, `cursor_shape`, `cursor_blink_off`, `cursor_cell`, `cursor_glide` | the old and new drawn-cursor rows, ink-padded, plus the last presented cursor recolor bounds; while a glide is drawn, the previous and current sampled cursor positions each damage the ink-padded rows their cell box crosses (a sample between two rows damages both), at the pane's full width; the cursor class moves no content, so these are rows on the alternate screen too, while the grid rows a cursor move dirties still damage that whole pane |
 | focus | `window_focused` | the cursor damage and the tab band |
 | tab band | `tab_hash`, `hover_tab`, `close_override`, `process_privileged` | the tab band, padded upward by one native font-cell height, plus the last presented and the current tab-title glyph ink; nothing while the bar is hidden |
 | selection | `selection` | the active pane's rows whose selection quads differ |
@@ -1008,7 +1008,9 @@ Some changes stay whole-surface or whole-pane:
   scrolled back;
 - a class change on an alternate-screen pane damages that whole pane, except a cursor or
   focus change, which moves no content and damages only the cursor's rows as on the
-  primary screen;
+  primary screen. A cursor move also dirties its old and new grid rows, and any dirty
+  row damages the whole alternate-screen pane, so the frame of the move does; the glide
+  frames that follow it do not;
 - the degraded path repaints the whole surface for any class change, and the
   first frame is the whole surface.
 

@@ -42,13 +42,20 @@ fn glide_steps(
     let start = Instant::now();
     renderer.__pin_glide_clock(Some(start));
     baseline(renderer, layout, scene)?;
+    let alternate = scene.grid.is_alt();
     for (step, target, offset_ms, gliding) in steps {
         let name = format!("{case}: {step}");
         renderer.__pin_glide_clock(Some(start + Duration::from_millis(*offset_ms)));
+        // Only a step that moves the cursor writes the grid, as a program's cursor move does.
+        let moved = target
+            .is_some_and(|(row, col)| (scene.grid.cursor.row, scene.grid.cursor.col) != (row, col));
         match target {
             Some((row, col)) => {
                 scene.cursor_visible = true;
-                scene.grid.goto(*row, *col);
+                if moved {
+                    // When: the target differs from the cursor's cell, the move marks both rows.
+                    scene.grid.goto(*row, *col);
+                }
             }
             None => scene.cursor_visible = false,
         }
@@ -58,9 +65,14 @@ fn glide_steps(
             renderer.cursor_gliding() == *gliding,
             &format!("{name}: the cursor {} mid-glide", if *gliding { "is" } else { "is not" }),
         )?;
+        if alternate && moved {
+            // When: the step moves the cursor on the alternate screen, the move's dirty rows
+            // damage the whole pane by the content rule; the glide frames after it are narrow.
+            continue;
+        }
         // The previous and current samples cross at most four rows, plus each strip's ink pad of
-        // about one font height: well under half of this pane, which whole-pane damage, the
-        // behaviour this narrows, would cover entirely.
+        // about one font height: well under half of this pane, which whole-pane damage would
+        // cover entirely.
         check(
             damage.damage.h < layout.pane.h / 2,
             &format!("{name}: damage {:?} spans only the glide's rows", damage.damage),
@@ -72,8 +84,8 @@ fn glide_steps(
 
 /// Test 9: a smooth cursor glide's frames, mid-way, landing and cancelled mid-way, on the primary
 /// and the alternate screen, for every cursor shape and onto a wide cell, at a fractional cell
-/// height: each frame glides when it should, damages only the glide's rows, and equals a full
-/// repaint. A preedit or any other overlay disables the glide and repaints the whole surface
+/// height: each frame glides when it should and equals a full repaint, and every frame damages
+/// only the glide's rows except, on the alternate screen, the one whose cursor move dirtied rows. A preedit or any other overlay disables the glide and repaints the whole surface
 /// (`overlay_active` in `core_assemble.rs`), so it needs no narrow case.
 pub(super) fn glide_parity(renderer: &mut GpuRenderer, layout: &Layout) -> Result<(), String> {
     // The compressed pitch makes the cell height fractional, so samples land between pixel rows.
