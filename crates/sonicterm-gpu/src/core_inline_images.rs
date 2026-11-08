@@ -136,21 +136,14 @@ pub(super) fn emit_inline_image_instances_with(
             glyph_id: fold_u64_to_u32(image.id),
             raster_variant: GlyphRasterVariant::Normal,
         };
-        let Some(info) =
-            image_atlas.get_or_insert_lazy_without_eviction(key, image.width, image.height, || {
-                sonicterm_text::glyph_atlas::RasterTile {
-                    width: image.width,
-                    height: image.height,
-                    offset_x: 0,
-                    offset_y: 0,
-                    advance: image.width as f32,
-                    coverage: image.bgra.as_ref().to_vec(),
-                    is_color: true,
-                    is_subpixel: false,
-                }
-            })
-        else {
-            // When: `get_or_insert_lazy_without_eviction` is None — the image
+        // The image's shared pixels are copied once, straight into the atlas.
+        let Some(info) = image_atlas.get_or_insert_color_pixels_without_eviction(
+            key,
+            image.width,
+            image.height,
+            &image.bgra,
+        ) else {
+            // When: `get_or_insert_color_pixels_without_eviction` is None — the image
             // does not fit the bounded atlas; older ones are dropped first.
             skipped += 1;
             continue;
