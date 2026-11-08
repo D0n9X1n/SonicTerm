@@ -17,6 +17,17 @@ fn the_dock_badge_names_each_state() {
     assert_eq!(badge_text(None), None, "a clear empties the badge");
 }
 
+/// A normal report at 0%, which programs send when they start (and `9;4;1` with no percent parses
+/// to), leaves the Dock badge cleared instead of a red `0%`; one percent shows, and the other
+/// states keep their glyph at 0%.
+#[test]
+fn a_normal_report_at_zero_shows_no_badge() {
+    assert_eq!(badge_text(report(ProgressState::Normal, 0)), None);
+    assert_eq!(badge_text(report(ProgressState::Normal, 1)).as_deref(), Some("1%"));
+    assert_eq!(badge_text(report(ProgressState::Error, 0)).as_deref(), Some("!"));
+    assert_eq!(badge_text(report(ProgressState::Paused, 0)).as_deref(), Some("‖"));
+}
+
 #[test]
 fn launcher_values_hide_the_bar_without_a_fraction() {
     // An error is urgent; indeterminate and cleared reports hide the bar instead of showing 0%.

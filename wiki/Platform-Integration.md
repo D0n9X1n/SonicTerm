@@ -505,7 +505,7 @@ unchanged.
 | Platform | Surface | Scope | Shows |
 | --- | --- | --- | --- |
 | Windows | `ITaskbarList3` taskbar button | Per window: each window's focused pane of its active tab | normal, error (red), indeterminate, paused (yellow), none |
-| macOS | `NSDockTile` badge | App-wide | `56%`, `!` for error, `…` indeterminate, `‖` paused; text only, since AppKit has no Dock bar without a custom tile view |
+| macOS | `NSDockTile` badge | App-wide | `56%`, `!` for error, `…` indeterminate, `‖` paused; a normal report at 0% shows no badge, since programs start there and a `0%` badge reads as an alert; text only, since AppKit has no Dock bar without a custom tile view |
 | Linux | `com.canonical.Unity.LauncherEntry.Update` for `application://com.d0n9x1n.SonicTerm.desktop` | App-wide | `progress`, `progress-visible`, `urgent` for error; indeterminate hides the bar. Docks that implement it show it (KDE Plasma, Dash to Dock, Ubuntu Dock); with no listener it has no visible effect |
 
 On the two app-wide surfaces the shown value is the most recently updated

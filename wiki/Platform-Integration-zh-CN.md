@@ -397,7 +397,7 @@ Orca 通过 D-Bus 上的 AT-SPI 访问每个终端窗口的 accesskit 适配器�
 | 平台 | 显示位置 | 范围 | 显示内容 |
 | --- | --- | --- | --- |
 | Windows | `ITaskbarList3` 任务栏按钮 | 每个窗口：该窗口活动标签页中获得焦点的窗格 | 正常、错误（红色）、不确定、暂停（黄色）、无 |
-| macOS | `NSDockTile` 徽标 | 整个应用 | `56%`、错误为 `!`、不确定为 `…`、暂停为 `‖`；只有文字，因为 AppKit 没有自定义图块视图就无法显示程序坞进度条 |
+| macOS | `NSDockTile` 徽标 | 整个应用 | `56%`、错误为 `!`、不确定为 `…`、暂停为 `‖`；进度为 0% 的普通报告不显示徽标，因为程序从 0% 开始，`0%` 徽标看起来像警示；只有文字，因为 AppKit 没有自定义图块视图就无法显示程序坞进度条 |
 | Linux | 针对 `application://com.d0n9x1n.SonicTerm.desktop` 的 `com.canonical.Unity.LauncherEntry.Update` | 整个应用 | `progress`、`progress-visible`，错误时 `urgent`；不确定时隐藏进度条。实现了它的程序坞会显示（KDE Plasma、Dash to Dock、Ubuntu Dock）；没有监听者时没有可见效果 |
 
 在两个整个应用范围的位置上，显示的是任意终端窗口中任意窗格最近更新的有效报告。
