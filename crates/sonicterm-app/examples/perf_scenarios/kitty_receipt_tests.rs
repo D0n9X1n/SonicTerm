@@ -1,5 +1,5 @@
 //! The kitty receipt counts what the pane holds, and the fixture's own bytes produce the `print`
-//! receipt on the smallest window the macOS runner gives.
+//! and `cap` receipts on the smallest grid the scenario must fit.
 
 use sonicterm_grid::grid::Grid;
 use sonicterm_render_model::KittyTag;
@@ -7,7 +7,7 @@ use sonicterm_vt::vt::{CaptureStagingPool, KittyAction, KittyCommand, Parser, Vt
 
 use super::*;
 
-/// The grid the macOS runner gives this scenario, read from PR CI's comparison table.
+/// Columns of the smallest grid the scenario must fit: a macOS host can clamp its window to it.
 const RUNNER_COLS: u16 = 125;
 /// Rows of that grid.
 const RUNNER_ROWS: u16 = 30;
@@ -85,10 +85,10 @@ fn grid_receipt(parser: &Parser, images: &[InlineImage], phase: &str) -> KittyRe
 }
 
 #[test]
-fn the_print_fixture_holds_its_receipt_on_the_smallest_runner_window() {
-    // The macOS runner gives this scenario a 125x30 grid: with the READY line above the fixture and
-    // the sentinel and a prompt below it, every one of the 512 runs must still be visible and name a
-    // placement the pane holds. A 32-row layout lost four rows there (448 runs).
+fn the_print_fixture_holds_its_receipt_on_the_smallest_grid() {
+    // On a 125x30 grid, with the READY line above the fixture and the sentinel and a prompt below
+    // it, every one of the 512 runs must still be visible and name a placement the pane holds; rows
+    // scrolled off the top would leave fewer runs to resolve.
     let mut bytes = b"READY 0\n".to_vec();
     bytes.extend(crate::workload::kitty_placeholders());
     bytes.extend_from_slice(b"PERF_DONE 0 0000000000000000\n$ ");
@@ -111,7 +111,7 @@ fn the_cap_command_fills_the_cap_and_one_is_refused() {
     }
     bytes.extend_from_slice(b"\x1b_Ga=p,U=1,i=1,p=9,q=2\x1b\\");
     // The sentinel, the prompt with the typed characters, the `cap` command line as the shell echoes
-    // it, and a new prompt follow the rows on screen, as they do on the runner.
+    // it, and a new prompt follow the rows on screen, as they do in a run.
     let line = match crate::scenarios::KITTY_CAP_STEPS[0].text {
         crate::scenarios::CommitText::Literal(line) => line.trim_start_matches('\u{15}').trim_end(),
         crate::scenarios::CommitText::Repeat(..) => panic!("the cap step is a literal line"),

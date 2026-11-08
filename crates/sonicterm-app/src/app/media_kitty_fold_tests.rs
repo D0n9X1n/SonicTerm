@@ -1,6 +1,6 @@
-//! Pins #1861's folded kitty scans: every operation answers and removes exactly what the code
-//! before the fold did, over seeded random command sequences, and a placement at the cap reads the
-//! store in fewer passes.
+//! The folded kitty store scans: every operation answers and removes exactly what the per-question
+//! scans in `media_kitty_reference.rs` do, over seeded random command sequences, and a placement at
+//! the cap reads the store at most twice.
 
 use std::sync::Arc;
 
@@ -89,8 +89,8 @@ fn the_folded_operations_match_the_pre_fold_ones() {
     }
 }
 
-/// At the placement cap, a refused placement and one that replaces its own both answer as before;
-/// the cap boundary is where the folded count and the old count could first disagree.
+/// At the placement cap, a refused placement and one that replaces its own both answer as the
+/// reference does; the cap boundary is where a folded count and a separate count could disagree.
 #[test]
 fn the_cap_boundary_answers_as_before() {
     let mut folded = Vec::new();
@@ -112,7 +112,7 @@ fn the_cap_boundary_answers_as_before() {
 }
 
 /// Anonymous (id 0) displayed transmits fill the cap and are never counted as replacing each other,
-/// so the next one is refused, exactly as before the fold.
+/// so the next one is refused, as the reference refuses it.
 #[test]
 fn anonymous_transmits_at_the_cap_are_refused_as_before() {
     let mut folded = Vec::new();

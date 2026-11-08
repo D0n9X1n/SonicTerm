@@ -36,8 +36,8 @@ fn placements(images: &[sonicterm_render_model::InlineImage]) -> Vec<InlineImage
         .collect()
 }
 
-/// The emission before the scratch reuse, kept verbatim as the oracle: reference sorting by id
-/// alone and freshly allocated buffers.
+/// The emission with fresh buffers and an allocation order sorted by id alone, the oracle the
+/// scratch-reusing emission must match draw for draw.
 fn reference_emit(
     image_atlas: &mut GlyphAtlas,
     out: &mut Vec<ImageInstance>,
@@ -119,7 +119,7 @@ fn steady_frames_reuse_the_sort_buffers_and_draw_as_before() {
     // Contract: after a completed or an incomplete pass, the next frame sorts in the same two
     // allocations, each buffer keeps the frame's use as its length (the scratch's release rule
     // reads it, and a drained buffer is a freed one whose address the allocator may hand back),
-    // and every frame's draws and skip count equal the old emission's. The 8x8 atlas
+    // and every frame's draws and skip count equal the oracle's. The 8x8 atlas
     // holds 16 tiles of 2x2, fewer than the 40 distinct ids, so newest-first residency and the
     // skip count are exercised too.
     let images = images(60);

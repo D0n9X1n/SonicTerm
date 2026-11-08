@@ -61,9 +61,9 @@ const IMAGE_BYTES: usize = (SIDE_PX * SIDE_PX * 4) as usize;
 
 #[test]
 fn a_first_image_insert_does_not_copy_the_image_on_the_heap() {
-    // A first 1024x1024 image show used to clone its 4 MiB of pixels into a tile before the atlas
-    // copied them. The borrowed insert allocates only bookkeeping (the entry and its dirty rect),
-    // far below one image; the owned-tile path, measured the same way, allocates the whole image.
+    // The borrowed insert copies the image's pixels straight into the atlas, allocating only
+    // bookkeeping (the entry and its dirty rect), far below one image; the owned-tile path,
+    // counted the same way, allocates the whole image for its tile first.
     let pixels = vec![0x5a_u8; IMAGE_BYTES];
     let mut borrowed = GlyphAtlas::new(2048, 2048);
     let borrowed_bytes = allocated_during(|| {

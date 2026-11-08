@@ -1,4 +1,4 @@
-//! Pins #1859's media figure reuse: a frame whose panes all keep their media revisions reuses the
+//! Media figure reuse: a frame whose panes all keep their media revisions reuses the
 //! previous figures without walking any image, and any change of revision, pane set, pane order or
 //! an untracked (0) revision recomputes them, giving the same figures a fresh walk gives.
 

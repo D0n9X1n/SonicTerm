@@ -1,5 +1,6 @@
-//! The store operations exactly as they were before their scans were folded, kept only as the
-//! differential oracle `media_kitty_fold_tests.rs` compares the folded operations against.
+//! The store operations written as one scan per question (count, find, any), the simplest form
+//! of their contract: the differential oracle `media_kitty_fold_tests.rs` checks the folded
+//! operations against.
 
 use sonicterm_render_model::{InlineImage, KittyShow, KittyTag};
 use sonicterm_vt::vt::{KittyCommand, KittyDelete};

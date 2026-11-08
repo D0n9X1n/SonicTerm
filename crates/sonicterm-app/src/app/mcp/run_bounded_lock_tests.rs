@@ -71,9 +71,9 @@ impl Drop for HeldParser {
     }
 }
 
-/// How long a refusal may take on a loaded CI runner. The code waits `PARSER_WAIT` (5 ms); a
-/// macOS runner running the whole suite measured 53 to 70 ms of scheduling delay. A blocking
-/// lock would instead wait until the test drops its holder, which it does only after the assert.
+/// How long a refusal may take. The code waits `PARSER_WAIT` (5 ms); the rest is scheduling delay
+/// on a host loaded by the whole suite, so the bound is generous. A blocking lock would instead
+/// wait until the test drops its holder, which it does only after the assert, so it still fails.
 const REFUSAL_BOUND: Duration = Duration::from_millis(500);
 
 /// A held parser makes the start return `parser_busy`, distinct from `busy`, after its bounded

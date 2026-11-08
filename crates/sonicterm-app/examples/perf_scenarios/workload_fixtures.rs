@@ -310,7 +310,7 @@ pub(crate) const KITTY_DRAWN_PLACEMENTS: u32 = 512;
 /// The pane's placement cap, which the `cap` phase fills before one more placement is refused.
 pub(crate) const KITTY_PLACEMENT_CAP: u32 = 1_024;
 /// Placeholder runs per row, each four cells wide and one space apart: 119 columns over 22 rows.
-/// The macOS runner gives this scenario a 125x30 grid (measured in PR CI), so the rows, the READY
+/// A macOS host can clamp the scenario's window to 125x30 cells; at that size the rows, the READY
 /// line above them, the sentinel, the prompt and the `cap` phase's command line all stay visible.
 pub(super) const KITTY_RUNS_PER_ROW: u32 = 24;
 

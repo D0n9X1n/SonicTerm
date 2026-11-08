@@ -1,5 +1,5 @@
-//! Pins #1858's placeholder index: it resolves every `(image, placement)` exactly as the old scan
-//! did, duplicates and placement 0 included, and a frame visits each image once rather than once
+//! The placeholder index resolves every `(image, placement)` exactly as the `find_virtual` scan
+//! does, duplicates and placement 0 included, and a frame visits each image once rather than once
 //! per run.
 
 use std::sync::Arc;
@@ -111,7 +111,7 @@ fn a_frame_visits_each_image_once_not_once_per_run() {
     // Only the rows the fitted image covers draw; every one of the 64 runs is still resolved.
     assert!(!slices.is_empty(), "the runs resolve to the virtual placement");
     assert!(visited <= images.len(), "{visited} visits for {} images", images.len());
-    // The scan visits every image once per run, which this index replaced.
+    // The scan, by contrast, visits every image once per run.
     LOOKUP_VISITS.with(|visits| visits.set(0));
     for _ in 0..64 {
         find_virtual(&images, 7, 0);
