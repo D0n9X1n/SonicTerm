@@ -107,6 +107,7 @@ pub(super) fn partial_result(status: Status) -> RunResult {
             frame_counters: None,
             updates: None,
             s10_attribution: None,
+            kitty_receipt: None,
             guard_correlation: None,
             guard_correlation_transport_ns: None,
         }],
@@ -272,6 +273,7 @@ pub(super) fn measured_result() -> RunResult {
         frame_counters: None,
         updates: None,
         s10_attribution: None,
+        kitty_receipt: None,
         guard_correlation: None,
         guard_correlation_transport_ns: None,
     });

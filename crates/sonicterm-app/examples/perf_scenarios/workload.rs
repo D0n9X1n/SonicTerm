@@ -566,8 +566,12 @@ mod fixtures;
 #[cfg(any(windows, test))]
 mod native;
 #[cfg(test)]
+pub(crate) use fixtures::kitty_placeholders;
+#[cfg(test)]
 use fixtures::*;
 pub(crate) use fixtures::{fixtures, FixtureBody, FixtureFile, SeededRng};
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) use fixtures::{KITTY_DRAWN_PLACEMENTS, KITTY_IMAGES, KITTY_PLACEMENT_CAP};
 #[cfg(test)]
 use native::ProgramHost;
 #[cfg(windows)]

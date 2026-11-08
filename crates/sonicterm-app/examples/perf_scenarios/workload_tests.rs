@@ -307,8 +307,8 @@ pub(super) const FIXTURE_PINS: &[(&str, &str)] = &[
     ("image.sixel 377", "5811aa986380a75e770fa445490d45057bf949b5d52d6108995a05d0b7c7c0f0"),
     ("inline.osc 461289", "06c2d2935c10dfc293a38ec38149c97a1e97c90501694c5e75cb14d904476f2c"),
     (
-        "kitty-placeholders.apc 112796",
-        "bb1278893dd30eeaf10b9184a65924b0eaf3df8f767e4fd0ab84edceb9543cb5",
+        "kitty-placeholders.apc 99892",
+        "80a89706ad5d2359fff63738617a254dfdb87a4a8cc9e21115fbbbd9f287847c",
     ),
     (
         "linked-history.txt 1443893",

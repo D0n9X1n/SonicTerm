@@ -360,8 +360,13 @@ impl Probe {
         if matches!(&self.driver, DriverState::Drag(drag) if drag.pressed) {
             self.button(event_loop, ElementState::Released);
         }
-        if let Some(reason) = self.park_problem(phase).or_else(|| self.status_line_problem(phase)) {
-            // When: a parked phase measured nothing, or a status-line phase broke the strip's idle contract.
+        let problem = self
+            .park_problem(phase)
+            .or_else(|| self.status_line_problem(phase))
+            .or_else(|| self.kitty_problem(phase));
+        if let Some(reason) = problem {
+            // When: a parked phase measured nothing, a status-line phase broke the strip's idle
+            // contract, or the kitty workload's pane did not hold what its plan put there.
             self.finalize_phase(phase);
             self.invalidate(event_loop, reason);
             return;

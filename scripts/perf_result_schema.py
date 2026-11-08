@@ -97,6 +97,8 @@ def _atlas_reading_ok(reading: object) -> bool:
 # The longest dispatches a phase records with their times; a harness that predates them records none.
 SLOW_DISPATCH_LIMIT = 64
 SLOW_DISPATCH_KEYS = ("start_unix_s", "end_unix_s", "ms")
+# The counts a kitty receipt holds.
+KITTY_RECEIPT_KEYS = ("images", "placements", "runs")
 # Each phase field's check; a field the result leaves out is a metric the harness does not have.
 _PHASE_FIELDS = {
     "cpu_user_s": perf_latency_schema._is_number, "cpu_system_s": perf_latency_schema._is_number, "presented_frames": perf_latency_schema._is_int,
@@ -110,6 +112,10 @@ _PHASE_FIELDS = {
     "dispatch_count": lambda value: perf_latency_schema._is_int(value) and value >= 0,
     # The logical updates S10's stream phase played; a harness older than the field leaves it out.
     "updates": lambda value: perf_latency_schema._is_int(value) and value > 0,
+    # S11/kitty-placeholders' receipt at the end of `print` and `cap`: the images, placements and
+    # resolved runs its pane held; the harness invalidates a run whose receipt is not the plan's.
+    "kitty_receipt": lambda value: isinstance(value, dict) and set(value) == set(KITTY_RECEIPT_KEYS)
+    and all(perf_latency_schema._is_int(value[key]) and value[key] >= 0 for key in KITTY_RECEIPT_KEYS),
     # The guard-correlation transport and its own time; a harness older than them leaves both out.
     "guard_correlation": lambda value: perf_guard_schema._guard_field_ok(value),
     "guard_correlation_transport_ns": lambda value: perf_latency_schema._is_int(value) and value >= 0,

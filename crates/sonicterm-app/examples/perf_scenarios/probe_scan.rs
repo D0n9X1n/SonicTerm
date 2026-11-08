@@ -283,8 +283,34 @@ impl Probe {
         let counters_end_at = self.guard_now();
         let mut record = meter.finish(counters_end, completion);
         record.s10_attribution = self.attribution.take();
+        record.kitty_receipt = self.kitty_receipt.take();
         self.phases.push(record);
         self.guard_window = Some((started, counters_end_at));
+    }
+}
+
+impl Probe {
+    /// Why S11/kitty-placeholders' `phase` ended with a pane other than its plan's: the receipt of
+    /// role 0's images and visible grid against [`crate::kitty_receipt::expected`]. The receipt is
+    /// kept for the phase's record either way; other plans and phases are not checked.
+    pub(super) fn kitty_problem(&mut self, phase: &PhaseSpec) -> Option<String> {
+        if (self.plan.scenario, self.plan.variant) != ("S11", "kitty-placeholders") {
+            // When: the plan is not S11/kitty-placeholders, it holds no kitty workload to check.
+            return None;
+        }
+        let expected = crate::kitty_receipt::expected(phase.name)?;
+        let pane = self.role_pane(0)?;
+        // Blocking reads at a phase boundary: the VT worker holds either lock only briefly. Lock
+        // order: parser, then image store, the order frame collection takes them in.
+        let parser = pane.parser.lock();
+        let images = pane.inline_images.lock();
+        let grid = parser.grid();
+        let got = crate::kitty_receipt::receipt(&images, (0..grid.rows).map(|row| grid.row(row)));
+        drop(images);
+        drop(parser);
+        self.kitty_receipt = Some(got);
+        (got != expected)
+            .then(|| format!("kitty receipt after {}: {got:?}, expected {expected:?}", phase.name))
     }
 }
 

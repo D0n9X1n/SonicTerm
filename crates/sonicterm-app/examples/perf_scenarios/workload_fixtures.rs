@@ -304,13 +304,14 @@ pub(super) fn image_burst(images: bool) -> Vec<u8> {
 }
 
 /// Images S11/kitty-placeholders transmits, the retained-buffer cap.
-pub(super) const KITTY_IMAGES: u32 = 128;
-/// Virtual placements its placeholder rows draw, and those it adds without cells to the cap.
-pub(super) const KITTY_DRAWN_PLACEMENTS: u32 = 512;
-/// The pane's placement cap, which the fixture fills before one more placement is refused.
-pub(super) const KITTY_PLACEMENT_CAP: u32 = 1_024;
-/// Placeholder runs per row, each four cells wide and one space apart.
-pub(super) const KITTY_RUNS_PER_ROW: u32 = 8;
+pub(crate) const KITTY_IMAGES: u32 = 128;
+/// Virtual placements its placeholder rows draw.
+pub(crate) const KITTY_DRAWN_PLACEMENTS: u32 = 512;
+/// The pane's placement cap, which the `cap` phase fills before one more placement is refused.
+pub(crate) const KITTY_PLACEMENT_CAP: u32 = 1_024;
+/// Placeholder runs per row, each four cells wide and one space apart: 79 columns, so every run
+/// is visible in an 80-column grid, and 32 rows, inside the macOS runner's 43-row window clamp.
+pub(super) const KITTY_RUNS_PER_ROW: u32 = 16;
 
 /// The kitty row/column diacritic for `value`.
 fn kitty_mark(value: u32) -> char {
@@ -323,10 +324,10 @@ fn kitty_mark(value: u32) -> char {
 }
 
 /// S11/kitty-placeholders: transmit 128 8x8 RGBA images (ids 1 to 128), place each virtually four
-/// times as a 4x1-cell box (placements 1 to 4), draw those 512 placements as placeholder runs, 8 to
-/// a row over 64 rows, then add placements 5 to 8 of every image without cells (the 1,024 cap) and
-/// one more the cap refuses. Every command is quiet (`q=2`), so the fixture prints only the rows.
-pub(super) fn kitty_placeholders() -> Vec<u8> {
+/// times as a 4x1-cell box (placements 1 to 4) and draw those 512 placements as placeholder runs,
+/// 16 to a row over 32 rows. Every command is quiet (`q=2`), so the fixture prints only the rows.
+/// The `cap` phase adds the rest of the placements through [`KITTY_CAP_COMMAND`].
+pub(crate) fn kitty_placeholders() -> Vec<u8> {
     use base64::Engine;
     let engine = base64::engine::general_purpose::STANDARD;
     let mut out = String::new();
@@ -358,17 +359,6 @@ pub(super) fn kitty_placeholders() -> Vec<u8> {
         }
         out.push_str("\x1b[39;59m");
         out.push(if (run + 1) % KITTY_RUNS_PER_ROW == 0 { '\n' } else { ' ' });
-    }
-    // The remaining placements reach the cap; the last is one past it, which the store refuses.
-    let total_per_image = KITTY_PLACEMENT_CAP / KITTY_IMAGES;
-    for placement_id in drawn_per_image + 1..=total_per_image + 1 {
-        for image_id in 1..=KITTY_IMAGES {
-            if placement_id > total_per_image && image_id > 1 {
-                // When: placement_id is past the cap, only one refused command is sent.
-                break;
-            }
-            out.push_str(&format!("\x1b_Ga=p,U=1,i={image_id},p={placement_id},q=2\x1b\\"));
-        }
     }
     out.into_bytes()
 }

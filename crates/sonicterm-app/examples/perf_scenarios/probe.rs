@@ -549,6 +549,8 @@ struct Probe {
     forced_delivery_problem: Option<String>,
     /// S10's attribution while its counted phase runs, taken into that phase's record when it ends.
     attribution: Option<attribution::Attribution>,
+    /// S11/kitty-placeholders' receipt for the phase ending now, taken into its record.
+    kitty_receipt: Option<crate::kitty_receipt::KittyReceipt>,
     role_panes: Vec<u64>,
     /// S6/rest: role 0's pane as the parked phase started, for its progress check.
     park_entry: Option<crate::record::ParkSnapshot>,

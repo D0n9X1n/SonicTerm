@@ -69,6 +69,19 @@ class ResultSchemaTests(unittest.TestCase):
             with self.subTest(overrides=overrides):
                 self.assertTrue(perf_result_schema.validate_result(valid_result(**overrides), perf_memory_tests.HARNESS_HASH, 0))
 
+    def test_a_kitty_receipt_holds_exactly_its_three_counts(self):
+        # S11/kitty-placeholders records each checked phase's images, placements and runs; a missing,
+        # extra, negative or non-integer count is a broken result, not a receipt.
+        phase = valid_result()["phases"][0]
+        good = dict(phase, kitty_receipt={"images": 128, "placements": 512, "runs": 512})
+        self.assertEqual(perf_result_schema.validate_result(valid_result(phases=[good]), perf_memory_tests.HARNESS_HASH, 0), [])
+        for receipt in ({"images": 128, "placements": 512}, {"images": 128, "placements": 512, "runs": -1},
+                        {"images": 128, "placements": 512, "runs": 1.5}, [128, 512, 512],
+                        {"images": 128, "placements": 512, "runs": 512, "extra": 0}):
+            with self.subTest(receipt=receipt):
+                broken = dict(phase, kitty_receipt=receipt)
+                self.assertTrue(perf_result_schema.validate_result(valid_result(phases=[broken]), perf_memory_tests.HARNESS_HASH, 0))
+
     def test_partial_result_with_null_fields_passes(self):
         # A timed-out or early result writes null for what it never measured; that is not a schema failure.
         latency = {"samples": [{"inject_unix_s": 2.0, "latency_ms": None, "reason": "no-candidate"},

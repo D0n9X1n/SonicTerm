@@ -71,8 +71,9 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     capped(
         // S11/burst and S11/burst-text time inline-image decoding against the same text alone; the
         // performance workflow runs them on macOS only for a release tag. S11/kitty-placeholders
-        // draws 512 kitty placeholder runs over 128 images, fills the 1,024-placement cap, then types
-        // under them, so each typing frame resolves every run; macOS only, two short runs a side.
+        // draws 512 kitty placeholder runs over 128 images, types under them, so each typing frame
+        // resolves every run, then fills the 1,024-placement cap in its own phase; macOS only, two
+        // short runs a side.
         spec(
             "S11",
             "inline image tab switch",
@@ -271,8 +272,8 @@ pub(crate) enum Fixture {
     ImageBurst,
     /// S11/burst-text: the same lines with no images, the burst's text-only baseline.
     ImageBurstText,
-    /// S11/kitty-placeholders: 128 kitty images, 512 virtual placements drawn by placeholder runs
-    /// over 64 rows, then 512 more placements to the 1,024 cap and one the cap refuses.
+    /// S11/kitty-placeholders: 128 kitty images and 512 virtual placements drawn by placeholder runs
+    /// over 32 rows.
     KittyPlaceholders,
 }
 
@@ -413,6 +414,17 @@ pub(crate) const PROGRAM_WINDOWS_STEPS: &[CommitStep] =
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) const GLYPHS_POSIX_STEPS: &[CommitStep] =
     &[CommitStep { after_ms: 0, text: CommitText::Literal("\u{15}printf '\\315\\270\\n'\r") }];
+
+/// S11/kitty-placeholders' `cap`: one shell line that adds placements 5 to 8 of every image (the
+/// pane's 1,024 cap with the 512 drawn ones) and then one past the cap, which the store refuses.
+/// Every command is quiet, so nothing is written back to the shell.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const KITTY_CAP_STEPS: &[CommitStep] = &[CommitStep {
+    after_ms: 0,
+    text: CommitText::Literal(
+        "\u{15}for i in {1..128}; do for p in 5 6 7 8; do printf '\\033_Ga=p,U=1,i=%d,p=%d,q=2\\033\\\\' $i $p; done; done; printf '\\033_Ga=p,U=1,i=1,p=9,q=2\\033\\\\'\r",
+    ),
+}];
 
 /// S1/status-line's `glyphs` on a Windows role: the character itself, which `cmd` echoes.
 #[cfg(any(target_os = "macos", windows, test))]

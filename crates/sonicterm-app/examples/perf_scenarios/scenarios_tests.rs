@@ -363,6 +363,7 @@ pub(super) const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S11/burst-text", "print", "transition", Some("sentinel-parsed")),
     ("S11/default", "idle", "hold", None),
     ("S11/default", "image", "transition", Some("image-registered-then-presented")),
+    ("S11/kitty-placeholders", "cap", "sustained", None),
     ("S11/kitty-placeholders", "idle", "hold", None),
     ("S11/kitty-placeholders", "print", "transition", Some("sentinel-parsed")),
     ("S11/kitty-placeholders", "typing", "sustained", None),

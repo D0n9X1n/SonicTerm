@@ -656,6 +656,10 @@ pub(crate) struct PhaseRecord {
     /// S10's per-present attribution for this phase; present only for a phase that plays counted updates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) s10_attribution: Option<crate::attribution::Attribution>,
+    /// S11/kitty-placeholders' receipt at the end of `print` and `cap`: the images, placements and
+    /// resolved runs the pane held. Absent for every other phase.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kitty_receipt: Option<crate::kitty_receipt::KittyReceipt>,
     /// The phase's guard-correlation transport, written once its endpoints are latched; absent when no
     /// transport ran (a killed run), which perf-compare reads as incomplete.
     #[serde(skip_serializing_if = "Option::is_none")]
