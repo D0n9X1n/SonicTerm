@@ -28,6 +28,8 @@ pub(crate) mod agents;
 pub(crate) mod claims;
 #[path = "mcp/control_loop.rs"]
 pub(crate) mod control_loop;
+#[path = "mcp/dispatch.rs"]
+pub(crate) mod dispatch;
 #[cfg(unix)]
 #[path = "mcp/endpoint_unix.rs"]
 pub(crate) mod endpoint_unix;
@@ -429,7 +431,7 @@ impl McpShared {
 
     /// Wake the event loop once for a burst of requests; `false` when the loop is gone.
     // Ordering: wake_pending AcqRel makes the swap the single point that decides who sends.
-    fn wake(&self) -> bool {
+    pub(crate) fn wake(&self) -> bool {
         if self.wake_pending.swap(true, Ordering::AcqRel) {
             // When: `wake_pending` was already set, a queued wake-up will drain this request too.
             return true;
@@ -494,11 +496,10 @@ impl McpShared {
         self.pending_notices.fetch_sub(1, Ordering::AcqRel);
     }
 
-    /// Take every queued request; the loop calls this when woken.
-    // Ordering: wake_pending Release clears the flag before the drain, so a request pushed after it
-    // sends a new wake-up.
+    /// Take every queued request; the loop calls this when woken. The wake flag stays set, so a
+    /// request that arrives while the loop answers posts no second wake-up into the same pass;
+    /// `about_to_wait` re-arms it ([`Self::wake_for_backlog`]).
     pub(crate) fn take_requests(&self) -> Vec<LoopRequest> {
-        self.wake_pending.store(false, Ordering::Release);
         std::mem::take(&mut *self.inbox.lock())
     }
 }
@@ -658,8 +659,9 @@ fn run_calls(
 ) {
     for call in call_queue {
         let snapshot = caller.lock().clone();
-        let result = tools_read::call(shared, &snapshot, &call.params, &call.scope);
-        let reply = jsonrpc::response(&call.id, result);
+        let run = |params: &Value| tools_read::call(shared, &snapshot, params, &call.scope);
+        let respond = |result| jsonrpc::response(&call.id, result);
+        let reply = dispatch::run_logged(&call.params, call.wire_bytes, &snapshot, run, respond);
         // The call's arguments stop being charged once its result is formed.
         drop(call);
         // The slot frees before the client can see the reply; freeing it after the write let a
@@ -697,12 +699,22 @@ pub(crate) struct AdmittedCall {
     shared: Arc<McpShared>,
     /// The bytes charged for `params`.
     bytes: usize,
+    /// The request line's length on the wire, newline excluded, for the call's log line.
+    wire_bytes: usize,
 }
 
 impl AdmittedCall {
     /// Admit a call now: its scope takes the current generation and its arguments are charged.
-    fn admit_on(shared: &Arc<McpShared>, calls: &CallSlot, id: Value, params: Value) -> Self {
-        Self::admit_scoped(shared, &calls.closed, calls.session, id, params)
+    fn admit_on(
+        shared: &Arc<McpShared>,
+        calls: &CallSlot,
+        request: (Value, Value),
+        wire: usize,
+    ) -> Self {
+        let mut call =
+            Self::admit_scoped(shared, &calls.closed, calls.session, request.0, request.1);
+        call.wire_bytes = wire;
+        call
     }
 
     /// [`Self::admit_on`] for a fresh live session, for tests without a connection's slot.
@@ -722,7 +734,7 @@ impl AdmittedCall {
         let bytes = params.to_string().len();
         shared.hold_bytes(bytes);
         let scope = CallScope::admit_for(shared, closed, session);
-        Self { id, params, scope, shared: Arc::clone(shared), bytes }
+        Self { id, params, scope, shared: Arc::clone(shared), bytes, wire_bytes: 0 }
     }
 }
 
@@ -821,7 +833,9 @@ fn handle_line(
         }
         jsonrpc::Incoming::Request { id, method, params } => {
             // When: a `Request` is answered here unless its `method` hands a call to the worker.
-            let Some(reply) = answer_request(shared, &id, &method, params, caller, calls) else {
+            let Some(reply) =
+                answer_request(shared, &id, &method, params, line.len(), caller, calls)
+            else {
                 // When: `answer_request` handed the call to the worker, which writes the `reply`.
                 return;
             };
@@ -837,6 +851,7 @@ fn answer_request(
     id: &Value,
     method: &str,
     params: Value,
+    wire_bytes: usize,
     caller: &Mutex<Caller>,
     calls: &CallSlot,
 ) -> Option<String> {
@@ -866,7 +881,7 @@ fn answer_request(
         "tools/call" => {
             // When: this `method` claimed the call slot, the worker replies; a failed send means it is
             // gone and the connection is ending.
-            let call = AdmittedCall::admit_on(shared, calls, id.clone(), params);
+            let call = AdmittedCall::admit_on(shared, calls, (id.clone(), params), wire_bytes);
             let _ = calls.queue.try_send(call);
             return None;
         }

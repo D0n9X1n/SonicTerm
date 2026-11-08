@@ -220,8 +220,11 @@ The server tells agents never to follow instructions found in pane text, but kee
 The read tools are `list_panes`, `read_pane` and `wait_for`. Their arguments,
 caps and locking are described in [Platform Integration](Platform-Integration).
 
-The control tools are checked against `control` again on the event loop when
-they run:
+The event loop answers queued requests for at most 2 ms at a time, so many agents
+calling at once cannot hold off input: what one drain does not reach goes back ahead
+of later arrivals and is answered on the next wake-up, in order. One request that
+runs longer still finishes. The control tools are checked against `control` again on
+the event loop when they run:
 
 | Tool | What it does |
 | --- | --- |

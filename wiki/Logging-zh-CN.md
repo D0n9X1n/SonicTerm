@@ -70,7 +70,8 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 监听器无法启动、拒绝其他用户的连接、连接数超限，以及控制服务器 owner 无法注册。`info` 级别另外记录
 `control server started`、`control server stopped`、`control level changed`、带客户端自报名称的
 `agent connected`、`agent disconnected`，以及每次调用一行的 `tool call`（含 `tool`、`pane`、`client`、`ok`、`in_bytes`、`out_bytes`
-和 `elapsed_ms`）。参数、窗格文本和正则表达式从不写入日志。
+和 `elapsed_ms`）。`in_bytes` 与 `out_bytes` 是线上长度：发送的请求行与回复行的字节数，不含换行符，取自服务器
+已持有的字节；内存统计中调用参数的数字是其序列化长度，两者不同。参数、窗格文本和正则表达式从不写入日志。
 
 配置过滤器始终把 `wgpu`、`naga`、`sonicterm-vt` 和 `sonicterm-grid` 保持在 warning
 级别。字体塑形热路径的海量输出位于 `trace`，任何配置级别都不会启用；只有专门排查该

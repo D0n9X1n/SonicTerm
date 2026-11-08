@@ -491,3 +491,72 @@ fn a_connection_limit_reload_revokes_nothing() {
     app.reconcile_mcp();
     assert_ne!(shared.generation.load(std::sync::atomic::Ordering::Acquire), before);
 }
+
+/// With a drain that yields after every request, eight queued notices take eight drains, each
+/// re-queuing the rest; every notice frees its slot exactly once, so the count ends at zero and
+/// never wraps.
+#[test]
+fn a_yielding_drain_frees_each_notice_once() {
+    let mut app = test_app();
+    let shared = install_server(&mut app, enabled(McpControl::Agent));
+    for index in 0..8 {
+        shared.notify(format!("notice {index}"));
+    }
+    super::super::dispatch::BUDGET_OVERRIDE.set(Some(Duration::ZERO));
+    for drain in 1..=8 {
+        app.drain_mcp_requests();
+        assert_eq!(
+            shared.pending_notices.load(Ordering::Acquire),
+            8 - drain,
+            "after drain {drain}"
+        );
+        // The drain posts no new wake-up: the flag the notices raised stays up through it, so no
+        // user event can chain the next slice into this pass. Only `about_to_wait`, after the turn's
+        // native input, posts one, and clears the flag once nothing waits.
+        assert!(super::super::dispatch::wake_pending(&shared), "drain {drain}");
+        shared.wake_for_backlog();
+        assert_eq!(super::super::dispatch::wake_pending(&shared), drain < 8, "after drain {drain}");
+    }
+    super::super::dispatch::BUDGET_OVERRIDE.set(None);
+    assert!(shared.inbox.lock().is_empty());
+}
+
+/// A re-queued request is checked again when its turn comes: one whose generation was revoked, or
+/// whose deadline passed, while it waited is refused as `revoked` and never runs, and a later
+/// request still runs.
+#[test]
+fn a_requeued_request_that_expired_or_was_revoked_never_runs() {
+    let mut app = test_app();
+    let shared = install_server(&mut app, enabled(McpControl::Agent));
+    let queue = |pane_id: u64, deadline: Instant| {
+        let (reply, answer) = sync_channel(1);
+        let request = LoopRequest {
+            call: LoopCall::ResolvePane { pane_id },
+            generation: shared.generation.load(std::sync::atomic::Ordering::Acquire),
+            deadline,
+            closed: Arc::new(AtomicBool::new(false)),
+            session: shared.sessions.open(),
+            reply,
+        };
+        (request, answer)
+    };
+    // One request expires while it waits in the inbox after a yield.
+    let (expiring, expired_answer) = queue(1, Instant::now() + Duration::from_millis(5));
+    shared.requeue_front(vec![expiring]);
+    std::thread::sleep(Duration::from_millis(10));
+    app.drain_mcp_requests();
+    assert!(matches!(expired_answer.try_recv(), Ok(LoopReply::Refused("revoked", _))));
+
+    // Another waits while the server's generation is revoked by a control change.
+    let (stale, stale_answer) = queue(2, Instant::now() + Duration::from_secs(5));
+    shared.requeue_front(vec![stale]);
+    shared.generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    app.drain_mcp_requests();
+    assert!(matches!(stale_answer.try_recv(), Ok(LoopReply::Refused("revoked", _))));
+
+    // A current request after both still runs.
+    let (fresh, fresh_answer) = queue(3, Instant::now() + Duration::from_secs(5));
+    shared.requeue_front(vec![fresh]);
+    app.drain_mcp_requests();
+    assert!(!matches!(fresh_answer.try_recv(), Ok(LoopReply::Refused("revoked", _))));
+}

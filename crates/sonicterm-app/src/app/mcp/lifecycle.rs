@@ -206,15 +206,23 @@ impl App {
             // When: no `mcp_server` runs, a late wake-up has nothing to answer.
             return;
         };
-        for request in shared.take_requests() {
-            if matches!(request.call, LoopCall::Notice { .. }) {
-                // A taken notice frees its slot whether it is shown or dropped as revoked.
-                shared.notice_shown();
-            }
-            let reply = self.answer_mcp_request(&shared, &request);
-            // A full or disconnected reply channel means the waiter already gave up.
-            let _ = request.reply.try_send(reply);
-        }
+        // The drain yields after its budget, so input events interleave with many agents' calls;
+        // what it did not reach goes back ahead of anything that arrived meanwhile.
+        let budget = super::dispatch::drain_budget();
+        let requests = shared.take_requests();
+        let rest = super::dispatch::drain_within(
+            requests,
+            budget,
+            super::dispatch::clock_now,
+            |request| {
+                let reply = self.answer_mcp_request(&shared, &request);
+                // A notice frees its slot once handled, shown or dropped as revoked.
+                super::dispatch::notice_handled(&shared, &request);
+                // A full or disconnected reply channel means the waiter already gave up.
+                let _ = request.reply.try_send(reply);
+            },
+        );
+        shared.requeue_front(rest);
     }
 
     /// Recheck a request against the server's current state, then do its work.

@@ -74,6 +74,11 @@ impl App {
             return;
         }
         self.service_gpu_recovery(event_loop, Instant::now());
+        // MCP requests a budgeted drain left queued wake the loop again only now, after this turn's
+        // native input and redraws, so agents' calls never hold input back for longer than a slice.
+        if let Some(server) = self.services.mcp_server.as_ref() {
+            server.shared.wake_for_backlog();
+        }
         self.clear_closed_broadcast_source();
         self.drain_winit_file_drops();
         // A report that waited for a selection or copy mode is shown once neither holds the pane.

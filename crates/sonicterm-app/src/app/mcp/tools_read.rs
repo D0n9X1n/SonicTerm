@@ -155,30 +155,20 @@ pub(crate) fn call(
     scope: &CallScope,
 ) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-    let started = Instant::now();
+    let empty = json!({});
+    let arguments = params.get("arguments").unwrap_or(&empty);
     let mut result = match name {
         "list_panes" => list_panes(shared, caller, scope),
-        "read_pane" => read_pane_tool(shared, &arguments, scope),
-        "wait_for" => wait_for(shared, &arguments, scope),
-        other => super::tools_control::call(shared, other, &arguments, scope)
+        "read_pane" => read_pane_tool(shared, arguments, scope),
+        "wait_for" => wait_for(shared, arguments, scope),
+        other => super::tools_control::call(shared, other, arguments, scope)
             .unwrap_or_else(|| tool_error("unknown_tool", &format!("no tool named {other:?}"))),
     };
     if scope.revoked(shared) {
         // A call revoked after its work ran returns no pane text, only the refusal.
         result = tool_error("revoked", "the server was disabled or changed during the call");
     }
-    tracing::info!(
-        target: "mcp",
-        tool = name,
-        pane = pane_id_arg(&arguments),
-        in_bytes = arguments.to_string().len() as u64,
-        out_bytes = result.to_string().len() as u64,
-        client = caller.client.as_deref().unwrap_or("unknown"),
-        ok = !result["isError"].as_bool().unwrap_or(false),
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "tool call"
-    );
+    // The call's log line is written by the connection's worker, from the reply's wire length.
     result
 }
 
@@ -331,8 +321,11 @@ pub(crate) fn read_with_generation(
     let generation = entry.output_generation.load(Ordering::Acquire);
     #[cfg(test)]
     READ_HOOK.with_borrow(|hook| hook.as_ref().map(|hook| hook()));
-    let snapshot = read_pane(&entry.parser, mode, limits);
-    let structured = snapshot_json(&snapshot, entry, generation);
+    let mut snapshot = read_pane(&entry.parser, mode, limits);
+    // The JSON is built after the parser was released; each line's text moves into it, and the
+    // snapshot keeps its row tokens and counts for the caller's summary.
+    let lines = snapshot.lines.iter_mut().map(|line| std::mem::take(&mut line.text)).collect();
+    let structured = snapshot_json(&snapshot, entry, generation, lines);
     (snapshot, structured)
 }
 
@@ -345,12 +338,17 @@ thread_local! {
 }
 
 /// A read's structured result: `generation` was loaded before the read (the snapshot holds at
-/// least every batch up to it) and `current_generation` after it.
+/// least every batch up to it) and `current_generation` after it. The line texts are passed in
+/// already taken from the snapshot, so they move into the JSON instead of being copied.
 // Ordering: output_generation Acquire pairs with the VT worker's Release publish after each batch.
-pub(crate) fn snapshot_json(snapshot: &ReadSnapshot, entry: &PaneEntry, generation: u64) -> Value {
-    json!({
+fn snapshot_json(
+    snapshot: &ReadSnapshot,
+    entry: &PaneEntry,
+    generation: u64,
+    lines: Vec<String>,
+) -> Value {
+    let mut result = json!({
         "pane_id": entry.pane_id.to_string(),
-        "lines": snapshot.lines.iter().map(|line| line.text.clone()).collect::<Vec<_>>(),
         "end_row": snapshot.lines.last().map(|line| encode_token(line.row)),
         "cursor": { "row": snapshot.cursor.0, "col": snapshot.cursor.1 },
         "size": { "cols": snapshot.size.0, "rows": snapshot.size.1 },
@@ -363,7 +361,9 @@ pub(crate) fn snapshot_json(snapshot: &ReadSnapshot, entry: &PaneEntry, generati
         "output_truncated": snapshot.output_truncated,
         "no_command": snapshot.no_command,
         "shell_integration_state": snapshot.shell_state.map(|state| state.as_str()),
-    })
+    });
+    super::dispatch::insert_owned_lines(&mut result, lines);
+    result
 }
 
 /// A row token as the opaque string a caller passes back as `after_row`.

@@ -84,8 +84,10 @@ peer of another user, a connection over the limit, and a control server owner
 that could not register. At `info` it adds `control server started`, `control
 server stopped`, `control level changed`, `agent connected` with the client's
 self-reported name, `agent disconnected`, and one `tool call` line per call with
-`tool`, `pane`, `client`, `ok`, `in_bytes`, `out_bytes` and `elapsed_ms`. Arguments, pane text and regexes are
-never logged.
+`tool`, `pane`, `client`, `ok`, `in_bytes`, `out_bytes` and `elapsed_ms`. `in_bytes` and `out_bytes`
+are wire lengths, the request line and the reply line as sent, newline excluded, measured from the
+bytes the server already holds; the Memory figure for a call's arguments is their serialized length,
+a different number. Arguments, pane text and regexes are never logged.
 
 `wgpu`, `naga`, `sonicterm-vt`, and `sonicterm-grid` remain warning-oriented in
 the configured filters. Very hot font-shaper dumps are `trace`; no configured

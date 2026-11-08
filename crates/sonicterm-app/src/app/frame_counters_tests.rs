@@ -353,6 +353,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/mcp/agents.rs", "live", 3),
     // The resume-token registry: session records, never a parser.
     ("app/mcp/claims.rs", "records", 7),
+    // The MCP inbox, put back in order after a budgeted drain and checked for a backlog to wake.
+    ("app/mcp/dispatch.rs", "inbox", 2),
     // A test's replacement recheck interval, read once per `wait_for`.
     ("app/mcp/tools_read.rs", "recheck_override", 1),
     ("app/os_drag.rs", "snapshots", 6),

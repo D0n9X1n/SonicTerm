@@ -268,7 +268,8 @@ fn collect_rows(
             }
         }
         pending_bytes = 0;
-        let text = text.trim_end().to_owned();
+        // Trimmed in place: the line's one allocation is kept, not copied again.
+        text.truncate(text.trim_end().len());
         let row = pending_row.take().expect("set with the first pending row");
         if !seen_text && text.is_empty() {
             // When: no text was `seen_text` yet, a blank line below the newest output is skipped.
