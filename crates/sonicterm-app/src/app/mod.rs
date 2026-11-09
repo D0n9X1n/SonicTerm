@@ -521,6 +521,9 @@ pub struct App {
     pub(super) frame_counters: Option<frame_counters::AppFrameCounters>,
     /// The windows asked for a frame in the current dispatch; see [`redraw::DispatchRedraws`].
     pub(super) dispatch_redraws: redraw::DispatchRedraws,
+    /// Windows whose Close caption button an assistive technology pressed; each closes through its
+    /// own close request at the next `about_to_wait`, which has the event loop.
+    pub(super) pending_caption_close: Vec<WindowId>,
     /// Each terminal window's adapter and strip focus by window id, warm spares included.
     pub(super) accessibility:
         std::collections::HashMap<WindowId, accessibility::WindowAccessibility>,

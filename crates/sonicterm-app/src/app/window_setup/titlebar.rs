@@ -83,8 +83,7 @@ pub(crate) fn creation_band_estimate(mode: TitlebarMode) -> f32 {
 pub(crate) fn sync_fullscreen_shadow(window: &Window, mode: TitlebarMode) {
     #[cfg(target_os = "windows")]
     if integrated(mode) {
-        // When: integrated(mode) on Windows, the shadow follows full screen; setting the same
-        // value again is a no-op inside winit.
+        // The shadow follows full screen; setting the same value again is a no-op inside winit.
         use winit::platform::windows::WindowExtWindows;
         window.set_undecorated_shadow(window.fullscreen().is_none());
     }

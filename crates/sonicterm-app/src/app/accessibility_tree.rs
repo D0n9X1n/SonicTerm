@@ -47,6 +47,24 @@ pub(super) fn segment_for_node(node: u64) -> Option<StatusSegmentId> {
     StatusSegmentId::ALL.into_iter().find(|id| segment_node(*id).0 == node)
 }
 
+/// The node of caption `button`: the same in every tree.
+pub(crate) fn caption_node(button: sonicterm_ui::window_band::CaptionButton) -> NodeId {
+    use sonicterm_ui::window_band::CaptionButton;
+    let code = match button {
+        CaptionButton::Minimize => 1,
+        CaptionButton::Maximize => 2,
+        CaptionButton::Close => 3,
+    };
+    NodeId(TERMINAL_WINDOW | KIND_CAPTION | code)
+}
+
+/// The caption button a node id names, if it names one.
+pub(super) fn caption_for_node(node: u64) -> Option<sonicterm_ui::window_band::CaptionButton> {
+    sonicterm_ui::window_band::CaptionButton::ALL
+        .into_iter()
+        .find(|button| caption_node(*button).0 == node)
+}
+
 /// A rect in raster px.
 pub(super) fn rect(left: f32, top: f32, width: f32, height: f32) -> Rect {
     Rect {
@@ -101,6 +119,15 @@ pub(crate) fn build_tree(inputs: &TreeInputs<'_>) -> TreeUpdate {
     announcement.set_bounds(inputs.announcement_bounds);
     nodes.push((ANNOUNCEMENT_NODE, announcement));
     children.push(ANNOUNCEMENT_NODE);
+    for (button, name, bounds) in &inputs.caption {
+        // Each self-drawn caption button is a pressable button, as the native one it replaces.
+        let mut node = Node::new(Role::Button);
+        node.set_label(name.clone());
+        node.set_bounds(*bounds);
+        node.add_action(AccessAction::Click);
+        nodes.push((caption_node(*button), node));
+        children.push(caption_node(*button));
+    }
     let mut root = Node::new(Role::Window);
     root.set_label(inputs.title.clone());
     root.set_children(children);
@@ -240,3 +267,7 @@ impl App {
 #[cfg(test)]
 #[path = "accessibility_tree_tests.rs"]
 mod accessibility_tree_tests;
+
+#[cfg(test)]
+#[path = "accessibility_tree_caption_tests.rs"]
+mod accessibility_tree_caption_tests;

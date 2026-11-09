@@ -402,6 +402,61 @@ impl App {
         false
     }
 
+    /// Run caption `button` of `window_id` for an assistive technology's click: minimise and
+    /// maximise at once, Close as the window's own close request on the next dispatch.
+    pub(in crate::app) fn click_caption_button(
+        &mut self,
+        window_id: WindowId,
+        button: CaptionButton,
+    ) {
+        if self.run_caption_button(window_id, button) {
+            // Close closes the window as the system button would, through its own close request.
+            self.pending_caption_close.push(window_id);
+        }
+    }
+
+    /// The caption buttons `window_id` exposes to assistive technology, with localized names and
+    /// raster-px bounds; empty without self-drawn buttons.
+    pub(in crate::app) fn accessible_caption(
+        &self,
+        window_id: WindowId,
+    ) -> Vec<(CaptionButton, String, accesskit::Rect)> {
+        let Some(window) = self.registry.windows.get(&window_id) else {
+            // When: window_id has no entry in windows, it exposes no buttons.
+            return Vec::new();
+        };
+        let Some(renderer) = window.renderer.as_ref() else {
+            // When: the window has no renderer, there is no band to read.
+            return Vec::new();
+        };
+        let band = renderer.window_band();
+        let (width, _) = renderer.surface_size();
+        let maximized = window.window.as_ref().is_some_and(|native| native.is_maximized());
+        sonicterm_ui::window_band::caption_buttons(
+            &band,
+            width as f32,
+            renderer.band_height(),
+            renderer.scale_factor(),
+        )
+        .into_iter()
+        .map(|(button, rect)| {
+            let key = match button {
+                CaptionButton::Minimize => "caption-minimize",
+                CaptionButton::Maximize if maximized => "caption-restore",
+                CaptionButton::Maximize => "caption-maximize",
+                CaptionButton::Close => "caption-close",
+            };
+            let bounds = accesskit::Rect {
+                x0: f64::from(rect.left),
+                y0: f64::from(rect.top),
+                x1: f64::from(rect.left + rect.width),
+                y1: f64::from(rect.top + rect.height),
+            };
+            (button, self.i18n.translate(key), bounds)
+        })
+        .collect()
+    }
+
     /// Route a left button `state` change in `window_id` through the titlebar band first. Returns
     /// whether the band consumed it; a released Close button replays `CloseRequested`.
     pub(in crate::app) fn route_band_left_input(

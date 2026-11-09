@@ -229,6 +229,7 @@ impl App {
             session_finished: None,
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
             dispatch_redraws: super::redraw::DispatchRedraws::default(),
+            pending_caption_close: Vec::new(),
             accessibility: Default::default(),
             event_loop_proxy,
             path_workers,

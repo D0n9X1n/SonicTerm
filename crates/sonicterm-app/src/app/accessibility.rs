@@ -156,6 +156,8 @@ const KIND_ANNOUNCEMENT: u64 = 3 << 32;
 const KIND_SEGMENT: u64 = 4 << 32;
 const KIND_ABOUT_ROW: u64 = 5 << 32;
 const KIND_ABOUT_COPY: u64 = 6 << 32;
+/// Self-drawn caption buttons of an integrated Windows titlebar.
+const KIND_CAPTION: u64 = 7 << 32;
 /// The About window's Copy button.
 pub(crate) const ABOUT_COPY_NODE: NodeId = NodeId(TERMINAL_WINDOW | KIND_ABOUT_COPY);
 /// The window node.
@@ -461,6 +463,10 @@ pub(crate) struct TreeInputs<'strip> {
     pub(crate) announcement: Option<Announcement>,
     /// The segment with focus.
     pub(crate) focus: Option<StatusSegmentId>,
+    /// The self-drawn caption buttons, their localized names and raster-px bounds; empty unless
+    /// the window has an integrated Windows titlebar. They replace native controls, so they are
+    /// exposed whether or not the status line is.
+    pub(crate) caption: Vec<(sonicterm_ui::window_band::CaptionButton, String, Rect)>,
 }
 
 impl App {
@@ -737,6 +743,7 @@ impl App {
             .unwrap_or_else(|| super::NATIVE_WINDOW_TITLE.to_owned());
         let strip_label = self.i18n.translate("status-accessible-strip");
         let announcements_label = self.i18n.translate("status-accessible-announcements");
+        let caption = self.accessible_caption(window_id);
         let state = self.accessibility.get_mut(&window_id)?;
         state.health = severity;
         state.health_text = health_text;
@@ -761,6 +768,7 @@ impl App {
             announcement_bounds,
             announcement: state.announcement.clone(),
             focus: state.focus,
+            caption,
         };
         // Names, roles, bounds and actions (the strip hash), focus and the announcement; never the
         // settings generation, so a reload that changes nothing read sends nothing.
@@ -772,6 +780,10 @@ impl App {
             &inputs.announcements_label,
         )
             .hash(&mut hasher);
+        for (button, name, bounds) in &inputs.caption {
+            (button, name, bounds.x0.to_bits(), bounds.y0.to_bits(), bounds.x1.to_bits())
+                .hash(&mut hasher);
+        }
         for bounds in band.iter().chain([&announcement_bounds]) {
             (bounds.x0.to_bits(), bounds.y0.to_bits(), bounds.x1.to_bits(), bounds.y1.to_bits())
                 .hash(&mut hasher);
@@ -906,6 +918,12 @@ impl App {
                     return;
                 };
                 self.set_status_focus(window_id, id);
+            }
+            AccessibilityRequest::Click { node, .. } if tree::caption_for_node(node).is_some() => {
+                // A click on a caption button acts as a released press over it does.
+                if let Some(button) = tree::caption_for_node(node) {
+                    self.click_caption_button(window_id, button);
+                }
             }
             AccessibilityRequest::Click { node, target } => {
                 // When: `request` is `Click`, run the segment's click unless the request is stale.

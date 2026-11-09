@@ -15,6 +15,8 @@ scrollbar, broadcast UI, and shared UI tokens.
 - `selection.rs`, `copy_mode.rs`, `cursor.rs`, `pane.rs` - terminal UI state.
 - `ime.rs`, `drag_chip.rs`, `scrollbar.rs`, `broadcast.rs` - interaction UI.
 - `i18n.rs`, `ui_tokens.rs` - localized labels and shared constants.
+- `window_band.rs` - the integrated titlebar band's size and insets, caption-button layout and
+  resize-edge hit tests, as pure geometry testable on every host.
 
 ## Local gate
 ```bash
