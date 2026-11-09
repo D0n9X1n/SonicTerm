@@ -121,3 +121,39 @@ fn the_band_routes_before_overlays_panes_and_chrome() {
     let chrome = body.find("self.handle_main_left_press_chrome(").expect("main chrome");
     assert!(band < chrome, "a main press reaches the band before its chrome");
 }
+
+/// A palette open in the window holding a caption button cancels the press at its next event,
+/// before a queued release, even if the palette closes again before that release; a palette open
+/// in another window leaves the press alone.
+#[test]
+fn only_the_window_s_own_palette_cancels_its_caption_press() {
+    use sonicterm_ui::window_band::CaptionButton::Minimize;
+    use winit::event::WindowEvent;
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let first = app.__test_seed_child_window(&["a"]);
+    let second = app.__test_seed_child_window(&["b"]);
+    let hold = |app: &mut App, id| {
+        let window = app.registry.windows.get_mut(&id).unwrap();
+        window.caption.pressed = Some(Minimize);
+        window.band_press_consumed = true;
+    };
+    hold(&mut app, second);
+    app.open_status_segments(Some(first), None);
+    assert_eq!(app.palette_window(), Some(first));
+    let moved = WindowEvent::Focused(true);
+    app.track_window_band(second, &moved);
+    assert_eq!(app.registry.windows[&second].caption.pressed, Some(Minimize), "another window's");
+    hold(&mut app, first);
+    app.track_window_band(first, &moved);
+    assert_eq!(app.registry.windows[&first].caption.pressed, None, "its own palette cancels");
+    app.interaction.command_palette.close();
+    assert_eq!(
+        app.release_window_band(first, 0.0, 0.0),
+        (true, false),
+        "the release acts on nothing"
+    );
+}

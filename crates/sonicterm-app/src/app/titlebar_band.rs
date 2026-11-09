@@ -157,11 +157,40 @@ pub(crate) fn is_double_click(
 }
 
 impl App {
+    /// The window the open command palette (or checklist, rename editor) belongs to; `None` while
+    /// none is open.
+    pub(in crate::app) fn palette_window(&self) -> Option<WindowId> {
+        self.interaction
+            .command_palette
+            .is_open()
+            .then(|| self.interaction.palette_attached_window.or(self.registry.main_window_id))
+            .flatten()
+    }
+
+    /// Cancel `window_id`'s held caption button when its own palette is open. Runs before every
+    /// window event, so a palette that opens and closes between a press and its release cancels
+    /// the press before the release arrives; another window's palette never does.
+    pub(in crate::app) fn cancel_caption_under_palette(&mut self, window_id: WindowId) {
+        if self.palette_window() != Some(window_id) {
+            // When: palette_window is not window_id, no overlay of this window took the pointer.
+            return;
+        }
+        let pressed = self
+            .registry
+            .windows
+            .get(&window_id)
+            .is_some_and(|window| window.caption.pressed.is_some());
+        if pressed {
+            // The held button no longer owns a release.
+            self.cancel_window_band(window_id);
+        }
+    }
+
     /// Bring every terminal window's band up to date with its platform metrics, hide its native
     /// title text while the band shows the name, and refit its panes when the band moved them.
     pub(in crate::app) fn refresh_window_bands(&mut self) {
         let mut refits = Vec::new();
-        let modal_open = self.interaction.command_palette.is_open();
+        let palette_window = self.palette_window();
         for (window_id, window) in &mut self.registry.windows {
             let Some(native) = window.window.as_ref() else {
                 // When: the window has no native window yet, there is nothing to measure.
@@ -177,7 +206,7 @@ impl App {
             };
             let caption = settle_caption(
                 CaptionState { maximized, focused, ..window.caption },
-                modal_open,
+                palette_window == Some(*window_id),
                 band != renderer.window_band(),
             );
             if renderer.set_window_band(band) {
@@ -314,8 +343,8 @@ impl App {
             BandPress::Caption(button) => Some(button),
             _ => None,
         };
-        // An overlay opened during the press takes the keys and the pointer: the press is cancelled.
-        let modal = self.interaction.command_palette.is_open();
+        // This window's overlay, open at release, takes the pointer: the press is cancelled.
+        let modal = self.palette_window() == Some(window_id);
         let action = release_action(pressed, under, modal);
         self.sync_caption_state(window_id);
         let close = action.is_some_and(|button| self.run_caption_button(window_id, button));
@@ -361,14 +390,17 @@ impl App {
         self.sync_caption_state(window_id);
     }
 
-    /// Follow `event` for `window_id`'s band before the usual routing: the pointer hovers caption
-    /// buttons and edges; leaving, focus loss, a resize or a scale change cancels a caption press.
+    /// Follow `event` for `window_id`'s band before the usual routing: this window's open palette,
+    /// leaving, focus loss, a resize or a scale change cancels a caption press, and the pointer
+    /// hovers caption buttons and edges.
     pub(in crate::app) fn track_window_band(
         &mut self,
         window_id: WindowId,
         event: &winit::event::WindowEvent,
     ) {
         use winit::event::WindowEvent;
+        // Before anything else: this window's own palette, open now, cancels a held button.
+        self.cancel_caption_under_palette(window_id);
         match event {
             WindowEvent::CursorMoved { position, .. } => {
                 let cursor =

@@ -502,3 +502,35 @@ fn a_finished_announcement_keeps_its_duration_after_the_tab_is_visited() {
     let heard = announced(&app, window_id).map(|said| said.text).unwrap_or_default();
     assert!(heard.contains(&format_duration(134)), "{heard}");
 }
+
+/// The name band's reader node resolves to a published target: a click against it renames the
+/// window, and one queued before the band's click changed is dropped instead of running the new one.
+#[test]
+fn the_name_band_click_runs_only_for_the_target_it_named() {
+    let (mut app, window_id) = app_with_window();
+    let band = |click: Option<SegmentClick>| StripHit {
+        top: 0.0,
+        height: 28.0,
+        segments: vec![PresentedStatusSegment {
+            id: StatusSegmentId::Window,
+            x: 300.0,
+            width: 80.0,
+            click,
+        }],
+    };
+    app.registry.windows.get_mut(&window_id).unwrap().title_band =
+        Some(band(Some(SegmentClick::Action(Action::RenameWindow))));
+    activate(&mut app, window_id, Instant::now());
+    let node = super::tree::NAME_BAND_NODE.0;
+    let target = access(&app, window_id).resolve(node);
+    assert!(target.is_some(), "the name band's target is published");
+    app.registry.windows.get_mut(&window_id).unwrap().title_band =
+        Some(band(Some(SegmentClick::Action(Action::ToggleStatusLine))));
+    app.handle_accessibility_request(window_id, AccessibilityRequest::Click { node, target });
+    assert!(app.status_line_shown(), "a click queued before the change is dropped");
+    assert!(!app.interaction.command_palette.is_open(), "and does not rename either");
+    app.registry.windows.get_mut(&window_id).unwrap().title_band =
+        Some(band(Some(SegmentClick::Action(Action::RenameWindow))));
+    app.handle_accessibility_request(window_id, AccessibilityRequest::Click { node, target });
+    assert!(app.interaction.command_palette.is_open(), "the click it named renames the window");
+}
