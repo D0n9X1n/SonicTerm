@@ -139,33 +139,27 @@ pub(crate) fn trim_panes_over_pool_ceiling<'a>(
     pool: &super::media::InlineMediaPool,
     panes: impl IntoIterator<Item = &'a PaneState>,
 ) -> usize {
-    if pool.bytes() <= super::media::MAX_PROCESS_INLINE_MEDIA_BYTES {
-        // When: pool bytes are at or under the ceiling; every pane is entitled
-        // to its share, so nothing is over the line to reclaim.
-        return 0;
-    }
-
     let mut reclaimed = 0usize;
     for pane in panes {
-        // Re-checked per pane, not hoisted. Each trim lowers the process
-        // total, and once the walk brings it back under the ceiling the
-        // remaining panes are entitled to a fair share rather than the floor.
-        // Stopping there is the point: the pass reclaims what is over the
-        // line and no more.
+        if pool.bytes() <= super::media::MAX_PROCESS_INLINE_MEDIA_BYTES {
+            // When: pool bytes are at or under the ceiling, checked before every pane: each trim
+            // lowers the total, and once it is back under, the remaining panes keep their share.
+            break;
+        }
         let Some(mut images) = pane.inline_images.try_lock() else {
             // When: try_lock finds inline_images contended; that pane re-trims on
             // its own thread, and blocking would front-run the render path.
             continue;
         };
-        let before = super::media::retained_inline_media(&images).bytes;
         let evicted =
             super::media::trim_inline_images_charged(&mut images, &pane.inline_media_charge);
-        let after = super::media::retained_inline_media(&images).bytes;
         drop(images);
+        // Every entry of an evicted pixel buffer leaves with it, so the evicted list alone says
+        // what was freed; it is read after the lock is released.
+        reclaimed = reclaimed.saturating_add(super::media::retained_inline_media(&evicted).bytes);
         // Freed outside the lock: releasing these pixel buffers takes
         // milliseconds, and the render path waits on the lock just released.
         drop(evicted);
-        reclaimed = reclaimed.saturating_add(before.saturating_sub(after));
     }
     reclaimed
 }
@@ -877,6 +871,10 @@ impl TrimSource {
 #[cfg(test)]
 #[path = "retention_tests.rs"]
 mod retention_tests;
+
+#[cfg(test)]
+#[path = "retention_ceiling_tests.rs"]
+mod retention_ceiling_tests;
 
 #[path = "retention_measure.rs"]
 mod measure;
