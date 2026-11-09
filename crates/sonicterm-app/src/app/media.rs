@@ -352,78 +352,70 @@ impl Drop for InlineMediaCharge {
     }
 }
 
-/// Trim one pane's retained inline media to its share of the process ceiling.
+/// Trim one pane's retained inline media to its share of the process ceiling, returning the
+/// evicted images for the caller to drop.
 ///
 /// Eviction is always from the calling pane. Evicting another pane's images to
 /// make room would make one busy pane blank out its neighbours, and two panes
 /// under pressure would evict each other every frame.
 ///
-/// The budget is [`InlineMediaPool::pane_budget`] — the pool's ceiling divided
-/// by its live pane count — rather than a fixed per-pane constant. A single pass
-/// against that budget replaces the loop that used to spin against the
-/// *process* total: because the loop body could only shrink the calling pane,
-/// a pane could evict itself to empty and still not satisfy a condition owned
-/// by other panes' bytes. Dividing the ceiling means a pane's own budget is
-/// always achievable by trimming itself.
-/// Trim one pane's retained inline media to its share of the process ceiling,
-/// returning the evicted images for the caller to drop.
+/// The budget is [`InlineMediaPool::pane_budget`]: the pool's ceiling divided by its live pane
+/// count, so a pane's own budget is always reachable by trimming itself and no pane evicts on
+/// another's behalf.
 ///
-/// The return value is the point: freeing the evicted pixel buffers costs
-/// ~2.6 ms for 64 images, measured, and this runs with the pane's image store
-/// locked while the render path waits on that same lock. The caller drops them
-/// after releasing it.
+/// The return value is the point: freeing the evicted pixel buffers is an allocator call per
+/// buffer, and this runs with the pane's image store locked while the render path waits on that
+/// same lock. The caller drops them after releasing it.
 #[must_use = "the evicted images must be dropped after releasing the image \
               lock, or a multi-millisecond allocator pause lands on the frame"]
 pub(super) fn trim_inline_images_charged(
-    images: &mut Vec<InlineImage>,
+    images: &mut impl ImageList,
     charge: &SharedInlineMediaCharge,
 ) -> Vec<InlineImage> {
     let pool = Arc::clone(&charge.lock().pool);
     let budget = if pool.bytes() > MAX_PROCESS_INLINE_MEDIA_BYTES {
         // Over the ceiling: trim to the floor, not to a fair share.
         //
-        // A fair share alone does not converge, because only a pane that is
-        // *decoding* re-trims. Panes created earlier keep the larger budget
-        // they were admitted under and never revisit it while idle, so the
-        // total grows as ceiling x (1 + ln(N/4)) — measured at 616 MiB for 20
-        // panes against a 256 MiB ceiling. Trimming to the floor under
-        // pressure means every decode while over the ceiling returns memory
-        // instead of merely capping the newcomer.
+        // A fair share alone does not converge, because only a pane that is *decoding* re-trims.
+        // Panes created earlier keep the larger budget they were admitted under and never revisit
+        // it while idle, so the total grows with the pane count. Trimming to the floor under
+        // pressure means every decode while over the ceiling returns memory instead of merely
+        // capping the newcomer.
         //
-        // The residual is irreducible: principle 1 requires every pane to
-        // render at least its newest image, so N panes cost at least N x the
-        // floor. That is a bound that can be stated, rather than a curve.
+        // The residual is irreducible: every pane renders at least its newest image, so N panes
+        // cost at least N x the floor. That is a bound that can be stated, rather than a curve.
         MIN_PANE_INLINE_MEDIA_BYTES
     } else {
         // When: pool bytes sit under MAX_PROCESS_INLINE_MEDIA_BYTES, so each
         // pane trims to its fair share of the pool.
         pool.pane_budget()
     };
-    let before = retained_inline_media(images);
-    let evicted = take_trimmed_inline_images(images, budget);
-    let after = retained_inline_media(images);
+    // One plan gives the figures before and after, so the list is scanned once.
+    let plan = TrimPlan::new(images.view(), budget);
+    let evicted = plan.take(images);
 
     // A pane is never trimmed below its most recent image, so a pane holding
     // one image at the rendered cap legitimately sits above `budget`. Anything
     // beyond that is not the residual — it is a trim that failed to run.
     debug_assert!(
-        after.bytes <= budget.max(max_pane_residual_bytes()),
+        plan.after.bytes <= budget.max(max_pane_residual_bytes()),
         "a trimmed pane retained {} bytes, above both its {budget}-byte budget and the \
          {}-byte single-image residual",
-        after.bytes,
+        plan.after.bytes,
         max_pane_residual_bytes()
     );
 
-    // Charge exactly what the reporting seam reports, so the figure the
-    // governor would see and the figure enforced here cannot drift apart.
-    charge.lock().set(after.bytes);
+    // Charge exactly what the reporting seam reports, so the figure the governor would see and the
+    // figure enforced here cannot drift apart. Charged even when nothing is evicted: an append or
+    // a kitty delete before this call may have changed what the pane holds.
+    charge.lock().set(plan.after.bytes);
 
-    if after.items < before.items {
+    if plan.after.items < plan.before.items {
         tracing::warn!(
             target: "memory",
-            evicted_images = before.items - after.items,
-            evicted_bytes = before.bytes.saturating_sub(after.bytes),
-            pane_retained_bytes = after.bytes,
+            evicted_images = plan.before.items - plan.after.items,
+            evicted_bytes = plan.before.bytes.saturating_sub(plan.after.bytes),
+            pane_retained_bytes = plan.after.bytes,
             pane_budget_bytes = budget,
             live_panes = pool.live_charges(),
             process_retained_bytes = pool.bytes(),
@@ -460,17 +452,10 @@ pub(super) fn trim_staged_inline_images(
 /// Drop oldest images until the vector fits `byte_budget` and the count cap,
 /// **returning** the evicted images rather than freeing them.
 ///
-/// Returning them looks like a needless allocation until you measure what
-/// freeing them costs. Each `InlineImage` holds an `Arc<[u8]>` over up to
-/// 4 MiB of pixels, and releasing the last reference calls the allocator.
-/// Evicting 64 of them takes **2.6 ms**, against **1.9 µs** for the same
-/// eviction when the buffers stay alive — a factor of ~1372. The `Vec` shuffle
-/// is not the cost; the deallocation is.
-///
-/// That matters because the pane's image store is locked while this runs and
-/// the render path takes the same lock. Freeing inside the critical section
-/// puts a multi-millisecond allocator pause directly in a 16 ms frame budget.
-/// Handing the images back lets the caller drop them after releasing the lock.
+/// Each `InlineImage` holds an `Arc<[u8]>` over up to 4 MiB of pixels, and releasing the last
+/// reference calls the allocator, which costs far more than moving the entries. The pane's image
+/// store is locked while this runs and the render path takes the same lock, so handing the images
+/// back lets the caller free them after releasing it.
 ///
 /// Always retains the newest image even when it alone exceeds the budget: a
 /// pane that renders nothing is a worse outcome than one that briefly holds a
@@ -478,32 +463,56 @@ pub(super) fn trim_staged_inline_images(
 /// how large that one image can be.
 #[must_use = "the evicted images must be dropped outside the lock, or the \
               allocator pause this exists to avoid happens anyway"]
-fn take_trimmed_inline_images(
-    images: &mut Vec<InlineImage>,
-    byte_budget: usize,
-) -> Vec<InlineImage> {
-    // Kitty placements share their image's pixel buffer and `id`, so eviction works per pixel
-    // buffer: oldest first by first appearance, and every entry of an evicted buffer goes with it.
-    let buffers = unique_pixel_buffers(images);
-    let mut retained_bytes =
-        buffers.iter().fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes));
-    let mut evict = 0usize;
-    while buffers.len() - evict > MAX_RETAINED_INLINE_IMAGES
-        || (retained_bytes > byte_budget && buffers.len() - evict > 1)
-    {
-        retained_bytes = retained_bytes.saturating_sub(buffers[evict].1);
-        evict += 1;
+fn take_trimmed_inline_images(images: &mut impl ImageList, byte_budget: usize) -> Vec<InlineImage> {
+    TrimPlan::new(images.view(), byte_budget).take(images)
+}
+
+/// One trim, planned from a single scan: what the list retains before and after, and the newest
+/// pixel buffer to evict.
+struct TrimPlan {
+    /// Distinct buffers and their bytes before the trim.
+    before: ResourceAmount,
+    /// Distinct buffers and their bytes the trim keeps.
+    after: ResourceAmount,
+    /// The id of the newest evicted buffer, or `None` when everything fits.
+    cutoff: Option<u64>,
+}
+
+impl TrimPlan {
+    /// Plan the trim of `images` to `byte_budget` and the count cap, oldest buffer first.
+    fn new(images: &[InlineImage], byte_budget: usize) -> Self {
+        // Kitty placements share their image's pixel buffer and `id`, so eviction works per pixel
+        // buffer: oldest first by id, and every entry of an evicted buffer goes with it.
+        let buffers = unique_pixel_buffers(images);
+        let before = ResourceAmount {
+            bytes: buffers.iter().fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes)),
+            items: buffers.len(),
+        };
+        let mut retained_bytes = before.bytes;
+        let mut evict = 0usize;
+        while buffers.len() - evict > MAX_RETAINED_INLINE_IMAGES
+            || (retained_bytes > byte_budget && buffers.len() - evict > 1)
+        {
+            retained_bytes = retained_bytes.saturating_sub(buffers[evict].1);
+            evict += 1;
+        }
+        let after = ResourceAmount { bytes: retained_bytes, items: buffers.len() - evict };
+        // The evicted buffers are a prefix of the id-sorted list, so an entry is evicted exactly
+        // when its id is at or below the last evicted id.
+        let cutoff = evict.checked_sub(1).map(|last| buffers[last].0);
+        Self { before, after, cutoff }
     }
-    if evict == 0 {
-        // When: evict is 0, everything fits, so no entry moves.
-        return Vec::new();
+
+    /// Carry the plan out on the list it was made from, returning the evicted entries. With
+    /// nothing to evict the list is not edited.
+    fn take(&self, images: &mut impl ImageList) -> Vec<InlineImage> {
+        let Some(cutoff) = self.cutoff else {
+            // When: cutoff is None, everything fits, so no entry moves and the list is not edited.
+            return Vec::new();
+        };
+        // Removed in place, in entry order, keeping the order of the rest.
+        images.edit().extract_if(.., |image| image.id <= cutoff).collect()
     }
-    let evicted_ids: std::collections::HashSet<u64> =
-        buffers[..evict].iter().map(|(id, _)| *id).collect();
-    let (evicted, kept): (Vec<InlineImage>, Vec<InlineImage>) =
-        std::mem::take(images).into_iter().partition(|image| evicted_ids.contains(&image.id));
-    *images = kept;
-    evicted
 }
 
 fn trim_inline_images_to(images: &mut Vec<InlineImage>, byte_budget: usize) {
@@ -536,184 +545,19 @@ pub(super) fn retained_inline_media(images: &[InlineImage]) -> ResourceAmount {
 ///
 /// Ids come from one increasing counter at decode, so ordering by id is ordering by pixel age.
 /// Entry order is not: re-placing an older kitty image moves its entry to the end of the vector.
+/// Entries that share an id share one buffer, so sorting and dropping repeated ids leaves each
+/// buffer once.
 fn unique_pixel_buffers(images: &[InlineImage]) -> Vec<(u64, usize)> {
-    let mut seen = std::collections::HashSet::with_capacity(images.len());
-    let mut buffers: Vec<(u64, usize)> = images
-        .iter()
-        .filter(|image| seen.insert(image.id))
-        .map(|image| (image.id, image.bgra.len()))
-        .collect();
+    let mut buffers: Vec<(u64, usize)> =
+        images.iter().map(|image| (image.id, image.bgra.len())).collect();
     buffers.sort_unstable_by_key(|(id, _)| *id);
+    buffers.dedup_by_key(|(id, _)| *id);
     buffers
 }
 
-fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-    // The same rendered-side cap the base64 path resizes to: this buffer is
-    // what a Sixel payload rasterises into, and anything addressing beyond it
-    // is clipped below.
-    const MAX_SIDE: usize = MAX_INLINE_IMAGE_RENDER_SIDE as usize;
-    let mut palette = [[0u8, 0, 0, 255]; 256];
-    palette[0] = [0, 0, 0, 255];
-    palette[1] = [255, 255, 255, 255];
-
-    let mut color_idx = 1usize;
-    let mut pixels = vec![0u8; MAX_SIDE * MAX_SIDE * 4];
-    let mut cursor_x = 0usize;
-    let mut cursor_y = 0usize;
-    let mut max_x = 0usize;
-    let mut max_y = 0usize;
-    let mut repeat = 1usize;
-    let mut position = 0usize;
-
-    while position < data.len() {
-        match data[position] {
-            b'"' => {
-                position += 1;
-                skip_sixel_params(data, &mut position);
-            }
-            b'#' => {
-                position += 1;
-                let idx = parse_sixel_number(data, &mut position).unwrap_or(0).min(255) as usize;
-                color_idx = idx;
-                if data.get(position) == Some(&b';') {
-                    position += 1;
-                    let mode = parse_sixel_number(data, &mut position).unwrap_or(0);
-                    if data.get(position) == Some(&b';') {
-                        position += 1;
-                    }
-                    let red_percent = parse_sixel_number(data, &mut position).unwrap_or(0);
-                    if data.get(position) == Some(&b';') {
-                        position += 1;
-                    }
-                    let green_percent = parse_sixel_number(data, &mut position).unwrap_or(0);
-                    if data.get(position) == Some(&b';') {
-                        position += 1;
-                    }
-                    let blue_percent = parse_sixel_number(data, &mut position).unwrap_or(0);
-                    if mode == 2 {
-                        palette[idx] = [
-                            percent_to_u8(red_percent),
-                            percent_to_u8(green_percent),
-                            percent_to_u8(blue_percent),
-                            255,
-                        ];
-                    }
-                }
-            }
-            b'!' => {
-                position += 1;
-                // Clamped to the raster width. Every iteration past `MAX_SIDE`
-                // is discarded by the `pixel_x >= MAX_SIDE` test below, and once `cursor_x`
-                // has advanced that far no later byte writes anything either —
-                // so the clamp changes how long the decode takes, not what it
-                // produces. Without it a twelve-byte payload (`!4294967295m`)
-                // buys about 4.29 billion no-op iterations, which any process
-                // that can write to the terminal could trigger.
-                repeat = (parse_sixel_number(data, &mut position).unwrap_or(1).max(1) as usize)
-                    .min(MAX_SIDE);
-            }
-            b'$' => {
-                cursor_x = 0;
-                position += 1;
-            }
-            b'-' => {
-                cursor_x = 0;
-                cursor_y = cursor_y.saturating_add(6);
-                position += 1;
-            }
-            byte @ b'?'..=b'~' => {
-                // When: byte falls in the sixel data range its low six bits
-                // paint one column strip of six vertical pixels.
-                let bits = byte - 63;
-                for column_offset in 0..repeat {
-                    let pixel_x = cursor_x + column_offset;
-                    if pixel_x >= MAX_SIDE {
-                        // When: pixel_x has reached MAX_SIDE the column lies outside
-                        // the raster, so the rest of the repeat run writes nothing.
-                        continue;
-                    }
-                    for bit in 0..6 {
-                        if bits & (1 << bit) == 0 {
-                            // When: this bit is clear in bits the pixel stays
-                            // background, so no colour is written for that row.
-                            continue;
-                        }
-                        let pixel_y = cursor_y + bit as usize;
-                        if pixel_y >= MAX_SIDE {
-                            // When: pixel_y has reached MAX_SIDE the row lies below
-                            // the raster, so the remaining bits are discarded.
-                            continue;
-                        }
-                        let off = (pixel_y * MAX_SIDE + pixel_x) * 4;
-                        let [red, green, blue, alpha] = palette[color_idx];
-                        pixels[off] = blue;
-                        pixels[off + 1] = green;
-                        pixels[off + 2] = red;
-                        pixels[off + 3] = alpha;
-                        max_x = max_x.max(pixel_x + 1);
-                        max_y = max_y.max(pixel_y + 1);
-                    }
-                }
-                cursor_x = cursor_x.saturating_add(repeat);
-                repeat = 1;
-                position += 1;
-            }
-            _ => {
-                position += 1;
-            }
-        }
-    }
-
-    if max_x == 0 || max_y == 0 {
-        // When: max_x or max_y stayed at zero no sixel byte painted anything,
-        // so there is no image to hand back.
-        return None;
-    }
-
-    let mut packed = Vec::with_capacity(max_x * max_y * 4);
-    for row in 0..max_y {
-        let off = row * MAX_SIDE * 4;
-        packed.extend_from_slice(&pixels[off..off + max_x * 4]);
-    }
-    Some((max_x as u32, max_y as u32, packed))
-}
-
-fn skip_sixel_params(data: &[u8], position: &mut usize) {
-    while *position < data.len() {
-        match data[*position] {
-            b'0'..=b'9' | b';' => *position += 1,
-            _ => {
-                // When: data holds a byte outside digits and ';' the parameter
-                // list has ended, so scanning stops with position on that byte.
-                break;
-            }
-        }
-    }
-}
-
-fn parse_sixel_number(data: &[u8], position: &mut usize) -> Option<u32> {
-    let start = *position;
-    let mut value = 0u32;
-    while *position < data.len() {
-        match data[*position] {
-            b'0'..=b'9' => {
-                value = value.saturating_mul(10).saturating_add(u32::from(data[*position] - b'0'));
-                *position += 1;
-            }
-            _ => {
-                // When: data holds a byte outside the digit range the number is
-                // complete, so position stops there and the digits so far form value.
-                break;
-            }
-        }
-    }
-    (*position > start).then_some(value)
-}
-
-fn percent_to_u8(percent: u32) -> u8 {
-    ((percent.min(100) * 255 + 50) / 100) as u8
-}
-
+#[path = "media_sixel.rs"]
+mod media_sixel;
+use media_sixel::decode_sixel;
 #[path = "media_kitty.rs"]
 mod media_kitty;
 #[path = "media_store.rs"]
@@ -721,8 +565,12 @@ mod media_store;
 #[cfg(test)]
 pub(super) use media_kitty::MAX_KITTY_PLACEMENTS;
 pub(super) use media_kitty::{apply_kitty, kitty_source_size, KittyOp};
+pub(super) use media_store::ImageList;
 pub use media_store::{InlineImageStore, MediaSnapshot};
 
 #[cfg(test)]
 #[path = "media_tests.rs"]
 mod media_tests;
+#[cfg(test)]
+#[path = "media_trim_tests.rs"]
+mod media_trim_tests;

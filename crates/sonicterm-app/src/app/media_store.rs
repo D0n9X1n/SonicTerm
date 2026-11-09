@@ -108,6 +108,37 @@ impl DerefMut for InlineImagesGuard<'_> {
     }
 }
 
+/// A pane's image list as the kitty store and the trims see it: read through `view`, and changed
+/// only through `edit`, which they call only when they will change the list. On the store's guard
+/// `edit` draws a new revision and may copy a list a frame still holds, so an operation that
+/// changes nothing leaves both alone.
+pub(in crate::app) trait ImageList {
+    /// The list, read-only.
+    fn view(&self) -> &[InlineImage];
+    /// The list, to change it.
+    fn edit(&mut self) -> &mut Vec<InlineImage>;
+}
+
+impl ImageList for Vec<InlineImage> {
+    fn view(&self) -> &[InlineImage] {
+        self
+    }
+
+    fn edit(&mut self) -> &mut Vec<InlineImage> {
+        self
+    }
+}
+
+impl ImageList for InlineImagesGuard<'_> {
+    fn view(&self) -> &[InlineImage] {
+        &self.0.images
+    }
+
+    fn edit(&mut self) -> &mut Vec<InlineImage> {
+        self
+    }
+}
+
 #[cfg(test)]
 #[path = "media_store_tests.rs"]
 mod media_store_tests;

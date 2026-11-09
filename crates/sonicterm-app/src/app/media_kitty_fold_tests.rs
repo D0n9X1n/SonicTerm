@@ -156,3 +156,34 @@ fn a_placement_at_the_cap_reads_the_store_twice() {
     let visited = SCAN_VISITS.with(std::cell::Cell::get);
     assert!(visited <= 2 * entries, "{visited} visits over {entries} entries");
 }
+
+/// A placement that replaces one reads the store at most twice wherever the replaced entry sits:
+/// the removal starts at the entry the fold found, so entries before it are not read again.
+#[test]
+fn a_replacing_placement_reads_the_store_twice_wherever_it_matches() {
+    let count = 64u64;
+    for replaced in [1, count / 2, count] {
+        let mut images = Vec::new();
+        for image_id in 1..=count {
+            let metadata = format!("a=T,i={image_id},p=1,f=32,s=1,v=1");
+            apply_kitty(
+                &mut images,
+                KittyOp::Transmit(command(&metadata), image(image_id), Some((1, 1))),
+            );
+        }
+        let entries = images.len();
+        SCAN_VISITS.with(|visits| visits.set(0));
+        let place = format!("a=p,i={replaced},p=1");
+        assert_eq!(
+            apply_kitty(&mut images, KittyOp::Place(command(&place), 3, 3, 0)).0,
+            Some("OK")
+        );
+        let visited = SCAN_VISITS.with(std::cell::Cell::get);
+        assert!(
+            visited <= 2 * entries,
+            "image {replaced}: {visited} visits over {entries} entries"
+        );
+        assert_eq!(images.len(), entries, "image {replaced}: the placement replaced its own");
+        assert_eq!(images.last().map(|entry| (entry.id, entry.row)), Some((replaced, 3)));
+    }
+}

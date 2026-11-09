@@ -9,7 +9,9 @@
 use sonicterm_render_model::{InlineImage, KittyShow, KittyTag};
 use sonicterm_vt::vt::{KittyAction, KittyCommand, KittyDelete, MediaEvent};
 
-use super::{decode_encoded_image, inline_image_decode_dimensions_allowed, rgba_to_retained_bgra};
+use super::{
+    decode_encoded_image, inline_image_decode_dimensions_allowed, rgba_to_retained_bgra, ImageList,
+};
 
 /// Decode a kitty transmit's pixels by its declared format.
 ///
@@ -120,9 +122,10 @@ thread_local! {
 }
 
 /// Apply one kitty operation to a pane's images, returning the reply message and the entries
-/// removed, which the caller drops after releasing the image lock.
+/// removed, which the caller drops after releasing the image lock. The list is edited only when
+/// the operation changes it: a refusal or a command that matches nothing only reads it.
 pub(in crate::app) fn apply_kitty(
-    images: &mut Vec<InlineImage>,
+    images: &mut impl ImageList,
     operation: KittyOp,
 ) -> (Option<&'static str>, Vec<InlineImage>) {
     match operation {
@@ -130,15 +133,22 @@ pub(in crate::app) fn apply_kitty(
             // When: operation is Transmit, the image replaces every entry of its id before it is tagged and stored.
             let show = show_for(&command);
             // A displayed transmit adds a placement; at the cap it is refused unless it replaces one of its own.
-            // One pass counts every placement and the ones this transmit replaces.
-            note_visits(images.len());
-            let (placements, replaced_placements) = images
-                .iter()
-                .filter(|entry| is_placement(entry))
-                .fold((0usize, 0usize), |(placements, replaced), entry| {
-                    let own = command.image_id != 0 && tag_of(entry).image_id == command.image_id;
-                    (placements + 1, replaced + usize::from(own))
-                });
+            // One pass counts every placement and the ones this transmit replaces, and finds the
+            // first entry it replaces, where the removal starts.
+            note_visits(images.view().len());
+            let mut placements = 0usize;
+            let mut replaced_placements = 0usize;
+            let mut first_own = None;
+            for (index, entry) in images.view().iter().enumerate() {
+                let own = command.image_id != 0 && tag_of(entry).image_id == command.image_id;
+                if own && first_own.is_none() {
+                    first_own = Some(index);
+                }
+                if is_placement(entry) {
+                    placements += 1;
+                    replaced_placements += usize::from(own);
+                }
+            }
             if show != KittyShow::Upload && placements - replaced_placements >= MAX_KITTY_PLACEMENTS
             {
                 // When: show adds a placement and placement_count minus replaced_placements is at the cap, it is refused.
@@ -153,7 +163,7 @@ pub(in crate::app) fn apply_kitty(
                 Vec::new()
             } else {
                 // When: image_id is nonzero, every earlier entry under it is replaced.
-                take_where(images, |entry| tag_of(entry).image_id == command.image_id)
+                take_from(images, first_own, |entry| tag_of(entry).image_id == command.image_id)
             };
             image.kitty = Some(KittyTag {
                 image_id: command.image_id,
@@ -161,7 +171,7 @@ pub(in crate::app) fn apply_kitty(
                 show,
                 source_px: source_px.unwrap_or((image.width, image.height)),
             });
-            images.push(image);
+            images.edit().push(image);
             (Some("OK"), removed)
         }
         KittyOp::Place(command, row, col, scroll_mark) => {
@@ -172,18 +182,23 @@ pub(in crate::app) fn apply_kitty(
                     && (tag.show == KittyShow::Upload
                         || (command.placement_id != 0 && tag.placement_id == command.placement_id))
             };
-            // One pass finds the first stored entry of the id, counts placements, and notes whether
-            // this placement replaces one (which keeps the count) rather than adding one.
-            note_visits(images.len());
+            // One pass finds the first stored entry of the id, counts placements, notes whether
+            // this placement replaces one (which keeps the count) rather than adding one, and
+            // finds the first entry it replaces, where the removal starts.
+            note_visits(images.view().len());
             let mut source = None;
             let mut placements = 0usize;
             let mut replaces_placement = false;
-            for entry in images.iter() {
+            let mut first_replaced = None;
+            for (index, entry) in images.view().iter().enumerate() {
                 if source.is_none()
                     && command.image_id != 0
                     && tag_of(entry).image_id == command.image_id
                 {
                     source = Some(entry);
+                }
+                if first_replaced.is_none() && replaces(entry) {
+                    first_replaced = Some(index);
                 }
                 if is_placement(entry) {
                     placements += 1;
@@ -194,13 +209,13 @@ pub(in crate::app) fn apply_kitty(
                 // When: source is None, no stored entry has image_id: kitty answers ENOENT and places nothing.
                 return (Some("ENOENT:no such image"), Vec::new());
             };
-            let source_px = tag_of(source).source_px;
-            let mut placed = source.clone();
             // Only replacing an existing placement keeps the count; placing an upload adds one.
             if !replaces_placement && placements >= MAX_KITTY_PLACEMENTS {
                 // When: replaces_placement is false and placement_count is at the cap, the new placement is refused.
                 return (Some("ENOSPC:too many placements"), Vec::new());
             }
+            let source_px = tag_of(source).source_px;
+            let mut placed = source.clone();
             placed.row = row;
             placed.col = col;
             placed.scroll_mark = scroll_mark;
@@ -215,12 +230,11 @@ pub(in crate::app) fn apply_kitty(
                     KittyShow::Anchored { cols: command.cols, rows: command.rows }
                 },
             });
-            let mut removed = take_where(images, replaces);
-            images.push(placed);
+            let placed_buffer = std::sync::Arc::clone(&placed.bgra);
+            let mut removed = take_from(images, first_replaced, replaces);
+            images.edit().push(placed);
             // An upload or a replaced placement shares the placed entry's buffer; dropping it frees nothing.
-            removed.retain(|entry| {
-                !std::sync::Arc::ptr_eq(&entry.bgra, &images[images.len() - 1].bgra)
-            });
+            removed.retain(|entry| !std::sync::Arc::ptr_eq(&entry.bgra, &placed_buffer));
             (Some("OK"), removed)
         }
         KittyOp::Delete(command) => (None, delete(images, &command)),
@@ -228,7 +242,7 @@ pub(in crate::app) fn apply_kitty(
 }
 
 /// Remove the placements a `d=i`/`d=I` command names, keeping or freeing the data.
-fn delete(images: &mut Vec<InlineImage>, command: &KittyCommand) -> Vec<InlineImage> {
+fn delete(images: &mut impl ImageList, command: &KittyCommand) -> Vec<InlineImage> {
     let free = match command.delete {
         Some(KittyDelete::ById) => false,
         Some(KittyDelete::ByIdFree) => true,
@@ -251,8 +265,9 @@ fn delete(images: &mut Vec<InlineImage>, command: &KittyCommand) -> Vec<InlineIm
     // One pass over what remains answers both questions: is any placement of id left, and is any
     // entry of id left at all. `has_upload` is read only when no placement is left, so then every
     // entry it saw is an upload.
-    note_visits(images.len());
+    note_visits(images.view().len());
     let (still_placed, has_upload) = images
+        .view()
         .iter()
         .filter(|entry| tag_of(entry).image_id == id)
         .fold((false, false), |(placed, _), entry| (placed || is_placement(entry), true));
@@ -269,7 +284,7 @@ fn delete(images: &mut Vec<InlineImage>, command: &KittyCommand) -> Vec<InlineIm
                 show: KittyShow::Upload,
                 source_px,
             });
-            images.push(kept);
+            images.edit().push(kept);
         }
     }
     removed
@@ -285,16 +300,32 @@ fn tag_of(entry: &InlineImage) -> KittyTag {
     })
 }
 
-/// Move every entry matching `predicate` out of `images`, preserving the order of the rest.
+/// Move every entry matching `predicate` out of `images`, preserving the order of both the taken
+/// and the kept entries. A list with no match is only read.
 fn take_where(
-    images: &mut Vec<InlineImage>,
+    images: &mut impl ImageList,
     mut predicate: impl FnMut(&InlineImage) -> bool,
 ) -> Vec<InlineImage> {
-    note_visits(images.len());
-    let (taken, kept): (Vec<InlineImage>, Vec<InlineImage>) =
-        std::mem::take(images).into_iter().partition(|entry| predicate(entry));
-    *images = kept;
-    taken
+    let first = images.view().iter().position(&mut predicate);
+    note_visits(first.map_or(images.view().len(), |index| index + 1));
+    take_from(images, first, predicate)
+}
+
+/// Move every entry matching `predicate` out of `images`, given `first`, the index of the first
+/// match (`None` when nothing matches, which leaves the list unedited). Entries before `first` are
+/// not read again.
+fn take_from(
+    images: &mut impl ImageList,
+    first: Option<usize>,
+    mut predicate: impl FnMut(&InlineImage) -> bool,
+) -> Vec<InlineImage> {
+    let Some(first) = first else {
+        // When: first is None, no entry matches, so the list is neither edited nor copied.
+        return Vec::new();
+    };
+    let list = images.edit();
+    note_visits(list.len() - first);
+    list.extract_if(first.., |entry| predicate(entry)).collect()
 }
 
 #[cfg(test)]
