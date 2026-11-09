@@ -320,3 +320,26 @@ fn quiet_band_sides_shrink_and_dim_everything_but_the_name() {
         quiet_band_sides(caution).segments[0].parts.iter().map(|part| part.tone).collect();
     assert_eq!(tones, [StatusTone::Name, StatusTone::Warn], "a caution keeps its color");
 }
+
+/// A name the user put in the right list is centred on a band whose buttons are on the right, not
+/// moved to the left edge with the rest of the right list; with the buttons on the left (macOS) it
+/// keeps its explicit place.
+#[test]
+fn a_right_listed_name_is_centred_beside_right_buttons() {
+    use crate::window_band::ButtonEdge;
+    let resolved = toml::from_str::<sonicterm_cfg::config::Config>(
+        "[status_line]\ncenter = []\nright = [\"window\", \"mem\"]\n",
+    )
+    .unwrap()
+    .status_line
+    .resolve()
+    .unwrap();
+    let side_of = |band: &sonicterm_cfg::status_line::ResolvedStatusLine, id| {
+        band.segment(id).map(|segment| segment.side)
+    };
+    let right = with_window_projected(&resolved, ButtonEdge::Right);
+    assert_eq!(side_of(&right, StatusSegmentId::Window), Some(StatusSide::Center));
+    assert_eq!(side_of(&right, StatusSegmentId::Mem), Some(StatusSide::Left));
+    let left = with_window_projected(&resolved, ButtonEdge::Left);
+    assert_eq!(side_of(&left, StatusSegmentId::Window), Some(StatusSide::Right));
+}

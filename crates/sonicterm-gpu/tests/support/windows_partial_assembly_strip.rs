@@ -51,13 +51,23 @@ pub(super) fn strip_tiles(renderer: &GpuRenderer) -> Vec<(sonicterm_types::Glyph
     renderer.__test_resident_tile_sizes(sonicterm_types::GlyphRasterVariant::StatusLine)
 }
 
+/// The palette-footer tiles `renderer`'s atlas holds: with the palette closed, only a small side
+/// segment of the strip draws them.
+pub(super) fn footer_tiles(renderer: &GpuRenderer) -> Vec<(sonicterm_types::GlyphKey, u32, u32)> {
+    renderer.__test_resident_tile_sizes(sonicterm_types::GlyphRasterVariant::PaletteFooter)
+}
+
+/// Strip tiles and small-text tiles of one renderer.
+type StripTileSets =
+    (Vec<(sonicterm_types::GlyphKey, u32, u32)>, Vec<(sonicterm_types::GlyphKey, u32, u32)>);
+
 /// The strip showing `view`, presented by a cold renderer built at `family`, `size_pt`,
 /// `scale_factor` and `font_scale`: the tiles a renderer that never drew another size holds.
 pub(super) fn cold_strip_tiles(
     active: &ActiveEventLoop,
     view: &sonicterm_render_model::boundary::ui::status_line::StatusLineView,
     (family, size_pt, scale_factor, font_scale): (&str, f32, f32, f32),
-) -> Result<Vec<(sonicterm_types::GlyphKey, u32, u32)>, String> {
+) -> Result<StripTileSets, String> {
     let (window, mut cold) = wgpu_renderer(active)?;
     cold.set_font(family, size_pt, 1.0, 1.0);
     cold.set_scale_factor(scale_factor);
@@ -67,13 +77,15 @@ pub(super) fn cold_strip_tiles(
     let mut scene = single(&layout(&cold, &window));
     present(&mut cold, &mut scene)?;
     check(cold.last_missing_chrome().is_empty(), "the cold strip drew every glyph")?;
-    Ok(strip_tiles(&cold))
+    Ok((strip_tiles(&cold), footer_tiles(&cold)))
 }
 
 /// Through the real renderer: a warm strip, then a zoom, a DPI change and a `font_scale` change.
 /// After each, every strip tile resident in the atlas has the atlas-rect size a cold renderer
 /// built at that final size draws for the same text, and no other strip tile is resident, so a
-/// tile of an earlier size can neither stay resident nor be drawn.
+/// tile of an earlier size can neither stay resident nor be drawn. A small side segment draws
+/// palette-footer tiles while that size is under the strip's, matching the cold renderer's, and
+/// none once `font_scale` brings the strip under it.
 ///
 /// It runs on its own renderer and window: the font, scale and strip changes and the cold
 /// renderers it builds must not reach the shared renderer the failure cases after it rely on.
@@ -92,23 +104,27 @@ pub(super) fn strip_rasterizes_anew_after_size_changes(
     let default_scale = sonicterm_gpu::status_strip::default_font_scale();
     let (family, size_pt, scale_factor) =
         ("Rec Mono St.Helens", renderer.font_size(), renderer.scale_factor());
-    let view = StatusLineView::new(vec![StatusSegmentView {
-        id: StatusSegmentId::Mode,
+    let segment = |id, text: &str, small| StatusSegmentView {
+        id,
         side: StatusSide::Left,
         priority: 500,
         protected: true,
-        parts: vec![StatusPart::new("HELLO", StatusTone::Value)],
+        parts: vec![StatusPart::new(text, StatusTone::Value)],
         compact: None,
         compact_last: false,
-        small: false,
+        small,
         click: None,
         spoken: SpokenSegment::default(),
-    }]);
+    };
+    let view = StatusLineView::new(vec![
+        segment(StatusSegmentId::Mode, "HELLO", false),
+        segment(StatusSegmentId::Mem, "MEM", true),
+    ]);
     let mut scene = single(&own_layout);
     renderer.set_status_line_view(view.clone());
     renderer.set_status_line_visible(true);
     let mut previous: Option<Vec<(sonicterm_types::GlyphKey, u32, u32)>> = None;
-    let mut step = |renderer: &mut GpuRenderer, label: &str, font_scale: f32| {
+    let mut step = |renderer: &mut GpuRenderer, label: &str, font_scale: f32, small: bool| {
         present(renderer, &mut scene)?;
         check(
             renderer.last_missing_chrome().is_empty(),
@@ -117,21 +133,30 @@ pub(super) fn strip_rasterizes_anew_after_size_changes(
         let mut live = strip_tiles(renderer);
         check(!live.is_empty(), &format!("{label}: the strip holds tiles"))?;
         let target = (family, renderer.font_size(), renderer.scale_factor(), font_scale);
-        let cold = cold_strip_tiles(active, &view, target)?;
+        let (cold, cold_footer) = cold_strip_tiles(active, &view, target)?;
         sonicterm_gpu::status_strip::compare_strip_tile_sizes(&live, &cold)
             .map_err(|error| format!("{label}: {error}"))?;
+        // The small segment's tiles are footer tiles exactly while the footer size is the smaller.
+        let live_footer = footer_tiles(renderer);
+        check(
+            live_footer.is_empty() != small,
+            &format!("{label}: small text drew {} footer tiles", live_footer.len()),
+        )?;
+        sonicterm_gpu::status_strip::compare_strip_tile_sizes(&live_footer, &cold_footer)
+            .map_err(|error| format!("{label} small text: {error}"))?;
         // Each change must reach the tiles, or the comparison above proved nothing about it.
         live.sort_by_key(|(key, width, height)| (key.ch, key.weight_bold, *width, *height));
         check(previous.as_ref() != Some(&live), &format!("{label}: the tiles kept their size"))?;
         previous = Some(live);
         Ok::<(), String>(())
     };
-    step(renderer, "warm", default_scale)?;
+    step(renderer, "warm", default_scale, true)?;
     renderer.set_font(family, size_pt + 4.0, 1.0, 1.0);
-    step(renderer, "zoom", default_scale)?;
+    step(renderer, "zoom", default_scale, true)?;
     renderer.set_scale_factor(scale_factor * 2.0);
-    step(renderer, "DPI", default_scale)?;
+    step(renderer, "DPI", default_scale, true)?;
     check(renderer.set_status_line_font_scale(0.5), "a new font_scale changes the strip")?;
-    step(renderer, "font_scale", 0.5)?;
+    // At half size the strip is under the footer size, so the small segment keeps the strip's.
+    step(renderer, "font_scale", 0.5, false)?;
     Ok(())
 }

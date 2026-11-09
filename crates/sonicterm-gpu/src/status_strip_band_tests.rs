@@ -117,3 +117,68 @@ fn small_segments_use_the_small_text() {
     let plain = fit_strip(&view, &geometry, &stack, &mut raster, &mut atlas, None);
     assert_eq!(width_of(&plain, 0), width_of(&plain, 1), "no small text: both at the strip size");
 }
+
+/// A small segment is drawn in the small text, on the strip's one baseline: its capital is shorter
+/// than a full-size segment's and both sit on the same line, so the side text lines up with the
+/// name.
+#[test]
+fn small_segments_draw_smaller_on_the_names_baseline() {
+    use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = chrome_stack();
+    let mut raster = stack.clone();
+    let small_stack = stack.with_font_size(10.0);
+    let mut small_raster = small_stack.clone();
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let geometry = StripGeometry {
+        top: 0.0,
+        height: 40.0,
+        position: StatusPosition::Top,
+        screen: (400.0, 200.0),
+        scale_factor: 1.0,
+        font_raster_px: 26.0,
+        font_scale: default_font_scale(),
+        cap_height: 7.0,
+        band: StripBand { in_band: true, left_inset: 0.0, right_inset: 0.0 },
+    };
+    let segment = |left: f32, small: bool| PlacedSegment {
+        index: 0,
+        left,
+        width: 40.0,
+        parts: vec![PlacedPart { text: "H".into(), tone: StatusTone::Name, left, width: 40.0 }],
+        small,
+    };
+    let placed = vec![segment(10.0, true), segment(200.0, false)];
+    let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
+    let palette = UiPalette::from_theme(&theme);
+    let colors = StatusColors::resolve(&theme, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
+    let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
+    emit_strip(
+        &placed,
+        &[],
+        &geometry,
+        &colors,
+        Some(&stack),
+        Some(&mut raster),
+        Some(SmallText { font_stack: &small_stack, rasterizer: &mut small_raster, text_px: 10.0 }),
+        &mut atlas,
+        &mut crate::chrome_cache::ChromeRunCache::default(),
+        true,
+        &mut quads,
+        &mut glyphs,
+    );
+    assert_eq!(glyphs.len(), 2, "one capital per segment");
+    // Each size rasterizes under its own variant: footer tiles for the small text, strip tiles for
+    // the full size, so neither can stand in for the other in the atlas.
+    let variants: std::collections::HashSet<_> =
+        atlas.resident_tile_keys().into_iter().map(|key| key.raster_variant).collect();
+    assert!(variants.contains(&GlyphRasterVariant::PaletteFooter), "{variants:?}");
+    assert!(variants.contains(&GlyphRasterVariant::StatusLine), "{variants:?}");
+    let ink = |index: usize| crate::cursor::ndc_rect_px(glyphs[index].rect, 400.0, 200.0);
+    let ((_, small_top, _, small_height), (_, full_top, _, full_height)) = (ink(0), ink(1));
+    assert!(small_height < full_height, "small {small_height} vs full {full_height}");
+    let (small_bottom, full_bottom) = (small_top + small_height, full_top + full_height);
+    assert!((small_bottom - full_bottom).abs() <= 1.0, "baselines {small_bottom} {full_bottom}");
+}

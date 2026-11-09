@@ -792,8 +792,8 @@ impl StatusLineView {
 /// every other segment, so a long name drops the others before it shortens. With
 /// `titlebar_segments = "right"` only the name and the right list remain. With the window buttons
 /// on the right `edge`, the right list moves to the left side, after any left list and in its
-/// configured order, so nothing sits beside the buttons. The user's lists, the checklist and Save
-/// never see this projection.
+/// configured order, so nothing sits beside the buttons, and a name in the right list is centred.
+/// The user's lists, the checklist and Save never see this projection.
 pub fn with_window_projected(
     resolved: &ResolvedStatusLine,
     edge: crate::window_band::ButtonEdge,
@@ -807,10 +807,15 @@ pub fn with_window_projected(
     }
     if edge == crate::window_band::ButtonEdge::Right {
         // The caption buttons own the right edge. Segments are stored left, centre, then right,
-        // so retagging keeps the right list after the left list and in its own order.
+        // so retagging keeps the right list after the left list and in its own order; a name the
+        // right list holds goes to the centre, where the band shows it.
         for segment in &mut projected.segments {
             if segment.side == StatusSide::Right {
-                segment.side = StatusSide::Left;
+                segment.side = if segment.id == StatusSegmentId::Window {
+                    StatusSide::Center
+                } else {
+                    StatusSide::Left
+                };
             }
         }
     }
