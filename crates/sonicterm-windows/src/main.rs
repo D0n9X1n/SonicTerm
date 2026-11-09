@@ -520,7 +520,8 @@ pub fn windows_default_config() -> Config {
 
 /// Apply Windows policy before config reaches app state, at startup and on every reload: terminal
 /// windows always use SonicTerm's integrated titlebar, so an explicit `titlebar = "native"` is
-/// replaced with one warning.
+/// replaced with one warning. Only the Windows shells install it; other hosts compile it for tests.
+#[cfg(any(target_os = "windows", test))]
 fn normalize_windows_config(mut config: Config) -> (Config, Vec<String>) {
     let mut warnings = Vec::new();
     if config.window.titlebar == sonicterm_cfg::config::TitlebarMode::Native {
