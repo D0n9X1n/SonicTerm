@@ -354,6 +354,7 @@ status-spoken-glyphs = Missing glyphs
 status-spoken-history = History
 status-spoken-font = Font scale
 status-spoken-zoom = Zoom
+status-spoken-window = Window
 status-spoken-size = Size
 status-accessible-strip = Status line
 status-accessible-warning = Warning:
@@ -389,6 +390,7 @@ status-group-program-reported = Program-reported
 status-name-health = Health
 status-name-mode = Mode
 status-name-zoom = Zoom
+status-name-window = Window
 
 # Save Current Settings
 settings-saved = Current settings saved

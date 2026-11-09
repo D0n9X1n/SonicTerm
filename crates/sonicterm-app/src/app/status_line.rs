@@ -99,6 +99,8 @@ impl StatusPaneFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BuiltFrom {
     generation: u64,
+    /// How the strip related to the window's titlebar band when it was built.
+    role: sync::StripRole,
     inputs: StatusLineInputs,
 }
 
@@ -458,7 +460,7 @@ impl App {
         tracing::info!("status line font_scale -> {}", scale.as_f32());
     }
 
-    /// Return the strip's text to the default 0.8 in every window for this session.
+    /// Return the strip's text to the default, the tab titles' size, in every window for this session.
     pub(super) fn reset_status_line_font_scale(&mut self) {
         let scale = sonicterm_cfg::status_line::StatusFontScale::DEFAULT;
         self.change_status_choices(|overrides, file| overrides.set_font_scale(file, scale));

@@ -20,6 +20,8 @@ pub enum StatusSegmentId {
     Health,
     /// SonicTerm's own process memory.
     Mem,
+    /// The window's name, the same text its native title shows.
+    Window,
     /// Copy mode, broadcast input and mouse capture.
     Mode,
     /// Input SonicTerm refused.
@@ -170,7 +172,7 @@ impl StatusPreset {
     fn catalog_lists(self) -> [&'static [StatusSegmentId]; 3] {
         use StatusSegmentId as Seg;
         const DEV_LEFT: &[Seg] = &[Seg::Mode, Seg::Font, Seg::Scroll, Seg::Input, Seg::Paste];
-        const DEV_CENTER: &[Seg] = &[Seg::Link, Seg::Sel];
+        const DEV_CENTER: &[Seg] = &[Seg::Window, Seg::Link, Seg::Sel];
         const DEV_RIGHT: &[Seg] =
             &[Seg::Alerts, Seg::Clip, Seg::Health, Seg::Glyphs, Seg::History, Seg::Mem];
         const DIAG_RIGHT: &[Seg] = &[
@@ -187,7 +189,9 @@ impl StatusPreset {
             Seg::Mem,
         ];
         match self {
-            Self::Minimal => [&[], &[], &[Seg::Alerts, Seg::Clip, Seg::Health, Seg::Mem]],
+            Self::Minimal => {
+                [&[], &[Seg::Window], &[Seg::Alerts, Seg::Clip, Seg::Health, Seg::Mem]]
+            }
             Self::Developer => [DEV_LEFT, DEV_CENTER, DEV_RIGHT],
             Self::Diagnostics => [DEV_LEFT, DEV_CENTER, DIAG_RIGHT],
         }
@@ -214,6 +218,17 @@ pub enum StatusIcons {
     Nerd,
 }
 
+/// Which segments a status line merged into an integrated titlebar band shows beside the name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitlebarSegments {
+    /// The window name and the right list: the band reads like a titlebar.
+    #[default]
+    Right,
+    /// The window name and every list.
+    All,
+}
+
 /// Which window edge the strip sits on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -236,8 +251,9 @@ impl StatusPosition {
     }
 }
 
-/// The strip's text size as a share of the live terminal font size: 0.3 to 1.0, 0.8 by default. A
-/// configured value is kept exactly as written; only Larger and Smaller Text land on 0.05 steps.
+/// The strip's text size as a share of the tab titles' size: 0.3 to 1.0, 1.0 by default, so the
+/// strip matches the tab bar. A configured value is kept exactly as written; only Larger and
+/// Smaller Text land on 0.05 steps.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StatusFontScale(f64);
 
@@ -245,8 +261,8 @@ pub struct StatusFontScale(f64);
 impl Eq for StatusFontScale {}
 
 impl StatusFontScale {
-    /// The default, 0.8.
-    pub const DEFAULT: Self = Self(0.8);
+    /// The default, 1.0: the tab titles' size.
+    pub const DEFAULT: Self = Self(1.0);
     /// The smallest scale, 0.3.
     pub const MIN: Self = Self(0.3);
     /// The largest scale, 1.0.
@@ -514,6 +530,19 @@ impl Default for AlertsSettings {
     }
 }
 
+/// Window segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WindowSegmentSettings {
+    /// Show the window's `#N` number before its name.
+    pub number: bool,
+}
+
+impl Default for WindowSegmentSettings {
+    fn default() -> Self {
+        Self { number: true }
+    }
+}
+
 /// Size segment settings beyond the common keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SizeSettings {
@@ -597,7 +626,11 @@ pub struct ResolvedStatusLine {
     pub icons: StatusIcons,
     /// The window edge the strip sits on.
     pub position: StatusPosition,
-    /// The strip's text size as a share of the live terminal font size.
+    /// Segments the strip shows when it is an integrated titlebar band.
+    pub titlebar_segments: TitlebarSegments,
+    /// These lists are drawn as an integrated titlebar band, so the name shortens last.
+    pub in_band: bool,
+    /// The strip's text size as a share of the tab titles' size.
     pub font_scale: StatusFontScale,
     /// Sampling interval of sampled segments, in milliseconds.
     pub update_interval_ms: u64,
@@ -618,6 +651,8 @@ pub struct ResolvedStatusLine {
     pub ime: ImeSettings,
     /// Size segment settings.
     pub size: SizeSettings,
+    /// Window segment settings.
+    pub window: WindowSegmentSettings,
     /// Alerts segment settings.
     pub alerts: AlertsSettings,
     /// Clipboard segment settings.
@@ -694,7 +729,10 @@ pub struct StatusLineConfig {
     pub icons: StatusIcons,
     /// The window edge the strip sits on; an unknown value fails the load.
     pub position: StatusPosition,
-    /// The strip's text size as a share of the live terminal font size, `0.3..=1.0`.
+    /// Segments the strip shows when it is an integrated titlebar band; an unknown value fails
+    /// the load.
+    pub titlebar_segments: TitlebarSegments,
+    /// The strip's text size as a share of the tab titles' size, `0.3..=1.0`.
     pub font_scale: f64,
     /// Hide every sensitive segment or part (screen sharing).
     pub hide_sensitive: bool,
@@ -722,6 +760,7 @@ impl Default for StatusLineConfig {
             right: None,
             icons: StatusIcons::Unicode,
             position: StatusPosition::Top,
+            titlebar_segments: TitlebarSegments::Right,
             font_scale: StatusFontScale::DEFAULT.as_f64(),
             hide_sensitive: false,
             update_interval_ms: 2000,

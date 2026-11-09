@@ -83,7 +83,7 @@ fn reload_changes_the_strip_font_scale_in_every_window() {
     for id in windows {
         let strip = recorded_strip(&app, id);
         assert!(strip.visible, "the strip is shown in every window");
-        assert!((strip.font_scale - 0.8).abs() < 1e-6, "{strip:?}");
+        assert!((strip.font_scale - 1.0).abs() < 1e-6, "{strip:?}");
     }
     let before = windows.map(|id| asks(&app.registry.windows[&id]));
     std::fs::write(&path, "[status_line]\nenabled = true\nfont_scale = 0.6\n").unwrap();
@@ -107,7 +107,7 @@ fn reload_changes_the_strip_font_scale_in_every_window() {
 
 /// Each palette action changes the live value and the strip geometry that follows from it, and
 /// hands it to every window's renderer strip: Move to Top/Bottom moves the band, Larger/Smaller
-/// step the text by 0.05 within 0.3..=1.0, and Reset returns it to 0.8.
+/// step the text by 0.05 within 0.3..=1.0, and Reset returns it to 1.0, the tab titles' size.
 #[test]
 fn status_line_palette_actions_change_the_live_strip() {
     use sonicterm_cfg::keymap::Action;
@@ -141,10 +141,13 @@ fn status_line_palette_actions_change_the_live_strip() {
     assert!(app.run_action(&Action::StatusLinePositionTop));
     every_window_follows(&app, "Move to Top");
     assert_eq!(band_top(&app), 28.0);
+    assert!(app.run_action(&Action::DecreaseStatusLineFontScale));
+    every_window_follows(&app, "Smaller Text");
+    assert!((app.status_line.resolved.font_scale.as_f32() - 0.95).abs() < 1e-6);
+    assert!((text_pt(&app) - 13.3).abs() < 1e-4, "the strip text shrinks from the title size");
     assert!(app.run_action(&Action::IncreaseStatusLineFontScale));
     every_window_follows(&app, "Larger Text");
-    assert!((app.status_line.resolved.font_scale.as_f32() - 0.85).abs() < 1e-6);
-    assert!((text_pt(&app) - 11.05).abs() < 1e-4, "the strip text grows");
+    assert!((text_pt(&app) - 14.0).abs() < 1e-4, "and grows back to it");
     for _ in 0..20 {
         app.run_action(&Action::IncreaseStatusLineFontScale);
     }
@@ -181,7 +184,7 @@ fn a_save_round_trips_the_toggle_position_and_text_size() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("enabled = true"), "{text}");
     assert!(text.contains("position = \"bottom\""), "{text}");
-    assert!(text.contains("font_scale = 0.75"), "{text}");
+    assert!(text.contains("font_scale = 0.95"), "{text}");
     assert!(app.status_line.overrides.is_empty(), "the save satisfied every choice");
     app.configs.runtime_config_path = Some(path.clone());
     app.force_reload_config();

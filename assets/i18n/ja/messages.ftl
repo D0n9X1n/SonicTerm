@@ -350,6 +350,7 @@ status-spoken-glyphs = 欠けている字形
 status-spoken-history = 履歴
 status-spoken-font = フォント倍率
 status-spoken-zoom = ズーム
+status-spoken-window = ウィンドウ
 status-spoken-size = サイズ
 status-accessible-strip = ステータスライン
 status-accessible-warning = 警告:
@@ -385,6 +386,7 @@ status-group-program-reported = プログラム報告
 status-name-health = 状態
 status-name-mode = モード
 status-name-zoom = ズーム
+status-name-window = ウィンドウ
 
 # Save Current Settings
 settings-saved = 現在の設定を保存しました

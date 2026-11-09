@@ -4,7 +4,7 @@ use super::*;
 
 impl StatusSegmentId {
     /// Every catalog id, in catalog (descending default priority) order.
-    pub const ALL: [StatusSegmentId; 21] = [
+    pub const ALL: [StatusSegmentId; 22] = [
         Self::Alerts,
         Self::Health,
         Self::Mem,
@@ -12,6 +12,7 @@ impl StatusSegmentId {
         Self::Input,
         Self::Clip,
         Self::PathCheck,
+        Self::Window,
         Self::Link,
         Self::Paste,
         Self::Sel,
@@ -34,6 +35,7 @@ impl StatusSegmentId {
             Self::Alerts => "alerts",
             Self::Health => "health",
             Self::Mem => "mem",
+            Self::Window => "window",
             Self::Mode => "mode",
             Self::Input => "input",
             Self::Clip => "clip",
@@ -87,6 +89,16 @@ impl StatusSegmentId {
                 Self::Mem => {
                     (Group::Core, Right, 900, Prot::None, Sensitivity::None, "status-spoken-mem")
                 }
+                // Protected by its formatter, ranked under the broadcast chip, alerts and health
+                // errors so those warnings outlast the name.
+                Self::Window => (
+                    Group::Core,
+                    Center,
+                    700,
+                    Prot::Always,
+                    Sensitivity::None,
+                    "status-spoken-window",
+                ),
                 Self::Mode => (
                     Group::Core,
                     Left,
@@ -203,7 +215,7 @@ impl StatusSegmentId {
                 }
             };
         let default_show = match self {
-            Self::Mem => ShowMode::Always,
+            Self::Mem | Self::Window => ShowMode::Always,
             _ => ShowMode::Active,
         };
         StatusSegmentMeta {
@@ -237,6 +249,7 @@ impl StatusSegmentId {
             implemented: matches!(
                 self,
                 Self::Alerts
+                    | Self::Window
                     | Self::Clip
                     | Self::Input
                     | Self::Glyphs

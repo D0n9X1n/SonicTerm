@@ -74,6 +74,23 @@ fn default_warm_window_pool_keeps_one_spare() {
     assert!(template.contains("0 disables"));
 }
 
+/// The titlebar is integrated by default on macOS and native elsewhere; the file chooses either,
+/// an unknown value fails the load like any other enum, and the starter template documents it.
+#[test]
+fn the_titlebar_mode_has_a_platform_default_and_rejects_unknown_values() {
+    let expected =
+        if cfg!(target_os = "macos") { TitlebarMode::Integrated } else { TitlebarMode::Native };
+    assert_eq!(Config::default().window.titlebar, expected);
+    let integrated: Config =
+        toml::from_str("[window]\ntitlebar = \"integrated\"\n").expect("integrated parses");
+    assert_eq!(integrated.window.titlebar, TitlebarMode::Integrated);
+    let native: Config =
+        toml::from_str("[window]\ntitlebar = \"native\"\n").expect("native parses");
+    assert_eq!(native.window.titlebar, TitlebarMode::Native);
+    assert!(toml::from_str::<Config>("[window]\ntitlebar = \"hidden\"\n").is_err());
+    assert!(default_config_template().contains("titlebar = "));
+}
+
 /// Local target and contextual bare-name activation are default-on and documented kill switches.
 #[test]
 fn clickable_local_target_switches_default_on_and_parse_independently() {

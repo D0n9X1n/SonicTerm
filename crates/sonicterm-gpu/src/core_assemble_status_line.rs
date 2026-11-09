@@ -1,6 +1,17 @@
-//! Assemble status line in the existing painter order, with no device work.
+//! Assemble the status line, the integrated titlebar band and its caption buttons in the existing
+//! painter order, with no device work.
 
 use super::*;
+
+/// Which top-level chrome surface a pass draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    /// The status strip, merged into the titlebar band when it is at the top of an integrated
+    /// window.
+    Strip,
+    /// The name-only band of an integrated window whose strip is off or at the bottom.
+    Band,
+}
 
 impl GpuRenderer {
     /// Emit this phase into the borrowed frame scratch; the caller owns settlement and retries.
@@ -13,48 +24,120 @@ impl GpuRenderer {
     ) {
         let AssemblyGeometry { surface_width_px: sw, surface_height_px: sh, .. } = geometry;
         let AssemblyUi { theme, .. } = inputs;
-        let frame_scratch::FrameScratch { glyphs: glyph_instances, quads, .. } = scratch;
-        // -------- Tab bar ---------------------------------------------------
-        // The insertion gap below opens 8 px at the current drop slot when a
-        // drag is active over this bar.
-        // -------- Status line strip ----------------------------------------
+        let layout = self.band_layout();
+        if layout.separate_px > 0.0 {
+            // An integrated window without a top strip: its name band sits above the panes.
+            self.assemble_surface(Surface::Band, theme, (sw, sh), scratch);
+        }
         if self.status_line_visible {
             // The strip is on: draw its band and fitted segments on its edge.
-            use std::hash::{Hash, Hasher};
-            let strip_palette = self.chrome_caches.palette.palette_for(theme);
-            let colors = crate::status_strip::StatusColors::resolve(
-                theme,
-                self.tab_active_fg,
-                self.tab_inactive_fg,
-                &strip_palette,
-            );
-            let mut geometry = crate::status_strip::StripGeometry {
-                top: self.status_line_top(),
-                height: self.status_line_height(),
-                position: self.status_line_position,
-                screen: (sw, sh),
-                scale_factor: self.scale_factor,
-                font_raster_px: self.font_size * self.scale_factor,
-                font_scale: self.status_line_font_scale,
-                cap_height: 0.0,
+            self.assemble_surface(Surface::Strip, theme, (sw, sh), scratch);
+        }
+        let band_px = if layout.merged { layout.strip_px } else { layout.separate_px };
+        if band_px > 0.0 {
+            // The caption buttons draw over whichever surface is the band.
+            let palette = self.chrome_caches.palette.palette_for(theme);
+            let colors = crate::caption_buttons::CaptionColors {
+                glyph: crate::color::chrome_color_to_linear_rgba(self.tab_active_fg),
+                hover: palette.bg_hover,
+                pressed: palette.bg_active,
             };
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (
-                self.status_line_view.pixel_hash,
-                sw.to_bits(),
-                geometry.text_px().to_bits(),
-                self.tab_title_font.key(),
-                self.tab_title_font.fallback_epoch(),
-            )
-                .hash(&mut hasher);
-            let fit_key = hasher.finish();
-            let mut strip_rasterizer = self.status_line_font_stack.clone();
-            let text_px = geometry.text_px();
-            // The cap height is measured once per text size and kept.
-            let kept = crate::status_strip::kept_cap_height(
-                self.status_line_cap_height,
-                text_px,
-                || match (self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut()) {
+            let buttons = sonicterm_render_model::boundary::ui::window_band::caption_buttons(
+                &self.window_band,
+                sw,
+                band_px,
+                self.scale_factor,
+            );
+            for (button, rect) in buttons {
+                let fills = crate::caption_buttons::caption_fills(
+                    button,
+                    rect,
+                    &self.caption_state,
+                    &colors,
+                    self.scale_factor,
+                );
+                crate::caption_buttons::push_fills(&fills, (sw, sh), &mut scratch.quads);
+            }
+        }
+    }
+
+    /// Draw one surface: its band, hairline, fitted segments and focus ring, and stage its hit
+    /// boxes for the presenter's outcome.
+    fn assemble_surface(
+        &mut self,
+        surface: Surface,
+        theme: &sonicterm_render_model::boundary::cfg::theme::Theme,
+        (sw, sh): (f32, f32),
+        scratch: &mut frame_scratch::FrameScratch,
+    ) {
+        use std::hash::{Hash, Hasher};
+        let frame_scratch::FrameScratch { glyphs: glyph_instances, quads, .. } = scratch;
+        let layout = self.band_layout();
+        let strip_palette = self.chrome_caches.palette.palette_for(theme);
+        let colors = crate::status_strip::StatusColors::resolve(
+            theme,
+            self.tab_active_fg,
+            self.tab_inactive_fg,
+            &strip_palette,
+        );
+        let in_band = match surface {
+            Surface::Strip => layout.merged,
+            Surface::Band => true,
+        };
+        let band = if in_band {
+            let scale = self.scale_factor;
+            crate::status_strip::StripBand {
+                in_band: true,
+                left_inset: (self.window_band.left_inset * scale).round(),
+                right_inset: (self.window_band.right_inset * scale).round(),
+            }
+        } else {
+            // When: in_band is false, the surface is an ordinary strip with no insets.
+            crate::status_strip::StripBand::default()
+        };
+        let (top, height, position) = match surface {
+            Surface::Strip => {
+                (self.status_line_top(), self.status_line_height(), self.status_line_position)
+            }
+            Surface::Band => (
+                self.titlebar_inset * self.scale_factor,
+                layout.separate_px,
+                sonicterm_render_model::boundary::cfg::status_line::StatusPosition::Top,
+            ),
+        };
+        let mut geometry = crate::status_strip::StripGeometry {
+            top,
+            height,
+            position,
+            screen: (sw, sh),
+            scale_factor: self.scale_factor,
+            font_raster_px: self.font_size * self.scale_factor,
+            font_scale: self.status_line_font_scale,
+            cap_height: 0.0,
+            band,
+        };
+        let view = match surface {
+            Surface::Strip => &self.status_line_view,
+            Surface::Band => &self.band_view,
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (
+            view.pixel_hash,
+            sw.to_bits(),
+            geometry.text_px().to_bits(),
+            band.left_inset.to_bits(),
+            band.right_inset.to_bits(),
+            self.tab_title_font.key(),
+            self.tab_title_font.fallback_epoch(),
+        )
+            .hash(&mut hasher);
+        let fit_key = hasher.finish();
+        let mut strip_rasterizer = self.status_line_font_stack.clone();
+        let text_px = geometry.text_px();
+        // The cap height is measured once per text size and kept.
+        let kept =
+            crate::status_strip::kept_cap_height(self.status_line_cap_height, text_px, || {
+                match (self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut()) {
                     (Some(stack), Some(rasterizer)) => crate::status_strip::strip_cap_height(
                         stack,
                         rasterizer,
@@ -62,91 +145,109 @@ impl GpuRenderer {
                         text_px,
                     ),
                     _ => text_px * 0.7,
-                },
-            );
-            self.status_line_cap_height = Some(kept);
-            geometry.cap_height = kept.1;
-            let stale = self.status_line_fit.as_ref().is_none_or(|(key, _)| *key != fit_key);
-            if let (true, Some(stack), Some(rasterizer)) =
-                (stale, self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut())
-            {
-                // The view, width or font changed: refit with the chrome font.
-                let fitted = crate::status_strip::fit_strip(
-                    &self.status_line_view,
-                    &geometry,
-                    stack,
-                    rasterizer,
-                    &mut self.glyph_atlas,
-                );
-                self.status_line_fit = Some((fit_key, fitted));
-            }
-            let (placed, separators): (&[PlacedSegment], &[PlacedPart]) =
-                self.status_line_fit.as_ref().map_or((&[], &[]), |(_, fitted)| {
-                    (fitted.segments.as_slice(), fitted.separators.as_slice())
-                });
-            crate::status_strip::emit_strip(
-                placed,
-                separators,
-                &geometry,
-                &colors,
-                self.status_line_font_stack.as_ref(),
-                strip_rasterizer.as_mut(),
-                &mut self.glyph_atlas,
-                &mut self.chrome_caches.runs,
-                self.chrome_reuse,
-                &mut *quads,
-                &mut *glyph_instances,
-            );
-            let focused_box = self.status_line_focus.and_then(|(id, strong)| {
-                placed.iter().find_map(|segment| {
-                    let view = self.status_line_view.segments.get(segment.index)?;
-                    (view.id == id).then_some((segment.left, segment.width, strong))
-                })
-            });
-            if let Some((left, width, strong)) = focused_box {
-                // The keyboard focus ring frames the focused segment inside the band.
-                let thickness =
-                    crate::status_strip::focus_ring_thickness(geometry.scale_factor, strong);
-                let color = crate::color::chrome_color_to_linear_rgba(colors.value);
-                for [ring_x, ring_y, ring_w, ring_h] in crate::status_strip::focus_ring_rects(
-                    left,
-                    width,
-                    geometry.top,
-                    geometry.height,
-                    thickness,
-                ) {
-                    quads.push(crate::quad::QuadInstance {
-                        rect: crate::quad::px_to_ndc(
-                            ring_x,
-                            ring_y,
-                            ring_w,
-                            ring_h,
-                            sw,
-                            geometry.screen.1,
-                        ),
-                        color,
-                        ..Default::default()
-                    });
                 }
-            }
-            // Staged only: the presenter's outcome decides whether this layout is ever on screen.
-            let staged = placed
-                .iter()
-                .filter_map(|segment| {
-                    let view = self.status_line_view.segments.get(segment.index)?;
-                    Some(crate::status_strip::PresentedStatusSegment {
-                        id: view.id,
-                        x: segment.left,
-                        width: segment.width,
-                        click: view.click.clone(),
-                    })
-                })
-                .collect();
-            self.status_line_layouts.stage(crate::status_strip::StripHit {
-                top: geometry.top,
-                height: geometry.height,
-                segments: staged,
             });
+        self.status_line_cap_height = Some(kept);
+        geometry.cap_height = kept.1;
+        let kept_fit = match surface {
+            Surface::Strip => &self.status_line_fit,
+            Surface::Band => &self.band_fit,
+        };
+        let stale = kept_fit.as_ref().is_none_or(|(key, _)| *key != fit_key);
+        if let (true, Some(stack), Some(rasterizer)) =
+            (stale, self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut())
+        {
+            // The view, width, insets or font changed: refit with the chrome font.
+            let view = match surface {
+                Surface::Strip => &self.status_line_view,
+                Surface::Band => &self.band_view,
+            };
+            let fitted = crate::status_strip::fit_strip(
+                view,
+                &geometry,
+                stack,
+                rasterizer,
+                &mut self.glyph_atlas,
+            );
+            match surface {
+                Surface::Strip => self.status_line_fit = Some((fit_key, fitted)),
+                Surface::Band => self.band_fit = Some((fit_key, fitted)),
+            }
+        }
+        let (fit, view) = match surface {
+            Surface::Strip => (&self.status_line_fit, &self.status_line_view),
+            Surface::Band => (&self.band_fit, &self.band_view),
+        };
+        let (placed, separators): (&[PlacedSegment], &[PlacedPart]) =
+            fit.as_ref().map_or((&[], &[]), |(_, fitted)| {
+                (fitted.segments.as_slice(), fitted.separators.as_slice())
+            });
+        crate::status_strip::emit_strip(
+            placed,
+            separators,
+            &geometry,
+            &colors,
+            self.status_line_font_stack.as_ref(),
+            strip_rasterizer.as_mut(),
+            &mut self.glyph_atlas,
+            &mut self.chrome_caches.runs,
+            self.chrome_reuse,
+            &mut *quads,
+            &mut *glyph_instances,
+        );
+        let focused_box = self.status_line_focus.and_then(|(id, strong)| {
+            placed.iter().find_map(|segment| {
+                let view = view.segments.get(segment.index)?;
+                (view.id == id).then_some((segment.left, segment.width, strong))
+            })
+        });
+        if let Some((left, width, strong)) = focused_box {
+            // The keyboard focus ring frames the focused segment inside the band.
+            let thickness =
+                crate::status_strip::focus_ring_thickness(geometry.scale_factor, strong);
+            let color = crate::color::chrome_color_to_linear_rgba(colors.value);
+            for [ring_x, ring_y, ring_w, ring_h] in crate::status_strip::focus_ring_rects(
+                left,
+                width,
+                geometry.top,
+                geometry.height,
+                thickness,
+            ) {
+                quads.push(crate::quad::QuadInstance {
+                    rect: crate::quad::px_to_ndc(
+                        ring_x,
+                        ring_y,
+                        ring_w,
+                        ring_h,
+                        sw,
+                        geometry.screen.1,
+                    ),
+                    color,
+                    ..Default::default()
+                });
+            }
+        }
+        // Staged only: the presenter's outcome decides whether this layout is ever on screen.
+        let staged = placed
+            .iter()
+            .filter_map(|segment| {
+                let view = view.segments.get(segment.index)?;
+                Some(crate::status_strip::PresentedStatusSegment {
+                    id: view.id,
+                    x: segment.left,
+                    width: segment.width,
+                    click: view.click.clone(),
+                })
+            })
+            .collect();
+        let hit = crate::status_strip::StripHit {
+            top: geometry.top,
+            height: geometry.height,
+            segments: staged,
+        };
+        match surface {
+            Surface::Strip => self.status_line_layouts.stage(hit),
+            Surface::Band => self.band_layouts.stage(hit),
         }
     }
 }

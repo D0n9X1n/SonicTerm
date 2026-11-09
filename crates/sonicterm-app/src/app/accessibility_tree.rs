@@ -33,6 +33,7 @@ pub(super) fn segment_code(id: StatusSegmentId) -> u64 {
         StatusSegmentId::Font => 19,
         StatusSegmentId::Zoom => 20,
         StatusSegmentId::Size => 21,
+        StatusSegmentId::Window => 22,
     }
 }
 

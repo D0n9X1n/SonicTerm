@@ -77,6 +77,7 @@ fn core_segments_format_as_name_value_and_chips() {
         out_rate: None,
         path_check: None,
         tab_mem: None,
+        window: None,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3 COPY MOUSE");
@@ -181,6 +182,7 @@ fn ascii_icons_change_symbols_only() {
         out_rate: None,
         path_check: None,
         tab_mem: None,
+        window: None,
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: x copy failed");

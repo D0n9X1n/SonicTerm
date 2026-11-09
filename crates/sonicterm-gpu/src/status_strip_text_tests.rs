@@ -3,18 +3,18 @@
 use super::super::status_strip_tests::*;
 use super::*;
 
-/// Contract: at the default `font_scale` strip text is exactly 80% of the live terminal font
-/// size, scaled by DPI, never under the 1 pt FreeType draws at; the strip's stack is built at the
-/// same size.
+/// Contract: at the default `font_scale` strip text is exactly the tab titles' size (the live
+/// terminal font size plus 1 pt), scaled by DPI, never under the 1 pt FreeType draws at; the
+/// strip's stack is built at the same size.
 #[test]
-fn strip_text_is_its_scale_of_the_terminal_font_size() {
-    assert!((geometry_for_font(13.0, 1.0).text_px() - 10.4).abs() < 1e-4, "13 pt gives 10.4");
-    assert!((geometry_for_font(13.5, 2.0).text_px() - 21.6).abs() < 1e-4, "13.5 pt at 2×");
-    // A Cmd+= zoom changes the live size, and the strip follows it.
-    assert!((geometry_for_font(16.0, 1.0).text_px() - 12.8).abs() < 1e-4, "a zoomed 16 pt");
-    assert!((geometry_for_font(1.0, 1.0).text_px() - 1.0).abs() < 1e-4, "the 1 pt floor at 1×");
-    assert!((status_line_font_size(13.0, default_font_scale()) - 10.4).abs() < 1e-4);
-    assert!((status_line_font_size(13.5, default_font_scale()) - 10.8).abs() < 1e-4);
+fn strip_text_is_its_scale_of_the_tab_title_size() {
+    assert!((geometry_for_font(13.0, 1.0).text_px() - 14.0).abs() < 1e-4, "13 pt gives 14");
+    assert!((geometry_for_font(13.5, 2.0).text_px() - 29.0).abs() < 1e-4, "13.5 pt at 2×");
+    // A Cmd+= zoom changes the live size, and the strip follows it as the titles do.
+    assert!((geometry_for_font(16.0, 1.0).text_px() - 17.0).abs() < 1e-4, "a zoomed 16 pt");
+    assert!((status_line_font_size(13.0, default_font_scale()) - 14.0).abs() < 1e-4);
+    assert!((status_line_font_size(13.5, default_font_scale()) - 14.5).abs() < 1e-4);
+    assert!((status_line_font_size(1.0, 0.3) - 1.0).abs() < 1e-4, "never under 1 pt");
 }
 
 /// Capitals sit centered in the band area outside the hairline, within one raster pixel, at
@@ -80,15 +80,15 @@ fn the_kept_cap_height_follows_the_text_size() {
     assert_eq!((back.1, measured.get()), (9.0, 3), "never the other size's stale value");
 }
 
-/// Strip text is `font_scale` × the live terminal font size, 0.8 by default, with the same 1 pt
-/// floor; the stack the renderer builds for a scale asks for the same size the geometry reports.
+/// Strip text is `font_scale` × the tab titles' size, 1.0 by default, with the same 1 pt floor;
+/// the stack the renderer builds for a scale asks for the same size the geometry reports.
 #[test]
 fn strip_text_follows_its_font_scale() {
-    assert!((default_font_scale() - 0.8).abs() < 1e-6);
+    assert!((default_font_scale() - 1.0).abs() < 1e-6);
     let mut geometry = geometry_for_font(13.0, 1.0);
-    assert!((geometry.text_px() - 10.4).abs() < 1e-4, "0.8 × 13 pt by default");
+    assert!((geometry.text_px() - 14.0).abs() < 1e-4, "the title size by default");
     geometry.font_scale = 0.65;
-    assert!((geometry.text_px() - 8.45).abs() < 1e-4);
-    assert!((status_line_font_size(13.0, 0.65) - 8.45).abs() < 1e-4);
+    assert!((geometry.text_px() - 9.1).abs() < 1e-4);
+    assert!((status_line_font_size(13.0, 0.65) - 9.1).abs() < 1e-4);
     assert!((status_line_font_size(1.0, 0.3) - 1.0).abs() < 1e-4, "never under 1 pt");
 }

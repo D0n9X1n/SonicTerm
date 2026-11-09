@@ -174,6 +174,15 @@ AppKit/CoreText 解析同一份文件。正文字体使用系统自带的 Menlo�
 动态库依赖，使用 bundle 内相对加载路径，并附带许可证和来源清单。最低 macOS 版本反映
 可执行文件/库的实际部署目标，而不只是打包主机架构。验证方式见[打包](Packaging-zh-CN)。
 
+### 集成标题栏
+
+设置 `[window] titlebar = "integrated"`（macOS 默认）时，终端窗口创建时带有透明标题栏、
+全尺寸内容视图和隐藏的标题文字。标题仍会设置，供 Mission Control、窗口菜单和 VoiceOver 使用。
+每次事件循环都从 AppKit 读取关闭和缩放按钮的框架，换算到内容视图坐标，并把标题栏带交给渲染器：
+高度为关闭按钮中心高度的两倍，左侧内边距到缩放按钮右侧再加 8 pt；原生全屏时没有按钮。
+在标题栏带空白处双击时，从 AppKit 读取 `AppleActionOnDoubleClick` 和事件的点击次数。见
+[配置](Configuration-zh-CN#集成标题栏)。
+
 ### 辅助功能
 
 每个终端窗口在窗口仍隐藏、首次显示之前，于 winit 的 view 上安装一个 accesskit 适配器；内存占用
@@ -189,8 +198,11 @@ winit 创建 HWND 前，`sonicterm-windows` 会请求
 `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`。这个进程级设置早于事件循环构造，因此保留，
 不假设 winit 较晚的设置在所有启动路径上都等价。Release 构建使用 Windows GUI subsystem，
 不会打开控制台窗口。一次性 window-ready callback 收到有效 HWND 后应用 DWM backdrop
-并安装原生 `muda` 菜单。窗口移动、snap layout 和最小化/最大化/关闭控件仍由 Windows
-原生 chrome 管理。
+并安装原生 `muda` 菜单。默认 `[window] titlebar = "native"` 时，窗口移动、snap layout
+和最小化/最大化/关闭控件仍由 Windows 原生 chrome 管理。设置为 `"integrated"` 时，窗口以无边框
+方式创建并启用 winit 的无边框阴影；全屏时关闭阴影，因为它会让客户区移动一个像素。SonicTerm 随后在
+标题栏带中绘制标题栏按钮，并通过 winit 的 `drag_window` 和 `drag_resize_window` 启动原生移动和
+边缘调整大小。不提供 snap layout 浮出菜单。见 [配置](Configuration-zh-CN#集成标题栏)。
 
 菜单把 `muda` 事件转换为共享 action。DWM 可请求 Mica、Acrylic 或 Tabbed material，
 并可回退为 opaque。强制软件渲染使用不透明窗口，因为 GDI presenter 无法合成透明效果。
@@ -546,6 +558,7 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 | 标签页操作系统交接 | NSPasteboard 发布，无 `NSDraggingSession` | OLE/COM 拖放 | 仅进程内 |
 | 原生菜单 | NSMenu | `muda` | 不可用；保留应用内操作 |
 | Backdrop | AppKit blur/config | DWM Mica/Acrylic/Tabbed | opaque |
+| 集成标题栏 | 默认；透明标题栏，AppKit 红绿灯 | 可选；无边框，SonicTerm 标题栏按钮 | 无；原生标题栏 |
 | 软件呈现 | wgpu adapter 路径 | CPU BGRA + GDI | wgpu Vulkan/lavapipe 或选中的平台 adapter |
 | 安装包格式 | 各架构 `.dmg` 中的 `.app` | x64 WiX `.msi` | x86_64 `.deb` 与 `.tar.gz` |
 | 签名 | ad-hoc bundle 签名 | 未签名 | 未签名 |
@@ -562,6 +575,7 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 | macOS 入口/菜单/打开文档与链接/标签页交接 | `crates/sonicterm-mac/src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs` |
 | 终端链接语法 | `crates/sonicterm-cfg/src/launch_url.rs` |
 | macOS 显示链接 | `crates/sonicterm-app/src/app/display_link.rs` |
+| 集成标题栏 | `crates/sonicterm-app/src/app/window_setup/{titlebar,titlebar_macos}.rs`、`crates/sonicterm-app/src/app/titlebar_band.rs`、`crates/sonicterm-ui/src/window_band.rs`、`crates/sonicterm-gpu/src/caption_buttons.rs` |
 | Windows 入口/CLI/菜单/backdrop/标签页拖放 | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows 软件呈现 | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`、`crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux 入口与 identity | `crates/sonicterm-linux/src/main.rs`、`crates/sonicterm-linux/resources/` |

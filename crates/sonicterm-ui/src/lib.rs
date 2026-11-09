@@ -44,6 +44,7 @@ pub mod tabbar_view;
 pub mod tabs;
 pub mod text_edit;
 pub mod ui_tokens;
+pub mod window_band;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

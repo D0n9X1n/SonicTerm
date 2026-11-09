@@ -164,6 +164,7 @@ impl App {
                     .with_visible(false)
                     .with_decorations(true)
                     .with_inner_size(inner_size),
+                sonicterm_cfg::config::TitlebarMode::Native,
             ),
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,
@@ -921,6 +922,12 @@ fn report_window_state(
         link_preview: None,
         path_probe: super::path_target::PathProbeState::default(),
         status_strip: None,
+        title_band: None,
+        titlebar: sonicterm_cfg::config::TitlebarMode::Native,
+        band_press_consumed: false,
+        caption: Default::default(),
+        band_last_press: None,
+        band_edge_cursor: false,
         sel_status: Default::default(),
         ime_discarded_at: None,
         alert_settings: None,

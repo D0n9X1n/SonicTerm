@@ -16,7 +16,13 @@ impl App {
             .registry
             .windows
             .get(&window_id)
-            .and_then(|window| window.status_strip.as_ref())
+            .and_then(|window| {
+                // The name band is a strip too: a press on its name runs the name's click.
+                [window.status_strip.as_ref(), window.title_band.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .find(|strip| strip.contains(pointer_y))
+            })
             .map(|strip| {
                 let click = strip
                     .segment_at(pointer_x, pointer_y)

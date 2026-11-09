@@ -150,6 +150,13 @@ impl GpuRenderer {
             self.line_height_mult.to_bits().hash(&mut hash);
             self.tab_bar_visible.hash(&mut hash);
             self.titlebar_inset.to_bits().hash(&mut hash);
+            // The name band and caption buttons repaint the whole frame; they change rarely.
+            self.window_band.integrated.hash(&mut hash);
+            self.window_band.button_height.to_bits().hash(&mut hash);
+            self.window_band.left_inset.to_bits().hash(&mut hash);
+            self.window_band.right_inset.to_bits().hash(&mut hash);
+            self.band_view.pixel_hash.hash(&mut hash);
+            self.caption_state.hash(&mut hash);
             self.panel_padding.to_bits().hash(&mut hash);
             if let Some(preview) = link_preview {
                 preview.uri.hash(&mut hash);

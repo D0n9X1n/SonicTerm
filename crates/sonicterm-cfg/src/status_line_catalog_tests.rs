@@ -6,7 +6,7 @@ use super::*;
 fn catalog_rows_match_the_published_priority_table() {
     // The catalog table in the issue is the contract segment issues cite; every id has a row.
     use StatusSegmentId as Seg;
-    let expected: [(Seg, &str, SegmentGroup, StatusSide, u16); 21] = [
+    let expected: [(Seg, &str, SegmentGroup, StatusSide, u16); 22] = [
         (Seg::Alerts, "alerts", SegmentGroup::OtherTabs, StatusSide::Right, 990),
         (Seg::Health, "health", SegmentGroup::Core, StatusSide::Right, 950),
         (Seg::Mem, "mem", SegmentGroup::Core, StatusSide::Right, 900),
@@ -14,6 +14,7 @@ fn catalog_rows_match_the_published_priority_table() {
         (Seg::Input, "input", SegmentGroup::Input, StatusSide::Left, 780),
         (Seg::Clip, "clip", SegmentGroup::ProgramReported, StatusSide::Right, 760),
         (Seg::PathCheck, "path_check", SegmentGroup::Diagnostics, StatusSide::Right, 700),
+        (Seg::Window, "window", SegmentGroup::Core, StatusSide::Center, 700),
         (Seg::Link, "link", SegmentGroup::Pointer, StatusSide::Center, 600),
         (Seg::Paste, "paste", SegmentGroup::Input, StatusSide::Left, 560),
         (Seg::Sel, "sel", SegmentGroup::Pointer, StatusSide::Center, 520),
@@ -68,6 +69,7 @@ fn protection_and_sensitivity_follow_the_catalog() {
             Seg::Input,
             Seg::Clip,
             Seg::PathCheck,
+            Seg::Window,
             Seg::Link,
             Seg::Paste,
             Seg::Sel,
@@ -88,4 +90,19 @@ fn protection_and_sensitivity_follow_the_catalog() {
         assert!(!id.meta().allows_always && !id.meta().clickable, "{id:?} only explains input");
         assert_eq!(id.meta().sensitivity, Sensitivity::None, "{id:?} shows no typed text");
     }
+}
+
+/// The window name is the centre's anchor: always shown by default, clickable (it opens Rename
+/// Window), protected but ranked under the protected warnings (broadcast chip 800, health 950,
+/// alerts 990), so those outlast it on a narrow strip. Its formatter redacts the tab part itself,
+/// so the catalog marks nothing sensitive.
+#[test]
+fn the_window_segment_is_an_always_shown_protected_centre_anchor() {
+    let meta = StatusSegmentId::Window.meta();
+    assert_eq!(meta.default_show, ShowMode::Always);
+    assert!(meta.allows_always && meta.clickable);
+    assert_eq!(meta.protection, Protection::Always);
+    assert!(meta.default_priority < StatusSegmentId::Mode.meta().default_priority);
+    assert_eq!(meta.sensitivity, Sensitivity::None);
+    assert_eq!(meta.spoken_name_key, "status-spoken-window");
 }

@@ -7,7 +7,8 @@ impl GpuRenderer {
     /// follows the font size and scale factor, so zoom and DPI changes refit it.
     pub fn status_line_height(&self) -> f32 {
         if self.status_line_visible {
-            crate::status_strip::status_line_height(self.font_size, self.scale_factor)
+            // A strip merged into the titlebar band is at least the window buttons' height.
+            self.band_layout().strip_px
         } else {
             // When: `!status_line_visible`, the strip reserves no rows.
             0.0
@@ -172,5 +173,83 @@ impl GpuRenderer {
         }
         let strip = self.status_line_layouts.presented()?;
         crate::status_strip::segment_at(&strip.segments, x)
+    }
+}
+
+impl GpuRenderer {
+    /// Set the integrated titlebar band, logical px. Returns `true` when the band changed, so the
+    /// caller refits the panes to the new top inset; the default band is a native titlebar.
+    pub fn set_window_band(
+        &mut self,
+        band: sonicterm_render_model::boundary::ui::window_band::WindowBand,
+    ) -> bool {
+        if self.window_band == band {
+            // When: the band is unchanged, nothing moves and nothing redraws.
+            return false;
+        }
+        self.window_band = band;
+        self.status_line_fit = None;
+        self.band_fit = None;
+        self.band_layouts.clear();
+        self.last_frame_key = None;
+        self.last_pane_layout.clear();
+        true
+    }
+}
+
+impl GpuRenderer {
+    /// The integrated titlebar band the renderer lays out, logical px.
+    pub fn window_band(&self) -> sonicterm_render_model::boundary::ui::window_band::WindowBand {
+        self.window_band
+    }
+}
+
+impl GpuRenderer {
+    /// Raster-px height of the titlebar band: the merged strip's or the name band's; 0 without.
+    pub fn band_height(&self) -> f32 {
+        let layout = self.band_layout();
+        if layout.merged {
+            layout.strip_px
+        } else {
+            // When: layout.merged is false, the name band stands alone, or there is none.
+            layout.separate_px
+        }
+    }
+}
+
+impl GpuRenderer {
+    /// Replace the name band's segments. Returns `true` when its pixels change, so the caller
+    /// requests a frame.
+    pub fn set_band_view(&mut self, view: StatusLineView) -> bool {
+        if self.band_view == view {
+            // When: the view is identical, there is nothing to redraw.
+            return false;
+        }
+        let pixels_changed = self.band_view.pixel_hash != view.pixel_hash;
+        self.band_view = view;
+        pixels_changed
+    }
+}
+
+impl GpuRenderer {
+    /// Set the caption buttons' hover, press, maximised and focus state. Returns `true` when it
+    /// changed, so the caller requests a frame.
+    pub fn set_caption_state(
+        &mut self,
+        state: sonicterm_render_model::boundary::ui::window_band::CaptionState,
+    ) -> bool {
+        if self.caption_state == state {
+            // When: the state is unchanged, the buttons look the same.
+            return false;
+        }
+        self.caption_state = state;
+        true
+    }
+}
+
+impl GpuRenderer {
+    /// The name band and the segments the last drawn frame presented in it; `None` without one.
+    pub fn band_hit(&self) -> Option<crate::status_strip::StripHit> {
+        self.band_layouts.presented().filter(|_| self.band_layout().separate_px > 0.0).cloned()
     }
 }

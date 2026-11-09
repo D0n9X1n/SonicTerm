@@ -155,6 +155,9 @@ pub struct WindowConfig {
     pub padding_bottom: f32,
     /// Whether to draw native window decorations (titlebar + traffic lights).
     pub decorations: bool,
+    /// macOS titlebar style of terminal windows, read when each window is created; other
+    /// platforms keep their native titlebar.
+    pub titlebar: TitlebarMode,
     /// Legacy window-opacity value retained for config compatibility. Current
     /// rendering uses [`AppearanceConfig::opacity`] instead.
     pub opacity: f32,
@@ -177,6 +180,33 @@ impl WindowConfig {
             self.padding_right = padding;
             self.padding_top = padding;
             self.padding_bottom = padding;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+/// How a terminal window draws its titlebar on macOS and Windows.
+pub enum TitlebarMode {
+    /// SonicTerm paints one titlebar band with the window name centred, beside the platform's
+    /// window buttons, and a status line at the top shares that band.
+    #[default]
+    Integrated,
+    /// The system titlebar, with the status line below it.
+    Native,
+}
+
+impl TitlebarMode {
+    /// The default for this build's platform: integrated on macOS; native elsewhere, where the
+    /// integrated band is opt-in.
+    #[must_use]
+    pub const fn platform_default() -> Self {
+        if cfg!(target_os = "macos") {
+            // When: cfg target_os is macos, the integrated band is the default.
+            Self::Integrated
+        } else {
+            // When: cfg target_os is not macos, the native titlebar stays the default.
+            Self::Native
         }
     }
 }
@@ -558,6 +588,7 @@ impl Default for WindowConfig {
             padding_top: 8.0,
             padding_bottom: 4.0,
             decorations: true,
+            titlebar: TitlebarMode::platform_default(),
             opacity: 1.0,
             blur: false,
             warm_window_pool: 1,

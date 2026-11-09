@@ -99,6 +99,7 @@ pub(super) fn strip_rasterizes_anew_after_size_changes(
         protected: true,
         parts: vec![StatusPart::new("HELLO", StatusTone::Value)],
         compact: None,
+        compact_last: false,
         click: None,
         spoken: SpokenSegment::default(),
     }]);

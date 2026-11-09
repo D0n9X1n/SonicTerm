@@ -73,6 +73,49 @@ pub fn strip_placement(
     }
 }
 
+/// An integrated titlebar band's button height in raster px: `button_height` logical px at `scale`,
+/// rounded to an even number of pixels so its midline, where the buttons centre, is a whole pixel.
+pub fn band_button_px(button_height: f32, scale: f32) -> f32 {
+    let raster = (button_height * scale).max(0.0);
+    (raster / 2.0).round() * 2.0
+}
+
+/// How the integrated band and the strip share the window's top for one frame, in raster px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BandLayout {
+    /// The strip is shown at the top of an integrated window, so it is the band.
+    pub merged: bool,
+    /// Height the band reserves above the panes, and the strip's placement's titlebar term: the
+    /// separate name band's height, or 0 when merged (the strip reserves it) or not integrated.
+    pub separate_px: f32,
+    /// The strip's drawn height: the merged band's, at least the buttons'; otherwise its own.
+    pub strip_px: f32,
+}
+
+/// Lay out a window whose integrated band needs `button_px` (0 for none or a native titlebar) and
+/// whose strip is `strip_px` tall at `position` while `strip_visible`. A merged band is
+/// `max(buttons, strip)`; a separate name band is the same height, so a large font never clips it.
+pub fn band_layout(
+    integrated: bool,
+    button_px: f32,
+    strip_visible: bool,
+    position: StatusPosition,
+    strip_px: f32,
+) -> BandLayout {
+    let shown_strip = if strip_visible { strip_px } else { 0.0 };
+    if !integrated {
+        // When: integrated is false, the strip keeps its own height and there is no band.
+        return BandLayout { merged: false, separate_px: 0.0, strip_px: shown_strip };
+    }
+    let merged = strip_visible && position == StatusPosition::Top;
+    if merged {
+        // When: merged, the strip is the band, at least the buttons' height.
+        return BandLayout { merged, separate_px: 0.0, strip_px: button_px.max(strip_px) };
+    }
+    // A name-only band in full screen (no buttons) still holds the name at the strip's height.
+    BandLayout { merged, separate_px: button_px.max(strip_px), strip_px: shown_strip }
+}
+
 /// Top edge of the hairline `thickness` px thick on the band's terminal side: the band's bottom
 /// edge at the top of the window, its top edge at the bottom.
 pub fn hairline_top(position: StatusPosition, top: f32, height: f32, thickness: f32) -> f32 {
@@ -246,21 +289,34 @@ pub struct StripGeometry {
     pub screen: (f32, f32),
     /// Display scale factor.
     pub scale_factor: f32,
-    /// The terminal font's live raster size, which the strip text is 60% of.
+    /// The terminal font's live raster size; the strip text is `font_scale` × the tab titles' size.
     pub font_raster_px: f32,
     /// `[status_line] font_scale`: the strip text's share of that size.
     pub font_scale: f32,
     /// Cap height of the strip font at [`Self::text_px`], raster px; see [`strip_cap_height`].
     pub cap_height: f32,
+    /// Where an integrated titlebar band puts the strip; the default is an ordinary strip.
+    pub band: StripBand,
+}
+
+/// What an integrated titlebar band changes about a strip drawn in it, in raster px.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StripBand {
+    /// The strip is an integrated titlebar band: its text centres on the whole band's midline,
+    /// which is the window buttons' centre line, instead of the area outside the hairline.
+    pub in_band: bool,
+    /// Width reserved at the left edge for the traffic lights.
+    pub left_inset: f32,
+    /// Width reserved at the right edge for the caption buttons.
+    pub right_inset: f32,
 }
 
 impl StripGeometry {
-    /// The strip's text raster size: `font_scale` × the live terminal font size, at least 1 pt at
-    /// the display scale, which is what [`status_line_font_size`] asks the stack for.
+    /// The strip's text raster size: `font_scale` × the tab titles' size at the display scale, at
+    /// least 1 pt, which is what [`status_line_font_size`] asks the stack for.
     pub fn text_px(&self) -> f32 {
-        (self.font_raster_px * self.font_scale)
-            .max(MIN_TEXT_PT * self.scale_factor.max(0.5))
-            .max(1.0)
+        let scale = self.scale_factor.max(0.5);
+        (status_line_font_size(self.font_raster_px / scale, self.font_scale) * scale).max(1.0)
     }
 
     /// Fit metrics for this geometry.
@@ -271,6 +327,8 @@ impl StripGeometry {
             edge_pad: 12.0 * scale,
             segment_gap: 20.0 * scale,
             separator_width: 0.0,
+            left_inset: self.band.left_inset,
+            right_inset: self.band.right_inset,
         }
     }
 }

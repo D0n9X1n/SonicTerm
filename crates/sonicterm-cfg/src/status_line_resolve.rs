@@ -28,6 +28,8 @@ const CLIP_KEYS: &[&str] = &["hold_secs"];
 const ALERTS_KEYS: &[&str] = &["min_secs", "sources"];
 /// Extra keys of the size segment table.
 const SIZE_KEYS: &[&str] = &["hold_ms"];
+/// Extra keys of the window segment table.
+const WINDOW_KEYS: &[&str] = &["number"];
 
 /// Keys a segment table accepts beyond [`COMMON_KEYS`].
 fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
@@ -37,6 +39,7 @@ fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
         StatusSegmentId::Paste => PASTE_KEYS,
         StatusSegmentId::Ime => IME_KEYS,
         StatusSegmentId::Size => SIZE_KEYS,
+        StatusSegmentId::Window => WINDOW_KEYS,
         StatusSegmentId::Alerts => ALERTS_KEYS,
         StatusSegmentId::Clip => CLIP_KEYS,
         StatusSegmentId::Input => INPUT_KEYS,
@@ -83,6 +86,7 @@ impl StatusLineConfig {
         let mut paste = PasteWarning::default();
         let mut ime = ImeSettings::default();
         let mut size = SizeSettings::default();
+        let mut window = WindowSegmentSettings::default();
         let mut alerts = AlertsSettings::default();
         let mut clip = ClipSettings::default();
         let mut input = InputSettings::default();
@@ -206,6 +210,13 @@ impl StatusLineConfig {
             if id == StatusSegmentId::Alerts {
                 apply_alerts_keys(&mut alerts, table).context("status_line.segment.alerts")?;
             }
+            if id == StatusSegmentId::Window {
+                if let Some(value) = table.get("number") {
+                    window.number = value
+                        .as_bool()
+                        .context("status_line.segment.window: number must be true or false")?;
+                }
+            }
             if id == StatusSegmentId::Size {
                 if let Some(value) = table.get("hold_ms") {
                     size.hold_ms = value
@@ -238,6 +249,8 @@ impl StatusLineConfig {
             hide_sensitive: self.hide_sensitive,
             icons: self.icons,
             position: self.position,
+            titlebar_segments: self.titlebar_segments,
+            in_band: false,
             font_scale,
             update_interval_ms: self.update_interval_ms,
             preset: self.preset,
@@ -248,6 +261,7 @@ impl StatusLineConfig {
             paste,
             ime,
             size,
+            window,
             alerts,
             clip,
             input,
@@ -526,3 +540,7 @@ fn apply_sel_keys(sel: &mut SelSettings, table: &toml::Table) -> Result<()> {
 #[cfg(test)]
 #[path = "status_line_resolve_tests.rs"]
 mod status_line_resolve_tests;
+
+#[cfg(test)]
+#[path = "status_line_resolve_window_tests.rs"]
+mod status_line_resolve_window_tests;

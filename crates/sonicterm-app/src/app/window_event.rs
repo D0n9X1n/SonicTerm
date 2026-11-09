@@ -134,6 +134,7 @@ impl App {
                 window.invalidate_path_hover();
             }
         }
+        self.track_window_band(win_id, &event);
         if let Some(drain) = self.route_shared_pointer(win_id, &event) {
             // When: `route_shared_pointer` consumed the event, neither window handler receives it.
             if drain {

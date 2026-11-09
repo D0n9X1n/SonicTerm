@@ -93,6 +93,11 @@ padding_bottom = {padding_bottom}
 
 # Native OS window decorations. Changing this usually requires restart.
 decorations = true
+# Titlebar: "integrated" paints one band with the window name centred beside the
+# window buttons, and a top status line shares it; "native" keeps the system
+# titlebar. Default: integrated on macOS, native on Windows; Linux is always native.
+# Applies to windows opened after the change.
+titlebar = "{titlebar}"
 
 # Legacy values accepted while reading old configs. Current startup/reload
 # behavior uses [appearance].opacity and [appearance].backdrop instead.
@@ -197,8 +202,11 @@ threshold_secs = 10
 enabled = false
 # Window edge: "top" (above the panes) or "bottom" (above the tab bar).
 position = "top"
-# Text size as a share of the terminal font size, 0.3-1.0.
-font_scale = 0.8
+# In an integrated titlebar a top strip is the titlebar: "right" shows the
+# window name and the right segments, "all" shows every segment.
+titlebar_segments = "right"
+# Text size as a share of the tab titles' size, 0.3-1.0; 1.0 matches the tab bar.
+font_scale = 1.0
 # Presets: "minimal", "developer", or "diagnostics".
 preset = "developer"
 # Symbols: "unicode", "ascii", or "nerd".
@@ -243,6 +251,10 @@ create_anchor = "any"
         padding_right = cfg.window.padding_right,
         padding_top = cfg.window.padding_top,
         padding_bottom = cfg.window.padding_bottom,
+        titlebar = match cfg.window.titlebar {
+            crate::config::TitlebarMode::Integrated => "integrated",
+            crate::config::TitlebarMode::Native => "native",
+        },
         panel_padding = cfg.appearance.panel_padding,
         term_program = cfg.terminal.term_program,
         scrollback = cfg.terminal.scrollback,

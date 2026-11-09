@@ -335,6 +335,11 @@ impl App {
                 config.appearance.scrollbar,
             ),
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                // When: MouseInput Left, the titlebar band sees the press or release before panes.
+                if self.route_band_left_input(event_loop, win_id, state) {
+                    // When: route_band_left_input consumed the press or its release in the band.
+                    return;
+                }
                 self.handle_child_left_mouse_input(event_loop, win_id, state);
                 if state == ElementState::Released {
                     // A release ends any press or drag that held every bar, so a bar whose

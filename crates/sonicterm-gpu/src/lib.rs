@@ -25,6 +25,8 @@
 /// wgpu-side wrapper around `sonicterm_text::glyph_atlas` — owns the texture,
 /// view, sampler, and bind group; syncs dirty tiles to the GPU.
 pub mod atlas_upload;
+/// Self-drawn Windows caption buttons.
+pub mod caption_buttons;
 /// Device-free chrome caches: tab titles, search-overlay runs and the UI palette.
 pub(crate) mod chrome_cache;
 /// Test seam over the chrome caches for integration tests; not a supported API.

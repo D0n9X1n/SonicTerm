@@ -376,6 +376,10 @@ impl App {
         win_id: WindowId,
         state: ElementState,
     ) {
+        if self.route_band_left_input(event_loop, win_id, state) {
+            // When: route_band_left_input consumed the press or its release in the titlebar band.
+            return;
+        }
         match state {
             ElementState::Pressed => {
                 // When: state is ElementState::Pressed, begin primary-pointer interaction.

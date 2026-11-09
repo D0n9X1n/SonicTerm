@@ -11,11 +11,12 @@ impl StatusLineState {
         &mut self,
         window_id: WindowId,
         inputs: StatusLineInputs,
+        role: StripRole,
         i18n: &sonicterm_ui::i18n::I18n,
         numbers: NumberStyle,
         shows: &mut StripShows,
     ) -> Option<StatusLineView> {
-        let built = BuiltFrom { generation: self.generation, inputs };
+        let built = BuiltFrom { generation: self.generation, role, inputs };
         let previous = self.built.get(&window_id);
         if previous == Some(&built) {
             // When: `built` matches the last build, the inputs and settings are unchanged.
@@ -39,7 +40,22 @@ impl StatusLineState {
         {
             shows.glyphs += 1;
         }
-        let view = build_view(&self.resolved, self.hide_sensitive, &built.inputs, i18n, numbers);
+        let projection;
+        let resolved = match role {
+            StripRole::Plain => &self.resolved,
+            StripRole::Band => {
+                projection = sonicterm_ui::status_line::with_window_projected(&self.resolved);
+                &projection
+            }
+            StripRole::BelowBand => {
+                // The band above already shows the name, so this strip leaves it out.
+                let mut without = self.resolved.clone();
+                without.segments.retain(|segment| segment.id != StatusSegmentId::Window);
+                projection = without;
+                &projection
+            }
+        };
+        let view = build_view(resolved, self.hide_sensitive, &built.inputs, i18n, numbers);
         self.built.insert(window_id, built);
         Some(view)
     }
@@ -478,6 +494,7 @@ impl App {
                 out_rate: state.out_shown.get(window_id).copied().flatten(),
                 tab_mem,
                 glyphs,
+                window: window_title_input(window),
                 input: input_state(
                     state.input.get(window_id).copied(),
                     window.panes.keys().filter_map(|pane_id| state.held.get(pane_id)?.shown),
@@ -509,8 +526,17 @@ impl App {
                     AlertsInput::default()
                 },
             };
+            // In an integrated window the strip at the top is the titlebar band and always
+            // presents the name; a strip elsewhere leaves the name to the band.
+            let integrated =
+                window.renderer.as_ref().is_some_and(|renderer| renderer.window_band().integrated);
+            let role = match (integrated, state.resolved.position) {
+                (false, _) => StripRole::Plain,
+                (true, sonicterm_cfg::status_line::StatusPosition::Top) => StripRole::Band,
+                (true, sonicterm_cfg::status_line::StatusPosition::Bottom) => StripRole::BelowBand,
+            };
             let Some(view) =
-                state.rebuild_window_strip(*window_id, inputs, i18n, numbers, &mut shows)
+                state.rebuild_window_strip(*window_id, inputs, role, i18n, numbers, &mut shows)
             else {
                 // When: rebuild_window_strip returns None, the inputs and settings are unchanged.
                 continue;
@@ -543,6 +569,77 @@ impl App {
         // A shown strip or a served reader leaves state a later hidden, unheard sync must take down.
         self.status_line.full_sync_owed = visible || listening;
         wake
+    }
+}
+
+/// How a window's strip relates to its titlebar band, which decides where the name appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StripRole {
+    /// A native titlebar: the strip presents the user's lists as they are.
+    Plain,
+    /// The strip is the integrated band: it always presents the name.
+    Band,
+    /// The strip sits below an integrated band that already shows the name.
+    BelowBand,
+}
+
+/// The status line's window input for `window`: the parts its native title last applied, or `None`
+/// before the first write and for an unnumbered window.
+pub(super) fn window_title_input(
+    window: &WindowState,
+) -> Option<sonicterm_ui::status_line::WindowTitleInput> {
+    let state = &window.native_title;
+    let shown = state.applied_shown.clone()?;
+    let number = state.applied_number?;
+    Some(sonicterm_ui::status_line::WindowTitleInput {
+        number,
+        shown,
+        custom: state.applied_custom,
+        app_name: super::super::NATIVE_WINDOW_TITLE,
+    })
+}
+
+impl App {
+    /// Bring every integrated window's name band up to date: its view, built from the window's
+    /// applied title alone, so it runs whether or not the status line is shown. A window whose
+    /// strip is the band clears its band view, since the strip presents the name.
+    pub(in crate::app) fn sync_title_bands(&mut self) {
+        let Self {
+            registry: crate::app::WindowRegistry { windows, .. },
+            status_line: state,
+            i18n,
+            dispatch_redraws,
+            ..
+        } = self;
+        let locale = i18n.locale();
+        let numbers = NumberStyle::for_locale(&locale);
+        let band_settings = sonicterm_ui::status_line::window_only(&state.resolved);
+        for (window_id, window) in windows.iter_mut() {
+            let Some(renderer) = window.renderer.as_ref() else {
+                // When: the window has no renderer, it draws no band.
+                continue;
+            };
+            let merged = state.visible
+                && state.resolved.position == sonicterm_cfg::status_line::StatusPosition::Top;
+            let view = if renderer.window_band().integrated && !merged {
+                let inputs =
+                    StatusLineInputs { window: window_title_input(window), ..Default::default() };
+                build_view(&band_settings, state.hide_sensitive, &inputs, i18n, numbers)
+            } else {
+                // When: not integrated, or merged with the strip, the name band draws nothing.
+                StatusLineView::default()
+            };
+            let Some(renderer) = window.renderer.as_mut() else {
+                // When: the renderer is gone after the view was built, there is nothing to draw.
+                continue;
+            };
+            if renderer.set_band_view(view) {
+                // The band's pixels changed: draw them once.
+                window.mark_redraw(RedrawCause::StatusLine);
+                dispatch_redraws.request(*window_id, window);
+            }
+            window.title_band = window.renderer.as_ref().and_then(|renderer| renderer.band_hit());
+        }
     }
 }
 

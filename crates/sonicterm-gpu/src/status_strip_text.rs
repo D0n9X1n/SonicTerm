@@ -64,9 +64,16 @@ pub fn strip_cap_height(
 }
 
 /// The strip's text baseline: capitals centered in the band area outside the hairline, so the
-/// baseline is that area's top plus half of its height and the cap height together.
+/// baseline is that area's top plus half of its height and the cap height together. In an
+/// integrated titlebar band the capitals centre on the whole band, whose midline is the window
+/// buttons' centre line.
 pub fn strip_baseline(geometry: &StripGeometry) -> f32 {
     let thickness = geometry.scale_factor.max(0.5).round().max(1.0);
+    if geometry.band.in_band {
+        // When: the strip is the titlebar band, its midline is the buttons' and the hairline,
+        // drawn inside the band's last row, is not subtracted.
+        return geometry.top + (geometry.height + geometry.cap_height) / 2.0;
+    }
     let area_top = match geometry.position {
         StatusPosition::Top => geometry.top,
         StatusPosition::Bottom => geometry.top + thickness,
@@ -75,16 +82,19 @@ pub fn strip_baseline(geometry: &StripGeometry) -> f32 {
     area_top + (area_h + geometry.cap_height) / 2.0
 }
 
-/// The default `[status_line] font_scale`, 0.8.
+/// The default `[status_line] font_scale`, 1.0: the tab titles' size.
 pub fn default_font_scale() -> f32 {
     StatusFontScale::DEFAULT.as_f32()
 }
 
 /// The strip's native font size in logical points for a `body_font_size` live terminal font at
-/// `font_scale`, never under 1 pt. Times the display scale it is [`StripGeometry::text_px`], so
-/// the strip's stack rasterizes at exactly the size it draws.
+/// `font_scale`, never under 1 pt: `font_scale` × the tab titles' size, so the default matches
+/// the tab bar. Times the display scale it is [`StripGeometry::text_px`], so the strip's stack
+/// rasterizes at exactly the size it draws.
 pub fn status_line_font_size(body_font_size: f32, font_scale: f32) -> f32 {
-    (body_font_size * font_scale).max(MIN_TEXT_PT)
+    let title_size =
+        sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size(body_font_size);
+    (title_size * font_scale).max(MIN_TEXT_PT)
 }
 
 #[cfg(test)]

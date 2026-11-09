@@ -331,6 +331,7 @@ mod tab_tree;
 mod window_registry_panes;
 pub use window_registry_panes::{DetachedPane, DetachedPanes, PaneMap};
 mod status_line;
+mod titlebar_band;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
