@@ -18,6 +18,7 @@ fn fit_view(segments: &[(StatusSegmentId, StatusSide, u16, bool, &str)]) -> Stat
                 parts: vec![StatusPart::new(*text, StatusTone::Value)],
                 compact: None,
                 compact_last: false,
+                small: false,
                 click: None,
                 spoken: SpokenSegment::default(),
             })
@@ -291,4 +292,30 @@ fn a_segment_fitting_empties_takes_no_separator() {
     assert_eq!(presented(&view, &narrow), [Seg::Mem], "the emptied mode is not shown");
     assert!(separators(&view, &narrow, &metrics(14.0)).is_empty(), "no dangling `|`");
     assert_eq!(narrow[0].left, 0.0, "no separator width reserved before Mem");
+}
+
+/// A small segment is measured as small text, so its placed width is the small width and its
+/// placement carries the flag for drawing; other segments keep the full size.
+#[test]
+fn small_segments_are_measured_and_placed_as_small() {
+    let mut view = fit_view(&[
+        (StatusSegmentId::Mem, StatusSide::Left, 500, false, "Mem"),
+        (StatusSegmentId::Window, StatusSide::Center, 500, false, "name"),
+    ]);
+    view.segments[0].small = true;
+    let metrics = FitMetrics {
+        width: 400.0,
+        edge_pad: 0.0,
+        segment_gap: 0.0,
+        separator_width: 0.0,
+        left_inset: 0.0,
+        right_inset: 0.0,
+    };
+    // Small text is half as wide per character as full-size text in this measure.
+    let placed = fit_sized(&view, &metrics, |text, small| {
+        text.len() as f32 * if small { 5.0 } else { 10.0 }
+    });
+    let by_index = |index| placed.iter().find(|segment| segment.index == index).unwrap();
+    assert_eq!((by_index(0).width, by_index(0).small), (15.0, true));
+    assert_eq!((by_index(1).width, by_index(1).small), (40.0, false));
 }

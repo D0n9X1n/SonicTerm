@@ -59,6 +59,13 @@ impl StatusLineState {
             }
         };
         let view = build_view(resolved, self.hide_sensitive, &built.inputs, i18n, numbers);
+        let view = if quiets_band_sides(role) {
+            // The band's buttons are on the right (Windows), so its sides step back.
+            sonicterm_ui::status_line::quiet_band_sides(view)
+        } else {
+            // When: quiets_band_sides(role) is false (no band, or macOS), the view stays as built.
+            view
+        };
         self.built.insert(window_id, built);
         Some(view)
     }
@@ -573,6 +580,15 @@ impl App {
         self.status_line.full_sync_owed = visible || listening;
         wake
     }
+}
+
+/// Whether a strip in `role` draws its side segments small and dim: only a strip that is the
+/// titlebar band of a platform whose window buttons are on the right (Windows), so the centred name
+/// is the band's largest and brightest text. macOS keeps its band as it is.
+pub(super) fn quiets_band_sides(role: StripRole) -> bool {
+    role == StripRole::Band
+        && crate::app::window_setup::titlebar::button_edge()
+            == sonicterm_ui::window_band::ButtonEdge::Right
 }
 
 /// How a window's strip relates to its titlebar band, which decides where the name appears.

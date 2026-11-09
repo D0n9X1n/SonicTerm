@@ -81,3 +81,16 @@ fn the_pass_applies_settings_before_the_name_band() {
     let body = &sync[sync.find("fn sync_title_bands").expect("band sync")..];
     assert!(body.contains("set_status_line_font_scale"), "the band follows font_scale");
 }
+
+/// Only a strip that is the titlebar band of a platform whose window buttons are on the right
+/// quiets its sides: Windows' band draws them small and dim, macOS's band is unchanged, and a strip
+/// that is not the band never changes.
+#[test]
+fn only_a_right_buttoned_band_quiets_its_sides() {
+    let right = crate::app::window_setup::titlebar::button_edge()
+        == sonicterm_ui::window_band::ButtonEdge::Right;
+    assert_eq!(right, cfg!(target_os = "windows"));
+    assert_eq!(quiets_band_sides(StripRole::Band), right);
+    assert!(!quiets_band_sides(StripRole::Plain));
+    assert!(!quiets_band_sides(StripRole::BelowBand));
+}

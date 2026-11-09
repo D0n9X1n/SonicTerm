@@ -271,3 +271,52 @@ fn buttons_on_the_right_move_the_right_list_to_the_left() {
     assert_eq!(band.segment(StatusSegmentId::Window).unwrap().side, StatusSide::Center);
     assert_eq!(sides(&band).len(), right_list.len() + 1, "only the name and the right list");
 }
+
+/// On a band whose window buttons are on the right, every segment except the name is drawn small and
+/// its plain values take the dim name tone, so the yellow name is the band's one accent; a caution
+/// keeps its color, and the pixel hash changes so the strip refits.
+#[test]
+fn quiet_band_sides_shrink_and_dim_everything_but_the_name() {
+    use crate::status_line::{
+        quiet_band_sides, SpokenSegment, StatusPart, StatusSegmentView, StatusTone,
+    };
+    let band = with_window_projected(&developer(), crate::window_band::ButtonEdge::Right);
+    let view = build_view(
+        &band,
+        false,
+        &titled("code/sonicterm", false),
+        &translator("en"),
+        NumberStyle::POINT,
+    );
+    let quiet = quiet_band_sides(view.clone());
+    assert_ne!(quiet.pixel_hash, view.pixel_hash, "the strip refits");
+    assert!(quiet.segments.iter().any(|segment| segment.small), "the band has side segments");
+    for segment in &quiet.segments {
+        if segment.id == StatusSegmentId::Window {
+            assert!(!segment.small, "the name keeps its size");
+            assert!(segment.parts.iter().any(|part| part.tone == StatusTone::Value));
+        } else {
+            assert!(segment.small, "{:?}", segment.id);
+            assert!(segment.parts.iter().all(|part| part.tone != StatusTone::Value));
+        }
+    }
+
+    let caution = StatusLineView::new(vec![StatusSegmentView {
+        id: StatusSegmentId::Mem,
+        side: StatusSide::Left,
+        priority: 500,
+        protected: false,
+        parts: vec![
+            StatusPart::new("Mem: ", StatusTone::Name),
+            StatusPart::new("3 GB", StatusTone::Warn),
+        ],
+        compact: None,
+        compact_last: false,
+        small: false,
+        click: None,
+        spoken: SpokenSegment::default(),
+    }]);
+    let tones: Vec<_> =
+        quiet_band_sides(caution).segments[0].parts.iter().map(|part| part.tone).collect();
+    assert_eq!(tones, [StatusTone::Name, StatusTone::Warn], "a caution keeps its color");
+}

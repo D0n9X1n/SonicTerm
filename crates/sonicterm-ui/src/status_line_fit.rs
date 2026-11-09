@@ -93,6 +93,8 @@ pub struct PlacedSegment {
     pub width: f32,
     /// Its parts, as fitted.
     pub parts: Vec<PlacedPart>,
+    /// Drawn in the smaller side text; see [`StatusSegmentView::small`].
+    pub small: bool,
 }
 
 /// A segment's fitting state.
@@ -109,6 +111,8 @@ struct FitSlot {
     anchor: bool,
     /// The compact form waits until this slot is the only one left.
     compact_last: bool,
+    /// Measured and drawn in the smaller side text.
+    small: bool,
 }
 
 impl FitSlot {
@@ -134,6 +138,16 @@ pub fn fit(
     view: &StatusLineView,
     metrics: &FitMetrics,
     mut measure: impl FnMut(&str) -> f32,
+) -> Vec<PlacedSegment> {
+    fit_sized(view, metrics, |text, _small| measure(text))
+}
+
+/// [`fit`] with `measure` told whether the text is a small segment's, so small segments are
+/// measured in the smaller side text they are drawn in.
+pub fn fit_sized(
+    view: &StatusLineView,
+    metrics: &FitMetrics,
+    mut measure: impl FnMut(&str, bool) -> f32,
 ) -> Vec<PlacedSegment> {
     let side_len =
         |side: StatusSide| view.segments.iter().filter(|segment| segment.side == side).count();
@@ -167,12 +181,17 @@ pub fn fit(
                     // When: any other segment, protection, then priority, then nearness to centre.
                     (segment.protected, segment.priority, distance)
                 },
-                part_widths: segment.parts.iter().map(|part| measure(&part.text)).collect(),
+                part_widths: segment
+                    .parts
+                    .iter()
+                    .map(|part| measure(&part.text, segment.small))
+                    .collect(),
                 parts: segment.parts.clone(),
                 compact: segment.compact.clone(),
                 active: true,
                 anchor: segment.id == StatusSegmentId::Window,
                 compact_last: segment.compact_last,
+                small: segment.small,
             }
         })
         .collect();
@@ -218,7 +237,8 @@ pub fn fit(
         if let Some(slot) = compactable {
             // When: `compactable` found a compact form, use the lowest-ranked one before dropping.
             let compact = slot.compact.take().unwrap_or_default();
-            slot.part_widths = compact.iter().map(|part| measure(&part.text)).collect();
+            let small = slot.small;
+            slot.part_widths = compact.iter().map(|part| measure(&part.text, small)).collect();
             slot.parts = compact;
             slot.active = !slot.is_blank();
             continue;
@@ -228,7 +248,8 @@ pub fn fit(
             // When: no active entry is left in `slots`, the strip is empty and cannot overflow.
             break;
         };
-        if shrink_slot(slot, overflow, &mut measure) {
+        let small = slot.small;
+        if shrink_slot(slot, overflow, &mut |text: &str| measure(text, small)) {
             // When: `shrink_slot` narrowed a text value, recheck the fit before dropping.
             continue;
         }
@@ -373,7 +394,7 @@ fn place_slot(slot: &FitSlot, origin: f32) -> PlacedSegment {
         });
         pen += width;
     }
-    PlacedSegment { index: slot.index, left: origin, width: pen - origin, parts }
+    PlacedSegment { index: slot.index, left: origin, width: pen - origin, parts, small: slot.small }
 }
 
 #[cfg(test)]

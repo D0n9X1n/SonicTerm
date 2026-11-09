@@ -11,7 +11,7 @@
 use sonicterm_render_model::boundary::cfg::status_line::{StatusFontScale, StatusPosition};
 use sonicterm_render_model::boundary::cfg::theme::Theme;
 use sonicterm_render_model::boundary::ui::status_line::{
-    fit, separators, FitMetrics, PlacedPart, PlacedSegment, SegmentClick, StatusLineView,
+    fit_sized, separators, FitMetrics, PlacedPart, PlacedSegment, SegmentClick, StatusLineView,
     StatusTone, SEGMENT_SEPARATOR,
 };
 use sonicterm_render_model::boundary::ui::tabbar_view::tab_bar_height;
@@ -347,35 +347,59 @@ pub struct FittedStrip {
     pub separators: Vec<PlacedPart>,
 }
 
-/// Fit `view` into the strip, measuring each run and the separator with the chrome font.
-pub fn fit_strip(
+/// The smaller text a band's side segments are drawn in: the palette footer's stack, rasterizer
+/// and raster size. It uses that stack's own glyph variant, so its tiles never collide with the
+/// strip's, which are keyed without a size.
+pub struct SmallText<'stack, Raster> {
+    /// The palette footer's stack.
+    pub font_stack: &'stack sonicterm_engine::FontStack,
+    /// Its rasterizer.
+    pub rasterizer: &'stack mut Raster,
+    /// Raster size of the small text, under the strip's own.
+    pub text_px: f32,
+}
+
+/// Fit `view` into the strip, measuring each run and the separator with the chrome font; a small
+/// segment's runs are measured in `small` when there is one.
+pub fn fit_strip<Raster: Rasterizer>(
     view: &StatusLineView,
     geometry: &StripGeometry,
     font_stack: &sonicterm_engine::FontStack,
-    rasterizer: &mut impl Rasterizer,
+    rasterizer: &mut Raster,
     atlas: &mut GlyphAtlas,
+    mut small: Option<SmallText<'_, Raster>>,
 ) -> FittedStrip {
     let text_px = geometry.text_px();
-    let mut measure = |text: &str| {
+    let mut measure = |text: &str, is_small: bool| {
+        let (stack, raster, size, variant) = match small.as_mut() {
+            Some(small) if is_small => (
+                small.font_stack,
+                &mut *small.rasterizer,
+                small.text_px,
+                GlyphRasterVariant::PaletteFooter,
+            ),
+            // A full-size segment's text, or no small text: the strip's own size.
+            _ => (font_stack, &mut *rasterizer, text_px, GlyphRasterVariant::StatusLine),
+        };
         chrome_text::layout_with_raster_variant(
-            font_stack,
-            rasterizer,
+            stack,
+            raster,
             atlas,
             text,
             ChromeColor::WHITE,
             ChromeAttrs { bold: false, italic: false },
-            text_px,
-            text_px,
+            size,
+            size,
             (0.0, 0.0),
             geometry.screen,
             None,
-            GlyphRasterVariant::StatusLine,
+            variant,
         )
         .width_px
     };
     let metrics =
-        FitMetrics { separator_width: measure(SEGMENT_SEPARATOR), ..geometry.fit_metrics() };
-    let segments = fit(view, &metrics, measure);
+        FitMetrics { separator_width: measure(SEGMENT_SEPARATOR, false), ..geometry.fit_metrics() };
+    let segments = fit_sized(view, &metrics, measure);
     let separators = separators(view, &segments, &metrics);
     FittedStrip { segments, separators }
 }
@@ -383,13 +407,14 @@ pub fn fit_strip(
 /// Emit the strip's band, hairline and glyphs; chips are colored text with no background. Glyphs are
 /// clipped to the band so no ink lands outside it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_strip(
+pub(crate) fn emit_strip<Raster: Rasterizer>(
     placed: &[PlacedSegment],
     separators: &[PlacedPart],
     geometry: &StripGeometry,
     colors: &StatusColors,
     font_stack: Option<&sonicterm_engine::FontStack>,
-    rasterizer: Option<&mut impl Rasterizer>,
+    rasterizer: Option<&mut Raster>,
+    mut small: Option<SmallText<'_, Raster>>,
     atlas: &mut GlyphAtlas,
     runs: &mut crate::chrome_cache::ChromeRunCache,
     reuse: bool,
@@ -415,9 +440,14 @@ pub(crate) fn emit_strip(
         return;
     };
     let text_px = geometry.text_px();
+    // Every run shares the strip's baseline, so small side text sits on the name's line.
     let baseline = strip_baseline(geometry);
     let first_glyph = glyphs.len();
-    for part in placed.iter().flat_map(|segment| &segment.parts).chain(separators) {
+    let parts = placed
+        .iter()
+        .flat_map(|segment| segment.parts.iter().map(move |part| (part, segment.small)))
+        .chain(separators.iter().map(|part| (part, false)));
+    for (part, is_small) in parts {
         if part.text.is_empty() || screen_w <= 0.0 || screen_h <= 0.0 {
             // When: the part has no text or the surface has no area, nothing is shaped or drawn.
             continue;
@@ -426,13 +456,25 @@ pub(crate) fn emit_strip(
         // is kept by text, bold, stack and size (DPI is in `text_px`), so an unchanged strip is not
         // reshaped; every face replacement clears the kept runs.
         let attrs = ChromeAttrs { bold: part.tone.is_chip(), italic: false };
-        let key = crate::chrome_cache::ChromeRunKey::new(
-            crate::chrome_cache::ChromeStack::StatusLine,
-            attrs,
-            text_px,
-            text_px,
-        );
-        let handle = runs.prepare(font_stack, &part.text, key, reuse);
+        let (stack, raster, size, chrome_stack, variant) = match small.as_mut() {
+            Some(small) if is_small => (
+                small.font_stack,
+                &mut *small.rasterizer,
+                small.text_px,
+                crate::chrome_cache::ChromeStack::PaletteFooter,
+                GlyphRasterVariant::PaletteFooter,
+            ),
+            // A full-size segment's part, a separator, or no small text: the strip's own size.
+            _ => (
+                font_stack,
+                &mut *rasterizer,
+                text_px,
+                crate::chrome_cache::ChromeStack::StatusLine,
+                GlyphRasterVariant::StatusLine,
+            ),
+        };
+        let key = crate::chrome_cache::ChromeRunKey::new(chrome_stack, attrs, size, size);
+        let handle = runs.prepare(stack, &part.text, key, reuse);
         let Some(view) = runs.view(&handle) else {
             // When: `runs.view(&handle)` is None, shaping failed; the part is dropped and reported.
             chrome_text::note_unshaped_chrome(&part.text);
@@ -440,13 +482,13 @@ pub(crate) fn emit_strip(
         };
         let run = chrome_text::layout_view(
             view,
-            rasterizer,
+            raster,
             atlas,
             colors.text(part.tone),
             (part.left.round(), baseline),
             geometry.screen,
             None,
-            GlyphRasterVariant::StatusLine,
+            variant,
         );
         glyphs.extend(run.glyphs);
         // Missing-glyph boxes are quads, which the glyph clip below does not reach.
@@ -586,6 +628,10 @@ where
 #[cfg(test)]
 #[path = "status_strip_tests.rs"]
 mod status_strip_tests;
+
+#[cfg(test)]
+#[path = "status_strip_band_tests.rs"]
+mod status_strip_band_tests;
 
 #[path = "status_strip_text.rs"]
 mod text;
