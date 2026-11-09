@@ -44,7 +44,10 @@ impl StatusLineState {
         let resolved = match role {
             StripRole::Plain => &self.resolved,
             StripRole::Band => {
-                projection = sonicterm_ui::status_line::with_window_projected(&self.resolved);
+                projection = sonicterm_ui::status_line::with_window_projected(
+                    &self.resolved,
+                    crate::app::window_setup::titlebar::button_edge(),
+                );
                 &projection
             }
             StripRole::BelowBand => {

@@ -95,7 +95,8 @@ padding_bottom = {padding_bottom}
 decorations = true
 # Titlebar: "integrated" paints one band with the window name centred beside the
 # window buttons, and a top status line shares it; "native" keeps the system
-# titlebar. Default: integrated on macOS, native on Windows; Linux is always native.
+# titlebar on macOS. Default: integrated on macOS and Windows; Windows always uses the
+# integrated band, and Linux always its native titlebar.
 # Applies to windows opened after the change.
 titlebar = "{titlebar}"
 

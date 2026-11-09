@@ -26,6 +26,19 @@ pub enum BandButtons {
     Caption,
 }
 
+/// The window edge that holds the platform's window buttons. It decides which side of the band the
+/// status segments may use: Windows draws its caption buttons on the right, macOS its traffic
+/// lights on the left. It follows the platform, not the band's current buttons, so segments stay
+/// put when full screen hides the buttons.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ButtonEdge {
+    /// Buttons on the left edge (macOS traffic lights): segments keep their configured sides.
+    #[default]
+    Left,
+    /// Buttons on the right edge (Windows caption buttons): right-list segments move to the left.
+    Right,
+}
+
 /// An integrated window's titlebar band, in logical px. The default is no band: a native titlebar.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WindowBand {

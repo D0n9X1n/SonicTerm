@@ -13,6 +13,15 @@ fn only_integrated_mode_on_macos_or_windows_gets_a_band() {
     assert_eq!(creation_band_estimate(TitlebarMode::Native), 0.0);
 }
 
+/// Windows' caption buttons are on the right, so its band moves the right list left; every other
+/// platform keeps the left edge, which leaves the band's layout as it was.
+#[test]
+fn the_button_edge_follows_the_platform() {
+    use sonicterm_ui::window_band::ButtonEdge;
+    let expected = if cfg!(target_os = "windows") { ButtonEdge::Right } else { ButtonEdge::Left };
+    assert_eq!(button_edge(), expected);
+}
+
 /// The macOS preference maps to its action, and an absent or unknown value is zoom, the system
 /// default.
 #[test]

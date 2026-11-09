@@ -244,10 +244,10 @@ Before winit creates an HWND, `sonicterm-windows` requests
 event-loop construction and is retained rather than assuming winit's later setup
 is equivalent for every startup path. Release builds use the Windows GUI
 subsystem and open no console window. The one-shot window-ready callback receives
-a live HWND and applies the DWM backdrop and native `muda` menu. With the
-default `[window] titlebar = "native"`, window movement, snap layouts, and
-minimize/maximize/close controls remain native Windows chrome. With
-`"integrated"` the window is created undecorated with winit's undecorated shadow,
+a live HWND and applies the DWM backdrop and native `muda` menu. Terminal windows
+always use the integrated titlebar: the Windows config normalizer replaces an
+explicit `[window] titlebar = "native"` at startup and on every reload and logs a
+warning. The window is created undecorated with winit's undecorated shadow,
 which is turned off in full screen because it moves the client area one pixel.
 SonicTerm then draws the caption buttons in its titlebar band and starts native
 moves and edge resizes through winit's `drag_window` and `drag_resize_window`.
@@ -742,7 +742,7 @@ untrusted input: the server tells agents never to follow instructions found in i
 | Tab OS handoff | NSPasteboard publication, no `NSDraggingSession` | OLE/COM drag/drop | in-process only |
 | Native menu | NSMenu | `muda` | unavailable; in-app actions remain |
 | Backdrop | AppKit blur/config | DWM Mica/Acrylic/Tabbed | opaque |
-| Integrated titlebar | default; transparent titlebar, AppKit traffic lights | opt-in; undecorated, SonicTerm caption buttons | none; native titlebar |
+| Integrated titlebar | default; transparent titlebar, AppKit traffic lights | always; undecorated, SonicTerm caption buttons, right list on the band's left | none; native titlebar |
 | Software present | wgpu adapter path | CPU BGRA + GDI | wgpu Vulkan/lavapipe or selected platform adapter |
 | Package format | `.app` in per-architecture `.dmg` | x64 WiX `.msi` | x86_64 `.deb` and `.tar.gz` |
 | Signing | ad-hoc bundle signature | unsigned | unsigned |

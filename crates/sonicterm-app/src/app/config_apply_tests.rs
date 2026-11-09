@@ -264,6 +264,33 @@ fn startup_and_reload_store_the_normalized_backdrop() {
     assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
 }
 
+/// A Windows shell's normalizer also runs on every reload, so a reload cannot bring back a value
+/// the Windows policy replaced at startup.
+#[test]
+fn windows_reload_stores_the_normalized_config() {
+    use sonicterm_cfg::config::BackdropKind;
+
+    let mut startup = Config::default();
+    startup.appearance.backdrop = BackdropKind::Mica;
+    let mut app = crate::shell::WindowsShell::new(
+        sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
+        Theme::default(),
+        startup,
+        Keymap::default(),
+    )
+    .with_config_normalizer(Box::new(|mut config| {
+        config.appearance.backdrop = BackdropKind::Opaque;
+        (config, Vec::new())
+    }))
+    .into_app_for_test();
+    assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
+
+    let mut reloaded = Config::default();
+    reloaded.appearance.backdrop = BackdropKind::Acrylic;
+    app.apply_new_config(reloaded);
+    assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
+}
+
 /// Normalization is the first reload transform, before warm-pool and baseline changes.
 #[test]
 fn reload_order_normalizes_before_any_config_side_effect() {

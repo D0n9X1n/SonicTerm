@@ -205,7 +205,10 @@ fn a_save_never_writes_the_band_projection() {
     let mut app =
         App::new(Theme::default(), Config::load_strict(&path).unwrap(), Keymap::default());
     let _ = app.sync_status_line(Instant::now());
-    let band = sonicterm_ui::status_line::with_window_projected(&app.status_line.resolved);
+    let band = sonicterm_ui::status_line::with_window_projected(
+        &app.status_line.resolved,
+        crate::app::window_setup::titlebar::button_edge(),
+    );
     assert!(band.segment(StatusSegmentId::Window).is_some(), "the band projects the name");
     app.save_current_settings_to(&path).expect("save");
     let text = std::fs::read_to_string(&path).unwrap();
@@ -236,7 +239,10 @@ fn a_save_never_writes_the_band_projection() {
         resolved.unlisted.iter().any(|segment| segment.id == StatusSegmentId::Window),
         "turned off, it waits unlisted with its keys"
     );
-    let band = sonicterm_ui::status_line::with_window_projected(&resolved);
+    let band = sonicterm_ui::status_line::with_window_projected(
+        &resolved,
+        crate::app::window_setup::titlebar::button_edge(),
+    );
     assert!(band.segment(StatusSegmentId::Window).is_some(), "the band still shows the name");
     app.save_current_settings_to(&preset).expect("save");
     let text = std::fs::read_to_string(&preset).unwrap();

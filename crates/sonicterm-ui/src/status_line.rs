@@ -786,15 +786,29 @@ impl StatusLineView {
 /// `resolved` as an integrated titlebar band presents it. The `window` segment is kept where a list
 /// already places it, otherwise first in the centre list with its configured keys, and it outranks
 /// every other segment, so a long name drops the others before it shortens. With
-/// `titlebar_segments = "right"` only the name and the right list remain. The user's lists, the
-/// checklist and Save never see this projection.
-pub fn with_window_projected(resolved: &ResolvedStatusLine) -> ResolvedStatusLine {
+/// `titlebar_segments = "right"` only the name and the right list remain. With the window buttons
+/// on the right `edge`, the right list moves to the left side, after any left list and in its
+/// configured order, so nothing sits beside the buttons. The user's lists, the checklist and Save
+/// never see this projection.
+pub fn with_window_projected(
+    resolved: &ResolvedStatusLine,
+    edge: crate::window_band::ButtonEdge,
+) -> ResolvedStatusLine {
     let mut projected = place_window(resolved);
     projected.in_band = true;
     if resolved.titlebar_segments == TitlebarSegments::Right {
         projected.segments.retain(|segment| {
             segment.id == StatusSegmentId::Window || segment.side == StatusSide::Right
         });
+    }
+    if edge == crate::window_band::ButtonEdge::Right {
+        // The caption buttons own the right edge. Segments are stored left, centre, then right,
+        // so retagging keeps the right list after the left list and in its own order.
+        for segment in &mut projected.segments {
+            if segment.side == StatusSide::Right {
+                segment.side = StatusSide::Left;
+            }
+        }
     }
     if let Some(window) =
         projected.segments.iter_mut().find(|segment| segment.id == StatusSegmentId::Window)

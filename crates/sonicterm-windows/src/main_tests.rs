@@ -271,3 +271,34 @@ fn windows_defaults_and_asset_loaders() {
     assert_eq!(super::load_keymap("no-such-keymap").0.meta.name, fallback);
     assert_eq!(super::load_theme("no-such-theme").0, sonicterm_cfg::theme::Theme::default());
 }
+
+/// Windows never uses the system titlebar for a terminal window: an explicit `titlebar = "native"`
+/// becomes integrated with one warning, other values pass through, and a second pass is silent.
+#[test]
+fn a_native_titlebar_is_normalized_to_integrated() {
+    use sonicterm_cfg::config::TitlebarMode;
+    let mut native = super::windows_default_config();
+    native.window.titlebar = TitlebarMode::Native;
+    let (normalized, warnings) = super::normalize_windows_config(native);
+    assert_eq!(normalized.window.titlebar, TitlebarMode::Integrated);
+    assert_eq!(warnings.len(), 1, "one warning names the ignored value: {warnings:?}");
+    // The message names the ignored setting in one readable line, with no run of spaces.
+    assert!(warnings[0].ends_with("ignoring [window] titlebar = \"native\""), "{warnings:?}");
+    assert!(!warnings[0].contains("  "), "{warnings:?}");
+    let (again, warnings) = super::normalize_windows_config(normalized);
+    assert_eq!(again.window.titlebar, TitlebarMode::Integrated);
+    assert!(warnings.is_empty(), "normalizing twice is silent");
+    let (default, warnings) = super::normalize_windows_config(super::windows_default_config());
+    assert_eq!(default.window.titlebar, TitlebarMode::Integrated);
+    assert!(warnings.is_empty());
+}
+
+/// Both Windows shells, the normal run and the runtime smoke, install the Windows config policy, so
+/// startup and every reload see it; a startup-only call would let a reload bring `native` back.
+#[test]
+fn both_windows_shells_install_the_config_normalizer() {
+    const SOURCE: &str = include_str!("main.rs");
+    let installs = SOURCE.matches(".with_config_normalizer(Box::new(normalize_windows_config))");
+    assert_eq!(installs.count(), 2, "the normal run and the runtime smoke");
+    assert!(!SOURCE.contains("normalize_windows_config(config"), "no startup-only call");
+}

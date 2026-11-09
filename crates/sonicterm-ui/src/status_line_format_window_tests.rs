@@ -93,7 +93,7 @@ fn the_band_projects_the_window_segment_once() {
     .unwrap()
     .status_line;
     let resolved = explicit.resolve().unwrap();
-    let projected = with_window_projected(&resolved);
+    let projected = with_window_projected(&resolved, crate::window_band::ButtonEdge::Left);
     let order: Vec<_> = projected.segments.iter().map(|segment| segment.id).collect();
     assert_eq!(order[..3], [StatusSegmentId::Mode, StatusSegmentId::Window, StatusSegmentId::Link]);
     let window = projected.segment(StatusSegmentId::Window).unwrap();
@@ -108,7 +108,7 @@ fn the_band_projects_the_window_segment_once() {
         side: StatusSide::Right,
         ..developer().segment(StatusSegmentId::Window).unwrap().clone()
     });
-    let projected = with_window_projected(&on_the_right);
+    let projected = with_window_projected(&on_the_right, crate::window_band::ButtonEdge::Left);
     let windows: Vec<_> =
         projected.segments.iter().filter(|segment| segment.id == StatusSegmentId::Window).collect();
     assert_eq!(windows.len(), 1);
@@ -124,7 +124,7 @@ fn the_band_projects_the_window_segment_once() {
 #[test]
 fn the_band_keeps_the_name_and_the_right_list() {
     use sonicterm_cfg::status_line::TitlebarSegments;
-    let band = with_window_projected(&developer());
+    let band = with_window_projected(&developer(), crate::window_band::ButtonEdge::Left);
     assert!(band.in_band);
     assert!(band
         .segments
@@ -136,7 +136,7 @@ fn the_band_keeps_the_name_and_the_right_list() {
     );
     let mut every = developer();
     every.titlebar_segments = TitlebarSegments::All;
-    let band = with_window_projected(&every);
+    let band = with_window_projected(&every, crate::window_band::ButtonEdge::Left);
     assert!(band.segments.iter().any(|segment| segment.side == StatusSide::Left));
     assert!(!developer().in_band, "the user's lists are not a band");
 }
@@ -148,8 +148,13 @@ fn a_long_band_name_hides_the_right_segments_first() {
     let long = "a-very-long-window-title-that-fills-the-titlebar";
     let inputs = StatusLineInputs { mem: idle_inputs().mem, ..titled(long, true) };
     let i18n = translator("en");
-    let view =
-        build_view(&with_window_projected(&developer()), false, &inputs, &i18n, NumberStyle::POINT);
+    let view = build_view(
+        &with_window_projected(&developer(), crate::window_band::ButtonEdge::Left),
+        false,
+        &inputs,
+        &i18n,
+        NumberStyle::POINT,
+    );
     let ids = |placed: &[PlacedSegment]| -> Vec<StatusSegmentId> {
         placed.iter().map(|segment| view.segments[segment.index].id).collect()
     };
@@ -188,7 +193,7 @@ fn the_band_name_outlasts_a_top_priority_protected_segment() {
         ..titled(long, true)
     };
     let view = build_view(
-        &with_window_projected(&resolved),
+        &with_window_projected(&resolved, crate::window_band::ButtonEdge::Left),
         false,
         &inputs,
         &translator("en"),
@@ -199,4 +204,70 @@ fn the_band_name_outlasts_a_top_priority_protected_segment() {
         placed.iter().map(|segment| view.segments[segment.index].id).collect();
     assert_eq!(ids, [StatusSegmentId::Window], "the protected health error went first");
     assert_eq!(text_of_placed(&placed[0]), format!("#2 {long}"), "the name is whole");
+}
+
+/// With the window buttons on the right edge (Windows), the band moves the right list to the left
+/// side in its configured order, after any left list, and keeps the name centred; with the buttons
+/// on the left (macOS) the projection is unchanged.
+#[test]
+fn buttons_on_the_right_move_the_right_list_to_the_left() {
+    use crate::window_band::ButtonEdge;
+    use sonicterm_cfg::status_line::TitlebarSegments;
+    let sides = |band: &sonicterm_cfg::status_line::ResolvedStatusLine| -> Vec<_> {
+        band.segments.iter().map(|segment| (segment.id, segment.side)).collect()
+    };
+    let right_list: Vec<_> = developer()
+        .segments
+        .iter()
+        .filter(|segment| segment.side == StatusSide::Right)
+        .map(|segment| segment.id)
+        .collect();
+    assert!(!right_list.is_empty(), "the developer preset has a right list");
+
+    let band = with_window_projected(&developer(), ButtonEdge::Right);
+    assert!(band.segments.iter().all(|segment| segment.side != StatusSide::Right));
+    let moved: Vec<_> = band
+        .segments
+        .iter()
+        .filter(|segment| segment.side == StatusSide::Left)
+        .map(|segment| segment.id)
+        .collect();
+    assert_eq!(moved, right_list, "the right list keeps its order on the left");
+    let window = band.segment(StatusSegmentId::Window).unwrap();
+    assert_eq!(window.side, StatusSide::Center, "the name stays centred");
+    assert_eq!(window.priority, sonicterm_cfg::status_line::MAX_PRIORITY);
+
+    let mut every = developer();
+    every.titlebar_segments = TitlebarSegments::All;
+    let left_list: Vec<_> = every
+        .segments
+        .iter()
+        .filter(|segment| segment.side == StatusSide::Left)
+        .map(|segment| segment.id)
+        .collect();
+    let band = with_window_projected(&every, ButtonEdge::Right);
+    let on_the_left: Vec<_> = band
+        .segments
+        .iter()
+        .filter(|segment| segment.side == StatusSide::Left)
+        .map(|segment| segment.id)
+        .collect();
+    assert_eq!(
+        on_the_left,
+        [left_list, right_list.clone()].concat(),
+        "left list, then the right list"
+    );
+
+    // The buttons on the left edge (macOS) keep the right list on the right, beside the name.
+    let band = with_window_projected(&developer(), ButtonEdge::Left);
+    let kept: Vec<_> = band
+        .segments
+        .iter()
+        .filter(|segment| segment.side == StatusSide::Right)
+        .map(|segment| segment.id)
+        .collect();
+    assert_eq!(kept, right_list, "macOS keeps the right list on the right");
+    assert!(band.segments.iter().all(|segment| segment.side != StatusSide::Left));
+    assert_eq!(band.segment(StatusSegmentId::Window).unwrap().side, StatusSide::Center);
+    assert_eq!(sides(&band).len(), right_list.len() + 1, "only the name and the right list");
 }
