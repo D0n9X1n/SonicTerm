@@ -599,6 +599,24 @@ pub(in crate::app) fn window_title_input(
     })
 }
 
+/// The name band's view: the window segment of `band_settings` for `window`'s applied title while
+/// `separate` (an integrated window whose strip is off or at the bottom), else nothing to draw.
+pub(super) fn band_view_for(
+    band_settings: &sonicterm_cfg::status_line::ResolvedStatusLine,
+    separate: bool,
+    hide_sensitive: bool,
+    window: Option<sonicterm_ui::status_line::WindowTitleInput>,
+    i18n: &sonicterm_ui::i18n::I18n,
+    numbers: NumberStyle,
+) -> StatusLineView {
+    if !separate {
+        // When: separate is false, there is no band or the strip is the band, so it draws nothing.
+        return StatusLineView::default();
+    }
+    let inputs = StatusLineInputs { window, ..Default::default() };
+    build_view(band_settings, hide_sensitive, &inputs, i18n, numbers)
+}
+
 impl App {
     /// Bring every integrated window's name band up to date: its view, built from the window's
     /// applied title alone, so it runs whether or not the status line is shown. A window whose
@@ -621,14 +639,14 @@ impl App {
             };
             let merged = state.visible
                 && state.resolved.position == sonicterm_cfg::status_line::StatusPosition::Top;
-            let view = if renderer.window_band().integrated && !merged {
-                let inputs =
-                    StatusLineInputs { window: window_title_input(window), ..Default::default() };
-                build_view(&band_settings, state.hide_sensitive, &inputs, i18n, numbers)
-            } else {
-                // When: not integrated, or merged with the strip, the name band draws nothing.
-                StatusLineView::default()
-            };
+            let view = band_view_for(
+                &band_settings,
+                renderer.window_band().integrated && !merged,
+                state.hide_sensitive,
+                window_title_input(window),
+                i18n,
+                numbers,
+            );
             let Some(renderer) = window.renderer.as_mut() else {
                 // When: the renderer is gone after the view was built, there is nothing to draw.
                 continue;
@@ -649,3 +667,7 @@ impl App {
 #[cfg(test)]
 #[path = "status_line_sync_tests.rs"]
 mod status_line_sync_tests;
+
+#[cfg(test)]
+#[path = "status_line_sync_band_tests.rs"]
+mod status_line_sync_band_tests;

@@ -18,6 +18,7 @@ fn caption_inputs() -> TreeInputs<'static> {
             (CaptionButton::Maximize, "Restore".to_owned(), rect(908.0, 0.0, 46.0, 32.0)),
             (CaptionButton::Close, "Close".to_owned(), rect(954.0, 0.0, 46.0, 32.0)),
         ],
+        name_band: Some(("Window: #1 Work".to_owned(), rect(400.0, 0.0, 120.0, 32.0))),
     }
 }
 
@@ -42,4 +43,16 @@ fn caption_buttons_are_named_pressable_buttons_without_a_strip() {
     }
     assert!(!root.1.children().contains(&STRIP_NODE), "no strip, no status line group");
     assert_eq!(caption_for_node(segment_node(StatusSegmentId::Mem).0), None);
+}
+
+/// A separate name band is a named button a reader can press to rename the window; without one the
+/// tree has no such node.
+#[test]
+fn the_name_band_is_a_pressable_button() {
+    let tree = build_tree(&caption_inputs());
+    let node = &tree.nodes.iter().find(|(id, _)| *id == NAME_BAND_NODE).unwrap().1;
+    assert_eq!((node.role(), node.label()), (Role::Button, Some("Window: #1 Work")));
+    assert!(node.supports_action(AccessAction::Click));
+    let without = TreeInputs { name_band: None, ..caption_inputs() };
+    assert!(build_tree(&without).nodes.iter().all(|(id, _)| *id != NAME_BAND_NODE));
 }

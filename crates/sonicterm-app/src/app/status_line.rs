@@ -379,6 +379,8 @@ impl App {
             state.built.get(&window_id).map(|built| built.inputs.clone()).unwrap_or_default();
         inputs.mem = state.mem;
         inputs.cpu_percent = state.cpu_shown;
+        // The name a reader hears is the title applied now, not the one the strip last built from.
+        inputs.window = sync::window_title_input(window);
         let gpu_recovering = self.gpu_recovery_snapshot().is_some_and(|snapshot| {
             !matches!(snapshot.phase, sonicterm_gpu::recovery::RecoveryPhase::Active)
         });

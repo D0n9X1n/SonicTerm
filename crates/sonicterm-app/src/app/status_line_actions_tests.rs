@@ -223,7 +223,7 @@ fn a_save_never_writes_the_band_projection() {
         .collect();
     assert_eq!(center, [StatusSegmentId::Link], "the reload shows the user's own list");
 
-    // A session that unchecks the preset's `window` removes it from both lists; the band still
+    // A session that unchecks the preset's `window` takes it out of the lists; the band still
     // projects it, and Save writes the lists without it.
     let preset = scratch_config("band-disabled", "[status_line]\nenabled = true\n");
     let mut app =
@@ -232,7 +232,10 @@ fn a_save_never_writes_the_band_projection() {
     app.toggle_status_segment(StatusSegmentId::Window);
     let resolved = app.status_line.resolved.clone();
     assert!(resolved.segment(StatusSegmentId::Window).is_none());
-    assert!(resolved.unlisted.iter().all(|segment| segment.id != StatusSegmentId::Window));
+    assert!(
+        resolved.unlisted.iter().any(|segment| segment.id == StatusSegmentId::Window),
+        "turned off, it waits unlisted with its keys"
+    );
     let band = sonicterm_ui::status_line::with_window_projected(&resolved);
     assert!(band.segment(StatusSegmentId::Window).is_some(), "the band still shows the name");
     app.save_current_settings_to(&preset).expect("save");

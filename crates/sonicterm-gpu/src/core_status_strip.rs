@@ -253,3 +253,10 @@ impl GpuRenderer {
         self.band_layouts.presented().filter(|_| self.band_layout().separate_px > 0.0).cloned()
     }
 }
+
+impl GpuRenderer {
+    /// The name band's segments, as last handed to the renderer.
+    pub fn band_view(&self) -> &StatusLineView {
+        &self.band_view
+    }
+}

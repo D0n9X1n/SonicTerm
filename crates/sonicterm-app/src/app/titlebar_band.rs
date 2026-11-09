@@ -9,13 +9,15 @@ use sonicterm_ui::window_band::{
 };
 use winit::window::{CursorIcon, ResizeDirection, WindowId};
 
+use sonicterm_cfg::status_line::StatusSegmentId;
+
 use super::redraw::RedrawCause;
 use super::window_setup::titlebar;
 use super::{App, WindowState};
 
-/// The double-click time and rectangle half-size (raster px at 100%) where the platform gives no
-/// click count: the system's own settings on Windows, its defaults elsewhere.
-fn double_click_limits() -> (Duration, f32) {
+/// The double-click time and rectangle half-width and half-height (raster px) where the platform
+/// gives no click count: the system's own settings on Windows, its defaults elsewhere.
+fn double_click_limits() -> (Duration, (f32, f32)) {
     titlebar::system_double_click_limits()
 }
 
@@ -108,6 +110,16 @@ pub(crate) fn edge_cursor(edge: ResizeEdge) -> CursorIcon {
     }
 }
 
+/// The caption button a left release runs: the one pressed, when the release is over that same
+/// button and no overlay opened while it was held; `None` cancels the press.
+pub(crate) fn release_action(
+    pressed: Option<CaptionButton>,
+    under: Option<CaptionButton>,
+    modal: bool,
+) -> Option<CaptionButton> {
+    pressed.filter(|button| !modal && Some(*button) == under)
+}
+
 /// Whether an empty-band press at `at`, `position`, follows `last` closely enough in time and
 /// place to complete a double-click; `click_count` is the platform's own count when it has one.
 pub(crate) fn is_double_click(
@@ -115,17 +127,17 @@ pub(crate) fn is_double_click(
     last: Option<(Instant, (f32, f32))>,
     at: Instant,
     position: (f32, f32),
-    limits: (Duration, f32),
+    limits: (Duration, (f32, f32)),
 ) -> bool {
     if let Some(count) = click_count {
         // When: the platform counted the clicks itself, its count decides.
         return count >= 2;
     }
-    let (time, slop) = limits;
+    let (time, (half_width, half_height)) = limits;
     last.is_some_and(|(then, (last_x, last_y))| {
         at.saturating_duration_since(then) <= time
-            && (position.0 - last_x).abs() <= slop
-            && (position.1 - last_y).abs() <= slop
+            && (position.0 - last_x).abs() <= half_width
+            && (position.1 - last_y).abs() <= half_height
     })
 }
 
@@ -203,8 +215,14 @@ impl App {
         };
         let press = classify_band_press(window, pointer_x, pointer_y);
         match press {
-            BandPress::Outside | BandPress::Segment => {
-                // When: Outside or Segment, the panes or the strip's own routing take the press.
+            BandPress::Outside => {
+                // When: Outside, the panes take the press.
+                return false;
+            }
+            BandPress::Segment => {
+                // When: Segment, the strip's own routing runs the click; the band still owns the
+                // release, so it never reaches a pane or the tab bar.
+                window.band_press_consumed = true;
                 return false;
             }
             BandPress::Caption(button) => {
@@ -276,7 +294,9 @@ impl App {
             BandPress::Caption(button) => Some(button),
             _ => None,
         };
-        let action = pressed.filter(|button| Some(*button) == under);
+        // An overlay opened during the press takes the keys and the pointer: the press is cancelled.
+        let modal = self.interaction.command_palette.is_open();
+        let action = release_action(pressed, under, modal);
         self.sync_caption_state(window_id);
         let close = action.is_some_and(|button| self.run_caption_button(window_id, button));
         (true, close)
@@ -438,6 +458,33 @@ impl App {
             // Close closes the window as the system button would, through its own close request.
             self.pending_caption_close.push(window_id);
         }
+    }
+
+    /// The separate name band `window_id` presented, as assistive technology reads it: "Window"
+    /// and the band's own spoken text (already redacted under `hide_sensitive`), with raster-px
+    /// bounds; `None` without a separate name band showing the name.
+    pub(in crate::app) fn accessible_name_band(
+        &self,
+        window_id: WindowId,
+    ) -> Option<(String, accesskit::Rect)> {
+        let window = self.registry.windows.get(&window_id)?;
+        let band = window.title_band.as_ref()?;
+        let placed = band.segments.iter().find(|segment| segment.id == StatusSegmentId::Window)?;
+        let renderer = window.renderer.as_ref()?;
+        let spoken = renderer
+            .band_view()
+            .segments
+            .iter()
+            .find(|segment| segment.id == StatusSegmentId::Window)?
+            .spoken
+            .clone();
+        let bounds = accesskit::Rect {
+            x0: f64::from(placed.x),
+            y0: f64::from(band.top),
+            x1: f64::from(placed.x + placed.width),
+            y1: f64::from(band.top + band.height),
+        };
+        Some((format!("{}: {}", spoken.name, spoken.value), bounds))
     }
 
     /// The caption buttons `window_id` exposes to assistive technology, with localized names and

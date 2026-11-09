@@ -467,6 +467,9 @@ pub(crate) struct TreeInputs<'strip> {
     /// the window has an integrated Windows titlebar. They replace native controls, so they are
     /// exposed whether or not the status line is.
     pub(crate) caption: Vec<(sonicterm_ui::window_band::CaptionButton, String, Rect)>,
+    /// The name band's window name, its spoken text and bounds, while a separate name band shows
+    /// it; a strip that is the band exposes the name among its segments instead.
+    pub(crate) name_band: Option<(String, Rect)>,
 }
 
 impl App {
@@ -529,12 +532,8 @@ impl App {
         let settings = self.status_generation();
         let shown = self.status_line_shown() && self.status_accessibility().expose;
         let hide_sensitive = self.status_hide_sensitive();
-        // The strip when it is shown and exposed; otherwise an integrated window's name band, which
-        // replaces the native title the reader would otherwise find there.
-        let presented =
-            window.status_strip.as_ref().filter(|_| shown).or(window.title_band.as_ref());
-        let Some(strip) = presented else {
-            // When: neither a shown strip nor a name band was presented, no segment is exposed.
+        let Some(strip) = window.status_strip.as_ref().filter(|_| shown) else {
+            // When: no strip was presented or `shown` is false, the tree exposes no segment.
             return Structure { pane, epoch, settings, ..Structure::default() };
         };
         let mut segments: Vec<Exposed> = strip
@@ -662,20 +661,13 @@ impl App {
             return None;
         };
         let active_tab = window.tabs.active().map(|tab| tab.id);
-        // Focus may rest on a shown strip's segment or on the name band's, which a reader reaches.
-        let in_band = |focus: StatusSegmentId| {
-            window
-                .title_band
-                .as_ref()
-                .is_some_and(|band| band.segments.iter().any(|segment| segment.id == focus))
-        };
         let stale = state.focus.is_some_and(|focus| {
-            state.focus_tab != active_tab
-                || !(in_band(focus)
-                    || shown
-                        && window.status_strip.as_ref().is_some_and(|strip| {
-                            strip.segments.iter().any(|segment| segment.id == focus)
-                        }))
+            !shown
+                || state.focus_tab != active_tab
+                || !window
+                    .status_strip
+                    .as_ref()
+                    .is_some_and(|strip| strip.segments.iter().any(|segment| segment.id == focus))
         });
         if stale {
             // The strip is off, the tab changed or the segment is gone: focus ends.
@@ -755,6 +747,7 @@ impl App {
         let strip_label = self.i18n.translate("status-accessible-strip");
         let announcements_label = self.i18n.translate("status-accessible-announcements");
         let caption = self.accessible_caption(window_id);
+        let name_band = self.accessible_name_band(window_id);
         let state = self.accessibility.get_mut(&window_id)?;
         state.health = severity;
         state.health_text = health_text;
@@ -780,6 +773,7 @@ impl App {
             announcement: state.announcement.clone(),
             focus: state.focus,
             caption,
+            name_band,
         };
         // Names, roles, bounds and actions (the strip hash), focus and the announcement; never the
         // settings generation, so a reload that changes nothing read sends nothing.
@@ -791,6 +785,10 @@ impl App {
             &inputs.announcements_label,
         )
             .hash(&mut hasher);
+        if let Some((name, bounds)) = &inputs.name_band {
+            let corners = [bounds.x0, bounds.y0, bounds.x1, bounds.y1].map(f64::to_bits);
+            (name, corners).hash(&mut hasher);
+        }
         for (button, name, bounds) in &inputs.caption {
             let corners = [bounds.x0, bounds.y0, bounds.x1, bounds.y1].map(f64::to_bits);
             (button, name, corners).hash(&mut hasher);
@@ -929,6 +927,18 @@ impl App {
                     return;
                 };
                 self.set_status_focus(window_id, id);
+            }
+            AccessibilityRequest::Click { node, .. } if node == tree::NAME_BAND_NODE.0 => {
+                // A click on the name band renames the window while a reader is connected and the
+                // band still shows the name, as a press on it would.
+                let current = self.accessibility.get(&window_id).is_some_and(|state| state.active)
+                    && self.accessible_name_band(window_id).is_some();
+                if current {
+                    self.click_status_segment(window_id, StatusSegmentId::Window);
+                } else {
+                    // When: current is false, the band is gone or no reader is connected.
+                    tracing::debug!(node, "stale name band click dropped");
+                }
             }
             AccessibilityRequest::Click { node, .. } if tree::caption_for_node(node).is_some() => {
                 // A caption click acts only while a reader is connected and the window still draws

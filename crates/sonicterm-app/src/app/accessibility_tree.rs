@@ -47,6 +47,9 @@ pub(super) fn segment_for_node(node: u64) -> Option<StatusSegmentId> {
     StatusSegmentId::ALL.into_iter().find(|id| segment_node(*id).0 == node)
 }
 
+/// The node of an integrated window's separate name band.
+pub(crate) const NAME_BAND_NODE: NodeId = NodeId(TERMINAL_WINDOW | KIND_CAPTION | 16);
+
 /// The node of caption `button`: the same in every tree.
 pub(crate) fn caption_node(button: sonicterm_ui::window_band::CaptionButton) -> NodeId {
     use sonicterm_ui::window_band::CaptionButton;
@@ -119,6 +122,15 @@ pub(crate) fn build_tree(inputs: &TreeInputs<'_>) -> TreeUpdate {
     announcement.set_bounds(inputs.announcement_bounds);
     nodes.push((ANNOUNCEMENT_NODE, announcement));
     children.push(ANNOUNCEMENT_NODE);
+    if let Some((name, bounds)) = &inputs.name_band {
+        // The name band is a button: pressing it renames the window, as a click on it does.
+        let mut node = Node::new(Role::Button);
+        node.set_label(name.clone());
+        node.set_bounds(*bounds);
+        node.add_action(AccessAction::Click);
+        nodes.push((NAME_BAND_NODE, node));
+        children.push(NAME_BAND_NODE);
+    }
     for (button, name, bounds) in &inputs.caption {
         // Each self-drawn caption button is a pressable button, as the native one it replaces.
         let mut node = Node::new(Role::Button);

@@ -42,10 +42,10 @@ impl App {
             // When: `windows` has no `window_id`, there is no strip to focus.
             return;
         };
-        let presented = [window.status_strip.as_ref(), window.title_band.as_ref()]
-            .into_iter()
-            .flatten()
-            .any(|strip| strip.segments.iter().any(|segment| segment.id == id));
+        let presented = window
+            .status_strip
+            .as_ref()
+            .is_some_and(|strip| strip.segments.iter().any(|segment| segment.id == id));
         let Some(state) = accessibility.get_mut(&window_id).filter(|_| presented) else {
             // When: the window has no accessibility or `presented` is false, focus cannot move there.
             return;

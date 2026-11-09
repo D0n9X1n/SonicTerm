@@ -124,10 +124,10 @@ pub(crate) fn system_double_click_action() -> DoubleClickAction {
     }
 }
 
-/// The system's double-click time and the half-size of its double-click rectangle in raster px:
-/// `GetDoubleClickTime` and `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK` on Windows; the Windows defaults
-/// (500 ms, a 4-pixel rectangle) where no setting is read.
-pub(crate) fn system_double_click_limits() -> (std::time::Duration, f32) {
+/// The system's double-click time and the half-width and half-height of its double-click rectangle
+/// in raster px: `GetDoubleClickTime` and `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK` on Windows; the Windows
+/// defaults (500 ms, a 4 × 4 rectangle) where no setting is read.
+pub(crate) fn system_double_click_limits() -> (std::time::Duration, (f32, f32)) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
@@ -143,12 +143,12 @@ pub(crate) fn system_double_click_limits() -> (std::time::Duration, f32) {
                     GetSystemMetrics(SM_CYDOUBLECLK),
                 )
             };
-        let half = (width.max(height).max(1) as f32) / 2.0;
-        (std::time::Duration::from_millis(u64::from(millis.max(1))), half)
+        let half = |side: i32| (side.max(1) as f32) / 2.0;
+        (std::time::Duration::from_millis(u64::from(millis.max(1))), (half(width), half(height)))
     }
     #[cfg(not(target_os = "windows"))]
     {
-        (std::time::Duration::from_millis(500), 4.0)
+        (std::time::Duration::from_millis(500), (2.0, 2.0))
     }
 }
 

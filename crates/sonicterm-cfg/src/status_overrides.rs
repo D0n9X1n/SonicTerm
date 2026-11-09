@@ -172,6 +172,14 @@ impl StatusLineOverrides {
             );
         }
         shown.unlisted.retain(|segment| !segments.iter().any(|shown| shown.id == segment.id));
+        // A listed segment the session turned off joins the unlisted set with its configured keys,
+        // so whatever places it later (a session enable, the titlebar band) keeps them.
+        for segment in &file.segments {
+            let gone = !segments.iter().any(|shown| shown.id == segment.id);
+            if gone && !shown.unlisted.iter().any(|unlisted| unlisted.id == segment.id) {
+                shown.unlisted.push(segment.clone());
+            }
+        }
         shown.segments = segments;
         shown
     }
