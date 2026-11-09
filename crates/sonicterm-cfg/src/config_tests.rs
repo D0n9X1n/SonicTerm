@@ -81,6 +81,11 @@ fn the_titlebar_mode_has_a_platform_default_and_rejects_unknown_values() {
     let expected =
         if cfg!(target_os = "macos") { TitlebarMode::Integrated } else { TitlebarMode::Native };
     assert_eq!(Config::default().window.titlebar, expected);
+    // A file written before the key existed, with a [window] table but no titlebar, gets the
+    // platform default too, so an upgraded macOS install opens integrated.
+    let omitted: Config =
+        toml::from_str("[window]\ndecorations = true\n").expect("titlebar is optional");
+    assert_eq!(omitted.window.titlebar, expected);
     let integrated: Config =
         toml::from_str("[window]\ntitlebar = \"integrated\"\n").expect("integrated parses");
     assert_eq!(integrated.window.titlebar, TitlebarMode::Integrated);
