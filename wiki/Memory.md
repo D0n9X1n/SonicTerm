@@ -21,7 +21,7 @@ This page explains what those figures count; protocol and atlas details are in
 | Media capture staging | 64 MiB process-wide; 4 MiB floor; 13 concurrent floor reservations guaranteed | refuse an unstaged capture; cancel after two unchanged 30 s progress samples |
 | Decoded inline images | 64 MiB and 128 images per pane (a kitty image's placements share one buffer and count once); 256 MiB process target divided across live panes; 4 MiB minimum and newest image retained | discard oldest images; a process under pressure may retain at most one 4 MiB newest-image residual per live pane beyond the target until the idle-pane pass converges |
 | Encoded image dimensions | pixels ≤ 2,048² and declared width/height ≤ 8,192; a larger image inside the budget is downscaled to 1,024 px on its long side | reject before decode |
-| Rendered image dimensions | width/height ≤ 1,024; BGRA8 ≤ 4 MiB | resize iTerm2/kitty images; Sixel decodes into the bounded buffer |
+| Rendered image dimensions | width/height ≤ 1,024; BGRA8 ≤ 4 MiB | resize iTerm2/kitty images; Sixel decodes into a buffer sized to the painted extent, clipped at 1,024 |
 | PTY input | one fixed 64-byte pending pointer-motion slot per pane; four queued UI messages, 16 MiB each; reply FIFO uses 64 KiB RAM including framing, ≤32 KiB writer output, ≤32 KiB + 4 B read scratch, ≤32 KiB app reply-batch payload, and <32 KiB parser-dispatch payload (growable vectors may retain spare capacity) | UI refuses with bytes intact; replies spill to private temporary storage without waiting for native input capacity |
 | Reply spill disk | 16 MiB of unconsumed records per pane (`SPILL_BUDGET_BYTES`); a consumed prefix of at least 1 MiB and half the file is compacted away, so the file stays below 32 MiB plus one record. Every pane's spill file length (consumed prefixes included) also counts against one process budget of 256 MiB (`PROCESS_SPILL_BUDGET_BYTES`); when it is full, a pane with a consumed prefix of at least 1 MiB compacts it first. This is file-length accounting, not exact filesystem allocation | refuse the one reply past either budget (`ReplyBudgetExceeded`, counted, warned once per backlog) and keep the spool; delete on drain, writer exit, or pane teardown; storage errors explicitly fail reply delivery while output/exit observation continues |
 | PTY output | 64 queued chunks plus one blocked sender chunk, each backed by a 64 KiB reader ring; structural worst case 4.0625 MiB. Each chunk is 64 B on 64-bit targets (const-asserted), 16 B of it the optional read stamp. Chunk timestamp-storage subtotal: 1,024 B per PTY in the 64 reserved channel slots, stamped or not, plus 16 B each for the blocked sender's chunk and the chunk the VT worker holds, 1,056 B; freed with the PTY. Whether a PTY stamps its reads is chosen at its creation (while the pane's counter gate is on) and fixed for the reader's lifetime, as an immutable boolean the reader owns; its layout contribution is not covered by that subtotal | block the reader and apply OS backpressure |
@@ -56,7 +56,9 @@ therefore:
 ```
 
 While `live_panes × 4 MiB` fits the target, the periodic idle-pane walk returns
-the total to 256 MiB or below. The larger formula is the pre-convergence bound,
+the total to 256 MiB or below. It checks the total before each pane and stops as
+soon as the total is back at or under the target, so panes after that keep their
+images. The larger formula is the pre-convergence bound,
 and remains the bound when the required one-image-per-pane floor itself exceeds
 the target.
 
