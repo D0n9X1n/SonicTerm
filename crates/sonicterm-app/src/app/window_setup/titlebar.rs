@@ -120,7 +120,8 @@ pub(crate) fn system_double_click_action() -> DoubleClickAction {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        DoubleClickAction::Maximize
+        // No platform setting is read here, so the action is the macOS rule's default.
+        double_click_action(None)
     }
 }
 
