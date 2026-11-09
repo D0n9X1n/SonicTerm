@@ -375,7 +375,7 @@ impl Drop for InlineMediaCharge {
 #[must_use = "the evicted images must be dropped after releasing the image \
               lock, or a multi-millisecond allocator pause lands on the frame"]
 pub(super) fn trim_inline_images_charged(
-    images: &mut Vec<InlineImage>,
+    images: &mut impl ImageList,
     charge: &SharedInlineMediaCharge,
 ) -> Vec<InlineImage> {
     let pool = Arc::clone(&charge.lock().pool);
@@ -399,9 +399,9 @@ pub(super) fn trim_inline_images_charged(
         // pane trims to its fair share of the pool.
         pool.pane_budget()
     };
-    let before = retained_inline_media(images);
+    let before = retained_inline_media(images.view());
     let evicted = take_trimmed_inline_images(images, budget);
-    let after = retained_inline_media(images);
+    let after = retained_inline_media(images.view());
 
     // A pane is never trimmed below its most recent image, so a pane holding
     // one image at the rendered cap legitimately sits above `budget`. Anything
@@ -478,13 +478,10 @@ pub(super) fn trim_staged_inline_images(
 /// how large that one image can be.
 #[must_use = "the evicted images must be dropped outside the lock, or the \
               allocator pause this exists to avoid happens anyway"]
-fn take_trimmed_inline_images(
-    images: &mut Vec<InlineImage>,
-    byte_budget: usize,
-) -> Vec<InlineImage> {
+fn take_trimmed_inline_images(images: &mut impl ImageList, byte_budget: usize) -> Vec<InlineImage> {
     // Kitty placements share their image's pixel buffer and `id`, so eviction works per pixel
     // buffer: oldest first by first appearance, and every entry of an evicted buffer goes with it.
-    let buffers = unique_pixel_buffers(images);
+    let buffers = unique_pixel_buffers(images.view());
     let mut retained_bytes =
         buffers.iter().fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes));
     let mut evict = 0usize;
@@ -495,11 +492,12 @@ fn take_trimmed_inline_images(
         evict += 1;
     }
     if evict == 0 {
-        // When: evict is 0, everything fits, so no entry moves.
+        // When: evict is 0, everything fits, so no entry moves and the list is not edited.
         return Vec::new();
     }
     let evicted_ids: std::collections::HashSet<u64> =
         buffers[..evict].iter().map(|(id, _)| *id).collect();
+    let images = images.edit();
     let (evicted, kept): (Vec<InlineImage>, Vec<InlineImage>) =
         std::mem::take(images).into_iter().partition(|image| evicted_ids.contains(&image.id));
     *images = kept;
@@ -557,6 +555,7 @@ mod media_store;
 #[cfg(test)]
 pub(super) use media_kitty::MAX_KITTY_PLACEMENTS;
 pub(super) use media_kitty::{apply_kitty, kitty_source_size, KittyOp};
+pub(super) use media_store::ImageList;
 pub use media_store::{InlineImageStore, MediaSnapshot};
 
 #[cfg(test)]

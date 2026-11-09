@@ -149,3 +149,85 @@ fn every_write_draws_a_revision_no_list_shares() {
     let other = InlineImageStore::default();
     assert_ne!(other.try_snapshot().unwrap().revision, after.revision, "stores never share one");
 }
+
+/// The kitty command `metadata` parses to.
+fn kitty(metadata: &str) -> sonicterm_vt::vt::KittyCommand {
+    sonicterm_vt::vt::KittyCommand::parse(metadata.as_bytes()).expect("valid command")
+}
+
+/// Kitty commands and trims that change nothing keep the list's revision and allocation, so the
+/// renderer reuses its media figures and a frame's held snapshot is never copied; an admitted
+/// placement draws a new revision.
+#[test]
+fn commands_and_trims_that_change_nothing_keep_the_revision() {
+    use super::super::{apply_kitty, trim_inline_images_charged, InlineMediaPool, KittyOp};
+    let store = InlineImageStore::default();
+    let pool = InlineMediaPool::new();
+    let charge = pool.new_charge();
+    let upload = KittyOp::Transmit(kitty("a=t,i=7,f=32,s=1,v=1"), image(1), Some((1, 1)));
+    assert_eq!(apply_kitty(&mut store.lock(), upload).0, Some("OK"));
+    let held = store.try_snapshot().unwrap();
+    let unchanged = [
+        // No image 9 is stored.
+        ("place of a missing image", KittyOp::Place(kitty("a=p,i=9"), 0, 0, 0)),
+        // No placement of 9, and image 7 has only its upload, which `d=i` keeps.
+        ("delete of a missing image", KittyOp::Delete(kitty("a=d,d=i,i=9"))),
+        ("delete of an unplaced upload", KittyOp::Delete(kitty("a=d,d=i,i=7"))),
+        // A selector this subset does not handle.
+        ("unsupported delete", KittyOp::Delete(kitty("a=d,d=a"))),
+        // An anonymous upload can never be placed, so it is dropped unstored.
+        ("anonymous upload", KittyOp::Transmit(kitty("a=t,f=32,s=1,v=1"), image(2), Some((1, 1)))),
+    ];
+    for (label, operation) in unchanged {
+        let mut images = store.lock();
+        drop(apply_kitty(&mut images, operation));
+        drop(trim_inline_images_charged(&mut images, &charge));
+        drop(images);
+        let now = store.try_snapshot().unwrap();
+        assert_eq!(now.revision, held.revision, "{label} drew a revision");
+        assert!(Arc::ptr_eq(&now.images, &held.images), "{label} copied the list");
+    }
+    let place = KittyOp::Place(kitty("a=p,i=7,p=1"), 0, 0, 0);
+    assert_eq!(apply_kitty(&mut store.lock(), place).0, Some("OK"));
+    assert_ne!(store.try_snapshot().unwrap().revision, held.revision, "a placement is a change");
+}
+
+/// At the placement cap, a refused displayed transmit and a refused placement, each followed by
+/// the charged trim, keep the order, the revision and the held snapshot's allocation.
+#[test]
+fn capacity_refusals_keep_the_revision() {
+    use super::super::{
+        apply_kitty, trim_inline_images_charged, InlineMediaPool, KittyOp, MAX_KITTY_PLACEMENTS,
+    };
+    let store = InlineImageStore::default();
+    let pool = InlineMediaPool::new();
+    let charge = pool.new_charge();
+    {
+        let mut images = store.lock();
+        let upload = KittyOp::Transmit(kitty("a=t,i=7,f=32,s=1,v=1"), image(1), Some((1, 1)));
+        assert_eq!(apply_kitty(&mut images, upload).0, Some("OK"));
+        for placement in 1..=MAX_KITTY_PLACEMENTS {
+            let place = KittyOp::Place(kitty(&format!("a=p,i=7,p={placement}")), 0, 0, 0);
+            assert_eq!(apply_kitty(&mut images, place).0, Some("OK"));
+        }
+        drop(trim_inline_images_charged(&mut images, &charge));
+    }
+    let held = store.try_snapshot().unwrap();
+    let refused = [
+        (
+            "displayed transmit",
+            KittyOp::Transmit(kitty("a=T,i=8,f=32,s=1,v=1"), image(2), Some((1, 1))),
+        ),
+        ("placement", KittyOp::Place(kitty("a=p,i=7,p=5000"), 0, 0, 0)),
+    ];
+    for (label, operation) in refused {
+        let mut images = store.lock();
+        let (reply, _) = apply_kitty(&mut images, operation);
+        assert_eq!(reply, Some("ENOSPC:too many placements"), "{label}");
+        drop(trim_inline_images_charged(&mut images, &charge));
+        drop(images);
+        let now = store.try_snapshot().unwrap();
+        assert_eq!(now.revision, held.revision, "{label} drew a revision");
+        assert!(Arc::ptr_eq(&now.images, &held.images), "{label} copied the list");
+    }
+}
