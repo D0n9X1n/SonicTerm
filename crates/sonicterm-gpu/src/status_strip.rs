@@ -112,7 +112,11 @@ pub fn band_layout(
         // When: merged, the strip is the band, at least the buttons' height.
         return BandLayout { merged, separate_px: 0.0, strip_px: button_px.max(strip_px) };
     }
-    // A name-only band in full screen (no buttons) still holds the name at the strip's height.
+    if button_px <= 0.0 {
+        // When: button_px is 0 (full screen), there is no titlebar to share: no band at all.
+        return BandLayout { merged, separate_px: 0.0, strip_px: shown_strip };
+    }
+    // A name-only band is at least the strip's height, so a large font never clips the name.
     BandLayout { merged, separate_px: button_px.max(strip_px), strip_px: shown_strip }
 }
 

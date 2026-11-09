@@ -384,6 +384,7 @@ status-checklist-center = center
 status-checklist-right = right
 status-checklist-sensitive = sensitive
 status-checklist-hidden = hidden
+status-checklist-in-titlebar = always in the titlebar
 status-group-core = Core
 status-group-pointer = Pointer
 status-group-input = Input

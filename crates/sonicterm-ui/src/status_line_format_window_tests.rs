@@ -171,3 +171,32 @@ fn a_long_band_name_hides_the_right_segments_first() {
 fn text_of_placed(segment: &PlacedSegment) -> String {
     segment.parts.iter().map(|part| part.text.as_str()).collect()
 }
+
+/// The band's name outranks even a protected segment raised to the top priority: such a segment
+/// is dropped before the name loses `#N` or shortens.
+#[test]
+fn the_band_name_outlasts_a_top_priority_protected_segment() {
+    let mut resolved = developer();
+    for segment in &mut resolved.segments {
+        if segment.id == StatusSegmentId::Health {
+            segment.priority = sonicterm_cfg::status_line::MAX_PRIORITY;
+        }
+    }
+    let long = "a-very-long-window-title-that-fills-the-titlebar";
+    let inputs = StatusLineInputs {
+        health: HealthInput { config: Some(ReloadFailure { line: Some(3) }), ..Default::default() },
+        ..titled(long, true)
+    };
+    let view = build_view(
+        &with_window_projected(&resolved),
+        false,
+        &inputs,
+        &translator("en"),
+        NumberStyle::POINT,
+    );
+    let placed = fit(&view, &tight(columns(&format!("#2 {long}"))), columns);
+    let ids: Vec<StatusSegmentId> =
+        placed.iter().map(|segment| view.segments[segment.index].id).collect();
+    assert_eq!(ids, [StatusSegmentId::Window], "the protected health error went first");
+    assert_eq!(text_of_placed(&placed[0]), format!("#2 {long}"), "the name is whole");
+}

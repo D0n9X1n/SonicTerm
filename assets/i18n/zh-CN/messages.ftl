@@ -380,6 +380,7 @@ status-checklist-center = 中
 status-checklist-right = 右
 status-checklist-sensitive = 敏感
 status-checklist-hidden = 已隐藏
+status-checklist-in-titlebar = 始终显示在标题栏
 status-group-core = 核心
 status-group-pointer = 指针
 status-group-input = 输入

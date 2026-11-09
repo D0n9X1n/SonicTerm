@@ -308,3 +308,7 @@ fn sync_window(
 #[cfg(test)]
 #[path = "native_title_tests.rs"]
 mod native_title_tests;
+
+#[cfg(test)]
+#[path = "native_title_band_tests.rs"]
+mod native_title_band_tests;

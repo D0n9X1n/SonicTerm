@@ -585,7 +585,7 @@ pub(super) enum StripRole {
 
 /// The status line's window input for `window`: the parts its native title last applied, or `None`
 /// before the first write and for an unnumbered window.
-pub(super) fn window_title_input(
+pub(in crate::app) fn window_title_input(
     window: &WindowState,
 ) -> Option<sonicterm_ui::status_line::WindowTitleInput> {
     let state = &window.native_title;
@@ -633,7 +633,10 @@ impl App {
                 // When: the renderer is gone after the view was built, there is nothing to draw.
                 continue;
             };
-            if renderer.set_band_view(view) {
+            // The name band draws in the strip's font, so its text size follows `font_scale` even
+            // while the strip is off and its own sync pass is skipped.
+            let rescaled = renderer.set_status_line_font_scale(state.resolved.font_scale.as_f32());
+            if renderer.set_band_view(view) || rescaled {
                 // The band's pixels changed: draw them once.
                 window.mark_redraw(RedrawCause::StatusLine);
                 dispatch_redraws.request(*window_id, window);

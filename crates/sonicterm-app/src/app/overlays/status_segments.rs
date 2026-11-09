@@ -46,6 +46,7 @@ fn label_keys() -> Vec<String> {
         "status-checklist-reset",
         "status-checklist-sensitive",
         "status-checklist-hidden",
+        "status-checklist-in-titlebar",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -86,8 +87,16 @@ impl App {
         self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 
-    /// The checklist rows for the strip the session shows now.
+    /// The checklist rows for the strip the session shows now. In an integrated window the Window
+    /// row notes that the titlebar band always shows the name, whatever the row places.
     fn status_segment_rows(&mut self) -> Vec<StatusSegmentRow> {
+        let integrated = self
+            .interaction
+            .palette_attached_window
+            .or(self.registry.main_window_id)
+            .and_then(|id| self.registry.windows.get(&id))
+            .and_then(|window| window.renderer.as_ref())
+            .is_some_and(|renderer| renderer.window_band().integrated);
         let shown = self.current_status_line();
         let check = |on: bool| if on { "✓ " } else { "  " };
         let row = |kind, label: String, name: String| StatusSegmentRow { kind, label, name };
@@ -128,6 +137,11 @@ impl App {
                 if let Some(side) = side {
                     label.push_str(" — ");
                     label.push_str(&self.i18n.translate(side_key(side)));
+                }
+                if integrated && id == StatusSegmentId::Window {
+                    // The row moves the name within the strip; the band shows it either way.
+                    label.push_str(" · ");
+                    label.push_str(&self.i18n.translate("status-checklist-in-titlebar"));
                 }
                 if id.meta().sensitivity != Sensitivity::None {
                     label.push_str(" · ");

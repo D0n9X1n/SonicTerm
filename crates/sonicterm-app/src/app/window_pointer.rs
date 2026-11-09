@@ -376,8 +376,11 @@ impl App {
         win_id: WindowId,
         state: ElementState,
     ) {
-        if self.route_band_left_input(event_loop, win_id, state) {
-            // When: route_band_left_input consumed the press or its release in the titlebar band.
+        if state == ElementState::Pressed
+            && self.route_band_left_input(event_loop, win_id, ElementState::Pressed)
+        {
+            // When: route_band_left_input took the press for a caption button, an edge or empty
+            // band space.
             return;
         }
         match state {

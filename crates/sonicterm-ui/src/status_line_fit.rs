@@ -160,7 +160,13 @@ pub fn fit(
             FitSlot {
                 index,
                 side: segment.side,
-                rank: (segment.protected, segment.priority, distance),
+                rank: if segment.compact_last {
+                    // A band's name outranks everything, whatever another segment's priority.
+                    (true, u16::MAX, usize::MAX)
+                } else {
+                    // When: any other segment, protection, then priority, then nearness to centre.
+                    (segment.protected, segment.priority, distance)
+                },
                 part_widths: segment.parts.iter().map(|part| measure(&part.text)).collect(),
                 parts: segment.parts.clone(),
                 compact: segment.compact.clone(),

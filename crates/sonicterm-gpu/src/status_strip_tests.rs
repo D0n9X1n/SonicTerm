@@ -963,6 +963,12 @@ pub(super) fn the_band_merges_with_a_top_strip_and_stands_alone_otherwise() {
     assert_eq!(off, BandLayout { merged: false, separate_px: 56.0, strip_px: 0.0 });
     let large_font = band_layout(true, 56.0, false, StatusPosition::Top, 70.0);
     assert_eq!(large_font.separate_px, 70.0, "a name-only band grows with its font");
+    let full_screen = band_layout(true, 0.0, false, StatusPosition::Top, 46.0);
+    assert_eq!(full_screen.separate_px, 0.0, "full screen with the strip off has no band");
+    let full_screen_bottom = band_layout(true, 0.0, true, StatusPosition::Bottom, 46.0);
+    assert_eq!(full_screen_bottom.separate_px, 0.0, "nor with the strip at the bottom");
+    let full_screen_top = band_layout(true, 0.0, true, StatusPosition::Top, 46.0);
+    assert_eq!(full_screen_top.strip_px, 46.0, "a top strip is just the strip");
     let native = band_layout(false, 56.0, true, StatusPosition::Top, 46.0);
     assert_eq!(native, BandLayout { merged: false, separate_px: 0.0, strip_px: 46.0 });
 }

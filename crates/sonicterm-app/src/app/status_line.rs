@@ -506,16 +506,17 @@ impl App {
         pointer_x: f32,
         pointer_y: f32,
     ) -> bool {
-        let Some(strip) =
-            self.registry.windows.get(&window_id).and_then(|window| window.status_strip.as_ref())
-        else {
-            // When: `status_strip` is None, the window presented no strip.
+        // The name band of an integrated window is a strip too.
+        let Some(strip) = self.registry.windows.get(&window_id).and_then(|window| {
+            [window.status_strip.as_ref(), window.title_band.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|strip| strip.contains(pointer_y))
+        }) else {
+            // When: neither the strip nor the name band contains pointer_y, no right press is
+            // handled.
             return false;
         };
-        if !strip.contains(pointer_y) {
-            // When: `contains` is false, the press is outside the band, which handles no right press.
-            return false;
-        }
         let pressed = strip.segment_at(pointer_x, pointer_y).map(|segment| segment.id);
         self.open_status_segments(Some(window_id), pressed);
         true
@@ -757,6 +758,8 @@ use inputs::{
 mod actions;
 #[path = "status_line_sync.rs"]
 mod sync;
+#[cfg(test)]
+pub(in crate::app) use sync::window_title_input;
 
 #[cfg(test)]
 use inputs::display_path;

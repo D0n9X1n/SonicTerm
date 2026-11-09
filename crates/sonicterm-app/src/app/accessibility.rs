@@ -529,8 +529,12 @@ impl App {
         let settings = self.status_generation();
         let shown = self.status_line_shown() && self.status_accessibility().expose;
         let hide_sensitive = self.status_hide_sensitive();
-        let Some(strip) = window.status_strip.as_ref().filter(|_| shown) else {
-            // When: no strip was presented or `shown` is false, the tree exposes no segment.
+        // The strip when it is shown and exposed; otherwise an integrated window's name band, which
+        // replaces the native title the reader would otherwise find there.
+        let presented =
+            window.status_strip.as_ref().filter(|_| shown).or(window.title_band.as_ref());
+        let Some(strip) = presented else {
+            // When: neither a shown strip nor a name band was presented, no segment is exposed.
             return Structure { pane, epoch, settings, ..Structure::default() };
         };
         let mut segments: Vec<Exposed> = strip
@@ -658,13 +662,20 @@ impl App {
             return None;
         };
         let active_tab = window.tabs.active().map(|tab| tab.id);
+        // Focus may rest on a shown strip's segment or on the name band's, which a reader reaches.
+        let in_band = |focus: StatusSegmentId| {
+            window
+                .title_band
+                .as_ref()
+                .is_some_and(|band| band.segments.iter().any(|segment| segment.id == focus))
+        };
         let stale = state.focus.is_some_and(|focus| {
-            !shown
-                || state.focus_tab != active_tab
-                || !window
-                    .status_strip
-                    .as_ref()
-                    .is_some_and(|strip| strip.segments.iter().any(|segment| segment.id == focus))
+            state.focus_tab != active_tab
+                || !(in_band(focus)
+                    || shown
+                        && window.status_strip.as_ref().is_some_and(|strip| {
+                            strip.segments.iter().any(|segment| segment.id == focus)
+                        }))
         });
         if stale {
             // The strip is off, the tab changed or the segment is gone: focus ends.
@@ -781,8 +792,8 @@ impl App {
         )
             .hash(&mut hasher);
         for (button, name, bounds) in &inputs.caption {
-            (button, name, bounds.x0.to_bits(), bounds.y0.to_bits(), bounds.x1.to_bits())
-                .hash(&mut hasher);
+            let corners = [bounds.x0, bounds.y0, bounds.x1, bounds.y1].map(f64::to_bits);
+            (button, name, corners).hash(&mut hasher);
         }
         for bounds in band.iter().chain([&announcement_bounds]) {
             (bounds.x0.to_bits(), bounds.y0.to_bits(), bounds.x1.to_bits(), bounds.y1.to_bits())
@@ -920,9 +931,19 @@ impl App {
                 self.set_status_focus(window_id, id);
             }
             AccessibilityRequest::Click { node, .. } if tree::caption_for_node(node).is_some() => {
-                // A click on a caption button acts as a released press over it does.
-                if let Some(button) = tree::caption_for_node(node) {
+                // A caption click acts only while a reader is connected and the window still draws
+                // that button, as a released press would.
+                let current = self.accessibility.get(&window_id).is_some_and(|state| state.active)
+                    && tree::caption_for_node(node).is_some_and(|button| {
+                        self.accessible_caption(window_id)
+                            .iter()
+                            .any(|(shown, ..)| *shown == button)
+                    });
+                if let (true, Some(button)) = (current, tree::caption_for_node(node)) {
                     self.click_caption_button(window_id, button);
+                } else {
+                    // When: current is false, the button is gone or no reader is connected.
+                    tracing::debug!(node, "stale caption click dropped");
                 }
             }
             AccessibilityRequest::Click { node, target } => {

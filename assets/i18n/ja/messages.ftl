@@ -380,6 +380,7 @@ status-checklist-center = 中央
 status-checklist-right = 右
 status-checklist-sensitive = 機密
 status-checklist-hidden = 非表示
+status-checklist-in-titlebar = タイトルバーに常に表示
 status-group-core = 基本
 status-group-pointer = ポインター
 status-group-input = 入力

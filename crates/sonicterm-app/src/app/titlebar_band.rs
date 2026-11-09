@@ -13,12 +13,11 @@ use super::redraw::RedrawCause;
 use super::window_setup::titlebar;
 use super::{App, WindowState};
 
-/// Longest gap between two empty-band presses that count as a double-click where the platform
-/// gives no click count: the Windows default double-click time.
-const DOUBLE_CLICK_TIME: Duration = Duration::from_millis(500);
-/// Largest pointer travel, raster px, between the presses of a double-click: the Windows default
-/// double-click rectangle at 100% scale.
-const DOUBLE_CLICK_SLOP: f32 = 4.0;
+/// The double-click time and rectangle half-size (raster px at 100%) where the platform gives no
+/// click count: the system's own settings on Windows, its defaults elsewhere.
+fn double_click_limits() -> (Duration, f32) {
+    titlebar::system_double_click_limits()
+}
 
 /// What a left press in an integrated window's band does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,17 +53,18 @@ pub(crate) fn classify_band_press(
     let (width, height) = (width as f32, height as f32);
     let scale = renderer.scale_factor();
     let maximized = window.window.as_ref().is_some_and(|native| native.is_maximized());
+    let band_height = renderer.band_height();
+    // Buttons first: the Close button's top and right edges overlap the resize zones.
+    if let Some(button) = caption_button_at(&band, width, band_height, scale, pointer_x, pointer_y)
+    {
+        // When: caption_button_at finds a self-drawn button under the pointer, it owns the press.
+        return BandPress::Caption(button);
+    }
     if let Some(edge) =
         resize_edge_at(&band, (width, height), scale, maximized, pointer_x, pointer_y)
     {
         // When: a self-framed window's edge is under the pointer, it resizes from there.
         return BandPress::Edge(edge);
-    }
-    let band_height = renderer.band_height();
-    if let Some(button) = caption_button_at(&band, width, band_height, scale, pointer_x, pointer_y)
-    {
-        // When: caption_button_at finds a self-drawn button under the pointer, it owns the press.
-        return BandPress::Caption(button);
     }
     if pointer_y < 0.0 || pointer_y >= band_height {
         // When: pointer_y is outside 0..band_height, the press is below the band and the panes'.
@@ -115,15 +115,15 @@ pub(crate) fn is_double_click(
     last: Option<(Instant, (f32, f32))>,
     at: Instant,
     position: (f32, f32),
-    scale: f32,
+    limits: (Duration, f32),
 ) -> bool {
     if let Some(count) = click_count {
         // When: the platform counted the clicks itself, its count decides.
         return count >= 2;
     }
+    let (time, slop) = limits;
     last.is_some_and(|(then, (last_x, last_y))| {
-        let slop = DOUBLE_CLICK_SLOP * scale.max(1.0);
-        at.saturating_duration_since(then) <= DOUBLE_CLICK_TIME
+        at.saturating_duration_since(then) <= time
             && (position.0 - last_x).abs() <= slop
             && (position.1 - last_y).abs() <= slop
     })
@@ -224,14 +224,12 @@ impl App {
                 // When: Empty band space, a press drags the window and a double-click runs the
                 // titlebar action.
                 let now = Instant::now();
-                let scale =
-                    window.renderer.as_ref().map_or(1.0, |renderer| renderer.scale_factor());
                 let double = is_double_click(
                     titlebar::native_click_count(),
                     window.band_last_press,
                     now,
                     (pointer_x, pointer_y),
-                    scale,
+                    double_click_limits(),
                 );
                 window.caption = CaptionState { pressed: None, ..window.caption };
                 if double {
@@ -400,6 +398,33 @@ impl App {
             }
         }
         false
+    }
+
+    /// Take the left release of a press the band consumed, before any overlay or pane routing,
+    /// so a palette opened while a caption button was held can neither eat it nor leave the band
+    /// waiting for a later release. Returns whether it was taken.
+    pub(in crate::app) fn take_band_release(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        window_id: WindowId,
+        event: &winit::event::WindowEvent,
+    ) -> bool {
+        use winit::event::{ElementState, MouseButton, WindowEvent};
+        let release = matches!(
+            event,
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            }
+        );
+        let owned =
+            self.registry.windows.get(&window_id).is_some_and(|window| window.band_press_consumed);
+        if !(release && owned) {
+            // When: not a left release, or the band took no press, routing continues as usual.
+            return false;
+        }
+        self.route_band_left_input(event_loop, window_id, ElementState::Released)
     }
 
     /// Run caption `button` of `window_id` for an assistive technology's click: minimise and

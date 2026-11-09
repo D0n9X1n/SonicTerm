@@ -194,3 +194,51 @@ fn a_save_round_trips_the_toggle_position_and_text_size() {
     assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::DEFAULT.stepped(-1));
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+/// The titlebar band's projection never reaches the file: with an explicit centre list that omits
+/// `window`, and with the session turning the preset's `window` off, Save writes the user's own
+/// lists and a reload shows them, while the band still projects the name.
+#[test]
+fn a_save_never_writes_the_band_projection() {
+    use sonicterm_cfg::status_line::{StatusSegmentId, StatusSide};
+    let path = scratch_config("band-projection", "[status_line]\ncenter = [\"link\"]\n");
+    let mut app =
+        App::new(Theme::default(), Config::load_strict(&path).unwrap(), Keymap::default());
+    let _ = app.sync_status_line(Instant::now());
+    let band = sonicterm_ui::status_line::with_window_projected(&app.status_line.resolved);
+    assert!(band.segment(StatusSegmentId::Window).is_some(), "the band projects the name");
+    app.save_current_settings_to(&path).expect("save");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("\"window\""), "the projection is not written: {text}");
+    app.configs.runtime_config_path = Some(path.clone());
+    app.force_reload_config();
+    let _ = app.sync_status_line(Instant::now());
+    let center: Vec<StatusSegmentId> = app
+        .status_line
+        .resolved
+        .segments
+        .iter()
+        .filter(|segment| segment.side == StatusSide::Center)
+        .map(|segment| segment.id)
+        .collect();
+    assert_eq!(center, [StatusSegmentId::Link], "the reload shows the user's own list");
+
+    // A session that unchecks the preset's `window` removes it from both lists; the band still
+    // projects it, and Save writes the lists without it.
+    let preset = scratch_config("band-disabled", "[status_line]\nenabled = true\n");
+    let mut app =
+        App::new(Theme::default(), Config::load_strict(&preset).unwrap(), Keymap::default());
+    let _ = app.sync_status_line(Instant::now());
+    app.toggle_status_segment(StatusSegmentId::Window);
+    let resolved = app.status_line.resolved.clone();
+    assert!(resolved.segment(StatusSegmentId::Window).is_none());
+    assert!(resolved.unlisted.iter().all(|segment| segment.id != StatusSegmentId::Window));
+    let band = sonicterm_ui::status_line::with_window_projected(&resolved);
+    assert!(band.segment(StatusSegmentId::Window).is_some(), "the band still shows the name");
+    app.save_current_settings_to(&preset).expect("save");
+    let text = std::fs::read_to_string(&preset).unwrap();
+    assert!(text.contains("center = ["), "the session's lists are written: {text}");
+    assert!(!text.contains("\"window\""), "without the projected name: {text}");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    let _ = std::fs::remove_dir_all(preset.parent().unwrap());
+}

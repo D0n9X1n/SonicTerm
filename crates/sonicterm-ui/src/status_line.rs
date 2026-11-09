@@ -812,15 +812,23 @@ fn place_window(resolved: &ResolvedStatusLine) -> ResolvedStatusLine {
         // When: segment(Window) is some, a list already places it and nothing is duplicated.
         return projected;
     }
-    let window = projected
+    // An unlisted entry keeps its configured keys; a session that turned the segment off removed
+    // it from both lists, and the band still shows the name with the catalog defaults.
+    let mut window = projected
         .unlisted
         .iter()
         .position(|segment| segment.id == StatusSegmentId::Window)
-        .map(|index| projected.unlisted.remove(index));
-    let Some(mut window) = window else {
-        // When: the build has no unlisted `window` entry, there is nothing to place.
-        return projected;
-    };
+        .map(|index| projected.unlisted.remove(index))
+        .unwrap_or_else(|| {
+            let meta = StatusSegmentId::Window.meta();
+            sonicterm_cfg::status_line::ResolvedSegment {
+                id: StatusSegmentId::Window,
+                side: meta.home_side,
+                show: meta.default_show,
+                priority: meta.default_priority,
+                click: ClickBinding::Default,
+            }
+        });
     window.side = StatusSide::Center;
     let first_center = projected
         .segments
