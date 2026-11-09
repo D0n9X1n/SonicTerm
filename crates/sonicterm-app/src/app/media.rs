@@ -352,26 +352,20 @@ impl Drop for InlineMediaCharge {
     }
 }
 
-/// Trim one pane's retained inline media to its share of the process ceiling.
+/// Trim one pane's retained inline media to its share of the process ceiling, returning the
+/// evicted images for the caller to drop.
 ///
 /// Eviction is always from the calling pane. Evicting another pane's images to
 /// make room would make one busy pane blank out its neighbours, and two panes
 /// under pressure would evict each other every frame.
 ///
-/// The budget is [`InlineMediaPool::pane_budget`] — the pool's ceiling divided
-/// by its live pane count — rather than a fixed per-pane constant. A single pass
-/// against that budget replaces the loop that used to spin against the
-/// *process* total: because the loop body could only shrink the calling pane,
-/// a pane could evict itself to empty and still not satisfy a condition owned
-/// by other panes' bytes. Dividing the ceiling means a pane's own budget is
-/// always achievable by trimming itself.
-/// Trim one pane's retained inline media to its share of the process ceiling,
-/// returning the evicted images for the caller to drop.
+/// The budget is [`InlineMediaPool::pane_budget`]: the pool's ceiling divided by its live pane
+/// count, so a pane's own budget is always reachable by trimming itself and no pane evicts on
+/// another's behalf.
 ///
-/// The return value is the point: freeing the evicted pixel buffers costs
-/// ~2.6 ms for 64 images, measured, and this runs with the pane's image store
-/// locked while the render path waits on that same lock. The caller drops them
-/// after releasing it.
+/// The return value is the point: freeing the evicted pixel buffers is an allocator call per
+/// buffer, and this runs with the pane's image store locked while the render path waits on that
+/// same lock. The caller drops them after releasing it.
 #[must_use = "the evicted images must be dropped after releasing the image \
               lock, or a multi-millisecond allocator pause lands on the frame"]
 pub(super) fn trim_inline_images_charged(
@@ -382,48 +376,46 @@ pub(super) fn trim_inline_images_charged(
     let budget = if pool.bytes() > MAX_PROCESS_INLINE_MEDIA_BYTES {
         // Over the ceiling: trim to the floor, not to a fair share.
         //
-        // A fair share alone does not converge, because only a pane that is
-        // *decoding* re-trims. Panes created earlier keep the larger budget
-        // they were admitted under and never revisit it while idle, so the
-        // total grows as ceiling x (1 + ln(N/4)) — measured at 616 MiB for 20
-        // panes against a 256 MiB ceiling. Trimming to the floor under
-        // pressure means every decode while over the ceiling returns memory
-        // instead of merely capping the newcomer.
+        // A fair share alone does not converge, because only a pane that is *decoding* re-trims.
+        // Panes created earlier keep the larger budget they were admitted under and never revisit
+        // it while idle, so the total grows with the pane count. Trimming to the floor under
+        // pressure means every decode while over the ceiling returns memory instead of merely
+        // capping the newcomer.
         //
-        // The residual is irreducible: principle 1 requires every pane to
-        // render at least its newest image, so N panes cost at least N x the
-        // floor. That is a bound that can be stated, rather than a curve.
+        // The residual is irreducible: every pane renders at least its newest image, so N panes
+        // cost at least N x the floor. That is a bound that can be stated, rather than a curve.
         MIN_PANE_INLINE_MEDIA_BYTES
     } else {
         // When: pool bytes sit under MAX_PROCESS_INLINE_MEDIA_BYTES, so each
         // pane trims to its fair share of the pool.
         pool.pane_budget()
     };
-    let before = retained_inline_media(images.view());
-    let evicted = take_trimmed_inline_images(images, budget);
-    let after = retained_inline_media(images.view());
+    // One plan gives the figures before and after, so the list is scanned once.
+    let plan = TrimPlan::new(images.view(), budget);
+    let evicted = plan.take(images);
 
     // A pane is never trimmed below its most recent image, so a pane holding
     // one image at the rendered cap legitimately sits above `budget`. Anything
     // beyond that is not the residual — it is a trim that failed to run.
     debug_assert!(
-        after.bytes <= budget.max(max_pane_residual_bytes()),
+        plan.after.bytes <= budget.max(max_pane_residual_bytes()),
         "a trimmed pane retained {} bytes, above both its {budget}-byte budget and the \
          {}-byte single-image residual",
-        after.bytes,
+        plan.after.bytes,
         max_pane_residual_bytes()
     );
 
-    // Charge exactly what the reporting seam reports, so the figure the
-    // governor would see and the figure enforced here cannot drift apart.
-    charge.lock().set(after.bytes);
+    // Charge exactly what the reporting seam reports, so the figure the governor would see and the
+    // figure enforced here cannot drift apart. Charged even when nothing is evicted: an append or
+    // a kitty delete before this call may have changed what the pane holds.
+    charge.lock().set(plan.after.bytes);
 
-    if after.items < before.items {
+    if plan.after.items < plan.before.items {
         tracing::warn!(
             target: "memory",
-            evicted_images = before.items - after.items,
-            evicted_bytes = before.bytes.saturating_sub(after.bytes),
-            pane_retained_bytes = after.bytes,
+            evicted_images = plan.before.items - plan.after.items,
+            evicted_bytes = plan.before.bytes.saturating_sub(plan.after.bytes),
+            pane_retained_bytes = plan.after.bytes,
             pane_budget_bytes = budget,
             live_panes = pool.live_charges(),
             process_retained_bytes = pool.bytes(),
@@ -460,17 +452,10 @@ pub(super) fn trim_staged_inline_images(
 /// Drop oldest images until the vector fits `byte_budget` and the count cap,
 /// **returning** the evicted images rather than freeing them.
 ///
-/// Returning them looks like a needless allocation until you measure what
-/// freeing them costs. Each `InlineImage` holds an `Arc<[u8]>` over up to
-/// 4 MiB of pixels, and releasing the last reference calls the allocator.
-/// Evicting 64 of them takes **2.6 ms**, against **1.9 µs** for the same
-/// eviction when the buffers stay alive — a factor of ~1372. The `Vec` shuffle
-/// is not the cost; the deallocation is.
-///
-/// That matters because the pane's image store is locked while this runs and
-/// the render path takes the same lock. Freeing inside the critical section
-/// puts a multi-millisecond allocator pause directly in a 16 ms frame budget.
-/// Handing the images back lets the caller drop them after releasing the lock.
+/// Each `InlineImage` holds an `Arc<[u8]>` over up to 4 MiB of pixels, and releasing the last
+/// reference calls the allocator, which costs far more than moving the entries. The pane's image
+/// store is locked while this runs and the render path takes the same lock, so handing the images
+/// back lets the caller free them after releasing it.
 ///
 /// Always retains the newest image even when it alone exceeds the budget: a
 /// pane that renders nothing is a worse outcome than one that briefly holds a
@@ -479,29 +464,55 @@ pub(super) fn trim_staged_inline_images(
 #[must_use = "the evicted images must be dropped outside the lock, or the \
               allocator pause this exists to avoid happens anyway"]
 fn take_trimmed_inline_images(images: &mut impl ImageList, byte_budget: usize) -> Vec<InlineImage> {
-    // Kitty placements share their image's pixel buffer and `id`, so eviction works per pixel
-    // buffer: oldest first by first appearance, and every entry of an evicted buffer goes with it.
-    let buffers = unique_pixel_buffers(images.view());
-    let mut retained_bytes =
-        buffers.iter().fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes));
-    let mut evict = 0usize;
-    while buffers.len() - evict > MAX_RETAINED_INLINE_IMAGES
-        || (retained_bytes > byte_budget && buffers.len() - evict > 1)
-    {
-        retained_bytes = retained_bytes.saturating_sub(buffers[evict].1);
-        evict += 1;
+    TrimPlan::new(images.view(), byte_budget).take(images)
+}
+
+/// One trim, planned from a single scan: what the list retains before and after, and the newest
+/// pixel buffer to evict.
+struct TrimPlan {
+    /// Distinct buffers and their bytes before the trim.
+    before: ResourceAmount,
+    /// Distinct buffers and their bytes the trim keeps.
+    after: ResourceAmount,
+    /// The id of the newest evicted buffer, or `None` when everything fits.
+    cutoff: Option<u64>,
+}
+
+impl TrimPlan {
+    /// Plan the trim of `images` to `byte_budget` and the count cap, oldest buffer first.
+    fn new(images: &[InlineImage], byte_budget: usize) -> Self {
+        // Kitty placements share their image's pixel buffer and `id`, so eviction works per pixel
+        // buffer: oldest first by id, and every entry of an evicted buffer goes with it.
+        let buffers = unique_pixel_buffers(images);
+        let before = ResourceAmount {
+            bytes: buffers.iter().fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes)),
+            items: buffers.len(),
+        };
+        let mut retained_bytes = before.bytes;
+        let mut evict = 0usize;
+        while buffers.len() - evict > MAX_RETAINED_INLINE_IMAGES
+            || (retained_bytes > byte_budget && buffers.len() - evict > 1)
+        {
+            retained_bytes = retained_bytes.saturating_sub(buffers[evict].1);
+            evict += 1;
+        }
+        let after = ResourceAmount { bytes: retained_bytes, items: buffers.len() - evict };
+        // The evicted buffers are a prefix of the id-sorted list, so an entry is evicted exactly
+        // when its id is at or below the last evicted id.
+        let cutoff = evict.checked_sub(1).map(|last| buffers[last].0);
+        Self { before, after, cutoff }
     }
-    if evict == 0 {
-        // When: evict is 0, everything fits, so no entry moves and the list is not edited.
-        return Vec::new();
+
+    /// Carry the plan out on the list it was made from, returning the evicted entries. With
+    /// nothing to evict the list is not edited.
+    fn take(&self, images: &mut impl ImageList) -> Vec<InlineImage> {
+        let Some(cutoff) = self.cutoff else {
+            // When: cutoff is None, everything fits, so no entry moves and the list is not edited.
+            return Vec::new();
+        };
+        // Removed in place, in entry order, keeping the order of the rest.
+        images.edit().extract_if(.., |image| image.id <= cutoff).collect()
     }
-    let evicted_ids: std::collections::HashSet<u64> =
-        buffers[..evict].iter().map(|(id, _)| *id).collect();
-    let images = images.edit();
-    let (evicted, kept): (Vec<InlineImage>, Vec<InlineImage>) =
-        std::mem::take(images).into_iter().partition(|image| evicted_ids.contains(&image.id));
-    *images = kept;
-    evicted
 }
 
 fn trim_inline_images_to(images: &mut Vec<InlineImage>, byte_budget: usize) {
@@ -534,14 +545,13 @@ pub(super) fn retained_inline_media(images: &[InlineImage]) -> ResourceAmount {
 ///
 /// Ids come from one increasing counter at decode, so ordering by id is ordering by pixel age.
 /// Entry order is not: re-placing an older kitty image moves its entry to the end of the vector.
+/// Entries that share an id share one buffer, so sorting and dropping repeated ids leaves each
+/// buffer once.
 fn unique_pixel_buffers(images: &[InlineImage]) -> Vec<(u64, usize)> {
-    let mut seen = std::collections::HashSet::with_capacity(images.len());
-    let mut buffers: Vec<(u64, usize)> = images
-        .iter()
-        .filter(|image| seen.insert(image.id))
-        .map(|image| (image.id, image.bgra.len()))
-        .collect();
+    let mut buffers: Vec<(u64, usize)> =
+        images.iter().map(|image| (image.id, image.bgra.len())).collect();
     buffers.sort_unstable_by_key(|(id, _)| *id);
+    buffers.dedup_by_key(|(id, _)| *id);
     buffers
 }
 
@@ -561,3 +571,6 @@ pub use media_store::{InlineImageStore, MediaSnapshot};
 #[cfg(test)]
 #[path = "media_tests.rs"]
 mod media_tests;
+#[cfg(test)]
+#[path = "media_trim_tests.rs"]
+mod media_trim_tests;
