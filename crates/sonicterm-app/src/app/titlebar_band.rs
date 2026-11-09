@@ -110,6 +110,21 @@ pub(crate) fn edge_cursor(edge: ResizeEdge) -> CursorIcon {
     }
 }
 
+/// A window's caption state for this pass: an overlay that opened, or a band that moved or
+/// resized, cancels the press for good, so its release can no longer act even after the overlay
+/// closes; hover clears with it.
+pub(crate) fn settle_caption(
+    state: CaptionState,
+    modal_open: bool,
+    band_changed: bool,
+) -> CaptionState {
+    if modal_open || band_changed {
+        // When: modal_open or band_changed, the held button no longer owns a release.
+        return CaptionState { pressed: None, hovered: None, ..state };
+    }
+    state
+}
+
 /// The caption button a left release runs: the one pressed, when the release is over that same
 /// button and no overlay opened while it was held; `None` cancels the press.
 pub(crate) fn release_action(
@@ -146,6 +161,7 @@ impl App {
     /// title text while the band shows the name, and refit its panes when the band moved them.
     pub(in crate::app) fn refresh_window_bands(&mut self) {
         let mut refits = Vec::new();
+        let modal_open = self.interaction.command_palette.is_open();
         for (window_id, window) in &mut self.registry.windows {
             let Some(native) = window.window.as_ref() else {
                 // When: the window has no native window yet, there is nothing to measure.
@@ -159,11 +175,15 @@ impl App {
                 // When: a test-seeded window has no renderer, it draws no band.
                 continue;
             };
+            let caption = settle_caption(
+                CaptionState { maximized, focused, ..window.caption },
+                modal_open,
+                band != renderer.window_band(),
+            );
             if renderer.set_window_band(band) {
                 // The band's height or insets changed: the panes refit to the new top inset.
                 refits.push(*window_id);
             }
-            let caption = CaptionState { maximized, focused, ..window.caption };
             if caption != window.caption {
                 window.caption = caption;
             }
@@ -462,11 +482,11 @@ impl App {
 
     /// The separate name band `window_id` presented, as assistive technology reads it: "Window"
     /// and the band's own spoken text (already redacted under `hide_sensitive`), with raster-px
-    /// bounds; `None` without a separate name band showing the name.
+    /// bounds and whether its click does something; `None` without a separate name band.
     pub(in crate::app) fn accessible_name_band(
         &self,
         window_id: WindowId,
-    ) -> Option<(String, accesskit::Rect)> {
+    ) -> Option<(String, accesskit::Rect, bool)> {
         let window = self.registry.windows.get(&window_id)?;
         let band = window.title_band.as_ref()?;
         let placed = band.segments.iter().find(|segment| segment.id == StatusSegmentId::Window)?;
@@ -484,7 +504,7 @@ impl App {
             x1: f64::from(placed.x + placed.width),
             y1: f64::from(band.top + band.height),
         };
-        Some((format!("{}: {}", spoken.name, spoken.value), bounds))
+        Some((format!("{}: {}", spoken.name, spoken.value), bounds, placed.click.is_some()))
     }
 
     /// The caption buttons `window_id` exposes to assistive technology, with localized names and

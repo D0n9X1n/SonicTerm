@@ -50,3 +50,74 @@ fn a_caption_press_acts_only_on_its_own_release() {
         "cancelled by a leave or focus loss"
     );
 }
+
+/// An overlay that opens, or a band that moves, cancels a held caption button for good: the press
+/// is gone after the overlay closes, so its release acts on nothing. Otherwise the press stands.
+#[test]
+fn an_overlay_or_a_moved_band_cancels_a_held_caption_button() {
+    use sonicterm_ui::window_band::CaptionButton::Close;
+    let held = CaptionState { pressed: Some(Close), hovered: Some(Close), ..Default::default() };
+    assert_eq!(settle_caption(held, false, false), held, "nothing changed");
+    let after_palette = settle_caption(held, true, false);
+    assert_eq!((after_palette.pressed, after_palette.hovered), (None, None));
+    // The palette closed again: the press does not come back, so the release cannot act.
+    let closed = settle_caption(after_palette, false, false);
+    assert_eq!(release_action(closed.pressed, Some(Close), false), None);
+    assert_eq!(settle_caption(held, false, true).pressed, None, "a moved band");
+}
+
+/// Through the production handlers on a real window entry: leaving the window or losing focus
+/// cancels a held caption button, and the release of a press the band took is swallowed (it is
+/// consumed and the flag clears) without acting, whatever the pointer is over.
+#[test]
+fn leave_and_focus_loss_cancel_and_the_band_release_is_swallowed() {
+    use sonicterm_ui::window_band::CaptionButton::Close;
+    use winit::event::WindowEvent;
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let child = app.__test_seed_child_window(&["work"]);
+    let hold = |app: &mut App| {
+        let window = app.registry.windows.get_mut(&child).unwrap();
+        window.caption.pressed = Some(Close);
+        window.caption.hovered = Some(Close);
+        window.band_press_consumed = true;
+    };
+    for event in [
+        WindowEvent::CursorLeft { device_id: winit::event::DeviceId::dummy() },
+        WindowEvent::Focused(false),
+    ] {
+        hold(&mut app);
+        app.track_window_band(child, &event);
+        let caption = app.registry.windows[&child].caption;
+        assert_eq!((caption.pressed, caption.hovered), (None, None), "{event:?} cancels");
+    }
+    hold(&mut app);
+    let (consumed, close) = app.release_window_band(child, 0.0, 0.0);
+    assert!(consumed, "the band owns the release");
+    assert!(!close, "the release acts on nothing it was not pressed over");
+    assert!(!app.registry.windows[&child].band_press_consumed, "and is taken once");
+    assert_eq!(app.release_window_band(child, 0.0, 0.0), (false, false), "a later release is free");
+}
+
+/// The band sees left input before anything else: a release the band owns is taken before overlay
+/// and pane routing in the shared handler, and a press goes to the band before child and main
+/// chrome, so neither a palette nor a pane can take it first.
+#[test]
+fn the_band_routes_before_overlays_panes_and_chrome() {
+    let shared = include_str!("window_event.rs");
+    let take = shared.find("self.take_band_release(").expect("band release");
+    let route = shared.find("self.route_shared_pointer(").expect("shared pointer routing");
+    assert!(take < route, "the band's release is taken first");
+    let child = include_str!("child_window.rs");
+    let band = child.find("self.route_band_left_input(").expect("child band press");
+    let chrome = child.find("self.handle_child_left_press_chrome(").expect("child chrome");
+    assert!(band < chrome, "a child press reaches the band before its chrome");
+    let main = include_str!("window_pointer.rs");
+    let body = &main[main.find("fn handle_main_left_mouse_input").expect("main left input")..];
+    let band = body.find("self.route_band_left_input(").expect("main band press");
+    let chrome = body.find("self.handle_main_left_press_chrome(").expect("main chrome");
+    assert!(band < chrome, "a main press reaches the band before its chrome");
+}

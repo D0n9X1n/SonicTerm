@@ -272,6 +272,26 @@ impl App {
     }
 }
 
+impl App {
+    /// A reader's click on `window_id`'s name band: it runs the name's click only while a reader is
+    /// connected and the band still exposes exactly `target`, the click, pane, settings and resize
+    /// epoch the request named, as a strip segment's click is checked.
+    pub(super) fn click_name_band(&mut self, window_id: WindowId, target: Option<RequestTarget>) {
+        let structure = self.exposed_structure(window_id);
+        let current = self.accessibility.get(&window_id).is_some_and(|state| state.active)
+            && structure.name_band.as_ref().is_some_and(|name| {
+                name.action.is_some() && target == Some(target_of(&structure, name))
+            });
+        if current {
+            // The band shows the same name and click the request named.
+            self.click_status_segment(window_id, StatusSegmentId::Window);
+        } else {
+            // When: current is false, the target changed or no reader is connected.
+            tracing::debug!(?window_id, "stale name band click dropped");
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "accessibility_actions_tests.rs"]
 mod accessibility_actions_tests;

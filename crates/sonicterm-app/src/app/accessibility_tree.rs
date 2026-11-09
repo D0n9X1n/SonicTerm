@@ -122,12 +122,15 @@ pub(crate) fn build_tree(inputs: &TreeInputs<'_>) -> TreeUpdate {
     announcement.set_bounds(inputs.announcement_bounds);
     nodes.push((ANNOUNCEMENT_NODE, announcement));
     children.push(ANNOUNCEMENT_NODE);
-    if let Some((name, bounds)) = &inputs.name_band {
-        // The name band is a button: pressing it renames the window, as a click on it does.
-        let mut node = Node::new(Role::Button);
+    if let Some((name, bounds, clickable)) = &inputs.name_band {
+        // The name band is a button when its click does something, as a segment is; with
+        // `click = "none"` it is a label.
+        let mut node = Node::new(if *clickable { Role::Button } else { Role::Label });
         node.set_label(name.clone());
         node.set_bounds(*bounds);
-        node.add_action(AccessAction::Click);
+        if *clickable {
+            node.add_action(AccessAction::Click);
+        }
         nodes.push((NAME_BAND_NODE, node));
         children.push(NAME_BAND_NODE);
     }

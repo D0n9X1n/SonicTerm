@@ -18,7 +18,7 @@ fn caption_inputs() -> TreeInputs<'static> {
             (CaptionButton::Maximize, "Restore".to_owned(), rect(908.0, 0.0, 46.0, 32.0)),
             (CaptionButton::Close, "Close".to_owned(), rect(954.0, 0.0, 46.0, 32.0)),
         ],
-        name_band: Some(("Window: #1 Work".to_owned(), rect(400.0, 0.0, 120.0, 32.0))),
+        name_band: Some(("Window: #1 Work".to_owned(), rect(400.0, 0.0, 120.0, 32.0), true)),
     }
 }
 
@@ -55,4 +55,13 @@ fn the_name_band_is_a_pressable_button() {
     assert!(node.supports_action(AccessAction::Click));
     let without = TreeInputs { name_band: None, ..caption_inputs() };
     assert!(build_tree(&without).nodes.iter().all(|(id, _)| *id != NAME_BAND_NODE));
+    // With `click = "none"` the name is a label a reader cannot press.
+    let inert = TreeInputs {
+        name_band: Some(("Window: #1 Work".to_owned(), rect(400.0, 0.0, 120.0, 32.0), false)),
+        ..caption_inputs()
+    };
+    let tree = build_tree(&inert);
+    let node = &tree.nodes.iter().find(|(id, _)| *id == NAME_BAND_NODE).unwrap().1;
+    assert_eq!(node.role(), Role::Label);
+    assert!(!node.supports_action(AccessAction::Click));
 }

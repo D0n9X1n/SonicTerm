@@ -231,6 +231,8 @@ pub(crate) struct Structure {
     epoch: u64,
     /// The strip settings generation: a reload can change what a node's click does.
     settings: u64,
+    /// The separate name band's window segment, which a reader reaches beside a bottom strip.
+    name_band: Option<Exposed>,
 }
 
 /// One terminal window's accessibility state, bounded by the strip's segment count.
@@ -344,12 +346,16 @@ impl WindowAccessibility {
 
     /// Publish the targets of the exposed structure for the action handler to resolve against.
     fn publish_targets(&mut self) {
-        let table: HashMap<u64, RequestTarget> = self
+        let mut table: HashMap<u64, RequestTarget> = self
             .structure
             .segments
             .iter()
             .map(|exposed| (segment_node(exposed.id).0, target_of(&self.structure, exposed)))
             .collect();
+        if let Some(name) = self.structure.name_band.as_ref() {
+            // The name band's node resolves like a segment's, so a stale click is dropped.
+            table.insert(tree::NAME_BAND_NODE.0, target_of(&self.structure, name));
+        }
         if let Ok(mut targets) = self.targets.lock() {
             *targets = table;
         }
@@ -467,9 +473,10 @@ pub(crate) struct TreeInputs<'strip> {
     /// the window has an integrated Windows titlebar. They replace native controls, so they are
     /// exposed whether or not the status line is.
     pub(crate) caption: Vec<(sonicterm_ui::window_band::CaptionButton, String, Rect)>,
-    /// The name band's window name, its spoken text and bounds, while a separate name band shows
-    /// it; a strip that is the band exposes the name among its segments instead.
-    pub(crate) name_band: Option<(String, Rect)>,
+    /// The name band's window name, its spoken text, bounds and whether a click does something,
+    /// while a separate name band shows it; a strip that is the band exposes the name among its
+    /// segments instead.
+    pub(crate) name_band: Option<(String, Rect, bool)>,
 }
 
 impl App {
@@ -532,9 +539,20 @@ impl App {
         let settings = self.status_generation();
         let shown = self.status_line_shown() && self.status_accessibility().expose;
         let hide_sensitive = self.status_hide_sensitive();
+        // The separate name band's window segment, exposed whether or not the strip is.
+        let name_band = window.title_band.as_ref().and_then(|band| {
+            band.segments.iter().find(|segment| segment.id == StatusSegmentId::Window).map(
+                |segment| Exposed {
+                    id: segment.id,
+                    left_px: segment.x,
+                    width: segment.width,
+                    action: segment.click.as_ref().map(action_fingerprint),
+                },
+            )
+        });
         let Some(strip) = window.status_strip.as_ref().filter(|_| shown) else {
             // When: no strip was presented or `shown` is false, the tree exposes no segment.
-            return Structure { pane, epoch, settings, ..Structure::default() };
+            return Structure { pane, epoch, settings, name_band, ..Structure::default() };
         };
         let mut segments: Vec<Exposed> = strip
             .segments
@@ -548,7 +566,14 @@ impl App {
             })
             .collect();
         segments.sort_by(|left, right| left.left_px.total_cmp(&right.left_px));
-        Structure { segments, band: Some((strip.top, strip.height)), pane, epoch, settings }
+        Structure {
+            segments,
+            band: Some((strip.top, strip.height)),
+            pane,
+            epoch,
+            settings,
+            name_band,
+        }
     }
 
     /// The one accessibility step of a dispatch, run from `about_to_wait` after the redraws: drop
@@ -785,9 +810,9 @@ impl App {
             &inputs.announcements_label,
         )
             .hash(&mut hasher);
-        if let Some((name, bounds)) = &inputs.name_band {
+        if let Some((name, bounds, clickable)) = &inputs.name_band {
             let corners = [bounds.x0, bounds.y0, bounds.x1, bounds.y1].map(f64::to_bits);
-            (name, corners).hash(&mut hasher);
+            (name, corners, clickable).hash(&mut hasher);
         }
         for (button, name, bounds) in &inputs.caption {
             let corners = [bounds.x0, bounds.y0, bounds.x1, bounds.y1].map(f64::to_bits);
@@ -928,17 +953,9 @@ impl App {
                 };
                 self.set_status_focus(window_id, id);
             }
-            AccessibilityRequest::Click { node, .. } if node == tree::NAME_BAND_NODE.0 => {
-                // A click on the name band renames the window while a reader is connected and the
-                // band still shows the name, as a press on it would.
-                let current = self.accessibility.get(&window_id).is_some_and(|state| state.active)
-                    && self.accessible_name_band(window_id).is_some();
-                if current {
-                    self.click_status_segment(window_id, StatusSegmentId::Window);
-                } else {
-                    // When: current is false, the band is gone or no reader is connected.
-                    tracing::debug!(node, "stale name band click dropped");
-                }
+            AccessibilityRequest::Click { node, target } if node == tree::NAME_BAND_NODE.0 => {
+                // The name band runs its click only for the exact target the request named.
+                self.click_name_band(window_id, target);
             }
             AccessibilityRequest::Click { node, .. } if tree::caption_for_node(node).is_some() => {
                 // A caption click acts only while a reader is connected and the window still draws
