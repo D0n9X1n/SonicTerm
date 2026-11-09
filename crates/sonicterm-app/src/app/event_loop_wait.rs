@@ -235,6 +235,11 @@ impl App {
         let mut due = self.refresh_frame_due_work_at(now);
         // Links follow the modes the frame deadlines above already read; the deadlines do not depend on it.
         self.sync_display_links();
+        // Native titles follow tab and name changes before the status line and the accessibility
+        // tree read them, so a trailing-edge title reaches the strip in the same pass. A changed
+        // title that waits out its write interval arms a wake to write it.
+        due.extend(self.native_title_wake(now));
+        self.refresh_window_bands();
         if let Some(deadline) = self.sync_status_line(now) {
             // A strip sample or pending path check is due; wake for it without a frame.
             due.push(super::super::redraw::DueWork {
@@ -243,12 +248,12 @@ impl App {
                 deadline,
             });
         }
+        // The name band reads the settings `sync_status_line` just applied, so a reload's
+        // `hide_sensitive` or text size reaches it in the same pass.
+        self.sync_title_bands();
         // A font, reload or DPI change resized the About pane without a frame yet: lay it out again,
         // so its rows and its accessibility tree both follow the new width.
         self.relayout_about_if_resized();
-        // Native titles follow tab and name changes before the accessibility tree reads them.
-        // A changed title that waits out its write interval arms a wake to write it.
-        due.extend(self.native_title_wake(now));
         // Accessibility trees are built here, once per dispatch after its redraws, never in one.
         if let Some(deadline) = self.flush_accessibility(now) {
             // A queued announcement becomes ready; wake to deliver it.

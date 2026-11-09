@@ -83,6 +83,7 @@ impl App {
                                 .with_decorations(true)
                                 .with_inner_size(request.inner_size)
                                 .with_visible(false),
+                            self.config.window.titlebar,
                         ),
                         self.config.appearance.backdrop,
                         self.config.appearance.software_render_mode,

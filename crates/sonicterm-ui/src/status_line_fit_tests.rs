@@ -17,6 +17,7 @@ fn fit_view(segments: &[(StatusSegmentId, StatusSide, u16, bool, &str)]) -> Stat
                 protected: *protected,
                 parts: vec![StatusPart::new(*text, StatusTone::Value)],
                 compact: None,
+                compact_last: false,
                 click: None,
                 spoken: SpokenSegment::default(),
             })
@@ -125,8 +126,14 @@ fn chips_measure_as_their_text() {
     view.segments[0].parts[0].tone = StatusTone::Chip;
     view.segments[0].parts.push(StatusPart::new(" ", StatusTone::Name));
     view.segments[0].parts.push(StatusPart::new("MOUSE", StatusTone::Chip));
-    let metrics =
-        FitMetrics { width: 100.0, edge_pad: 2.0, segment_gap: 3.0, separator_width: 0.0 };
+    let metrics = FitMetrics {
+        width: 100.0,
+        edge_pad: 2.0,
+        segment_gap: 3.0,
+        separator_width: 0.0,
+        left_inset: 0.0,
+        right_inset: 0.0,
+    };
     let placed = fit(&view, &metrics, columns);
     assert_eq!(
         placed[0].parts[0],
@@ -158,7 +165,17 @@ fn separated_view() -> (StatusLineView, FitMetrics) {
         (Seg::Health, StatusSide::Right, 950, false, "dd"),
         (Seg::Mem, StatusSide::Right, 900, false, "ee"),
     ]);
-    (view, FitMetrics { width: 40.0, edge_pad: 0.0, segment_gap: 2.0, separator_width: 1.0 })
+    (
+        view,
+        FitMetrics {
+            width: 40.0,
+            edge_pad: 0.0,
+            segment_gap: 2.0,
+            separator_width: 1.0,
+            left_inset: 0.0,
+            right_inset: 0.0,
+        },
+    )
 }
 
 /// Each separator is a `|` in the name tone that sits between two presented segments of one group
@@ -259,8 +276,14 @@ fn a_segment_fitting_empties_takes_no_separator() {
         ..idle_inputs()
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
-    let metrics =
-        |width| FitMetrics { width, edge_pad: 0.0, segment_gap: 2.0, separator_width: 1.0 };
+    let metrics = |width| FitMetrics {
+        width,
+        edge_pad: 0.0,
+        segment_gap: 2.0,
+        separator_width: 1.0,
+        left_inset: 0.0,
+        right_inset: 0.0,
+    };
     let wide = fit(&view, &metrics(19.0), columns);
     assert_eq!(presented(&view, &wide), [Seg::Mode, Seg::Mem], "MOUSE | Mem: 412 MB fits in 19");
     assert_eq!(separators(&view, &wide, &metrics(19.0)).len(), 1);

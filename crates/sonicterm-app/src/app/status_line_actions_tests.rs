@@ -83,7 +83,7 @@ fn reload_changes_the_strip_font_scale_in_every_window() {
     for id in windows {
         let strip = recorded_strip(&app, id);
         assert!(strip.visible, "the strip is shown in every window");
-        assert!((strip.font_scale - 0.8).abs() < 1e-6, "{strip:?}");
+        assert!((strip.font_scale - 1.0).abs() < 1e-6, "{strip:?}");
     }
     let before = windows.map(|id| asks(&app.registry.windows[&id]));
     std::fs::write(&path, "[status_line]\nenabled = true\nfont_scale = 0.6\n").unwrap();
@@ -107,7 +107,7 @@ fn reload_changes_the_strip_font_scale_in_every_window() {
 
 /// Each palette action changes the live value and the strip geometry that follows from it, and
 /// hands it to every window's renderer strip: Move to Top/Bottom moves the band, Larger/Smaller
-/// step the text by 0.05 within 0.3..=1.0, and Reset returns it to 0.8.
+/// step the text by 0.05 within 0.3..=1.0, and Reset returns it to 1.0, the tab titles' size.
 #[test]
 fn status_line_palette_actions_change_the_live_strip() {
     use sonicterm_cfg::keymap::Action;
@@ -141,10 +141,13 @@ fn status_line_palette_actions_change_the_live_strip() {
     assert!(app.run_action(&Action::StatusLinePositionTop));
     every_window_follows(&app, "Move to Top");
     assert_eq!(band_top(&app), 28.0);
+    assert!(app.run_action(&Action::DecreaseStatusLineFontScale));
+    every_window_follows(&app, "Smaller Text");
+    assert!((app.status_line.resolved.font_scale.as_f32() - 0.95).abs() < 1e-6);
+    assert!((text_pt(&app) - 13.3).abs() < 1e-4, "the strip text shrinks from the title size");
     assert!(app.run_action(&Action::IncreaseStatusLineFontScale));
     every_window_follows(&app, "Larger Text");
-    assert!((app.status_line.resolved.font_scale.as_f32() - 0.85).abs() < 1e-6);
-    assert!((text_pt(&app) - 11.05).abs() < 1e-4, "the strip text grows");
+    assert!((text_pt(&app) - 14.0).abs() < 1e-4, "and grows back to it");
     for _ in 0..20 {
         app.run_action(&Action::IncreaseStatusLineFontScale);
     }
@@ -181,7 +184,7 @@ fn a_save_round_trips_the_toggle_position_and_text_size() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("enabled = true"), "{text}");
     assert!(text.contains("position = \"bottom\""), "{text}");
-    assert!(text.contains("font_scale = 0.75"), "{text}");
+    assert!(text.contains("font_scale = 0.95"), "{text}");
     assert!(app.status_line.overrides.is_empty(), "the save satisfied every choice");
     app.configs.runtime_config_path = Some(path.clone());
     app.force_reload_config();
@@ -190,4 +193,55 @@ fn a_save_round_trips_the_toggle_position_and_text_size() {
     assert_eq!(app.status_line.resolved.position, StatusPosition::Bottom);
     assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::DEFAULT.stepped(-1));
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// The titlebar band's projection never reaches the file: with an explicit centre list that omits
+/// `window`, and with the session turning the preset's `window` off, Save writes the user's own
+/// lists and a reload shows them, while the band still projects the name.
+#[test]
+fn a_save_never_writes_the_band_projection() {
+    use sonicterm_cfg::status_line::{StatusSegmentId, StatusSide};
+    let path = scratch_config("band-projection", "[status_line]\ncenter = [\"link\"]\n");
+    let mut app =
+        App::new(Theme::default(), Config::load_strict(&path).unwrap(), Keymap::default());
+    let _ = app.sync_status_line(Instant::now());
+    let band = sonicterm_ui::status_line::with_window_projected(&app.status_line.resolved);
+    assert!(band.segment(StatusSegmentId::Window).is_some(), "the band projects the name");
+    app.save_current_settings_to(&path).expect("save");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("\"window\""), "the projection is not written: {text}");
+    app.configs.runtime_config_path = Some(path.clone());
+    app.force_reload_config();
+    let _ = app.sync_status_line(Instant::now());
+    let center: Vec<StatusSegmentId> = app
+        .status_line
+        .resolved
+        .segments
+        .iter()
+        .filter(|segment| segment.side == StatusSide::Center)
+        .map(|segment| segment.id)
+        .collect();
+    assert_eq!(center, [StatusSegmentId::Link], "the reload shows the user's own list");
+
+    // A session that unchecks the preset's `window` takes it out of the lists; the band still
+    // projects it, and Save writes the lists without it.
+    let preset = scratch_config("band-disabled", "[status_line]\nenabled = true\n");
+    let mut app =
+        App::new(Theme::default(), Config::load_strict(&preset).unwrap(), Keymap::default());
+    let _ = app.sync_status_line(Instant::now());
+    app.toggle_status_segment(StatusSegmentId::Window);
+    let resolved = app.status_line.resolved.clone();
+    assert!(resolved.segment(StatusSegmentId::Window).is_none());
+    assert!(
+        resolved.unlisted.iter().any(|segment| segment.id == StatusSegmentId::Window),
+        "turned off, it waits unlisted with its keys"
+    );
+    let band = sonicterm_ui::status_line::with_window_projected(&resolved);
+    assert!(band.segment(StatusSegmentId::Window).is_some(), "the band still shows the name");
+    app.save_current_settings_to(&preset).expect("save");
+    let text = std::fs::read_to_string(&preset).unwrap();
+    assert!(text.contains("center = ["), "the session's lists are written: {text}");
+    assert!(!text.contains("\"window\""), "without the projected name: {text}");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    let _ = std::fs::remove_dir_all(preset.parent().unwrap());
 }

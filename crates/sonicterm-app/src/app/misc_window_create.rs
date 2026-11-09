@@ -177,6 +177,7 @@ impl App {
                     .with_visible(false)
                     .with_decorations(true)
                     .with_inner_size(request.inner_size),
+                self.config.window.titlebar,
             ),
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,
@@ -326,6 +327,12 @@ impl App {
             link_preview: None,
             path_probe: super::super::path_target::PathProbeState::default(),
             status_strip: None,
+            title_band: None,
+            titlebar: self.config.window.titlebar,
+            band_press_consumed: false,
+            caption: Default::default(),
+            band_last_press: None,
+            band_edge_cursor: false,
             sel_status: Default::default(),
             ime_discarded_at: None,
             alert_settings: None,

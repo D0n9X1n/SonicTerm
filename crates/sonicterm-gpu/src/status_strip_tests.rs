@@ -27,6 +27,7 @@ pub(super) fn geometry_for_font(font_pt: f32, scale_factor: f32) -> StripGeometr
         font_raster_px: font_pt * scale_factor,
         font_scale: default_font_scale(),
         cap_height: 7.0 * scale_factor,
+        band: StripBand::default(),
     }
 }
 
@@ -94,6 +95,7 @@ pub(super) fn strip_ink_never_leaves_its_band() {
         font_raster_px: 40.0,
         font_scale: 0.6,
         cap_height: 7.0,
+        band: StripBand::default(),
     };
     let placed = vec![PlacedSegment {
         index: 0,
@@ -183,6 +185,7 @@ pub(super) fn an_unchanged_strip_draws_again_without_shaping() {
         font_raster_px: 20.0,
         font_scale: 0.6,
         cap_height: 8.0,
+        band: StripBand::default(),
     };
     let (placed, separators) = two_part_strip();
     let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
@@ -396,6 +399,7 @@ pub(super) fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) 
         font_raster_px: 13.0,
         font_scale: default_font_scale(),
         cap_height: 7.0,
+        band: StripBand::default(),
     };
     let part = PlacedPart { text: text.into(), tone: StatusTone::Value, left: 10.0, width: 80.0 };
     let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 80.0, parts: vec![part] }];
@@ -444,10 +448,10 @@ pub(super) fn the_strip_draws_with_its_own_smaller_stack() {
     let title = stacks.tab_title.expect("a tab-title stack");
     let strip = stacks.status_line.expect("a strip stack");
     assert!(strip.shares_configuration_with(&title), "one configuration, one font database");
-    assert!((status_line_font_size(13.0, default_font_scale()) - 10.4).abs() < 1e-4, "80% of 13");
+    assert!((status_line_font_size(13.0, default_font_scale()) - 14.0).abs() < 1e-4, "title size");
     let (strip_h, title_h) = (strip_ink_height(&strip, "H"), strip_ink_height(&title, "H"));
-    // 10.4 pt against 14 pt: the strip's capitals are drawn shorter, whole pixels apart.
-    assert!(strip_h > 0.0 && strip_h < title_h, "strip H {strip_h} vs title H {title_h}");
+    // At the default scale the strip's own stack draws capitals as tall as the titles'.
+    assert!(strip_h > 0.0 && strip_h == title_h, "strip H {strip_h} vs title H {title_h}");
     let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     assert!(core.contains("let mut strip_rasterizer = self.status_line_font_stack.clone();"));
     assert!(core.contains("self.status_line_font_stack = new_stacks.status_line;"));
@@ -457,7 +461,7 @@ pub(super) fn the_strip_draws_with_its_own_smaller_stack() {
 
 /// Drawn `H` height over the text size the geometry reports, for a `body_pt` terminal font at
 /// `scale`, on the bundled font's strip stack.
-pub(super) fn cap_over_text_px(body_pt: f32, scale: f32) -> f32 {
+pub(super) fn cap_over_text_px(body_pt: f32, scale: f32, font_scale: f32) -> f32 {
     let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../sonicterm-font/test-fonts/rec-mono");
     let dpi = (72.0 * scale).round() as usize;
@@ -469,8 +473,11 @@ pub(super) fn cap_over_text_px(body_pt: f32, scale: f32) -> f32 {
         1.0,
     )
     .unwrap();
-    let stack = crate::core::renderer_font_views(Some(body), body_pt).status_line.unwrap();
-    let text_px = geometry_for_font(body_pt, scale).text_px();
+    let stack = crate::core::renderer_font_views(Some(body), body_pt)
+        .status_line
+        .unwrap()
+        .with_font_size(f64::from(status_line_font_size(body_pt, font_scale)));
+    let text_px = StripGeometry { font_scale, ..geometry_for_font(body_pt, scale) }.text_px();
     let (ink_h, _) =
         drawn_h(&stack, &mut GlyphAtlas::new(512, 512), GlyphRasterVariant::StatusLine, text_px);
     ink_h / text_px
@@ -484,10 +491,11 @@ pub(super) fn a_tiny_strip_size_is_the_size_freetype_draws() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!((status_line_font_size(1.0, default_font_scale()) - 1.0).abs() < 1e-4, "1 pt");
-    assert!((geometry_for_font(1.0, 2.0).text_px() - 2.0).abs() < 1e-4, "1 pt at 2×");
+    assert!((status_line_font_size(0.5, 0.3) - 1.0).abs() < 1e-4, "1 pt");
+    let tiny_geometry = StripGeometry { font_scale: 0.3, ..geometry_for_font(0.5, 2.0) };
+    assert!((tiny_geometry.text_px() - 2.0).abs() < 1e-4, "1 pt at 2×");
     // At 16× a 1 pt capital is 16 px tall, so one pixel of rounding moves the ratio by under 0.07.
-    let (normal, tiny) = (cap_over_text_px(13.0, 16.0), cap_over_text_px(1.0, 16.0));
+    let (normal, tiny) = (cap_over_text_px(13.0, 16.0, 1.0), cap_over_text_px(0.5, 16.0, 0.3));
     assert!((tiny - normal).abs() < 0.15, "cap/text {tiny} at 1 pt vs {normal} at 13 pt");
 }
 
@@ -538,9 +546,14 @@ pub(super) fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
             1.0,
         )
         .unwrap();
-        crate::core::renderer_font_views(Some(body), body_pt)
+        let mut views = crate::core::renderer_font_views(Some(body), body_pt);
+        // A smaller strip than the titles (0.8), so the two tiles differ in size.
+        views.status_line = views
+            .status_line
+            .map(|stack| stack.with_font_size(f64::from(status_line_font_size(body_pt, 0.8))));
+        views
     };
-    let strip_px = |body_pt: f32| status_line_font_size(body_pt, default_font_scale());
+    let strip_px = |body_pt: f32| status_line_font_size(body_pt, 0.8);
     let views = views_at(13.0);
     let (strip, title) = (views.status_line.unwrap(), views.tab_title.unwrap());
     let mut atlas = GlyphAtlas::new(1024, 1024);
@@ -675,6 +688,7 @@ pub(super) fn emit_one_part(
         font_raster_px: 13.0,
         font_scale: default_font_scale(),
         cap_height: 7.0,
+        band: StripBand::default(),
     };
     let part = PlacedPart { text: "MOUSE".into(), tone, left: 10.0, width: 50.0 };
     let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 50.0, parts: vec![part] }];
@@ -795,6 +809,7 @@ pub(super) fn test_strip_geometry(
         font_raster_px: 13.0 * scale,
         font_scale: default_font_scale(),
         cap_height: 0.0,
+        band: StripBand::default(),
     };
     let mut raster = stack.clone();
     let mut atlas = GlyphAtlas::new(256, 256);
@@ -824,6 +839,7 @@ pub(super) fn the_strip_draws_a_separator_between_adjacent_segments() {
         protected: false,
         parts: vec![StatusPart::new(text, StatusTone::Value)],
         compact: None,
+        compact_last: false,
         click: None,
         spoken: SpokenSegment::default(),
     };
@@ -840,6 +856,7 @@ pub(super) fn the_strip_draws_a_separator_between_adjacent_segments() {
         font_raster_px: 26.0,
         font_scale: default_font_scale(),
         cap_height: 7.0,
+        band: StripBand::default(),
     };
     let fitted = fit_strip(&view, &geometry, &stack, &mut raster, &mut atlas);
     assert_eq!((fitted.segments.len(), fitted.separators.len()), (2, 1));
@@ -919,4 +936,62 @@ pub(super) fn strip_tile_sizes_accept_fresh_tiles() {
     let cold = [('H', 12, 16), ('E', 11, 16), ('L', 10, 16)];
     let live = [('L', 10, 16), ('H', 12, 16), ('E', 11, 16)];
     assert_eq!(compare_strip_tile_sizes(&live, &cold), Ok(()));
+}
+
+/// The band's button height is whole and even at every scale, so its midline is a whole pixel.
+#[test]
+pub(super) fn the_band_button_height_is_an_even_number_of_raster_pixels() {
+    for (logical, scale, raster) in
+        [(28.0, 1.0, 28.0), (28.0, 1.5, 42.0), (28.0, 2.0, 56.0), (27.0, 1.5, 40.0)]
+    {
+        assert_eq!(band_button_px(logical, scale), raster, "{logical} × {scale}");
+    }
+}
+
+/// Merged at the top, the strip is the band, at least the buttons' height, and reserves it through
+/// its own placement; otherwise a separate name band reserves its height above the panes and the
+/// strip keeps its own. A native window has no band.
+#[test]
+pub(super) fn the_band_merges_with_a_top_strip_and_stands_alone_otherwise() {
+    let merged = band_layout(true, 56.0, true, StatusPosition::Top, 46.0);
+    assert_eq!(merged, BandLayout { merged: true, separate_px: 0.0, strip_px: 56.0 });
+    let tall = band_layout(true, 56.0, true, StatusPosition::Top, 70.0);
+    assert_eq!(tall.strip_px, 70.0, "a taller strip sets the merged band's height");
+    let bottom = band_layout(true, 56.0, true, StatusPosition::Bottom, 46.0);
+    assert_eq!(bottom, BandLayout { merged: false, separate_px: 56.0, strip_px: 46.0 });
+    let off = band_layout(true, 56.0, false, StatusPosition::Top, 46.0);
+    assert_eq!(off, BandLayout { merged: false, separate_px: 56.0, strip_px: 0.0 });
+    let large_font = band_layout(true, 56.0, false, StatusPosition::Top, 70.0);
+    assert_eq!(large_font.separate_px, 70.0, "a name-only band grows with its font");
+    let full_screen = band_layout(true, 0.0, false, StatusPosition::Top, 46.0);
+    assert_eq!(full_screen.separate_px, 0.0, "full screen with the strip off has no band");
+    let full_screen_bottom = band_layout(true, 0.0, true, StatusPosition::Bottom, 46.0);
+    assert_eq!(full_screen_bottom.separate_px, 0.0, "nor with the strip at the bottom");
+    let full_screen_top = band_layout(true, 0.0, true, StatusPosition::Top, 46.0);
+    assert_eq!(full_screen_top.strip_px, 46.0, "a top strip is just the strip");
+    let native = band_layout(false, 56.0, true, StatusPosition::Top, 46.0);
+    assert_eq!(native, BandLayout { merged: false, separate_px: 0.0, strip_px: 46.0 });
+}
+
+/// In an integrated band the capitals centre on the whole band, which is the window buttons'
+/// centre line: the cap centre is exactly half the band at every scale and band height, merged or
+/// name-only, with no hairline offset.
+#[test]
+pub(super) fn text_in_the_band_centres_on_the_button_centre_line() {
+    for (scale, band_px) in [(1.0, 28.0), (1.5, 42.0), (2.0, 56.0), (2.0, 80.0)] {
+        let geometry = StripGeometry {
+            top: 0.0,
+            height: band_px,
+            position: StatusPosition::Top,
+            band: StripBand { in_band: true, left_inset: 0.0, right_inset: 0.0 },
+            ..geometry_for_font(13.0, scale)
+        };
+        let baseline = strip_baseline(&geometry);
+        let cap_centre = baseline - geometry.cap_height / 2.0;
+        assert_eq!(cap_centre, band_px / 2.0, "scale {scale}, band {band_px}");
+    }
+    // An ordinary top strip still centres in the area above its hairline.
+    let ordinary = StripGeometry { position: StatusPosition::Top, ..geometry_for_font(13.0, 2.0) };
+    let centre = strip_baseline(&ordinary) - ordinary.cap_height / 2.0;
+    assert!(centre < ordinary.height / 2.0);
 }

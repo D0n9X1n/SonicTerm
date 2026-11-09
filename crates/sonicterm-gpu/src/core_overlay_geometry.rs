@@ -237,7 +237,7 @@ impl GpuRenderer {
     /// Raster px from the window top to where the top-right overlay stack may start; see
     /// [`overlay_stack_top`].
     pub(super) fn overlay_stack_top_px(&self) -> f32 {
-        overlay_stack_top(self.titlebar_inset * self.scale_factor, self.status_line_placement())
+        overlay_stack_top(self.top_chrome_px(), self.status_line_placement())
     }
 }
 

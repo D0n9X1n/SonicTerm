@@ -235,8 +235,13 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => {
-                // When: a left `MouseInput` press arrives, so notification,
+                // When: a left `MouseInput` press arrives, so the titlebar band, notification,
                 // scrollbar, splitter and URL hit-tests run before pane input.
+                if self.route_band_left_input(event_loop, win_id, ElementState::Pressed) {
+                    // When: route_band_left_input took the press for a caption button, an edge or
+                    // empty band space.
+                    return;
+                }
                 let consumed = self.handle_child_left_press_chrome(win_id);
                 if consumed {
                     // When: `consumed` is true, child chrome handled the press, so the

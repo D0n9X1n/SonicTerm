@@ -56,6 +56,10 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let _dispatch = self.frame_dispatch_scope();
         let started = self.frame_clock_start();
+        for window_id in std::mem::take(&mut self.pending_caption_close) {
+            // A reader's Close closes the window as the system close button would.
+            self.window_event(event_loop, window_id, WindowEvent::CloseRequested);
+        }
         self.do_about_to_wait(event_loop);
         self.acknowledge_tab_activations();
         self.note_frame_dispatch(frame_counters::DispatchKind::AboutToWait, started);

@@ -134,6 +134,11 @@ impl App {
                 window.invalidate_path_hover();
             }
         }
+        self.track_window_band(win_id, &event);
+        if self.take_band_release(event_loop, win_id, &event) {
+            // When: take_band_release ended a press the band took, no overlay or pane sees it.
+            return;
+        }
         if let Some(drain) = self.route_shared_pointer(win_id, &event) {
             // When: `route_shared_pointer` consumed the event, neither window handler receives it.
             if drain {

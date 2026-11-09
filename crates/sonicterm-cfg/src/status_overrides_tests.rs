@@ -278,3 +278,19 @@ fn position_and_font_scale_overrides_apply_and_reconcile() {
     assert_eq!(overrides.effective(&edited).font_scale, StatusFontScale::from_f64(0.9).unwrap());
     assert!(overrides.is_empty(), "the file's own change wins");
 }
+
+/// A listed segment the session turns off joins the unlisted set with the keys its file table
+/// gives it, so whatever places it later (a session enable, the titlebar band) keeps its `click`.
+#[test]
+fn a_disabled_file_segment_keeps_its_keys_in_the_unlisted_set() {
+    let base = file("center = [\"window\"]\n[segment.window]\nclick = \"none\"\n");
+    let mut overrides = StatusLineOverrides::default();
+    overrides.toggle_segment(&base, Seg::Window);
+    let shown = overrides.effective(&base);
+    assert!(shown.segment(Seg::Window).is_none(), "turned off");
+    let unlisted = shown.unlisted.iter().find(|segment| segment.id == Seg::Window);
+    assert_eq!(
+        unlisted.map(|segment| &segment.click),
+        Some(&crate::status_line::ClickBinding::None)
+    );
+}

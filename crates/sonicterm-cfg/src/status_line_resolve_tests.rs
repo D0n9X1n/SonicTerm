@@ -37,7 +37,7 @@ fn default_table_is_the_developer_preset_and_off() {
     );
     assert_eq!(
         side_ids(&resolved, StatusSide::Center),
-        [StatusSegmentId::Link, StatusSegmentId::Sel]
+        [StatusSegmentId::Window, StatusSegmentId::Link, StatusSegmentId::Sel]
     );
     assert_eq!(
         side_ids(&resolved, StatusSide::Right),
@@ -51,8 +51,11 @@ fn default_table_is_the_developer_preset_and_off() {
         ]
     );
     for segment in &resolved.segments {
-        let expected =
-            if segment.id == StatusSegmentId::Mem { ShowMode::Always } else { ShowMode::Active };
+        let expected = if matches!(segment.id, StatusSegmentId::Mem | StatusSegmentId::Window) {
+            ShowMode::Always
+        } else {
+            ShowMode::Active
+        };
         assert_eq!(segment.show, expected, "{:?}", segment.id);
         assert_eq!(segment.click, ClickBinding::Default);
     }
@@ -72,7 +75,8 @@ fn presets_resolve_to_their_implemented_lists() {
     let left = side_ids(&diagnostics, StatusSide::Left);
     let scroll = left.iter().position(|id| *id == StatusSegmentId::Scroll).unwrap();
     assert_eq!(left[scroll - 1], StatusSegmentId::Font, "{left:?}");
-    assert!(side_ids(&minimal, StatusSide::Center).is_empty());
+    // Every preset centres the window name.
+    assert_eq!(side_ids(&minimal, StatusSide::Center), [StatusSegmentId::Window]);
     assert_eq!(
         side_ids(&minimal, StatusSide::Right),
         [
@@ -122,7 +126,7 @@ fn explicit_list_replaces_only_that_list() {
     assert_eq!(side_ids(&resolved, StatusSide::Left), [StatusSegmentId::Scroll]);
     assert_eq!(
         side_ids(&resolved, StatusSide::Center),
-        [StatusSegmentId::Link, StatusSegmentId::Sel]
+        [StatusSegmentId::Window, StatusSegmentId::Link, StatusSegmentId::Sel]
     );
     assert_eq!(
         side_ids(&resolved, StatusSide::Right),
@@ -517,13 +521,13 @@ fn position_defaults_to_top_and_rejects_unknown_values() {
     assert!(config("position = \"left\"\n").is_err(), "an unknown position fails the load");
 }
 
-/// `font_scale` defaults to 0.8, reads any value in 0.3..=1.0 exactly, and a value outside
-/// that range, or not a number, fails the load like `update_interval_ms` does.
+/// `font_scale` defaults to 1.0 (the tab titles' size), reads any value in 0.3..=1.0 exactly, and a
+/// value outside that range, or not a number, fails the load like `update_interval_ms` does.
 #[test]
-fn font_scale_defaults_to_eighty_percent_and_rejects_out_of_range() {
+fn font_scale_defaults_to_the_tab_title_size_and_rejects_out_of_range() {
     let defaults = StatusLineConfig::default().resolve().unwrap();
     assert_eq!(defaults.font_scale, StatusFontScale::DEFAULT);
-    assert!((defaults.font_scale.as_f32() - 0.8).abs() < 1e-6);
+    assert!((defaults.font_scale.as_f32() - 1.0).abs() < 1e-6);
     let parsed = parse("font_scale = 0.65\n").resolve().unwrap();
     assert!((parsed.font_scale.as_f32() - 0.65).abs() < 1e-6);
     assert!((parse("font_scale = 1\n").resolve().unwrap().font_scale.as_f32() - 1.0).abs() < 1e-6);
@@ -538,9 +542,10 @@ fn font_scale_defaults_to_eighty_percent_and_rejects_out_of_range() {
 /// The scale steps by 0.05 and stays in 0.3..=1.0.
 #[test]
 fn font_scale_steps_and_clamps() {
-    let scale = StatusFontScale::DEFAULT;
+    let scale = StatusFontScale::from_f64(0.8).unwrap();
     assert!((scale.stepped(1).as_f32() - 0.85).abs() < 1e-6);
     assert!((scale.stepped(-1).as_f32() - 0.75).abs() < 1e-6);
+    assert_eq!(StatusFontScale::DEFAULT.stepped(1), StatusFontScale::MAX, "the default is the top");
     assert_eq!(StatusFontScale::MAX.stepped(1), StatusFontScale::MAX);
     assert_eq!(StatusFontScale::MIN.stepped(-1), StatusFontScale::MIN);
 }

@@ -36,6 +36,7 @@ fn every_catalog_variant_is_listed_and_has_an_accessible_name_in_every_locale() 
         StatusSegmentId::Alerts
         | StatusSegmentId::Health
         | StatusSegmentId::Mem
+        | StatusSegmentId::Window
         | StatusSegmentId::Mode
         | StatusSegmentId::Input
         | StatusSegmentId::Clip

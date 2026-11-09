@@ -354,6 +354,11 @@ status-spoken-glyphs = Missing glyphs
 status-spoken-history = History
 status-spoken-font = Font scale
 status-spoken-zoom = Zoom
+status-spoken-window = Window
+caption-minimize = Minimize
+caption-maximize = Maximize
+caption-restore = Restore
+caption-close = Close
 status-spoken-size = Size
 status-accessible-strip = Status line
 status-accessible-warning = Warning:
@@ -379,6 +384,7 @@ status-checklist-center = center
 status-checklist-right = right
 status-checklist-sensitive = sensitive
 status-checklist-hidden = hidden
+status-checklist-in-titlebar = always in the titlebar
 status-group-core = Core
 status-group-pointer = Pointer
 status-group-input = Input
@@ -389,6 +395,7 @@ status-group-program-reported = Program-reported
 status-name-health = Health
 status-name-mode = Mode
 status-name-zoom = Zoom
+status-name-window = Window
 
 # Save Current Settings
 settings-saved = Current settings saved

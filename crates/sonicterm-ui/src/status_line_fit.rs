@@ -13,12 +13,26 @@ pub struct FitMetrics {
     pub segment_gap: f32,
     /// Width of the `|` drawn between two adjacent segments of one list; it widens only those gaps.
     pub separator_width: f32,
+    /// Width reserved at the left edge before `edge_pad`, such as macOS's traffic lights; 0 without.
+    pub left_inset: f32,
+    /// Width reserved at the right edge before `edge_pad`, such as Windows' caption buttons.
+    pub right_inset: f32,
 }
 
 impl FitMetrics {
     /// The gap between two adjacent segments of one list: the segment gap with the separator in it.
     fn in_group_gap(&self) -> f32 {
         self.segment_gap + self.separator_width
+    }
+
+    /// The left edge of the first left-list segment.
+    fn left_start(&self) -> f32 {
+        self.left_inset + self.edge_pad
+    }
+
+    /// The right edge of the last right-list segment.
+    fn right_end(&self) -> f32 {
+        self.width - self.right_inset - self.edge_pad
     }
 }
 
@@ -91,6 +105,10 @@ struct FitSlot {
     part_widths: Vec<f32>,
     compact: Option<Vec<StatusPart>>,
     active: bool,
+    /// The segment whose centre goes on the strip's midline.
+    anchor: bool,
+    /// The compact form waits until this slot is the only one left.
+    compact_last: bool,
 }
 
 impl FitSlot {
@@ -142,11 +160,19 @@ pub fn fit(
             FitSlot {
                 index,
                 side: segment.side,
-                rank: (segment.protected, segment.priority, distance),
+                rank: if segment.compact_last {
+                    // A band's name outranks everything, whatever another segment's priority.
+                    (true, u16::MAX, usize::MAX)
+                } else {
+                    // When: any other segment, protection, then priority, then nearness to centre.
+                    (segment.protected, segment.priority, distance)
+                },
                 part_widths: segment.parts.iter().map(|part| measure(&part.text)).collect(),
                 parts: segment.parts.clone(),
                 compact: segment.compact.clone(),
                 active: true,
+                anchor: segment.id == StatusSegmentId::Window,
+                compact_last: segment.compact_last,
             }
         })
         .collect();
@@ -167,6 +193,8 @@ pub fn fit(
             .filter_map(|side| group_width(&slots, side))
             .collect();
         let needed = 2.0 * metrics.edge_pad
+            + metrics.left_inset
+            + metrics.right_inset
             + groups.iter().sum::<f32>()
             + metrics.segment_gap * groups.len().saturating_sub(1) as f32;
         let overflow = needed - metrics.width;
@@ -174,9 +202,18 @@ pub fn fit(
             // When: `overflow` is not positive, everything active fits.
             break;
         }
+        let others_active = |slots: &[FitSlot], index: usize| {
+            slots.iter().any(|slot| slot.active && slot.index != index)
+        };
+        let waiting: Vec<usize> = slots
+            .iter()
+            .filter(|slot| slot.compact_last && others_active(&slots, slot.index))
+            .map(|slot| slot.index)
+            .collect();
         let compactable = slots
             .iter_mut()
             .filter(|slot| slot.active && slot.compact.is_some())
+            .filter(|slot| !waiting.contains(&slot.index))
             .min_by_key(|slot| slot.rank);
         if let Some(slot) = compactable {
             // When: `compactable` found a compact form, use the lowest-ranked one before dropping.
@@ -278,7 +315,7 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
     let mut placed = Vec::new();
     let active =
         |side: StatusSide| slots.iter().filter(move |slot| slot.active && slot.side == side);
-    let mut pen = metrics.edge_pad;
+    let mut pen = metrics.left_start();
     let mut left_end = None;
     for slot in active(StatusSide::Left) {
         placed.push(place_slot(slot, pen));
@@ -286,7 +323,7 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
         left_end = Some(pen);
         pen += metrics.in_group_gap();
     }
-    let mut pen = metrics.width - metrics.edge_pad;
+    let mut pen = metrics.right_end();
     let mut right_start = None;
     for slot in active(StatusSide::Right).collect::<Vec<_>>().into_iter().rev() {
         pen -= slot.width();
@@ -298,11 +335,22 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
     if !center.is_empty() {
         let total = center.iter().map(|slot| slot.width()).sum::<f32>()
             + metrics.in_group_gap() * (center.len() - 1) as f32;
-        let low = left_end.map_or(metrics.edge_pad, |end| end + metrics.segment_gap);
-        let high = right_start
-            .map_or(metrics.width - metrics.edge_pad, |start| start - metrics.segment_gap)
-            - total;
-        let mut pen = ((metrics.width - total) / 2.0).clamp(low, high.max(low));
+        let low = left_end.map_or(metrics.left_start(), |end| end + metrics.segment_gap);
+        let high =
+            right_start.map_or(metrics.right_end(), |start| start - metrics.segment_gap) - total;
+        // The window name's centre goes on the window's midline, its neighbours either side;
+        // without it the group centres as a whole. The clamp moves it only as far as needed.
+        let preferred = match center.iter().position(|slot| slot.anchor) {
+            Some(anchor) => {
+                let before = center[..anchor]
+                    .iter()
+                    .map(|slot| slot.width() + metrics.in_group_gap())
+                    .sum::<f32>();
+                metrics.width / 2.0 - before - center[anchor].width() / 2.0
+            }
+            None => (metrics.width - total) / 2.0,
+        };
+        let mut pen = preferred.clamp(low, high.max(low));
         for slot in center {
             placed.push(place_slot(slot, pen));
             pen += slot.width() + metrics.in_group_gap();
@@ -331,3 +379,7 @@ fn place_slot(slot: &FitSlot, origin: f32) -> PlacedSegment {
 #[cfg(test)]
 #[path = "status_line_fit_tests.rs"]
 mod status_line_fit_tests;
+
+#[cfg(test)]
+#[path = "status_line_fit_anchor_tests.rs"]
+mod status_line_fit_anchor_tests;

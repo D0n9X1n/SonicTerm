@@ -429,7 +429,14 @@ fn an_existing_and_a_later_window_build_their_strip_from_the_effective_lists() {
         let App { status_line, i18n, .. } = app;
         let numbers = NumberStyle::for_locale("en");
         let mut shows = StripShows::default();
-        status_line.rebuild_window_strip(window_id, inputs.clone(), i18n, numbers, &mut shows)
+        status_line.rebuild_window_strip(
+            window_id,
+            inputs.clone(),
+            super::sync::StripRole::Plain,
+            i18n,
+            numbers,
+            &mut shows,
+        )
     };
     let has_cpu = |view: &StatusLineView| {
         view.segments.iter().any(|segment| segment.id == StatusSegmentId::Cpu)

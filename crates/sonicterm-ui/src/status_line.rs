@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use sonicterm_cfg::status_line::{
     ClickBinding, MemSettings, ResolvedStatusLine, Sensitivity, ShowMode, StatusIcons,
-    StatusSegmentId, StatusSide,
+    StatusSegmentId, StatusSide, TitlebarSegments, WindowSegmentSettings,
 };
 use sonicterm_types::Action;
 use unicode_segmentation::UnicodeSegmentation;
@@ -220,6 +220,9 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Font => (UpdateKind::Event, format_font, DefaultClick::Action(Action::ResetFontSize)),
         Seg::Size => (UpdateKind::Event, format_size, DefaultClick::None),
         Seg::Zoom => (UpdateKind::Event, format_zoom, DefaultClick::Action(Action::TogglePaneZoom)),
+        Seg::Window => {
+            (UpdateKind::Event, format_window, DefaultClick::Action(Action::RenameWindow))
+        }
         Seg::Ime => (UpdateKind::Event, format_ime, DefaultClick::None),
         Seg::Glyphs => {
             (UpdateKind::Event, format_glyphs, DefaultClick::Handler(SegmentHandler::ListGlyphs))
@@ -248,6 +251,10 @@ pub struct FormatEnv<'a> {
     pub mem: MemSettings,
     /// The segment's configured `show`.
     pub show: ShowMode,
+    /// Window segment settings.
+    pub window: WindowSegmentSettings,
+    /// `hide_sensitive` is on, so a formatter that redacts its own text does.
+    pub hide_sensitive: bool,
 }
 
 /// The facts the strip shows, gathered by the App.
@@ -295,6 +302,21 @@ pub struct StatusLineInputs {
     pub path_check: Option<PathCheckInput>,
     /// The terminal state SonicTerm keeps for the active tab's panes, from cached charges.
     pub tab_mem: Option<TabMemInput>,
+    /// The window's name as its native title last showed it; `None` for a window with no number.
+    pub window: Option<WindowTitleInput>,
+}
+
+/// What a terminal window's native title was last set from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowTitleInput {
+    /// The window's process-local number, shown as `#N`.
+    pub number: u64,
+    /// The part after `#N`, already sanitized and capped for a title.
+    pub shown: String,
+    /// `shown` is the user's own window name, not a tab's title.
+    pub custom: bool,
+    /// The application name, shown in place of a tab title while `hide_sensitive` is on.
+    pub app_name: &'static str,
 }
 
 /// Which presenter draws a window's frames.
@@ -725,6 +747,9 @@ pub struct StatusSegmentView {
     pub parts: Vec<StatusPart>,
     /// The compact form, if shorter.
     pub compact: Option<Vec<StatusPart>>,
+    /// Fitting tries the compact form only once every other segment is gone: the name of an
+    /// integrated titlebar band.
+    pub compact_last: bool,
     /// What a click does; `None` is inert.
     pub click: Option<SegmentClick>,
     /// Accessible name and value.
@@ -752,9 +777,75 @@ impl StatusLineView {
             segment.protected.hash(&mut hasher);
             segment.parts.hash(&mut hasher);
             segment.compact.hash(&mut hasher);
+            segment.compact_last.hash(&mut hasher);
         }
         Self { segments, pixel_hash: hasher.finish() }
     }
+}
+
+/// `resolved` as an integrated titlebar band presents it. The `window` segment is kept where a list
+/// already places it, otherwise first in the centre list with its configured keys, and it outranks
+/// every other segment, so a long name drops the others before it shortens. With
+/// `titlebar_segments = "right"` only the name and the right list remain. The user's lists, the
+/// checklist and Save never see this projection.
+pub fn with_window_projected(resolved: &ResolvedStatusLine) -> ResolvedStatusLine {
+    let mut projected = place_window(resolved);
+    projected.in_band = true;
+    if resolved.titlebar_segments == TitlebarSegments::Right {
+        projected.segments.retain(|segment| {
+            segment.id == StatusSegmentId::Window || segment.side == StatusSide::Right
+        });
+    }
+    if let Some(window) =
+        projected.segments.iter_mut().find(|segment| segment.id == StatusSegmentId::Window)
+    {
+        // The name is the titlebar: it is the last thing fitting gives up.
+        window.priority = sonicterm_cfg::status_line::MAX_PRIORITY;
+    }
+    projected
+}
+
+/// `resolved` with `window` in a list: where a list places it, otherwise first in the centre.
+fn place_window(resolved: &ResolvedStatusLine) -> ResolvedStatusLine {
+    let mut projected = resolved.clone();
+    if projected.segment(StatusSegmentId::Window).is_some() {
+        // When: segment(Window) is some, a list already places it and nothing is duplicated.
+        return projected;
+    }
+    // An unlisted entry keeps its configured keys; a session that turned the segment off removed
+    // it from both lists, and the band still shows the name with the catalog defaults.
+    let mut window = projected
+        .unlisted
+        .iter()
+        .position(|segment| segment.id == StatusSegmentId::Window)
+        .map(|index| projected.unlisted.remove(index))
+        .unwrap_or_else(|| {
+            let meta = StatusSegmentId::Window.meta();
+            sonicterm_cfg::status_line::ResolvedSegment {
+                id: StatusSegmentId::Window,
+                side: meta.home_side,
+                show: meta.default_show,
+                priority: meta.default_priority,
+                click: ClickBinding::Default,
+            }
+        });
+    window.side = StatusSide::Center;
+    let first_center = projected
+        .segments
+        .iter()
+        .position(|segment| segment.side != StatusSide::Left)
+        .unwrap_or(projected.segments.len());
+    projected.segments.insert(first_center, window);
+    projected
+}
+
+/// The band-only view's settings: just the `window` segment of `resolved`, projected, for a band
+/// shown while the strip is off or at the bottom.
+pub fn window_only(resolved: &ResolvedStatusLine) -> ResolvedStatusLine {
+    let mut projected = place_window(resolved);
+    projected.in_band = true;
+    projected.segments.retain(|segment| segment.id == StatusSegmentId::Window);
+    projected
 }
 
 /// Format every configured segment for `inputs`.
@@ -779,6 +870,8 @@ pub fn build_view(
             numbers,
             mem: resolved.mem,
             show: configured.show,
+            window: resolved.window,
+            hide_sensitive,
         };
         let Some(mut formatted) = (spec.format)(inputs, &env) else {
             // When: `format` returns None, the segment has nothing to say and takes no slot.
@@ -813,6 +906,7 @@ pub fn build_view(
             protected: formatted.protected,
             parts: formatted.parts,
             compact: formatted.compact,
+            compact_last: resolved.in_band && configured.id == StatusSegmentId::Window,
             click,
             spoken: SpokenSegment {
                 name: i18n.translate(meta.spoken_name_key),

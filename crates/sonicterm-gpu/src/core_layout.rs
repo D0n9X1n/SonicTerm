@@ -20,7 +20,8 @@ impl GpuRenderer {
     /// A strip at the top sits between the titlebar band and the top padding, so its height is
     /// reserved here too.
     pub fn top_inset(&self) -> f32 {
-        (self.titlebar_inset + self.padding_top) * self.scale_factor
+        self.top_chrome_px()
+            + self.padding_top * self.scale_factor
             + self.status_line_placement().reserved_top
     }
 }
@@ -44,7 +45,29 @@ impl GpuRenderer {
 }
 
 impl GpuRenderer {
-    /// The strip's band and the height it reserves on its edge, from the current geometry.
+    /// How the integrated band and the strip share the window's top this frame.
+    pub(super) fn band_layout(&self) -> crate::status_strip::BandLayout {
+        let band = &self.window_band;
+        crate::status_strip::band_layout(
+            band.integrated,
+            crate::status_strip::band_button_px(band.button_height, self.scale_factor),
+            self.status_line_visible,
+            self.status_line_position,
+            crate::status_strip::status_line_height(self.font_size, self.scale_factor),
+        )
+    }
+}
+
+impl GpuRenderer {
+    /// Raster px above the strip's placement: the OS titlebar inset and a separate name band.
+    pub(super) fn top_chrome_px(&self) -> f32 {
+        self.titlebar_inset * self.scale_factor + self.band_layout().separate_px
+    }
+}
+
+impl GpuRenderer {
+    /// The strip's band and the height it reserves on its edge, from the current geometry. A
+    /// strip merged into an integrated titlebar band is that band, at the window's top.
     pub(super) fn status_line_placement(&self) -> crate::status_strip::StripPlacement {
         let tab_bar = if self.tab_bar_visible {
             self.tab_bar_logical_height()
@@ -55,7 +78,7 @@ impl GpuRenderer {
         crate::status_strip::strip_placement(
             self.status_line_position,
             self.config.height as f32,
-            self.titlebar_inset * self.scale_factor,
+            self.top_chrome_px(),
             tab_bar,
             self.status_line_height(),
         )

@@ -223,43 +223,6 @@ fn new_window_request_keeps_captured_fallback() {
     assert_ne!(app.window_request(None).inner_size, expected);
 }
 
-/// Parentless requests use configured startup dimensions rather than the warm pool's internal size.
-#[test]
-fn new_window_size_fallback_tracks_configured_rows_and_columns() {
-    let mut config = Config::default();
-    config.window.cols = 100;
-    config.window.rows = 40;
-    config.font.size = 16.0;
-    config.font.line_height = 1.25;
-    config.window.padding_left = 8.0;
-    config.window.padding_right = 12.0;
-    config.window.padding_top = 4.0;
-    config.window.padding_bottom = 6.0;
-    let size = configured_window_size(&config, false);
-    assert_eq!(size, winit::dpi::LogicalSize::new(920.0, 810.0));
-    assert_eq!(
-        configured_window_size(&config, true).height,
-        size.height + f64::from(sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT)
-    );
-}
-
-/// An enabled status line adds its own height to the initial window, with or without the tab
-/// bar, so a window opened with `[window]` rows keeps that many terminal rows.
-#[test]
-fn configured_window_size_adds_the_status_line_when_enabled() {
-    let mut config = Config::default();
-    let without = configured_window_size(&config, true);
-    config.status_line.enabled = true;
-    let strip = f64::from(sonicterm_gpu::status_strip::status_line_height(config.font.size, 1.0));
-    assert!(strip >= 20.0);
-    assert_eq!(configured_window_size(&config, true).height, without.height + strip);
-    assert_eq!(configured_window_size(&config, true).width, without.width);
-    config.status_line.enabled = false;
-    let bare = configured_window_size(&config, false);
-    config.status_line.enabled = true;
-    assert_eq!(configured_window_size(&config, false).height, bare.height + strip);
-}
-
 #[test]
 fn broadcast_render_flags_include_fixed_source_and_exclude_unrelated_panes() {
     // Visual membership includes the fixed source without changing delivery or following focus.

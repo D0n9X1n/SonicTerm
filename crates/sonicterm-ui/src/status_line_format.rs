@@ -739,6 +739,41 @@ pub(super) fn format_zoom(
     Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, spoken) })
 }
 
+/// The `window` segment: `#2 Work`, the text the window's native title shows. The dim `#N` goes
+/// first in the compact form, then the name middle-ellipsizes; in a titlebar band every other
+/// segment goes before either. With `hide_sensitive` on, a tab's
+/// title (which can hold a path or host) gives way to the application name; a user's own window
+/// name stays, since the user chose it.
+pub(super) fn format_window(
+    inputs: &StatusLineInputs,
+    env: &FormatEnv<'_>,
+) -> Option<FormattedSegment> {
+    let window = inputs.window.as_ref()?;
+    let name = if env.hide_sensitive && !window.custom {
+        window.app_name
+    } else {
+        // When: window.custom or hide_sensitive is off, the shown title stays.
+        window.shown.as_str()
+    };
+    let name_part = StatusPart::new(name, StatusTone::Value).ellipsized();
+    let mut parts = Vec::with_capacity(2);
+    let mut spoken = name.to_owned();
+    if env.window.number {
+        parts.push(StatusPart::new(format!("#{} ", window.number), StatusTone::Name));
+        spoken = format!("#{} {name}", window.number);
+    }
+    parts.push(name_part.clone());
+    // Without `#N`; in a titlebar band fitting tries it only once the name stands alone.
+    let compact = (parts.len() > 1).then(|| vec![name_part]);
+    // Protected, so every unprotected segment drops before the name shortens past `#N`.
+    Some(FormattedSegment {
+        compact,
+        protected: true,
+        default_click: true,
+        ..FormattedSegment::plain(parts, spoken)
+    })
+}
+
 /// Formatter of a catalog id whose segment has not landed: shows nothing.
 /// The `frame` segment: `Frame: 4.1 ms · GPU`, the mean CPU-side time of content frames, with the
 /// rate in the spoken value; `always` reads `idle · GPU` with no content frames.
@@ -871,3 +906,7 @@ pub(super) fn format_tab_mem(
 #[cfg(test)]
 #[path = "status_line_format_tests.rs"]
 mod status_line_format_tests;
+
+#[cfg(test)]
+#[path = "status_line_format_window_tests.rs"]
+mod status_line_format_window_tests;

@@ -376,6 +376,13 @@ impl App {
         win_id: WindowId,
         state: ElementState,
     ) {
+        if state == ElementState::Pressed
+            && self.route_band_left_input(event_loop, win_id, ElementState::Pressed)
+        {
+            // When: route_band_left_input took the press for a caption button, an edge or empty
+            // band space.
+            return;
+        }
         match state {
             ElementState::Pressed => {
                 // When: state is ElementState::Pressed, begin primary-pointer interaction.

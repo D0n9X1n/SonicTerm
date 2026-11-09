@@ -331,6 +331,7 @@ mod tab_tree;
 mod window_registry_panes;
 pub use window_registry_panes::{DetachedPane, DetachedPanes, PaneMap};
 mod status_line;
+mod titlebar_band;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
@@ -520,6 +521,9 @@ pub struct App {
     pub(super) frame_counters: Option<frame_counters::AppFrameCounters>,
     /// The windows asked for a frame in the current dispatch; see [`redraw::DispatchRedraws`].
     pub(super) dispatch_redraws: redraw::DispatchRedraws,
+    /// Windows whose Close caption button an assistive technology pressed; each closes through its
+    /// own close request at the next `about_to_wait`, which has the event loop.
+    pub(super) pending_caption_close: Vec<WindowId>,
     /// Each terminal window's adapter and strip focus by window id, warm spares included.
     pub(super) accessibility:
         std::collections::HashMap<WindowId, accessibility::WindowAccessibility>,

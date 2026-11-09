@@ -179,6 +179,18 @@ pub struct WindowState {
     pub(in crate::app) path_probe: path_target::PathProbeState,
     /// The status line band and segments the last presented frame drew; pointer routing reads it.
     pub(crate) status_strip: Option<sonicterm_gpu::status_strip::StripHit>,
+    /// The name band the last presented frame drew in an integrated window; `None` without one.
+    pub(crate) title_band: Option<sonicterm_gpu::status_strip::StripHit>,
+    /// The titlebar style this window was created with; a reload changes only later windows.
+    pub(crate) titlebar: sonicterm_cfg::config::TitlebarMode,
+    /// A left press the titlebar band consumed waits for its release, which is swallowed too.
+    pub(crate) band_press_consumed: bool,
+    /// The self-drawn caption buttons' hover and press state.
+    pub(crate) caption: sonicterm_ui::window_band::CaptionState,
+    /// The last empty-band left press, for counting a double-click where the platform does not.
+    pub(crate) band_last_press: Option<(std::time::Instant, (f32, f32))>,
+    /// The pointer is on a resize edge, so the window shows a resize cursor.
+    pub(crate) band_edge_cursor: bool,
     /// The status line's selection count and last copy result for this window.
     pub(crate) sel_status: super::status_line::SelStatus,
     /// When copy mode last dropped an IME commit in this window; the status line holds it for a while.

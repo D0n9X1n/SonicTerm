@@ -350,6 +350,11 @@ status-spoken-glyphs = 欠けている字形
 status-spoken-history = 履歴
 status-spoken-font = フォント倍率
 status-spoken-zoom = ズーム
+status-spoken-window = ウィンドウ
+caption-minimize = 最小化
+caption-maximize = 最大化
+caption-restore = 元に戻す
+caption-close = 閉じる
 status-spoken-size = サイズ
 status-accessible-strip = ステータスライン
 status-accessible-warning = 警告:
@@ -375,6 +380,7 @@ status-checklist-center = 中央
 status-checklist-right = 右
 status-checklist-sensitive = 機密
 status-checklist-hidden = 非表示
+status-checklist-in-titlebar = タイトルバーに常に表示
 status-group-core = 基本
 status-group-pointer = ポインター
 status-group-input = 入力
@@ -385,6 +391,7 @@ status-group-program-reported = プログラム報告
 status-name-health = 状態
 status-name-mode = モード
 status-name-zoom = ズーム
+status-name-window = ウィンドウ
 
 # Save Current Settings
 settings-saved = 現在の設定を保存しました

@@ -99,6 +99,8 @@ impl StatusPaneFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BuiltFrom {
     generation: u64,
+    /// How the strip related to the window's titlebar band when it was built.
+    role: sync::StripRole,
     inputs: StatusLineInputs,
 }
 
@@ -377,6 +379,8 @@ impl App {
             state.built.get(&window_id).map(|built| built.inputs.clone()).unwrap_or_default();
         inputs.mem = state.mem;
         inputs.cpu_percent = state.cpu_shown;
+        // The name a reader hears is the title applied now, not the one the strip last built from.
+        inputs.window = sync::window_title_input(window);
         let gpu_recovering = self.gpu_recovery_snapshot().is_some_and(|snapshot| {
             !matches!(snapshot.phase, sonicterm_gpu::recovery::RecoveryPhase::Active)
         });
@@ -458,7 +462,7 @@ impl App {
         tracing::info!("status line font_scale -> {}", scale.as_f32());
     }
 
-    /// Return the strip's text to the default 0.8 in every window for this session.
+    /// Return the strip's text to the default, the tab titles' size, in every window for this session.
     pub(super) fn reset_status_line_font_scale(&mut self) {
         let scale = sonicterm_cfg::status_line::StatusFontScale::DEFAULT;
         self.change_status_choices(|overrides, file| overrides.set_font_scale(file, scale));
@@ -504,16 +508,17 @@ impl App {
         pointer_x: f32,
         pointer_y: f32,
     ) -> bool {
-        let Some(strip) =
-            self.registry.windows.get(&window_id).and_then(|window| window.status_strip.as_ref())
-        else {
-            // When: `status_strip` is None, the window presented no strip.
+        // The name band of an integrated window is a strip too.
+        let Some(strip) = self.registry.windows.get(&window_id).and_then(|window| {
+            [window.status_strip.as_ref(), window.title_band.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|strip| strip.contains(pointer_y))
+        }) else {
+            // When: neither the strip nor the name band contains pointer_y, no right press is
+            // handled.
             return false;
         };
-        if !strip.contains(pointer_y) {
-            // When: `contains` is false, the press is outside the band, which handles no right press.
-            return false;
-        }
         let pressed = strip.segment_at(pointer_x, pointer_y).map(|segment| segment.id);
         self.open_status_segments(Some(window_id), pressed);
         true
@@ -755,6 +760,8 @@ use inputs::{
 mod actions;
 #[path = "status_line_sync.rs"]
 mod sync;
+#[cfg(test)]
+pub(in crate::app) use sync::window_title_input;
 
 #[cfg(test)]
 use inputs::display_path;

@@ -214,6 +214,18 @@ with bundle-relative imports, plus licenses and provenance. Its minimum macOS
 version reflects the actual executable/library deployment targets, not merely
 the packaging host's architecture. See [Packaging](Packaging) for verification.
 
+### Integrated titlebar
+
+With `[window] titlebar = "integrated"`, the default on macOS, a terminal window is
+created with a transparent titlebar, a full-size content view and hidden title
+text. The title is still set for Mission Control, the Window menu and VoiceOver.
+Each event-loop pass reads the close and zoom buttons' frames from AppKit,
+converted into the content view, and gives the renderer the band: twice the
+close button's centre tall, with a left inset 8 pt past the zoom button, or no
+buttons in native full screen. A double-click on empty band space reads
+`AppleActionOnDoubleClick` and the event's click count from AppKit. See
+[Configuration](Configuration#integrated-titlebar).
+
 ### Accessibility
 
 Every terminal window gets an accesskit adapter on winit's view, installed while
@@ -232,8 +244,15 @@ Before winit creates an HWND, `sonicterm-windows` requests
 event-loop construction and is retained rather than assuming winit's later setup
 is equivalent for every startup path. Release builds use the Windows GUI
 subsystem and open no console window. The one-shot window-ready callback receives
-a live HWND and applies the DWM backdrop and native `muda` menu. Window movement,
-snap layouts, and minimize/maximize/close controls remain native Windows chrome.
+a live HWND and applies the DWM backdrop and native `muda` menu. With the
+default `[window] titlebar = "native"`, window movement, snap layouts, and
+minimize/maximize/close controls remain native Windows chrome. With
+`"integrated"` the window is created undecorated with winit's undecorated shadow,
+which is turned off in full screen because it moves the client area one pixel.
+SonicTerm then draws the caption buttons in its titlebar band and starts native
+moves and edge resizes through winit's `drag_window` and `drag_resize_window`.
+The snap layouts flyout is not offered. See
+[Configuration](Configuration#integrated-titlebar).
 
 The menu translates `muda` events to shared actions. DWM can request Mica,
 Acrylic, or Tabbed material and falls back to opaque. Forced software rendering
@@ -723,6 +742,7 @@ untrusted input: the server tells agents never to follow instructions found in i
 | Tab OS handoff | NSPasteboard publication, no `NSDraggingSession` | OLE/COM drag/drop | in-process only |
 | Native menu | NSMenu | `muda` | unavailable; in-app actions remain |
 | Backdrop | AppKit blur/config | DWM Mica/Acrylic/Tabbed | opaque |
+| Integrated titlebar | default; transparent titlebar, AppKit traffic lights | opt-in; undecorated, SonicTerm caption buttons | none; native titlebar |
 | Software present | wgpu adapter path | CPU BGRA + GDI | wgpu Vulkan/lavapipe or selected platform adapter |
 | Package format | `.app` in per-architecture `.dmg` | x64 WiX `.msi` | x86_64 `.deb` and `.tar.gz` |
 | Signing | ad-hoc bundle signature | unsigned | unsigned |
@@ -739,6 +759,7 @@ untrusted input: the server tells agents never to follow instructions found in i
 | macOS entry/menu/open documents and links/tab handoff | `crates/sonicterm-mac/src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs` |
 | Terminal link grammar | `crates/sonicterm-cfg/src/launch_url.rs` |
 | macOS display link | `crates/sonicterm-app/src/app/display_link.rs` |
+| Integrated titlebar | `crates/sonicterm-app/src/app/window_setup/{titlebar,titlebar_macos}.rs`, `crates/sonicterm-app/src/app/titlebar_band.rs`, `crates/sonicterm-ui/src/window_band.rs`, `crates/sonicterm-gpu/src/caption_buttons.rs` |
 | Windows entry/CLI/menu/backdrop/tab drag | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows software present | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux entry and identity | `crates/sonicterm-linux/src/main.rs`, `crates/sonicterm-linux/resources/` |

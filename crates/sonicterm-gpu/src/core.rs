@@ -436,6 +436,16 @@ pub struct GpuRenderer {
     /// no ring.
     status_line_focus:
         Option<(sonicterm_render_model::boundary::cfg::status_line::StatusSegmentId, bool)>,
+    /// The integrated titlebar band, logical px; the default is a native titlebar with no band.
+    window_band: sonicterm_render_model::boundary::ui::window_band::WindowBand,
+    /// The name-only band's segments, drawn while the band does not merge with a top strip.
+    band_view: StatusLineView,
+    /// The name-only band's fit, keyed like [`Self::status_line_fit`].
+    band_fit: Option<(u64, crate::status_strip::FittedStrip)>,
+    /// Hit boxes of the name-only band the last drawn frame presented.
+    band_layouts: crate::status_strip::StripLayouts,
+    /// Hover, press, maximised and focus state of the self-drawn caption buttons.
+    caption_state: sonicterm_render_model::boundary::ui::window_band::CaptionState,
     /// Reserved height (logical px) above the tab bar for the OS native
     /// titlebar. Kept at zero while SonicTerm uses the normal OS titlebar with a
     /// bottom-pinned tab bar.

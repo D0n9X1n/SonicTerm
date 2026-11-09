@@ -74,6 +74,7 @@ Enter 或点击会在本次会话中保留它，Escape 或点击面板外会恢�
 | `padding_top` | `8` | 内容上方 padding，单位为逻辑像素。 |
 | `padding_bottom` | `4` | 内容下方 padding，单位为逻辑像素。 |
 | `decorations` | `true` | 为新窗口启用原生标题栏装饰。 |
+| `titlebar` | macOS 为 `"integrated"`，Windows 为 `"native"` | `"integrated"` 绘制一条标题栏带，窗口名称居中，位于窗口按钮旁边；顶部的状态栏与它共用。`"native"` 保留系统标题栏。Linux 始终使用原生标题栏。打开终端窗口时读取，因此修改只作用于之后打开的窗口；报告窗口始终保留系统标题栏。其他值会导致加载失败。见 [集成标题栏](#集成标题栏)。 |
 | `warm_window_pool` | `1` | 为快速拖出标签页预留的隐藏子窗口数量。`0` 关闭预热池。硬件渲染最多保留 `5` 个；软件渲染会把任何非零值限制为 `1`。 |
 
 `cols` 与 `rows` 设置启动尺寸，以及没有可用来源窗口时的默认尺寸。新建和拖出窗口继承发起窗口
@@ -152,9 +153,10 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 | `icons` | `"unicode"` | 只改变符号：`"unicode"`、`"ascii"` 或 `"nerd"`。本版本没有为这些段定义 Nerd Font 符号，因此 `nerd` 整体使用 Unicode 符号集，不做逐字形回退。段没有工具提示；每个段都有供辅助技术使用的纯文字朗读名称和值。 |
 | `hide_sensitive` | `false` | 隐藏所有敏感段（例如指针下的链接），用于屏幕共享。**切换状态栏敏感内容**（`toggle_status_line_sensitive`）在本次会话中切换它。 |
 | `position` | `"top"` | 状态栏所在的窗口边缘：`"top"` 位于窗格上方，`"bottom"` 位于窗格与标签栏之间。其他值会导致加载失败。 |
-| `font_scale` | `0.8` | 状态栏文字大小占实时终端字号的比例，`0.3` 到 `1.0`，按所写的值原样使用；随 Cmd+= 缩放和显示缩放变化。其他值会导致加载失败。状态栏高度不变，字体族与终端相同。 |
+| `titlebar_segments` | `"right"` | 顶部状态栏作为集成标题栏带时显示的内容：`"right"` 为窗口名称和右侧列表，`"all"` 为名称和所有列表。其他值会导致加载失败。 |
+| `font_scale` | `1.0` | 状态栏文字大小占标签页标题字号（实时终端字号加 1 pt）的比例，`0.3` 到 `1.0`，按所写的值原样使用；默认值与标签栏一致。随 Cmd+= 缩放和显示缩放变化。其他值会导致加载失败。状态栏高度不变，字体族与终端相同。 |
 
-命令面板与 **切换状态栏显示** 一样，在本次会话中修改所有窗口的状态栏：**状态栏：移到顶部**（`status_line_position_top`）和 **状态栏：移到底部**（`status_line_position_bottom`）移动它，并只调整一次窗格大小；**状态栏：放大文字**（`increase_status_line_font_scale`）和 **状态栏：缩小文字**（`decrease_status_line_font_scale`）把 `font_scale` 调到 0.3 到 1.0 之间下一个 0.05 的倍数；**状态栏：重置文字大小**（`reset_status_line_font_scale`）将它恢复为 0.8。每个动作都可以在键位中绑定。**保存当前设置** 按 [保存当前设置](#保存当前设置) 中的规则写入 `enabled`、`position` 和 `font_scale`：文件中已有的 key 就地更新，即使新值是默认值；文件中没有的 key 只在会话值与其默认值不同时才写入。
+命令面板与 **切换状态栏显示** 一样，在本次会话中修改所有窗口的状态栏：**状态栏：移到顶部**（`status_line_position_top`）和 **状态栏：移到底部**（`status_line_position_bottom`）移动它，并只调整一次窗格大小；**状态栏：放大文字**（`increase_status_line_font_scale`）和 **状态栏：缩小文字**（`decrease_status_line_font_scale`）把 `font_scale` 调到 0.3 到 1.0 之间下一个 0.05 的倍数；**状态栏：重置文字大小**（`reset_status_line_font_scale`）将它恢复为 1.0。每个动作都可以在键位中绑定。**保存当前设置** 按 [保存当前设置](#保存当前设置) 中的规则写入 `enabled`、`position` 和 `font_scale`：文件中已有的 key 就地更新，即使新值是默认值；文件中没有的 key 只在会话值与其默认值不同时才写入。
 
 | `update_interval_ms` | `2000` | 采样段（内存）的采样间隔，`500` 到 `60000`。 |
 
@@ -164,11 +166,11 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | 预设 | `left` | `center` | `right` | 段默认值 |
 | --- | --- | --- | --- | --- |
-| `developer` | `mode`、`font`、`scroll`、`input`、`paste` | `link`、`sel` | `alerts`、`clip`、`health`、`glyphs`、`history`、`mem` | — |
-| `minimal` | — | — | `alerts`、`clip`、`health`、`mem` | — |
+| `developer` | `mode`、`font`、`scroll`、`input`、`paste` | `window`、`link`、`sel` | `alerts`、`clip`、`health`、`glyphs`、`history`、`mem` | — |
+| `minimal` | — | `window` | `alerts`、`clip`、`health`、`mem` | — |
 | `diagnostics` | 同 `developer` | 同 `developer` | `alerts`、`clip`、`health`、`glyphs`、`history`、`cpu`、`frame`、`out`、`path_check`、`tab_mem`、`mem` | `mem.sparkline = true` |
 
-除 `mem` 外，每个段只在有内容时显示，因此空闲窗口只显示 `内存: 412 MB`。
+除 `mem` 和 `window` 外，每个段只在有内容时显示，因此空闲窗口只显示窗口名称和 `内存: 412 MB`。
 
 | 段 | 显示 | 默认优先级 | 默认点击 |
 | --- | --- | --- | --- |
@@ -189,6 +191,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 | `paste` | 粘贴到当前窗格不会被括起时，以琥珀色显示 `粘贴: ⚠ 未括起`：括号粘贴模式关闭、窗格处于主屏幕，且其 shell 已通过 OSC 133 报告提示符（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）。没有 OSC 133 的窗格或正在运行命令的窗格从不显示。朗读值为"粘贴未使用括号模式，可能逐行执行"：SonicTerm 无法知道 shell 会如何处理换行。`cmd.exe` 不发送 OSC 133，因此从不显示该警告，尽管它的粘贴总是逐行执行；PowerShell 只有在提示符发送 OSC 133 时才显示。 | 560 | 无。 |
 | `ime` | 只显示输入法问题：复制模式丢弃一次提交后，在 `hold_secs` 内显示 `输入法: ⚠ 已丢弃（复制模式）`；或在组字的提交将进入搜索框或命令面板而不是窗格时显示 `输入法: → 搜索` / `输入法: → 命令面板`。正常向窗格组字时不显示。平台不报告组字事件时（部分 Wayland 环境），只会出现复制模式警告。不在任何预设中。 | 500 | 无。 |
 | `scroll` | 当前窗格向上滚动时显示 `滚动: ↑ 340`。 | 400 | 让窗格回到底部。 |
+| `window` | 窗口名称，如 `#2 Work`：与原生标题相同的文字，取最后一次写入原生标题的内容，因此程序快速改标题时每秒最多更新四次。`#N` 为暗色。它的中心位于窗口中线；中间列表中排在它前面的段在其左侧，排在后面的在其右侧，整组只在被两侧列表挤压时才移动。开启 `hide_sensitive` 时，标签页标题（可能含路径或主机名）在绘制和朗读文字中都显示为 `SonicTerm`；用重命名窗口设置的名称保留。原生标题不受此影响。状态栏较窄时先去掉 `#N`，再从中间缩短名称。 | 700，受保护 | 打开**重命名窗口**。 |
 | `history` | SonicTerm 因当前窗格的历史超过网格内存预算而丢弃回滚行后，以琥珀色显示 `历史: 已截断`；朗读值给出行数。超过 `[terminal] scrollback` 上限的滚动、清除、调整大小或降低上限都不会显示。点击它或程序清除回滚（`CSI 3 J`，大多数 shell 中的 `clear` 会发送）前一直显示，之后再次截断时重新显示。SonicTerm 没有清除回滚的动作，因此只有这两种确认方式。 | 300 | 确认截断。 |
 | `font` | `比例: 115%`：实时字号占配置字号的百分比，四舍五入到整数，只在不为 100% 时显示。朗读值为“百分之 115”。每个列出 `scroll` 的预设都把它放在 `scroll` 之前，因此处于复制模式、已放大且向上滚动的窗格显示 `复制 | 比例: 115% | 滚动: ↑ 340`。字号对整个应用生效，因此每个窗口显示相同的值。 | 280 | 重置字号（`reset_font_size`）。 |
 | `zoom` | 需手动加入。活动标签页中有分屏窗格被放大填满时显示 `缩放` 标记（活动标签页标题颜色的加粗文字，对比度低于 3:1 时改用主题前景色，没有背景），不带名称。 | 260 | 切换窗格放大（`toggle_pane_zoom`）。 |
@@ -204,13 +207,27 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 | `priority` | `0` 到 `1000` | 窗口变窄时，值越高保留越久。 |
 | `click` | `"default"`、`"none"` 或动作名 | `default` 执行该段自己的点击；`none` 让它不响应指针；不带参数的键位动作（如 `"show_memory_usage"`）在被点击的窗口中执行。`paste`、`ime` 和 `size` 只接受 `default` 或 `none`，二者都不响应。 |
 
-`[status_line.segment.mem]` 还接受 `show_trend`（`true`）、`sparkline`（`false`，`diagnostics` 中为 `true`：数字后面八个暗色单元，表示最近两分钟，每个单元是一个按墙钟对齐的 15 秒区间中的最大采样，在绘制单元的最小值和最大值之间缩放；只绘制已结束的区间，因此只在区间结束时变化；没有采样的时间段，例如窗口被遮挡或机器休眠，保持空白）、`warn_mib`（`1024`）和 `critical_mib`（`2048`，不小于 `warn_mib`），取值均为 `1` 到 `1048576`。`[status_line.segment.sel]` 还接受 `copied_secs`（`2`，`1` 到 `10`），即复制结果显示多久。`[status_line.segment.paste]` 接受 `paste`（`"when_off"`，默认，或 `"never"`）。`[status_line.segment.ime]` 接受 `hold_secs`（`8`，`1` 到 `60`），即复制模式警告显示多久。`[status_line.segment.size]` 接受 `hold_ms`（`1500`，`250` 到 `10000`）。`[status_line.segment.clip]` 接受 `hold_secs`（`10`，`1` 到 `600`）。`[status_line.segment.path_check]` 接受 `show_after_ms`（`300`，`100` 到 `5000`）、`hold_ms`（`1000`，`0` 到 `10000`）和 `warn_after_secs`（`10`，`1` 到 `600`）。`[status_line.segment.cpu]` 接受 `scale`（`"auto"`：Windows 上为 `"total"`，其它平台为 `"core"`）、`min_percent`（`5`，`0` 到 `1000`）、`hide_ratio`（`0.7`，`0.1` 到 `1.0`）和 `hold_samples`（`2`，`0` 到 `10`）。`[status_line.segment.out]` 接受 `scope`（`"pane"` 为焦点窗格，或 `"window"`）、`min_bytes_per_sec`（`1048576`，`1024` 到 `1073741824`），以及与 `cpu` 相同的 `hide_ratio` 和 `hold_samples`。`[status_line.segment.glyphs]` 接受 `min_count`（`1`，`1` 到 `1000`），低于此数时隐藏，以及 `ignore_private_use`（`false`；`true` 时不计入 Nerd Font 图标等私用区码位）。`[status_line.segment.input]` 接受 `hold_secs`（`8`，`1` 到 `600`），即拒绝或失败显示多久，以及 `held_after_ms`（`1500`，`250` 到 `60000`），即已接受的写入未完成多久后显示 `已等待`。`[status_line.segment.alerts]` 接受 `min_secs`（`10`，`0` 到 `86400`）和 `sources`（`["bell", "notify", "finished"]`；列出的来源较少时，其余来源关闭）。`[status_line]` 下和段表内的未知 key 会被忽略，并在每次加载时以一条列出全部未知 key 的 `sonicterm-cfg` 警告记录一次。
+`[status_line.segment.window]` 接受 `number`（`true`）；`false` 时不显示 `#N`。`[status_line.segment.mem]` 还接受 `show_trend`（`true`）、`sparkline`（`false`，`diagnostics` 中为 `true`：数字后面八个暗色单元，表示最近两分钟，每个单元是一个按墙钟对齐的 15 秒区间中的最大采样，在绘制单元的最小值和最大值之间缩放；只绘制已结束的区间，因此只在区间结束时变化；没有采样的时间段，例如窗口被遮挡或机器休眠，保持空白）、`warn_mib`（`1024`）和 `critical_mib`（`2048`，不小于 `warn_mib`），取值均为 `1` 到 `1048576`。`[status_line.segment.sel]` 还接受 `copied_secs`（`2`，`1` 到 `10`），即复制结果显示多久。`[status_line.segment.paste]` 接受 `paste`（`"when_off"`，默认，或 `"never"`）。`[status_line.segment.ime]` 接受 `hold_secs`（`8`，`1` 到 `60`），即复制模式警告显示多久。`[status_line.segment.size]` 接受 `hold_ms`（`1500`，`250` 到 `10000`）。`[status_line.segment.clip]` 接受 `hold_secs`（`10`，`1` 到 `600`）。`[status_line.segment.path_check]` 接受 `show_after_ms`（`300`，`100` 到 `5000`）、`hold_ms`（`1000`，`0` 到 `10000`）和 `warn_after_secs`（`10`，`1` 到 `600`）。`[status_line.segment.cpu]` 接受 `scale`（`"auto"`：Windows 上为 `"total"`，其它平台为 `"core"`）、`min_percent`（`5`，`0` 到 `1000`）、`hide_ratio`（`0.7`，`0.1` 到 `1.0`）和 `hold_samples`（`2`，`0` 到 `10`）。`[status_line.segment.out]` 接受 `scope`（`"pane"` 为焦点窗格，或 `"window"`）、`min_bytes_per_sec`（`1048576`，`1024` 到 `1073741824`），以及与 `cpu` 相同的 `hide_ratio` 和 `hold_samples`。`[status_line.segment.glyphs]` 接受 `min_count`（`1`，`1` 到 `1000`），低于此数时隐藏，以及 `ignore_private_use`（`false`；`true` 时不计入 Nerd Font 图标等私用区码位）。`[status_line.segment.input]` 接受 `hold_secs`（`8`，`1` 到 `600`），即拒绝或失败显示多久，以及 `held_after_ms`（`1500`，`250` 到 `60000`），即已接受的写入未完成多久后显示 `已等待`。`[status_line.segment.alerts]` 接受 `min_secs`（`10`，`0` 到 `86400`）和 `sources`（`["bell", "notify", "finished"]`；列出的来源较少时，其余来源关闭）。`[status_line]` 下和段表内的未知 key 会被忽略，并在每次加载时以一条列出全部未知 key 的 `sonicterm-cfg` 警告记录一次。
 
 在每个列表（左、中、右）内，相邻显示的段之间居中绘制一个暗色的 `|`；列表边缘和列表之间不绘制。分隔符不属于任何段，因此点击或右键单击它没有作用，辅助技术也不会朗读它；排布时计入它的宽度，因此移除一个段时它的分隔符也一并移除。
 
 窗口过窄时，状态栏先使用紧凑形式（内存去掉箭头和迷你图，`mode` 去掉 `鼠标`），再从中间缩短链接的路径，然后按优先级从低到高整段移除。健康错误、广播标记和链接的目标主机最后移除。
 
-状态栏高度为标签栏的 0.6 倍，至少 20 个逻辑像素，并随字体缩放和显示缩放变化。它与标签栏共用背景，只在靠近终端的一侧有一条细线。文字按字体的大写字母高度在细线以外的区域内垂直居中。`position = "top"`（默认）时它位于窗格上方、macOS 标题栏区域下方，细线在其下边缘；`"bottom"` 时它位于窗格与标签栏之间，标签栏隐藏时位于窗口底部，细线在其上边缘。拆出的窗口以相同方式放置它。右上角由 READONLY 标记、搜索栏和通知组成的堆叠从顶部状态栏和标题栏区域下方开始，因此不会遮住状态栏。打开或关闭它，或重载时 `position` 改变，都会调整一次窗格大小；用 `[window]` `rows` 打开的窗口保持该行数。在状态栏上的按下和滚轮不会传给窗格或程序。它只出现在终端窗口中，不出现在内存占用报告中。
+状态栏高度为标签栏的 0.6 倍，至少 20 个逻辑像素，并随字体缩放和显示缩放变化。它与标签栏共用背景，只在靠近终端的一侧有一条细线。文字按字体的大写字母高度在细线以外的区域内垂直居中。`position = "top"`（默认）时它位于窗格上方，细线在其下边缘；在[集成标题栏](#集成标题栏)中它就是标题栏带，文字以窗口按钮的中线居中；`"bottom"` 时它位于窗格与标签栏之间，标签栏隐藏时位于窗口底部，细线在其上边缘。拆出的窗口以相同方式放置它。右上角由 READONLY 标记、搜索栏和通知组成的堆叠从顶部状态栏和标题栏带下方开始，因此不会遮住两者。打开或关闭它，或重载时 `position` 改变，都会调整一次窗格大小；用 `[window]` `rows` 打开的窗口保持该行数。在状态栏上的按下和滚轮不会传给窗格或程序。它只出现在终端窗口中，不出现在内存占用报告中。
+
+#### 集成标题栏
+
+设置 `[window] titlebar = "integrated"` 时，终端窗口用一条顶部标题栏带代替系统标题栏。它使用标签栏的背景色，在靠近终端的一侧有一条细线，窗口名称居中显示。
+
+- **macOS：** 标题栏透明地覆盖在窗口内容上，红绿灯按钮位于 macOS 放置的位置。标题栏带的高度为红绿灯中心高度的两倍，因此文字与红绿灯共用一条中线。左侧列表从缩放按钮右侧 8 pt 处开始。
+- **Windows：** 窗口没有系统边框，但保留阴影。SonicTerm 在标题栏带右侧绘制 46 像素宽的最小化、最大化/还原和关闭按钮，使用细线条。悬停的按钮有淡色填充，关闭按钮变为红底白线，未获得焦点的窗口线条变暗。在按钮上松开按键时才执行操作；移出按钮会取消。关闭按钮与系统按钮一样关闭窗口。未最大化的窗口边缘 6 像素可调整大小，并显示相应光标。不提供 Windows 11 的贴靠布局浮出菜单；Win+方向键和 Win+Z 仍然有效。读屏软件把这三个按钮读作带名称的按钮（最小化、最大化或还原、关闭），可通过点击操作按下，无论状态栏是否显示。
+- **状态栏在顶部：** 状态栏就是标题栏带，高度为 `max(按钮高度, 状态栏高度)`。它显示窗口名称；`titlebar_segments = "right"` 时还显示右侧列表。在标题栏带中名称的优先级高于所有其他段：名称过长时先隐藏右侧段，再去掉 `#N`，最后从中间缩短。
+- **状态栏在底部或关闭：** 标题栏带只显示名称，高度至少为状态栏文字高度。底部状态栏保持原位，不再显示名称。
+- **指针：** 在标题栏带空白处左键按下可拖动窗口。双击执行系统的标题栏操作：macOS 遵循**连按窗口标题栏以**的设置（默认缩放，也可最小化或不操作）；Windows 最大化或还原，使用系统的双击时间。按下段时执行该段的点击，右键打开段清单，与普通状态栏相同。标题栏带接收的按键，其松开事件不会传给窗格。
+- **全屏：** 没有窗口按钮，因此标题栏带只容纳状态栏；状态栏关闭时没有标题栏带。
+- **原生标题：** 窗口标题仍会设置，因此 Mission Control、任务栏、Alt+Tab、窗口菜单和读屏软件仍能获得名称。macOS 上集成标题栏带中隐藏标题文字。
+
+新窗口的大小只计入一次标题栏带，因此 `[window] rows` 保持行数。
 
 #### 运行时选择段
 

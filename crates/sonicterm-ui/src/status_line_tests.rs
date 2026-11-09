@@ -127,7 +127,14 @@ pub(super) fn columns(text: &str) -> f32 {
 
 /// Fit metrics with no padding or gaps, so widths are plain column counts.
 pub(super) fn tight(width: f32) -> FitMetrics {
-    FitMetrics { width, edge_pad: 0.0, segment_gap: 1.0, separator_width: 0.0 }
+    FitMetrics {
+        width,
+        edge_pad: 0.0,
+        segment_gap: 1.0,
+        separator_width: 0.0,
+        left_inset: 0.0,
+        right_inset: 0.0,
+    }
 }
 
 /// Inputs with a 412 MiB memory figure and nothing else to say.

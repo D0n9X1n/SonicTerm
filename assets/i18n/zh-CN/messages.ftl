@@ -350,6 +350,11 @@ status-spoken-glyphs = 缺失字形
 status-spoken-history = 历史记录
 status-spoken-font = 字号比例
 status-spoken-zoom = 缩放
+status-spoken-window = 窗口
+caption-minimize = 最小化
+caption-maximize = 最大化
+caption-restore = 还原
+caption-close = 关闭
 status-spoken-size = 尺寸
 status-accessible-strip = 状态栏
 status-accessible-warning = 警告：
@@ -375,6 +380,7 @@ status-checklist-center = 中
 status-checklist-right = 右
 status-checklist-sensitive = 敏感
 status-checklist-hidden = 已隐藏
+status-checklist-in-titlebar = 始终显示在标题栏
 status-group-core = 核心
 status-group-pointer = 指针
 status-group-input = 输入
@@ -385,6 +391,7 @@ status-group-program-reported = 程序报告
 status-name-health = 状态
 status-name-mode = 模式
 status-name-zoom = 缩放
+status-name-window = 窗口
 
 # Save Current Settings
 settings-saved = 已保存当前设置

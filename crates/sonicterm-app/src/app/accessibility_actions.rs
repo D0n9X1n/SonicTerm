@@ -258,11 +258,36 @@ impl App {
             .registry
             .windows
             .get(&window_id)
-            .and_then(|window| window.status_strip.as_ref())
-            .and_then(|strip| strip.segments.iter().find(|segment| segment.id == id))
+            .and_then(|window| {
+                // The name band's segment answers too, for a window whose strip is not shown.
+                [window.status_strip.as_ref(), window.title_band.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|strip| strip.segments.iter().find(|segment| segment.id == id))
+            })
             .and_then(|segment| segment.click.clone());
         if let Some(click) = click {
             self.run_status_click(window_id, click);
+        }
+    }
+}
+
+impl App {
+    /// A reader's click on `window_id`'s name band: it runs the name's click only while a reader is
+    /// connected and the band still exposes exactly `target`, the click, pane, settings and resize
+    /// epoch the request named, as a strip segment's click is checked.
+    pub(super) fn click_name_band(&mut self, window_id: WindowId, target: Option<RequestTarget>) {
+        let structure = self.exposed_structure(window_id);
+        let current = self.accessibility.get(&window_id).is_some_and(|state| state.active)
+            && structure.name_band.as_ref().is_some_and(|name| {
+                name.action.is_some() && target == Some(target_of(&structure, name))
+            });
+        if current {
+            // The band shows the same name and click the request named.
+            self.click_status_segment(window_id, StatusSegmentId::Window);
+        } else {
+            // When: current is false, the target changed or no reader is connected.
+            tracing::debug!(?window_id, "stale name band click dropped");
         }
     }
 }

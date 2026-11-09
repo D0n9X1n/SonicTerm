@@ -351,11 +351,13 @@ impl GpuRenderer {
             // When: `fault_present_error` is armed, the presenter call fails as a real `Err` would,
             // and the frame's staged strip is discarded with it.
             self.status_line_layouts.settle(false);
+            self.band_layouts.settle(false);
             return Err(anyhow!("injected presentation failure"));
         }
         let outcome = self.present_frame(&layers, &mut gpu_timing);
         // Only a presented frame's strip is what the user sees and may be routed or read aloud.
         self.status_line_layouts.settle(matches!(outcome, Ok(PresentOutcome::Presented)));
+        self.band_layouts.settle(matches!(outcome, Ok(PresentOutcome::Presented)));
         let outcome = outcome?;
         // Only a presented frame's field geometry is what the user sees and may be hit-tested.
         self.presented_fields

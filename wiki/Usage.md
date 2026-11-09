@@ -188,6 +188,9 @@ changes rapidly, such as a progress display in an OSC title, is written at most
 four times a second, always ending on its latest text. Switching, closing or
 dragging out a tab, and renaming the window, update the title at once. A hidden or covered
 window refreshes its tab's working-directory or OSC title when it is next shown.
+The same text appears centred in the status line's `window` segment, and in the
+titlebar band of an [integrated titlebar](Configuration#integrated-titlebar);
+clicking it opens **Rename Window**.
 Use **Rename Window** in the command palette to set a custom name, for example
 `#2 Work`, which replaces the tab part. Edit only the name: Enter trims surrounding whitespace
 and saves, blank input returns the title to the active tab, and Escape cancels. Names

@@ -368,7 +368,7 @@ fn a_status_line_save_writes_position_only_when_it_differs() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Save writes `font_scale` only when the session's differs from the file's, as `0.85`, and a
+/// Save writes `font_scale` only when the session's differs from the file's, as `0.95`, and a
 /// reload shows it.
 #[test]
 fn a_status_line_save_writes_font_scale_only_when_it_differs() {
@@ -380,10 +380,10 @@ fn a_status_line_save_writes_font_scale_only_when_it_differs() {
     Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&unchanged)).unwrap();
     assert!(!std::fs::read_to_string(&path).unwrap().contains("font_scale"));
     let mut larger = unchanged.clone();
-    larger.font_scale = StatusFontScale::DEFAULT.stepped(1);
+    larger.font_scale = StatusFontScale::DEFAULT.stepped(-1);
     Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&larger)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("font_scale = 0.85"), "{text}");
+    assert!(text.contains("font_scale = 0.95"), "{text}");
     assert_eq!(reloaded_lists(&path), larger, "the reload shows the saved scale");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -408,7 +408,7 @@ fn a_status_line_save_updates_present_keys_in_place_even_to_their_defaults() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(
         text.contains(
-            "[status_line]\nenabled = false # on\nposition = \"top\"\nfont_scale = 0.8\n"
+            "[status_line]\nenabled = false # on\nposition = \"top\"\nfont_scale = 1.0\n"
         ),
         "each present key is rewritten in place: {text}"
     );

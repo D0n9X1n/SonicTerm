@@ -11,6 +11,9 @@ mod unix;
 #[path = "window_setup/windows.rs"]
 mod windows_os;
 
+#[path = "window_setup/titlebar.rs"]
+pub(crate) mod titlebar;
+
 #[cfg(not(target_os = "windows"))]
 use unix::destination_available_inner_size;
 #[cfg(not(target_os = "windows"))]
@@ -20,14 +23,15 @@ use windows_os::destination_available_inner_size;
 #[cfg(target_os = "windows")]
 pub use windows_os::install_native_window_background;
 
-/// Apply WezTerm-style integrated titlebar on macOS.
-///
-/// The tab bar is now always bottom-pinned, so there is no top tab strip to
-/// fuse with the native titlebar. Keep this helper as a no-op compatibility
-/// shim so all window creation sites stay in sync.
+/// `attrs` for a window with titlebar `mode`: every window-creation site passes through here, so
+/// terminal windows get the configured titlebar and report windows pass
+/// [`TitlebarMode::Native`](sonicterm_cfg::config::TitlebarMode::Native).
 #[doc(hidden)]
-pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
-    attrs
+pub fn with_integrated_titlebar(
+    attrs: WindowAttributes,
+    mode: sonicterm_cfg::config::TitlebarMode,
+) -> WindowAttributes {
+    titlebar::titlebar_attributes(attrs, mode)
 }
 
 /// Embedded application icon (256×256 PNG), used for the live window's
@@ -124,11 +128,33 @@ pub(super) fn configured_window_size(
         + config.window.padding_top
         + config.window.padding_bottom
         + if tab_bar_visible { sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT } else { 0.0 }
-        + match config.status_line.enabled {
-            true => sonicterm_gpu::status_strip::status_line_height(config.font.size, 1.0),
-            false => 0.0,
-        };
+        + top_chrome_height(config);
     winit::dpi::LogicalSize::new(f64::from(width), f64::from(height))
+}
+
+/// Logical px the top chrome and a strip take from a new window's inner height: the strip's own
+/// height, and for an integrated titlebar the band, which a top strip shares (`max`) and any other
+/// strip sits apart from (`+`). The same rule lays the window out once it exists.
+pub(super) fn top_chrome_height(config: &Config) -> f32 {
+    let strip = if config.status_line.enabled {
+        sonicterm_gpu::status_strip::status_line_height(config.font.size, 1.0)
+    } else {
+        // When: status_line.enabled is false, the strip is off and takes no height.
+        0.0
+    };
+    let band = titlebar::creation_band_estimate(config.window.titlebar);
+    let top_strip = config.status_line.position == sonicterm_cfg::status_line::StatusPosition::Top;
+    if band > 0.0 && config.status_line.enabled && top_strip {
+        // the strip is the integrated band, the two share one height.
+        band.max(strip)
+    } else if band > 0.0 {
+        // When: the band stands alone, a name band at least the strip's text height, plus any
+        // bottom strip.
+        band.max(sonicterm_gpu::status_strip::status_line_height(config.font.size, 1.0)) + strip
+    } else {
+        // When: band is 0, the titlebar is native and only the strip is inside the content.
+        strip
+    }
 }
 
 pub(super) fn inherited_window_size(
@@ -362,3 +388,7 @@ pub(super) fn apply_window_state_minimum(window: &mut WindowState) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "window_setup_tests.rs"]
+mod window_setup_tests;

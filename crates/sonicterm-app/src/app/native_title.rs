@@ -43,6 +43,14 @@ pub(crate) struct NativeTitleState {
     written_at: Option<Instant>,
     /// A composed title waiting for the throttle interval to pass.
     pending: Option<String>,
+    /// The part of `applied` after `#N`, which the status line's window segment shows.
+    pub(crate) applied_shown: Option<String>,
+    /// `applied_shown` is the user's own window name, not a tab title. It follows the inputs even
+    /// when they compose the same text, so clearing a name that equals the tab title still lets
+    /// `hide_sensitive` redact it.
+    pub(crate) applied_custom: bool,
+    /// The window number `applied` shows.
+    pub(crate) applied_number: Option<u64>,
     /// Native writes made, for tests that pin the write count.
     #[cfg(test)]
     pub(crate) writes: u32,
@@ -150,13 +158,31 @@ fn window_title_text_with(
     body: Option<&str>,
     draws: impl Fn(char) -> bool + Copy,
 ) -> String {
-    let shown = [Some(name), body]
-        .into_iter()
-        .flatten()
+    format!("#{number} {}", window_title_part_with(name, body, draws).0)
+}
+
+/// The part of a window title after `#N` for `name` and `body`, and whether it is the user's
+/// own name: the first non-blank of the name, the tab body and the application name.
+fn window_title_part_with(
+    name: &str,
+    body: Option<&str>,
+    draws: impl Fn(char) -> bool + Copy,
+) -> (String, bool) {
+    let custom = title_part(name, draws);
+    if !custom.is_empty() {
+        // When: custom is not empty, the user's window name is the title.
+        return (custom, true);
+    }
+    let shown = body
         .map(|text| title_part(text, draws))
-        .find(|part| !part.is_empty())
+        .filter(|part| !part.is_empty())
         .unwrap_or_else(|| NATIVE_WINDOW_TITLE.to_owned());
-    format!("#{number} {shown}")
+    (shown, false)
+}
+
+/// [`window_title_part_with`] with the platform's title font coverage.
+pub(super) fn window_title_part(name: &str, body: Option<&str>) -> (String, bool) {
+    window_title_part_with(name, body, native_title_font::title_font_draws)
 }
 
 impl App {
@@ -241,10 +267,13 @@ fn sync_window(
         let user_change =
             state.tab_id != tab.map(|tab| tab.id) || state.name != window.custom_window_name;
         state.remember_inputs(&window.custom_window_name, tab);
-        let title =
-            window_title_text(key.raw(), &window.custom_window_name, tab.map(tab_display_body));
+        let (shown, custom) =
+            window_title_part(&window.custom_window_name, tab.map(tab_display_body));
+        let title = format!("#{} {shown}", key.raw());
         if state.applied.as_deref() == Some(title.as_str()) {
-            // When: different inputs compose the same title, so it stays and nothing waits.
+            // When: different inputs compose the same title, so it stays and nothing waits; its
+            // provenance still follows the inputs.
+            state.applied_custom = custom;
             state.pending = None;
             return None;
         }
@@ -259,6 +288,13 @@ fn sync_window(
     if let Some(native) = window.window.as_ref() {
         native.set_title(&title);
     }
+    // The applied title's parts, for the status line: the text after `#N`, and whether it is the
+    // user's name. A name wins whenever it shows, and a rename is written at once, so a throttled
+    // title is a tab's.
+    let number_prefix = format!("#{} ", key.raw());
+    state.applied_shown = Some(title.strip_prefix(&number_prefix).unwrap_or(&title).to_owned());
+    state.applied_custom = window_title_part(&window.custom_window_name, None).1;
+    state.applied_number = Some(key.raw());
     state.applied = Some(title);
     state.written_at = Some(now);
     state.pending = None;
@@ -272,3 +308,7 @@ fn sync_window(
 #[cfg(test)]
 #[path = "native_title_tests.rs"]
 mod native_title_tests;
+
+#[cfg(test)]
+#[path = "native_title_band_tests.rs"]
+mod native_title_band_tests;
