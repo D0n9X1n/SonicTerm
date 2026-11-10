@@ -185,9 +185,9 @@ impl App {
             self.cancel_window_band(window_id);
         }
     }
-    /// `toggle_integrated_titlebar`: switch every terminal window between the integrated and the
-    /// system titlebar for this session, on a platform whose titlebar can switch; report windows
-    /// keep the system titlebar. Each window's native titlebar follows on the next band refresh,
+    /// `toggle_integrated_titlebar`: switch every terminal window to the opposite of the titlebar
+    /// the frontmost terminal window has, for this session, on a platform whose titlebar can
+    /// switch; report windows keep the system titlebar. Each window's native titlebar follows on the next band refresh,
     /// after it leaves full screen if it is in it, and the panes refit to the new band. Prewarmed
     /// tear-out windows were built with the old titlebar, so the pool is emptied and refills.
     /// A config reload sets the titlebar of windows opened afterwards again.
@@ -197,7 +197,13 @@ impl App {
             // When: titlebar_switchable is false, this platform keeps the titlebar it has.
             return;
         }
-        let mode = titlebar::other_mode(self.config.window.titlebar);
+        // The window the toggle came from decides; a reload may have left the config default
+        // different from what open windows show.
+        let current = self
+            .frontmost()
+            .filter(|window| !window.role.is_report())
+            .map_or(self.config.window.titlebar, |window| window.titlebar);
+        let mode = titlebar::other_mode(current);
         self.config.window.titlebar = mode;
         self.registry.warm_window_pool.clear();
         let mut changed = Vec::new();

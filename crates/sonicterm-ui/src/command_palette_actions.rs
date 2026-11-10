@@ -221,6 +221,12 @@ pub fn palette_actions() -> Vec<Action> {
     actions
 }
 
+/// Whether the palette may list `action` on this platform: the integrated titlebar toggle only on
+/// macOS, the one platform whose titlebar can switch; every other action everywhere.
+pub fn palette_lists(action: &Action) -> bool {
+    *action != Action::ToggleIntegratedTitlebar || cfg!(target_os = "macos")
+}
+
 /// Coverage assertion: every variant kind from
 /// [`ALL_VARIANT_KINDS`] is represented by at least one entry in
 /// [`all_actions`]. Lives here (not in the test crate) so the public

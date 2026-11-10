@@ -148,7 +148,8 @@ pub(crate) const fn shown_mode(mode: TitlebarMode, synced: bool) -> TitlebarMode
 
 /// Bring the live `window`'s native titlebar to `mode` where [`titlebar_switchable`], once it is
 /// out of full screen: AppKit owns the titlebar while a window is full screen or entering or
-/// leaving it, so a switch then waits for the next call. Returns whether `window` now has `mode`.
+/// leaving it, which its full-screen style-mask bit shows until the exit animation ends, so a
+/// switch then waits for the next call. Returns whether `window` now has `mode`.
 pub(crate) fn sync_titlebar(window: &Window, mode: TitlebarMode) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -157,8 +158,10 @@ pub(crate) fn sync_titlebar(window: &Window, mode: TitlebarMode) -> bool {
             // When: has_full_size_content already matches, the window has this titlebar.
             return true;
         }
-        if window.fullscreen().is_some() {
-            // When: the window is full screen, the switch waits until it leaves.
+        let full_screen = macos::in_full_screen(window).unwrap_or(true);
+        if full_screen || window.fullscreen().is_some() {
+            // When: AppKit or winit has the window in full screen, or animating out of it, the
+            // switch waits until the transition ends.
             return false;
         }
         macos::apply_titlebar(window, want)

@@ -176,6 +176,8 @@ fn the_titlebar_toggle_switches_terminal_windows_only() {
     }
     app.registry.windows.get_mut(&report).unwrap().role = crate::app::WindowRole::MemoryReport;
     app.registry.windows.get_mut(&report).unwrap().titlebar = Native;
+    // The toggle reads the frontmost terminal window's titlebar.
+    app.registry.frontmost_window = Some(terminal);
     let start = app.config.window.titlebar;
     app.toggle_integrated_titlebar();
     if !titlebar::titlebar_switchable() {
@@ -191,4 +193,28 @@ fn the_titlebar_toggle_switches_terminal_windows_only() {
     app.toggle_integrated_titlebar();
     assert_eq!(app.config.window.titlebar, start, "a second toggle switches back");
     assert_eq!(app.registry.windows[&terminal].titlebar, start);
+}
+
+/// The toggle switches to the opposite of the frontmost window's titlebar, not of the config
+/// default: after a reload has set the default back to integrated while open windows stay native,
+/// one toggle makes them integrated, so it is never a no-op.
+#[test]
+fn the_titlebar_toggle_follows_the_frontmost_window_not_the_config_default() {
+    use sonicterm_cfg::config::TitlebarMode::{Integrated, Native};
+    if !titlebar::titlebar_switchable() {
+        // Only macOS switches a live titlebar; elsewhere the first test covers the no-op.
+        return;
+    }
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let window = app.__test_seed_child_window(&["a"]);
+    app.registry.windows.get_mut(&window).unwrap().titlebar = Native;
+    app.registry.frontmost_window = Some(window);
+    app.config.window.titlebar = Integrated;
+    app.toggle_integrated_titlebar();
+    assert_eq!(app.registry.windows[&window].titlebar, Integrated);
+    assert_eq!(app.config.window.titlebar, Integrated);
 }

@@ -574,6 +574,10 @@ impl CommandPalette {
         self.all = palette_actions().into_iter().map(PaletteEntry::Command).collect();
         for binding in &keymap.bindings {
             let action = &binding.action.0;
+            if !palette_lists(action) {
+                // When: palette_lists is false, the binding still works but the palette hides it.
+                continue;
+            }
             if !self
                 .all
                 .iter()
@@ -961,6 +965,8 @@ mod modes;
 #[path = "command_palette_presentation.rs"]
 mod presentation;
 
-pub use actions::{action_display_name, all_actions, covers_every_variant_kind, palette_actions};
+pub use actions::{
+    action_display_name, all_actions, covers_every_variant_kind, palette_actions, palette_lists,
+};
 use presentation::CommandPresentation;
 pub(crate) use presentation::PaletteText;

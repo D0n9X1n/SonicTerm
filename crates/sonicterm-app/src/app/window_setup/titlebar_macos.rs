@@ -114,3 +114,11 @@ pub(super) fn has_full_size_content(window: &Window) -> Option<bool> {
     let ns_window = ns_window(window)?;
     Some(ns_window.styleMask().contains(NSWindowStyleMask::FullSizeContentView))
 }
+
+/// Whether AppKit has `window` in full screen, or still animating out of it: its full-screen
+/// style-mask bit stays set until the exit transition ends, unlike winit's own state, which clears
+/// before the animation. `None` off the main thread or without an AppKit window.
+pub(super) fn in_full_screen(window: &Window) -> Option<bool> {
+    let ns_window = ns_window(window)?;
+    Some(ns_window.styleMask().contains(NSWindowStyleMask::FullScreen))
+}
