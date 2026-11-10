@@ -43,13 +43,58 @@ pub struct UiPalette {
     pub search_current: [f32; 4],
 }
 
+/// Contrast the theme foreground needs on a palette color before the bars use it; the band's
+/// quiet text has its own 4.5:1 floor and its own fallbacks.
+const CHROME_FOREGROUND_CONTRAST: f32 = 3.0;
+
+/// Contrast the active tab title needs on a palette color before the bars use it: the WCAG AA
+/// text floor, so the active tab and a focused band's values never fade into the bars.
+const CHROME_ACTIVE_CONTRAST: f32 = 4.5;
+
+/// WCAG contrast ratio between two opaque linear-sRGB colors.
+fn contrast_linear(first: [f32; 4], second: [f32; 4]) -> f32 {
+    let (one, two) = (relative_luminance(first), relative_luminance(second));
+    (one.max(two) + 0.05) / (one.min(two) + 0.05)
+}
+
+/// Relative luminance of an opaque linear-sRGB color.
+fn relative_luminance(rgba: [f32; 4]) -> f32 {
+    0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
+}
+
+/// The chrome background from `colors`' own palette: `tab.bar_bg` when the theme gives the bars
+/// their own color, else `ansi.black` when it differs from the terminal background, so the bars
+/// stay apart from the terminal. A candidate is used only when it is lighter than the background
+/// darkened 8% (so it is never black), the foreground reads at 3:1 on it and the active tab title
+/// at 4.5:1; a theme with no such candidate gets that darkened shade.
+fn chrome_background(colors: &sonicterm_cfg::theme::Palette) -> [f32; 4] {
+    let background = colors.background.0.as_str();
+    let foreground = color::hex(&colors.foreground.0);
+    let active = color::hex(&colors.tab.active_fg.0);
+    let derived = color::hex_with_lightness_delta(background, -0.08);
+    [colors.tab.bar_bg.0.as_str(), colors.ansi.black.0.as_str()]
+        .into_iter()
+        .filter(|candidate| !candidate.eq_ignore_ascii_case(background))
+        .map(color::hex)
+        .find(|candidate| {
+            relative_luminance(*candidate) > relative_luminance(derived)
+                && contrast_linear(foreground, *candidate) >= CHROME_FOREGROUND_CONTRAST
+                && contrast_linear(active, *candidate) >= CHROME_ACTIVE_CONTRAST
+        })
+        .unwrap_or(derived)
+}
+
 impl UiPalette {
     /// Derive a chrome palette from the active terminal [`Theme`].
     ///
     /// - `accent`        — `theme.colors.tab.active_fg` (the theme's
     ///   explicit chrome accent), e.g. `#fabd2f` for gruvbox-dark-hard,
     ///   `#7aa2f7` for tokyo-night.
-    /// - `bg_base`       — `theme.colors.background` shifted -8% lightness.
+    /// - `bg_base`       — the chrome background (tab bar, status strip, titlebar band), a theme
+    ///   palette color: `theme.colors.tab.bar_bg` when it differs from the background, else
+    ///   `theme.colors.ansi.black` when that differs, each only if it is lighter than the
+    ///   derived shade, the foreground reads at 3:1 and `tab.active_fg` at 4.5:1 on it; else
+    ///   the background shifted -8% lightness.
     /// - `bg_elevated`   — `theme.colors.background` (i.e. base).
     /// - `bg_surface`    — `theme.colors.background` shifted +5% lightness.
     /// - `bg_hover`      — `foreground` @ 6% alpha.
@@ -84,7 +129,7 @@ impl UiPalette {
             color::hex(&theme_colors.tab.active_fg.0)
         };
         let bg_elevated = color::hex(&theme_colors.background.0);
-        let bg_base = color::hex_with_lightness_delta(&theme_colors.background.0, -0.08);
+        let bg_base = chrome_background(theme_colors);
         let bg_surface = color::hex_with_lightness_delta(&theme_colors.background.0, 0.05);
         let fg = color::hex(&theme_colors.foreground.0);
         let text_secondary = color::hex_with_lightness_delta(&theme_colors.foreground.0, -0.15);
