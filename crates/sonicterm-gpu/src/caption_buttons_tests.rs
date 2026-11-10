@@ -7,6 +7,7 @@ const COLORS: CaptionColors = CaptionColors {
     glyph: [0.9, 0.9, 0.9, 1.0],
     hover: [0.06, 0.06, 0.06, 0.06],
     pressed: [0.1, 0.1, 0.1, 0.1],
+    quiet: [0.5, 0.5, 0.5, 1.0],
 };
 
 /// A 46 × 32 button at the origin, at scale 1.
@@ -39,6 +40,7 @@ fn fills_follow_hover_and_press_and_close_alone_turns_red() {
         1.0,
     );
     assert_eq!(pressed[0].color, COLORS.pressed, "press wins over hover");
+    assert!(pressed[1..].iter().all(|fill| fill.color == COLORS.quiet), "a held glyph quietens");
     let close = caption_fills(
         CaptionButton::Close,
         RECT,
@@ -76,7 +78,8 @@ fn strokes_stay_inside_the_button_on_whole_pixels() {
     }
 }
 
-/// Maximise draws one square and restore two; an unfocused window dims every stroke.
+/// Maximise draws one square and restore two; an unfocused window draws every stroke in the
+/// quiet tone its band text uses, not a faded glyph color.
 #[test]
 fn maximise_and_restore_differ_and_unfocused_strokes_dim() {
     let square = caption_fills(CaptionButton::Maximize, RECT, &state(None, None), &COLORS, 1.0);
@@ -85,5 +88,5 @@ fn maximise_and_restore_differ_and_unfocused_strokes_dim() {
     assert_eq!(caption_fills(CaptionButton::Maximize, RECT, &restore, &COLORS, 1.0).len(), 6);
     let unfocused = CaptionState { focused: false, ..state(None, None) };
     let dim = caption_fills(CaptionButton::Minimize, RECT, &unfocused, &COLORS, 1.0);
-    assert!(dim.iter().all(|fill| fill.color[3] < COLORS.glyph[3]));
+    assert!(dim.iter().all(|fill| fill.color == COLORS.quiet));
 }

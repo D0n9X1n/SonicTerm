@@ -51,10 +51,19 @@ impl GpuRenderer {
         if band_px > 0.0 {
             // The caption buttons draw over whichever surface is the band.
             let palette = self.chrome_caches.palette.palette_for(theme);
+            let band_name = crate::status_strip::StatusColors::resolve(
+                theme,
+                self.tab_active_fg,
+                self.tab_inactive_fg,
+                &palette,
+            )
+            .band_name;
+            // Neutral like Windows 11's: text-colored glyphs, and a press as faint as a hover.
             let colors = crate::caption_buttons::CaptionColors {
-                glyph: crate::color::chrome_color_to_linear_rgba(self.tab_active_fg),
+                glyph: palette.text_primary,
                 hover: palette.bg_hover,
-                pressed: palette.bg_active,
+                pressed: palette.bg_hover,
+                quiet: crate::color::chrome_color_to_linear_rgba(band_name),
             };
             let buttons = sonicterm_render_model::boundary::ui::window_band::caption_buttons(
                 &self.window_band,
