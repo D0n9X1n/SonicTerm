@@ -575,3 +575,370 @@ fn real_pointer_hover_click_and_leave_reach_the_caption_logic() {
     event_loop.run_app(&mut probe).unwrap();
     assert!(probe.failures.is_empty(), "{:#?}", probe.failures);
 }
+/// With the real pointer (moved, never clicked; clicks are posted to the test window), the App's
+/// own band handlers run on winit's real events for a SonicTerm window whose snap hook the App's
+/// band refresh installed: resting on maximise hovers it with no leave; a press there holds the
+/// capture and its release maximises the window exactly once; a press dragged onto the pane and
+/// released there cancels and leaves the window as it was; the hover clears outside. A press is
+/// posted only while the App shows maximise hovered, so a miss cannot start a blocking window drag.
+/// Ignored by default because it moves the pointer, which is put back before any failure is
+/// reported.
+#[test]
+#[ignore = "moves the real pointer over a test window"]
+fn real_pointer_hover_click_and_cancel_drive_the_app_caption_buttons() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use crate::app::pty_test_support::{isolated_with_output, phase, IsolationConfig};
+    use crate::app::App;
+    use sonicterm_cfg::config::{BackdropKind, Config, SoftwareRenderMode, TitlebarMode};
+    use sonicterm_cfg::{keymap::Keymap, theme::Theme};
+    use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
+    use sonicterm_ui::window_band::{CaptionButton, CaptionState};
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, PostMessageW, SetCursorPos, WM_LBUTTONUP,
+    };
+    use winit::application::ApplicationHandler;
+    use winit::event::{ElementState, MouseButton, WindowEvent};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+    use winit::window::{Window, WindowId, WindowLevel};
+    if isolated_with_output(IsolationConfig::ORDINARY) {
+        return;
+    }
+
+    /// The probe: the App under test, its window, what the real events did, and the phase.
+    struct Probe {
+        app: Option<App>,
+        tracked: Option<WindowId>,
+        native: Option<(Arc<Window>, HWND)>,
+        leaves: usize,
+        captured_at_press: Option<bool>,
+        maximize_changes: usize,
+        was_maximized: bool,
+        phase: usize,
+        next_at: Instant,
+        saved: POINT,
+        failures: Vec<String>,
+        deadline: Instant,
+    }
+
+    /// Put the pointer at screen `point`; nothing is clicked.
+    fn point_at(point: POINT) {
+        let _ =
+            // SAFETY: moves the pointer only.
+            unsafe { SetCursorPos(point.x, point.y) };
+    }
+
+    impl Probe {
+        /// The App's caption state for the window.
+        fn caption(&self) -> CaptionState {
+            let (Some(app), Some(tracked)) = (self.app.as_ref(), self.tracked) else {
+                // When: app or tracked is missing, setup has not run and nothing is hovered.
+                return CaptionState::default();
+            };
+            app.registry.windows[&tracked].caption
+        }
+
+        /// The maximise button's centre in client px, from the renderer's band geometry.
+        fn maximise(&self) -> (i32, i32) {
+            let app = self.app.as_ref().expect("app");
+            let window = &app.registry.windows[&self.tracked.expect("tracked")];
+            let renderer = window.renderer.as_ref().expect("renderer");
+            let (width, _) = renderer.surface_size();
+            let button = (46.0 * renderer.scale_factor()).round();
+            let centre_x = width as f32 - 1.5 * button;
+            (centre_x as i32, (renderer.band_height() / 2.0) as i32)
+        }
+
+        /// Client `(x_px, y_px)` as a screen point.
+        fn screen(&self, x_px: i32, y_px: i32) -> POINT {
+            let mut point = POINT { x: x_px, y: y_px };
+            if let Some((_, hwnd)) = self.native.as_ref() {
+                let _ =
+                    // SAFETY: hwnd is the probe's window and point a local the call rewrites.
+                    unsafe { ClientToScreen(*hwnd, &mut point) };
+            }
+            point
+        }
+
+        /// Post `message` to the probe's own window.
+        fn post(&self, message: u32, wparam: usize, lparam: isize) {
+            if let Some((_, hwnd)) = self.native.as_ref() {
+                let _ =
+                    // SAFETY: posting to the probe's own window injects no input elsewhere.
+                    unsafe { PostMessageW(Some(*hwnd), message, WPARAM(wparam), LPARAM(lparam)) };
+            }
+        }
+
+        /// Whether the probe's window holds the mouse capture.
+        fn captured(&self) -> bool {
+            let holder =
+                // SAFETY: GetCapture only reads which window of this thread holds the capture.
+                unsafe { GetCapture() };
+            self.native.as_ref().is_some_and(|(_, hwnd)| *hwnd == holder)
+        }
+
+        /// Whether the window is maximised now.
+        fn maximized(&self) -> bool {
+            self.native.as_ref().is_some_and(|(window, _)| window.is_maximized())
+        }
+
+        /// Record `failure` when `ok` is false.
+        fn check(&mut self, ok: bool, failure: String) {
+            if !ok {
+                self.failures.push(failure);
+            }
+        }
+
+        /// Run the current phase; returns how long to wait before the next, or `None` when done.
+        fn step(&mut self) -> Option<u64> {
+            // Stderr markers survive a killed child, so a stall names its phase.
+            phase(0, &format!("step {}", self.phase));
+            let (max_x, max_y) = self.maximise();
+            let on_maximise = self.screen(max_x, max_y);
+            let caption = self.caption();
+            match self.phase {
+                0 => {
+                    // Rest on maximise long enough for the system to offer the flyout.
+                    self.leaves = 0;
+                    point_at(on_maximise);
+                    Some(1500)
+                }
+                1 => {
+                    let leaves = self.leaves;
+                    let hovered = caption.hovered;
+                    self.check(
+                        hovered == Some(CaptionButton::Maximize),
+                        format!("rest {hovered:?}"),
+                    );
+                    self.check(leaves == 0, format!("rest: {leaves} leaves on the button"));
+                    if hovered != Some(CaptionButton::Maximize) {
+                        // When: the button is not hovered, a press could start a blocking window
+                        // drag instead of a caption press: skip to the end and report.
+                        self.phase = 98;
+                        return Some(10);
+                    }
+                    let screen = lparam_of(on_maximise.x, on_maximise.y);
+                    self.post(snap_route::WM_NCLBUTTONDOWN, HTMAXBUTTON as usize, screen);
+                    Some(500)
+                }
+                2 => {
+                    let at_press = self.captured_at_press;
+                    let held = self.captured();
+                    self.check(at_press == Some(true), format!("press capture {at_press:?}"));
+                    self.check(held, "the capture ended before the release".into());
+                    let pressed = caption.pressed;
+                    self.check(
+                        pressed == Some(CaptionButton::Maximize),
+                        format!("held {pressed:?}"),
+                    );
+                    self.post(WM_LBUTTONUP, 0, lparam_of(max_x, max_y));
+                    Some(1000)
+                }
+                3 => {
+                    let changes = self.maximize_changes;
+                    let maximized = self.maximized();
+                    self.check(maximized && changes == 1, format!("click: {changes} changes"));
+                    if let Some((window, _)) = self.native.as_ref() {
+                        // The window goes back to its size for the cancel case.
+                        window.set_maximized(false);
+                    }
+                    Some(1000)
+                }
+                4 => {
+                    let maximized = self.maximized();
+                    self.check(!maximized, "the restore did not take".into());
+                    self.maximize_changes = 0;
+                    self.captured_at_press = None;
+                    point_at(on_maximise);
+                    Some(1000)
+                }
+                5 => {
+                    let hovered = caption.hovered;
+                    self.check(
+                        hovered == Some(CaptionButton::Maximize),
+                        format!("again {hovered:?}"),
+                    );
+                    if hovered != Some(CaptionButton::Maximize) {
+                        // When: the button is not hovered again, the cancel case cannot start.
+                        self.phase = 98;
+                        return Some(10);
+                    }
+                    let screen = lparam_of(on_maximise.x, on_maximise.y);
+                    self.post(snap_route::WM_NCLBUTTONDOWN, HTMAXBUTTON as usize, screen);
+                    Some(500)
+                }
+                6 => {
+                    let pressed = caption.pressed;
+                    self.check(
+                        pressed == Some(CaptionButton::Maximize),
+                        format!("held {pressed:?}"),
+                    );
+                    // Drag the held press onto the pane, under the capture.
+                    point_at(self.screen(200, 300));
+                    Some(600)
+                }
+                7 => {
+                    let pressed = caption.pressed;
+                    self.check(pressed.is_none(), format!("drag-off kept the press {pressed:?}"));
+                    self.post(WM_LBUTTONUP, 0, lparam_of(200, 300));
+                    Some(800)
+                }
+                8 => {
+                    let changes = self.maximize_changes;
+                    let maximized = self.maximized();
+                    self.check(!maximized && changes == 0, format!("cancel: {changes} changes"));
+                    point_at(self.screen(-200, -150));
+                    Some(800)
+                }
+                _ => {
+                    let (hovered, pressed) = (caption.hovered, caption.pressed);
+                    let clear = hovered.is_none() && pressed.is_none();
+                    self.check(clear, format!("outside: {hovered:?} {pressed:?}"));
+                    point_at(self.saved);
+                    None
+                }
+            }
+        }
+    }
+
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let attributes = Window::default_attributes()
+                .with_active(false)
+                .with_decorations(false)
+                .with_window_level(WindowLevel::AlwaysOnTop)
+                .with_position(winit::dpi::PhysicalPosition::new(400, 300))
+                .with_inner_size(winit::dpi::PhysicalSize::new(900, 400));
+            let window = Arc::new(event_loop.create_window(attributes).unwrap());
+            let theme = Theme::default();
+            let mut config = Config::default();
+            config.window.titlebar = TitlebarMode::Integrated;
+            config.appearance.backdrop = BackdropKind::Opaque;
+            config.appearance.opacity = 1.0;
+            config.appearance.software_render_mode = SoftwareRenderMode::Force;
+            let renderer = GpuRenderer::new(
+                window.clone(),
+                event_loop,
+                &theme,
+                RendererSettings {
+                    font_family: &config.font.family,
+                    font_dirs: &[],
+                    font_size: config.font.size,
+                    line_height_mult: config.font.line_height,
+                    font_weight_scale: config.font.effective_weight_scale(),
+                    subpixel_aa: config.font.subpixel_aa,
+                    padding: [0.0; 4],
+                    appearance: SurfaceAppearance {
+                        backdrop: config.appearance.backdrop,
+                        opacity: 1.0,
+                        scrollbar: config.appearance.scrollbar,
+                        panel_padding: 0.0,
+                        software_render_mode: SoftwareRenderMode::Force,
+                    },
+                    role: "snap-pointer-test",
+                    glyph_atlas_start: GlyphAtlasStart::Normal,
+                },
+            )
+            .unwrap();
+            let mut app = App::new(theme, config, Keymap::default());
+            app.__test_set_software_render_degrade(true);
+            app.__test_seed_tab("snap");
+            let tracked = app.registry.main_window_id.expect("main window");
+            app.registry.windows.get_mut(&tracked).unwrap().titlebar = TitlebarMode::Integrated;
+            assert!(app.__test_attach_window_renderer(tracked, window.clone(), renderer));
+            app.window_event(event_loop, tracked, WindowEvent::Focused(true));
+            // The App's own band refresh draws the caption band and installs the snap hook.
+            app.refresh_window_bands();
+            let RawWindowHandle::Win32(handle) = window.window_handle().unwrap().as_raw() else {
+                panic!("Windows handle")
+            };
+            let hwnd = HWND(handle.hwnd.get() as *mut _);
+            let installed = hooked(hwnd);
+            self.check(installed, "the App's band refresh did not install the snap hook".into());
+            self.native = Some((window, hwnd));
+            self.tracked = Some(tracked);
+            self.app = Some(app);
+            let _ =
+                // SAFETY: saved is a field the call writes.
+                unsafe { GetCursorPos(&mut self.saved) };
+            self.next_at = Instant::now() + Duration::from_millis(500);
+        }
+
+        fn window_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            _id: WindowId,
+            event: WindowEvent,
+        ) {
+            match &event {
+                WindowEvent::CursorLeft { .. } => self.leaves += 1,
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => self.captured_at_press = Some(self.captured()),
+                _ => {
+                    // When: any other event, the probe only forwards it.
+                }
+            }
+            let (Some(app), Some(tracked)) = (self.app.as_mut(), self.tracked) else {
+                // When: app or tracked is missing, setup has not finished: nothing to drive.
+                return;
+            };
+            // The App handles the native event as its own window's, as production dispatch does.
+            app.window_event(event_loop, tracked, event);
+        }
+
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            let now = Instant::now();
+            if now >= self.deadline {
+                // When: now passed the deadline, the pointer goes back before the test fails.
+                point_at(self.saved);
+                panic!("real pointer probe timed out in phase {}", self.phase);
+            }
+            if let Some(app) = self.app.as_mut() {
+                // Each pass, as the App's own loop does: the band and the snap hook follow.
+                app.refresh_window_bands();
+            }
+            let maximized = self.maximized();
+            if maximized != self.was_maximized {
+                // The window's maximised state changed: count it.
+                self.maximize_changes += 1;
+                self.was_maximized = maximized;
+            }
+            if now >= self.next_at && self.app.is_some() {
+                let Some(wait_ms) = self.step() else {
+                    // When: step returns None, every phase ran and the pointer is back.
+                    event_loop.exit();
+                    return;
+                };
+                self.phase += 1;
+                self.next_at = now + Duration::from_millis(wait_ms);
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(10)));
+        }
+    }
+
+    let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let now = Instant::now();
+    let mut probe = Probe {
+        app: None,
+        tracked: None,
+        native: None,
+        leaves: 0,
+        captured_at_press: None,
+        maximize_changes: 0,
+        was_maximized: false,
+        phase: 0,
+        next_at: now,
+        saved: POINT::default(),
+        failures: Vec::new(),
+        deadline: now + Duration::from_secs(40),
+    };
+    event_loop.run_app(&mut probe).unwrap();
+    point_at(probe.saved);
+    assert!(probe.failures.is_empty(), "{:#?}", probe.failures);
+}
