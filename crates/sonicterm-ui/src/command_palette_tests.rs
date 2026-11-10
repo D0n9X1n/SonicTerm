@@ -693,3 +693,22 @@ fn palette_presentation_hash_tracks_the_selection_anchor() {
     assert_ne!(from_start, from_end);
     assert_ne!(collapsed, from_end);
 }
+
+/// A keymap binding the titlebar toggle lists it in the populated palette only on macOS, where the
+/// titlebar can switch; elsewhere the binding still works but the palette keeps it hidden.
+#[test]
+fn a_bound_titlebar_toggle_is_listed_only_where_the_titlebar_switches() {
+    let keymap = Keymap {
+        meta: Meta { name: "titlebar".into(), version: "1.0".into() },
+        bindings: vec![Binding {
+            keys: "super+alt+shift+i".into(),
+            action: ActionWrapper(Action::ToggleIntegratedTitlebar),
+        }],
+    };
+    let mut palette = CommandPalette::new();
+    palette.set_keymap(&keymap, &translator("en"));
+    let listed = palette.all.contains(&Command(Action::ToggleIntegratedTitlebar));
+    assert_eq!(listed, cfg!(target_os = "macos"));
+    assert!(!palette_lists(&Action::ToggleIntegratedTitlebar) || cfg!(target_os = "macos"));
+    assert!(palette_lists(&Action::ToggleStatusLine), "other actions are listed everywhere");
+}

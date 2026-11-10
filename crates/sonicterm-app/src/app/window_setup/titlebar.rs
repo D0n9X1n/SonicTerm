@@ -122,6 +122,57 @@ pub(crate) fn sync_fullscreen_shadow(window: &Window, mode: TitlebarMode) {
     let _ = (window, mode);
 }
 
+/// Whether this platform can switch a live window between the integrated and system titlebars:
+/// macOS only, since Windows always uses the integrated one and Linux always uses its own.
+pub(crate) const fn titlebar_switchable() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// The titlebar mode a window switching away from `mode` still has.
+pub(crate) const fn other_mode(mode: TitlebarMode) -> TitlebarMode {
+    match mode {
+        TitlebarMode::Integrated => TitlebarMode::Native,
+        TitlebarMode::Native => TitlebarMode::Integrated,
+    }
+}
+
+/// The titlebar a window asked for `mode` shows now: `mode` once its native titlebar has followed
+/// (`synced`), else still the other one, while a switch waits for full screen to end.
+pub(crate) const fn shown_mode(mode: TitlebarMode, synced: bool) -> TitlebarMode {
+    if synced {
+        // When: synced, the native titlebar already has `mode`.
+        return mode;
+    }
+    other_mode(mode)
+}
+
+/// Bring the live `window`'s native titlebar to `mode` where [`titlebar_switchable`], once it is
+/// out of full screen: AppKit owns the titlebar while a window is full screen or entering or
+/// leaving it, which its full-screen style-mask bit shows until the exit animation ends, so a
+/// switch then waits for the next call. Returns whether `window` now has `mode`.
+pub(crate) fn sync_titlebar(window: &Window, mode: TitlebarMode) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let want = integrated(mode);
+        if macos::has_full_size_content(window) == Some(want) {
+            // When: has_full_size_content already matches, the window has this titlebar.
+            return true;
+        }
+        let full_screen = macos::in_full_screen(window).unwrap_or(true);
+        if full_screen || window.fullscreen().is_some() {
+            // When: AppKit or winit has the window in full screen, or animating out of it, the
+            // switch waits until the transition ends.
+            return false;
+        }
+        macos::apply_titlebar(window, want)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, mode);
+        true
+    }
+}
+
 /// What a double-click on empty titlebar space does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DoubleClickAction {

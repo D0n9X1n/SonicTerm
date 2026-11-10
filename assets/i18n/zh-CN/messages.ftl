@@ -103,6 +103,7 @@ command-apply-theme = 应用主题：{ $name }
 command-toggle-tab-bar = 切换标签栏显示
 command-toggle-status-line = 切换状态栏显示
 command-toggle-status-line-sensitive = 切换状态栏敏感内容
+command-toggle-integrated-titlebar = 切换集成标题栏
 command-status-line-position-top = 状态栏：移到顶部
 command-status-line-position-bottom = 状态栏：移到底部
 command-increase-status-line-font-scale = 状态栏：放大文字

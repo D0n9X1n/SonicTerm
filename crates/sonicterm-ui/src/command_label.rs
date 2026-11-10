@@ -63,6 +63,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ToggleTabBar",
     "ToggleStatusLine",
     "ToggleStatusLineSensitive",
+    "ToggleIntegratedTitlebar",
     "StatusLinePositionTop",
     "StatusLinePositionBottom",
     "IncreaseStatusLineFontScale",
@@ -437,6 +438,12 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
             "command-focus-status-line",
             &["status", "keyboard", "accessibility", "screen reader"],
         ),
+        Action::ToggleIntegratedTitlebar => (
+            "ToggleIntegratedTitlebar",
+            Appearance,
+            "command-toggle-integrated-titlebar",
+            &["titlebar", "title", "window", "integrated", "native", "chrome"],
+        ),
         Action::ToggleStatusLineSensitive => (
             "ToggleStatusLineSensitive",
             Appearance,
@@ -596,6 +603,7 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         | Action::ToggleTabBar
         | Action::ToggleStatusLine
         | Action::ToggleStatusLineSensitive
+        | Action::ToggleIntegratedTitlebar
         | Action::StatusLinePositionTop
         | Action::StatusLinePositionBottom
         | Action::IncreaseStatusLineFontScale
@@ -686,6 +694,7 @@ pub fn label(action: &Action) -> String {
         Action::ToggleTabBar => "Toggle Tab Bar".into(),
         Action::ToggleStatusLine => "Toggle Status Line".into(),
         Action::ToggleStatusLineSensitive => "Toggle Status Line Sensitive Content".into(),
+        Action::ToggleIntegratedTitlebar => "Toggle Integrated Titlebar".into(),
         Action::StatusLinePositionTop => "Status Line: Move to Top".into(),
         Action::StatusLinePositionBottom => "Status Line: Move to Bottom".into(),
         Action::IncreaseStatusLineFontScale => "Status Line: Larger Text".into(),

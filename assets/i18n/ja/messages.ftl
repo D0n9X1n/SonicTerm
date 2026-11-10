@@ -103,6 +103,7 @@ command-apply-theme = テーマを適用：{ $name }
 command-toggle-tab-bar = タブバーの表示を切り替え
 command-toggle-status-line = ステータスラインの表示を切り替え
 command-toggle-status-line-sensitive = ステータスラインの機密内容を切り替え
+command-toggle-integrated-titlebar = 統合タイトルバーの切り替え
 command-status-line-position-top = ステータスライン: 上に移動
 command-status-line-position-bottom = ステータスライン: 下に移動
 command-increase-status-line-font-scale = ステータスライン: 文字を大きく

@@ -143,6 +143,9 @@ pub enum Action {
     ToggleStatusLine,
     /// Toggle hiding of sensitive status line content (screen sharing).
     ToggleStatusLineSensitive,
+    /// Switch every terminal window between the integrated titlebar and the system titlebar for
+    /// this session (macOS; Windows and Linux keep theirs).
+    ToggleIntegratedTitlebar,
     /// Move the status line to the top edge for this session.
     StatusLinePositionTop,
     /// Move the status line to the bottom edge for this session.

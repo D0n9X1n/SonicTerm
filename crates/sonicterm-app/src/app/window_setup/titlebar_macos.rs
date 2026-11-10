@@ -2,7 +2,9 @@
 
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSView, NSWindow, NSWindowButton, NSWindowStyleMask};
+use objc2_app_kit::{
+    NSApplication, NSView, NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
+};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSUserDefaults};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sonicterm_ui::window_band::WindowBand;
@@ -79,4 +81,44 @@ pub(super) fn current_click_count() -> Option<u32> {
     let mtm = MainThreadMarker::new()?;
     let event = NSApplication::sharedApplication(mtm).currentEvent()?;
     u32::try_from(event.clickCount()).ok()
+}
+
+/// Switch the live `window` to the integrated titlebar (`integrated`) or the system one: the same
+/// full-size content view, transparent titlebar and hidden title that creation sets, applied to
+/// the running `NSWindow` on the main thread. As winit does after a style-mask change, the view
+/// takes first responder again so keys and IME keep reaching it. Returns whether AppKit was reached.
+pub(super) fn apply_titlebar(window: &Window, integrated: bool) -> bool {
+    let Some(ns_window) = ns_window(window) else {
+        // When: ns_window is None, there is no AppKit window to switch on this thread.
+        return false;
+    };
+    let mut mask = ns_window.styleMask();
+    mask.set(NSWindowStyleMask::FullSizeContentView, integrated);
+    ns_window.setStyleMask(mask);
+    if let Some(view) = ns_window.contentView() {
+        // When: contentView is Some, it takes first responder again; a style-mask change can
+        // leave the window without a key view, as winit notes.
+        let _ = ns_window.makeFirstResponder(Some(&view));
+    }
+    ns_window.setTitlebarAppearsTransparent(integrated);
+    // The integrated titlebar hides the title; the system titlebar shows it again.
+    let visibility =
+        if integrated { NSWindowTitleVisibility::Hidden } else { NSWindowTitleVisibility::Visible };
+    ns_window.setTitleVisibility(visibility);
+    true
+}
+
+/// Whether the live `window` now has the integrated titlebar's full-size content view, as AppKit
+/// reports it; `None` off the main thread or without an AppKit window.
+pub(super) fn has_full_size_content(window: &Window) -> Option<bool> {
+    let ns_window = ns_window(window)?;
+    Some(ns_window.styleMask().contains(NSWindowStyleMask::FullSizeContentView))
+}
+
+/// Whether AppKit has `window` in full screen, or still animating out of it: its full-screen
+/// style-mask bit stays set until the exit transition ends, unlike winit's own state, which clears
+/// before the animation. `None` off the main thread or without an AppKit window.
+pub(super) fn in_full_screen(window: &Window) -> Option<bool> {
+    let ns_window = ns_window(window)?;
+    Some(ns_window.styleMask().contains(NSWindowStyleMask::FullScreen))
 }
