@@ -170,6 +170,18 @@ pub fn readable_or(
     }
 }
 
+/// Black or white, whichever reads better on `background`: the last band text fallback, which
+/// always reaches 4.5:1 since one of the two is at least that far from any color.
+fn most_readable_extreme(background: [f32; 4]) -> ChromeColor {
+    let black = ChromeColor::rgb(0, 0, 0);
+    if contrast_ratio(ChromeColor::WHITE, background) >= contrast_ratio(black, background) {
+        ChromeColor::WHITE
+    } else {
+        // When: black reads better than white on background, the band text is black.
+        black
+    }
+}
+
 /// Colors of the strip's tones, resolved once per frame from the theme.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StatusColors {
@@ -189,7 +201,8 @@ pub struct StatusColors {
     /// Hairline between the terminal and the strip.
     pub hairline: [f32; 4],
     /// Quiet text of a caption band (Windows): the name color when it reads at 4.5:1 on the band,
-    /// else the theme's secondary text, else its foreground, else its `bright.white`.
+    /// else the theme's secondary text, its foreground, its `bright.white` or its active tab color,
+    /// the first that does; else black or white, whichever reads better.
     pub band_name: ChromeColor,
 }
 
@@ -211,10 +224,10 @@ impl StatusColors {
         let secondary = palette.text_secondary.map(crate::color::linear_channel_to_srgb_u8);
         let secondary = ChromeColor::rgb(secondary[0], secondary[1], secondary[2]);
         let bright_white = hex_to_chrome_color(theme.colors.bright.white.0.as_str());
-        let band_name = [tab_inactive_fg, secondary, foreground]
+        let band_name = [tab_inactive_fg, secondary, foreground, bright_white, tab_active_fg]
             .into_iter()
             .find(|color| contrast_ratio(*color, background) >= BAND_TEXT_CONTRAST)
-            .unwrap_or(bright_white);
+            .unwrap_or_else(|| most_readable_extreme(background));
         Self {
             chip: readable_or(tab_active_fg, foreground, background),
             value: tab_active_fg,

@@ -228,3 +228,36 @@ fn every_bundled_theme_band_name_reads_at_four_and_a_half_to_one() {
     }
     assert_eq!(checked, 9, "the nine bundled themes");
 }
+
+/// The band's quiet text never takes an unchecked color: a custom solarized-dark whose
+/// `bright.white` is its own bar color still gets a band name that reads at 4.5:1 (its active
+/// tab color), and a theme where every palette text fails gets black or white.
+#[test]
+fn band_name_fallbacks_are_checked() {
+    use sonicterm_render_model::boundary::cfg::theme::Hex;
+    use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/themes/solarized-dark.toml");
+    let mut theme = Theme::load_strict(&path).expect("bundled solarized-dark parses");
+    theme.colors.bright.white = theme.colors.tab.bar_bg.clone();
+    let palette = UiPalette::from_theme(&theme);
+    let active = hex_to_chrome_color(theme.colors.tab.active_fg.0.as_str());
+    let inactive = hex_to_chrome_color(theme.colors.tab.inactive_fg.0.as_str());
+    let colors = StatusColors::resolve(&theme, active, inactive, &palette);
+    let ratio = contrast_ratio(colors.band_name, colors.background);
+    assert!(ratio >= BAND_TEXT_CONTRAST, "custom solarized band name: {ratio}");
+    let grey = Hex("#777777".into());
+    let mut flat = Theme::default();
+    flat.colors.background = grey.clone();
+    flat.colors.foreground = grey.clone();
+    flat.colors.bright.white = grey.clone();
+    flat.colors.tab.active_fg = grey.clone();
+    flat.colors.tab.inactive_fg = grey.clone();
+    flat.colors.tab.bar_bg = grey.clone();
+    flat.colors.ansi.black = grey;
+    let palette = UiPalette::from_theme(&flat);
+    let text = hex_to_chrome_color("#777777");
+    let colors = StatusColors::resolve(&flat, text, text, &palette);
+    let ratio = contrast_ratio(colors.band_name, colors.background);
+    assert!(ratio >= BAND_TEXT_CONTRAST, "flat theme band name: {ratio}");
+}
