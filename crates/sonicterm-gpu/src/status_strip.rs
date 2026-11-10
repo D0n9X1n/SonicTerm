@@ -189,7 +189,7 @@ pub struct StatusColors {
     /// Hairline between the terminal and the strip.
     pub hairline: [f32; 4],
     /// Quiet text of a caption band (Windows): the name color when it reads at 4.5:1 on the band,
-    /// else the theme's secondary text, else its foreground.
+    /// else the theme's secondary text, else its foreground, else its `bright.white`.
     pub band_name: ChromeColor,
 }
 
@@ -210,10 +210,11 @@ impl StatusColors {
         );
         let secondary = palette.text_secondary.map(crate::color::linear_channel_to_srgb_u8);
         let secondary = ChromeColor::rgb(secondary[0], secondary[1], secondary[2]);
-        let band_name = [tab_inactive_fg, secondary]
+        let bright_white = hex_to_chrome_color(theme.colors.bright.white.0.as_str());
+        let band_name = [tab_inactive_fg, secondary, foreground]
             .into_iter()
             .find(|color| contrast_ratio(*color, background) >= BAND_TEXT_CONTRAST)
-            .unwrap_or(foreground);
+            .unwrap_or(bright_white);
         Self {
             chip: readable_or(tab_active_fg, foreground, background),
             value: tab_active_fg,
