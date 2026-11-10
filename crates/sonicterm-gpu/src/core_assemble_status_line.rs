@@ -98,6 +98,8 @@ impl GpuRenderer {
             Surface::Strip => layout.merged,
             Surface::Band => true,
         };
+        let colors =
+            colors.for_band_focus(self.window_band.buttons, in_band, self.caption_state.focused);
         let band = if in_band {
             let scale = self.scale_factor;
             crate::status_strip::StripBand {

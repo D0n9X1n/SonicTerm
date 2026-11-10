@@ -218,6 +218,23 @@ impl StatusColors {
         }
     }
 
+    /// These colors for a surface drawn in a band with `buttons` (`in_band`), in a window that is
+    /// `focused` or not: an unfocused window's caption band draws values in the name color, as
+    /// Windows dims an inactive title. Cautions, chips and every other surface keep their colors.
+    pub fn for_band_focus(
+        self,
+        buttons: sonicterm_render_model::boundary::ui::window_band::BandButtons,
+        in_band: bool,
+        focused: bool,
+    ) -> Self {
+        use sonicterm_render_model::boundary::ui::window_band::BandButtons;
+        if in_band && buttons == BandButtons::Caption && !focused {
+            // When: in_band, buttons is Caption and the window is not focused, values dim.
+            return Self { value: self.name, ..self };
+        }
+        self
+    }
+
     /// Text color of `tone`.
     fn text(&self, tone: StatusTone) -> ChromeColor {
         match tone {
@@ -330,6 +347,8 @@ impl StripGeometry {
             width: self.screen.0,
             edge_pad: 12.0 * scale,
             segment_gap: 20.0 * scale,
+            // Small side text sits closer: two adjacent small segments of a list are 16 px apart.
+            small_gap: 16.0 * scale,
             separator_width: 0.0,
             left_inset: self.band.left_inset,
             right_inset: self.band.right_inset,

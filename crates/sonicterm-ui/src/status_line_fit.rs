@@ -11,6 +11,8 @@ pub struct FitMetrics {
     pub edge_pad: f32,
     /// Space between segments and between lists.
     pub segment_gap: f32,
+    /// Space between two adjacent small segments of one list; every other gap is `segment_gap`.
+    pub small_gap: f32,
     /// Width of the `|` drawn between two adjacent segments of one list; it widens only those gaps.
     pub separator_width: f32,
     /// Width reserved at the left edge before `edge_pad`, such as macOS's traffic lights; 0 without.
@@ -20,9 +22,22 @@ pub struct FitMetrics {
 }
 
 impl FitMetrics {
-    /// The gap between two adjacent segments of one list: the segment gap with the separator in it.
-    fn in_group_gap(&self) -> f32 {
-        self.segment_gap + self.separator_width
+    /// The gap between adjacent segments `first` and `second` of one list, separator included:
+    /// the small gap when both are small side text, the segment gap otherwise.
+    fn pair_gap(&self, first: &FitSlot, second: &FitSlot) -> f32 {
+        let gap = if first.small && second.small {
+            // Two small side segments are set closer than any other pair.
+            self.small_gap
+        } else {
+            self.segment_gap
+        };
+        gap + self.separator_width
+    }
+
+    /// The width of `slots`, one list's active segments in order, with the gaps between them.
+    fn list_width(&self, slots: &[&FitSlot]) -> f32 {
+        let gaps: f32 = slots.windows(2).map(|pair| self.pair_gap(pair[0], pair[1])).sum();
+        slots.iter().map(|slot| slot.width()).sum::<f32>() + gaps
     }
 
     /// The left edge of the first left-list segment.
@@ -196,15 +211,10 @@ pub fn fit_sized(
         })
         .collect();
     let group_width = |slots: &[FitSlot], side: StatusSide| -> Option<f32> {
-        let widths: Vec<f32> = slots
-            .iter()
-            .filter(|slot| slot.active && slot.side == side)
-            .map(|slot| slot.width())
-            .collect();
+        let list: Vec<&FitSlot> =
+            slots.iter().filter(|slot| slot.active && slot.side == side).collect();
         // Segments of one list are a separator gap apart, so a dropped segment takes its `|` along.
-        (!widths.is_empty()).then(|| {
-            widths.iter().sum::<f32>() + metrics.in_group_gap() * (widths.len() - 1) as f32
-        })
+        (!list.is_empty()).then(|| metrics.list_width(&list))
     };
     loop {
         let groups: Vec<f32> = [StatusSide::Left, StatusSide::Center, StatusSide::Right]
@@ -338,24 +348,31 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
         |side: StatusSide| slots.iter().filter(move |slot| slot.active && slot.side == side);
     let mut pen = metrics.left_start();
     let mut left_end = None;
-    for slot in active(StatusSide::Left) {
+    let left: Vec<&FitSlot> = active(StatusSide::Left).collect();
+    for (position, slot) in left.iter().enumerate() {
+        if let Some(previous) = position.checked_sub(1).map(|before| left[before]) {
+            // A left segment after the first sits one pair gap after the one before it.
+            pen += metrics.pair_gap(previous, slot);
+        }
         placed.push(place_slot(slot, pen));
         pen += slot.width();
         left_end = Some(pen);
-        pen += metrics.in_group_gap();
     }
     let mut pen = metrics.right_end();
     let mut right_start = None;
-    for slot in active(StatusSide::Right).collect::<Vec<_>>().into_iter().rev() {
+    let right: Vec<&FitSlot> = active(StatusSide::Right).collect();
+    for (position, slot) in right.iter().enumerate().rev() {
+        if let Some(next) = right.get(position + 1) {
+            // A right segment before the last ends one pair gap before the one after it.
+            pen -= metrics.pair_gap(slot, next);
+        }
         pen -= slot.width();
         placed.push(place_slot(slot, pen));
         right_start = Some(pen);
-        pen -= metrics.in_group_gap();
     }
     let center: Vec<&FitSlot> = active(StatusSide::Center).collect();
     if !center.is_empty() {
-        let total = center.iter().map(|slot| slot.width()).sum::<f32>()
-            + metrics.in_group_gap() * (center.len() - 1) as f32;
+        let total = metrics.list_width(&center);
         let low = left_end.map_or(metrics.left_start(), |end| end + metrics.segment_gap);
         let high =
             right_start.map_or(metrics.right_end(), |start| start - metrics.segment_gap) - total;
@@ -363,18 +380,19 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
         // without it the group centres as a whole. The clamp moves it only as far as needed.
         let preferred = match center.iter().position(|slot| slot.anchor) {
             Some(anchor) => {
-                let before = center[..anchor]
-                    .iter()
-                    .map(|slot| slot.width() + metrics.in_group_gap())
-                    .sum::<f32>();
+                let before = metrics.list_width(&center[..=anchor]) - center[anchor].width();
                 metrics.width / 2.0 - before - center[anchor].width() / 2.0
             }
             None => (metrics.width - total) / 2.0,
         };
         let mut pen = preferred.clamp(low, high.max(low));
-        for slot in center {
+        for (position, slot) in center.iter().enumerate() {
             placed.push(place_slot(slot, pen));
-            pen += slot.width() + metrics.in_group_gap();
+            pen += slot.width();
+            if let Some(next) = center.get(position + 1) {
+                // The next centre segment, if any, starts one pair gap after this one.
+                pen += metrics.pair_gap(slot, next);
+            }
         }
     }
     placed.sort_by_key(|segment| segment.index);

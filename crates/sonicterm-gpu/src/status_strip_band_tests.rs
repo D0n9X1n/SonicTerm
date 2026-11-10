@@ -182,3 +182,23 @@ fn small_segments_draw_smaller_on_the_names_baseline() {
     let (small_bottom, full_bottom) = (small_top + small_height, full_top + full_height);
     assert!((small_bottom - full_bottom).abs() <= 1.0, "baselines {small_bottom} {full_bottom}");
 }
+
+/// An unfocused window's caption band draws values, the centred window name among them, in the
+/// dim name color, as Windows dims an inactive title; a focused band, a band without caption
+/// buttons (macOS traffic lights, full screen) and an ordinary strip keep the bright value color.
+#[test]
+fn an_unfocused_caption_band_dims_its_values_to_the_name_color() {
+    use sonicterm_render_model::boundary::ui::window_band::BandButtons;
+    let theme = Theme::default();
+    let palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(&theme);
+    let (active, inactive) = (ChromeColor::WHITE, hex_to_chrome_color("#808080"));
+    let colors = StatusColors::resolve(&theme, active, inactive, &palette);
+    let dimmed = colors.for_band_focus(BandButtons::Caption, true, false);
+    assert_eq!(dimmed.value, inactive, "unfocused caption band: values take the name color");
+    assert_eq!(dimmed.name, colors.name);
+    assert_eq!(dimmed.warn, colors.warn, "cautions keep their own color");
+    assert_eq!(colors.for_band_focus(BandButtons::Caption, true, true), colors, "focused");
+    assert_eq!(colors.for_band_focus(BandButtons::TrafficLights, true, false), colors, "macOS");
+    assert_eq!(colors.for_band_focus(BandButtons::None, true, false), colors, "full screen");
+    assert_eq!(colors.for_band_focus(BandButtons::Caption, false, false), colors, "strip below");
+}
