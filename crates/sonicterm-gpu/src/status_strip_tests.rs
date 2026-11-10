@@ -434,7 +434,8 @@ pub(super) fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) 
 
 /// The strip draws at its own size: a native stack at `status_line_font_size`, sharing the body
 /// configuration, so its capitals are smaller than the tab title's, not tab-title tiles placed
-/// on a smaller baseline. The renderer builds, rescales and routes that stack.
+/// on a smaller baseline. The renderer builds, rescales and routes that stack, and routes text
+/// in an integrated titlebar band through the tab-title stack instead.
 #[test]
 pub(super) fn the_strip_draws_with_its_own_smaller_stack() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
@@ -459,7 +460,11 @@ pub(super) fn the_strip_draws_with_its_own_smaller_stack() {
     // At the default scale the strip's own stack draws capitals as tall as the titles'.
     assert!(strip_h > 0.0 && strip_h == title_h, "strip H {strip_h} vs title H {title_h}");
     let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
-    assert!(core.contains("let mut strip_rasterizer = self.status_line_font_stack.clone();"));
+    assert!(core.contains(
+        "let text_stack = if in_band {\n            self.tab_title_font.stack().cloned()"
+    ));
+    assert!(core.contains("font_scale stack.\n            self.status_line_font_stack.clone()"));
+    assert!(core.contains("let mut strip_rasterizer = text_stack.clone();"));
     assert!(core.contains("self.status_line_font_stack = new_stacks.status_line;"));
     assert!(core.contains("if let Some(stack) = self.status_line_font_stack.as_ref() {"));
     assert!(core.contains("GlyphRasterVariant::StatusLine => self.status_line_font_stack.as_ref()"));
@@ -823,7 +828,13 @@ pub(super) fn test_strip_geometry(
     };
     let mut raster = stack.clone();
     let mut atlas = GlyphAtlas::new(256, 256);
-    geometry.cap_height = strip_cap_height(stack, &mut raster, &mut atlas, geometry.text_px());
+    geometry.cap_height = strip_cap_height(
+        stack,
+        &mut raster,
+        &mut atlas,
+        geometry.text_px(),
+        geometry.raster_variant(),
+    );
     geometry
 }
 

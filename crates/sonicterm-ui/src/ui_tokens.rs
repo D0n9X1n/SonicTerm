@@ -43,13 +43,20 @@ pub struct UiPalette {
     pub search_current: [f32; 4],
 }
 
-/// Contrast the theme foreground needs on a palette color before the bars use it; the band's
-/// quiet text has its own 4.5:1 floor and its own fallbacks.
+/// Contrast the theme foreground needs on `tab.bar_bg` before the bars use it; the band's quiet
+/// text has its own 4.5:1 floor and its own fallbacks.
 const CHROME_FOREGROUND_CONTRAST: f32 = 3.0;
 
-/// Contrast the active tab title needs on a palette color before the bars use it: the WCAG AA
+/// Contrast the active tab title needs on `tab.bar_bg` before the bars use it: the WCAG AA
 /// text floor, so the active tab and a focused band's values never fade into the bars.
 const CHROME_ACTIVE_CONTRAST: f32 = 4.5;
+
+/// HSL lightness shift that darkens the terminal background into the chrome background: enough to
+/// set the bars below the terminal without turning a dark theme's bars black.
+const CHROME_SHADE_DELTA: f32 = -0.04;
+
+/// The deeper shade used when the active tab title does not read on [`CHROME_SHADE_DELTA`].
+const CHROME_DEEP_SHADE_DELTA: f32 = -0.08;
 
 /// WCAG contrast ratio between two opaque linear-sRGB colors.
 fn contrast_linear(first: [f32; 4], second: [f32; 4]) -> f32 {
@@ -62,26 +69,27 @@ fn relative_luminance(rgba: [f32; 4]) -> f32 {
     0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
 }
 
-/// The chrome background from `colors`' own palette: `tab.bar_bg` when the theme gives the bars
-/// their own color, else `ansi.black` when it differs from the terminal background, so the bars
-/// stay apart from the terminal. A candidate is used only when it is lighter than the background
-/// darkened 8% (so it is never black), the foreground reads at 3:1 on it and the active tab title
-/// at 4.5:1; a theme with no such candidate gets that darkened shade.
+/// The chrome background, never lighter than the terminal: the first of `colors`' own
+/// `tab.bar_bg`, the background darkened by [`CHROME_SHADE_DELTA`] and then by
+/// [`CHROME_DEEP_SHADE_DELTA`] that is darker than the background, on which the foreground reads at
+/// 3:1 and the active tab title at 4.5:1; the deeper shade when none does.
 fn chrome_background(colors: &sonicterm_cfg::theme::Palette) -> [f32; 4] {
-    let background = colors.background.0.as_str();
+    let background = color::hex(&colors.background.0);
     let foreground = color::hex(&colors.foreground.0);
     let active = color::hex(&colors.tab.active_fg.0);
-    let derived = color::hex_with_lightness_delta(background, -0.08);
-    [colors.tab.bar_bg.0.as_str(), colors.ansi.black.0.as_str()]
-        .into_iter()
-        .filter(|candidate| !candidate.eq_ignore_ascii_case(background))
-        .map(color::hex)
-        .find(|candidate| {
-            relative_luminance(*candidate) > relative_luminance(derived)
-                && contrast_linear(foreground, *candidate) >= CHROME_FOREGROUND_CONTRAST
-                && contrast_linear(active, *candidate) >= CHROME_ACTIVE_CONTRAST
-        })
-        .unwrap_or(derived)
+    let deep = color::hex_with_lightness_delta(&colors.background.0, CHROME_DEEP_SHADE_DELTA);
+    [
+        color::hex(&colors.tab.bar_bg.0),
+        color::hex_with_lightness_delta(&colors.background.0, CHROME_SHADE_DELTA),
+        deep,
+    ]
+    .into_iter()
+    .find(|candidate| {
+        relative_luminance(*candidate) < relative_luminance(background)
+            && contrast_linear(foreground, *candidate) >= CHROME_FOREGROUND_CONTRAST
+            && contrast_linear(active, *candidate) >= CHROME_ACTIVE_CONTRAST
+    })
+    .unwrap_or(deep)
 }
 
 impl UiPalette {
@@ -90,11 +98,10 @@ impl UiPalette {
     /// - `accent`        — `theme.colors.tab.active_fg` (the theme's
     ///   explicit chrome accent), e.g. `#fabd2f` for gruvbox-dark-hard,
     ///   `#7aa2f7` for tokyo-night.
-    /// - `bg_base`       — the chrome background (tab bar, status strip, titlebar band), a theme
-    ///   palette color: `theme.colors.tab.bar_bg` when it differs from the background, else
-    ///   `theme.colors.ansi.black` when that differs, each only if it is lighter than the
-    ///   derived shade, the foreground reads at 3:1 and `tab.active_fg` at 4.5:1 on it; else
-    ///   the background shifted -8% lightness.
+    /// - `bg_base`       — the chrome background (tab bar, status strip, titlebar band), never
+    ///   lighter than the terminal: the first of `theme.colors.tab.bar_bg`, the background
+    ///   shifted -4% lightness and then -8% that is darker than the background, with the
+    ///   foreground at 3:1 and `tab.active_fg` at 4.5:1 on it; else the -8% shade.
     /// - `bg_elevated`   — `theme.colors.background` (i.e. base).
     /// - `bg_surface`    — `theme.colors.background` shifted +5% lightness.
     /// - `bg_hover`      — `foreground` @ 6% alpha.

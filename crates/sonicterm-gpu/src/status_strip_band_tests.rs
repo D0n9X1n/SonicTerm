@@ -170,12 +170,12 @@ fn small_segments_draw_smaller_on_the_names_baseline() {
         &mut glyphs,
     );
     assert_eq!(glyphs.len(), 2, "one capital per segment");
-    // Each size rasterizes under its own variant: footer tiles for the small text, strip tiles for
-    // the full size, so neither can stand in for the other in the atlas.
+    // Each size rasterizes under its own variant: footer tiles for the small text, tab-title tiles
+    // for the band's full size, so neither can stand in for the other in the atlas.
     let variants: std::collections::HashSet<_> =
         atlas.resident_tile_keys().into_iter().map(|key| key.raster_variant).collect();
     assert!(variants.contains(&GlyphRasterVariant::PaletteFooter), "{variants:?}");
-    assert!(variants.contains(&GlyphRasterVariant::StatusLine), "{variants:?}");
+    assert!(variants.contains(&GlyphRasterVariant::TabTitle), "{variants:?}");
     let ink = |index: usize| crate::cursor::ndc_rect_px(glyphs[index].rect, 400.0, 200.0);
     let ((_, small_top, _, small_height), (_, full_top, _, full_height)) = (ink(0), ink(1));
     assert!(small_height < full_height, "small {small_height} vs full {full_height}");
@@ -260,4 +260,29 @@ fn band_name_fallbacks_are_checked() {
     let colors = StatusColors::resolve(&flat, text, text, &palette);
     let ratio = contrast_ratio(colors.band_name, colors.background);
     assert!(ratio >= BAND_TEXT_CONTRAST, "flat theme band name: {ratio}");
+}
+
+/// Text in the integrated titlebar band, a name band or a top strip merged into it, is the tab
+/// titles' size on their raster variant whatever `[status_line] font_scale` is, so the titlebar
+/// reads like the tab bar; an ordinary strip keeps `font_scale` on its own variant.
+#[test]
+fn band_text_matches_the_tab_titles_whatever_the_font_scale() {
+    use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
+    for (scale, font_scale) in [(1.0, 0.85), (2.0, 0.85), (2.0, 1.0), (1.5, 1.2)] {
+        let ordinary = StripGeometry { font_scale, ..geometry_for_font(13.0, scale) };
+        let band = StripGeometry {
+            band: StripBand { in_band: true, left_inset: 0.0, right_inset: 0.0 },
+            ..ordinary
+        };
+        assert_eq!(band.text_px(), tab_title_font_size(13.0) * scale, "{scale} × {font_scale}");
+        assert_eq!(band.raster_variant(), GlyphRasterVariant::TabTitle);
+        assert_eq!(band.chrome_stack(), crate::chrome_cache::ChromeStack::TabTitle);
+        assert_eq!(
+            ordinary.text_px(),
+            status_line_font_size(13.0, font_scale) * scale,
+            "an ordinary strip scales"
+        );
+        assert_eq!(ordinary.raster_variant(), GlyphRasterVariant::StatusLine);
+        assert_eq!(ordinary.chrome_stack(), crate::chrome_cache::ChromeStack::StatusLine);
+    }
 }

@@ -37,6 +37,7 @@ impl GpuRenderer {
         self.rebuild_status_line_stack();
         self.status_line_fit = None;
         self.status_line_cap_height = None;
+        self.band_cap_height = None;
         self.reset_glyph_atlas_in_place("status_line_font_scale");
         self.glyph_atlas_retry_without_eviction = false;
         self.row_glyph_cache.invalidate_all();

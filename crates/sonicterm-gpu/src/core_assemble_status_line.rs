@@ -162,23 +162,34 @@ impl GpuRenderer {
         )
             .hash(&mut hasher);
         let fit_key = hasher.finish();
-        let mut strip_rasterizer = self.status_line_font_stack.clone();
+        // Text in a band is the tab titles' size, so it shapes with their stack.
+        let text_stack = if in_band {
+            self.tab_title_font.stack().cloned()
+        } else {
+            // When: in_band is false, an ordinary strip shapes with its own font_scale stack.
+            self.status_line_font_stack.clone()
+        };
+        let mut strip_rasterizer = text_stack.clone();
         let mut small_rasterizer = small_px.and(self.palette_footer_font_stack.clone());
         let text_px = geometry.text_px();
-        // The cap height is measured once per text size and kept.
-        let kept =
-            crate::status_strip::kept_cap_height(self.status_line_cap_height, text_px, || {
-                match (self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut()) {
-                    (Some(stack), Some(rasterizer)) => crate::status_strip::strip_cap_height(
-                        stack,
-                        rasterizer,
-                        &mut self.glyph_atlas,
-                        text_px,
-                    ),
-                    _ => text_px * 0.7,
-                }
-            });
-        self.status_line_cap_height = Some(kept);
+        let variant = geometry.raster_variant();
+        // The cap height is measured once per text size and kept, the band's apart from the strip's.
+        let kept_cap = if in_band { self.band_cap_height } else { self.status_line_cap_height };
+        let kept = crate::status_strip::kept_cap_height(kept_cap, text_px, || {
+            match (text_stack.as_ref(), strip_rasterizer.as_mut()) {
+                (Some(stack), Some(rasterizer)) => crate::status_strip::strip_cap_height(
+                    stack,
+                    rasterizer,
+                    &mut self.glyph_atlas,
+                    text_px,
+                    variant,
+                ),
+                _ => text_px * 0.7,
+            }
+        });
+        // The band keeps its own cap height so a strip below it never remeasures it.
+        *(if in_band { &mut self.band_cap_height } else { &mut self.status_line_cap_height }) =
+            Some(kept);
         geometry.cap_height = kept.1;
         let kept_fit = match surface {
             Surface::Strip => &self.status_line_fit,
@@ -186,7 +197,7 @@ impl GpuRenderer {
         };
         let stale = kept_fit.as_ref().is_none_or(|(key, _)| *key != fit_key);
         if let (true, Some(stack), Some(rasterizer)) =
-            (stale, self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut())
+            (stale, text_stack.as_ref(), strip_rasterizer.as_mut())
         {
             // The view, width, insets or font changed: refit with the chrome font.
             let view = match surface {
@@ -223,7 +234,7 @@ impl GpuRenderer {
             separators,
             &geometry,
             &colors,
-            self.status_line_font_stack.as_ref(),
+            text_stack.as_ref(),
             strip_rasterizer.as_mut(),
             small_text(
                 self.palette_footer_font_stack.as_ref(),

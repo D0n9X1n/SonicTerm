@@ -126,7 +126,7 @@ default; when omitted, it becomes `#d5c4a1`.
 | `selection_bg` | Selection overlay, drawn at 50% alpha |
 | `colors.ansi` | ANSI colors 0–7 and derived UI accents |
 | `colors.bright` | ANSI colors 8–15 and derived UI accents |
-| `colors.tab.bar_bg` | Background of the tab bar, the status strip, the integrated titlebar band and the search panel. When it equals `colors.background`, those bars use `colors.ansi.black` instead, so they stay apart from the terminal. A color is skipped when it is not lighter than the background darkened 8% (so the bars are never black), when the theme `foreground` does not reach 3:1 on it, or when `colors.tab.active_fg` does not reach 4.5:1 on it; with neither usable, the bars use that darkened shade. Every bundled theme uses one of its two palette colors. |
+| `colors.tab.bar_bg` | Background of the tab bar, the status strip, the integrated titlebar band and the search panel. These bars are never lighter than the terminal: `bar_bg` is used when it is darker than `colors.background`, the theme `foreground` reaches 3:1 on it and `colors.tab.active_fg` reaches 4.5:1 on it. Otherwise, including when it equals the background, the bars use the background darkened 4% in lightness. |
 | `colors.tab.active_bg` / `active_fg` | Active tab |
 | `colors.tab.inactive_bg` / `inactive_fg` | Inactive tabs and separators |
 
