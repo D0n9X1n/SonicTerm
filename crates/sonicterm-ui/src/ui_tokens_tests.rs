@@ -43,32 +43,39 @@ fn palette_derives_from_theme_channels() {
     close(palette.border_focus[3], 0.65);
 }
 
-/// The chrome background (tab bar, status strip, titlebar band) is never lighter than the
-/// terminal in any bundled theme: a theme's own `tab.bar_bg` when it is darker than the
-/// background, else the background at 95% of its lightness; every bundled theme reads on it.
+/// Contrast of `text` on `colors`' chrome background, and on its previous color, the floor.
+fn contrast_and_floor(theme: &Theme, text: &str, floor_cap: f32) -> (f32, f32) {
+    let text = color::hex(text);
+    let palette = UiPalette::from_theme(theme);
+    let previous = previous_chrome_background(&theme.colors);
+    (contrast_linear(text, palette.bg_base), contrast_linear(text, previous).min(floor_cap))
+}
+
+/// In every bundled theme the chrome background (tab bar, status strip, titlebar band) is darker
+/// than the terminal, and its foreground and active tab title read at least as well as they did
+/// on the previous chrome color.
 #[test]
-fn chrome_background_is_never_lighter_than_the_terminal() {
+fn chrome_background_is_darker_than_the_terminal_in_every_bundled_theme() {
     let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
     let mut checked = 0;
     for entry in std::fs::read_dir(&themes).expect("bundled themes") {
         let path = entry.expect("theme entry").path();
         let theme = Theme::load_strict(&path).expect("bundled theme parses");
         let colors = &theme.colors;
-        let background = color::hex(&colors.background.0);
-        let bar = color::hex(&colors.tab.bar_bg.0);
-        let expected = if relative_luminance(bar) < relative_luminance(background) {
-            // When: the theme's bar color is darker than the terminal, the bars use it.
-            bar
-        } else {
-            color::hex_with_lightness_scale(&colors.background.0, CHROME_SHADE_SCALE)
-        };
         let palette = UiPalette::from_theme(&theme);
-        assert_eq!(palette.bg_base, expected, "{}", path.display());
+        let background = color::hex(&colors.background.0);
         assert!(
             relative_luminance(palette.bg_base) < relative_luminance(background),
             "{}: the bars are darker than the terminal",
             path.display()
         );
+        for (text, cap) in [
+            (&colors.foreground.0, CHROME_FOREGROUND_CONTRAST),
+            (&colors.tab.active_fg.0, CHROME_ACTIVE_CONTRAST),
+        ] {
+            let (now, floor) = contrast_and_floor(&theme, text, cap);
+            assert!(now >= floor, "{}: {text} {now} under {floor}", path.display());
+        }
         checked += 1;
     }
     assert_eq!(checked, 9, "the nine bundled themes");
@@ -85,12 +92,10 @@ fn chrome_background_darkens_a_background_the_bar_color_repeats() {
     theme.colors.ansi.black = sonicterm_cfg::theme::Hex("#1d2021".into());
     let palette = UiPalette::from_theme(&theme);
     assert_eq!(palette.bg_base, color::hex_with_lightness_scale("#141617", 0.95));
-    let background = color::hex("#141617");
-    assert!(relative_luminance(palette.bg_base) < relative_luminance(background));
 }
 
 /// A `tab.bar_bg` lighter than the background, such as solarized-dark's, is skipped, so the bars
-/// never stand out lighter than the terminal.
+/// stay below the terminal.
 #[test]
 fn chrome_background_skips_a_lighter_bar_color() {
     let mut theme = Theme::default();
@@ -100,84 +105,60 @@ fn chrome_background_skips_a_lighter_bar_color() {
     assert_eq!(palette.bg_base, color::hex_with_lightness_scale("#002b36", 0.95));
 }
 
-/// A darker `tab.bar_bg` the active tab title fades into is skipped: with `tab.bar_bg` and
-/// `tab.active_fg` both `#080000`, the active tab and a focused band's values would vanish there.
-/// No shade reads either, so the bars take the one the title reads best on, never that bar color.
+/// No reviewed theme reads worse than on the previous chrome color: for each, the foreground
+/// and the active tab title read at least as well, up to 3:1 and 4.5:1. They cover a dim
+/// foreground, a dim active title on a near-black background, a light theme whose previous bars
+/// were its lighter `bar_bg`, a dark theme whose title needs a deeper shade, and a foreground-
+/// colored `bar_bg` under a white title.
 #[test]
-fn chrome_background_skips_a_color_the_active_title_fades_into() {
-    let mut theme = Theme::default();
-    theme.colors.background = sonicterm_cfg::theme::Hex("#202020".into());
-    theme.colors.foreground = sonicterm_cfg::theme::Hex("#ffffff".into());
-    theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#080000".into());
-    theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#080000".into());
-    let palette = UiPalette::from_theme(&theme);
-    assert_ne!(palette.bg_base, color::hex("#080000"), "a bar the title fades into is skipped");
-    assert_eq!(palette.bg_base, color::hex("#202020"), "it reads best on the lightest");
+fn chrome_background_never_reads_worse_than_before() {
+    let fixtures = [
+        ("#101010", "#5a5a5a", "#ffffff", "#101010", "#101010"),
+        ("#101010", "#ffffff", "#767676", "#101010", "#101010"),
+        ("#fafafa", "#202020", "#767676", "#ffffff", "#1d2021"),
+        ("#202020", "#ffffff", "#7c7c7c", "#202020", "#202020"),
+        ("#fafafa", "#202020", "#ffffff", "#202020", "#1d2021"),
+        ("#202020", "#ffffff", "#080000", "#080000", "#202020"),
+    ];
+    for (background, foreground, active, bar, black) in fixtures {
+        let mut theme = Theme::default();
+        theme.colors.background = sonicterm_cfg::theme::Hex(background.into());
+        theme.colors.foreground = sonicterm_cfg::theme::Hex(foreground.into());
+        theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex(active.into());
+        theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex(bar.into());
+        theme.colors.ansi.black = sonicterm_cfg::theme::Hex(black.into());
+        let label = format!("{background} {foreground} {active} {bar}");
+        let (fg_now, fg_floor) = contrast_and_floor(&theme, foreground, CHROME_FOREGROUND_CONTRAST);
+        assert!(fg_now >= fg_floor, "{label}: foreground {fg_now} under {fg_floor}");
+        let (act_now, act_floor) = contrast_and_floor(&theme, active, CHROME_ACTIVE_CONTRAST);
+        assert!(act_now >= act_floor, "{label}: active title {act_now} under {act_floor}");
+    }
 }
 
-/// A dark theme's light active title that misses 4.5:1 on the 5% shade gets a deeper one it reads
-/// on: `#7c7c7c` on `#202020` falls short down to 60% lightness and reads at 40%, so it keeps at
-/// least the 4.5:1 floor it had before this rule.
+/// A dark theme's light active title that misses its floor on the 5% shade gets a deeper shade it
+/// reads on: `#7c7c7c` on `#202020` falls short down to 60% lightness and reads at 40%.
 #[test]
 fn chrome_background_deepens_until_the_active_title_reads() {
     let mut theme = Theme::default();
     theme.colors.background = sonicterm_cfg::theme::Hex("#202020".into());
     theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#202020".into());
+    theme.colors.ansi.black = sonicterm_cfg::theme::Hex("#202020".into());
     theme.colors.foreground = sonicterm_cfg::theme::Hex("#ffffff".into());
     theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#7c7c7c".into());
-    let active = color::hex("#7c7c7c");
-    let at = |scale| color::hex_with_lightness_scale("#202020", scale);
-    assert!(contrast_linear(active, at(CHROME_SHADE_SCALE)) < CHROME_ACTIVE_CONTRAST, "setup");
     let palette = UiPalette::from_theme(&theme);
-    assert!(contrast_linear(active, palette.bg_base) >= CHROME_ACTIVE_CONTRAST);
-    let chosen = [CHROME_SHADE_SCALE].into_iter().chain(CHROME_DEEPER_SCALES).map(at);
-    let first_readable = chosen
-        .into_iter()
-        .find(|candidate| contrast_linear(active, *candidate) >= CHROME_ACTIVE_CONTRAST);
-    assert_eq!(Some(palette.bg_base), first_readable, "the lightest shade that reads");
+    assert_eq!(palette.bg_base, color::hex_with_lightness_scale("#202020", 0.4));
 }
 
-/// When the active title reads on no darker candidate, as `#767676` on a `#fafafa` theme, the bars
-/// take whatever it reads best on, here the background itself, never a shade that reads worse.
+/// A light theme whose previous bars were its own lighter `tab.bar_bg`, because no darker color
+/// kept the active title readable, keeps that color: `#767676` reads at 4.5:1 on `#ffffff` and on
+/// no darker shade of `#fafafa`.
 #[test]
-fn chrome_background_takes_the_best_reading_color_when_none_passes() {
+fn chrome_background_keeps_the_previous_color_when_no_darker_one_reads() {
     let mut theme = Theme::default();
     theme.colors.background = sonicterm_cfg::theme::Hex("#fafafa".into());
     theme.colors.foreground = sonicterm_cfg::theme::Hex("#202020".into());
     theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#ffffff".into());
     theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#767676".into());
-    let active = color::hex("#767676");
-    let shade = color::hex_with_lightness_scale("#fafafa", CHROME_SHADE_SCALE);
-    assert!(contrast_linear(active, shade) < CHROME_ACTIVE_CONTRAST, "setup: the shade fails");
     let palette = UiPalette::from_theme(&theme);
-    assert_eq!(palette.bg_base, color::hex("#fafafa"));
-}
-
-/// The last fallback never trades the foreground for the active title: with `tab.bar_bg` the
-/// foreground's own `#202020` under a white active title on `#fafafa`, no candidate reads for both,
-/// and the bars take one the foreground still reads on at 3:1, never that bar color.
-#[test]
-fn chrome_background_fallback_keeps_the_foreground_readable() {
-    let mut theme = Theme::default();
-    theme.colors.background = sonicterm_cfg::theme::Hex("#fafafa".into());
-    theme.colors.foreground = sonicterm_cfg::theme::Hex("#202020".into());
-    theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#202020".into());
-    theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#ffffff".into());
-    let palette = UiPalette::from_theme(&theme);
-    let foreground = color::hex("#202020");
-    assert_ne!(palette.bg_base, color::hex("#202020"), "not the foreground's own color");
-    assert!(contrast_linear(foreground, palette.bg_base) >= CHROME_FOREGROUND_CONTRAST);
-}
-
-/// A light theme that leaves `tab.bar_bg` at its dark default does not get dark bars under its
-/// dark text: a bar color the foreground cannot be read on is skipped, and the bars are the
-/// background at 95% of its lightness, still darker than the terminal.
-#[test]
-fn chrome_background_skips_palette_colors_the_text_cannot_be_read_on() {
-    let mut theme = Theme::default();
-    theme.colors.background = sonicterm_cfg::theme::Hex("#fafafa".into());
-    theme.colors.foreground = sonicterm_cfg::theme::Hex("#202020".into());
-    theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#202020".into());
-    let palette = UiPalette::from_theme(&theme);
-    assert_eq!(palette.bg_base, color::hex_with_lightness_scale("#fafafa", 0.95));
+    assert_eq!(palette.bg_base, color::hex("#ffffff"));
 }

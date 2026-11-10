@@ -123,7 +123,7 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 | `selection_bg` | 选区 overlay，以 50% alpha 绘制 |
 | `colors.ansi` | ANSI 颜色 0–7 和派生 UI accent |
 | `colors.bright` | ANSI 颜色 8–15 和派生 UI accent |
-| `colors.tab.bar_bg` | 标签栏、状态栏、集成标题栏带和搜索面板的背景。这些栏不会比终端更亮。它们依次尝试 `bar_bg`（比 `colors.background` 更暗时）以及亮度为背景色 95%、90%、80%、60%、40% 的颜色，使用第一个能让主题 `foreground` 对比度达到 3:1、`colors.tab.active_fg` 达到 4.5:1 的颜色。`bar_bg` 与背景色相同的主题通常得到 95% 的颜色，只比终端略暗。都不满足时，在上述颜色和背景色中 `foreground` 对比度仍达到 3:1 的颜色里，使用活动标签标题对比度最高的那个。 |
+| `colors.tab.bar_bg` | 标签栏、状态栏、集成标题栏带和搜索面板的背景。只要文字仍然可读，这些栏就比终端更暗。它们依次尝试 `bar_bg` 以及亮度为背景色 95%、90%、80%、60%、40% 的颜色，使用第一个比 `colors.background` 更暗、且主题 `foreground` 和 `colors.tab.active_fg` 在其上的对比度不低于在之前的界面颜色上（上限分别为 3:1 和 4.5:1）的颜色。之前的界面颜色是：`bar_bg` 与背景色不同时使用它，否则 `colors.ansi.black` 与背景色不同时使用它，二者都须比背景色降低 8% 亮度后的颜色更亮，且两种文字都可读；否则使用该降低亮度后的颜色。`bar_bg` 与背景色相同的主题（例如内置的 wezterm 主题）得到 95% 的颜色，只比终端略暗。没有满足条件的颜色时，这些栏保留之前的颜色。 |
 | `colors.tab.active_bg` / `active_fg` | 当前标签页 |
 | `colors.tab.inactive_bg` / `inactive_fg` | 非当前标签页和分隔线 |
 

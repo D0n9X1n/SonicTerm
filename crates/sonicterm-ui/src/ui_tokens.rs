@@ -70,38 +70,50 @@ fn relative_luminance(rgba: [f32; 4]) -> f32 {
     0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
 }
 
-/// The chrome background, never lighter than the terminal: the first of `colors`' own
-/// `tab.bar_bg`, the background at [`CHROME_SHADE_SCALE`] of its lightness and then at each of
-/// [`CHROME_DEEPER_SCALES`] that is darker than the background, with the foreground at 3:1 and the
-/// active tab title at 4.5:1 on it. With none, of those and the background on which the
-/// foreground still reads at 3:1, the one the active title reads best on; the background when the
-/// foreground reads on none.
+/// The chrome background before it was kept below the terminal: `tab.bar_bg` when it differs from
+/// the background, else `ansi.black` when that differs, each only when it is lighter than the
+/// background darkened 8%, the foreground reads at 3:1 and the active tab title at 4.5:1 on it;
+/// else that darkened shade. Its contrast is the floor [`chrome_background`] never goes under.
+fn previous_chrome_background(colors: &sonicterm_cfg::theme::Palette) -> [f32; 4] {
+    let background = colors.background.0.as_str();
+    let foreground = color::hex(&colors.foreground.0);
+    let active = color::hex(&colors.tab.active_fg.0);
+    let derived = color::hex_with_lightness_delta(background, -0.08);
+    [colors.tab.bar_bg.0.as_str(), colors.ansi.black.0.as_str()]
+        .into_iter()
+        .filter(|candidate| !candidate.eq_ignore_ascii_case(background))
+        .map(color::hex)
+        .find(|candidate| {
+            relative_luminance(*candidate) > relative_luminance(derived)
+                && contrast_linear(foreground, *candidate) >= CHROME_FOREGROUND_CONTRAST
+                && contrast_linear(active, *candidate) >= CHROME_ACTIVE_CONTRAST
+        })
+        .unwrap_or(derived)
+}
+
+/// The chrome background, darker than the terminal wherever that keeps its text readable: the
+/// first of `colors`' own `tab.bar_bg`, the background at [`CHROME_SHADE_SCALE`] of its lightness
+/// and then at each of [`CHROME_DEEPER_SCALES`] that is darker than the background and on which the
+/// foreground and the active tab title each read at least as well as on
+/// [`previous_chrome_background`], up to their 3:1 and 4.5:1 floors. With none, that previous
+/// color, so the bars never read worse than they did.
 fn chrome_background(colors: &sonicterm_cfg::theme::Palette) -> [f32; 4] {
     let background = color::hex(&colors.background.0);
     let foreground = color::hex(&colors.foreground.0);
     let active = color::hex(&colors.tab.active_fg.0);
+    let previous = previous_chrome_background(colors);
+    let foreground_floor = contrast_linear(foreground, previous).min(CHROME_FOREGROUND_CONTRAST);
+    let active_floor = contrast_linear(active, previous).min(CHROME_ACTIVE_CONTRAST);
     let shade = |scale| color::hex_with_lightness_scale(&colors.background.0, scale);
-    let candidates: Vec<[f32; 4]> = std::iter::once(color::hex(&colors.tab.bar_bg.0))
+    std::iter::once(color::hex(&colors.tab.bar_bg.0))
         .chain(std::iter::once(shade(CHROME_SHADE_SCALE)))
         .chain(CHROME_DEEPER_SCALES.into_iter().map(shade))
-        .filter(|candidate| relative_luminance(*candidate) < relative_luminance(background))
-        .collect();
-    let reads = |candidate: &[f32; 4]| {
-        contrast_linear(foreground, *candidate) >= CHROME_FOREGROUND_CONTRAST
-            && contrast_linear(active, *candidate) >= CHROME_ACTIVE_CONTRAST
-    };
-    candidates.iter().copied().find(reads).unwrap_or_else(|| {
-        // No candidate reads for both: keep the foreground readable and favour the active title.
-        std::iter::once(background)
-            .chain(candidates)
-            .filter(|candidate| {
-                contrast_linear(foreground, *candidate) >= CHROME_FOREGROUND_CONTRAST
-            })
-            .max_by(|left, right| {
-                contrast_linear(active, *left).total_cmp(&contrast_linear(active, *right))
-            })
-            .unwrap_or(background)
-    })
+        .find(|candidate| {
+            relative_luminance(*candidate) < relative_luminance(background)
+                && contrast_linear(foreground, *candidate) >= foreground_floor
+                && contrast_linear(active, *candidate) >= active_floor
+        })
+        .unwrap_or(previous)
 }
 
 impl UiPalette {
@@ -110,11 +122,12 @@ impl UiPalette {
     /// - `accent`        — `theme.colors.tab.active_fg` (the theme's
     ///   explicit chrome accent), e.g. `#fabd2f` for gruvbox-dark-hard,
     ///   `#7aa2f7` for tokyo-night.
-    /// - `bg_base`       — the chrome background (tab bar, status strip, titlebar band), never
-    ///   lighter than the terminal: the first of `theme.colors.tab.bar_bg` (when darker than the
-    ///   background) and the background at 95%, then 90%, 80%, 60% and 40% of its lightness, with
-    ///   the foreground at 3:1 and `tab.active_fg` at 4.5:1 on it; else, of those and the
-    ///   background on which the foreground reads at 3:1, the one `tab.active_fg` reads best on.
+    /// - `bg_base`       — the chrome background (tab bar, status strip, titlebar band),
+    ///   darker than the terminal where its text stays readable: the first of
+    ///   `theme.colors.tab.bar_bg` and the background at 95%, then 90%, 80%, 60% and 40% of its
+    ///   lightness that is darker than the background and on which the foreground and
+    ///   `tab.active_fg` read at least as well as on the previous chrome color (up to 3:1 and
+    ///   4.5:1); else that previous color.
     /// - `bg_elevated`   — `theme.colors.background` (i.e. base).
     /// - `bg_surface`    — `theme.colors.background` shifted +5% lightness.
     /// - `bg_hover`      — `foreground` @ 6% alpha.
