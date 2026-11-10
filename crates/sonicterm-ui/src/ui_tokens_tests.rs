@@ -153,6 +153,22 @@ fn chrome_background_takes_the_best_reading_color_when_none_passes() {
     assert_eq!(palette.bg_base, color::hex("#fafafa"));
 }
 
+/// The last fallback never trades the foreground for the active title: with `tab.bar_bg` the
+/// foreground's own `#202020` under a white active title on `#fafafa`, no candidate reads for both,
+/// and the bars take one the foreground still reads on at 3:1, never that bar color.
+#[test]
+fn chrome_background_fallback_keeps_the_foreground_readable() {
+    let mut theme = Theme::default();
+    theme.colors.background = sonicterm_cfg::theme::Hex("#fafafa".into());
+    theme.colors.foreground = sonicterm_cfg::theme::Hex("#202020".into());
+    theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#202020".into());
+    theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#ffffff".into());
+    let palette = UiPalette::from_theme(&theme);
+    let foreground = color::hex("#202020");
+    assert_ne!(palette.bg_base, color::hex("#202020"), "not the foreground's own color");
+    assert!(contrast_linear(foreground, palette.bg_base) >= CHROME_FOREGROUND_CONTRAST);
+}
+
 /// A light theme that leaves `tab.bar_bg` at its dark default does not get dark bars under its
 /// dark text: a bar color the foreground cannot be read on is skipped, and the bars are the
 /// background at 95% of its lightness, still darker than the terminal.

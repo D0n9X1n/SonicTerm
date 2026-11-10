@@ -126,7 +126,7 @@ default; when omitted, it becomes `#d5c4a1`.
 | `selection_bg` | Selection overlay, drawn at 50% alpha |
 | `colors.ansi` | ANSI colors 0–7 and derived UI accents |
 | `colors.bright` | ANSI colors 8–15 and derived UI accents |
-| `colors.tab.bar_bg` | Background of the tab bar, the status strip, the integrated titlebar band and the search panel. These bars are never lighter than the terminal. They use the first of `bar_bg` (when it is darker than `colors.background`) and the background at 95%, then 90%, 80%, 60% and 40% of its lightness on which the theme `foreground` reaches 3:1 and `colors.tab.active_fg` reaches 4.5:1. A theme whose `bar_bg` repeats the background usually gets the 95% shade, just darker than the terminal. With none, the bars use whichever of those or the background the active tab title reads best on. |
+| `colors.tab.bar_bg` | Background of the tab bar, the status strip, the integrated titlebar band and the search panel. These bars are never lighter than the terminal. They use the first of `bar_bg` (when it is darker than `colors.background`) and the background at 95%, then 90%, 80%, 60% and 40% of its lightness on which the theme `foreground` reaches 3:1 and `colors.tab.active_fg` reaches 4.5:1. A theme whose `bar_bg` repeats the background usually gets the 95% shade, just darker than the terminal. With none, they use, of those and the background on which the `foreground` still reaches 3:1, the one the active tab title reads best on. |
 | `colors.tab.active_bg` / `active_fg` | Active tab |
 | `colors.tab.inactive_bg` / `inactive_fg` | Inactive tabs and separators |
 
