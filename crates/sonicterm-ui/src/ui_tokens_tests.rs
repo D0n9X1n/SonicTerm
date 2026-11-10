@@ -102,7 +102,7 @@ fn chrome_background_skips_a_lighter_bar_color() {
 
 /// A darker `tab.bar_bg` the active tab title fades into is skipped: with `tab.bar_bg` and
 /// `tab.active_fg` both `#080000`, the active tab and a focused band's values would vanish there.
-/// The title cannot read on the shade either, so the bars keep the background itself.
+/// No shade reads either, so the bars take the one the title reads best on, never that bar color.
 #[test]
 fn chrome_background_skips_a_color_the_active_title_fades_into() {
     let mut theme = Theme::default();
@@ -111,14 +111,36 @@ fn chrome_background_skips_a_color_the_active_title_fades_into() {
     theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#080000".into());
     theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#080000".into());
     let palette = UiPalette::from_theme(&theme);
-    assert_eq!(palette.bg_base, color::hex("#202020"));
+    assert_ne!(palette.bg_base, color::hex("#080000"), "a bar the title fades into is skipped");
+    assert_eq!(palette.bg_base, color::hex("#202020"), "it reads best on the lightest");
 }
 
-/// The chrome never reads worse than the terminal: when the active tab title would fall under
-/// 4.5:1 on every darker candidate (`#767676` on a `#fafafa` theme and its 95% shade), the bars
-/// keep the background, so the title reads exactly as it does on the terminal.
+/// A dark theme's light active title that misses 4.5:1 on the 5% shade gets a deeper one it reads
+/// on: `#7c7c7c` on `#202020` falls short down to 60% lightness and reads at 40%, so it keeps at
+/// least the 4.5:1 floor it had before this rule.
 #[test]
-fn chrome_background_keeps_the_background_when_no_shade_reads() {
+fn chrome_background_deepens_until_the_active_title_reads() {
+    let mut theme = Theme::default();
+    theme.colors.background = sonicterm_cfg::theme::Hex("#202020".into());
+    theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#202020".into());
+    theme.colors.foreground = sonicterm_cfg::theme::Hex("#ffffff".into());
+    theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#7c7c7c".into());
+    let active = color::hex("#7c7c7c");
+    let at = |scale| color::hex_with_lightness_scale("#202020", scale);
+    assert!(contrast_linear(active, at(CHROME_SHADE_SCALE)) < CHROME_ACTIVE_CONTRAST, "setup");
+    let palette = UiPalette::from_theme(&theme);
+    assert!(contrast_linear(active, palette.bg_base) >= CHROME_ACTIVE_CONTRAST);
+    let chosen = [CHROME_SHADE_SCALE].into_iter().chain(CHROME_DEEPER_SCALES).map(at);
+    let first_readable = chosen
+        .into_iter()
+        .find(|candidate| contrast_linear(active, *candidate) >= CHROME_ACTIVE_CONTRAST);
+    assert_eq!(Some(palette.bg_base), first_readable, "the lightest shade that reads");
+}
+
+/// When the active title reads on no darker candidate, as `#767676` on a `#fafafa` theme, the bars
+/// take whatever it reads best on, here the background itself, never a shade that reads worse.
+#[test]
+fn chrome_background_takes_the_best_reading_color_when_none_passes() {
     let mut theme = Theme::default();
     theme.colors.background = sonicterm_cfg::theme::Hex("#fafafa".into());
     theme.colors.foreground = sonicterm_cfg::theme::Hex("#202020".into());

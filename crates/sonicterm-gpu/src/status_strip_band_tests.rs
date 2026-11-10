@@ -289,16 +289,29 @@ fn band_text_is_the_terminal_font_size_whatever_the_font_scale() {
     }
 }
 
-/// A band and an ordinary strip of different sizes drawn into one atlas, in either order, keep
-/// their own tiles: the band's capitals land on the grid's variant at the terminal size and the
-/// strip's on its own variant at its size, so neither draw leaves a tile the other then reuses.
+/// A band and an ordinary strip of different sizes share one atlas safely, in either order: each
+/// probes its cap height and draws on its own variant at its own size, with the renderer's own
+/// native-size stacks, so the band's capital is the body stack's Normal tile at the terminal size,
+/// the tile a grid row of the same font draws, and the strip's stays on StatusLine at its size.
 #[test]
 fn band_and_strip_text_keep_their_own_tiles_in_one_atlas() {
     use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let body = chrome_stack();
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
+    // At 144 DPI (scale 2) a 13 pt body stack draws at 26 px, the band's `font_raster_px`: the same
+    // native size the renderer gives the grid, large enough that the strip's 0.85 size draws a
+    // visibly shorter capital.
+    let body = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+        &[("Rec Mono St.Helens", false)],
+        vec![assets],
+        13.0,
+        144,
+        1.0,
+    )
+    .unwrap();
     let strip_stack = body.with_font_size(f64::from(status_line_font_size(13.0, 0.85)));
     let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
     let palette = UiPalette::from_theme(&theme);
@@ -317,13 +330,13 @@ fn band_and_strip_text_keep_their_own_tiles_in_one_atlas() {
     }];
     let ordinary = StripGeometry {
         top: 0.0,
-        height: 40.0,
+        height: 80.0,
         position: StatusPosition::Bottom,
         screen: (400.0, 200.0),
-        scale_factor: 1.0,
-        font_raster_px: 13.0,
+        scale_factor: 2.0,
+        font_raster_px: 26.0,
         font_scale: 0.85,
-        cap_height: 7.0,
+        cap_height: 0.0,
         band: StripBand::default(),
     };
     let band = StripGeometry {
@@ -331,14 +344,23 @@ fn band_and_strip_text_keep_their_own_tiles_in_one_atlas() {
         position: StatusPosition::Top,
         ..ordinary
     };
+    // Probe the cap height and draw one capital, as the assembler does for each surface.
     let draw =
         |geometry: &StripGeometry, stack: &sonicterm_engine::FontStack, atlas: &mut GlyphAtlas| {
             let mut raster = stack.clone();
+            let mut probed = *geometry;
+            probed.cap_height = strip_cap_height(
+                stack,
+                &mut raster,
+                atlas,
+                geometry.text_px(),
+                geometry.raster_variant(),
+            );
             let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
             emit_strip(
                 &placed,
                 &[],
-                geometry,
+                &probed,
                 &colors,
                 Some(stack),
                 Some(&mut raster),
@@ -351,21 +373,32 @@ fn band_and_strip_text_keep_their_own_tiles_in_one_atlas() {
             );
             let ink =
                 glyphs.first().map(|glyph| crate::cursor::ndc_rect_px(glyph.rect, 400.0, 200.0).3);
-            ink.expect("one capital")
+            (probed.cap_height, ink.expect("one capital"))
         };
+    // The grid's own `H` tile at the terminal size, for comparison with the band's.
+    let grid_ink = {
+        let mut atlas = GlyphAtlas::new(1024, 1024);
+        let mut raster = body.clone();
+        strip_cap_height(&body, &mut raster, &mut atlas, 26.0, GlyphRasterVariant::Normal)
+    };
     for band_first in [true, false] {
         let mut atlas = GlyphAtlas::new(1024, 1024);
-        let (band_h, strip_h) = if band_first {
-            let band_h = draw(&band, &body, &mut atlas);
-            (band_h, draw(&ordinary, &strip_stack, &mut atlas))
+        let ((band_cap, band_h), (strip_cap, strip_h)) = if band_first {
+            let band_drawn = draw(&band, &body, &mut atlas);
+            (band_drawn, draw(&ordinary, &strip_stack, &mut atlas))
         } else {
-            let strip_h = draw(&ordinary, &strip_stack, &mut atlas);
-            (draw(&band, &body, &mut atlas), strip_h)
+            let strip_drawn = draw(&ordinary, &strip_stack, &mut atlas);
+            (draw(&band, &body, &mut atlas), strip_drawn)
         };
         assert!(strip_h < band_h, "band first {band_first}: strip {strip_h} vs band {band_h}");
+        assert!(strip_cap < band_cap, "band first {band_first}: caps {strip_cap} vs {band_cap}");
+        assert_eq!(band_cap, grid_ink, "band first {band_first}: the band's H is the grid's");
         let variants: std::collections::HashSet<_> =
             atlas.resident_tile_keys().into_iter().map(|key| key.raster_variant).collect();
-        assert!(variants.contains(&GlyphRasterVariant::Normal), "{variants:?}");
-        assert!(variants.contains(&GlyphRasterVariant::StatusLine), "{variants:?}");
+        assert_eq!(
+            variants,
+            [GlyphRasterVariant::Normal, GlyphRasterVariant::StatusLine].into_iter().collect(),
+            "band first {band_first}: each probe and draw stays on its surface's variant"
+        );
     }
 }
