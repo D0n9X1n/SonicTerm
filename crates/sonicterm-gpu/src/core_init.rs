@@ -580,6 +580,7 @@ impl GpuRenderer {
             status_line_view: StatusLineView::default(),
             status_line_fit: None,
             status_line_cap_height: None,
+            band_cap_height: None,
             status_line_layouts: Default::default(),
             status_line_focus: None,
             window_band: Default::default(),

@@ -55,7 +55,8 @@ fn the_strip_measures_its_drawn_capital() {
     let mut raster = stack.clone();
     let mut atlas = GlyphAtlas::new(256, 256);
     let text_px = 13.0;
-    let cap = strip_cap_height(&stack, &mut raster, &mut atlas, text_px);
+    let cap =
+        strip_cap_height(&stack, &mut raster, &mut atlas, text_px, GlyphRasterVariant::StatusLine);
     let (ink_h, _) =
         drawn_h(&stack, &mut GlyphAtlas::new(256, 256), GlyphRasterVariant::StatusLine, text_px);
     assert!(cap > 0.0 && cap <= ink_h, "cap {cap} vs drawn H {ink_h}");

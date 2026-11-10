@@ -120,6 +120,7 @@ impl GpuRenderer {
         self.rebuild_status_line_stack();
         self.status_line_fit = None;
         self.status_line_cap_height = None;
+        self.band_cap_height = None;
         self.cell_w = new_cell_w;
         self.cell_h = new_line_h;
         self.reset_glyph_atlas_in_place("font_change");

@@ -430,6 +430,9 @@ pub struct GpuRenderer {
     status_line_fit: Option<(u64, crate::status_strip::FittedStrip)>,
     /// The strip font's cap height, keyed by the text size it was measured at (`f32` bits).
     status_line_cap_height: Option<(u32, f32)>,
+    /// The band text's cap height on the tab-title stack, keyed like `status_line_cap_height`,
+    /// kept apart so a name band and a bottom strip never remeasure each other.
+    band_cap_height: Option<(u32, f32)>,
     /// Hit boxes of the segments the last drawn frame presented.
     status_line_layouts: crate::status_strip::StripLayouts,
     /// The segment keyboard focus is on and whether `strong_focus` doubles its ring; `None` draws

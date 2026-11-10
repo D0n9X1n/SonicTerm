@@ -343,7 +343,8 @@ pub struct StripGeometry {
     pub screen: (f32, f32),
     /// Display scale factor.
     pub scale_factor: f32,
-    /// The terminal font's live raster size; the strip text is `font_scale` × the tab titles' size.
+    /// The terminal font's live raster size; the strip text is `font_scale` × the tab titles' size,
+    /// and this size itself in a band.
     pub font_raster_px: f32,
     /// `[status_line] font_scale`: the strip text's share of that size.
     pub font_scale: f32,
@@ -366,11 +367,38 @@ pub struct StripBand {
 }
 
 impl StripGeometry {
-    /// The strip's text raster size: `font_scale` × the tab titles' size at the display scale, at
-    /// least 1 pt, which is what [`status_line_font_size`] asks the stack for.
+    /// The strip's text raster size at the display scale, at least 1 pt: the terminal font's size
+    /// in an integrated titlebar band, one point under the tab titles, and otherwise `font_scale`
+    /// × the tab titles' size, which is what [`status_line_font_size`] asks the stack for.
     pub fn text_px(&self) -> f32 {
         let scale = self.scale_factor.max(0.5);
+        if self.band.in_band {
+            // When: band.in_band, the text is the terminal font's own size, as the grid draws it.
+            return self.font_raster_px.max(scale);
+        }
         (status_line_font_size(self.font_raster_px / scale, self.font_scale) * scale).max(1.0)
+    }
+
+    /// The atlas raster variant the strip's full-size text is drawn on: the terminal's in a band,
+    /// whose text is the terminal font's size, so its tiles are the grid's; the strip's own
+    /// otherwise.
+    pub fn raster_variant(&self) -> GlyphRasterVariant {
+        if self.band.in_band {
+            // When: band.in_band, the text is the terminal font's size and shares the grid's tiles.
+            return GlyphRasterVariant::Normal;
+        }
+        GlyphRasterVariant::StatusLine
+    }
+
+    /// The chrome run cache's stack for the strip's full-size text, matching
+    /// [`Self::raster_variant`].
+    pub fn chrome_stack(&self) -> crate::chrome_cache::ChromeStack {
+        use crate::chrome_cache::ChromeStack;
+        if self.band.in_band {
+            // When: band.in_band, runs are shaped with the terminal's body stack.
+            return ChromeStack::Body;
+        }
+        ChromeStack::StatusLine
     }
 
     /// Fit metrics for this geometry.
@@ -431,7 +459,7 @@ pub fn fit_strip<Raster: Rasterizer>(
                 GlyphRasterVariant::PaletteFooter,
             ),
             // A full-size segment's text, or no small text: the strip's own size.
-            _ => (font_stack, &mut *rasterizer, text_px, GlyphRasterVariant::StatusLine),
+            _ => (font_stack, &mut *rasterizer, text_px, geometry.raster_variant()),
         };
         chrome_text::layout_with_raster_variant(
             stack,
@@ -521,8 +549,8 @@ pub(crate) fn emit_strip<Raster: Rasterizer>(
                 font_stack,
                 &mut *rasterizer,
                 text_px,
-                crate::chrome_cache::ChromeStack::StatusLine,
-                GlyphRasterVariant::StatusLine,
+                geometry.chrome_stack(),
+                geometry.raster_variant(),
             ),
         };
         let key = crate::chrome_cache::ChromeRunKey::new(chrome_stack, attrs, size, size);

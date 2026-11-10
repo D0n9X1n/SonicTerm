@@ -43,13 +43,21 @@ pub struct UiPalette {
     pub search_current: [f32; 4],
 }
 
-/// Contrast the theme foreground needs on a palette color before the bars use it; the band's
-/// quiet text has its own 4.5:1 floor and its own fallbacks.
+/// Contrast the theme foreground needs on `tab.bar_bg` before the bars use it; the band's quiet
+/// text has its own 4.5:1 floor and its own fallbacks.
 const CHROME_FOREGROUND_CONTRAST: f32 = 3.0;
 
-/// Contrast the active tab title needs on a palette color before the bars use it: the WCAG AA
+/// Contrast the active tab title needs on `tab.bar_bg` before the bars use it: the WCAG AA
 /// text floor, so the active tab and a focused band's values never fade into the bars.
 const CHROME_ACTIVE_CONTRAST: f32 = 4.5;
+
+/// Share of the terminal background's HSL lightness the chrome background keeps: 5% darker, so the
+/// bars sit just below the terminal.
+const CHROME_SHADE_SCALE: f32 = 0.95;
+
+/// Deeper shares of the background's lightness tried, in order, when the text does not read on
+/// [`CHROME_SHADE_SCALE`]; a dark theme's light text reads better the darker the bars are.
+const CHROME_DEEPER_SCALES: [f32; 4] = [0.9, 0.8, 0.6, 0.4];
 
 /// WCAG contrast ratio between two opaque linear-sRGB colors.
 fn contrast_linear(first: [f32; 4], second: [f32; 4]) -> f32 {
@@ -62,12 +70,11 @@ fn relative_luminance(rgba: [f32; 4]) -> f32 {
     0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
 }
 
-/// The chrome background from `colors`' own palette: `tab.bar_bg` when the theme gives the bars
-/// their own color, else `ansi.black` when it differs from the terminal background, so the bars
-/// stay apart from the terminal. A candidate is used only when it is lighter than the background
-/// darkened 8% (so it is never black), the foreground reads at 3:1 on it and the active tab title
-/// at 4.5:1; a theme with no such candidate gets that darkened shade.
-fn chrome_background(colors: &sonicterm_cfg::theme::Palette) -> [f32; 4] {
+/// The chrome background before it was kept below the terminal: `tab.bar_bg` when it differs from
+/// the background, else `ansi.black` when that differs, each only when it is lighter than the
+/// background darkened 8%, the foreground reads at 3:1 and the active tab title at 4.5:1 on it;
+/// else that darkened shade. Its contrast is the floor [`chrome_background`] never goes under.
+fn previous_chrome_background(colors: &sonicterm_cfg::theme::Palette) -> [f32; 4] {
     let background = colors.background.0.as_str();
     let foreground = color::hex(&colors.foreground.0);
     let active = color::hex(&colors.tab.active_fg.0);
@@ -84,17 +91,43 @@ fn chrome_background(colors: &sonicterm_cfg::theme::Palette) -> [f32; 4] {
         .unwrap_or(derived)
 }
 
+/// The chrome background, darker than the terminal wherever that keeps its text readable: the
+/// first of `colors`' own `tab.bar_bg`, the background at [`CHROME_SHADE_SCALE`] of its lightness
+/// and then at each of [`CHROME_DEEPER_SCALES`] that is darker than the background and on which the
+/// foreground and the active tab title each read at least as well as on
+/// [`previous_chrome_background`], up to their 3:1 and 4.5:1 floors. With none, that previous
+/// color, so the bars never read worse than they did.
+fn chrome_background(colors: &sonicterm_cfg::theme::Palette) -> [f32; 4] {
+    let background = color::hex(&colors.background.0);
+    let foreground = color::hex(&colors.foreground.0);
+    let active = color::hex(&colors.tab.active_fg.0);
+    let previous = previous_chrome_background(colors);
+    let foreground_floor = contrast_linear(foreground, previous).min(CHROME_FOREGROUND_CONTRAST);
+    let active_floor = contrast_linear(active, previous).min(CHROME_ACTIVE_CONTRAST);
+    let shade = |scale| color::hex_with_lightness_scale(&colors.background.0, scale);
+    std::iter::once(color::hex(&colors.tab.bar_bg.0))
+        .chain(std::iter::once(shade(CHROME_SHADE_SCALE)))
+        .chain(CHROME_DEEPER_SCALES.into_iter().map(shade))
+        .find(|candidate| {
+            relative_luminance(*candidate) < relative_luminance(background)
+                && contrast_linear(foreground, *candidate) >= foreground_floor
+                && contrast_linear(active, *candidate) >= active_floor
+        })
+        .unwrap_or(previous)
+}
+
 impl UiPalette {
     /// Derive a chrome palette from the active terminal [`Theme`].
     ///
     /// - `accent`        — `theme.colors.tab.active_fg` (the theme's
     ///   explicit chrome accent), e.g. `#fabd2f` for gruvbox-dark-hard,
     ///   `#7aa2f7` for tokyo-night.
-    /// - `bg_base`       — the chrome background (tab bar, status strip, titlebar band), a theme
-    ///   palette color: `theme.colors.tab.bar_bg` when it differs from the background, else
-    ///   `theme.colors.ansi.black` when that differs, each only if it is lighter than the
-    ///   derived shade, the foreground reads at 3:1 and `tab.active_fg` at 4.5:1 on it; else
-    ///   the background shifted -8% lightness.
+    /// - `bg_base`       — the chrome background (tab bar, status strip, titlebar band),
+    ///   darker than the terminal where its text stays readable: the first of
+    ///   `theme.colors.tab.bar_bg` and the background at 95%, then 90%, 80%, 60% and 40% of its
+    ///   lightness that is darker than the background and on which the foreground and
+    ///   `tab.active_fg` read at least as well as on the previous chrome color (up to 3:1 and
+    ///   4.5:1); else that previous color.
     /// - `bg_elevated`   — `theme.colors.background` (i.e. base).
     /// - `bg_surface`    — `theme.colors.background` shifted +5% lightness.
     /// - `bg_hover`      — `foreground` @ 6% alpha.
@@ -269,7 +302,7 @@ pub mod color {
 
     /// Double HSL saturation for an accent color, preserving lightness and alpha.
     pub fn double_saturate_hex(hex_color: &str) -> [f32; 4] {
-        adjust_hsl(hex_color, 0.0, Some(2.0))
+        adjust_hsl_with(hex_color, |lightness| lightness, Some(2.0))
     }
 
     /// Adjust the lightness of a `#RRGGBB`/`#RRGGBBAA` color in HSL space
@@ -277,12 +310,19 @@ pub mod color {
     /// linear-sRGB premultiplied `[r,g,b,a]`. `delta > 0` lightens,
     /// `delta < 0` darkens. Clamped to `[0, 1]`.
     pub fn hex_with_lightness_delta(hex_color: &str, delta: f32) -> [f32; 4] {
-        adjust_hsl(hex_color, delta, None)
+        adjust_hsl_with(hex_color, |lightness| lightness + delta, None)
     }
 
-    fn adjust_hsl(
+    /// Scale the HSL lightness of a `#RRGGBB`/`#RRGGBBAA` color by `factor` (`0.95` keeps 95% of
+    /// it) and return linear-sRGB premultiplied `[r,g,b,a]`, so a change is proportional to the
+    /// color's own lightness. Clamped to `[0, 1]`.
+    pub fn hex_with_lightness_scale(hex_color: &str, factor: f32) -> [f32; 4] {
+        adjust_hsl_with(hex_color, |lightness| lightness * factor, None)
+    }
+
+    fn adjust_hsl_with(
         hex_color: &str,
-        lightness_delta: f32,
+        lightness_of: impl Fn(f32) -> f32,
         saturation_scale: Option<f32>,
     ) -> [f32; 4] {
         const SENTINEL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
@@ -329,7 +369,7 @@ pub mod color {
         let (hue, saturation, lightness) = srgb_to_hsl(red, green, blue);
         let saturation =
             saturation_scale.map_or(saturation, |scale| (saturation * scale).clamp(0.0, 1.0));
-        let lightness = (lightness + lightness_delta).clamp(0.0, 1.0);
+        let lightness = lightness_of(lightness).clamp(0.0, 1.0);
         let (adjusted_red, adjusted_green, adjusted_blue) = hsl_to_srgb(hue, saturation, lightness);
 
         // Now re-encode through the same path as `hex()` (sRGB→linear,

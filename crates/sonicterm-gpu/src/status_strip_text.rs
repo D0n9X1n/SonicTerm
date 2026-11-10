@@ -30,14 +30,15 @@ pub fn kept_cap_height(
     }
 }
 
-/// The strip font's cap height at `text_px`, in raster px: a capital `H` rasterized through the
-/// strip on baseline 0 and measured by its ink box, so it describes exactly what the strip draws
+/// The strip font's cap height at `text_px` on `raster_variant`, in raster px: a capital `H`
+/// rasterized through the strip on baseline 0 and measured by its ink box, so it describes exactly what the strip draws
 /// on every rasterizer. The font's own measurement is used when no `H` is drawn.
 pub fn strip_cap_height(
     font_stack: &sonicterm_engine::FontStack,
     rasterizer: &mut impl Rasterizer,
     atlas: &mut GlyphAtlas,
     text_px: f32,
+    raster_variant: GlyphRasterVariant,
 ) -> f32 {
     let screen = (text_px * 4.0, text_px * 4.0);
     let reference = chrome_text::layout_with_raster_variant(
@@ -52,7 +53,7 @@ pub fn strip_cap_height(
         (0.0, 0.0),
         screen,
         None,
-        GlyphRasterVariant::StatusLine,
+        raster_variant,
     );
     let drawn = reference.glyphs.first().map(|glyph| {
         let (_, ink_top, _, ink_height) =
