@@ -252,7 +252,7 @@ unsafe extern "system" fn snap_proc(
         // The tracking changed: store it before acting, since acting can re-enter.
         store_tracking(hwnd, generation, tracking);
     }
-    act(hwnd, (message, wparam.0, lparam.0), generation, action, hook.target)
+    act(hwnd, (message, wparam.0, lparam.0), generation, action)
 }
 
 /// Carry out `action` for `message` (with its wparam and lparam) on `hwnd`.
@@ -261,15 +261,23 @@ fn act(
     (message, wparam, lparam): (u32, usize, isize),
     generation: usize,
     action: SnapAction,
-    target: Option<SnapTarget>,
 ) -> LRESULT {
     match action {
         SnapAction::Pass => send_below(hwnd, message, wparam, lparam),
         SnapAction::HitTest => {
+            // When: HitTest, the default answers first and the maximise answer may replace it.
             let hit = send_below(hwnd, message, wparam, lparam);
+            let Some(hook) = alive(hwnd, generation).then(|| hook_of(hwnd, generation)).flatten()
+            else {
+                // When: alive is false or the hook is gone, the window closed during the default
+                // hit test, so its answer stands.
+                return hit;
+            };
             let client = to_client(hwnd, point_of(lparam));
-            // The default said client area and the point is the maximise button: name it.
-            let on_button = hit.0 == HTCLIENT && spot_at(hwnd, target, client) == Spot::Maximize;
+            // The default said client area and the point is the maximise button of the target
+            // as it is now (full screen may have cleared it during the call): name it.
+            let on_button =
+                hit.0 == HTCLIENT && spot_at(hwnd, hook.target, client) == Spot::Maximize;
             if on_button {
                 LRESULT(HTMAXBUTTON)
             } else {

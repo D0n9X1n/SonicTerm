@@ -25,6 +25,20 @@ thread_local! {
     static LOG: RefCell<Vec<(u32, usize, isize)>> = const { RefCell::new(Vec::new()) };
     /// The recorder closes its window on the next client move, as an App closing during a callback.
     static CLOSE_ON_MOVE: Cell<bool> = const { Cell::new(false) };
+    /// What the recorder does during the next hit test: close its window, or clear its snap
+    /// target as full screen would, both while the subclass waits for the default answer.
+    static ON_HIT: Cell<HitSideEffect> = const { Cell::new(HitSideEffect::None) };
+}
+
+/// A side effect the recorder runs inside a hit test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HitSideEffect {
+    /// Nothing.
+    None,
+    /// Close the window.
+    Close,
+    /// Clear the snap target.
+    ClearTarget,
 }
 
 /// The procedure below the snap subclass, standing in for winit: it answers `HTCLIENT` to every
@@ -39,7 +53,18 @@ unsafe extern "system" fn recorder(
     _data: usize,
 ) -> LRESULT {
     match message {
-        snap_route::WM_NCHITTEST => LRESULT(HTCLIENT),
+        snap_route::WM_NCHITTEST => {
+            match ON_HIT.with(|effect| effect.replace(HitSideEffect::None)) {
+                HitSideEffect::Close => {
+                    let _ =
+                        // SAFETY: the test owns this window on this thread.
+                        unsafe { DestroyWindow(hwnd) };
+                }
+                HitSideEffect::ClearTarget => sync_hwnd(hwnd, None),
+                HitSideEffect::None => {}
+            }
+            LRESULT(HTCLIENT)
+        }
         WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_NCMOUSEMOVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP => {
             LOG.with(|log| log.borrow_mut().push((message, wparam.0, lparam.0)));
             if message == WM_MOUSEMOVE && CLOSE_ON_MOVE.with(Cell::take) {
@@ -274,4 +299,19 @@ fn winit_reports_one_press_and_release_for_a_forwarded_click() {
         .filter(|seen| !seen.starts_with("move") || *seen == "move 731,16")
         .collect();
     assert_eq!(clicks, vec!["move 731,16", "press", "release"], "all seen: {:?}", probe.seen);
+}
+
+/// A window closed, or put into full screen, while the subclass waits for the default hit test
+/// gets that default answer: the maximise answer is decided on the window's state after the call.
+#[test]
+fn a_hit_test_decides_on_the_window_as_it_is_after_the_default() {
+    let hwnd = test_window(caption());
+    ON_HIT.with(|effect| effect.set(HitSideEffect::ClearTarget));
+    assert_eq!(send(hwnd, snap_route::WM_NCHITTEST, 0, lparam_of(-269, 116)), HTCLIENT);
+    assert!(hooked(hwnd), "a cleared target keeps the hook, passing everything through");
+    sync_hwnd(hwnd, caption());
+    assert_eq!(send(hwnd, snap_route::WM_NCHITTEST, 0, lparam_of(-269, 116)), HTMAXBUTTON);
+    ON_HIT.with(|effect| effect.set(HitSideEffect::Close));
+    assert_eq!(send(hwnd, snap_route::WM_NCHITTEST, 0, lparam_of(-269, 116)), HTCLIENT);
+    assert!(!hooked(hwnd), "the closed window's hook is gone");
 }
