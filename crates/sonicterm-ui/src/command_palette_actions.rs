@@ -63,6 +63,7 @@ pub fn action_display_name(action: &Action) -> String {
         Action::ToggleTabBar => "ToggleTabBar".into(),
         Action::ToggleStatusLine => "ToggleStatusLine".into(),
         Action::ToggleStatusLineSensitive => "ToggleStatusLineSensitive".into(),
+        Action::ToggleIntegratedTitlebar => "ToggleIntegratedTitlebar".into(),
         Action::StatusLinePositionTop => "StatusLinePositionTop".into(),
         Action::StatusLinePositionBottom => "StatusLinePositionBottom".into(),
         Action::IncreaseStatusLineFontScale => "IncreaseStatusLineFontScale".into(),
@@ -109,6 +110,10 @@ fn scroll_name(scroll: ScrollAction) -> &'static str {
 pub fn all_actions() -> Vec<Action> {
     let mut actions = palette_actions();
     actions.push(Action::ApplyTheme("wezterm".into()));
+    // The palette lists the titlebar toggle only on macOS; it is bindable everywhere.
+    if !actions.contains(&Action::ToggleIntegratedTitlebar) {
+        actions.push(Action::ToggleIntegratedTitlebar);
+    }
     // The palette lists About as its own entry, so the action is bindable but not listed twice.
     actions.push(Action::ShowAbout);
     actions
@@ -118,9 +123,9 @@ pub fn all_actions() -> Vec<Action> {
 /// palette should present them when no query is entered. Keep grouped by
 /// feature area for readability. Theme actions are added only when they come
 /// from the user's concrete keymap binding; SSH is hidden until its pane backend
-/// is wired.
+/// is wired. The integrated titlebar toggle is listed only on macOS, whose titlebar can switch.
 pub fn palette_actions() -> Vec<Action> {
-    vec![
+    let mut actions = vec![
         // Tabs
         Action::NewTab,
         Action::CloseTab,
@@ -204,7 +209,16 @@ pub fn palette_actions() -> Vec<Action> {
         Action::CopyMemoryReport,
         // System integration
         Action::SetDefaultHandlers,
-    ]
+    ];
+    if cfg!(target_os = "macos") {
+        // When: target_os is macos, the only platform whose titlebar can switch, list the toggle.
+        let after = actions.iter().position(|action| *action == Action::ToggleStatusLineSensitive);
+        actions.insert(
+            after.map_or(actions.len(), |index| index + 1),
+            Action::ToggleIntegratedTitlebar,
+        );
+    }
+    actions
 }
 
 /// Coverage assertion: every variant kind from

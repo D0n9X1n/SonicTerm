@@ -92,3 +92,20 @@ fn reset_font_weight_is_in_the_palette() {
         .expect("reset font weight should be searchable");
     assert_eq!(palette.label_for_visible_index(index), Some("Reset Font Weight to Config"));
 }
+
+/// The integrated titlebar toggle is a palette command on macOS, whose titlebar can switch, next
+/// to the status line's sensitive-content toggle; elsewhere the palette leaves it out, but it stays
+/// bindable through `all_actions`.
+#[test]
+fn the_titlebar_toggle_is_listed_only_where_the_titlebar_switches() {
+    let palette = palette_actions();
+    let listed = palette.contains(&Action::ToggleIntegratedTitlebar);
+    assert_eq!(listed, cfg!(target_os = "macos"));
+    if listed {
+        // When: listed on macOS, it sits right after the sensitive-content toggle.
+        let after = palette.iter().position(|action| *action == Action::ToggleStatusLineSensitive);
+        let at = palette.iter().position(|action| *action == Action::ToggleIntegratedTitlebar);
+        assert_eq!(at, after.map(|index| index + 1));
+    }
+    assert!(all_actions().contains(&Action::ToggleIntegratedTitlebar), "always bindable");
+}

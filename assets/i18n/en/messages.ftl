@@ -103,6 +103,7 @@ command-apply-theme = Apply Theme: { $name }
 command-toggle-tab-bar = Toggle Tab Bar
 command-toggle-status-line = Toggle Status Line
 command-toggle-status-line-sensitive = Toggle Status Line Sensitive Content
+command-toggle-integrated-titlebar = Toggle Integrated Titlebar
 command-status-line-position-top = Status Line: Move to Top
 command-status-line-position-bottom = Status Line: Move to Bottom
 command-increase-status-line-font-scale = Status Line: Larger Text

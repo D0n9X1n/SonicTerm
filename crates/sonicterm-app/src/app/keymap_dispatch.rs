@@ -607,6 +607,7 @@ impl App {
             }
             Action::ToggleStatusLine => self.toggle_status_line(),
             Action::ToggleStatusLineSensitive => self.toggle_status_line_sensitive(),
+            Action::ToggleIntegratedTitlebar => self.toggle_integrated_titlebar(),
             Action::StatusLinePositionTop => {
                 self.move_status_line(sonicterm_cfg::status_line::StatusPosition::Top)
             }

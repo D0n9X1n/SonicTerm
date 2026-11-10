@@ -185,6 +185,36 @@ impl App {
             self.cancel_window_band(window_id);
         }
     }
+    /// `toggle_integrated_titlebar`: switch every terminal window between the integrated and the
+    /// system titlebar for this session, on a platform whose titlebar can switch; report windows
+    /// keep the system titlebar. Each window's native titlebar follows on the next band refresh,
+    /// after it leaves full screen if it is in it, and the panes refit to the new band. Prewarmed
+    /// tear-out windows were built with the old titlebar, so the pool is emptied and refills.
+    /// A config reload sets the titlebar of windows opened afterwards again.
+    pub(in crate::app) fn toggle_integrated_titlebar(&mut self) {
+        use sonicterm_cfg::config::TitlebarMode;
+        if !titlebar::titlebar_switchable() {
+            // When: titlebar_switchable is false, this platform keeps the titlebar it has.
+            return;
+        }
+        let mode = titlebar::other_mode(self.config.window.titlebar);
+        self.config.window.titlebar = mode;
+        self.registry.warm_window_pool.clear();
+        let mut changed = Vec::new();
+        for (window_id, window) in &mut self.registry.windows {
+            if window.role.is_report() {
+                // When: role.is_report(), the report window keeps the system titlebar.
+                continue;
+            }
+            window.titlebar = mode;
+            changed.push(*window_id);
+        }
+        self.refresh_window_bands();
+        for window_id in changed {
+            self.request_redraw_once(window_id);
+        }
+        tracing::info!("integrated titlebar -> {}", mode == TitlebarMode::Integrated);
+    }
 
     /// Bring every terminal window's band up to date with its platform metrics, hide its native
     /// title text while the band shows the name, and refit its panes when the band moved them.
@@ -196,7 +226,11 @@ impl App {
                 // When: the window has no native window yet, there is nothing to measure.
                 continue;
             };
-            let band = titlebar::read_window_band(native, window.titlebar);
+            // The native titlebar follows the window's mode, which a toggle can change; the band
+            // is read from what the window has now, so a deferred switch keeps its old band.
+            let synced = titlebar::sync_titlebar(native, window.titlebar);
+            let shown = titlebar::shown_mode(window.titlebar, synced);
+            let band = titlebar::read_window_band(native, shown);
             titlebar::sync_fullscreen_shadow(native, window.titlebar);
             let focused = native.has_focus();
             let maximized = native.is_maximized();
