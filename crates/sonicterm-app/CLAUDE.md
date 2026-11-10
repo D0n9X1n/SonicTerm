@@ -51,7 +51,8 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/app/live_font.rs` - live font size and family changes in every window and the
   `LiveFontRequest` each renderer receives.
-- `src/app/window_setup/titlebar.rs`, `titlebar_macos.rs`, `src/app/titlebar_band.rs` - the integrated
+- `src/app/window_setup/titlebar.rs`, `titlebar_macos.rs`, `titlebar_windows.rs` (the snap layouts
+  subclass, its decisions in `snap_route.rs`), `src/app/titlebar_band.rs` - the integrated
   titlebar: creation attributes per `[window] titlebar`, the band read back from AppKit each pass
   (traffic-light centre, zoom-button edge, none in full screen), and band presses (window drag, the
   system titlebar double-click, Windows caption buttons and edge resize). A consumed band press owns

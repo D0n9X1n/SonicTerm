@@ -202,7 +202,10 @@ winit 创建 HWND 前，`sonicterm-windows` 会请求
 替换显式的 `[window] titlebar = "native"`，并记录一条警告。窗口以无边框
 方式创建并启用 winit 的无边框阴影；全屏时关闭阴影，因为它会让客户区移动一个像素。SonicTerm 随后在
 标题栏带中绘制标题栏按钮，并通过 winit 的 `drag_window` 和 `drag_resize_window` 启动原生移动和
-边缘调整大小。不提供 snap layout 浮出菜单。见 [配置](Configuration-zh-CN#集成标题栏)。
+边缘调整大小。每个带标题栏按钮的窗口都有一个 comctl32 子类，它在最大化按钮上对 `WM_NCHITTEST`
+返回 `HTMAXBUTTON`，因此 Windows 11 会在那里显示贴靠布局浮出菜单。随后的非客户区鼠标消息
+以客户区移动和按下的形式交给 winit，因此悬停、按下、移出后松开取消和点击都保持应用内行为；非客户区
+松开被吞掉，系统不会再次最大化。子类在 `WM_NCDESTROY` 时移除自身。见 [配置](Configuration-zh-CN#集成标题栏)。
 
 菜单把 `muda` 事件转换为共享 action。DWM 可请求 Mica、Acrylic 或 Tabbed material，
 并可回退为 opaque。强制软件渲染使用不透明窗口，因为 GDI presenter 无法合成透明效果。

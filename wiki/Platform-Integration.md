@@ -251,7 +251,12 @@ warning. The window is created undecorated with winit's undecorated shadow,
 which is turned off in full screen because it moves the client area one pixel.
 SonicTerm then draws the caption buttons in its titlebar band and starts native
 moves and edge resizes through winit's `drag_window` and `drag_resize_window`.
-The snap layouts flyout is not offered. See
+A comctl32 subclass on each window with caption buttons answers `WM_NCHITTEST`
+with `HTMAXBUTTON` over the maximise button, so Windows 11 shows the snap
+layouts flyout there. The non-client mouse messages that follow reach winit as
+client moves and presses, so hover, press, release-outside cancel and click keep
+their in-app behaviour; the non-client release is swallowed so the system never
+maximises a second time. The subclass removes itself on `WM_NCDESTROY`. See
 [Configuration](Configuration#integrated-titlebar).
 
 The menu translates `muda` events to shared actions. DWM can request Mica,
