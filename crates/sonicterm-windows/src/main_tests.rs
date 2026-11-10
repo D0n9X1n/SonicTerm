@@ -288,9 +288,13 @@ fn a_native_titlebar_is_normalized_to_integrated() {
     let (again, warnings) = super::normalize_windows_config(normalized);
     assert_eq!(again.window.titlebar, TitlebarMode::Integrated);
     assert!(warnings.is_empty(), "normalizing twice is silent");
-    let (default, warnings) = super::normalize_windows_config(super::windows_default_config());
-    assert_eq!(default.window.titlebar, TitlebarMode::Integrated);
-    assert!(warnings.is_empty());
+    // An integrated config passes through silently. It is set explicitly: the default differs by
+    // the host the tests run on, and this test also runs on Linux, whose default is native.
+    let mut integrated = super::windows_default_config();
+    integrated.window.titlebar = TitlebarMode::Integrated;
+    let (passed, warnings) = super::normalize_windows_config(integrated);
+    assert_eq!(passed.window.titlebar, TitlebarMode::Integrated);
+    assert!(warnings.is_empty(), "an integrated config is untouched: {warnings:?}");
 }
 
 /// Both Windows shells, the normal run and the runtime smoke, install the Windows config policy, so
