@@ -575,6 +575,36 @@ fn real_pointer_hover_click_and_leave_reach_the_caption_logic() {
     event_loop.run_app(&mut probe).unwrap();
     assert!(probe.failures.is_empty(), "{:#?}", probe.failures);
 }
+/// How often `resizes` leaves the `restored` size and how often it comes back to it: one
+/// maximise leaves once and never returns, while a maximise, restore and maximise in one batch
+/// leaves twice and returns once although the window ends maximised.
+fn leave_and_return(restored: Option<(u32, u32)>, resizes: &[(u32, u32)]) -> (usize, usize) {
+    let mut at_restored = true;
+    let (mut left, mut returned) = (0, 0);
+    for size in resizes {
+        let restored_now = Some(*size) == restored;
+        if at_restored && !restored_now {
+            left += 1;
+        } else if !at_restored && restored_now {
+            // When: the size comes back to the restored one after leaving it, count it.
+            returned += 1;
+        }
+        at_restored = restored_now;
+    }
+    (left, returned)
+}
+
+/// The resize oracle tells one maximise from a maximise, restore and maximise in one batch, which
+/// ends in the same maximised state; a cancel that never resized leaves and returns zero times.
+#[test]
+fn the_resize_oracle_counts_every_leave_and_return() {
+    let restored = Some((900, 467));
+    assert_eq!(leave_and_return(restored, &[(2256, 1420)]), (1, 0), "one maximise");
+    let flicker = [(2256, 1420), (900, 467), (2256, 1420)];
+    assert_eq!(leave_and_return(restored, &flicker), (2, 1), "maximise, restore, maximise");
+    assert_eq!(leave_and_return(restored, &[]), (0, 0), "no resize");
+}
+
 /// With the real pointer (moved, never clicked; clicks are posted to the test window), the App's
 /// own band handlers run on winit's real events for a SonicTerm window whose snap hook the App's
 /// band refresh installed: resting on maximise hovers it with no leave; a press there holds the
@@ -615,8 +645,10 @@ fn real_pointer_hover_click_and_cancel_drive_the_app_caption_buttons() {
         native: Option<(Arc<Window>, HWND)>,
         leaves: usize,
         captured_at_press: Option<bool>,
-        maximize_changes: usize,
-        was_maximized: bool,
+        /// Every inner size winit reported since the last mark, in order.
+        resizes: Vec<(u32, u32)>,
+        /// The window's inner size when the click's release was posted.
+        restored: Option<(u32, u32)>,
         phase: usize,
         next_at: Instant,
         saved: POINT,
@@ -734,13 +766,25 @@ fn real_pointer_hover_click_and_cancel_drive_the_app_caption_buttons() {
                         pressed == Some(CaptionButton::Maximize),
                         format!("held {pressed:?}"),
                     );
+                    // Every resize from the release on is recorded, so a maximise, restore and
+                    // maximise inside one event batch shows up even though it ends maximised.
+                    self.restored = self.native.as_ref().map(|(window, _)| {
+                        let size = window.inner_size();
+                        (size.width, size.height)
+                    });
+                    self.resizes.clear();
                     self.post(WM_LBUTTONUP, 0, lparam_of(max_x, max_y));
                     Some(1000)
                 }
                 3 => {
-                    let changes = self.maximize_changes;
+                    let (left, returned) = leave_and_return(self.restored, &self.resizes);
                     let maximized = self.maximized();
-                    self.check(maximized && changes == 1, format!("click: {changes} changes"));
+                    let once = maximized && left == 1 && returned == 0;
+                    let resizes = &self.resizes;
+                    self.check(
+                        once,
+                        format!("click: left {left}, returned {returned}: {resizes:?}"),
+                    );
                     if let Some((window, _)) = self.native.as_ref() {
                         // The window goes back to its size for the cancel case.
                         window.set_maximized(false);
@@ -750,7 +794,7 @@ fn real_pointer_hover_click_and_cancel_drive_the_app_caption_buttons() {
                 4 => {
                     let maximized = self.maximized();
                     self.check(!maximized, "the restore did not take".into());
-                    self.maximize_changes = 0;
+                    self.resizes.clear();
                     self.captured_at_press = None;
                     point_at(on_maximise);
                     Some(1000)
@@ -787,9 +831,10 @@ fn real_pointer_hover_click_and_cancel_drive_the_app_caption_buttons() {
                     Some(800)
                 }
                 8 => {
-                    let changes = self.maximize_changes;
                     let maximized = self.maximized();
-                    self.check(!maximized && changes == 0, format!("cancel: {changes} changes"));
+                    let resizes = &self.resizes;
+                    let still = !maximized && resizes.is_empty();
+                    self.check(still, format!("cancel resized the window: {resizes:?}"));
                     point_at(self.screen(-200, -150));
                     Some(800)
                 }
@@ -875,6 +920,7 @@ fn real_pointer_hover_click_and_cancel_drive_the_app_caption_buttons() {
         ) {
             match &event {
                 WindowEvent::CursorLeft { .. } => self.leaves += 1,
+                WindowEvent::Resized(size) => self.resizes.push((size.width, size.height)),
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
@@ -903,12 +949,6 @@ fn real_pointer_hover_click_and_cancel_drive_the_app_caption_buttons() {
                 // Each pass, as the App's own loop does: the band and the snap hook follow.
                 app.refresh_window_bands();
             }
-            let maximized = self.maximized();
-            if maximized != self.was_maximized {
-                // The window's maximised state changed: count it.
-                self.maximize_changes += 1;
-                self.was_maximized = maximized;
-            }
             if now >= self.next_at && self.app.is_some() {
                 let Some(wait_ms) = self.step() else {
                     // When: step returns None, every phase ran and the pointer is back.
@@ -930,8 +970,8 @@ fn real_pointer_hover_click_and_cancel_drive_the_app_caption_buttons() {
         native: None,
         leaves: 0,
         captured_at_press: None,
-        maximize_changes: 0,
-        was_maximized: false,
+        resizes: Vec::new(),
+        restored: None,
         phase: 0,
         next_at: now,
         saved: POINT::default(),
