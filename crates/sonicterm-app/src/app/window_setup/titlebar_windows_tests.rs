@@ -315,3 +315,263 @@ fn a_hit_test_decides_on_the_window_as_it_is_after_the_default() {
     assert_eq!(send(hwnd, snap_route::WM_NCHITTEST, 0, lparam_of(-269, 116)), HTCLIENT);
     assert!(!hooked(hwnd), "the closed window's hook is gone");
 }
+
+/// With the real pointer (moved, never clicked; the click is posted to the test window), the
+/// caption logic sees what a user's hover and click produce: resting on maximise keeps it hovered
+/// with no leave flicker, a press there holds the mouse capture and survives to its release, which
+/// runs maximise once, and the hover clears on the pane and outside the window. Ignored by default
+/// because it moves the pointer; the pointer is put back before any assertion fails.
+#[test]
+#[ignore = "moves the real pointer over a test window"]
+fn real_pointer_hover_click_and_leave_reach_the_caption_logic() {
+    use crate::app::pty_test_support::{isolated_with_output, IsolationConfig};
+    use crate::app::titlebar_band::release_action;
+    use sonicterm_ui::window_band::{caption_button_at, CaptionButton};
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetCursorPos, PostMessageW, SetCursorPos, WindowFromPoint, WM_LBUTTONUP,
+    };
+    use winit::application::ApplicationHandler;
+    use winit::event::{ElementState, MouseButton, WindowEvent};
+    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+    use winit::window::{Window, WindowLevel};
+    if isolated_with_output(IsolationConfig::ORDINARY) {
+        return;
+    }
+    /// The probe: the window, the caption state the App would hold, and the phase it is in.
+    struct Probe {
+        window: Option<(Window, HWND)>,
+        geometry: (f32, f32, f32),
+        hovered: Option<CaptionButton>,
+        pressed: Option<CaptionButton>,
+        leaves: usize,
+        captured_at_press: bool,
+        action: Option<Option<CaptionButton>>,
+        phase: usize,
+        next_at: std::time::Instant,
+        saved: POINT,
+        failures: Vec<String>,
+        deadline: std::time::Instant,
+    }
+    impl Probe {
+        /// The caption button at client `(x_px, y_px)`, by the App's own geometry.
+        fn button_at(&self, x_px: f32, y_px: f32) -> Option<CaptionButton> {
+            let (width, band_height, scale) = self.geometry;
+            caption_button_at(&WindowBand::caption(), width, band_height, scale, x_px, y_px)
+        }
+        /// Client `(x_px, y_px)` as a screen point.
+        fn screen(&self, x_px: i32, y_px: i32) -> POINT {
+            let mut point = POINT { x: x_px, y: y_px };
+            if let Some((_, hwnd)) = self.window.as_ref() {
+                let _ =
+                    // SAFETY: hwnd is the probe's window and point a local the call rewrites.
+                    unsafe { ClientToScreen(*hwnd, &mut point) };
+            }
+            point
+        }
+        /// The maximise button's centre, client px.
+        fn maximise(&self) -> (i32, i32) {
+            let (width, band_height, scale) = self.geometry;
+            let button = (46.0 * scale).round();
+            ((width - 1.5 * button) as i32, (band_height / 2.0) as i32)
+        }
+        /// Record `failure` when `ok` is false.
+        fn check(&mut self, ok: bool, failure: String) {
+            if !ok {
+                self.failures.push(failure);
+            }
+        }
+        /// Post `message` to the probe's own window.
+        fn post(&self, message: u32, wparam: usize, lparam: isize) {
+            if let Some((_, hwnd)) = self.window.as_ref() {
+                let _ =
+                    // SAFETY: posting to the probe's own window injects no input elsewhere.
+                    unsafe { PostMessageW(Some(*hwnd), message, WPARAM(wparam), LPARAM(lparam)) };
+            }
+        }
+        /// The class name of the window under screen `point`.
+        fn class_under(point: POINT) -> String {
+            let mut class = [0u16; 128];
+            let length =
+                // SAFETY: WindowFromPoint and GetClassNameW only read window identity.
+                unsafe { GetClassNameW(WindowFromPoint(point), &mut class) };
+            String::from_utf16_lossy(&class[..length.max(0) as usize])
+        }
+    }
+    /// Put the pointer at screen `point`; nothing is clicked.
+    fn point_at(point: POINT) {
+        let _ =
+            // SAFETY: moves the pointer only.
+            unsafe { SetCursorPos(point.x, point.y) };
+    }
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let attributes = Window::default_attributes()
+                .with_active(false)
+                .with_decorations(false)
+                .with_window_level(WindowLevel::AlwaysOnTop)
+                .with_position(winit::dpi::PhysicalPosition::new(400, 300))
+                .with_inner_size(winit::dpi::PhysicalSize::new(900, 400));
+            let window = event_loop.create_window(attributes).unwrap();
+            let scale = window.scale_factor() as f32;
+            let band_height = (32.0 * scale).round();
+            self.geometry = (window.inner_size().width as f32, band_height, scale);
+            sync(&window, WindowBand::caption(), band_height, scale);
+            let RawWindowHandle::Win32(handle) = window.window_handle().unwrap().as_raw() else {
+                panic!("Windows handle")
+            };
+            self.window = Some((window, HWND(handle.hwnd.get() as *mut _)));
+            let _ =
+                // SAFETY: saved is a field the call writes.
+                unsafe { GetCursorPos(&mut self.saved) };
+            self.next_at = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        }
+        fn window_event(
+            &mut self,
+            _event_loop: &ActiveEventLoop,
+            _id: winit::window::WindowId,
+            event: WindowEvent,
+        ) {
+            match event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    // As hover_window_band: hover follows the pointer; leaving a held button
+                    // cancels it.
+                    let under = self.button_at(position.x as f32, position.y as f32);
+                    if self.pressed.is_some() && self.pressed != under {
+                        self.pressed = None;
+                    }
+                    self.hovered = under;
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    // As cancel_window_band: a leave clears hover and press.
+                    self.leaves += 1;
+                    self.hovered = None;
+                    self.pressed = None;
+                }
+                WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                    let hwnd = self.window.as_ref().map(|(_, hwnd)| *hwnd);
+                    if state == ElementState::Pressed {
+                        let holder =
+                            // SAFETY: GetCapture only reads which window holds the capture.
+                            unsafe { GetCapture() };
+                        self.captured_at_press = Some(holder) == hwnd;
+                        self.pressed = self.hovered;
+                    } else {
+                        // When: Released, release_window_band decides the action.
+                        let action = release_action(self.pressed.take(), self.hovered, false);
+                        self.action = Some(action);
+                    }
+                }
+                _ => {
+                    // When: any other event, the caption logic ignores it.
+                }
+            }
+        }
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            let now = std::time::Instant::now();
+            if now >= self.deadline {
+                // When: the deadline passed, the pointer goes back before the test fails.
+                point_at(self.saved);
+                panic!("real pointer probe timed out in phase {}", self.phase);
+            }
+            if now >= self.next_at {
+                let Some(wait_ms) = self.step() else {
+                    // When: step returns None, every phase ran: the pointer is back.
+                    event_loop.exit();
+                    return;
+                };
+                self.phase += 1;
+                self.next_at = now + std::time::Duration::from_millis(wait_ms);
+            }
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                now + std::time::Duration::from_millis(10),
+            ));
+        }
+    }
+    impl Probe {
+        /// Run the current phase; returns how long to wait before the next, or `None` when done.
+        fn step(&mut self) -> Option<u64> {
+            let (max_x, max_y) = self.maximise();
+            let on_maximise = self.screen(max_x, max_y);
+            match self.phase {
+                0 => {
+                    // Rest on maximise long enough for the system to offer the flyout.
+                    self.leaves = 0;
+                    point_at(on_maximise);
+                    Some(1500)
+                }
+                1 => {
+                    let (hovered, leaves) = (self.hovered, self.leaves);
+                    self.check(
+                        hovered == Some(CaptionButton::Maximize),
+                        format!("rest {hovered:?}"),
+                    );
+                    self.check(leaves == 0, format!("rest: {leaves} leaves on the button"));
+                    let below = self.screen(max_x, max_y * 2 + 40);
+                    println!("under the button after the hover: {}", Probe::class_under(below));
+                    let screen = lparam_of(on_maximise.x, on_maximise.y);
+                    self.post(snap_route::WM_NCLBUTTONDOWN, HTMAXBUTTON as usize, screen);
+                    Some(400)
+                }
+                2 => {
+                    let (captured, pressed) = (self.captured_at_press, self.pressed);
+                    self.check(captured, "press: the window did not hold the capture".into());
+                    self.check(
+                        pressed == Some(CaptionButton::Maximize),
+                        format!("held {pressed:?}"),
+                    );
+                    self.post(WM_LBUTTONUP, 0, lparam_of(max_x, max_y));
+                    Some(400)
+                }
+                3 => {
+                    let action = self.action;
+                    let once = action == Some(Some(CaptionButton::Maximize));
+                    self.check(once, format!("click: {action:?}"));
+                    point_at(self.screen(200, 300));
+                    Some(600)
+                }
+                4 => {
+                    let hovered = self.hovered;
+                    self.check(hovered.is_none(), format!("pane: still hovered {hovered:?}"));
+                    point_at(on_maximise);
+                    Some(800)
+                }
+                5 => {
+                    let hovered = self.hovered;
+                    self.check(
+                        hovered == Some(CaptionButton::Maximize),
+                        format!("back {hovered:?}"),
+                    );
+                    point_at(self.screen(-200, -150));
+                    Some(800)
+                }
+                _ => {
+                    let (hovered, pressed) = (self.hovered, self.pressed);
+                    let clear = hovered.is_none() && pressed.is_none();
+                    self.check(clear, format!("outside: {hovered:?} {pressed:?}"));
+                    point_at(self.saved);
+                    None
+                }
+            }
+        }
+    }
+    let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let now = std::time::Instant::now();
+    let mut probe = Probe {
+        window: None,
+        geometry: (0.0, 0.0, 1.0),
+        hovered: None,
+        pressed: None,
+        leaves: 0,
+        captured_at_press: false,
+        action: None,
+        phase: 0,
+        next_at: now,
+        saved: POINT::default(),
+        failures: Vec::new(),
+        deadline: now + std::time::Duration::from_secs(30),
+    };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.failures.is_empty(), "{:#?}", probe.failures);
+}
