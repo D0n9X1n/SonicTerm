@@ -78,8 +78,12 @@ fn default_warm_window_pool_keeps_one_spare() {
 /// an unknown value fails the load like any other enum, and the starter template documents it.
 #[test]
 fn the_titlebar_mode_has_a_platform_default_and_rejects_unknown_values() {
-    let expected =
-        if cfg!(target_os = "macos") { TitlebarMode::Integrated } else { TitlebarMode::Native };
+    // Integrated on macOS and Windows; Linux keeps its system titlebar.
+    let expected = if cfg!(any(target_os = "macos", target_os = "windows")) {
+        TitlebarMode::Integrated
+    } else {
+        TitlebarMode::Native
+    };
     assert_eq!(Config::default().window.titlebar, expected);
     // A file written before the key existed, with a [window] table but no titlebar, gets the
     // platform default too, so an upgraded macOS install opens integrated.

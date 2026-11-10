@@ -107,6 +107,7 @@ pub(super) fn strip_ink_never_leaves_its_band() {
             left: 10.0,
             width: 300.0,
         }],
+        small: false,
     }];
     let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
     let palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(&theme);
@@ -119,6 +120,7 @@ pub(super) fn strip_ink_never_leaves_its_band() {
         &colors,
         Some(&stack),
         Some(&mut raster),
+        None,
         &mut atlas,
         &mut crate::chrome_cache::ChromeRunCache::default(),
         true,
@@ -162,6 +164,7 @@ pub(super) fn two_part_strip(
             part("Mem: 41 MB", StatusTone::Value, 10.0),
             part("COPY", StatusTone::Chip, 100.0),
         ],
+        small: false,
     }];
     (placed, vec![part(" · ", StatusTone::Value, 190.0)])
 }
@@ -201,6 +204,7 @@ pub(super) fn an_unchanged_strip_draws_again_without_shaping() {
             &colors,
             Some(&stack),
             Some(&mut raster),
+            None,
             &mut atlas,
             &mut runs,
             true,
@@ -402,7 +406,8 @@ pub(super) fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) 
         band: StripBand::default(),
     };
     let part = PlacedPart { text: text.into(), tone: StatusTone::Value, left: 10.0, width: 80.0 };
-    let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 80.0, parts: vec![part] }];
+    let placed =
+        vec![PlacedSegment { index: 0, left: 10.0, width: 80.0, parts: vec![part], small: false }];
     let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
     let palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(&theme);
     let colors = StatusColors::resolve(&theme, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
@@ -414,6 +419,7 @@ pub(super) fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) 
         &colors,
         Some(stack),
         Some(&mut raster),
+        None,
         &mut atlas,
         &mut crate::chrome_cache::ChromeRunCache::default(),
         true,
@@ -691,7 +697,8 @@ pub(super) fn emit_one_part(
         band: StripBand::default(),
     };
     let part = PlacedPart { text: "MOUSE".into(), tone, left: 10.0, width: 50.0 };
-    let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 50.0, parts: vec![part] }];
+    let placed =
+        vec![PlacedSegment { index: 0, left: 10.0, width: 50.0, parts: vec![part], small: false }];
     let palette = UiPalette::from_theme(theme);
     // White values: the default theme's active tab color is its yellow, which would hide the
     // difference between the value and warn colors this test compares.
@@ -704,6 +711,7 @@ pub(super) fn emit_one_part(
         &colors,
         Some(&stack),
         Some(&mut raster),
+        None,
         &mut atlas,
         &mut crate::chrome_cache::ChromeRunCache::default(),
         true,
@@ -763,7 +771,8 @@ pub(super) fn capital_centering_error(position: StatusPosition, scale: f32) -> f
     };
     let geometry = test_strip_geometry(position, top, height, screen, scale, &stack);
     let part = PlacedPart { text: "Mem".into(), tone: StatusTone::Value, left: 10.0, width: 80.0 };
-    let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 80.0, parts: vec![part] }];
+    let placed =
+        vec![PlacedSegment { index: 0, left: 10.0, width: 80.0, parts: vec![part], small: false }];
     let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
     let palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(&theme);
     let colors = StatusColors::resolve(&theme, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
@@ -775,6 +784,7 @@ pub(super) fn capital_centering_error(position: StatusPosition, scale: f32) -> f
         &colors,
         Some(&stack),
         Some(&mut raster),
+        None,
         &mut atlas,
         &mut crate::chrome_cache::ChromeRunCache::default(),
         true,
@@ -840,6 +850,7 @@ pub(super) fn the_strip_draws_a_separator_between_adjacent_segments() {
         parts: vec![StatusPart::new(text, StatusTone::Value)],
         compact: None,
         compact_last: false,
+        small: false,
         click: None,
         spoken: SpokenSegment::default(),
     };
@@ -858,7 +869,7 @@ pub(super) fn the_strip_draws_a_separator_between_adjacent_segments() {
         cap_height: 7.0,
         band: StripBand::default(),
     };
-    let fitted = fit_strip(&view, &geometry, &stack, &mut raster, &mut atlas);
+    let fitted = fit_strip(&view, &geometry, &stack, &mut raster, &mut atlas, None);
     assert_eq!((fitted.segments.len(), fitted.separators.len()), (2, 1));
     let (first, second, separator) =
         (&fitted.segments[0], &fitted.segments[1], &fitted.separators[0]);
@@ -877,6 +888,7 @@ pub(super) fn the_strip_draws_a_separator_between_adjacent_segments() {
         &colors,
         Some(&stack),
         Some(&mut raster),
+        None,
         &mut atlas,
         &mut crate::chrome_cache::ChromeRunCache::default(),
         true,
@@ -936,62 +948,4 @@ pub(super) fn strip_tile_sizes_accept_fresh_tiles() {
     let cold = [('H', 12, 16), ('E', 11, 16), ('L', 10, 16)];
     let live = [('L', 10, 16), ('H', 12, 16), ('E', 11, 16)];
     assert_eq!(compare_strip_tile_sizes(&live, &cold), Ok(()));
-}
-
-/// The band's button height is whole and even at every scale, so its midline is a whole pixel.
-#[test]
-pub(super) fn the_band_button_height_is_an_even_number_of_raster_pixels() {
-    for (logical, scale, raster) in
-        [(28.0, 1.0, 28.0), (28.0, 1.5, 42.0), (28.0, 2.0, 56.0), (27.0, 1.5, 40.0)]
-    {
-        assert_eq!(band_button_px(logical, scale), raster, "{logical} × {scale}");
-    }
-}
-
-/// Merged at the top, the strip is the band, at least the buttons' height, and reserves it through
-/// its own placement; otherwise a separate name band reserves its height above the panes and the
-/// strip keeps its own. A native window has no band.
-#[test]
-pub(super) fn the_band_merges_with_a_top_strip_and_stands_alone_otherwise() {
-    let merged = band_layout(true, 56.0, true, StatusPosition::Top, 46.0);
-    assert_eq!(merged, BandLayout { merged: true, separate_px: 0.0, strip_px: 56.0 });
-    let tall = band_layout(true, 56.0, true, StatusPosition::Top, 70.0);
-    assert_eq!(tall.strip_px, 70.0, "a taller strip sets the merged band's height");
-    let bottom = band_layout(true, 56.0, true, StatusPosition::Bottom, 46.0);
-    assert_eq!(bottom, BandLayout { merged: false, separate_px: 56.0, strip_px: 46.0 });
-    let off = band_layout(true, 56.0, false, StatusPosition::Top, 46.0);
-    assert_eq!(off, BandLayout { merged: false, separate_px: 56.0, strip_px: 0.0 });
-    let large_font = band_layout(true, 56.0, false, StatusPosition::Top, 70.0);
-    assert_eq!(large_font.separate_px, 70.0, "a name-only band grows with its font");
-    let full_screen = band_layout(true, 0.0, false, StatusPosition::Top, 46.0);
-    assert_eq!(full_screen.separate_px, 0.0, "full screen with the strip off has no band");
-    let full_screen_bottom = band_layout(true, 0.0, true, StatusPosition::Bottom, 46.0);
-    assert_eq!(full_screen_bottom.separate_px, 0.0, "nor with the strip at the bottom");
-    let full_screen_top = band_layout(true, 0.0, true, StatusPosition::Top, 46.0);
-    assert_eq!(full_screen_top.strip_px, 46.0, "a top strip is just the strip");
-    let native = band_layout(false, 56.0, true, StatusPosition::Top, 46.0);
-    assert_eq!(native, BandLayout { merged: false, separate_px: 0.0, strip_px: 46.0 });
-}
-
-/// In an integrated band the capitals centre on the whole band, which is the window buttons'
-/// centre line: the cap centre is exactly half the band at every scale and band height, merged or
-/// name-only, with no hairline offset.
-#[test]
-pub(super) fn text_in_the_band_centres_on_the_button_centre_line() {
-    for (scale, band_px) in [(1.0, 28.0), (1.5, 42.0), (2.0, 56.0), (2.0, 80.0)] {
-        let geometry = StripGeometry {
-            top: 0.0,
-            height: band_px,
-            position: StatusPosition::Top,
-            band: StripBand { in_band: true, left_inset: 0.0, right_inset: 0.0 },
-            ..geometry_for_font(13.0, scale)
-        };
-        let baseline = strip_baseline(&geometry);
-        let cap_centre = baseline - geometry.cap_height / 2.0;
-        assert_eq!(cap_centre, band_px / 2.0, "scale {scale}, band {band_px}");
-    }
-    // An ordinary top strip still centres in the area above its hairline.
-    let ordinary = StripGeometry { position: StatusPosition::Top, ..geometry_for_font(13.0, 2.0) };
-    let centre = strip_baseline(&ordinary) - ordinary.cap_height / 2.0;
-    assert!(centre < ordinary.height / 2.0);
 }

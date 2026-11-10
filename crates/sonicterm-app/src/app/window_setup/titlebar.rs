@@ -14,6 +14,18 @@ pub(crate) fn integrated(mode: TitlebarMode) -> bool {
     mode == TitlebarMode::Integrated && cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
+/// The edge this platform's window buttons sit on: the right for Windows' caption buttons, the
+/// left for macOS's traffic lights and for Linux, which has no band.
+pub(crate) const fn button_edge() -> sonicterm_ui::window_band::ButtonEdge {
+    if cfg!(target_os = "windows") {
+        // When: cfg target_os is windows, SonicTerm draws the caption buttons on the right.
+        sonicterm_ui::window_band::ButtonEdge::Right
+    } else {
+        // When: cfg target_os is another platform, its buttons (if any) are on the left.
+        sonicterm_ui::window_band::ButtonEdge::Left
+    }
+}
+
 /// `attrs` for a terminal window with titlebar `mode`. Integrated on macOS: a transparent titlebar
 /// over a full-size content view with its title text hidden (the title is still set). Integrated
 /// on Windows: an undecorated window that keeps its drop shadow. Native, Linux and report windows

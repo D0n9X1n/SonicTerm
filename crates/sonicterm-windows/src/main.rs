@@ -119,6 +119,7 @@ fn run_windows_runtime_smoke() -> Result<i32> {
         sonicterm_app::ProcessPrivilege::Unprivileged
     });
     let mut shell = sonicterm_app::shell::WindowsShell::new(machine, theme, config, keymap)
+        .with_config_normalizer(Box::new(normalize_windows_config))
         .with_process_privilege(process_privilege)
         .with_on_window_ready(on_window_ready);
     if let Some(recorder) = breadcrumb_recorder.clone() {
@@ -449,6 +450,7 @@ fn main() -> Result<std::process::ExitCode> {
             );
             // Only the palette command reaches this backend; installing it changes nothing.
             let mut shell = sonicterm_app::shell::WindowsShell::new(machine, theme, config, keymap)
+                .with_config_normalizer(Box::new(normalize_windows_config))
                 .with_process_privilege(process_privilege)
                 .with_startup_loads(startup_loads)
                 .with_asset_loaders(theme_loader, keymap_loader)
@@ -514,6 +516,24 @@ fn load_config(warnings: &mut Vec<String>) -> (Config, Option<anyhow::Error>) {
 
 pub fn windows_default_config() -> Config {
     Config { keymap: "sonicterm-windows".to_string(), ..Config::default() }
+}
+
+/// Apply Windows policy before config reaches app state, at startup and on every reload: terminal
+/// windows always use SonicTerm's integrated titlebar, so an explicit `titlebar = "native"` is
+/// replaced with one warning. Only the Windows shells install it; other hosts compile it for tests.
+#[cfg(any(target_os = "windows", test))]
+fn normalize_windows_config(mut config: Config) -> (Config, Vec<String>) {
+    let mut warnings = Vec::new();
+    if config.window.titlebar == sonicterm_cfg::config::TitlebarMode::Native {
+        // When: the file asks for the system titlebar, which Windows terminal windows no longer use.
+        warnings.push(
+            "Windows terminal windows always use the integrated titlebar; ignoring \
+             [window] titlebar = \"native\""
+                .to_string(),
+        );
+        config.window.titlebar = sonicterm_cfg::config::TitlebarMode::Integrated;
+    }
+    (config, warnings)
 }
 
 fn load_theme(name: &str) -> (Theme, Option<anyhow::Error>) {

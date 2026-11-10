@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// The small side text when its stack, rasterizer and size are all present; otherwise small
+/// segments are drawn at the strip's own size.
+fn small_text<'stack, Raster>(
+    font_stack: Option<&'stack sonicterm_engine::FontStack>,
+    rasterizer: Option<&'stack mut Raster>,
+    text_px: Option<f32>,
+) -> Option<crate::status_strip::SmallText<'stack, Raster>> {
+    Some(crate::status_strip::SmallText {
+        font_stack: font_stack?,
+        rasterizer: rasterizer?,
+        text_px: text_px?,
+    })
+}
+
 /// Which top-level chrome surface a pass draws.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Surface {
@@ -120,7 +134,12 @@ impl GpuRenderer {
             Surface::Strip => &self.status_line_view,
             Surface::Band => &self.band_view,
         };
+        // Small side segments use the palette footer's stack and size, only while that is smaller
+        // than the strip's own text; otherwise they keep the strip's size.
+        let small_px = Some(self.raster_px(palette_footer_font_size(self.font_size)))
+            .filter(|small_px| *small_px < geometry.text_px());
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        small_px.map(f32::to_bits).hash(&mut hasher);
         (
             view.pixel_hash,
             sw.to_bits(),
@@ -133,6 +152,7 @@ impl GpuRenderer {
             .hash(&mut hasher);
         let fit_key = hasher.finish();
         let mut strip_rasterizer = self.status_line_font_stack.clone();
+        let mut small_rasterizer = small_px.and(self.palette_footer_font_stack.clone());
         let text_px = geometry.text_px();
         // The cap height is measured once per text size and kept.
         let kept =
@@ -168,6 +188,11 @@ impl GpuRenderer {
                 stack,
                 rasterizer,
                 &mut self.glyph_atlas,
+                small_text(
+                    self.palette_footer_font_stack.as_ref(),
+                    small_rasterizer.as_mut(),
+                    small_px,
+                ),
             );
             match surface {
                 Surface::Strip => self.status_line_fit = Some((fit_key, fitted)),
@@ -189,6 +214,11 @@ impl GpuRenderer {
             &colors,
             self.status_line_font_stack.as_ref(),
             strip_rasterizer.as_mut(),
+            small_text(
+                self.palette_footer_font_stack.as_ref(),
+                small_rasterizer.as_mut(),
+                small_px,
+            ),
             &mut self.glyph_atlas,
             &mut self.chrome_caches.runs,
             self.chrome_reuse,

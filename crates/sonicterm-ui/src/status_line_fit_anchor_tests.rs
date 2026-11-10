@@ -13,6 +13,7 @@ fn segment(id: StatusSegmentId, side: StatusSide, text: &str) -> StatusSegmentVi
         parts: vec![StatusPart::new(text, StatusTone::Value)],
         compact: None,
         compact_last: false,
+        small: false,
         click: None,
         spoken: SpokenSegment::default(),
     }

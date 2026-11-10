@@ -1,7 +1,8 @@
-//! Windows chrome is native Win11 chrome.
+//! Windows window chrome.
 //!
-//! SonicTerm does not subclass or draw the caption area on Windows: the OS owns
-//! titlebar drag, snap layouts, and min/max/close buttons. The app only paints
-//! the client-area terminal grid and bottom tab bar.
+//! Terminal windows are undecorated and SonicTerm draws its own titlebar band with
+//! minimise, maximise/restore and close on the right; moves and edge resizes go
+//! through winit's native drag calls. The window is not subclassed, so the Windows
+//! 11 snap layouts flyout is not offered on the maximise button.
 
 #![cfg(target_os = "windows")]

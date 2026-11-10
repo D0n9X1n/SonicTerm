@@ -417,6 +417,19 @@ impl WindowsShell {
         Self { runner: ShellRunner::new(machine, theme, config, keymap) }
     }
 
+    /// Install the Windows config policy used by startup and every reload.
+    #[must_use]
+    pub fn with_config_normalizer(mut self, normalizer: ConfigNormalizer) -> Self {
+        self.runner.config_normalizer = normalizer;
+        self
+    }
+
+    /// Build a headless app for startup-policy regression tests.
+    #[cfg(test)]
+    pub(crate) fn into_app_for_test(self) -> App {
+        self.runner.into_app_with_proxy(None)
+    }
+
     /// Install the process privilege observed by the Windows startup boundary.
     #[must_use]
     pub fn with_process_privilege(mut self, privilege: ProcessPrivilege) -> Self {

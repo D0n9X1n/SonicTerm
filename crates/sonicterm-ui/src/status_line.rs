@@ -750,6 +750,9 @@ pub struct StatusSegmentView {
     /// Fitting tries the compact form only once every other segment is gone: the name of an
     /// integrated titlebar band.
     pub compact_last: bool,
+    /// Drawn in the smaller side text: a side segment of a band whose window buttons are on the
+    /// right, so the centred name stays the largest text.
+    pub small: bool,
     /// What a click does; `None` is inert.
     pub click: Option<SegmentClick>,
     /// Accessible name and value.
@@ -778,6 +781,7 @@ impl StatusLineView {
             segment.parts.hash(&mut hasher);
             segment.compact.hash(&mut hasher);
             segment.compact_last.hash(&mut hasher);
+            segment.small.hash(&mut hasher);
         }
         Self { segments, pixel_hash: hasher.finish() }
     }
@@ -786,15 +790,34 @@ impl StatusLineView {
 /// `resolved` as an integrated titlebar band presents it. The `window` segment is kept where a list
 /// already places it, otherwise first in the centre list with its configured keys, and it outranks
 /// every other segment, so a long name drops the others before it shortens. With
-/// `titlebar_segments = "right"` only the name and the right list remain. The user's lists, the
-/// checklist and Save never see this projection.
-pub fn with_window_projected(resolved: &ResolvedStatusLine) -> ResolvedStatusLine {
+/// `titlebar_segments = "right"` only the name and the right list remain. With the window buttons
+/// on the right `edge`, the right list moves to the left side, after any left list and in its
+/// configured order, so nothing sits beside the buttons, and a name in the right list is centred.
+/// The user's lists, the checklist and Save never see this projection.
+pub fn with_window_projected(
+    resolved: &ResolvedStatusLine,
+    edge: crate::window_band::ButtonEdge,
+) -> ResolvedStatusLine {
     let mut projected = place_window(resolved);
     projected.in_band = true;
     if resolved.titlebar_segments == TitlebarSegments::Right {
         projected.segments.retain(|segment| {
             segment.id == StatusSegmentId::Window || segment.side == StatusSide::Right
         });
+    }
+    if edge == crate::window_band::ButtonEdge::Right {
+        // The caption buttons own the right edge. Segments are stored left, centre, then right,
+        // so retagging keeps the right list after the left list and in its own order; a name the
+        // right list holds goes to the centre, where the band shows it.
+        for segment in &mut projected.segments {
+            if segment.side == StatusSide::Right {
+                segment.side = if segment.id == StatusSegmentId::Window {
+                    StatusSide::Center
+                } else {
+                    StatusSide::Left
+                };
+            }
+        }
     }
     if let Some(window) =
         projected.segments.iter_mut().find(|segment| segment.id == StatusSegmentId::Window)
@@ -803,6 +826,23 @@ pub fn with_window_projected(resolved: &ResolvedStatusLine) -> ResolvedStatusLin
         window.priority = sonicterm_cfg::status_line::MAX_PRIORITY;
     }
     projected
+}
+
+/// `view` as a band with its window buttons on the right edge draws it: every segment except the
+/// name is small, and its plain values take the dim name tone, so the name is the band's one
+/// accent. Cautions, failures and chips keep their colors. The pixel hash is rebuilt.
+pub fn quiet_band_sides(mut view: StatusLineView) -> StatusLineView {
+    let sides = view.segments.iter_mut().filter(|segment| segment.id != StatusSegmentId::Window);
+    for segment in sides {
+        // A side segment steps back behind the centred name, in its full and compact forms.
+        segment.small = true;
+        for part in segment.parts.iter_mut().chain(segment.compact.iter_mut().flatten()) {
+            if part.tone == StatusTone::Value {
+                part.tone = StatusTone::Name;
+            }
+        }
+    }
+    StatusLineView::new(view.segments)
 }
 
 /// `resolved` with `window` in a list: where a list places it, otherwise first in the centre.
@@ -907,6 +947,7 @@ pub fn build_view(
             parts: formatted.parts,
             compact: formatted.compact,
             compact_last: resolved.in_band && configured.id == StatusSegmentId::Window,
+            small: false,
             click,
             spoken: SpokenSegment {
                 name: i18n.translate(meta.spoken_name_key),
@@ -936,7 +977,7 @@ pub use status_line_links::{
 #[path = "status_line_fit.rs"]
 mod status_line_fit;
 pub use status_line_fit::{
-    ellipsize_middle_to_width, fit, separators, FitMetrics, PlacedPart, PlacedSegment,
+    ellipsize_middle_to_width, fit, fit_sized, separators, FitMetrics, PlacedPart, PlacedSegment,
     SEGMENT_SEPARATOR,
 };
 

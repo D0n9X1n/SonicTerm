@@ -198,8 +198,8 @@ winit 创建 HWND 前，`sonicterm-windows` 会请求
 `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`。这个进程级设置早于事件循环构造，因此保留，
 不假设 winit 较晚的设置在所有启动路径上都等价。Release 构建使用 Windows GUI subsystem，
 不会打开控制台窗口。一次性 window-ready callback 收到有效 HWND 后应用 DWM backdrop
-并安装原生 `muda` 菜单。默认 `[window] titlebar = "native"` 时，窗口移动、snap layout
-和最小化/最大化/关闭控件仍由 Windows 原生 chrome 管理。设置为 `"integrated"` 时，窗口以无边框
+并安装原生 `muda` 菜单。终端窗口始终使用集成标题栏：Windows 配置规范化在启动和每次重载时
+替换显式的 `[window] titlebar = "native"`，并记录一条警告。窗口以无边框
 方式创建并启用 winit 的无边框阴影；全屏时关闭阴影，因为它会让客户区移动一个像素。SonicTerm 随后在
 标题栏带中绘制标题栏按钮，并通过 winit 的 `drag_window` 和 `drag_resize_window` 启动原生移动和
 边缘调整大小。不提供 snap layout 浮出菜单。见 [配置](Configuration-zh-CN#集成标题栏)。
@@ -558,7 +558,7 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 | 标签页操作系统交接 | NSPasteboard 发布，无 `NSDraggingSession` | OLE/COM 拖放 | 仅进程内 |
 | 原生菜单 | NSMenu | `muda` | 不可用；保留应用内操作 |
 | Backdrop | AppKit blur/config | DWM Mica/Acrylic/Tabbed | opaque |
-| 集成标题栏 | 默认；透明标题栏，AppKit 红绿灯 | 可选；无边框，SonicTerm 标题栏按钮 | 无；原生标题栏 |
+| 集成标题栏 | 默认；透明标题栏，AppKit 红绿灯 | 始终；无边框，SonicTerm 标题栏按钮，右侧列表在标题栏带左侧 | 无；原生标题栏 |
 | 软件呈现 | wgpu adapter 路径 | CPU BGRA + GDI | wgpu Vulkan/lavapipe 或选中的平台 adapter |
 | 安装包格式 | 各架构 `.dmg` 中的 `.app` | x64 WiX `.msi` | x86_64 `.deb` 与 `.tar.gz` |
 | 签名 | ad-hoc bundle 签名 | 未签名 | 未签名 |

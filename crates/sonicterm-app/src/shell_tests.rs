@@ -74,6 +74,18 @@ fn shell_runner_stores_normalized_startup_config() {
     assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
 }
 
+/// The Windows shell installs a config normalizer that runs before startup config enters App state.
+#[test]
+fn windows_shell_stores_normalized_startup_config() {
+    let mut config = Config::default();
+    config.appearance.backdrop = BackdropKind::Mica;
+    let app = WindowsShell::new(machine(), Theme::default(), config, Keymap::default())
+        .with_config_normalizer(Box::new(opaque_normalizer))
+        .runner
+        .into_app_with_proxy(None);
+    assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
+}
+
 #[test]
 fn shell_installs_privilege_before_a_pending_startup_tab() {
     // Protect startup payloads and later torn-out windows from seeing different process-level state.
