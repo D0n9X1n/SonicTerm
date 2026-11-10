@@ -44,9 +44,10 @@ fn palette_derives_from_theme_channels() {
 }
 
 /// The chrome background (tab bar, status strip, titlebar band) is a color from the theme's own
-/// palette, never a darkened shade of the background: the theme's `tab.bar_bg` when it differs
-/// from the terminal background, else `ansi.black` when that differs, so the bars stay apart from
-/// the terminal. Every bundled theme gets one of the two.
+/// palette: the theme's `tab.bar_bg` when it differs from the terminal background, else
+/// `ansi.black` when that differs, so the bars stay apart from the terminal. solarized-dark's bar
+/// color (`#073642`, also its `ansi.black`) reads only 4.1:1 under its foreground, below the 4.5:1
+/// text floor, so it alone keeps the derived darker shade.
 #[test]
 fn chrome_background_is_a_theme_palette_color() {
     let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
@@ -55,14 +56,18 @@ fn chrome_background_is_a_theme_palette_color() {
         let path = entry.expect("theme entry").path();
         let theme = Theme::load_strict(&path).expect("bundled theme parses");
         let colors = &theme.colors;
-        let expected = if colors.tab.bar_bg.0 != colors.background.0 {
-            &colors.tab.bar_bg.0
+        let derived = path.file_stem().is_some_and(|stem| stem == "solarized-dark");
+        let expected = if derived {
+            // When: derived, no palette candidate reads at 4.5:1 under the foreground.
+            color::hex_with_lightness_delta(&colors.background.0, -0.08)
+        } else if colors.tab.bar_bg.0 != colors.background.0 {
+            color::hex(&colors.tab.bar_bg.0)
         } else {
             // When: bar_bg repeats the background, ansi.black separates the bars instead.
-            &colors.ansi.black.0
+            color::hex(&colors.ansi.black.0)
         };
         let palette = UiPalette::from_theme(&theme);
-        assert_eq!(palette.bg_base, color::hex(expected), "{}", path.display());
+        assert_eq!(palette.bg_base, expected, "{}", path.display());
         assert_ne!(palette.bg_base, color::hex(&colors.background.0), "{}", path.display());
         checked += 1;
     }

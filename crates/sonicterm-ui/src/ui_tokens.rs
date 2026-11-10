@@ -43,9 +43,10 @@ pub struct UiPalette {
     pub search_current: [f32; 4],
 }
 
-/// Contrast the theme foreground needs on a palette color before the bars use it: a theme that
-/// leaves `tab.bar_bg` at its dark default under light text would otherwise get unreadable bars.
-const CHROME_TEXT_CONTRAST: f32 = 3.0;
+/// Contrast the theme foreground needs on a palette color before the bars use it, the WCAG AA
+/// text floor, so the bars' quiet text always has a readable fallback; a light theme that leaves
+/// `tab.bar_bg` at its dark default would otherwise get unreadable bars.
+const CHROME_TEXT_CONTRAST: f32 = 4.5;
 
 /// WCAG contrast ratio between two opaque linear-sRGB colors.
 fn contrast_linear(first: [f32; 4], second: [f32; 4]) -> f32 {
@@ -56,7 +57,7 @@ fn contrast_linear(first: [f32; 4], second: [f32; 4]) -> f32 {
 
 /// The chrome background from `colors`' own palette: `tab.bar_bg` when the theme gives the bars
 /// their own color, else `ansi.black` when it differs from the terminal background, so the bars
-/// stay apart from the terminal. A candidate the foreground cannot be read on (under 3:1) is
+/// stay apart from the terminal. A candidate the foreground cannot be read on (under 4.5:1) is
 /// skipped; a theme with no usable candidate gets the background darkened 8%.
 fn chrome_background(colors: &sonicterm_cfg::theme::Palette) -> [f32; 4] {
     let background = colors.background.0.as_str();
@@ -78,7 +79,7 @@ impl UiPalette {
     /// - `bg_base`       — the chrome background (tab bar, status strip, titlebar band), a theme
     ///   palette color: `theme.colors.tab.bar_bg` when it differs from the background, else
     ///   `theme.colors.ansi.black` when that differs, each only if the foreground reads at
-    ///   3:1 on it; else the background shifted -8% lightness.
+    ///   4.5:1 on it; else the background shifted -8% lightness.
     /// - `bg_elevated`   — `theme.colors.background` (i.e. base).
     /// - `bg_surface`    — `theme.colors.background` shifted +5% lightness.
     /// - `bg_hover`      — `foreground` @ 6% alpha.
