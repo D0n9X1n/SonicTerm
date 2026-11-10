@@ -344,7 +344,7 @@ pub struct StripGeometry {
     /// Display scale factor.
     pub scale_factor: f32,
     /// The terminal font's live raster size; the strip text is `font_scale` × the tab titles' size,
-    /// and exactly their size in a band.
+    /// and this size itself in a band.
     pub font_raster_px: f32,
     /// `[status_line] font_scale`: the strip text's share of that size.
     pub font_scale: f32,
@@ -367,21 +367,25 @@ pub struct StripBand {
 }
 
 impl StripGeometry {
-    /// The strip's text raster size at the display scale, at least 1 pt: the tab titles' size in an
-    /// integrated titlebar band, so the titlebar reads like the tab bar, and otherwise
-    /// `font_scale` × that size, which is what [`status_line_font_size`] asks the stack for.
+    /// The strip's text raster size at the display scale, at least 1 pt: the terminal font's size
+    /// in an integrated titlebar band, one point under the tab titles, and otherwise `font_scale`
+    /// × the tab titles' size, which is what [`status_line_font_size`] asks the stack for.
     pub fn text_px(&self) -> f32 {
         let scale = self.scale_factor.max(0.5);
-        let font_scale = if self.band.in_band { 1.0 } else { self.font_scale };
-        (status_line_font_size(self.font_raster_px / scale, font_scale) * scale).max(1.0)
+        if self.band.in_band {
+            // When: band.in_band, the text is the terminal font's own size, as the grid draws it.
+            return self.font_raster_px.max(scale);
+        }
+        (status_line_font_size(self.font_raster_px / scale, self.font_scale) * scale).max(1.0)
     }
 
-    /// The atlas raster variant the strip's full-size text is drawn on: the tab titles' in a band,
-    /// whose text is their size, so its tiles are theirs; the strip's own otherwise.
+    /// The atlas raster variant the strip's full-size text is drawn on: the terminal's in a band,
+    /// whose text is the terminal font's size, so its tiles are the grid's; the strip's own
+    /// otherwise.
     pub fn raster_variant(&self) -> GlyphRasterVariant {
         if self.band.in_band {
-            // When: band.in_band, the text is the tab titles' size and shares their tiles.
-            return GlyphRasterVariant::TabTitle;
+            // When: band.in_band, the text is the terminal font's size and shares the grid's tiles.
+            return GlyphRasterVariant::Normal;
         }
         GlyphRasterVariant::StatusLine
     }
@@ -391,8 +395,8 @@ impl StripGeometry {
     pub fn chrome_stack(&self) -> crate::chrome_cache::ChromeStack {
         use crate::chrome_cache::ChromeStack;
         if self.band.in_band {
-            // When: band.in_band, runs are shaped with the tab-title stack.
-            return ChromeStack::TabTitle;
+            // When: band.in_band, runs are shaped with the terminal's body stack.
+            return ChromeStack::Body;
         }
         ChromeStack::StatusLine
     }

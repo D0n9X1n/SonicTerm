@@ -126,7 +126,7 @@ default; when omitted, it becomes `#d5c4a1`.
 | `selection_bg` | Selection overlay, drawn at 50% alpha |
 | `colors.ansi` | ANSI colors 0–7 and derived UI accents |
 | `colors.bright` | ANSI colors 8–15 and derived UI accents |
-| `colors.tab.bar_bg` | Background of the tab bar, the status strip, the integrated titlebar band and the search panel. These bars are never lighter than the terminal: `bar_bg` is used when it is darker than `colors.background`, the theme `foreground` reaches 3:1 on it and `colors.tab.active_fg` reaches 4.5:1 on it. Otherwise, including when it equals the background, the bars use the background darkened 4% in lightness. |
+| `colors.tab.bar_bg` | Background of the tab bar, the status strip, the integrated titlebar band and the search panel. These bars are never lighter than the terminal. `bar_bg` is used when it is darker than `colors.background`; otherwise, including when it equals the background, the bars use the background at 95% of its lightness, just darker than the terminal. Either is used only while the theme `foreground` reaches 3:1 and `colors.tab.active_fg` reaches 4.5:1 on it; with neither, the bars are the background itself, so the chrome never reads worse than the terminal. |
 | `colors.tab.active_bg` / `active_fg` | Active tab |
 | `colors.tab.inactive_bg` / `inactive_fg` | Inactive tabs and separators |
 

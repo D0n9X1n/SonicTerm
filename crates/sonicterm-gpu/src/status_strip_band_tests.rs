@@ -170,12 +170,12 @@ fn small_segments_draw_smaller_on_the_names_baseline() {
         &mut glyphs,
     );
     assert_eq!(glyphs.len(), 2, "one capital per segment");
-    // Each size rasterizes under its own variant: footer tiles for the small text, tab-title tiles
-    // for the band's full size, so neither can stand in for the other in the atlas.
+    // Each size rasterizes under its own variant: footer tiles for the small text, the grid's
+    // tiles for the band's full size, so neither can stand in for the other in the atlas.
     let variants: std::collections::HashSet<_> =
         atlas.resident_tile_keys().into_iter().map(|key| key.raster_variant).collect();
     assert!(variants.contains(&GlyphRasterVariant::PaletteFooter), "{variants:?}");
-    assert!(variants.contains(&GlyphRasterVariant::TabTitle), "{variants:?}");
+    assert!(variants.contains(&GlyphRasterVariant::Normal), "{variants:?}");
     let ink = |index: usize| crate::cursor::ndc_rect_px(glyphs[index].rect, 400.0, 200.0);
     let ((_, small_top, _, small_height), (_, full_top, _, full_height)) = (ink(0), ink(1));
     assert!(small_height < full_height, "small {small_height} vs full {full_height}");
@@ -262,11 +262,12 @@ fn band_name_fallbacks_are_checked() {
     assert!(ratio >= BAND_TEXT_CONTRAST, "flat theme band name: {ratio}");
 }
 
-/// Text in the integrated titlebar band, a name band or a top strip merged into it, is the tab
-/// titles' size on their raster variant whatever `[status_line] font_scale` is, so the titlebar
-/// reads like the tab bar; an ordinary strip keeps `font_scale` on its own variant.
+/// Text in the integrated titlebar band, a name band or a top strip merged into it, is the
+/// terminal font's size on the grid's raster variant and body stack whatever `[status_line]
+/// font_scale` is, one point under the tab titles; an ordinary strip keeps `font_scale` on its own
+/// variant and stack.
 #[test]
-fn band_text_matches_the_tab_titles_whatever_the_font_scale() {
+fn band_text_is_the_terminal_font_size_whatever_the_font_scale() {
     use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
     for (scale, font_scale) in [(1.0, 0.85), (2.0, 0.85), (2.0, 1.0), (1.5, 1.2)] {
         let ordinary = StripGeometry { font_scale, ..geometry_for_font(13.0, scale) };
@@ -274,9 +275,10 @@ fn band_text_matches_the_tab_titles_whatever_the_font_scale() {
             band: StripBand { in_band: true, left_inset: 0.0, right_inset: 0.0 },
             ..ordinary
         };
-        assert_eq!(band.text_px(), tab_title_font_size(13.0) * scale, "{scale} × {font_scale}");
-        assert_eq!(band.raster_variant(), GlyphRasterVariant::TabTitle);
-        assert_eq!(band.chrome_stack(), crate::chrome_cache::ChromeStack::TabTitle);
+        assert_eq!(band.text_px(), 13.0 * scale, "{scale} × {font_scale}");
+        assert!(band.text_px() < tab_title_font_size(13.0) * scale, "under the tab titles");
+        assert_eq!(band.raster_variant(), GlyphRasterVariant::Normal);
+        assert_eq!(band.chrome_stack(), crate::chrome_cache::ChromeStack::Body);
         assert_eq!(
             ordinary.text_px(),
             status_line_font_size(13.0, font_scale) * scale,
@@ -284,5 +286,86 @@ fn band_text_matches_the_tab_titles_whatever_the_font_scale() {
         );
         assert_eq!(ordinary.raster_variant(), GlyphRasterVariant::StatusLine);
         assert_eq!(ordinary.chrome_stack(), crate::chrome_cache::ChromeStack::StatusLine);
+    }
+}
+
+/// A band and an ordinary strip of different sizes drawn into one atlas, in either order, keep
+/// their own tiles: the band's capitals land on the grid's variant at the terminal size and the
+/// strip's on its own variant at its size, so neither draw leaves a tile the other then reuses.
+#[test]
+fn band_and_strip_text_keep_their_own_tiles_in_one_atlas() {
+    use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let body = chrome_stack();
+    let strip_stack = body.with_font_size(f64::from(status_line_font_size(13.0, 0.85)));
+    let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
+    let palette = UiPalette::from_theme(&theme);
+    let colors = StatusColors::resolve(&theme, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
+    let placed = vec![PlacedSegment {
+        index: 0,
+        left: 10.0,
+        width: 40.0,
+        parts: vec![PlacedPart {
+            text: "H".into(),
+            tone: StatusTone::Name,
+            left: 10.0,
+            width: 40.0,
+        }],
+        small: false,
+    }];
+    let ordinary = StripGeometry {
+        top: 0.0,
+        height: 40.0,
+        position: StatusPosition::Bottom,
+        screen: (400.0, 200.0),
+        scale_factor: 1.0,
+        font_raster_px: 13.0,
+        font_scale: 0.85,
+        cap_height: 7.0,
+        band: StripBand::default(),
+    };
+    let band = StripGeometry {
+        band: StripBand { in_band: true, left_inset: 0.0, right_inset: 0.0 },
+        position: StatusPosition::Top,
+        ..ordinary
+    };
+    let draw =
+        |geometry: &StripGeometry, stack: &sonicterm_engine::FontStack, atlas: &mut GlyphAtlas| {
+            let mut raster = stack.clone();
+            let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
+            emit_strip(
+                &placed,
+                &[],
+                geometry,
+                &colors,
+                Some(stack),
+                Some(&mut raster),
+                None,
+                atlas,
+                &mut crate::chrome_cache::ChromeRunCache::default(),
+                true,
+                &mut quads,
+                &mut glyphs,
+            );
+            let ink =
+                glyphs.first().map(|glyph| crate::cursor::ndc_rect_px(glyph.rect, 400.0, 200.0).3);
+            ink.expect("one capital")
+        };
+    for band_first in [true, false] {
+        let mut atlas = GlyphAtlas::new(1024, 1024);
+        let (band_h, strip_h) = if band_first {
+            let band_h = draw(&band, &body, &mut atlas);
+            (band_h, draw(&ordinary, &strip_stack, &mut atlas))
+        } else {
+            let strip_h = draw(&ordinary, &strip_stack, &mut atlas);
+            (draw(&band, &body, &mut atlas), strip_h)
+        };
+        assert!(strip_h < band_h, "band first {band_first}: strip {strip_h} vs band {band_h}");
+        let variants: std::collections::HashSet<_> =
+            atlas.resident_tile_keys().into_iter().map(|key| key.raster_variant).collect();
+        assert!(variants.contains(&GlyphRasterVariant::Normal), "{variants:?}");
+        assert!(variants.contains(&GlyphRasterVariant::StatusLine), "{variants:?}");
     }
 }

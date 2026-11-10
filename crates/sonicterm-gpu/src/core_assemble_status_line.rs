@@ -162,9 +162,9 @@ impl GpuRenderer {
         )
             .hash(&mut hasher);
         let fit_key = hasher.finish();
-        // Text in a band is the tab titles' size, so it shapes with their stack.
+        // Text in a band is the terminal font's size, so it shapes with the body stack.
         let text_stack = if in_band {
-            self.tab_title_font.stack().cloned()
+            self.font_stack.clone()
         } else {
             // When: in_band is false, an ordinary strip shapes with its own font_scale stack.
             self.status_line_font_stack.clone()

@@ -45,7 +45,7 @@ fn palette_derives_from_theme_channels() {
 
 /// The chrome background (tab bar, status strip, titlebar band) is never lighter than the
 /// terminal in any bundled theme: a theme's own `tab.bar_bg` when it is darker than the
-/// background, else the background darkened 4%; every bundled theme's text reads on that shade.
+/// background, else the background at 95% of its lightness; every bundled theme reads on it.
 #[test]
 fn chrome_background_is_never_lighter_than_the_terminal() {
     let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
@@ -60,7 +60,7 @@ fn chrome_background_is_never_lighter_than_the_terminal() {
             // When: the theme's bar color is darker than the terminal, the bars use it.
             bar
         } else {
-            color::hex_with_lightness_delta(&colors.background.0, CHROME_SHADE_DELTA)
+            color::hex_with_lightness_scale(&colors.background.0, CHROME_SHADE_SCALE)
         };
         let palette = UiPalette::from_theme(&theme);
         assert_eq!(palette.bg_base, expected, "{}", path.display());
@@ -75,7 +75,8 @@ fn chrome_background_is_never_lighter_than_the_terminal() {
 }
 
 /// A theme whose `tab.bar_bg` repeats the background, as Apollo and the bundled wezterm theme do,
-/// gets the background darkened 4%, not its lighter `ansi.black`.
+/// gets the background at 95% of its lightness: just darker than the terminal, not its lighter
+/// `ansi.black`.
 #[test]
 fn chrome_background_darkens_a_background_the_bar_color_repeats() {
     let mut theme = Theme::default();
@@ -83,7 +84,9 @@ fn chrome_background_darkens_a_background_the_bar_color_repeats() {
     theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#141617".into());
     theme.colors.ansi.black = sonicterm_cfg::theme::Hex("#1d2021".into());
     let palette = UiPalette::from_theme(&theme);
-    assert_eq!(palette.bg_base, color::hex_with_lightness_delta("#141617", -0.04));
+    assert_eq!(palette.bg_base, color::hex_with_lightness_scale("#141617", 0.95));
+    let background = color::hex("#141617");
+    assert!(relative_luminance(palette.bg_base) < relative_luminance(background));
 }
 
 /// A `tab.bar_bg` lighter than the background, such as solarized-dark's, is skipped, so the bars
@@ -94,12 +97,12 @@ fn chrome_background_skips_a_lighter_bar_color() {
     theme.colors.background = sonicterm_cfg::theme::Hex("#002b36".into());
     theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#073642".into());
     let palette = UiPalette::from_theme(&theme);
-    assert_eq!(palette.bg_base, color::hex_with_lightness_delta("#002b36", -0.04));
+    assert_eq!(palette.bg_base, color::hex_with_lightness_scale("#002b36", 0.95));
 }
 
 /// A darker `tab.bar_bg` the active tab title fades into is skipped: with `tab.bar_bg` and
 /// `tab.active_fg` both `#080000`, the active tab and a focused band's values would vanish there.
-/// The title fades on every dark shade too, so the bars take the deeper shade, the last fallback.
+/// The title cannot read on the shade either, so the bars keep the background itself.
 #[test]
 fn chrome_background_skips_a_color_the_active_title_fades_into() {
     let mut theme = Theme::default();
@@ -108,30 +111,29 @@ fn chrome_background_skips_a_color_the_active_title_fades_into() {
     theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#080000".into());
     theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#080000".into());
     let palette = UiPalette::from_theme(&theme);
-    assert_ne!(palette.bg_base, color::hex("#080000"), "a bar the title fades into is skipped");
-    assert_eq!(palette.bg_base, color::hex_with_lightness_delta("#202020", -0.08));
+    assert_eq!(palette.bg_base, color::hex("#202020"));
 }
 
-/// When the active tab title would fall under 4.5:1 on the 4% shade, the bars take the deeper 8%
-/// shade, on which it still reads: `#7c7c7c` on a `#202020` background reads at 4.7:1 there.
+/// The chrome never reads worse than the terminal: when the active tab title would fall under
+/// 4.5:1 on every darker candidate (`#767676` on a `#fafafa` theme and its 95% shade), the bars
+/// keep the background, so the title reads exactly as it does on the terminal.
 #[test]
-fn chrome_background_deepens_when_the_active_title_fades_on_the_shade() {
+fn chrome_background_keeps_the_background_when_no_shade_reads() {
     let mut theme = Theme::default();
-    theme.colors.background = sonicterm_cfg::theme::Hex("#202020".into());
-    theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#202020".into());
-    theme.colors.ansi.black = sonicterm_cfg::theme::Hex("#202020".into());
-    theme.colors.foreground = sonicterm_cfg::theme::Hex("#ffffff".into());
-    theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#7c7c7c".into());
+    theme.colors.background = sonicterm_cfg::theme::Hex("#fafafa".into());
+    theme.colors.foreground = sonicterm_cfg::theme::Hex("#202020".into());
+    theme.colors.tab.bar_bg = sonicterm_cfg::theme::Hex("#ffffff".into());
+    theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#767676".into());
+    let active = color::hex("#767676");
+    let shade = color::hex_with_lightness_scale("#fafafa", CHROME_SHADE_SCALE);
+    assert!(contrast_linear(active, shade) < CHROME_ACTIVE_CONTRAST, "setup: the shade fails");
     let palette = UiPalette::from_theme(&theme);
-    let deep = color::hex_with_lightness_delta("#202020", -0.08);
-    assert_eq!(palette.bg_base, deep);
-    let active = color::hex("#7c7c7c");
-    assert!(contrast_linear(active, palette.bg_base) >= CHROME_ACTIVE_CONTRAST);
+    assert_eq!(palette.bg_base, color::hex("#fafafa"));
 }
 
 /// A light theme that leaves `tab.bar_bg` at its dark default does not get dark bars under its
 /// dark text: a bar color the foreground cannot be read on is skipped, and the bars are the
-/// background darkened 4%, still darker than the terminal.
+/// background at 95% of its lightness, still darker than the terminal.
 #[test]
 fn chrome_background_skips_palette_colors_the_text_cannot_be_read_on() {
     let mut theme = Theme::default();
@@ -139,5 +141,5 @@ fn chrome_background_skips_palette_colors_the_text_cannot_be_read_on() {
     theme.colors.foreground = sonicterm_cfg::theme::Hex("#202020".into());
     theme.colors.tab.active_fg = sonicterm_cfg::theme::Hex("#202020".into());
     let palette = UiPalette::from_theme(&theme);
-    assert_eq!(palette.bg_base, color::hex_with_lightness_delta("#fafafa", -0.04));
+    assert_eq!(palette.bg_base, color::hex_with_lightness_scale("#fafafa", 0.95));
 }

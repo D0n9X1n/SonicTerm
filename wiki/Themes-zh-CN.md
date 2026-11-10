@@ -123,7 +123,7 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 | `selection_bg` | 选区 overlay，以 50% alpha 绘制 |
 | `colors.ansi` | ANSI 颜色 0–7 和派生 UI accent |
 | `colors.bright` | ANSI 颜色 8–15 和派生 UI accent |
-| `colors.tab.bar_bg` | 标签栏、状态栏、集成标题栏带和搜索面板的背景。这些栏不会比终端更亮：`bar_bg` 比 `colors.background` 更暗、主题 `foreground` 在其上对比度达到 3:1，且 `colors.tab.active_fg` 在其上对比度达到 4.5:1 时，使用它；否则（包括它与背景色相同时），这些栏使用背景色降低 4% 亮度后的颜色。 |
+| `colors.tab.bar_bg` | 标签栏、状态栏、集成标题栏带和搜索面板的背景。这些栏不会比终端更亮。`bar_bg` 比 `colors.background` 更暗时使用它；否则（包括它与背景色相同时），这些栏使用亮度为背景色 95% 的颜色，只比终端略暗。两者都只在主题 `foreground` 在其上对比度达到 3:1、`colors.tab.active_fg` 达到 4.5:1 时使用；都不满足时，这些栏就是背景色本身，因此标题栏和标签栏的可读性不会比终端差。 |
 | `colors.tab.active_bg` / `active_fg` | 当前标签页 |
 | `colors.tab.inactive_bg` / `inactive_fg` | 非当前标签页和分隔线 |
 
