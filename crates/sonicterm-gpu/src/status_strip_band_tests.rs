@@ -182,3 +182,49 @@ fn small_segments_draw_smaller_on_the_names_baseline() {
     let (small_bottom, full_bottom) = (small_top + small_height, full_top + full_height);
     assert!((small_bottom - full_bottom).abs() <= 1.0, "baselines {small_bottom} {full_bottom}");
 }
+
+/// A caption band draws its quiet text in the band name color, which reads at 4.5:1; an unfocused
+/// window's band draws values, the centred window name among them, in it too, as Windows dims an
+/// inactive title. A band without caption buttons (macOS traffic lights, full screen) and an
+/// ordinary strip keep their colors.
+#[test]
+fn an_unfocused_caption_band_dims_its_values_to_the_name_color() {
+    use sonicterm_render_model::boundary::ui::window_band::BandButtons;
+    let theme = Theme::default();
+    let palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(&theme);
+    let (active, inactive) = (ChromeColor::WHITE, hex_to_chrome_color("#808080"));
+    let colors = StatusColors::resolve(&theme, active, inactive, &palette);
+    let dimmed = colors.for_band_focus(BandButtons::Caption, true, false);
+    assert_eq!(
+        dimmed.value, colors.band_name,
+        "unfocused caption band: values take the name color"
+    );
+    assert_eq!(dimmed.name, colors.band_name);
+    assert_eq!(dimmed.warn, colors.warn, "cautions keep their own color");
+    let focused = colors.for_band_focus(BandButtons::Caption, true, true);
+    assert_eq!((focused.value, focused.name), (colors.value, colors.band_name), "focused");
+    assert_eq!(colors.for_band_focus(BandButtons::TrafficLights, true, false), colors, "macOS");
+    assert_eq!(colors.for_band_focus(BandButtons::None, true, false), colors, "full screen");
+    assert_eq!(colors.for_band_focus(BandButtons::Caption, false, false), colors, "strip below");
+}
+
+/// Every bundled theme's caption band name color reads at 4.5:1 on the band, the WCAG AA text
+/// floor, whether the theme's inactive tab color does or falls back to quieter foreground text.
+#[test]
+fn every_bundled_theme_band_name_reads_at_four_and_a_half_to_one() {
+    use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
+    let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&themes).expect("bundled themes") {
+        let path = entry.expect("theme entry").path();
+        let theme = Theme::load_strict(&path).expect("bundled theme parses");
+        let palette = UiPalette::from_theme(&theme);
+        let active = hex_to_chrome_color(theme.colors.tab.active_fg.0.as_str());
+        let inactive = hex_to_chrome_color(theme.colors.tab.inactive_fg.0.as_str());
+        let colors = StatusColors::resolve(&theme, active, inactive, &palette);
+        let ratio = contrast_ratio(colors.band_name, colors.background);
+        assert!(ratio >= BAND_TEXT_CONTRAST, "{}: {ratio}", path.display());
+        checked += 1;
+    }
+    assert_eq!(checked, 9, "the nine bundled themes");
+}

@@ -13,8 +13,6 @@ const CLOSE_PRESSED: [f32; 4] = [0.469, 0.020, 0.010, 1.0];
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// Side of a glyph's square, in logical px.
 const GLYPH_SIDE: f32 = 10.0;
-/// Glyph opacity of an unfocused window's buttons.
-const UNFOCUSED_ALPHA: f32 = 0.45;
 
 /// Colors the caption buttons draw with, premultiplied linear RGBA.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,6 +23,8 @@ pub struct CaptionColors {
     pub hover: [f32; 4],
     /// Pressed fill of minimise and maximise.
     pub pressed: [f32; 4],
+    /// Strokes of an unfocused window and of a held button: the band's quiet text tone.
+    pub quiet: [f32; 4],
 }
 
 /// One rectangle to fill, in raster px.
@@ -34,11 +34,6 @@ pub struct CaptionFill {
     pub rect: BandRect,
     /// Premultiplied linear RGBA.
     pub color: [f32; 4],
-}
-
-/// `color` scaled by `alpha`, staying premultiplied.
-fn faded(color: [f32; 4], alpha: f32) -> [f32; 4] {
-    color.map(|channel| channel * alpha)
 }
 
 /// The fills that draw `button` in `rect` at `scale`: its background when hovered or pressed, then
@@ -67,12 +62,12 @@ pub fn caption_fills(
     let glyph = if close_lit {
         // White strokes sit on the red close fill.
         WHITE
-    } else if state.focused {
-        // When: state.focused, the strokes take the full glyph colour.
+    } else if state.focused && !pressed {
+        // When: state.focused and not pressed, the strokes take the full glyph colour.
         colors.glyph
     } else {
-        // When: neither close_lit nor state.focused, the strokes dim like the system's.
-        faded(colors.glyph, UNFOCUSED_ALPHA)
+        // When: unfocused or pressed (and not close_lit), the strokes quieten like the system's.
+        colors.quiet
     };
     let stroke = scale.round().max(1.0);
     let side = (GLYPH_SIDE * scale).round();

@@ -131,6 +131,7 @@ fn chips_measure_as_their_text() {
         width: 100.0,
         edge_pad: 2.0,
         segment_gap: 3.0,
+        small_gap: 3.0,
         separator_width: 0.0,
         left_inset: 0.0,
         right_inset: 0.0,
@@ -172,6 +173,7 @@ fn separated_view() -> (StatusLineView, FitMetrics) {
             width: 40.0,
             edge_pad: 0.0,
             segment_gap: 2.0,
+            small_gap: 2.0,
             separator_width: 1.0,
             left_inset: 0.0,
             right_inset: 0.0,
@@ -281,6 +283,7 @@ fn a_segment_fitting_empties_takes_no_separator() {
         width,
         edge_pad: 0.0,
         segment_gap: 2.0,
+        small_gap: 2.0,
         separator_width: 1.0,
         left_inset: 0.0,
         right_inset: 0.0,
@@ -307,6 +310,7 @@ fn small_segments_are_measured_and_placed_as_small() {
         width: 400.0,
         edge_pad: 0.0,
         segment_gap: 0.0,
+        small_gap: 0.0,
         separator_width: 0.0,
         left_inset: 0.0,
         right_inset: 0.0,
@@ -318,4 +322,41 @@ fn small_segments_are_measured_and_placed_as_small() {
     let by_index = |index| placed.iter().find(|segment| segment.index == index).unwrap();
     assert_eq!((by_index(0).width, by_index(0).small), (15.0, true));
     assert_eq!((by_index(1).width, by_index(1).small), (40.0, false));
+}
+
+/// Two adjacent small segments of one list sit `small_gap` apart; a full-size neighbour, the gap
+/// to the centre list and the gap between lists keep `segment_gap`. The exact-fit width proves the
+/// group width uses the same gaps as placement: one px less drops a segment.
+#[test]
+fn adjacent_small_segments_use_the_small_gap() {
+    use StatusSegmentId as Seg;
+    let mut view = fit_view(&[
+        (Seg::Mem, StatusSide::Left, 500, false, "a"),
+        (Seg::Cpu, StatusSide::Left, 500, false, "b"),
+        (Seg::Frame, StatusSide::Left, 500, false, "c"),
+        (Seg::Window, StatusSide::Center, 900, true, "n"),
+        (Seg::Size, StatusSide::Right, 500, false, "d"),
+        (Seg::Zoom, StatusSide::Right, 500, false, "e"),
+    ]);
+    // Segments a, b, d and e are small; c is full size, so b-c keeps the segment gap.
+    for index in [0, 1, 4, 5] {
+        view.segments[index].small = true;
+    }
+    let metrics = |width| FitMetrics {
+        width,
+        edge_pad: 0.0,
+        segment_gap: 20.0,
+        small_gap: 16.0,
+        separator_width: 0.0,
+        left_inset: 0.0,
+        right_inset: 0.0,
+    };
+    // Every segment is 10 px wide: left 10+16+10+20+10 = 66, centre 10, right 10+16+10 = 36, two
+    // list gaps of 20: 152 in all.
+    let measure = |_text: &str, _small: bool| 10.0;
+    let placed = fit_sized(&view, &metrics(152.0), measure);
+    let lefts: Vec<f32> = placed.iter().map(|segment| segment.left).collect();
+    assert_eq!(lefts, vec![0.0, 26.0, 56.0, 86.0, 116.0, 142.0]);
+    let narrower = fit_sized(&view, &metrics(151.0), measure);
+    assert!(narrower.len() < 6, "one px short of the exact fit drops a segment");
 }

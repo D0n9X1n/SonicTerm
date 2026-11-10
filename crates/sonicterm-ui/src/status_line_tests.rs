@@ -131,6 +131,7 @@ pub(super) fn tight(width: f32) -> FitMetrics {
         width,
         edge_pad: 0.0,
         segment_gap: 1.0,
+        small_gap: 1.0,
         separator_width: 0.0,
         left_inset: 0.0,
         right_inset: 0.0,

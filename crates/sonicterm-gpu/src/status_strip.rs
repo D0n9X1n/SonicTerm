@@ -32,6 +32,8 @@ const MIN_HEIGHT_LOGICAL: f32 = 20.0;
 const MIN_TEXT_PT: f32 = 1.0;
 /// Contrast a caution or failure color needs against the strip background.
 const MIN_CONTRAST: f32 = 3.0;
+/// Contrast the quiet text of a caption band needs against it: the WCAG AA floor for small text.
+pub(crate) const BAND_TEXT_CONTRAST: f32 = 4.5;
 
 /// Strip height in raster px for `font_size` (logical pt) at `scale_factor`:
 /// 0.6 × the tab bar height with a 20 logical px floor, rounded to whole px.
@@ -186,6 +188,9 @@ pub struct StatusColors {
     pub background: [f32; 4],
     /// Hairline between the terminal and the strip.
     pub hairline: [f32; 4],
+    /// Quiet text of a caption band (Windows): the name color when it reads at 4.5:1 on the band,
+    /// else the theme's secondary text, else its foreground.
+    pub band_name: ChromeColor,
 }
 
 impl StatusColors {
@@ -203,10 +208,17 @@ impl StatusColors {
             foreground,
             background,
         );
+        let secondary = palette.text_secondary.map(crate::color::linear_channel_to_srgb_u8);
+        let secondary = ChromeColor::rgb(secondary[0], secondary[1], secondary[2]);
+        let band_name = [tab_inactive_fg, secondary]
+            .into_iter()
+            .find(|color| contrast_ratio(*color, background) >= BAND_TEXT_CONTRAST)
+            .unwrap_or(foreground);
         Self {
             chip: readable_or(tab_active_fg, foreground, background),
             value: tab_active_fg,
             name: tab_inactive_fg,
+            band_name,
             warn,
             error: readable_or(
                 hex_to_chrome_color(theme.colors.ansi.red.0.as_str()),
@@ -216,6 +228,30 @@ impl StatusColors {
             background,
             hairline: palette.border_subtle,
         }
+    }
+
+    /// These colors for a surface drawn in a band with `buttons` (`in_band`), in a window that is
+    /// `focused` or not: a caption band draws quiet text in `band_name`, and an unfocused one its
+    /// values too, as Windows dims an inactive title. Cautions, chips and every other surface,
+    /// macOS's band included, keep their colors.
+    pub fn for_band_focus(
+        self,
+        buttons: sonicterm_render_model::boundary::ui::window_band::BandButtons,
+        in_band: bool,
+        focused: bool,
+    ) -> Self {
+        use sonicterm_render_model::boundary::ui::window_band::BandButtons;
+        if !(in_band && buttons == BandButtons::Caption) {
+            // When: not in_band with Caption buttons, the surface keeps every color.
+            return self;
+        }
+        let value = if focused {
+            self.value
+        } else {
+            // An inactive window's values quieten too.
+            self.band_name
+        };
+        Self { value, name: self.band_name, ..self }
     }
 
     /// Text color of `tone`.
@@ -330,6 +366,8 @@ impl StripGeometry {
             width: self.screen.0,
             edge_pad: 12.0 * scale,
             segment_gap: 20.0 * scale,
+            // Small side text sits closer: two adjacent small segments of a list are 16 px apart.
+            small_gap: 16.0 * scale,
             separator_width: 0.0,
             left_inset: self.band.left_inset,
             right_inset: self.band.right_inset,

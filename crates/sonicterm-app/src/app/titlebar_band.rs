@@ -213,6 +213,13 @@ impl App {
                 // The band's height or insets changed: the panes refit to the new top inset.
                 refits.push(*window_id);
             }
+            // The snap layouts hook follows the band drawn now: buttons, height and scale.
+            titlebar::sync_snap_layouts(
+                native,
+                band,
+                renderer.band_height(),
+                renderer.scale_factor(),
+            );
             if caption != window.caption {
                 window.caption = caption;
             }

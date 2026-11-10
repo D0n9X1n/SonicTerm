@@ -9,6 +9,25 @@ use winit::window::{Window, WindowAttributes};
 #[path = "titlebar_macos.rs"]
 mod macos;
 
+// The snap layouts routing runs only in the Windows subclass; other hosts compile it for tests.
+#[cfg(any(target_os = "windows", test))]
+#[path = "snap_route.rs"]
+mod snap_route;
+
+#[cfg(target_os = "windows")]
+#[path = "titlebar_windows.rs"]
+mod windows_snap;
+
+/// Keep `window`'s snap layouts hook in step with its `band`, `band_height` raster px tall at
+/// `scale`: on Windows a band with caption buttons offers the flyout on its maximise button;
+/// elsewhere this does nothing.
+pub(crate) fn sync_snap_layouts(window: &Window, band: WindowBand, band_height: f32, scale: f32) {
+    #[cfg(target_os = "windows")]
+    windows_snap::sync(window, band, band_height, scale);
+    #[cfg(not(target_os = "windows"))]
+    let _ = (window, band, band_height, scale);
+}
+
 /// Whether a terminal window created with `mode` gets the integrated band on this platform.
 pub(crate) fn integrated(mode: TitlebarMode) -> bool {
     mode == TitlebarMode::Integrated && cfg!(any(target_os = "macos", target_os = "windows"))
