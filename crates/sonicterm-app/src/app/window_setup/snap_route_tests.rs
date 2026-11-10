@@ -121,3 +121,13 @@ fn points_round_trip_with_negative_coordinates() {
     assert_eq!(point_of(0xFFFF_FFFF_u32 as i32 as isize), (-1, -1), "sign-extended lparam");
     assert_eq!(point_of(0xFFFF_FFFF), (-1, -1), "zero-extended lparam");
 }
+
+/// The local message and hit-test ids are the documented Win32 values the subclass compares
+/// with, so the router and the Windows layer agree on every host.
+#[test]
+fn message_and_hit_test_ids_are_the_win32_values() {
+    assert_eq!((HTCLIENT, HTMAXBUTTON), (1, 9));
+    assert_eq!((WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCLBUTTONDOWN), (0x84, 0xA0, 0xA1));
+    assert_eq!((WM_NCLBUTTONUP, WM_NCLBUTTONDBLCLK, WM_NCMOUSELEAVE), (0xA2, 0xA3, 0x2A2));
+    assert_eq!((WM_MOUSELEAVE, WM_MOUSEMOVE, WM_CAPTURECHANGED), (0x2A3, 0x200, 0x215));
+}
