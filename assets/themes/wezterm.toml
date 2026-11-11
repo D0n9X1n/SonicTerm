@@ -46,7 +46,7 @@ cyan    = "#8ec07c"  # base0C
 white   = "#fbf1c7"  # base07
 
 [colors.tab]
-bar_bg          = "#141617"
+bar_bg          = "#101010"
 active_bg       = "#141617"
 active_fg       = "#fabd2f"
 inactive_bg     = "#141617"

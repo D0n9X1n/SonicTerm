@@ -220,7 +220,8 @@ pub(super) fn an_unchanged_strip_draws_again_without_shaping() {
     assert_eq!(cold, warm, "and draws the same glyphs");
 }
 
-/// A light fixture theme (every bundled theme is dark) whose yellow fails 3:1 on the strip.
+/// A light fixture theme with a light `tab.bar_bg`, the strip background, on which its yellow
+/// fails 3:1.
 pub(super) fn light_fixture() -> sonicterm_render_model::boundary::cfg::theme::Theme {
     use sonicterm_render_model::boundary::cfg::theme::{Appearance, Hex};
     let mut theme = sonicterm_render_model::boundary::cfg::theme::Theme {
@@ -229,6 +230,7 @@ pub(super) fn light_fixture() -> sonicterm_render_model::boundary::cfg::theme::T
     };
     theme.colors.background = Hex("#fafafa".into());
     theme.colors.foreground = Hex("#202020".into());
+    theme.colors.tab.bar_bg = Hex("#f0f0f0".into());
     theme.colors.tab.active_fg = Hex("#1a1a1a".into());
     theme.colors.tab.inactive_fg = Hex("#555555".into());
     theme.colors.ansi.yellow = Hex("#f0e040".into());
