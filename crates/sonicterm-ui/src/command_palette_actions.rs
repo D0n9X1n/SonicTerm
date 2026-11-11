@@ -42,6 +42,7 @@ pub fn action_display_name(action: &Action) -> String {
         Action::ResetFontWeight => "ResetFontWeight".into(),
         Action::SaveCurrentSettings => "SaveCurrentSettings".into(),
         Action::ChooseFontFamily => "ChooseFontFamily".into(),
+        Action::ChooseTheme => "ChooseTheme".into(),
         Action::NewWindow => "NewWindow".into(),
         Action::MoveTabToNewWindow => "MoveTabToNewWindow".into(),
         Action::ToggleFullscreen => "ToggleFullscreen".into(),
@@ -167,6 +168,7 @@ pub fn palette_actions() -> Vec<Action> {
         Action::ResetFontWeight,
         Action::SaveCurrentSettings,
         Action::ChooseFontFamily,
+        Action::ChooseTheme,
         // UI chrome
         Action::ToggleTabBar,
         Action::ToggleStatusLine,

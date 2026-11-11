@@ -197,6 +197,7 @@ impl App {
                 keymap_loader: None,
                 runtime_config_path: None,
                 startup_loads: None,
+                theme_picker: None,
             },
             fonts: super::font_state::FontState {
                 font_dirs,

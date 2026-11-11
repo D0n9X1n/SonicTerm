@@ -2,7 +2,7 @@
 //! Moving the highlight applies a family live to every window; Escape restores the font the
 //! picker opened with, and Enter keeps the highlighted one for the session.
 
-use sonicterm_ui::command_palette::FontFamilyRow;
+use sonicterm_ui::command_palette::{PickerKind, PickerRow};
 
 use crate::app::font_catalog::FontCatalog;
 use crate::app::{App, FrontmostKind};
@@ -20,6 +20,10 @@ impl App {
     /// Open the picker on the frontmost window, listing the catalog with the live family marked
     /// and highlighted. Before the catalog is ready, only the live family is listed.
     pub(in crate::app) fn open_font_family_picker(&mut self) {
+        // An open picker of either kind is cancelled first, so its original value comes back,
+        // and one another page replaced is settled, so the original below is a confirmed font.
+        self.close_picker(false);
+        self.settle_abandoned_pickers();
         self.interaction.palette_pointer_capture = None;
         // Installed families are enumerated the first time the picker opens, never at startup.
         self.start_font_catalog();
@@ -33,14 +37,20 @@ impl App {
         let current = self.config.font.family.clone();
         let (title, rows) = self.font_family_page(&current);
         let footer = self.i18n.translate("font-picker-footer");
-        self.interaction.command_palette.start_font_family(title, footer, rows, &current);
+        self.interaction.command_palette.start_picker(
+            PickerKind::FontFamily,
+            title,
+            footer,
+            rows,
+            &current,
+        );
         self.fonts.font_picker_original = Some(current);
         self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 
     /// The picker's title and rows from the catalog, with `current` marked. Before the catalog is
     /// ready only `current` is listed, under the loading title.
-    fn font_family_page(&self, current: &str) -> (String, Vec<FontFamilyRow>) {
+    fn font_family_page(&self, current: &str) -> (String, Vec<PickerRow>) {
         let (mut families, title_key) = match &self.fonts.font_catalog {
             FontCatalog::Ready(families) => (families.clone(), "font-picker-title"),
             FontCatalog::Idle | FontCatalog::Loading => (Vec::new(), "font-picker-loading"),
@@ -53,7 +63,7 @@ impl App {
             .into_iter()
             .map(|family| {
                 let mark = if family.eq_ignore_ascii_case(current) { "✓ " } else { "  " };
-                FontFamilyRow { label: format!("{mark}{family}"), family }
+                PickerRow { label: format!("{mark}{family}"), value: family }
             })
             .collect();
         (self.i18n.translate(title_key), rows)
@@ -67,21 +77,33 @@ impl App {
             return;
         };
         let (title, rows) = self.font_family_page(&current);
-        self.interaction.command_palette.update_font_family(title, rows);
+        self.interaction.command_palette.update_picker(PickerKind::FontFamily, title, rows);
         self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 
     /// Apply the highlighted family live to every window, if it is not the live one already.
     pub(in crate::app) fn preview_font_family(&mut self) {
         let Some(family) =
-            self.interaction.command_palette.selected_font_family().map(str::to_owned)
+            self.interaction.command_palette.selected_picker_value().map(str::to_owned)
         else {
-            // When: `selected_font_family()` is None, as when the filter matches nothing, nothing applies.
+            // When: `selected_picker_value()` is None, as when the filter matches nothing, nothing applies.
             return;
         };
         if family != self.config.font.family {
             self.set_font_family(&family);
             self.request_redraw_for_overlay(self.interaction.palette_attached_window);
+        }
+    }
+
+    /// Bring back the family a picker opened with when its page is gone without its own close.
+    pub(in crate::app) fn restore_abandoned_font_picker(&mut self) {
+        let Some(original) = self.fonts.font_picker_original.take() else {
+            // When: font_picker_original is None, no font picker was left behind.
+            return;
+        };
+        if original != self.config.font.family {
+            // A family that differs from the live one is the abandoned preview's original; it comes back.
+            self.set_font_family(&original);
         }
     }
 

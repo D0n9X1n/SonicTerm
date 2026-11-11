@@ -85,6 +85,8 @@ impl App {
         if let Some(id) = self.registry.main_window_id {
             self.cancel_window_rename(id);
             self.cancel_tab_edit(id);
+            // A picker on the hiding main window restores its original theme or font.
+            self.cancel_picker_for_window(id);
         }
         if let Some(main_window) = self.main_window() {
             main_window.set_visible(false);

@@ -60,6 +60,8 @@ impl ApplicationHandler<UserEvent> for App {
             // A reader's Close closes the window as the system close button would.
             self.window_event(event_loop, window_id, WindowEvent::CloseRequested);
         }
+        // A picker page the palette left by another route gives back its original value first.
+        self.settle_abandoned_pickers();
         self.do_about_to_wait(event_loop);
         self.acknowledge_tab_activations();
         self.note_frame_dispatch(frame_counters::DispatchKind::AboutToWait, started);

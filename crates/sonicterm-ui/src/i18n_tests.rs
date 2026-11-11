@@ -352,7 +352,7 @@ fn palette_locale_refresh_in_other_modes_preserves_rows_but_refreshes_commands()
             }
             CommandPaletteMode::Commands
             | CommandPaletteMode::StatusSegments
-            | CommandPaletteMode::FontFamily => unreachable!(),
+            | CommandPaletteMode::Picker => unreachable!(),
         }
         let before = (
             palette.query().to_string(),
@@ -423,7 +423,7 @@ fn palette_refreshes_preserve_reversed_text_selection() {
             CommandPaletteMode::TabColor
             | CommandPaletteMode::Confirm
             | CommandPaletteMode::StatusSegments
-            | CommandPaletteMode::FontFamily => unreachable!(),
+            | CommandPaletteMode::Picker => unreachable!(),
         }
         palette.set_cursor("a你🙂".len());
         palette.extend_to("a".len());

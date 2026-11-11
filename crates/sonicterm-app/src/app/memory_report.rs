@@ -892,6 +892,7 @@ pub(crate) fn report_route(action: &Action) -> ReportRoute {
         | Action::ResetStatusLineFontScale
         | Action::ChooseStatusLineSegments
         | Action::ChooseFontFamily
+        | Action::ChooseTheme
         | Action::EditConfigFile
         | Action::OpenKeymapFile
         | Action::CheckForUpdates

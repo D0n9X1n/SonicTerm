@@ -619,6 +619,7 @@ impl App {
             Action::ResetStatusLineFontScale => self.reset_status_line_font_scale(),
             Action::ChooseStatusLineSegments => self.open_status_segments(None, None),
             Action::ChooseFontFamily => self.open_font_family_picker(),
+            Action::ChooseTheme => self.open_theme_picker(),
             Action::RenameTab => self.start_rename_active_tab(),
             Action::RenameWindow => {
                 let target = match self.frontmost_kind() {

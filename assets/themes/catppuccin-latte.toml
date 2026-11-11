@@ -1,0 +1,42 @@
+# Catppuccin Latte: the light Catppuccin flavor. Terminal colors are the
+# official catppuccin/kitty port (themes/latte.conf, MIT License,
+# Copyright (c) 2021 Catppuccin). The bar is the port's tab bar color.
+name = "Catppuccin Latte"
+appearance = "light"
+
+[colors]
+background   = "#eff1f5"
+foreground   = "#4c4f69"
+cursor       = "#dc8a78"
+cursor_text  = "#eff1f5"
+selection_bg = "#dc8a78"
+selection_fg = "#eff1f5"
+
+[colors.ansi]
+black   = "#5c5f77"
+red     = "#d20f39"
+green   = "#40a02b"
+yellow  = "#df8e1d"
+blue    = "#1e66f5"
+magenta = "#ea76cb"
+cyan    = "#179299"
+white   = "#acb0be"
+
+[colors.bright]
+black   = "#6c6f85"
+red     = "#d20f39"
+green   = "#40a02b"
+yellow  = "#df8e1d"
+blue    = "#1e66f5"
+magenta = "#ea76cb"
+cyan    = "#179299"
+white   = "#bcc0cc"
+
+[colors.tab]
+bar_bg          = "#bcc0cc"
+active_bg       = "#eff1f5"
+active_fg       = "#4c4f69"
+inactive_bg     = "#bcc0cc"
+inactive_fg     = "#5c5f77"
+hover_bg        = "#ccd0da"
+close_button_fg = "#8839ef"

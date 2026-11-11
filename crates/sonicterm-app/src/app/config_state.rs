@@ -15,4 +15,6 @@ pub(in crate::app) struct ConfigState {
     pub(in crate::app) runtime_config_path: Option<std::path::PathBuf>,
     /// Startup config, theme and keymap load outcomes, until the first main window records them.
     pub(in crate::app) startup_loads: Option<super::config_apply::StartupLoads>,
+    /// The open theme picker's original theme and loaded candidates; `None` when it is closed.
+    pub(in crate::app) theme_picker: Option<super::overlays::ThemePickerState>,
 }

@@ -6,14 +6,18 @@
 
 SonicTerm themes are TOML files. Bundled themes live in `assets/themes/`:
 
+- `catppuccin-latte` (light)
 - `catppuccin-mocha`
 - `dracula`
+- `github-light` (light)
 - `gruvbox-dark-hard`
 - `monokai-pro`
 - `nord`
 - `one-dark`
+- `rose-pine-dawn` (light)
 - `solarized-dark`
 - `tokyo-night`
+- `tokyo-night-day` (light)
 - `wezterm`
 
 Editable user themes live in:
@@ -31,6 +35,23 @@ theme = "wezterm"
 A name first checks `~/.sonicterm/themes/<name>.toml`, then bundled assets. A
 path-like value is used directly. See [Configuration](Configuration) for config
 reload rules.
+
+### Preview and switch themes
+
+**Theme: Choose…** (`choose_theme`) in the command palette lists every bundled
+theme and every `*.toml` theme in `~/.sonicterm/themes/`, light themes first,
+then dark, each by name. A user theme replaces a bundled theme of the same name.
+Each row shows the theme name and its kind, `light` or `dark` in English; the
+live theme is marked `✓`. Typing filters the rows, so typing the kind as the row
+shows it narrows the list to light or dark themes.
+
+Moving the highlight with the arrow keys applies the highlighted theme live to
+every window. Enter or a click keeps it for the session, and Escape or a click
+outside restores the theme the picker opened with, even if that theme's file
+changed or was deleted meanwhile. A file that does not parse is left out of the
+list and named in the log. **Reload Config** while the picker is open closes it
+and applies the theme `sonicterm.toml` names. The picker does not write
+`sonicterm.toml`; to keep a theme across restarts, set `theme` there.
 
 ### Create and apply a theme
 
@@ -139,8 +160,11 @@ Keep `selection_fg`, `colors.tab.hover_bg`, `colors.tab.hover_fg`, and
 `hover_fg`, although none currently affects rendering.
 
 `accessibility.high_contrast = true` is applied after theme loading. It replaces
-only `foreground` with `#ffffff` and `background` with `#000000`; the ANSI,
-cursor, selection, and tab slots remain from the theme.
+`foreground` with `#ffffff` and `background` with `#000000`, and sets the
+`colors.tab` slots to white text on black: `bar_bg`, `active_bg` and
+`inactive_bg` `#000000`, `hover_bg` `#333333`, `active_fg` and `hover_fg`
+`#ffffff`, `inactive_fg` `#c0c0c0`. The ANSI, cursor and selection colors remain
+from the theme.
 
 ### Reload and failure behavior
 

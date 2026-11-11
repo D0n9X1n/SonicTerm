@@ -170,30 +170,30 @@ impl App {
                 return true;
             }
         }
-        if self.interaction.command_palette.mode() == CommandPaletteMode::FontFamily {
-            // When: mode is FontFamily, arrows preview the highlighted family, Enter keeps it and
+        if self.interaction.command_palette.mode() == CommandPaletteMode::Picker {
+            // When: mode is Picker, arrows preview the highlighted row, Enter keeps it and
             // Escape restores the font the picker opened with; other keys edit the filter.
             match logical_key {
                 Key::Named(NamedKey::Escape) => {
-                    // When: logical_key is Escape, the picker closes and the font comes back.
-                    self.close_font_family_picker(false);
+                    // When: logical_key is Escape, the picker closes and its original value comes back.
+                    self.close_picker(false);
                     return true;
                 }
                 Key::Named(NamedKey::Enter) => {
-                    // When: logical_key is Enter, the highlighted family stays for the session.
-                    self.close_font_family_picker(true);
+                    // When: logical_key is Enter, the highlighted row stays for the session.
+                    self.close_picker(true);
                     return true;
                 }
                 Key::Named(NamedKey::ArrowDown) => {
-                    // When: logical_key is ArrowDown, the next family applies live.
+                    // When: logical_key is ArrowDown, the next row applies live.
                     self.interaction.command_palette.move_selection_down();
-                    self.preview_font_family();
+                    self.preview_picker();
                     return true;
                 }
                 Key::Named(NamedKey::ArrowUp) => {
-                    // When: logical_key is ArrowUp, the previous family applies live.
+                    // When: logical_key is ArrowUp, the previous row applies live.
                     self.interaction.command_palette.move_selection_up();
-                    self.preview_font_family();
+                    self.preview_picker();
                     return true;
                 }
                 _ => {
