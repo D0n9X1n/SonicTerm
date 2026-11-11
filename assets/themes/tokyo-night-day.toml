@@ -1,0 +1,42 @@
+# Tokyo Night Day: the light Tokyo Night style. Terminal colors are the
+# folke/tokyonight.nvim kitty extra (extras/kitty/tokyonight_day.conf,
+# Apache License 2.0, Copyright folke). The bar is the port's inactive tab color.
+name = "Tokyo Night Day"
+appearance = "light"
+
+[colors]
+background   = "#e1e2e7"
+foreground   = "#3760bf"
+cursor       = "#3760bf"
+cursor_text  = "#e1e2e7"
+selection_bg = "#b7c1e3"
+selection_fg = "#3760bf"
+
+[colors.ansi]
+black   = "#b4b5b9"
+red     = "#f52a65"
+green   = "#587539"
+yellow  = "#8c6c3e"
+blue    = "#2e7de9"
+magenta = "#9854f1"
+cyan    = "#007197"
+white   = "#6172b0"
+
+[colors.bright]
+black   = "#a1a6c5"
+red     = "#ff4774"
+green   = "#5c8524"
+yellow  = "#a27629"
+blue    = "#358aff"
+magenta = "#a463ff"
+cyan    = "#007ea8"
+white   = "#3760bf"
+
+[colors.tab]
+bar_bg          = "#c4c8da"
+active_bg       = "#e1e2e7"
+active_fg       = "#3760bf"
+inactive_bg     = "#c4c8da"
+inactive_fg     = "#4c5a8c"
+hover_bg        = "#d0d5e3"
+close_button_fg = "#f52a65"

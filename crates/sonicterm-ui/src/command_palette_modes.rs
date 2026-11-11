@@ -230,76 +230,96 @@ impl CommandPalette {
         &self.status_footer
     }
 
-    /// Open the font family picker with `rows`, highlighting `current`'s row or else the first.
-    /// `title` is the query placeholder and `footer` the key help.
-    pub fn start_font_family(
+    /// Open a `kind` picker with `rows`, highlighting `current`'s row or else the first.
+    /// `title` is the query placeholder and `footer` the key help. A font family matches without
+    /// ASCII case, as font lookup does; a theme name matches exactly, since two theme files may
+    /// differ only in case on a case-sensitive file system.
+    pub fn start_picker(
         &mut self,
+        kind: PickerKind,
         title: impl Into<String>,
         footer: impl Into<String>,
-        rows: Vec<FontFamilyRow>,
+        rows: Vec<PickerRow>,
         current: &str,
     ) {
         self.session = self.session.wrapping_add(1);
         self.open = true;
-        self.mode = CommandPaletteMode::FontFamily;
+        self.mode = CommandPaletteMode::Picker;
         self.tabs_only = false;
         self.window_name_error = None;
         self.query.clear();
         self.selection = TextSelection::default();
-        self.font_title = title.into();
-        self.font_footer = footer.into();
-        self.font_rows = rows;
+        self.picker_kind = kind;
+        self.picker_title = title.into();
+        self.picker_footer = footer.into();
+        self.picker_items = rows;
         self.scroll_offset = 0;
-        self.filter_font_rows();
+        self.filter_picker_rows();
         self.selected = self
             .items
             .iter()
-            .position(|&index| self.font_rows[index].family.eq_ignore_ascii_case(current))
+            .position(|&index| {
+                let value = &self.picker_items[index].value;
+                match kind {
+                    PickerKind::FontFamily => value.eq_ignore_ascii_case(current),
+                    PickerKind::Theme => value == current,
+                }
+            })
             .unwrap_or(0);
         self.ensure_selected_in_view();
     }
 
-    /// The picker rows the query keeps, in display order; empty in any other mode.
-    pub fn font_family_rows(&self) -> Vec<&FontFamilyRow> {
-        if self.mode != CommandPaletteMode::FontFamily {
-            // When: mode is not FontFamily, stale rows from a closed picker must not show.
-            return Vec::new();
-        }
-        self.items.iter().filter_map(|&index| self.font_rows.get(index)).collect()
+    /// The open picker's kind, or `None` when the palette shows no picker.
+    pub fn picker_kind(&self) -> Option<PickerKind> {
+        (self.mode == CommandPaletteMode::Picker).then_some(self.picker_kind)
     }
 
-    /// The highlighted picker family, if the picker is open and a row is highlighted.
-    pub fn selected_font_family(&self) -> Option<&str> {
-        if self.mode != CommandPaletteMode::FontFamily {
-            // When: mode is not FontFamily, no picker row is highlighted.
+    /// The picker rows the query keeps, in display order; empty in any other mode.
+    pub fn picker_rows(&self) -> Vec<&PickerRow> {
+        if self.mode != CommandPaletteMode::Picker {
+            // When: mode is not Picker, stale rows from a closed picker must not show.
+            return Vec::new();
+        }
+        self.items.iter().filter_map(|&index| self.picker_items.get(index)).collect()
+    }
+
+    /// The highlighted picker value, if a picker is open and a row is highlighted.
+    pub fn selected_picker_value(&self) -> Option<&str> {
+        if self.mode != CommandPaletteMode::Picker {
+            // When: mode is not Picker, no picker row is highlighted.
             return None;
         }
         let index = *self.items.get(self.selected)?;
-        self.font_rows.get(index).map(|row| row.family.as_str())
+        self.picker_items.get(index).map(|row| row.value.as_str())
     }
 
-    /// Replace the picker's title and rows in place, keeping the typed filter and, when it is
-    /// still listed, the highlighted family; does nothing once the picker has closed.
-    pub fn update_font_family(&mut self, title: impl Into<String>, rows: Vec<FontFamilyRow>) {
-        if self.mode != CommandPaletteMode::FontFamily {
-            // When: mode is not FontFamily, the picker closed; there is nothing to refresh.
+    /// Replace an open `kind` picker's title and rows in place, keeping the typed filter and, when
+    /// it is still listed, the highlighted value; does nothing once that picker has closed.
+    pub fn update_picker(
+        &mut self,
+        kind: PickerKind,
+        title: impl Into<String>,
+        rows: Vec<PickerRow>,
+    ) {
+        if self.picker_kind() != Some(kind) {
+            // When: no `kind` picker is open, a late refresh must not replace another page's rows.
             return;
         }
-        let kept = self.selected_font_family().map(str::to_owned);
-        self.font_title = title.into();
-        self.font_rows = rows;
-        self.filter_font_rows();
+        let kept = self.selected_picker_value().map(str::to_owned);
+        self.picker_title = title.into();
+        self.picker_items = rows;
+        self.filter_picker_rows();
         self.selected = kept
-            .and_then(|family| {
-                self.items.iter().position(|&index| self.font_rows[index].family == family)
+            .and_then(|value| {
+                self.items.iter().position(|&index| self.picker_items[index].value == value)
             })
             .unwrap_or(0);
         self.ensure_selected_in_view();
     }
 
     /// Highlight picker row `index` of the filtered view.
-    pub fn select_font_row(&mut self, index: usize) -> bool {
-        let selectable = self.mode == CommandPaletteMode::FontFamily && index < self.items.len();
+    pub fn select_picker_row(&mut self, index: usize) -> bool {
+        let selectable = self.mode == CommandPaletteMode::Picker && index < self.items.len();
         if selectable {
             self.selected = index;
             self.ensure_selected_in_view();
@@ -307,22 +327,23 @@ impl CommandPalette {
         selectable
     }
 
-    /// The font picker's query placeholder.
-    pub fn font_title(&self) -> &str {
-        &self.font_title
+    /// The picker's query placeholder.
+    pub fn picker_title(&self) -> &str {
+        &self.picker_title
     }
 
-    /// The font picker's key help.
-    pub fn font_footer(&self) -> &str {
-        &self.font_footer
+    /// The picker's key help.
+    pub fn picker_footer(&self) -> &str {
+        &self.picker_footer
     }
 
-    /// Keep every picker row for an empty query, else the families containing it, without case.
-    pub(super) fn filter_font_rows(&mut self) {
+    /// Keep every picker row for an empty query, else the rows whose label contains it, without
+    /// case; the label holds the value, so a theme row also matches its `light` or `dark` tag.
+    pub(super) fn filter_picker_rows(&mut self) {
         let query = self.query.trim().to_lowercase();
-        self.items = (0..self.font_rows.len())
+        self.items = (0..self.picker_items.len())
             .filter(|&index| {
-                query.is_empty() || self.font_rows[index].family.to_lowercase().contains(&query)
+                query.is_empty() || self.picker_items[index].label.to_lowercase().contains(&query)
             })
             .collect();
     }
@@ -367,8 +388,8 @@ impl CommandPalette {
                 self.filter_status_rows();
                 self.selected = self.first_selectable_status_row();
             }
-            CommandPaletteMode::FontFamily => {
-                self.filter_font_rows();
+            CommandPaletteMode::Picker => {
+                self.filter_picker_rows();
                 self.selected = 0;
             }
             _ => {

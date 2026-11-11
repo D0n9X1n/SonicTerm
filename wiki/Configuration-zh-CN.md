@@ -128,7 +128,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | Key | 默认值 | 行为 |
 | --- | --- | --- |
-| `high_contrast` | `false` | 把当前主题的前景色和背景色改为 `#ffffff` 与 `#000000`。 |
+| `high_contrast` | `false` | 把当前主题的前景色改为 `#ffffff`、背景色改为 `#000000`，并把标签栏改为黑底白字（见[主题](Themes-zh-CN)）。 |
 | `reduced_motion` | `false` | 可以解析和保留，但目前不会改变界面。 |
 | `strong_focus` | `false` | 将状态栏中获得键盘焦点的段周围的焦点环加粗一倍。 |
 

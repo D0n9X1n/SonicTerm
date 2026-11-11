@@ -226,7 +226,7 @@ fn every_bundled_theme_band_name_reads_at_four_and_a_half_to_one() {
         assert!(ratio >= BAND_TEXT_CONTRAST, "{}: {ratio}", path.display());
         checked += 1;
     }
-    assert_eq!(checked, 9, "the nine bundled themes");
+    assert_eq!(checked, 13, "the thirteen bundled themes");
 }
 
 /// The band's quiet text never takes an unchecked color: a custom solarized-dark whose

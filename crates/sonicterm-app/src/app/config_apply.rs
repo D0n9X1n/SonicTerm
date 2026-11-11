@@ -170,6 +170,9 @@ impl App {
     }
 
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
+        // A reload ends an open theme preview first, so a later Escape cannot restore a theme
+        // captured before the reload over the theme and accessibility settings it applies.
+        self.end_theme_preview();
         let new_cfg = Self::normalize_config(&self.configs.config_normalizer, new_cfg);
         self.fonts.configured_font_size = new_cfg.font.size;
         self.fonts.configured_font_family = new_cfg.font.family.clone();
@@ -660,6 +663,13 @@ impl App {
             }
         };
         theme.apply_accessibility(&self.config.accessibility);
+        self.install_theme(theme, name);
+        tracing::info!("theme -> {name}");
+    }
+
+    /// Make `theme`, already adjusted for accessibility, the live theme named `name`: every
+    /// window's renderer and pane parsers take its colors and every pane redraws.
+    pub(super) fn install_theme(&mut self, theme: Theme, name: &str) {
         if let Some(renderer) = self.main_renderer_mut() {
             renderer.set_theme(&theme);
         }
@@ -695,8 +705,8 @@ impl App {
             }
             child.request_window_redraw();
         }
-        tracing::info!("theme -> {name}");
     }
+
     pub(super) fn change_font_size(&mut self, delta: f32) {
         let cur = self.config.font.size;
         let next = (cur + delta).clamp(8.0, 48.0);

@@ -233,6 +233,16 @@ impl Theme {
         if accessibility.high_contrast {
             self.colors.foreground = Hex("#ffffff".to_string());
             self.colors.background = Hex("#000000".to_string());
+            // The bars paint the tab colors as is and draw caption buttons in the foreground, so
+            // every tab slot becomes white text on black, whatever the theme's tabs use.
+            let tab = &mut self.colors.tab;
+            tab.bar_bg = Hex("#000000".to_string());
+            tab.active_bg = Hex("#000000".to_string());
+            tab.inactive_bg = Hex("#000000".to_string());
+            tab.hover_bg = Hex("#333333".to_string());
+            tab.active_fg = Hex("#ffffff".to_string());
+            tab.hover_fg = Hex("#ffffff".to_string());
+            tab.inactive_fg = Hex("#c0c0c0".to_string());
         }
     }
 

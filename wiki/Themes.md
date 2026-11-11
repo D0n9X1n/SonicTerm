@@ -6,14 +6,18 @@
 
 SonicTerm themes are TOML files. Bundled themes live in `assets/themes/`:
 
+- `catppuccin-latte` (light)
 - `catppuccin-mocha`
 - `dracula`
+- `github-light` (light)
 - `gruvbox-dark-hard`
 - `monokai-pro`
 - `nord`
 - `one-dark`
+- `rose-pine-dawn` (light)
 - `solarized-dark`
 - `tokyo-night`
+- `tokyo-night-day` (light)
 - `wezterm`
 
 Editable user themes live in:
@@ -31,6 +35,23 @@ theme = "wezterm"
 A name first checks `~/.sonicterm/themes/<name>.toml`, then bundled assets. A
 path-like value is used directly. See [Configuration](Configuration) for config
 reload rules.
+
+### Preview and switch themes
+
+**Theme: Choose…** (`choose_theme`) in the command palette lists every bundled
+theme and every `*.toml` theme in `~/.sonicterm/themes/`, light themes first,
+then dark, each by name. A user theme replaces a bundled theme of the same name.
+Each row shows the theme name and its kind, `light` or `dark` in English; the
+live theme is marked `✓`. Typing filters the rows, so typing the kind as the row
+shows it narrows the list to light or dark themes.
+
+Moving the highlight with the arrow keys applies the highlighted theme live to
+every window. Enter or a click keeps it for the session, and Escape or a click
+outside restores the theme the picker opened with, even if that theme's file
+changed or was deleted meanwhile. A file that does not parse is left out of the
+list and named in the log. **Reload Config** while the picker is open closes it
+and applies the theme `sonicterm.toml` names. The picker does not write
+`sonicterm.toml`; to keep a theme across restarts, set `theme` there.
 
 ### Create and apply a theme
 
@@ -126,7 +147,7 @@ default; when omitted, it becomes `#d5c4a1`.
 | `selection_bg` | Selection overlay, drawn at 50% alpha |
 | `colors.ansi` | ANSI colors 0–7 and derived UI accents |
 | `colors.bright` | ANSI colors 8–15 and derived UI accents |
-| `colors.tab.bar_bg` | Background of the tab bar, the status strip, the integrated titlebar band and the search panel. These bars sit darker than the terminal wherever their text stays readable. They use the first of `bar_bg` and the background at 95%, then 90%, 80%, 60% and 40% of its lightness that is darker than `colors.background` and on which the theme `foreground` and `colors.tab.active_fg` read at least as well as on the previous chrome color, up to 3:1 and 4.5:1. The previous chrome color is `bar_bg` when it differs from the background, else `colors.ansi.black` when that differs, each only when it is lighter than the background darkened 8% and both texts read on it; else that darkened shade. A theme whose `bar_bg` repeats the background, such as the bundled wezterm theme, gets the 95% shade, just darker than the terminal, when both texts read on it as above. With no such candidate, the bars keep the previous color. |
+| `colors.tab.bar_bg` | Background of the tab bar, the status strip, the integrated titlebar band and the search panel, used exactly as the theme sets it. SonicTerm derives no shade from the terminal background and applies no contrast filter, so pick a `bar_bg` on which `foreground` and `colors.tab.active_fg` read. |
 | `colors.tab.active_bg` / `active_fg` | Active tab |
 | `colors.tab.inactive_bg` / `inactive_fg` | Inactive tabs and separators |
 
@@ -139,8 +160,11 @@ Keep `selection_fg`, `colors.tab.hover_bg`, `colors.tab.hover_fg`, and
 `hover_fg`, although none currently affects rendering.
 
 `accessibility.high_contrast = true` is applied after theme loading. It replaces
-only `foreground` with `#ffffff` and `background` with `#000000`; the ANSI,
-cursor, selection, and tab slots remain from the theme.
+`foreground` with `#ffffff` and `background` with `#000000`, and sets the
+`colors.tab` slots to white text on black: `bar_bg`, `active_bg` and
+`inactive_bg` `#000000`, `hover_bg` `#333333`, `active_fg` and `hover_fg`
+`#ffffff`, `inactive_fg` `#c0c0c0`. The ANSI, cursor and selection colors remain
+from the theme.
 
 ### Reload and failure behavior
 

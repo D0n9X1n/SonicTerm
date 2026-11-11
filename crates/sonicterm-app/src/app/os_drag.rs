@@ -679,6 +679,8 @@ impl App {
         self.drop_field_pointer_for_window(window_id);
         self.cancel_window_rename(window_id);
         self.cancel_tab_edit(window_id);
+        // A picker on the closing window restores its original theme or font before it goes.
+        self.cancel_picker_for_window(window_id);
         self.pending_redraw_windows.remove(&window_id);
         if let Some(workers) = &self.path_workers {
             // A closed window leaves no waiting probe; one already executing is

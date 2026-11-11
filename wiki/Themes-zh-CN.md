@@ -6,14 +6,18 @@
 
 SonicTerm 的主题是 TOML 文件。内置主题位于 `assets/themes/`：
 
+- `catppuccin-latte`（浅色）
 - `catppuccin-mocha`
 - `dracula`
+- `github-light`（浅色）
 - `gruvbox-dark-hard`
 - `monokai-pro`
 - `nord`
 - `one-dark`
+- `rose-pine-dawn`（浅色）
 - `solarized-dark`
 - `tokyo-night`
+- `tokyo-night-day`（浅色）
 - `wezterm`
 
 用户可编辑主题位于：
@@ -30,6 +34,19 @@ theme = "wezterm"
 
 使用名称时，SonicTerm 先查找 `~/.sonicterm/themes/<name>.toml`，再查找内置
 资产。看起来像路径的值会直接使用。配置重载规则见 [配置](Configuration-zh-CN)。
+
+### 预览和切换主题
+
+命令面板中的 **Theme: Choose…**（`choose_theme`）列出所有内置主题，以及
+`~/.sonicterm/themes/` 中的所有 `*.toml` 主题：先浅色、后深色，各自按名称排序。
+同名的用户主题会替换内置主题。每一行显示主题名和“浅色”或“深色”；当前主题标有
+`✓`。输入文字可以筛选，输入“浅色”或“深色”可只看一类主题。
+
+用方向键移动高亮时，高亮的主题会立即应用到所有窗口。按 Enter 或点击会在本次会话中
+保留它；按 Escape 或点击面板外会恢复打开选择器时的主题，即使该主题文件在此期间被修改
+或删除。无法解析的文件不会列出，日志会写明文件名。选择器打开时执行 **Reload Config**
+会关闭选择器，并应用 `sonicterm.toml` 指定的主题。选择器不会写入 `sonicterm.toml`；
+要在重启后保留主题，请在其中设置 `theme`。
 
 ### 创建并应用主题
 
@@ -123,7 +140,7 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 | `selection_bg` | 选区 overlay，以 50% alpha 绘制 |
 | `colors.ansi` | ANSI 颜色 0–7 和派生 UI accent |
 | `colors.bright` | ANSI 颜色 8–15 和派生 UI accent |
-| `colors.tab.bar_bg` | 标签栏、状态栏、集成标题栏带和搜索面板的背景。只要文字仍然可读，这些栏就比终端更暗。它们依次尝试 `bar_bg` 以及亮度为背景色 95%、90%、80%、60%、40% 的颜色，使用第一个比 `colors.background` 更暗、且主题 `foreground` 和 `colors.tab.active_fg` 在其上的对比度不低于在之前的界面颜色上（上限分别为 3:1 和 4.5:1）的颜色。之前的界面颜色是：`bar_bg` 与背景色不同时使用它，否则 `colors.ansi.black` 与背景色不同时使用它，二者都须比背景色降低 8% 亮度后的颜色更亮，且两种文字都可读；否则使用该降低亮度后的颜色。`bar_bg` 与背景色相同的主题（例如内置的 wezterm 主题），在两种文字都满足上述对比度时得到 95% 的颜色，只比终端略暗。没有满足条件的颜色时，这些栏保留之前的颜色。 |
+| `colors.tab.bar_bg` | 标签栏、状态栏、集成标题栏带和搜索面板的背景，按主题设置的值原样使用。SonicTerm 不会从终端背景色推导更暗的颜色，也不做对比度筛选，因此请选择能让 `foreground` 和 `colors.tab.active_fg` 清晰可读的 `bar_bg`。 |
 | `colors.tab.active_bg` / `active_fg` | 当前标签页 |
 | `colors.tab.inactive_bg` / `inactive_fg` | 非当前标签页和分隔线 |
 
@@ -133,9 +150,11 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 自定义主题应保留 `selection_fg`、`colors.tab.hover_bg`、`colors.tab.hover_fg` 和
 `colors.tab.close_button_fg`：除 `hover_fg` 外都为 schema 必需字段，尽管目前均不影响渲染。
 
-主题加载后还会应用 `accessibility.high_contrast = true`。该设置只把
-`foreground` 改为 `#ffffff`、把 `background` 改为 `#000000`；ANSI、光标、
-选区和标签页字段仍来自主题。
+主题加载后还会应用 `accessibility.high_contrast = true`。该设置把
+`foreground` 改为 `#ffffff`、把 `background` 改为 `#000000`，并把 `colors.tab`
+各字段改为黑底白字：`bar_bg`、`active_bg`、`inactive_bg` 为 `#000000`，`hover_bg`
+为 `#333333`，`active_fg`、`hover_fg` 为 `#ffffff`，`inactive_fg` 为 `#c0c0c0`。
+ANSI、光标和选区颜色仍来自主题。
 
 ### 重载与失败行为
 

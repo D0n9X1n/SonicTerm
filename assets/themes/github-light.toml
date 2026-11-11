@@ -1,0 +1,43 @@
+# GitHub Light: GitHub's light theme. Terminal colors are the
+# projekt0n/github-theme-contrib kitty port (themes/kitty/github_light.conf,
+# MIT License). The port sets no selection colors; these use GitHub Light's
+# blue tint under the foreground. The bar is the port's inactive tab color.
+name = "GitHub Light"
+appearance = "light"
+
+[colors]
+background   = "#ffffff"
+foreground   = "#1f2328"
+cursor       = "#1f2328"
+cursor_text  = "#ffffff"
+selection_bg = "#b6e3ff"
+selection_fg = "#1f2328"
+
+[colors.ansi]
+black   = "#24292f"
+red     = "#cf222e"
+green   = "#116329"
+yellow  = "#4d2d00"
+blue    = "#0969da"
+magenta = "#8250df"
+cyan    = "#1b7c83"
+white   = "#6e7781"
+
+[colors.bright]
+black   = "#57606a"
+red     = "#a40e26"
+green   = "#1a7f37"
+yellow  = "#633c01"
+blue    = "#218bff"
+magenta = "#a475f9"
+cyan    = "#3192aa"
+white   = "#8c959f"
+
+[colors.tab]
+bar_bg          = "#ddf4ff"
+active_bg       = "#ffffff"
+active_fg       = "#1a7f37"
+inactive_bg     = "#ddf4ff"
+inactive_fg     = "#57606a"
+hover_bg        = "#eaeef2"
+close_button_fg = "#cf222e"

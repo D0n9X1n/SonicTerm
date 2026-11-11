@@ -19,7 +19,7 @@ fn picker_app(family: &str) -> (App, winit::window::WindowId) {
 
 /// The picker's row labels, in display order.
 fn labels(app: &App) -> Vec<String> {
-    app.interaction.command_palette.font_family_rows().iter().map(|row| row.label.clone()).collect()
+    app.interaction.command_palette.picker_rows().iter().map(|row| row.label.clone()).collect()
 }
 
 /// The bindable action lists the catalog with the live family marked; an arrow applies the
@@ -28,7 +28,7 @@ fn labels(app: &App) -> Vec<String> {
 fn arrows_preview_live_and_escape_restores() {
     let (mut app, child) = picker_app("Menlo");
     assert!(app.run_action_for_window(&Action::ChooseFontFamily, child));
-    assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::FontFamily);
+    assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::Picker);
     assert_eq!(labels(&app), ["✓ Menlo", "  Monaco", "  Rec Mono"]);
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowDown));
     assert_eq!(app.config.font.family, "Monaco");
@@ -84,9 +84,9 @@ fn an_open_picker_fills_in_when_the_catalog_lands() {
     app.adopt_font_catalog(catalog);
     assert_eq!(labels(&app), ["✓ Menlo", "  Rec Mono"]);
     assert_eq!(app.interaction.command_palette.query(), "e");
-    assert_eq!(app.interaction.command_palette.selected_font_family(), Some("Menlo"));
+    assert_eq!(app.interaction.command_palette.selected_picker_value(), Some("Menlo"));
     assert_eq!(
-        app.interaction.command_palette.font_title(),
+        app.interaction.command_palette.picker_title(),
         app.i18n.translate("font-picker-title")
     );
 }

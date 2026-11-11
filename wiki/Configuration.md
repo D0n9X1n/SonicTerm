@@ -143,7 +143,7 @@ right edge.
 
 | Key | Default | Behavior |
 | --- | --- | --- |
-| `high_contrast` | `false` | Replaces the active theme foreground and background with `#ffffff` and `#000000`. |
+| `high_contrast` | `false` | Replaces the active theme foreground with `#ffffff` and its background with `#000000`, and draws the tab bar as white text on black (see [Themes](Themes)). |
 | `reduced_motion` | `false` | Parsed and retained, but currently has no presentation effect. |
 | `strong_focus` | `false` | Doubles the thickness of the keyboard focus ring drawn around the focused status line segment. |
 

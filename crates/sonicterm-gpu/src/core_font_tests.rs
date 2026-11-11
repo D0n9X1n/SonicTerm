@@ -91,7 +91,7 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
         CommandPaletteMode::TabColor,
         CommandPaletteMode::Confirm,
         CommandPaletteMode::StatusSegments,
-        CommandPaletteMode::FontFamily,
+        CommandPaletteMode::Picker,
     ] {
         let mut palette = CommandPalette::new();
         match mode {
@@ -110,7 +110,8 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
                 None,
             ),
             // The font picker footer also comes from the host.
-            CommandPaletteMode::FontFamily => palette.start_font_family(
+            CommandPaletteMode::Picker => palette.start_picker(
+                sonicterm_render_model::boundary::ui::command_palette::PickerKind::FontFamily,
                 "title",
                 longest_localized_footer("font-picker-footer"),
                 Vec::new(),

@@ -131,6 +131,8 @@ pub enum Action {
     SaveCurrentSettings,
     /// List the installed monospace families in the palette and switch the font family live.
     ChooseFontFamily,
+    /// List the bundled and user themes in the palette and switch the theme live.
+    ChooseTheme,
 
     /// Apply a theme by name for the current session.
     /// Bound from the View → Theme submenu in the macOS menubar.

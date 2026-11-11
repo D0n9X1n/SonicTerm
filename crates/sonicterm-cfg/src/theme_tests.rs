@@ -72,6 +72,12 @@ fn bundled_default_and_accessibility_override_are_stable() {
     theme.apply_accessibility(&AccessibilityConfig { high_contrast: true, ..Default::default() });
     assert_eq!(theme.colors.foreground.0, "#ffffff");
     assert_eq!(theme.colors.background.0, "#000000");
+    // Every tab slot is light text on black, so chrome text stays readable on a light theme too.
+    let tab = &theme.colors.tab;
+    assert_eq!((tab.bar_bg.0.as_str(), tab.active_bg.0.as_str()), ("#000000", "#000000"));
+    assert_eq!((tab.inactive_bg.0.as_str(), tab.hover_bg.0.as_str()), ("#000000", "#333333"));
+    assert_eq!((tab.active_fg.0.as_str(), tab.hover_fg.0.as_str()), ("#ffffff", "#ffffff"));
+    assert_eq!(tab.inactive_fg.0, "#c0c0c0");
 }
 
 #[test]
@@ -107,4 +113,28 @@ fn palette_first_eight_preserves_ansi_order() {
             "#1d2021", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#d5c4a1"
         ]
     );
+}
+
+/// Every bundled theme parses strictly, declares the appearance its background implies, and is
+/// listed in the Windows installer, whose theme files are named one by one; a theme added to
+/// `assets/themes/` without its MSI entry would be missing from Windows installs.
+#[test]
+fn bundled_themes_parse_and_ship_in_the_windows_installer() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let wix = std::fs::read_to_string(root.join("crates/sonicterm-windows/wix/main.wxs"))
+        .expect("read the WiX source");
+    let mut light_count = 0;
+    for entry in std::fs::read_dir(root.join("assets/themes")).expect("bundled themes") {
+        let path = entry.expect("theme entry").path();
+        let file_name = path.file_name().and_then(|name| name.to_str()).expect("UTF-8 name");
+        let theme = Theme::load_strict(&path).expect("bundled theme parses");
+        let (red, green, blue) = theme.colors.background.rgb().expect("background is a color");
+        // A background brighter than mid grey is a light theme; the rough luma is enough here.
+        let looks_light =
+            u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114 > 128_000;
+        assert_eq!(looks_light, theme.appearance == Appearance::Light, "{file_name} appearance");
+        light_count += usize::from(looks_light);
+        assert!(wix.contains(&format!("Name='{file_name}'")), "{file_name} is not in main.wxs");
+    }
+    assert!(light_count >= 4, "light themes are bundled");
 }

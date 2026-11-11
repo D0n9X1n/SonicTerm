@@ -72,16 +72,27 @@ pub enum CommandPaletteMode {
     Confirm,
     /// The status line checklist: toggles, grouped segment rows and Reset; the query filters it.
     StatusSegments,
-    /// The font family picker: installed monospace families; the query filters them.
-    FontFamily,
+    /// A live-preview picker, of the [`PickerKind`] the palette holds: the query filters its rows,
+    /// moving the highlight previews a row, Enter keeps it and Escape restores the original.
+    Picker,
 }
 
-/// One font picker row: the family it applies and the text it shows, which marks the live one.
+/// What a [`CommandPaletteMode::Picker`] page lists and applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PickerKind {
+    /// Installed monospace font families.
+    #[default]
+    FontFamily,
+    /// Bundled and user color themes.
+    Theme,
+}
+
+/// One picker row: the value it applies and the text it shows, which marks the live one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FontFamilyRow {
-    /// The family the row applies.
-    pub family: String,
-    /// The row's text: the family, marked when it is the live one.
+pub struct PickerRow {
+    /// The value the row applies: a font family or a theme name.
+    pub value: String,
+    /// The row's text: the value, marked when it is the live one.
     pub label: String,
 }
 
@@ -288,11 +299,12 @@ pub struct CommandPalette {
     status_title: String,
     status_footer: String,
     status_rows: Vec<StatusSegmentRow>,
-    /// Query placeholder, footer and rows of the font picker while `mode` is `FontFamily`;
-    /// `items` indexes `font_rows`.
-    font_title: String,
-    font_footer: String,
-    font_rows: Vec<FontFamilyRow>,
+    /// Kind, query placeholder, footer and rows of the picker while `mode` is `Picker`;
+    /// `items` indexes `picker_items`.
+    picker_kind: PickerKind,
+    picker_title: String,
+    picker_footer: String,
+    picker_items: Vec<PickerRow>,
     window_name_error: Option<WindowNameError>,
     /// Increments on every open, so a gesture held across close and reopen is not
     /// mistaken for one in the new editor.
@@ -342,9 +354,10 @@ impl CommandPalette {
             status_title: String::new(),
             status_footer: String::new(),
             status_rows: Vec::new(),
-            font_title: String::new(),
-            font_footer: String::new(),
-            font_rows: Vec::new(),
+            picker_kind: PickerKind::default(),
+            picker_title: String::new(),
+            picker_footer: String::new(),
+            picker_items: Vec::new(),
             window_name_error: None,
             session: 0,
         }
@@ -474,11 +487,12 @@ impl CommandPalette {
             self.status_footer.hash(&mut hash);
             self.status_rows.hash(&mut hash);
         }
-        // A picker reopened after the live family moved changes only row text.
-        if self.mode == CommandPaletteMode::FontFamily {
-            self.font_title.hash(&mut hash);
-            self.font_footer.hash(&mut hash);
-            self.font_rows.hash(&mut hash);
+        // A picker reopened after the live value moved changes only row text.
+        if self.mode == CommandPaletteMode::Picker {
+            self.picker_kind.hash(&mut hash);
+            self.picker_title.hash(&mut hash);
+            self.picker_footer.hash(&mut hash);
+            self.picker_items.hash(&mut hash);
         }
         hash.finish()
     }
@@ -533,9 +547,10 @@ impl CommandPalette {
         self.status_title.clear();
         self.status_footer.clear();
         self.status_rows.clear();
-        self.font_title.clear();
-        self.font_footer.clear();
-        self.font_rows.clear();
+        self.picker_kind = PickerKind::default();
+        self.picker_title.clear();
+        self.picker_footer.clear();
+        self.picker_items.clear();
         self.tabs_only = false;
         self.window_name_error = None;
         self.query.clear();

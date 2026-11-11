@@ -247,19 +247,56 @@ fn a_checklist_row_change_changes_the_presentation_hash() {
 #[test]
 fn font_family_picker_filters_and_highlights_the_live_family() {
     let mut palette = CommandPalette::new();
-    let rows: Vec<FontFamilyRow> = ["Consolas", "Menlo", "Monaco"]
+    let rows: Vec<PickerRow> = ["Consolas", "Menlo", "Monaco"]
         .iter()
-        .map(|family| FontFamilyRow { family: (*family).into(), label: format!("  {family}") })
+        .map(|family| PickerRow { value: (*family).into(), label: format!("  {family}") })
         .collect();
-    palette.start_font_family("Type to filter fonts", "footer", rows, "Monaco");
-    assert_eq!(palette.mode(), CommandPaletteMode::FontFamily);
-    assert_eq!(palette.selected_font_family(), Some("Monaco"));
+    palette.start_picker(PickerKind::FontFamily, "Type to filter fonts", "footer", rows, "Monaco");
+    assert_eq!(palette.mode(), CommandPaletteMode::Picker);
+    assert_eq!(palette.picker_kind(), Some(PickerKind::FontFamily));
+    assert_eq!(palette.selected_picker_value(), Some("Monaco"));
     palette.input_str("MEN");
-    let kept: Vec<&str> =
-        palette.font_family_rows().iter().map(|row| row.family.as_str()).collect();
+    let kept: Vec<&str> = palette.picker_rows().iter().map(|row| row.value.as_str()).collect();
     assert_eq!(kept, ["Menlo"]);
-    assert_eq!(palette.selected_font_family(), Some("Menlo"));
+    assert_eq!(palette.selected_picker_value(), Some("Menlo"));
     palette.close();
     assert_eq!(palette.mode(), CommandPaletteMode::Commands);
-    assert!(palette.font_family_rows().is_empty());
+    assert_eq!(palette.picker_kind(), None);
+    assert!(palette.picker_rows().is_empty());
+}
+
+/// A theme picker filters on the row label, so typing `light` keeps the rows tagged light, and a
+/// late font catalog refresh cannot replace its rows: `update_picker` only touches its own kind.
+#[test]
+fn theme_picker_filters_by_label_and_ignores_another_kinds_refresh() {
+    let mut palette = CommandPalette::new();
+    let rows: Vec<PickerRow> =
+        [("github-light", "light"), ("nord", "dark"), ("rose-pine-dawn", "light")]
+            .iter()
+            .map(|(name, tone)| PickerRow {
+                value: (*name).into(),
+                label: format!("  {name} · {tone}"),
+            })
+            .collect();
+    palette.start_picker(PickerKind::Theme, "Type to filter themes", "footer", rows, "nord");
+    assert_eq!(palette.picker_kind(), Some(PickerKind::Theme));
+    assert_eq!(palette.selected_picker_value(), Some("nord"));
+    // Theme names match exactly: `Nord` is another file, so the live `nord` row stays highlighted.
+    let mut cased = palette.clone();
+    let rows = vec![
+        PickerRow { value: "Nord".into(), label: "  Nord · light".into() },
+        PickerRow { value: "nord".into(), label: "✓ nord · dark".into() },
+    ];
+    cased.start_picker(PickerKind::Theme, "themes", "footer", rows, "nord");
+    assert_eq!(cased.selected_picker_value(), Some("nord"));
+    let font_rows = vec![PickerRow { value: "Menlo".into(), label: "  Menlo".into() }];
+    palette.update_picker(PickerKind::FontFamily, "fonts", font_rows);
+    assert_eq!(
+        palette.picker_title(),
+        "Type to filter themes",
+        "another kind's refresh is ignored"
+    );
+    palette.input_str("LIGHT");
+    let kept: Vec<&str> = palette.picker_rows().iter().map(|row| row.value.as_str()).collect();
+    assert_eq!(kept, ["github-light", "rose-pine-dawn"]);
 }
