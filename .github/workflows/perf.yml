@@ -12,7 +12,8 @@ name: Performance comparison
 #   refs, plus two frame-counter runs per scenario on the head, and on the base too when it declares
 #   perf-counters (`--counters --counters-runs 2`).
 # - A release tag gets the full comparison against the previous release tag, with the shipping release
-#   profile, full-length runs and a full counters set (`--counters`). It may take hours.
+#   profile, full-length runs and three counters runs a side (`--counters --counters-runs 3`). It may take
+#   hours, and each job must stay under GitHub's 6-hour job limit.
 #
 # Jobs: `perf-build-macos` builds both refs once and publishes the binaries with a manifest that binds them
 # to this run, the producer's attempt, both SHAs, the harness, toolchain, profile, features and runner
@@ -220,6 +221,13 @@ jobs:
       # 3 short runs a side in every set (--list run_caps), about 6 min less; a release comparison runs it uncapped.
       # S2/glide (one short run a side) and S11/kitty-placeholders (two) run in S7-S4, the macOS shard with the
       # most slack, so they stay off the critical path.
+      # A release comparison runs every variant in full, so the pull-request sets do not balance it: each entry's
+      # release_partition replaces its scenarios on a release. It holds every pull-request variant and every
+      # release-only one (S13's wide layouts, S2/spawn, S3/history, S3/resize, S11/burst, S11/burst-text), each
+      # release-only variant beside its scenario, S12 in a CELL_LAYOUT_SHARDS shard and S9 with its laps. From
+      # run 42970532300's per-variant times the three sets take about 289, 287 and 268 min at five counters runs
+      # a side; a release runs three, about 230 min each, under GitHub's 6-hour job limit with room for a slow
+      # runner. Shard names stay the artifact identities, so a release's S7-S4 also runs S10/sync and S11.
       matrix:
         include:
           - platform: macOS
@@ -227,19 +235,23 @@ jobs:
             shard: S7-S4
             scenarios: S7 S4 S1/atlas-retry S8 S6/selection-drag S2/glide S11/kitty-placeholders
             laps: ""
-            release_scenarios: ""
+            release_partition: >-
+              S7 S4 S1/atlas-retry S8 S6/selection-drag S2/glide S11/kitty-placeholders S10/sync S11 S11/burst
+              S11/burst-text S1/status-line
           - platform: macOS
             runner: macos-15
             shard: S9-S10sync
             scenarios: S10/sync S9 S11 S6 S1 S5 S6/rest S1/status-line S12 S12/status-line S3
             laps: S9
-            release_scenarios: S3/history S3/resize S11/burst S11/burst-text
+            release_partition: S9 S12 S12/status-line S6 S6/rest S1 S3 S3/history S3/resize S5
           - platform: macOS
             runner: macos-15
             shard: S10-S11release
             scenarios: S10 S11/release S2 S2/flood S6/flood S13 S13/sustained-4
             laps: ""
-            release_scenarios: S13/wide-8 S13/wide-16 S13/wide-32 S2/spawn
+            release_partition: >-
+              S10 S11/release S2 S2/flood S6/flood S13 S13/sustained-4 S13/wide-8 S13/wide-16 S13/wide-32
+              S2/spawn
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
       # itself, not a pull request's merge ref.
@@ -351,21 +363,22 @@ jobs:
           RUN_LENGTH: ${{ steps.refs.outputs.length }}
           SCENARIOS: ${{ matrix.scenarios }}
           LAPS: ${{ matrix.laps }}
-          RELEASE_SCENARIOS: ${{ matrix.release_scenarios }}
+          RELEASE_PARTITION: ${{ matrix.release_partition }}
           PRODUCER_ATTEMPT: ${{ needs.perf-build-macos.outputs.attempt }}
           PRODUCER_MANIFEST: ${{ needs.perf-build-macos.outputs.manifest_sha256 }}
           PERF_JOB_NAME: ${{ matrix.platform }} before/after comparison (${{ matrix.shard }})
           PERF_SHARD: ${{ matrix.shard }}
         run: |
           read -ra scenarios <<<"$SCENARIOS"
-          # A release comparison (full-length runs) adds the release-only scenarios: S13's wide layouts and,
-          # on macOS, S3/history, S3/resize, the S11 image burst with its text-only twin, and S2/spawn.
-          if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_SCENARIOS" ]; then
-            read -ra release_scenarios <<<"$RELEASE_SCENARIOS"
-            scenarios+=("${release_scenarios[@]}")
+          # A release comparison (full-length runs) runs this entry's release partition instead: the release-only
+          # variants beside their scenarios, balanced for full-length runs.
+          if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_PARTITION" ]; then
+            read -ra scenarios <<<"$RELEASE_PARTITION"
           fi
-          # A pull request fits 35 minutes with short runs and two counters runs; a release runs --runs of each.
-          run_flags=(--counters)
+          # A pull request fits 35 minutes with short runs and two counters runs. A release runs --runs timed runs
+          # and three counters runs a side: the counters set reports counts and ratios, not timing, and three runs
+          # keep every counters-derived figure above its sample floor.
+          run_flags=(--counters --counters-runs 3)
           if [ "$RUN_LENGTH" = "short" ]; then
             run_flags=(--short --counters --counters-runs 2)
           fi
@@ -572,8 +585,10 @@ jobs:
             read -ra release_scenarios <<<"$RELEASE_SCENARIOS"
             scenarios+=("${release_scenarios[@]}")
           fi
-          # A pull request fits 35 minutes with short runs and two counters runs; a release runs --runs of each.
-          run_flags=(--counters)
+          # A pull request fits 35 minutes with short runs and two counters runs. A release runs --runs timed runs
+          # and three counters runs a side: the counters set reports counts and ratios, not timing, and three runs
+          # keep every counters-derived figure above its sample floor.
+          run_flags=(--counters --counters-runs 3)
           if [ "$RUN_LENGTH" = "short" ]; then
             run_flags=(--short --counters --counters-runs 2)
           fi

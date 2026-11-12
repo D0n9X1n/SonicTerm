@@ -408,14 +408,18 @@ a reproduction.
     the runs, never drop the budget.
   - **Release pipeline:** runs for each pushed release tag and may take hours.
     It compares the previous release tag with the new one using full-length
-    runs, `--counters` and the shipping release profile. Put any long or exhaustive perf
-    measurement here, not in the PR pipeline: the matrix entry holding S13 also runs its
-    release-only wide layouts (`S13/wide-8`, `S13/wide-16`, `S13/wide-32`) through its
-    `release_scenarios` field, whose `Scaling` row is reported, not a gate, and the macOS
-    entry holding S3 runs `S3/history`, a flood into budget-filling history, `S3/resize`,
-    twenty window resizes over a flooded history, and `S11/burst` against `S11/burst-text`,
-    ten inline PNGs between text against the same text alone; the macOS entry holding S2 runs
-    `S2/spawn`, typing while a tab opens after every tenth character.
+    runs, `--counters --counters-runs 3` and the shipping release profile. Every job
+    must stay under GitHub's 6-hour job limit: a release runs each macOS entry's
+    `release_partition` instead of its PR `scenarios`, balanced from measured
+    per-variant release times; rebalance it when you add a release scenario. Put any
+    long or exhaustive perf measurement here, not in the PR pipeline: S13's release-only
+    wide layouts (`S13/wide-8`, `S13/wide-16`, `S13/wide-32`, through the Windows S13
+    entry's `release_scenarios` and the macOS partition) report a `Scaling` row that is
+    not a gate; macOS also runs `S3/history`, a flood into budget-filling history,
+    `S3/resize`, twenty window resizes over a flooded history, `S11/burst` against
+    `S11/burst-text`, ten inline PNGs between text against the same text alone, and
+    `S2/spawn`, typing while a tab opens after every tenth character, each beside its
+    scenario.
   - **Locally:** build and run the functional checks only. The local gate,
     including `macos-perf-smoke` and `windows-perf-smoke`, proves the tooling
     works and asserts no timing.
