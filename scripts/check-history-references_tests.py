@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,8 @@ from pathlib import Path
 _SPEC = importlib.util.spec_from_file_location("history_references", Path(__file__).with_name(
     "check-history-references.py"))
 history_references = importlib.util.module_from_spec(_SPEC)
+# Registered before it runs, as an import would be: `dataclasses` resolves the module's annotations through it.
+sys.modules[_SPEC.name] = history_references
 _SPEC.loader.exec_module(history_references)
 
 
