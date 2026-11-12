@@ -217,9 +217,13 @@ pub(super) fn hardwrap_uri_candidate<'grid>(
             // When: close exists, the wrapper terminates and joined must validate as one whole URI.
             if unsafe_path_cell(&cells[end])
                 || cells[end].hyperlink().is_some()
-                || cells[end + 1..].iter().take_while(|cell| !cell.ch.is_whitespace()).any(|cell| {
-                    unsafe_path_cell(cell) || !matches!(cell.ch, '.' | ',' | ';' | ':' | '!' | '?')
-                })
+                || !closer_tail_ends_token(
+                    frame,
+                    cells,
+                    row_number,
+                    end,
+                    usize::from(frame.grid().cols),
+                )
             {
                 // When: cells after end continue the token, the apparent closer may be internal URI text.
                 return refusal(&spans);

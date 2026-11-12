@@ -199,8 +199,13 @@ impl App {
                 return None;
             }
             HardwrapUri::NotApplicable => {
-                // When: `hardwrap_uri_in` is NotApplicable, the bare program-broken rule decides next.
-                match bare_hardwrap_uri_in(frame, pointed) {
+                // When: `hardwrap_uri_in` is NotApplicable, a padded markdown target, then the bare
+                // program-broken rule, decides next.
+                let program_broken = match padded_markdown_uri_in(frame, pointed) {
+                    HardwrapUri::NotApplicable => bare_hardwrap_uri_in(frame, pointed),
+                    decided => decided,
+                };
+                match program_broken {
                     HardwrapUri::Complete(candidate) => {
                         LogicalPathScan { candidates: vec![candidate], rows: SmallVec::new() }
                     }
