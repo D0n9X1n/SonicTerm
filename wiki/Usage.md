@@ -428,7 +428,25 @@ is capped at 4 KiB. Only the
 indentation and line boundaries are removed; query text, percent escapes, and
 hyphens remain literal. Whitespace inside a fragment, nested wrappers, unsafe
 cells, mixed wrap kinds, and multiple schemes prevent reconstruction. Incomplete
-recognized fragments never fall back to a truncated URL.
+recognized fragments never fall back to a truncated URL. Non-ASCII text such as
+`。` or `了解` may also follow the closer, since no URL character is non-ASCII,
+unless that text runs to the right edge and the row soft-wraps into more text.
+
+A markdown link target that Claude Code's numbered diff or markdown view wraps
+at its own box width, short of the pane edge, is also joined. The first row
+starts with a line number (one to six digits, one blank, and an optional `+` or
+`-` sign); its `](https://…` or `](http://…` target, with the authority and
+first path slash, runs to the row's last text, and only blank padding follows
+up to the pane edge. Every continuation row leaves the gutter blank or repeats
+the same sign, starts at the column after the gutter, and, except the last,
+ends at the first row's cut; the last ends at `)`, after which only sentence
+punctuation or non-ASCII text may follow. A first fragment ending in `.`, `,`,
+`;`, `:`, `!` or `?` is never joined. The repeated sign, gutter and wrappers are
+not part of the destination. When any condition fails, the first row's own URL
+is used, as without this rule. The rule is a heuristic: an unclosed link target
+in the source followed by a line indented to the content column that reads
+like `61) next` joins into a longer URL; the modifier-hover preview shows the
+full destination before activation.
 
 A URL or absolute path that a program breaks across rows itself, as Claude Code
 does, is also joined, on the primary and the alternate screen, inside tmux, rmux

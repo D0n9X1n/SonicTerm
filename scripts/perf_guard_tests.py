@@ -18,7 +18,7 @@ import perf_timeline_tests
 
 
 def guard_pane(pane_id: int, prev_next: int, next_seq: int, **overrides: object) -> dict:
-    """One pane transfer with every §3.2 field, zeroed, then `overrides`."""
+    """One pane transfer with every sidecar field, zeroed, then `overrides`."""
     pane = {"pane_id": pane_id, "closed": False, "identities_exhausted": False,
             "prev_next_section_seq": prev_next, "next_section_seq": next_seq, "carried_pending": None,
             "records": [], "pending": None, "abandoned": [], "abandoned_overflow": 0, "abandoned_unlocated": 0,
@@ -30,7 +30,7 @@ def guard_pane(pane_id: int, prev_next: int, next_seq: int, **overrides: object)
 
 
 def guard_batch(prev_next: int, next_seq: int, **overrides: object) -> dict:
-    """One span batch with every §3.2 field, zeroed, then `overrides`."""
+    """One span batch with every sidecar field, zeroed, then `overrides`."""
     batch = {"spans": [], "spans_issued": 0, "spans_dropped_located": 0, "spans_dropped_unlocated": 0,
              "losses": [], "loss_events": 0, "losses_merged": False, "collections_issued": 0,
              "collections_refused_exhausted": 0, "prev_next_collection_seq": prev_next,
@@ -91,7 +91,7 @@ def guard_status(name: str, take_seq: int | None = None) -> dict:
 
 
 class GuardCorrelationTests(unittest.TestCase):
-    """#1584 D2.1b: the chained validation, window completeness and two-pointer join of raw guard takes."""
+    """The chained validation, window completeness and two-pointer join of raw guard takes."""
 
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="guard-join-"))
@@ -108,7 +108,7 @@ class GuardCorrelationTests(unittest.TestCase):
         return [verdict["verdict"] for verdict in verdicts]
 
     def test_overlap_at_each_end_containment_and_touching(self) -> None:
-        # J1: partial overlap at either end, a span inside the wait and the wait inside a span; touching is 0.
+        # Partial overlap at either end, a span inside the wait and the wait inside a span; touching is 0.
         self.assertEqual(perf_guard_schema.guard_overlap([(10, 20)], [(5, 12)]), (2, 1, 1))
         self.assertEqual(perf_guard_schema.guard_overlap([(10, 20)], [(18, 30)]), (2, 1, 1))
         self.assertEqual(perf_guard_schema.guard_overlap([(10, 20)], [(12, 15)]), (3, 1, 1))
@@ -118,11 +118,11 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertEqual(perf_guard_schema.guard_overlap([(10, 20)], [(15, 15)]), (0, 0, 0))
 
     def test_several_spans_in_one_wait_count_their_union_once(self) -> None:
-        # J2: disjoint spans inside one wait sum to their union; the section counts once, each span once.
+        # Disjoint spans inside one wait sum to their union; the section counts once, each span once.
         self.assertEqual(perf_guard_schema.guard_overlap([(0, 100)], [(10, 20), (30, 50), (60, 61)]), (31, 1, 3))
 
     def test_overlapping_spans_of_one_pane_fail_validation(self) -> None:
-        # J3: two spans of one pane cannot overlap; the take does not validate.
+        # Two spans of one pane cannot overlap; the take does not validate.
         sidecars = guard_run(1)
         batch = sidecars[0]["spans"]
         batch["spans"].append(dict(batch["spans"][0], collection_seq=2, acquired_ns=1120))
@@ -132,7 +132,7 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertTrue(any("overlap" in reason for reason in verdict["reasons"]), verdict)
 
     def test_panes_are_isolated_and_a_span_needs_its_pane(self) -> None:
-        # J4: another pane's span never counts against pane 7's waits; a span whose pane has no container fails.
+        # Another pane's span never counts against pane 7's waits; a span whose pane has no container fails.
         sidecars = guard_run(1)
         sidecars[0]["panes"].append(guard_pane(8, 1, 1))
         sidecars[0]["spans"]["spans"][0]["pane_id"] = 8
@@ -144,7 +144,7 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertIn("spans: a span's pane has no container", verdict["reasons"])
 
     def test_identity_ranges_carries_and_sticky_flags(self) -> None:
-        # J5: a carry completing with an unchanged next validates; a carried identity twice, MAX without the
+        # A carry completing with an unchanged next validates; a carried identity twice, MAX without the
         # flag, and a sticky flag turning false do not; abandoned_unlocated counts in the identity.
         sidecars = guard_run(2)
         first, second = sidecars[0]["panes"][0], sidecars[1]["panes"][0]
@@ -174,7 +174,7 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertEqual(verdict["reasons"], ["pane 7: unlocated abandoned_unlocated"], verdict)
 
     def test_binding_mismatches_fail(self) -> None:
-        # J6: a different pid, a substituted nonce, a clock nonce that differs, a reversed window and a
+        # A different pid, a substituted nonce, a clock nonce that differs, a reversed window and a
         # non-increasing take time each fail, and every later take with them.
         for mutate in (lambda sidecar: sidecar["clock"].update(pid=1),
                        lambda sidecar: sidecar.update(run_nonce="f" * 32) or sidecar["clock"].update(run_nonce="f" * 32),
@@ -186,7 +186,7 @@ class GuardCorrelationTests(unittest.TestCase):
             self.assertEqual(self.kinds(self.verdicts(sidecars)), ["complete", "incomplete", "incomplete"])
 
     def test_a_null_harness_hash_unbinds_every_take(self) -> None:
-        # J6b: a null hash at the first, middle or last take makes every take incomplete, the earlier ones too.
+        # A null hash at the first, middle or last take makes every take incomplete, the earlier ones too.
         for position in range(3):
             sidecars = guard_run(3)
             sidecars[position]["harness_hash"] = None
@@ -198,16 +198,16 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertEqual(self.kinds(self.verdicts(sidecars, expected_hash="cd" * 32)), ["incomplete"] * 2)
 
     def test_unsorted_input_gives_the_same_result(self) -> None:
-        # J7: records and spans in reverse order are sorted, validated and joined deterministically.
+        # Records and spans in reverse order are sorted, validated and joined deterministically.
         self.assertEqual(perf_guard_schema.guard_overlap([(50, 60), (0, 20)], [(55, 70), (10, 15)]),
                          perf_guard_schema.guard_overlap([(0, 20), (50, 60)], [(10, 15), (55, 70)]))
 
     def test_distinct_sections_and_spans(self) -> None:
-        # J8: two waits overlapping one span count two sections and one span.
+        # Two waits overlapping one span count two sections and one span.
         self.assertEqual(perf_guard_schema.guard_overlap([(0, 10), (20, 30)], [(5, 25)]), (10, 2, 1))
 
     def test_each_completeness_rule(self) -> None:
-        # J9: each §5.2 rule makes the window incomplete; losses_merged alone does not.
+        # Each window-completeness rule makes the window incomplete; losses_merged alone does not.
         rules = {
             "unknown registered_ns": lambda pane, batch: pane.update(
                 next_section_seq=3, pending={"section_seq": 2, "registered_ns": None}),
@@ -232,7 +232,7 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertEqual(self.verdicts(merged)[0]["verdict"], "complete")
 
     def test_report_lines_never_print_a_number_when_not_complete(self) -> None:
-        # J10: an incomplete phase prints its reasons and no number; an unavailable one prints n/a.
+        # An incomplete phase prints its reasons and no number; an unavailable one prints n/a.
         incomplete = {"phase": "flood", "verdict": "incomplete", "status": "written", "reasons": ["harness_unbound"]}
         self.assertEqual(perf_guard_schema.format_guard_verdict(incomplete),
                          "[perf-compare] guard correlation flood: incomplete: harness_unbound")
@@ -243,7 +243,7 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertIn("observed overlap 5 ns, 1 sections, 1 spans", perf_guard_schema.format_guard_verdict(verdict))
 
     def test_a_late_record_is_counted_in_neither_window(self) -> None:
-        # J11: a section pending at take 1 and published in take 2 inside window 1 is excluded from window 2,
+        # A section pending at take 1 and published in take 2 inside window 1 is excluded from window 2,
         # and window 1 stays incomplete.
         sidecars = guard_run(2)
         sidecars[0]["panes"][0].update(next_section_seq=3, pending={"section_seq": 2, "registered_ns": 1140})
@@ -255,7 +255,7 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertEqual(verdicts[1]["observed_overlap_ns"], 5)
 
     def test_the_chain_rejects_gaps_and_misnamed_takes(self) -> None:
-        # J12: a take_seq gap invalidates it and every later take; distinct phase names validate; a sidecar
+        # A take_seq gap invalidates it and every later take; distinct phase names validate; a sidecar
         # naming another phase than its own record is rejected.
         self.assertEqual(self.kinds(self.verdicts(guard_run(3))), ["complete"] * 3)
         gapped = guard_run(3)
@@ -311,7 +311,7 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertEqual(self.kinds(verdicts), ["n/a", "n/a"], "a genuine gate-off run consumes no take")
 
     def test_the_sidecar_window_is_bound_to_its_phase_record(self) -> None:
-        # Finding 1: a header window changed with its digest while the phase keeps its own is rejected; a window
+        # A header window changed with its digest while the phase keeps its own is rejected; a window
         # ending after its take, or one with a null end, is not complete; the next take still validates.
         for label, mutate in (("moved", lambda sidecar: sidecar["window"].update(start_ns=1500, end_ns=1800)),
                               ("after the take", lambda sidecar: sidecar.update(taken_at_ns=1050))):
@@ -327,7 +327,7 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertEqual(verdicts[0]["reasons"], ["the window is unknown"])
 
     def test_the_chain_keeps_clocks_and_registrations_across_takes(self) -> None:
-        # Finding 2: an unknown take time breaks the chain; a carried pending section keeps its registration,
+        # An unknown take time breaks the chain; a carried pending section keeps its registration,
         # null included; an earlier take's interval reused under a later section or collection is rejected.
         unknown = guard_run(3)
         unknown[0]["taken_at_ns"] = None
@@ -350,7 +350,7 @@ class GuardCorrelationTests(unittest.TestCase):
         self.assertIn("spans: a span predates the previous take", self.verdicts(reused_span)[1]["reasons"])
 
     def test_malformed_fields_are_named_never_raised(self) -> None:
-        # Finding 3: a missing frozen field is distinct from null, and a bool or float schema is not 1; each is a
+        # A missing schema field is distinct from null, and a bool or float schema is not 1; each is a
         # named problem, and the take and every later one are incomplete.
         cases = {
             "pending": lambda sidecar: sidecar["panes"][0].pop("pending"),
@@ -368,7 +368,7 @@ class GuardCorrelationTests(unittest.TestCase):
             self.assertTrue(verdicts[1]["reasons"], label)
 
     def test_contradictory_counts_and_crossing_spans_are_not_complete(self) -> None:
-        # Finding 4: a refusal with no time and none unlocated, a reversed span loss, a recorded collection with
+        # A refusal with no time and none unlocated, a reversed span loss, a recorded collection with
         # collections_issued 0, and a span crossing the window's start each keep the window from being complete.
         cases = {
             "refusal": lambda sidecar: sidecar["panes"][0].update(refused_closed=1),
@@ -385,7 +385,7 @@ class GuardCorrelationTests(unittest.TestCase):
             self.assertNotIn("observed_overlap_ns", verdict, label)
 
     def test_availability_is_bound_to_the_run(self) -> None:
-        # Finding 5: a no-take status naming a file or take is malformed; a written run with one middle gate_off
+        # A no-take status naming a file or take is malformed; a written run with one middle gate_off
         # is an impossible availability change; a status the build rules out is impossible; a declared contract
         # with every field missing is incomplete; a genuine cfg-off run is n/a and consumes nothing.
         check = perf_guard_schema.guard_field_problems

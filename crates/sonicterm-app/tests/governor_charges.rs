@@ -166,8 +166,8 @@ fn charges_shrink_when_a_pane_releases_memory() {
 /// Dropping a pane releases its charges.
 ///
 /// `CommittedReservation::Drop` returns the charge, so there is no teardown
-/// site to forget — the same property that made the inline-media charge
-/// correct after it was fixed to co-own with the pane.
+/// site to forget — the same property the inline-media charge relies on by
+/// co-owning its reservation with the pane.
 #[test]
 fn dropping_a_pane_releases_its_charges() {
     let mut app = app();

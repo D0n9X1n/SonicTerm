@@ -42,6 +42,7 @@ python3 scripts/local-gate.py
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
+| `history-references` | `bash scripts/check-history-references.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
@@ -112,6 +113,17 @@ Needs:
 [Local Gate](Local-Gate) describes how the runner executes these steps: process
 groups and leftover detection, Windows job objects and preparation, output paths
 and Git state, timeouts, and CI parity.
+
+The `history-references` step keeps comments, docstrings, help and log text,
+workflow comments and wiki pages about what the code does, why it is needed
+and how it prevents a problem. It fails on issue and pull-request numbers
+(`#1234`, `issue 1234`, links to this repository's issues and pull requests)
+and on CI run or job ids. Those belong in the commit message, the pull request
+or the issue. In test sources and fixtures only comments and docstrings are
+read, because their strings are test data; hex colours, GUIDs, versions and
+links to another project's tracker are not citations. Each remaining data
+exception is listed in `scripts/check-history-references.py` with its reason,
+and an exception that no longer matches fails the step.
 
 ## Comparing performance
 
@@ -717,7 +729,7 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   timelines read `unavailable` with `gate-off` when the build has `perf-echo-trace`, and
   with `cfg-off` when it does not.
 - `perf-compare.py --echo-attribution DIR DIR [--echo-control NAME DIR]... [--echo-platform macos|windows]`
-  applies #1607's frozen attribution procedure to S2/flood echo timelines. It is analysis
+  applies the S2/flood echo attribution procedure, fixed before CI, to S2/flood echo timelines. It is analysis
   only: it builds and runs nothing, and takes no comparison, smoke or `--out` option. Each
   directory holds one workflow execution's downloaded perf-comparison artifacts. They are
   read through `perf-flags.py`'s validated path, the same one its flag comparison uses:
@@ -1184,9 +1196,12 @@ gives its own `fallback_receive` verdict. A bare scenario ID selects only its de
 variant, so every variant is named explicitly. Under `--short`, `S7` is capped at 3 runs per side (it alone set
 the critical path past 35 minutes), `S2/flood` at 2, `S11/release`, `S1/status-line`, `S12/status-line`, `S13/default` and `S13/sustained-4` at 1, and `S11/gdi`, `S11/wgpu`,
 `S1/atlas-retry` and `S6/rest` at 2. The `S2/flood` cap only keeps the pull-request comparison within 35 minutes:
-a release comparison runs it in full. A release comparison also runs S13's wide layouts on the shard holding S13: each
-matrix entry's `release_scenarios` field (empty except there) is appended only when the run is not short, so pull requests
-never run them. With `perf-frame-texture`, S11's
+a release comparison runs it in full. A release comparison also runs the release-only variants (S13's wide
+layouts, and on macOS `S2/spawn`, `S3/history`, `S3/resize`, `S11/burst` and `S11/burst-text`). On Windows each
+matrix entry's `release_scenarios` field (S13's wide layouts on the shard holding S13, empty elsewhere) is appended
+only when the run is not short. On macOS each entry's `release_partition` replaces its `scenarios` when the run is
+not short: the three partitions hold every variant once, each release-only variant beside its scenario, balanced
+from measured release times so no job nears GitHub's 6-hour limit. Pull requests never run either. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
 on a base without the feature. S9's and S12's `end` checkpoints record the
 renderer's glyph completeness: at each presented `Full` frame the renderer stores
@@ -1208,18 +1223,18 @@ real-renderer rows come from the working-set test. The combined gate steps
 `perf-scenarios-harness-api-clippy` and `perf-scenarios-harness-api-tests` lint
 and test the harness with this cfg on, together with every other entry. Each shard runs its sets' base and head runs
 interleaved on its own runner, so a comparison never crosses runners or
-platforms. The macOS shard count, four today, matches the macOS
+platforms. The macOS shard count, three today, matches the macOS
 runner slots that reached perf while CI's macOS jobs ran in the measured trials; it is chosen from measured critical paths. Both modes add the counters set, on the
 head and on a base that declares `perf-counters`: a pull request takes two
 counters runs per scenario and side to stay within 35 minutes, a release takes
-`--runs`. The Windows runner has no GPU and no user session: its table measures
+three, which keeps every counters-derived figure above its sample floor. The Windows runner has no GPU and no user session: its table measures
 the software-rendering path, and a foreground change there is recorded, not
 judged.
 
 | Mode | When | Compares | Runs | Release profile | Time |
 | --- | --- | --- | --- | --- | --- |
 | Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5 --counters --counters-runs 2` | LTO off, 16 codegen units, for both refs | within 35 minutes of the run's creation, queue included |
-| Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5 --counters` | the shipping profile | may take hours |
+| Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5 --counters --counters-runs 3` | the shipping profile | may take hours; each job stays under GitHub's 6-hour limit |
 
 Each comparison job writes its `comparison.md` to the job summary and uploads
 it, its `timing.json` and each run's logs and records as an artifact whose name

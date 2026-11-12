@@ -103,17 +103,16 @@ pub(super) fn tracking_only_owner_limits() -> OwnerLimits {
 ///
 /// The charge on a pane is released by `CommittedReservation::Drop`, and its
 /// doc comment states why that is correct: *there is no teardown site to
-/// forget*. The owner beside it had no such guarantee — it was a plain
-/// `Option<ResourceOwnerId>` that vanished when the pane dropped, leaving the
-/// governor holding a record that never closed.
+/// forget*. This guard gives the owner beside it the same guarantee: a plain
+/// `Option<ResourceOwnerId>` would vanish when the pane dropped and leave the
+/// governor holding a record that never closes.
 ///
-/// Measured before this: 80 of 80 owners still `Open` after 40 create/destroy
-/// cycles, and `OwnerRegistry` has `get` and `insert` and **no `remove`**, so
-/// each one is retained for the life of the process along with its `RwLock`,
-/// `Mutex`, and two `EnumMap`s over every resource class.
+/// A record that never closes is never removed from `OwnerRegistry`, so it
+/// stays for the life of the process along with its `RwLock`, `Mutex`, and two
+/// `EnumMap`s over every resource class.
 ///
-/// Six pane-removal sites across four files reach `panes.remove`. Patching
-/// each is how the original defect happened; this makes the close a property
+/// Many pane-removal sites reach `panes.remove`. Closing at each of them would
+/// leave every new site free to forget; the guard makes the close a property
 /// of ownership instead.
 pub(crate) struct OwnerGuard {
     pub(super) governor: ResourceGovernor,

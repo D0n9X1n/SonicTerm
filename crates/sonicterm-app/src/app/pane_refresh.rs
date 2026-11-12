@@ -5,9 +5,8 @@ use super::*;
 
 /// Seed a freshly-created parser with the active theme's query-reply colours:
 /// default fg/bg/cursor (OSC 10/11/12 `?`) AND the full 16-colour ANSI palette
-/// (OSC 4 `?`). Centralizes what used to be duplicated at every pane-spawn site
-/// so the OSC 4 palette wiring can't be added to one path and forgotten
-/// on another. Per-slot colours that don't resolve are simply left unseeded
+/// (OSC 4 `?`). Every pane-spawn site calls this one function, so the OSC 4
+/// palette wiring cannot be added to one path and forgotten on another. Per-slot colours that don't resolve are simply left unseeded
 /// (the parser then suppresses that slot's reply rather than lying).
 pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &Theme) {
     if let Some((red, green, blue)) = theme.colors.foreground.rgb() {

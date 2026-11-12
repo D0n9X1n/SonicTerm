@@ -11,11 +11,11 @@
 //! crates that never meet. These tests are in `sonicterm-app` because it
 //! depends on both.
 //!
-//! Measured before this was corrected: `PtyInput` was recorded
-//! `MeasuredNegligible { per_pane_bytes: 4096 }` while its queue accepted four
-//! messages of up to 16 MiB each — 67,108,864 bytes, **16,384x** the declared
-//! figure, reachable from a single paste because a paste is admitted at the
-//! full message size and broadcast to every pane.
+//! `PtyInput` is the case that matters: its queue accepts
+//! `PTY_INPUT_QUEUE_CAPACITY` messages of up to `MAX_PTY_INPUT_MESSAGE_BYTES`
+//! each, reachable from a single paste because a paste is admitted at the full
+//! message size and broadcast to every pane. A small `MeasuredNegligible`
+//! figure for it would understate that bound by orders of magnitude.
 
 #![warn(clippy::min_ident_chars)]
 

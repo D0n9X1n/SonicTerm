@@ -237,7 +237,7 @@ class GuardChain:
 
 
 def _guard_pane_problems(pane: dict, chain: GuardChain) -> list[str]:
-    """§5.1's pane rules for one transfer, against the chain: identities, accounting, consistency, and clock
+    """The chain's pane rules for one transfer, against the chain: identities, accounting, consistency, and clock
     continuity with the previous take."""
     pane_id = pane["pane_id"]
     before = chain.panes.get(pane_id)
@@ -316,7 +316,7 @@ def _guard_pane_problems(pane: dict, chain: GuardChain) -> list[str]:
 
 
 def _guard_span_problems(batch: dict, chain: GuardChain, pane_ids: set[int]) -> list[str]:
-    """§5.1's span rules for the batch against the chain, with clock continuity across takes."""
+    """The chain's span rules for the batch against the chain, with clock continuity across takes."""
     problems = []
     prev_next, next_seq = batch["prev_next_collection_seq"], batch["next_collection_seq"]
     if prev_next != chain.next_collection_seq:
@@ -362,7 +362,7 @@ def _guard_span_problems(batch: dict, chain: GuardChain, pane_ids: set[int]) -> 
 
 def guard_take_problems(sidecar: dict, phase_index: int, phase_name: str, phase_window: dict, chain: GuardChain,
                         expected_hash: str | None) -> list[str]:
-    """§5.1: why take k does not validate against the chain and its own phase record; empty when it does. The
+    """Why take k does not validate against the chain and its own phase record; empty when it does. The
     chain is not advanced."""
     problems = _guard_shape(sidecar)
     if problems:
@@ -430,7 +430,7 @@ def _guard_advance(chain: GuardChain, sidecar: dict) -> None:
 
 
 def guard_window_reasons(sidecar: dict) -> list[str]:
-    """§5.2: why a validated take's window is incomplete; empty when it is complete. Nothing is clipped: a
+    """Why a validated take's window is incomplete; empty when it is complete. Nothing is clipped: a
     section or span crossing an edge makes the window incomplete."""
     window = sidecar["window"]
     start_ns, end_ns = window["start_ns"], window["end_ns"]
@@ -474,7 +474,7 @@ def guard_window_reasons(sidecar: dict) -> list[str]:
 
 
 def guard_window_join(sidecar: dict) -> dict[str, int]:
-    """§5.3 for a complete window: per pane, its records inside the window against its spans in it."""
+    """The correlation for a complete window: per pane, its records inside the window against its spans in it."""
     start_ns, end_ns = sidecar["window"]["start_ns"], sidecar["window"]["end_ns"]
     totals = {"observed_overlap_ns": 0, "observed_overlap_sections": 0, "observed_overlapping_spans": 0}
     for pane in sidecar["panes"]:
@@ -518,7 +518,7 @@ def guard_correlation_verdicts(phases: Sequence[object], root: Path, expected_ha
                                availability: str | None = None) -> list[dict]:
     """Each phase's guard-correlation verdict: `complete` with its overlap, `incomplete` with reasons, or `n/a`.
 
-    Takes are validated in phase order as one chain (§5.1): a missing, truncated, mismatched, misbound,
+    Takes are validated in phase order as one chain: a missing, truncated, mismatched, misbound,
     write_failed, take_exhausted or malformed take makes itself and every later take incomplete. Two run-wide
     rules are decided before any verdict is final: a null harness hash in any take makes every take incomplete
     (`harness_unbound`), and statuses of more than one availability class, or of a class the run's build and

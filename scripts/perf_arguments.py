@@ -94,7 +94,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                         help="an empty directory for the evidence and comparison.md "
                              "(default: target/perf-compare/out-<stamp>)")
     parser.add_argument("--echo-attribution", nargs="+", type=Path, metavar="ARTIFACT_DIR",
-                        help="analysis only: apply #1607's frozen §4 attribution to the S2/flood echo timelines of "
+                        help="analysis only: apply the fixed attribution procedure to the S2/flood echo timelines of "
                              "two replay executions' downloaded perf-comparison artifacts; builds and runs nothing")
     parser.add_argument("--echo-control", nargs=2, action="append", metavar=("NAME", "ARTIFACT_DIR"),
                         help="with --echo-attribution: one control execution's artifact, NAME one of C1-C5; give "

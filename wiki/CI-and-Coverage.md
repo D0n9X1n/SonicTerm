@@ -239,17 +239,21 @@ enabled; a static-check archive can no longer occupy the test-codegen cache key.
 Overlapping main runs can still race to save an immutable key.
 
 The three macOS perf shards keep their artifact names and run every scenario
-exactly once, partitioned from run 42371975980's per-variant times, in which S7 alone
-took 21 minutes of its shard's scenarios and that shard set the critical path:
+exactly once, partitioned from measured per-variant times so that no shard sets the
+critical path; S7, the longest variant, shares its shard only with short ones:
 `S7-S4` runs S7, S4, atlas-retry, S8 and S6/selection-drag;
 `S9-S10sync` runs S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line, S12,
 S12/status-line and S3;
-`S10-S11release` runs S10, S11/release, S2, S2/flood, S6/flood, S13 and S13/sustained-4, and for a release tag
-also S13's wide layouts (`release_scenarios`; Windows adds them to its S13 shard the same way). All three start
+`S10-S11release` runs S10, S11/release, S2, S2/flood, S6/flood, S13 and S13/sustained-4. A release tag runs
+every variant in full, so each macOS entry runs its `release_partition` instead, balanced from measured release
+times so each shard stays well under GitHub's 6-hour job limit: `S7-S4` runs its pull-request set plus S10/sync,
+S11, S11/burst, S11/burst-text and S1/status-line; `S9-S10sync` runs S9, S12, S12/status-line, S6, S6/rest, S1,
+S3, S3/history, S3/resize and S5; `S10-S11release` runs its pull-request set plus S13's wide layouts and S2/spawn.
+Windows appends S13's wide layouts to its S13 shard (`release_scenarios`). All three start
 when the binaries land: this repository runs at most five macOS jobs at once, and CI
 holds two (core gates, which also runs the aarch64 smoke, and the Intel smoke). The
 35-minute PR budget includes queues; exact-head CI timing, not local estimates,
-verifies the remaining margin. Runs, counters, S9 laps and release lengths are unchanged.
+verifies the remaining margin. A release takes three counters runs a side.
 
 A compatible successful `main` job must populate a key before a later run can
 hit it; compiler or dependency changes can still cause a miss. Cache reuse can

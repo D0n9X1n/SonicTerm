@@ -235,9 +235,9 @@ fn measure_full_queue(script: &str) -> QueueTruth {
 
 /// The reported figure must track the ring the queue pins, in both directions.
 ///
-/// Measured before the fix: 524,288 reported against 65,576 pinned in all
-/// three scenarios — **8x over**, and the same number every time because the
-/// old figure was the slot count restated, blind to what the slots held.
+/// A figure derived from the slot count alone would report the same number in
+/// every scenario, blind to what the slots hold; comparing against the pinned
+/// ring in each direction rules that out.
 #[test]
 fn reported_bytes_track_the_ring_the_queue_pins() {
     let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -289,8 +289,8 @@ fn reported_bytes_track_the_ring_the_queue_pins() {
 /// A queue of keystroke echoes must not be reported as half a megabyte.
 ///
 /// The headline case: 64 one-byte echoes hold 64 bytes of payload in one 64 KiB
-/// ring, and the old figure called it 524,288 — enough to refuse a pane over
-/// memory that was never allocated.
+/// ring. Charging each slot at its maximum size would report half a megabyte —
+/// enough to refuse a pane over memory that was never allocated.
 #[test]
 fn keystroke_echo_queue_is_not_reported_as_half_a_megabyte() {
     let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

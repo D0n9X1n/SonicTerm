@@ -9,8 +9,8 @@ fn v120_parser_media_capture_shares_one_budget() {
     // beginning any escape family cancels a capture already in flight, so they
     // are alternatives rather than addends: the parser cannot hold both.
     //
-    // Measured before writing this — feeding an 8 MiB DCS capture and then an
-    // 8 MiB APC capture grows resident memory once, not twice. So the budget
+    // Feeding an 8 MiB DCS capture and then an 8 MiB APC capture must grow
+    // resident memory once, not twice. So the budget
     // that needs guarding is not their sum but the exclusivity that keeps a sum
     // from arising, and that is what this asserts.
     let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
@@ -124,12 +124,10 @@ fn the_three_retention_seams_are_disjoint_and_must_be_summed() {
     // URI *strings* — `(id + uri) * 2` — which is a different allocation. The
     // two are disjoint, so both are charged exactly once.
     //
-    // This assertion previously required the grid figure not to move at all,
-    // using that as a proxy for "no double counting". The proxy was wrong in
-    // the direction that matters: it also holds when the grid fails to count
-    // something it genuinely owns, which is the defect it was meant to
-    // exclude. Measured before the fix: 1.85 MiB reported against 3.09 MiB
-    // held on a populated scrollback.
+    // "The grid figure does not move" is not a proxy for "no double counting":
+    // it also holds when the grid fails to count something it genuinely owns,
+    // which is the defect to exclude, so the figure must grow with what the
+    // populated scrollback holds.
     let grid_after = parser.grid().retained_amount().bytes;
     assert!(
         grid_after > grid_before,
@@ -484,11 +482,11 @@ fn cancelling_a_capture_emits_no_media_event() {
 /// Interleaved captures must hold the ceiling without help from the host.
 ///
 /// Round-robin is the shape of real concurrent transfers. The bound asserted
-/// here is the ceiling itself; it used to be
+/// here is the ceiling itself, not
 /// `MAX_PROCESS_CAPTURE_STAGING_BYTES.max(MIN_CAPTURE_STAGING_BYTES * PANES)`,
-/// which grows with the pane count and so accommodated exactly the
-/// unboundedness it looked like it was checking. A bound that widens to fit
-/// the measurement is not a bound.
+/// which grows with the pane count and so would accommodate exactly the
+/// unboundedness it looks like it checks. A bound that widens to fit the
+/// measurement is not a bound.
 #[test]
 fn interleaved_captures_hold_the_ceiling_without_a_reclaim_pass() {
     let pool = CaptureStagingPool::new();

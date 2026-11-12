@@ -40,6 +40,7 @@ python3 scripts/local-gate.py
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS、Windows、Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
 | `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
+| `history-references` | `bash scripts/check-history-references.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
 | `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `tooling`、`windows-checks`、`linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
@@ -109,6 +110,13 @@ python3 scripts/local-gate.py
 
 [本地 gate](Local-Gate-zh-CN) 说明 runner 如何执行这些步骤：进程组与残留进程检测、Windows Job Object 与准备阶段、
 输出路径与 Git 状态、超时与 CI 一致性。
+
+`history-references` 步骤让注释、docstring、帮助与日志文字、工作流注释和 wiki 页面只说明代码做什么、为什么
+需要，以及如何防止问题。它在出现 issue 与 pull request 编号（`#1234`、`issue 1234`、指向本仓库 issue 与 pull
+request 的链接）以及 CI run 或 job ID 时失败。这些内容属于 commit 信息、pull request 或 issue。测试源码与
+fixture 只读取注释与 docstring，因为其中的字符串是测试数据；十六进制颜色、GUID、版本号以及指向其他项目问题
+追踪器的链接都不算引用。其余每个数据例外都在 `scripts/check-history-references.py` 中列出并说明原因，
+不再匹配的例外会使该步骤失败。
 
 ## 性能对比
 
@@ -476,7 +484,7 @@ PR 与 Change。
   整数交叉相乘。什么都未记录的一侧显示 `unavailable`，绝不是测得的零，此时关卡也为 `unavailable`；测试工具早于
   该能力的一侧显示 `n/a (no timeline)`。计时运行保持计数器关闭，因此构建带有 `perf-echo-trace` 时其时间线记为带 `gate-off` 的 `unavailable`，不带时记为带 `cfg-off` 的 `unavailable`。
 - `perf-compare.py --echo-attribution DIR DIR [--echo-control NAME DIR]... [--echo-platform macos|windows]`
-  对 S2/flood 回显时间线应用 #1607 冻结的归因流程。它只做分析：不构建、不运行，也不接受对比、smoke 或 `--out`
+  对 S2/flood 回显时间线应用在 CI 之前固定的 S2/flood 回显归因流程。它只做分析：不构建、不运行，也不接受对比、smoke 或 `--out`
   选项。每个目录存放一次工作流执行下载的 perf-comparison 制品。它们通过 `perf-flags.py` 的验证路径读取，与其
   标记比较使用同一条路径：
   - 校验每个制品的 `run-identity.json`（运行、引用、测试工具、设置、能力）；
@@ -783,8 +791,12 @@ S2、S10/sync、S6/rest、S13 与 S13/sustained-4；S4、S5、S11、S11/release�
 各平台包含 S9 的分片（macOS 的 S9-S10sync，Windows 的 S9-S10）还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
 lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
 裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S7` 每侧上限 3 次（仅它就使关键路径超过 35 分钟），`S2/flood` 每侧上限 2 次，`S11/release`、`S1/status-line`、`S12/status-line`、`S13/default` 与 `S13/sustained-4` 上限 1 次，
-`S11/gdi`、`S11/wgpu`、`S1/atlas-retry` 与 `S6/rest` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 35 分钟内：release 对比完整运行它。release 对比还会在包含 S13 的分片上运行
-S13 的宽布局：每个矩阵条目的 `release_scenarios` 字段（除该分片外为空）只在非 short 运行时追加，因此 pull request 从不运行它们。
+`S11/gdi`、`S11/wgpu`、`S1/atlas-retry` 与 `S6/rest` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 35 分钟内：release 对比完整运行它。release 对比还会运行仅限
+发布的变体（S13 的宽布局，以及 macOS 上的 `S2/spawn`、`S3/history`、`S3/resize`、`S11/burst` 与
+`S11/burst-text`）。在 Windows 上，每个矩阵条目的 `release_scenarios` 字段（包含 S13 的分片上为 S13 的宽布局，
+其余为空）只在非 short 运行时追加。在 macOS 上，非 short 运行时每个条目的 `release_partition` 取代其
+`scenarios`：三个分区恰好各包含每个变体一次，每个仅限发布的变体与其场景同在一个分片，并按实测的发布时间均衡，
+使任何 job 都不接近 GitHub 的 6 小时上限。pull request 从不运行两者。
 带 `perf-frame-texture` 时，S11 的 `end` 检查点记录 `frame_texture_bytes`：head 在 GDI 下为 4 B，未声明该 feature 的 base
 为 `n/a`。S9 与 S12 的 `end` 检查点记录渲染器的字形完整性：每次呈现 `Full` 帧时，渲染器保存一份证书，包含该帧的场景
 （去掉窗格 revision 与 dirty generation 的帧键）、字形图集的内容戳与尺寸，以及终端与界面各自缺失的不同字符。之后同一场景、同一图集的帧会并入
@@ -793,15 +805,15 @@ S13 的宽布局：每个矩阵条目的 `release_scenarios` 字段（除该分�
 `api-disabled`。证书在每个构建中都会保存：每次成功呈现都会投影其帧键的场景，每个 `Full` 帧都会构建两个字符集合。perf-compare 为每次 S9/S12
 运行的每一侧在 `completeness.json` 中写一行（运行 ID 与 `GITHUB_RUN_ATTEMPT`、该运行的尝试目录、所测 SHA、侧、平台、fixture、组与缩放），
 并在 `comparison.md` 中列出。这些只是 perf 结束行；helper 行与真实渲染器行来自工作集测试。合并的关卡步骤 `perf-scenarios-harness-api-clippy` 与
-`perf-scenarios-harness-api-tests` 在开启该 cfg（以及其他每一项）时对 harness 做 lint 与测试。每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为四个，与实测试验中 CI 的 macOS job 运行期间分给 perf 的 macOS runner 数一致）
+`perf-scenarios-harness-api-tests` 在开启该 cfg（以及其他每一项）时对 harness 做 lint 与测试。每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为三个，与实测试验中 CI 的 macOS job 运行期间分给 perf 的 macOS runner 数一致）
 根据实测的关键路径选定。两种模式都会运行计数器组，在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、
-每一侧运行两次计数器运行以保持在 35 分钟内，release 运行 `--runs` 次。Windows runner 没有 GPU，也没有用户会话：其对比表测量
+每一侧运行两次计数器运行以保持在 35 分钟内，release 运行三次，使每个由计数器得出的数值都高于其样本下限。Windows runner 没有 GPU，也没有用户会话：其对比表测量
 软件渲染路径，前台变化在那里只被记录，不被判定。
 
 | 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |
 | --- | --- | --- | --- | --- | --- |
 | Pull request | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | `--short --runs 5 --counters --counters-runs 2` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 从运行创建起 35 分钟内，包含排队时间 |
-| Release | 推送的 `v*` tag | 上一个 release tag 与该 tag | 完整时长，`--runs 5 --counters` | 发布用的 profile | 可能数小时 |
+| Release | 推送的 `v*` tag | 上一个 release tag 与该 tag | 完整时长，`--runs 5 --counters --counters-runs 3` | 发布用的 profile | 可能数小时；每个 job 保持在 GitHub 的 6 小时上限之内 |
 
 每个对比 job 把它的 `comparison.md` 写入 job summary，并把它、它的 `timing.json` 与每次运行的日志和记录一起作为 artifact
 上传，artifact 名称以运行的 attempt 结尾，因此重新运行的证据从不替换第一次 attempt 的证据。对比表的细节记录运行时长、任何 release profile 覆盖，以及在 macOS 上 producer 的

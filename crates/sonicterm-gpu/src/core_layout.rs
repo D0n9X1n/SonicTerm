@@ -653,9 +653,8 @@ impl GpuRenderer {
     /// not at `padding_left`.
     ///
     /// Before the first render the layout snapshot is empty and we fall
-    /// back to the legacy single-grid arithmetic; callers should not
-    /// hit-test before rendering, but tests / early input events
-    /// previously did and the legacy behaviour is preserved for them.
+    /// back to the single-grid arithmetic, so a hit-test from a test or an
+    /// early input event before the first render still maps to a cell.
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
         self.pixel_to_pane_cell(px, py).map(|(_, row, col)| (row, col))
     }

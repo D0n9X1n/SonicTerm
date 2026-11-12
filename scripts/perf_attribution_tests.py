@@ -247,7 +247,7 @@ class S10AttributionAnalysisTests(unittest.TestCase):
         self.assertTrue(perf_attribution_report.attribution_verdict([complete], False, [2]).startswith("unsupported"))
 
     def test_an_unequal_feature_comparison_gives_rows_but_no_verdict(self):
-        # The report keeps each side's runs, but only equal feature sets give a #1598 verdict.
+        # The report keeps each side's runs, but only equal feature sets give an S10 attribution verdict.
         counters = perf_sets.SetResult("S10/sync", "counters", perf_metrics.SideRuns([armed_outcome(complete_lines())]),
                                   perf_metrics.SideRuns([armed_outcome(complete_lines())]))
         timed = perf_sets.SetResult("S10/sync", "timed", perf_metrics.SideRuns([armed_outcome(complete_lines())]),

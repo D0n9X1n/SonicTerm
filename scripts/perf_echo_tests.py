@@ -127,7 +127,7 @@ class EchoAttributionTests(unittest.TestCase):
 
     def test_a_renderer_shift_screens_m1_and_stays_unconfirmed_without_controls(self):
         # +4 ms of render in every head sample, both executions: reproduced, render is the whole Δ_total, so M1;
-        # main has no controls (ruling D1), so step 4 says so.
+        # no controls are given, so step 4 says so.
         result = self.attribute(echo_replay(ECHO_BASE, ECHO_RENDER))
         self.assertEqual(self.outcome(result), ("M1 renderer work", 4))
         self.assertEqual(result.confirmations, {"M1": "screened, unconfirmed (no control runs)"})
@@ -139,10 +139,10 @@ class EchoAttributionTests(unittest.TestCase):
                       "reproduced", result.lines)
 
     def test_one_execution_is_evidence_unavailable(self):
-        # §4 reads two executions; one is disclosed as unavailable, never read as a decision.
+        # The attribution reads two executions; one is disclosed as unavailable, never read as a decision.
         result = self.attribute(echo_replay(ECHO_BASE, ECHO_RENDER)[:1])
         self.assertEqual(self.outcome(result), ("inconclusive (evidence unavailable)", 0))
-        self.assertIn("- 1 replay execution(s); §4 reads two", result.lines)
+        self.assertIn("- 1 replay execution(s); the attribution reads two", result.lines)
 
     def test_an_execution_without_identity_is_evidence_unavailable(self):
         # Evidence with no run identity cannot be shown to be a distinct execution of this comparison.
@@ -353,7 +353,7 @@ class EchoAttributionTests(unittest.TestCase):
         self.assertTrue(any("rise +0.800 per sample" in line for line in result.lines))
 
     def test_a_permit_absence_of_exactly_half_screens_m4(self):
-        # frame_request_to_entry +4 ms, of which the permit is absent for exactly 2 ms, 50% (v6 X3, v6.1 B2): M4.
+        # frame_request_to_entry +4 ms, of which the permit is absent for exactly 2 ms, 50%, the threshold inclusive: M4.
         head = [echo_entry(frame_request_to_entry=6.0, absent=2.0)] * 5
         result = self.attribute(echo_replay(ECHO_BASE, head))
         self.assertEqual(self.outcome(result), ("M4 pacing", 4))
@@ -423,7 +423,7 @@ class EchoAttributionTests(unittest.TestCase):
         self.assertTrue(any("M4, replay 1: unavailable: tick-qualified 6/8 base" in line for line in failing.lines))
 
     def test_an_unavailable_m3_population_is_not_a_zero_and_blocks_m4(self):
-        # Three of four samples with a complete flood interval is below §2's gate in both executions.
+        # Three of four samples with a complete flood interval is below the population gate in both executions.
         incomplete = echo_entry(m3_complete=False)
         head_incomplete = echo_entry(m3_complete=False, frame_request_to_entry=6.0, absent=2.0)
         result = self.attribute(echo_replay([echo_entry()] * 3 + [incomplete],
@@ -488,11 +488,11 @@ class EchoAttributionTests(unittest.TestCase):
                          {"M4": "attributed (C4, control identity unverified)"})
 
     def test_a_control_below_the_ordered_gate_cannot_confirm(self):
-        # The control's head orders three of four samples (6 of 8 over its two runs), below §2's gate.
+        # The control's head orders three of four samples (6 of 8 over its two runs), below the population gate.
         head = [echo_entry(render=4.0)] * 3 + [perf_timeline_tests.timeline("split-only")]
         result = self.attribute(echo_replay(ECHO_BASE, ECHO_RENDER), {"C2": echo_control("C2", head)})
         self.assertEqual(result.confirmations, {"M1": "screened, unconfirmed"})
-        self.assertTrue(any("ordered 10/10 base, 6/8 head, below §2's gates" in line for line in result.lines),
+        self.assertTrue(any("ordered 10/10 base, 6/8 head, below the population gates" in line for line in result.lines),
                         result.lines)
 
     def test_a_control_below_the_keypress_gate_cannot_confirm(self):
@@ -521,7 +521,7 @@ class EchoAttributionTests(unittest.TestCase):
                 self.assertEqual(result.confirmations, {"M1": "screened, unconfirmed"})
                 expected = {"empty": "unavailable: C2 1 head: no accepted S2/flood counters run",
                             "unavailable": "unavailable: C2 1 head: no recorded timeline",
-                            "split-only": "ordered 10/10 base, 0/10 head, below §2's gates"}[case]
+                            "split-only": "ordered 10/10 base, 0/10 head, below the population gates"}[case]
                 self.assertTrue(any(expected in line for line in result.lines), (expected, result.lines))
 
     # M3's head: three busy samples, frame_request_to_entry 7 ms with two flood services, and two quiet ones at

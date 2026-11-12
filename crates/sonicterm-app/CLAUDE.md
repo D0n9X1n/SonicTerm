@@ -301,7 +301,10 @@ cargo build -p sonicterm-app
   rows: when the pointed unspaced run reaches a stopped pane edge the scan is refused, and
   any other candidate that reaches one is filtered out individually. The primary screen
   joins only recorded wraps. A bracketed URL never joins two rows across a pane border that
-  both rows draw. On the alternate screen, `hyperlink_hover_cells` continues one OSC 8
+  both rows draw. `padded_markdown_uri_in` (`path_target_hardwrap_markdown.rs`), tried after the
+  edge-reaching bracketed rule, joins a `](http…` target Claude Code's numbered diff/markdown box
+  wraps short of the pane edge; every refusal is `NotApplicable`, so it only adds joins. Both
+  rules share `closer_tail_ends_token`. On the alternate screen, `hyperlink_hover_cells` continues one OSC 8
   link's fragment into the next row's fragment of the same link when, inside one pane, at
   most `LINK_CONTINUATION_MARGIN` (2) blank cells follow the upper fragment before the
   pane's right edge and only blank indentation of at most `LINK_CONTINUATION_INDENT` (8)

@@ -86,18 +86,17 @@ fn held_since(before: isize) -> usize {
 
 /// The reported figure must track real heap across sizes.
 ///
-/// Measured before the table term was counted: reported 983,040 against
-/// 4,718,624 held at 16 Ki entries — **4.80x**. The tables cost roughly 3.7 MB
-/// against 1.0 MB of strings, so the uncounted term was the dominant one.
+/// The registry's hash tables cost several times more than the URI strings
+/// they index, so a figure that counted only the strings would understate the
+/// heap several times over; the reported figure must include the tables.
 #[test]
 fn reported_bytes_track_real_heap() {
     let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     for (count, uri_len) in [(1_000usize, 24usize), (1_000, 60), (8_000, 30)] {
         // Build every URI *before* the measurement window. `format!` allocates
         // a temporary per call, and measuring inside the loop would attribute
-        // the harness's own garbage to the registry — the first draft of this
-        // test did exactly that and reported a 4.21x undercount that was
-        // mostly its own `String`s.
+        // the harness's own garbage to the registry and report an undercount
+        // that is mostly the test's own `String`s.
         let uris: Vec<String> =
             (0..count).map(|index| format!("{:width$}", index, width = uri_len)).collect();
 

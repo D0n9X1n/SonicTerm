@@ -146,12 +146,18 @@ def compare_argv(job_id, run_length):
     return [argument.replace(str(result.root), "$RUNNER_TEMP") for argument in result.argv]
 
 
+# The release-only variants: S13's wide layouts on both platforms, then the macOS-only ones.
+MACOS_RELEASE_ONLY = ["S13/wide-8", "S13/wide-16", "S13/wide-32", "S2/spawn", "S3/history", "S3/resize",
+                      "S11/burst", "S11/burst-text"]
+
+
 @unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake python3")
 class CountersWorkflowTests(unittest.TestCase):
     """Each comparison job's step: which run and counters options each mode passes."""
 
-    def test_a_pull_request_runs_two_counters_runs_and_a_release_its_full_count(self):
-        # The PR budget allows two counters runs per scenario; a release takes --runs. Both are strict.
+    def test_a_pull_request_runs_two_counters_runs_and_a_release_three(self):
+        # The PR budget allows two counters runs per scenario; a release takes three, enough for every
+        # counters-derived figure's sample floor, while its timed set keeps --runs. Both are strict.
         for job_id in perf_workflow_fixture.COMPARISON_JOBS:
             with self.subTest(job=job_id):
                 pull_request = compare_argv(job_id, "short")
@@ -160,7 +166,7 @@ class CountersWorkflowTests(unittest.TestCase):
                 self.assertEqual(pull_request[pull_request.index("--counters-runs") + 1], "2")
                 release = compare_argv(job_id, "full")
                 self.assertIn("--counters", release)
-                self.assertNotIn("--counters-runs", release)
+                self.assertEqual(release[release.index("--counters-runs") + 1], "3")
                 self.assertNotIn("--short", release)
                 for argv in (pull_request, release):
                     self.assertIn("--require-base", argv)
@@ -426,9 +432,9 @@ class WindowsComparisonLegTests(unittest.TestCase):
         self.assertEqual(shard["scenarios"].split()[:6], ["S4", "S5", "S11"] + perf_workflow_fixture.PLATFORM_SCENARIOS["Windows"])
 
     def test_the_macos_shards_are_the_reviewed_three_set_partition(self):
-        # Three sets from measured per-variant times (run 42371975980): S7 leads the first, alone near the budget;
-        # S12, S12/status-line and S3 join the S9 set; S2 and S13's two variants the release set. Exact-head CI must
-        # measure it including runner queues against the 35-minute budget. S2/glide and S11/kitty-placeholders
+        # Three sets balanced from measured per-variant times: S7, the longest variant, leads the first with only
+        # short ones; S12, S12/status-line and S3 join the S9 set; S2 and S13's two variants the release set.
+        # Exact-head CI measures it including runner queues against the 35-minute budget. S2/glide and S11/kitty-placeholders
         # run in S7-S4, the shard with the most slack, so they stay off the critical path.
         self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
             "S7-S4": ["S7", "S4", "S1/atlas-retry", "S8", "S6/selection-drag", "S2/glide", "S11/kitty-placeholders"],
@@ -476,27 +482,80 @@ class WindowsComparisonLegTests(unittest.TestCase):
                                              / "perf.yml").read_text(encoding="utf-8"))
 
     def test_only_a_release_run_adds_the_release_only_scenarios(self):
-        # Every entry carries release_scenarios: S13's three wide layouts on the shard holding S13 and, on
-        # macOS, S3/history, S3/resize, S11/burst and S11/burst-text on the shard holding S3 and S11 and
-        # S2/spawn on the one holding S2, empty elsewhere; the comparison step appends them
-        # only when the run is not short, so a pull request never runs them and its 35-minute budget is
-        # untouched.
-        wide = ["S13/wide-8", "S13/wide-16", "S13/wide-32"]
-        expected_by_job = {"compare-macos": sorted(wide + ["S3/history", "S3/resize", "S11/burst", "S11/burst-text", "S2/spawn"]), "compare-windows": sorted(wide)}
-        for job_id, expected in expected_by_job.items():
-            with self.subTest(job=job_id):
-                entries = self.matrix(job_id)
-                self.assertTrue(all("release_scenarios" in entry for entry in entries))
-                release_only = [name for entry in entries for name in entry["release_scenarios"].split()]
-                self.assertEqual(sorted(release_only), expected)
-                # Each release-only variant runs on the shard that holds its scenario's PR variants.
-                for entry in entries:
-                    for name in entry["release_scenarios"].split():
-                        self.assertIn(name.split("/")[0], entry["scenarios"].split(), name)
-                step = next(step for step in perf_workflow_fixture.load_perf_workflow()["jobs"][job_id]["steps"]
-                            if step.get("name") == "Compare the base and the head")
-                self.assertEqual(step["env"]["RELEASE_SCENARIOS"], "${{ matrix.release_scenarios }}")
-                self.assertIn('if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_SCENARIOS" ]; then', step["run"])
+        # Windows entries carry release_scenarios: S13's three wide layouts on the shard holding S13, empty
+        # elsewhere, appended only when the run is not short, so a pull request never runs them.
+        entries = self.matrix("compare-windows")
+        self.assertTrue(all("release_scenarios" in entry for entry in entries))
+        release_only = [name for entry in entries for name in entry["release_scenarios"].split()]
+        self.assertEqual(sorted(release_only), sorted(MACOS_RELEASE_ONLY[:3]))
+        for entry in entries:
+            for name in entry["release_scenarios"].split():
+                self.assertIn(name.split("/")[0], entry["scenarios"].split(), name)
+        step = next(step for step in perf_workflow_fixture.load_perf_workflow()["jobs"]["compare-windows"]["steps"]
+                    if step.get("name") == "Compare the base and the head")
+        self.assertEqual(step["env"]["RELEASE_SCENARIOS"], "${{ matrix.release_scenarios }}")
+        self.assertIn('if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_SCENARIOS" ]; then', step["run"])
+
+    def test_the_macos_release_partition_covers_every_variant_once(self):
+        # A release runs each macOS entry's release_partition instead of its scenarios. Together they hold every
+        # pull-request variant and every release-only one exactly once; each release-only variant runs beside its
+        # scenario, S12 stays in a CELL_LAYOUT_SHARDS shard, and S9 stays on the shard with its laps.
+        entries = self.matrix("compare-macos")
+        pull_request = [name for entry in entries for name in entry["scenarios"].split()]
+        release = [name for entry in entries for name in entry["release_partition"].split()]
+        self.assertEqual(len(release), len(set(release)), release)
+        self.assertEqual(sorted(release), sorted(pull_request + MACOS_RELEASE_ONLY))
+        for entry in entries:
+            partition = entry["release_partition"].split()
+            for name in set(partition) & set(MACOS_RELEASE_ONLY):
+                self.assertIn(name.split("/")[0], partition, name)
+            if "S12" in partition:
+                self.assertIn(entry["shard"], perf_cell_layout.CELL_LAYOUT_SHARDS["macOS"])
+            if entry["laps"]:
+                self.assertIn(entry["laps"], partition)
+        self.assertIn("S12", " ".join(entry["release_partition"] for entry in entries).split())
+        step = next(step for step in perf_workflow_fixture.load_perf_workflow()["jobs"]["compare-macos"]["steps"]
+                    if step.get("name") == "Compare the base and the head")
+        self.assertEqual(step["env"]["RELEASE_PARTITION"], "${{ matrix.release_partition }}")
+        self.assertIn('if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_PARTITION" ]; then\n'
+                      '  read -ra scenarios <<<"$RELEASE_PARTITION"\nfi', step["run"])
+
+    @unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake python3")
+    def test_each_macos_step_runs_its_release_partition_only_on_a_release(self):
+        # Run the real bash step with every macOS entry's own matrix values: a release passes exactly that
+        # entry's release_partition, in order, and a pull request exactly its scenarios. This catches a YAML
+        # block style that would keep only one line of a folded partition.
+        step = perf_expression_fixture.job_step(perf_workflow_fixture.load_perf_workflow(), "compare-macos",
+                                                perf_workflow_fixture.COMPARE_STEP)
+        # Resolve this runtime-only dependency after module initialization.
+        import perf_workflow_tests
+        for entry in self.matrix("compare-macos"):
+            for run_length, expected in (("full", entry["release_partition"].split()),
+                                         ("short", entry["scenarios"].split())):
+                with self.subTest(shard=entry["shard"], run_length=run_length):
+                    context = comparison_context("compare-macos", run_length)
+                    context["matrix"] = dict(entry)
+                    environ = {name: perf_expression_fixture.substitute(value, context)
+                               for name, value in step["env"].items()}
+                    result = perf_workflow_tests.run_bash_step(
+                        step["run"], dict(environ, GITHUB_RUN_ID="7"),
+                        fakes={"python3": perf_workflow_tests.RECORD_ARGV})
+                    self.assertEqual(result.code, 0, result.stderr)
+                    argv = result.argv
+                    start = argv.index("--scenario") + 1
+                    self.assertEqual(argv[start:argv.index("--runs")], expected)
+
+    def test_the_macos_release_partition_is_the_reviewed_balanced_set(self):
+        # Balanced from measured per-variant release times so no set nears GitHub's 6-hour job limit, which
+        # cancels a job with no table; a pull-request shard plus its release-only variants can exceed it.
+        self.assertEqual({entry["shard"]: entry["release_partition"].split() for entry in self.matrix("compare-macos")}, {
+            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S8", "S6/selection-drag", "S2/glide", "S11/kitty-placeholders",
+                      "S10/sync", "S11", "S11/burst", "S11/burst-text", "S1/status-line"],
+            "S9-S10sync": ["S9", "S12", "S12/status-line", "S6", "S6/rest", "S1", "S3", "S3/history", "S3/resize",
+                           "S5"],
+            "S10-S11release": ["S10", "S11/release", "S2", "S2/flood", "S6/flood", "S13", "S13/sustained-4",
+                               "S13/wide-8", "S13/wide-16", "S13/wide-32", "S2/spawn"],
+        })
 
     def test_windows_legs_get_cairo_bash_and_their_own_names(self):
         # Windows builds need Cairo from vcpkg, the shared step scripts need bash, and the two platforms'

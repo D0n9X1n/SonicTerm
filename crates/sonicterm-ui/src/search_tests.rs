@@ -211,7 +211,7 @@ fn a_search_pointed_at_a_new_grid_rescans_despite_an_equal_revision() {
         "and the stale match survives — this is the defect, shown before the fix acts"
     );
 
-    // What the pane-close path now does.
+    // What the pane-close path does.
     search.invalidate_for_new_grid();
 
     assert!(

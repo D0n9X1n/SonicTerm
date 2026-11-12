@@ -224,7 +224,7 @@ def timed_excess(side: perf_metrics.SideRuns) -> list[int]:
 
 
 def attribution_verdict(runs: Sequence[AttributionRun], synchronized: bool, timed: Sequence[int]) -> str:
-    """One side's #1598 verdict on this platform. Only complete runs decide; the evidence boundary needs the
+    """One side's S10 attribution verdict on this platform. Only complete runs decide; the evidence boundary needs the
     counters runs' excess within ±1 of the same workflow's timed median, and even then it attributes the timed
     excess under instrumentation only."""
     # Resolve this runtime-only dependency after module initialization.

@@ -812,7 +812,7 @@ fn a_uniform_row_stays_one_cluster() {
     );
 }
 
-/// The half-built compaction helper is gone and the module doc no longer calls the storage unwired.
+/// The line source holds no compaction helper and its module doc does not call the storage unwired.
 #[test]
 fn line_source_has_no_compaction_helper_or_stale_wiring_note() {
     let source = LINE_CHECKOUT.replace("\r\n", "\n");

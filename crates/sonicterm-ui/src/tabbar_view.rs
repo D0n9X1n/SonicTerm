@@ -792,8 +792,8 @@ fn shrink_widest_to_fit(mut widths: Vec<f32>, budget_px: f32) -> Vec<f32> {
 /// Pure helper computing the top inset reserved above the grid for both
 /// the OS titlebar band (when an integrated titlebar pushes the content
 /// view under the native chrome) and the tab bar. Returns the titlebar
-/// inset alone when the tab bar is hidden, so the grid recovers the row
-/// the bar used to take. Exposed so tests can validate visibility wiring
+/// inset alone when the tab bar is hidden, so the grid takes the row the
+/// bar would occupy. Exposed so tests can validate visibility wiring
 /// without needing a live GPU context.
 pub fn tab_bar_top_inset(visible: bool, padding: f32) -> f32 {
     tab_bar_top_inset_with_titlebar(visible, padding, 0.0)
