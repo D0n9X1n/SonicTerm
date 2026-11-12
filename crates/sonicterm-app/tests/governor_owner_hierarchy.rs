@@ -163,13 +163,11 @@ fn registering_owners_charges_nothing() {
 
 /// Closing a window through the production path must close its owners.
 ///
-/// `release_window_owner` had exactly one caller: `__test_remove_window`, a
-/// `#[doc(hidden)]` test seam. The production close paths call
-/// `release_child_window_registries`, which touches three maps and the drag
-/// backend and never mentions the governor.
-///
-/// Measured before this: 100 create/destroy cycles left **200 owners created
-/// and 200 still `Open`** — not `Closing`, `Open`. Close was never attempted.
+/// `__test_remove_window`, a `#[doc(hidden)]` test seam, calls
+/// `release_window_owner` directly, so a test through it would pass even if
+/// the production close path never reached the governor. This test closes
+/// panes the way a user does and requires every owner it created to leave
+/// `Open` — not merely to reach a state where close was attempted.
 #[test]
 fn the_production_close_path_closes_the_owners_it_created() {
     let mut app = app();
@@ -206,10 +204,11 @@ fn the_production_close_path_closes_the_owners_it_created() {
 
 /// Repeated create/destroy must not ratchet the root's child count.
 ///
-/// `OwnerRegistry` exposes `get` and `insert` and **no `remove`**, so every
-/// `OwnerRecord` — with its `RwLock`, `Mutex`, and two `EnumMap`s over all
-/// resource classes — is retained for the life of the process. An owner that
-/// never closes is therefore a genuine leak, not merely a stale counter.
+/// `OwnerRegistry` removes a record only once its owner closes, so every
+/// `OwnerRecord` that never closes — with its `RwLock`, `Mutex`, and two
+/// `EnumMap`s over all resource classes — is retained for the life of the
+/// process. An owner that never closes is therefore a genuine leak, not merely
+/// a stale counter.
 #[test]
 fn repeated_window_cycles_do_not_ratchet_open_owners() {
     let mut app = app();

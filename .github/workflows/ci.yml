@@ -86,6 +86,10 @@ jobs:
         shell: bash
         run: bash scripts/check-script-identifiers.sh
 
+      - name: Check history references
+        shell: bash
+        run: bash scripts/check-history-references.sh
+
       - name: Run release-note unit test
         shell: bash
         run: bash scripts/test-release-notes.sh
@@ -705,6 +709,10 @@ jobs:
       - name: Check script identifiers
         shell: bash
         run: bash scripts/check-script-identifiers.sh
+
+      - name: Check history references
+        shell: bash
+        run: bash scripts/check-history-references.sh
 
       - name: Check public Rustdoc
         shell: bash
@@ -1534,6 +1542,7 @@ jobs:
         run: |
           bash scripts/check-authored-rust-comments.sh
           bash scripts/check-script-identifiers.sh
+          bash scripts/check-history-references.sh
           bash scripts/check-no-raw-process-exit.sh
           bash scripts/check-rust-version.sh
           bash scripts/check-window-owner-registration.sh

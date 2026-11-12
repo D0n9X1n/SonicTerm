@@ -42,6 +42,7 @@ python3 scripts/local-gate.py
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
+| `history-references` | `bash scripts/check-history-references.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
@@ -112,6 +113,17 @@ Needs:
 [Local Gate](Local-Gate) describes how the runner executes these steps: process
 groups and leftover detection, Windows job objects and preparation, output paths
 and Git state, timeouts, and CI parity.
+
+The `history-references` step keeps comments, docstrings, help and log text,
+workflow comments and wiki pages about what the code does, why it is needed
+and how it prevents a problem. It fails on issue and pull-request numbers
+(`#1234`, `issue 1234`, links to this repository's issues and pull requests)
+and on CI run or job ids. Those belong in the commit message, the pull request
+or the issue. In test sources and fixtures only comments and docstrings are
+read, because their strings are test data; hex colours, GUIDs, versions and
+links to another project's tracker are not citations. Each remaining data
+exception is listed in `scripts/check-history-references.py` with its reason,
+and an exception that no longer matches fails the step.
 
 ## Comparing performance
 
@@ -717,7 +729,7 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   timelines read `unavailable` with `gate-off` when the build has `perf-echo-trace`, and
   with `cfg-off` when it does not.
 - `perf-compare.py --echo-attribution DIR DIR [--echo-control NAME DIR]... [--echo-platform macos|windows]`
-  applies #1607's frozen attribution procedure to S2/flood echo timelines. It is analysis
+  applies the S2/flood echo attribution procedure, fixed before CI, to S2/flood echo timelines. It is analysis
   only: it builds and runs nothing, and takes no comparison, smoke or `--out` option. Each
   directory holds one workflow execution's downloaded perf-comparison artifacts. They are
   read through `perf-flags.py`'s validated path, the same one its flag comparison uses:

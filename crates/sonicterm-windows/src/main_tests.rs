@@ -224,12 +224,12 @@ fn ole_drag_paths_reject_missing_initialization_and_empty_payloads() {
 
 /// No caller may answer the detection question with a literal.
 ///
-/// `should_use(false)` in `main.rs` made the branch unreachable under `Auto`,
-/// the default mode — the answer was fixed before the adapter was consulted.
+/// `should_use(false)` in `main.rs` would make the branch unreachable under
+/// `Auto`, the default mode, by fixing the answer before the adapter is consulted.
 /// The argument must come from runtime detection or the call is decorative.
 ///
 /// Lives here rather than beside the presenter tests: this reads `main.rs` as
-/// text and needs nothing platform-specific, and `software_presenter` is now
+/// text and needs nothing platform-specific, and `software_presenter` is
 /// `#[cfg(target_os = "windows")]` — so a guard placed there would stop running
 /// on macOS, which is where most of this repository's development happens.
 ///

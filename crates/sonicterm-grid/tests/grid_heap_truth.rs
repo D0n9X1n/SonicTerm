@@ -130,10 +130,10 @@ fn fill_with_extras(cols: u16, rows: u32, marks: usize) -> Grid {
 
 /// Ordinary output must not grow the grid past its budget.
 ///
-/// Enforcement ran only on alt-screen transitions and resize, so a grid
-/// growing through `cat` was never checked. Measured before this: **63 MiB
-/// against a 24 MiB budget** at 80 columns with linked cells, with no resize
-/// anywhere in the sequence.
+/// Enforcement must run as rows scroll into history, not only on alt-screen
+/// transitions and resize: a grid growing through `cat` sees neither. The
+/// fill here has no resize anywhere in the sequence and must still stay in
+/// budget, with and without linked cells.
 #[test]
 fn scrolling_alone_keeps_the_grid_inside_its_budget() {
     let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -279,14 +279,12 @@ fn enforcement_sees_the_same_figure_the_governor_is_charged() {
 /// Grapheme extras must be counted, not assumed small.
 ///
 /// `FatAttributes::extras` is an `Option<Box<str>>` holding a cell's trailing
-/// zero-width codepoints. The figure was built from `size_of::<FatAttributes>()`
-/// alone, which describes the pointer and not the string behind it, so a grid
-/// of accented text reported the same as a grid of plain linked cells.
+/// zero-width codepoints. `size_of::<FatAttributes>()` describes the pointer
+/// and not the string behind it, so a figure built from it alone would report
+/// a grid of accented text the same as a grid of plain linked cells.
 ///
-/// Measured before the payload was counted, at 80 columns with a full
-/// scrollback: 40,682,664 held against 20,455,464 reported — **1.99x**. The
-/// uncounted term was the larger one, exactly as it was for the rare-attribute
-/// box before it.
+/// With a full scrollback of combining marks the string payload is the larger
+/// term, so leaving it out would understate real heap by about half.
 ///
 /// Reached by ordinary output. Combining marks and ZWJ emoji both land here; no
 /// resize, no configuration change, and no alternate screen is involved.
@@ -322,10 +320,10 @@ fn grapheme_extras_are_counted_against_real_heap() {
 /// A grid of extras-bearing text must stop at the budget, in real memory.
 ///
 /// The case the ratio assertion above cannot make on its own: enforcement
-/// compares `retained_amount()`, so while the payload went uncounted the grid
-/// judged itself compliant and kept accepting rows. Measured before the fix:
-/// **52,958,568 bytes held against a 25,165,824 budget — 210%** — while the
-/// grid reported 26,673,384 and considered itself in band.
+/// compares `retained_amount()`, so a payload left uncounted would let the
+/// grid judge itself compliant and keep accepting rows far past its budget.
+/// Measuring the real heap catches that, where the reported figure alone
+/// would read in band.
 #[test]
 fn extras_bearing_output_stops_at_the_budget() {
     let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -250,8 +250,8 @@ fn grid_with_scrollback(rows: usize) -> Grid {
 
 /// A window drag that returns to its starting width must return its memory.
 ///
-/// Measured before this was handled: one ±1 column drag on a populated
-/// scrollback permanently retained **1.875 MiB** — about 8% of a pane's entire
+/// A ±1 column drag on a populated scrollback must not permanently retain a
+/// reallocated copy of its rows: that would be a sizeable share of a pane's
 /// grid ceiling, from a gesture the user would not describe as doing anything.
 #[test]
 fn an_adjacent_resize_round_trip_returns_its_capacity() {

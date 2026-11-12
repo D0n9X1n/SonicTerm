@@ -326,8 +326,8 @@ fn v120_stale_atlas_identity_invalidates_all_dependents_888() {
     // The eviction counter cannot serve as that identity. `reset_in_place`
     // returns it to zero, so a cache holding a pre-reset value is invalidated
     // correctly at first and then matches again once the counter climbs back
-    // past it — pointing into an atlas that was entirely replaced. Measured
-    // before this fix: 8 -> 0 -> 11, and an entry holding 8 revived.
+    // past it — pointing into an atlas that was entirely replaced. The test
+    // drives the counter down by reset and back up past the held value.
     let mut atlas = GlyphAtlas::new(32, 32);
     let mut raster = TileRasterizer(RasterTile {
         width: 16,

@@ -40,6 +40,7 @@ python3 scripts/local-gate.py
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS、Windows、Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
 | `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
+| `history-references` | `bash scripts/check-history-references.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
 | `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `tooling`、`windows-checks`、`linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-checks`、`linux-core` |
@@ -109,6 +110,13 @@ python3 scripts/local-gate.py
 
 [本地 gate](Local-Gate-zh-CN) 说明 runner 如何执行这些步骤：进程组与残留进程检测、Windows Job Object 与准备阶段、
 输出路径与 Git 状态、超时与 CI 一致性。
+
+`history-references` 步骤让注释、docstring、帮助与日志文字、工作流注释和 wiki 页面只说明代码做什么、为什么
+需要，以及如何防止问题。它在出现 issue 与 pull request 编号（`#1234`、`issue 1234`、指向本仓库 issue 与 pull
+request 的链接）以及 CI run 或 job ID 时失败。这些内容属于 commit 信息、pull request 或 issue。测试源码与
+fixture 只读取注释与 docstring，因为其中的字符串是测试数据；十六进制颜色、GUID、版本号以及指向其他项目问题
+追踪器的链接都不算引用。其余每个数据例外都在 `scripts/check-history-references.py` 中列出并说明原因，
+不再匹配的例外会使该步骤失败。
 
 ## 性能对比
 
@@ -476,7 +484,7 @@ PR 与 Change。
   整数交叉相乘。什么都未记录的一侧显示 `unavailable`，绝不是测得的零，此时关卡也为 `unavailable`；测试工具早于
   该能力的一侧显示 `n/a (no timeline)`。计时运行保持计数器关闭，因此构建带有 `perf-echo-trace` 时其时间线记为带 `gate-off` 的 `unavailable`，不带时记为带 `cfg-off` 的 `unavailable`。
 - `perf-compare.py --echo-attribution DIR DIR [--echo-control NAME DIR]... [--echo-platform macos|windows]`
-  对 S2/flood 回显时间线应用 #1607 冻结的归因流程。它只做分析：不构建、不运行，也不接受对比、smoke 或 `--out`
+  对 S2/flood 回显时间线应用在 CI 之前固定的 S2/flood 回显归因流程。它只做分析：不构建、不运行，也不接受对比、smoke 或 `--out`
   选项。每个目录存放一次工作流执行下载的 perf-comparison 制品。它们通过 `perf-flags.py` 的验证路径读取，与其
   标记比较使用同一条路径：
   - 校验每个制品的 `run-identity.json`（运行、引用、测试工具、设置、能力）；

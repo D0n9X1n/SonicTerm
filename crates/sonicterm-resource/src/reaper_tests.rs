@@ -284,8 +284,8 @@ fn release_retained_wakes_a_waiting_reserver() {
 ///
 /// One entry per unsettled *task* would grow with work rather than with the
 /// number of owners in trouble, and the vector is cloned into every shutdown
-/// report. Measured before this was deduplicated: 4,000 unsettled tasks from a
-/// single owner produced 4,000 entries naming that one owner.
+/// report. Many unsettled tasks from a single owner must produce exactly one
+/// entry naming that owner.
 #[test]
 fn the_unresolved_report_names_each_owner_once() {
     let clock = TestClock::new();

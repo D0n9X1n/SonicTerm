@@ -1,7 +1,7 @@
 """S13's contention verdict: whether a 2x2 grid with one sustained flood keeps the idle pane's typing as
 responsive as two side-by-side panes, read from each variant's counters runs.
 
-The rule was fixed before any CI run measured S13:
+The rule:
 
 - Each variant needs at least `MIN_SAMPLES` credited typing samples, every run's window counters
   (the miss attribution included), and the flood alive throughout `typing` and `tail`: the harness

@@ -99,8 +99,9 @@ fn retained_amount_tracks_trimming_back_down() {
 
 /// Linked cells must move the reported figure.
 ///
-/// Before this was counted, filling a screen with OSC 8 links moved
-/// `retained_amount().bytes` by **exactly zero** while allocating 76,800 bytes.
+/// Each linked cell allocates a `FatAttributes` box that `size_of::<Cell>()`
+/// does not see, so a screen of OSC 8 links must raise
+/// `retained_amount().bytes` by at least those boxes.
 #[test]
 fn linking_cells_moves_the_retained_figure() {
     let mut grid = Grid::new(80, 24);

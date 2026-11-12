@@ -203,31 +203,27 @@ jobs:
     strategy:
       # Every shard reports: one shard's failure must not hide the other sets' tables.
       fail-fast: false
-      # The macOS shards do not build: each is its scenarios' runs plus about 31 s of setup, download, listing and
-      # report. GitHub runs at most five of this repository's macOS jobs at once, across workflows, and CI holds two
-      # (core gates, which also runs the aarch64 smoke, and the Intel smoke) for most of a perf run, so three slots
-      # reach these shards when the binaries land. Three sets of about 19 min each, from run 40344066083's
-      # per-variant times (S7 12.1, S10/sync 5.4, S2 5.4, S10 5.0, S11/release 4.5 min, the rest 1.1-3.1 min), all
-      # start then; a fourth would queue behind CI's macOS jobs and set the critical path. Every scenario runs once.
-      # S11/release holds 65 s after its media-free frame, so --short caps it at one run per side; S2/flood,
-      # S1/atlas-retry and S6/rest run twice per side (--list run_caps). A release comparison runs them uncapped.
-      # S12 runs in S9-S10sync, a shard perf-compare.py's cell-layout decision reads (CELL_LAYOUT_SHARDS). Shard
-      # names remain stable artifact identities. Exact-head elapsed time, including queues, must stay below 35 min.
-      # Run 42371975980 measured S7-S4 at 41.3 min from creation, the critical path: S7 alone takes 21.0 min of its
-      # scenarios. S13 and S13/sustained-4 (2.6 min each) moved to S10-S11release, which had 13.8 min of slack, and
-      # S12/status-line (1.4) and S3 (1.5) to S9-S10sync (13.6 min of slack), so S7-S4 leaves S7 with S4, S8,
-      # S6/selection-drag and the counters-only S1/atlas-retry. Run 42375734702 still measured 36.7 min with S7 at
-      # 20.9 (base and head alike; the last earlier PR run, 41234583335, was 46.4 min on the same path), so S7 takes
-      # 3 short runs a side in every set (--list run_caps), about 6 min less; a release comparison runs it uncapped.
-      # S2/glide (one short run a side) and S11/kitty-placeholders (two) run in S7-S4, the macOS shard with the
-      # most slack, so they stay off the critical path.
-      # A release comparison runs every variant in full, so the pull-request sets do not balance it: each entry's
-      # release_partition replaces its scenarios on a release. It holds every pull-request variant and every
-      # release-only one (S13's wide layouts, S2/spawn, S3/history, S3/resize, S11/burst, S11/burst-text), each
-      # release-only variant beside its scenario, S12 in a CELL_LAYOUT_SHARDS shard and S9 with its laps. From
-      # run 42970532300's per-variant times the three sets take about 289, 287 and 268 min at five counters runs
-      # a side; a release runs three, about 230 min each, under GitHub's 6-hour job limit with room for a slow
-      # runner. Shard names stay the artifact identities, so a release's S7-S4 also runs S10/sync and S11.
+      # The macOS shards do not build: each is its scenarios' runs plus setup, download, listing and report.
+      # GitHub runs at most five of this repository's macOS jobs at once, across workflows, and CI holds two
+      # (core gates, which also runs the aarch64 smoke, and the Intel smoke) for most of a perf run, so three
+      # slots reach these shards when the binaries land; a fourth would queue behind CI's macOS jobs and set the
+      # critical path. Every scenario runs once, and the sets are balanced so that no shard sets the pull-request
+      # critical path: rebalance them from measured per-variant times (scripts/perf-critical-path.py reads an
+      # exact-head run) when a scenario is added or grows. Exact-head elapsed time, including queues, must stay
+      # below 35 min. S7 is the longest variant, so it shares its shard only with short ones and --short caps it
+      # at 3 runs a side (--list run_caps); a release comparison runs it uncapped. S11/release holds 65 s after its
+      # media-free frame, so --short caps it at one run per side; S2/flood, S1/atlas-retry and S6/rest run twice
+      # per side. S2/glide (one short run a side) and S11/kitty-placeholders (two) run in S7-S4, the shard with
+      # the most slack, so they stay off the critical path. S12 runs in S9-S10sync, a shard perf-compare.py's
+      # cell-layout decision reads (CELL_LAYOUT_SHARDS). Shard names remain stable artifact identities.
+      # A release comparison runs every variant in full, so the pull-request sets do not balance it, and a job
+      # past GitHub's 6-hour limit is cancelled with no table: each entry's release_partition replaces its
+      # scenarios on a release. It holds every pull-request variant and every release-only one (S13's wide
+      # layouts, S2/spawn, S3/history, S3/resize, S11/burst, S11/burst-text), each release-only variant beside its
+      # scenario, S12 in a CELL_LAYOUT_SHARDS shard and S9 with its laps, balanced from measured per-variant
+      # release times so each set stays well under that limit with room for a slow runner; rebalance it when a
+      # release scenario is added. Shard names stay the artifact identities, so a release's S7-S4 also runs
+      # S10/sync and S11.
       matrix:
         include:
           - platform: macOS
@@ -428,16 +424,12 @@ jobs:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     strategy:
       fail-fast: false
-      # Each Windows shard builds both refs itself (about 6-12 min), then runs its sets; without counters the
-      # jobs took 10-20 min (S7 20, S2-S10sync 18, S1-S3-S6-S8-S12 15). Rebalance here when a scenario grows.
-      # Measured with counters (run 37128040244): S1-S3-S6-S8-S12 23.7, S7 20.9, S2-S10sync 20.2,
-      # S4-S5-S11 17.5, S9-S10 13.4. S6/flood (+2.0), S6/selection-drag (+1.3) and S2/flood (+5.3) all join
-      # S9-S10. S2/flood's cap of 2 short runs saves about 3.8 min there; a release comparison runs it
-      # uncapped. S9-S10 measured 22.6 (run 37147065934); S9's laps set, two runs a side, adds about 0.4.
-      # S6/rest joins S2-S10sync. Its added time is not estimated here: the exact-head run, read with
-      # scripts/perf-critical-path.py, is the measurement. S1/status-line and S12/status-line join S7, the
-      # one-scenario shard, one run per side in each set: nominally about 1 and 2 min, not measured. S13 and
-      # S13/sustained-4 join S2-S10sync on the same caps, nominally about 6 min a variant, not measured.
+      # Each Windows shard builds both refs itself, then runs its sets. Rebalance here when a scenario is added or
+      # grows, from measured per-variant times: the exact-head run, read with scripts/perf-critical-path.py, is
+      # the measurement, never a local estimate. S2/flood's cap of 2 short runs keeps S9-S10 within the budget; a
+      # release comparison runs it uncapped. S9's laps set, two runs a side, runs on the shard holding S9.
+      # S1/status-line and S12/status-line run in S7, the one-scenario shard, one run per side in each set; S13
+      # and S13/sustained-4 run in S2-S10sync on the same caps.
       matrix:
         include:
           - platform: Windows
@@ -462,19 +454,16 @@ jobs:
             runner: windows-latest
             shard: S4-S5-S11
             # S11/release runs once per side under --short, and the S11/gdi (frame texture) and S11/wgpu
-            # (CPU-adapter control) presenter variants twice: 17.5 min before, about 26.4 min projected.
+            # (CPU-adapter control) presenter variants twice, which keeps this shard within the budget.
             scenarios: S4 S5 S11 S11/release S11/gdi S11/wgpu
             laps: ""
             release_scenarios: ""
           - platform: Windows
             runner: windows-latest
             shard: S1-S3-S6-S8-S12
-            # S1/atlas-retry runs only in the counters set, twice per side. Nominal cost, not measured: four
-            # runs at S1's measured 5.5 s plus 0.23 s between runs, about 23 s, assuming its recovery ends
-            # inside the 5 s --short hold; a slow or invalid run can take up to about 74 s and is retried
-            # up to 3 times a side. Measured compare steps 1110-1326 s with 266-1910 s of slack (runs
-            # 37318119545, 37325514262, 37333587004); S4-S5-S11 here had 0 s in one of them. The
-            # exact-head CI run is the measurement.
+            # S1/atlas-retry runs only in the counters set, twice per side, and is retried up to 3 times a side
+            # when a run is slow or invalid; this shard has the slack to absorb that. The exact-head CI run is
+            # the measurement.
             scenarios: S1 S3 S6 S8 S12 S1/atlas-retry
             laps: ""
             release_scenarios: ""

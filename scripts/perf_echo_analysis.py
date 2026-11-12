@@ -11,31 +11,32 @@ import perf_metrics
 import perf_timeline_schema
 
 
-# --- S2/flood echo attribution (#1607 plan v6.1 §4) ------------------------------------------
+# --- S2/flood echo attribution ----------------------------------------------------------------
 
-# The seven additive parts of an ordered sample's credited latency, spelled as the frozen schema 1 spells them.
-# v6.1's `publication_to_service` and `service_to_entry` are v5 V2's `publication_to_frame_request` and
+# The seven additive parts of an ordered sample's credited latency, spelled as timeline schema 1 spells them.
+# The publication-to-service and service-to-entry intervals are the parts `publication_to_frame_request` and
 # `frame_request_to_entry`.
 ECHO_PARTS = perf_timeline_schema.TIMELINE_PART_NAMES
-# §4 step 3: the primary part each mechanism screens. M3 and M4 share frame_request_to_entry and are told apart by
+# Step 3: the primary part each mechanism screens. M3 and M4 share frame_request_to_entry and are told apart by
 # the flood count and the permit's absence.
 ECHO_MECHANISM_PARTS = {"M1": "render", "M2": "publication_to_frame_request", "M3": "frame_request_to_entry",
                         "M4": "frame_request_to_entry"}
 ECHO_MECHANISM_NAMES = {"M1": "renderer work", "M2": "upstream readiness", "M3": "flood competition",
                         "M4": "pacing"}
-# §4 step 4 and v5 V5: the controls that can confirm each mechanism. C5 is broad, so M3 is only ever supported.
+# Step 4: the controls that can confirm each mechanism. C5 is broad, so M3 is only ever supported.
 ECHO_MECHANISM_CONTROLS = {"M1": ("C1", "C2", "C3"), "M2": ("C1", "C2", "C3"), "M3": ("C5",), "M4": ("C4",)}
 ECHO_CONTROL_NAMES = ("C1", "C2", "C3", "C4", "C5")
-# Ruling D1 keeps control identity (v5 V3's `sonic::perf_control` check) in the experimental stack, so a control
+# Control identity (the `sonic::perf_control` check) lives in the experimental stack, not here, so a control
 # named on the command line is not verified to be that control: every confirmation it gives says so.
 ECHO_UNVERIFIED = "control identity unverified"
-# The frozen thresholds as exact fractions: a primary part's share of Δ_total, M4's permit-absent share of its part's
-# Δ, a control's reduction, and M3's rise in flood services per sample (absolute, so a zero base is defined).
+# The thresholds, fixed before CI, as exact fractions: a primary part's share of Δ_total, M4's permit-absent
+# share of its part's Δ, a control's reduction, and M3's rise in flood services per sample (absolute, so a zero
+# base is defined).
 ECHO_PRIMARY_SHARE = Fraction(1, 2)
 ECHO_PERMIT_ABSENT_SHARE = Fraction(1, 2)
 ECHO_REDUCTION = Fraction(1, 2)
 ECHO_FLOOD_RISE = Fraction(1)
-# §4's "in both runs" and "in two runs": a replay, and each control, is two executions of its workflow pair.
+# "In both runs" and "in two runs": a replay, and each control, is two executions of its workflow pair.
 ECHO_EXECUTIONS = 2
 # The set the attribution reads: S2/flood's counters dataset, the only one whose samples carry a timeline.
 ECHO_LABEL = "S2/flood"
@@ -81,7 +82,7 @@ class EchoExecution:
 
 @dataclass
 class EchoAttribution:
-    """The §4 verdict: the outcome, the step that decided it, each screened mechanism with its step-4 confirmation,
+    """The attribution verdict: the outcome, the step that decided it, each screened mechanism with its step-4 confirmation,
     and every figure behind it, unavailable populations named."""
     outcome: str
     step: int
@@ -138,7 +139,7 @@ def _echo_percent(share: Fraction) -> str:
 
 
 def _echo_gate(base: tuple[int, int], head: tuple[int, int]) -> bool:
-    """§2's population gate on (numerator, denominator) per side: each at least 80%, the two within 10 points, by
+    """The population gate on (numerator, denominator) per side: each at least 80%, the two within 10 points, by
     latency_acceptance's integer cross-products, so both boundaries are exact. An empty denominator fails."""
     return base[1] > 0 and head[1] > 0 and perf_metrics.latency_acceptance(base, head)
 
@@ -173,7 +174,7 @@ def _echo_side_unavailable(execution: EchoExecution) -> list:
 
 
 def _echo_gates(execution: EchoExecution) -> tuple[bool, str]:
-    """§2's two gates on one execution, both sides: keypress attribution and the ordered population over credited,
+    """The two population gates on one execution, both sides: keypress attribution and the ordered population over credited,
     each at least 80% per side with at most a 10-point gap. Returns whether both pass and the figures."""
     attributed = [(sum(run.attributed for run in runs), sum(run.total for run in runs))
                   for runs in (execution.base, execution.head)]
@@ -243,9 +244,9 @@ def echo_identity_problems(replay: Sequence[EchoExecution],
 
 
 def _echo_m3(replay: Sequence[EchoExecution], lines: list) -> list:
-    """§4 step 3's M3 screen, per execution: on ordered ∩ m3_complete, the head's mean flood services exceed the
+    """Step 3's M3 screen, per execution: on ordered ∩ m3_complete, the head's mean flood services exceed the
     base's by at least 1.0 per sample. Each execution's state is True, False, or None when that population fails
-    §2's gate, which is unavailable, never false."""
+    the population gate, which is unavailable, never false."""
     states: list = []
     for execution in replay:
         base, head = (_echo_timelines(runs, perf_timeline_schema._timeline_in_m3) for runs in (execution.base, execution.head))
@@ -253,8 +254,8 @@ def _echo_m3(replay: Sequence[EchoExecution], lines: list) -> list:
                     (len(head), _echo_credited_count(execution.head)))
         figures = f"ordered ∩ m3_complete {coverage[0][0]}/{coverage[0][1]} base, {coverage[1][0]}/{coverage[1][1]} head"
         if not _echo_gate(*coverage):
-            # When: the M3 population is below §2's gate, its mean is not evidence; missing is never zero.
-            lines.append(f"- step 3 M3, {execution.label}: unavailable: {figures} of credited, below §2's gate")
+            # When: the M3 population is below the population gate, its mean is not evidence; missing is never zero.
+            lines.append(f"- step 3 M3, {execution.label}: unavailable: {figures} of credited, below the population gate")
             states.append(None)
             continue
         rise = (_echo_mean([timeline["flood_services"] for timeline in head])
@@ -266,8 +267,8 @@ def _echo_m3(replay: Sequence[EchoExecution], lines: list) -> list:
 
 
 def _echo_m4(replay: Sequence[EchoExecution], lines: list, m3_states: Sequence[bool | None]) -> bool:
-    """§4 step 3's M4 screen, with v6 X3 and v6.1 B2: in each execution, on ordered ∩ tick_qualified (at least 80%
-    of ordered per side, §2), the mean integrated permit-absent time carries at least 50% of frame_request_to_entry's
+    """Step 3's M4 screen: in each execution, on ordered ∩ tick_qualified (at least 80% of ordered
+    per side, by the population gate), the mean integrated permit-absent time carries at least 50% of frame_request_to_entry's
     Δ on that population, and M3's condition is false in that execution. tick_to_entry stays descriptive."""
     holds = []
     for execution, m3_state in zip(replay, m3_states):
@@ -282,7 +283,7 @@ def _echo_m4(replay: Sequence[EchoExecution], lines: list, m3_states: Sequence[b
         figures = f"tick-qualified {coverage[0][0]}/{coverage[0][1]} base, {coverage[1][0]}/{coverage[1][1]} head"
         if not _echo_gate(*coverage):
             # When: too few ordered samples consumed a known tick, the M4 population is not evidence.
-            lines.append(f"- step 3 M4, {execution.label}: unavailable: {figures} of ordered, below §2's gate")
+            lines.append(f"- step 3 M4, {execution.label}: unavailable: {figures} of ordered, below the population gate")
             holds.append(False)
             continue
         part = (_echo_mean(_echo_part_values(head, "frame_request_to_entry"))
@@ -303,7 +304,7 @@ def _echo_m4(replay: Sequence[EchoExecution], lines: list, m3_states: Sequence[b
 
 
 def _echo_stratified(replay: Sequence[EchoExecution], lines: list) -> bool:
-    """§4 step 4's M3 check: within each head run of both executions, ordered ∩ m3_complete samples with no flood
+    """Step 4's M3 check: within each head run of both executions, ordered ∩ m3_complete samples with no flood
     service have a lower frame_request_to_entry median than those with at least one. A run with an empty stratum
     leaves the check unavailable, which does not hold."""
     results = []
@@ -329,8 +330,8 @@ def _echo_stratified(replay: Sequence[EchoExecution], lines: list) -> bool:
 
 def _echo_control_holds(part: str, name: str, control: EchoExecution, reference: EchoExecution,
                         lines: list) -> bool:
-    """One control execution against the replay execution it is paired with, both on the ordered population (v5 V5).
-    The control's evidence and both §2 gates come first, so no statistic is computed from an empty or ungated side.
+    """One control execution against the replay execution it is paired with, both on the ordered population.
+    The control's evidence and both population gates come first, so no statistic is computed from an empty or ungated side.
     Then R_C = 1 - Δ(control vs base) / Δ(head vs base) for the part's mean, and likewise for the total median
     shift; it holds when both reductions are at least 50% of a positive reference shift."""
     where = f"- step 4 {name}, {control.label} against {reference.label}"
@@ -343,7 +344,7 @@ def _echo_control_holds(part: str, name: str, control: EchoExecution, reference:
         return False
     passed, figures = _echo_gates(control)
     if not passed:
-        lines.append(f"{where}: {figures}, below §2's gates")
+        lines.append(f"{where}: {figures}, below the population gates")
         return False
     pools = [[_echo_timelines(runs, perf_timeline_schema._timeline_ordered) for runs in (execution.base, execution.head)]
              for execution in (reference, control)]
@@ -367,9 +368,9 @@ def _echo_control_holds(part: str, name: str, control: EchoExecution, reference:
 
 def _echo_confirm(mechanism: str, replay: Sequence[EchoExecution], controls: Mapping[str, Sequence[EchoExecution]],
                   lines: list) -> str:
-    """§4 step 4 for one screened mechanism: attributed when one of its controls holds in both executions; M3, whose
-    C5 is broad, is at most supporting evidence (v5 V5). Without its controls it is screened, unconfirmed. Every
-    confirmation names that the control's identity is unverified (ruling D1)."""
+    """Step 4 for one screened mechanism: attributed when one of its controls holds in both executions; M3, whose
+    C5 is broad, is at most supporting evidence. Without its controls it is screened, unconfirmed. Every
+    confirmation names that the control's identity is unverified, since nothing here checks it."""
     stratified = _echo_stratified(replay, lines) if mechanism == "M3" else False
     given = [name for name in ECHO_MECHANISM_CONTROLS[mechanism] if controls.get(name)]
     if not given:
@@ -395,14 +396,14 @@ def _echo_confirm(mechanism: str, replay: Sequence[EchoExecution], controls: Map
 
 def echo_attribution(replay: Sequence[EchoExecution],
                      controls: Mapping[str, Sequence[EchoExecution]] | None = None) -> EchoAttribution:
-    """Apply plan v6.1 §4, with its v5, v6 and v6.1 amendments, to the S2/flood echo timelines of a replay's two
+    """Apply the attribution procedure (steps 1 to 4) to the S2/flood echo timelines of a replay's two
     executions and of each control's two executions, paired in order. Analysis only; the evidence is expected read
     through load_echo_execution. Timeline means and shifts are exact over integer nanoseconds; step 1 reads the
     serialized latency_ms. Missing identity, a side or a population without evidence is named, never read as zero."""
     controls = controls or {}
     lines = [f"- {execution.label}: skipped rejected attempts {', '.join(execution.skipped)}"
              for execution in replay if execution.skipped]
-    missing = ([] if len(replay) == ECHO_EXECUTIONS else [f"{len(replay)} replay execution(s); §4 reads two"])
+    missing = ([] if len(replay) == ECHO_EXECUTIONS else [f"{len(replay)} replay execution(s); the attribution reads two"])
     missing += echo_identity_problems(replay, controls)
     missing += [problem for execution in replay for problem in _echo_side_unavailable(execution)]
     if missing:
@@ -428,18 +429,18 @@ def echo_attribution(replay: Sequence[EchoExecution],
                      + (f"; the harness of {', '.join(undeclared)} declares no echo_timeline_schema" if undeclared
                         else "") + ")")
         return EchoAttribution("inconclusive (evidence unavailable)", 2, lines=lines)
-    # §2's gates: keypress attribution and the ordered population, each at least 80% with at most a 10-point gap.
+    # The population gates: keypress attribution and the ordered population, each at least 80% with at most a 10-point gap.
     gated = []
     for execution in replay:
         passed, figures = _echo_gates(execution)
         gated.append(passed)
-        lines.append(f"- §2 gates, {execution.label}: {figures}: {'pass' if passed else 'fail'}")
+        lines.append(f"- population gates, {execution.label}: {figures}: {'pass' if passed else 'fail'}")
         ordered = [_echo_credited_count(runs) for runs in (execution.base, execution.head)]
         during = [len(_echo_timelines(runs, lambda timeline: timeline.get("ordering") == "published_during_dispatch"))
                   for runs in (execution.base, execution.head)]
-        # A published_during_dispatch share that moves by more than 10 points is itself a candidate (§2).
+        # A published_during_dispatch share that moves by more than 10 points is itself a candidate.
         if 10 * ordered[0] * ordered[1] < 100 * abs(during[0] * ordered[1] - during[1] * ordered[0]):
-            lines.append(f"- §2 population shift, {execution.label}: published_during_dispatch {during[0]}/"
+            lines.append(f"- population shift, {execution.label}: published_during_dispatch {during[0]}/"
                          f"{ordered[0]} base, {during[1]}/{ordered[1]} head differs by more than 10 points "
                          f"(a candidate)")
     if not all(gated):
@@ -495,12 +496,12 @@ def echo_attribution(replay: Sequence[EchoExecution],
 
 def format_echo_attribution(result: EchoAttribution) -> str:
     """The verdict as Markdown: the outcome, each mechanism's confirmation, then every figure behind them."""
-    lines = ["## S2/flood echo attribution (#1607 plan v6.1 §4)", "",
+    lines = ["## S2/flood echo attribution", "",
              f"- outcome: {result.outcome} (step {result.step})"]
     lines += [f"- {mechanism} {ECHO_MECHANISM_NAMES[mechanism]}: {result.confirmations[mechanism]}"
               for mechanism in result.mechanisms]
     lines += result.lines
-    lines.append("- control identity is not verified here (ruling D1): a control named on the command line is "
+    lines.append("- control identity is not verified here: a control named on the command line is "
                  "trusted to be that control, so every attribution is conditional on it.")
     lines.append("- exit status 0 means the evidence was read and validated, not that a mechanism is confirmed: "
                  "read the outcome.")

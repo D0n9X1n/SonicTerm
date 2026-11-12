@@ -7,11 +7,10 @@
 //! class, an `RwLock`, a `Mutex`, and an `Arc` to its parent, so a record that
 //! stays in its shard after close is a leak the state machine cannot see.
 //!
-//! Measured before the registry could remove a record: 14,000 owners created
-//! and fully closed, every close returning `Ok`, every owner reporting
-//! `Closed`, and **14,054,504 bytes** still held — 1,001 bytes per closed
-//! owner, perfectly linear in the number of cycles. The governor's own figure
-//! for process bytes was **0**.
+//! A registry that kept closed records would hold about a kilobyte per closed
+//! owner, linear in the number of cycles, while every close returned `Ok`,
+//! every owner reported `Closed`, and the governor's own figure for process
+//! bytes read zero. These tests require that heap to come back.
 //!
 //! Reachable from ordinary use: every tab or pane opened and closed is one
 //! owner, and every pane moved between windows closes one and creates another.

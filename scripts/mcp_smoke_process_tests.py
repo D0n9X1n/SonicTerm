@@ -398,7 +398,7 @@ class UnixTreeTests(unittest.TestCase):
             sibling.wait()
 
     def test_group_kill_alone_leaves_the_child_alive(self):
-        # The control: killing only the root's process group, the old behavior, leaves the detached child.
+        # The control: killing only the root's process group leaves the detached child, so cleanup must do more.
         pid_file = self.directory / "child.pid"
         root = subprocess.Popen([sys.executable, "-c", ROOT_SOURCE, CHILD_SOURCE, "stay", str(pid_file)],
                                 start_new_session=True)

@@ -432,9 +432,9 @@ class WindowsComparisonLegTests(unittest.TestCase):
         self.assertEqual(shard["scenarios"].split()[:6], ["S4", "S5", "S11"] + perf_workflow_fixture.PLATFORM_SCENARIOS["Windows"])
 
     def test_the_macos_shards_are_the_reviewed_three_set_partition(self):
-        # Three sets from measured per-variant times (run 42371975980): S7 leads the first, alone near the budget;
-        # S12, S12/status-line and S3 join the S9 set; S2 and S13's two variants the release set. Exact-head CI must
-        # measure it including runner queues against the 35-minute budget. S2/glide and S11/kitty-placeholders
+        # Three sets balanced from measured per-variant times: S7, the longest variant, leads the first with only
+        # short ones; S12, S12/status-line and S3 join the S9 set; S2 and S13's two variants the release set.
+        # Exact-head CI measures it including runner queues against the 35-minute budget. S2/glide and S11/kitty-placeholders
         # run in S7-S4, the shard with the most slack, so they stay off the critical path.
         self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
             "S7-S4": ["S7", "S4", "S1/atlas-retry", "S8", "S6/selection-drag", "S2/glide", "S11/kitty-placeholders"],
@@ -545,8 +545,8 @@ class WindowsComparisonLegTests(unittest.TestCase):
                     self.assertEqual(argv[start:argv.index("--runs")], expected)
 
     def test_the_macos_release_partition_is_the_reviewed_balanced_set(self):
-        # From run 42970532300's per-variant release times the three sets take about 289, 287 and 268 min at five
-        # counters runs a side, so none nears GitHub's 6-hour job limit; S9-S10sync alone took over 6 h before.
+        # Balanced from measured per-variant release times so no set nears GitHub's 6-hour job limit, which
+        # cancels a job with no table; a pull-request shard plus its release-only variants can exceed it.
         self.assertEqual({entry["shard"]: entry["release_partition"].split() for entry in self.matrix("compare-macos")}, {
             "S7-S4": ["S7", "S4", "S1/atlas-retry", "S8", "S6/selection-drag", "S2/glide", "S11/kitty-placeholders",
                       "S10/sync", "S11", "S11/burst", "S11/burst-text", "S1/status-line"],

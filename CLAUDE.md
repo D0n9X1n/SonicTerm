@@ -135,6 +135,7 @@ python3 scripts/local-gate.py
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
+| `history-references` | `bash scripts/check-history-references.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-checks`, `linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-checks`, `linux-core` |
@@ -526,7 +527,17 @@ a reproduction.
   not by its age. A fact about the environment stays only as the requirement
   it imposes ("a macOS host can clamp the window to 125x30"), never as a
   measurement. Run numbers, evidence and history belong in the commit message,
-  PR description or issue.
+  PR description or issue. When a change fixes a problem, the comment states
+  why the code is needed and how it prevents the problem ("a job past
+  GitHub's 6-hour limit is cancelled with no table, so each set is balanced
+  under it"), never which issue, PR, run or measurement prompted it ("run
+  42970532300 took 6 h", "fixes #1892"). The `history-references` gate step
+  (`scripts/check-history-references.py`) fails on issue and PR numbers, links
+  to this repository's issues and pull requests, and CI run or job ids in
+  comments, docstrings, help and log text, workflow comments and wiki pages;
+  each data exception it allows is listed in the checker with its reason. It
+  cannot read intent, so "used to", "before the fix" and measured-before
+  numbers still need review.
 - **Names say what they hold.** Variables, parameters, closures, loop bindings,
   fields, functions and constants are never one character, a letter followed
   by digits, or two letters outside `allowed-idents-below-min-chars` in

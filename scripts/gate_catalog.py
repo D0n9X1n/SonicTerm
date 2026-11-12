@@ -91,6 +91,8 @@ STEPS = (
          "local", ("bash",), _SCRIPT_CHECKS),
     gate_model.Step("script-identifiers", ("bash", "scripts/check-script-identifiers.sh"), gate_model.HOSTS, 300,
          "local", ("bash",), _SCRIPT_CHECKS),
+    gate_model.Step("history-references", ("bash", "scripts/check-history-references.sh"), gate_model.HOSTS, 300,
+         "local", ("bash",), _SCRIPT_CHECKS),
     gate_model.Step("no-raw-exit", ("bash", "scripts/check-no-raw-process-exit.sh"), gate_model.HOSTS, 120, "local",
          ("bash",), _SCRIPT_CHECKS),
     gate_model.Step("rust-version", ("bash", "scripts/check-rust-version.sh"), gate_model.HOSTS, 300, "local",

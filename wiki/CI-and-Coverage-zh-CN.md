@@ -155,8 +155,8 @@ Windows 缓存分为 `check-windows-latest`（`windows-checks` 写入）、`test
 缓存策略不变。编译器及环境哈希仍启用；静态检查归档不能再占据测试 codegen key。
 重叠的 main run 仍可能竞争保存同一不可变 key。
 
-三个 macOS perf shard 保留 artifact 名称，每个场景恰好运行一次，按 run 42371975980
-的各变体实测时间划分；在该次运行中，仅 S7 就占用其分片场景时间中的 21 分钟，且该分片决定了关键路径：
+三个 macOS perf shard 保留 artifact 名称，每个场景恰好运行一次，按各变体的实测时间划分，使任何分片都不
+决定关键路径；最长的变体 S7 只与较短的变体同在一个分片：
 `S7-S4` 运行 S7、S4、atlas-retry、S8 与 S6/selection-drag；`S9-S10sync` 运行 S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line、S12、S12/status-line 与 S3；
 `S10-S11release` 运行 S10、S11/release、S2、S2/flood、S6/flood、S13 与 S13/sustained-4。release tag 完整运行
 每个变体，因此每个 macOS 条目改为运行其 `release_partition`，按实测的发布时间均衡，使每个分片都远低于 GitHub

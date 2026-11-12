@@ -108,7 +108,7 @@ def _echo_attempt_side(name: str) -> str:
 
 def echo_attribution_main(args: argparse.Namespace) -> int:
     """`--echo-attribution`: read the replay's and the controls' artifacts through the validated evidence path,
-    refuse malformed evidence and executions that are not distinct and paired, and print the §4 verdict. Exit 0
+    refuse malformed evidence and executions that are not distinct and paired, and print the attribution verdict. Exit 0
     means the evidence was read, not that a mechanism is confirmed."""
     platform = args.echo_platform or "macos"
     problems: list = []

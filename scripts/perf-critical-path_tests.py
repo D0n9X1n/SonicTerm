@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Contracts of the performance comparison's critical-path accounting, driven by recorded and synthetic runs.
 
-No test calls GitHub: the recorded run 37118041050 (two attempts, its Windows S9-S10 shard rerun) is a
+No test calls GitHub: the recorded fixture run (two attempts, its Windows S9-S10 shard rerun) is a
 fixture copied from `gh api`, with steps kept for the jobs its critical paths use, and every other run
 is built here.
 """

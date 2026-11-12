@@ -239,8 +239,8 @@ enabled; a static-check archive can no longer occupy the test-codegen cache key.
 Overlapping main runs can still race to save an immutable key.
 
 The three macOS perf shards keep their artifact names and run every scenario
-exactly once, partitioned from run 42371975980's per-variant times, in which S7 alone
-took 21 minutes of its shard's scenarios and that shard set the critical path:
+exactly once, partitioned from measured per-variant times so that no shard sets the
+critical path; S7, the longest variant, shares its shard only with short ones:
 `S7-S4` runs S7, S4, atlas-retry, S8 and S6/selection-drag;
 `S9-S10sync` runs S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line, S12,
 S12/status-line and S3;

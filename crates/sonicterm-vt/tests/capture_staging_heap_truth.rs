@@ -144,11 +144,10 @@ fn media_payload(events: &[VtEvent]) -> Option<usize> {
 
 /// Real heap across every parser must stop below the process ceiling.
 ///
-/// Measured before the pools: 64 panes each took the 4 MiB floor and the
-/// process held **374 MiB against a stated 64 MiB**. Past `live == 16` the
-/// floor won the clamp, so the per-capture budget stopped falling and the
-/// total became `N × 4 MiB` — with no `N` at which it stopped, and nothing in
-/// the workspace bounding the number of panes.
+/// A per-capture budget clamped to a per-pane floor cannot hold this: once the
+/// floor wins the clamp the budget stops falling and the total becomes
+/// `N × floor`, with no `N` at which it stops and nothing in the workspace
+/// bounding the number of panes. The shared pool must hold the ceiling anyway.
 #[test]
 fn real_heap_stops_below_the_process_ceiling_at_many_panes() {
     let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -265,8 +264,8 @@ fn maximum_iterm2_metadata_adds_no_heap_beyond_the_staging_pool() {
 /// The harder ordering, and the one a per-capture budget cannot see: four
 /// captures arrive while uncontended, each grows to the full 16 MiB, and only
 /// then do sixty more open. The four are already large and the budget was only
-/// consulted for *future* growth, so the sixty added their floors on top.
-/// Measured before the pools: **350 MiB against a stated 64 MiB.**
+/// consulted for *future* growth, so without a shared pool the sixty would add
+/// their floors on top and push the total far past the ceiling.
 #[test]
 fn early_grown_captures_do_not_let_later_panes_pass_the_ceiling() {
     let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -379,7 +378,7 @@ fn an_uncontended_pane_still_receives_a_full_size_image_whole() {
 /// Every pane the pools guarantee must complete an ordinary image.
 ///
 /// This is the property the floor exists to protect, stated as a number rather
-/// than as the unbounded promise it used to be. Panes are not bounded anywhere
+/// than as an unbounded promise. Panes are not bounded anywhere
 /// in the workspace, so "every pane, however many are active" was never
 /// something a fixed ceiling could promise. What can be promised is a count,
 /// and every pane inside it must actually get its image.
