@@ -218,3 +218,29 @@ fn the_titlebar_toggle_follows_the_frontmost_window_not_the_config_default() {
     assert_eq!(app.registry.windows[&window].titlebar, Integrated);
     assert_eq!(app.config.window.titlebar, Integrated);
 }
+
+/// With mouse clicks off, a press on the window name in the band is empty titlebar space, so it
+/// drags the window; with them on, the same press is the name's segment.
+#[test]
+fn an_inert_name_in_the_band_is_titlebar_space() {
+    use sonicterm_gpu::status_strip::{PresentedStatusSegment, StripHit};
+    let band = StripHit {
+        top: 0.0,
+        height: 32.0,
+        segments: vec![PresentedStatusSegment {
+            id: StatusSegmentId::Window,
+            x: 300.0,
+            width: 120.0,
+            click: Some(sonicterm_ui::status_line::SegmentClick::Action(
+                sonicterm_types::Action::RenameWindow,
+            )),
+        }],
+    };
+    let on_name = |clickable| segment_or_empty([None, Some(&band)], 350.0, 10.0, clickable);
+    assert!(matches!(on_name(false), BandPress::Empty), "clicks off: the press drags");
+    assert!(matches!(on_name(true), BandPress::Segment), "clicks on: the name runs Rename");
+    assert!(
+        matches!(segment_or_empty([None, Some(&band)], 50.0, 10.0, true), BandPress::Empty),
+        "space beside the name is titlebar space either way"
+    );
+}

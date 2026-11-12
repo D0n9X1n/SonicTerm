@@ -377,3 +377,70 @@ fn a_failed_save_keeps_the_clicks_toggle_for_the_session() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The toggle reaches every window: a press in a second window runs its click once clicks are
+/// on. The saved file becomes the baseline, so the session holds no override and a reload of
+/// that same file changes nothing.
+#[test]
+fn the_clicks_toggle_reaches_every_window_and_adopts_the_saved_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-app-clicks-windows-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, "[status_line]\nenabled = true\n").unwrap();
+    let mut app = app_with_strip(true);
+    app.__test_synthetic_main();
+    let first = app.__test_seed_child_window(&["one"]);
+    let second = app.__test_seed_child_window(&["two"]);
+    let _path_guard = App::set_test_current_settings_path(path.clone());
+
+    assert!(app.run_action_for_window(&Action::ToggleStatusLineClicks, first));
+    strip_with_mem_toggle(&mut app, second);
+    assert!(app.press_status_line(second, 10.0, 510.0));
+    assert!(!app.status_line_shown(), "the other window's press ran its click");
+    assert_eq!(app.status_line.overrides.clickable(), None, "the saved file is the baseline");
+    assert_eq!(
+        app.__test_child_notification_message(first),
+        Some("Status line clicks on"),
+        "the window that ran the command announces it"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The checklist row stays quiet on success, but a failed save is reported on the window the
+/// checklist is attached to, and the session keeps the change.
+#[test]
+fn the_clicks_row_reports_a_failed_save_on_its_window() {
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-app-clicks-row-fail-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, "[status_line\n").unwrap();
+    let mut app = app_with_strip(true);
+    let child = app.__test_seed_child_window(&["work"]);
+    let _path_guard = App::set_test_current_settings_path(path.clone());
+
+    app.open_status_segments(Some(child), None);
+    while app.interaction.command_palette.selected_status_row()
+        != Some(sonicterm_ui::command_palette::StatusSegmentRowKind::Clickable)
+    {
+        app.command_palette_handle_logical_key(&winit::keyboard::Key::Named(
+            winit::keyboard::NamedKey::ArrowDown,
+        ));
+    }
+    app.command_palette_handle_logical_key(&winit::keyboard::Key::Named(
+        winit::keyboard::NamedKey::Enter,
+    ));
+    assert!(app.status_clickable(), "the session keeps the change");
+    assert_eq!(
+        app.__test_child_notification_message(child),
+        Some("Unable to save status line clicks; applies to this session only")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

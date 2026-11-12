@@ -75,10 +75,27 @@ pub(crate) fn classify_band_press(
         // When: pointer_y is outside 0..band_height, the press is below the band and the panes'.
         return BandPress::Outside;
     }
-    let on_segment =
-        [window.status_strip.as_ref(), window.title_band.as_ref()].into_iter().flatten().any(
-            |hit| super::status_line::pointer_click(hit, pointer_x, pointer_y, clickable).is_some(),
-        );
+    segment_or_empty(
+        [window.status_strip.as_ref(), window.title_band.as_ref()],
+        pointer_x,
+        pointer_y,
+        clickable,
+    )
+}
+
+/// What a press inside the band, past the caption buttons and edges, is: `Segment` when a mouse
+/// press runs a click under `(pointer_x, pointer_y)` in `strips`, else `Empty` titlebar space,
+/// which drags the window. With `clickable` false every segment, the window name included, is
+/// titlebar space.
+pub(crate) fn segment_or_empty(
+    strips: [Option<&sonicterm_gpu::status_strip::StripHit>; 2],
+    pointer_x: f32,
+    pointer_y: f32,
+    clickable: bool,
+) -> BandPress {
+    let on_segment = strips.into_iter().flatten().any(|hit| {
+        super::status_line::pointer_click(hit, pointer_x, pointer_y, clickable).is_some()
+    });
     if on_segment {
         BandPress::Segment
     } else {
