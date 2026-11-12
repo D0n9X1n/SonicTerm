@@ -520,6 +520,7 @@ class WindowsComparisonLegTests(unittest.TestCase):
         self.assertIn('if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_PARTITION" ]; then\n'
                       '  read -ra scenarios <<<"$RELEASE_PARTITION"\nfi', step["run"])
 
+    @unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake python3")
     def test_each_macos_step_runs_its_release_partition_only_on_a_release(self):
         # Run the real bash step with every macOS entry's own matrix values: a release passes exactly that
         # entry's release_partition, in order, and a pull request exactly its scenarios. This catches a YAML
