@@ -179,3 +179,35 @@ fn sensitive_rows_stay_listed_and_toggleable_while_hidden() {
         assert!(label(&app, sensitive).ends_with(tag), "{locale}");
     }
 }
+
+#[test]
+fn the_clicks_row_follows_hide_sensitive_and_saves_without_a_toast() {
+    // The Allow segment clicks row sits after the two strip toggles, starts unchecked because
+    // clicks are off by default, and Enter turns clicks on, writes the key and shows no toast:
+    // the check mark already says the new state.
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-app-clicks-row-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, "[status_line]\nenabled = true\n").unwrap();
+    let _path_guard = App::set_test_current_settings_path(path.clone());
+    let (mut app, child) = checklist_app();
+    app.open_status_segments(Some(child), None);
+    assert_eq!(kinds(&app)[..3], [Kind::ShowStrip, Kind::HideSensitive, Kind::Clickable]);
+    let row = |app: &App| {
+        let rows = app.interaction.command_palette.status_segment_rows();
+        rows.iter().find(|row| row.kind == Kind::Clickable).map(|row| row.label.clone()).unwrap()
+    };
+    assert_eq!(row(&app), "  Allow segment clicks");
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowDown));
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowDown));
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
+    assert!(app.current_status_line().clickable);
+    assert_eq!(row(&app), "✓ Allow segment clicks");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("clickable = true"));
+    assert_eq!(app.__test_child_notification_message(child), None, "the row shows no toast");
+    let _ = std::fs::remove_dir_all(dir);
+}

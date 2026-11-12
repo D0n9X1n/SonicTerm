@@ -294,3 +294,27 @@ fn a_disabled_file_segment_keeps_its_keys_in_the_unlisted_set() {
         Some(&crate::status_line::ClickBinding::None)
     );
 }
+
+#[test]
+fn clickable_is_off_by_default_and_overrides_like_hide_sensitive() {
+    // `clickable` defaults to false, a session value equal to the file is not kept, and a reload
+    // drops the session value only when the file's own `clickable` changed.
+    let base = file("");
+    assert!(!base.clickable, "segment clicks are off when the key is absent");
+    assert!(file("clickable = true\n").clickable);
+    let mut overrides = StatusLineOverrides::default();
+    overrides.set_clickable(&base, false);
+    assert_eq!(overrides.clickable(), None, "an override equal to the file is not kept");
+    assert!(overrides.is_empty());
+    overrides.set_clickable(&base, true);
+    assert_eq!(overrides.clickable(), Some(true));
+    assert!(!overrides.is_empty());
+    assert!(overrides.effective(&base).clickable);
+    let unrelated = file("update_interval_ms = 5000\n");
+    overrides.reconcile(&base, &unrelated);
+    assert_eq!(overrides.clickable(), Some(true), "an unrelated reload keeps the session value");
+    let changed = file("clickable = true\n");
+    overrides.reconcile(&unrelated, &changed);
+    assert_eq!(overrides.clickable(), None, "the file now says what the session shows");
+    assert!(overrides.effective(&changed).clickable);
+}

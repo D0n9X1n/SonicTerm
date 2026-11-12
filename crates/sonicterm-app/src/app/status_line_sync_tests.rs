@@ -642,7 +642,10 @@ fn torn_out_window_strip_consumes_press_and_wheel() {
 /// A press on the scroll segment runs its default handler and returns the pane to the bottom.
 #[test]
 fn strip_scroll_segment_returns_the_pane_to_the_bottom() {
-    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    // Mouse clicks on segments are off by default; this test turns them on to reach the handler.
+    let mut config = Config::default();
+    config.status_line.clickable = true;
+    let mut app = App::new(Theme::default(), config, Keymap::default());
     let pane_id = app.__test_seed_tab("main");
     let main_id = app.registry.main_window_id.unwrap();
     app.main_mut().unwrap().panes.get_mut(&pane_id).unwrap().pin_viewport_top(Some(0));

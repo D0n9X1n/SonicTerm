@@ -251,3 +251,129 @@ fn a_save_never_writes_the_band_projection() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
     let _ = std::fs::remove_dir_all(preset.parent().unwrap());
 }
+
+use sonicterm_cfg::keymap::Action;
+
+/// A strip at the bottom of a 600 px window with one `mem` segment at x 0..40 whose click
+/// toggles the strip, so a click that ran is observable as the strip turning off.
+fn strip_with_mem_toggle(app: &mut App, window_id: WindowId) {
+    use sonicterm_gpu::status_strip::{PresentedStatusSegment, StripHit};
+    let segments = vec![PresentedStatusSegment {
+        id: StatusSegmentId::Mem,
+        x: 0.0,
+        width: 40.0,
+        click: Some(SegmentClick::Action(Action::ToggleStatusLine)),
+    }];
+    app.registry.windows.get_mut(&window_id).unwrap().status_strip =
+        Some(StripHit { top: 500.0, height: 20.0, segments });
+}
+
+/// The pointer gate: a segment's click reaches the pointer only while clicks are allowed, and
+/// space between segments never has one.
+#[test]
+fn the_pointer_gate_passes_a_click_only_while_clicks_are_allowed() {
+    use sonicterm_gpu::status_strip::{PresentedStatusSegment, StripHit};
+    let click = SegmentClick::Action(Action::ShowMemoryUsage);
+    let strip = StripHit {
+        top: 0.0,
+        height: 20.0,
+        segments: vec![PresentedStatusSegment {
+            id: StatusSegmentId::Mem,
+            x: 0.0,
+            width: 40.0,
+            click: Some(click.clone()),
+        }],
+    };
+    assert_eq!(pointer_click(&strip, 10.0, 10.0, true), Some(click));
+    assert_eq!(pointer_click(&strip, 10.0, 10.0, false), None, "clicks are off");
+    assert_eq!(pointer_click(&strip, 60.0, 10.0, true), None, "between segments");
+}
+
+/// With the default config a mouse press on a clickable segment is consumed and runs nothing;
+/// with `clickable = true` the same press runs the segment's click.
+#[test]
+fn a_mouse_press_on_a_segment_runs_its_click_only_when_clicks_are_on() {
+    let mut app = app_with_strip(true);
+    let child = app.__test_seed_child_window(&["work"]);
+    strip_with_mem_toggle(&mut app, child);
+    assert!(!app.status_clickable(), "segment clicks are off by default");
+    assert!(app.press_status_line(child, 10.0, 510.0), "the press is still the strip's");
+    assert!(app.status_line_shown(), "the click did not run");
+
+    let mut config = Config::default();
+    config.status_line.enabled = true;
+    config.status_line.clickable = true;
+    let mut app = App::new(Theme::default(), config, Keymap::default());
+    let child = app.__test_seed_child_window(&["work"]);
+    strip_with_mem_toggle(&mut app, child);
+    assert!(app.press_status_line(child, 10.0, 510.0));
+    assert!(!app.status_line_shown(), "the click ran and turned the strip off");
+}
+
+/// Turning mouse clicks off never takes a segment's action from the keyboard or a screen reader:
+/// the shared click path still runs it.
+#[test]
+fn keyboard_and_reader_clicks_still_run_while_mouse_clicks_are_off() {
+    let mut app = app_with_strip(true);
+    let child = app.__test_seed_child_window(&["work"]);
+    strip_with_mem_toggle(&mut app, child);
+    assert!(!app.status_clickable());
+    app.click_status_segment(child, StatusSegmentId::Mem);
+    assert!(!app.status_line_shown(), "the keyboard and reader path ran the click");
+}
+
+/// Toggle Status Line Clicks flips the session value, writes only `[status_line] clickable` to
+/// the config file, keeps its comments, and says the new state in a notification.
+#[test]
+fn the_clicks_toggle_applies_at_once_and_saves_the_key() {
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-app-clicks-toggle-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, "# mine\n[status_line]\nenabled = true\n").unwrap();
+    let mut app = app_with_strip(true);
+    app.__test_synthetic_main();
+    let _path_guard = App::set_test_current_settings_path(path.clone());
+
+    assert!(app.run_action(&Action::ToggleStatusLineClicks));
+    assert!(app.status_clickable(), "the session applies the toggle at once");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text, "# mine\n[status_line]\nenabled = true\nclickable = true\n");
+    assert_eq!(app.__test_main_notification_message(), Some("Status line clicks on"));
+
+    assert!(app.run_action(&Action::ToggleStatusLineClicks));
+    assert!(!app.status_clickable());
+    assert!(std::fs::read_to_string(&path).unwrap().ends_with("clickable = false\n"));
+    assert_eq!(app.__test_main_notification_message(), Some("Status line clicks off"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A config that cannot be written leaves the toggle applied for the session, writes nothing,
+/// and reports that it was not saved.
+#[test]
+fn a_failed_save_keeps_the_clicks_toggle_for_the_session() {
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-app-clicks-fail-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    let broken = "[status_line\n";
+    std::fs::write(&path, broken).unwrap();
+    let mut app = app_with_strip(true);
+    app.__test_synthetic_main();
+    let _path_guard = App::set_test_current_settings_path(path.clone());
+
+    assert!(app.run_action(&Action::ToggleStatusLineClicks));
+    assert!(app.status_clickable(), "the session value still applies");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), broken, "nothing was written");
+    assert_eq!(
+        app.__test_main_notification_message(),
+        Some("Unable to save status line clicks; applies to this session only")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

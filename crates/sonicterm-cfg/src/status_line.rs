@@ -622,6 +622,9 @@ pub struct ResolvedStatusLine {
     pub enabled: bool,
     /// Configured `hide_sensitive`, before any session toggle.
     pub hide_sensitive: bool,
+    /// Configured `clickable`, before any session toggle: whether a mouse press runs a segment's
+    /// click.
+    pub clickable: bool,
     /// Symbol set.
     pub icons: StatusIcons,
     /// The window edge the strip sits on.
@@ -736,6 +739,9 @@ pub struct StatusLineConfig {
     pub font_scale: f64,
     /// Hide every sensitive segment or part (screen sharing).
     pub hide_sensitive: bool,
+    /// Let a mouse press on a segment, or on the name in the titlebar band, run its click. Off by
+    /// default; the keyboard and assistive technology run clicks either way.
+    pub clickable: bool,
     /// Sampling interval of sampled segments, `500..=60000` ms.
     pub update_interval_ms: u64,
     /// `[status_line.segment.<id>]` tables, kept raw so unknown keys and
@@ -763,6 +769,7 @@ impl Default for StatusLineConfig {
             titlebar_segments: TitlebarSegments::Right,
             font_scale: StatusFontScale::DEFAULT.as_f64(),
             hide_sensitive: false,
+            clickable: false,
             update_interval_ms: 2000,
             segment: toml::Table::new(),
             accessibility: StatusAccessibilityConfig::default(),

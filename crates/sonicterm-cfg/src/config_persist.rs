@@ -80,42 +80,107 @@ impl Config {
     where
         F: FnOnce(&Path) -> Result<()>,
     {
+        let status = match status_line {
+            Some(save) => StatusWrite::Session(save),
+            None => StatusWrite::Unchanged,
+        };
+        persist_core(path, Some((size, weight_scale, family)), status, before_commit)
+    }
+
+    /// Write only `[status_line] clickable` to `path`, without rewriting unrelated TOML.
+    ///
+    /// The save starts from the file's own resolved `[status_line]` with only `clickable`
+    /// changed, so it never writes a session choice, a font value or any other key. A missing
+    /// file gets the starter template first. It runs under the same save lock, strict parse,
+    /// verification and unchanged-file replacement as Save Current Settings, and returns the
+    /// written `[status_line]`, resolved, as the new baseline.
+    pub fn persist_status_line_clickable(
+        path: &Path,
+        clickable: bool,
+    ) -> Result<crate::status_overrides::WrittenStatusLine> {
+        persist_core(path, None, StatusWrite::Clickable(clickable), |_| Ok(()))
+    }
+}
+
+/// What a save writes into `[status_line]`.
+enum StatusWrite<'a> {
+    /// Nothing; the table stays as the file has it.
+    Unchanged,
+    /// Every key whose session value differs from the file, by the Save rule.
+    Session(&'a crate::status_overrides::StatusLineSave),
+    /// Only `clickable`, set to this value.
+    Clickable(bool),
+}
+
+/// The one atomic, format-preserving config write behind every save. With `font`, the runtime
+/// font size and weight (and optionally the family) are patched and verified; `status` says what
+/// `[status_line]` receives. Returns the written `[status_line]`, resolved.
+fn persist_core<F>(
+    path: &Path,
+    font: Option<(f32, f32, Option<FamilySave<'_>>)>,
+    status: StatusWrite<'_>,
+    before_commit: F,
+) -> Result<crate::status_overrides::WrittenStatusLine>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    if let Some((size, weight_scale, _)) = font {
         validate_font_runtime_values(size, weight_scale)?;
-        if !path.exists() {
-            Self::ensure_user_config_file(path)?;
-        }
+    }
+    if !path.exists() {
+        Config::ensure_user_config_file(path)?;
+    }
 
-        let destination = canonical_destination(path)?;
-        let _save_lock = ConfigSaveLock::acquire(&destination)?;
-        let bytes = std::fs::read(&destination)
-            .with_context(|| format!("read config for font persistence at {destination:?}"))?;
-        let text = std::str::from_utf8(&bytes)
-            .with_context(|| format!("decode config for font persistence at {destination:?}"))?;
-        let line_ending = line_ending_convention(text)?;
-        let on_disk: Self = toml::from_str(text)
-            .with_context(|| format!("strictly parse config at {destination:?}"))?;
-        let normalized = normalize_for_toml_edit(text, line_ending);
-        let mut document: DocumentMut = normalized
-            .parse()
-            .with_context(|| format!("format-preserving parse config at {destination:?}"))?;
+    let destination = canonical_destination(path)?;
+    let _save_lock = ConfigSaveLock::acquire(&destination)?;
+    let bytes = std::fs::read(&destination)
+        .with_context(|| format!("read config for saving at {destination:?}"))?;
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("decode config for saving at {destination:?}"))?;
+    let line_ending = line_ending_convention(text)?;
+    let on_disk: Config = toml::from_str(text)
+        .with_context(|| format!("strictly parse config at {destination:?}"))?;
+    let normalized = normalize_for_toml_edit(text, line_ending);
+    let mut document: DocumentMut = normalized
+        .parse()
+        .with_context(|| format!("format-preserving parse config at {destination:?}"))?;
 
+    if let Some((size, weight_scale, family)) = font {
         patch_font_runtime_values(&mut document, size, weight_scale)?;
         if let Some(family) = family {
             patch_font_family(&mut document, family)?;
         }
-        if let Some(save) = status_line {
-            let disk = on_disk
-                .status_line
-                .resolve()
-                .with_context(|| format!("resolve [status_line] of config at {destination:?}"))?;
-            patch_status_line_values(&mut document, save, &disk)?;
-        }
-        let rendered = apply_line_ending(document.to_string(), line_ending);
-        verify_persisted_font_runtime_values(&rendered, size, weight_scale)?;
-        let written = verify_persisted_status_line(&rendered, status_line)?;
-        atomic_replace_if_unchanged(&destination, &bytes, rendered.as_bytes(), before_commit)?;
-        Ok(written)
     }
+    let resolve_disk = || {
+        on_disk
+            .status_line
+            .resolve()
+            .with_context(|| format!("resolve [status_line] of config at {destination:?}"))
+    };
+    // The save the written table must resolve to; `None` leaves `[status_line]` unchecked.
+    let expected = match status {
+        StatusWrite::Unchanged => None,
+        StatusWrite::Session(save) => {
+            patch_status_line_values(&mut document, save, &resolve_disk()?)?;
+            Some(save.clone())
+        }
+        StatusWrite::Clickable(clickable) => {
+            let disk = resolve_disk()?;
+            let save = crate::status_overrides::StatusLineSave {
+                clickable,
+                ..crate::status_overrides::StatusLineSave::from_resolved(&disk)
+            };
+            patch_status_line_values(&mut document, &save, &disk)?;
+            Some(save)
+        }
+    };
+    let rendered = apply_line_ending(document.to_string(), line_ending);
+    if let Some((size, weight_scale, _)) = font {
+        verify_persisted_font_runtime_values(&rendered, size, weight_scale)?;
+    }
+    let written = verify_persisted_status_line(&rendered, expected.as_ref())?;
+    atomic_replace_if_unchanged(&destination, &bytes, rendered.as_bytes(), before_commit)?;
+    Ok(written)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

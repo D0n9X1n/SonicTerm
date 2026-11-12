@@ -401,6 +401,8 @@ fn a_mouse_click_on_a_segment_hands_the_keyboard_to_what_it_opens() {
     // Round 4 item 2: a mouse click goes through the same handoff as Enter and an assistive
     // technology's Click, so the rename editor it opens receives the next character.
     let (mut app, window_id) = app_with_window();
+    // Mouse clicks are off by default; this test turns them on to follow the click's handoff.
+    app.config.status_line.clickable = true;
     present_with(
         &mut app,
         window_id,

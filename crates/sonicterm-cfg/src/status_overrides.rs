@@ -38,6 +38,7 @@ pub enum MoveDirection {
 pub struct StatusLineOverrides {
     enabled: Option<bool>,
     hide_sensitive: Option<bool>,
+    clickable: Option<bool>,
     position: Option<crate::status_line::StatusPosition>,
     font_scale: Option<crate::status_line::StatusFontScale>,
     segments: BTreeMap<StatusSegmentId, SegmentOverride>,
@@ -72,6 +73,11 @@ impl StatusLineOverrides {
         self.hide_sensitive
     }
 
+    /// The `clickable` override, if the session changed it from the file.
+    pub fn clickable(&self) -> Option<bool> {
+        self.clickable
+    }
+
     /// The override on segment `id`, if any.
     pub fn segment(&self, id: StatusSegmentId) -> Option<SegmentOverride> {
         self.segments.get(&id).copied()
@@ -89,6 +95,7 @@ impl StatusLineOverrides {
     pub fn is_empty(&self) -> bool {
         self.enabled.is_none()
             && self.hide_sensitive.is_none()
+            && self.clickable.is_none()
             && self.position.is_none()
             && self.font_scale.is_none()
             && self.segments.is_empty()
@@ -107,6 +114,11 @@ impl StatusLineOverrides {
     /// Hide or show sensitive segments; an override equal to `file` is not kept.
     pub fn set_hide_sensitive(&mut self, file: &ResolvedStatusLine, hide: bool) {
         self.hide_sensitive = (hide != file.hide_sensitive).then_some(hide);
+    }
+
+    /// Let mouse presses run segment clicks or not; an override equal to `file` is not kept.
+    pub fn set_clickable(&mut self, file: &ResolvedStatusLine, clickable: bool) {
+        self.clickable = (clickable != file.clickable).then_some(clickable);
     }
 
     /// Move the strip to `position`; an override equal to `file` is not kept.
@@ -132,6 +144,7 @@ impl StatusLineOverrides {
         let mut shown = file.clone();
         shown.enabled = self.enabled.unwrap_or(file.enabled);
         shown.hide_sensitive = self.hide_sensitive.unwrap_or(file.hide_sensitive);
+        shown.clickable = self.clickable.unwrap_or(file.clickable);
         shown.position = self.position.unwrap_or(file.position);
         shown.font_scale = self.font_scale.unwrap_or(file.font_scale);
         let configured = |id: StatusSegmentId| -> Option<ResolvedSegment> {
@@ -244,7 +257,8 @@ impl StatusLineOverrides {
 
     /// Reconcile with a reload from `previous` to `new`: drop an `absent` override only when the
     /// file changed that segment's presence, a placed one when the file changed that segment's
-    /// presence or side, an `enabled` or `hide_sensitive` override whose own value changed, and
+    /// presence or side, an `enabled`, `hide_sensitive` or `clickable` override whose own value
+    /// changed, and
     /// every override the new file already satisfies. Reordering alone changes none.
     pub fn reconcile(&mut self, previous: &ResolvedStatusLine, new: &ResolvedStatusLine) {
         if previous.enabled != new.enabled {
@@ -258,6 +272,10 @@ impl StatusLineOverrides {
         }
         if self.hide_sensitive == Some(new.hide_sensitive) {
             self.hide_sensitive = None;
+        }
+        // A file that changed its own `clickable` wins, and one that now agrees needs no override.
+        if previous.clickable != new.clickable || self.clickable == Some(new.clickable) {
+            self.clickable = None;
         }
         // A file that changed its own position or text size wins over the session's choice.
         if previous.position != new.position || self.position == Some(new.position) {
@@ -327,6 +345,8 @@ pub struct StatusLineSave {
     pub enabled: bool,
     /// Whether sensitive segments are hidden.
     pub hide_sensitive: bool,
+    /// Whether a mouse press runs a segment's click.
+    pub clickable: bool,
     /// The window edge the strip sits on.
     pub position: crate::status_line::StatusPosition,
     /// The strip's text size as a share of the terminal font size.
@@ -349,6 +369,7 @@ impl StatusLineSave {
         Self {
             enabled: resolved.enabled,
             hide_sensitive: resolved.hide_sensitive,
+            clickable: resolved.clickable,
             position: resolved.position,
             font_scale: resolved.font_scale,
             lists: [side(StatusSide::Left), side(StatusSide::Center), side(StatusSide::Right)],

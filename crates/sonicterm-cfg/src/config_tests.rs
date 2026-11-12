@@ -380,3 +380,17 @@ fn osc52_policy_defaults_to_allow_and_parses_deny() {
     assert!(toml::from_str::<Config>("[terminal]\nosc52 = \"ask\"\n").is_err());
     assert!(crate::config::default_config_template().contains("\nosc52 = \"allow\"\n"));
 }
+
+/// The starter template is written only into an absent file: a config that already exists,
+/// such as one another writer created a moment earlier, keeps its bytes.
+#[test]
+fn the_starter_template_never_replaces_an_existing_config() {
+    let dir = font_persist_test_dir("starter-absent-only");
+    let path = dir.join("sonicterm.toml");
+    super::write_template_if_absent(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), default_config_template());
+    std::fs::write(&path, "# mine\n").unwrap();
+    super::write_template_if_absent(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n", "the existing file is kept");
+    let _ = std::fs::remove_dir_all(dir);
+}

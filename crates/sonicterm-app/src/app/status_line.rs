@@ -362,6 +362,13 @@ impl App {
         self.status_line.hide_sensitive
     }
 
+    /// Whether a mouse press on a segment runs its click this session: `[status_line] clickable`
+    /// with the session's toggle applied.
+    pub(in crate::app) fn status_clickable(&mut self) -> bool {
+        self.apply_status_line_config();
+        self.status_line.resolved.clickable
+    }
+
     /// `[status_line.accessibility]` as resolved.
     pub(super) fn status_accessibility(
         &self,
@@ -443,6 +450,49 @@ impl App {
         let hide = !self.status_line.hide_sensitive;
         self.change_status_choices(|overrides, file| overrides.set_hide_sensitive(file, hide));
         tracing::info!("status line hide_sensitive -> {}", self.status_line.hide_sensitive);
+    }
+
+    /// Let mouse presses run segment clicks, or stop them, in every window, then write only
+    /// `[status_line] clickable` to the config file. With `announce`, `kind`'s window shows the new
+    /// state; a failed write keeps the value for this session and always says it was not saved.
+    pub(in crate::app) fn toggle_status_line_clicks(
+        &mut self,
+        kind: crate::app::FrontmostKind,
+        announce: bool,
+    ) {
+        let clickable = !self.status_clickable();
+        self.change_status_choices(|overrides, file| overrides.set_clickable(file, clickable));
+        tracing::info!("status line clickable -> {clickable}");
+        let saved = self.current_settings_path().and_then(|path| {
+            sonicterm_cfg::config::Config::persist_status_line_clickable(&path, clickable).map_err(
+                |error| error.context(format!("persist status line clicks to {}", path.display())),
+            )
+        });
+        let (level, key) = match saved {
+            Ok(written) => {
+                // When: `saved` is Ok, the file now holds the session's value, so its table is the
+                // new baseline.
+                self.adopt_saved_status_line(written);
+                if !announce {
+                    // When: announce is false, the checklist row's check mark shows the new state.
+                    return;
+                }
+                let key =
+                    if clickable { "status-line-clicks-on" } else { "status-line-clicks-off" };
+                (sonicterm_ui::overlays::NotificationLevel::Info, key)
+            }
+            Err(error) => {
+                // Nothing was written; the session keeps the toggle and the window says it was
+                // not saved.
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    "unable to save status line clicks; the session keeps the change"
+                );
+                (sonicterm_ui::overlays::NotificationLevel::Error, "status-line-clicks-save-failed")
+            }
+        };
+        let message = self.i18n.translate(key);
+        self.show_notification_for_kind(kind, level, message);
     }
 
     /// Move the strip to `position` in every window for this session; the panes refit once.
@@ -758,6 +808,7 @@ use inputs::{
 };
 #[path = "status_line_actions.rs"]
 mod actions;
+pub(in crate::app) use actions::pointer_click;
 #[path = "status_line_sync.rs"]
 mod sync;
 #[cfg(test)]
