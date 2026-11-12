@@ -66,7 +66,7 @@ fn signal_sender() -> impl FnMut(Option<ProgressReport>) + Send + 'static {
             return;
         };
         let values = launcher_values(report);
-        let mut properties: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+        let mut properties: HashMap<&str, zbus::Variant<'_>> = HashMap::new();
         properties.insert("progress", values.progress.into());
         properties.insert("progress-visible", values.visible.into());
         properties.insert("urgent", values.urgent.into());

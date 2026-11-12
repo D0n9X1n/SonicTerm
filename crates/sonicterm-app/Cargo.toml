@@ -57,7 +57,7 @@ accesskit = "0.25.1"
 accesskit_winit = { version = "0.34.1", default-features = false, features = ["accesskit_unix", "async-io", "rwh_06"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13.13", default-features = false, features = ["open_uri", "async-io"] }
+ashpd = { version = "0.14", default-features = false, features = ["open_uri", "async-io"] }
 async-io = "2.6"
 libc.workspace = true
 
@@ -100,7 +100,7 @@ windows = { workspace = true, features = [
 tempfile = "3"
 # Parses this crate's own source in structural source tests (test-support gates, item cfgs), so
 # they read attributes and items rather than matching text.
-syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
+syn = { version = "3", default-features = false, features = ["full", "parsing", "visit"] }
 # For the software-adapter detection test, which enumerates the host's real
 # adapters. A dev-dependency rather than a dependency: the app reaches wgpu
 # through `sonicterm-gpu` and must not gain a direct one.

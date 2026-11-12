@@ -127,7 +127,7 @@ fn key_code(key: &str) -> Option<Code> {
 
 fn accelerator(item: &Item) -> Option<Accelerator> {
     let code = key_code(item.key)?;
-    Some(Accelerator::new(Some(modifiers(item.mods)), code))
+    Some(Accelerator::new(modifiers(item.mods), code))
 }
 
 fn build_submenu(sm: &Submenu) -> Result<MudaSubmenu> {

@@ -56,7 +56,7 @@ unicode-general-category = "1.1"
 
 # Channels, locks, and enum maps
 crossbeam-channel = "0.5"
-parking_lot = "0.12"
+parking_lot = "0.13"
 enum-map = "3.1"
 
 # Rendering
@@ -98,7 +98,7 @@ serde_plain = "1"
 pollster = "1.0"
 arboard = "3"
 regex = "1"
-getrandom = "0.3"
+getrandom = "0.4"
 # Exact lock pin: terminal-link URLs decode each component once with this crate.
 percent-encoding = "=2.3.2"
 

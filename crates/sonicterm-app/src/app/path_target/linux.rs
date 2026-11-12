@@ -27,7 +27,6 @@ pub(super) fn reveal_native_file(path: &Path) -> io::Result<()> {
     use std::future::Future;
     let operation = async {
         let connection = ashpd::zbus::connection::Builder::session()
-            .map_err(io::Error::other)?
             .method_timeout(std::time::Duration::from_secs(5))
             .build()
             .await
