@@ -247,6 +247,7 @@ impl StatusLineConfig {
         Ok(ResolvedStatusLine {
             enabled: self.enabled,
             hide_sensitive: self.hide_sensitive,
+            clickable: self.clickable,
             icons: self.icons,
             position: self.position,
             titlebar_segments: self.titlebar_segments,

@@ -5,7 +5,7 @@
     "runner": "ubuntu22-container/X64"
   },
   "tolerance_pp": 1.0,
-  "reason": "Host migration from aarch64-apple-darwin on macos14/ARM64 to x86_64-unknown-linux-gnu on ubuntu22-container/X64. Logic coverage moves from the macOS runner to the linux-coverage job's ubuntu:22.04 container, so every crate floor is re-recorded on Linux, where macOS-only code compiles out and Linux-only code is measured. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/40401978787 attempt 1, job linux-coverage, evidence artifact rust-logic-coverage-evidence-40401978787-1, on x86_64-unknown-linux-gnu on ubuntu22-container/X64 (image ubuntu:22.04) with rustc 1.99.1 (58cf8f9c3 2026-10-13) and cargo-llvm-cov 0.9.0, at commit 168892019bbf4b6438d936d409f713d8b8be3454, the test merge of pull-request head 858b2cdeda23a6e80e5774b34882565ca2ab3c96. sonicterm-mcp, the stdio bridge, enters at a provisional 207/295 (70.17%), below the 236/295 (80.00%) its tests reach on aarch64-apple-darwin, because its Unix connect module is measured here and its Windows one compiles out; replace it with this job's Linux measurement once one exists.",
+  "reason": "CI's stable toolchain moved from rustc 1.99.1 to 1.100.0 (LLVM 23.1.5). The new instrumentation counts fewer coverable lines in unchanged sources (sonicterm-font parser.rs 930 -> 645 regions, font_bytes.rs 296 -> 198); no sonicterm-font or sonicterm-mac Rust source changed in this PR, and both crates' covered share fell with the new counting, not with lost tests. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/43293106504 attempt 1, job linux-coverage, evidence artifact rust-logic-coverage-evidence-43293106504-1, on x86_64-unknown-linux-gnu on ubuntu22-container/X64 (image ubuntu:22.04) with rustc 1.100.0 (0ef1bc386 2026-11-09) and cargo-llvm-cov 0.9.0, at commit 184c10811fb7b0b49f1f8cf4fdbdb00f9a581fb3, the test merge of pull-request head b46e3fb24e03a94478adeb4a31b9f6a750d5d2b1.",
   "crates": {
     "sonicterm-app": {
       "lines": 36754,
@@ -33,9 +33,9 @@
       "percent": 96.65
     },
     "sonicterm-font": {
-      "lines": 7225,
-      "covered": 5556,
-      "percent": 76.9
+      "lines": 6708,
+      "covered": 5051,
+      "percent": 75.3
     },
     "sonicterm-font-config": {
       "lines": 317,
@@ -73,9 +73,9 @@
       "percent": 83.15
     },
     "sonicterm-mac": {
-      "lines": 260,
-      "covered": 166,
-      "percent": 63.85
+      "lines": 242,
+      "covered": 150,
+      "percent": 61.98
     },
     "sonicterm-mcp": {
       "lines": 295,

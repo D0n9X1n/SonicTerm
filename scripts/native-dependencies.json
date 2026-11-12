@@ -26,20 +26,20 @@
     {
       "name": "harfbuzz",
       "path": "crates/sonicterm-harfbuzz/harfbuzz",
-      "version": "14.6.0",
-      "tag": "14.6.0",
+      "version": "15.1.0",
+      "tag": "15.1.0",
       "latest_source": {"provider": "git-tags", "url": "https://github.com/harfbuzz/harfbuzz.git", "pattern": "(\\d+)\\.(\\d+)\\.(\\d+)"},
-      "revision": "c7a7457b7385f33178e8cf87615ca077a810bbe7",
+      "revision": "3df40d9b98d6b32f0e4288d4ecfbb158ddb3a372",
       "archive": {
-        "url": "https://github.com/harfbuzz/harfbuzz/releases/download/14.6.0/harfbuzz-14.6.0.tar.xz",
-        "sha256": "d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586",
-        "root": "harfbuzz-14.6.0"
+        "url": "https://github.com/harfbuzz/harfbuzz/releases/download/15.1.0/harfbuzz-15.1.0.tar.xz",
+        "sha256": "0fc7c565443a5f4be7da65ac5ee5bd737d9b158dc908708b7689a0a5796b0c8d",
+        "root": "harfbuzz-15.1.0"
       },
       "include": ["src/**", "COPYING", "AUTHORS", "NEWS", "README.md", "CONFIG.md", "SECURITY.md"],
       "upstream_fixes": [],
       "local_modifications": [],
-      "tree_sha256": "618e4922d98ef66891b520fe7f32b61a8161b4ea1d5cf61b233556cf876c5f62",
-      "version_check": {"path": "src/hb-version.h", "pattern": "HB_VERSION_STRING\\s+\"([^\"]+)\"", "value": "14.6.0"}
+      "tree_sha256": "b4a9c268cefc130ac31939653882da93cf2655a23df853e1b45603175cc98391",
+      "version_check": {"path": "src/hb-version.h", "pattern": "HB_VERSION_STRING\\s+\"([^\"]+)\"", "value": "15.1.0"}
     },
     {
       "name": "libpng",
@@ -62,40 +62,20 @@
     {
       "name": "zlib",
       "path": "crates/sonicterm-freetype/zlib",
-      "version": "1.3.2",
-      "tag": "v1.3.2",
+      "version": "1.4",
+      "tag": "v1.4",
       "latest_source": {"provider": "git-tags", "url": "https://github.com/madler/zlib.git", "pattern": "v(\\d+)\\.(\\d+)(?:\\.(\\d+))?"},
-      "revision": "da607da739fa6047df13e66a2af6b8bec7c2a498",
+      "revision": "99623ef7097352da7993ba614161fd6a311e046e",
       "archive": {
-        "url": "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.xz",
-        "sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
-        "root": "zlib-1.3.2"
+        "url": "https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.xz",
+        "sha256": "4f11c512053d7bab8d9e9b89bde3575add3e4c50a383b42ef6cb837035fc5a7c",
+        "root": "zlib-1.4"
       },
       "include": ["*.c", "*.h", "LICENSE", "README", "ChangeLog", "FAQ"],
-      "upstream_fixes": [
-        {
-          "revision": "09a1572aa624e5ddb6c075dc013880de70b1b9b9",
-          "url": "https://github.com/madler/zlib/commit/09a1572aa624e5ddb6c075dc013880de70b1b9b9"
-        },
-        {
-          "revision": "e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca",
-          "url": "https://github.com/madler/zlib/commit/e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca"
-        },
-        {
-          "revision": "bbc2ccf3d0de267576b524b875c769a724a513b0",
-          "url": "https://github.com/madler/zlib/commit/bbc2ccf3d0de267576b524b875c769a724a513b0"
-        },
-        {
-          "revision": "df84af25dc1942490e1d1c899a07619152a46148",
-          "url": "https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148"
-        }
-      ],
-      "local_modifications": [
-        {"path": "gzwrite.c", "reason": "carries the upstream_fixes backports to gzwrite.c"},
-        {"path": "infback.c", "reason": "carries the upstream_fixes backports to infback.c"}
-      ],
-      "tree_sha256": "d021ec147dcd37fb5b33f8413d7409942d4a7607558e03b6bc0c191a6b5156f8",
-      "version_check": {"path": "zlib.h", "pattern": "ZLIB_VERSION\\s+\"([^\"]+)\"", "value": "1.3.2"}
+      "upstream_fixes": [],
+      "local_modifications": [],
+      "tree_sha256": "1ee2186e2a8902cf22a3759a93f8e479baaa9aeec4c232a6c4a7bcc64b4de068",
+      "version_check": {"path": "zlib.h", "pattern": "ZLIB_VERSION\\s+\"([^\"]+)\"", "value": "1.4"}
     },
     {
       "name": "winit",

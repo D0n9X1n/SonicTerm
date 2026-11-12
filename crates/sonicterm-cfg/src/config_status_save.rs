@@ -16,6 +16,9 @@ pub(super) fn patch_status_line_values(
     if save.hide_sensitive != disk_save.hide_sensitive {
         changes.push(("hide_sensitive", save.hide_sensitive.into()));
     }
+    if save.clickable != disk_save.clickable {
+        changes.push(("clickable", save.clickable.into()));
+    }
     if save.position != disk_save.position {
         changes.push(("position", save.position.as_str().into()));
     }

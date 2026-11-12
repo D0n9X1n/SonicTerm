@@ -105,6 +105,8 @@ pub enum StatusSegmentRowKind {
     ShowStrip,
     /// Hide or show sensitive segments.
     HideSensitive,
+    /// Let mouse presses run segment clicks, or stop them; saved to the config file at once.
+    Clickable,
     /// Enable or disable one segment.
     Segment(sonicterm_cfg::status_line::StatusSegmentId),
     /// Drop every session choice.

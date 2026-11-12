@@ -436,3 +436,55 @@ fn a_status_line_save_leaves_absent_keys_absent_at_their_defaults() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The clicks toggle writes only `[status_line] clickable`: comments, `[font]` and every other
+/// status-line key stay as they were, and the written table resolves to the new value.
+#[test]
+fn the_clicks_toggle_writes_only_the_clickable_key() {
+    let dir = font_persist_test_dir("status-clickable");
+    let path = dir.join("sonicterm.toml");
+    let original = "# mine\n[font]\nsize = 15 # big\n\n[status_line]\n# keep me\nenabled = true\n";
+    std::fs::write(&path, original).unwrap();
+    let written = Config::persist_status_line_clickable(&path, true).unwrap();
+    assert!(written.resolved.clickable && written.table.clickable);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        text,
+        "# mine\n[font]\nsize = 15 # big\n\n[status_line]\n# keep me\nenabled = true\nclickable = true\n"
+    );
+    // A key already in the file is updated in place, even back to its default.
+    let written = Config::persist_status_line_clickable(&path, false).unwrap();
+    assert!(!written.resolved.clickable);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.ends_with("enabled = true\nclickable = false\n"), "{text}");
+    assert_eq!(text.matches("clickable =").count(), 1, "{text}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// With no config file the clicks toggle writes the starter template first, then sets the key in
+/// the template's `[status_line]` table without touching its font values.
+#[test]
+fn the_clicks_toggle_creates_the_starter_config_when_none_exists() {
+    let dir = font_persist_test_dir("status-clickable-starter");
+    let path = dir.join("sonicterm.toml");
+    let written = Config::persist_status_line_clickable(&path, true).unwrap();
+    assert!(written.resolved.clickable);
+    let config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(config.status_line.clickable);
+    assert_eq!(config.font.size, Config::default().font.size, "the font is not rewritten");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Save Current Settings carries a session `clickable` by the Save rule.
+#[test]
+fn save_current_settings_writes_a_session_clickable() {
+    let dir = font_persist_test_dir("status-clickable-save");
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, "[status_line]\nenabled = true\n").unwrap();
+    let save = session_save(&path, |overrides, file| overrides.set_clickable(file, true));
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&save)).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("clickable = true"), "{text}");
+    assert!(reloaded_lists(&path).clickable);
+    let _ = std::fs::remove_dir_all(dir);
+}

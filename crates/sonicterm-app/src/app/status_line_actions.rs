@@ -2,16 +2,35 @@
 
 use super::*;
 
+/// The click a mouse press at raster-px `(pointer_x, pointer_y)` runs in `strip`: the pressed
+/// segment's click while `clickable` (`[status_line] clickable`) allows mouse clicks, else none.
+/// Only pointer paths call this; the keyboard and assistive technology read `click` directly, so
+/// turning mouse clicks off never takes a segment's action from them.
+pub(in crate::app) fn pointer_click(
+    strip: &sonicterm_gpu::status_strip::StripHit,
+    pointer_x: f32,
+    pointer_y: f32,
+    clickable: bool,
+) -> Option<SegmentClick> {
+    if !clickable {
+        // When: `clickable` is false, a mouse press on a segment runs nothing.
+        return None;
+    }
+    strip.segment_at(pointer_x, pointer_y).and_then(|segment| segment.click.clone())
+}
+
 impl App {
     /// Route a left press at raster-px `(pointer_x, pointer_y)` in `window_id`. Returns `true`
     /// when the press is inside the strip: it is consumed, so no selection,
-    /// mouse report or tab gesture starts there.
+    /// mouse report or tab gesture starts there. The pressed segment's click runs only while
+    /// `[status_line] clickable` allows mouse clicks.
     pub(in crate::app) fn press_status_line(
         &mut self,
         window_id: WindowId,
         pointer_x: f32,
         pointer_y: f32,
     ) -> bool {
+        let clickable = self.status_clickable();
         let hit = self
             .registry
             .windows
@@ -24,10 +43,7 @@ impl App {
                     .find(|strip| strip.contains(pointer_y))
             })
             .map(|strip| {
-                let click = strip
-                    .segment_at(pointer_x, pointer_y)
-                    .and_then(|segment| segment.click.clone());
-                (strip.contains(pointer_y), click)
+                (strip.contains(pointer_y), pointer_click(strip, pointer_x, pointer_y, clickable))
             });
         let Some((true, click)) = hit else {
             // When: `hit` is None or outside the band, the press is outside the strip: strip focus

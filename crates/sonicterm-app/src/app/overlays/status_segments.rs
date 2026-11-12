@@ -43,6 +43,7 @@ fn label_keys() -> Vec<String> {
         "status-checklist-footer",
         "status-checklist-show",
         "status-checklist-hide-sensitive",
+        "status-checklist-clicks",
         "status-checklist-reset",
         "status-checklist-sensitive",
         "status-checklist-hidden",
@@ -115,6 +116,15 @@ impl App {
                 ),
                 String::new(),
             ),
+            row(
+                StatusSegmentRowKind::Clickable,
+                format!(
+                    "{}{}",
+                    check(shown.clickable),
+                    self.i18n.translate("status-checklist-clicks")
+                ),
+                String::new(),
+            ),
         ];
         for (group, heading) in GROUPS {
             let ids: Vec<StatusSegmentId> = StatusSegmentId::ALL
@@ -171,6 +181,15 @@ impl App {
         match kind {
             StatusSegmentRowKind::ShowStrip => self.toggle_status_line(),
             StatusSegmentRowKind::HideSensitive => self.toggle_status_line_sensitive(),
+            StatusSegmentRowKind::Clickable => {
+                // The row's check mark shows the new state, so only a failed save is announced,
+                // on the window the checklist is attached to.
+                let kind = self
+                    .interaction
+                    .palette_attached_window
+                    .map_or(FrontmostKind::Main, FrontmostKind::Child);
+                self.toggle_status_line_clicks(kind, false);
+            }
             StatusSegmentRowKind::Segment(id) => self.toggle_status_segment(id),
             StatusSegmentRowKind::Reset => self.reset_status_line_choices(),
             StatusSegmentRowKind::Heading => {

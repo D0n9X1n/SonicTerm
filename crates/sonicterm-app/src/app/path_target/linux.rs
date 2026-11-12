@@ -27,7 +27,6 @@ pub(super) fn reveal_native_file(path: &Path) -> io::Result<()> {
     use std::future::Future;
     let operation = async {
         let connection = ashpd::zbus::connection::Builder::session()
-            .map_err(io::Error::other)?
             .method_timeout(std::time::Duration::from_secs(5))
             .build()
             .await
@@ -156,22 +155,18 @@ pub(super) fn open_native_path(path: &Path, expected_decision: PathOpenDecision)
             ));
         }
         async_io::block_on(async {
-            let request = match OpenFileRequest::default()
-                .writeable(false)
-                .ask(false)
-                .send_file(file)
-                .await
-            {
-                Ok(request) => request,
-                Err(error) if linux_portal_unavailable(&error) => {
-                    // When: `linux_portal_unavailable` accepts `error`, signal the narrowly permitted fixed-path fallback.
-                    return Err(io::Error::new(io::ErrorKind::NotFound, error.to_string()));
-                }
-                Err(error) => {
-                    // When: `send_file` returns another `error`, preserve it and never bypass portal rejection with a fallback.
-                    return Err(io::Error::other(error.to_string()));
-                }
-            };
+            let request =
+                match OpenFileRequest::default().writable(false).ask(false).send_file(file).await {
+                    Ok(request) => request,
+                    Err(error) if linux_portal_unavailable(&error) => {
+                        // When: `linux_portal_unavailable` accepts `error`, signal the narrowly permitted fixed-path fallback.
+                        return Err(io::Error::new(io::ErrorKind::NotFound, error.to_string()));
+                    }
+                    Err(error) => {
+                        // When: `send_file` returns another `error`, preserve it and never bypass portal rejection with a fallback.
+                        return Err(io::Error::other(error.to_string()));
+                    }
+                };
             request.response().map_err(|error| io::Error::other(error.to_string()))
         })
     });

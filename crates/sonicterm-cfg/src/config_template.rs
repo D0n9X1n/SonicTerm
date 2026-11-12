@@ -214,6 +214,10 @@ preset = "developer"
 icons = "unicode"
 # Hide sensitive segments such as the link under the pointer (screen sharing).
 hide_sensitive = false
+# Let a mouse click on a segment, or on the window name in the titlebar, run
+# its action (such as Memory Usage or Rename Window). The keyboard and screen
+# readers run them either way.
+clickable = false
 # Sampling interval of sampled segments such as memory, 500-60000 ms.
 update_interval_ms = 2000
 

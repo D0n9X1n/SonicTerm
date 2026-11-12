@@ -145,6 +145,9 @@ pub enum Action {
     ToggleStatusLine,
     /// Toggle hiding of sensitive status line content (screen sharing).
     ToggleStatusLineSensitive,
+    /// Let a mouse press on a status line segment, or on the window name in the titlebar band,
+    /// run its click, or stop it; the new value is written to the config file.
+    ToggleStatusLineClicks,
     /// Switch every terminal window between the integrated titlebar and the system titlebar for
     /// this session (macOS; Windows and Linux keep theirs).
     ToggleIntegratedTitlebar,

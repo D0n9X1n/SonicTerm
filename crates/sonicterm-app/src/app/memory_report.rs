@@ -884,6 +884,7 @@ pub(crate) fn report_route(action: &Action) -> ReportRoute {
         | Action::ToggleTabBar
         | Action::ToggleStatusLine
         | Action::ToggleStatusLineSensitive
+        | Action::ToggleStatusLineClicks
         | Action::ToggleIntegratedTitlebar
         | Action::StatusLinePositionTop
         | Action::StatusLinePositionBottom

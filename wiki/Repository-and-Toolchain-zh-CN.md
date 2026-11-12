@@ -129,7 +129,7 @@ python3 scripts/native-dependencies_tests.py
 文件，并附一行原因。它与只记录回移修复的 `upstream_fixes` 分开。winit 列出 13 个文件：
 桌面子集对 `Cargo.toml`、`Cargo.lock`、`build.rs`、平台模块表与文档的裁剪，以及
 `src/platform/windows.rs` 和 `platform_impl/windows` 的键盘、事件循环、模块文件中的
-Windows 原生键盘元数据，外加新增的 `keyboard_tests.rs`。zlib 列出其上游修复涉及的两个文件。
+Windows 原生键盘元数据，外加新增的 `keyboard_tests.rs`。其他库均不列出文件。
 另一个会访问网络的工具负责让该列表与实际一致：
 
 ```sh
@@ -181,8 +181,7 @@ python3 scripts/native-dependency-delta.py --latest
    光栅输出。要求准确 head 的平台 CI；本地 macOS 测试不验证 Windows 代码或 Intel
    二进制。在同一 PR 更新 wiki 的两个语言部分。
 
-仓库内的 FreeType、HarfBuzz 和 libpng 均为未经修改的上游发布，不携带额外修复。仓库内的
-zlib 带有 1.3.2 之后的无效距离解码修复及相关 gzip 写入修复。这些修复已存在于导入的源码中，清单记录了每项
-修复的完整上游提交号。这些选择不证明每个公告都能从 SonicTerm 触发，也不表示所有剩余
+仓库内的 FreeType、HarfBuzz、libpng 和 zlib 均为未经修改的上游发布，不携带额外修复。
+这些选择不证明每个公告都能从 SonicTerm 触发，也不表示所有剩余
 上游缺陷均已修复。准备每次依赖更新和发布前都应重新检查上游版本/公告；更新始终经过
 审查，而不是自动合并。

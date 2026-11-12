@@ -401,6 +401,8 @@ fn a_mouse_click_on_a_segment_hands_the_keyboard_to_what_it_opens() {
     // Round 4 item 2: a mouse click goes through the same handoff as Enter and an assistive
     // technology's Click, so the rename editor it opens receives the next character.
     let (mut app, window_id) = app_with_window();
+    // Mouse clicks are off by default; this test turns them on to follow the click's handoff.
+    app.config.status_line.clickable = true;
     present_with(
         &mut app,
         window_id,
@@ -533,4 +535,18 @@ fn the_name_band_click_runs_only_for_the_target_it_named() {
         Some(band(Some(SegmentClick::Action(Action::RenameWindow))));
     app.handle_accessibility_request(window_id, AccessibilityRequest::Click { node, target });
     assert!(app.interaction.command_palette.is_open(), "the click it named renames the window");
+}
+
+#[test]
+fn space_runs_a_focused_segment_while_mouse_clicks_are_off() {
+    // Turning mouse clicks off leaves the keyboard path whole: Space, named or as a character,
+    // runs the focused segment's click just as Enter does.
+    for key in [Key::Named(NamedKey::Space), Key::Character(SmolStr::new(" "))] {
+        let (mut app, window_id) = app_with_window();
+        assert!(!app.status_clickable(), "mouse clicks are off by default");
+        present(&mut app, window_id, &[(StatusSegmentId::Mem, 0.0, true)]);
+        app.focus_status_line(window_id);
+        assert!(app.status_focus_key(window_id, &key, false));
+        assert!(!app.status_line_shown(), "{key:?} ran the segment's click");
+    }
 }

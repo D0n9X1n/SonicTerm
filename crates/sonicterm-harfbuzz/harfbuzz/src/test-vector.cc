@@ -23,17 +23,54 @@
  *
  */
 
+/* Include before hb.hh so libstdc++'s inline string implementations remain
+ * available for MemorySanitizer instrumentation. */
+#include <string>
+
+#define hb_realloc vector_test_realloc
+
 #include "hb.hh"
 #include "hb-vector.hh"
+#include "hb-alloc-pool.hh"
 #include "hb-set.hh"
 #include "hb-map.hh"
-#include <string>
+
+static size_t allocation_limit = SIZE_MAX;
+static size_t last_reallocation;
+
+extern "C" void *
+vector_test_realloc (void *ptr, size_t size)
+{
+  last_reallocation = size;
+  return size > allocation_limit ? nullptr : realloc (ptr, size);
+}
 
 
 int
 main (int argc, char **argv)
 {
   hb_always_assert (sizeof (hb_vector_t<int>) == sizeof (hb_sorted_vector_t<int>));
+
+  /* Exercise large requests without allocating large buffers. */
+  allocation_limit = 4096;
+  for (bool exact : {false, true})
+    for (unsigned size : {(unsigned) INT_MAX + 1u, UINT_MAX})
+    {
+      hb_vector_t<char> v {'x'};
+      last_reallocation = 0;
+      hb_always_assert (!v.alloc (size, exact));
+      hb_always_assert (v.in_error ());
+      hb_always_assert (!last_reallocation);
+      hb_always_assert (v.length == 1 && v[0] == 'x');
+    }
+  {
+    hb_vector_t<char> v;
+    hb_always_assert (!v.alloc (INT_MAX));
+    hb_always_assert (v.in_error ());
+    /* Geometric growth must stay representable in the signed capacity. */
+    hb_always_assert (last_reallocation == INT_MAX);
+  }
+  allocation_limit = SIZE_MAX;
 
   /* Test copy constructor. */
   {
@@ -59,6 +96,100 @@ main (int argc, char **argv)
     hb_always_assert (v2.length == 2);
     hb_always_assert (v2[0] == 1);
     hb_always_assert (v2[1] == 2);
+  }
+
+  /* Self-copy assignment must preserve both trivial and nontrivial items. */
+  {
+    hb_vector_t<int> v {1, 2};
+    const auto &self = v;
+    v = self;
+    hb_always_assert (v.length == 2);
+    hb_always_assert (v[0] == 1);
+    hb_always_assert (v[1] == 2);
+  }
+  {
+    hb_vector_t<std::string> v;
+    v.push (std::string ("one"));
+    v.push (std::string ("two"));
+    const auto &self = v;
+    v = self;
+    hb_always_assert (v.length == 2);
+    hb_always_assert (v[0] == "one");
+    hb_always_assert (v[1] == "two");
+  }
+
+  /* Test pushing an element of the vector itself while it grows. */
+  {
+    hb_vector_t<int> v {7};
+    for (unsigned i = 0; i < 1000; i++)
+      v.push (v.arrayZ[0]);
+    hb_always_assert (v.length == 1001);
+    for (unsigned i = 0; i < v.length; i++)
+      hb_always_assert (v[i] == 7);
+  }
+  {
+    hb_vector_t<std::string> v;
+    v.push (std::string ("a string longer than the small-string buffer"));
+    for (unsigned i = 0; i < 1000; i++)
+      v.push (v.arrayZ[i]);
+    hb_always_assert (v.length == 1001);
+    for (unsigned i = 0; i < v.length; i++)
+      hb_always_assert (v[i] == "a string longer than the small-string buffer");
+  }
+  {
+    hb_vector_t<hb_vector_t<int>> v;
+    v.push (hb_vector_t<int> {1, 2, 3});
+    for (unsigned i = 0; i < 1000; i++)
+      v.push (v.arrayZ[0]);
+    hb_always_assert (v.length == 1001);
+    for (unsigned i = 0; i < v.length; i++)
+      hb_always_assert (v[i].length == 3 && v[i][2] == 3);
+  }
+  {
+    hb_vector_t<hb_vector_t<int>> v {hb_vector_t<int> {1, 2, 3}};
+    v.push (std::move (v[0]));
+    hb_always_assert (v.length == 2 && v[0].length == 0);
+    hb_always_assert (v[1].length == 3 && v[1][2] == 3);
+  }
+  {
+    hb_vector_t<std::string> v {"one"};
+    v.push (3, v[0][0]);
+    hb_always_assert (v.length == 2);
+    hb_always_assert (v[0] == "one" && v[1] == "ooo");
+  }
+  {
+    hb_vector_t<int> v {1, 2, 3};
+    v.extend (v.as_array ());
+    hb_always_assert (v.length == 6);
+    hb_always_assert (v[3] == 1 && v[4] == 2 && v[5] == 3);
+  }
+  {
+    hb_vector_t<int> v {1, 2, 3};
+    v.extend (hb_array_t<const int> (v.arrayZ + 1, 2));
+    hb_always_assert (v.length == 5);
+    hb_always_assert (v[3] == 2 && v[4] == 3);
+  }
+  {
+    hb_vector_t<std::string> v {"one", "two", "three"};
+    v.extend (v.as_array ());
+    hb_always_assert (v.length == 6);
+    for (unsigned i = 0; i < 3; i++)
+      hb_always_assert (v[i] == v[i + 3]);
+  }
+  {
+    hb_vector_t<std::string> v {"one", "two", "three"};
+    v.extend (v);
+    hb_always_assert (v.length == 6);
+    for (unsigned i = 0; i < 3; i++)
+      hb_always_assert (v[i] == v[i + 3]);
+  }
+
+  /* A failed vector must not move from an aliased argument. */
+  {
+    hb_vector_t<std::string> v {"one"};
+    v.set_error ();
+    hb_always_assert (!v.push_or_fail (std::move (v[0])));
+    hb_always_assert (v.length == 1 && v[0] == "one");
   }
 
   /* Test move constructor. */
@@ -185,6 +316,19 @@ main (int argc, char **argv)
     hb_vector_t<hb_map_t> v;
     hb_map_t m;
     v.push (m);
+  }
+
+  /* An empty allocation from a pool with no open chunk is not a failure. */
+  {
+    hb_alloc_pool_t pool;
+    hb_vector_t<int> v, empty;
+    hb_always_assert (v.allocate_from_pool (&pool, 0));
+    hb_always_assert (!v.in_error ());
+    hb_always_assert (v.duplicate_vector_from_pool (&pool, empty));
+    hb_always_assert (!v.in_error ());
+    hb_always_assert (v.allocate_from_pool (&pool, 2));
+    hb_always_assert (!v.in_error ());
+    hb_always_assert (v.length == 2);
   }
 
   return 0;

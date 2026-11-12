@@ -33,9 +33,9 @@ PINNED_EMPTY_TREE = "dc1b85cc111ad965f947938798d33b98ffcc90b724dacac0b2153368eb1
 # Pin reviewed source trees independently so manifest-only digest changes cannot hide drift.
 PINNED_VENDOR_TREES = {
     "freetype": "ab93a207b5f03bd923590dac918cc7463e10bd101a430e0fc020f748b2be419d",
-    "harfbuzz": "618e4922d98ef66891b520fe7f32b61a8161b4ea1d5cf61b233556cf876c5f62",
+    "harfbuzz": "b4a9c268cefc130ac31939653882da93cf2655a23df853e1b45603175cc98391",
     "libpng": "a4663dc1dfe43329e9808cba99f2a0dbd2400218ccfaccd57a36f0d3ab88cad9",
-    "zlib": "d021ec147dcd37fb5b33f8413d7409942d4a7607558e03b6bc0c191a6b5156f8",
+    "zlib": "1ee2186e2a8902cf22a3759a93f8e479baaa9aeec4c232a6c4a7bcc64b4de068",
     "winit": "e9e7ee5adefc2fbc8f81d7983658ca63ed6cf88a0a7c5257280c1739b9e4b456",
 }
 

@@ -37,10 +37,13 @@ pub(crate) enum BandPress {
 }
 
 /// Classify a left press at raster-px `(pointer_x, pointer_y)` in `window`, caption buttons and edges first.
+/// A segment counts only while `clickable` (`[status_line] clickable`) lets a mouse press run its
+/// click; otherwise the press is empty band space, so it drags the window.
 pub(crate) fn classify_band_press(
     window: &WindowState,
     pointer_x: f32,
     pointer_y: f32,
+    clickable: bool,
 ) -> BandPress {
     let Some(renderer) = window.renderer.as_ref() else {
         // When: the window has no renderer, it draws no band.
@@ -72,12 +75,27 @@ pub(crate) fn classify_band_press(
         // When: pointer_y is outside 0..band_height, the press is below the band and the panes'.
         return BandPress::Outside;
     }
-    let on_segment = [window.status_strip.as_ref(), window.title_band.as_ref()]
-        .into_iter()
-        .flatten()
-        .any(|hit| {
-            hit.segment_at(pointer_x, pointer_y).is_some_and(|segment| segment.click.is_some())
-        });
+    segment_or_empty(
+        [window.status_strip.as_ref(), window.title_band.as_ref()],
+        pointer_x,
+        pointer_y,
+        clickable,
+    )
+}
+
+/// What a press inside the band, past the caption buttons and edges, is: `Segment` when a mouse
+/// press runs a click under `(pointer_x, pointer_y)` in `strips`, else `Empty` titlebar space,
+/// which drags the window. With `clickable` false every segment, the window name included, is
+/// titlebar space.
+pub(crate) fn segment_or_empty(
+    strips: [Option<&sonicterm_gpu::status_strip::StripHit>; 2],
+    pointer_x: f32,
+    pointer_y: f32,
+    clickable: bool,
+) -> BandPress {
+    let on_segment = strips.into_iter().flatten().any(|hit| {
+        super::status_line::pointer_click(hit, pointer_x, pointer_y, clickable).is_some()
+    });
     if on_segment {
         BandPress::Segment
     } else {
@@ -305,11 +323,12 @@ impl App {
         pointer_x: f32,
         pointer_y: f32,
     ) -> bool {
+        let clickable = self.status_clickable();
         let Some(window) = self.registry.windows.get_mut(&window_id) else {
             // When: window_id has no entry in windows, it closed and nothing consumes the press.
             return false;
         };
-        let press = classify_band_press(window, pointer_x, pointer_y);
+        let press = classify_band_press(window, pointer_x, pointer_y, clickable);
         match press {
             BandPress::Outside => {
                 // When: Outside, the panes take the press.
@@ -386,7 +405,8 @@ impl App {
             return (false, false);
         }
         let pressed = window.caption.pressed.take();
-        let under = match classify_band_press(window, pointer_x, pointer_y) {
+        // A release reads only caption buttons, which the segment setting never changes.
+        let under = match classify_band_press(window, pointer_x, pointer_y, false) {
             BandPress::Caption(button) => Some(button),
             _ => None,
         };
@@ -408,7 +428,8 @@ impl App {
         pointer_y: f32,
     ) -> Option<CursorIcon> {
         let window = self.registry.windows.get_mut(&window_id)?;
-        let press = classify_band_press(window, pointer_x, pointer_y);
+        // Hover reads only caption buttons and edges, so it skips the per-move config check.
+        let press = classify_band_press(window, pointer_x, pointer_y, false);
         let hovered = match press {
             BandPress::Caption(button) => Some(button),
             _ => None,

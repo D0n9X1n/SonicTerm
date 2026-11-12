@@ -29,7 +29,7 @@ libc.workspace = true
 
 # The launcher progress signal; the same zbus `ashpd` already builds, driven by `async-io`.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5.13", default-features = false, features = ["async-io"] }
+zbus = { version = "6", default-features = false, features = ["default-rt"] }
 async-io = "2.6"
 
 [[bin]]

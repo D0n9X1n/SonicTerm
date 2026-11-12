@@ -652,11 +652,7 @@ impl Config {
                 seed_user_examples(parent)?;
             }
         }
-        if path.exists() {
-            // When: `path` already exists, preserve the user's config and only ensure companion directories/examples.
-            return Ok(());
-        }
-        std::fs::write(path, default_config_template()).with_context(|| format!("write {path:?}"))
+        write_template_if_absent(path)
     }
 
     /// Ensure and open the platform user config file.
@@ -858,6 +854,24 @@ fn write_if_missing(path: &Path, content: &str) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
     }
     std::fs::write(path, content).with_context(|| format!("write {path:?}"))
+}
+
+/// Write the starter template to `path` only when no file is there. The check and the create are
+/// one `create_new` open, so a config another writer created in between is kept, never truncated.
+fn write_template_if_absent(path: &Path) -> Result<()> {
+    use std::io::Write;
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // When: `path` already exists, preserve the user's config; only the companions were ensured.
+            return Ok(());
+        }
+        Err(error) => {
+            // When: the open failed for another reason, such as a missing permission, report it.
+            return Err(error).with_context(|| format!("create {path:?}"));
+        }
+    };
+    file.write_all(default_config_template().as_bytes()).with_context(|| format!("write {path:?}"))
 }
 
 #[cfg(test)]

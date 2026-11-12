@@ -50,7 +50,7 @@ windows = { workspace = true, features = [
 ] }
 windows-implement = "0.60"
 windows-core = "0.62"
-muda = "0.19"
+muda = "0.21"
 window-vibrancy = "0.8"
 raw-window-handle = { workspace = true }
 

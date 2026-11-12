@@ -522,3 +522,24 @@ action = "show_keymap_cheatsheet"
         "all-dead-action file yields no bindings (no panic, no error)"
     );
 }
+
+/// Contract: `toggle_status_line_clicks` deserializes from its snake_case name for a user
+/// binding, and no bundled keymap binds it, because it has no default binding.
+#[test]
+fn toggle_status_line_clicks_parses_and_has_no_default_binding() {
+    let source = "[meta]\nname = \"test\"\nversion = \"1\"\n\n[[binding]]\nkeys = \"f9\"\naction = \"toggle_status_line_clicks\"\n";
+    let keymap: Keymap = toml::from_str(source).expect("toggle_status_line_clicks deserializes");
+    assert_eq!(keymap.lookup("f9"), Some(&Action::ToggleStatusLineClicks));
+    for text in [
+        include_str!("../../../assets/keymaps/sonicterm.toml"),
+        include_str!("../../../assets/keymaps/sonicterm-macos.toml"),
+        include_str!("../../../assets/keymaps/sonicterm-windows.toml"),
+        include_str!("../../../assets/keymaps/sonicterm-linux.toml"),
+    ] {
+        let bundled: Keymap = toml::from_str(text).expect("bundled keymap parses");
+        assert!(bundled
+            .bindings
+            .iter()
+            .all(|binding| binding.action.0 != Action::ToggleStatusLineClicks));
+    }
+}

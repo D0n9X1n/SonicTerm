@@ -463,15 +463,10 @@ Ordinary fonts are not shared because holding every font file whole, a 75 MiB CJ
 
 ### Native source versions and configuration
 
-The source-pinned stack is FreeType 2.15.0, HarfBuzz 14.6.0, libpng 1.6.59,
-and zlib 1.3.2. FreeType, HarfBuzz and libpng are plain upstream releases; the
-vendored zlib carries the upstream invalid-distance `inflateBack`
-correction and three related nonblocking gzip-writing fixes. Those fixes are
-already present in the imported sources rather than applied at build time. The
-exact release commits, archive SHA-256 values, selected paths, the upstream
-revision and URL of each carried fix, and the resulting source-tree hashes are in
-`scripts/native-dependencies.json`. The headers report the base releases, not the
-additional fix revisions. Cairo remains an external platform dependency;
+The source-pinned stack is FreeType 2.15.0, HarfBuzz 15.1.0, libpng 1.6.59,
+and zlib 1.4. All four are plain upstream releases with no carried fixes. The
+exact release commits, archive SHA-256 values, selected paths and the resulting
+source-tree hashes are in `scripts/native-dependencies.json`. Cairo remains an external platform dependency;
 this inventory does not pin Cairo or imply a self-contained macOS bundle.
 
 FreeType configuration is generated outside the vendored tree. It enables error

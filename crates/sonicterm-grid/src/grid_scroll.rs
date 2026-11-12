@@ -257,8 +257,8 @@ impl Grid {
         // Some rows ended up with stale data after the swaps in the
         // bottom `line_count` slots — explicitly clear them.
         let blank_start = bot_i + 1 - line_count;
-        for row in blank_start..=bot_i {
-            for cell in self.visible[row].iter_mut() {
+        for line in self.visible.range_mut(blank_start..=bot_i) {
+            for cell in line.iter_mut() {
                 *cell = fill.clone();
             }
         }
@@ -312,8 +312,8 @@ impl Grid {
             }
         }
         // Clear the top `line_count` rows of the region.
-        for row in top_i..(top_i + line_count).min(bot_i + 1) {
-            for cell in self.visible[row].iter_mut() {
+        for line in self.visible.range_mut(top_i..(top_i + line_count).min(bot_i + 1)) {
+            for cell in line.iter_mut() {
                 *cell = fill.clone();
             }
         }

@@ -43,7 +43,7 @@ winapi = { version = "0.3", features = ["dwrite", "dwrite_1", "dwrite_2", "winba
 wio = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "=0.26.1"
+cocoa = "=0.27.0"
 core-foundation = "=0.10.1"
 core-text = "=22.0.0"
 objc = "0.2"
