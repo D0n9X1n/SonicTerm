@@ -164,8 +164,8 @@ They are kept apart from `upstream_fixes`, which record backports only. winit li
 13 files: the desktop-subset trims to `Cargo.toml`, `Cargo.lock`, `build.rs`, the
 platform module tables and docs, and the Windows native keyboard metadata in
 `src/platform/windows.rs` and the `platform_impl/windows` keyboard, event loop and
-module files, plus the added `keyboard_tests.rs`. zlib lists the two files its
-upstream fixes touch. A separate tool reaches the network to hold that list to the
+module files, plus the added `keyboard_tests.rs`. Every other library lists
+none. A separate tool reaches the network to hold that list to the
 truth:
 
 ```sh
@@ -233,10 +233,8 @@ For an update, use one reviewable library change at a time:
    raster output. Require exact-head platform CI; local macOS tests do not validate
    Windows code or Intel binaries. Update both wiki language files in the same PR.
 
-The vendored FreeType, HarfBuzz and libpng are plain upstream releases with no
-carried fixes. The vendored zlib carries the invalid-distance decoding fix and the
-related gzip-write corrections after 1.3.2. Those fixes are already present in the
-imported sources, and the manifest records the full upstream commits for each one.
+The vendored FreeType, HarfBuzz, libpng and zlib are plain upstream releases with
+no carried fixes.
 These choices do not establish that every advisory is reachable through SonicTerm
 or that every remaining upstream defect is fixed. Recheck upstream
 releases/advisories when preparing each dependency update and before a release;

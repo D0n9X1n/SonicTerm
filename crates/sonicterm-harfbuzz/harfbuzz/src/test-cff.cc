@@ -24,7 +24,111 @@
 
 #include "hb.hh"
 #include "hb-ot-cff-common.hh"
+#include "hb-ot-cff1-table.hh"
 #include "hb-subset-cff-common.hh"
+#include "hb-cff-specializer.hh"
+#include "hb-cff-interp-dict-common.hh"
+
+static void
+test_specialized_line_geometry ()
+{
+  /* Reconstruct every point after specializing horizontal/vertical line
+   * sequences, including repeated directions and merged alternating runs. */
+  for (unsigned n = 1; n <= 8; n++)
+    for (unsigned mask = 0; mask < (1u << n); mask++)
+      for (unsigned maxstack : {4u, 48u})
+      {
+        hb_vector_t<CFF::cs_command_t> commands;
+        for (unsigned i = 0; i < n; i++)
+        {
+          bool horizontal = mask & (1u << i);
+          int delta = (i & 1) ? -(int) i - 1 : (int) i + 1;
+          CFF::cs_command_t cmd (OpCode_rlineto);
+          CFF::number_t dx, dy;
+          dx.set_int (horizontal ? delta : 0);
+          dy.set_int (horizontal ? 0 : delta);
+          cmd.args.push (dx);
+          cmd.args.push (dy);
+          commands.push (std::move (cmd));
+        }
+        CFF::specialize_commands (commands, maxstack);
+        for (const auto &cmd : commands)
+          hb_always_assert (cmd.args.length <= maxstack);
+        CFF::str_buff_t encoded;
+        hb_always_assert (CFF::encode_commands (commands, encoded));
+        CFF::generalize_commands (commands);
+        hb_always_assert (commands.length == n);
+        int x = 0, y = 0, expected_x = 0, expected_y = 0;
+        for (unsigned i = 0; i < n; i++)
+        {
+          bool horizontal = mask & (1u << i);
+          int delta = (i & 1) ? -(int) i - 1 : (int) i + 1;
+          expected_x += horizontal ? delta : 0;
+          expected_y += horizontal ? 0 : delta;
+          x += commands[i].args[0].to_int ();
+          y += commands[i].args[1].to_int ();
+          hb_always_assert (x == expected_x && y == expected_y);
+        }
+      }
+}
+
+static void
+test_specialized_fractional_geometry ()
+{
+  const double deltas[][2] = {
+    {0.5, 12}, {-0.5, 12}, {12, 0.5}, {12, -0.5},
+    {0.25, -0.75}, {0, 12}, {12, 0},
+  };
+  for (CFF::op_code_t op : {OpCode_rmoveto, OpCode_rlineto})
+    for (const auto &delta : deltas)
+    {
+      hb_vector_t<CFF::cs_command_t> commands;
+      CFF::cs_command_t cmd (op);
+      CFF::number_t dx, dy;
+      dx.set_real (delta[0]);
+      dy.set_real (delta[1]);
+      cmd.args.push (dx);
+      cmd.args.push (dy);
+      commands.push (std::move (cmd));
+      CFF::specialize_commands (commands);
+      CFF::str_buff_t encoded;
+      hb_always_assert (CFF::encode_commands (commands, encoded));
+      CFF::generalize_commands (commands);
+      hb_always_assert (commands.length == 1);
+      hb_always_assert (commands[0].op == op);
+      hb_always_assert (commands[0].args.length == 2);
+      hb_always_assert (commands[0].args[0].to_real () == delta[0]);
+      hb_always_assert (commands[0].args[1].to_real () == delta[1]);
+    }
+}
+
+static void
+test_charset1_splits_long_ranges ()
+{
+  hb_vector_t<CFF::code_pair_t> ranges;
+  ranges.push (CFF::code_pair_t {100, 511});
+  ranges.push (CFF::code_pair_t {1000, 0});
+
+  char buffer[10];
+  hb_serialize_context_t c (buffer, sizeof (buffer));
+  auto *charset = c.start_serialize<CFF::Charset> ();
+  hb_always_assert (charset->serialize (&c, 1, 514, ranges));
+  c.end_serialize ();
+  hb_always_assert (!c.in_error ());
+
+  const unsigned char expected[] = {
+    1, 0, 100, 255, 1, 100, 255, 3, 232, 0,
+  };
+  hb_bytes_t bytes = c.copy_bytes ();
+  hb_always_assert (bytes.length == sizeof (expected));
+  hb_always_assert (!hb_memcmp (bytes.arrayZ, expected, sizeof (expected)));
+  bytes.fini ();
+
+  for (unsigned int i = 0; i < 10; i++)
+    ranges.push (CFF::code_pair_t {2000 + i * 2, 0});
+  hb_always_assert (CFF::Charset::get_size_for_format1 (ranges) <
+		    CFF::Charset2::get_size_for_ranges (ranges.length));
+}
 
 template <typename GID, typename FD>
 static void
@@ -52,9 +156,36 @@ test_fd_select_sentinel ()
   c.end_processing ();
 }
 
+static void
+test_index_count_limits ()
+{
+  char buffer[65550];
+  for (unsigned count : {0u, 65535u, 65536u, 65537u})
+  {
+    auto items = hb_range (count) | hb_map ([] (unsigned) { return hb_bytes_t (); });
+    hb_serialize_context_t c (buffer, sizeof (buffer));
+    auto *index = c.start_serialize<OT::CFF1Index> ();
+    bool success = index->serialize_header (&c, +items, 0);
+    hb_always_assert (success == (count <= 65535u));
+    if (success)
+      hb_always_assert (index->count == count);
+    else
+      hb_always_assert (c.in_error ());
+
+    hb_serialize_context_t c2 (buffer, sizeof (buffer));
+    auto *index2 = c2.start_serialize<OT::CFF2Index> ();
+    hb_always_assert (index2->serialize_header (&c2, +items, 0));
+    hb_always_assert (index2->count == count);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
+  test_index_count_limits ();
+  test_specialized_line_geometry ();
+  test_specialized_fractional_geometry ();
+  test_charset1_splits_long_ranges ();
   test_fd_select_sentinel<OT::HBUINT16, OT::HBUINT8> ();
   test_fd_select_sentinel<OT::HBUINT32, OT::HBUINT16> ();
 
@@ -73,7 +204,8 @@ main (int argc, char **argv)
       { 9.399999999999999999, 3, { 0x1E, 0x9A, 0x4F } }, // 9.4
       { 456.8, 4, { 0x1E, 0x45, 0x6A, 0x8F } }, // 456.8
       { 98765.37e2, 5, { 0x1E, 0x98, 0x76, 0x53, 0x7F } }, // 9876537
-      { 1234567890.0, 7, { 0x1E, 0x12, 0x34, 0x56, 0x79, 0xB2, 0xFF } }, // 12345679E2
+      { 1234567890.0, 7, { 0x1E, 0x12, 0x34, 0x56, 0x79, 0xB2, 0xFF } }, // 12345679E2 (rounded)
+      { 1234567900.0, 7, { 0x1E, 0x12, 0x34, 0x56, 0x79, 0xB2, 0xFF } }, // 12345679E2
       { 9.876537e-4, 7, { 0x1E, 0x98, 0x76, 0x53, 0x7C, 0x10, 0xFF } }, // 9876537E-10
       { 9.876537e4, 6, { 0x1E, 0x98, 0x76, 0x5A, 0x37, 0xFF } }, // 98765.37
       { 1e8, 3, { 0x1E, 0x1B, 0x8F } }, // 1E8
@@ -87,15 +219,31 @@ main (int argc, char **argv)
       { -0.01, 4, { 0x1E, 0xE1, 0xC2, 0xFF } }, // -1E-2
       { 0.0123, 4, { 0x1E, 0x12, 0x3C, 0x4F } }, // 123E-4
       { -0.0123, 5, { 0x1E, 0xE1, 0x23, 0xC4, 0xFF } }, // -123E-4
+      { 0.0012, 4, { 0x1E, 0x12, 0xC4, 0xFF } },
+      { 1.23e-5, 4, { 0x1E, 0x12, 0x3C, 0x7F } },   // 123E-7
+      { 123456780.0, 6, { 0x1E, 0x12, 0x34, 0x56, 0x78, 0x0F } },  // 123456780
+      { 0.000123, 4, { 0x1E, 0x12, 0x3C, 0x6F } },   // 123E-6
+      { -0.000123, 5, { 0x1E, 0xE1, 0x23, 0xC6, 0xFF } },  // -123E-6
+      /* Test cases for trailing zeros fix */
+      { 5000.0, 3, { 0x1C, 0x13, 0x88 } }, // 5000
+      { 12340000.0, 5, { 0x1E, 0x12, 0x34, 0xB4, 0xFF } }, // 1234E4
+      { 1000000.0, 3, { 0x1E, 0x1B, 0x6F } }, // 1E6
     };
-    for (size_t t = 0; t < sizeof num_tp_tests / sizeof num_tp_tests[0]; t++)
+    for (auto &num_tp_test : num_tp_tests)
     {
-      struct num_tp_test num_tp_test = num_tp_tests[t];
       number.set_real (num_tp_test.input);
       encoder.encode_num_tp (number);
       hb_always_assert (buff.length == num_tp_test.length);
       for (unsigned i = 0; i < buff.length; i++)
 	hb_always_assert (buff[i] == num_tp_test.output[i]);
+      if (buff.length > 1 && buff[0] == 0x1E) /* OpCode_BCD = 30 = 0x1E */
+      {
+	hb_ubytes_t bytes (buff.arrayZ + 1, buff.length - 1);
+	CFF::byte_str_ref_t str_ref (bytes);
+	double parsed = CFF::dict_opset_t::parse_bcd (str_ref);
+        bool almost_equal = fabs (parsed - num_tp_test.input) <= fabs (num_tp_test.input) * 1e-7;
+	hb_always_assert (almost_equal);
+      }
       encoder.reset ();
     }
   }
