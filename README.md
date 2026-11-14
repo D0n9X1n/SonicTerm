@@ -16,10 +16,10 @@
 
 <p align="center">
   <a href="assets/screenshots/agents-hero.png">
-    <img src="assets/screenshots/agents-hero.png" alt="SonicTerm running Claude Code with a rendered Mermaid sequence diagram, beside two mux-agents helper panes and their live sidebar" width="100%"/>
+    <img src="assets/screenshots/agents-hero.png" alt="SonicTerm with three split panes: Claude Code drawing a Mermaid flowchart of a cache bug, a Claude reviewer naming two problems with line references, and a Claude test writer printing Rust unit tests" width="100%"/>
   </a>
   <br/>
-  <sub><b>Your agents, side by side, drawing real pictures.</b> Claude Code answers with a rendered Mermaid diagram while a reviewer and a test-writer work in the panes beside it.</sub>
+  <sub><b>Your agents, side by side.</b> Claude Code answers with a Mermaid flowchart drawn in the terminal, while a reviewer and a test writer work in the panes beside it.</sub>
 </p>
 
 ## Why SonicTerm
@@ -58,15 +58,13 @@
 Download the [latest release](https://github.com/D0n9X1n/SonicTerm/releases/latest) for your platform and open it. Everything SonicTerm keeps lives under `~/.sonicterm`; see [Usage](wiki/Usage.md) to make it your default terminal.
 
 <details>
-<summary><b>Set up the agent workspace in the screenshot</b></summary>
+<summary><b>Draw Claude Code's diagrams like the screenshot</b></summary>
 
-[mermaid-tty](https://github.com/D0n9X1n/mermaid-tty) draws Claude Code's Mermaid answers as pictures, and [mux-agents](https://github.com/D0n9X1n/mux-agents) runs helper agents in their own panes:
+[mermaid-tty](https://github.com/D0n9X1n/mermaid-tty) draws the Mermaid blocks Claude Code writes as diagrams in the terminal. Split panes with <kbd>Cmd</kbd>+<kbd>D</kbd> and <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> (<kbd>Alt</kbd> on Windows and Linux) and start an agent in each.
 
 ```sh
 claude plugin marketplace add D0n9X1n/mermaid-tty
-claude plugin install mermaid-tty@mermaid-tty --config theme=default
-claude plugin marketplace add D0n9X1n/mux-agents && claude plugin install mux-agents@mux-agents
-npm i -g @mermaid-js/mermaid-cli   # pictures; without it diagrams draw as text
+claude plugin install mermaid-tty@mermaid-tty
 ```
 
 Inside tmux, add `set -g allow-passthrough on` and start Claude Code with mermaid-tty's `bin/claude-tmux.py` launcher, which forwards its images through tmux to SonicTerm.
