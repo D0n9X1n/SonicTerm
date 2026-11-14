@@ -48,9 +48,9 @@
 </table>
 
 <p align="center">
-  <a href="assets/screenshots/inline-images.png"><img src="assets/screenshots/inline-images.png" alt="SonicTerm showing its icon, a heatmap of its own commits by hour and a weekly-commits chart as inline kitty images in two split panes" width="100%"/></a>
+  <a href="assets/screenshots/inline-images.png"><img src="assets/screenshots/inline-images.png" alt="SonicTerm showing its icon, a heatmap of its own commits by hour and a weekly-commits chart side by side as inline kitty images, each at its own pixel size"/></a>
   <br/>
-  <sub><b>Real images, inline</b> — logos, plots and heatmaps right in the scrollback, next to the command that made them.</sub>
+  <sub><b>Real images, inline</b> — each drawn at its own pixel size, right in the scrollback next to the command that made them.</sub>
 </p>
 
 ## Get started
