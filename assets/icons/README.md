@@ -1,45 +1,15 @@
 # Icons
 
-Live master + baked exports for the SonicTerm Terminal icon.
-
-## Layout
-
-```
-assets/icons/
-├── source/                   ← edit this master asset
-│   └── sonic.png             full-color squircle app icon
-└── exports/                  ← generated, do not edit
-    ├── png/                  multi-size PNGs (1× and @2x)
-    ├── sonic.icns            macOS bundle
-    └── sonic.ico             Windows multi-res
-
-scripts/bake-icons.sh          regenerator
-```
-
-## Design
-
-The master must keep the dark squircle filling **~92% of the canvas** (a
-small ~4% transparent margin per side). The art still uses the macOS
-rounded-rect convention, but a *wide* margin makes the Windows taskbar /
-Start-menu button render a size-step smaller than neighbours (Firefox, VS
-Code), because Windows adds its own slot padding on top of the baked-in
-margin. If you replace the master, trim it to roughly this fill ratio
-before committing — otherwise the icon looks undersized on Windows.
-
-## Regenerating
+`source/sonic.svg` is the SonicTerm app icon master; edit only it. Everything in
+`exports/` is generated from it and committed:
 
 ```bash
-brew install imagemagick     # one-time, for .ico and preferred resizing
+brew install librsvg imagemagick   # one-time
 bash scripts/bake-icons.sh
 ```
 
-Outputs are reproducible — the same source master always produces the same
-bytes (within renderer anti-aliasing tolerance). If you change a
-master asset, re-run `scripts/bake-icons.sh` and commit both `source/` and
-`exports/` together.
+Commit `source/` and `exports/` together. Packaging ships the committed exports as
+they are, so an icon change takes effect only once its exports are committed.
 
-## CI
-
-The release workflow runs `scripts/bake-icons.sh` when packaging the macOS
-DMGs. The Windows build consumes the committed `sonic.ico`, so icon changes
-must include the regenerated exports before a release tag is pushed.
+What each export holds, which package uses it, and why the squircle fills 92% of
+the canvas are on the [Packaging](../../wiki/Packaging.md#app-icon) wiki page.

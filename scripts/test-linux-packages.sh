@@ -66,7 +66,11 @@ for required in \
   share/applications/com.d0n9x1n.SonicTerm.open-script.desktop \
   share/man/man1/sonicterm.1 \
   share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml \
+  share/icons/hicolor/16x16/apps/com.d0n9x1n.SonicTerm.png \
+  share/icons/hicolor/48x48/apps/com.d0n9x1n.SonicTerm.png \
   share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png \
+  share/icons/hicolor/512x512/apps/com.d0n9x1n.SonicTerm.png \
+  share/icons/hicolor/scalable/apps/com.d0n9x1n.SonicTerm.svg \
   LICENSE \
   LICENSE-SymbolsNerdFont-MIT \
   LICENSE-winit-Apache-2.0 \

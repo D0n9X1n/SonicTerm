@@ -25,6 +25,8 @@ payload_name="SonicTerm-${tag}-linux-x86_64"
 work="$dist/.linux-package-work"
 payload="$work/$payload_name"
 tarball="$dist/SonicTerm-${tag}-linux-x86_64.tar.gz"
+# Every hicolor size a launcher, panel or window switcher asks for, so none scales a bitmap.
+hicolor_sizes_px=(16 22 24 32 48 64 128 256 512)
 deb="$dist/SonicTerm-${tag}-linux-x86_64.deb"
 version="${tag#v}"
 
@@ -50,8 +52,7 @@ rm -rf "$work"
 mkdir -p "$payload/assets" \
   "$payload/share/applications" \
   "$payload/share/man/man1" \
-  "$payload/share/metainfo" \
-  "$payload/share/icons/hicolor/256x256/apps"
+  "$payload/share/metainfo"
 install -m 0755 "$binary" "$payload/sonicterm"
 install -m 0755 "$bridge" "$payload/sonicterm-mcp"
 for directory in fonts themes keymaps icons i18n; do
@@ -69,9 +70,15 @@ install -m 0644 \
 install -m 0644 \
   "$root/crates/sonicterm-linux/resources/sonicterm.1" \
   "$payload/share/man/man1/sonicterm.1"
-install -m 0644 \
-  "$root/assets/icons/exports/png/sonic-256.png" \
-  "$payload/share/icons/hicolor/256x256/apps/$identity.png"
+# `mkdir -p` then `install`: BSD install, which the macOS stage-only run uses, has no GNU `-D`.
+for size_px in "${hicolor_sizes_px[@]}"; do
+  mkdir -p "$payload/share/icons/hicolor/${size_px}x${size_px}/apps"
+  install -m 0644 "$root/assets/icons/exports/png/sonic-${size_px}.png" \
+    "$payload/share/icons/hicolor/${size_px}x${size_px}/apps/$identity.png"
+done
+mkdir -p "$payload/share/icons/hicolor/scalable/apps"
+install -m 0644 "$root/assets/icons/exports/sonic.svg" \
+  "$payload/share/icons/hicolor/scalable/apps/$identity.svg"
 install -m 0644 "$root/LICENSE" "$payload/LICENSE"
 install -m 0644 \
   "$root/assets/fonts/LICENSE-SymbolsNerdFont.txt" \
@@ -143,7 +150,6 @@ mkdir -p \
   "$deb_root/usr/share/applications" \
   "$deb_root/usr/share/man/man1" \
   "$deb_root/usr/share/metainfo" \
-  "$deb_root/usr/share/icons/hicolor/256x256/apps" \
   "$deb_root/usr/share/doc/sonicterm"
 install -m 0755 "$payload/sonicterm" "$deb_root/usr/bin/sonicterm"
 install -m 0755 "$payload/sonicterm-mcp" "$deb_root/usr/bin/sonicterm-mcp"
@@ -156,8 +162,7 @@ install -m 0644 "$payload/share/applications/$identity.open-script.desktop" \
 gzip -n -9 -c "$payload/share/man/man1/sonicterm.1" > "$deb_root/usr/share/man/man1/sonicterm.1.gz"
 install -m 0644 "$payload/share/metainfo/$identity.metainfo.xml" \
   "$deb_root/usr/share/metainfo/$identity.metainfo.xml"
-install -m 0644 "$payload/share/icons/hicolor/256x256/apps/$identity.png" \
-  "$deb_root/usr/share/icons/hicolor/256x256/apps/$identity.png"
+cp -R "$payload/share/icons" "$deb_root/usr/share/"
 install -m 0644 "$payload/LICENSE" "$deb_root/usr/share/doc/sonicterm/copyright"
 install -m 0644 "$payload/LICENSE-SymbolsNerdFont-MIT" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-SymbolsNerdFont-MIT"

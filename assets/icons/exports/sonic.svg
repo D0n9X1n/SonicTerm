@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="1024" height="1024">
+  <title>SonicTerm</title>
+  <!-- Echo Chevrons: a shell prompt at Mach speed. A Mach cone's edges are straight lines, so the
+       wavefronts trailing the tip are fainter chevrons, not arcs. The squircle fills 92% of the canvas
+       so the Windows taskbar, which adds its own slot padding, draws it the size of its neighbours. -->
+  <defs>
+    <linearGradient id="base" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a2130"/>
+      <stop offset="1" stop-color="#0b0f16"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".09"/>
+      <stop offset=".5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="sonic" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3ee6ff"/>
+      <stop offset="1" stop-color="#7a5cff"/>
+    </linearGradient>
+    <clipPath id="squircle">
+      <rect x="4" y="4" width="92" height="92" rx="22"/>
+    </clipPath>
+  </defs>
+  <rect x="4" y="4" width="92" height="92" rx="22" fill="url(#base)"/>
+  <rect x="4" y="4" width="92" height="92" rx="22" fill="url(#sheen)"/>
+  <g clip-path="url(#squircle)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 26 L44 50 L18 74" stroke="#7a5cff" stroke-width="5" opacity=".28"/>
+    <path d="M27 26 L53 50 L27 74" stroke="#5ab8ff" stroke-width="7" opacity=".5"/>
+  </g>
+  <path d="M36 26 L62 50 L36 74" fill="none" stroke="url(#sonic)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="66" y="66" width="16" height="8" rx="2.5" fill="#e9f7ff"/>
+</svg>

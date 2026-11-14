@@ -32,8 +32,13 @@ fi
 cp "$BRIDGE" "$APP/Contents/MacOS/sonicterm-mcp"
 chmod +x "$APP/Contents/MacOS/sonicterm-mcp"
 
-cp "$ROOT/assets/icons/exports/sonic.icns" "$APP/Contents/Resources/" 2>/dev/null || \
-    echo "warning: icon not baked, continuing"
+# A bundle without its .icns shows the generic app icon in Finder and the Dock, so it is refused.
+ICNS="$ROOT/assets/icons/exports/sonic.icns"
+if [ ! -f "$ICNS" ]; then
+    printf 'missing app icon %s; run bash scripts/bake-icons.sh\n' "$ICNS" >&2
+    exit 1
+fi
+cp "$ICNS" "$APP/Contents/Resources/"
 
 # Bundle runtime assets/ tree — required by crates/sonicterm-mac/src/main.rs
 # which loads Contents/Resources/assets/{fonts,themes,keymaps,icons,i18n}/ at

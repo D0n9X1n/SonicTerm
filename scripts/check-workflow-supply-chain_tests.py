@@ -76,6 +76,7 @@ from workflow_repository_tests import (
 )
 from workflow_packages_tests import (
     MacPackageGateTests,
+    IconExportTests,
     CommandLineTests,
 )
 

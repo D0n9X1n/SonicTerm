@@ -1,78 +1,89 @@
 #!/usr/bin/env bash
-# Bake all icon assets from the source master.
+# Bake every icon asset from the vector master.
 #
-# Input (assets/icons/source/):
-#   sonic.png        — full-color app icon (squircle)
+# Input:
+#   assets/icons/source/sonic.svg            the master; edit only this
 #
-# Outputs (assets/icons/exports/):
-#   png/sonic-{16,32,48,64,128,256,512,1024}.png  (full-color)
-#   png/sonic-{16,32,64,128,256,512}@2x.png (retina pairs)
-#   sonic.icns      — macOS bundle (built via iconutil; mac only)
-#   sonic.ico       — Windows multi-resolution (built via ImageMagick)
+# Outputs (assets/icons/exports/, committed; packaging reads them as they are):
+#   sonic.svg                                the master, copied for Linux `hicolor/scalable`
+#   png/sonic-<N>.png                        16 22 24 32 48 64 128 256 512 1024 px
+#   png/sonic-<N>@2x.png                     16 32 64 128 256 512 pt at twice the pixels
+#   sonic.icns                               macOS bundle icon (iconutil; macOS only)
+#   sonic.ico                                Windows exe, taskbar and MSI icon, 16 to 256 px
 #
-# Dependencies:
-#   magick (ImageMagick) or sips for PNG resizing
-#   iconutil for .icns (macOS, part of the OS)
-#   magick for .ico
+# Each PNG is rendered from the vector at its own size instead of shrunk from one
+# large bitmap, so the 16 to 48 px icons that title bars, taskbars and docks show
+# keep sharp chevron edges.
+#
+# Dependencies: rsvg-convert (librsvg) renders, magick (ImageMagick) packs the .ico,
+# iconutil packs the .icns. `brew install librsvg imagemagick` on macOS.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$ROOT/assets/icons/source"
+MASTER="$ROOT/assets/icons/source/sonic.svg"
 OUT="$ROOT/assets/icons/exports"
 PNG="$OUT/png"
-rm -rf "$OUT"
-mkdir -p "$PNG"
+
+# The Linux hicolor sizes, plus 1024 px for full-size previews.
+PNG_SIZES_PX=(16 22 24 32 48 64 128 256 512 1024)
+RETINA_SIZES_PT=(16 32 64 128 256 512)
+# Windows' title-bar, taskbar and Start sizes at every scale from 100% to 400%. It looks for an
+# exact match first, else shrinks the next larger entry, so each missing step is drawn soft.
+ICO_SIZES_PX=(16 20 24 30 32 36 40 48 60 64 72 80 96 256)
+
+for tool in rsvg-convert magick; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        printf 'bake-icons: %s is required (brew install librsvg imagemagick)\n' "$tool" >&2
+        exit 1
+    }
+done
+[[ -f "$MASTER" ]] || { printf 'bake-icons: master %s is missing\n' "$MASTER" >&2; exit 1; }
 
 render_png() {
-    local png="$1" size="$2" out="$3"
-    if command -v magick >/dev/null 2>&1; then
-        magick "$png" -resize "${size}x${size}" "$out"
-    elif command -v sips >/dev/null 2>&1; then
-        sips -z "$size" "$size" "$png" --out "$out" >/dev/null
-    else
-        echo "Need magick or sips for PNG resizing" >&2
-        exit 1
-    fi
+    local size_px="$1" out="$2"
+    rsvg-convert --width "$size_px" --height "$size_px" --keep-aspect-ratio "$MASTER" -o "$out"
 }
 
-echo "==> Full-color PNGs"
-for size_px in 16 32 48 64 128 256 512 1024; do
-    render_png "$SRC/sonic.png" "$size_px" "$PNG/sonic-${size_px}.png"
+# The PNG set is rebuilt whole so a dropped size leaves no stale file; the .icns is kept
+# until it is rebuilt, so a host without iconutil does not delete the shipped one.
+rm -rf "$PNG"
+mkdir -p "$PNG"
+cp "$MASTER" "$OUT/sonic.svg"
+
+echo "==> PNGs"
+for size_px in "${PNG_SIZES_PX[@]}"; do
+    render_png "$size_px" "$PNG/sonic-${size_px}.png"
 done
-echo "==> Retina @2x PNGs"
-for size_pt in 16 32 64 128 256 512; do
-    render_png "$SRC/sonic.png" "$((size_pt * 2))" "$PNG/sonic-${size_pt}@2x.png"
+for size_pt in "${RETINA_SIZES_PT[@]}"; do
+    render_png "$((size_pt * 2))" "$PNG/sonic-${size_pt}@2x.png"
 done
 
-# ---- macOS .icns ----
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    echo "==> Building sonic.icns"
-    ICONSET="$OUT/sonic.iconset"
-    rm -rf "$ICONSET"; mkdir -p "$ICONSET"
-    cp "$PNG/sonic-16.png"     "$ICONSET/icon_16x16.png"
-    cp "$PNG/sonic-32.png"     "$ICONSET/icon_16x16@2x.png"
-    cp "$PNG/sonic-32.png"     "$ICONSET/icon_32x32.png"
-    cp "$PNG/sonic-64.png"     "$ICONSET/icon_32x32@2x.png"
-    cp "$PNG/sonic-128.png"    "$ICONSET/icon_128x128.png"
-    cp "$PNG/sonic-256.png"    "$ICONSET/icon_128x128@2x.png"
-    cp "$PNG/sonic-256.png"    "$ICONSET/icon_256x256.png"
-    cp "$PNG/sonic-512.png"    "$ICONSET/icon_256x256@2x.png"
-    cp "$PNG/sonic-512.png"    "$ICONSET/icon_512x512.png"
-    cp "$PNG/sonic-1024.png"   "$ICONSET/icon_512x512@2x.png"
+# When: iconutil exists only on macOS; elsewhere the committed .icns stays the shipped one.
+if command -v iconutil >/dev/null 2>&1; then
+    echo "==> sonic.icns"
+    ICONSET="$(mktemp -d)/sonic.iconset"
+    mkdir -p "$ICONSET"
+    for size_pt in 16 32 128 256 512; do
+        cp "$PNG/sonic-${size_pt}.png" "$ICONSET/icon_${size_pt}x${size_pt}.png"
+        cp "$PNG/sonic-${size_pt}@2x.png" "$ICONSET/icon_${size_pt}x${size_pt}@2x.png"
+    done
     iconutil -c icns "$ICONSET" -o "$OUT/sonic.icns"
-    rm -rf "$ICONSET"
+    rm -rf "$(dirname "$ICONSET")"
+else
+    printf 'bake-icons: iconutil not found; sonic.icns not rebuilt\n' >&2
 fi
 
-# ---- Windows .ico ----
-if command -v magick >/dev/null 2>&1; then
-    echo "==> Building sonic.ico"
-    magick \
-        "$PNG/sonic-16.png" "$PNG/sonic-32.png" "$PNG/sonic-48.png" \
-        "$PNG/sonic-64.png" "$PNG/sonic-128.png" "$PNG/sonic-256.png" \
-        "$OUT/sonic.ico"
-fi
+echo "==> sonic.ico"
+ICO_WORK="$(mktemp -d)"
+ico_inputs=()
+for size_px in "${ICO_SIZES_PX[@]}"; do
+    render_png "$size_px" "$ICO_WORK/sonic-${size_px}.png"
+    ico_inputs+=("$ICO_WORK/sonic-${size_px}.png")
+done
+# Date chunks would change the bytes on every run although the pixels do not.
+magick "${ico_inputs[@]}" -define png:exclude-chunks=date,time "$OUT/sonic.ico"
+rm -rf "$ICO_WORK"
 
 echo
-echo "==> Done. Artifacts:"
-ls -lh "$OUT"
-ls -lh "$PNG"
+echo "==> Done"
+ls -lh "$OUT" "$PNG"
