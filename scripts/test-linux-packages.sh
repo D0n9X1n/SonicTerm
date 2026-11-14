@@ -66,12 +66,19 @@ for required in \
   share/applications/com.d0n9x1n.SonicTerm.open-script.desktop \
   share/man/man1/sonicterm.1 \
   share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml \
-  share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png \
-  LICENSE \
+    LICENSE \
   LICENSE-SymbolsNerdFont-MIT \
   LICENSE-winit-Apache-2.0 \
   README.md; do
   [[ -f "$stage/$required" ]] || fail "staged payload is missing $required"
+done
+# Every hicolor size a launcher asks for, plus the scalable master, so none scales a bitmap.
+hicolor_icons=(scalable/apps/com.d0n9x1n.SonicTerm.svg)
+for size_px in 16 22 24 32 48 64 128 256 512; do
+  hicolor_icons+=("${size_px}x${size_px}/apps/com.d0n9x1n.SonicTerm.png")
+done
+for icon in "${hicolor_icons[@]}"; do
+  [[ -f "$stage/share/icons/hicolor/$icon" ]] || fail "staged payload is missing hicolor $icon"
 done
 cmp -s "$root/crates/sonicterm-winit/LICENSE" "$stage/LICENSE-winit-Apache-2.0" || \
   fail "staged winit license differs from the pinned source license"
@@ -172,6 +179,10 @@ for license in "$portable_root/LICENSE-SymbolsNerdFont-MIT" \
     fail "package symbols font license is missing or differs from the bundled license: $license"
 done
 
+for icon in "${hicolor_icons[@]}"; do
+  [[ -f "$portable_root/share/icons/hicolor/$icon" ]] || fail "tarball is missing hicolor $icon"
+  [[ -f "$deb_root/usr/share/icons/hicolor/$icon" ]] || fail "Debian package is missing hicolor $icon"
+done
 [[ -f "$portable_root/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop" ]] || \
   fail "tarball open-script desktop entry is missing"
 [[ -f "$deb_root/usr/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop" ]] || \

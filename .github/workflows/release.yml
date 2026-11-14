@@ -119,11 +119,10 @@ jobs:
       # Packaging runs here, on the architecture it targets, so the bundle that
       # ships is the one a host actually executed. Producing Intel bytes on an
       # Apple Silicon packager would sign off on a load closure never run.
+      # The DMG ships the committed, reviewed icon exports; baking them again here
+      # could change their bytes with the runner's librsvg or ImageMagick version.
       - name: Install packaging dependencies
-        run: brew install create-dmg imagemagick
-
-      - name: Bake icons
-        run: bash scripts/bake-icons.sh
+        run: brew install create-dmg
 
       - name: Verify x86_64 binary architecture
         run: |
@@ -237,11 +236,10 @@ jobs:
       # Packaging runs here, on the architecture it targets, so the bundle that
       # ships is the one a host actually executed. Producing Intel bytes on an
       # Apple Silicon packager would sign off on a load closure never run.
+      # The DMG ships the committed, reviewed icon exports; baking them again here
+      # could change their bytes with the runner's librsvg or ImageMagick version.
       - name: Install packaging dependencies
-        run: brew install create-dmg imagemagick
-
-      - name: Bake icons
-        run: bash scripts/bake-icons.sh
+        run: brew install create-dmg
 
       - name: Verify aarch64 binary architecture
         run: |

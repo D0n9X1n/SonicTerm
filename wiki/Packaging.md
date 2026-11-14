@@ -31,6 +31,26 @@ First-party packaging executables are direct children of `scripts/`.
 Every package includes the pinned, statically linked winit dependency's
 `crates/sonicterm-winit/LICENSE` as `LICENSE-winit-Apache-2.0`.
 
+## App icon
+
+`assets/icons/source/sonic.svg` is the only icon master. `bash scripts/bake-icons.sh`
+renders every export from it with `rsvg-convert` (`brew install librsvg imagemagick`),
+each size from the vector rather than shrunk from one bitmap, so small icons keep sharp
+edges. The exports under `assets/icons/exports/` are committed, and packaging copies them
+as they are: no release job bakes again, so the icon a reviewer saw is the one that ships.
+
+| Export | Holds | Used by |
+| --- | --- | --- |
+| `sonic.icns` | the ten iconset slots, 16 pt to 512 pt at 1x and 2x | the macOS bundle's `CFBundleIconFile`; `make-macos-dmg.sh` refuses a bundle without it |
+| `sonic.ico` | 16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96 and 256 px | the Windows exe resource, the MSI and its shortcuts; Windows takes the exact size for each scale from 100% to 400% |
+| `png/sonic-<N>.png` | 16, 22, 24, 32, 48, 64, 128, 256, 512 and 1024 px, plus `@2x` pairs | Linux `hicolor/<N>x<N>/apps`; the 256 px file is also the runtime window and taskbar icon |
+| `sonic.svg` | a copy of the master | Linux `hicolor/scalable/apps` |
+
+The squircle fills 92% of the canvas. Windows adds its own padding around a taskbar
+icon, so a wider margin draws SonicTerm a size step smaller than its neighbours.
+`IconExportTests` in `scripts/workflow_packages_tests.py` checks every size, the
+`.ico` and `.icns` entries, and that the scalable copy matches the master.
+
 ## macOS package
 
 ### Requirements and command
@@ -60,13 +80,12 @@ rewrites the bottles' Homebrew paths to the prefix, signs each rewritten dylib
 again, refuses any dylib whose minimum macOS is newer than 15.0 or that loads a
 library outside the prefix and the system, and points `PKG_CONFIG_PATH` at the
 prefix for the build. Install Cairo/pkg-config
-for the Rust build and `create-dmg` plus ImageMagick for packaging:
+for the Rust build and `create-dmg` for packaging:
 
 ```bash
-brew install cairo pkg-config create-dmg imagemagick
+brew install cairo pkg-config create-dmg
 cargo build --release -p sonicterm-mac
 cargo build --release -p sonicterm-mcp
-bash scripts/bake-icons.sh
 
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
 import json, sys
@@ -396,7 +415,8 @@ SonicTerm-<tag>-linux-x86_64/
 ├── share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
 ├── share/man/man1/sonicterm.1
 ├── share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
-├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
+├── share/icons/hicolor/{16,22,24,32,48,64,128,256,512}x…/apps/com.d0n9x1n.SonicTerm.png
+├── share/icons/hicolor/scalable/apps/com.d0n9x1n.SonicTerm.svg
 ├── LICENSE
 ├── LICENSE-SymbolsNerdFont-MIT
 ├── LICENSE-winit-Apache-2.0
@@ -413,7 +433,8 @@ The Debian package is `SonicTerm-<tag>-linux-x86_64.deb` and installs:
 /usr/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
 /usr/share/man/man1/sonicterm.1.gz
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
-/usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
+/usr/share/icons/hicolor/{16,22,24,32,48,64,128,256,512}x…/apps/com.d0n9x1n.SonicTerm.png
+/usr/share/icons/hicolor/scalable/apps/com.d0n9x1n.SonicTerm.svg
 /usr/share/doc/sonicterm/{copyright,LICENSE-SymbolsNerdFont-MIT,LICENSE-winit-Apache-2.0,README.md}
 ```
 

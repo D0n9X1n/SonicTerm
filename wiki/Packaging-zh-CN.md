@@ -27,6 +27,24 @@ Release tag 会增加 `v` 前缀。`scripts/prepare-release-assets.py check-vers
 每种安装包都将固定源码并静态链接的 winit 依赖的 `crates/sonicterm-winit/LICENSE`
 以 `LICENSE-winit-Apache-2.0` 文件名附带。
 
+## 应用图标
+
+`assets/icons/source/sonic.svg` 是唯一的图标母版。`bash scripts/bake-icons.sh` 用 `rsvg-convert`
+（`brew install librsvg imagemagick`）从它渲染所有导出文件，每个尺寸都直接从矢量渲染，而不是从一张位图缩小，
+因此小图标边缘依然清晰。`assets/icons/exports/` 下的导出文件已提交，打包时原样复制：发布 job 不会重新烘焙，
+所以审阅者看到的图标就是发布的图标。
+
+| 导出文件 | 内容 | 使用者 |
+| --- | --- | --- |
+| `sonic.icns` | 十个 iconset 槽位，16 pt 到 512 pt 的 1x 与 2x | macOS bundle 的 `CFBundleIconFile`；缺少它时 `make-macos-dmg.sh` 拒绝打包 |
+| `sonic.ico` | 16、20、24、30、32、36、40、48、60、64、72、80、96 和 256 px | Windows exe 资源、MSI 及其快捷方式；Windows 在 100% 到 400% 的每个缩放比例下取精确尺寸 |
+| `png/sonic-<N>.png` | 16、22、24、32、48、64、128、256、512 和 1024 px，以及 `@2x` 成对文件 | Linux `hicolor/<N>x<N>/apps`；256 px 文件同时是运行时窗口与任务栏图标 |
+| `sonic.svg` | 母版的副本 | Linux `hicolor/scalable/apps` |
+
+圆角方形占画布的 92%。Windows 会在任务栏图标周围再加自己的内边距，边距更宽会让 SonicTerm 比相邻图标小一个尺寸档。
+`scripts/workflow_packages_tests.py` 中的 `IconExportTests` 检查每个尺寸、`.ico` 与 `.icns` 的条目，
+以及 scalable 副本与母版一致。
+
 ## macOS 安装包
 
 ### 要求与命令
@@ -47,13 +65,12 @@ bottle，检查每个下载的大小和 SHA-256，并把它们解压到 runner �
 依赖都不会改变。它把 bottle 中的 Homebrew 路径改写为该前缀，重新签名每个改写过的 dylib，拒绝最低 macOS
 高于 15.0 或加载前缀与系统以外库的 dylib，并让 `PKG_CONFIG_PATH` 指向该前缀供构建使用。Rust 构建需要
 Cairo/pkg-config，打包需要
-`create-dmg` 和 ImageMagick：
+`create-dmg`：
 
 ```bash
-brew install cairo pkg-config create-dmg imagemagick
+brew install cairo pkg-config create-dmg
 cargo build --release -p sonicterm-mac
 cargo build --release -p sonicterm-mcp
-bash scripts/bake-icons.sh
 
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
 import json, sys
@@ -329,7 +346,8 @@ SonicTerm-<tag>-linux-x86_64/
 ├── share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
 ├── share/man/man1/sonicterm.1
 ├── share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
-├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
+├── share/icons/hicolor/{16,22,24,32,48,64,128,256,512}x…/apps/com.d0n9x1n.SonicTerm.png
+├── share/icons/hicolor/scalable/apps/com.d0n9x1n.SonicTerm.svg
 ├── LICENSE
 ├── LICENSE-SymbolsNerdFont-MIT
 ├── LICENSE-winit-Apache-2.0
@@ -346,7 +364,8 @@ Debian package 为 `SonicTerm-<tag>-linux-x86_64.deb`，安装到：
 /usr/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
 /usr/share/man/man1/sonicterm.1.gz
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
-/usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
+/usr/share/icons/hicolor/{16,22,24,32,48,64,128,256,512}x…/apps/com.d0n9x1n.SonicTerm.png
+/usr/share/icons/hicolor/scalable/apps/com.d0n9x1n.SonicTerm.svg
 /usr/share/doc/sonicterm/{copyright,LICENSE-SymbolsNerdFont-MIT,LICENSE-winit-Apache-2.0,README.md}
 ```
 

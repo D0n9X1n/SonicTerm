@@ -88,8 +88,10 @@ class MacPackageGateTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 job = workflow_test_fixture.job_block("release.yml", job_name)
                 commands = workflow_test_fixture.shell_commands(job)
-                self.assertIn("brew install create-dmg imagemagick", commands)
-                self.assertIn("bash scripts/bake-icons.sh", commands)
+                self.assertIn("brew install create-dmg", commands)
+                # The DMG ships the committed icon exports, not a runner-local bake.
+                self.assertNotIn("bake-icons.sh", commands)
+                self.assertNotIn("imagemagick", commands)
                 binary = f"target/{target}/release/sonicterm-mac"
                 self.assertIn(f'test "$(lipo -archs {binary})" = "{lipo_arch}"', commands)
                 self.assertIn(
@@ -232,6 +234,64 @@ class MacPackageGateTests(unittest.TestCase):
                 self.assertIn("python3 scripts/test-macos-package.py", job)
                 self.assertIn("--dmg ", job)
                 self.assertIn("--state-dir ", job)
+
+
+_ICONS = Path(__file__).resolve().parent.parent / "assets" / "icons"
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def png_header(path: Path) -> tuple[int, int, int]:
+    """Width, height and colour type from a PNG's IHDR chunk."""
+    data = path.read_bytes()[:26]
+    if data[:8] != _PNG_SIGNATURE or data[12:16] != b"IHDR":
+        raise AssertionError(f"{path} is not a PNG")
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"), data[25]
+
+
+class IconExportTests(unittest.TestCase):
+    """Packaging reads the committed icon exports as they are, so each must exist at its size."""
+
+    def test_every_png_is_square_at_its_named_size_with_alpha(self):
+        # The Linux hicolor install, the runtime window icon and the .ico all pick files by name.
+        sizes_px = (16, 22, 24, 32, 48, 64, 128, 256, 512, 1024)
+        retina_pt = (16, 32, 64, 128, 256, 512)
+        expected = {f"sonic-{size}.png": size for size in sizes_px}
+        expected.update({f"sonic-{size}@2x.png": size * 2 for size in retina_pt})
+        present = {path.name for path in (_ICONS / "exports" / "png").glob("*.png")}
+        self.assertEqual(present, set(expected))
+        for name, size_px in expected.items():
+            with self.subTest(png=name):
+                width_px, height_px, colour_type = png_header(_ICONS / "exports" / "png" / name)
+                self.assertEqual((width_px, height_px), (size_px, size_px))
+                # Colour type 6 is RGBA: the squircle's corners must stay transparent.
+                self.assertEqual(colour_type, 6)
+
+    def test_the_ico_holds_every_windows_scale_step(self):
+        # Windows looks for an exact size per DPI scale, else shrinks a larger entry and draws it soft.
+        data = (_ICONS / "exports" / "sonic.ico").read_bytes()
+        self.assertEqual(data[:4], b"\x00\x00\x01\x00")
+        count = int.from_bytes(data[4:6], "little")
+        # A directory entry stores 0 for a 256 px side.
+        sizes_px = sorted((data[6 + 16 * index] or 256) for index in range(count))
+        self.assertEqual(sizes_px, [16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256])
+
+    def test_the_icns_holds_every_iconset_slot(self):
+        # iconutil's ten slots, 16 pt to 512 pt at 1x and 2x; it stores 16 and 32 px as ic04 and ic05.
+        data = (_ICONS / "exports" / "sonic.icns").read_bytes()
+        self.assertEqual(data[:4], b"icns")
+        self.assertEqual(int.from_bytes(data[4:8], "big"), len(data))
+        types, offset = set(), 8
+        while offset < len(data):
+            types.add(data[offset:offset + 4].decode("ascii"))
+            offset += int.from_bytes(data[offset + 4:offset + 8], "big")
+        self.assertLessEqual({"ic04", "ic05", "ic07", "ic08", "ic09", "ic10", "ic11", "ic12", "ic13", "ic14"},
+                             types)
+
+    def test_the_scalable_export_is_the_master(self):
+        # Linux installs the exported SVG as the scalable icon, so it must not drift from the master.
+        self.assertEqual((_ICONS / "exports" / "sonic.svg").read_bytes(),
+                         (_ICONS / "source" / "sonic.svg").read_bytes())
+        self.assertFalse((_ICONS / "source" / "sonic.png").exists(), "the vector is the only master")
 
 
 class CommandLineTests(unittest.TestCase):
