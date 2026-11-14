@@ -6,14 +6,9 @@
 
 **The native GPU terminal for people who live in the shell —<br/>and the agents that work there with them.**
 
-[![Version](https://img.shields.io/github/v/tag/D0n9X1n/SonicTerm?sort=semver&label=version&color=7a5cff)](https://github.com/D0n9X1n/SonicTerm/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/D0n9X1n/SonicTerm/total?label=downloads&color=3ee6ff)](https://github.com/D0n9X1n/SonicTerm/releases)
-[![CI](https://github.com/D0n9X1n/SonicTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/D0n9X1n/SonicTerm/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-5ab8ff.svg)](LICENSE)
+[![Version](https://img.shields.io/github/v/tag/D0n9X1n/SonicTerm?sort=semver&label=version&color=7a5cff)](https://github.com/D0n9X1n/SonicTerm/releases/latest) [![Downloads](https://img.shields.io/github/downloads/D0n9X1n/SonicTerm/total?label=downloads&color=3ee6ff)](https://github.com/D0n9X1n/SonicTerm/releases) [![CI](https://github.com/D0n9X1n/SonicTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/D0n9X1n/SonicTerm/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-5ab8ff.svg)](LICENSE)
 
-**[Download](https://github.com/D0n9X1n/SonicTerm/releases/latest)** ·
-**[Documentation](wiki/Home.md)** ·
-[简体中文](wiki/Home-zh-CN.md)
+**[Download](https://github.com/D0n9X1n/SonicTerm/releases/latest)** · **[Documentation](wiki/Home.md)** · [简体中文](wiki/Home-zh-CN.md)
 
 <sub>macOS 15+ (Apple Silicon and Intel) · Windows x64 · Linux x86_64 (.deb, .tar.gz)</sub>
 
@@ -24,22 +19,16 @@
     <img src="assets/screenshots/agents-hero.png" alt="SonicTerm running Claude Code with a rendered Mermaid sequence diagram, beside two mux-agents helper panes and their live sidebar" width="100%"/>
   </a>
   <br/>
-  <sub><b>Your agents, side by side, drawing real pictures.</b> Claude Code answers with a rendered
-  Mermaid diagram while a reviewer and a test-writer work in the panes beside it.</sub>
+  <sub><b>Your agents, side by side, drawing real pictures.</b> Claude Code answers with a rendered Mermaid diagram while a reviewer and a test-writer work in the panes beside it.</sub>
 </p>
 
 ## Why SonicTerm
 
-- **Native, not a web page.** One small app per platform, every cell, glyph and overlay
-  drawn on the GPU (Metal, D3D12, Vulkan), with a full software path on Windows when there is no GPU.
-- **Built for agents.** Kitty, Sixel and iTerm2 images inline, Mermaid diagrams as pictures,
-  agents in split panes, and an [MCP server](wiki/MCP-Server.md) that lets an agent drive the terminal.
-- **Modern comforts.** A command palette for every action, tabs you drag between windows,
-  broadcast input, READONLY mode, and clickable file paths.
-- **Bounded memory.** Grids, images, captures and PTY queues each keep their own limits;
-  **Memory Usage** shows where every byte goes.
-- **Config is just files.** Plain TOML in `~/.sonicterm`, thirteen light and dark themes
-  previewed live, no preferences pane.
+- **Native, not a web page.** One small app per platform, every cell, glyph and overlay drawn on the GPU (Metal, D3D12, Vulkan), with a full software path on Windows when there is no GPU.
+- **Built for agents.** Kitty, Sixel and iTerm2 images inline, Mermaid diagrams as pictures, agents in split panes, and an [MCP server](wiki/MCP-Server.md) that lets an agent drive the terminal.
+- **Modern comforts.** A command palette for every action, tabs you drag between windows, broadcast input, READONLY mode, and clickable file paths.
+- **Bounded memory.** Grids, images, captures and PTY queues each keep their own limits; **Memory Usage** shows where every byte goes.
+- **Config is just files.** Plain TOML in `~/.sonicterm`, thirteen light and dark themes previewed live, no preferences pane.
 
 ## A closer look
 
@@ -66,16 +55,12 @@
 
 ## Get started
 
-Download the [latest release](https://github.com/D0n9X1n/SonicTerm/releases/latest) for your
-platform and open it. Everything SonicTerm keeps lives under `~/.sonicterm`; see
-[Usage](wiki/Usage.md) to make it your default terminal.
+Download the [latest release](https://github.com/D0n9X1n/SonicTerm/releases/latest) for your platform and open it. Everything SonicTerm keeps lives under `~/.sonicterm`; see [Usage](wiki/Usage.md) to make it your default terminal.
 
 <details>
 <summary><b>Set up the agent workspace in the screenshot</b></summary>
 
-[mermaid-tty](https://github.com/D0n9X1n/mermaid-tty) draws Claude Code's Mermaid answers as
-pictures, and [mux-agents](https://github.com/D0n9X1n/mux-agents) runs helper agents in their
-own panes:
+[mermaid-tty](https://github.com/D0n9X1n/mermaid-tty) draws Claude Code's Mermaid answers as pictures, and [mux-agents](https://github.com/D0n9X1n/mux-agents) runs helper agents in their own panes:
 
 ```sh
 claude plugin marketplace add D0n9X1n/mermaid-tty
@@ -84,25 +69,17 @@ claude plugin marketplace add D0n9X1n/mux-agents && claude plugin install mux-ag
 npm i -g @mermaid-js/mermaid-cli   # pictures; without it diagrams draw as text
 ```
 
-Inside tmux, add `set -g allow-passthrough on` and start Claude Code with mermaid-tty's
-`bin/claude-tmux.py` launcher, which forwards its images through tmux to SonicTerm.
+Inside tmux, add `set -g allow-passthrough on` and start Claude Code with mermaid-tty's `bin/claude-tmux.py` launcher, which forwards its images through tmux to SonicTerm.
 
 </details>
 
 ## Documentation
 
-[Usage](wiki/Usage.md) · [Configuration](wiki/Configuration.md) ·
-[Keybindings](wiki/Keybindings.md) · [Themes](wiki/Themes.md) ·
-[Multiplexers](wiki/Terminal-Multiplexers.md) · [MCP server](wiki/MCP-Server.md) ·
-[Logging](wiki/Logging.md) · [Packaging](wiki/Packaging.md) — also in
-[简体中文](wiki/Home-zh-CN.md).
+[Usage](wiki/Usage.md) · [Configuration](wiki/Configuration.md) · [Keybindings](wiki/Keybindings.md) · [Themes](wiki/Themes.md) · [Multiplexers](wiki/Terminal-Multiplexers.md) · [MCP server](wiki/MCP-Server.md) · [Logging](wiki/Logging.md) · [Packaging](wiki/Packaging.md) — also in [简体中文](wiki/Home-zh-CN.md).
 
 ## Thanks, WezTerm
 
-SonicTerm uses [WezTerm](https://github.com/wezterm/wezterm) as its reference for terminal
-semantics, font behavior, keymap conventions and rendering edge cases, and absorbs that
-proven behavior into its own crates. WezTerm is MIT-licensed; the license for absorbed
-custom-glyph code is kept at `crates/sonicterm-block-glyph/LICENSE-WEZTERM`.
+SonicTerm uses [WezTerm](https://github.com/wezterm/wezterm) as its reference for terminal semantics, font behavior, keymap conventions and rendering edge cases, and absorbs that proven behavior into its own crates. WezTerm is MIT-licensed; the license for absorbed custom-glyph code is kept at `crates/sonicterm-block-glyph/LICENSE-WEZTERM`.
 
 ## License
 
