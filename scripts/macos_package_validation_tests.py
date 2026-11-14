@@ -82,6 +82,24 @@ class PackageTests(unittest.TestCase):
         self.assertLess(sign_index, seal_index)
         self.assertLess(seal_index, verify_index)
 
+    def test_packaging_refuses_a_bundle_without_its_icns_before_assembling(self):
+        # A bundle without sonic.icns shows the generic app icon, so packaging stops before it builds one.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            script = root / "scripts" / "make-macos-dmg.sh"
+            script.write_text(Path(__file__).with_name("make-macos-dmg.sh").read_text(encoding="utf-8"),
+                              encoding="utf-8")
+            binary = root / "sonicterm-mac"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            completed = subprocess.run(["bash", str(script), str(binary), "0.0.0", "mac-test", "--bundle-only"],
+                                       env={**os.environ, "SONICTERM_PACKAGE_DIR": str(root / "dist")},
+                                       capture_output=True, text=True, check=False, timeout=60)
+            self.assertEqual(completed.returncode, 1, completed.stderr)
+            self.assertIn("missing app icon", completed.stderr)
+            # Nothing was assembled: the refusal comes before the bundle directory is created.
+            self.assertFalse((root / "dist" / "SonicTerm.app").exists())
+
     def test_packaging_declares_and_asserts_the_macos_15_floor(self):
         # The app's declared floor and the default ceiling both match the 15.0 deployment target.
         script = Path(__file__).with_name("make-macos-dmg.sh").read_text(encoding="utf-8")

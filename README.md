@@ -27,7 +27,7 @@
 - **Native, not a web page.** One small app per platform, every cell, glyph and overlay drawn on the GPU (Metal, D3D12, Vulkan), with a full software path on Windows when there is no GPU.
 - **Built for agents.** Kitty, Sixel and iTerm2 images inline, Mermaid diagrams as pictures, agents in split panes, and an [MCP server](wiki/MCP-Server.md) that lets an agent drive the terminal.
 - **Modern comforts.** A command palette for every action, tabs you drag between windows, broadcast input, READONLY mode, and clickable file paths.
-- **Bounded memory.** Grids, images, captures and PTY queues each keep their own limits; **Memory Usage** shows where every byte goes.
+- **Bounded memory.** Grids, images, captures and PTY queues each keep their own limits; **Memory Usage** opens a copyable report of what each subsystem holds.
 - **Config is just files.** Plain TOML in `~/.sonicterm`, thirteen light and dark themes previewed live, no preferences pane.
 
 ## A closer look
@@ -50,7 +50,7 @@
 <p align="center">
   <a href="assets/screenshots/inline-images.png"><img src="assets/screenshots/inline-images.png" alt="SonicTerm showing its icon, a heatmap of its own commits by hour and a weekly-commits chart as inline kitty images in two split panes" width="100%"/></a>
   <br/>
-  <sub><b>Real images, inline</b> — logos, plots and heatmaps at full resolution, right in the scrollback.</sub>
+  <sub><b>Real images, inline</b> — logos, plots and heatmaps right in the scrollback, next to the command that made them.</sub>
 </p>
 
 ## Get started

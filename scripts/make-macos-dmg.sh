@@ -16,6 +16,14 @@ if [ -n "$MODE" ] && [ "$MODE" != "--bundle-only" ]; then
     exit 2
 fi
 
+# A bundle without its .icns shows the generic app icon in Finder and the Dock, so it is refused
+# before anything is assembled.
+ICNS="$ROOT/assets/icons/exports/sonic.icns"
+if [ ! -f "$ICNS" ]; then
+    printf 'missing app icon %s; run bash scripts/bake-icons.sh\n' "$ICNS" >&2
+    exit 1
+fi
+
 echo "==> Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/"{MacOS,Resources}
@@ -32,12 +40,6 @@ fi
 cp "$BRIDGE" "$APP/Contents/MacOS/sonicterm-mcp"
 chmod +x "$APP/Contents/MacOS/sonicterm-mcp"
 
-# A bundle without its .icns shows the generic app icon in Finder and the Dock, so it is refused.
-ICNS="$ROOT/assets/icons/exports/sonic.icns"
-if [ ! -f "$ICNS" ]; then
-    printf 'missing app icon %s; run bash scripts/bake-icons.sh\n' "$ICNS" >&2
-    exit 1
-fi
 cp "$ICNS" "$APP/Contents/Resources/"
 
 # Bundle runtime assets/ tree — required by crates/sonicterm-mac/src/main.rs
