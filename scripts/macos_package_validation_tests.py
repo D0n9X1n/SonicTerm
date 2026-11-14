@@ -82,6 +82,7 @@ class PackageTests(unittest.TestCase):
         self.assertLess(sign_index, seal_index)
         self.assertLess(seal_index, verify_index)
 
+    @unittest.skipIf(os.name == "nt", "Windows `bash` may be WSL, which cannot see the scratch tree's Windows paths")
     def test_packaging_refuses_a_bundle_without_its_icns_before_assembling(self):
         # A bundle without sonic.icns shows the generic app icon, so packaging stops before it builds one.
         with tempfile.TemporaryDirectory() as directory:
