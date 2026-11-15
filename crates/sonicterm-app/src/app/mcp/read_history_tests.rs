@@ -108,8 +108,32 @@ fn a_line_longer_than_the_page_budget_pages_through_with_cut() {
     assert_eq!(rebuilt, long);
 }
 
-/// A byte cap that fits only one short line returns one whole line per page; a one-byte cap
-/// returns one empty, cut line per row and still reaches the start.
+/// A cut wrap keeps trailing cells that sit inside the logical line, not at its real end.
+#[test]
+fn paging_inside_a_wrap_preserves_its_spaces() {
+    let pane = parser(10, 2, 100);
+    let wrapped = "abcd      WXYZ";
+    pane.lock().advance(wrapped.as_bytes());
+    let pages = every_page(&pane, 1_000, 11);
+    assert_eq!(pages.len(), 2);
+    assert!(pages.iter().all(|read| read.lines.len() == 1 && read.lines[0].cut));
+    let rebuilt: String = pages.iter().rev().map(|read| read.lines[0].text.as_str()).collect();
+    assert_eq!(rebuilt, wrapped);
+}
+
+/// A row larger than the byte cap stays whole because row tokens cannot resume inside a row.
+#[test]
+fn a_row_larger_than_the_byte_cap_is_returned_whole() {
+    let pane = parser(10, 1, 100);
+    pane.lock().advance(b"abcdefghij");
+    let pages = every_page(&pane, 1_000, 4);
+    assert_eq!(pages.len(), 1);
+    assert_eq!(texts(&pages[0]), vec!["abcdefghij"]);
+    assert!(pages[0].at_start);
+    assert_eq!(pages[0].first_row, Some(pane.lock().grid().row_token(0)));
+}
+
+/// Even a one-byte cap returns one whole row per page without losing text between row tokens.
 #[test]
 fn a_tiny_byte_cap_still_makes_progress() {
     let pane = parser(10, 3, 1_000);
@@ -119,9 +143,33 @@ fn a_tiny_byte_cap_still_makes_progress() {
     assert_eq!(page_texts, vec![vec!["ef"], vec!["cd"], vec!["ab"]]);
     let pages = every_page(&pane, 1_000, 1);
     assert_eq!(pages.len(), 3, "one row per page");
-    for read in &pages {
-        assert_eq!(read.lines.len(), 1);
-        assert!(read.lines[0].cut && read.lines[0].text.is_empty());
+    let page_texts: Vec<Vec<&str>> = pages.iter().map(texts).collect();
+    assert_eq!(page_texts, vec![vec!["ef"], vec!["cd"], vec!["ab"]]);
+}
+
+/// Blank rows still consume the cell budget: an empty first page must advance to the text, and
+/// both languages must tell clients to continue rather than treating that empty page as the end.
+#[test]
+fn blank_tail_pages_advance_and_document_empty_pages() {
+    let pane = parser(4096, 10, 100);
+    pane.lock().advance(b"x");
+    let pages = every_page(&pane, 1_000, 64 * 1024);
+    assert!(pages[0].lines.is_empty() && !pages[0].at_start);
+    assert_eq!(pages[0].first_row, Some(pane.lock().grid().row_token(2)));
+    assert!(pages[1].first_row.unwrap().line < pages[0].first_row.unwrap().line);
+    assert_eq!(texts(&pages[1]), vec!["x", ""]);
+    assert!(pages[1].at_start);
+    for documentation in [
+        include_str!("../../../../../wiki/MCP-Server.md"),
+        include_str!("../../../../../wiki/Platform-Integration.md"),
+    ] {
+        assert!(documentation.contains("may be empty while skipping blank rows"));
+    }
+    for documentation in [
+        include_str!("../../../../../wiki/MCP-Server-zh-CN.md"),
+        include_str!("../../../../../wiki/Platform-Integration-zh-CN.md"),
+    ] {
+        assert!(documentation.contains("跳过空白行时页面可能为空"));
     }
 }
 

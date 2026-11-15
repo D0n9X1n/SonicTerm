@@ -1,10 +1,10 @@
 //! `search_pane`: a regex search back through a pane's retained history; `command_history`: the
 //! pane's recent shell commands with their exit codes and durations.
 //!
-//! One call copies at most [`super::super::read::MAX_CELLS_PER_READ`] cells and [`SEARCH_BYTES`] of text under one
-//! bounded parser attempt, the same history page `read_pane` returns, then matches after the guard
-//! drops. Each logical line is matched whole; a line longer than one call is matched only on the
-//! part a call copied and reported `cut`, never passed off as the whole line.
+//! One call copies at most [`MAX_CELLS_PER_READ`] cells under one bounded parser attempt, with a
+//! [`SEARCH_BYTES`] text budget and the history reader's whole-row exception, then matches after
+//! the guard drops. A long logical line is matched on copied parts with one reread row of newer
+//! context; match starts belong before the cursor, and incomplete lines are reported `cut`.
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -18,7 +18,7 @@ use super::super::read::{
 use super::super::{CallScope, McpShared, PaneEntry};
 use super::{decode_token, encode_token, regex_arg, resolve};
 
-/// The most bytes of text one call copies under the parser.
+/// The text budget under the parser; an otherwise empty page may exceed it by one whole row.
 pub(crate) const SEARCH_BYTES: usize = 256 * 1024;
 /// The matches a call returns when `max_results` is absent.
 pub(crate) const DEFAULT_RESULTS: usize = 20;
@@ -43,7 +43,8 @@ pub(crate) struct SearchMatch {
 pub(crate) struct SearchPage {
     /// Matches, newest first.
     pub(crate) matches: Vec<SearchMatch>,
-    /// The first row of the oldest line examined; the next call passes it as `before_row`.
+    /// The first row of the oldest line examined; pass as `before_row`. A split logical line
+    /// rereads this row as context, without accepting match starts in it.
     pub(crate) next_before_row: Option<RowToken>,
     /// Every retained row before the cursor was examined.
     pub(crate) scan_complete: bool,
@@ -65,7 +66,7 @@ pub(crate) fn search_history(
 ) -> SearchPage {
     // Each line costs at least one byte, so the byte cap bounds the line count.
     let limits = ReadLimits { lines: usize::MAX, bytes: SEARCH_BYTES };
-    let snapshot = read_pane(parser, ReadMode::History { before }, limits);
+    let snapshot = read_pane(parser, ReadMode::Search { before }, limits);
     if snapshot.busy || snapshot.refused.is_some() {
         // When: the parser was `busy` or the cursor `refused`, nothing was examined.
         return SearchPage {
@@ -75,31 +76,47 @@ pub(crate) fn search_history(
             ..SearchPage::default()
         };
     }
-    let mut page = SearchPage { at_start: snapshot.at_start, ..SearchPage::default() };
+    let mut page = SearchPage {
+        at_start: snapshot.at_start,
+        next_before_row: snapshot.first_row,
+        ..SearchPage::default()
+    };
     for line in snapshot.lines.iter().rev() {
         if line.text.is_empty() {
             // When: the line's text is empty, it is never matched, as in `wait_for`.
             continue;
         }
         let Some(found) = regex.find(&line.text) else {
-            // When: the regex `find`s nothing on this line, the search moves to the older one.
+            // When: the regex finds nothing on this copied line, move to the older one.
             continue;
         };
-        let (text, clipped) = clip_match(&line.text, found.start());
+        // shortcut: one-row context covers boundary matches, not regexes needing still newer rows.
+        if before == Some(line.row) && found.start() >= line.newest_row_start {
+            // When: the match starts in the reread row, its owning call already examined it.
+            continue;
+        }
+        // The reread row is context only: include its prefix only when the match reaches into it.
+        let overlap = before == Some(line.row);
+        let end = if overlap {
+            line.newest_row_start.max(found.end())
+        } else {
+            // When: no overlap row was reread, the entire copied line belongs to this call.
+            line.text.len()
+        };
+        let (text, clipped) = clip_match(&line.text[..end], found.start());
         page.matches.push(SearchMatch {
             row: line.first_row,
             line: text,
-            cut: line.cut || clipped,
+            cut: line.cut || clipped || overlap,
         });
         if page.matches.len() >= max_results {
-            // When: `max_results` is reached, the next call ends before this match's line, so no
-            // older line is skipped and this one is not examined twice.
+            // When: `max_results` is reached, resume before this line's owned rows, retaining any
+            // overlap so older matches are neither skipped nor duplicated.
             page.next_before_row = Some(line.first_row);
             page.scan_complete = false;
             return page;
         }
     }
-    page.next_before_row = snapshot.first_row;
     page.scan_complete = snapshot.at_start;
     page
 }

@@ -227,6 +227,13 @@ shell integration and read the terminal's retained text, not the shell's own his
 Their arguments, caps and locking are described in
 [Platform Integration](Platform-Integration).
 
+A non-busy history page may be empty while skipping blank rows: pass its `first_row`
+as `before_row` again until `at_start` is true. Row tokens always advance. A row larger
+than `max_bytes` is returned whole on an otherwise empty page, so no suffix is lost;
+the byte cap may be exceeded by one row. Spaces inside a soft-wrapped line survive
+page boundaries. Search rereads one row when a page cuts a long logical line and
+reports only matches starting before its cursor, avoiding duplicates at the overlap.
+
 The event loop answers queued requests for at most 2 ms at a time, so many agents
 calling at once cannot hold off input: what one drain does not reach goes back ahead
 of later arrivals and is answered on the next wake-up, in order. One request that

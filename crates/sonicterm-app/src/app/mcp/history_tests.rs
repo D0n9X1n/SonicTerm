@@ -105,6 +105,46 @@ fn a_line_longer_than_one_call_is_matched_on_its_parts_cut() {
     assert!(found.iter().all(|part| part.cut && part.line.len() <= MAX_MATCH_LINE_BYTES));
 }
 
+/// Matches crossing either edge of the reread row stay visible, while a match wholly inside it
+/// is not repeated; result-limited calls must keep the same ownership and progress.
+#[test]
+fn a_match_across_long_line_parts_is_found_exactly_once() {
+    let cols = 128usize;
+    let row_count = MAX_CELLS_PER_READ / cols + 2;
+    let entry = test_entry(cols as u16, 2, row_count);
+    let boundary = 2 * cols;
+    let mut text = "x".repeat(row_count * cols);
+    text.replace_range(boundary - 3..boundary + 3, "NEEDLE");
+    text.replace_range(boundary + 10..boundary + 14, "ONCE");
+    text.replace_range(boundary + cols - 3..boundary + cols + 3, "ACROSS");
+    emit(&entry, text.as_bytes());
+    for pattern in ["NEEDLE", "ONCE", "ACROSS"] {
+        for max_results in [1, DEFAULT_RESULTS] {
+            let pages = every_call(&entry, pattern, max_results);
+            let found: Vec<&SearchMatch> = pages.iter().flat_map(|page| &page.matches).collect();
+            assert_eq!(found.len(), 1, "{pattern}: {:?}", matched(&pages));
+            assert!(found[0].line.contains(pattern) && found[0].cut);
+            assert_eq!(pages[0].matches.is_empty(), pattern == "NEEDLE");
+        }
+    }
+}
+
+/// A context row larger than the byte budget must not consume every subsequent call: older
+/// owned rows still advance the cursor even when combining marks leave no room for overlap.
+#[test]
+fn an_oversized_overlap_row_does_not_stall_search() {
+    let entry = test_entry(4096, 2, 100);
+    let cell = format!("x{}", "\u{301}".repeat(32));
+    emit(&entry, format!("HEAD{}", cell.repeat(8192 - 4)).as_bytes());
+    let regex = Regex::new("HEAD").unwrap();
+    let first = search_history(&entry.parser, &regex, DEFAULT_RESULTS, None);
+    assert!(!first.scan_complete && first.matches.is_empty());
+    let second = search_history(&entry.parser, &regex, DEFAULT_RESULTS, first.next_before_row);
+    assert!(second.scan_complete, "{second:?}");
+    assert_eq!(second.matches.len(), 1);
+    assert!(second.matches[0].line.starts_with("HEAD"));
+}
+
 /// A search with no match pages back through every retained row, each call ending before the last,
 /// until it reports the scan complete.
 #[test]
@@ -134,6 +174,17 @@ fn a_cursor_inside_a_wrap_matches_the_start_cut() {
     assert_eq!(page.matches.len(), 1);
     assert_eq!(page.matches[0].line, "NEEDLExxxx");
     assert!(page.matches[0].cut);
+}
+
+/// Trimming a blank context row cannot leave its byte boundary past the owned text's end.
+#[test]
+fn a_blank_overlap_row_keeps_match_offsets_in_bounds() {
+    let entry = test_entry(10, 2, 100);
+    emit(&entry, b"NEEDLE              ");
+    let before = entry.parser.lock().grid().row_token(1);
+    let regex = Regex::new("NEEDLE").unwrap();
+    let page = search_history(&entry.parser, &regex, DEFAULT_RESULTS, Some(before));
+    assert_eq!(matched(&[page]), vec!["NEEDLE"]);
 }
 
 /// A parser held by someone else returns busy at once, with no matches and the caller's cursor,

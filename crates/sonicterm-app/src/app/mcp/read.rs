@@ -45,6 +45,11 @@ pub(crate) enum ReadMode {
         /// The row the page ends before: the `first_row` of the previous page.
         before: Option<RowToken>,
     },
+    /// A history page with one reread row of newer context when `before` splits a logical line.
+    Search {
+        /// Match starts belong strictly before this row; the row itself is context only.
+        before: Option<RowToken>,
+    },
 }
 
 /// Why a read could not start where its caller asked: a history page's cursor, or a command's
@@ -84,7 +89,7 @@ impl HistoryRefusal {
 pub(crate) struct ReadLimits {
     /// The most lines returned.
     pub(crate) lines: usize,
-    /// The most bytes of text returned.
+    /// The byte budget; an otherwise empty history page admits one whole row even past it.
     pub(crate) bytes: usize,
 }
 
@@ -104,8 +109,11 @@ impl ReadLimits {
 /// One line a read returned, with the tokens of its first and last rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadLine {
-    /// The line's text, trailing blanks trimmed.
+    /// The line's text, with trailing blanks trimmed only at its real logical end.
     pub(crate) text: String,
+    /// Byte offset where the newest row starts; search excludes match starts in that row when
+    /// it was reread solely as context beyond the caller's cursor.
+    pub(crate) newest_row_start: usize,
     /// The stable token of the line's last row, which a caller waits past.
     pub(crate) row: RowToken,
     /// The stable token of the line's first row: a line that began at or before a caller's token
@@ -161,7 +169,7 @@ pub(crate) struct ReadSnapshot {
     pub(crate) first_row: Option<RowToken>,
     /// The read reached the oldest retained row of the screen it read, so no older page remains.
     pub(crate) at_start: bool,
-    /// For `History` or `LastCommand` with a `seq`: the cursor or `seq` could not start a read, and
+    /// For `History`, `Search` or `LastCommand` with a `seq`: the cursor or `seq` could not start a read, and
     /// nothing was read.
     pub(crate) refused: Option<HistoryRefusal>,
 }
@@ -193,31 +201,49 @@ pub(crate) fn snapshot(grid: &Grid, mode: ReadMode, limits: ReadLimits) -> ReadS
         ..ReadSnapshot::default()
     };
     let mut budget = Budget { cells: MAX_CELLS_PER_READ, bytes: limits.bytes, lines: limits.lines };
-    let tail = Walk { join_wraps: true, skip_blank_tail: true, keep_cut: false };
+    let tail =
+        Walk { join_wraps: true, skip_blank_tail: true, keep_cut: false, search_overlap: false };
     match mode {
         ReadMode::Screen => {
             let first = grid.scrollback_len() as u64;
             let last = first + u64::from(grid.rows).saturating_sub(1);
             let span = RowSpan { start: first, last, last_cols: None };
-            let walk = Walk { join_wraps: false, skip_blank_tail: false, keep_cut: false };
+            let walk = Walk {
+                join_wraps: false,
+                skip_blank_tail: false,
+                keep_cut: false,
+                search_overlap: false,
+            };
             collect_rows(grid, span, walk, &mut budget).fill(&mut snapshot);
         }
         ReadMode::Tail => {
             let span = RowSpan { start: 0, last: newest_abs(grid), last_cols: None };
             collect_rows(grid, span, tail, &mut budget).fill(&mut snapshot);
         }
-        ReadMode::History { before } => match history_end(grid, before) {
-            Err(refusal) => snapshot.refused = Some(refusal),
-            // `history_end` found no row before `before`: the page is empty, at the start.
-            Ok(None) => snapshot.at_start = true,
-            Ok(Some(last)) => {
-                // Blank rows under the cursor are skipped only on the first page; once paging,
-                // a blank line is part of the history like any other.
-                let walk = Walk { skip_blank_tail: before.is_none(), keep_cut: true, ..tail };
-                let span = RowSpan { start: 0, last, last_cols: None };
-                collect_rows(grid, span, walk, &mut budget).fill(&mut snapshot);
+        ReadMode::History { before } | ReadMode::Search { before } => {
+            match history_end(grid, before) {
+                Err(refusal) => snapshot.refused = Some(refusal),
+                // `history_end` found no row before `before`: the page is empty, at the start.
+                Ok(None) => snapshot.at_start = true,
+                Ok(Some(last)) => {
+                    // Blank rows under the cursor are skipped only on the first page; once paging,
+                    // a blank line is part of the history like any other.
+                    let overlap = matches!(mode, ReadMode::Search { before: Some(_) })
+                        && grid
+                            .row_at_abs(last + 1)
+                            .is_some_and(|row| row.soft_wrapped_from_previous());
+                    let walk = Walk {
+                        skip_blank_tail: before.is_none(),
+                        keep_cut: true,
+                        search_overlap: overlap,
+                        ..tail
+                    };
+                    let last = last + u64::from(overlap);
+                    let span = RowSpan { start: 0, last, last_cols: None };
+                    collect_rows(grid, span, walk, &mut budget).fill(&mut snapshot);
+                }
             }
-        },
+        }
         ReadMode::LastCommand { seq } => match command_span(grid, seq) {
             Err(refusal) => snapshot.refused = Some(refusal),
             Ok(None) => snapshot.no_command = true,
@@ -250,7 +276,8 @@ pub(crate) fn snapshot(grid: &Grid, mode: ReadMode, limits: ReadLimits) -> ReadS
 /// whether a limit cut it short. An agent run reads its command's output with it.
 pub(crate) fn collect_span(grid: &Grid, span: RowSpan, limits: ReadLimits) -> (Vec<String>, bool) {
     let mut budget = Budget { cells: MAX_CELLS_PER_READ, bytes: limits.bytes, lines: limits.lines };
-    let walk = Walk { join_wraps: true, skip_blank_tail: false, keep_cut: false };
+    let walk =
+        Walk { join_wraps: true, skip_blank_tail: false, keep_cut: false, search_overlap: false };
     let collected = collect_rows(grid, span, walk, &mut budget);
     (collected.lines.into_iter().map(|line| line.text).collect(), budget.exhausted())
 }
@@ -325,6 +352,8 @@ struct Walk {
     join_wraps: bool,
     /// Blank lines below the newest text are skipped, at the cost of their cells.
     skip_blank_tail: bool,
+    /// The newest row is reread search context; it cannot prevent copying the first owned row.
+    search_overlap: bool,
     /// A limit that stops the walk before any line was returned leaves the rows already copied
     /// whole as one cut line, and lines the span's ends split are marked cut, so a history page
     /// always makes progress and never passes a fragment off as a whole line.
@@ -389,23 +418,46 @@ fn collect_rows(grid: &Grid, span: RowSpan, walk: Walk, budget: &mut Budget) -> 
             break;
         }
         budget.cells -= width;
-        // Copying stops at the bytes the read may still return, less one for the line's newline,
-        // so a long wrapped line never allocates past the budget under the parser lock.
-        let room = budget.bytes.saturating_sub(pending_bytes + 1);
+        // Row tokens cannot resume inside a row: an empty history page admits one whole row,
+        // even past its byte cap. Every later row stays within the remaining room.
+        let context_row = walk.search_overlap && abs == span.last;
+        let only_context = walk.search_overlap && pending.len() == 1 && pending[0].abs == span.last;
+        let room = if walk.keep_cut
+            && lines.is_empty()
+            && !context_row
+            && (pending.is_empty() || only_context)
+        {
+            usize::MAX
+        } else {
+            // When: this is context or an additional row, reserve the pending text and its newline.
+            budget.bytes.saturating_sub(pending_bytes + 1)
+        };
         let copy = row_cells_text_capped(row, width, room);
+        if context_row && (copy.cut || copy.text.len() + copy.trailing_blanks + 1 > budget.bytes) {
+            // When: the context row exhausts the byte budget, discard it so older owned rows advance.
+            // shortcut: overlap is omitted when its row leaves no byte room for an owned row.
+            newest_cut = true;
+            continue;
+        }
+        if only_context && pending_bytes + copy.text.len() + copy.trailing_blanks + 1 > budget.bytes
+        {
+            // Context leaves no room for the first owned row; keep that row instead of stalling.
+            pending.clear();
+            pending_bytes = 0;
+            newest_cut = true;
+        }
         // A row older than one already pending sits inside the wrapped line, so its trailing
         // blanks will be joined and are charged now, before any of them is copied; only the
-        // newest row's padding stays free.
-        let joined_blanks = if pending.is_empty() { 0 } else { copy.trailing_blanks };
+        // newest row's padding stays free unless the logical line continues beyond the page.
+        let joined_blanks =
+            if pending.is_empty() && !newest_cut { 0 } else { copy.trailing_blanks };
         pending_bytes += copy.text.len() + joined_blanks;
         if copy.cut || pending_bytes + 1 > budget.bytes {
-            // When: the row was `cut` at the byte budget, the read stops. The partial row is kept
-            // only when it is the line's only row, as the newest part a cut line can return.
+            // When: the row was `cut` or passes the byte budget, stop before it unless this empty
+            // history page admitted the whole row to preserve progress without losing its suffix.
             budget.bytes = 0;
-            if pending.is_empty() {
-                // shortcut: a single row longer than the byte cap returns only its start; tokens
-                // name whole rows, so the next page continues before it and the rest is not paged.
-                pending.push(PendingRow { text: copy.text, blanks: 0, abs });
+            if walk.keep_cut && lines.is_empty() && pending.is_empty() {
+                pending.push(PendingRow { text: copy.text, blanks: copy.trailing_blanks, abs });
             }
             break;
         }
@@ -418,7 +470,7 @@ fn collect_rows(grid: &Grid, span: RowSpan, walk: Walk, budget: &mut Budget) -> 
         // The span's oldest row continuing an older one means the line's start lies outside it.
         let starts_outside = walk.keep_cut && wraps;
         pending_bytes = 0;
-        let (mut line, oldest) = join_rows(grid, &mut pending);
+        let (mut line, oldest) = join_rows(grid, &mut pending, newest_cut);
         if !seen_text && line.text.is_empty() {
             // When: no text was `seen_text` yet, a blank line below the newest output is skipped.
             covered = Some(oldest);
@@ -440,7 +492,7 @@ fn collect_rows(grid: &Grid, span: RowSpan, walk: Walk, budget: &mut Budget) -> 
     if walk.keep_cut && lines.is_empty() && !pending.is_empty() {
         // A limit stopped the walk inside the first line: the whole rows already copied are
         // returned cut as the line's newest part, so the next page continues inside it.
-        let (mut line, oldest) = join_rows(grid, &mut pending);
+        let (mut line, oldest) = join_rows(grid, &mut pending, newest_cut);
         line.cut = true;
         covered = Some(oldest);
         lines.push(line);
@@ -454,23 +506,30 @@ fn collect_rows(grid: &Grid, span: RowSpan, walk: Walk, budget: &mut Budget) -> 
 }
 
 /// Join `pending` (newest first) oldest first into one line and empty it; also return the line's
-/// oldest row. Every row but the newest keeps its trailing blanks, which sit inside the wrapped
-/// line; the line's own end is trimmed.
-fn join_rows(grid: &Grid, pending: &mut Vec<PendingRow>) -> (ReadLine, u64) {
+/// oldest row. Interior trailing blanks survive, including the newest row's when `newest_cut`
+/// means the logical line continues past this page. Only a real line end is trimmed.
+fn join_rows(grid: &Grid, pending: &mut Vec<PendingRow>, newest_cut: bool) -> (ReadLine, u64) {
     let newest = pending.first().map_or(0, |part| part.abs);
     let oldest = pending.last().map_or(newest, |part| part.abs);
+    let newest_row_start: usize =
+        pending.iter().skip(1).map(|part| part.text.len() + part.blanks).sum();
     let mut text = String::new();
     let newest_index = pending.len().saturating_sub(1);
     for (index, part) in pending.drain(..).rev().enumerate() {
         text.push_str(&part.text);
-        if index < newest_index {
+        if index < newest_index || newest_cut {
             text.extend(std::iter::repeat_n(' ', part.blanks));
         }
     }
-    // Trimmed in place: the line's one allocation is kept, not copied again.
-    text.truncate(text.trim_end().len());
+    if !newest_cut {
+        // The newest row ends the logical line, so only its real trailing padding is removed.
+        text.truncate(text.trim_end().len());
+    }
+    // Trimming a blank newest row can also remove blanks from the preceding row.
+    let newest_row_start = newest_row_start.min(text.len());
     let line = ReadLine {
         text,
+        newest_row_start,
         row: grid.row_token(newest),
         first_row: grid.row_token(oldest),
         cut: false,
