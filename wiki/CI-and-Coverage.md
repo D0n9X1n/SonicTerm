@@ -15,6 +15,12 @@ ref advances. Each `main` push instead has a SHA-specific group and never
 cancels in progress, so a later merge cannot erase the exact-SHA verification
 record for an earlier one.
 
+A failed job is rerun once on the same commit (`gh run rerun <run-id> --failed`)
+before anyone changes code or tests for it. A failure that passes on the rerun was
+transient, and the pull request records both results. Only a failure that
+reproduces and is traced to a defect in the code gets a fix and an issue; a test
+that fails only from a runner's load or timing is not one.
+
 `.github/workflows/perf.yml` (`Performance comparison`) runs separately and is
 not a required job. It measures a quick before/after table, within 35 minutes
 of the run's creation, queue included, for pull requests labelled `perf`, and the
