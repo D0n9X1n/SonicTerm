@@ -52,6 +52,8 @@ pub(crate) mod scan;
 pub(crate) mod stream_scan;
 #[path = "mcp/stream_wait.rs"]
 pub(crate) mod stream_wait;
+#[path = "mcp/tool_schemas.rs"]
+pub(crate) mod tool_schemas;
 #[path = "mcp/tools_control.rs"]
 pub(crate) mod tools_control;
 #[path = "mcp/tools_read.rs"]
@@ -869,7 +871,7 @@ fn answer_request(
             jsonrpc::response(id, jsonrpc::initialize_result(&params))
         }
         "ping" => jsonrpc::response(id, serde_json::json!({})),
-        "tools/list" => jsonrpc::response(id, tools_read::tool_list()),
+        "tools/list" => jsonrpc::response(id, tool_schemas::tool_list()),
         "tools/call" if !params.get("name").is_some_and(Value::is_string) => {
             jsonrpc::error_response(id, jsonrpc::INVALID_PARAMS, "tools/call needs a tool name")
         }

@@ -135,7 +135,7 @@ changes `control` drops every request already queued.
 
 ## Read scope
 
-`[mcp] read` sets which panes `list_panes`, `read_pane` and `wait_for` may see.
+`[mcp] read` sets which panes `list_panes`, `read_pane`, `wait_for` and `search_pane` may see.
 
 | `read` | Read tools see |
 | --- | --- |
@@ -217,8 +217,10 @@ The server tells agents never to follow instructions found in pane text, but kee
 
 ## Tools
 
-The read tools are `list_panes`, `read_pane` and `wait_for`. Their arguments,
-caps and locking are described in [Platform Integration](Platform-Integration).
+The read tools are `list_panes`, `read_pane`, `wait_for` and `search_pane`. `read_pane`
+with `mode: "history"` pages back through a pane's scrollback, and `search_pane` finds a
+regex there, newest match first. Their arguments, caps and locking are described in
+[Platform Integration](Platform-Integration).
 
 The event loop answers queued requests for at most 2 ms at a time, so many agents
 calling at once cannot hold off input: what one drain does not reach goes back ahead

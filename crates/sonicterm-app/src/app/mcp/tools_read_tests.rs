@@ -247,15 +247,60 @@ fn moving_output_is_not_quiet_while_the_parser_is_held() {
     assert_eq!(outcome.reason, WaitReason::Timeout, "quiet was reported while output moved");
 }
 
-/// The tool list names every read tool and marks each read-only.
+/// The tool list names every read tool, `search_pane` included, and marks each read-only;
+/// `read_pane` offers the `history` mode and its `before_row` cursor.
 #[test]
 fn the_tool_list_names_the_read_tools() {
-    let list = tool_list();
+    let list = crate::app::mcp::tool_schemas::tool_list();
     let tools = list["tools"].as_array().unwrap();
-    for name in ["list_panes", "read_pane", "wait_for"] {
+    for name in ["list_panes", "read_pane", "wait_for", "search_pane"] {
         let tool = tools.iter().find(|tool| tool["name"] == name).expect(name);
         assert_eq!(tool["annotations"]["readOnlyHint"], true, "{name}");
     }
+    let read = tools.iter().find(|tool| tool["name"] == "read_pane").unwrap();
+    let modes = read["inputSchema"]["properties"]["mode"]["enum"].as_array().unwrap();
+    assert!(modes.contains(&json!("history")), "{modes:?}");
+    assert!(read["inputSchema"]["properties"]["before_row"].is_object());
+    let search = tools.iter().find(|tool| tool["name"] == "search_pane").unwrap();
+    assert_eq!(search["inputSchema"]["required"], json!(["pane_id", "regex"]));
+}
+
+/// `read_pane` in `history` mode pages back by passing each result's `first_row` as the next
+/// `before_row`, and reports `at_start` once the oldest retained row is reached.
+#[test]
+fn read_pane_history_pages_back_through_first_row() {
+    let entry = test_entry(20, 4, 100);
+    emit(&entry, b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+    let first = read_reply(&entry, &json!({ "mode": "history", "max_lines": 3 }));
+    let result = &first["structuredContent"];
+    assert_eq!(result["lines"], json!(["three", "four", "five"]));
+    assert_eq!(result["at_start"], false);
+    assert_eq!(result["cut"], false);
+    let before = result["first_row"].as_str().expect("a token").to_owned();
+    let second = read_reply(&entry, &json!({ "mode": "history", "before_row": before }));
+    assert_eq!(second["structuredContent"]["lines"], json!(["one", "two"]));
+    assert_eq!(second["structuredContent"]["at_start"], true);
+}
+
+/// `before_row` is refused outside `history` and when malformed; a token naming the other screen
+/// or a row that left history is refused with its stable code.
+#[test]
+fn read_pane_refuses_bad_history_cursors() {
+    let entry = test_entry(10, 3, 3);
+    let refusal = |reply: Value| reply["structuredContent"]["error"].as_str().map(str::to_owned);
+    let tail = json!({ "mode": "tail", "before_row": "p0" });
+    assert_eq!(refusal(read_reply(&entry, &tail)).as_deref(), Some("invalid_arguments"));
+    let malformed = json!({ "mode": "history", "before_row": "z9" });
+    assert_eq!(refusal(read_reply(&entry, &malformed)).as_deref(), Some("invalid_arguments"));
+    emit(&entry, b"0\r\n1\r\n2\r\n3");
+    let oldest = encode_token(entry.parser.lock().grid().row_token(0));
+    emit(&entry, b"\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
+    let evicted = json!({ "mode": "history", "before_row": oldest });
+    assert_eq!(refusal(read_reply(&entry, &evicted)).as_deref(), Some("evicted"));
+    let primary = encode_token(entry.parser.lock().grid().row_token(1));
+    emit(&entry, b"\x1b[?1049h");
+    let other = json!({ "mode": "history", "before_row": primary });
+    assert_eq!(refusal(read_reply(&entry, &other)).as_deref(), Some("other_screen"));
 }
 
 /// `pane_id` arrives as the string `list_panes` reports, or as a number.
