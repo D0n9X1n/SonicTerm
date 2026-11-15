@@ -86,7 +86,7 @@ impl Client {
     }
 
     /// Whether the server closed its end within five seconds.
-    fn sees_eof(&mut self) -> bool {
+    pub(super) fn sees_eof(&mut self) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             let mut line = String::new();
@@ -126,7 +126,7 @@ pub(super) fn tool(id: u64, name: &str, arguments: Value) -> Value {
 }
 
 /// Play the event loop for `shared`: answer every queued request with `entry` until stopped.
-fn fake_loop(shared: &Arc<McpShared>, entry: PaneEntry) -> std::thread::JoinHandle<()> {
+pub(super) fn fake_loop(shared: &Arc<McpShared>, entry: PaneEntry) -> std::thread::JoinHandle<()> {
     let shared = Arc::clone(shared);
     std::thread::spawn(move || {
         while !shared.is_stopped() {
@@ -155,7 +155,7 @@ fn fake_loop(shared: &Arc<McpShared>, entry: PaneEntry) -> std::thread::JoinHand
 }
 
 /// Wait until `shared` reports `count` live connections, for up to five seconds.
-fn wait_for_connections(shared: &McpShared, count: u64) -> bool {
+pub(super) fn wait_for_connections(shared: &McpShared, count: u64) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if shared.connections.load(Ordering::Acquire) == count {
@@ -297,8 +297,15 @@ fn a_departing_client_abandons_a_queued_request() {
     }
     client.to_server = None;
     assert!(wait_for_connections(&shared, 0));
-    // The loop wakes late: the request it finds is marked closed, so it will be refused unrun.
-    let queued = shared.take_requests();
+    // The loop wakes late: the request it finds is marked closed, so it will be refused unrun. The
+    // connect and departure notices queued beside it are not tool requests.
+    let queued: Vec<_> = shared
+        .take_requests()
+        .into_iter()
+        .filter(|request| {
+            !matches!(request.call, LoopCall::Notice { .. } | LoopCall::AgentLeft { .. })
+        })
+        .collect();
     assert_eq!(queued.len(), 1);
     assert!(queued[0].closed.load(Ordering::Acquire));
 }
@@ -389,8 +396,9 @@ fn a_queued_call_keeps_its_acceptance_generation() {
     assert_eq!(shared.buffered(), 0, "the charge goes with the call");
 }
 
-/// Repeated `initialize` on one connection is answered but announced once, and connection churn
-/// never queues more than `MAX_PENDING_NOTICES` notices.
+/// Repeated `initialize` on one connection is answered and announces nothing (a connection is
+/// announced on its first admitted tool call), and connection churn never queues more than
+/// `MAX_PENDING_NOTICES` notices.
 #[test]
 fn notices_are_bounded() {
     let shared = McpShared::new(McpControl::Agent, None);
@@ -400,7 +408,7 @@ fn notices_are_bounded() {
         client.send(&call(id, "initialize", json!({ "clientInfo": { "name": "spam" } })));
         assert_eq!(client.reply()["id"], id);
     }
-    assert_eq!(shared.inbox.lock().len(), 1, "only the first initialize is announced");
+    assert!(shared.inbox.lock().is_empty(), "initialize announces nothing");
     for _ in 0..100 {
         shared.notify("churn".into());
     }
@@ -456,7 +464,15 @@ fn the_call_slot_is_free_before_the_reply_is_written() {
 /// Start a `wait_for` that never matches on `shared` with a 10 s recheck, through a real connection
 /// and a fake loop, and return once its worker is parked on the pane's signal; the waiter count
 /// tells when it ends. Every end-to-end close below must beat the recheck, so it can only come from a wake.
-fn sleeping_wait() -> (Arc<McpShared>, Client, std::thread::JoinHandle<()>) {
+pub(super) fn sleeping_wait() -> (Arc<McpShared>, Client, std::thread::JoinHandle<()>) {
+    sleeping_wait_with(json!({}))
+}
+
+/// [`sleeping_wait`] with `extra` arguments merged into the `wait_for` call, such as a stream
+/// `source`.
+pub(super) fn sleeping_wait_with(
+    extra: Value,
+) -> (Arc<McpShared>, Client, std::thread::JoinHandle<()>) {
     let shared = McpShared::new(McpControl::Agent, None);
     *shared.recheck_override.lock() = Some(Duration::from_secs(10));
     let entry = test_entry(20, 4, 100);
@@ -466,11 +482,11 @@ fn sleeping_wait() -> (Arc<McpShared>, Client, std::thread::JoinHandle<()>) {
     let looper = fake_loop(&shared, entry);
     let (mut client, transport) = connection();
     spawn_connection(&shared, transport);
-    client.send(&tool(
-        1,
-        "wait_for",
-        json!({ "pane_id": pane_id, "regex": "never", "timeout_ms": 60000 }),
-    ));
+    let mut arguments = json!({ "pane_id": pane_id, "regex": "never", "timeout_ms": 60000 });
+    if let (Some(arguments), Some(extra)) = (arguments.as_object_mut(), extra.as_object()) {
+        arguments.extend(extra.clone());
+    }
+    client.send(&tool(1, "wait_for", arguments));
     // Parked means the worker's wait holds the signal's mutex and found nothing changed, so only a
     // wake can end it before its 10 s recheck.
     parked.recv_timeout(Duration::from_secs(5)).expect("the connection's wait parked");
@@ -479,7 +495,7 @@ fn sleeping_wait() -> (Arc<McpShared>, Client, std::thread::JoinHandle<()>) {
 
 /// Whether the connection's wait ended (unregistered) within five seconds, well under its 10 s
 /// recheck.
-fn wait_ended(shared: &McpShared) -> bool {
+pub(super) fn wait_ended(shared: &McpShared) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if shared.waiter_count() == 0 {

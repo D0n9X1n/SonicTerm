@@ -371,7 +371,7 @@ impl CommandPalette {
                 // When: forward is false, step back without underflowing past the first row.
                 (self.selected + count - step % count) % count
             };
-            if self.status_rows[self.items[candidate]].selectable() {
+            if self.row_selectable(candidate) {
                 // When: the candidate row is selectable, it becomes the highlight and the search stops.
                 self.selected = candidate;
                 break;
@@ -392,10 +392,41 @@ impl CommandPalette {
                 self.filter_picker_rows();
                 self.selected = 0;
             }
+            CommandPaletteMode::Agents => {
+                self.filter_agent_rows();
+                self.selected = self.first_selectable_row();
+            }
             _ => {
                 // When: mode edits a name or shows a fixed list, typing filters nothing.
             }
         }
+    }
+
+    /// Alternate between Apply and Cancel; with two choices, up and down are the same step.
+    pub(super) fn step_confirm_selection(&mut self) {
+        self.selected = (self.selected.min(CONFIRM_ACTION_ROWS - 1) + 1) % CONFIRM_ACTION_ROWS;
+        self.scroll_offset = 0;
+    }
+
+    /// Whether the open page has rows the highlight skips (checklist headings, Agents info rows)
+    /// and at least one row, so Up and Down step through [`Self::row_selectable`] rows.
+    pub(super) fn has_unselectable_rows(&self) -> bool {
+        matches!(self.mode, CommandPaletteMode::StatusSegments | CommandPaletteMode::Agents)
+            && !self.items.is_empty()
+    }
+
+    /// Highlight the confirmation page's row at `index`, as a click does; `false` and no change
+    /// for an item row, a row past the page, or when no confirmation page is open.
+    pub fn select_confirm_row(&mut self, index: usize) -> bool {
+        let selectable = self.mode == CommandPaletteMode::Confirm
+            && matches!(
+                self.confirm_rows.get(index),
+                Some(ConfirmRow::Apply(_) | ConfirmRow::Cancel(_))
+            );
+        if selectable {
+            self.selected = index;
+        }
+        selectable
     }
 
     /// Whether the highlighted row of an open confirmation page is Apply.

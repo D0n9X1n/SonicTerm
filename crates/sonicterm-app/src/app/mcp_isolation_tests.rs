@@ -203,8 +203,10 @@ fn a_disconnect_during_a_create_leaves_an_orphaned_pane() {
         two_agents(McpIsolation::Session, McpCreateAnchor::Any);
     let session = shared.sessions.open();
     let ending = Arc::clone(&shared);
-    crate::app::pane_target::CREATE_HOOK
-        .set(Some(Box::new(move || ending.sessions.close(session))));
+    crate::app::pane_target::CREATE_HOOK.set(Some(Box::new(move || {
+        // The departure record is not needed: the test checks only the orphaned pane.
+        let _ = ending.sessions.close(session);
+    })));
     let reply = app.mcp_create_pane(
         shared.access(session),
         user,

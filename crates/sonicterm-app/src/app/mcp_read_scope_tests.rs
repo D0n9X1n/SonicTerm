@@ -186,9 +186,10 @@ fn changing_only_the_read_scope_revokes_queued_requests() {
 
 #[test]
 fn every_read_tool_answers_each_pane_by_ownership_and_scope() {
-    // The full matrix: list_panes, read_pane and wait_for, on the user's pane and the agent's,
-    // under "agent" and "any". Each permitted call succeeds (a quiet wait ends `quiet`, never
-    // refused); each forbidden one is refused as out_of_scope, so neither half can pass alone.
+    // The full matrix: list_panes, read_pane (tail and history), wait_for, search_pane and
+    // command_history, on the user's pane and the agent's, under "agent" and "any". Each permitted
+    // call succeeds (a quiet wait ends `quiet`, never refused); each forbidden one is refused as
+    // out_of_scope, so neither half can pass alone.
     for read in [McpRead::Agent, McpRead::Any] {
         let (mut app, shared, mut client, user, agent) = app_with_client(read);
         for (pane, owned) in [(user, false), (agent, true)] {
@@ -206,6 +207,15 @@ fn every_read_tool_answers_each_pane_by_ownership_and_scope() {
             if permitted {
                 assert_eq!(reply["result"]["structuredContent"]["reason"], "quiet", "{label}");
             }
+            let search = json!({ "pane_id": pane.to_string(), "regex": "x" });
+            let (reply, next) = exchange(&mut app, next, tool(4, "search_pane", search));
+            assert_eq!(refusal(&reply), expected, "{label}: search_pane {reply}");
+            let history = json!({ "pane_id": pane.to_string(), "mode": "history" });
+            let (reply, next) = exchange(&mut app, next, tool(5, "read_pane", history));
+            assert_eq!(refusal(&reply), expected, "{label}: read_pane history {reply}");
+            let commands = json!({ "pane_id": pane.to_string() });
+            let (reply, next) = exchange(&mut app, next, tool(6, "command_history", commands));
+            assert_eq!(refusal(&reply), expected, "{label}: command_history {reply}");
             client = next;
         }
         shared.stop();

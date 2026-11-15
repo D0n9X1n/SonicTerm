@@ -83,6 +83,7 @@ fn command_context_requirements_and_readonly_policy_are_explicit() {
                 | Action::ShowMemoryUsage
                 | Action::CopyMemoryReport
                 | Action::ShowAbout
+                | Action::ShowAgents
                 | Action::SetDefaultHandlers
                 | Action::OpenCommandPalette
                 | Action::RenameWindow
@@ -136,4 +137,18 @@ fn focus_status_line_is_a_read_only_window_command() {
     assert_eq!(entry.requirement, CommandRequirement::Window);
     assert!(all_actions().contains(&Action::FocusStatusLine));
     assert_eq!(crate::i18n::test_translator("en").translate(entry.label_key), "Focus Status Line");
+}
+
+/// `show_agents` is a window command labelled "Agents…" that READONLY allows, because the page only
+/// lists agents and disconnecting one writes nothing to a pane; the palette lists it.
+#[test]
+fn show_agents_is_a_read_only_window_command() {
+    let entry = descriptor(&Action::ShowAgents);
+    assert_eq!(entry.id, "ShowAgents");
+    assert_eq!(entry.label_key, "command-show-agents");
+    assert!(entry.read_only_allowed);
+    assert_eq!(entry.requirement, CommandRequirement::Window);
+    assert!(crate::command_palette::palette_actions().contains(&Action::ShowAgents));
+    assert_eq!(label(&Action::ShowAgents), "Agents…");
+    assert_eq!(crate::i18n::test_translator("en").translate(entry.label_key), "Agents…");
 }

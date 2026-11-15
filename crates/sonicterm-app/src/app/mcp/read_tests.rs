@@ -89,12 +89,14 @@ fn a_held_parser_returns_busy_quickly() {
 #[test]
 fn the_last_command_is_read_from_its_span() {
     let pane = parser(20, 8);
-    let empty = read_pane(&pane, ReadMode::LastCommand, ReadLimits::clamped(None, None));
+    let empty =
+        read_pane(&pane, ReadMode::LastCommand { seq: None }, ReadLimits::clamped(None, None));
     assert!(empty.no_command);
     pane.lock().advance(
         b"\x1b]133;A\x07$ \x1b]133;B\x07make\r\n\x1b]133;C\x07built\r\nok\r\n\x1b]133;D;2\x07$ ",
     );
-    let read = read_pane(&pane, ReadMode::LastCommand, ReadLimits::clamped(None, None));
+    let read =
+        read_pane(&pane, ReadMode::LastCommand { seq: None }, ReadLimits::clamped(None, None));
     assert_eq!(texts(&read), vec!["built", "ok"]);
     assert_eq!(read.exit_code, Some(2));
 }
@@ -107,7 +109,8 @@ fn the_last_command_is_found_on_the_alternate_screen() {
     pane.lock().advance(
         b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a.txt\r\n\x1b]133;D;0\x07$ \x1b[?1049hvim",
     );
-    let read = read_pane(&pane, ReadMode::LastCommand, ReadLimits::clamped(None, None));
+    let read =
+        read_pane(&pane, ReadMode::LastCommand { seq: None }, ReadLimits::clamped(None, None));
     assert!(read.alt_screen);
     assert_eq!(texts(&read), vec!["a.txt"]);
     assert_eq!(read.exit_code, Some(0));
@@ -119,7 +122,8 @@ fn output_on_the_d_row_is_kept() {
     let pane = parser(20, 8);
     pane.lock()
         .advance(b"\x1b]133;A\x07$ \x1b]133;B\x07printf hi\r\n\x1b]133;C\x07hi\x1b]133;D;0\x07$ ");
-    let read = read_pane(&pane, ReadMode::LastCommand, ReadLimits::clamped(None, None));
+    let read =
+        read_pane(&pane, ReadMode::LastCommand { seq: None }, ReadLimits::clamped(None, None));
     assert_eq!(texts(&read), vec!["hi"]);
 }
 
@@ -182,7 +186,8 @@ fn surviving_output_is_read_after_the_c_row_left_history() {
         sonicterm_vt::vt::CaptureStagingPool::new(),
     )));
     pane.lock().advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\r\n\x1b]133;C\x07one\r\ntwo\r\nthree\r\nfour\x1b]133;D;0\x07");
-    let read = read_pane(&pane, ReadMode::LastCommand, ReadLimits::clamped(None, None));
+    let read =
+        read_pane(&pane, ReadMode::LastCommand { seq: None }, ReadLimits::clamped(None, None));
     assert!(read.output_truncated);
     assert!(texts(&read).contains(&"four"), "{:?}", texts(&read));
 }

@@ -216,6 +216,9 @@ pub enum Action {
     CopyMemoryReport,
     /// Open the About window, or focus and refresh it when it is already open.
     ShowAbout,
+    /// Open the Agents palette page: the connected MCP agents, each of which can be disconnected
+    /// after a confirmation.
+    ShowAgents,
 
     // System integration
     /// Show the file and link handlers SonicTerm can claim, and change them only after

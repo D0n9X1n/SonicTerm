@@ -92,6 +92,7 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
         CommandPaletteMode::Confirm,
         CommandPaletteMode::StatusSegments,
         CommandPaletteMode::Picker,
+        CommandPaletteMode::Agents,
     ] {
         let mut palette = CommandPalette::new();
         match mode {
@@ -117,6 +118,10 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
                 Vec::new(),
                 "",
             ),
+            // The Agents page footer also comes from the host.
+            CommandPaletteMode::Agents => {
+                palette.start_agents("title", longest_localized_footer("agents-footer"), Vec::new())
+            }
         }
         let layout = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 1.0)
             .expect("open palette has layout");

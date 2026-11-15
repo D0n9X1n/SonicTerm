@@ -75,6 +75,8 @@ pub enum CommandPaletteMode {
     /// A live-preview picker, of the [`PickerKind`] the palette holds: the query filters its rows,
     /// moving the highlight previews a row, Enter keeps it and Escape restores the original.
     Picker,
+    /// The connected MCP agents; Enter on a session or Disconnect all opens a confirm page.
+    Agents,
 }
 
 /// What a [`CommandPaletteMode::Picker`] page lists and applies.
@@ -307,6 +309,8 @@ pub struct CommandPalette {
     picker_title: String,
     picker_footer: String,
     picker_items: Vec<PickerRow>,
+    /// The Agents page while `mode` is `Agents`; `items` indexes its rows.
+    agents: agents::AgentsPage,
     window_name_error: Option<WindowNameError>,
     /// Increments on every open, so a gesture held across close and reopen is not
     /// mistaken for one in the new editor.
@@ -358,6 +362,7 @@ impl CommandPalette {
             status_rows: Vec::new(),
             picker_kind: PickerKind::default(),
             picker_title: String::new(),
+            agents: agents::AgentsPage::default(),
             picker_footer: String::new(),
             picker_items: Vec::new(),
             window_name_error: None,
@@ -496,6 +501,7 @@ impl CommandPalette {
             self.picker_footer.hash(&mut hash);
             self.picker_items.hash(&mut hash);
         }
+        self.hash_agents(&mut hash);
         hash.finish()
     }
 
@@ -553,6 +559,7 @@ impl CommandPalette {
         self.picker_title.clear();
         self.picker_footer.clear();
         self.picker_items.clear();
+        self.clear_agents();
         self.tabs_only = false;
         self.window_name_error = None;
         self.query.clear();
@@ -819,8 +826,8 @@ impl CommandPalette {
             self.step_confirm_selection();
             return;
         }
-        if self.mode == CommandPaletteMode::StatusSegments && !self.items.is_empty() {
-            // When: mode is StatusSegments, the step skips dimmed group headings.
+        if self.has_unselectable_rows() {
+            // When: `has_unselectable_rows` holds (checklist or Agents page), headings and info rows are skipped.
             self.step_status_selection(true);
             return;
         }
@@ -846,8 +853,8 @@ impl CommandPalette {
             self.step_confirm_selection();
             return;
         }
-        if self.mode == CommandPaletteMode::StatusSegments && !self.items.is_empty() {
-            // When: mode is StatusSegments, the step skips dimmed group headings.
+        if self.has_unselectable_rows() {
+            // When: `has_unselectable_rows` holds (checklist or Agents page), headings and info rows are skipped.
             self.step_status_selection(false);
             return;
         }
@@ -864,12 +871,6 @@ impl CommandPalette {
             self.selected - 1
         };
         self.ensure_selected_in_view();
-    }
-
-    /// Alternate between Apply and Cancel; with two choices, up and down are the same step.
-    fn step_confirm_selection(&mut self) {
-        self.selected = (self.selected.min(CONFIRM_ACTION_ROWS - 1) + 1) % CONFIRM_ACTION_ROWS;
-        self.scroll_offset = 0;
     }
 
     /// Current first-visible-row offset. The renderer uses this to draw
@@ -977,6 +978,8 @@ mod command_palette_tests;
 
 #[path = "command_palette_actions.rs"]
 mod actions;
+#[path = "command_palette_agents.rs"]
+mod agents;
 #[path = "command_palette_modes.rs"]
 mod modes;
 #[path = "command_palette_presentation.rs"]
@@ -985,5 +988,6 @@ mod presentation;
 pub use actions::{
     action_display_name, all_actions, covers_every_variant_kind, palette_actions, palette_lists,
 };
+pub use agents::{AgentRow, AgentRowKind};
 use presentation::CommandPresentation;
 pub(crate) use presentation::PaletteText;

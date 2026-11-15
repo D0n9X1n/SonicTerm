@@ -169,6 +169,26 @@ fn cancel_makes_no_backend_call() {
     assert!(calls.applied.is_empty());
 }
 
+/// Contract: on the confirmation page a click acts as Enter on the clicked row: Cancel makes no
+/// apply call, a text row does nothing, and Apply makes exactly one.
+#[test]
+fn a_click_on_cancel_or_apply_acts_as_enter_on_that_row() {
+    let (mut app, calls, _) = app_with(Ok(two_item_plan()), Vec::new());
+    let window_id = app.registry.main_window_id.expect("the seed made a main window");
+    app.run_action(&Action::SetDefaultHandlers);
+    app.click_confirm_row(window_id, 1);
+    assert!(!app.interaction.command_palette.is_open(), "Cancel closes the page");
+    assert!(app.default_handlers.pending.is_none());
+    assert!(calls.lock().unwrap().applied.is_empty(), "Cancel applies nothing");
+    app.run_action(&Action::SetDefaultHandlers);
+    app.click_confirm_row(window_id, 2);
+    assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::Confirm);
+    assert!(calls.lock().unwrap().applied.is_empty(), "a text row applies nothing");
+    app.click_confirm_row(window_id, 0);
+    assert!(!app.interaction.command_palette.is_open());
+    assert_eq!(calls.lock().unwrap().applied, vec![two_item_plan().items], "Apply runs once");
+}
+
 /// Contract: Apply makes exactly one apply call covering every listed item, and the
 /// report appears once all items have answered.
 #[test]

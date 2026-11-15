@@ -59,6 +59,7 @@ pub fn action_display_name(action: &Action) -> String {
         Action::ShowMemoryUsage => "ShowMemoryUsage".into(),
         Action::CopyMemoryReport => "CopyMemoryReport".into(),
         Action::ShowAbout => "ShowAbout".into(),
+        Action::ShowAgents => "ShowAgents".into(),
         Action::SetDefaultHandlers => "SetDefaultHandlers".into(),
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
@@ -211,6 +212,8 @@ pub fn palette_actions() -> Vec<Action> {
         // Diagnostics
         Action::ShowMemoryUsage,
         Action::CopyMemoryReport,
+        // Agents
+        Action::ShowAgents,
         // System integration
         Action::SetDefaultHandlers,
     ];

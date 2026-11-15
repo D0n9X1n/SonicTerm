@@ -19,6 +19,10 @@ pub(super) enum PalettePointerTarget {
     StatusRow(StatusSegmentRowKind),
     /// A picker row, by the value it applies.
     PickerRow(String),
+    /// An Agents page row, by what it acts on.
+    AgentRow(sonicterm_ui::command_palette::AgentRowKind),
+    /// A confirm page's Apply or Cancel row, by its index; the page's rows never move.
+    ConfirmRow(usize),
     Outside,
 }
 
@@ -36,6 +40,15 @@ enum PalettePointerHit {
     PickerRow {
         index: usize,
         value: String,
+    },
+    /// An Agents page row at filtered `index`.
+    AgentRow {
+        index: usize,
+        kind: sonicterm_ui::command_palette::AgentRowKind,
+    },
+    /// A confirm page row at `index`: Apply, Cancel, or one of its text lines.
+    ConfirmRow {
+        index: usize,
     },
     Outside,
     Inside,
@@ -66,6 +79,17 @@ impl App {
                 let kind = rows.get(row.item_index)?.kind;
                 return Some(PalettePointerHit::StatusRow { index: row.item_index, kind });
             }
+            if self.interaction.command_palette.mode() == CommandPaletteMode::Agents {
+                // When: mode is Agents, the row is named by what it acts on.
+                let rows = self.interaction.command_palette.agent_rows();
+                let kind = rows.get(row.item_index)?.kind;
+                return Some(PalettePointerHit::AgentRow { index: row.item_index, kind });
+            }
+            if self.interaction.command_palette.mode() == CommandPaletteMode::Confirm {
+                // When: mode is Confirm, the row is named by its index; only Apply and Cancel press.
+                self.interaction.command_palette.confirm_rows().get(row.item_index)?;
+                return Some(PalettePointerHit::ConfirmRow { index: row.item_index });
+            }
             if self.interaction.command_palette.mode() == CommandPaletteMode::Picker {
                 // When: mode is Picker, the row is named by the value it applies.
                 let rows = self.interaction.command_palette.picker_rows();
@@ -77,6 +101,79 @@ impl App {
             return Some(PalettePointerHit::Row { index: row.item_index, entry });
         }
         Some(PalettePointerHit::Inside)
+    }
+
+    /// Capture the row under a left press so the release can act on it, highlighting it now.
+    fn press_command_palette_pointer(
+        &mut self,
+        window_id: WindowId,
+        hit: Option<PalettePointerHit>,
+    ) {
+        self.interaction.palette_pointer_capture = match hit {
+            Some(PalettePointerHit::Row { index, entry }) => {
+                // Capture the displayed identity before any live target refresh can move this row.
+                self.interaction.command_palette.select_visible_index(index);
+                Some(PalettePointerCapture {
+                    window_id,
+                    target: PalettePointerTarget::Entry(entry),
+                })
+            }
+            Some(PalettePointerHit::PickerRow { index, value }) => {
+                // A picker row is highlighted on press and applied on release.
+                self.interaction.command_palette.select_picker_row(index).then_some(
+                    PalettePointerCapture {
+                        window_id,
+                        target: PalettePointerTarget::PickerRow(value),
+                    },
+                )
+            }
+            Some(PalettePointerHit::AgentRow { index, kind }) => {
+                // An info row cannot be pressed; a row is highlighted on press.
+                self.interaction.command_palette.select_agent_row(index).then_some(
+                    PalettePointerCapture {
+                        window_id,
+                        target: PalettePointerTarget::AgentRow(kind),
+                    },
+                )
+            }
+            Some(PalettePointerHit::ConfirmRow { index }) => {
+                // Only Apply and Cancel can be pressed; a text line is not a button.
+                self.interaction.command_palette.select_confirm_row(index).then_some(
+                    PalettePointerCapture {
+                        window_id,
+                        target: PalettePointerTarget::ConfirmRow(index),
+                    },
+                )
+            }
+            Some(PalettePointerHit::StatusRow { index, kind }) => {
+                // A heading cannot be pressed; a row is highlighted on press.
+                self.interaction.command_palette.select_status_row(index).then_some(
+                    PalettePointerCapture {
+                        window_id,
+                        target: PalettePointerTarget::StatusRow(kind),
+                    },
+                )
+            }
+            Some(PalettePointerHit::Outside) => {
+                Some(PalettePointerCapture { window_id, target: PalettePointerTarget::Outside })
+            }
+            _ => None,
+        };
+        self.request_redraw_for_overlay(Some(window_id));
+    }
+
+    /// A left click on confirm page row `index`, through the same press and release a pointer
+    /// takes; headless tests have no renderer to hit-test against.
+    #[cfg(test)]
+    pub(in crate::app) fn click_confirm_row(&mut self, window_id: WindowId, index: usize) {
+        self.press_command_palette_pointer(
+            window_id,
+            Some(PalettePointerHit::ConfirmRow { index }),
+        );
+        self.release_command_palette_pointer(
+            window_id,
+            Some(PalettePointerHit::ConfirmRow { index }),
+        );
     }
 
     fn release_command_palette_pointer(
@@ -97,6 +194,8 @@ impl App {
                 CommandPaletteMode::Commands
                     | CommandPaletteMode::StatusSegments
                     | CommandPaletteMode::Picker
+                    | CommandPaletteMode::Agents
+                    | CommandPaletteMode::Confirm
             )
             || self.palette_ime_is_composing()
         {
@@ -109,6 +208,13 @@ impl App {
             {
                 // An outside click cancels the picker and restores the value it opened with.
                 self.close_picker(false);
+            }
+            (PalettePointerTarget::Outside, Some(PalettePointerHit::Outside))
+                if self.interaction.command_palette.mode() == CommandPaletteMode::Confirm =>
+            {
+                // An outside click cancels the confirm page as Escape does, so its pending action
+                // is dropped with it.
+                self.close_confirm_page(false);
             }
             (PalettePointerTarget::Outside, Some(PalettePointerHit::Outside)) => {
                 self.interaction.command_palette.close();
@@ -140,6 +246,22 @@ impl App {
                 }
                 // The checklist's window is `window_id` here; an activation already asked once.
                 self.request_checklist_redraw();
+            }
+            (
+                PalettePointerTarget::AgentRow(pressed),
+                Some(PalettePointerHit::AgentRow { index, kind }),
+            ) if pressed == kind && self.interaction.command_palette.select_agent_row(index) => {
+                // The row released on is the one pressed: open its confirm page, as Enter does; a
+                // click never disconnects on its own.
+                self.activate_agent_row();
+            }
+            (
+                PalettePointerTarget::ConfirmRow(pressed),
+                Some(PalettePointerHit::ConfirmRow { index }),
+            ) if pressed == index && self.interaction.command_palette.select_confirm_row(index) => {
+                // The Apply or Cancel row released on is the one pressed: act as Enter on it.
+                let apply = self.interaction.command_palette.confirm_applies();
+                self.close_confirm_page(apply);
             }
             (
                 PalettePointerTarget::PickerRow(pressed),
@@ -226,6 +348,8 @@ impl App {
                     CommandPaletteMode::Commands
                         | CommandPaletteMode::StatusSegments
                         | CommandPaletteMode::Picker
+                        | CommandPaletteMode::Agents
+                        | CommandPaletteMode::Confirm
                 ) || self.palette_ime_is_composing()
                     || *button != MouseButton::Left
                 {
@@ -235,42 +359,7 @@ impl App {
                 }
                 let hit = self.command_palette_pointer_hit(window_id);
                 match state {
-                    ElementState::Pressed => {
-                        self.interaction.palette_pointer_capture = match hit {
-                            Some(PalettePointerHit::Row { index, entry }) => {
-                                // Capture the displayed identity before any live target refresh can move this row.
-                                self.interaction.command_palette.select_visible_index(index);
-                                Some(PalettePointerCapture {
-                                    window_id,
-                                    target: PalettePointerTarget::Entry(entry),
-                                })
-                            }
-                            Some(PalettePointerHit::PickerRow { index, value }) => {
-                                // A picker row is highlighted on press and applied on release.
-                                self.interaction.command_palette.select_picker_row(index).then_some(
-                                    PalettePointerCapture {
-                                        window_id,
-                                        target: PalettePointerTarget::PickerRow(value),
-                                    },
-                                )
-                            }
-                            Some(PalettePointerHit::StatusRow { index, kind }) => {
-                                // A heading cannot be pressed; a row is highlighted on press.
-                                self.interaction.command_palette.select_status_row(index).then_some(
-                                    PalettePointerCapture {
-                                        window_id,
-                                        target: PalettePointerTarget::StatusRow(kind),
-                                    },
-                                )
-                            }
-                            Some(PalettePointerHit::Outside) => Some(PalettePointerCapture {
-                                window_id,
-                                target: PalettePointerTarget::Outside,
-                            }),
-                            _ => None,
-                        };
-                        self.request_redraw_for_overlay(Some(window_id));
-                    }
+                    ElementState::Pressed => self.press_command_palette_pointer(window_id, hit),
                     ElementState::Released => self.release_command_palette_pointer(window_id, hit),
                 }
                 true

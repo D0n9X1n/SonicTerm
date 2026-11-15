@@ -121,7 +121,8 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 
 ## 读取范围
 
-`[mcp] read` 决定 `list_panes`、`read_pane` 和 `wait_for` 可以看到哪些窗格。
+`[mcp] read` 决定 `list_panes`、`read_pane`、`wait_for`、`search_pane` 和 `command_history`
+可以看到哪些窗格。
 
 | `read` | 读取类工具可看到 |
 | --- | --- |
@@ -183,8 +184,16 @@ agent 对话的任何东西）都能用它认领，其能力与以你的身份�
 
 ## 工具
 
-读取类工具是 `list_panes`、`read_pane` 和 `wait_for`。它们的参数、上限和加锁方式见
+读取类工具是 `list_panes`、`read_pane`、`wait_for`、`search_pane` 和 `command_history`。`read_pane` 使用
+`mode: "history"` 时可逐页向前翻阅窗格的回滚缓冲区，`search_pane` 在其中查找正则，最新的匹配在前。
+`command_history` 列出窗格最近的 shell 命令及其退出码和耗时，`read_pane` 的 `last_command` 带上列出的
+`seq` 即可读取该命令的输出。两者都需要 shell 集成，读取的是终端保留的文本，而不是 shell 自己的历史。它们的参数、上限和加锁方式见
 [平台集成](Platform-Integration-zh-CN)。
+
+非繁忙的历史读取在跳过空白行时页面可能为空：继续把其 `first_row` 作为 `before_row`，直到
+`at_start` 为真。行标记始终向前推进。如果单行超过 `max_bytes`，尚未返回其他行的页面仍会返回完整行，
+不会丢失行尾；字节上限最多可多出一行。软换行内部的空格在分页边界处仍保留。搜索页面截断长逻辑行时
+会重读一行，并且只报告起点位于游标之前的匹配，避免重叠部分重复报告。
 
 事件循环每次最多用 2 ms 处理排队的请求，因此多个 agent 同时调用也不会挡住输入：一次处理未轮到的请求
 会排回到之后到达的请求之前，在下一次唤醒时按顺序处理。单个请求耗时更长时仍会运行完毕。控制类工具在事件循环上执行时会再次按 `control` 检查：
@@ -198,6 +207,12 @@ agent 对话的任何东西）都能用它认领，其能力与以你的身份�
 | `close_pane` | 关闭一个窗格；标签页的唯一窗格会关闭该标签页。主窗口的最后一个标签页永不关闭。 |
 | `session_token` | 返回本会话的恢复令牌；见上文“Agent 会话”一节。 |
 | `claim_panes` | 给定已断开会话的 `resume_token` 和本会话自己的 `own_token`，把该会话的窗格转给本会话；报告转移了多少个。 |
+| `focus_pane` | 选中窗格所在的标签页（主窗口或子窗口中）以及其中的该窗格。标签页正缩放到另一个窗格时以 `zoomed` 拒绝。它从不激活 SonicTerm，也不聚焦任何窗口，因此绝不从其他应用夺走焦点：只有窗格所在窗口已经是最前面的 SonicTerm 窗口时 `raised` 才为真；否则 SonicTerm 请求操作系统提醒用户（尽力而为；Wayland 可能忽略）。报告 `selected` 和 `raised`。 |
+| `set_title` | 像重命名命令一样设置窗格所在标签页的自定义标题；空标题或只含空白的标题会清除它。去掉控制字符和格式字符（Unicode Cc 和 Cf）后至多 64 个字符。在 `control = "agent"` 下，标签页中的每个窗格都必须是该会话可控制的，因此拆分到你的标签页中的 agent 无法为其改名。 |
+| `notify` | 在应用内通知中显示 `Agent message (pane <id>): <text>`。前缀由 SonicTerm 自己给出，不显示客户端名称，因此 agent 无法冒充 SonicTerm。去掉控制字符和格式字符后至多 200 个字符。报告 `shown`；已有 8 条通知在等待时报告 `queue_full`。 |
+
+`focus_pane` 和 `notify` 共享每个 agent 会话的一个限额：每 2 s 一次调用，否则返回 `rate_limited`。
+因范围、READONLY 或缩放而被拒绝的调用不计入。
 
 `run_command` 需要 shell 集成：shell 必须用 OSC 133 `A`、`B`、`C`、`D` 标记提示符，WezTerm、
 iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有输入的文本、输入队列不为空，或上一条
@@ -304,9 +319,36 @@ PowerShell 集成需要 PSReadLine，PowerShell 7 会在每个交互式控制台
 来自文件、远程主机以及从未见过 shell 环境的程序的输出。以你的身份在窗格中运行、能读取 shell 内存的
 程序不在防范范围内：它本就拥有 agent 的权限。
 
+## 管理 agent
+
+命令面板中的 **Agent…**（`show_agents`，默认未绑定）列出已连接的 agent。无论服务器是否运行都能打开，
+READONLY 下也可用，因为它不向任何窗格写入。服务器关闭时，它显示几行文字，说明如何开启。否则显示：
+
+- 一行端点，以及一行 `control` 和 `read` 范围；
+- 每个已连接会话一行，最新的在前：客户端名称、会话编号（`#3`）、已连接时长、工具调用次数、上次调用
+  距今多久，以及它拥有的窗格数；
+- **断开所有 agent**。
+
+每一行都适合面板的宽度。放不下的行先省略上次调用的时间，再用省略号缩短客户端名称，因此窗格数总会显示；
+过长的端点也以同样方式缩短。
+
+输入文字会筛选会话行。列表是打开页面时的一次快照；最近半秒内关闭的会话可能仍在列表中。
+
+在会话行或 **断开所有 agent** 上按 Enter 或点击，会打开确认页，默认高亮“取消”。它说明后果：该 agent
+的 SonicTerm 工具停止；其客户端（Claude Code、Copilot CLI）会显示服务器已断开，直到你在客户端中重新
+连接，例如使用 `/mcp`；它的窗格保持打开；已经启动的命令继续运行。只有该页上的 **断开** 才会执行，
+按 Enter 或点击均可；点击 **取消** 或页面之外会取消。
+SonicTerm 随后再次查找该会话（已经离开的会话不做任何事），并像客户端挂断一样关闭其连接：正在运行的调用
+以 `revoked` 结束，它的窗格变为孤立窗格，可用其令牌认领，服务器继续运行。**断开所有 agent** 会结束确认
+时所有已连接的会话。该页面只显示自己的确认结果，不另外显示断开通知。
+
 ## 确认是否生效
 
-- 每个连接都会显示应用内通知 `Agent connected: <name>`，其中是客户端报告的名称。
+- agent 的第一次工具调用开始时，会显示一次 `Agent connected: <name>`，其中是客户端报告的名称。只做
+  初始化并列出工具的连接（例如 `claude mcp list`）不显示任何通知。
+- 仍拥有自己创建的窗格的 agent 离开时，显示 `Agent disconnected: <name>; <n> pane(s) left without an agent`；
+  不拥有窗格（从未创建，或重新连接后已被认领）的 agent 离开时不显示任何通知。名称由客户端自报，两个
+  agent 可能同名。同时等待显示的通知至多八条，每次连接和断开都会在 `mcp` 下以 `info` 级别记录。
 - 设置 `[logging] level = "info"` 后，日志会记录 `control server started`、
   `control server stopped` 和 `control level changed`。服务器无法启动时，总会在 `mcp`
   target 下记录一条警告。见 [日志](Logging-zh-CN)。

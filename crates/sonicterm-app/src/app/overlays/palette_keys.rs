@@ -110,10 +110,10 @@ impl App {
         if self.interaction.command_palette.mode() == CommandPaletteMode::Confirm {
             // When: `mode` is `Confirm`, only Apply or Cancel closes the page; text input is ignored.
             match logical_key {
-                Key::Named(NamedKey::Escape) => self.confirm_default_handlers(false),
+                Key::Named(NamedKey::Escape) => self.close_confirm_page(false),
                 Key::Named(NamedKey::Enter) => {
                     let apply = self.interaction.command_palette.confirm_applies();
-                    self.confirm_default_handlers(apply);
+                    self.close_confirm_page(apply);
                 }
                 Key::Named(NamedKey::ArrowDown) => {
                     self.interaction.command_palette.move_selection_down();
@@ -128,6 +128,37 @@ impl App {
                 }
             }
             return true;
+        }
+        if self.interaction.command_palette.mode() == CommandPaletteMode::Agents {
+            // When: mode is Agents, Enter opens the confirm page for the highlighted row, Escape
+            // closes, Up and Down skip info rows; other keys edit the filter query.
+            match logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    // When: logical_key is Escape, the page closes and no agent is touched.
+                    self.finish_agents_page(None);
+                    return true;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    // When: logical_key is Enter, the highlighted row opens its confirm page.
+                    self.activate_agent_row();
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    // When: logical_key is ArrowDown, the highlight steps down and no row acts.
+                    self.interaction.command_palette.move_selection_down();
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    // When: logical_key is ArrowUp, the highlight steps up and no row acts.
+                    self.interaction.command_palette.move_selection_up();
+                    self.request_redraw_for_overlay(self.interaction.palette_attached_window);
+                    return true;
+                }
+                _ => {
+                    // When: logical_key is any other key, it edits the filter query below.
+                }
+            }
         }
         if self.interaction.command_palette.mode() == CommandPaletteMode::StatusSegments {
             // When: mode is StatusSegments, Enter toggles and keeps the page open, Left and Right

@@ -56,14 +56,17 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 
 macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行 Rust 检查、严格 Rustdoc、
 一次性 workspace 测试 gate、workspace doctest、host probe、macOS 专属进程组监管测试与真实
-resource baseline 采集。它还在 scenario-harness 测试之后，单独运行被忽略的原生文件复制粘贴测试，
-不与 workspace 测试同时访问通用粘贴板。这个原生测试必须实际运行，不能跳过；本地运行的明确
+resource baseline 采集。它还在 workspace doctest 之后，单独运行被忽略的原生文件复制粘贴测试，
+不与 workspace 测试同时访问通用粘贴板。scenario harness 的单元测试及其 feature 与 harness API
+变体以及 glyph atlas 工作集测量，改在 Intel `macos-smoke` 腿中、紧接其
+perf scenario smoke 构建好 harness 之后运行：它们与架构无关，移走后最长的 `macos-core` 变短，
+且不占用第三个 macOS runner。这个原生测试必须实际运行，不能跳过；本地运行的明确
 许可方式见[本地 Gate](Local-Gate-zh-CN)。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版本、raw-exit、window-owner、
 工作流供应链、注释与脚本标识符检查，以及发布说明、Wiki 发布、资源清单、soak 和资源基线脚本测试。
 这些命令仍是各支持主机的本地 gate；既有 macOS 汇总要求 tooling 成功，因此没有检查变为可选。
 tooling job 还会安装 runner 镜像自带的 Cairo 与 Fontconfig，并针对它们运行 COLR 绘制测试（`colr-tests`）：
 该 Cairo 比其它 Linux job 所用 `ubuntu:22.04` 容器中的更新，因此改变 COLR 字形绘制方式的 Cairo 更新会让 CI 失败。
-工作集测量留在 macos-core，复用已编译 harness，避免增加 macOS 冷构建及与 perf 竞争 runner。logic coverage
+工作集测量在 `macos-smoke` 中运行，复用该腿已编译的 harness，不增加 macOS 冷构建，也不占用 perf 对比等待的 runner。logic coverage
 在独立的 `linux-coverage` job 中、`linux-core` 所用的 `ubuntu:22.04` 容器内运行，不占用性能对比等待的 macOS runner 池。
 容器让其测试使用与 workspace gate 相同的 Cairo、FreeType 与 Fontconfig，也就是其 baseline 测量时所用的库。runner 不会把镜像标识导出到容器中，因此该 job 以这个容器作为其镜像标识。它安装固定版本
 `cargo-llvm-cov` 发布的静态链接 x86_64 Linux 预编译二进制：由 `scripts/install-pinned-tool.sh` 安装，解包前先校验该 host 的 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
@@ -136,7 +139,9 @@ Windows cfg-on 测试在进程树监管下直接运行 Cargo 报告的精确 lib
 的 bin 目录写入 `SONICTERM_CAIRO_BIN_DIR` 和 PATH。Cairo 默认仍为静态链接，动态 triplet
 也保留 DLL 查找路径。
 
-`windows-glyph-oracle` 只运行一次原有的 ignored 工作集 gate。只有全部完整性、精确漂移和
+`windows-glyph-oracle` 只运行一次原有的 ignored 工作集 gate。只有 `perf_scenarios` example
+读取 oracle，而它不是默认测试目标（`test = false`），因此 `windows-tests-workspace` 既不构建它，
+也不等待 oracle；由三个 harness shard 使用 oracle。只有全部完整性、精确漂移和
 起始尺寸检查通过后，才发布 S9/S12 在 72/144 DPI 下的四组 helper tile。清单绑定全部受跟踪
 源码字节（含打包字体）、系统及用户字体字节和 GDI 注册表映射、runner 镜像、Rust/Cargo 版本、检出 SHA、run ID
 与生产者 attempt。消费者在测试前验证输出摘要及全部绑定。GitHub 可能给同一次 run 的 Windows job

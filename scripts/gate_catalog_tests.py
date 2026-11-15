@@ -94,8 +94,9 @@ class TableTests(unittest.TestCase):
             self.assertIn(step, gate_cli.select_steps(host))
 
     def test_perf_scenarios_unit_tests_run_on_every_host(self):
-        # workspace-crates runs `cargo test --workspace --lib --bins --tests`, which skips examples, so the
-        # scenario harness's unit tests need their own step on every host, right after the doctests.
+        # workspace-crates runs `cargo test --workspace --lib --bins --tests`, which builds no example, so the
+        # scenario harness's unit tests need their own step on every host: right after the doctests locally,
+        # and in macOS CI right after the Intel leg's perf smoke, which already built the harness.
         step = next((step for step in gate_catalog.STEPS if step.id == "perf-scenarios-tests"), None)
         self.assertIsNotNone(step, "no perf-scenarios-tests step")
         self.assertEqual(gate_harness.command_text(step), "cargo test --locked -p sonicterm-app --example perf_scenarios")
@@ -103,7 +104,7 @@ class TableTests(unittest.TestCase):
         self.assertEqual(step.evidence, "local")
         self.assertEqual(step.prerequisites, ("rust", "native"))
         self.assertEqual(step.timeout_s, 900)
-        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests-harness", "linux-core"))
+        self.assertEqual(step.ci_jobs, ("macos-smoke", "windows-tests-harness", "linux-core"))
         for host in gate_model.HOSTS:
             chosen = [selected.id for selected in gate_cli.select_steps(host)]
             self.assertEqual(chosen.index("perf-scenarios-tests"), chosen.index("doctests") + 1, host)
@@ -115,6 +116,9 @@ class TableTests(unittest.TestCase):
             if "cargo test --workspace --doc --no-fail-fast" in commands:
                 doctests = commands.index("cargo test --workspace --doc --no-fail-fast")
                 self.assertEqual(commands[doctests + 1], gate_harness.command_text(step), job)
+            elif "python3 scripts/perf-compare.py --smoke" in commands:
+                smoke = commands.index("python3 scripts/perf-compare.py --smoke")
+                self.assertEqual(commands[smoke + 1], gate_harness.command_text(step), job)
             else:
                 self.assertEqual(job, "windows-tests-harness")
                 cargo = [command for command in commands if command.startswith("cargo ")]

@@ -188,7 +188,8 @@ def windows_shard_problems(workflow: str) -> list[str]:
             continue
         block = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", workflow.split(f"\n  {shard}:\n", 1)[1], maxsplit=1)[0]
         head, _, body = block.partition("    steps:\n")
-        consumer = shard not in ("windows-tests-runtime", "windows-glyph-oracle")
+        # The harness shards read the oracle through the perf_scenarios example; no other shard runs it.
+        consumer = shard.startswith("windows-tests-harness")
         dependencies = "windows-native, windows-glyph-oracle" if consumer else "windows-native"
         if "    runs-on: windows-latest\n" not in head or f"    needs: [{dependencies}]\n" not in head:
             problems.append(f"{shard} must run on windows-latest after windows-native")

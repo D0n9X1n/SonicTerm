@@ -103,6 +103,32 @@ pub struct CommandSpan {
     pub output_truncated: bool,
 }
 
+/// Where a finished command's input and output sit, for listing recent commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandRegion {
+    /// The region's identity.
+    pub seq: u64,
+    /// Absolute row and column where the typed command begins (B); `None` without a B or once its
+    /// row left history.
+    pub input_start: Option<(u64, u16)>,
+    /// Absolute row where the command's output begins (C); `None` once it left history.
+    pub output_start_row: Option<u64>,
+    /// The column on `output_start_row` where C arrived.
+    pub output_start_col: u16,
+    /// When C was parsed.
+    pub output_start_at: Option<Instant>,
+    /// Absolute row where the latest D arrived; `None` once it left history.
+    pub end_row: Option<u64>,
+    /// The column on `end_row` where the latest D arrived.
+    pub end_col: u16,
+    /// When the latest D was parsed.
+    pub end_at: Option<Instant>,
+    /// The exit code the latest D reported.
+    pub exit_code: Option<i32>,
+    /// The latest D carried the pane's shell token.
+    pub end_authenticated: bool,
+}
+
 impl Grid {
     /// Record an OSC 133 `A` (prompt-start) marker at the cursor row.
     /// Coalesces consecutive markers on the same row so a shell that emits
@@ -126,6 +152,11 @@ impl Grid {
                 run.evicted = true;
             }
         }
+        // A prompt after D says the shell took control back, so the previous command is finished;
+        // a later D lands on the new region and never reopens it.
+        if let Some(previous) = self.prompts.back_mut().filter(|previous| previous.completed) {
+            previous.settled = true;
+        }
         if self.prompts.len() >= PROMPT_REGION_LIMIT {
             self.prompts.pop_front();
         }
@@ -137,12 +168,16 @@ impl Grid {
             input_start: None,
             input_start_at: None,
             output_start_row: None,
+            output_start_col: 0,
             output_start_at: None,
             output_seen: false,
             end_row: None,
             end_col: 0,
             completed: false,
             exit_code: None,
+            end_at: None,
+            end_authenticated: false,
+            settled: false,
         });
     }
 
@@ -166,6 +201,14 @@ impl Grid {
     /// shell token; the pinned run keeps that for its own C.
     pub fn record_output_start_marked(&mut self, authenticated: bool) {
         let row = self.cursor_absolute_row();
+        // A pending wrap leaves the cursor on the last column, whose character is already typed,
+        // so C then sits past the full row rather than on that character.
+        let col = if self.pending_wrap {
+            self.cols
+        } else {
+            // When: no wrap is `pending_wrap`, C sits on the cursor's own column.
+            self.cursor.col.min(self.cols.saturating_sub(1))
+        };
         let token = self.row_token(row);
         let Some(last) = self.prompts.back_mut().filter(|last| !last.output_seen) else {
             // When: `back_mut` finds no region, or its `output_seen` is set, the first C stands.
@@ -174,6 +217,7 @@ impl Grid {
         let now = Instant::now();
         last.output_seen = true;
         last.output_start_row = Some(row);
+        last.output_start_col = col;
         last.output_start_at = Some(now);
         let seq = last.seq;
         let is_alt = self.is_alt();
@@ -218,6 +262,8 @@ impl Grid {
         last.end_col = col;
         last.completed = true;
         last.exit_code = exit_code;
+        last.end_at = Some(Instant::now());
+        last.end_authenticated = authenticated;
         let seq = last.seq;
         let is_alt = self.is_alt();
         if let Some(run) =
@@ -255,19 +301,39 @@ impl Grid {
 
     /// The newest primary-screen region that has both C and D, as a command output span.
     pub fn last_completed_command(&self) -> Option<CommandSpan> {
-        let region = self
-            .primary_prompts()
+        self.primary_prompts().iter().rev().find(|region| ran_command(region)).map(command_span)
+    }
+
+    /// The primary-screen region `seq` as a command output span, when it has both C and D; `None`
+    /// once the region was evicted or before its command finished.
+    pub fn completed_command(&self, seq: u64) -> Option<CommandSpan> {
+        self.primary_prompts()
+            .iter()
+            .find(|region| region.seq == seq && ran_command(region))
+            .map(command_span)
+    }
+
+    /// The primary screen's settled commands, newest first, at most `limit` of them. Only a
+    /// settled region is listed, so a D printed by a still-running program never lists it.
+    pub fn command_regions(&self, limit: usize) -> Vec<CommandRegion> {
+        self.primary_prompts()
             .iter()
             .rev()
-            .find(|region| region.output_seen && region.completed)?;
-        Some(CommandSpan {
-            seq: region.seq,
-            output_start_row: region.output_start_row,
-            end_row: region.end_row,
-            end_col: region.end_col,
-            exit_code: region.exit_code,
-            output_truncated: region.output_start_row.is_none(),
-        })
+            .filter(|region| region.settled && ran_command(region))
+            .take(limit)
+            .map(|region| CommandRegion {
+                seq: region.seq,
+                input_start: region.input_start,
+                output_start_row: region.output_start_row,
+                output_start_col: region.output_start_col,
+                output_start_at: region.output_start_at,
+                end_row: region.end_row,
+                end_col: region.end_col,
+                end_at: region.end_at,
+                exit_code: region.exit_code,
+                end_authenticated: region.end_authenticated,
+            })
+            .collect()
     }
 
     /// The newest region on the active screen, the one a command typed now would run in.
@@ -387,6 +453,23 @@ impl Grid {
     }
 }
 
+/// Whether `region` ran a command: C and D were both seen.
+fn ran_command(region: &PromptRegion) -> bool {
+    region.output_seen && region.completed
+}
+
+/// `region`'s output span, from C up to where the latest D arrived.
+fn command_span(region: &PromptRegion) -> CommandSpan {
+    CommandSpan {
+        seq: region.seq,
+        output_start_row: region.output_start_row,
+        end_row: region.end_row,
+        end_col: region.end_col,
+        exit_code: region.exit_code,
+        output_truncated: region.output_start_row.is_none(),
+    }
+}
+
 #[cfg(test)]
 #[path = "grid_prompts_tests.rs"]
 mod grid_prompts_tests;
@@ -394,3 +477,7 @@ mod grid_prompts_tests;
 #[cfg(test)]
 #[path = "grid_prompts_trust_tests.rs"]
 mod grid_prompts_trust_tests;
+
+#[cfg(test)]
+#[path = "grid_prompts_history_tests.rs"]
+mod grid_prompts_history_tests;

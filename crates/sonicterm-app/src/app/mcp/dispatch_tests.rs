@@ -91,21 +91,19 @@ fn a_requeue_goes_ahead_and_wakes_only_from_about_to_wait() {
     assert!(!wake_pending(&shared), "an empty inbox owes no wake-up");
 }
 
-/// A notice frees its slot once it is handled, and a notice that is re-queued untaken keeps it, so
-/// the pending count returns to zero exactly once.
+/// A notice frees its slot when the drain drops it handled, and a notice that is re-queued untaken
+/// keeps it, so the pending count returns to zero exactly once.
 #[test]
 fn a_notice_frees_its_slot_once() {
     let shared = McpShared::new(McpControl::Agent, None);
     shared.notify("one".into());
     shared.notify("two".into());
     let notices = shared.take_requests();
-    let rest = drain_within(notices, DRAIN_BUDGET, stepping(Duration::from_millis(5)), |done| {
-        notice_handled(&shared, &done);
-    });
+    let rest = drain_within(notices, DRAIN_BUDGET, stepping(Duration::from_millis(5)), drop);
     assert_eq!(shared.pending_notices.load(Ordering::Acquire), 1, "one handled, one re-queued");
     shared.requeue_front(rest);
     for done in shared.take_requests() {
-        notice_handled(&shared, &done);
+        drop(done);
     }
     assert_eq!(shared.pending_notices.load(Ordering::Acquire), 0);
 }

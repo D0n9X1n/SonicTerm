@@ -17,8 +17,8 @@ fn scope(shared: &McpShared) -> CallScope {
     CallScope::admit(shared, &Arc::new(AtomicBool::new(false)))
 }
 
-/// Every control tool is listed; creating, reading the token and claiming are not destructive,
-/// the others are.
+/// Every control tool is listed; creating, reading the token, claiming and the surfacing tools
+/// (focus, title, message) are not destructive, the others are.
 #[test]
 fn the_tool_list_marks_destructive_tools() {
     let tools = control_tools();
@@ -26,7 +26,8 @@ fn the_tool_list_marks_destructive_tools() {
         let tool = tools.iter().find(|tool| tool["name"] == name).expect(name);
         tool["annotations"]["destructiveHint"].as_bool()
     };
-    for name in ["create_pane", "session_token", "claim_panes"] {
+    for name in ["create_pane", "session_token", "claim_panes", "focus_pane", "set_title", "notify"]
+    {
         assert_eq!(hint(name), Some(false), "{name}");
     }
     for name in ["send_text", "send_keys", "run_command", "close_pane"] {
@@ -87,6 +88,12 @@ fn bad_arguments_never_reach_the_loop() {
         ("create_pane", json!({ "anchor_pane_id": "1", "placement": "tab", "argv": [1, 2] })),
         ("run_command", json!({ "pane_id": "1" })),
         ("close_pane", json!({})),
+        ("focus_pane", json!({})),
+        ("set_title", json!({ "pane_id": "1" })),
+        ("set_title", json!({ "title": "x" })),
+        ("notify", json!({ "pane_id": "1" })),
+        // A message that is empty once control and format characters are removed says nothing.
+        ("notify", json!({ "pane_id": "1", "text": "\u{200B}\u{1b}" })),
     ];
     for (name, arguments) in cases {
         let result = call(&shared, name, &arguments, &call_scope).expect(name);

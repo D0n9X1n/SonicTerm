@@ -344,13 +344,16 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     // The event-loop proxy a default-handler completion posts its result through.
     ("app/default_handlers.rs", "proxy", 1),
     // The control server's request inbox, wake-up proxy, per-connection caller and reply writer.
-    ("app/mcp.rs", "caller", 5),
-    ("app/mcp.rs", "inbox", 3),
+    ("app/mcp.rs", "caller", 4),
+    ("app/mcp.rs", "inbox", 2),
     ("app/mcp.rs", "proxy", 1),
     ("app/mcp.rs", "writer", 1),
     // The MCP server's list of sleeping waits' pane signals: weak pointers, never a parser.
     ("app/mcp.rs", "waiters", 4),
-    ("app/mcp/agents.rs", "live", 3),
+    // The live agent sessions' records: names, counters and close flags, never a parser.
+    ("app/mcp/agents.rs", "live", 11),
+    // The MCP inbox, where a connect notice or a departure is queued for the loop.
+    ("app/mcp/agent_notices.rs", "inbox", 1),
     // The resume-token registry: session records, never a parser.
     ("app/mcp/claims.rs", "records", 7),
     // The MCP inbox, put back in order after a budgeted drain and checked for a backlog to wake.

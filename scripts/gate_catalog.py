@@ -20,9 +20,11 @@ _WINDOWS_HARNESS_FEATURES = "windows-tests-harness-features"
 _WINDOWS_HARNESS_API = "windows-tests-harness-api"
 _WINDOWS_RUNTIME = "windows-tests-runtime"
 _WORKSPACE_TESTS = ("macos-core", _WINDOWS_WORKSPACE, "linux-core")
-_HARNESS_TESTS = ("macos-core", _WINDOWS_HARNESS, "linux-core")
-_HARNESS_FEATURE_TESTS = ("macos-core", _WINDOWS_HARNESS_FEATURES, "linux-core")
-_HARNESS_API_TESTS = ("macos-core", _WINDOWS_HARNESS_API, "linux-core")
+# The scenario harness checks are architecture independent, so on macOS the Intel smoke leg runs them beside
+# its own harness build; macos-core holds the critical path and a third macOS job would hold a perf runner slot.
+_HARNESS_TESTS = ("macos-smoke", _WINDOWS_HARNESS, "linux-core")
+_HARNESS_FEATURE_TESTS = ("macos-smoke", _WINDOWS_HARNESS_FEATURES, "linux-core")
+_HARNESS_API_TESTS = ("macos-smoke", _WINDOWS_HARNESS_API, "linux-core")
 
 # Local timeouts are explicit command budgets independent of CI timeout policy.
 # They allow cold-cache runtime; commands grouped in CI retain their local
@@ -121,7 +123,7 @@ STEPS = (
     # After workspace-crates, so the libraries the doctests link are already built.
     gate_model.Step("doctests", ("cargo", "test", "--workspace", "--doc", "--no-fail-fast"), gate_model.HOSTS, 900,
          "local", ("rust", "native"), _WORKSPACE_TESTS),
-    # workspace-crates' `--lib --bins --tests` skips examples, so the scenario harness's unit tests run here.
+    # workspace-crates' `--lib --bins --test '*'` builds no example, so the scenario harness's unit tests run here.
     gate_model.Step("perf-scenarios-tests", ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
          gate_model.HOSTS, 900, "local", ("rust", "native"), _HARNESS_TESTS,
          windows_preparations=(gate_model.Preparation(),)),
@@ -136,7 +138,7 @@ STEPS = (
     gate_model.Step("glyph-atlas-working-set",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "glyph_atlas_working_set", "--", "--ignored", "--nocapture"),
-         ("macos", "windows"), 900, "local", ("rust", "native"), ("macos-core", "windows-glyph-oracle")),
+         ("macos", "windows"), 900, "local", ("rust", "native"), ("macos-smoke", "windows-glyph-oracle")),
     # The same unit tests with the frame-texture reading compiled in, wherever the plain ones run.
     gate_model.Step("perf-scenarios-frame-texture-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",

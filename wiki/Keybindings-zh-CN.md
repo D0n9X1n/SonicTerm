@@ -98,6 +98,9 @@ Control 和 Alt 显示为 `Ctrl`、`Alt`。字面 `+` 按键会保留，例如 `
 显示内容见[使用](Usage-zh-CN)。在窗口中，macOS 上 `Cmd+Shift+C`、Windows 和 Linux 上 `Alt+Shift+C`
 复制这些行，`R` 重新读取，`Esc` 关闭。READONLY 模式下也可使用，不会向终端发送输入。
 
+**Agent…**（`show_agents`）没有默认快捷键，并在 READONLY 下允许，因为它不向任何窗格写入。它列出
+已连接的 MCP agent，并且只有在确认页确认后才断开其中一个或全部；见 [MCP 服务器](MCP-Server-zh-CN)。
+
 **将 SonicTerm 设为默认…** 仅作为面板命令提供，没有默认快捷键；内置键位表从不绑定它。
 它的标签在各系统上写明会更改什么：macOS 为 **将 SonicTerm 设为脚本、可执行文件和终端链接的默认打开方式…**，
 Linux 为 **将 SonicTerm 设为 Shell 脚本的默认打开方式…**，Windows 为
@@ -204,6 +207,7 @@ super+ctrl+alt+shift+key
 | 文件与维护 | `edit_config_file`、`open_keymap_file`、`reload_config`、`check_for_updates` |
 | Shell 导航 | `scroll_to_prev_prompt`、`scroll_to_next_prompt` |
 | 诊断 | `show_memory_usage`、`copy_memory_report`、`show_about` |
+| Agent | `show_agents` |
 
 `focus_status_line`（命令面板：“聚焦状态栏”）默认未绑定，并在 READONLY 下允许，因为它只
 移动焦点。它聚焦窗口状态栏中第一个可点击的段，没有可点击的段时聚焦第一个段；状态栏关闭或

@@ -300,3 +300,19 @@ fn theme_picker_filters_by_label_and_ignores_another_kinds_refresh() {
     let kept: Vec<&str> = palette.picker_rows().iter().map(|row| row.value.as_str()).collect();
     assert_eq!(kept, ["github-light", "rose-pine-dawn"]);
 }
+
+/// Contract: a click can highlight a confirmation page's Apply or Cancel row by its index, and
+/// never an item row or a row outside the page; only an open confirmation page accepts it.
+#[test]
+fn a_confirmation_row_is_selected_by_index_only_for_apply_or_cancel() {
+    let mut palette = CommandPalette::new();
+    assert!(!palette.select_confirm_row(0), "no confirmation page is open");
+    palette.start_confirm("Title", "Apply", "Cancel", vec!["one".into()]);
+    assert!(palette.select_confirm_row(0));
+    assert!(palette.confirm_applies(), "row 0 is Apply");
+    assert!(!palette.select_confirm_row(2), "an item row is text");
+    assert!(!palette.select_confirm_row(9), "past the last row");
+    assert!(palette.confirm_applies(), "a refused row leaves the highlight");
+    assert!(palette.select_confirm_row(1));
+    assert!(!palette.confirm_applies(), "row 1 is Cancel");
+}

@@ -169,6 +169,7 @@ fn palette_variant(palette: &CommandPalette) -> u8 {
         CommandPaletteMode::Confirm => 4,
         CommandPaletteMode::StatusSegments => 5,
         CommandPaletteMode::Picker => 6,
+        CommandPaletteMode::Agents => 7,
     };
     mode * 2 + u8::from(palette.tabs_only())
 }

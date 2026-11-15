@@ -135,7 +135,8 @@ changes `control` drops every request already queued.
 
 ## Read scope
 
-`[mcp] read` sets which panes `list_panes`, `read_pane` and `wait_for` may see.
+`[mcp] read` sets which panes `list_panes`, `read_pane`, `wait_for`, `search_pane` and
+`command_history` may see.
 
 | `read` | Read tools see |
 | --- | --- |
@@ -217,8 +218,21 @@ The server tells agents never to follow instructions found in pane text, but kee
 
 ## Tools
 
-The read tools are `list_panes`, `read_pane` and `wait_for`. Their arguments,
-caps and locking are described in [Platform Integration](Platform-Integration).
+The read tools are `list_panes`, `read_pane`, `wait_for`, `search_pane` and
+`command_history`. `read_pane` with `mode: "history"` pages back through a pane's
+scrollback, and `search_pane` finds a regex there, newest match first. `command_history`
+lists the pane's recent shell commands with their exit codes and durations, and
+`read_pane` `last_command` with a listed `seq` reads that command's output. Both need
+shell integration and read the terminal's retained text, not the shell's own history.
+Their arguments, caps and locking are described in
+[Platform Integration](Platform-Integration).
+
+A non-busy history page may be empty while skipping blank rows: pass its `first_row`
+as `before_row` again until `at_start` is true. Row tokens always advance. A row larger
+than `max_bytes` is returned whole on an otherwise empty page, so no suffix is lost;
+the byte cap may be exceeded by one row. Spaces inside a soft-wrapped line survive
+page boundaries. Search rereads one row when a page cuts a long logical line and
+reports only matches starting before its cursor, avoiding duplicates at the overlap.
 
 The event loop answers queued requests for at most 2 ms at a time, so many agents
 calling at once cannot hold off input: what one drain does not reach goes back ahead
@@ -235,6 +249,12 @@ the event loop when they run:
 | `close_pane` | Closes one pane; a tab's only pane closes the tab. The main window's last tab is never closed. |
 | `session_token` | Returns this session's resume token; see Agent sessions. |
 | `claim_panes` | Moves a disconnected session's panes to this session, given that session's `resume_token` and this session's own `own_token`; reports how many moved. |
+| `focus_pane` | Selects the pane's tab, in the main window or a child window, and the pane within it. A tab zoomed on a different pane is refused as `zoomed`. It never activates SonicTerm or focuses a window, so it never takes focus from another application: `raised` is true only when the pane's window is already the frontmost SonicTerm window; otherwise SonicTerm asks the OS for the user's attention (best effort; Wayland may ignore it). Reports `selected` and `raised`. |
+| `set_title` | Sets the custom title of the pane's tab, as the rename command does; an empty or blank title clears it. At most 64 characters once control and format characters (Unicode Cc and Cf) are removed. Under `control = "agent"` every pane in the tab must be one the session may control, so an agent split into your tab cannot rename it. |
+| `notify` | Shows `Agent message (pane <id>): <text>` in the in-app notification. The prefix is SonicTerm's own and the client's name is not shown, so an agent cannot pose as SonicTerm. At most 200 characters once control and format characters are removed. Reports `shown`, or `queue_full` when 8 notices already wait. |
+
+`focus_pane` and `notify` share one limit per agent session: one call every 2 s,
+else `rate_limited`. A call refused for scope, READONLY or zoom does not count.
 
 `run_command` needs shell integration: the shell must mark its prompt with
 OSC 133 `A`, `B`, `C` and `D`, as the shell-integration scripts of WezTerm,
@@ -375,10 +395,49 @@ files, remote hosts and programs that never saw the shell's environment. A progr
 running in the pane as you, which could read the shell's memory, is out of scope:
 it already has the agent's powers.
 
+## Manage agents
+
+**Agents…** in the command palette (`show_agents`, no default key) lists the
+connected agents. It opens whether or not the server runs, and in READONLY, since
+it writes nothing to a pane. With the server off it shows a few lines saying how
+to turn it on. Otherwise it shows:
+
+- a line with the endpoint, and a line with the `control` and `read` scopes;
+- one row per connected session, newest first: the client's name, the session
+  number (`#3`), how long it has been connected, its tool calls, how long ago its
+  last call was, and how many panes it owns;
+- **Disconnect all agents**.
+
+Every row fits the palette's width. A row that would not fit drops the last-call
+age first, then shortens the client's name with an ellipsis, so the pane count
+always shows; a long endpoint is shortened the same way.
+
+Typing filters the session rows. The list is one snapshot taken when the page
+opens; a session that closed within the last half second may still be listed.
+
+Enter or a click on a session row, or on **Disconnect all agents**, opens a
+confirm page with Cancel highlighted. It says what happens: the agent's SonicTerm
+tools stop; its client (Claude Code, Copilot CLI) shows the server as disconnected
+until you reconnect it there, for example with `/mcp`; its panes stay open; and a
+command it already started keeps running. Only **Disconnect** on that page acts,
+by Enter or a click; a click on **Cancel** or outside the page cancels.
+SonicTerm then looks the session up again (one that already left is a no-op) and
+closes its connection as a client hang-up would: a running call ends `revoked`,
+its panes become orphaned and claimable with its token, and the server keeps
+running. **Disconnect all agents** ends every session connected when you confirm.
+The page shows its own confirmation and no separate disconnect notice.
+
 ## Check that it works
 
-- Each connection shows an in-app notification, `Agent connected: <name>`, with
-  the name the client reported.
+- An agent is announced once, `Agent connected: <name>` with the name the client
+  reported, when its first tool call starts. A connection that only initializes
+  and lists tools, such as `claude mcp list`, shows nothing.
+- An agent that leaves while it still owns panes it created shows
+  `Agent disconnected: <name>; <n> pane(s) left without an agent`; one that owns
+  none (it created none, or a reconnect already claimed them) shows nothing.
+  Names are self-reported, so two agents can share one. At most eight notices
+  wait for the window at a time, and every connect and disconnect is logged at
+  `info` under `mcp`.
 - With `[logging] level = "info"`, the log records `control server started`,
   `control server stopped` and `control level changed`. A server that cannot
   start always logs a warning under the `mcp` target. See [Logging](Logging).

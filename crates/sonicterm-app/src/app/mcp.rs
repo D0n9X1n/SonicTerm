@@ -22,12 +22,16 @@ use winit::event_loop::EventLoopProxy;
 
 use super::UserEvent;
 
+#[path = "mcp/agent_notices.rs"]
+mod agent_notices;
 #[path = "mcp/agents.rs"]
 pub(crate) mod agents;
 #[path = "mcp/claims.rs"]
 pub(crate) mod claims;
 #[path = "mcp/control_loop.rs"]
 pub(crate) mod control_loop;
+#[path = "mcp/control_loop_ui.rs"]
+pub(crate) mod control_loop_ui;
 #[path = "mcp/dispatch.rs"]
 pub(crate) mod dispatch;
 #[cfg(unix)]
@@ -42,6 +46,8 @@ pub(crate) mod jsonrpc;
 pub(crate) mod keys;
 #[path = "mcp/lifecycle.rs"]
 mod lifecycle;
+#[path = "mcp/loop_call.rs"]
+mod loop_call;
 #[path = "mcp/read.rs"]
 pub(crate) mod read;
 #[path = "mcp/run.rs"]
@@ -52,12 +58,15 @@ pub(crate) mod scan;
 pub(crate) mod stream_scan;
 #[path = "mcp/stream_wait.rs"]
 pub(crate) mod stream_wait;
+#[path = "mcp/tool_schemas.rs"]
+pub(crate) mod tool_schemas;
 #[path = "mcp/tools_control.rs"]
 pub(crate) mod tools_control;
 #[path = "mcp/tools_read.rs"]
 pub(crate) mod tools_read;
 
 pub(crate) use lifecycle::McpServer;
+pub(crate) use loop_call::{LoopCall, LoopReply};
 
 /// The default limit on connections served at once (`[mcp] max_connections`).
 pub(crate) const MAX_CONNECTIONS: usize = sonicterm_cfg::config::DEFAULT_MCP_CONNECTIONS as usize;
@@ -78,66 +87,6 @@ pub(crate) struct Transport {
     pub(crate) reader: Box<dyn Read + Send>,
     /// Bytes to the client; its write timeout is already [`WRITE_DEADLINE`].
     pub(crate) writer: Box<dyn Write + Send>,
-}
-
-/// Work only the event loop may do, with the reply it owes.
-pub(crate) enum LoopCall {
-    /// Every pane in every window, with the handles a read needs.
-    ListPanes,
-    /// One pane's read handles, if it exists.
-    ResolvePane {
-        /// The pane to resolve.
-        pane_id: u64,
-    },
-    /// Show `text` in the existing in-app notification; nobody waits for the reply.
-    Notice {
-        /// The sanitized, bounded message.
-        text: String,
-    },
-    /// Open a helper pane beside `anchor`.
-    CreatePane {
-        /// The pane the helper opens beside.
-        anchor: u64,
-        /// A split or a new tab.
-        placement: crate::app::pane_target::Placement,
-        /// What the helper runs.
-        launch: crate::app::pane_target::AgentLaunch,
-    },
-    /// Type `text` into a pane, then Enter when `submit` is set.
-    SendText {
-        /// The target pane.
-        pane_id: u64,
-        /// The text, at most 64 KiB.
-        text: String,
-        /// Whether to add `\r`.
-        submit: bool,
-    },
-    /// Send parsed keys to a pane.
-    SendKeys {
-        /// The target pane.
-        pane_id: u64,
-        /// The keys, already parsed.
-        keys: Vec<keys::KeySpec>,
-    },
-    /// Start a command at a pane's shell prompt.
-    RunStart {
-        /// The target pane.
-        pane_id: u64,
-        /// The command line, without control characters.
-        command: String,
-    },
-    /// Close one pane.
-    ClosePane {
-        /// The pane to close.
-        pane_id: u64,
-    },
-    /// Move a closed session's panes to the caller.
-    ClaimPanes {
-        /// The closed session's token.
-        resume: claims::ResumeToken,
-        /// The caller's own token, proving it received it.
-        own: claims::ResumeToken,
-    },
 }
 
 /// Where a pane sits in the UI, which only `list_panes` reports. Computing it orders every
@@ -176,27 +125,6 @@ pub(crate) struct PaneEntry {
     pub(crate) run_typed_at: Arc<AtomicU64>,
     /// Set while an agent run owns the pane.
     pub(crate) agent_run: Arc<AtomicBool>,
-}
-
-/// What the loop answered.
-pub(crate) enum LoopReply {
-    /// The panes [`LoopCall::ListPanes`] found.
-    Panes(Vec<PaneEntry>),
-    /// The pane [`LoopCall::ResolvePane`] found.
-    Pane(PaneEntry),
-    /// The request was refused, with a stable code and a message.
-    Refused(&'static str, String),
-    /// [`LoopCall::CreatePane`] opened this pane.
-    Created(crate::app::pane_target::CreatedPane),
-    /// A write queued this many bytes; `receipt` is its delivery ticket and the pane's probe, or
-    /// `None` for a pane without a PTY.
-    Written(usize, Option<(u64, sonicterm_io::pty::PtyDeliveryProbe)>),
-    /// [`LoopCall::RunStart`] started a run.
-    RunStarted(Box<run::RunStarted>),
-    /// [`LoopCall::ClosePane`] closed the pane.
-    Closed,
-    /// [`LoopCall::ClaimPanes`] moved this many panes.
-    Claimed(usize),
 }
 
 /// A request waiting in the inbox.
@@ -240,8 +168,9 @@ pub(crate) struct McpShared {
     /// The most connections served at once; a further one is refused. A change applies to new
     /// connections only.
     pub(crate) connection_limit: AtomicU64,
-    /// Connection notices queued and not yet shown, at most [`MAX_PENDING_NOTICES`].
-    pending_notices: AtomicU64,
+    /// Notices queued and not yet shown, at most [`MAX_PENDING_NOTICES`]: connect notices,
+    /// departures and agent messages, each holding one [`control_loop_ui::NoticeSlot`] of it.
+    pending_notices: Arc<AtomicU64>,
     /// Bytes every connection holds right now: partial request lines and replies being written.
     /// The loop charges this figure to the governor's `Mcp` owner.
     pub(crate) buffered_bytes: AtomicU64,
@@ -292,7 +221,7 @@ impl McpShared {
             proxy: Mutex::new(proxy),
             connections: AtomicU64::new(0),
             connection_limit: AtomicU64::new(MAX_CONNECTIONS as u64),
-            pending_notices: AtomicU64::new(0),
+            pending_notices: Arc::new(AtomicU64::new(0)),
             buffered_bytes: AtomicU64::new(0),
             waiters: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -463,37 +392,19 @@ impl McpShared {
     }
 
     /// Show `text` in the in-app notification without waiting: the request is queued and the
-    /// loop shows it when it next drains. A stopped server shows nothing.
-    // Ordering: generation Acquire reads the value the loop compares; pending_notices AcqRel makes
-    // the increment the single admission point for a notice.
-    pub(crate) fn notify(&self, text: String) {
+    /// loop shows it when it next drains. A stopped server shows nothing. `true` when the notice
+    /// was admitted to the queue; its slot frees when the request is dropped, shown or not.
+    pub(crate) fn notify(&self, text: String) -> bool {
         if self.is_stopped() {
             // When: the server `is_stopped`, its connections end without a notice.
-            return;
+            return false;
         }
-        if self.pending_notices.fetch_add(1, Ordering::AcqRel) >= MAX_PENDING_NOTICES {
-            // When: `MAX_PENDING_NOTICES` are already waiting, connection churn cannot grow the inbox.
-            self.pending_notices.fetch_sub(1, Ordering::AcqRel);
-            return;
-        }
-        // The reply channel is dropped at once; the loop's `try_send` to it is ignored.
-        let (reply, _answer) = sync_channel(1);
-        self.inbox.lock().push(LoopRequest {
-            call: LoopCall::Notice { text },
-            generation: self.generation.load(Ordering::Acquire),
-            deadline: Instant::now() + LOOP_DEADLINE,
-            closed: Arc::new(AtomicBool::new(false)),
-            // A notice reads no pane, so the session it carries is never checked.
-            session: agents::AgentSessionId::next(),
-            reply,
-        });
-        let _ = self.wake();
-    }
-
-    /// Mark one queued notice as shown.
-    // Ordering: pending_notices AcqRel pairs with the admitting increment in `notify`.
-    pub(crate) fn notice_shown(&self) {
-        self.pending_notices.fetch_sub(1, Ordering::AcqRel);
+        let Some(slot) = self.admit_notice() else {
+            // When: `admit_notice` found the queue full, connection churn cannot grow the inbox.
+            return false;
+        };
+        self.queue_notice(LoopCall::Notice { text, _slot: slot });
+        true
     }
 
     /// Take every queued request; the loop calls this when woken. The wake flag stays set, so a
@@ -601,7 +512,7 @@ pub(crate) struct Caller {
     pub(crate) self_pane: Option<u64>,
     /// The name `initialize` reported, for display and logs only.
     pub(crate) client: Option<String>,
-    /// Whether `initialize` already ran; only the first one is announced.
+    /// Whether `initialize` already ran; only the first one names the client.
     pub(crate) initialized: bool,
 }
 
@@ -612,8 +523,11 @@ fn agent_scope_code(isolation: McpIsolation, anchor: McpCreateAnchor) -> u8 {
 
 /// Serve one connection until it closes or the server stops: a reader thread parses lines and
 /// answers what needs no app state, and a worker thread runs tool calls one at a time. Returns the
-/// name the client gave in `initialize`, if it did.
-pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> Option<String> {
+/// connection's session and its departure record, or `None` when the connection never started.
+pub(crate) fn serve_connection(
+    shared: Arc<McpShared>,
+    transport: Transport,
+) -> Option<(agents::AgentSessionId, Option<agents::Departure>)> {
     let closed = Arc::new(AtomicBool::new(false));
     let writer = Arc::new(Mutex::new(transport.writer));
     let caller = Arc::new(Mutex::new(Caller::default()));
@@ -637,13 +551,12 @@ pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> 
     }
     // The session starts before the first call is admitted and ends with the connection, so a
     // pane it created reads as orphaned from the moment the client is gone.
-    let session = shared.sessions.open_connection(Some(Arc::clone(&in_flight)));
+    let session =
+        shared.sessions.open_connection(Some(Arc::clone(&in_flight)), Arc::clone(&closed));
     let calls = CallSlot { queue: calls, in_flight, closed: Arc::clone(&closed), session };
     read_loop(&shared, transport.reader, &writer, &caller, &calls, &closed);
     close_connection(&shared, &closed);
-    shared.sessions.close(session);
-    let client = caller.lock().client.clone();
-    client
+    Some((session, shared.sessions.close(session)))
 }
 
 /// The worker: run admitted tool calls one at a time and write each reply.
@@ -859,17 +772,18 @@ fn answer_request(
         "initialize" => {
             let first = !std::mem::replace(&mut caller.lock().initialized, true);
             if first {
-                // Only a connection's first `initialize` names the client and is announced.
+                // Only the first `initialize` names the client; it is logged here and announced on
+                // the first admitted tool call, so a probe that only lists tools shows nothing.
                 let client = jsonrpc::client_name(&params);
                 let name = client.as_deref().unwrap_or("unknown");
                 tracing::info!(target: "mcp", client = name, "agent connected");
-                shared.notify(format!("Agent connected: {name}"));
+                shared.sessions.set_client(calls.session, client.clone());
                 caller.lock().client = client;
             }
             jsonrpc::response(id, jsonrpc::initialize_result(&params))
         }
         "ping" => jsonrpc::response(id, serde_json::json!({})),
-        "tools/list" => jsonrpc::response(id, tools_read::tool_list()),
+        "tools/list" => jsonrpc::response(id, tool_schemas::tool_list()),
         "tools/call" if !params.get("name").is_some_and(Value::is_string) => {
             jsonrpc::error_response(id, jsonrpc::INVALID_PARAMS, "tools/call needs a tool name")
         }
@@ -882,6 +796,7 @@ fn answer_request(
             // When: this `method` claimed the call slot, the worker replies; a failed send means it is
             // gone and the connection is ending.
             let call = AdmittedCall::admit_on(shared, calls, (id.clone(), params), wire_bytes);
+            shared.announce_first_call(calls.session);
             let _ = calls.queue.try_send(call);
             return None;
         }
@@ -947,13 +862,13 @@ pub(crate) fn spawn_connection(shared: &Arc<McpShared>, transport: Transport) {
 /// A connection thread's body: serve, then release the slot.
 // Ordering: connections AcqRel pairs with the admitting fetch_add in `spawn_connection`.
 fn serve_and_release(shared: Arc<McpShared>, transport: Transport) {
-    let client = serve_connection(Arc::clone(&shared), transport);
-    shared.connections.fetch_sub(1, Ordering::AcqRel);
-    tracing::info!(target: "mcp", "agent disconnected");
-    // Only a connection that introduced itself was announced, so only it is announced leaving.
-    if let Some(name) = client {
-        shared.notify(format!("Agent disconnected: {name}"));
+    let served = serve_connection(Arc::clone(&shared), transport);
+    // The departure is queued before the slot is released, so a caller that waits for the
+    // connection count to drop finds it already in the inbox.
+    if let Some((session, departure)) = served {
+        shared.report_departure(session, departure);
     }
+    shared.connections.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// What keeps a bound endpoint's file in place; dropping it removes the file. A named pipe has

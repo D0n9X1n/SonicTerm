@@ -206,29 +206,6 @@ jobs:
       - name: Run workspace documentation tests
         run: cargo test --workspace --doc --no-fail-fast
 
-      - name: Run scenario harness unit tests
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios
-
-      - name: Run scenario harness unit tests with frame counters
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
-
-      - name: Measure the glyph atlas working set
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture
-
-      - name: Run scenario harness unit tests with the frame texture reading
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
-
-      - name: Run scenario harness unit tests with the echo trace
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
-
-      - name: Run scenario harness unit tests with the harness API cfgs
-        shell: bash
-        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
-
-      - name: Run scenario harness unit tests with the harness API cfgs and the echo trace
-        shell: bash
-        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
-
       - name: Verify native copied-file paste on macOS
         run: cargo test --locked -p sonicterm-app --lib app::misc::clipboard::misc_clipboard_native_macos_tests::native_pasteboard_paste_action_reaches_real_pty -- --exact --ignored --nocapture
 
@@ -452,6 +429,29 @@ jobs:
 
       - name: Require macOS perf scenario smoke
         run: python3 scripts/perf-compare.py --smoke
+
+      - name: Run scenario harness unit tests
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios
+
+      - name: Run scenario harness unit tests with frame counters
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+
+      - name: Measure the glyph atlas working set
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture
+
+      - name: Run scenario harness unit tests with the frame texture reading
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
+
+      - name: Run scenario harness unit tests with the echo trace
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
+
+      - name: Run scenario harness unit tests with the harness API cfgs
+        shell: bash
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+
+      - name: Run scenario harness unit tests with the harness API cfgs and the echo trace
+        shell: bash
+        run: python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
 
       - name: Build macOS release binary for runtime smoke
         run: cargo build --release -p sonicterm-mac
@@ -726,9 +726,10 @@ jobs:
   windows-tests-workspace:
     name: Windows workspace tests
     runs-on: windows-latest
-    needs: [windows-native, windows-glyph-oracle]
+    # The glyph oracle's only reader is the perf_scenarios example, which the harness shards run, so this
+    # shard starts as soon as the native dependencies are cached.
+    needs: [windows-native]
     env:
-      SONICTERM_GLYPH_ORACLE_DIR: ${{ github.workspace }}/ci-glyph-oracle
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -757,19 +758,6 @@ jobs:
       - name: Install Cairo for Windows
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
-
-      # Failed-job reruns reuse the successful producer's attempt, not the consumer's attempt.
-      - name: Download the exact-run helper oracle
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: glyph-oracle-${{ github.run_id }}-${{ needs.windows-glyph-oracle.outputs.attempt }}
-          path: ${{ env.SONICTERM_GLYPH_ORACLE_DIR }}
-
-      - name: Verify helper sources fonts and provenance
-        env:
-          ORACLE_ATTEMPT: ${{ needs.windows-glyph-oracle.outputs.attempt }}
-          ORACLE_DIGEST: ${{ needs.windows-glyph-oracle.outputs.digest }}
-        run: python3 scripts/glyph-oracle.py verify
 
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
