@@ -245,7 +245,9 @@ fn stdout_closing_during_the_drain_is_a_normal_end() {
     let started = Instant::now();
     let output = ClosesAfter { allowed: 128 * 1024 };
     assert_eq!(relay("{}\n", input, output, from_server, to_server), Ended::EndpointClosed);
-    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    // A stall would hold out for the whole DRAIN; ending as closed stays below it, with room for a
+    // loaded test runner's scheduling delay.
+    assert!(started.elapsed() < DRAIN, "{:?}", started.elapsed());
 }
 
 /// A client that keeps reading, however slowly, is never cut off: stdout taking a capped write

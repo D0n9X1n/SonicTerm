@@ -449,7 +449,9 @@ fn a_closed_pane_with_a_held_parser_ends_its_run_within_the_drain() {
     let elapsed = begun.elapsed();
     assert_eq!(outcome.state, RunState::PaneClosed);
     let drain = crate::app::mcp::tools_read::CLOSE_DRAIN;
-    assert!(elapsed < drain + Duration::from_millis(200), "the run returned after {elapsed:?}");
+    // Ending through the drain lands just past it; waiting on the holder takes its 3 s. The bound
+    // sits between them, leaving a loaded test runner's scheduling delay room above the drain.
+    assert!(elapsed < drain + Duration::from_secs(1), "the run returned after {elapsed:?}");
     assert!(!entry.agent_run.load(Ordering::Acquire), "the reservation outlived the run");
     holder.join().unwrap();
 }
