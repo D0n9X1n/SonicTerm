@@ -115,6 +115,10 @@ macOS or `Alt+Shift+C` on Windows and Linux copies the rows, `R` reads them agai
 and `Esc` closes it. It is available in READONLY mode and does not send input to
 the terminal.
 
+**Agents…** (`show_agents`) has no default shortcut and is allowed in READONLY,
+because it writes nothing to a pane. It lists the connected MCP agents and
+disconnects one, or all, only after a confirm page; see [MCP Server](MCP-Server).
+
 **Set SonicTerm as Default…** is a palette-only command with no default
 shortcut; the bundled keymaps never bind it. Its label names what it changes on
 each OS: **Set SonicTerm as Default for Scripts, Executables and Terminal
@@ -242,6 +246,7 @@ Actions without arguments use a string. The active action names are:
 | Files and maintenance | `edit_config_file`, `open_keymap_file`, `reload_config`, `check_for_updates` |
 | Shell navigation | `scroll_to_prev_prompt`, `scroll_to_next_prompt` |
 | Diagnostics | `show_memory_usage`, `copy_memory_report`, `show_about` |
+| Agents | `show_agents` |
 
 `focus_status_line` (palette: "Focus Status Line") has no default binding and is
 allowed in READONLY, because it only moves focus. It focuses the first clickable

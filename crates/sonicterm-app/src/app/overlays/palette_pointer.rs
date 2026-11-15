@@ -19,6 +19,8 @@ pub(super) enum PalettePointerTarget {
     StatusRow(StatusSegmentRowKind),
     /// A picker row, by the value it applies.
     PickerRow(String),
+    /// An Agents page row, by what it acts on.
+    AgentRow(sonicterm_ui::command_palette::AgentRowKind),
     Outside,
 }
 
@@ -36,6 +38,11 @@ enum PalettePointerHit {
     PickerRow {
         index: usize,
         value: String,
+    },
+    /// An Agents page row at filtered `index`.
+    AgentRow {
+        index: usize,
+        kind: sonicterm_ui::command_palette::AgentRowKind,
     },
     Outside,
     Inside,
@@ -65,6 +72,12 @@ impl App {
                 let rows = self.interaction.command_palette.status_segment_rows();
                 let kind = rows.get(row.item_index)?.kind;
                 return Some(PalettePointerHit::StatusRow { index: row.item_index, kind });
+            }
+            if self.interaction.command_palette.mode() == CommandPaletteMode::Agents {
+                // When: mode is Agents, the row is named by what it acts on.
+                let rows = self.interaction.command_palette.agent_rows();
+                let kind = rows.get(row.item_index)?.kind;
+                return Some(PalettePointerHit::AgentRow { index: row.item_index, kind });
             }
             if self.interaction.command_palette.mode() == CommandPaletteMode::Picker {
                 // When: mode is Picker, the row is named by the value it applies.
@@ -97,6 +110,7 @@ impl App {
                 CommandPaletteMode::Commands
                     | CommandPaletteMode::StatusSegments
                     | CommandPaletteMode::Picker
+                    | CommandPaletteMode::Agents
             )
             || self.palette_ime_is_composing()
         {
@@ -140,6 +154,14 @@ impl App {
                 }
                 // The checklist's window is `window_id` here; an activation already asked once.
                 self.request_checklist_redraw();
+            }
+            (
+                PalettePointerTarget::AgentRow(pressed),
+                Some(PalettePointerHit::AgentRow { index, kind }),
+            ) if pressed == kind && self.interaction.command_palette.select_agent_row(index) => {
+                // The row released on is the one pressed: open its confirm page, as Enter does; a
+                // click never disconnects on its own.
+                self.activate_agent_row();
             }
             (
                 PalettePointerTarget::PickerRow(pressed),
@@ -226,6 +248,7 @@ impl App {
                     CommandPaletteMode::Commands
                         | CommandPaletteMode::StatusSegments
                         | CommandPaletteMode::Picker
+                        | CommandPaletteMode::Agents
                 ) || self.palette_ime_is_composing()
                     || *button != MouseButton::Left
                 {
@@ -251,6 +274,15 @@ impl App {
                                     PalettePointerCapture {
                                         window_id,
                                         target: PalettePointerTarget::PickerRow(value),
+                                    },
+                                )
+                            }
+                            Some(PalettePointerHit::AgentRow { index, kind }) => {
+                                // An info row cannot be pressed; a row is highlighted on press.
+                                self.interaction.command_palette.select_agent_row(index).then_some(
+                                    PalettePointerCapture {
+                                        window_id,
+                                        target: PalettePointerTarget::AgentRow(kind),
                                     },
                                 )
                             }

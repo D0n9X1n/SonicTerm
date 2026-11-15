@@ -152,7 +152,8 @@ impl App {
         let editable = match self.interaction.command_palette.mode() {
             CommandPaletteMode::Commands
             | CommandPaletteMode::StatusSegments
-            | CommandPaletteMode::Picker => true,
+            | CommandPaletteMode::Picker
+            | CommandPaletteMode::Agents => true,
             CommandPaletteMode::RenameTab => self.tab_edit_target_window() == Some(window_id),
             CommandPaletteMode::RenameWindow => {
                 self.interaction

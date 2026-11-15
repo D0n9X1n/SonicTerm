@@ -180,7 +180,8 @@ impl App {
                 }
                 CommandPaletteMode::Commands
                 | CommandPaletteMode::StatusSegments
-                | CommandPaletteMode::Picker => true,
+                | CommandPaletteMode::Picker
+                | CommandPaletteMode::Agents => true,
             };
             let session = self.interaction.command_palette.session();
             return live.then_some(FieldTarget::Palette { mode, session });

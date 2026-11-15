@@ -22,6 +22,8 @@ use winit::event_loop::EventLoopProxy;
 
 use super::UserEvent;
 
+#[path = "mcp/agent_notices.rs"]
+mod agent_notices;
 #[path = "mcp/agents.rs"]
 pub(crate) mod agents;
 #[path = "mcp/claims.rs"]
@@ -390,31 +392,21 @@ impl McpShared {
     }
 
     /// Show `text` in the in-app notification without waiting: the request is queued and the
-    /// loop shows it when it next drains. A stopped server shows nothing.
-    // Ordering: generation Acquire reads the value the loop compares; pending_notices AcqRel makes
-    // the increment the single admission point for a notice.
-    pub(crate) fn notify(&self, text: String) {
+    /// loop shows it when it next drains. A stopped server shows nothing. `true` when the notice
+    /// was admitted to the queue.
+    // Ordering: pending_notices AcqRel makes the increment the single admission point for a notice.
+    pub(crate) fn notify(&self, text: String) -> bool {
         if self.is_stopped() {
             // When: the server `is_stopped`, its connections end without a notice.
-            return;
+            return false;
         }
         if self.pending_notices.fetch_add(1, Ordering::AcqRel) >= MAX_PENDING_NOTICES {
             // When: `MAX_PENDING_NOTICES` are already waiting, connection churn cannot grow the inbox.
             self.pending_notices.fetch_sub(1, Ordering::AcqRel);
-            return;
+            return false;
         }
-        // The reply channel is dropped at once; the loop's `try_send` to it is ignored.
-        let (reply, _answer) = sync_channel(1);
-        self.inbox.lock().push(LoopRequest {
-            call: LoopCall::Notice { text },
-            generation: self.generation.load(Ordering::Acquire),
-            deadline: Instant::now() + LOOP_DEADLINE,
-            closed: Arc::new(AtomicBool::new(false)),
-            // A notice reads no pane, so the session it carries is never checked.
-            session: agents::AgentSessionId::next(),
-            reply,
-        });
-        let _ = self.wake();
+        self.queue_notice(LoopCall::Notice { text });
+        true
     }
 
     /// Mark one queued notice as shown.
@@ -528,7 +520,7 @@ pub(crate) struct Caller {
     pub(crate) self_pane: Option<u64>,
     /// The name `initialize` reported, for display and logs only.
     pub(crate) client: Option<String>,
-    /// Whether `initialize` already ran; only the first one is announced.
+    /// Whether `initialize` already ran; only the first one names the client.
     pub(crate) initialized: bool,
 }
 
@@ -539,8 +531,11 @@ fn agent_scope_code(isolation: McpIsolation, anchor: McpCreateAnchor) -> u8 {
 
 /// Serve one connection until it closes or the server stops: a reader thread parses lines and
 /// answers what needs no app state, and a worker thread runs tool calls one at a time. Returns the
-/// name the client gave in `initialize`, if it did.
-pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> Option<String> {
+/// connection's session and its departure record, or `None` when the connection never started.
+pub(crate) fn serve_connection(
+    shared: Arc<McpShared>,
+    transport: Transport,
+) -> Option<(agents::AgentSessionId, Option<agents::Departure>)> {
     let closed = Arc::new(AtomicBool::new(false));
     let writer = Arc::new(Mutex::new(transport.writer));
     let caller = Arc::new(Mutex::new(Caller::default()));
@@ -564,13 +559,12 @@ pub(crate) fn serve_connection(shared: Arc<McpShared>, transport: Transport) -> 
     }
     // The session starts before the first call is admitted and ends with the connection, so a
     // pane it created reads as orphaned from the moment the client is gone.
-    let session = shared.sessions.open_connection(Some(Arc::clone(&in_flight)));
+    let session =
+        shared.sessions.open_connection(Some(Arc::clone(&in_flight)), Arc::clone(&closed));
     let calls = CallSlot { queue: calls, in_flight, closed: Arc::clone(&closed), session };
     read_loop(&shared, transport.reader, &writer, &caller, &calls, &closed);
     close_connection(&shared, &closed);
-    shared.sessions.close(session);
-    let client = caller.lock().client.clone();
-    client
+    Some((session, shared.sessions.close(session)))
 }
 
 /// The worker: run admitted tool calls one at a time and write each reply.
@@ -786,11 +780,12 @@ fn answer_request(
         "initialize" => {
             let first = !std::mem::replace(&mut caller.lock().initialized, true);
             if first {
-                // Only a connection's first `initialize` names the client and is announced.
+                // Only the first `initialize` names the client; it is logged here and announced on
+                // the first admitted tool call, so a probe that only lists tools shows nothing.
                 let client = jsonrpc::client_name(&params);
                 let name = client.as_deref().unwrap_or("unknown");
                 tracing::info!(target: "mcp", client = name, "agent connected");
-                shared.notify(format!("Agent connected: {name}"));
+                shared.sessions.set_client(calls.session, client.clone());
                 caller.lock().client = client;
             }
             jsonrpc::response(id, jsonrpc::initialize_result(&params))
@@ -809,6 +804,7 @@ fn answer_request(
             // When: this `method` claimed the call slot, the worker replies; a failed send means it is
             // gone and the connection is ending.
             let call = AdmittedCall::admit_on(shared, calls, (id.clone(), params), wire_bytes);
+            shared.announce_first_call(calls.session);
             let _ = calls.queue.try_send(call);
             return None;
         }
@@ -874,13 +870,13 @@ pub(crate) fn spawn_connection(shared: &Arc<McpShared>, transport: Transport) {
 /// A connection thread's body: serve, then release the slot.
 // Ordering: connections AcqRel pairs with the admitting fetch_add in `spawn_connection`.
 fn serve_and_release(shared: Arc<McpShared>, transport: Transport) {
-    let client = serve_connection(Arc::clone(&shared), transport);
-    shared.connections.fetch_sub(1, Ordering::AcqRel);
-    tracing::info!(target: "mcp", "agent disconnected");
-    // Only a connection that introduced itself was announced, so only it is announced leaving.
-    if let Some(name) = client {
-        shared.notify(format!("Agent disconnected: {name}"));
+    let served = serve_connection(Arc::clone(&shared), transport);
+    // The departure is queued before the slot is released, so a caller that waits for the
+    // connection count to drop finds it already in the inbox.
+    if let Some((session, departure)) = served {
+        shared.report_departure(session, departure);
     }
+    shared.connections.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// What keeps a bound endpoint's file in place; dropping it removes the file. A named pipe has

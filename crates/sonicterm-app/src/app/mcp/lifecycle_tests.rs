@@ -255,7 +255,7 @@ fn connection_notices_reach_the_notification() {
     assert_eq!(bubble.message, "Agent connected: test");
     app.main_mut().unwrap().notification = None;
     shared.stop();
-    shared.notify("Agent disconnected: test".into());
+    shared.notify("Agent disconnected: test; 1 pane(s) left without an agent".into());
     app.drain_mcp_requests();
     assert!(app.main().unwrap().notification.is_none());
 }

@@ -90,6 +90,24 @@ fn memory_usage_command_is_listed_and_translated_in_every_locale() {
     }
 }
 
+/// Contract: the palette lists Agents… in every shipped locale with its translated label, and
+/// its English aliases (`agent`, `mcp`, `disconnect`) stay searchable in each.
+#[test]
+fn agents_command_is_listed_and_translated_in_every_locale() {
+    use crate::command_label::{localized_label, localized_search_haystack};
+    use sonicterm_cfg::keymap::Action;
+    assert!(crate::command_palette::palette_actions().contains(&Action::ShowAgents));
+    for (locale, expected) in [("en", "Agents…"), ("zh-CN", "Agent…"), ("ja", "エージェント…")]
+    {
+        let i18n = translator(locale);
+        assert_eq!(localized_label(&Action::ShowAgents, &i18n), expected, "{locale}");
+        let haystack = localized_search_haystack(&Action::ShowAgents, &i18n);
+        for alias in ["agent", "mcp", "disconnect"] {
+            assert!(haystack.contains(alias), "{locale} haystack lost {alias}");
+        }
+    }
+}
+
 /// Missing action templates fall back wholly to English, even if the locale has translated enum words.
 #[test]
 fn command_labels_fall_back_to_existing_english_text() {
@@ -352,7 +370,8 @@ fn palette_locale_refresh_in_other_modes_preserves_rows_but_refreshes_commands()
             }
             CommandPaletteMode::Commands
             | CommandPaletteMode::StatusSegments
-            | CommandPaletteMode::Picker => unreachable!(),
+            | CommandPaletteMode::Picker
+            | CommandPaletteMode::Agents => unreachable!(),
         }
         let before = (
             palette.query().to_string(),
@@ -423,7 +442,8 @@ fn palette_refreshes_preserve_reversed_text_selection() {
             CommandPaletteMode::TabColor
             | CommandPaletteMode::Confirm
             | CommandPaletteMode::StatusSegments
-            | CommandPaletteMode::Picker => unreachable!(),
+            | CommandPaletteMode::Picker
+            | CommandPaletteMode::Agents => unreachable!(),
         }
         palette.set_cursor("a你🙂".len());
         palette.extend_to("a".len());

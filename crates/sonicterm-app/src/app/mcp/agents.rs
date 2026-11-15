@@ -162,36 +162,104 @@ pub(crate) enum MessageAdmission {
     Closed,
 }
 
+/// One live session's record: who it says it is, what it has done, and how to close it.
+struct SessionRecord {
+    /// The name `initialize` reported, already sanitized; `None` until then.
+    client: Option<String>,
+    /// When the connection opened.
+    connected_at: Instant,
+    /// Tool calls admitted so far.
+    tool_calls: u64,
+    /// When the last tool call was admitted.
+    last_call: Option<Instant>,
+    /// When the session's last message was admitted, for [`AGENT_MESSAGE_INTERVAL`].
+    last_message: Option<Instant>,
+    /// Whether its connect notice was admitted to the notice queue.
+    announced: bool,
+    /// Whether the user disconnected it from the Agents page.
+    user_disconnected: bool,
+    /// The connection's close flag, set by [`super::close_connection`].
+    closed: Arc<AtomicBool>,
+}
+
+/// A copy of one live session for the Agents page, taken under the lock and read without it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionSnapshot {
+    /// The session.
+    pub(crate) session: AgentSessionId,
+    /// The client's sanitized, self-reported name, if it gave one.
+    pub(crate) client: Option<String>,
+    /// When the connection opened.
+    pub(crate) connected_at: Instant,
+    /// Tool calls admitted so far.
+    pub(crate) tool_calls: u64,
+    /// When the last tool call was admitted.
+    pub(crate) last_call: Option<Instant>,
+    /// Whether its connect notice was admitted.
+    pub(crate) announced: bool,
+}
+
+/// What a closed session's departure needs, handed back by [`LiveSessions::close`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Departure {
+    /// The client's sanitized, self-reported name, if it gave one.
+    pub(crate) client: Option<String>,
+    /// Whether its connect notice was admitted.
+    pub(crate) announced: bool,
+    /// Whether the user disconnected it from the Agents page, which shows its own confirmation.
+    pub(crate) user_disconnected: bool,
+}
+
 /// The sessions still connected; a session leaves when its connection closes.
 #[derive(Default)]
 pub(crate) struct LiveSessions {
-    /// The connected sessions, each with the instant of its last admitted message; held only for
-    /// one insert, remove, lookup or admission.
-    live: Mutex<HashMap<AgentSessionId, Option<Instant>>>,
+    /// The connected sessions' records; held only for one insert, remove, lookup, update or copy,
+    /// and never while a connection is closed, since that takes the waiter lock.
+    live: Mutex<HashMap<AgentSessionId, SessionRecord>>,
     /// Each session's resume token, kept past its close while it may own panes.
     pub(crate) tokens: super::claims::ResumeRegistry,
 }
 
 impl LiveSessions {
-    /// Start a session with no call slot and return its fresh id, for tests.
+    /// Start a session with no call slot and its own close flag, and return its fresh id, for tests.
     #[cfg(test)]
     pub(crate) fn open(&self) -> AgentSessionId {
-        self.open_connection(None)
+        self.open_connection(None, Arc::new(AtomicBool::new(false)))
     }
 
-    /// Start a connection's session, whose calls set `in_flight` while they run, and mint its
-    /// resume token.
-    pub(crate) fn open_connection(&self, in_flight: Option<Arc<AtomicBool>>) -> AgentSessionId {
+    /// Start a connection's session, whose calls set `in_flight` while they run and whose
+    /// connection ends when `closed` is set, and mint its resume token.
+    pub(crate) fn open_connection(
+        &self,
+        in_flight: Option<Arc<AtomicBool>>,
+        closed: Arc<AtomicBool>,
+    ) -> AgentSessionId {
         let session = AgentSessionId::next();
-        self.live.lock().insert(session, None);
+        let record = SessionRecord {
+            client: None,
+            connected_at: Instant::now(),
+            tool_calls: 0,
+            last_call: None,
+            last_message: None,
+            announced: false,
+            user_disconnected: false,
+            closed,
+        };
+        self.live.lock().insert(session, record);
         self.tokens.connect(session, in_flight);
         session
     }
 
-    /// End `session`; its panes read as orphaned from now on, claimable with its token.
-    pub(crate) fn close(&self, session: AgentSessionId) {
-        self.live.lock().remove(&session);
+    /// End `session`; its panes read as orphaned from now on, claimable with its token. Returns its
+    /// departure, or `None` when it was not live.
+    pub(crate) fn close(&self, session: AgentSessionId) -> Option<Departure> {
+        let record = self.live.lock().remove(&session);
         self.tokens.disconnect(session);
+        record.map(|record| Departure {
+            client: record.client,
+            announced: record.announced,
+            user_disconnected: record.user_disconnected,
+        })
     }
 
     /// Whether `session` is still connected.
@@ -199,14 +267,87 @@ impl LiveSessions {
         self.live.lock().contains_key(&session)
     }
 
+    /// Record the name `session`'s `initialize` reported.
+    pub(crate) fn set_client(&self, session: AgentSessionId, client: Option<String>) {
+        if let Some(record) = self.live.lock().get_mut(&session) {
+            record.client = client;
+        }
+    }
+
+    /// Count one admitted tool call of `session` at `now`. On its first call returns the name to
+    /// announce (`unknown` when it gave none); `None` afterwards and for a session not live.
+    pub(crate) fn record_call(&self, session: AgentSessionId, now: Instant) -> Option<String> {
+        let mut live = self.live.lock();
+        let record = live.get_mut(&session)?;
+        record.tool_calls += 1;
+        record.last_call = Some(now);
+        (record.tool_calls == 1).then(|| record.client.clone().unwrap_or_else(|| "unknown".into()))
+    }
+
+    /// Remember that `session`'s connect notice was admitted.
+    pub(crate) fn mark_announced(&self, session: AgentSessionId) {
+        if let Some(record) = self.live.lock().get_mut(&session) {
+            record.announced = true;
+        }
+    }
+
+    /// Copy every live session, newest first; the lock is released before the copy is read.
+    pub(crate) fn snapshot(&self) -> Vec<SessionSnapshot> {
+        let mut listed: Vec<SessionSnapshot> = self
+            .live
+            .lock()
+            .iter()
+            .map(|(session, record)| SessionSnapshot {
+                session: *session,
+                client: record.client.clone(),
+                connected_at: record.connected_at,
+                tool_calls: record.tool_calls,
+                last_call: record.last_call,
+                announced: record.announced,
+            })
+            .collect();
+        listed.sort_by_key(|entry| std::cmp::Reverse(entry.session.get()));
+        listed
+    }
+
+    /// Mark `session` as disconnected by the user and hand back its close flag, for the caller to
+    /// close outside this lock; `None` when the session already left.
+    pub(crate) fn take_for_disconnect(&self, session: AgentSessionId) -> Option<Arc<AtomicBool>> {
+        let mut live = self.live.lock();
+        let record = live.get_mut(&session)?;
+        record.user_disconnected = true;
+        Some(Arc::clone(&record.closed))
+    }
+
+    /// [`Self::take_for_disconnect`] for every session whose connection is still open.
+    // Ordering: closed Acquire pairs with close_connection's Release store.
+    pub(crate) fn take_all_for_disconnect(&self) -> Vec<Arc<AtomicBool>> {
+        let mut live = self.live.lock();
+        live.values_mut()
+            .filter(|record| !record.closed.load(Ordering::Acquire))
+            .map(|record| {
+                record.user_disconnected = true;
+                Arc::clone(&record.closed)
+            })
+            .collect()
+    }
+
+    /// Whether `session`'s connection was closed, or `None` when it is not live, for tests.
+    // Ordering: closed Acquire pairs with close_connection's Release store.
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self, session: AgentSessionId) -> Option<bool> {
+        self.live.lock().get(&session).map(|record| record.closed.load(Ordering::Acquire))
+    }
+
     /// Admit one message from `session` at `now`: at most one per [`AGENT_MESSAGE_INTERVAL`]. The
     /// limit lives on the session, not on one call, so a client cannot reset it per call.
     pub(crate) fn admit_message(&self, session: AgentSessionId, now: Instant) -> MessageAdmission {
         let mut live = self.live.lock();
-        let Some(last) = live.get_mut(&session) else {
+        let Some(record) = live.get_mut(&session) else {
             // When: `session` is not `live`, its connection closed and it shows nothing.
             return MessageAdmission::Closed;
         };
+        let last = &mut record.last_message;
         if last.is_some_and(|last| now.saturating_duration_since(last) < AGENT_MESSAGE_INTERVAL) {
             // When: the `last` message is younger than the interval, this one is refused and the
             // clock keeps running from the last admitted one.
@@ -217,6 +358,37 @@ impl LiveSessions {
     }
 }
 
+impl super::McpShared {
+    /// Disconnect `session` from the Agents page: close its connection as a client hang-up would,
+    /// so its running wait ends `revoked` and its panes become claimable once it tears down.
+    /// `false` when it had already left.
+    // The sessions lock is released before close_connection takes the waiter lock; never both.
+    pub(crate) fn disconnect_agent(&self, session: AgentSessionId) -> bool {
+        let Some(closed) = self.sessions.take_for_disconnect(session) else {
+            // When: `take_for_disconnect` finds no live `session`, it left already; nothing closes.
+            return false;
+        };
+        super::close_connection(self, &closed);
+        tracing::info!(target: "mcp", session = session.get(), "agent disconnected by the user");
+        true
+    }
+
+    /// Disconnect every session whose connection is open now; returns how many were closed.
+    // The sessions lock is released before close_connection takes the waiter lock; never both.
+    pub(crate) fn disconnect_all_agents(&self) -> usize {
+        let flags = self.sessions.take_all_for_disconnect();
+        for closed in &flags {
+            super::close_connection(self, closed);
+        }
+        tracing::info!(target: "mcp", count = flags.len(), "every agent disconnected by the user");
+        flags.len()
+    }
+}
+
 #[cfg(test)]
 #[path = "agents_tests.rs"]
 mod agents_tests;
+
+#[cfg(test)]
+#[path = "agents_disconnect_tests.rs"]
+mod agents_disconnect_tests;

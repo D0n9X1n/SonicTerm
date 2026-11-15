@@ -659,10 +659,14 @@ Every pane's shell gets `SONICTERM_PANE_ID` and, while the server runs,
 `SONICTERM_CONTROL`, the endpoint's path or pipe name. A bridge may send a
 preamble line `{"sonicterm_bridge":1,"pane_id":…}` naming the pane the agent runs
 in; `list_panes` reports it as `self_pane_id`. It is a default, never an
-authorization. Connecting and disconnecting show SonicTerm's in-app
-notification, `Agent connected: <name>` with the name the client reported
-(control characters removed, at most 64 characters), once per connection; at
-most eight notices wait for the window at a time. Stopping the server removes
+authorization. A connection is announced in SonicTerm's in-app notification,
+`Agent connected: <name>` with the name the client reported (control characters
+removed, at most 64 characters), once, when its first tool call starts; a probe
+that only initializes and lists tools shows nothing. A departure is shown,
+`Agent disconnected: <name>; <n> pane(s) left without an agent`, only while the
+session still owns panes it created, and never for a disconnect made from the
+**Agents…** page ([MCP Server](MCP-Server)). Connect and disconnect notices and
+agent messages share one limit of eight notices waiting for the window. Stopping the server removes
 the socket or discovery record; a SonicTerm that is killed leaves it behind, and
 the next start removes those whose process is gone.
 

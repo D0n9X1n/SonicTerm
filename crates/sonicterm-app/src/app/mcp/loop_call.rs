@@ -76,6 +76,15 @@ pub(crate) enum LoopCall {
         /// for its drop.
         _slot: super::control_loop_ui::NoticeSlot,
     },
+    /// A closed session's departure, shown only if it still owns panes when the loop handles it.
+    AgentLeft {
+        /// The session that left.
+        session: super::agents::AgentSessionId,
+        /// Its sanitized, self-reported name, if it gave one.
+        client: Option<String>,
+        /// The notice's place in the queue, freed when the request is dropped; held only for its drop.
+        _slot: super::control_loop_ui::NoticeSlot,
+    },
     /// Move a closed session's panes to the caller.
     ClaimPanes {
         /// The closed session's token.

@@ -388,10 +388,44 @@ files, remote hosts and programs that never saw the shell's environment. A progr
 running in the pane as you, which could read the shell's memory, is out of scope:
 it already has the agent's powers.
 
+## Manage agents
+
+**Agents…** in the command palette (`show_agents`, no default key) lists the
+connected agents. It opens whether or not the server runs, and in READONLY, since
+it writes nothing to a pane. With the server off it shows one row saying how to
+turn it on. Otherwise it shows:
+
+- a line with the endpoint and the `control` and `read` scopes;
+- one row per connected session, newest first: the client's name, the session
+  number, how long it has been connected, its tool calls, how long ago its last
+  call was, and how many panes it owns;
+- **Disconnect all agents**.
+
+Typing filters the session rows. The list is one snapshot taken when the page
+opens; a session that closed within the last half second may still be listed.
+
+Enter or a click on a session row, or on **Disconnect all agents**, opens a
+confirm page with Cancel highlighted. It says what happens: the agent's SonicTerm
+tools stop; its client (Claude Code, Copilot CLI) shows the server as disconnected
+until you reconnect it there, for example with `/mcp`; its panes stay open; and a
+command it already started keeps running. Only **Disconnect** on that page acts.
+SonicTerm then looks the session up again (one that already left is a no-op) and
+closes its connection as a client hang-up would: a running call ends `revoked`,
+its panes become orphaned and claimable with its token, and the server keeps
+running. **Disconnect all agents** ends every session connected when you confirm.
+The page shows its own confirmation and no separate disconnect notice.
+
 ## Check that it works
 
-- Each connection shows an in-app notification, `Agent connected: <name>`, with
-  the name the client reported.
+- An agent is announced once, `Agent connected: <name>` with the name the client
+  reported, when its first tool call starts. A connection that only initializes
+  and lists tools, such as `claude mcp list`, shows nothing.
+- An agent that leaves while it still owns panes it created shows
+  `Agent disconnected: <name>; <n> pane(s) left without an agent`; one that owns
+  none (it created none, or a reconnect already claimed them) shows nothing.
+  Names are self-reported, so two agents can share one. At most eight notices
+  wait for the window at a time, and every connect and disconnect is logged at
+  `info` under `mcp`.
 - With `[logging] level = "info"`, the log records `control server started`,
   `control server stopped` and `control level changed`. A server that cannot
   start always logs a warning under the `mcp` target. See [Logging](Logging).

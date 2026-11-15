@@ -282,3 +282,56 @@ fn a_checklist_click_or_key_requests_one_redraw_per_terminal_window() {
     expect_one(&app, "click turning the strip off", before);
     assert!(!app.current_status_line().enabled);
 }
+
+/// A click on an Agents session row works like Enter: press highlights it, a release on the same
+/// row opens the confirm page, and nothing is disconnected until Apply there; a release on another
+/// row does nothing.
+#[test]
+fn an_agents_row_click_opens_the_confirm_page_and_disconnects_nothing() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let shared = crate::app::mcp::McpShared::new(sonicterm_cfg::config::McpControl::Agent, None);
+    let owner = app.register_mcp_owner();
+    app.services.mcp_server = Some(crate::app::mcp::McpServer {
+        shared: std::sync::Arc::clone(&shared),
+        endpoint: "test-endpoint".into(),
+        _endpoint_guard: None,
+        config: app.config.mcp,
+        charges: std::collections::HashMap::new(),
+        owner,
+        read_notice_due: false,
+    });
+    let (older, newer) = (shared.sessions.open(), shared.sessions.open());
+    let window_id = app.registry.main_window_id.unwrap();
+    assert!(app.run_action(&Action::ShowAgents));
+    let kind = sonicterm_ui::command_palette::AgentRowKind::Session(older.get());
+    // Row 2 is the older session: the server line, then the newer one, then it.
+    let capture = |kind| super::PalettePointerCapture {
+        window_id,
+        target: super::PalettePointerTarget::AgentRow(kind),
+    };
+    app.interaction.palette_pointer_capture = Some(capture(kind));
+    let elsewhere = sonicterm_ui::command_palette::AgentRowKind::Session(newer.get());
+    app.release_command_palette_pointer(
+        window_id,
+        Some(super::PalettePointerHit::AgentRow { index: 1, kind: elsewhere }),
+    );
+    assert_eq!(
+        app.interaction.command_palette.mode(),
+        sonicterm_ui::command_palette::CommandPaletteMode::Agents,
+        "a release on another row does nothing"
+    );
+    app.interaction.palette_pointer_capture = Some(capture(kind));
+    app.release_command_palette_pointer(
+        window_id,
+        Some(super::PalettePointerHit::AgentRow { index: 2, kind }),
+    );
+    assert_eq!(
+        app.interaction.command_palette.mode(),
+        sonicterm_ui::command_palette::CommandPaletteMode::Confirm
+    );
+    assert!(!app.interaction.command_palette.confirm_applies(), "Cancel is highlighted first");
+    assert_eq!(shared.sessions.is_closed(older), Some(false), "a click never disconnects");
+    assert_eq!(shared.sessions.is_closed(newer), Some(false));
+    shared.stop();
+}

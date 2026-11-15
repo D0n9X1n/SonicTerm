@@ -314,9 +314,32 @@ PowerShell 集成需要 PSReadLine，PowerShell 7 会在每个交互式控制台
 来自文件、远程主机以及从未见过 shell 环境的程序的输出。以你的身份在窗格中运行、能读取 shell 内存的
 程序不在防范范围内：它本就拥有 agent 的权限。
 
+## 管理 agent
+
+命令面板中的 **Agent…**（`show_agents`，默认未绑定）列出已连接的 agent。无论服务器是否运行都能打开，
+READONLY 下也可用，因为它不向任何窗格写入。服务器关闭时，它只显示一行，说明如何开启。否则显示：
+
+- 一行端点以及 `control` 和 `read` 范围；
+- 每个已连接会话一行，最新的在前：客户端名称、会话编号、已连接时长、工具调用次数、上次调用距今多久，
+  以及它拥有的窗格数；
+- **断开所有 agent**。
+
+输入文字会筛选会话行。列表是打开页面时的一次快照；最近半秒内关闭的会话可能仍在列表中。
+
+在会话行或 **断开所有 agent** 上按 Enter 或点击，会打开确认页，默认高亮“取消”。它说明后果：该 agent
+的 SonicTerm 工具停止；其客户端（Claude Code、Copilot CLI）会显示服务器已断开，直到你在客户端中重新
+连接，例如使用 `/mcp`；它的窗格保持打开；已经启动的命令继续运行。只有该页上的 **断开** 才会执行。
+SonicTerm 随后再次查找该会话（已经离开的会话不做任何事），并像客户端挂断一样关闭其连接：正在运行的调用
+以 `revoked` 结束，它的窗格变为孤立窗格，可用其令牌认领，服务器继续运行。**断开所有 agent** 会结束确认
+时所有已连接的会话。该页面只显示自己的确认结果，不另外显示断开通知。
+
 ## 确认是否生效
 
-- 每个连接都会显示应用内通知 `Agent connected: <name>`，其中是客户端报告的名称。
+- agent 的第一次工具调用开始时，会显示一次 `Agent connected: <name>`，其中是客户端报告的名称。只做
+  初始化并列出工具的连接（例如 `claude mcp list`）不显示任何通知。
+- 仍拥有自己创建的窗格的 agent 离开时，显示 `Agent disconnected: <name>; <n> pane(s) left without an agent`；
+  不拥有窗格（从未创建，或重新连接后已被认领）的 agent 离开时不显示任何通知。名称由客户端自报，两个
+  agent 可能同名。同时等待显示的通知至多八条，每次连接和断开都会在 `mcp` 下以 `info` 级别记录。
 - 设置 `[logging] level = "info"` 后，日志会记录 `control server started`、
   `control server stopped` 和 `control level changed`。服务器无法启动时，总会在 `mcp`
   target 下记录一条警告。见 [日志](Logging-zh-CN)。

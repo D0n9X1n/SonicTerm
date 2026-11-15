@@ -92,6 +92,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ShowMemoryUsage",
     "CopyMemoryReport",
     "ShowAbout",
+    "ShowAgents",
     "SetDefaultHandlers",
 ];
 
@@ -586,6 +587,9 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         Action::ShowAbout => {
             ("ShowAbout", Settings, "command-show-about", &["about", "version", "build", "info"])
         }
+        Action::ShowAgents => {
+            ("ShowAgents", Settings, "command-show-agents", &["agent", "mcp", "disconnect"])
+        }
         Action::SetDefaultHandlers => (
             "SetDefaultHandlers",
             Settings,
@@ -606,7 +610,7 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         | Action::ShowMemoryUsage
         | Action::CopyMemoryReport
         | Action::ShowAbout => (Requirement::Global, true),
-        Action::SetDefaultHandlers => (Requirement::Window, true),
+        Action::SetDefaultHandlers | Action::ShowAgents => (Requirement::Window, true),
         Action::NewTab
         | Action::IncreaseFontSize
         | Action::DecreaseFontSize
@@ -740,6 +744,7 @@ pub fn label(action: &Action) -> String {
         Action::ShowMemoryUsage => "Memory Usage".into(),
         Action::CopyMemoryReport => "Copy Memory Report".into(),
         Action::ShowAbout => "About SonicTerm".into(),
+        Action::ShowAgents => "Agents…".into(),
         Action::SetDefaultHandlers => {
             default_handlers_label(DefaultHandlersPlatform::native()).into()
         }

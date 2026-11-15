@@ -898,6 +898,7 @@ pub(crate) fn report_route(action: &Action) -> ReportRoute {
         | Action::OpenKeymapFile
         | Action::CheckForUpdates
         | Action::SetDefaultHandlers
+        | Action::ShowAgents
         | Action::SaveCurrentSettings => ReportRoute::Redirect,
         Action::PasteFromClipboard
         | Action::EnterQuickSelect

@@ -16,6 +16,8 @@ pub(in crate::app) struct InteractionState {
     pub(in crate::app) palette_attached_window: Option<WindowId>,
     /// Stable editor target, including main; an absent key never falls back to another window.
     pub(in crate::app) window_rename_target: Option<sonicterm_types::WindowKey>,
+    /// The disconnect the Agents confirm page shows, until Apply or Cancel closes it.
+    pub(in crate::app) agent_disconnect: Option<overlays::AgentDisconnect>,
     /// Tab captured when a rename or color editor opened; submit edits only that live tab.
     pub(in crate::app) tab_edit_target: Option<overlays::TabEditTarget>,
     /// One modal press retains its source and target until release or an intervening input change.

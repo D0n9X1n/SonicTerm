@@ -376,11 +376,13 @@ impl PaletteLayout {
         let confirm_rows = palette.confirm_rows();
         let status_rows = palette.status_segment_rows();
         let picker_rows = palette.picker_rows();
+        let agent_rows = palette.agent_rows();
         let total = match palette.mode() {
             CommandPaletteMode::TabColor => color_choices.len(),
             CommandPaletteMode::Confirm => confirm_rows.len(),
             CommandPaletteMode::StatusSegments => status_rows.len(),
             CommandPaletteMode::Picker => picker_rows.len(),
+            CommandPaletteMode::Agents => agent_rows.len(),
             _ => visible.len(),
         };
 
@@ -411,7 +413,10 @@ impl PaletteLayout {
                     )
                     || status_rows.get(item_index).is_some_and(|row| {
                         row.kind == crate::command_palette::StatusSegmentRowKind::Heading
-                    }),
+                    })
+                    || agent_rows
+                        .get(item_index)
+                        .is_some_and(|row| row.kind == crate::command_palette::AgentRowKind::Info),
             );
             match palette.mode() {
                 CommandPaletteMode::StatusSegments => {
@@ -421,6 +426,14 @@ impl PaletteLayout {
                             .get(item_index)
                             .map(|row| row.label.clone())
                             .unwrap_or_default(),
+                    );
+                    row_shortcuts.push(None);
+                    row_swatches.push(None);
+                }
+                CommandPaletteMode::Agents => {
+                    // An Agents row shows its prepared text; an info row is drawn dimmed.
+                    row_labels.push(
+                        agent_rows.get(item_index).map(|row| row.label.clone()).unwrap_or_default(),
                     );
                     row_shortcuts.push(None);
                     row_swatches.push(None);
@@ -504,6 +517,7 @@ impl PaletteLayout {
                 CommandPaletteMode::RenameWindow => palette.text().window_name_placeholder.clone(),
                 CommandPaletteMode::StatusSegments => palette.status_title().to_string(),
                 CommandPaletteMode::Picker => palette.picker_title().to_string(),
+                CommandPaletteMode::Agents => palette.agents_title().to_string(),
                 CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => String::new(),
             })
         } else {
@@ -563,6 +577,7 @@ impl PaletteLayout {
             CommandPaletteMode::Confirm => palette.text().confirm_footer.clone(),
             CommandPaletteMode::StatusSegments => palette.status_footer().to_string(),
             CommandPaletteMode::Picker => palette.picker_footer().to_string(),
+            CommandPaletteMode::Agents => palette.agents_footer().to_string(),
         };
 
         Some(PaletteLayout {

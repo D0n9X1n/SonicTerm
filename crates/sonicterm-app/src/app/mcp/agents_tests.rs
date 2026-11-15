@@ -80,3 +80,66 @@ fn a_session_admits_one_agent_message_per_interval() {
     assert_eq!(sessions.admit_message(mine, later), MessageAdmission::Closed);
     assert_eq!(sessions.admit_message(AgentSessionId::next(), later), MessageAdmission::Closed);
 }
+
+/// The snapshot lists every live session newest first with its client name and activity; a tool
+/// call counts and stamps the session, and only the first one hands back the name to announce.
+#[test]
+fn the_snapshot_lists_sessions_newest_first_with_their_activity() {
+    let sessions = LiveSessions::default();
+    let older = sessions.open();
+    let newer = sessions.open();
+    sessions.set_client(older, Some("claude".into()));
+    let now = std::time::Instant::now();
+    assert_eq!(sessions.record_call(older, now), Some("claude".to_owned()), "first call");
+    assert_eq!(sessions.record_call(older, now), None, "announced once");
+    assert_eq!(sessions.record_call(newer, now), Some("unknown".to_owned()), "no name given");
+    assert_eq!(sessions.record_call(AgentSessionId::next(), now), None, "unknown session");
+    let listed = sessions.snapshot();
+    assert_eq!(listed.iter().map(|entry| entry.session).collect::<Vec<_>>(), [newer, older]);
+    assert_eq!(listed[1].client.as_deref(), Some("claude"));
+    assert_eq!(listed[1].tool_calls, 2);
+    assert_eq!(listed[1].last_call, Some(now));
+    assert_eq!(listed[0].client, None);
+    assert!(!listed[1].announced, "announced only once the notice was admitted");
+    sessions.mark_announced(older);
+    assert!(sessions.snapshot()[1].announced);
+}
+
+/// Closing a session hands back what its departure needs: the client name, whether it was
+/// announced, and whether the user disconnected it from the Agents page. An unknown or already
+/// closed session hands back nothing.
+#[test]
+fn closing_hands_back_the_departure() {
+    let sessions = LiveSessions::default();
+    let session = sessions.open();
+    sessions.set_client(session, Some("copilot".into()));
+    sessions.mark_announced(session);
+    let flag = sessions.take_for_disconnect(session).expect("live");
+    assert!(!flag.load(std::sync::atomic::Ordering::Acquire), "the caller closes it");
+    let departure = sessions.close(session).expect("was live");
+    assert_eq!(departure.client.as_deref(), Some("copilot"));
+    assert!(departure.announced);
+    assert!(departure.user_disconnected);
+    assert!(sessions.close(session).is_none());
+    assert!(sessions.take_for_disconnect(session).is_none());
+}
+
+/// Disconnecting from the Agents page closes exactly the chosen connection: its close flag is set
+/// and the session stays listed until its connection tears down; another session is untouched,
+/// a session that already left is a no-op, and "all" closes every session still open.
+#[test]
+fn disconnecting_closes_only_the_chosen_connection() {
+    let shared = super::super::McpShared::new(McpControl::Agent, None);
+    let (first, second, third) =
+        (shared.sessions.open(), shared.sessions.open(), shared.sessions.open());
+    assert!(shared.disconnect_agent(first));
+    assert_eq!(shared.sessions.is_closed(first), Some(true));
+    assert_eq!(shared.sessions.is_closed(second), Some(false));
+    assert!(shared.sessions.contains(first), "listed until the connection tears down");
+    shared.sessions.close(third);
+    assert!(!shared.disconnect_agent(third), "a session that already left");
+    assert_eq!(shared.disconnect_all_agents(), 1, "only the session still open");
+    assert_eq!(shared.sessions.is_closed(second), Some(true));
+    let departure = shared.sessions.close(first).expect("still recorded");
+    assert!(departure.user_disconnected);
+}

@@ -274,6 +274,11 @@ impl App {
             LoopCall::Notify { pane_id, text, .. } => {
                 self.mcp_notify(&shared.sessions, access, *pane_id, text)
             }
+            // The departure's notice slot is freed when the request drops after this reply.
+            LoopCall::AgentLeft { session, client, .. } => {
+                self.mcp_agent_left(*session, client.as_deref());
+                LoopReply::Notified
+            }
             LoopCall::ClaimPanes { resume, own } => {
                 self.mcp_claim_panes(&shared.sessions.tokens, access, resume, own)
             }

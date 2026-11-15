@@ -506,8 +506,10 @@ flowchart LR
 
 每个窗格的 shell 都会得到 `SONICTERM_PANE_ID`；服务器运行时还会得到 `SONICTERM_CONTROL`，即端点
 路径或管道名。桥接程序可以先发送一行前导 `{"sonicterm_bridge":1,"pane_id":…}`，说明 agent 所在的
-窗格；`list_panes` 以 `self_pane_id` 报告它。它只是默认值，从不授予权限。连接和断开时显示 SonicTerm 的应用内通知
-`Agent connected: <name>`，名称为客户端自报的名字（去除控制字符，至多 64 个字符），每个连接只显示一次；同时等待显示的通知至多八条。停止服务器会删除
+窗格；`list_panes` 以 `self_pane_id` 报告它。它只是默认值，从不授予权限。连接在其第一次工具调用开始时，以 SonicTerm 的应用内通知
+`Agent connected: <name>` 宣告一次，名称为客户端自报的名字（去除控制字符，至多 64 个字符）；只做初始化并列出工具的探测连接不显示任何通知。
+只有当会话仍拥有自己创建的窗格时，才显示离开通知 `Agent disconnected: <name>; <n> pane(s) left without an agent`；
+在 **Agent…** 页面（[MCP 服务器](MCP-Server-zh-CN)）中断开的连接从不显示该通知。连接与断开通知和 agent 消息共用一个上限：同时等待显示的通知至多八条。停止服务器会删除
 socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次启动时删除进程已不存在的那些。
 
 | 工具 | 作用 |
