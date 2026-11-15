@@ -294,6 +294,15 @@ publishes two macOS DMGs, the Windows MSI, Linux `.deb` and `.tar.gz`,
 
 ## Debugging
 
+**Rerun a failed test before treating it as a bug.** When a CI job or a local
+test fails and the failure is not already confirmed as a defect, rerun it once on
+the same commit (`gh run rerun <run-id> --failed`, or the same test command)
+before changing anything. A failure that passes on the rerun was transient: say
+so in the pull request with both results, and change no test or code for it.
+Fix code, and raise an issue, only for a confirmed code bug: a failure that
+reproduces and whose cause is traced to the code. A test that fails only from a
+runner's load or timing is not a confirmed code bug.
+
 Work a defect in this order. **Baseline → Theory → Probe → Log → Confirm →
 Fix → Pin.** Skipping a step does not save time; it produces a confident wrong
 answer that costs more to retract than it did to reach.
