@@ -278,10 +278,10 @@ pub(crate) fn list_commands(parser: &std::sync::Arc<Mutex<Parser>>, limit: usize
 /// The shared cell budget ran out before a command's rows were copied.
 struct BudgetSpent;
 
-/// The typed text of `region` on `primary`: from B's column to the row before C (or B's row alone
-/// when C is on it), soft wraps joined with their blanks, hard breaks kept as line feeds, trailing
-/// blanks trimmed, at most [`MAX_COMMAND_BYTES`]. Each row's cells are charged to `cells_left`
-/// before it is copied; `Ok(None)` when B is missing or its row left history.
+/// The typed text of `region` on `primary`: from B's column up to C's column on C's row (B's row
+/// alone once C's row left history), soft wraps joined with their blanks, hard breaks kept as line
+/// feeds, trailing blanks trimmed, at most [`MAX_COMMAND_BYTES`]. Each row's cells are charged to
+/// `cells_left` before it is copied; `Ok(None)` when B is missing or its row left history.
 fn command_text(
     primary: &Grid,
     region: &CommandRegion,
@@ -291,12 +291,13 @@ fn command_text(
         // When: the region has no `input_start`, there is no typed text to read.
         return Ok(None);
     };
-    // shortcut: a C on B's row is read with the whole row after B, since the region keeps C's row,
-    // not its column; a shell prints C after the typed line's newline, so this rarely matters.
-    let last_row = region
-        .output_start_row
-        .and_then(|row| row.checked_sub(1))
-        .map_or(first_row, |row| row.max(first_row));
+    // The span ends at C: on C's row only the cells before C's column are typed text. A C at
+    // column 0 of a later row leaves that row out, so it adds no line break.
+    let (last_row, last_row_end) = match region.output_start_row {
+        Some(row) if row > first_row && region.output_start_col == 0 => (row - 1, None),
+        Some(row) => (row.max(first_row), Some(usize::from(region.output_start_col))),
+        None => (first_row, None),
+    };
     let mut text = String::new();
     // Blank cells after the previous row's text, kept only when the next row wraps from it.
     let mut pending_blanks = 0usize;
@@ -326,7 +327,13 @@ fn command_text(
             0
         };
         let room = MAX_COMMAND_BYTES.saturating_sub(text.len());
-        let copy = row_cells_text_from(row, start, row.len(), room);
+        let end = if let Some(c_col) = last_row_end.filter(|_| abs == last_row) {
+            c_col.min(row.len())
+        } else {
+            // When: `abs` is not C's row, or C's column is not known, the whole row is typed text.
+            row.len()
+        };
+        let copy = row_cells_text_from(row, start, end, room);
         text.push_str(&copy.text);
         pending_blanks = copy.trailing_blanks;
         if copy.cut || text.len() >= MAX_COMMAND_BYTES {

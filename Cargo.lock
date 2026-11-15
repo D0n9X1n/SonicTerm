@@ -3620,6 +3620,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "unicode-general-category",
  "unicode-width",
  "ureq",
  "wgpu",

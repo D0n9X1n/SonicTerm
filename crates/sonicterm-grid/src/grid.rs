@@ -137,6 +137,8 @@ pub struct PromptRegion {
     pub input_start_at: Option<std::time::Instant>,
     /// Absolute row where the command's output begins (OSC 133 ; C).
     pub output_start_row: Option<u64>,
+    /// The column on `output_start_row` where C arrived: typed text on that row ends there.
+    pub output_start_col: u16,
     /// When the C marker was parsed.
     pub output_start_at: Option<std::time::Instant>,
     /// Whether C was seen, kept apart from its row, which can leave history.

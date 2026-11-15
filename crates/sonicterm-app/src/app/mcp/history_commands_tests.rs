@@ -81,8 +81,8 @@ fn a_d_from_a_running_program_lists_nothing() {
     assert_eq!(result["commands"][0]["exit_code"], 3);
 }
 
-/// A command whose C arrives on B's row is read from B's column to the end of that row; a region
-/// with no B lists with a `null` command.
+/// A command whose C arrives on B's row is read from B's column to C's column; a region with no B
+/// lists with a `null` command.
 #[test]
 fn b_and_c_on_one_row_and_no_b() {
     let entry = test_entry(30, 10, 100);
@@ -92,6 +92,16 @@ fn b_and_c_on_one_row_and_no_b() {
     let result = history(&entry, &json!({}));
     assert_eq!(command_texts(&result), vec![Value::Null, json!("ls")]);
     assert_eq!(result["commands"][0]["exit_code"], 4);
+}
+
+/// When B, C, the output and D all share one row, the command stops at C's column, so output
+/// printed on that row after C never joins the command text.
+#[test]
+fn a_command_on_one_row_with_its_output_stops_at_c() {
+    let entry = test_entry(40, 10, 100);
+    emit(&entry, b"\x1b]133;A\x07$ \x1b]133;B\x07echo ok\x1b]133;C\x07RESULT\x1b]133;D;0\x07");
+    emit(&entry, b"\x1b]133;A\x07");
+    assert_eq!(command_texts(&history(&entry, &json!({}))), vec![json!("echo ok")]);
 }
 
 /// A typed command that soft-wraps is joined into one command, keeping the spaces at the wrap.

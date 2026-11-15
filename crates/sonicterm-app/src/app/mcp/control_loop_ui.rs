@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sonicterm_cfg::config::McpControl;
+use unicode_general_category::{get_general_category, GeneralCategory};
 use winit::window::UserAttentionType;
 
 use super::agents::{Access, AgentSessionId, LiveSessions, MessageAdmission};
@@ -22,36 +23,19 @@ pub(crate) const TITLE_MAX_CHARS: usize = 64;
 /// The most characters of an agent's message `notify` shows.
 pub(crate) const NOTIFY_MAX_CHARS: usize = 200;
 
-/// `text` without control characters (Unicode Cc) or the format characters (Cf) that reorder or
+/// `text` without control characters (Unicode Cc) or format characters (Cf), which reorder or
 /// hide text, cut to at most `max_chars` characters, so an agent cannot fake or hide what it shows.
+/// The categories come from the Unicode tables, so no hand-kept list can miss a format character.
 pub(crate) fn display_text(text: &str, max_chars: usize) -> String {
     text.chars()
-        .filter(|character| !character.is_control() && !is_format_character(*character))
+        .filter(|character| {
+            !matches!(
+                get_general_category(*character),
+                GeneralCategory::Control | GeneralCategory::Format
+            )
+        })
         .take(max_chars)
         .collect()
-}
-
-/// Whether `character` is a Unicode format character (Cf): bidi controls, zero-width marks, the
-/// byte-order mark, the soft hyphen, invisible operators, interlinear annotation and tag marks.
-fn is_format_character(character: char) -> bool {
-    matches!(
-        character,
-        '\u{00AD}'
-            | '\u{0600}'..='\u{0605}'
-            | '\u{061C}'
-            | '\u{06DD}'
-            | '\u{070F}'
-            | '\u{08E2}'
-            | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{206F}'
-            | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
-            | '\u{E0001}'
-            | '\u{E0020}'..='\u{E007F}'
-    )
 }
 
 /// One agent message's place in the notice queue; dropping it, with its request, frees the place.
@@ -83,13 +67,13 @@ impl McpShared {
     }
 }
 
-/// How `focus_pane` brings a window forward.
+/// How `focus_pane` brings a window forward. Neither choice activates the app or focuses a
+/// window, so keys meant for another application never reach an agent's pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RaiseRequest {
-    /// SonicTerm is the active application: the window is asked to take focus.
-    Focus,
-    /// Another application is active: the OS is only asked for the user's attention, so keys
-    /// meant for that application never reach an agent's pane.
+    /// The pane's window is the frontmost SonicTerm window: it is already in front.
+    AlreadyFront,
+    /// Any other window: the OS is only asked for the user's attention.
     Attention,
 }
 
@@ -118,8 +102,8 @@ fn admit_agent_message(sessions: &LiveSessions, session: AgentSessionId) -> Resu
 }
 
 impl App {
-    /// `focus_pane` on the loop: select the pane's tab and the pane within it, then raise its
-    /// window while SonicTerm is active, or else request the user's attention.
+    /// `focus_pane` on the loop: select the pane's tab and the pane within it; unless its window
+    /// is already the frontmost one, request the user's attention. Never activates the app.
     pub(crate) fn mcp_focus_pane(
         &mut self,
         sessions: &LiveSessions,
@@ -166,33 +150,29 @@ impl App {
         LoopReply::Focused { raised }
     }
 
-    /// Bring `window_id` forward: focus it while a SonicTerm window is frontmost, else only ask
-    /// the OS for attention. `true` when the window was asked to take focus; best effort, since
-    /// Wayland and minimized windows may refuse.
+    /// Bring `window_id` forward without taking OS focus: `true` when it is the frontmost
+    /// SonicTerm window and so already in front, else the OS is asked for the user's attention.
     fn surface_window(&self, window_id: crate::app::WindowId) -> bool {
-        let app_active = self
-            .registry
-            .frontmost_window
-            .is_some_and(|frontmost| self.registry.windows.contains_key(&frontmost));
-        let request = if app_active { RaiseRequest::Focus } else { RaiseRequest::Attention };
+        // The cached frontmost window can be stale while a blur is still queued, so it only
+        // reports what is in front; it never licenses `focus_window`, which activates the app.
+        let request = if self.registry.frontmost_window == Some(window_id) {
+            RaiseRequest::AlreadyFront
+        } else {
+            RaiseRequest::Attention
+        };
         #[cfg(test)]
         RAISE_REQUESTS.with(|requests| requests.borrow_mut().push(request));
-        let Some(native) =
-            self.registry.windows.get(&window_id).and_then(|window| window.window.as_ref())
-        else {
-            // When: the window has no `native` window (headless), there is nothing to raise.
-            return false;
-        };
-        match request {
-            RaiseRequest::Focus => {
-                native.focus_window();
-                true
-            }
-            RaiseRequest::Attention => {
-                native.request_user_attention(Some(UserAttentionType::Informational));
-                false
-            }
+        if request == RaiseRequest::AlreadyFront {
+            // When: the window is `AlreadyFront`, nothing needs to come forward.
+            return true;
         }
+        if let Some(native) =
+            self.registry.windows.get(&window_id).and_then(|window| window.window.as_ref())
+        {
+            // A headless window has no `native` window to ask for attention.
+            native.request_user_attention(Some(UserAttentionType::Informational));
+        }
+        false
     }
 
     /// `set_title` on the loop: set or clear the custom title of the pane's tab. Under

@@ -1,7 +1,7 @@
 //! Pins the finished-command records `command_history` lists: every D stamps its time and trust
 //! and a later D replaces them, only a newer prompt settles a region, a forged D alone never lists
 //! a running command, the list is newest first and bounded by FIFO eviction, and a region whose B
-//! row left history keeps no B coordinates.
+//! row left history keeps no B coordinates; C records its column.
 
 use std::time::Duration;
 
@@ -128,4 +128,39 @@ fn a_region_whose_b_left_history_has_no_b_coordinates() {
     assert_eq!(listed.len(), 1);
     assert_eq!((listed[0].input_start, listed[0].output_start_row), (None, None));
     assert_eq!(listed[0].exit_code, Some(7));
+}
+
+/// C records its column beside its row, and the listed command region carries it, so a command
+/// whose output starts on its own row can stop the typed text where the output begins.
+#[test]
+fn c_records_its_column() {
+    let mut grid = Grid::new(30, 10);
+    grid.record_prompt_start();
+    grid.goto(0, 2);
+    grid.record_input_start();
+    grid.goto(0, 9);
+    grid.record_output_start();
+    grid.goto(0, 15);
+    grid.record_prompt_end(Some(0));
+    let region = *grid.newest_prompt().expect("region");
+    assert_eq!((region.output_start_row, region.output_start_col), (Some(0), 9));
+    grid.goto(1, 0);
+    grid.record_prompt_start();
+    let listed = grid.command_regions(10);
+    assert_eq!((listed[0].output_start_row, listed[0].output_start_col), (Some(0), 9));
+}
+
+/// A C that arrives while a wrap is pending sits past the full row, so the character in the last
+/// column still counts as typed text rather than being cut off at C.
+#[test]
+fn c_after_a_full_row_records_the_column_past_it() {
+    let mut grid = Grid::new(4, 3);
+    grid.record_prompt_start();
+    grid.record_input_start();
+    for character in "abcd".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+    }
+    assert!(grid.pending_wrap());
+    grid.record_output_start();
+    assert_eq!(grid.newest_prompt().expect("region").output_start_col, 4);
 }

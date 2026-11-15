@@ -1,8 +1,8 @@
 //! Pins the tools that surface an agent's work: `focus_pane`, `set_title` and `notify` refuse
 //! outside the control scope without changing anything, focus selects a hidden tab in the main or
-//! a child window, a tab zoomed on another pane is refused, the window is raised only while
-//! SonicTerm is active, titles and messages lose control and format characters, and one session's
-//! messages are rate-limited and bounded by the notice queue.
+//! a child window, a tab zoomed on another pane is refused, focus never activates the app and
+//! reports a raise only for a pane in the frontmost window, titles and messages lose control and
+//! format characters, and one session's messages are rate-limited and bounded by the notice queue.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -215,25 +215,46 @@ fn a_tab_zoomed_on_another_pane_refuses_focus() {
     assert_eq!(app.main().unwrap().tabs.active_index(), 1);
 }
 
-/// The window is asked to take focus only while a SonicTerm window is frontmost; otherwise only
-/// user attention is requested, so focus never moves away from another application.
+/// Focus never activates the app: a pane whose window is the frontmost SonicTerm window is
+/// already in front and reports `raised`, while with no SonicTerm window frontmost only the user's
+/// attention is requested and nothing is raised.
 #[test]
-fn focus_raises_only_while_sonicterm_is_active() {
+fn focus_reports_raised_only_for_the_frontmost_window_and_never_activates() {
     let sessions = LiveSessions::default();
     let (first, second) = (sessions.open(), sessions.open());
     let (mut app, _user, agent) = seeded(first);
     take_raises();
     app.registry.frontmost_window = None;
     let inactive = access(McpControl::Agent, McpIsolation::Shared, first);
-    assert!(matches!(app.mcp_focus_pane(&sessions, inactive, agent), LoopReply::Focused { .. }));
+    let reply = app.mcp_focus_pane(&sessions, inactive, agent);
+    assert!(matches!(reply, LoopReply::Focused { raised: false }));
     assert_eq!(take_raises(), [RaiseRequest::Attention]);
     // A second session has its own message slot.
     app.registry.frontmost_window = app.registry.main_window_id;
     let active = access(McpControl::Agent, McpIsolation::Shared, second);
-    // A headless window has no native window to raise, so the result reports none.
     let reply = app.mcp_focus_pane(&sessions, active, agent);
+    assert!(matches!(reply, LoopReply::Focused { raised: true }));
+    assert_eq!(take_raises(), [RaiseRequest::AlreadyFront]);
+}
+
+/// A pane in a SonicTerm window other than the frontmost one only requests the user's attention:
+/// the cached frontmost window can be stale while a blur is queued, so another SonicTerm window
+/// being in front never licenses activating the app.
+#[test]
+fn focus_never_activates_a_different_sonicterm_window() {
+    let sessions = LiveSessions::default();
+    let mine = sessions.open();
+    let mut app = app();
+    let main_pane = app.__test_seed_tab("main");
+    app.main_mut().unwrap().panes.get_mut(&main_pane).unwrap().creator = PaneOwner::Agent(mine);
+    let child = app.__test_seed_child_window(&["child"]);
+    app.registry.frontmost_window = Some(child);
+    take_raises();
+    let own = access(McpControl::Agent, McpIsolation::Shared, mine);
+    let reply = app.mcp_focus_pane(&sessions, own, main_pane);
     assert!(matches!(reply, LoopReply::Focused { raised: false }));
-    assert_eq!(take_raises(), [RaiseRequest::Focus]);
+    assert_eq!(take_raises(), [RaiseRequest::Attention]);
+    assert_eq!(app.registry.frontmost_window, Some(child), "focus moved to another window");
 }
 
 /// `focus_pane` and `notify` share one slot per session: after a focus, the same session's
@@ -303,6 +324,16 @@ fn display_text_drops_control_and_format_characters_then_caps_characters() {
     assert_eq!(display_text(text, 64), "ab[2Jcdey");
     assert_eq!(display_text(&"é".repeat(100), TITLE_MAX_CHARS).chars().count(), 64);
     assert_eq!(display_text("\u{200B}\u{1b}", 64), "");
+}
+
+/// Every Unicode format character (Cf) is dropped, not only a listed subset: the prepended
+/// number mark U+0890, the Kaithi number sign U+110BD, the shorthand format overlap U+1BCA0 and
+/// the musical begin-beam U+1D173 vanish, and format-only text becomes blank.
+#[test]
+fn display_text_drops_every_format_character() {
+    let text = "a\u{0890}b\u{110BD}c\u{1BCA0}d\u{1D173}e";
+    assert_eq!(display_text(text, 64), "abcde");
+    assert_eq!(display_text("\u{0890}\u{110BD}\u{1BCA0}\u{1D173}", 64), "");
 }
 
 /// Through the tool path a message carries SonicTerm's prefix even from a client that names

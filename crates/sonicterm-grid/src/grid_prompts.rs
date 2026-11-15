@@ -113,6 +113,8 @@ pub struct CommandRegion {
     pub input_start: Option<(u64, u16)>,
     /// Absolute row where the command's output begins (C); `None` once it left history.
     pub output_start_row: Option<u64>,
+    /// The column on `output_start_row` where C arrived.
+    pub output_start_col: u16,
     /// When C was parsed.
     pub output_start_at: Option<Instant>,
     /// Absolute row where the latest D arrived; `None` once it left history.
@@ -166,6 +168,7 @@ impl Grid {
             input_start: None,
             input_start_at: None,
             output_start_row: None,
+            output_start_col: 0,
             output_start_at: None,
             output_seen: false,
             end_row: None,
@@ -198,6 +201,14 @@ impl Grid {
     /// shell token; the pinned run keeps that for its own C.
     pub fn record_output_start_marked(&mut self, authenticated: bool) {
         let row = self.cursor_absolute_row();
+        // A pending wrap leaves the cursor on the last column, whose character is already typed,
+        // so C then sits past the full row rather than on that character.
+        let col = if self.pending_wrap {
+            self.cols
+        } else {
+            // When: no wrap is `pending_wrap`, C sits on the cursor's own column.
+            self.cursor.col.min(self.cols.saturating_sub(1))
+        };
         let token = self.row_token(row);
         let Some(last) = self.prompts.back_mut().filter(|last| !last.output_seen) else {
             // When: `back_mut` finds no region, or its `output_seen` is set, the first C stands.
@@ -206,6 +217,7 @@ impl Grid {
         let now = Instant::now();
         last.output_seen = true;
         last.output_start_row = Some(row);
+        last.output_start_col = col;
         last.output_start_at = Some(now);
         let seq = last.seq;
         let is_alt = self.is_alt();
@@ -313,6 +325,7 @@ impl Grid {
                 seq: region.seq,
                 input_start: region.input_start,
                 output_start_row: region.output_start_row,
+                output_start_col: region.output_start_col,
                 output_start_at: region.output_start_at,
                 end_row: region.end_row,
                 end_col: region.end_col,

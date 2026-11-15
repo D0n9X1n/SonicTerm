@@ -181,7 +181,8 @@ pub(crate) fn control_tools() -> Vec<Value> {
         json!({
             "name": "focus_pane",
             "description": "Select a pane's tab and the pane in it, to show the user your work. \
-                            The window is raised only while SonicTerm is the active application; \
+                            SonicTerm never takes focus from another application: raised is true \
+                            only when the pane's window is already the frontmost SonicTerm window; \
                             otherwise the OS asks for the user's attention. A tab zoomed on another \
                             pane is refused as zoomed. Shares notify's limit of one call per 2 s.",
             "inputSchema": {

@@ -111,9 +111,9 @@ pub(crate) enum LoopReply {
     RunStarted(Box<run::RunStarted>),
     /// [`LoopCall::ClosePane`] closed the pane.
     Closed,
-    /// [`LoopCall::FocusPane`] selected the pane; `raised` when its window was asked to take focus.
+    /// [`LoopCall::FocusPane`] selected the pane; `raised` when its window was already in front.
     Focused {
-        /// Whether the window was asked to take focus, not only to request attention.
+        /// Whether the window was already the frontmost one; otherwise attention was requested.
         raised: bool,
     },
     /// [`LoopCall::SetTitle`] set this title, or cleared it (`None`).
