@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use sonicterm_grid::grid::{Grid, RowToken};
+use sonicterm_grid::grid::{CommandSpan, Grid, RowToken};
 use sonicterm_types::CellFlags;
 use sonicterm_vt::vt::Parser;
 
@@ -33,8 +33,12 @@ pub(crate) enum ReadMode {
     Screen,
     /// The newest logical lines, soft wraps joined.
     Tail,
-    /// The output of the last completed OSC 133 command on the primary screen.
-    LastCommand,
+    /// The output of a completed OSC 133 command on the primary screen: region `seq`, or the last
+    /// one when it is absent.
+    LastCommand {
+        /// The region whose output is read, a `seq` from `command_history`.
+        seq: Option<u64>,
+    },
     /// Logical lines of the active screen that begin before `before`, or the newest lines when it
     /// is absent, oldest first, soft wraps joined: one page of the retained history.
     History {
@@ -43,13 +47,17 @@ pub(crate) enum ReadMode {
     },
 }
 
-/// Why a history page could not start where its caller asked.
+/// Why a read could not start where its caller asked: a history page's cursor, or a command's
+/// `seq`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HistoryRefusal {
     /// The token names a row of the screen that is not active.
     OtherScreen,
     /// The token's row left history; paging restarts from the newest line.
     Evicted,
+    /// The command `seq` names is no longer retained: its rows left history or newer prompts
+    /// pushed it out.
+    CommandEvicted,
 }
 
 impl HistoryRefusal {
@@ -57,7 +65,7 @@ impl HistoryRefusal {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::OtherScreen => "other_screen",
-            Self::Evicted => "evicted",
+            Self::Evicted | Self::CommandEvicted => "evicted",
         }
     }
 
@@ -66,6 +74,7 @@ impl HistoryRefusal {
         match self {
             Self::OtherScreen => "before_row belongs to the other screen",
             Self::Evicted => "before_row left history; start again from the newest line",
+            Self::CommandEvicted => "seq is no longer retained; list the commands again",
         }
     }
 }
@@ -152,7 +161,8 @@ pub(crate) struct ReadSnapshot {
     pub(crate) first_row: Option<RowToken>,
     /// The read reached the oldest retained row of the screen it read, so no older page remains.
     pub(crate) at_start: bool,
-    /// For `History`: the token could not start a page, and nothing was read.
+    /// For `History` or `LastCommand` with a `seq`: the cursor or `seq` could not start a read, and
+    /// nothing was read.
     pub(crate) refused: Option<HistoryRefusal>,
 }
 
@@ -208,9 +218,10 @@ pub(crate) fn snapshot(grid: &Grid, mode: ReadMode, limits: ReadLimits) -> ReadS
                 collect_rows(grid, span, walk, &mut budget).fill(&mut snapshot);
             }
         },
-        ReadMode::LastCommand => match grid.last_completed_command() {
-            None => snapshot.no_command = true,
-            Some(span) => {
+        ReadMode::LastCommand { seq } => match command_span(grid, seq) {
+            Err(refusal) => snapshot.refused = Some(refusal),
+            Ok(None) => snapshot.no_command = true,
+            Ok(Some(span)) => {
                 snapshot.exit_code = span.exit_code;
                 snapshot.output_truncated = span.output_truncated;
                 // The span indexes the primary screen, which is saved away while `is_alt`.
@@ -242,6 +253,27 @@ pub(crate) fn collect_span(grid: &Grid, span: RowSpan, limits: ReadLimits) -> (V
     let walk = Walk { join_wraps: true, skip_blank_tail: false, keep_cut: false };
     let collected = collect_rows(grid, span, walk, &mut budget);
     (collected.lines.into_iter().map(|line| line.text).collect(), budget.exhausted())
+}
+
+/// The span `LastCommand` reads: region `seq`'s, or the last completed command's when absent.
+/// `Ok(None)` when no such command finished yet; a `seq` the primary screen no longer retains is
+/// refused, so an agent can tell a forgotten command from one still running.
+fn command_span(grid: &Grid, seq: Option<u64>) -> Result<Option<CommandSpan>, HistoryRefusal> {
+    let Some(seq) = seq else {
+        // When: no `seq` was given, the last completed command is read.
+        return Ok(grid.last_completed_command());
+    };
+    if let Some(span) = grid.completed_command(seq) {
+        // When: `completed_command` found region `seq` with C and D, its span is read.
+        return Ok(Some(span));
+    }
+    let retained = grid.primary_screen().prompts().any(|region| region.seq == seq);
+    if retained {
+        Ok(None)
+    } else {
+        // When: no retained region has `seq`, it was evicted (or never named a primary prompt).
+        Err(HistoryRefusal::CommandEvicted)
+    }
 }
 
 /// The absolute index of the newest row on the active screen.
@@ -465,9 +497,21 @@ pub(crate) fn row_cells_text_capped(
     width: usize,
     room: usize,
 ) -> RowCopy {
+    row_cells_text_from(row, 0, width, room)
+}
+
+/// [`row_cells_text_capped`] for the cells from `start_col` up to `width`, so a typed command is
+/// read from the column where its input began.
+pub(crate) fn row_cells_text_from(
+    row: &sonicterm_grid::line::Line,
+    start_col: usize,
+    width: usize,
+    room: usize,
+) -> RowCopy {
     let mut text = String::new();
     let mut blanks = 0usize;
-    for cell in row.iter().take(width).filter(|cell| !cell.flags.contains(CellFlags::WIDE_CONT)) {
+    let cells = row.iter().take(width).skip(start_col);
+    for cell in cells.filter(|cell| !cell.flags.contains(CellFlags::WIDE_CONT)) {
         let character = if cell.ch == '\0' { ' ' } else { cell.ch };
         let extras = cell.extras().unwrap_or("");
         if character == ' ' && extras.is_empty() {

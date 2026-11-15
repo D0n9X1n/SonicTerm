@@ -135,7 +135,8 @@ changes `control` drops every request already queued.
 
 ## Read scope
 
-`[mcp] read` sets which panes `list_panes`, `read_pane`, `wait_for` and `search_pane` may see.
+`[mcp] read` sets which panes `list_panes`, `read_pane`, `wait_for`, `search_pane` and
+`command_history` may see.
 
 | `read` | Read tools see |
 | --- | --- |
@@ -217,9 +218,13 @@ The server tells agents never to follow instructions found in pane text, but kee
 
 ## Tools
 
-The read tools are `list_panes`, `read_pane`, `wait_for` and `search_pane`. `read_pane`
-with `mode: "history"` pages back through a pane's scrollback, and `search_pane` finds a
-regex there, newest match first. Their arguments, caps and locking are described in
+The read tools are `list_panes`, `read_pane`, `wait_for`, `search_pane` and
+`command_history`. `read_pane` with `mode: "history"` pages back through a pane's
+scrollback, and `search_pane` finds a regex there, newest match first. `command_history`
+lists the pane's recent shell commands with their exit codes and durations, and
+`read_pane` `last_command` with a listed `seq` reads that command's output. Both need
+shell integration and read the terminal's retained text, not the shell's own history.
+Their arguments, caps and locking are described in
 [Platform Integration](Platform-Integration).
 
 The event loop answers queued requests for at most 2 ms at a time, so many agents

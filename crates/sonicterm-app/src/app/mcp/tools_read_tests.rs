@@ -247,13 +247,14 @@ fn moving_output_is_not_quiet_while_the_parser_is_held() {
     assert_eq!(outcome.reason, WaitReason::Timeout, "quiet was reported while output moved");
 }
 
-/// The tool list names every read tool, `search_pane` included, and marks each read-only;
-/// `read_pane` offers the `history` mode and its `before_row` cursor.
+/// The tool list names every read tool, `search_pane` and `command_history` included, and marks
+/// each read-only; `read_pane` offers the `history` mode, its `before_row` cursor and the
+/// `last_command` `seq`.
 #[test]
 fn the_tool_list_names_the_read_tools() {
     let list = crate::app::mcp::tool_schemas::tool_list();
     let tools = list["tools"].as_array().unwrap();
-    for name in ["list_panes", "read_pane", "wait_for", "search_pane"] {
+    for name in ["list_panes", "read_pane", "wait_for", "search_pane", "command_history"] {
         let tool = tools.iter().find(|tool| tool["name"] == name).expect(name);
         assert_eq!(tool["annotations"]["readOnlyHint"], true, "{name}");
     }
@@ -261,6 +262,7 @@ fn the_tool_list_names_the_read_tools() {
     let modes = read["inputSchema"]["properties"]["mode"]["enum"].as_array().unwrap();
     assert!(modes.contains(&json!("history")), "{modes:?}");
     assert!(read["inputSchema"]["properties"]["before_row"].is_object());
+    assert!(read["inputSchema"]["properties"]["seq"].is_object());
     let search = tools.iter().find(|tool| tool["name"] == "search_pane").unwrap();
     assert_eq!(search["inputSchema"]["required"], json!(["pane_id", "regex"]));
 }

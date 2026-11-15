@@ -1,4 +1,5 @@
-//! The read tools: `list_panes`, `read_pane` and `wait_for`; `search_pane` lives in `history.rs`.
+//! The read tools: `list_panes`, `read_pane` and `wait_for`; `search_pane` and `command_history`
+//! live in `history.rs`.
 //!
 //! The event loop only resolves panes to handles ([`LoopCall`]); everything else here runs on
 //! the connection's worker thread: bounded parser reads, regex matching and serialization.
@@ -49,6 +50,7 @@ pub(crate) fn call(
         "read_pane" => read_pane_tool(shared, arguments, scope),
         "wait_for" => wait_for(shared, arguments, scope),
         "search_pane" => history::search_pane_tool(shared, arguments, scope),
+        "command_history" => history::command_history_tool(shared, arguments, scope),
         other => super::tools_control::call(shared, other, arguments, scope)
             .unwrap_or_else(|| tool_error("unknown_tool", &format!("no tool named {other:?}"))),
     };
@@ -184,15 +186,26 @@ pub(crate) fn read_reply(entry: &PaneEntry, arguments: &Value) -> Value {
             return error;
         }
     };
+    let seq = match history::seq_arg(arguments) {
+        Ok(seq) => seq,
+        Err(error) => {
+            // When: `seq_arg` found a `seq` that is not an integer, its tool `error` is the result.
+            return error;
+        }
+    };
     let mode = match arguments.get("mode").and_then(Value::as_str).unwrap_or("tail") {
-        "history" => ReadMode::History { before },
+        "history" if seq.is_none() => ReadMode::History { before },
+        "last_command" if before.is_none() => ReadMode::LastCommand { seq },
         _ if before.is_some() => {
             // When: `before` was given for any mode but history, it has no page to bound.
             return tool_error("invalid_arguments", "before_row applies only to mode \"history\"");
         }
+        _ if seq.is_some() => {
+            // When: `seq` was given for any mode but last_command, it names no read.
+            return tool_error("invalid_arguments", "seq applies only to mode \"last_command\"");
+        }
         "screen" => ReadMode::Screen,
         "tail" => ReadMode::Tail,
-        "last_command" => ReadMode::LastCommand,
         other => {
             // When: the requested mode, `other`, is not one of the four, the call is refused.
             return tool_error("invalid_arguments", &format!("unknown mode {other:?}"));
@@ -204,7 +217,7 @@ pub(crate) fn read_reply(entry: &PaneEntry, arguments: &Value) -> Value {
     );
     let (snapshot, structured) = read_with_generation(entry, mode, limits);
     if let Some(refusal) = snapshot.refused {
-        // When: the history cursor was `refused` (other screen or evicted), its code is the result.
+        // When: the history cursor or command `seq` was `refused`, its code is the result.
         return tool_error(refusal.as_str(), refusal.message());
     }
     let summary = format!(

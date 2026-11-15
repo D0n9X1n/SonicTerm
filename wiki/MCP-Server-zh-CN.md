@@ -121,7 +121,8 @@ Linux 上管道按页释放空间，套接字按每次 16 KiB 的写入释放空
 
 ## 读取范围
 
-`[mcp] read` 决定 `list_panes`、`read_pane`、`wait_for` 和 `search_pane` 可以看到哪些窗格。
+`[mcp] read` 决定 `list_panes`、`read_pane`、`wait_for`、`search_pane` 和 `command_history`
+可以看到哪些窗格。
 
 | `read` | 读取类工具可看到 |
 | --- | --- |
@@ -183,8 +184,10 @@ agent 对话的任何东西）都能用它认领，其能力与以你的身份�
 
 ## 工具
 
-读取类工具是 `list_panes`、`read_pane`、`wait_for` 和 `search_pane`。`read_pane` 使用
-`mode: "history"` 时可逐页向前翻阅窗格的回滚缓冲区，`search_pane` 在其中查找正则，最新的匹配在前。它们的参数、上限和加锁方式见
+读取类工具是 `list_panes`、`read_pane`、`wait_for`、`search_pane` 和 `command_history`。`read_pane` 使用
+`mode: "history"` 时可逐页向前翻阅窗格的回滚缓冲区，`search_pane` 在其中查找正则，最新的匹配在前。
+`command_history` 列出窗格最近的 shell 命令及其退出码和耗时，`read_pane` 的 `last_command` 带上列出的
+`seq` 即可读取该命令的输出。两者都需要 shell 集成，读取的是终端保留的文本，而不是 shell 自己的历史。它们的参数、上限和加锁方式见
 [平台集成](Platform-Integration-zh-CN)。
 
 事件循环每次最多用 2 ms 处理排队的请求，因此多个 agent 同时调用也不会挡住输入：一次处理未轮到的请求

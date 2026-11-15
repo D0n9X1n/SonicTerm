@@ -149,6 +149,13 @@ pub struct PromptRegion {
     pub completed: bool,
     /// Exit code reported by `OSC 133 ; D ; <code>`, if any.
     pub exit_code: Option<i32>,
+    /// When the latest D was parsed; a later D replaces it with its code and trust.
+    pub end_at: Option<std::time::Instant>,
+    /// The latest D carried the pane's shell token.
+    pub end_authenticated: bool,
+    /// A newer prompt opened on this screen after the region's D, so the shell took control back
+    /// and the command is finished; a D printed by a running program alone never sets it.
+    pub settled: bool,
 }
 
 /// Maximum number of prompt regions retained per grid. Older ones are
@@ -565,7 +572,7 @@ mod grid_retention;
 
 #[path = "grid_prompts.rs"]
 mod grid_prompts;
-pub use grid_prompts::{CommandSpan, ExitSource, PinnedRun, RowToken};
+pub use grid_prompts::{CommandRegion, CommandSpan, ExitSource, PinnedRun, RowToken};
 
 #[cfg(test)]
 #[path = "grid_test_support.rs"]

@@ -1,4 +1,5 @@
-//! `search_pane`: a regex search back through a pane's retained history.
+//! `search_pane`: a regex search back through a pane's retained history; `command_history`: the
+//! pane's recent shell commands with their exit codes and durations.
 //!
 //! One call copies at most [`super::super::read::MAX_CELLS_PER_READ`] cells and [`SEARCH_BYTES`] of text under one
 //! bounded parser attempt, the same history page `read_pane` returns, then matches after the guard
@@ -7,11 +8,13 @@
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use sonicterm_grid::grid::RowToken;
+use sonicterm_grid::grid::{CommandRegion, Grid, RowToken};
 use sonicterm_vt::vt::Parser;
 
 use super::super::jsonrpc::{tool_error, tool_result};
-use super::super::read::{read_pane, ReadLimits, ReadMode};
+use super::super::read::{
+    read_pane, row_cells_text_from, ReadLimits, ReadMode, MAX_CELLS_PER_READ, PARSER_WAIT,
+};
 use super::super::{CallScope, McpShared, PaneEntry};
 use super::{decode_token, encode_token, regex_arg, resolve};
 
@@ -195,6 +198,217 @@ pub(crate) fn search_reply(entry: &PaneEntry, arguments: &Value) -> Value {
     )
 }
 
+/// The commands `command_history` lists when `limit` is absent.
+pub(crate) const DEFAULT_COMMANDS: usize = 10;
+/// The most commands one call lists.
+pub(crate) const MAX_COMMANDS: usize = 50;
+
+/// The longest command text returned; a longer one is cut on a character boundary.
+pub(crate) const MAX_COMMAND_BYTES: usize = 1024;
+
+/// One listed command, copied out of the pane before serialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommandEntry {
+    /// The region's identity; `read_pane` `last_command` with it reads the command's output.
+    pub(crate) seq: u64,
+    /// The typed text from B to C; `None` without a B, once B's row left history, or when the
+    /// shared cell budget ran out first.
+    pub(crate) command: Option<String>,
+    /// The code the latest D reported.
+    pub(crate) exit_code: Option<i32>,
+    /// The latest D carried the pane's shell token.
+    pub(crate) exit_authenticated: bool,
+    /// Milliseconds from C to the latest D; `None` when either time is missing.
+    pub(crate) duration_ms: Option<u64>,
+    /// The output's first row left history.
+    pub(crate) output_truncated: bool,
+}
+
+/// What one `command_history` call listed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct CommandList {
+    /// Settled commands, newest first.
+    pub(crate) commands: Vec<CommandEntry>,
+    /// Some entry's text was left out because the shared cell budget ran out, or the parser was
+    /// busy and nothing was listed.
+    pub(crate) partial: bool,
+    /// The parser could not be taken within [`PARSER_WAIT`].
+    pub(crate) busy: bool,
+}
+
+/// List the primary screen's newest `limit` settled commands. The parser is taken once, for at
+/// most [`PARSER_WAIT`]; every entry's text spends one budget of [`MAX_CELLS_PER_READ`] cells.
+// Only the pane parser is taken, once; no image store or other lock is held with it.
+pub(crate) fn list_commands(parser: &std::sync::Arc<Mutex<Parser>>, limit: usize) -> CommandList {
+    let Some(guard) = parser.try_lock_for(PARSER_WAIT) else {
+        // When: `try_lock_for` misses within `PARSER_WAIT`, nothing is listed and the call is busy.
+        return CommandList { commands: Vec::new(), partial: true, busy: true };
+    };
+    let grid = guard.grid();
+    // Regions and rows both belong to the primary screen, saved away while the alternate is up.
+    let primary = grid.primary_screen();
+    let mut cells_left = MAX_CELLS_PER_READ;
+    let mut list = CommandList::default();
+    for region in grid.command_regions(limit) {
+        let command = match command_text(primary, &region, &mut cells_left) {
+            Ok(command) => command,
+            Err(BudgetSpent) => {
+                // The shared budget is spent: this and every older entry lists without its text.
+                list.partial = true;
+                None
+            }
+        };
+        let duration_ms = region
+            .end_at
+            .zip(region.output_start_at)
+            .map(|(end, start)| end.saturating_duration_since(start).as_millis())
+            .map(|millis| u64::try_from(millis).unwrap_or(u64::MAX));
+        list.commands.push(CommandEntry {
+            seq: region.seq,
+            command,
+            exit_code: region.exit_code,
+            exit_authenticated: region.end_authenticated,
+            duration_ms,
+            output_truncated: region.output_start_row.is_none(),
+        });
+    }
+    list
+}
+
+/// The shared cell budget ran out before a command's rows were copied.
+struct BudgetSpent;
+
+/// The typed text of `region` on `primary`: from B's column to the row before C (or B's row alone
+/// when C is on it), soft wraps joined with their blanks, hard breaks kept as line feeds, trailing
+/// blanks trimmed, at most [`MAX_COMMAND_BYTES`]. Each row's cells are charged to `cells_left`
+/// before it is copied; `Ok(None)` when B is missing or its row left history.
+fn command_text(
+    primary: &Grid,
+    region: &CommandRegion,
+    cells_left: &mut usize,
+) -> Result<Option<String>, BudgetSpent> {
+    let Some((first_row, start_col)) = region.input_start else {
+        // When: the region has no `input_start`, there is no typed text to read.
+        return Ok(None);
+    };
+    // shortcut: a C on B's row is read with the whole row after B, since the region keeps C's row,
+    // not its column; a shell prints C after the typed line's newline, so this rarely matters.
+    let last_row = region
+        .output_start_row
+        .and_then(|row| row.checked_sub(1))
+        .map_or(first_row, |row| row.max(first_row));
+    let mut text = String::new();
+    // Blank cells after the previous row's text, kept only when the next row wraps from it.
+    let mut pending_blanks = 0usize;
+    for abs in first_row..=last_row {
+        let Some(row) = primary.row_at_abs(abs) else {
+            // When: `row_at_abs` has no row at `abs`, the span ended early.
+            break;
+        };
+        if row.len() > *cells_left {
+            // When: the row's cells exceed `cells_left`, the shared budget is spent.
+            *cells_left = 0;
+            return Err(BudgetSpent);
+        }
+        *cells_left -= row.len();
+        if abs > first_row {
+            if row.soft_wrapped_from_previous() {
+                text.extend(std::iter::repeat_n(' ', pending_blanks));
+            } else {
+                // When: the row does not wrap from the previous one, a hard break separates them.
+                text.push('\n');
+            }
+        }
+        let start = if abs == first_row {
+            usize::from(start_col)
+        } else {
+            // When: `abs` is a row after B's, the typed text continues from its first column.
+            0
+        };
+        let room = MAX_COMMAND_BYTES.saturating_sub(text.len());
+        let copy = row_cells_text_from(row, start, row.len(), room);
+        text.push_str(&copy.text);
+        pending_blanks = copy.trailing_blanks;
+        if copy.cut || text.len() >= MAX_COMMAND_BYTES {
+            // When: the copy was `cut` at the byte cap, the rest of the command is left out.
+            break;
+        }
+    }
+    text.truncate(text.trim_end().len());
+    // Padding or a line feed may have passed the cap; cut back to a character boundary.
+    let mut end = text.len().min(MAX_COMMAND_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    Ok(Some(text))
+}
+
+/// The `limit` argument, defaulted and clamped to 1 through [`MAX_COMMANDS`].
+pub(crate) fn limit_arg(arguments: &Value) -> usize {
+    arguments.get("limit").and_then(Value::as_u64).map_or(DEFAULT_COMMANDS, |count| {
+        usize::try_from(count).unwrap_or(MAX_COMMANDS).clamp(1, MAX_COMMANDS)
+    })
+}
+
+/// The `seq` argument of `read_pane` `last_command`, `None` when absent.
+pub(crate) fn seq_arg(arguments: &Value) -> Result<Option<u64>, Value> {
+    match arguments.get("seq") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| tool_error("invalid_arguments", "seq is not a non-negative integer")),
+    }
+}
+
+/// `command_history`: resolves the pane under the read scope, then lists its commands.
+pub(crate) fn command_history_tool(
+    shared: &McpShared,
+    arguments: &Value,
+    scope: &CallScope,
+) -> Value {
+    match resolve(shared, arguments, scope) {
+        Ok(entry) => commands_reply(&entry, arguments),
+        // Resolving the pane failed: its tool error is the result.
+        Err(error) => error,
+    }
+}
+
+/// List the resolved `entry`'s recent commands as `arguments` ask and build the tool result,
+/// serialized after the parser was released.
+pub(crate) fn commands_reply(entry: &PaneEntry, arguments: &Value) -> Value {
+    let list = list_commands(&entry.parser, limit_arg(arguments));
+    let commands: Vec<Value> = list
+        .commands
+        .iter()
+        .map(|command| {
+            json!({
+                "seq": command.seq,
+                "command": command.command,
+                "exit_code": command.exit_code,
+                "exit_authenticated": command.exit_authenticated,
+                "duration_ms": command.duration_ms,
+                "output_truncated": command.output_truncated,
+            })
+        })
+        .collect();
+    let summary = format!("{} command(s){}", commands.len(), if list.busy { ", busy" } else { "" });
+    tool_result(
+        &summary,
+        json!({
+            "pane_id": entry.pane_id.to_string(),
+            "commands": commands,
+            "partial": list.partial,
+            "busy": list.busy,
+        }),
+    )
+}
+
 #[cfg(test)]
 #[path = "history_tests.rs"]
 mod history_tests;
+
+#[cfg(test)]
+#[path = "history_commands_tests.rs"]
+mod history_commands_tests;
