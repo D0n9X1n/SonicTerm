@@ -93,8 +93,8 @@ workspace doctests, host probes, the macOS-only process-group custody test, and 
 resource-baseline capture. It also runs the ignored native copied-file paste test
 alone on the hosted runner, after the workspace doctests; the general pasteboard
 is not exercised concurrently with workspace tests. The scenario harness's unit
-tests, their feature and harness-API variants, the glyph atlas working-set measurement
-and the previous-release harness check run in the Intel `macos-smoke` leg instead,
+tests, their feature and harness-API variants and the glyph atlas working-set measurement
+run in the Intel `macos-smoke` leg instead,
 right after its perf scenario smoke has built the harness: they do not depend on the
 architecture, and moving them takes them off `macos-core`, the longest job, without
 holding a third macOS runner. The exact native test must

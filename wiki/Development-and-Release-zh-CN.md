@@ -79,7 +79,7 @@ python3 scripts/local-gate.py
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`、`native` | `macos-core`、`macos-smoke` |
 | `mcp-smoke` | `python3 scripts/mcp-smoke.py` | macOS、Linux | `local` | `rust`、`native`、`display` | `macos-core`、`linux-packages` |
 | `windows-mcp-smoke` | `python scripts/mcp-smoke.py` | Windows | `local` | `rust`、`native`、`display` | `windows-smoke` |
-| `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`、`native` | `macos-smoke` |
+| `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`、`native` | `macos-core` |
 | `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`、`native` | `windows-checks` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-core`、`macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
@@ -217,7 +217,7 @@ cfg 关闭的诊断在两侧都不可用：此时 S1/atlas-retry 不运行任何
 其 harness 以 `blocked`（退出码 5）结束，而不是无效。
 
 head 的 harness 必须仍能在上一个发布标签上构建，那正是发布比较所用的 base。`perf-compare.py --check-previous-release`
-（关卡步骤 `perf-previous-release`，在 CI 的 `macos-smoke` 与 `windows-checks` 作业中运行）需要完整克隆。它按发布工作流的
+（关卡步骤 `perf-previous-release`，在 CI 的 `macos-core` 与 `windows-checks` 作业中运行）需要完整克隆。它按发布工作流的
 规则对 HEAD 的父提交选出该标签，叠加 head 的 harness，推导比较会使用的特性与 cfg，并在自己的目标目录中检查两个 harness
 示例，结束时连同其工作树一起删除该目录。Ubuntu 的示例根排除了 probe，因此 Ubuntu 不运行它。
 

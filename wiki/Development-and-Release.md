@@ -81,7 +81,7 @@ python3 scripts/local-gate.py
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `mcp-smoke` | `python3 scripts/mcp-smoke.py` | macOS, Linux | `local` | `rust`, `native`, `display` | `macos-core`, `linux-packages` |
 | `windows-mcp-smoke` | `python scripts/mcp-smoke.py` | Windows | `local` | `rust`, `native`, `display` | `windows-smoke` |
-| `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`, `native` | `macos-smoke` |
+| `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`, `native` | `macos-core` |
 | `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`, `native` | `windows-checks` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-core`, `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
@@ -295,7 +295,7 @@ directly without the cfg, its harness ends `blocked` (exit 5), never invalid.
 
 The head's harness must still build on the previous release tag, the base a
 release comparison uses. `perf-compare.py --check-previous-release` (the
-`perf-previous-release` gate step, in the `macos-smoke` and `windows-checks` CI
+`perf-previous-release` gate step, in the `macos-core` and `windows-checks` CI
 jobs) needs a full clone. It picks that tag with the release workflow's rule
 applied to HEAD's parent, overlays the head's harness, derives the features and
 cfgs a comparison would, and checks both harness examples there in its own

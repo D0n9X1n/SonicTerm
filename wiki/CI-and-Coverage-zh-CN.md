@@ -58,7 +58,7 @@ macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再
 一次性 workspace 测试 gate、workspace doctest、host probe、macOS 专属进程组监管测试与真实
 resource baseline 采集。它还在 workspace doctest 之后，单独运行被忽略的原生文件复制粘贴测试，
 不与 workspace 测试同时访问通用粘贴板。scenario harness 的单元测试及其 feature 与 harness API
-变体、glyph atlas 工作集测量和上一发布版 harness 检查，改在 Intel `macos-smoke` 腿中、紧接其
+变体以及 glyph atlas 工作集测量，改在 Intel `macos-smoke` 腿中、紧接其
 perf scenario smoke 构建好 harness 之后运行：它们与架构无关，移走后最长的 `macos-core` 变短，
 且不占用第三个 macOS runner。这个原生测试必须实际运行，不能跳过；本地运行的明确
 许可方式见[本地 Gate](Local-Gate-zh-CN)。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版本、raw-exit、window-owner、

@@ -234,7 +234,7 @@ STEPS = (
     # the features and harness cfgs a comparison would derive: a cold check of the workspace (3600 s) plus
     # the worktree and overlay. Ubuntu's example roots exclude the probe, so only macOS and Windows run it.
     gate_model.Step("perf-previous-release", ("python3", "scripts/perf-compare.py", "--check-previous-release"),
-         ("macos",), 4200, "local", ("rust", "native"), ("macos-smoke",)),
+         ("macos",), 4200, "local", ("rust", "native"), ("macos-core",)),
     gate_model.Step("windows-perf-previous-release", ("python", "scripts/perf-compare.py", "--check-previous-release"),
          ("windows",), 4200, "local", ("rust", "native"), ("windows-checks",)),
     gate_model.Step("release-macos", ("cargo", "build", "--release", "-p", "sonicterm-mac"), ("macos",), 1500,
