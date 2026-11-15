@@ -17,6 +17,9 @@ use sonicterm_vt::vt::Parser;
 pub(crate) const PARSER_WAIT: Duration = Duration::from_millis(5);
 /// The most cells a read visits while holding the parser.
 pub(crate) const MAX_CELLS_PER_READ: usize = 32_768;
+// A search call rereads one overlap row before the rows it owns, so two of the widest rows must
+// fit one call's cells; otherwise the overlap alone could spend the budget and the cursor stall.
+const _: () = assert!(2 * sonicterm_grid::grid::MAX_GRID_AXIS as usize <= MAX_CELLS_PER_READ);
 /// The default and largest line counts a read returns.
 pub(crate) const DEFAULT_LINES: usize = 120;
 /// The largest line count a caller may ask for.
