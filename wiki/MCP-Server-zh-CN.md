@@ -202,6 +202,12 @@ agent 对话的任何东西）都能用它认领，其能力与以你的身份�
 | `close_pane` | 关闭一个窗格；标签页的唯一窗格会关闭该标签页。主窗口的最后一个标签页永不关闭。 |
 | `session_token` | 返回本会话的恢复令牌；见上文“Agent 会话”一节。 |
 | `claim_panes` | 给定已断开会话的 `resume_token` 和本会话自己的 `own_token`，把该会话的窗格转给本会话；报告转移了多少个。 |
+| `focus_pane` | 选中窗格所在的标签页（主窗口或子窗口中）以及其中的该窗格。标签页正缩放到另一个窗格时以 `zoomed` 拒绝。只有 SonicTerm 是当前活动应用时才会把窗口提到前台；否则 SonicTerm 只请求操作系统提醒用户，绝不从其他应用夺走焦点。报告 `selected` 和 `raised`；提到前台只是尽力而为（Wayland 和最小化的窗口可能拒绝）。 |
+| `set_title` | 像重命名命令一样设置窗格所在标签页的自定义标题；空标题或只含空白的标题会清除它。去掉控制字符和格式字符（Unicode Cc 和 Cf）后至多 64 个字符。在 `control = "agent"` 下，标签页中的每个窗格都必须是该会话可控制的，因此拆分到你的标签页中的 agent 无法为其改名。 |
+| `notify` | 在应用内通知中显示 `Agent message (pane <id>): <text>`。前缀由 SonicTerm 自己给出，不显示客户端名称，因此 agent 无法冒充 SonicTerm。去掉控制字符和格式字符后至多 200 个字符。报告 `shown`；已有 8 条通知在等待时报告 `queue_full`。 |
+
+`focus_pane` 和 `notify` 共享每个 agent 会话的一个限额：每 2 s 一次调用，否则返回 `rate_limited`。
+因范围、READONLY 或缩放而被拒绝的调用不计入。
 
 `run_command` 需要 shell 集成：shell 必须用 OSC 133 `A`、`B`、`C`、`D` 标记提示符，WezTerm、
 iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有输入的文本、输入队列不为空，或上一条

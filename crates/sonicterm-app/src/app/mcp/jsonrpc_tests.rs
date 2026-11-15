@@ -129,3 +129,24 @@ fn initialize_answers_a_handshake_revision() {
     assert_eq!(initialize_result(&stateless)["protocolVersion"], "2025-11-25");
     assert!(!PROTOCOL_VERSIONS.contains(&"2026-07-28"));
 }
+
+/// The `instructions` describe the read workflow tool by tool and keep the warning that pane text
+/// is untrusted, so a client that reads them learns paging, searching and the surfacing tools.
+#[test]
+fn initialize_instructions_describe_the_workflow() {
+    let instructions = initialize_result(&json!({}))["instructions"].as_str().unwrap().to_owned();
+    for needle in [
+        "list_panes",
+        "read_pane",
+        "after_row",
+        "history",
+        "search_pane",
+        "command_history",
+        "focus_pane",
+        "set_title",
+        "notify",
+        "untrusted",
+    ] {
+        assert!(instructions.contains(needle), "{needle}: {instructions}");
+    }
+}

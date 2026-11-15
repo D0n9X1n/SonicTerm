@@ -675,7 +675,7 @@ the next start removes those whose process is gone.
 | `search_pane` | Searches the active screen's retained history for `regex` (required, the same size limit as `wait_for`), newest match first, ending before `before_row` or at the newest line, and returns at most `max_results` matches (default 20, at most 100). Each call copies at most 32,768 cells and 256 KiB of text under one parser attempt of at most 5 ms, then matches after releasing it. Each logical line is matched whole; a line longer than one call is matched on the part that call copied and reported `cut`, never as if it were the whole line. Each match gives `row`, its line's first row, `line`, at most 1 KiB (shortened around the match and marked `cut` when longer), and `cut`. Pass `next_before_row` to the next call until `scan_complete`: it is the first row of the oldest line examined, or of the last match's line when `max_results` was reached, so no match is skipped and a line straddling two calls is examined once. `at_start` says the copy reached the oldest retained row. A busy parser answers `busy` with no matches and the same cursor; `other_screen` and `evicted` refuse a cursor as `read_pane` does. Blank lines never match. |
 
 The control tools (`create_pane`, `send_text`, `send_keys`, `run_command`,
-`close_pane`) and the `[mcp] control` scope are described in [MCP Server](MCP-Server). Each
+`close_pane`, `focus_pane`, `set_title`, `notify`) and the `[mcp] control` scope are described in [MCP Server](MCP-Server). Each
 is checked against the scope again on the event loop when it runs.
 
 A read takes the pane's parser for one attempt of at most 5 ms, visits at most

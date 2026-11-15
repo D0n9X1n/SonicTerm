@@ -28,6 +28,8 @@ pub(crate) mod agents;
 pub(crate) mod claims;
 #[path = "mcp/control_loop.rs"]
 pub(crate) mod control_loop;
+#[path = "mcp/control_loop_ui.rs"]
+pub(crate) mod control_loop_ui;
 #[path = "mcp/dispatch.rs"]
 pub(crate) mod dispatch;
 #[cfg(unix)]
@@ -42,6 +44,8 @@ pub(crate) mod jsonrpc;
 pub(crate) mod keys;
 #[path = "mcp/lifecycle.rs"]
 mod lifecycle;
+#[path = "mcp/loop_call.rs"]
+mod loop_call;
 #[path = "mcp/read.rs"]
 pub(crate) mod read;
 #[path = "mcp/run.rs"]
@@ -60,6 +64,7 @@ pub(crate) mod tools_control;
 pub(crate) mod tools_read;
 
 pub(crate) use lifecycle::McpServer;
+pub(crate) use loop_call::{LoopCall, LoopReply};
 
 /// The default limit on connections served at once (`[mcp] max_connections`).
 pub(crate) const MAX_CONNECTIONS: usize = sonicterm_cfg::config::DEFAULT_MCP_CONNECTIONS as usize;
@@ -80,66 +85,6 @@ pub(crate) struct Transport {
     pub(crate) reader: Box<dyn Read + Send>,
     /// Bytes to the client; its write timeout is already [`WRITE_DEADLINE`].
     pub(crate) writer: Box<dyn Write + Send>,
-}
-
-/// Work only the event loop may do, with the reply it owes.
-pub(crate) enum LoopCall {
-    /// Every pane in every window, with the handles a read needs.
-    ListPanes,
-    /// One pane's read handles, if it exists.
-    ResolvePane {
-        /// The pane to resolve.
-        pane_id: u64,
-    },
-    /// Show `text` in the existing in-app notification; nobody waits for the reply.
-    Notice {
-        /// The sanitized, bounded message.
-        text: String,
-    },
-    /// Open a helper pane beside `anchor`.
-    CreatePane {
-        /// The pane the helper opens beside.
-        anchor: u64,
-        /// A split or a new tab.
-        placement: crate::app::pane_target::Placement,
-        /// What the helper runs.
-        launch: crate::app::pane_target::AgentLaunch,
-    },
-    /// Type `text` into a pane, then Enter when `submit` is set.
-    SendText {
-        /// The target pane.
-        pane_id: u64,
-        /// The text, at most 64 KiB.
-        text: String,
-        /// Whether to add `\r`.
-        submit: bool,
-    },
-    /// Send parsed keys to a pane.
-    SendKeys {
-        /// The target pane.
-        pane_id: u64,
-        /// The keys, already parsed.
-        keys: Vec<keys::KeySpec>,
-    },
-    /// Start a command at a pane's shell prompt.
-    RunStart {
-        /// The target pane.
-        pane_id: u64,
-        /// The command line, without control characters.
-        command: String,
-    },
-    /// Close one pane.
-    ClosePane {
-        /// The pane to close.
-        pane_id: u64,
-    },
-    /// Move a closed session's panes to the caller.
-    ClaimPanes {
-        /// The closed session's token.
-        resume: claims::ResumeToken,
-        /// The caller's own token, proving it received it.
-        own: claims::ResumeToken,
-    },
 }
 
 /// Where a pane sits in the UI, which only `list_panes` reports. Computing it orders every
@@ -178,27 +123,6 @@ pub(crate) struct PaneEntry {
     pub(crate) run_typed_at: Arc<AtomicU64>,
     /// Set while an agent run owns the pane.
     pub(crate) agent_run: Arc<AtomicBool>,
-}
-
-/// What the loop answered.
-pub(crate) enum LoopReply {
-    /// The panes [`LoopCall::ListPanes`] found.
-    Panes(Vec<PaneEntry>),
-    /// The pane [`LoopCall::ResolvePane`] found.
-    Pane(PaneEntry),
-    /// The request was refused, with a stable code and a message.
-    Refused(&'static str, String),
-    /// [`LoopCall::CreatePane`] opened this pane.
-    Created(crate::app::pane_target::CreatedPane),
-    /// A write queued this many bytes; `receipt` is its delivery ticket and the pane's probe, or
-    /// `None` for a pane without a PTY.
-    Written(usize, Option<(u64, sonicterm_io::pty::PtyDeliveryProbe)>),
-    /// [`LoopCall::RunStart`] started a run.
-    RunStarted(Box<run::RunStarted>),
-    /// [`LoopCall::ClosePane`] closed the pane.
-    Closed,
-    /// [`LoopCall::ClaimPanes`] moved this many panes.
-    Claimed(usize),
 }
 
 /// A request waiting in the inbox.
@@ -242,8 +166,9 @@ pub(crate) struct McpShared {
     /// The most connections served at once; a further one is refused. A change applies to new
     /// connections only.
     pub(crate) connection_limit: AtomicU64,
-    /// Connection notices queued and not yet shown, at most [`MAX_PENDING_NOTICES`].
-    pending_notices: AtomicU64,
+    /// Notices queued and not yet shown, at most [`MAX_PENDING_NOTICES`]: connection notices and
+    /// agent messages, whose [`control_loop_ui::NoticeSlot`] holds a share of this counter.
+    pending_notices: Arc<AtomicU64>,
     /// Bytes every connection holds right now: partial request lines and replies being written.
     /// The loop charges this figure to the governor's `Mcp` owner.
     pub(crate) buffered_bytes: AtomicU64,
@@ -294,7 +219,7 @@ impl McpShared {
             proxy: Mutex::new(proxy),
             connections: AtomicU64::new(0),
             connection_limit: AtomicU64::new(MAX_CONNECTIONS as u64),
-            pending_notices: AtomicU64::new(0),
+            pending_notices: Arc::new(AtomicU64::new(0)),
             buffered_bytes: AtomicU64::new(0),
             waiters: Mutex::new(Vec::new()),
             #[cfg(test)]

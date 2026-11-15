@@ -61,3 +61,22 @@ fn owner_view_follows_the_live_set() {
             .collect();
     assert_eq!(spellings, ["user", "you", "other_agent", "orphaned"]);
 }
+
+/// One message per session per interval: a second inside it is refused and records nothing, so
+/// the next admission is measured from the first; another session has its own clock; a closed or
+/// unknown session is refused rather than admitted.
+#[test]
+fn a_session_admits_one_agent_message_per_interval() {
+    let sessions = LiveSessions::default();
+    let (mine, theirs) = (sessions.open(), sessions.open());
+    let start = std::time::Instant::now();
+    assert_eq!(sessions.admit_message(mine, start), MessageAdmission::Admitted);
+    let early = start + AGENT_MESSAGE_INTERVAL / 2;
+    assert_eq!(sessions.admit_message(mine, early), MessageAdmission::TooSoon);
+    assert_eq!(sessions.admit_message(theirs, early), MessageAdmission::Admitted);
+    let later = start + AGENT_MESSAGE_INTERVAL;
+    assert_eq!(sessions.admit_message(mine, later), MessageAdmission::Admitted);
+    sessions.close(mine);
+    assert_eq!(sessions.admit_message(mine, later), MessageAdmission::Closed);
+    assert_eq!(sessions.admit_message(AgentSessionId::next(), later), MessageAdmission::Closed);
+}

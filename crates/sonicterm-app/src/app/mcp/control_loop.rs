@@ -39,6 +39,10 @@ pub(crate) enum Refusal {
     Unavailable,
     /// The pane is the main window's last tab.
     LastTab,
+    /// The pane's tab is zoomed on a different pane, so selecting it would change the user's zoom.
+    Zoomed,
+    /// The session put a message in front of the user less than two seconds ago.
+    RateLimited,
 }
 
 impl Refusal {
@@ -56,6 +60,8 @@ impl Refusal {
             Self::DraftPresent => "draft_present",
             Self::Unavailable => "unavailable",
             Self::LastTab => "last_tab",
+            Self::Zoomed => "zoomed",
+            Self::RateLimited => "rate_limited",
         }
     }
 
@@ -78,6 +84,8 @@ impl Refusal {
             }
             Self::Unavailable => "the window cannot host a new pane now",
             Self::LastTab => "the pane is the main window's last tab",
+            Self::Zoomed => "the pane's tab is zoomed on another pane",
+            Self::RateLimited => "at most one focus_pane or notify per session every 2 s",
         }
     }
 

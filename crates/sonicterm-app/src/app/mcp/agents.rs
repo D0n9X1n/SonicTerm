@@ -6,9 +6,10 @@
 //! the session ends the pane is orphaned, which is derived from the live set rather than stored,
 //! so a disconnect walks no panes and a create racing a disconnect is orphaned by construction.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use sonicterm_cfg::config::{McpControl, McpCreateAnchor, McpIsolation, McpRead};
@@ -146,11 +147,27 @@ impl From<McpControl> for Access {
     }
 }
 
+/// The shortest gap between two messages one session puts in front of the user: a `notify`, or a
+/// `focus_pane` that selects a tab and may raise the window.
+pub(crate) const AGENT_MESSAGE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Whether a session may put a message in front of the user now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MessageAdmission {
+    /// Admitted; the session's clock restarts now.
+    Admitted,
+    /// The session's previous message was less than [`AGENT_MESSAGE_INTERVAL`] ago.
+    TooSoon,
+    /// The session is no longer connected, so it may show nothing.
+    Closed,
+}
+
 /// The sessions still connected; a session leaves when its connection closes.
 #[derive(Default)]
 pub(crate) struct LiveSessions {
-    /// The connected sessions; held only for one insert, remove or lookup.
-    live: Mutex<HashSet<AgentSessionId>>,
+    /// The connected sessions, each with the instant of its last admitted message; held only for
+    /// one insert, remove, lookup or admission.
+    live: Mutex<HashMap<AgentSessionId, Option<Instant>>>,
     /// Each session's resume token, kept past its close while it may own panes.
     pub(crate) tokens: super::claims::ResumeRegistry,
 }
@@ -166,7 +183,7 @@ impl LiveSessions {
     /// resume token.
     pub(crate) fn open_connection(&self, in_flight: Option<Arc<AtomicBool>>) -> AgentSessionId {
         let session = AgentSessionId::next();
-        self.live.lock().insert(session);
+        self.live.lock().insert(session, None);
         self.tokens.connect(session, in_flight);
         session
     }
@@ -179,7 +196,24 @@ impl LiveSessions {
 
     /// Whether `session` is still connected.
     pub(crate) fn contains(&self, session: AgentSessionId) -> bool {
-        self.live.lock().contains(&session)
+        self.live.lock().contains_key(&session)
+    }
+
+    /// Admit one message from `session` at `now`: at most one per [`AGENT_MESSAGE_INTERVAL`]. The
+    /// limit lives on the session, not on one call, so a client cannot reset it per call.
+    pub(crate) fn admit_message(&self, session: AgentSessionId, now: Instant) -> MessageAdmission {
+        let mut live = self.live.lock();
+        let Some(last) = live.get_mut(&session) else {
+            // When: `session` is not `live`, its connection closed and it shows nothing.
+            return MessageAdmission::Closed;
+        };
+        if last.is_some_and(|last| now.saturating_duration_since(last) < AGENT_MESSAGE_INTERVAL) {
+            // When: the `last` message is younger than the interval, this one is refused and the
+            // clock keeps running from the last admitted one.
+            return MessageAdmission::TooSoon;
+        }
+        *last = Some(now);
+        MessageAdmission::Admitted
     }
 }
 

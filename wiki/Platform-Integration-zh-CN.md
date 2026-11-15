@@ -518,7 +518,7 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 | `command_history` | 列出主屏幕最近的 shell 命令，最新的在前，备用屏幕开启时同样可用：至多 `limit` 条（默认 10，至多 50）。命令在稳定后才会列出：已收到 OSC 133 C 和 D，且在其 D 之后打开了更新的提示符（A），因此仍在运行的程序打印的 D 绝不会让它列出，最新的命令要等 shell 显示下一个提示符后才出现。之后的 D 会同时替换退出码、其可信性和结束时间。每一项给出 `seq`（传给 `read_pane` 的 `last_command`）、`command`（从 B 所在列到 C 前一行的输入文本，软换行连同其空格合并，保留换行，去掉末尾空白，至多 1 KiB；区域没有 B 或 B 所在行已离开历史时为 `null`）、`exit_code`、`exit_authenticated`（最新的 D 携带了窗格的 shell 令牌）、`duration_ms`（从 C 到最新的 D；任一缺失时为 `null`）和 `output_truncated`（输出的首行已离开历史）。一次调用只获取一次解析器、至多 5 ms，所有条目共享至多 32,768 个单元格的复制预算；预算用完后，更旧的条目不带 `command` 返回，结果为 `partial: true`。解析器忙时以 `busy` 和 `partial` 返回，没有条目。这是终端保留的文本，而不是 shell 的历史：命令所在行离开历史，或之后又出现 256 个提示符时，该命令即被遗忘。 |
 | `search_pane` | 在活动屏幕保留的历史中查找 `regex`（必需，大小限制与 `wait_for` 相同），最新的匹配在前，范围在 `before_row` 之前结束（未给出时从最新的行开始），至多返回 `max_results` 个匹配（默认 20，至多 100）。每次调用在一次至多 5 ms 的解析器尝试中至多复制 32,768 个单元格和 256 KiB 文本，释放锁之后再匹配。每个逻辑行整行匹配；比一次调用还长的行只匹配该次调用复制的部分并报告 `cut`，绝不当作整行。每个匹配给出 `row`（该行的首行标记）、`line`（至多 1 KiB，更长时围绕匹配截短并标记 `cut`）和 `cut`。把 `next_before_row` 传给下一次调用，直到 `scan_complete`：它是所检查的最旧一行的首行，达到 `max_results` 时则是最后一个匹配所在行的首行，因此不会跳过匹配，跨两次调用的行只检查一次。`at_start` 表示复制已到达保留的最旧一行。解析器忙时以 `busy` 返回，没有匹配，游标不变；`other_screen` 和 `evicted` 与 `read_pane` 一样拒绝游标。空行永不匹配。 |
 
-控制类工具（`create_pane`、`send_text`、`send_keys`、`run_command`、`close_pane`）和
+控制类工具（`create_pane`、`send_text`、`send_keys`、`run_command`、`close_pane`、`focus_pane`、`set_title`、`notify`）和
 `[mcp] control` 范围见 [MCP 服务器](MCP-Server-zh-CN)。每个工具在事件循环上执行时都会再次按范围检查。
 
 一次读取对窗格解析器只尝试一次、至多 5 ms，最多访问 32,768 个单元格（含空白行），复制到字节上限即停止；解析器被占用时直接返回

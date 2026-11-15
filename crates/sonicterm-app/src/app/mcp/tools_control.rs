@@ -1,4 +1,5 @@
-//! The control tools: `create_pane`, `send_text`, `send_keys`, `run_command` and `close_pane`.
+//! The control tools: `create_pane`, `send_text`, `send_keys`, `run_command`, `close_pane`, and
+//! `focus_pane`, `set_title` and `notify`, which surface an agent's work to the user.
 //! Arguments are checked here, on the connection's worker; the loop rechecks scope and does the
 //! work; `run_command` then waits here, off the loop.
 
@@ -9,6 +10,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::claims::ResumeToken;
+use super::control_loop_ui::{display_text, NOTIFY_MAX_CHARS, TITLE_MAX_CHARS};
 use super::jsonrpc::{tool_error, tool_result};
 use super::run::{wait_run, DEFAULT_RUN_WAIT, MAX_RUN_WAIT};
 use super::tools_read::pane_id_arg;
@@ -176,6 +178,59 @@ pub(crate) fn control_tools() -> Vec<Value> {
             "outputSchema": output(json!({ "claimed": { "type": "integer", "minimum": 0 } })),
             "annotations": { "destructiveHint": false },
         }),
+        json!({
+            "name": "focus_pane",
+            "description": "Select a pane's tab and the pane in it, to show the user your work. \
+                            The window is raised only while SonicTerm is the active application; \
+                            otherwise the OS asks for the user's attention. A tab zoomed on another \
+                            pane is refused as zoomed. Shares notify's limit of one call per 2 s.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["pane_id"],
+                "properties": { "pane_id": pane_id },
+            },
+            "outputSchema": output(json!({
+                "pane_id": { "type": "string" },
+                "selected": { "type": "boolean" },
+                "raised": { "type": "boolean" },
+            })),
+            "annotations": { "destructiveHint": false },
+        }),
+        json!({
+            "name": "set_title",
+            "description": "Set the title of a pane's tab; an empty or blank title clears it. At \
+                            most 64 characters once control and format characters are removed. \
+                            Under control 'agent' every pane in the tab must be one you may \
+                            control.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["pane_id", "title"],
+                "properties": { "pane_id": pane_id, "title": { "type": "string" } },
+            },
+            "outputSchema": output(json!({
+                "pane_id": { "type": "string" },
+                "title": { "type": ["string", "null"] },
+            })),
+            "annotations": { "destructiveHint": false },
+        }),
+        json!({
+            "name": "notify",
+            "description": "Show the user a short message about a pane you may control, as \
+                            'Agent message (pane <id>): <text>'. At most 200 characters once \
+                            control and format characters are removed. One focus_pane or notify \
+                            per 2 s per session, else rate_limited; queue_full when too many \
+                            notices wait.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["pane_id", "text"],
+                "properties": { "pane_id": pane_id, "text": { "type": "string" } },
+            },
+            "outputSchema": output(json!({
+                "pane_id": { "type": "string" },
+                "status": { "enum": ["shown"] },
+            })),
+            "annotations": { "destructiveHint": false },
+        }),
     ]
 }
 
@@ -194,6 +249,9 @@ pub(crate) fn call(
         "close_pane" => close_pane(shared, arguments, scope),
         "session_token" => session_token(shared, scope),
         "claim_panes" => claim_panes(shared, arguments, scope),
+        "focus_pane" => focus_pane(shared, arguments, scope),
+        "set_title" => set_title(shared, arguments, scope),
+        "notify" => notify(shared, arguments, scope),
         _ => {
             // When: the `name` is no control tool, the read tools answer for it.
             return None;
@@ -439,6 +497,68 @@ fn claim_panes(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Valu
     match shared.ask(LoopCall::ClaimPanes { resume, own }, scope) {
         LoopReply::Claimed(count) => {
             tool_result(&format!("claimed {count} panes"), json!({ "claimed": count }))
+        }
+        other => reply_error(other),
+    }
+}
+
+/// `focus_pane`.
+fn focus_pane(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
+    let Some(pane_id) = pane_id_arg(arguments) else {
+        // When: no usable `pane_id` was given, nothing is selected.
+        return invalid("pane_id is required");
+    };
+    match shared.ask(LoopCall::FocusPane { pane_id }, scope) {
+        LoopReply::Focused { raised } => tool_result(
+            if raised { "selected and raised" } else { "selected" },
+            json!({ "pane_id": pane_id.to_string(), "selected": true, "raised": raised }),
+        ),
+        other => reply_error(other),
+    }
+}
+
+/// `set_title`: the title is cleaned and capped here, before it is queued.
+fn set_title(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
+    let Some(pane_id) = pane_id_arg(arguments) else {
+        // When: no usable `pane_id` was given, no title changes.
+        return invalid("pane_id is required");
+    };
+    let Some(title) = arguments.get("title").and_then(Value::as_str) else {
+        // When: no `title` string was given, no title changes.
+        return invalid("title is required");
+    };
+    let title = display_text(title, TITLE_MAX_CHARS);
+    match shared.ask(LoopCall::SetTitle { pane_id, title }, scope) {
+        LoopReply::Titled(title) => tool_result(
+            if title.is_some() { "title set" } else { "title cleared" },
+            json!({ "pane_id": pane_id.to_string(), "title": title }),
+        ),
+        other => reply_error(other),
+    }
+}
+
+/// `notify`: the text is cleaned and capped, and a notice-queue place taken, before it is queued.
+fn notify(shared: &McpShared, arguments: &Value, scope: &CallScope) -> Value {
+    let Some(pane_id) = pane_id_arg(arguments) else {
+        // When: no usable `pane_id` was given, nothing is shown.
+        return invalid("pane_id is required");
+    };
+    let Some(text) = arguments.get("text").and_then(Value::as_str) else {
+        // When: no `text` string was given, nothing is shown.
+        return invalid("text is required");
+    };
+    let text = display_text(text, NOTIFY_MAX_CHARS);
+    if text.trim().is_empty() {
+        // When: the cleaned `text` is blank, the message would say nothing.
+        return invalid("text is empty once control and format characters are removed");
+    }
+    let Some(slot) = shared.admit_notice() else {
+        // When: `admit_notice` found the notice queue full, nothing is queued.
+        return tool_error("queue_full", "too many notices are waiting to be shown");
+    };
+    match shared.ask(LoopCall::Notify { pane_id, text, _slot: slot }, scope) {
+        LoopReply::Notified => {
+            tool_result("shown", json!({ "pane_id": pane_id.to_string(), "status": "shown" }))
         }
         other => reply_error(other),
     }

@@ -266,6 +266,14 @@ impl App {
                 self.mcp_run_start(access, *pane_id, command)
             }
             LoopCall::ClosePane { pane_id } => self.mcp_close_pane(access, *pane_id),
+            LoopCall::FocusPane { pane_id } => {
+                self.mcp_focus_pane(&shared.sessions, access, *pane_id)
+            }
+            LoopCall::SetTitle { pane_id, title } => self.mcp_set_title(access, *pane_id, title),
+            // The message's notice slot is freed when the request drops after this reply.
+            LoopCall::Notify { pane_id, text, .. } => {
+                self.mcp_notify(&shared.sessions, access, *pane_id, text)
+            }
             LoopCall::ClaimPanes { resume, own } => {
                 self.mcp_claim_panes(&shared.sessions.tokens, access, resume, own)
             }
