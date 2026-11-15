@@ -54,8 +54,8 @@ fn shown(app: &App) -> Option<String> {
     app.main().and_then(|main| main.notification.as_ref()).map(|bubble| bubble.message.clone())
 }
 
-/// The rows follow the snapshot: the server line with its endpoint and scopes, one row per live
-/// session newest first with its name, number, calls and the panes it owns, then Disconnect all.
+/// The rows follow the snapshot: the endpoint line and the scope line, one row per live session
+/// newest first with its name, number, calls and the panes it owns, then Disconnect all.
 #[test]
 fn the_rows_match_the_snapshot() {
     let (mut app, shared, user) = app_with_server();
@@ -68,17 +68,25 @@ fn the_rows_match_the_snapshot() {
     assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::Agents);
     assert_eq!(
         kinds(&app),
-        [Kind::Info, Kind::Session(newer.get()), Kind::Session(older.get()), Kind::DisconnectAll]
+        [
+            Kind::Info,
+            Kind::Info,
+            Kind::Session(newer.get()),
+            Kind::Session(older.get()),
+            Kind::DisconnectAll
+        ]
     );
     let rows = app.interaction.command_palette.agent_rows();
-    assert!(rows[0].label.contains("/tmp/sonicterm-test.sock"), "{}", rows[0].label);
-    assert!(rows[0].label.contains("control agent"), "{}", rows[0].label);
-    assert!(rows[0].label.contains("read agent"), "{}", rows[0].label);
-    let claude = &rows[2].label;
-    assert!(claude.starts_with("claude · session "), "{claude}");
-    assert!(claude.contains("1 tool calls") && claude.contains("1 pane(s)"), "{claude}");
-    assert!(rows[1].label.starts_with("unknown · "), "{}", rows[1].label);
-    assert!(rows[1].label.contains("last call never"), "{}", rows[1].label);
+    assert_eq!(rows[0].label, "Endpoint /tmp/sonicterm-test.sock");
+    assert!(rows[1].label.contains("control agent"), "{}", rows[1].label);
+    assert!(rows[1].label.contains("read agent"), "{}", rows[1].label);
+    let claude = &rows[3].label;
+    assert!(claude.starts_with(&format!("claude · #{} · ", older.get())), "{claude}");
+    assert!(claude.contains("1 calls") && claude.ends_with("1 panes"), "{claude}");
+    assert!(claude.contains("last 0s ago"), "{claude}");
+    let unknown = &rows[2].label;
+    assert!(unknown.starts_with("unknown · "), "{unknown}");
+    assert!(!unknown.contains("last"), "a session with no call shows no last-call age: {unknown}");
     shared.stop();
 }
 
@@ -126,7 +134,7 @@ fn enter_confirms_and_cancel_changes_nothing() {
             })
             .collect();
         assert!(items.iter().any(|text| text.contains("/mcp")), "{items:?}");
-        assert!(items.iter().any(|text| text.contains("keeps running")), "{items:?}");
+        assert!(items.iter().any(|text| text.contains("keep running")), "{items:?}");
         press(&mut app, cancel);
         assert!(!app.interaction.command_palette.is_open());
         assert_eq!(shared.sessions.is_closed(chosen), Some(false), "{cancel:?} changed nothing");
@@ -184,16 +192,16 @@ fn disconnect_all_ends_every_live_session() {
     shared.stop();
 }
 
-/// With the server off the page still opens, with one text row saying how to turn it on; Enter
-/// does nothing there.
+/// With the server off the page still opens, with text rows saying how to turn it on; Enter does
+/// nothing there.
 #[test]
 fn the_page_opens_with_the_server_off() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("user");
     assert!(app.run_action(&Action::ShowAgents));
-    assert_eq!(kinds(&app), [Kind::Info]);
-    let label = app.interaction.command_palette.agent_rows()[0].label.clone();
-    assert!(label.contains("[mcp] enabled = true"), "{label}");
+    assert_eq!(kinds(&app), [Kind::Info, Kind::Info, Kind::Info]);
+    let rows = app.interaction.command_palette.agent_rows();
+    assert!(rows.iter().any(|row| row.label.contains("[mcp] enabled = true")), "{rows:?}");
     press(&mut app, NamedKey::Enter);
     assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::Agents);
 }
@@ -207,4 +215,94 @@ fn the_page_attaches_to_a_child_window() {
     assert!(app.run_action_for_window(&Action::ShowAgents, child));
     assert_eq!(app.interaction.palette_attached_window, Some(child));
     assert_eq!(app.interaction.command_palette.mode(), CommandPaletteMode::Agents);
+}
+
+/// The palette draws each row as one line clipped at its edge, about 60 columns wide at the default
+/// font, so the page builds every row, the confirm title and every confirm line within
+/// `AGENT_ROW_COLUMNS`, in each shipped locale, with long client names and a long endpoint.
+#[test]
+fn every_row_and_confirm_line_fits_the_palette_width() {
+    use unicode_width::UnicodeWidthStr;
+    let limit = super::AGENT_ROW_COLUMNS;
+    let fits = |text: &str, what: &str| {
+        assert!(text.width() <= limit, "{what} is {} columns: {text}", text.width());
+    };
+    let (mut app, shared, user) = app_with_server();
+    if let Some(server) = app.services.mcp_server.as_mut() {
+        server.endpoint =
+            format!("/private/var/folders/{}/T/sonicterm-501/12345.sock", "x".repeat(48));
+    }
+    let wide = shared.sessions.open();
+    shared.sessions.set_client(wide, Some("長いクライアント名".repeat(8)));
+    let long = shared.sessions.open();
+    shared
+        .sessions
+        .set_client(long, Some("claude-code-with-a-very-long-self-reported-name".repeat(3)));
+    for _ in 0..120 {
+        shared.sessions.record_call(long, std::time::Instant::now());
+    }
+    app.registry.pane_mut(user).unwrap().creator = PaneOwner::Agent(long);
+    for locale in ["en", "ja", "zh-CN"] {
+        app.i18n = sonicterm_ui::i18n::I18n::new(Some(locale));
+        app.run_action(&Action::ShowAgents);
+        let rows: Vec<String> = app
+            .interaction
+            .command_palette
+            .agent_rows()
+            .iter()
+            .map(|row| row.label.clone())
+            .collect();
+        for label in &rows {
+            fits(label, &format!("{locale} row"));
+        }
+        // Every selectable row opens a confirm page whose title and lines must fit as well.
+        for index in 0..rows.len() {
+            app.run_action(&Action::ShowAgents);
+            if !app.interaction.command_palette.select_agent_row(index) {
+                continue;
+            }
+            press(&mut app, NamedKey::Enter);
+            let palette = &app.interaction.command_palette;
+            fits(palette.confirm_title(), &format!("{locale} confirm title"));
+            for row in palette.confirm_rows() {
+                fits(row.label(), &format!("{locale} confirm line"));
+            }
+            press(&mut app, NamedKey::Escape);
+        }
+        let mut off = App::new(Theme::default(), Config::default(), Keymap::default());
+        off.__test_seed_tab("user");
+        off.i18n = sonicterm_ui::i18n::I18n::new(Some(locale));
+        off.run_action(&Action::ShowAgents);
+        for row in off.interaction.command_palette.agent_rows() {
+            fits(&row.label, &format!("{locale} server-off row"));
+        }
+    }
+    shared.stop();
+}
+
+/// A session row shows its name whole and its last-call age when the row fits; a name too long
+/// for the row is cut with an ellipsis and the last-call age is dropped, never the pane count.
+#[test]
+fn a_long_name_is_cut_and_the_last_call_age_drops_first() {
+    let (mut app, shared, _user) = app_with_server();
+    let short = shared.sessions.open();
+    shared.sessions.set_client(short, Some("claude".into()));
+    shared.sessions.record_call(short, std::time::Instant::now());
+    let long = shared.sessions.open();
+    let name = "copilot-cli-with-a-really-long-client-name-for-testing";
+    shared.sessions.set_client(long, Some(name.into()));
+    shared.sessions.record_call(long, std::time::Instant::now());
+    app.run_action(&Action::ShowAgents);
+    let label = |session: crate::app::mcp::agents::AgentSessionId| {
+        let rows = app.interaction.command_palette.agent_rows();
+        rows.iter().find(|row| row.kind == Kind::Session(session.get())).unwrap().label.clone()
+    };
+    let short_row = label(short);
+    assert!(short_row.starts_with("claude · #"), "{short_row}");
+    assert!(short_row.contains("last 0s ago") && short_row.ends_with("0 panes"), "{short_row}");
+    let long_row = label(long);
+    assert!(long_row.starts_with("copilot-cli") && long_row.contains('…'), "{long_row}");
+    assert!(!long_row.contains("last"), "the age is dropped first: {long_row}");
+    assert!(long_row.ends_with("0 panes"), "{long_row}");
+    shared.stop();
 }

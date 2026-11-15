@@ -392,14 +392,18 @@ it already has the agent's powers.
 
 **Agents…** in the command palette (`show_agents`, no default key) lists the
 connected agents. It opens whether or not the server runs, and in READONLY, since
-it writes nothing to a pane. With the server off it shows one row saying how to
-turn it on. Otherwise it shows:
+it writes nothing to a pane. With the server off it shows a few lines saying how
+to turn it on. Otherwise it shows:
 
-- a line with the endpoint and the `control` and `read` scopes;
+- a line with the endpoint, and a line with the `control` and `read` scopes;
 - one row per connected session, newest first: the client's name, the session
-  number, how long it has been connected, its tool calls, how long ago its last
-  call was, and how many panes it owns;
+  number (`#3`), how long it has been connected, its tool calls, how long ago its
+  last call was, and how many panes it owns;
 - **Disconnect all agents**.
+
+Every row fits the palette's width. A row that would not fit drops the last-call
+age first, then shortens the client's name with an ellipsis, so the pane count
+always shows; a long endpoint is shortened the same way.
 
 Typing filters the session rows. The list is one snapshot taken when the page
 opens; a session that closed within the last half second may still be listed.
@@ -408,7 +412,8 @@ Enter or a click on a session row, or on **Disconnect all agents**, opens a
 confirm page with Cancel highlighted. It says what happens: the agent's SonicTerm
 tools stop; its client (Claude Code, Copilot CLI) shows the server as disconnected
 until you reconnect it there, for example with `/mcp`; its panes stay open; and a
-command it already started keeps running. Only **Disconnect** on that page acts.
+command it already started keeps running. Only **Disconnect** on that page acts,
+by Enter or a click; a click on **Cancel** or outside the page cancels.
 SonicTerm then looks the session up again (one that already left is a no-op) and
 closes its connection as a client hang-up would: a running call ends `revoked`,
 its panes become orphaned and claimable with its token, and the server keeps

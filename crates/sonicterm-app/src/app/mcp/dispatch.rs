@@ -160,14 +160,6 @@ pub(crate) fn insert_owned_lines(result: &mut Value, lines: Vec<String>) {
     }
 }
 
-/// Free a notice's slot once the loop handled it, shown or dropped; called once per notice.
-pub(crate) fn notice_handled(shared: &McpShared, request: &LoopRequest) {
-    if matches!(request.call, super::LoopCall::Notice { .. }) {
-        // The request is a notice: its slot frees now, never on a re-queue.
-        shared.notice_shown();
-    }
-}
-
 /// The current instant, for the production drain.
 pub(crate) fn clock_now() -> Instant {
     Instant::now()

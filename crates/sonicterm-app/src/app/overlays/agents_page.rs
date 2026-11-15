@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use sonicterm_ui::command_palette::{AgentRow, AgentRowKind};
 use sonicterm_ui::overlays::NotificationLevel;
+use sonicterm_ui::status_line::ellipsize_middle_columns;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::mcp::agents::{PaneOwner, SessionSnapshot};
 use crate::app::{App, FrontmostKind};
@@ -28,6 +30,11 @@ pub(in crate::app) struct AgentDisconnect {
     /// Who Apply disconnects.
     target: DisconnectTarget,
 }
+
+/// Display columns every row, the confirm title and each confirm line fit in. The palette draws a
+/// row as one line clipped at its edge, about 60 columns at the default font, so text past this
+/// width would be cut off.
+pub(in crate::app) const AGENT_ROW_COLUMNS: usize = 56;
 
 /// `elapsed` in its largest whole unit: seconds, minutes or hours.
 fn short_age(elapsed: Duration) -> String {
@@ -55,24 +62,41 @@ impl App {
         self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 
-    /// The page's rows: the server line, then each live session newest first, then Disconnect
-    /// all; one text row when the server is off or no agent is connected.
+    /// `key` rendered with `args` plus `fitted` set to `value`, within [`AGENT_ROW_COLUMNS`]:
+    /// whole when it fits, else with `value` middle-ellipsized into the columns the rest leaves.
+    fn fit_label(&self, key: &str, args: &[(&str, &str)], fitted: &str, value: &str) -> String {
+        let render = |value: &str| {
+            let mut all = args.to_vec();
+            all.push((fitted, value));
+            self.i18n.t_args(key, Some(&all))
+        };
+        let whole = render(value);
+        if whole.width() <= AGENT_ROW_COLUMNS {
+            // When: the `whole` label fits, nothing is cut.
+            return whole;
+        }
+        let rest = render("").width();
+        render(&ellipsize_middle_columns(value, AGENT_ROW_COLUMNS.saturating_sub(rest)))
+    }
+
+    /// The page's rows: the endpoint and scope lines, then each live session newest first, then
+    /// Disconnect all; text rows only when the server is off or no agent is connected.
     fn agent_rows(&self) -> Vec<AgentRow> {
         let info = |label: String| AgentRow { kind: AgentRowKind::Info, label };
         let Some(server) = self.services.mcp_server.as_ref() else {
             // When: no `mcp_server` runs, the page says how to turn it on and lists nothing.
-            return vec![info(self.i18n.translate("agents-server-off"))];
+            return ["agents-server-off-1", "agents-server-off-2", "agents-server-off-3"]
+                .into_iter()
+                .map(|key| info(self.i18n.translate(key)))
+                .collect();
         };
         let shared = &server.shared;
-        let header = self.i18n.t_args(
-            "agents-server",
-            Some(&[
-                ("endpoint", server.endpoint.as_str()),
-                ("control", shared.control().as_str()),
-                ("read", shared.read().as_str()),
-            ]),
+        let endpoint = self.fit_label("agents-endpoint", &[], "endpoint", &server.endpoint);
+        let scopes = self.i18n.t_args(
+            "agents-scopes",
+            Some(&[("control", shared.control().as_str()), ("read", shared.read().as_str())]),
         );
-        let mut rows = vec![info(header)];
+        let mut rows = vec![info(endpoint), info(scopes)];
         let sessions = shared.sessions.snapshot();
         if sessions.is_empty() {
             // When: the snapshot holds no `sessions`, there is no row to act on.
@@ -94,6 +118,8 @@ impl App {
     }
 
     /// One session's row text: name, number, connected for, tool calls, last call ago, panes owned.
+    /// The last-call age shows only when the whole name still fits beside it; otherwise it is
+    /// dropped, and a name still too long is cut, so the pane count is never clipped.
     fn agent_row_label(&self, entry: &SessionSnapshot, now: Instant) -> String {
         let panes = self
             .registry
@@ -102,27 +128,28 @@ impl App {
             .flat_map(|window| window.panes.values())
             .filter(|pane| pane.creator == PaneOwner::Agent(entry.session))
             .count();
-        let last = match entry.last_call {
-            Some(at) => self.i18n.t_args(
-                "agents-ago",
-                Some(&[("age", short_age(now.saturating_duration_since(at)).as_str())]),
-            ),
-            None => self.i18n.translate("agents-never"),
-        };
-        self.i18n.t_args(
-            "agents-session",
-            Some(&[
-                ("name", entry.client.as_deref().unwrap_or("unknown")),
-                ("session", entry.session.get().to_string().as_str()),
-                (
-                    "connected",
-                    short_age(now.saturating_duration_since(entry.connected_at)).as_str(),
-                ),
-                ("calls", entry.tool_calls.to_string().as_str()),
-                ("last", last.as_str()),
-                ("panes", panes.to_string().as_str()),
-            ]),
-        )
+        let name = entry.client.as_deref().unwrap_or("unknown");
+        let (session, calls, panes) =
+            (entry.session.get().to_string(), entry.tool_calls.to_string(), panes.to_string());
+        let connected = short_age(now.saturating_duration_since(entry.connected_at));
+        let args = [
+            ("session", session.as_str()),
+            ("connected", connected.as_str()),
+            ("calls", calls.as_str()),
+            ("panes", panes.as_str()),
+        ];
+        if let Some(at) = entry.last_call {
+            // When: `last_call` holds the session's latest call, its age shows if the row fits whole.
+            let last = short_age(now.saturating_duration_since(at));
+            let mut with_last = args.to_vec();
+            with_last.extend([("last", last.as_str()), ("name", name)]);
+            let label = self.i18n.t_args("agents-session-last", Some(&with_last));
+            if label.width() <= AGENT_ROW_COLUMNS {
+                // When: the `label` with the age fits, nothing needs dropping.
+                return label;
+            }
+        }
+        self.fit_label("agents-session", &args, "name", name)
     }
 
     /// The live session numbered `number`, looked up in a fresh snapshot.
@@ -155,17 +182,25 @@ impl App {
                 };
                 let session = number.to_string();
                 let name = entry.client.as_deref().unwrap_or("unknown");
-                let title = self.i18n.t_args(
+                let title = self.fit_label(
                     "agents-confirm-title-one",
-                    Some(&[("name", name), ("session", session.as_str())]),
+                    &[("session", session.as_str())],
+                    "name",
+                    name,
                 );
                 (title, DisconnectTarget::One(number))
             }
         };
-        let items = ["agents-confirm-tools", "agents-confirm-client", "agents-confirm-panes"]
-            .into_iter()
-            .map(|key| self.i18n.translate(key))
-            .collect();
+        // One short line each, so every consequence fits a palette row.
+        let items = [
+            "agents-confirm-tools",
+            "agents-confirm-client",
+            "agents-confirm-reconnect",
+            "agents-confirm-panes",
+        ]
+        .into_iter()
+        .map(|key| self.i18n.translate(key))
+        .collect();
         self.interaction.palette_pointer_capture = None;
         self.interaction.command_palette.start_confirm(
             title,

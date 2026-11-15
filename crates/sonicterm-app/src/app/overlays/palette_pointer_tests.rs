@@ -305,7 +305,7 @@ fn an_agents_row_click_opens_the_confirm_page_and_disconnects_nothing() {
     let window_id = app.registry.main_window_id.unwrap();
     assert!(app.run_action(&Action::ShowAgents));
     let kind = sonicterm_ui::command_palette::AgentRowKind::Session(older.get());
-    // Row 2 is the older session: the server line, then the newer one, then it.
+    // Row 3 is the older session: the endpoint and scope lines, then the newer one, then it.
     let capture = |kind| super::PalettePointerCapture {
         window_id,
         target: super::PalettePointerTarget::AgentRow(kind),
@@ -314,7 +314,7 @@ fn an_agents_row_click_opens_the_confirm_page_and_disconnects_nothing() {
     let elsewhere = sonicterm_ui::command_palette::AgentRowKind::Session(newer.get());
     app.release_command_palette_pointer(
         window_id,
-        Some(super::PalettePointerHit::AgentRow { index: 1, kind: elsewhere }),
+        Some(super::PalettePointerHit::AgentRow { index: 2, kind: elsewhere }),
     );
     assert_eq!(
         app.interaction.command_palette.mode(),
@@ -324,7 +324,7 @@ fn an_agents_row_click_opens_the_confirm_page_and_disconnects_nothing() {
     app.interaction.palette_pointer_capture = Some(capture(kind));
     app.release_command_palette_pointer(
         window_id,
-        Some(super::PalettePointerHit::AgentRow { index: 2, kind }),
+        Some(super::PalettePointerHit::AgentRow { index: 3, kind }),
     );
     assert_eq!(
         app.interaction.command_palette.mode(),
@@ -333,5 +333,60 @@ fn an_agents_row_click_opens_the_confirm_page_and_disconnects_nothing() {
     assert!(!app.interaction.command_palette.confirm_applies(), "Cancel is highlighted first");
     assert_eq!(shared.sessions.is_closed(older), Some(false), "a click never disconnects");
     assert_eq!(shared.sessions.is_closed(newer), Some(false));
+    // On the confirm page a click acts as Enter on the clicked row: Cancel (row 1) changes nothing.
+    app.click_confirm_row(window_id, 1);
+    assert!(!app.interaction.command_palette.is_open(), "Cancel closes the page");
+    assert_eq!(shared.sessions.is_closed(older), Some(false), "Cancel disconnects nothing");
+    // Reopened, a click on Disconnect (row 0) ends exactly the confirmed session.
+    assert!(app.run_action(&Action::ShowAgents));
+    app.interaction.palette_pointer_capture = Some(capture(kind));
+    app.release_command_palette_pointer(
+        window_id,
+        Some(super::PalettePointerHit::AgentRow { index: 3, kind }),
+    );
+    app.click_confirm_row(window_id, 0);
+    assert!(!app.interaction.command_palette.is_open());
+    assert_eq!(shared.sessions.is_closed(older), Some(true), "Disconnect ends that session");
+    assert_eq!(shared.sessions.is_closed(newer), Some(false), "and only that one");
+    shared.stop();
+}
+
+/// A click on a confirm page's text row neither applies nor closes the page, and an outside click
+/// cancels it as Escape does, so the pending disconnect is dropped with the page.
+#[test]
+fn a_confirm_page_ignores_item_clicks_and_an_outside_click_cancels() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let shared = crate::app::mcp::McpShared::new(sonicterm_cfg::config::McpControl::Agent, None);
+    let owner = app.register_mcp_owner();
+    app.services.mcp_server = Some(crate::app::mcp::McpServer {
+        shared: std::sync::Arc::clone(&shared),
+        endpoint: "test-endpoint".into(),
+        _endpoint_guard: None,
+        config: app.config.mcp,
+        charges: std::collections::HashMap::new(),
+        owner,
+        read_notice_due: false,
+    });
+    let session = shared.sessions.open();
+    let window_id = app.registry.main_window_id.unwrap();
+    assert!(app.run_action(&Action::ShowAgents));
+    assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter)));
+    // Row 2 is the first consequence line, which is text.
+    app.click_confirm_row(window_id, 2);
+    assert_eq!(
+        app.interaction.command_palette.mode(),
+        sonicterm_ui::command_palette::CommandPaletteMode::Confirm,
+        "a text row is not a button"
+    );
+    assert!(!app.interaction.command_palette.confirm_applies(), "the highlight stays on Cancel");
+    app.interaction.palette_pointer_capture = Some(super::PalettePointerCapture {
+        window_id,
+        target: super::PalettePointerTarget::Outside,
+    });
+    app.release_command_palette_pointer(window_id, Some(super::PalettePointerHit::Outside));
+    assert!(!app.interaction.command_palette.is_open(), "an outside click closes the page");
+    assert!(app.interaction.agent_disconnect.is_none(), "the pending disconnect is dropped");
+    assert_eq!(shared.sessions.is_closed(session), Some(false), "nothing disconnected");
     shared.stop();
 }

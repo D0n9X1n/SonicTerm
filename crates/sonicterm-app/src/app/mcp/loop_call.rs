@@ -16,6 +16,8 @@ pub(crate) enum LoopCall {
     Notice {
         /// The sanitized, bounded message.
         text: String,
+        /// The notice's place in the queue, freed when the request is dropped; held only for its drop.
+        _slot: super::control_loop_ui::NoticeSlot,
     },
     /// Open a helper pane beside `anchor`.
     CreatePane {

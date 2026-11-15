@@ -168,8 +168,8 @@ pub(crate) struct McpShared {
     /// The most connections served at once; a further one is refused. A change applies to new
     /// connections only.
     pub(crate) connection_limit: AtomicU64,
-    /// Notices queued and not yet shown, at most [`MAX_PENDING_NOTICES`]: connection notices and
-    /// agent messages, whose [`control_loop_ui::NoticeSlot`] holds a share of this counter.
+    /// Notices queued and not yet shown, at most [`MAX_PENDING_NOTICES`]: connect notices,
+    /// departures and agent messages, each holding one [`control_loop_ui::NoticeSlot`] of it.
     pending_notices: Arc<AtomicU64>,
     /// Bytes every connection holds right now: partial request lines and replies being written.
     /// The loop charges this figure to the governor's `Mcp` owner.
@@ -393,26 +393,18 @@ impl McpShared {
 
     /// Show `text` in the in-app notification without waiting: the request is queued and the
     /// loop shows it when it next drains. A stopped server shows nothing. `true` when the notice
-    /// was admitted to the queue.
-    // Ordering: pending_notices AcqRel makes the increment the single admission point for a notice.
+    /// was admitted to the queue; its slot frees when the request is dropped, shown or not.
     pub(crate) fn notify(&self, text: String) -> bool {
         if self.is_stopped() {
             // When: the server `is_stopped`, its connections end without a notice.
             return false;
         }
-        if self.pending_notices.fetch_add(1, Ordering::AcqRel) >= MAX_PENDING_NOTICES {
-            // When: `MAX_PENDING_NOTICES` are already waiting, connection churn cannot grow the inbox.
-            self.pending_notices.fetch_sub(1, Ordering::AcqRel);
+        let Some(slot) = self.admit_notice() else {
+            // When: `admit_notice` found the queue full, connection churn cannot grow the inbox.
             return false;
-        }
-        self.queue_notice(LoopCall::Notice { text });
+        };
+        self.queue_notice(LoopCall::Notice { text, _slot: slot });
         true
-    }
-
-    /// Mark one queued notice as shown.
-    // Ordering: pending_notices AcqRel pairs with the admitting increment in `notify`.
-    pub(crate) fn notice_shown(&self) {
-        self.pending_notices.fetch_sub(1, Ordering::AcqRel);
     }
 
     /// Take every queued request; the loop calls this when woken. The wake flag stays set, so a

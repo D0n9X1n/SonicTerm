@@ -57,7 +57,7 @@ fn queued_notices(shared: &McpShared) -> Vec<String> {
         .lock()
         .iter()
         .filter_map(|request| match &request.call {
-            super::super::LoopCall::Notice { text } => Some(text.clone()),
+            super::super::LoopCall::Notice { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()
@@ -157,4 +157,16 @@ fn a_departure_counts_panes_owned_when_the_loop_handles_it() {
         shown(&app).as_deref(),
         Some("Agent disconnected: unknown; 1 pane(s) left without an agent")
     );
+}
+
+/// A connect notice holds a notice slot like every other notice: one still queued when the server
+/// stops is dropped with the inbox, and dropping it frees its slot, so no place stays taken.
+#[test]
+fn a_connect_notice_dropped_at_stop_frees_its_slot() {
+    let shared = McpShared::new(McpControl::Agent, None);
+    assert!(shared.notify("Agent connected: claude".into()));
+    assert_eq!(shared.pending_notices.load(Ordering::Acquire), 1);
+    shared.stop();
+    drop(shared.take_requests());
+    assert_eq!(shared.pending_notices.load(Ordering::Acquire), 0, "the dropped notice freed it");
 }

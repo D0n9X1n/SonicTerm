@@ -216,10 +216,9 @@ impl App {
             super::dispatch::clock_now,
             |request| {
                 let reply = self.answer_mcp_request(&shared, &request);
-                // A notice frees its slot once handled, shown or dropped as revoked.
-                super::dispatch::notice_handled(&shared, &request);
                 // A full or disconnected reply channel means the waiter already gave up.
                 let _ = request.reply.try_send(reply);
+                // The handled request drops here, so a notice's slot frees once; a re-queued one keeps it.
             },
         );
         shared.requeue_front(rest);
@@ -247,7 +246,7 @@ impl App {
                 entries.retain(readable);
                 LoopReply::Panes(entries)
             }
-            LoopCall::Notice { text } => {
+            LoopCall::Notice { text, .. } => {
                 self.show_notification_for_kind(
                     self.frontmost_kind(),
                     sonicterm_ui::overlays::NotificationLevel::Info,

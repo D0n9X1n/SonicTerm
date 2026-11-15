@@ -415,6 +415,20 @@ impl CommandPalette {
             && !self.items.is_empty()
     }
 
+    /// Highlight the confirmation page's row at `index`, as a click does; `false` and no change
+    /// for an item row, a row past the page, or when no confirmation page is open.
+    pub fn select_confirm_row(&mut self, index: usize) -> bool {
+        let selectable = self.mode == CommandPaletteMode::Confirm
+            && matches!(
+                self.confirm_rows.get(index),
+                Some(ConfirmRow::Apply(_) | ConfirmRow::Cancel(_))
+            );
+        if selectable {
+            self.selected = index;
+        }
+        selectable
+    }
+
     /// Whether the highlighted row of an open confirmation page is Apply.
     pub fn confirm_applies(&self) -> bool {
         self.mode == CommandPaletteMode::Confirm
