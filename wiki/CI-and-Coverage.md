@@ -91,8 +91,13 @@ The macOS core shard first measures the real PTY close baseline after Cargo
 restore, then runs Rust checks, strict Rustdoc, the one-pass workspace test gate,
 workspace doctests, host probes, the macOS-only process-group custody test, and real
 resource-baseline capture. It also runs the ignored native copied-file paste test
-alone on the hosted runner, after scenario-harness tests; the general pasteboard
-is not exercised concurrently with workspace tests. The exact native test must
+alone on the hosted runner, after the workspace doctests; the general pasteboard
+is not exercised concurrently with workspace tests. The scenario harness's unit
+tests, their feature and harness-API variants, the glyph atlas working-set measurement
+and the previous-release harness check run in the Intel `macos-smoke` leg instead,
+right after its perf scenario smoke has built the harness: they do not depend on the
+architecture, and moving them takes them off `macos-core`, the longest job, without
+holding a third macOS runner. The exact native test must
 run rather than skip; local opt-in is described in [Local Gate](Local-Gate). The required `tooling` job runs on Ubuntu: Rust-version,
 raw-exit, window-owner, workflow supply-chain, authored-comment and script-identifier
 checks, plus release-note, wiki-publish, resource-inventory, soak and resource-baseline
@@ -101,8 +106,8 @@ macOS aggregate requires the tooling job, so none became optional. The tooling j
 installs the runner image's own Cairo and Fontconfig and runs the COLR painting tests
 (`colr-tests`) against them: that Cairo is newer than the `ubuntu:22.04` container's the
 other Linux jobs use, so a Cairo update that changes how COLR glyphs draw fails CI. The working-set
-measurement stays in macos-core to reuse its compiled harness without adding a cold
-macOS build or competing with perf for another runner slot. Logic coverage runs in its own
+measurement runs in `macos-smoke` beside the harness that leg already compiles, so it
+adds no cold macOS build and no runner slot the perf comparison waits for. Logic coverage runs in its own
 `linux-coverage` job, in the `ubuntu:22.04` container `linux-core` uses, outside the macOS
 runner pool the perf comparison waits for. The container gives its tests the workspace
 gate's Cairo, FreeType and Fontconfig, the libraries its baseline was measured with. The job names that container as its image identity, since
@@ -212,7 +217,10 @@ and `setup-windows-cairo.ps1` publishes the selected triplet's bin directory as
 `SONICTERM_CAIRO_BIN_DIR` and on PATH. Static Cairo remains the default; dynamic triplets
 therefore retain their DLL lookup path too.
 
-`windows-glyph-oracle` runs the unchanged ignored working-set gate once. Only after every
+`windows-glyph-oracle` runs the unchanged ignored working-set gate once. Only the
+`perf_scenarios` example reads the oracle, and that example is not a default test target
+(`test = false`), so `windows-tests-workspace` neither builds it nor waits for the oracle;
+the three harness shards consume it. Only after every
 completeness, exact drift and start-size check passes does it publish the four S9/S12,
 72/144-DPI helper tile sets. The manifest binds all tracked source bytes (including bundled
 fonts), system/user font bytes and GDI registry mappings, runner image, Rust/Cargo versions, checkout SHA, run ID and

@@ -349,9 +349,10 @@ python3 scripts/native-selection-smoke.py
 
 ## 性能场景 smoke
 
-`perf-scenarios-tests` 在每个主机上，以及在 `macos-core`、`windows-tests-harness` 与 `linux-core` 中，运行
+`perf-scenarios-tests` 在每个主机上，以及在 `macos-smoke`、`windows-tests-harness` 与 `linux-core` 中，运行
 harness 自身的单元测试 `cargo test --locked -p sonicterm-app --example perf_scenarios`，因为
-`workspace-crates` 运行的 `cargo test --workspace --lib --bins --tests` 不包含 example。
+`workspace-crates` 运行的 `cargo test --workspace --lib --bins --tests` 不构建任何 example：`perf_scenarios`
+声明为 `test = false`，只由其具名步骤各构建并运行一次。
 `perf-scenarios-counters-tests` 在相同的 job 中以 `--features perf-counters` 运行同一组测试；
 `perf-scenarios-counters-clippy` 在运行 `clippy` 的每个 job（`macos-core`、`windows-checks` 与
 `linux-core`）中带该 feature 检查此 example，因此计数器代码在每个主机上都会被构建、测试和检查。
@@ -366,7 +367,7 @@ S2 回显时间线的 App 访问器只在同时具备 `perf-echo-trace` 与 `per
 与 `-tests`），只有该 cfg（`perf-scenarios-harness-api-clippy` 与 `-tests`，开启 `HARNESS_API_CFGS` 的每一项），
 以及两者皆有（`perf-scenarios-harness-api-echo-trace-clippy` 与 `-tests`，在同样的 cfg 上再加 `perf-echo-trace`）。
 只有最后这一对会构建并测试真正的适配器。其检查在 `macos-core`、`windows-checks` 与 `linux-core` 中运行，其测试在
-`macos-core` 与 `linux-core` 中运行；在 Windows 上则在 `windows-tests-harness-api` 中、紧接 harness API 测试之后运行，
+`macos-smoke` 与 `linux-core` 中运行；在 Windows 上则在 `windows-tests-harness-api` 中、紧接 harness API 测试之后运行，
 仅向目标传入 cfg 的启动器保持依赖标志不变；全部 feature/cfg 组合仍有测试。
 
 `macos-perf-smoke` 检查的是对比工具本身，而不是性能。它运行

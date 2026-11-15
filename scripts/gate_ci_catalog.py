@@ -32,7 +32,7 @@ CI_ONLY = (
     CiOnly("runtime-evidence", "python3 scripts/glyph-oracle.py seal", ("windows-glyph-oracle",),
            "publishes only a successful canonical helper gate's four rows"),
     CiOnly("runtime-evidence", "python3 scripts/glyph-oracle.py verify",
-           (gate_catalog._WINDOWS_WORKSPACE, gate_catalog._WINDOWS_HARNESS, gate_catalog._WINDOWS_HARNESS_FEATURES, gate_catalog._WINDOWS_HARNESS_API),
+           (gate_catalog._WINDOWS_HARNESS, gate_catalog._WINDOWS_HARNESS_FEATURES, gate_catalog._WINDOWS_HARNESS_API),
            "verifies the exact producer artifact before each real-renderer consumer suite"),
     CiOnly("setup", ".\\scripts\\setup-windows-cairo.ps1",
            ("windows-native", "windows-checks", gate_catalog._WINDOWS_WORKSPACE, gate_catalog._WINDOWS_HARNESS, gate_catalog._WINDOWS_HARNESS_FEATURES,

@@ -162,10 +162,12 @@ path = "examples/native_split_selection.rs"
 harness = false
 test = false
 
+# The gate runs this example's tests by name (`--example perf_scenarios`), so the workspace run's `--tests`
+# leaves it out rather than build and run it a second time.
 [[example]]
 name = "perf_scenarios"
 path = "examples/perf_scenarios/main.rs"
-test = true
+test = false
 
 [[example]]
 name = "perf_scenarios_alloc"

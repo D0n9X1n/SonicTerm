@@ -51,13 +51,13 @@ python3 scripts/local-gate.py
 | `cargo-deny` | `cargo deny --locked check` | macOS、Windows、Linux | `local` | `rust`、`cargo-deny` | `linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS、Windows、Linux | `local` | `rust`、`native`、`bash` | `macos-core`、`windows-tests-workspace`、`linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-workspace`、`linux-core` |
-| `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness`、`linux-core` |
-| `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness`、`linux-core` |
-| `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS、Windows | `local` | `rust`、`native` | `macos-core`、`windows-glyph-oracle` |
-| `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness-features`、`linux-core` |
-| `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness-features`、`linux-core` |
-| `perf-scenarios-harness-api-tests` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness-api`、`linux-core` |
-| `perf-scenarios-harness-api-echo-trace-tests` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness-api`、`linux-core` |
+| `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-smoke`、`windows-tests-harness`、`linux-core` |
+| `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-smoke`、`windows-tests-harness`、`linux-core` |
+| `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS、Windows | `local` | `rust`、`native` | `macos-smoke`、`windows-glyph-oracle` |
+| `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-smoke`、`windows-tests-harness-features`、`linux-core` |
+| `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-smoke`、`windows-tests-harness-features`、`linux-core` |
+| `perf-scenarios-harness-api-tests` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-smoke`、`windows-tests-harness-api`、`linux-core` |
+| `perf-scenarios-harness-api-echo-trace-tests` | `python3 scripts/harness-target.py --cfgs perf_atlas_retry_api,perf_s10_attribution_api,perf_completeness_api,perf_dispatch_timeline_api,perf_echo_timeline_api,perf_guard_spans_api,perf_taskbar_progress_api -- cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-smoke`、`windows-tests-harness-api`、`linux-core` |
 | `macos-clipboard-paste` | `cargo test --locked -p sonicterm-app --lib app::misc::clipboard::misc_clipboard_native_macos_tests::native_pasteboard_paste_action_reaches_real_pty -- --exact --ignored --nocapture` | macOS | `local` | `rust`、`native` | `macos-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests-workspace` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-tests-workspace` |
@@ -79,7 +79,7 @@ python3 scripts/local-gate.py
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`、`native` | `macos-core`、`macos-smoke` |
 | `mcp-smoke` | `python3 scripts/mcp-smoke.py` | macOS、Linux | `local` | `rust`、`native`、`display` | `macos-core`、`linux-packages` |
 | `windows-mcp-smoke` | `python scripts/mcp-smoke.py` | Windows | `local` | `rust`、`native`、`display` | `windows-smoke` |
-| `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`、`native` | `macos-core` |
+| `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`、`native` | `windows-checks` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-core`、`macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
@@ -217,7 +217,7 @@ cfg 关闭的诊断在两侧都不可用：此时 S1/atlas-retry 不运行任何
 其 harness 以 `blocked`（退出码 5）结束，而不是无效。
 
 head 的 harness 必须仍能在上一个发布标签上构建，那正是发布比较所用的 base。`perf-compare.py --check-previous-release`
-（关卡步骤 `perf-previous-release`，在 CI 的 `macos-core` 与 `windows-checks` 作业中运行）需要完整克隆。它按发布工作流的
+（关卡步骤 `perf-previous-release`，在 CI 的 `macos-smoke` 与 `windows-checks` 作业中运行）需要完整克隆。它按发布工作流的
 规则对 HEAD 的父提交选出该标签，叠加 head 的 harness，推导比较会使用的特性与 cfg，并在自己的目标目录中检查两个 harness
 示例，结束时连同其工作树一起删除该目录。Ubuntu 的示例根排除了 probe，因此 Ubuntu 不运行它。
 

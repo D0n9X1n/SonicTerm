@@ -518,9 +518,10 @@ macOS execution, and a direct example invocation without `--run` is not acceptan
 ## Performance scenario smoke
 
 `perf-scenarios-tests` runs the harness's own unit tests,
-`cargo test --locked -p sonicterm-app --example perf_scenarios`, on every host and in `macos-core`,
+`cargo test --locked -p sonicterm-app --example perf_scenarios`, on every host and in `macos-smoke`,
 `windows-tests-harness` and `linux-core`, because the `cargo test --workspace --lib --bins --tests` that
-`workspace-crates` runs skips examples. `perf-scenarios-counters-tests` runs the same tests with
+`workspace-crates` runs builds no example: `perf_scenarios` is declared `test = false`, so only its
+named steps build and run it, once each. `perf-scenarios-counters-tests` runs the same tests with
 `--features perf-counters` in the same jobs, and `perf-scenarios-counters-clippy` lints the example
 with the feature wherever `clippy` runs (`macos-core`, `windows-checks` and `linux-core`), so the
 counter code is built, tested and linted on every host. `perf-scenarios-frame-texture-tests` and
@@ -537,7 +538,7 @@ The S2 echo timeline's App accessor is named only with both `perf-echo-trace` an
 (`perf-scenarios-harness-api-clippy` and `-tests`, with every `HARNESS_API_CFGS` entry),
 and both (`perf-scenarios-harness-api-echo-trace-clippy` and `-tests`, the same cfgs with
 `perf-echo-trace` added). The last pair alone builds and tests the real adapter. Its lint
-runs in `macos-core`, `windows-checks` and `linux-core`, and its tests in `macos-core`
+runs in `macos-core`, `windows-checks` and `linux-core`, and its tests in `macos-smoke`
 and `linux-core` and, on Windows, in `windows-tests-harness-api` after the harness-API
 tests. The target-only launcher leaves dependency flags unchanged; every feature/cfg combination remains tested.
 

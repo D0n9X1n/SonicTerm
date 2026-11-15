@@ -310,11 +310,16 @@ jobs:
             self.assertNotIn(command, workflow_test_fixture.job_block("ci.yml", "macos-core"), script)
         self.assertIn("run: bash scripts/install-pinned-tool.sh actionlint", block)
         self.assertIn("run: actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/perf.yml", block)
-        for job in ("windows-glyph-oracle", "windows-tests-workspace", "windows-tests-harness",
+        # The oracle's producer and its harness consumers keep it in the workspace; the workspace shard runs no
+        # harness test, so it neither waits for nor names the oracle.
+        for job in ("windows-glyph-oracle", "windows-tests-harness",
                     "windows-tests-harness-features", "windows-tests-harness-api"):
             header = workflow_test_fixture.job_block("ci.yml", job).split("    steps:", 1)[0]
             self.assertNotIn("runner.temp", header)
             self.assertIn("${{ github.workspace }}/ci-glyph-oracle", header)
+        workspace = workflow_test_fixture.job_block("ci.yml", "windows-tests-workspace")
+        self.assertNotIn("glyph-oracle", workspace)
+        self.assertIn("    needs: [windows-native]\n", workspace)
 
     def test_ci_caches_are_bounded_and_cairo_is_published_immediately(self):
         text = (workflow_test_fixture._HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
@@ -512,14 +517,16 @@ jobs:
             for job in step.ci_jobs:
                 with self.subTest(command=command, job=job):
                     self.assertEqual(run_lines(job_body(job), command), 1)
+            # Each runs only in the jobs its step names, so on macOS the lint stays in macos-core and the
+            # tests in macos-smoke.
             self.assertEqual(run_lines(workflow, command), len(step.ci_jobs))
-            self.assertNotIn(command, job_body("macos-smoke"))
 
         # Each feature's tests run exactly once on each platform that runs the harness's plain tests, and its
-        # lint wherever the workspace lint runs; no job runs either twice, and macos-smoke runs neither. On
-        # Windows the plain and feature tests sit in different parallel shards, so they are counted per platform.
+        # lint wherever the workspace lint runs; no job runs either twice. On macOS the Intel smoke leg runs the
+        # tests and macos-core the lints; on Windows the plain and feature tests sit in different parallel shards,
+        # so they are counted per platform.
         plain_test = "cargo test --locked -p sonicterm-app --example perf_scenarios"
-        test_platforms = (("macos-core",), workflow_test_fixture.WINDOWS_TEST_SHARDS, ("linux-core",))
+        test_platforms = (("macos-smoke",), workflow_test_fixture.WINDOWS_TEST_SHARDS, ("linux-core",))
         for feature in feature_sets:
             feature_test = f"{plain_test} --features {feature}"
             feature_lint = (f"cargo clippy --locked -p sonicterm-app --example perf_scenarios --features {feature}"
@@ -536,7 +543,8 @@ jobs:
                     self.assertEqual(run_lines(body, feature_lint), 1)
                     self.assertIn("        run: cargo clippy --workspace --all-targets -- -D warnings\n", body)
             self.assertEqual(run_lines(workflow, feature_lint), len(lint_jobs))
-            self.assertNotIn(feature, job_body("macos-smoke"))
+            self.assertEqual(run_lines(job_body("macos-smoke"), feature_lint), 0)
+            self.assertEqual(run_lines(job_body("macos-core"), feature_test), 0)
             # The plain lint and test in their three jobs each, plus the cfg runs that compile this set.
             cfg_runs = sum(len(step.ci_jobs) for step in cfg_steps
                            if f"--features {feature}" in gate.command_text(step))
