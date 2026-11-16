@@ -4,10 +4,17 @@
 //! is not installed, unless `SONICTERM_REQUIRE_PWSH` is set, as CI sets it where PowerShell is.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use super::*;
+
+/// How long PowerShell may take to show its first prompt; a loaded runner can take many seconds.
+const FIRST_PROMPT_WAIT: Duration = Duration::from_secs(30);
+
+/// Each pwsh run's number, so concurrent tests in one process load their own snippet file.
+static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
 
 /// The pwsh to test: `SONICTERM_TEST_PWSH` when set, else `pwsh` on `PATH`.
 pub(super) fn pwsh() -> Option<String> {
@@ -27,8 +34,10 @@ pub(super) fn drive_pwsh(pwsh: &str, prehook: &str, snippet: &str, lines: &[&[u8
     let (mut controller, terminal) = open_pty();
     set_window_size(&terminal);
     let stdio = |fd: &OwnedFd| Stdio::from(fd.try_clone().expect("dup the terminal side"));
-    let file =
-        std::env::temp_dir().join(format!("sonicterm-shellint-{}-pwsh.ps1", std::process::id()));
+    // Ordering: the counter only makes names unique; no other memory is published through it.
+    let run = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let file = std::env::temp_dir()
+        .join(format!("sonicterm-shellint-{}-{run}-pwsh.ps1", std::process::id()));
     std::fs::write(&file, snippet).unwrap();
     let mut child = Command::new(pwsh)
         .args(["-NoLogo", "-NoProfile", "-NoExit", "-Command"])
@@ -49,17 +58,58 @@ pub(super) fn drive_pwsh(pwsh: &str, prehook: &str, snippet: &str, lines: &[&[u8
         .expect("pwsh starts");
     drop(terminal);
     // PowerShell starts slowly; the first prompt must be up before anything is typed.
-    let mut output = answer_for(&mut controller, Duration::from_secs(4));
+    let mut output = first_prompt(&mut controller, &mut child);
     for line in lines {
-        controller.write_all(line).unwrap();
+        type_line(&mut controller, &mut child, line, &output);
         output.extend(answer_for(&mut controller, Duration::from_millis(1500)));
     }
-    controller.write_all(b"exit\r").unwrap();
+    type_line(&mut controller, &mut child, b"exit\r", &output);
     output.extend(answer_for(&mut controller, Duration::from_millis(1500)));
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_file(&file);
     String::from_utf8_lossy(&output).into_owned()
+}
+
+/// Read until the integration's first tokened B marker, the prompt PSReadLine reads keys after,
+/// then a little longer for its cursor position query. Panics with what pwsh wrote, and whether it
+/// exited, when no prompt comes within [`FIRST_PROMPT_WAIT`].
+fn first_prompt(controller: &mut std::fs::File, child: &mut Child) -> Vec<u8> {
+    let prompt = format!("\u{1b}]133;B;sonicterm_token={TOKEN}");
+    let deadline = Instant::now() + FIRST_PROMPT_WAIT;
+    let mut output = Vec::new();
+    while !String::from_utf8_lossy(&output).contains(&prompt) {
+        if Instant::now() >= deadline || matches!(child.try_wait(), Ok(Some(_))) {
+            // When: the `deadline` passed or pwsh exited, no prompt is coming.
+            panic!("{}", pwsh_failure(child, "showed no first prompt", &output));
+        }
+        output.extend(answer_for(controller, Duration::from_millis(200)));
+    }
+    output.extend(answer_for(controller, Duration::from_millis(500)));
+    output
+}
+
+/// Type `line` into pwsh. A failed write means pwsh closed its terminal, so the panic names the
+/// exit status and everything pwsh wrote rather than the bare I/O error.
+fn type_line(controller: &mut std::fs::File, child: &mut Child, line: &[u8], output: &[u8]) {
+    if let Err(error) = controller.write_all(line) {
+        // When: the write failed, pwsh's side of the terminal is gone.
+        let what =
+            format!("closed its terminal ({error}) before {:?}", String::from_utf8_lossy(line));
+        panic!("{}", pwsh_failure(child, &what, output));
+    }
+}
+
+/// A failure message naming what went wrong, pwsh's exit status if it has exited, and its output.
+fn pwsh_failure(child: &mut Child, what: &str, output: &[u8]) -> String {
+    // Give an exiting pwsh a moment to be reaped, so its status is reported rather than unknown.
+    std::thread::sleep(Duration::from_millis(200));
+    let status = match child.try_wait() {
+        Ok(Some(status)) => status.to_string(),
+        Ok(None) => "still running".to_owned(),
+        Err(error) => format!("unknown ({error})"),
+    };
+    format!("pwsh {what}; status {status}; output: {:?}", String::from_utf8_lossy(output))
 }
 
 /// [`read_for`] in short slices, answering each cursor position query (`CSI 6 n`) PSReadLine

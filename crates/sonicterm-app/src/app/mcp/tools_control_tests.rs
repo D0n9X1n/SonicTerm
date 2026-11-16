@@ -427,7 +427,7 @@ fn silent_typing_is_seen_at_the_recheck() {
     assert!(begun.elapsed() < Duration::from_secs(1), "seen after {:?}", begun.elapsed());
 }
 
-/// A closed pane's run returns within the one close drain even while its parser stays held, the
+/// A closed pane's run returns after the one close drain even while its parser stays held, the
 /// output read included, and frees the pane's run reservation.
 #[test]
 fn a_closed_pane_with_a_held_parser_ends_its_run_within_the_drain() {
@@ -437,21 +437,30 @@ fn a_closed_pane_with_a_held_parser_ends_its_run_within_the_drain() {
     entry.change_signal.close();
     let held = Arc::clone(&entry.parser);
     let (locked, ready) = std::sync::mpsc::channel();
+    let (returned, release) = std::sync::mpsc::channel::<()>();
+    // The parser stays held until the run has returned, so a run that waited for the parser
+    // would meet its 20 s timeout. A dropped sender also ends the hold if an assertion fails.
     let holder = std::thread::spawn(move || {
         let _guard = held.lock();
         locked.send(()).unwrap();
-        std::thread::sleep(Duration::from_secs(3));
+        let _ = release.recv();
     });
     ready.recv().unwrap();
     let begun = std::time::Instant::now();
     let outcome =
         wait_run_every(&shared, run, Duration::from_secs(20), &scope(&shared), LONG_RUN_RECHECK);
     let elapsed = begun.elapsed();
+    returned.send(()).unwrap();
+    holder.join().unwrap();
     assert_eq!(outcome.state, RunState::PaneClosed);
     let drain = crate::app::mcp::tools_read::CLOSE_DRAIN;
-    assert!(elapsed < drain + Duration::from_millis(200), "the run returned after {elapsed:?}");
+    // A loaded runner oversleeps each 50 ms poll, so the bound leaves room past the drain; the
+    // finish adding no wait of its own is pinned by `run_tests`, not by this wall clock.
+    assert!(
+        elapsed >= drain && elapsed < drain + RUN_WAKE_BOUND,
+        "the run returned after {elapsed:?}"
+    );
     assert!(!entry.agent_run.load(Ordering::Acquire), "the reservation outlived the run");
-    holder.join().unwrap();
 }
 
 /// The end-reason table on the MCP Server page, English and Chinese, lists exactly the values
