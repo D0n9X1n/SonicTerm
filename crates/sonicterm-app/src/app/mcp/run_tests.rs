@@ -190,3 +190,15 @@ fn an_authenticated_d_without_a_code_completes_with_no_exit_code() {
     assert!(exit_verified(&unknown));
     assert_eq!(unknown.exit.flatten(), None, "the code is unknown, not zero");
 }
+
+/// A closed pane's finish waits only for what is left of the close drain: nothing once the drain
+/// has passed, so the run returns within that one bound and never a `FINISH_WAIT` past it.
+#[test]
+fn the_finish_budget_is_what_the_close_drain_has_left() {
+    let drain = super::super::tools_read::CLOSE_DRAIN;
+    assert_eq!(close_budget(None), FINISH_WAIT, "an open pane waits the normal finish wait");
+    let expired = Instant::now().checked_sub(drain + Duration::from_millis(1)).unwrap();
+    assert_eq!(close_budget(Some(expired)), Duration::ZERO, "a drained pane waits nothing more");
+    // Just closed: the drain's remainder exceeds the finish wait, which still caps it.
+    assert_eq!(close_budget(Some(Instant::now())), FINISH_WAIT);
+}
