@@ -438,19 +438,21 @@ fn a_closed_pane_with_a_held_parser_ends_its_run_within_the_drain() {
     let held = Arc::clone(&entry.parser);
     let (locked, ready) = std::sync::mpsc::channel();
     let (returned, release) = std::sync::mpsc::channel::<()>();
-    // The parser stays held until the run has returned, so a run that waited for the parser
-    // would meet its 20 s timeout. A dropped sender also ends the hold if an assertion fails.
+    // The parser stays held until the run has returned, so a run that polled past the drain
+    // would meet its 20 s timeout. The hold also ends after a bound past the assertion's, so a run
+    // blocked on the lock itself returns too late and fails rather than hanging the test.
     let holder = std::thread::spawn(move || {
         let _guard = held.lock();
         locked.send(()).unwrap();
-        let _ = release.recv();
+        let _ = release.recv_timeout(Duration::from_secs(10));
     });
     ready.recv().unwrap();
     let begun = std::time::Instant::now();
     let outcome =
         wait_run_every(&shared, run, Duration::from_secs(20), &scope(&shared), LONG_RUN_RECHECK);
     let elapsed = begun.elapsed();
-    returned.send(()).unwrap();
+    // A holder whose bound already ended has dropped its receiver; the bound assertion reports it.
+    let _ = returned.send(());
     holder.join().unwrap();
     assert_eq!(outcome.state, RunState::PaneClosed);
     let drain = crate::app::mcp::tools_read::CLOSE_DRAIN;
