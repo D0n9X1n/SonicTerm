@@ -425,3 +425,39 @@ fn doubled_quote_in_a_quoted_url_never_opens_a_prefix() {
     let display = exact_target_at(&lines, (80, 10), 0, 37);
     assert_ne!(display.as_deref(), Some("https://en.wikipedia.org/wiki/The_Hitchhiker"));
 }
+
+/// An indented markdown link whose continuation opens with `-` joins: a diff could not show that
+/// row below a context line, so the markdown reading stands.
+#[test]
+fn indented_markdown_link_with_a_hyphen_continuation_joins() {
+    let lines = [
+        "     87   [SSH setup](https://docs.github.com/en/authentication/connecting".to_string(),
+        "        -to-github-with-ssh)".to_string(),
+        "     88   Next steps.".to_string(),
+    ];
+    assert_eq!(
+        exact_target_at(&lines, (80, 10), 0, 30).as_deref(),
+        Some("https://docs.github.com/en/authentication/connecting-to-github-with-ssh")
+    );
+}
+
+/// A markdown thematic break (`---`) is no removed line: a box holding one beside a list never
+/// drops a continuation's `-` as a diff sign.
+#[test]
+fn thematic_break_proves_no_diff() {
+    let lines = [
+        "     85 ---".to_string(),
+        "     86 ".to_string(),
+        "     87 - <https://docs.github.com/en/authentication/connecting".to_string(),
+        "        -to-github-with-ssh>".to_string(),
+        "     88   Configure your SSH key.".to_string(),
+    ];
+    for (row, col) in [(2u16, 25u16), (3, 12)] {
+        let display = exact_target_at(&lines, (69, 10), row, col);
+        assert_ne!(
+            display.as_deref(),
+            Some("https://docs.github.com/en/authentication/connectingto-github-with-ssh"),
+            "row {row}"
+        );
+    }
+}

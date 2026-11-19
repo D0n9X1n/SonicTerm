@@ -442,9 +442,12 @@ starts in the next column; in a diff view that column holds the line's sign
 (`+`, `-` or blank), which every continuation row repeats, and the text starts
 one column further. A box is a markdown view when any of its rows holds other
 text in that column, and a diff when it shows a line removed and then added, or
-signed rows beside unsigned ones where some signed row is not shaped like a
-markdown bullet (a sign, one blank, then text); any other box may be either, so
-a joined URL opens only when both readings find the same one. Continuation rows leave the line number blank and start their text at
+unsigned rows beside a `+` row not shaped like a markdown bullet (`+`, one
+blank, then text); a `-` row proves nothing, since markdown bullets and rules
+(`---`) start with one. Any other box may be either, so a joined URL opens only
+when both readings find the same one, unless a row below the line could be no
+diff row (a continuation with another character where the line's sign belongs),
+which leaves the markdown reading. Continuation rows leave the line number blank and start their text at
 that same text column. Rows are read as a view only when the view shows a line
 removed and then added, or two consecutive line numbers in a diff or with every
 row that reaches the box's widest column continuing below: indented tool output

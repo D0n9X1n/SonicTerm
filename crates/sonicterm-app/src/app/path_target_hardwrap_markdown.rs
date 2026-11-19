@@ -258,6 +258,9 @@ struct BoxLine {
     /// Whether the joined URL must sit inside a markdown `](`…`)` pair: the box is not proven, so
     /// only that delimiter shows the rows hold one source line.
     markdown_pair: bool,
+    /// Whether the row below the line could be no row of this layout, so the layout is not the
+    /// box's.
+    impossible: bool,
     /// The box's cut: the widest text column of its rows, which every wrapped row reaches.
     cut_end: usize,
     /// The line's head row, when it lies within the rebuilt rows.
@@ -372,6 +375,10 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
     for layout in readings {
         let geometry = (head_row, gutter_end, layout, evidence.cut_end);
         let reading = match box_line(&mut rows, geometry, pointed.row) {
+            Some(line) if line.impossible => {
+                // When: the reading is `impossible`, a row of the box is none of this layout's.
+                continue;
+            }
             Some(mut line) => {
                 line.markdown_pair = !proven;
                 box_line_uri(&mut rows, &line, pointed)
@@ -383,7 +390,33 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
             Some(earlier) => agreed(earlier, reading),
         });
     }
-    decided.unwrap_or(HardwrapUri::NotApplicable)
+    // Every reading impossible: the box's rows fit no layout, so nothing opens.
+    decided.unwrap_or(HardwrapUri::Incomplete)
+}
+
+/// Whether the unnumbered row `below` a line of `layout`, with gutter end `gutter_end`, could be no
+/// row of a diff: in a diff every row below a line either repeats its sign right after the gutter
+/// or starts the next numbered line, so a row writing another character there rules the diff out.
+fn layout_breaks_at(
+    rows: &mut BoxRows<'_, '_>,
+    layout: BoxLayout,
+    gutter_end: usize,
+    below: u64,
+) -> bool {
+    let BoxLayout::Diff(sign) = layout else {
+        // When: the `layout` is markdown, any text may continue a line.
+        return false;
+    };
+    let Some(row) = rows.get(below) else {
+        // When: the row `below` is not readable here, it shows nothing about the layout.
+        return false;
+    };
+    if row.soft_wrapped || row.gutter_end.is_some() || !row.blank_through(gutter_end) {
+        // When: the row soft_wrapped, is numbered, or writes into the gutter, it is no continuation.
+        return false;
+    }
+    let cell = row.cells.get(gutter_end + 1).filter(|cell| !box_blank(cell));
+    cell.is_some_and(|cell| Some(cell.ch) != sign)
 }
 
 /// One decision from two readings of a box: the same URL with the same spans, or neither owning
@@ -412,7 +445,7 @@ struct BoxEvidence {
     /// A `-` row and a later `+` row carry the same line number: a diff replaced that line, which
     /// a markdown list or other output never shows.
     replaced_line: bool,
-    /// A numbered row holds `+` or `-` right after the gutter, not shaped like a markdown bullet.
+    /// A numbered row holds `+` right after the gutter, not shaped like a markdown bullet.
     signed_row: bool,
     /// The box's cut: the widest text column of all its displayed rows, which every row the box
     /// wrapped reaches, however far from the pointer.
@@ -450,11 +483,11 @@ fn box_evidence(rows: &mut BoxRows<'_, '_>, pointed_row: u64, gutter_end: usize)
         evidence.markdown_text |=
             cell.is_some_and(|cell| !box_blank(cell) && !matches!(cell.ch, '+' | '-'));
         evidence.context_row |= numbered && cell.is_none_or(|cell| box_blank(cell));
-        // A sign, one blank, then text is also a markdown bullet; any other signed row is a diff's.
+        // A `+` with text right after it is an added line's; `+ ` is also a markdown bullet, and
+        // a `-` also opens markdown bullets and thematic breaks (`---`), so neither proves a diff.
         let bullet = row.cells.get(gutter_end + 2).is_some_and(|cell| box_blank(cell))
             && row.cells.get(gutter_end + 3).is_some_and(|cell| !box_blank(cell));
-        evidence.signed_row |=
-            numbered && !bullet && cell.is_some_and(|cell| matches!(cell.ch, '+' | '-'));
+        evidence.signed_row |= numbered && !bullet && cell.is_some_and(|cell| cell.ch == '+');
         evidence.cut_end = evidence.cut_end.max(row.text.map_or(0, |(_, last)| last));
         if let Some(number) = row.number.filter(|_| numbered) {
             // A numbered row's line number and sign join the box's ordered numbers.
@@ -657,6 +690,7 @@ fn box_line(
     // The line's rows below the pointer, within the same bounds.
     let mut last_row = pointed_row;
     let mut below_bytes = 0;
+    let mut impossible = false;
     let open_below = loop {
         let below = last_row + 1;
         if !rows.frame.contains(below) {
@@ -666,6 +700,7 @@ fn box_line(
         if !line_row(rows, below) {
             // When: `line_row` refuses the row `below`, the line ends unless `row_ends_line`
             // cannot prove it.
+            impossible = layout_breaks_at(rows, layout, gutter_end, below);
             let pane_left = usize::from(rows.pane.0);
             break !row_ends_line(rows.get_any(below), gutter_end, pane_left);
         }
@@ -681,6 +716,7 @@ fn box_line(
         gutter_end,
         layout,
         markdown_pair: false,
+        impossible,
         cut_end,
         head_row: head_row.filter(|head_row| *head_row >= first_row),
         first_row,
