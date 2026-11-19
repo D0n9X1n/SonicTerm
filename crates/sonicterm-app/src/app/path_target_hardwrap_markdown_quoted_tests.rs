@@ -889,3 +889,47 @@ fn added_lines_beside_context_rows_join() {
         assert_eq!(found, expected, "sign {url_sign:?}");
     }
 }
+
+/// Signed rows beside a context row prove a diff even when a neighbouring line exactly fills the
+/// box's width: the added row's wrapped URL joins rather than opening its first row's prefix.
+#[test]
+fn diff_box_with_an_exact_width_line_still_joins() {
+    let lines = [
+        "     87 +get \"https://example.test/aaaa".to_string(),
+        "        +bbbb\"".to_string(),
+        "     88  result = download_and_parse();".to_string(),
+    ];
+    assert_eq!(lines[0].len(), lines[2].len(), "the next line fills the box's width");
+    let decided = decide_in_frame(&lines, (60, 10), 0, AbsoluteCell { row: 0, col: 24 });
+    let HardwrapUri::Complete(candidate) = decided else { panic!("{decided:?}") };
+    assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
+}
+
+/// In a box the rows do not prove, a markdown pair still joins only when both layouts read the
+/// same URL: a continuation opening with `-` in an all-signed box may be a sign or text.
+#[test]
+fn unproven_signed_markdown_pair_needs_both_readings() {
+    let lines = [
+        "     87 - [doc](https://example.test/aaaa".to_string(),
+        "        -preview.zip)".to_string(),
+        "     88 - More installation instructions.".to_string(),
+    ];
+    let decided = decide_in_frame(&lines, (60, 10), 0, AbsoluteCell { row: 0, col: 24 });
+    assert_eq!(decided, HardwrapUri::Incomplete);
+}
+
+/// Numbered tool output that holds two URLs on consecutive rows proves no box: each URL stays its
+/// row's own, never refused as a broken one.
+#[test]
+fn unproven_rows_keep_independent_urls() {
+    let lines = [
+        "     302 https://example.test/redirect".to_string(),
+        "         https://new.test/".to_string(),
+    ];
+    for (row, col, expected) in
+        [(0, 15, "https://example.test/redirect"), (1, 12, "https://new.test/")]
+    {
+        let display = exact_target_at(&lines, (60, 8), row, col);
+        assert_eq!(display.as_deref(), Some(expected), "row {row}");
+    }
+}

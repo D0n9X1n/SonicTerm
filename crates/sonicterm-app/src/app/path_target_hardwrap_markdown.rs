@@ -327,34 +327,35 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
         }
     };
     let evidence = box_evidence(&mut rows, pointed.row, gutter_end);
-    // Consecutive numbers prove a box only when every row reaching its cut wrapped there: numbered
-    // tool output whose rows happen to share a width shows a row that reaches it and ends.
-    let proven = evidence.replaced_line || (evidence.consecutive && evidence.cut_wrapped);
+    // A replaced line, or signed rows beside context rows, proves a diff.
+    let diff_proven = evidence.replaced_line || (evidence.signed_row && evidence.context_row);
+    // Consecutive numbers prove a box when it is a diff, or when every row reaching its cut wrapped
+    // there: numbered tool output whose rows happen to share a width shows a row that reaches it
+    // and ends, and never signs its rows beside unsigned ones.
+    let proven =
+        evidence.replaced_line || (evidence.consecutive && (evidence.cut_wrapped || diff_proven));
     if !proven && narrower_gutter_nearby(&mut rows, pointed.row, gutter_end) {
         // When: no box is `proven` but a narrower gutter nearby shows one, the head was misread.
         return HardwrapUri::Incomplete;
     }
-    // The layouts the box leaves possible. Text after the gutter proves markdown; a replaced line,
-    // or signed rows beside context rows, proves a diff. A box whose rows are all signed, or all
-    // blank there, may be either, so a URL opens only when both readings find the same one.
+    // The layouts the box leaves possible. Text after the gutter proves markdown; a diff may be
+    // `diff_proven`. A box whose rows are all signed, or all blank there, may be either, so a URL
+    // opens only when both readings find the same one. An unproven box is read the same way, and
+    // only a markdown `](`…`)` pair joins in it, as a padded markdown target.
     let mut readings = SmallVec::<[BoxLayout; 2]>::new();
-    let diff_proven = evidence.replaced_line || (evidence.signed_row && evidence.context_row);
-    if !proven {
-        // An unproven box: the head row's own sign decides one reading, and only a markdown
-        // `](`…`)` pair may join it, as a padded markdown target.
-        readings.push(match line_sign {
-            Ok(Some(sign)) => BoxLayout::Diff(Some(sign)),
-            Ok(None) | Err(()) => BoxLayout::Markdown,
-        });
-    } else if evidence.markdown_text {
-        // When: the box shows `markdown_text` after a gutter, no row is a diff.
+    if evidence.markdown_text {
+        // Text after a gutter: no row is a diff.
         readings.push(BoxLayout::Markdown);
     } else {
-        // When: a proven box shows no `markdown_text`, it is a diff, or markdown too unless
+        // When: the box shows no `markdown_text`, it is a diff, or markdown too unless
         // `diff_proven`; a diff line's sign must be readable.
         let Ok(sign) = line_sign else {
-            // When: the line's sign is `Err`, which rows continue a diff line cannot be read.
-            return HardwrapUri::Incomplete;
+            // When: the line's sign is `Err`, which rows continue a diff line cannot be read; in
+            // an unproven box the single-row rules decide.
+            return match proven {
+                true => HardwrapUri::Incomplete,
+                false => HardwrapUri::NotApplicable,
+            };
         };
         readings.push(BoxLayout::Diff(sign));
         if !diff_proven {
@@ -789,6 +790,12 @@ fn box_token_uri(
         // When: no `scheme_at` exists or `multi_row` is false, the single-row rules decide.
         return HardwrapUri::NotApplicable;
     };
+    let opener_at = token_start + scheme_at;
+    if line.markdown_pair && text.get(opener_at.saturating_sub(2)..opener_at) != Some("](") {
+        // When: the line needs a `markdown_pair` and no `](` opens the URL, the rows may be
+        // other output, so the single-row rules decide first.
+        return HardwrapUri::NotApplicable;
+    }
     if pointed_byte < token_start + scheme_at {
         // When: `pointed_byte` is before the scheme, the pointer is on text that leads the URL.
         return HardwrapUri::NotApplicable;

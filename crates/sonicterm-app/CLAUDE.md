@@ -307,10 +307,11 @@ cargo build -p sonicterm-app
   whose sign column every continuation repeats; a box is markdown when any row holds other text
   at gutter end + 1) and finds the URL under the pointer in it,
   whatever wraps it. `BoxEvidence` reads every displayed row of the box: its cut is their widest
-  column. A box is proven by one line removed then added, or by consecutive line numbers with
-  every cut-reaching row followed by a possible continuation (`cut_wrapped`); in an unproven box
-  only a markdown `](`…`)` pair joins, else `NotApplicable` (`Incomplete` when a narrower gutter
-  nearby shows the head was misread). Text after a gutter proves markdown; a replaced line or
+  column. A box is proven by one line removed then added, or by consecutive line numbers in a
+  proven diff or with every cut-reaching row followed by a possible continuation (`cut_wrapped`);
+  in an unproven box only a URL opened by a markdown `](` is this rule's (else `NotApplicable`
+  before any refusal, or `Incomplete` when a narrower gutter nearby shows the head was misread),
+  read under the same layouts. Text after a gutter proves markdown; a replaced line or
   signed beside context rows proves a diff; otherwise both layouts are read and `agreed` opens a
   URL only when both find the same one. Once the URL token under the pointer spans two rows
   the rule owns it: it opens whole or is `Incomplete` (past the displayed or rebuilt rows, the
