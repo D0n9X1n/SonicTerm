@@ -120,10 +120,11 @@ fn padded_box_joins_every_wrapped_url_shape() {
             "https://example.com/aaaa/bbbb,cccc",
         ),
         (
+            // A continuation one column right of the hang began with a blank: the URL ended there.
             "unaligned",
             format!("  1 [a]({prefix}"),
             "     cccc)".into(),
-            "https://example.com/aaaa/bbbbcccc",
+            "https://example.com/aaaa/bbbb",
         ),
         (
             "space",
@@ -157,29 +158,28 @@ fn padded_box_joins_every_wrapped_url_shape() {
     assert_eq!(joined.first().map(|found| found.url.as_str()), Some(split_host));
 }
 
-/// Shapes that are not one numbered line keep today's single-row result: the first row's own URL,
-/// and the continuation never resolves to a destination built from that prefix.
+/// Shapes that are not one numbered line never open a joined destination. Rows with no gutter
+/// keep the first row's own URL; a row shaped like a continuation that does not continue the line
+/// (another sign, a sign inside the gutter) may still hold the rest of the URL, so the first row's
+/// fragment stays inert rather than opening as a prefix.
 #[test]
 fn padded_markdown_refusals_keep_single_row_detection() {
     let prefix = "https://example.com/aaaa/bbbb";
-    let cases: [(&str, String, String); 4] = [
+    let cases: [(&str, String, String, Option<&str>); 3] = [
         // Without a numbered gutter the row is not the box, even when a later row looks aligned.
-        ("no gutter", format!("See [x]({prefix}"), "    cccc) next item".into()),
-        // A new numbered gutter row is a new line, not a hanging continuation.
-        ("gutter row", format!("    60 [a]({prefix}"), "    61)".into()),
-        // A sign that differs from the opener row's is a different diff line.
-        ("other sign", format!("    59 +[a]({prefix}"), "       -cccc)".into()),
-        // Without a sign on the opener row, a sign inside the gutter is not a continuation.
-        ("unexpected sign", format!("    59 [a]({prefix}"), "      +cccc)".into()),
+        ("no gutter", format!("See [x]({prefix}"), "    cccc) next item".into(), Some(prefix)),
+        // A sign that differs from the opener row's starts no continuation of this line.
+        ("other sign", format!("    59 +[a]({prefix}"), "       -cccc)".into(), None),
+        // A sign inside the gutter of an unsigned opener row is no continuation either.
+        ("unexpected sign", format!("    59 [a]({prefix}"), "      +cccc)".into(), None),
     ];
-    for (label, first, second) in cases {
+    for (label, first, second, row_url) in cases {
         let lines = padded_rows(&[&first, &second], first.len() + 6, None);
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let (window, pane) = hardwrap_pane_sized(&mut app, 90, 10, &lines);
         let col = first.find("https").unwrap() as u16 + 2;
-        // The first row keeps exactly the URL it shows on its own.
         let display = app.cell_target_at(window, pane, 0, col).map(|target| target.display);
-        assert_eq!(display.as_deref(), Some(prefix), "{label}");
+        assert_eq!(display.as_deref(), row_url, "{label}");
         // The continuation never resolves to a destination built from the first row's prefix.
         assert!(
             app.cell_target_at(window, pane, 1, 8)

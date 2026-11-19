@@ -437,23 +437,27 @@ the view wraps it at its own box width, short of the pane edge. The URL can sit
 anywhere in the line: a markdown `](https://…` target, a quoted argument such
 as `"https://…"`, a parenthesis, a code comment, or bare text, and it can start
 on the line's first row or on a continuation row. A source line starts with a
-line number (one to six digits and one blank); its continuation rows leave the
-line number blank and, on an added or removed line, repeat its `+` or `-`. The
-view cuts every wrapped row at the same column, so SonicTerm rebuilds the
-source line: a row that reaches the box's widest text column joins the next
-row directly, a row that stops before it, or a continuation that starts right
-of the box's leftmost continuation column, adds a blank, and the line number
-and repeated signs are dropped. The URL under the pointer is then found in the
-rebuilt line, so a closing quote, `)` or space ends it as it would on one row.
+line number (one to six digits and one blank). In a markdown view its text
+starts in the next column; in a diff view that column holds the line's sign
+(`+`, `-` or blank), which every continuation row repeats, and the text starts
+one column further. Continuation rows leave the line number blank and start
+their text at that same text column. The view cuts every wrapped row at the
+same column, so SonicTerm rebuilds the source line: a row that reaches the box's
+widest text column joins the next row directly, a row that stops before it, or
+a continuation that starts right of the text column, adds a blank, and the line
+number and repeated signs are dropped. A `+` or `-` at the text column is
+source text. The URL under the pointer is then found in the rebuilt line, so a
+closing quote, `)` or space ends it as it would on one row.
 A joined URL is at most 32 rows and 4 KiB; the limits bound the URL, not the
 source line, so a URL deep in a long wrapped line still joins. Once the URL text
 under the pointer spans two rows it opens whole or not at all: a URL that may
 continue past the displayed rows, passes either limit, holds a cell with
 combining marks, an OSC 8 link or a stray wide-character half, or meets a second
-scheme on a later row stays inert rather than opening a truncated prefix. A
-leading `+` or `-` on a continuation of an unchanged line is URL text, and a
-continuation that starts with digits never starts a new numbered line. A URL on
-one row is left to the single-row rules. The rule is a heuristic: a source line whose
+scheme on a later row stays inert rather than opening a truncated prefix. So
+does a URL at the edge of a row whose line cannot be read: a continuation that
+starts with digits, a row below that looks like a continuation but does not
+repeat the line's sign, or a line whose numbered head scrolled out of view with
+no numbered row below it. A URL on one row is left to the single-row rules. The rule is a heuristic: a source line whose
 text ends exactly at the cut followed by a continuation that starts with a
 word joins them, and the modifier-hover preview shows the full destination
 before activation.
