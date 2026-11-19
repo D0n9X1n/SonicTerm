@@ -875,8 +875,9 @@ fn box_token_uri(
         // opens another scheme, two destinations or an unbounded one would open.
         return HardwrapUri::Incomplete;
     }
-    if spans.len() < 2 {
-        // When: the `spans` of the URL `find_urls` read hold one row, single-row rules decide.
+    if spans.len() < 2 && delimited.is_none() {
+        // When: the URL `find_urls` read is on one row, single-row rules decide; a `delimited`
+        // URL in a wrapped token stays this rule's.
         return HardwrapUri::NotApplicable;
     }
     if spans_join_across_pane_border(frame, &spans) {

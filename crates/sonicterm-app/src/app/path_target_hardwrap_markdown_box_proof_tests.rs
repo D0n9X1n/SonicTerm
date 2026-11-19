@@ -360,3 +360,68 @@ fn prose_parenthesis_urls_keep_their_own_parentheses() {
         );
     }
 }
+
+/// A URL in prose parentheses that ends in `!` or `?` may own that mark or leave it to the
+/// sentence, so it stays inert rather than opening either reading.
+#[test]
+fn prose_parenthesis_url_ending_in_a_mark_stays_inert() {
+    let lines = [
+        "     87  // Background for the quiz (https://en.wikipedia.org/wiki/Jeopar".to_string(),
+        "         dy!) and more.".to_string(),
+        "     88 -old();".to_string(),
+        "     88 +new();".to_string(),
+    ];
+    let display = exact_target_at(&lines, (80, 10), 0, 41);
+    assert_ne!(display.as_deref(), Some("https://en.wikipedia.org/wiki/Jeopardy"));
+}
+
+/// A markdown link whose label is itself a URL opens the label at the label and the destination at
+/// the destination, never one URL running through `](`.
+#[test]
+fn url_label_and_destination_open_separately() {
+    let lines = [
+        "     87  [https://doc.rust-lang.org/book/ch01-01-installation.html](https://doc.rust-lang.org".to_string(),
+        "         /book/ch01-01-installation.html)".to_string(),
+        "     88 -Old instructions.".to_string(),
+        "     88 +New instructions.".to_string(),
+    ];
+    let expected = "https://doc.rust-lang.org/book/ch01-01-installation.html";
+    for (row, col) in [(0, 14), (0, 80), (1, 15)] {
+        assert_eq!(
+            exact_target_at(&lines, (100, 10), row, col).as_deref(),
+            Some(expected),
+            "row {row} col {col}"
+        );
+    }
+}
+
+/// A URL a backtick or `<` opens runs to the matching backtick or `>`, keeping a `)` it holds.
+#[test]
+fn backtick_and_autolink_urls_keep_their_own_parenthesis() {
+    let expected = "https://en.wikipedia.org/wiki/Function_(mathematics)";
+    for (open, close) in [('`', '`'), ('<', '>')] {
+        let lines = [
+            format!(
+                "     87  var documentation = {open}https://en.wikipedia.org/wiki/Function_(mat"
+            ),
+            format!("         hematics){close}"),
+            "     88 -old();".to_string(),
+            "     88 +new();".to_string(),
+        ];
+        assert_eq!(exact_target_at(&lines, (80, 10), 0, 34).as_deref(), Some(expected), "{open}");
+    }
+}
+
+/// A doubled quote inside a quoted URL escapes a quote, as YAML writes an apostrophe: no URL may
+/// hold it, so the URL stays inert rather than opening the part before it.
+#[test]
+fn doubled_quote_in_a_quoted_url_never_opens_a_prefix() {
+    let lines = [
+        "     87      documentation_url: 'https://en.wikipedia.org/wiki/The_Hitchh".to_string(),
+        "         iker''s_Guide_to_the_Galaxy'".to_string(),
+        "     88 -    timeout: 10".to_string(),
+        "     88 +    timeout: 20".to_string(),
+    ];
+    let display = exact_target_at(&lines, (80, 10), 0, 37);
+    assert_ne!(display.as_deref(), Some("https://en.wikipedia.org/wiki/The_Hitchhiker"));
+}
