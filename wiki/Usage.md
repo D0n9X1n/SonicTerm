@@ -440,7 +440,8 @@ on the line's first row or on a continuation row. A source line starts with a
 line number (one to six digits and one blank). In a markdown view its text
 starts in the next column; in a diff view that column holds the line's sign
 (`+`, `-` or blank), which every continuation row repeats, and the text starts
-one column further. Continuation rows leave the line number blank and start
+one column further. A box is a markdown view when any of its rows holds other
+text in that column. Continuation rows leave the line number blank and start
 their text at that same text column. The view cuts every wrapped row at the
 same column, so SonicTerm rebuilds the source line: a row that reaches the box's
 widest text column joins the next row directly, a row that stops before it, or
@@ -455,9 +456,11 @@ continue past the displayed rows, passes either limit, holds a cell with
 combining marks, an OSC 8 link or a stray wide-character half, or meets a second
 scheme on a later row stays inert rather than opening a truncated prefix. So
 does a URL at the edge of a row whose line cannot be read: a continuation that
-starts with digits, a row below that looks like a continuation but does not
-repeat the line's sign, or a line whose numbered head scrolled out of view with
-no numbered row below it. A URL on one row is left to the single-row rules. The rule is a heuristic: a source line whose
+starts with digits, or a row below that looks like a continuation but does not
+repeat the line's sign. A URL on one row is left to the single-row rules, and so
+is a line whose numbered head scrolled out of view with no numbered row below
+it: those rows cannot be told from other indented output, so its first visible
+row may offer that row's part of the URL. The rule is a heuristic: a source line whose
 text ends exactly at the cut followed by a continuation that starts with a
 word joins them, and the modifier-hover preview shows the full destination
 before activation.

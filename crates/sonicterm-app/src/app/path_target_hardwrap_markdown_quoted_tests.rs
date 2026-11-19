@@ -520,26 +520,74 @@ fn context_continuation_with_a_sign_at_the_text_column_keeps_it_as_text() {
     }
 }
 
-/// A line whose head scrolled above the frame, with no numbered row below, never opens the first
-/// visible row's fragment of a URL the box broke at a row edge.
+/// A line whose numbered head is displayed joins its URL. When the head scrolls above the frame
+/// and no numbered row below shows the box, the rows cannot be told from other indented output,
+/// so the rule leaves them to the single-row rules: a documented limit of reading the box.
 #[test]
-fn headless_line_without_a_numbered_row_below_keeps_the_fragment_inert() {
+fn line_whose_head_scrolled_away_with_no_numbered_row_below_is_not_read() {
     let source =
         format!("{} \"https://example.test/aaaabbbb\" {}", "x".repeat(40), "word ".repeat(20));
     // `  1 ` ends its gutter at column 3 and the text opens with `x`, so the box hangs at column 4.
     let lines = box_line("  1 ", ' ', &source, 32, 4);
     let row_count = lines.len() as u16;
     let url = DetectedTarget::Uri("https://example.test/aaaabbbb".into());
-    // Every row displayed: the head is row 0 and the URL on rows 1 and 2 joins.
     let whole = decide_in_frame(&lines, (60, row_count), 0, AbsoluteCell { row: 1, col: 20 });
     assert!(
         matches!(&whole, HardwrapUri::Complete(candidate) if candidate.target == url),
         "{whole:?}"
     );
-    // One row shorter: the head scrolls into history and the frame's top row starts the URL.
     let scrolled =
         decide_in_frame(&lines, (60, row_count - 1), 1, AbsoluteCell { row: 1, col: 20 });
+    assert_eq!(scrolled, HardwrapUri::NotApplicable);
+}
+
+/// A markdown box decides its layout from every row: one line opening with spaces is still a
+/// markdown line, so its continuation one column right of the text column began with a blank and
+/// the URL above it never runs into that text.
+#[test]
+fn indented_markdown_line_keeps_its_url_whole() {
+    let lines = [
+        "  11 Documentation links:".to_string(),
+        "  12   see https://example.test/aaaa".to_string(),
+        "      next paragraph".to_string(),
+        "  13 More text".to_string(),
+    ];
+    assert_eq!(target_at(&lines, 70, 1, 25).as_deref(), Some("https://example.test/aaaa"));
+}
+
+/// A continuation that starts with three digits, one column further in, is no head even when the
+/// row above it scrolled away: the URL it starts never opens a prefix.
+#[test]
+fn deeper_digit_continuation_at_the_frame_top_is_no_false_head() {
+    let lines = [
+        format!("  1 {}", "x".repeat(32)),
+        "      123 \"https://example.test/aaaa".to_string(),
+        "    bbbb\"".to_string(),
+        "  2 next".to_string(),
+    ];
+    let full = decide_in_frame(&lines, (70, 4), 0, AbsoluteCell { row: 1, col: 20 });
+    let url = DetectedTarget::Uri("https://example.test/aaaabbbb".into());
+    assert!(
+        matches!(&full, HardwrapUri::Complete(candidate) if candidate.target == url),
+        "{full:?}"
+    );
+    let scrolled = decide_in_frame(&lines, (70, 3), 1, AbsoluteCell { row: 1, col: 20 });
     assert_eq!(scrolled, HardwrapUri::Incomplete);
+}
+
+/// Equal-width URLs on consecutive tool-output rows are separate links; the box rule never makes
+/// them inert.
+#[test]
+fn aligned_tool_output_urls_stay_clickable() {
+    let lines = [
+        "  ⎿  https://example.test/aaaa".to_string(),
+        "     https://example.test/bbbb".to_string(),
+        "     https://example.test/cccc".to_string(),
+    ];
+    for (row, expected) in [(0, "aaaa"), (1, "bbbb"), (2, "cccc")] {
+        let display = target_at(&lines, 70, row, 15);
+        assert_eq!(display, Some(format!("https://example.test/{expected}")), "row {row}");
+    }
 }
 
 /// A continuation that starts with digits at the frame's top is not taken for a head when a row

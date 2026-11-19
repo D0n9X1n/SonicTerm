@@ -304,7 +304,8 @@ cargo build -p sonicterm-app
   both rows draw. `numbered_box_uri_in` (`path_target_hardwrap_markdown.rs`), tried after the
   edge-reaching bracketed rule, rebuilds one line of Claude Code's numbered diff/markdown box (the
   box cut is its widest text column; text starts at gutter end + 1 in markdown, + 2 in a diff,
-  whose sign column every continuation repeats) and finds the URL under the pointer in it,
+  whose sign column every continuation repeats; a box is markdown when any row holds other text
+  at gutter end + 1) and finds the URL under the pointer in it,
   whatever wraps it. Once the URL token under the pointer spans two rows
   the rule owns it: it opens whole or is `Incomplete` (past the displayed or rebuilt rows, the
   caps, an unsafe cell, or a later-row second scheme), never `NotApplicable`, so no single-row
