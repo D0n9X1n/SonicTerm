@@ -355,8 +355,8 @@ fn quoted_url_closed_above_an_undisplayed_row_joins() {
     assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
 }
 
-/// Hovering every cell of a large box stays bounded: each decision reads at most a fixed window of
-/// rows around the pointer, whatever the number of rows the box holds.
+/// Hovering a cell of a large box stays bounded: each decision reads each displayed row at most
+/// once, whatever the number of rows the box holds.
 #[test]
 fn box_decision_reads_a_bounded_window() {
     let lines = (0..200)
@@ -375,8 +375,7 @@ fn box_decision_reads_a_bounded_window() {
     let frame = FrameRows::new(&grid, 0);
     let (_, cells) =
         hardwrap_work::measure(|| numbered_box_uri_in(&frame, AbsoluteCell { row: 100, col: 20 }));
-    let window_rows = 6 * (MAX_WRAPPED_PATH_ROWS as u64 - 1) + 1;
-    assert!(cells <= window_rows * 80, "read {cells} cells");
+    assert!(cells <= 200 * 80, "read {cells} cells");
 }
 
 /// Hovering a delimiter that opens a numbered row's text resolves nothing and never panics.
@@ -674,4 +673,47 @@ fn signed_line_byte_bound_counts_url_text_only() {
     );
     let HardwrapUri::Complete(candidate) = decided else { panic!("signed line: {decided:?}") };
     assert_eq!(candidate.target, DetectedTarget::Uri(uri));
+}
+
+/// Markdown evidence anywhere in the displayed box decides its layout, however far above the
+/// pointer: an indented line's continuation one column right of the text column began with a
+/// blank, so the URL never runs into it.
+#[test]
+fn markdown_evidence_far_above_the_pointer_decides_the_layout() {
+    let mut lines = vec!["   1 Title".to_string()];
+    lines.extend((2..=32).map(|number| format!("  {number:>2}   indented code")));
+    lines.push("  33   see https://example.test/aaaa".to_string());
+    lines.push("      next paragraph".to_string());
+    assert_eq!(target_at(&lines, 70, 32, 23).as_deref(), Some("https://example.test/aaaa"));
+}
+
+/// When the head scrolled away but a numbered row below shows a markdown box, the visible rows'
+/// differing first characters are text, not signs, and the wrapped URL joins.
+#[test]
+fn headless_markdown_line_with_a_plus_row_joins() {
+    let lines = [
+        "  12 xxxxxxxxxxxxxxxxxxxxxxxxxx".to_string(),
+        "     +yyyyyyyyyyyyyyyyyyyyyyyyy".to_string(),
+        "     \"https://example.test/aaaa".to_string(),
+        "     bbbb\"".to_string(),
+        "  13 next".to_string(),
+    ];
+    let decided = decide_in_frame(&lines, (70, 4), 1, AbsoluteCell { row: 2, col: 15 });
+    let HardwrapUri::Complete(candidate) = decided else { panic!("{decided:?}") };
+    assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
+}
+
+/// A box in a right-hand multiplexer pane ends its line at a row whose text starts at the pane's
+/// own margin, measured from the pane's left edge, not the grid's.
+#[test]
+fn box_in_a_right_hand_pane_ends_at_the_pane_margin() {
+    let pad = format!("{}│", " ".repeat(29));
+    let mut output = String::from("\x1b[?1049h");
+    for line in ["    87  // https://example.test/aaaa", "⏺ Done"] {
+        output.push_str(&format!("{pad}{line}\r\n"));
+    }
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = hardwrap_pane_sized(&mut app, 100, 8, &[output]);
+    let display = app.cell_target_at(window, pane, 0, 55).map(|target| target.display);
+    assert_eq!(display.as_deref(), Some("https://example.test/aaaa"));
 }

@@ -153,15 +153,17 @@ impl BoxLayout {
     }
 }
 
-/// The first column a box row's text can start at: Claude Code indents its line numbers past the
-/// two columns its `⏺` and `⎿` markers use, so a row whose text starts left of it is outside any box.
+/// The first column, from the pane's left edge, a box row's text can start at: Claude Code indents
+/// its line numbers past the two columns its `⏺` and `⎿` markers use, so a row whose text starts
+/// left of it is outside any box.
 const BOX_TEXT_MIN_COL: usize = 4;
 
 /// Whether the row below a line's last row proves the line ended there: a blank row, a numbered
-/// row with the same gutter, or a row whose text starts left of `BOX_TEXT_MIN_COL` does. `None`, a
-/// soft wrap, a row in another pane split, a numbered row with another gutter, or a row shaped
-/// like a continuation that does not continue this line may hold more of it, so none proves an end.
-fn row_ends_line(row: Option<&BoxRow<'_>>, gutter_end: usize) -> bool {
+/// row with the same gutter, or a row whose text starts left of `BOX_TEXT_MIN_COL` past the pane's
+/// left edge `pane_left` does. `None`, a soft wrap, a row in another pane split, a numbered row
+/// with another gutter, or a row shaped like a continuation that does not continue this line may
+/// hold more of it, so none proves an end.
+fn row_ends_line(row: Option<&BoxRow<'_>>, gutter_end: usize, pane_left: usize) -> bool {
     let Some(row) = row else {
         // When: no `row` is readable below, the line may continue into it.
         return false;
@@ -180,7 +182,7 @@ fn row_ends_line(row: Option<&BoxRow<'_>>, gutter_end: usize) -> bool {
     }
     match row.gutter_end {
         Some(end) => end == gutter_end,
-        None => first < BOX_TEXT_MIN_COL,
+        None => first < pane_left + BOX_TEXT_MIN_COL,
     }
 }
 
@@ -272,11 +274,11 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
         // When: the pointer is on a pane border, no pane target lies under it.
         return HardwrapUri::NotApplicable;
     }
-    // Reads stay within the displayed frame: the head search may reach its top, and the rows
-    // below the pointer that rebuild and measure the line are bounded by `MAX_WRAPPED_PATH_ROWS`.
-    let reach = (MAX_WRAPPED_PATH_ROWS - 1) as u64;
+    // Reads stay within the displayed frame, each row at most once: the head search and the box's
+    // layout evidence may reach its top and bottom; the rebuilt rows stay within
+    // `MAX_WRAPPED_PATH_ROWS` of the pointer.
     let top = frame.view_top();
-    let bottom = (pointed.row + 2 * reach + 2).min(frame.view_end());
+    let bottom = frame.view_end();
     let mut rows = BoxRows {
         frame,
         pane,
@@ -311,6 +313,16 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
                 // single-row rules decide.
                 return HardwrapUri::NotApplicable;
             };
+            let sign = match sign {
+                Ok(sign) => sign,
+                // A box with markdown text has no sign column: the rows' first characters are text.
+                Err(()) if box_has_markdown_text(&mut rows, pointed.row, gutter_end) => None,
+                Err(()) => {
+                    // When: a diff box's visible rows disagree on the line's sign, which of them
+                    // continue the pointed line cannot be read.
+                    return HardwrapUri::Incomplete;
+                }
+            };
             (None, gutter_end, sign)
         }
         LineHead::Outside => {
@@ -331,9 +343,8 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
 
 /// Whether a row of the box around `pointed_row`, whose gutter ends at `gutter_end`, holds text at
 /// `gutter_end + 1` other than a diff sign, which makes the box markdown. The rows read are the
-/// contiguous numbered rows and hanging continuations within `MAX_WRAPPED_PATH_ROWS` of the pointer.
+/// box's contiguous numbered rows and hanging continuations the frame displays.
 fn box_has_markdown_text(rows: &mut BoxRows<'_, '_>, pointed_row: u64, gutter_end: usize) -> bool {
-    let reach = (MAX_WRAPPED_PATH_ROWS - 1) as u64;
     let markdown_at = |rows: &mut BoxRows<'_, '_>, row_number: u64| -> Option<bool> {
         let row = rows.get(row_number)?;
         let numbered = row.gutter_end == Some(gutter_end);
@@ -348,13 +359,12 @@ fn box_has_markdown_text(rows: &mut BoxRows<'_, '_>, pointed_row: u64, gutter_en
             .is_some_and(|cell| !box_blank(cell) && !(matches!(cell.ch, '+' | '-')));
         Some(markdown)
     };
-    let below = (pointed_row..=pointed_row + reach).map_while(|row| markdown_at(rows, row));
+    let below = (pointed_row..rows.frame.view_end()).map_while(|row| markdown_at(rows, row));
     if below.collect::<SmallVec<[bool; 32]>>().contains(&true) {
         // When: a row at or below the pointer holds markdown text, the box is markdown.
         return true;
     }
-    let first = pointed_row.saturating_sub(reach).max(rows.frame.view_top());
-    let above = (first..pointed_row).rev().map_while(|row| markdown_at(rows, row));
+    let above = (rows.frame.view_top()..pointed_row).rev().map_while(|row| markdown_at(rows, row));
     above.collect::<SmallVec<[bool; 32]>>().contains(&true)
 }
 
@@ -408,12 +418,15 @@ fn box_line_head(rows: &mut BoxRows<'_, '_>, pointed_row: u64) -> LineHead {
 /// The gutter end and sign of a line whose head lies above the frame, read from the box below:
 /// the first numbered row past the pointer whose gutter ends left of every row between, and the
 /// `+` or `-` the visible rows from the frame's top to the pointer share at the sign column, if
-/// any. `None` when no such row shows the box or those rows disagree on their sign column.
-fn headless_line(rows: &mut BoxRows<'_, '_>, pointed_row: u64) -> Option<(usize, Option<char>)> {
-    let reach = (MAX_WRAPPED_PATH_ROWS - 1) as u64;
+/// any, or `Err` when those rows disagree on it or hold one that is not plain. `None` when no
+/// such row shows the box.
+fn headless_line(
+    rows: &mut BoxRows<'_, '_>,
+    pointed_row: u64,
+) -> Option<(usize, Result<Option<char>, ()>)> {
     let mut leftmost_text = usize::MAX;
     let mut numbered = None;
-    for row_number in pointed_row..=pointed_row + 2 * reach {
+    for row_number in pointed_row..rows.frame.view_end() {
         let row = rows.get(row_number)?;
         let (first, _) = row.text?;
         if row.soft_wrapped {
@@ -437,17 +450,17 @@ fn headless_line(rows: &mut BoxRows<'_, '_>, pointed_row: u64) -> Option<(usize,
             Some(cell) if plain_cell(cell) && matches!(cell.ch, '+' | '-') => Some(cell.ch),
             Some(cell) if matches!(cell.ch, '+' | '-') => {
                 // When: a sign cell is not plain, the line's sign column cannot be read.
-                return None;
+                return Some((gutter_end, Err(())));
             }
             _ => None,
         };
         if row_number > rows.frame.view_top() && row_sign != sign {
             // When: `row_sign` differs from the rows above, the visible rows mix lines.
-            return None;
+            return Some((gutter_end, Err(())));
         }
         sign = row_sign;
     }
-    Some((gutter_end, sign))
+    Some((gutter_end, Ok(sign)))
 }
 
 /// The geometry of the line around `pointed_row` whose head is `head_row` (or above the frame),
@@ -505,7 +518,8 @@ fn box_line(
         if !line_row(rows, below) {
             // When: `line_row` refuses the row `below`, the line ends unless `row_ends_line`
             // cannot prove it.
-            break !row_ends_line(rows.get_any(below), gutter_end);
+            let pane_left = usize::from(rows.pane.0);
+            break !row_ends_line(rows.get_any(below), gutter_end, pane_left);
         }
         if below - pointed_row > reach || below_bytes > MAX_LOGICAL_PATH_BYTES {
             // When: `below` passes a bound, the line continues unread below.
