@@ -378,3 +378,105 @@ fn box_decision_reads_a_bounded_window() {
     let window_rows = 6 * (MAX_WRAPPED_PATH_ROWS as u64 - 1) + 1;
     assert!(cells <= window_rows * 80, "read {cells} cells");
 }
+
+/// Hovering a delimiter that opens a numbered row's text resolves nothing and never panics.
+#[test]
+fn delimiter_at_the_text_start_resolves_nothing() {
+    for line in ["  1 \"hello\"", "  1 {", "  1 (x)"] {
+        assert!(target_at(&[line.to_string()], 60, 0, 4).is_none(), "{line:?}");
+    }
+}
+
+/// A URL that fits both limits joins even when it starts past the rows `MAX_LOGICAL_PATH_BYTES`
+/// of prose would fill: the rebuild reads the line around the pointer, not from its head.
+#[test]
+fn url_after_long_prose_on_a_wide_row_joins() {
+    let uri = format!("https://example.test/{}", "a".repeat(980));
+    let lines = box_line("  1 ", ' ', &format!("{}\"{uri}\"", "word ".repeat(3200)), 1000, 4);
+    let (row, start) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| Some((index, line.find("https")?)))
+        .unwrap();
+    let spans = url_spans(row as u16, start, uri.len(), 1000, 4);
+    assert!(spans.len() >= 2, "fixture must wrap the URL: {spans:?}");
+    assert_joined(&lines, 1010, &spans, &uri);
+}
+
+/// A two-row URL whose numbered head is far above it, but still displayed, joins.
+#[test]
+fn two_row_url_far_below_its_head_joins() {
+    let uri = "https://example.test/aaaaaaaaabbbbbbbbcccccccc";
+    let lines = box_line("  1 ", ' ', &format!("{} \"{uri}\"", "x".repeat(2276)), 40, 4);
+    let (row, start) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| Some((index, line.find("https")?)))
+        .unwrap();
+    assert!(row > 2 * MAX_WRAPPED_PATH_ROWS - 2, "fixture must put the URL far below its head");
+    let spans = url_spans(row as u16, start, uri.len(), 40, 4);
+    assert_eq!(spans.len(), 2, "fixture must split the URL over two rows");
+    assert_joined(&lines, 60, &spans, uri);
+}
+
+/// When the head is above the displayed frame, a URL whose rows the frame shows still joins, and
+/// one that may start above the frame stays inert.
+#[test]
+fn url_in_a_line_whose_head_scrolled_away() {
+    let uri = "https://example.test/aaaaaaaaabbbbbbbbcccccccc";
+    let lines = box_line("  1 ", ' ', &format!("{} \"{uri}\" x", "x".repeat(400)), 40, 4);
+    let mut lines = lines;
+    lines.push(format!("  2 {}", "y".repeat(10)));
+    let (row, start) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| Some((index, line.find("https")?)))
+        .unwrap();
+    let mut grid = Grid::new(60, 6);
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            grid.carriage_return();
+            grid.linefeed();
+        }
+        for character in line.chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    // The frame shows the URL's rows and the next numbered row, not the line's head.
+    let view_top = row as u64 - 2;
+    let frame = FrameRows::new(&grid, view_top);
+    assert!(view_top > 0 && frame.contains(row as u64 + 1));
+    let decided =
+        numbered_box_uri_in(&frame, AbsoluteCell { row: row as u64, col: start as u16 + 2 });
+    let HardwrapUri::Complete(candidate) = decided else { panic!("headless line: {decided:?}") };
+    assert_eq!(candidate.target, DetectedTarget::Uri(uri.into()));
+    // On the frame's top row the prose may continue above, so the token there is not proven.
+    let top = numbered_box_uri_in(&frame, AbsoluteCell { row: view_top, col: 6 });
+    assert!(!matches!(top, HardwrapUri::Complete(_)), "{top:?}");
+}
+
+/// A continuation that holds only the repeated sign ends nothing: the URL closed above it opens.
+#[test]
+fn sign_only_continuation_keeps_the_closed_url() {
+    let lines = [
+        "  1 +get \"https://example.test/aaaa".to_string(),
+        "    +bbbb\" more".to_string(),
+        "    +".to_string(),
+    ];
+    assert_eq!(target_at(&lines, 60, 0, 20).as_deref(), Some("https://example.test/aaaabbbb"));
+}
+
+/// A blank cell carrying a combining mark is unreadable text, not padding, and a continuation's
+/// sign carrying one is unreadable too: either leaves the broken URL inert instead of opening a
+/// joined or truncated destination.
+#[test]
+fn unreadable_blank_or_sign_keeps_the_url_inert() {
+    let cases = [
+        ("combining blank", ["  1 get \"https://example.test/aaaa \u{301}", "    bbbb\""]),
+        ("combining sign", ["  1 +get \"https://example.test/aaaa", "    +\u{301}bbbb\""]),
+    ];
+    for (label, lines) in cases {
+        let lines = lines.map(str::to_string);
+        assert_eq!(target_at(&lines, 60, 0, 20), None, "{label}");
+    }
+}

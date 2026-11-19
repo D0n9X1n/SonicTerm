@@ -23,7 +23,7 @@ impl BoxRow<'_> {
     fn plain_char(&self, column: usize) -> Option<char> {
         self.cells
             .get(column)
-            .filter(|cell| plain_cell(cell) && !hardwrap_blank(cell))
+            .filter(|cell| !box_blank(cell) && plain_cell(cell))
             .map(|cell| cell.ch)
     }
 
@@ -31,11 +31,22 @@ impl BoxRow<'_> {
     fn blank_through(&self, end: usize) -> bool {
         self.text.is_none_or(|(first, _)| first > end)
     }
+
+    /// The number of columns the row's text spans, a bound on the bytes it adds to a line.
+    fn text_len(&self) -> usize {
+        self.text.map_or(0, |(first, last)| last + 1 - first)
+    }
 }
 
 /// Whether `cell` is plain text: single-width, without combining extras and outside any OSC 8 link.
 fn plain_cell(cell: &Cell) -> bool {
     !unsafe_path_cell(&cell) && cell.hyperlink().is_none()
+}
+
+/// Whether `cell` is padding: a plain blank. A blank that carries combining extras or an OSC 8
+/// link is text the rule cannot read, so it is never trimmed away as padding.
+fn box_blank(cell: &Cell) -> bool {
+    hardwrap_blank(cell) && plain_cell(cell)
 }
 
 /// The displayed rows of the pointed pane that one decision may read, each read at most once.
@@ -75,7 +86,7 @@ impl<'grid> BoxRows<'_, 'grid> {
         hardwrap_work::add(cells.len());
         let left = usize::from(self.pane.0);
         let right = cells.len().min(usize::from(self.pane.1));
-        let non_blank = |column: &usize| !hardwrap_blank(cells[*column]);
+        let non_blank = |column: &usize| !box_blank(cells[*column]);
         let text = (left..right)
             .find(non_blank)
             .map(|first| (first, (first..right).rev().find(non_blank).unwrap_or(first)));
@@ -94,7 +105,7 @@ impl BoxRow<'_> {
     /// The first non-blank column after the gutter end `gutter_end`; `None` when there is none.
     fn first_after(&self, gutter_end: usize) -> Option<usize> {
         let (first, last) = self.text?;
-        (first.max(gutter_end + 1)..=last).find(|column| !hardwrap_blank(self.cells[*column]))
+        (first.max(gutter_end + 1)..=last).find(|column| !box_blank(self.cells[*column]))
     }
 
     /// The first column of the row's text after the gutter end, skipping one plain `+` or `-`
@@ -104,31 +115,34 @@ impl BoxRow<'_> {
         let signed = self.plain_char(first).is_some_and(|sign| matches!(sign, '+' | '-'));
         let start = first + usize::from(signed);
         let (_, last) = self.text?;
-        (start..=last).find(|column| !hardwrap_blank(self.cells[*column]))
+        (start..=last).find(|column| !box_blank(self.cells[*column]))
     }
 
-    /// The first column of the row's own text in a line whose head carries `head_sign`: after the
-    /// repeated sign of a signed line; otherwise its first non-blank, even a `+` or `-` of a URL.
+    /// The first column of the row's own text in a line whose head carries `head_sign`: after a
+    /// signed line's repeated plain sign; otherwise its first non-blank, even a `+` or `-` of a URL
+    /// or a cell the rule cannot read. `None` when the row holds no text after its sign.
     fn line_start(&self, gutter_end: usize, head_sign: Option<char>) -> Option<usize> {
         let first = self.first_after(gutter_end)?;
-        if head_sign.is_none() {
-            // When: `head_sign` is None, a leading `+` or `-` is the line's text, not a sign.
+        if head_sign.is_none() || self.plain_char(first) != head_sign {
+            // When: `head_sign` is None or the row's `first` cell is not that plain sign, the row's
+            // text starts at `first`.
             return Some(first);
         }
         let (_, last) = self.text?;
-        (first + 1..=last).find(|column| !hardwrap_blank(self.cells[*column]))
+        (first + 1..=last).find(|column| !box_blank(self.cells[*column]))
     }
 
     /// Whether the row continues a numbered line whose head carries `head_sign`: it soft-wraps
     /// nowhere, writes nothing into the gutter, holds text, and, under a signed head, opens with
-    /// the same plain sign.
+    /// the same plain sign or with a cell the rule cannot read, which the rebuild keeps unsafe.
     fn continues(&self, gutter_end: usize, head_sign: Option<char>) -> bool {
         if self.soft_wrapped || !self.blank_through(gutter_end) || self.text.is_none() {
             // When: the row soft_wrapped, writes into the gutter, or is blank, it ends the line.
             return false;
         }
+        let first = self.first_after(gutter_end).and_then(|column| self.cells.get(column));
         head_sign.is_none_or(|sign| {
-            self.first_after(gutter_end).and_then(|column| self.plain_char(column)) == Some(sign)
+            first.is_some_and(|cell| !plain_cell(cell) || (cell.ch == sign && !box_blank(cell)))
         })
     }
 }
@@ -174,6 +188,17 @@ fn cell_line_byte(cell: &Cell) -> LineByte {
     [LineByte::Prose, LineByte::Unsafe][usize::from(hides_text)]
 }
 
+/// Where the numbered row that heads the pointed row's line is.
+enum LineHead {
+    /// This displayed row heads the line.
+    Row(u64),
+    /// No displayed row heads it: the walk reached the frame's top inside the box, so the head
+    /// may lie above the frame.
+    AboveFrame,
+    /// The pointed row is not inside a box line.
+    Outside,
+}
+
 /// One numbered line's geometry inside the box, shared by its rebuild and its decision.
 struct BoxLine {
     gutter_end: usize,
@@ -182,34 +207,36 @@ struct BoxLine {
     cut_end: usize,
     /// The box's hang column: the leftmost text start of its continuation rows.
     hang: Option<usize>,
-    /// The line's head row.
-    head_row: u64,
-    /// The first and last rows rebuilt: the line's rows within `MAX_WRAPPED_PATH_ROWS` of the
-    /// pointed row, since no URL this rule joins spans more.
+    /// The line's head row, when it lies within the rebuilt rows.
+    head_row: Option<u64>,
+    /// The first and last rows rebuilt: the line's rows around the pointed row, within
+    /// `MAX_WRAPPED_PATH_ROWS` rows and `MAX_LOGICAL_PATH_BYTES` bytes of it, since no URL this
+    /// rule joins spans more.
     first_row: u64,
     last_row: u64,
-    /// Whether the line may continue below `last_row`: past the rebuilt rows, past the displayed
-    /// frame, or into a soft-wrapped row.
+    /// Whether the line may continue above `first_row` or below `last_row` into rows the rebuild
+    /// did not read or the frame does not display.
+    open_above: bool,
     open_below: bool,
 }
 
 /// Decide the URL under `pointed` in one numbered line of the box. A row that reaches the box's
 /// cut, the widest text column of the box's rows, joins the next row directly, so a URL that
 /// starts mid-row, ends mid-row, or wraps many times is found as `find_urls` finds it in the source
-/// line. The URL token under the pointer is owned by this rule once it spans two rows: it opens
-/// only when `find_urls` reads it whole, within `MAX_WRAPPED_PATH_ROWS` rows and
-/// `MAX_LOGICAL_PATH_BYTES` bytes, with no unsafe cell and no unread row it may continue into;
-/// otherwise it is `Incomplete`, so no prefix of it opens. A one-row token is `NotApplicable`.
+/// line. The URL token under the pointer is owned by this rule once it spans two rows or may run
+/// into rows the rebuild did not read: it opens only when `find_urls` reads it whole, within
+/// `MAX_WRAPPED_PATH_ROWS` rows and `MAX_LOGICAL_PATH_BYTES` bytes, with no unsafe cell; otherwise
+/// it is `Incomplete`, so no prefix of it opens. A one-row token is `NotApplicable`.
 pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) -> HardwrapUri {
     let pane = pane_columns_at(frame, pointed.row, pointed.col);
     if pointed.col < pane.0 || pointed.col >= pane.1 {
         // When: the pointer is on a pane border, no pane target lies under it.
         return HardwrapUri::NotApplicable;
     }
-    // Reads stay within the head search above the pointer, the rebuilt rows, and the rows around
-    // them that measure the box, each bounded by `MAX_WRAPPED_PATH_ROWS`.
+    // Reads stay within the displayed frame: the head search may reach its top, and the rows
+    // below the pointer that rebuild and measure the line are bounded by `MAX_WRAPPED_PATH_ROWS`.
     let reach = (MAX_WRAPPED_PATH_ROWS - 1) as u64;
-    let top = pointed.row.saturating_sub(4 * reach).max(frame.view_top());
+    let top = frame.view_top();
     let bottom = (pointed.row + 2 * reach + 1).min(frame.view_end());
     let mut rows = BoxRows {
         frame,
@@ -218,12 +245,41 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
         top,
         rows: (0..bottom.saturating_sub(top)).map(|_| None).collect(),
     };
-    let Some(head_row) = box_line_head(&mut rows, pointed.row) else {
-        // When: no numbered row owns the pointed row, the pointer is not inside a box line.
-        return HardwrapUri::NotApplicable;
+    let head = match box_line_head(&mut rows, pointed.row) {
+        LineHead::Row(head_row) => {
+            // When: `box_line_head` found the `head_row`, its gutter and sign come from it.
+            let Some(head) = rows.get(head_row) else {
+                // When: the head row cannot be read, no line can be rebuilt.
+                return HardwrapUri::NotApplicable;
+            };
+            let Some(gutter_end) = head.gutter_end.filter(|_| !head.soft_wrapped) else {
+                // When: the head row has no gutter or soft-wraps, it heads no box line.
+                return HardwrapUri::NotApplicable;
+            };
+            let sign_cell = head.cells.get(gutter_end + 1);
+            if sign_cell.is_some_and(|cell| matches!(cell.ch, '+' | '-') && !plain_cell(cell)) {
+                // When: the `sign_cell` holds a `+` or `-` that is not `plain_cell`, which rows
+                // repeat it, and so which rows continue the line, cannot be read.
+                return HardwrapUri::Incomplete;
+            }
+            let sign = sign_cell.map(|cell| cell.ch).filter(|sign| matches!(sign, '+' | '-'));
+            (Some(head_row), gutter_end, sign)
+        }
+        LineHead::AboveFrame => {
+            // When: the walk met the frame's top first, `AboveFrame` reads the box below instead.
+            let Some((gutter_end, sign)) = headless_line(&mut rows, pointed.row) else {
+                // When: no numbered row below shows the box's gutter, the rows are not a box line.
+                return HardwrapUri::NotApplicable;
+            };
+            (None, gutter_end, sign)
+        }
+        LineHead::Outside => {
+            // When: no numbered row owns the pointed row, the pointer is not inside a box line.
+            return HardwrapUri::NotApplicable;
+        }
     };
-    let Some(line) = box_line(&mut rows, head_row, pointed.row) else {
-        // When: `box_line` reads no line around `head_row`, the rows are not a box line.
+    let Some(line) = box_line(&mut rows, head, pointed.row) else {
+        // When: `box_line` reads no line around the pointed row, the rows are not a box line.
         return HardwrapUri::NotApplicable;
     };
     box_line_uri(&mut rows, &line, pointed)
@@ -232,12 +288,13 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
 /// The numbered row whose line holds `pointed_row`. Walking up, a numbered row qualifies when its
 /// gutter ends before the text of every row between it and the pointer; the qualifying row with
 /// the smallest gutter end wins, the nearest on a tie, so a continuation whose text starts with
-/// digits never heads a line its real head owns. The walk ends at a row outside the box.
-fn box_line_head(rows: &mut BoxRows<'_, '_>, pointed_row: u64) -> Option<u64> {
-    let reach = 2 * (MAX_WRAPPED_PATH_ROWS - 1) as u64;
+/// digits never heads a line its real head owns. The walk ends at a row outside the box, or at the
+/// frame's top, above which the head may lie.
+fn box_line_head(rows: &mut BoxRows<'_, '_>, pointed_row: u64) -> LineHead {
     let mut leftmost_text = usize::MAX;
     let mut best: Option<(u64, usize)> = None;
-    for row_number in (pointed_row.saturating_sub(reach)..=pointed_row).rev() {
+    let top = rows.frame.view_top();
+    for row_number in (top..=pointed_row).rev() {
         let Some(row) = rows.get(row_number) else {
             // When: the row is not displayed in this pane, the box ends at it.
             break;
@@ -257,61 +314,116 @@ fn box_line_head(rows: &mut BoxRows<'_, '_>, pointed_row: u64) -> Option<u64> {
             // A first or strictly smaller qualifying gutter end is the nearest real head so far.
             best = best.filter(|(_, best_end)| *best_end < end).or(Some((row_number, end)));
         }
-        if best.is_some_and(|(_, best_end)| first <= best_end) && candidate.is_none() {
-            // When: an unnumbered row's text starts at or before the best gutter end, it is not
-            // in the box.
-            break;
-        }
-        if row.soft_wrapped {
-            // When: the row soft_wrapped, the rows above it are another line of text.
+        let outside = best.is_some_and(|(_, best_end)| first <= best_end) && candidate.is_none();
+        if outside || row.soft_wrapped {
+            // When: an unnumbered row's text starts at or before the best gutter end, or the row
+            // soft_wrapped, the rows above it are not this box line.
             break;
         }
         leftmost_text = leftmost_text.min(first);
+        if best.is_none() && leftmost_text <= 1 {
+            // When: `leftmost_text` is at most 1, no gutter above can end left of it.
+            return LineHead::Outside;
+        }
+        if row_number == top {
+            // When: the walk reached the frame's top with no head, the head may lie above it.
+            return best.map_or(LineHead::AboveFrame, |(head_row, _)| LineHead::Row(head_row));
+        }
     }
-    best.map(|(row_number, _)| row_number)
+    best.map_or(LineHead::Outside, |(head_row, _)| LineHead::Row(head_row))
 }
 
-/// The geometry of the line headed by `head_row` around `pointed_row`; `None` when the head row
-/// is not a box row.
-fn box_line(rows: &mut BoxRows<'_, '_>, head_row: u64, pointed_row: u64) -> Option<BoxLine> {
-    let head = rows.get(head_row)?;
-    let gutter_end = head.gutter_end?;
-    if head.soft_wrapped {
-        // When: the head row soft_wrapped, the wrap-aware scanner owns it.
+/// The gutter end and sign of a box line whose head lies above the frame, read from the box below:
+/// the first numbered row past the pointer, through rows that continue it, whose gutter ends left
+/// of every one of their text starts. The sign is the plain `+` or `-` every row of the line opens
+/// with, when one does. `None` when no such row shows the box.
+fn headless_line(rows: &mut BoxRows<'_, '_>, pointed_row: u64) -> Option<(usize, Option<char>)> {
+    let reach = (MAX_WRAPPED_PATH_ROWS - 1) as u64;
+    let top = rows.frame.view_top().max(pointed_row.saturating_sub(reach));
+    let mut leftmost_text = usize::MAX;
+    let mut line_rows = SmallVec::<[u64; 8]>::new();
+    for row_number in top..=pointed_row + 2 * reach {
+        let row = rows.get(row_number)?;
+        let (first, _) = row.text?;
+        if row.soft_wrapped {
+            // When: the row soft_wrapped, it is not part of the box's hard-broken rows.
+            return None;
+        }
+        if row_number > pointed_row && row.gutter_end.is_some_and(|end| end < leftmost_text) {
+            // When: a numbered row below ends its gutter left of the line's text, it shows the box.
+            let gutter_end = row.gutter_end?;
+            let signs = line_rows.iter().map(|line_row| {
+                rows.get(*line_row).and_then(|row| {
+                    row.first_after(gutter_end).and_then(|column| row.plain_char(column))
+                })
+            });
+            let signs = signs.collect::<SmallVec<[Option<char>; 8]>>();
+            let sign = signs.first().copied().flatten().filter(|sign| {
+                matches!(sign, '+' | '-') && signs.iter().all(|other| *other == Some(*sign))
+            });
+            return Some((gutter_end, sign));
+        }
+        leftmost_text = leftmost_text.min(first);
+        line_rows.push(row_number);
+    }
+    None
+}
+
+/// The geometry of the line around `pointed_row` whose head is `head_row` (or above the frame),
+/// with gutter end `gutter_end` and sign `head_sign`; `None` when the pointed row is not in it.
+fn box_line(
+    rows: &mut BoxRows<'_, '_>,
+    (head_row, gutter_end, head_sign): (Option<u64>, usize, Option<char>),
+    pointed_row: u64,
+) -> Option<BoxLine> {
+    let reach = (MAX_WRAPPED_PATH_ROWS - 1) as u64;
+    let line_row = |rows: &mut BoxRows<'_, '_>, row_number: u64| {
+        Some(row_number) == head_row
+            || rows.get(row_number).is_some_and(|row| row.continues(gutter_end, head_sign))
+    };
+    if !line_row(rows, pointed_row) {
+        // When: `line_row` refuses the pointed row, the line does not hold it.
         return None;
     }
-    let head_sign = match head.cells.get(gutter_end + 1) {
-        Some(cell) if matches!(cell.ch, '+' | '-') => Some(cell.ch),
-        _ => None,
-    };
-    let reach = (MAX_WRAPPED_PATH_ROWS - 1) as u64;
-    // The line: the head and every continuation below it, read no further than `reach` rows past
-    // the pointer, since no URL this rule joins spans more rows than that.
-    let mut line_end = head_row;
-    let mut open_below = true;
-    for row_number in head_row + 1..=pointed_row + reach + 1 {
-        if !rows.frame.contains(row_number) {
-            // When: the next row is outside the frame, only a view with rows below hides more.
-            open_below = rows.frame.rows_below();
+    // The line's rows above the pointer, up to its head, `reach` rows or `MAX_LOGICAL_PATH_BYTES`
+    // bytes, past which no URL under the pointer can reach.
+    let mut first_row = pointed_row;
+    let mut open_above = false;
+    let mut above_bytes = 0;
+    while Some(first_row) != head_row {
+        let past_bound = pointed_row - first_row >= reach || above_bytes > MAX_LOGICAL_PATH_BYTES;
+        if first_row == rows.frame.view_top() || past_bound {
+            // When: the walk reached the frame's top or a bound, the line continues unread above.
+            open_above = true;
             break;
         }
-        if row_number > pointed_row + reach {
-            // When: `row_number` passes `reach` below the pointer, the line is unread beyond it.
-            open_below =
-                rows.get(row_number).is_some_and(|row| row.continues(gutter_end, head_sign));
-            break;
+        if !line_row(rows, first_row - 1) {
+            // When: `line_row` refuses the row above `first_row`, the pointer is in no line.
+            return None;
         }
-        let continues =
-            rows.get(row_number).is_some_and(|row| row.continues(gutter_end, head_sign));
-        if !continues {
-            // When: the row `continues` nothing, the line ended above it unless it soft-wraps.
-            open_below = rows.get(row_number).is_some_and(|row| row.soft_wrapped);
-            break;
-        }
-        line_end = row_number;
+        first_row -= 1;
+        above_bytes += rows.get(first_row).map_or(0, BoxRow::text_len);
     }
-    let first_row = head_row.max(pointed_row.saturating_sub(reach));
-    let last_row = line_end.min(pointed_row + reach);
+    // The line's rows below the pointer, within the same bounds.
+    let mut last_row = pointed_row;
+    let mut below_bytes = 0;
+    let open_below = loop {
+        let below = last_row + 1;
+        if !rows.frame.contains(below) {
+            // When: the next row is outside the frame, only a view with rows below hides more.
+            break rows.frame.rows_below();
+        }
+        if !line_row(rows, below) {
+            // When: `line_row` refuses the row `below`, the line ends here unless it soft-wraps.
+            break rows.get(below).is_some_and(|row| row.soft_wrapped);
+        }
+        if below - pointed_row > reach || below_bytes > MAX_LOGICAL_PATH_BYTES {
+            // When: `below` passes a bound, the line continues unread below.
+            break true;
+        }
+        last_row = below;
+        below_bytes += rows.get(below).map_or(0, BoxRow::text_len);
+    };
 
     // The box: the contiguous rows around the rebuilt rows that are numbered rows or their hanging
     // continuations. Its widest text column is the cut every wrapped row reaches, and its
@@ -359,64 +471,44 @@ fn box_line(rows: &mut BoxRows<'_, '_>, head_row: u64, pointed_row: u64) -> Opti
         head_sign,
         cut_end,
         hang,
-        head_row,
+        head_row: head_row.filter(|head_row| *head_row == first_row),
         first_row,
         last_row,
-        open_below: open_below || last_row < line_end,
+        open_above,
+        open_below,
     })
 }
 
 /// Rebuild `line` from its rows and decide the URL token under `pointed` in it.
 fn box_line_uri(rows: &mut BoxRows<'_, '_>, line: &BoxLine, pointed: AbsoluteCell) -> HardwrapUri {
-    if rows
-        .get(line.head_row)
-        .and_then(|head| head.cells.get(line.gutter_end + 1))
-        .is_some_and(|cell| matches!(cell.ch, '+' | '-') && !plain_cell(cell))
-    {
-        // When: the head's sign column holds a `+` or `-` that is not plain, which rows repeat
-        // it, and so which rows continue the line, cannot be read.
-        return HardwrapUri::Incomplete;
-    }
-
     // Rebuild the rows: the head from its text start, each continuation from its own. A row that
     // reaches the cut joins the next row directly, as the box cut the source line there; a row that
     // stops short ended at a blank in the source, and a continuation that starts right of the hang
-    // column began with one, so one blank separates those rows.
+    // column began with one, so one blank separates those rows. A row with no text after its sign
+    // adds nothing but that blank.
     let mut text = String::new();
     let mut bytes = Vec::new();
     let mut byte_rows = Vec::new();
-    let mut truncated = false;
-    'rows: for row_number in line.first_row..=line.last_row {
+    for row_number in line.first_row..=line.last_row {
         let Some(row) = rows.get(row_number) else {
             // When: a line row cannot be read, the line cannot be rebuilt.
             return HardwrapUri::NotApplicable;
         };
         // The head's text follows its sign column; a continuation's follows its repeated sign.
         let head_text_from = line.gutter_end + usize::from(line.head_sign.is_some());
-        let start_col = match row_number == line.head_row {
+        let start_col = match Some(row_number) == line.head_row {
             true => row.first_after(head_text_from),
             false => row.line_start(line.gutter_end, line.head_sign),
         };
-        let Some(start_col) = start_col else {
-            // When: no `start_col` exists, a line row holds no text after its gutter.
-            return HardwrapUri::NotApplicable;
-        };
         let row_last = row.text.map_or(0, |(_, last)| last);
-        if row_number > line.first_row
-            && row_number > line.head_row
-            && line.hang.is_some_and(|hang| start_col > hang)
-        {
+        let continuation = Some(row_number) != line.head_row && row_number > line.first_row;
+        if continuation && start_col.zip(line.hang).is_some_and(|(start, hang)| start > hang) {
             // A continuation that starts right of the hang column began with a blank in the source.
             text.push(' ');
             bytes.push(LineByte::Blank);
             byte_rows.push(row_number);
         }
-        for column in start_col..=row_last {
-            if text.len() >= MAX_LOGICAL_LINE_BYTES {
-                // When: the line passes `MAX_LOGICAL_LINE_BYTES`, the rest of it is not read.
-                truncated = true;
-                break 'rows;
-            }
+        for column in start_col.unwrap_or(row_last + 1)..=row_last {
             let byte = match row.cells.get(column) {
                 None => LineByte::Blank,
                 Some(cell) if cell.flags.contains(CellFlags::WIDE_CONT) => {
@@ -430,7 +522,7 @@ fn box_line_uri(rows: &mut BoxRows<'_, '_>, line: &BoxLine, pointed: AbsoluteCel
                     LineByte::Unsafe
                 }
                 Some(cell) if !plain_cell(cell) => cell_line_byte(cell),
-                Some(cell) if hardwrap_blank(cell) => LineByte::Blank,
+                Some(cell) if box_blank(cell) => LineByte::Blank,
                 Some(cell) if cell.ch.is_ascii() && !cell.ch.is_control() => {
                     LineByte::Text(row_number, column as u16)
                 }
@@ -453,20 +545,19 @@ fn box_line_uri(rows: &mut BoxRows<'_, '_>, line: &BoxLine, pointed: AbsoluteCel
     let Some(pointed_byte) =
         bytes.iter().position(|byte| *byte == LineByte::Text(pointed.row, pointed.col))
     else {
-        // When: no `pointed_byte` exists, the pointer is on padding, the gutter or unread text.
-        return if truncated { HardwrapUri::Incomplete } else { HardwrapUri::NotApplicable };
+        // When: no `pointed_byte` exists, the pointer is on padding, the gutter or a sign.
+        return HardwrapUri::NotApplicable;
     };
-    let rebuilt = RebuiltLine { text: &text, bytes: &bytes, rows: &byte_rows, truncated };
+    let rebuilt = RebuiltLine { text: &text, bytes: &bytes, rows: &byte_rows };
     box_token_uri(rows.frame, line, &rebuilt, pointed_byte)
 }
 
 /// One rebuilt line: each byte's character (blanks, prose and unsafe cells as spaces), what each
-/// byte is, the row each came from, and whether `MAX_LOGICAL_LINE_BYTES` cut the line short.
+/// byte is, and the row each came from.
 struct RebuiltLine<'line> {
     text: &'line str,
     bytes: &'line [LineByte],
     rows: &'line [u64],
-    truncated: bool,
 }
 
 /// Decide the URL token around `pointed_byte` of `rebuilt`.
@@ -476,26 +567,29 @@ fn box_token_uri(
     rebuilt: &RebuiltLine<'_>,
     pointed_byte: usize,
 ) -> HardwrapUri {
-    let RebuiltLine { text, bytes, rows: byte_rows, truncated } = *rebuilt;
+    let RebuiltLine { text, bytes, rows: byte_rows } = *rebuilt;
     let raw = text.as_bytes();
     let in_token = |index: usize| token_byte(bytes[index], raw[index] as char);
+    if !in_token(pointed_byte) {
+        // When: `in_token` is false at the pointer, it is on a delimiter, not on URL text.
+        return HardwrapUri::NotApplicable;
+    }
     let token_start =
         (0..pointed_byte).rev().find(|index| !in_token(*index)).map_or(0, |index| index + 1);
     let token_end =
         (pointed_byte..bytes.len()).find(|index| !in_token(*index)).unwrap_or(bytes.len());
-    let row_of = |byte: &LineByte| match byte {
-        LineByte::Text(row, _) => Some(*row),
-        _ => None,
-    };
     let token = &bytes[token_start..token_end];
-    let multi_row = byte_rows[token_start] != byte_rows[token_end - 1];
+    let open_start = line.open_above && token_start == 0;
+    let open_end = line.open_below && token_end == bytes.len();
     let token_text = &text[token_start..token_end];
-    let scheme_at = token_text
-        .to_ascii_lowercase()
-        .find("http://")
-        .into_iter()
-        .chain(token_text.to_ascii_lowercase().find("https://"))
-        .min();
+    let lowered = token_text.to_ascii_lowercase();
+    let scheme_at = lowered.find("http://").into_iter().chain(lowered.find("https://")).min();
+    if (open_start || open_end) && scheme_at.is_none_or(|at| pointed_byte >= token_start + at) {
+        // When: `open_start` or `open_end` holds, the token may run into rows the rebuild did not
+        // read, so its extent and scheme are unknown and no prefix of it opens.
+        return HardwrapUri::Incomplete;
+    }
+    let multi_row = byte_rows[token_start] != byte_rows[token_end - 1];
     let Some(scheme_at) = scheme_at.filter(|_| multi_row) else {
         // When: no `scheme_at` exists or `multi_row` is false, the single-row rules decide.
         return HardwrapUri::NotApplicable;
@@ -505,11 +599,8 @@ fn box_token_uri(
         return HardwrapUri::NotApplicable;
     }
     // From here the token is a URL the box broke across rows: it opens whole or not at all.
-    let open_start = line.first_row > line.head_row && token_start == 0;
-    let open_end = (line.open_below || truncated) && token_end == bytes.len();
-    if open_start || open_end || token.contains(&LineByte::Unsafe) {
-        // When: the token may run past an unread or undisplayed row, or holds an unsafe cell, its
-        // visible text is not proven whole, so no prefix of it opens.
+    if token.contains(&LineByte::Unsafe) {
+        // When: the token holds an unsafe cell, its visible text is not proven whole.
         return HardwrapUri::Incomplete;
     }
     let matches = sonicterm_cfg::url_scan::find_urls(text);
@@ -518,6 +609,10 @@ fn box_token_uri(
         // When: no `found` URL in `matches` covers the pointer, the token is no valid URL as a
         // whole, too long or malformed, so none of it opens.
         return HardwrapUri::Incomplete;
+    };
+    let row_of = |byte: &LineByte| match byte {
+        LineByte::Text(row, _) => Some(*row),
+        _ => None,
     };
     let url_bytes = &bytes[found.start..found.end];
     let mut spans = SmallVec::<[AbsoluteCellSpan; 2]>::new();
