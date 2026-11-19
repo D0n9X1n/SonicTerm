@@ -300,3 +300,63 @@ fn widening_line_numbers_keep_their_urls() {
         Some("https://example.test/guide")
     );
 }
+
+/// A quoted URL that holds an apostrophe cannot open, since no URL may hold one; it stays inert
+/// rather than opening the part before the apostrophe.
+#[test]
+fn quoted_url_with_an_apostrophe_never_opens_a_prefix() {
+    let lines = [
+        "     87  const documentation_url = \"https://en.wikipedia.org/wiki/The_Hit".to_string(),
+        "         chhiker's_Guide_to_the_Galaxy\";".to_string(),
+        "     88 -old();".to_string(),
+        "     88 +new();".to_string(),
+    ];
+    let display = exact_target_at(&lines, (80, 10), 0, 45);
+    assert_ne!(display.as_deref(), Some("https://en.wikipedia.org/wiki/The_Hitchhiker"));
+}
+
+/// A linked badge holds an image URL and a link destination in one token: the pointer on the
+/// destination opens it, not the image.
+#[test]
+fn linked_badge_destination_opens_whole() {
+    let lines = [
+        "      1 [![CI](https://img.shields.io/badge/CI-passing-green)](https://github.com/rust-lang/rust/actions/workflow".to_string(),
+        "        s/ci.yml)".to_string(),
+        "      2 Next steps.".to_string(),
+    ];
+    let expected = "https://github.com/rust-lang/rust/actions/workflows/ci.yml";
+    for (row, col) in [(0, 70), (1, 10)] {
+        assert_eq!(exact_target_at(&lines, (120, 10), row, col).as_deref(), Some(expected));
+    }
+}
+
+/// A URL opened by a prose `(` runs to the matching `)`, so its own balanced parentheses stay,
+/// and sentence punctuation before the closing `)` is not the URL's.
+#[test]
+fn prose_parenthesis_urls_keep_their_own_parentheses() {
+    let cases = [
+        (
+            "     87  (https://en.wikipedia.org/wiki/Function",
+            "         _(mathematics)) for details",
+            "https://en.wikipedia.org/wiki/Function_(mathematics)",
+        ),
+        (
+            "     87  (https://example.test/aaaaaaaaaaaaaaaaaaaa",
+            "         bbbb.) and more",
+            "https://example.test/aaaaaaaaaaaaaaaaaaaabbbb",
+        ),
+    ];
+    for (first, second, expected) in cases {
+        let lines = [
+            first.to_string(),
+            second.to_string(),
+            "     88 -old();".to_string(),
+            "     88 +new();".to_string(),
+        ];
+        assert_eq!(
+            exact_target_at(&lines, (80, 10), 0, 25).as_deref(),
+            Some(expected),
+            "{expected}"
+        );
+    }
+}

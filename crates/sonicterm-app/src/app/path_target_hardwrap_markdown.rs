@@ -8,6 +8,11 @@
 
 use super::*;
 
+#[path = "path_target_hardwrap_delimited.rs"]
+mod delimited;
+
+use delimited::{delimited_url, Delimited};
+
 /// One displayed row of the box, read once inside the pointed pane.
 struct BoxRow<'grid> {
     cells: Vec<&'grid Cell>,
@@ -786,7 +791,14 @@ fn box_token_uri(
     let token_text = &text[token_start..token_end];
     let lowered = token_text.to_ascii_lowercase();
     let scheme_at = lowered.find("http://").into_iter().chain(lowered.find("https://")).min();
-    let opened_by_pair = scheme_at.is_some_and(|at| {
+    // The scheme of the URL the pointer is on: the last one the token starts at or before it.
+    let pointed_scheme = ["http://", "https://"]
+        .iter()
+        .flat_map(|scheme| lowered.match_indices(scheme).map(|(at, _)| at))
+        .filter(|at| token_start + at <= pointed_byte)
+        .max()
+        .or(scheme_at);
+    let opened_by_pair = pointed_scheme.is_some_and(|at| {
         let opener_at = token_start + at;
         text.get(opener_at.saturating_sub(2)..opener_at) == Some("](")
     });
@@ -815,7 +827,16 @@ fn box_token_uri(
         return HardwrapUri::Incomplete;
     }
     let matches = sonicterm_cfg::url_scan::find_urls(text);
-    let delimited = delimited_url(text, token_start + scheme_at, token_end);
+    let scheme_start = token_start + pointed_scheme.unwrap_or(scheme_at);
+    let delimited = match delimited_url(text, scheme_start, token_end) {
+        Delimited::Url(found) => Some(found),
+        Delimited::Unresolved => {
+            // When: the URL's opener is `Unresolved`, its closer is another character or its text
+            // is no URL, so the scanner's shorter reading would be a prefix of it.
+            return HardwrapUri::Incomplete;
+        }
+        Delimited::Absent => None,
+    };
     let found = delimited
         .as_ref()
         .or_else(|| matches.iter().find(|found| (found.start..found.end).contains(&pointed_byte)));
@@ -874,49 +895,6 @@ fn box_token_uri(
         target: DetectedTarget::Uri(found.url.clone()),
         spans,
         joined: false,
-    })
-}
-
-/// The URL starting at byte `scheme` of the rebuilt `text`, when its delimiters fix its extent:
-/// after `(` or `](` it runs to the matching `)` inside the token ending at `token_end`, so a `)`
-/// the URL holds stays and markdown after the closer does not join; after a quote it runs to the
-/// same quote, which ends the token. `None` when no such closer is found or the text is no URL.
-fn delimited_url(
-    text: &str,
-    scheme: usize,
-    token_end: usize,
-) -> Option<sonicterm_cfg::url_scan::UrlMatch> {
-    let bytes = text.as_bytes();
-    let opener = *bytes.get(scheme.checked_sub(1)?)?;
-    let end = match opener {
-        b'(' => {
-            // The matching `)`: depth counts the URL's own parentheses.
-            let mut depth = 0usize;
-            (scheme..token_end).find(|index| match bytes[*index] {
-                b'(' => {
-                    depth += 1;
-                    false
-                }
-                b')' if depth == 0 => true,
-                b')' => {
-                    depth -= 1;
-                    false
-                }
-                _ => false,
-            })?
-        }
-        b'"' | b'\'' if bytes.get(token_end) == Some(&opener) => token_end,
-        _ => {
-            // When: the `opener` is neither a parenthesis nor a quote that also ends the token, the
-            // URL's delimiters fix no extent.
-            return None;
-        }
-    };
-    let url = text.get(scheme..end)?;
-    sonicterm_cfg::url_scan::is_url(url).then(|| sonicterm_cfg::url_scan::UrlMatch {
-        start: scheme,
-        end,
-        url: url.to_string(),
     })
 }
 

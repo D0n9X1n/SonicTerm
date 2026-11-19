@@ -314,8 +314,9 @@ cargo build -p sonicterm-app
   read under the same layouts; a `](`-opened URL not closed by `)` (a link title) is `Incomplete`.
   Text after a gutter proves markdown; a replaced line, or context rows beside a signed row not
   shaped like a markdown bullet, proves a diff; otherwise both layouts are read and `agreed`
-  opens a URL only when both find the same one. `delimited_url` gives a URL opened by `(`, `](`
-  or a quote the extent its matching closer fixes, checked whole with `url_scan::is_url`. Once the URL token under the pointer spans two rows
+  opens a URL only when both find the same one. `delimited_url` gives the URL under the pointer
+  that `(`, `](` or a quote opens the extent its matching closer fixes, checked whole with
+  `url_scan::is_url`; an opener whose closer is another character is `Incomplete`. Once the URL token under the pointer spans two rows
   the rule owns it: it opens whole or is `Incomplete` (past the displayed or rebuilt rows, the
   caps, an unsafe cell, or a later-row second scheme), never `NotApplicable`, so no single-row
   rule opens its prefix; caps bound the URL, not the source line. The bracketed rule keeps
