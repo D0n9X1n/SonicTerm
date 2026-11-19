@@ -442,7 +442,10 @@ starts in the next column; in a diff view that column holds the line's sign
 (`+`, `-` or blank), which every continuation row repeats, and the text starts
 one column further. A box is a markdown view when any of its rows holds other
 text in that column. Continuation rows leave the line number blank and start
-their text at that same text column. The view cuts every wrapped row at the
+their text at that same text column. Rows are read as a view only when the view
+shows two consecutive line numbers, or one line number removed and then added
+again: indented tool output that merely opens with a number is not a view, so
+its URLs stay single-row links. The view cuts every wrapped row at the
 same column, so SonicTerm rebuilds the source line: a row that reaches the box's
 widest text column joins the next row directly, a row that stops before it, or
 a continuation that starts right of the text column, adds a blank, and the line
@@ -456,11 +459,14 @@ continue past the displayed rows, passes either limit, holds a cell with
 combining marks, an OSC 8 link or a stray wide-character half, or meets a second
 scheme on a later row stays inert rather than opening a truncated prefix. So
 does a URL at the edge of a row whose line cannot be read: a continuation that
-starts with digits, or a row below that looks like a continuation but does not
-repeat the line's sign. A URL on one row is left to the single-row rules, and so
-is a line whose numbered head scrolled out of view with no numbered row below
-it: those rows cannot be told from other indented output, so its first visible
-row may offer that row's part of the URL. The rule is a heuristic: a source line whose
+starts with digits, a row below that looks like a continuation but does not
+repeat the line's sign, or a continuation that opens with `+` or `-` in a view
+whose every line is signed, which may be a diff sign or a markdown list's text.
+A URL on one row is left to the single-row rules, and so are rows the view
+does not prove: a line whose numbered head scrolled out of view with no
+numbered row below it, or a view that shows a single line number. Those rows
+cannot be told from other indented output, so a broken URL there may offer
+only the visible row's part. The rule is a heuristic: a source line whose
 text ends exactly at the cut followed by a continuation that starts with a
 word joins them, and the modifier-hover preview shows the full destination
 before activation.

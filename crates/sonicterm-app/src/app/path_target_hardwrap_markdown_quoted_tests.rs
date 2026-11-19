@@ -1,6 +1,7 @@
 //! Numbered box lines that hold a URL mid-row: quoted arguments, code comments and prose.
 
 use super::super::path_target_tests::*;
+use super::path_target_hardwrap_markdown_tests::with_next;
 use super::*;
 
 /// A long URL in a quoted command argument, as Claude Code's diff view shows it.
@@ -47,12 +48,14 @@ fn url_spans(
     spans
 }
 
-/// Every pointer inside `spans` resolves to `expected` with exactly those spans highlighted.
+/// Every pointer inside `spans` of `lines`, shown above the box's next numbered line, resolves to
+/// `expected` with exactly those spans highlighted.
 fn assert_joined(lines: &[String], cols: u16, spans: &[(u16, u16, u16)], expected: &str) {
+    let lines = with_next(lines);
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     // The pane holds every line, so no row scrolls into history.
     let pane_rows = lines.len() as u16 + 4;
-    let (window, pane) = hardwrap_pane_sized(&mut app, cols, pane_rows, lines);
+    let (window, pane) = hardwrap_pane_sized(&mut app, cols, pane_rows, &lines);
     for &(row, start, end) in spans {
         for col in start..end {
             let target = app
@@ -167,7 +170,7 @@ fn closer_alone_on_continuation_keeps_the_row_url() {
     let lines = box_line(&head, ' ', &source, cut, 8);
     assert!(lines[1].trim_start().starts_with('"'), "fixture must put the closer on the next row");
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    let (window, pane) = hardwrap_pane_sized(&mut app, 60, 10, &lines);
+    let (window, pane) = hardwrap_pane_sized(&mut app, 60, 10, &with_next(&lines));
     let col = lines[0].find("https").unwrap() as u16 + 3;
     let display = app.cell_target_at(window, pane, 0, col).map(|target| target.display);
     assert_eq!(display.as_deref(), Some(uri));
@@ -216,6 +219,7 @@ fn captured_update_view_rows_join_at_their_cut() {
         "      5 -    # first comment line that is long enough to wrap inside the diff box of the terminal user interface for sure".to_string(),
         "      5 +    # second comment line that is long enough to wrap inside the diff box of the terminal user interface for sure".to_string(),
         "      6    }".to_string(),
+        "      7  end".to_string(),
     ];
     assert_eq!(invoke.len(), 161, "the captured row reaches the box's cut");
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -233,10 +237,11 @@ fn captured_update_view_rows_join_at_their_cut() {
     assert_joined(&lines, 168, &spans, QUOTED_URI);
 }
 
-/// Resolve the target at `(row, col)` of `lines` written into a `cols`-wide pane.
+/// Resolve the target at `(row, col)` of `lines`, shown above the box's next numbered line, written
+/// into a `cols`-wide pane.
 fn target_at(lines: &[String], cols: u16, row: u16, col: u16) -> Option<String> {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    let (window, pane) = hardwrap_pane_sized(&mut app, cols, 40, lines);
+    let (window, pane) = hardwrap_pane_sized(&mut app, cols, 40, &with_next(lines));
     app.cell_target_at(window, pane, row, col).map(|target| target.display)
 }
 
@@ -333,11 +338,12 @@ fn two_row_url_deep_in_a_long_line_joins() {
 #[test]
 fn quoted_url_closed_above_an_undisplayed_row_joins() {
     let lines = [
-        format!("{}  get \"https://example.test/aaaa", gutter(1, ' ')),
+        format!("{}  x", gutter(1, ' ')),
+        format!("{}  get \"https://example.test/aaaa", gutter(2, ' ')),
         "        bbbb\"".to_string(),
         "        more".to_string(),
     ];
-    let mut grid = Grid::new(60, 2);
+    let mut grid = Grid::new(60, 3);
     for (index, line) in lines.iter().enumerate() {
         if index > 0 {
             grid.carriage_return();
@@ -347,10 +353,10 @@ fn quoted_url_closed_above_an_undisplayed_row_joins() {
             grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
     }
-    // Three rows into a two-row grid: the view shows rows 0 and 1, the third row is below it.
+    // Four rows into a three-row grid: the view shows rows 0 to 2, the fourth row is below it.
     let frame = FrameRows::new(&grid, 0);
     assert!(frame.rows_below(), "fixture must hide a row below the view");
-    let decided = numbered_box_uri_in(&frame, AbsoluteCell { row: 0, col: 20 });
+    let decided = numbered_box_uri_in(&frame, AbsoluteCell { row: 1, col: 20 });
     let HardwrapUri::Complete(candidate) = decided else { panic!("closed URL: {decided:?}") };
     assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
 }
@@ -426,6 +432,7 @@ fn url_in_a_line_whose_head_scrolled_away() {
     let lines = box_line("  1 ", ' ', &format!("{} \"{uri}\" x", "x".repeat(400)), 40, 4);
     let mut lines = lines;
     lines.push(format!("  2 {}", "y".repeat(10)));
+    lines.push(format!("  3 {}", "y".repeat(10)));
     let (row, start) = lines
         .iter()
         .enumerate()
@@ -441,10 +448,10 @@ fn url_in_a_line_whose_head_scrolled_away() {
             grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
     }
-    // The frame shows the URL's rows and the next numbered row, not the line's head.
-    let view_top = row as u64 - 2;
+    // The frame shows the URL's rows and the next two numbered rows, not the line's head.
+    let view_top = lines.len() as u64 - 6;
     let frame = FrameRows::new(&grid, view_top);
-    assert!(view_top > 0 && frame.contains(row as u64 + 1));
+    assert!(view_top > 0 && view_top < row as u64 && frame.contains(lines.len() as u64 - 1));
     let decided =
         numbered_box_uri_in(&frame, AbsoluteCell { row: row as u64, col: start as u16 + 2 });
     let HardwrapUri::Complete(candidate) = decided else { panic!("headless line: {decided:?}") };
@@ -511,6 +518,7 @@ fn context_continuation_with_a_sign_at_the_text_column_keeps_it_as_text() {
             format!("{}  get \"https://example.test/aaaa", gutter(1, ' ')),
             format!("        {sign}{}", "b".repeat(29)),
             "         cccc\"".to_string(),
+            format!("{}  x", gutter(2, ' ')),
         ];
         let decided = decide_in_frame(&lines, (60, 6), 0, AbsoluteCell { row: 0, col: 20 });
         let HardwrapUri::Complete(candidate) = decided else { panic!("{sign}: {decided:?}") };
@@ -530,7 +538,12 @@ fn line_whose_head_scrolled_away_with_no_numbered_row_below_is_not_read() {
     let lines = box_line("  1 ", ' ', &source, 32, 4);
     let row_count = lines.len() as u16;
     let url = DetectedTarget::Uri("https://example.test/aaaabbbb".into());
-    let whole = decide_in_frame(&lines, (60, row_count), 0, AbsoluteCell { row: 1, col: 20 });
+    let whole = decide_in_frame(
+        &with_next(&lines),
+        (60, row_count + 1),
+        0,
+        AbsoluteCell { row: 1, col: 20 },
+    );
     assert!(
         matches!(&whole, HardwrapUri::Complete(candidate) if candidate.target == url),
         "{whole:?}"
@@ -629,9 +642,10 @@ fn headless_markdown_line_keeps_a_leading_plus() {
         "    +\"https://example.test/aaaa".to_string(),
         "    +bbbb\"".to_string(),
         "  2 next".to_string(),
+        "  3 last".to_string(),
     ];
     for view_top in [0u64, 1] {
-        let rows = if view_top == 0 { 4 } else { 3 };
+        let rows = if view_top == 0 { 5 } else { 4 };
         let mut grid = Grid::new(60, rows);
         for (index, line) in lines.iter().enumerate() {
             if index > 0 {
@@ -657,7 +671,7 @@ fn signed_line_byte_bound_counts_url_text_only() {
     let uri = format!("https://example.test/{}", "a".repeat(MAX_LOGICAL_PATH_BYTES - 21));
     assert_eq!(uri.len(), MAX_LOGICAL_PATH_BYTES);
     let source = format!("{}\"{uri}\"", " ".repeat(122));
-    let lines = box_line(&gutter(1, '+'), '+', &source, 143, 8);
+    let lines = with_next(&box_line(&gutter(1, '+'), '+', &source, 143, 8));
     let (row, start) = lines
         .iter()
         .enumerate()
@@ -697,8 +711,9 @@ fn headless_markdown_line_with_a_plus_row_joins() {
         "     \"https://example.test/aaaa".to_string(),
         "     bbbb\"".to_string(),
         "  13 next".to_string(),
+        "  14 last".to_string(),
     ];
-    let decided = decide_in_frame(&lines, (70, 4), 1, AbsoluteCell { row: 2, col: 15 });
+    let decided = decide_in_frame(&lines, (70, 5), 1, AbsoluteCell { row: 2, col: 15 });
     let HardwrapUri::Complete(candidate) = decided else { panic!("{decided:?}") };
     assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
 }
@@ -716,4 +731,54 @@ fn box_in_a_right_hand_pane_ends_at_the_pane_margin() {
     let (window, pane) = hardwrap_pane_sized(&mut app, 100, 8, &[output]);
     let display = app.cell_target_at(window, pane, 0, 55).map(|target| target.display);
     assert_eq!(display.as_deref(), Some("https://example.test/aaaa"));
+}
+
+/// A numbered list whose every item opens with `- ` reads as markdown and as an all-signed diff
+/// alike: a broken URL whose continuation opens with `-` would join with or without that `-`, so it
+/// stays inert rather than opening either guess.
+#[test]
+fn all_signed_box_leaves_a_hyphen_continuation_inert() {
+    let lines = [
+        "     86 - item one".to_string(),
+        "     87 - curl \"https://example.test/markdown".to_string(),
+        "         -preview.zip\"".to_string(),
+        "     88 - item three".to_string(),
+    ];
+    for (row, col) in [(1, 25), (2, 12)] {
+        let display = target_at(&lines, 60, row, col);
+        assert!(
+            display.as_deref().is_none_or(|display| !display.starts_with("https://example.test")),
+            "row {row}: {display:?}"
+        );
+    }
+}
+
+/// Indented tool output whose row opens with a number is no box: a complete URL on it stays the
+/// row's own, never joined with the status text below it.
+#[test]
+fn numeric_tool_output_keeps_its_own_url() {
+    let lines = [
+        "  ⎿  Status URL".to_string(),
+        "     200 https://example.test/ok".to_string(),
+        "         fetched successfully".to_string(),
+    ];
+    // The pane shows exactly these rows: `target_at` would add a next numbered line below them.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = hardwrap_pane_sized(&mut app, 60, 10, &lines);
+    let display = app.cell_target_at(window, pane, 1, 20).map(|target| target.display);
+    assert_eq!(display.as_deref(), Some("https://example.test/ok"));
+}
+
+/// A one-line file's Update shows a single line number, removed then added: that replaced line
+/// proves the diff box, so the added row's wrapped URL joins without its repeated sign.
+#[test]
+fn replaced_line_alone_proves_the_box() {
+    let lines = [
+        "      1 - get \"https://example.test/old\"".to_string(),
+        "      1 + get \"https://example.test/aaaa".to_string(),
+        "        +bbbb\"".to_string(),
+    ];
+    let decided = decide_in_frame(&lines, (60, 3), 0, AbsoluteCell { row: 1, col: 20 });
+    let HardwrapUri::Complete(candidate) = decided else { panic!("replaced line: {decided:?}") };
+    assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
 }

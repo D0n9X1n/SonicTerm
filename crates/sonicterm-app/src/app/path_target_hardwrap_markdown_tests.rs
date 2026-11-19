@@ -7,13 +7,38 @@ use super::*;
 const DOC_URI: &str =
     "https://github.com/D0n9X1n/bufferlines.nvim/wiki/Installation-and-Usage-zh-CN";
 
-/// Pad each line with blanks to `content_cols` display cells, then add `border` when one is given,
-/// so every row ends the same distance from the pane edge as a padded box draws it.
+/// `lines` with the next numbered source line after their last numbered row, as every Claude Code
+/// box shows: the box rule reads a box only where consecutive line numbers prove it is one.
+pub(super) fn with_next<Line: AsRef<str>>(lines: &[Line]) -> Vec<String> {
+    let mut out = lines.iter().map(|line| line.as_ref().to_string()).collect::<Vec<_>>();
+    // Each numbered row's gutter end and number; a continuation that opens with digits sits right
+    // of the head's gutter, so the last row with the narrowest gutter numbers the box's lines.
+    let numbered = out.iter().filter_map(|line| {
+        let indent = line.len() - line.trim_start().len();
+        let digits = line[indent..].chars().take_while(char::is_ascii_digit).count();
+        let after = line[indent + digits..].chars().next();
+        let number = line[indent..indent + digits].parse::<u64>().ok()?;
+        ((1..=6).contains(&digits) && after == Some(' ')).then_some((indent + digits, number))
+    });
+    let last = numbered.fold(None, |best: Option<(usize, u64)>, (gutter_end, number)| match best {
+        Some((best_end, _)) if best_end < gutter_end => best,
+        _ => Some((gutter_end, number)),
+    });
+    if let Some((gutter_end, number)) = last {
+        // The next line keeps the gutter's right edge and leaves the sign column blank.
+        out.push(format!("{:>gutter_end$}  x", number + 1));
+    }
+    out
+}
+
+/// Pad each line, and the box's next numbered line [`with_next`] adds below them, with blanks to
+/// `content_cols` display cells, then add `border` when one is given, so every row ends the same
+/// distance from the pane edge as a padded box draws it.
 fn padded_rows(lines: &[&str], content_cols: usize, border: Option<&str>) -> Vec<String> {
-    lines
+    with_next(lines)
         .iter()
         .map(|line| {
-            let width = unicode_width::UnicodeWidthStr::width(*line);
+            let width = unicode_width::UnicodeWidthStr::width(line.as_str());
             assert!(width <= content_cols, "line wider than the box: {line}");
             format!("{line}{}{}", " ".repeat(content_cols - width), border.unwrap_or(""))
         })
@@ -174,15 +199,18 @@ fn padded_markdown_refusals_keep_single_row_detection() {
         ("unexpected sign", format!("    59 [a]({prefix}"), "      +cccc)".into(), None),
     ];
     for (label, first, second, row_url) in cases {
-        let lines = padded_rows(&[&first, &second], first.len() + 6, None);
+        // The box's previous line, a diff context row, shows its consecutive numbers above the
+        // malformed row.
+        let previous = if first.starts_with("    59") { "    58  x" } else { "" };
+        let lines = padded_rows(&[previous, &first, &second], first.len() + 6, None);
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let (window, pane) = hardwrap_pane_sized(&mut app, 90, 10, &lines);
         let col = first.find("https").unwrap() as u16 + 2;
-        let display = app.cell_target_at(window, pane, 0, col).map(|target| target.display);
+        let display = app.cell_target_at(window, pane, 1, col).map(|target| target.display);
         assert_eq!(display.as_deref(), row_url, "{label}");
         // The continuation never resolves to a destination built from the first row's prefix.
         assert!(
-            app.cell_target_at(window, pane, 1, 8)
+            app.cell_target_at(window, pane, 2, 8)
                 .is_none_or(|target| !target.display.starts_with(prefix)),
             "{label} continuation"
         );
@@ -374,8 +402,10 @@ fn padded_markdown_closer_tail_stops_at_pane_border() {
     let second = format!("    {tail})");
     assert_eq!((first.len(), second.len()), (40, 40), "both rows must end at the border");
     for neighbour in ["X", " "] {
-        let lines =
-            [&first, &second].iter().map(|line| format!("{line}│{neighbour}")).collect::<Vec<_>>();
+        let lines = with_next(&[&first, &second])
+            .iter()
+            .map(|line| format!("{line:<40}│{neighbour}"))
+            .collect::<Vec<_>>();
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let (window, pane) = hardwrap_pane_sized(&mut app, 60, 10, &lines);
         let target = app.cell_target_at(window, pane, 1, 5).expect("continuation target");
@@ -488,7 +518,8 @@ fn padded_markdown_structural_cells_must_be_plain() {
             let second =
                 format!("       {}ts/wiki{} and more", cell("second sign", '+'), cell(")", ')'));
             let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-            let (window, pane) = hardwrap_pane_sized(&mut app, 90, 10, &[first, second]);
+            let (window, pane) =
+                hardwrap_pane_sized(&mut app, 90, 10, &with_next(&[first, second]));
             for (row, col) in [(0, 30), (1, 9)] {
                 let display =
                     app.cell_target_at(window, pane, row, col).map(|target| target.display);
@@ -503,8 +534,8 @@ fn padded_markdown_structural_cells_must_be_plain() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let first =
         format!("    59 +see [Nerd Font](https://github.com/ryanoasis/nerd-fon{}", " ".repeat(7));
-    let (window, pane) =
-        hardwrap_pane_sized(&mut app, 90, 10, &[first, "       +ts/wiki) and more".into()]);
+    let lines = with_next(&[first, "       +ts/wiki) and more".into()]);
+    let (window, pane) = hardwrap_pane_sized(&mut app, 90, 10, &lines);
     assert_eq!(
         app.cell_target_at(window, pane, 1, 9).expect("plain fixture").display,
         "https://github.com/ryanoasis/nerd-fonts/wiki"
@@ -532,7 +563,7 @@ fn hard_rows_grid(cols: u16, rows: u16, lines: &[String]) -> Grid {
 fn padded_markdown_structural_cells_refuse_wide_flags() {
     let first =
         format!("    59 +see [Nerd Font](https://github.com/ryanoasis/nerd-fon{}", " ".repeat(7));
-    let lines = [first.clone(), "       +ts/wiki) and more".to_string()];
+    let lines = with_next(&[first.clone(), "       +ts/wiki) and more".to_string()]);
     let opener = first.find('(').unwrap();
     // The structural cells: R0's sign, `(`, the closer and the repeated sign.
     let positions = [(0u16, 7usize), (0, opener), (1, 15), (1, 7)];
@@ -572,12 +603,13 @@ fn closer_tail_at_edge_above_undisplayed_row_is_not_proven() {
             "live row {row}"
         );
     }
-    // The box rule: a URL row that reaches the cut, above a closer row filled to the grid edge
-    // with `é` and an undisplayed row.
-    let first = format!("  1 [x](https://example.test/{}", "a".repeat(40 - 29));
-    let padded = [first, format!("    bbbb){}", "é".repeat(40 - 9)), "tail)".to_string()];
-    let grid = hard_rows_grid(40, 2, &padded);
-    let pointed = AbsoluteCell { row: 1, col: 5 };
+    // The box rule: below the box's previous line, a URL row that reaches the cut, above a closer
+    // row filled to the grid edge with `é` and an undisplayed row.
+    let first = format!("  2 [x](https://example.test/{}", "a".repeat(40 - 29));
+    let padded =
+        ["  1 x".to_string(), first, format!("    bbbb){}", "é".repeat(40 - 9)), "tail)".into()];
+    let grid = hard_rows_grid(40, 3, &padded);
+    let pointed = AbsoluteCell { row: 2, col: 5 };
     let (decided, reads) = frame_rows::read_observer::observe(|| {
         numbered_box_uri_in(&FrameRows::new(&grid, 0), pointed)
     });
@@ -607,13 +639,14 @@ fn padded_markdown_middle_row_must_end_at_the_cut() {
 }
 
 /// The live twin of the padded undisplayed-tail case: with no row below the closer row, a non-ASCII
-/// tail that reaches the grid's edge ends the target, and the padded chain joins.
+/// tail that reaches the grid's edge ends the target, and the padded chain below the box's previous
+/// line joins.
 #[test]
 fn padded_markdown_closer_tail_at_edge_joins_on_the_live_view() {
-    let first = format!("  1 [x](https://example.test/{}", "a".repeat(40 - 29));
-    let padded = [first, format!("    bbbb){}", "é".repeat(40 - 9))];
-    let grid = hard_rows_grid(40, 2, &padded);
-    let decided = numbered_box_uri_in(&FrameRows::new(&grid, 0), AbsoluteCell { row: 1, col: 5 });
+    let first = format!("  2 [x](https://example.test/{}", "a".repeat(40 - 29));
+    let padded = ["  1 x".to_string(), first, format!("    bbbb){}", "é".repeat(40 - 9))];
+    let grid = hard_rows_grid(40, 3, &padded);
+    let decided = numbered_box_uri_in(&FrameRows::new(&grid, 0), AbsoluteCell { row: 2, col: 5 });
     let HardwrapUri::Complete(candidate) = decided else {
         panic!("live twin must join: {decided:?}")
     };
