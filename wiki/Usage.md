@@ -458,7 +458,10 @@ joins the next row directly, a row that stops before it, or a continuation that
 starts right of the text column, adds a blank, and the line number and repeated
 signs are dropped. A `+` or `-` at the text column is
 source text. The URL under the pointer is then found in the rebuilt line, so a
-closing quote, `)` or space ends it as it would on one row.
+closing quote, `)` or space ends it as it would on one row. A URL opened by `(`,
+`](` or a quote runs to its matching closer, so a `)` the URL holds, as in
+`Function_(mathematics)`, stays, and markdown after the closer, such as `**`,
+does not join.
 A joined URL is at most 32 rows and 4 KiB; the limits bound the URL, not the
 source line, so a URL deep in a long wrapped line still joins. Once the URL text
 under the pointer spans two rows it opens whole or not at all: a URL that may

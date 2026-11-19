@@ -200,6 +200,15 @@ pub fn find_urls(text: &str) -> Vec<UrlMatch> {
     out
 }
 
+/// Whether `url`, whole and untrimmed, is a URL detection recognises: an allowed scheme and no
+/// forbidden character. A caller that knows a URL's exact extent from its delimiters (a markdown
+/// `](`…`)` destination, a quoted argument) checks that text as is, where [`find_urls`] would trim
+/// a closing `)` the URL itself holds.
+#[must_use]
+pub fn is_url(url: &str) -> bool {
+    check_uri(url, SCHEMES).is_ok()
+}
+
 /// Return the URL covering byte offset `byte_col`, if any.
 pub fn url_at_byte(text: &str, byte_col: usize) -> Option<UrlMatch> {
     find_url_at(text, byte_col)

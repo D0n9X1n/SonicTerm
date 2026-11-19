@@ -491,22 +491,24 @@ fn box_evidence(rows: &mut BoxRows<'_, '_>, pointed_row: u64, gutter_end: usize)
     evidence
 }
 
-/// Whether a numbered row whose gutter ends left of `gutter_end` lies in the run of non-blank rows
-/// around `pointed_row` the frame displays: a box with that narrower gutter owns these rows, so
-/// a head read with `gutter_end` is one of its continuations, not a line of its own.
+/// Whether a numbered row whose gutter ends left of `gutter_end`, in the run of non-blank rows
+/// around `pointed_row` the frame displays, may own the pointed row: the pointed row is blank
+/// through that narrower gutter, so a head read with `gutter_end` may be one of its continuations.
 fn narrower_gutter_nearby(rows: &mut BoxRows<'_, '_>, pointed_row: u64, gutter_end: usize) -> bool {
-    let narrower = |rows: &mut BoxRows<'_, '_>, row_number: u64| -> Option<bool> {
+    let narrower = |rows: &mut BoxRows<'_, '_>, row_number: u64| -> Option<Option<usize>> {
         let row = rows.get(row_number)?;
         row.text?;
-        Some(row.gutter_end.is_some_and(|end| end < gutter_end))
+        Some(row.gutter_end.filter(|end| *end < gutter_end))
     };
     let below = (pointed_row..rows.frame.view_end()).map_while(|row| narrower(rows, row));
-    if below.collect::<SmallVec<[bool; 32]>>().contains(&true) {
-        // When: a row at or below the pointer has a narrower gutter, the head was misread.
-        return true;
-    }
+    let mut ends = below.flatten().collect::<SmallVec<[usize; 4]>>();
     let above = (rows.frame.view_top()..pointed_row).rev().map_while(|row| narrower(rows, row));
-    above.collect::<SmallVec<[bool; 32]>>().contains(&true)
+    ends.extend(above.flatten());
+    let Some(pointed) = rows.get(pointed_row) else {
+        // When: the pointed row cannot be read, no narrower gutter can be shown to own it.
+        return false;
+    };
+    ends.iter().any(|end| pointed.blank_through(*end))
 }
 
 /// The numbered row whose line holds `pointed_row`. Walking up, a numbered row qualifies when its
@@ -813,10 +815,13 @@ fn box_token_uri(
         return HardwrapUri::Incomplete;
     }
     let matches = sonicterm_cfg::url_scan::find_urls(text);
-    let Some(found) = matches.iter().find(|found| (found.start..found.end).contains(&pointed_byte))
-    else {
-        // When: no `found` URL in `matches` covers the pointer, the token is no valid URL as a
-        // whole, too long or malformed, so none of it opens.
+    let delimited = delimited_url(text, token_start + scheme_at, token_end);
+    let found = delimited
+        .as_ref()
+        .or_else(|| matches.iter().find(|found| (found.start..found.end).contains(&pointed_byte)));
+    let Some(found) = found.filter(|found| (found.start..found.end).contains(&pointed_byte)) else {
+        // When: no `found` URL covers the pointer, the token is no valid URL as a whole, too long
+        // or malformed, or the pointer is on text after its closer, so none of it opens.
         return HardwrapUri::Incomplete;
     };
     let row_of = |byte: &LineByte| match byte {
@@ -872,6 +877,49 @@ fn box_token_uri(
     })
 }
 
+/// The URL starting at byte `scheme` of the rebuilt `text`, when its delimiters fix its extent:
+/// after `(` or `](` it runs to the matching `)` inside the token ending at `token_end`, so a `)`
+/// the URL holds stays and markdown after the closer does not join; after a quote it runs to the
+/// same quote, which ends the token. `None` when no such closer is found or the text is no URL.
+fn delimited_url(
+    text: &str,
+    scheme: usize,
+    token_end: usize,
+) -> Option<sonicterm_cfg::url_scan::UrlMatch> {
+    let bytes = text.as_bytes();
+    let opener = *bytes.get(scheme.checked_sub(1)?)?;
+    let end = match opener {
+        b'(' => {
+            // The matching `)`: depth counts the URL's own parentheses.
+            let mut depth = 0usize;
+            (scheme..token_end).find(|index| match bytes[*index] {
+                b'(' => {
+                    depth += 1;
+                    false
+                }
+                b')' if depth == 0 => true,
+                b')' => {
+                    depth -= 1;
+                    false
+                }
+                _ => false,
+            })?
+        }
+        b'"' | b'\'' if bytes.get(token_end) == Some(&opener) => token_end,
+        _ => {
+            // When: the `opener` is neither a parenthesis nor a quote that also ends the token, the
+            // URL's delimiters fix no extent.
+            return None;
+        }
+    };
+    let url = text.get(scheme..end)?;
+    sonicterm_cfg::url_scan::is_url(url).then(|| sonicterm_cfg::url_scan::UrlMatch {
+        start: scheme,
+        end,
+        url: url.to_string(),
+    })
+}
+
 /// Whether the cells after the closer at column `close` of absolute row `row_number` leave it
 /// the end of the URL. Up to the next whitespace, every cell must be sentence punctuation or a
 /// non-ASCII character without extras: no URL character is non-ASCII, so such text cannot continue
@@ -921,3 +969,7 @@ mod path_target_hardwrap_markdown_tests;
 #[cfg(test)]
 #[path = "path_target_hardwrap_markdown_quoted_tests.rs"]
 mod path_target_hardwrap_markdown_quoted_tests;
+
+#[cfg(test)]
+#[path = "path_target_hardwrap_markdown_box_proof_tests.rs"]
+mod path_target_hardwrap_markdown_box_proof_tests;
