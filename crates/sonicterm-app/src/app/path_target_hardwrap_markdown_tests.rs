@@ -162,7 +162,7 @@ fn padded_box_joins_every_wrapped_url_shape() {
 #[test]
 fn padded_markdown_refusals_keep_single_row_detection() {
     let prefix = "https://example.com/aaaa/bbbb";
-    let cases: [(&str, String, String); 5] = [
+    let cases: [(&str, String, String); 4] = [
         // Without a numbered gutter the row is not the box, even when a later row looks aligned.
         ("no gutter", format!("See [x]({prefix}"), "    cccc) next item".into()),
         // A new numbered gutter row is a new line, not a hanging continuation.
@@ -171,8 +171,6 @@ fn padded_markdown_refusals_keep_single_row_detection() {
         ("other sign", format!("    59 +[a]({prefix}"), "       -cccc)".into()),
         // Without a sign on the opener row, a sign inside the gutter is not a continuation.
         ("unexpected sign", format!("    59 [a]({prefix}"), "      +cccc)".into()),
-        // A continuation that opens its own scheme would join two destinations.
-        ("second scheme", format!("  1 [a]({prefix}"), "    https://b.test/x)".into()),
     ];
     for (label, first, second) in cases {
         let lines = padded_rows(&[&first, &second], first.len() + 6, None);
@@ -297,7 +295,8 @@ fn padded_markdown_enforces_row_bound() {
                 "{} rows {total_rows}: {display:?}",
                 shape.head
             );
-            assert!(joins || display.as_deref().is_none_or(|display| !display.contains("zz")));
+            // Past the cap no prefix opens either: the whole target stays inert.
+            assert!(joins || display.is_none(), "{} rows {total_rows}: {display:?}", shape.head);
         }
     }
 }
@@ -319,12 +318,9 @@ fn padded_markdown_enforces_byte_bound() {
             let (window, pane) = hardwrap_pane_sized(&mut app, 150, 40, &lines);
             let col = (shape.head.len() + 4) as u16;
             let display = app.cell_target_at(window, pane, 0, col).map(|target| target.display);
-            assert_eq!(
-                display.as_deref() == Some(uri.as_str()),
-                joins,
-                "{} extra {extra}",
-                shape.head
-            );
+            // Past the cap no prefix opens either: the whole target stays inert.
+            let expected = joins.then_some(uri.as_str());
+            assert_eq!(display.as_deref(), expected, "{} extra {extra}", shape.head);
         }
     }
 }

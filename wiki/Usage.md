@@ -445,10 +445,15 @@ row directly, a row that stops before it, or a continuation that starts right
 of the box's leftmost continuation column, adds a blank, and the line number
 and repeated signs are dropped. The URL under the pointer is then found in the
 rebuilt line, so a closing quote, `)` or space ends it as it would on one row.
-A joined URL is at most 32 rows and 4 KiB. A URL that may continue past the
-displayed rows, past either limit, or into a cell with combining marks or an
-OSC 8 link stays inert rather than opening a truncated prefix; a URL on one row
-is left to the single-row rules. The rule is a heuristic: a source line whose
+A joined URL is at most 32 rows and 4 KiB; the limits bound the URL, not the
+source line, so a URL deep in a long wrapped line still joins. Once the URL text
+under the pointer spans two rows it opens whole or not at all: a URL that may
+continue past the displayed rows, passes either limit, holds a cell with
+combining marks, an OSC 8 link or a stray wide-character half, or meets a second
+scheme on a later row stays inert rather than opening a truncated prefix. A
+leading `+` or `-` on a continuation of an unchanged line is URL text, and a
+continuation that starts with digits never starts a new numbered line. A URL on
+one row is left to the single-row rules. The rule is a heuristic: a source line whose
 text ends exactly at the cut followed by a continuation that starts with a
 word joins them, and the modifier-hover preview shows the full destination
 before activation.

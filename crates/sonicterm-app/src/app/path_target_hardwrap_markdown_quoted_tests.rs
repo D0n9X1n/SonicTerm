@@ -50,7 +50,9 @@ fn url_spans(
 /// Every pointer inside `spans` resolves to `expected` with exactly those spans highlighted.
 fn assert_joined(lines: &[String], cols: u16, spans: &[(u16, u16, u16)], expected: &str) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    let (window, pane) = hardwrap_pane_sized(&mut app, cols, 16, lines);
+    // The pane holds every line, so no row scrolls into history.
+    let pane_rows = lines.len() as u16 + 4;
+    let (window, pane) = hardwrap_pane_sized(&mut app, cols, pane_rows, lines);
     for &(row, start, end) in spans {
         for col in start..end {
             let target = app
@@ -229,4 +231,150 @@ fn captured_update_view_rows_join_at_their_cut() {
     let start = lines[0].find("https").unwrap();
     let spans = url_spans(0, start, QUOTED_URI.len(), lines[0].len(), 9);
     assert_joined(&lines, 168, &spans, QUOTED_URI);
+}
+
+/// Resolve the target at `(row, col)` of `lines` written into a `cols`-wide pane.
+fn target_at(lines: &[String], cols: u16, row: u16, col: u16) -> Option<String> {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = hardwrap_pane_sized(&mut app, cols, 40, lines);
+    app.cell_target_at(window, pane, row, col).map(|target| target.display)
+}
+
+/// A URL the box broke across rows opens whole or not at all: a continuation that opens its own
+/// scheme, an unsafe cell anywhere in the token (a combining mark, an OSC 8 link or an orphan wide
+/// continuation, also after trimmed punctuation or on a non-ASCII cell), or a token longer than
+/// `MAX_LOGICAL_PATH_BYTES` leaves every fragment inert instead of opening the first row's prefix.
+#[test]
+fn broken_url_with_unreadable_fragment_never_opens_a_prefix() {
+    let first = format!("{}  get \"https://example.test/aaaa", gutter(1, ' '));
+    let cases = [
+        ("second scheme", "         https://b.test/x\"".to_string()),
+        ("combining on the first fragment cell", "         b\u{301}bbb\"".to_string()),
+        ("combining after trimmed punctuation", "         bbbb)b\u{301}ccc\"".to_string()),
+        ("combining on non-ASCII", "         bbbbé\u{301}\"".to_string()),
+        (
+            "hyperlinked fragment",
+            "         \x1b]8;;https://declared.test/\x1b\\bbbb\x1b]8;;\x1b\\\"".to_string(),
+        ),
+    ];
+    for (label, second) in cases {
+        let lines = [first.clone(), second];
+        for (row, col) in [(0, first.len() as u16 - 3), (1, 10)] {
+            let display = target_at(&lines, 60, row, col);
+            assert!(
+                display
+                    .as_deref()
+                    .is_none_or(|display| !display.starts_with("https://example.test")),
+                "{label} row {row}: {display:?}"
+            );
+        }
+    }
+    // The same rows without the unreadable cell join, so each refusal comes from that cell.
+    let plain = [first.clone(), "         bbbb)bccc\"".to_string()];
+    assert_eq!(
+        target_at(&plain, 60, 0, first.len() as u16 - 3).as_deref(),
+        Some("https://example.test/aaaabbbb)bccc")
+    );
+}
+
+/// A URL one byte past `MAX_LOGICAL_PATH_BYTES` never opens its first rows' prefix.
+#[test]
+fn broken_url_past_the_byte_cap_stays_inert() {
+    let uri = format!("https://example.test/{}", "a".repeat(MAX_LOGICAL_PATH_BYTES + 1 - 21));
+    assert_eq!(uri.len(), MAX_LOGICAL_PATH_BYTES + 1);
+    let lines = box_line(&gutter(1, ' '), ' ', &format!("  \"{uri}\" x"), 150, 9);
+    assert!(target_at(&lines, 160, 0, 20).is_none());
+    assert!(target_at(&lines, 160, 1, 20).is_none());
+}
+
+/// A leading `-` or `+` on a context line's continuation is URL text, not a diff sign.
+#[test]
+fn context_continuation_opening_with_a_hyphen_joins() {
+    let first = format!("{}  get \"https://example.test/markdown", gutter(87, ' '));
+    let lines = [first.clone(), "         -preview.zip\"".to_string()];
+    assert_eq!(
+        target_at(&lines, 60, 0, first.len() as u16 - 3).as_deref(),
+        Some("https://example.test/markdown-preview.zip")
+    );
+}
+
+/// A continuation whose text starts with digits and a blank is not a new numbered line: the URL
+/// it starts still joins the next continuation.
+#[test]
+fn continuation_starting_with_digits_keeps_its_head() {
+    let lines = [
+        format!("  1 {}", "x".repeat(28)),
+        "    123 \"https://a.test/aaaaaaaa".to_string(),
+        "    bbbb\"".to_string(),
+    ];
+    assert_eq!(target_at(&lines, 40, 1, 12).as_deref(), Some("https://a.test/aaaaaaaabbbb"));
+}
+
+/// The row cap bounds the joined URL, not the source line: a two-row URL that starts deep in a
+/// long wrapped line still joins.
+#[test]
+fn two_row_url_deep_in_a_long_line_joins() {
+    let uri = "https://example.test/aaaaaaaaaabbbbbbbbbb";
+    let prose = "word ".repeat(31 * 7);
+    let lines = box_line(&gutter(1, ' '), ' ', &format!("  {prose}\"{uri}\" x"), 40, 9);
+    let (row, start) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| Some((index, line.find("https")?)))
+        .unwrap();
+    assert!(row >= MAX_WRAPPED_PATH_ROWS - 1, "fixture must start the URL deep in the line");
+    let spans = url_spans(row as u16, start, uri.len(), 40, 9);
+    assert!(spans.len() == 2, "fixture must split the URL over two rows: {spans:?}");
+    assert_joined(&lines, 60, &spans, uri);
+}
+
+/// A closing quote inside the frame ends a URL even when the view is scrolled back and the line's
+/// next row is not displayed.
+#[test]
+fn quoted_url_closed_above_an_undisplayed_row_joins() {
+    let lines = [
+        format!("{}  get \"https://example.test/aaaa", gutter(1, ' ')),
+        "         bbbb\"".to_string(),
+        "         more".to_string(),
+    ];
+    let mut grid = Grid::new(60, 2);
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            grid.carriage_return();
+            grid.linefeed();
+        }
+        for character in line.chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    // Three rows into a two-row grid: the view shows rows 0 and 1, the third row is below it.
+    let frame = FrameRows::new(&grid, 0);
+    assert!(frame.rows_below(), "fixture must hide a row below the view");
+    let decided = numbered_box_uri_in(&frame, AbsoluteCell { row: 0, col: 20 });
+    let HardwrapUri::Complete(candidate) = decided else { panic!("closed URL: {decided:?}") };
+    assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
+}
+
+/// Hovering every cell of a large box stays bounded: each decision reads at most a fixed window of
+/// rows around the pointer, whatever the number of rows the box holds.
+#[test]
+fn box_decision_reads_a_bounded_window() {
+    let lines = (0..200)
+        .map(|index| format!("{} {}", gutter(index % 90 + 10, ' '), "z".repeat(60)))
+        .collect::<Vec<_>>();
+    let mut grid = Grid::new(80, 200);
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            grid.carriage_return();
+            grid.linefeed();
+        }
+        for character in line.chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    let frame = FrameRows::new(&grid, 0);
+    let (_, cells) =
+        hardwrap_work::measure(|| numbered_box_uri_in(&frame, AbsoluteCell { row: 100, col: 20 }));
+    let window_rows = 6 * (MAX_WRAPPED_PATH_ROWS as u64 - 1) + 1;
+    assert!(cells <= window_rows * 80, "read {cells} cells");
 }

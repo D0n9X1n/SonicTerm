@@ -304,8 +304,10 @@ cargo build -p sonicterm-app
   both rows draw. `numbered_box_uri_in` (`path_target_hardwrap_markdown.rs`), tried after the
   edge-reaching bracketed rule, rebuilds one line of Claude Code's numbered diff/markdown box (the
   box cut is its widest text column, the hang its leftmost continuation start) and finds the URL
-  under the pointer in it, whatever wraps it; a one-row URL is `NotApplicable`, a URL that may run
-  past the displayed rows, the caps or an unsafe cell is `Incomplete`. The bracketed rule keeps
+  under the pointer in it, whatever wraps it. Once the URL token under the pointer spans two rows
+  the rule owns it: it opens whole or is `Incomplete` (past the displayed or rebuilt rows, the
+  caps, an unsafe cell, or a later-row second scheme), never `NotApplicable`, so no single-row
+  rule opens its prefix; caps bound the URL, not the source line. The bracketed rule keeps
   `closer_tail_ends_token`. On the alternate screen, `hyperlink_hover_cells` continues one OSC 8
   link's fragment into the next row's fragment of the same link when, inside one pane, at
   most `LINK_CONTINUATION_MARGIN` (2) blank cells follow the upper fragment before the
