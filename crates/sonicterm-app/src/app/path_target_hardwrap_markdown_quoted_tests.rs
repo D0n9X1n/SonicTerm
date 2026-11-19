@@ -933,3 +933,49 @@ fn unproven_rows_keep_independent_urls() {
         assert_eq!(display.as_deref(), Some(expected), "row {row}");
     }
 }
+
+/// A signed row shaped like a markdown bullet beside an indented row proves no diff: in a
+/// markdown view the continuation's `-` is text, so the URL is never opened without it.
+#[test]
+fn bullet_rows_beside_indented_rows_prove_no_diff() {
+    let lines = [
+        "     87 - curl \"https://example.test/markdown".to_string(),
+        "        -preview.zip\"".to_string(),
+        "     88   More installation instructions now.".to_string(),
+    ];
+    for (row, col) in [(0u64, 24u16), (1, 12)] {
+        let decided = decide_in_frame(&lines, (60, 10), 0, AbsoluteCell { row, col });
+        let wrong = DetectedTarget::Uri("https://example.test/markdownpreview.zip".into());
+        assert!(
+            !matches!(&decided, HardwrapUri::Complete(candidate) if candidate.target == wrong),
+            "row {row}: {decided:?}"
+        );
+    }
+}
+
+/// A wrapped markdown link with a title after its URL is owned by its `](`: it never opens the
+/// first row's prefix.
+#[test]
+fn titled_markdown_link_never_opens_a_prefix() {
+    let lines = [
+        "      1 [doc](https://example.test/aaaa".to_string(),
+        "        bbbb \"Documentation\")".to_string(),
+    ];
+    let display = exact_target_at(&lines, (60, 10), 0, 24);
+    assert_ne!(display.as_deref(), Some("https://example.test/aaaa"));
+}
+
+/// Numbered tool output whose next row starts at the box's text column proves no box, and its
+/// URL, opened by no markdown `](`, stays its row's own.
+#[test]
+fn unproven_rows_keep_a_url_above_plain_text() {
+    let lines = [
+        "  ⎿  Status URL".to_string(),
+        "     200 https://example.test/ok".to_string(),
+        "     fetched successfully".to_string(),
+    ];
+    assert_eq!(
+        exact_target_at(&lines, (60, 10), 1, 20).as_deref(),
+        Some("https://example.test/ok")
+    );
+}

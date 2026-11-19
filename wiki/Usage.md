@@ -442,15 +442,16 @@ starts in the next column; in a diff view that column holds the line's sign
 (`+`, `-` or blank), which every continuation row repeats, and the text starts
 one column further. A box is a markdown view when any of its rows holds other
 text in that column, and a diff when it shows a line removed and then added, or
-signed rows beside unsigned ones; a box whose rows are all signed, or all blank
-there, may be either, so a joined URL opens only when both readings find the
-same one. Continuation rows leave the line number blank and start their text at
+signed rows beside unsigned ones where some signed row is not shaped like a
+markdown bullet (a sign, one blank, then text); any other box may be either, so
+a joined URL opens only when both readings find the same one. Continuation rows leave the line number blank and start their text at
 that same text column. Rows are read as a view only when the view shows a line
 removed and then added, or two consecutive line numbers in a diff or with every
 row that reaches the box's widest column continuing below: indented tool output
 that merely opens with a number is not a view, so its URLs stay single-row
 links. In rows the view does not prove, only a markdown `](`…`)` pair joins,
-and only when both readings agree. The view
+and only when both readings agree; a wrapped link with a title after its URL
+stays inert. The view
 cuts every wrapped row at the same column, so SonicTerm rebuilds the source
 line: a row that reaches the widest text column of any displayed row of the box
 joins the next row directly, a row that stops before it, or a continuation that

@@ -407,7 +407,7 @@ struct BoxEvidence {
     /// A `-` row and a later `+` row carry the same line number: a diff replaced that line, which
     /// a markdown list or other output never shows.
     replaced_line: bool,
-    /// A numbered row holds `+` or `-` right after the gutter.
+    /// A numbered row holds `+` or `-` right after the gutter, not shaped like a markdown bullet.
     signed_row: bool,
     /// The box's cut: the widest text column of all its displayed rows, which every row the box
     /// wrapped reaches, however far from the pointer.
@@ -445,7 +445,11 @@ fn box_evidence(rows: &mut BoxRows<'_, '_>, pointed_row: u64, gutter_end: usize)
         evidence.markdown_text |=
             cell.is_some_and(|cell| !box_blank(cell) && !matches!(cell.ch, '+' | '-'));
         evidence.context_row |= numbered && cell.is_none_or(|cell| box_blank(cell));
-        evidence.signed_row |= numbered && cell.is_some_and(|cell| matches!(cell.ch, '+' | '-'));
+        // A sign, one blank, then text is also a markdown bullet; any other signed row is a diff's.
+        let bullet = row.cells.get(gutter_end + 2).is_some_and(|cell| box_blank(cell))
+            && row.cells.get(gutter_end + 3).is_some_and(|cell| !box_blank(cell));
+        evidence.signed_row |=
+            numbered && !bullet && cell.is_some_and(|cell| matches!(cell.ch, '+' | '-'));
         evidence.cut_end = evidence.cut_end.max(row.text.map_or(0, |(_, last)| last));
         if let Some(number) = row.number.filter(|_| numbered) {
             // A numbered row's line number and sign join the box's ordered numbers.
@@ -780,6 +784,15 @@ fn box_token_uri(
     let token_text = &text[token_start..token_end];
     let lowered = token_text.to_ascii_lowercase();
     let scheme_at = lowered.find("http://").into_iter().chain(lowered.find("https://")).min();
+    let opened_by_pair = scheme_at.is_some_and(|at| {
+        let opener_at = token_start + at;
+        text.get(opener_at.saturating_sub(2)..opener_at) == Some("](")
+    });
+    if line.markdown_pair && !opened_by_pair {
+        // When: the line needs a `markdown_pair` and no `](` opens the URL, the rows may be
+        // other output, so the single-row rules decide before any refusal of this rule's.
+        return HardwrapUri::NotApplicable;
+    }
     if (open_start || open_end) && scheme_at.is_none_or(|at| pointed_byte >= token_start + at) {
         // When: `open_start` or `open_end` holds, the token may run into rows the rebuild did not
         // read, so its extent and scheme are unknown and no prefix of it opens.
@@ -790,12 +803,6 @@ fn box_token_uri(
         // When: no `scheme_at` exists or `multi_row` is false, the single-row rules decide.
         return HardwrapUri::NotApplicable;
     };
-    let opener_at = token_start + scheme_at;
-    if line.markdown_pair && text.get(opener_at.saturating_sub(2)..opener_at) != Some("](") {
-        // When: the line needs a `markdown_pair` and no `](` opens the URL, the rows may be
-        // other output, so the single-row rules decide first.
-        return HardwrapUri::NotApplicable;
-    }
     if pointed_byte < token_start + scheme_at {
         // When: `pointed_byte` is before the scheme, the pointer is on text that leads the URL.
         return HardwrapUri::NotApplicable;
@@ -854,9 +861,9 @@ fn box_token_uri(
         && text.get(found.start - 2..found.start) == Some("](")
         && text.get(found.end..found.end + 1) == Some(")");
     if line.markdown_pair && !pair {
-        // When: the line needs a `markdown_pair` and the URL is not inside one, the rows may be
-        // other indented output, so the single-row rules decide.
-        return HardwrapUri::NotApplicable;
+        // When: a `markdown_pair` URL is not closed by `)`, as before a link title, its `](`
+        // still owns it, so it stays inert rather than opening a prefix.
+        return HardwrapUri::Incomplete;
     }
     HardwrapUri::Complete(LogicalTargetCandidate {
         target: DetectedTarget::Uri(found.url.clone()),
