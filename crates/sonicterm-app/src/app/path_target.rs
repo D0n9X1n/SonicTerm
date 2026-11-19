@@ -566,12 +566,12 @@ use probe_worker::select_openable_candidate;
 mod hardwrap_uri;
 #[cfg(test)]
 use hardwrap_uri::hardwrap_uri_at_cell;
-use hardwrap_uri::{hardwrap_body_break, hardwrap_uri_in, hardwrap_uri_target, opens_http_scheme};
+use hardwrap_uri::{hardwrap_body_break, hardwrap_uri_in, hardwrap_uri_target};
 #[path = "path_target_hardwrap_markdown.rs"]
 mod hardwrap_markdown;
 #[path = "path_target_hardwrap_paths.rs"]
 mod hardwrap_paths;
-use hardwrap_markdown::{closer_tail_ends_token, padded_markdown_uri_in};
+use hardwrap_markdown::{closer_tail_ends_token, numbered_box_uri_in};
 use hardwrap_paths::{
     bare_hardwrap_path_in, bare_hardwrap_uri_in, hardwrap_blank, merge_hardwrap_fragments,
 };

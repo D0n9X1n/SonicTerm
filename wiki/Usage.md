@@ -432,21 +432,26 @@ recognized fragments never fall back to a truncated URL. Non-ASCII text such as
 `。` or `了解` may also follow the closer, since no URL character is non-ASCII,
 unless that text runs to the right edge and the row soft-wraps into more text.
 
-A markdown link target that Claude Code's numbered diff or markdown view wraps
-at its own box width, short of the pane edge, is also joined. The first row
-starts with a line number (one to six digits, one blank, and an optional `+` or
-`-` sign); its `](https://…` or `](http://…` target, with the authority and
-first path slash, runs to the row's last text, and only blank padding follows
-up to the pane edge. Every continuation row leaves the gutter blank or repeats
-the same sign, starts at the column after the gutter, and, except the last,
-ends at the first row's cut; the last ends at `)`, after which only sentence
-punctuation or non-ASCII text may follow. A first fragment ending in `.`, `,`,
-`;`, `:`, `!` or `?` is never joined. The repeated sign, gutter and wrappers are
-not part of the destination. When any condition fails, the first row's own URL
-is used, as without this rule. The rule is a heuristic: an unclosed link target
-in the source followed by a line indented to the content column that reads
-like `61) next` joins into a longer URL; the modifier-hover preview shows the
-full destination before activation.
+A URL inside Claude Code's numbered diff or markdown view is also joined when
+the view wraps it at its own box width, short of the pane edge. The URL can sit
+anywhere in the line: a markdown `](https://…` target, a quoted argument such
+as `"https://…"`, a parenthesis, a code comment, or bare text, and it can start
+on the line's first row or on a continuation row. A source line starts with a
+line number (one to six digits and one blank); its continuation rows leave the
+line number blank and, on an added or removed line, repeat its `+` or `-`. The
+view cuts every wrapped row at the same column, so SonicTerm rebuilds the
+source line: a row that reaches the box's widest text column joins the next
+row directly, a row that stops before it, or a continuation that starts right
+of the box's leftmost continuation column, adds a blank, and the line number
+and repeated signs are dropped. The URL under the pointer is then found in the
+rebuilt line, so a closing quote, `)` or space ends it as it would on one row.
+A joined URL is at most 32 rows and 4 KiB. A URL that may continue past the
+displayed rows, past either limit, or into a cell with combining marks or an
+OSC 8 link stays inert rather than opening a truncated prefix; a URL on one row
+is left to the single-row rules. The rule is a heuristic: a source line whose
+text ends exactly at the cut followed by a continuation that starts with a
+word joins them, and the modifier-hover preview shows the full destination
+before activation.
 
 A URL or absolute path that a program breaks across rows itself, as Claude Code
 does, is also joined, on the primary and the alternate screen, inside tmux, rmux
