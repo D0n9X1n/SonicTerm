@@ -441,15 +441,20 @@ line number (one to six digits and one blank). In a markdown view its text
 starts in the next column; in a diff view that column holds the line's sign
 (`+`, `-` or blank), which every continuation row repeats, and the text starts
 one column further. A box is a markdown view when any of its rows holds other
-text in that column. Continuation rows leave the line number blank and start
-their text at that same text column. Rows are read as a view only when the view
-shows two consecutive line numbers, or one line number removed and then added
-again: indented tool output that merely opens with a number is not a view, so
-its URLs stay single-row links. The view cuts every wrapped row at the
-same column, so SonicTerm rebuilds the source line: a row that reaches the box's
-widest text column joins the next row directly, a row that stops before it, or
-a continuation that starts right of the text column, adds a blank, and the line
-number and repeated signs are dropped. A `+` or `-` at the text column is
+text in that column, and a diff when it shows a line removed and then added, or
+signed rows beside unsigned ones; a box whose rows are all signed, or all blank
+there, may be either, so a joined URL opens only when both readings find the
+same one. Continuation rows leave the line number blank and start their text at
+that same text column. Rows are read as a view only when the view shows a line
+removed and then added, or two consecutive line numbers with every row that
+reaches the box's widest column continuing below: indented tool output that
+merely opens with a number is not a view, so its URLs stay single-row links. In
+rows the view does not prove, only a markdown `](`…`)` pair joins. The view
+cuts every wrapped row at the same column, so SonicTerm rebuilds the source
+line: a row that reaches the widest text column of any displayed row of the box
+joins the next row directly, a row that stops before it, or a continuation that
+starts right of the text column, adds a blank, and the line number and repeated
+signs are dropped. A `+` or `-` at the text column is
 source text. The URL under the pointer is then found in the rebuilt line, so a
 closing quote, `)` or space ends it as it would on one row.
 A joined URL is at most 32 rows and 4 KiB; the limits bound the URL, not the
@@ -460,13 +465,12 @@ combining marks, an OSC 8 link or a stray wide-character half, or meets a second
 scheme on a later row stays inert rather than opening a truncated prefix. So
 does a URL at the edge of a row whose line cannot be read: a continuation that
 starts with digits, a row below that looks like a continuation but does not
-repeat the line's sign, or a continuation that opens with `+` or `-` in a view
-whose every line is signed, which may be a diff sign or a markdown list's text.
-A URL on one row is left to the single-row rules, and so are rows the view
-does not prove: a line whose numbered head scrolled out of view with no
-numbered row below it, or a view that shows a single line number. Those rows
-cannot be told from other indented output, so a broken URL there may offer
-only the visible row's part. The rule is a heuristic: a source line whose
+repeat the line's sign, or a continuation the two readings of an all-signed or
+all-unsigned box join differently. A URL on one row is left to the single-row
+rules, and so is a bare URL in rows the view does not prove: a line whose
+numbered head scrolled out of view with no numbered row below it, or a view
+that shows a single line number. Those rows cannot be told from other indented
+output, so a broken URL there may offer only the visible row's part. The rule is a heuristic: a source line whose
 text ends exactly at the cut followed by a continuation that starts with a
 word joins them, and the modifier-hover preview shows the full destination
 before activation.

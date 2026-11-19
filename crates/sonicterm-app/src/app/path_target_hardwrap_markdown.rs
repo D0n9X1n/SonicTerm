@@ -250,9 +250,9 @@ enum LineHead {
 struct BoxLine {
     gutter_end: usize,
     layout: BoxLayout,
-    /// Whether the box shows no row that tells a diff from a markdown list: no context row (blank
-    /// sign column) and no other text there, so a `+` or `-` that opens a row may be either.
-    ambiguous: bool,
+    /// Whether the joined URL must sit inside a markdown `](`…`)` pair: the box is not proven, so
+    /// only that delimiter shows the rows hold one source line.
+    markdown_pair: bool,
     /// The box's cut: the widest text column of its rows, which every wrapped row reaches.
     cut_end: usize,
     /// The line's head row, when it lies within the rebuilt rows.
@@ -327,30 +327,70 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
         }
     };
     let evidence = box_evidence(&mut rows, pointed.row, gutter_end);
-    if !evidence.consecutive && !evidence.replaced_line {
-        // When: neither `consecutive` nor `replaced_line` proves a box, these may be tool rows;
-        // a narrower gutter nearby still marks a misread head.
-        return match narrower_gutter_nearby(&mut rows, pointed.row, gutter_end) {
-            true => HardwrapUri::Incomplete,
-            false => HardwrapUri::NotApplicable,
-        };
+    // Consecutive numbers prove a box only when every row reaching its cut wrapped there: numbered
+    // tool output whose rows happen to share a width shows a row that reaches it and ends.
+    let proven = evidence.replaced_line || (evidence.consecutive && evidence.cut_wrapped);
+    if !proven && narrower_gutter_nearby(&mut rows, pointed.row, gutter_end) {
+        // When: no box is `proven` but a narrower gutter nearby shows one, the head was misread.
+        return HardwrapUri::Incomplete;
     }
-    let layout = match (evidence.markdown_text, line_sign) {
-        (true, _) => BoxLayout::Markdown,
-        (false, Ok(sign)) => BoxLayout::Diff(sign),
-        (false, Err(())) => {
-            // When: no `markdown_text` and the line's sign is `Err`, which rows continue the line
-            // cannot be read either.
+    // The layouts the box leaves possible. Text after the gutter proves markdown; a replaced line,
+    // or signed rows beside context rows, proves a diff. A box whose rows are all signed, or all
+    // blank there, may be either, so a URL opens only when both readings find the same one.
+    let mut readings = SmallVec::<[BoxLayout; 2]>::new();
+    let diff_proven = evidence.replaced_line || (evidence.signed_row && evidence.context_row);
+    if !proven {
+        // An unproven box: the head row's own sign decides one reading, and only a markdown
+        // `](`…`)` pair may join it, as a padded markdown target.
+        readings.push(match line_sign {
+            Ok(Some(sign)) => BoxLayout::Diff(Some(sign)),
+            Ok(None) | Err(()) => BoxLayout::Markdown,
+        });
+    } else if evidence.markdown_text {
+        // When: the box shows `markdown_text` after a gutter, no row is a diff.
+        readings.push(BoxLayout::Markdown);
+    } else {
+        // When: a proven box shows no `markdown_text`, it is a diff, or markdown too unless
+        // `diff_proven`; a diff line's sign must be readable.
+        let Ok(sign) = line_sign else {
+            // When: the line's sign is `Err`, which rows continue a diff line cannot be read.
             return HardwrapUri::Incomplete;
+        };
+        readings.push(BoxLayout::Diff(sign));
+        if !diff_proven {
+            // Not `diff_proven`: the rows may be a markdown list or indented text.
+            readings.push(BoxLayout::Markdown);
         }
-    };
-    let ambiguous = !evidence.markdown_text && !evidence.context_row && !evidence.replaced_line;
-    let Some(mut line) = box_line(&mut rows, (head_row, gutter_end, layout), pointed.row) else {
-        // When: `box_line` reads no line around the pointed row, the rows are not a box line.
-        return HardwrapUri::NotApplicable;
-    };
-    line.ambiguous = ambiguous;
-    box_line_uri(&mut rows, &line, pointed)
+    }
+    let mut decided = None;
+    for layout in readings {
+        let geometry = (head_row, gutter_end, layout, evidence.cut_end);
+        let reading = match box_line(&mut rows, geometry, pointed.row) {
+            Some(mut line) => {
+                line.markdown_pair = !proven;
+                box_line_uri(&mut rows, &line, pointed)
+            }
+            None => HardwrapUri::NotApplicable,
+        };
+        decided = Some(match decided {
+            None => reading,
+            Some(earlier) => agreed(earlier, reading),
+        });
+    }
+    decided.unwrap_or(HardwrapUri::NotApplicable)
+}
+
+/// One decision from two readings of a box: the same URL with the same spans, or neither owning
+/// the token, stands; any other pair means the box's layout decides the destination, which it
+/// does not show, so nothing opens.
+fn agreed(earlier: HardwrapUri, later: HardwrapUri) -> HardwrapUri {
+    match (earlier, later) {
+        (HardwrapUri::Complete(first), HardwrapUri::Complete(second)) if first == second => {
+            HardwrapUri::Complete(first)
+        }
+        (HardwrapUri::NotApplicable, HardwrapUri::NotApplicable) => HardwrapUri::NotApplicable,
+        _ => HardwrapUri::Incomplete,
+    }
 }
 
 /// What the box around `pointed_row`, whose gutter ends at `gutter_end`, shows: its contiguous
@@ -366,6 +406,14 @@ struct BoxEvidence {
     /// A `-` row and a later `+` row carry the same line number: a diff replaced that line, which
     /// a markdown list or other output never shows.
     replaced_line: bool,
+    /// A numbered row holds `+` or `-` right after the gutter.
+    signed_row: bool,
+    /// The box's cut: the widest text column of all its displayed rows, which every row the box
+    /// wrapped reaches, however far from the pointer.
+    cut_end: usize,
+    /// Every displayed row that reaches `cut_end` is followed by a row that may continue its line,
+    /// as a row the box cut is.
+    cut_wrapped: bool,
 }
 
 /// Read the `BoxEvidence` of the box around `pointed_row` whose gutter ends at `gutter_end`.
@@ -375,6 +423,9 @@ fn box_evidence(rows: &mut BoxRows<'_, '_>, pointed_row: u64, gutter_end: usize)
         context_row: false,
         consecutive: false,
         replaced_line: false,
+        signed_row: false,
+        cut_end: 0,
+        cut_wrapped: true,
     };
     // Each numbered row's absolute row, line number and sign.
     let mut numbers = SmallVec::<[(u64, u64, Option<char>); 32]>::new();
@@ -393,6 +444,8 @@ fn box_evidence(rows: &mut BoxRows<'_, '_>, pointed_row: u64, gutter_end: usize)
         evidence.markdown_text |=
             cell.is_some_and(|cell| !box_blank(cell) && !matches!(cell.ch, '+' | '-'));
         evidence.context_row |= numbered && cell.is_none_or(|cell| box_blank(cell));
+        evidence.signed_row |= numbered && cell.is_some_and(|cell| matches!(cell.ch, '+' | '-'));
+        evidence.cut_end = evidence.cut_end.max(row.text.map_or(0, |(_, last)| last));
         if let Some(number) = row.number.filter(|_| numbered) {
             // A numbered row's line number and sign join the box's ordered numbers.
             let sign = cell.map(|cell| cell.ch).filter(|sign| matches!(sign, '+' | '-'));
@@ -407,6 +460,23 @@ fn box_evidence(rows: &mut BoxRows<'_, '_>, pointed_row: u64, gutter_end: usize)
     let mut above = pointed_row;
     while above > rows.frame.view_top() && read(rows, above - 1) {
         above -= 1;
+    }
+    // A row that reaches the cut and is followed by a row that ends its line was not wrapped there.
+    let pane_left = usize::from(rows.pane.0);
+    for row_number in above..below {
+        let reaches = rows
+            .get(row_number)
+            .is_some_and(|row| row.text.is_some_and(|(_, last)| last == evidence.cut_end));
+        let next = row_number + 1;
+        let ended = match rows.frame.contains(next) {
+            true => row_ends_line(rows.get_any(next), gutter_end, pane_left),
+            false => !rows.frame.rows_below(),
+        };
+        if reaches && ended {
+            // When: a row `reaches` the cut and the next row `ended` its line, the cut is no wrap.
+            evidence.cut_wrapped = false;
+            break;
+        }
     }
     numbers.sort_unstable_by_key(|(row_number, _, _)| *row_number);
     evidence.consecutive = numbers.windows(2).any(|pair| pair[1].1 == pair[0].1 + 1);
@@ -533,7 +603,7 @@ fn headless_line(
 /// with gutter end `gutter_end` and `layout`; `None` when the rows do not form that line.
 fn box_line(
     rows: &mut BoxRows<'_, '_>,
-    (head_row, gutter_end, layout): (Option<u64>, usize, BoxLayout),
+    (head_row, gutter_end, layout, cut_end): (Option<u64>, usize, BoxLayout, usize),
     pointed_row: u64,
 ) -> Option<BoxLine> {
     let reach = (MAX_WRAPPED_PATH_ROWS - 1) as u64;
@@ -595,45 +665,10 @@ fn box_line(
         below_bytes += row_start(rows, below).unwrap_or(0);
     };
 
-    // The box: the contiguous rows around the rebuilt rows that are numbered rows with the same
-    // gutter or hanging continuations. Its widest text column is the cut every wrapped row reaches.
-    let mut cut_end = 0;
-    let mut scan = |rows: &mut BoxRows<'_, '_>, row_number: u64| {
-        let Some(row) = rows.get(row_number) else {
-            // When: the row is not displayed in this pane, the box ends at it.
-            return false;
-        };
-        let numbered = row.gutter_end == Some(gutter_end);
-        let continuation = row.text.is_some() && row.blank_through(gutter_end);
-        if row.soft_wrapped || !(numbered || continuation) {
-            // When: the row soft_wrapped or is neither numbered nor a continuation, the box ends.
-            return false;
-        }
-        cut_end = cut_end.max(row.text.map_or(0, |(_, last)| last));
-        true
-    };
-    for row_number in first_row..=last_row {
-        if !scan(rows, row_number) {
-            // When: `scan` refuses a rebuilt row, the line is not one box line.
-            return None;
-        }
-    }
-    for row_number in (first_row.saturating_sub(reach)..first_row).rev() {
-        if !scan(rows, row_number) {
-            // When: `scan` reached a row outside the box, the box starts below it.
-            break;
-        }
-    }
-    for row_number in last_row + 1..=last_row + reach {
-        if !scan(rows, row_number) {
-            // When: `scan` reached a row outside the box, the box ends above it.
-            break;
-        }
-    }
     Some(BoxLine {
         gutter_end,
         layout,
-        ambiguous: false,
+        markdown_pair: false,
         cut_end,
         head_row: head_row.filter(|head_row| *head_row >= first_row),
         first_row,
@@ -759,11 +794,6 @@ fn box_token_uri(
         return HardwrapUri::NotApplicable;
     }
     // From here the token is a URL the box broke across rows: it opens whole or not at all.
-    if line.ambiguous {
-        // When: the box is `ambiguous`, a `+` or `-` that opens a row may be a sign or text, so
-        // the joined destination is not proven.
-        return HardwrapUri::Incomplete;
-    }
     if token.contains(&LineByte::Unsafe) {
         // When: the token holds an unsafe cell, its visible text is not proven whole.
         return HardwrapUri::Incomplete;
@@ -812,6 +842,14 @@ fn box_token_uri(
     if spans_join_across_pane_border(frame, &spans) {
         // When: `spans_join_across_pane_border` holds, the chain runs into the next pane's text.
         return HardwrapUri::Incomplete;
+    }
+    let pair = found.start >= 2
+        && text.get(found.start - 2..found.start) == Some("](")
+        && text.get(found.end..found.end + 1) == Some(")");
+    if line.markdown_pair && !pair {
+        // When: the line needs a `markdown_pair` and the URL is not inside one, the rows may be
+        // other indented output, so the single-row rules decide.
+        return HardwrapUri::NotApplicable;
     }
     HardwrapUri::Complete(LogicalTargetCandidate {
         target: DetectedTarget::Uri(found.url.clone()),

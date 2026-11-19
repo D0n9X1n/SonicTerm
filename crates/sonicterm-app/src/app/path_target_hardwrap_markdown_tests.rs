@@ -7,8 +7,9 @@ use super::*;
 const DOC_URI: &str =
     "https://github.com/D0n9X1n/bufferlines.nvim/wiki/Installation-and-Usage-zh-CN";
 
-/// `lines` with the next numbered source line after their last numbered row, as every Claude Code
-/// box shows: the box rule reads a box only where consecutive line numbers prove it is one.
+/// `lines` followed by the next numbered source line replaced, as Claude Code's Update view shows
+/// it: removed, then added. The box rule reads a box only where consecutive line numbers or a
+/// replaced line prove it is one, and a replaced line also proves a diff's sign column.
 pub(super) fn with_next<Line: AsRef<str>>(lines: &[Line]) -> Vec<String> {
     let mut out = lines.iter().map(|line| line.as_ref().to_string()).collect::<Vec<_>>();
     // Each numbered row's gutter end and number; a continuation that opens with digits sits right
@@ -25,8 +26,9 @@ pub(super) fn with_next<Line: AsRef<str>>(lines: &[Line]) -> Vec<String> {
         _ => Some((gutter_end, number)),
     });
     if let Some((gutter_end, number)) = last {
-        // The next line keeps the gutter's right edge and leaves the sign column blank.
-        out.push(format!("{:>gutter_end$}  x", number + 1));
+        // The next line keeps the gutter's right edge, removed and then added.
+        out.push(format!("{:>gutter_end$} - x", number + 1));
+        out.push(format!("{:>gutter_end$} + y", number + 1));
     }
     out
 }

@@ -338,12 +338,13 @@ fn two_row_url_deep_in_a_long_line_joins() {
 #[test]
 fn quoted_url_closed_above_an_undisplayed_row_joins() {
     let lines = [
-        format!("{}  x", gutter(1, ' ')),
+        format!("{}x", gutter(1, '-')),
+        format!("{}y", gutter(1, '+')),
         format!("{}  get \"https://example.test/aaaa", gutter(2, ' ')),
         "        bbbb\"".to_string(),
         "        more".to_string(),
     ];
-    let mut grid = Grid::new(60, 3);
+    let mut grid = Grid::new(60, 4);
     for (index, line) in lines.iter().enumerate() {
         if index > 0 {
             grid.carriage_return();
@@ -353,10 +354,10 @@ fn quoted_url_closed_above_an_undisplayed_row_joins() {
             grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
     }
-    // Four rows into a three-row grid: the view shows rows 0 to 2, the fourth row is below it.
+    // Five rows into a four-row grid: the view shows rows 0 to 3, the fifth row is below it.
     let frame = FrameRows::new(&grid, 0);
     assert!(frame.rows_below(), "fixture must hide a row below the view");
-    let decided = numbered_box_uri_in(&frame, AbsoluteCell { row: 1, col: 20 });
+    let decided = numbered_box_uri_in(&frame, AbsoluteCell { row: 2, col: 20 });
     let HardwrapUri::Complete(candidate) = decided else { panic!("closed URL: {decided:?}") };
     assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
 }
@@ -518,7 +519,8 @@ fn context_continuation_with_a_sign_at_the_text_column_keeps_it_as_text() {
             format!("{}  get \"https://example.test/aaaa", gutter(1, ' ')),
             format!("        {sign}{}", "b".repeat(29)),
             "         cccc\"".to_string(),
-            format!("{}  x", gutter(2, ' ')),
+            format!("{}x", gutter(2, '-')),
+            format!("{}y", gutter(2, '+')),
         ];
         let decided = decide_in_frame(&lines, (60, 6), 0, AbsoluteCell { row: 0, col: 20 });
         let HardwrapUri::Complete(candidate) = decided else { panic!("{sign}: {decided:?}") };
@@ -781,4 +783,109 @@ fn replaced_line_alone_proves_the_box() {
     let decided = decide_in_frame(&lines, (60, 3), 0, AbsoluteCell { row: 1, col: 20 });
     let HardwrapUri::Complete(candidate) = decided else { panic!("replaced line: {decided:?}") };
     assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
+}
+
+/// Resolve the target at `(row, col)` of exactly `lines` in a `cols` by `pane_rows` pane, with no
+/// numbered line added below them.
+fn exact_target_at(
+    lines: &[String],
+    (cols, pane_rows): (u16, u16),
+    row: u16,
+    col: u16,
+) -> Option<String> {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = hardwrap_pane_sized(&mut app, cols, pane_rows, lines);
+    app.cell_target_at(window, pane, row, col).map(|target| target.display)
+}
+
+/// A box whose every row leaves the column after the gutter blank may be indented markdown or a
+/// diff's context: the continuation one column further in either began with a source blank or
+/// continues the URL, so the box never opens the joined guess.
+#[test]
+fn unsigned_indented_box_never_joins_a_guessed_continuation() {
+    let lines = [
+        "      1  see https://example.test/aaaa".to_string(),
+        "         next".to_string(),
+        "      2  other".to_string(),
+    ];
+    let display = exact_target_at(&lines, (45, 8), 0, 20);
+    assert_ne!(display.as_deref(), Some("https://example.test/aaaanext"));
+}
+
+/// A box showing a single line number is not proven, but a markdown `](`…`)` pair wrapped in it
+/// still joins: the delimiters show the rows hold one source line, as a padded markdown target.
+#[test]
+fn one_line_box_joins_a_markdown_pair() {
+    let lines =
+        ["      1 [doc](https://example.test/aaaa".to_string(), "        bbbb)".to_string()];
+    assert_eq!(
+        exact_target_at(&lines, (46, 8), 0, 20).as_deref(),
+        Some("https://example.test/aaaabbbb")
+    );
+}
+
+/// The cut comes from every displayed row of the box: a wide row far above the URL sets it, so a
+/// URL row that stops short ended at a source blank and never runs into the next row.
+#[test]
+fn box_cut_comes_from_distant_rows() {
+    let mut lines = vec![format!("      1  {}", "x".repeat(30))];
+    lines.extend((2..=33).map(|number| format!("{number:>7}  short")));
+    lines.push("     34  see https://example.test/aaaa ".to_string());
+    lines.push("         next".to_string());
+    lines.push("     35  done".to_string());
+    assert_eq!(
+        exact_target_at(&lines, (46, 50), 33, 20).as_deref(),
+        Some("https://example.test/aaaa")
+    );
+}
+
+/// Numbered tool output whose consecutive rows share a width is no box: a row that reaches that
+/// width and ends shows the width is no cut, so each URL stays its row's own.
+#[test]
+fn consecutive_status_rows_keep_their_own_urls() {
+    let lines = [
+        "  ⎿  Status URLs".to_string(),
+        "     200 https://example.test/old".to_string(),
+        "         fetched successfully".to_string(),
+        "     201 https://example.test/new".to_string(),
+    ];
+    assert_eq!(
+        exact_target_at(&lines, (60, 8), 1, 20).as_deref(),
+        Some("https://example.test/old")
+    );
+}
+
+/// An Update view that only adds lines shows context rows beside added rows, which proves a diff:
+/// a URL wrapped on an added row and one wrapped on a context row both join, without the signs.
+#[test]
+fn added_lines_beside_context_rows_join() {
+    let uri = "https://example.test/aaaaaaaaaa/bbbbbbbbbb/cccccccccc";
+    for (url_sign, other_sign) in [('+', ' '), (' ', '+')] {
+        let mut lines = box_line(&gutter(85, ' '), ' ', "  try {", 40, 8);
+        lines.extend(box_line(&gutter(86, other_sign), other_sign, "    x = 1", 40, 8));
+        let url_row = lines.len();
+        let source = format!("    get \"{uri}\" -o out");
+        lines.extend(box_line(&gutter(87, url_sign), url_sign, &source, 40, 8));
+        lines.extend(box_line(&gutter(88, ' '), ' ', "  }", 40, 8));
+        let start = lines[url_row].find("https").unwrap();
+        let spans = url_spans(url_row as u16, start, uri.len(), 40, 8);
+        let decided = decide_in_frame(
+            &lines,
+            (60, lines.len() as u16),
+            0,
+            AbsoluteCell { row: url_row as u64, col: start as u16 + 2 },
+        );
+        let HardwrapUri::Complete(candidate) = decided else {
+            panic!("sign {url_sign:?}: {decided:?}")
+        };
+        assert_eq!(candidate.target, DetectedTarget::Uri(uri.into()), "sign {url_sign:?}");
+        let found = candidate
+            .spans
+            .iter()
+            .map(|span| (span.row, span.start_col, span.end_col))
+            .collect::<Vec<_>>();
+        let expected =
+            spans.iter().map(|&(row, start, end)| (row as u64, start, end)).collect::<Vec<_>>();
+        assert_eq!(found, expected, "sign {url_sign:?}");
+    }
 }

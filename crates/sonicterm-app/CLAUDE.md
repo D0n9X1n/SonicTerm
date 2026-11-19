@@ -306,10 +306,13 @@ cargo build -p sonicterm-app
   box cut is its widest text column; text starts at gutter end + 1 in markdown, + 2 in a diff,
   whose sign column every continuation repeats; a box is markdown when any row holds other text
   at gutter end + 1) and finds the URL under the pointer in it,
-  whatever wraps it. The box must show two consecutive line numbers or one line removed then
-  added (`BoxEvidence`), else numeric tool output stays single-row (`NotApplicable`, or
-  `Incomplete` when a narrower gutter nearby shows the head was misread); in an all-signed box
-  (no markdown text, no context row) a multi-row token is `Incomplete`. Once the URL token under the pointer spans two rows
+  whatever wraps it. `BoxEvidence` reads every displayed row of the box: its cut is their widest
+  column. A box is proven by one line removed then added, or by consecutive line numbers with
+  every cut-reaching row followed by a possible continuation (`cut_wrapped`); in an unproven box
+  only a markdown `](`…`)` pair joins, else `NotApplicable` (`Incomplete` when a narrower gutter
+  nearby shows the head was misread). Text after a gutter proves markdown; a replaced line or
+  signed beside context rows proves a diff; otherwise both layouts are read and `agreed` opens a
+  URL only when both find the same one. Once the URL token under the pointer spans two rows
   the rule owns it: it opens whole or is `Incomplete` (past the displayed or rebuilt rows, the
   caps, an unsafe cell, or a later-row second scheme), never `NotApplicable`, so no single-row
   rule opens its prefix; caps bound the URL, not the source line. The bracketed rule keeps
