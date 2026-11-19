@@ -207,7 +207,7 @@ Windows 执行阶段。阶段元数据保留在原始日志中，子进程字节
 ### 要求与命令
 
 请使用 Windows x64 主机，并安装 MSVC target、vcpkg、`cargo-wix` 0.3.9 和 WiX
-Toolset 3.14.1.20250415。CI 逻辑覆盖率使用 `cargo-llvm-cov` 0.9.0。
+Toolset 3.14.1.20250415。CI 逻辑覆盖率使用 `cargo-llvm-cov` 0.9.1。
 `scripts/setup-windows-cairo.ps1` 会通过 `VCPKG_ROOT`、
 `VCPKG_INSTALLATION_ROOT` 或 `C:\vcpkg` 查找 `vcpkg.exe`，再安装静态 Cairo 和 pkgconf。
 
