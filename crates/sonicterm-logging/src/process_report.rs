@@ -58,7 +58,7 @@ pub fn sample_footprint() -> ProcessFootprint {
 /// The current local wall-clock time, formatted for a report header (`2026-10-17 12:22:23 -07:00`).
 #[must_use]
 pub fn local_timestamp() -> String {
-    chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string()
+    jiff::ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S %:z").to_string()
 }
 
 /// This process's own CPU time (user plus system, every thread; children excluded), or `None`

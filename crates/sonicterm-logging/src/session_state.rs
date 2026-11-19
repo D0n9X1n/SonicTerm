@@ -144,7 +144,7 @@ impl SessionMarker {
         if !valid_session_id(&id)
             || !valid_version(&version)
             || !valid_platform(&platform)
-            || chrono::DateTime::parse_from_rfc3339(&started_at).is_err()
+            || started_at.parse::<jiff::Timestamp>().is_err()
         {
             // When: any of id, version, platform, or started_at fails its
             // shape check, the marker is unusable and classifies as corrupt.
@@ -277,7 +277,7 @@ pub fn arm(log_dir: &Path, version: &str) -> io::Result<ArmedSession> {
     std::fs::create_dir_all(&dir)?;
 
     let pid = std::process::id();
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     // Timestamp, pid, and a process-local counter. The counter is what makes
     // the id unique rather than merely probable: the timestamp has millisecond
     // resolution and the pid is constant within a process, so two sessions
@@ -285,13 +285,13 @@ pub fn arm(log_dir: &Path, version: &str) -> io::Result<ArmedSession> {
     // the second marker overwrote the first — losing the evidence the first
     // one existed to leave.
     let sequence = ARM_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let id = format!("{}-{pid}-{sequence}", now.format("%Y%m%dT%H%M%S%.3fZ"));
+    let id = format!("{}-{pid}-{sequence}", now.strftime("%Y%m%dT%H%M%S%.3fZ"));
     let marker = SessionMarker {
         id: id.clone(),
         pid,
         version: version.to_string(),
         platform: std::env::consts::OS.to_string(),
-        started_at: now.to_rfc3339(),
+        started_at: now.to_string(),
         state: SessionState::Armed,
     };
 

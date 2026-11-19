@@ -122,7 +122,7 @@ impl<const N: usize> std::fmt::Write for BoundedText<N> {
 /// Captured rendering of a single tracing event.
 #[derive(Debug, Clone)]
 struct Captured {
-    timestamp: chrono::DateTime<chrono::Utc>,
+    timestamp: jiff::Timestamp,
     level: tracing::Level,
     target: Box<str>,
     message: Box<str>,
@@ -158,7 +158,7 @@ where
         let mut visitor = MessageVisitor { message: BoundedText::new(RECORD_BYTES - target.len()) };
         event.record(&mut visitor);
         push_captured(Captured {
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             level: *meta.level(),
             target,
             message: visitor.message.into_boxed_str(),
@@ -344,7 +344,7 @@ fn write_dump(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
         dir.join("crashes")
     };
     std::fs::create_dir_all(&crashes)?;
-    let stamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
+    let stamp = jiff::Timestamp::now().strftime("%Y-%m-%dT%H-%M-%S%.3fZ");
     let path = crashes.join(format!("crash-{stamp}.log"));
     let mut file = std::fs::File::create(&path)?;
 
@@ -354,7 +354,7 @@ fn write_dump(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("<unnamed>");
     writeln!(file, "== sonic crash dump ==")?;
-    writeln!(file, "timestamp: {}", chrono::Utc::now().to_rfc3339())?;
+    writeln!(file, "timestamp: {}", jiff::Timestamp::now())?;
     writeln!(file, "version:   {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(file, "session:   {}", session_id())?;
     writeln!(file, "classification: panic")?;
@@ -376,10 +376,7 @@ fn write_dump(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
         writeln!(
             file,
             "{} {:>5} {} {}",
-            event.timestamp.to_rfc3339(),
-            event.level,
-            event.target,
-            event.message
+            event.timestamp, event.level, event.target, event.message
         )?;
     }
     file.flush()?;
@@ -398,7 +395,7 @@ pub fn __test_push(level: tracing::Level, target: &str, message: &str) {
         format_args!("{message}"),
     )
     .into_boxed_str();
-    push_captured(Captured { timestamp: chrono::Utc::now(), level, target, message });
+    push_captured(Captured { timestamp: jiff::Timestamp::now(), level, target, message });
 }
 
 #[doc(hidden)]
@@ -408,11 +405,11 @@ pub fn __test_push(level: tracing::Level, target: &str, message: &str) {
 /// format for an explicit message + location pair.
 pub fn __test_write_dump(dir: &Path, message: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let stamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
+    let stamp = jiff::Timestamp::now().strftime("%Y-%m-%dT%H-%M-%S%.3fZ");
     let path = dir.join(format!("crash-{stamp}.log"));
     let mut file = std::fs::File::create(&path)?;
     writeln!(file, "== sonic crash dump ==")?;
-    writeln!(file, "timestamp: {}", chrono::Utc::now().to_rfc3339())?;
+    writeln!(file, "timestamp: {}", jiff::Timestamp::now())?;
     writeln!(file, "version:   {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(file, "session:   {}", session_id())?;
     writeln!(file, "classification: panic")?;
@@ -426,10 +423,7 @@ pub fn __test_write_dump(dir: &Path, message: &str) -> std::io::Result<PathBuf> 
         writeln!(
             file,
             "{} {:>5} {} {}",
-            event.timestamp.to_rfc3339(),
-            event.level,
-            event.target,
-            event.message
+            event.timestamp, event.level, event.target, event.message
         )?;
     }
     file.flush()?;
