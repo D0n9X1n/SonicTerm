@@ -291,8 +291,14 @@ fn a_departing_client_abandons_a_queued_request() {
     let (mut client, transport) = connection();
     spawn_connection(&shared, transport);
     client.send(&tool(1, "list_panes", json!({})));
+    // The first call queues the connect notice before the worker queues the call itself, so the
+    // wait is for the tool request: a client gone before it would leave nothing queued.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while shared.inbox.lock().is_empty() && Instant::now() < deadline {
+    let tool_queued = |shared: &McpShared| {
+        let inbox = shared.inbox.lock();
+        inbox.iter().any(|request| !matches!(request.call, LoopCall::Notice { .. }))
+    };
+    while !tool_queued(&shared) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
     client.to_server = None;
