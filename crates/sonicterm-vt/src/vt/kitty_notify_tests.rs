@@ -49,12 +49,23 @@ fn base64_decodes_across_both_chunking_styles() {
     assert_eq!(shown(notifications.receive(b"i=b:e=1:p=body;bGxv")).2, "h\u{e9}llo");
 }
 
-/// Invalid base64, an unfinished group and bytes that are not UTF-8 drop the notification.
+/// The final chunk may omit its padding, as kitty's protocol allows: a two- or three-character
+/// final group decodes, alone or after earlier chunks of the same id.
+#[test]
+fn an_unpadded_final_group_decodes() {
+    let mut notifications = KittyNotifications::default();
+    assert_eq!(shown(notifications.receive(b"e=1:p=body;YWI")).2, "ab");
+    assert_eq!(shown(notifications.receive(b"e=1:p=body;YQ")).2, "a");
+    assert_eq!(notifications.receive(b"i=u:d=0:e=1:p=body;aGVs"), KittyNotify::Nothing);
+    assert_eq!(shown(notifications.receive(b"i=u:e=1:p=body;bG8")).2, "hello");
+}
+
+/// Invalid base64, a single leftover character and bytes that are not UTF-8 drop the notification.
 #[test]
 fn malformed_payloads_show_nothing() {
     let mut notifications = KittyNotifications::default();
     assert_eq!(notifications.receive(b"e=1:p=body;not*base64"), KittyNotify::Nothing);
-    assert_eq!(notifications.receive(b"e=1:p=body;YWJ"), KittyNotify::Nothing, "unfinished group");
+    assert_eq!(notifications.receive(b"e=1:p=body;YWJjZ"), KittyNotify::Nothing, "one leftover");
     assert_eq!(
         notifications.receive(b"e=1:p=body;/w=="),
         KittyNotify::Nothing,

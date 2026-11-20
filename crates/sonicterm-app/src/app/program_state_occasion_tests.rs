@@ -45,6 +45,20 @@ fn invisible_waits_until_the_pane_is_not_drawn() {
     assert!(shows(&mut app, front, "x", NotifyOccasion::Invisible), "a background tab");
     app.registry.windows.get_mut(&child).unwrap().redraw.native_occluded = true;
     assert!(shows(&mut app, back, "x", NotifyOccasion::Invisible), "a covered window");
+    app.registry.windows.get_mut(&child).unwrap().redraw.native_occluded = false;
+    app.registry.windows.get_mut(&child).unwrap().redraw.backend_occluded = true;
+    assert!(shows(&mut app, back, "x", NotifyOccasion::Invisible), "an occluded surface");
+}
+
+/// A window counts as hidden when the platform or the presenter reports it covered, or when it
+/// is minimized, which Windows reports only through the window itself, never as occlusion.
+#[test]
+fn a_minimized_or_occluded_window_is_hidden() {
+    assert!(!window_hidden(false, false, Some(false)));
+    assert!(!window_hidden(false, false, None), "a platform that cannot tell is not minimized");
+    assert!(window_hidden(false, false, Some(true)), "minimized on Windows");
+    assert!(window_hidden(true, false, None));
+    assert!(window_hidden(false, true, None));
 }
 
 /// A notification with the shown toast's pane and id replaces its text instead of counting, and

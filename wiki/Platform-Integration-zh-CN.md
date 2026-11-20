@@ -446,12 +446,13 @@ Orca 通过 D-Bus 上的 AT-SPI 访问每个终端窗口的 accesskit 适配器�
 
 | 平台 | 服务 |
 | --- | --- |
-| macOS | `UNUserNotificationCenter`，仅限打包后的应用（未打包的可执行文件，例如 `cargo run`，只在应用内显示）。首次桌面通知时请求一次权限；被拒绝时通知留在应用内。SonicTerm 是活动应用时的通知留在应用内。 |
+| macOS | `UNUserNotificationCenter`，仅限打包后的应用（未打包的可执行文件，例如 `cargo run`，只在应用内显示）。首次桌面通知时请求一次权限，获准后才发出该通知；提示未答复期间，之后的请求与超时调用一样等待；被拒绝时通知留在应用内。SonicTerm 是活动应用时的通知留在应用内。 |
 | Linux | XDG 通知 portal，SonicTerm 以 `com.d0n9x1n.SonicTerm` 注册；portal 没有 Notification 接口时（xdg-desktop-portal-wlr：sway、i3）使用 `org.freedesktop.Notifications`，其正文按标记转义。超时的请求会被取消。 |
 | Windows | 通过 `notify-rust` 显示 toast。 |
 
 OSC 99 id 会变成原生标识 `sonicterm-<会话>-<窗格>-<id>`，其中含每个进程的随机数，因此同一 id 的
-后续通知替换桌面通知（Windows 显示新 toast），且不会替换其他窗格或其他 SonicTerm 进程的通知。
+后续通知替换桌面通知（Windows 显示新 toast），且不会替换其他窗格或其他 SonicTerm 进程的通知。没有 id 的通知
+获得不与任何通知共享的标识，因此不会替换任何通知。
 
 ## 默认处理程序命令
 

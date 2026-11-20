@@ -405,6 +405,21 @@ impl App {
             }
             return Some(false);
         }
+        let left_press = matches!(
+            event,
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }
+        );
+        if left_press
+            && self
+                .registry
+                .windows
+                .get(&win_id)
+                .is_some_and(|window| window.secondary_press.is_some())
+        {
+            // When: a `left_press` comes while a right or middle press is held, the first button
+            // keeps the pointer and the left press does nothing, in the main and child windows.
+            return Some(false);
+        }
         None
     }
 }

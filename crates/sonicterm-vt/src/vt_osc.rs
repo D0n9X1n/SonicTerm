@@ -182,7 +182,7 @@ impl Performer {
     }
 
     pub(super) fn invalidate_semantic_osc(&mut self, code: u16) {
-        // When: code selects CWD or hyperlink state, revoke it; other codes preserve the prior display title.
+        // When: code selects CWD, hyperlink or notification state, revoke it; other codes preserve the prior display title.
         match code {
             7 => {
                 self.cwd_revision = self.cwd_revision.wrapping_add(1);
@@ -192,6 +192,9 @@ impl Performer {
                 self.current_hyperlink = None;
                 self.events.push(VtEvent::Hyperlink { id: None, uri: String::new() });
             }
+            // A refused or cancelled OSC 99 chunk names an id the parser never read, so every
+            // pending notification is dropped: a later chunk can never complete a cut one.
+            99 => self.kitty_notifications.clear(),
             _ => {}
         }
     }

@@ -140,17 +140,33 @@ pub(crate) fn send_desktop(notice: DesktopNotice) {
     }
 }
 
-/// The native identifier for OSC 99 id `id` from `pane_id`: a per-process nonce keeps two
-/// SonicTerm processes, whose pane ids both start at 1, from replacing each other's notifications.
-pub(crate) fn native_notice_id(pane_id: u64, id: &str) -> String {
+/// A random value fixed for this process, so identifiers from two SonicTerm processes, or from
+/// one run and the next, never meet.
+fn session_nonce() -> u64 {
     static SESSION: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    let session = SESSION.get_or_init(|| {
+    *SESSION.get_or_init(|| {
         use std::hash::{BuildHasher, Hasher};
         let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
         hasher.write_u32(std::process::id());
         hasher.finish()
-    });
-    format!("sonicterm-{session:016x}-{pane_id}-{id}")
+    })
+}
+
+/// The native identifier for OSC 99 id `id` from `pane_id`: a per-process nonce keeps two
+/// SonicTerm processes, whose pane ids both start at 1, from replacing each other's notifications.
+pub(crate) fn native_notice_id(pane_id: u64, id: &str) -> String {
+    format!("sonicterm-{:016x}-{pane_id}-{id}", session_nonce())
+}
+
+/// The identifier a backend gives `notice`: its replaceable `native_id`, or one no other
+/// notification of any SonicTerm process shares, so a notice without an id replaces none.
+// Ordering: NEXT is Relaxed; only its unique count is read, so it orders no other memory.
+pub(crate) fn notice_identifier(notice: &DesktopNotice) -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    notice.native_id.clone().unwrap_or_else(|| {
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("sonicterm-{:016x}-notice-{serial}", session_nonce())
+    })
 }
 
 /// `text` with `&`, `<` and `>` escaped, for a notification server that reads bodies as markup.
@@ -159,6 +175,9 @@ pub(crate) fn escape_markup(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[path = "desktop_notify_center.rs"]
+mod center;
 #[cfg(target_os = "linux")]
 #[path = "desktop_notify_linux.rs"]
 mod linux;

@@ -185,9 +185,13 @@ impl App {
     ) -> Option<SecondaryPress> {
         let window = self.registry.windows.get(&win_id)?;
         let read_only = window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only);
-        if window.secondary_press.is_some() || read_only || window.modifiers.shift_key() {
-            // When: `secondary_press` is held, `read_only` is on, or Shift asks for local
-            // handling, no report starts.
+        if window.secondary_press.is_some()
+            || window.mouse_down
+            || read_only
+            || window.modifiers.shift_key()
+        {
+            // When: a `secondary_press` or the left button (`mouse_down`) is held, `read_only` is
+            // on, or Shift asks for local handling, no report starts: the first button owns.
             return None;
         }
         let (cursor_x, cursor_y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);

@@ -178,3 +178,36 @@ fn focus_loss_releases_a_held_right_press() {
     assert!(writes.contains(&(pane_id, b"\x1b[<2;4;3m".to_vec())), "{writes:?}");
     assert!(app.registry.windows[&main].secondary_press.is_none());
 }
+
+/// The first button owns the pointer in either window: with a right press held a left press is
+/// consumed before either window handler and starts no gesture, and with the left button down a
+/// right press reports nothing and holds nothing.
+#[test]
+fn a_held_button_refuses_the_other_in_either_window() {
+    let (mut app, windows) = tracking_app(MouseTracking::Button);
+    let button = |state, button| WindowEvent::MouseInput {
+        device_id: winit::event::DeviceId::dummy(),
+        state,
+        button,
+    };
+    for (window_id, pane_id) in windows {
+        point(&mut app, window_id, 35.0, 45.0);
+        let right_press = button(ElementState::Pressed, MouseButton::Right);
+        assert_eq!(app.route_shared_pointer(window_id, &right_press), Some(false));
+        let left_press = button(ElementState::Pressed, MouseButton::Left);
+        assert_eq!(app.route_shared_pointer(window_id, &left_press), Some(false), "left consumed");
+        assert!(!app.registry.windows[&window_id].mouse_down, "no left gesture starts");
+        let right_release = button(ElementState::Released, MouseButton::Right);
+        assert_eq!(app.route_shared_pointer(window_id, &right_release), Some(false));
+        assert_eq!(
+            app.__test_drain_pty_writes(),
+            vec![(pane_id, b"\x1b[<2;4;3M".to_vec()), (pane_id, b"\x1b[<2;4;3m".to_vec())]
+        );
+
+        app.registry.windows.get_mut(&window_id).unwrap().mouse_down = true;
+        assert_eq!(app.route_shared_pointer(window_id, &right_press), Some(false));
+        assert!(app.registry.windows[&window_id].secondary_press.is_none(), "left owns");
+        assert!(app.__test_drain_pty_writes().is_empty());
+        app.registry.windows.get_mut(&window_id).unwrap().mouse_down = false;
+    }
+}

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 
-use super::{escape_markup, DeliveryOutcome, DesktopNotice, NotifyBackend};
+use super::{escape_markup, notice_identifier, DeliveryOutcome, DesktopNotice, NotifyBackend};
 
 /// The desktop id the portal knows SonicTerm by, from its desktop entry.
 const APP_ID: &str = "com.d0n9x1n.SonicTerm";
@@ -41,8 +41,7 @@ impl DesktopPortal {
                 let _ = ashpd::register_host_app(app_id).await;
             }
         }
-        let id =
-            notice.native_id.clone().unwrap_or_else(|| format!("sonicterm-{}", std::process::id()));
+        let id = notice_identifier(notice);
         // The portal takes plain text, so the body is never escaped here.
         let portal = async {
             let proxy = ashpd::desktop::notification::NotificationProxy::new().await?;

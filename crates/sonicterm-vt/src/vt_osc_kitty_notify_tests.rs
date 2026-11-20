@@ -59,3 +59,19 @@ fn reset_drops_pending_chunks() {
         vec![(None, "body".into(), Some("r".into()), NotifyOccasion::Always)]
     );
 }
+
+/// A chunk the parser refuses (past the OSC cap) or a CAN/SUB cancels drops the pending
+/// notification it continued, so a later chunk under the same id never completes it cut.
+#[test]
+fn a_refused_or_cancelled_chunk_drops_the_pending_notification() {
+    let oversized = format!("\x1b]99;i=x:d=0:p=body;{}\x1b\\", "m".repeat(MAX_NOTIFY_BYTES + 1));
+    for interruption in [oversized.into_bytes(), b"\x1b]99;i=x:d=0:p=body;mid\x18".to_vec()] {
+        let mut parser = Parser::new(Grid::new(20, 4));
+        assert!(notifications(&mut parser, b"\x1b]99;i=x:d=0:p=body;old\x1b\\").is_empty());
+        assert!(notifications(&mut parser, &interruption).is_empty());
+        assert_eq!(
+            notifications(&mut parser, b"\x1b]99;i=x:p=body;new\x1b\\"),
+            vec![(None, "new".into(), Some("x".into()), NotifyOccasion::Always)]
+        );
+    }
+}

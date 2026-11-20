@@ -399,7 +399,15 @@ impl App {
             }
             NotifyOccasion::Invisible => {
                 let zoomed_away = tab.tree.zoomed_pane_id().is_some_and(|zoomed| zoomed != pane_id);
-                in_active_tab && !zoomed_away && !window.redraw.native_occluded
+                // Windows reports no occlusion, so a minimized window is read from the window
+                // itself; a platform that cannot tell answers `None`, read as not minimized.
+                let minimized = window.window.as_ref().and_then(|native| native.is_minimized());
+                let hidden = window_hidden(
+                    window.redraw.native_occluded,
+                    window.redraw.backend_occluded,
+                    minimized,
+                );
+                in_active_tab && !zoomed_away && !hidden
             }
         }
     }
@@ -588,6 +596,16 @@ fn native_handle(window: &winit::window::Window) -> Option<isize> {
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
         _ => None,
     }
+}
+
+/// Whether nothing of a window is drawn: the platform reported it covered, the presenter found
+/// its surface occluded, or it is minimized (`None` where the platform cannot tell).
+pub(super) fn window_hidden(
+    native_occluded: bool,
+    backend_occluded: bool,
+    minimized: Option<bool>,
+) -> bool {
+    native_occluded || backend_occluded || minimized.unwrap_or(false)
 }
 
 #[cfg(test)]

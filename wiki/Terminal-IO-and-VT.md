@@ -243,11 +243,12 @@ Current protocol support includes:
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12 color queries, OSC 133 prompt markers, OSC 9;4
   progress, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
-  title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere),
-  at most eight open at once and 16 KiB in all; a later notification with the same id from the same
+  title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere,
+  the final padding optional), at most eight open at once and 16 KiB in all, and all of them dropped
+  when a chunk is refused or cancelled, so none completes cut; a later notification with the same id from the same
   pane replaces the shown one; `o=unfocused` shows only while the pane is not the focused window's
   active pane, `o=invisible` only while it is not drawn (another tab, zoomed away, or the window
-  covered); a `p=?` query is answered with `p=title,body:o=always,unfocused,invisible`, and other
+  covered or minimized); a `p=?` query is answered with `p=title,body:o=always,unfocused,invisible`, and other
   parts (close, icons, buttons) are ignored;
 - DSR, DA, XTVERSION, DECRQSS SGR, DECRQM, color-scheme (DSR 996, mode 2031), cell-size
   (`CSI 16 t`), palette, and kitty keyboard replies (see [Host reports](#host-reports));
@@ -662,9 +663,9 @@ child windows use the same routing rule.
 Right and middle buttons reach a pane only while its program tracks the mouse:
 button codes 2 and 1, `32 +` the code for motion while held under `?1002` and
 `?1003`, and SGR `m` or the legacy release 3 on release. A right press on the
-status strip stays the strip's. The first right or middle press owns the button
-until its own release: a second one pressed meanwhile is ignored, and the left
-button keeps its own gesture. READONLY, Shift and tracking off keep them local,
+status strip stays the strip's. The first button pressed owns the pointer
+until its own release: a right or middle press while another button is held,
+or a left press while a right or middle one is held, does nothing. READONLY, Shift and tracking off keep them local,
 where they do nothing. Losing focus releases a held press. The report goes only to
 the pane under the pointer, never to broadcast receivers. Programs such as herdr
 use this for right-click menus.

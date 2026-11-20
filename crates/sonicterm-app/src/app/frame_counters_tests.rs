@@ -340,7 +340,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/media.rs", "charge", 3),
     ("app/command_events.rs", "command_events", 1),
     ("app/desktop_notify.rs", "NOTIFIER", 1),
-    ("app/desktop_notify_macos.rs", "done", 1),
+    ("app/desktop_notify_center.rs", "completion", 1),
+    ("app/desktop_notify_macos.rs", "slot", 1),
     // The request targets an accessibility adapter's handler resolves against; a plain std mutex.
     ("app/accessibility.rs", "targets", 4),
     // The event-loop proxy a default-handler completion posts its result through.

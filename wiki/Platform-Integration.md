@@ -582,13 +582,14 @@ never joined, so a stuck service cannot hold up shutdown. Each platform:
 
 | Platform | Service |
 | --- | --- |
-| macOS | `UNUserNotificationCenter`, only from the bundled app (an unbundled binary, such as `cargo run`, stays in-app). Permission is asked once, on the first desktop notification; a denial keeps notifications in-app. A notification while SonicTerm is the active app stays in-app. |
+| macOS | `UNUserNotificationCenter`, only from the bundled app (an unbundled binary, such as `cargo run`, stays in-app). Permission is asked once, on the first desktop notification, which is posted only after it is granted; while the prompt is unanswered later requests wait as for a late call, and a denial keeps notifications in-app. A notification while SonicTerm is the active app stays in-app. |
 | Linux | The XDG notification portal, with SonicTerm registered as `com.d0n9x1n.SonicTerm`; where the portal has no Notification interface (xdg-desktop-portal-wlr: sway, i3) `org.freedesktop.Notifications`, whose body is escaped for markup. A late request is cancelled. |
 | Windows | Toasts through `notify-rust`. |
 
 An OSC 99 id becomes the native identifier `sonicterm-<session>-<pane>-<id>`, with a
 per-process nonce, so a later notification with the same id replaces the desktop one
-(Windows shows a new toast) and never one from another pane or SonicTerm process.
+(Windows shows a new toast) and never one from another pane or SonicTerm process. A
+notification without an id gets an identifier no other shares, so it replaces none.
 
 ## Default-handler command
 

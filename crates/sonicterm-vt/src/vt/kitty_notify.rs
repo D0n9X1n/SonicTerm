@@ -83,16 +83,24 @@ impl Part {
         self.bytes.len() + self.carry.len()
     }
 
-    /// The completed text: `None` when nothing was sent for this part, or when a base64 group was
-    /// left unfinished or the bytes are not UTF-8.
-    fn finish(self) -> Option<Option<String>> {
+    /// The completed text: `None` when nothing was sent for this part, or when a single base64
+    /// character was left over or the bytes are not UTF-8. The protocol lets the final chunk omit
+    /// its padding, so a two- or three-character final group decodes as if padded.
+    fn finish(mut self) -> Option<Option<String>> {
         if !self.seen {
             // When: `seen` is false, no chunk named this part, which is no error.
             return Some(None);
         }
-        if !self.carry.is_empty() {
-            // When: `carry` holds an unfinished base64 group, the text was cut.
+        let leftover = self.carry.len();
+        if leftover == 1 {
+            // When: one character is the `leftover`, it encodes no whole byte: the text was cut.
             return None;
+        }
+        if leftover > 1 {
+            // Two or three characters left over are an unpadded final group, decoded as if padded.
+            let mut group = std::mem::take(&mut self.carry);
+            group.resize(4, b'=');
+            decode_group(&group, &mut self.bytes)?;
         }
         String::from_utf8(self.bytes).ok().map(Some)
     }
