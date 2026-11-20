@@ -1,6 +1,7 @@
 //! Shell-integration command events: bounded per-pane queues, tab status polling, and
 //! long-command notifications.
 
+use super::desktop_notify::DesktopNotice;
 use super::*;
 
 /// Append parsed command events, bounding both the entries kept and the
@@ -164,54 +165,49 @@ pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Co
 }
 
 fn maybe_notify_long_command(config: &Config, duration: Option<Duration>, exit: Option<u8>) {
-    let Some(duration) = duration else {
-        // When: the event carries no `duration`, so elapsed time cannot be
-        // compared against the threshold that makes a command "long".
-        return;
-    };
+    if let Some(body) = long_command_message(config, duration, exit) {
+        notify_command_done(body);
+    }
+}
+
+/// The desktop notification a finished command raises: only with `long_command` on (whatever
+/// `osc9` is) and after it ran past `threshold_secs`.
+pub(super) fn long_command_message(
+    config: &Config,
+    duration: Option<Duration>,
+    exit: Option<u8>,
+) -> Option<String> {
+    let duration = duration?;
     if !config.notifications.long_command {
         // When: `config` disables long_command notifications, so a finished
         // command stays silent however long it ran.
-        return;
+        return None;
     }
     if duration.as_secs() <= config.notifications.threshold_secs {
         // When: `duration` sits within threshold_secs, so the user was not
         // waiting long enough for a desktop interruption to be welcome.
-        return;
+        return None;
     }
-    let result = match exit {
-        Some(0) => "completed successfully",
-        Some(code) => {
-            // When: `code` is nonzero, so the message names the failure rather
-            // than the generic completion wording built below.
-            return notify_command_done(format!("Command failed with exit code {code}"));
-        }
-        None => "completed",
-    };
-    notify_command_done(format!("Command {result} after {}s", duration.as_secs()));
+    Some(match exit {
+        Some(0) => format!("Command completed successfully after {}s", duration.as_secs()),
+        Some(code) => format!("Command failed with exit code {code}"),
+        None => format!("Command completed after {}s", duration.as_secs()),
+    })
 }
 
-#[cfg(target_os = "windows")]
+/// Raise a desktop notification for a finished command, on every platform; it has no source
+/// window, so no focus rule applies.
 pub(super) fn notify_command_done(body: String) {
-    if let Err(err) = notify_rust::Notification::new().summary("Command done").body(&body).show() {
-        tracing::debug!(target: "sonicterm_app::app", ?err, "desktop notification failed");
-    }
+    let notice = DesktopNotice { title: "Command done".into(), body, native_id: None };
+    super::desktop_notify::send_desktop(notice);
 }
 
-#[cfg(not(target_os = "windows"))]
-pub(super) fn notify_command_done(_body: String) {}
-
-/// Raise a desktop notification for a program notification; only Windows has one.
-#[cfg(target_os = "windows")]
-pub(super) fn notify_program(title: &str, body: &str) {
-    if let Err(err) = notify_rust::Notification::new().summary(title).body(body).show() {
-        tracing::debug!(target: "sonicterm_app::app", ?err, "desktop notification failed");
-    }
+/// Raise a desktop notification for a program notification, replacing an earlier one with the
+/// same `native_id`.
+pub(super) fn notify_program(title: &str, body: &str, native_id: Option<String>) {
+    let notice = DesktopNotice { title: title.into(), body: body.into(), native_id };
+    super::desktop_notify::send_desktop(notice);
 }
-
-/// macOS and Linux show program notifications in the app only.
-#[cfg(not(target_os = "windows"))]
-pub(super) fn notify_program(_title: &str, _body: &str) {}
 
 #[cfg(test)]
 #[path = "command_events_tests.rs"]

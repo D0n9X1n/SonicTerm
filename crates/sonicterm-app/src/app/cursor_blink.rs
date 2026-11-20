@@ -203,7 +203,7 @@ pub(crate) fn sample_frame_cursor(
 }
 
 /// Whether `window`'s cursor blinks now: blinking on, focused, and its active pane's cursor drawn
-/// (visible and at the live view). A window that does not blink schedules no blink frame.
+/// (visible and at the live view) and not asked to be steady by its program. A window that does not blink schedules no blink frame.
 pub(crate) fn window_blinks(window: &super::WindowState) -> bool {
     let Some(renderer) = window.renderer.as_ref() else {
         // When: the window has no renderer, it draws no cursor to blink.
@@ -214,7 +214,7 @@ pub(crate) fn window_blinks(window: &super::WindowState) -> bool {
 
 /// [`window_blinks`] with the renderer's `cursor_blink` setting and focus passed in, so a headless
 /// test window, which has no renderer, can be checked too.
-// Ordering: cursor_visible Relaxed reads only choose whether a blink deadline exists.
+// Ordering: cursor_visible and cursor_steady Relaxed reads only choose whether a blink deadline exists.
 pub(crate) fn blinks(window: &super::WindowState, cursor_blink: bool, focused: bool) -> bool {
     let read_only = window.copy_mode.as_ref().is_some_and(|state| state.is_read_only());
     cursor_blink
@@ -226,6 +226,7 @@ pub(crate) fn blinks(window: &super::WindowState, cursor_blink: bool, focused: b
             .and_then(|tab| window.panes.get(&tab.active_pane))
             .is_some_and(|pane| {
                 pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed)
+                    && !pane.cursor_steady.load(std::sync::atomic::Ordering::Relaxed)
                     && pane.viewport_top_abs.is_none()
             })
 }

@@ -42,4 +42,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Test output can hold any character; escape what a legacy console encoding cannot print
+    # instead of failing the step after the tests ran.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     raise SystemExit(main())

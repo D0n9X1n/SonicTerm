@@ -9,6 +9,22 @@ use super::*;
 /// palette wiring cannot be added to one path and forgotten on another. Per-slot colours that don't resolve are simply left unseeded
 /// (the parser then suppresses that slot's reply rather than lying).
 pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &Theme) {
+    // The creation seed records the pane's starting theme; it never reports a change.
+    let _ = reseed_parser_theme_colors(parser, theme);
+}
+
+/// Seed `parser` with `theme` as [`seed_parser_theme_colors`] does, and return the color-scheme
+/// report the program asked for with DEC mode 2031 when a readable color or the scheme changed
+/// since the last seed. The caller writes it to the pane after releasing the parser lock.
+#[must_use]
+pub(super) fn reseed_parser_theme_colors(
+    parser: &mut sonicterm_vt::vt::Parser,
+    theme: &Theme,
+) -> Option<Vec<u8>> {
+    parser.set_theme_color_scheme(match theme.appearance {
+        sonicterm_cfg::theme::Appearance::Dark => sonicterm_types::ColorScheme::Dark,
+        sonicterm_cfg::theme::Appearance::Light => sonicterm_types::ColorScheme::Light,
+    });
     if let Some((red, green, blue)) = theme.colors.foreground.rgb() {
         parser.set_theme_fg(red, green, blue);
     }
@@ -45,6 +61,30 @@ pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &T
             parser.set_theme_palette_color(palette_index as u8, red, green, blue);
         }
     }
+    parser.finish_theme_update()
+}
+
+/// Reseed every pane parser in `panes` with `theme`, and return each pane's mode 2031 report
+/// paired with its id, for the host to send once every parser lock has ended.
+pub(super) fn propagate_theme_to_pane_parsers(
+    panes: &HashMap<u64, PaneState>,
+    theme: &Theme,
+) -> Vec<(u64, Vec<u8>)> {
+    let mut reports = Vec::new();
+    for (pane_id, pane) in panes {
+        // Config live-reload runs on the app thread, not the render hot path, so lock() is
+        // intentional here. Dropping this update would leave OSC 10/11/12 + OSC 4 palette replies
+        // stale for shells already attached to the pane.
+        let report = {
+            let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
+            reseed_parser_theme_colors(&mut parser, theme)
+        };
+        if let Some(report) = report {
+            reports.push((*pane_id, report));
+        }
+    }
+    reports.sort_by_key(|(pane_id, _)| *pane_id);
+    reports
 }
 
 /// Resize every pane in `panes` to `(cols, rows)`: both the parser's
@@ -275,3 +315,7 @@ impl App {
 #[cfg(test)]
 #[path = "pane_refresh_tests.rs"]
 mod pane_refresh_tests;
+
+#[cfg(test)]
+#[path = "pane_refresh_theme_tests.rs"]
+mod pane_refresh_theme_tests;

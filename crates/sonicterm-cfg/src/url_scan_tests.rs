@@ -302,3 +302,13 @@ fn find_url_at_matches_the_full_scan_at_every_byte() {
         }
     }
 }
+
+/// `is_url` checks the exact text it is given: a URL whose own `)` closes it stays whole, while an
+/// unknown scheme or a forbidden character is refused.
+#[test]
+fn is_url_checks_the_whole_text() {
+    assert!(is_url("https://en.wikipedia.org/wiki/Function_(mathematics)"));
+    assert!(!is_url("ftp://example.test/file"));
+    assert!(!is_url("https://example.test/a\"b"));
+    assert!(!is_url(""));
+}

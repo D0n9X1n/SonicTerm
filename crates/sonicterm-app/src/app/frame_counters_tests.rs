@@ -311,8 +311,8 @@ pub(super) fn parser_lock_audit(
 
 /// Every plain `lock()` in the crate's non-test sources by file and receiver, each verified to
 /// lock a mutex that is not a pane parser: event-loop proxies, the reaper's state, drag
-/// snapshots, media charges, command queues, redraw targets and the per-window native-request
-/// totals. The worker's image-store and
+/// snapshots, media charges, command queues, redraw targets, the per-window native-request
+/// totals and the desktop notification worker and its completion slot. The worker's image-store and
 /// command-queue locks sit inside its exempt section.
 pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("menubar_bridge.rs", "proxy_slot()", 2),
@@ -339,6 +339,9 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/window_setup/windows.rs", "brushes", 1),
     ("app/media.rs", "charge", 3),
     ("app/command_events.rs", "command_events", 1),
+    ("app/desktop_notify.rs", "NOTIFIER", 1),
+    ("app/desktop_notify_center.rs", "completion", 1),
+    ("app/desktop_notify_macos.rs", "slot", 1),
     // The request targets an accessibility adapter's handler resolves against; a plain std mutex.
     ("app/accessibility.rs", "targets", 4),
     // The event-loop proxy a default-handler completion posts its result through.
@@ -394,7 +397,7 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/child_tabs.rs", 1),
     ("app/child_window.rs", 2),
     ("app/child_window_pointer.rs", 1),
-    ("app/config_apply.rs", 2),
+    ("app/config_apply.rs", 1),
     ("app/keymap_dispatch/explicit_source.rs", 1),
     // The report pane's theme seed at creation, and the report feed that replaces its text.
     ("app/memory_report_window.rs", 2),
@@ -402,7 +405,7 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/overlays.rs", 2),
     // The local status line a held pane or a failed command launch writes into its own grid.
     ("app/pane_exit.rs", 1),
-    ("app/pane_refresh.rs", 3),
+    ("app/pane_refresh.rs", 4),
     ("app/pane_state.rs", 1),
     ("app/pane_target.rs", 1),
     ("app/mcp/control_loop.rs", 2),

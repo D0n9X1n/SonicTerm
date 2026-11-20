@@ -368,18 +368,11 @@ pub(super) fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
         13 => Some(pick(p.bright.magenta.0.as_str())),
         14 => Some(pick(p.bright.cyan.0.as_str())),
         15 => Some(pick(p.bright.white.0.as_str())),
-        16..=231 => {
-            let v = i - 16;
-            let r = v / 36;
-            let g = (v / 6) % 6;
-            let b = v % 6;
-            // When: c is nonzero, the xterm 6x6x6 cube spaces levels at 55 + 40c rather than evenly, so 256-color ramps match other terminals.
-            let to8bit = |c: u8| if c == 0 { 0 } else { c * 40 + 55 };
-            Some(ChromeColor::rgb(to8bit(r), to8bit(g), to8bit(b)))
-        }
-        232..=255 => {
-            let g = (i - 232) * 10 + 8;
-            Some(ChromeColor::rgb(g, g, g))
+        16..=255 => {
+            // The cube and gray ramp come from the one table `OSC 4` replies read too, so a reported
+            // color is always the drawn one.
+            let (red, green, blue) = sonicterm_types::indexed_rgb(i)?;
+            Some(ChromeColor::rgb(red, green, blue))
         }
     }
 }

@@ -141,6 +141,9 @@ pub struct PaneState {
     /// Arc and the moved pane's VT thread kept writing to an orphaned
     /// AtomicBool that nobody read. Init `true`.
     pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the pane's program asked for a steady cursor with DECSCUSR, published by its VT
+    /// worker; a steady cursor never blinks, so no blink frame is scheduled for it. Init `false`.
+    pub cursor_steady: Arc<std::sync::atomic::AtomicBool>,
     /// Coherent keyboard modes, Kitty flags, and protocol epoch published after each parser batch.
     pub keyboard_input: Arc<AtomicU64>,
     /// Pointer-routing modes (`Parser::pointer_input_snapshot`) published after each parser batch,
@@ -356,6 +359,7 @@ impl PaneState {
             command_events: Arc::new(Mutex::new(CommandQueue::default())),
             command_state: PaneCommandState::default(),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            cursor_steady: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
             pointer_input: Arc::new(std::sync::atomic::AtomicU8::new(pointer_input)),
             sync_word: Arc::new(AtomicU64::new(super::spawn_pane::sync_word_of(sync_state))),

@@ -395,6 +395,7 @@ impl Performer {
                 }
                 1004 => self.focus_reporting = set,
                 2026 => self.set_synchronized_output(set),
+                2031 => self.color_scheme_updates = set,
                 _ => {
                     // When: code is not implemented, preserve current terminal state so unknown private modes remain compatible.
                 }

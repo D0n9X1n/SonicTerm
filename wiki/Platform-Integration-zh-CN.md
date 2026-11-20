@@ -292,7 +292,7 @@ Desktop entry、AppStream component、hicolor icon、Wayland application id 和 
 统一为 `com.d0n9x1n.SonicTerm`；X11 instance name 为 `sonicterm`。统一 identity 可让
 launcher activation、任务分组和 compositor identity 对齐。
 
-Linux 没有 SonicTerm 原生菜单、桌面通知 bridge、前台进程标题 adapter、原生 material
+Linux 没有 SonicTerm 原生菜单、前台进程标题 adapter、原生 material
 backdrop 或跨进程标签页拖放。Linux shell 会在共享 app runner 上安装纯平台收敛器。
 启动和每次显式重载都会在配置被存储或应用前经过同一个接缝：Mica、Acrylic 与 Tabbed
 会变为 opaque 并记录一次 warning；已经为 opaque 的输入保持不变且不写 warning。
@@ -430,11 +430,29 @@ Orca 通过 D-Bus 上的 AT-SPI 访问每个终端窗口的 accesskit 适配器�
 每条程序通知（包括 OSC 777）都以指明窗格所在标签页的来源标记 `⟨标签页 3⟩` 开头，然后是标题和正文：
 `⟨标签页 3⟩ CI: green`；OSC 9 没有标题，则为 `⟨标签页 3⟩ build done`。清理会把程序文本中的
 `⟨` `⟩` `<` `>` 替换掉，因此程序无法伪造该标记，也无法冒充 SonicTerm 自己的消息；
-Windows 桌面通知的标题以同一标记开头。一批输出中的多条通知里，显示清理后仍有文本的第一条，
+桌面通知的标题以同一标记开头。一批输出中的多条通知里，显示清理后仍有文本的第一条，
 其余计数；清理后没有文本的通知既不显示也不计数。提示显示期间来自同一窗格的通知，
 或在提示出现后 1 秒内来自任意窗格的通知，不会打开新提示，而是增加该提示的 `+N` 计数，
 最多显示到 99。只保留计数，从不保留被合并的文本；提示过期后不会重放任何内容。
 合并的计数（包括第一批本身已带的计数）以 debug 级别记录，从不记录文本。通知还会为后台标签页设置 `alerts` 段的 `notify` 标记。
+一批输出中每种 OSC 99 场合各保留一条通知，因此被 `o=unfocused` 暂缓的通知不会挡住 `always` 通知；
+同一窗格以相同 id 发出的后续 OSC 99 通知会替换提示的文本，而不是计数。
+
+桌面通知（`osc9 = "desktop"`、`long_command`）交给一个工作线程，每次只发送一个请求，因此事件循环
+从不等待通知服务。队列已满（四个等待）时丢弃最新的请求，并以 debug 级别计数。每个请求有 5 秒；
+无法撤回的原生调用（macOS、Windows）超时后，会挡住之后的所有请求（它们只在应用内显示），直到它
+结束，因此原生调用不会堆积。日志只记录长度和结果，从不记录文本。工作线程从不被 join，因此卡住的
+服务不会拖住退出。各平台：
+
+| 平台 | 服务 |
+| --- | --- |
+| macOS | `UNUserNotificationCenter`，仅限打包后的应用（未打包的可执行文件，例如 `cargo run`，只在应用内显示）。首次桌面通知时请求一次权限，获准后才发出该通知；提示未答复期间，之后的请求与超时调用一样等待；被拒绝时通知留在应用内。SonicTerm 是活动应用时的通知留在应用内。 |
+| Linux | XDG 通知 portal，SonicTerm 以 `com.d0n9x1n.SonicTerm` 注册；portal 没有 Notification 接口时（xdg-desktop-portal-wlr：sway、i3）使用 `org.freedesktop.Notifications`，其正文按标记转义。超时的请求会被取消。 |
+| Windows | 通过 `notify-rust` 显示 toast。 |
+
+OSC 99 id 会变成原生标识 `sonicterm-<会话>-<窗格>-<id>`，其中含每个进程的随机数，因此同一 id 的
+后续通知替换桌面通知（Windows 显示新 toast），且不会替换其他窗格或其他 SonicTerm 进程的通知。没有 id 的通知
+获得不与任何通知共享的标识，因此不会替换任何通知。
 
 ## 默认处理程序命令
 

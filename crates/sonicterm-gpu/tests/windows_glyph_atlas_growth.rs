@@ -446,7 +446,7 @@ fn frame(renderer: &mut GpuRenderer, window: &Window, grid: &mut Grid) -> Presen
         grid,
         viewport_top_abs: None,
         is_active: true,
-        cursor_style: CursorStyle::BlockSteady,
+        cursor_style: CursorStyle::Configured,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
         inline_images: Default::default(),

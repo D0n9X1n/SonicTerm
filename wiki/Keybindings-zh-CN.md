@@ -385,7 +385,9 @@ shell、Vim 还是 tmux。默认旧式模式下，Option/Alt+Backspace 发送 Me
 可打印输入来自操作系统的 `KeyEvent.text`，因此 Unicode 键盘布局以及 Option/AltGr
 组合生成的字符会按系统结果插入。Super 以及普通 Control、Alt 或 Ctrl+Alt 命令组合不会
 变成文本框内容。只有 Option/Alt 或 AltGr 生成的字符不同于布局解析出的未修饰按键时，
-才会把它视为组合输入；上表中明确列出的 Control 编辑组合仍优先执行。
+才会把它视为组合输入；上表中明确列出的 Control 编辑组合仍优先执行。在 macOS 上，
+`[terminal] macos_option_as_alt` 可让左侧、右侧或两侧 Option 键作为 Alt：该键随后发送
+带 Alt 的未修饰字符（`Option+B` 发送 `ESC b`），不再组合字符；另一个 Option 键仍然组合字符。
 
 方向键、功能键等具名非文本按键始终保留终端协议编码，即使 macOS 在原生事件中
 附带了私用区字符。这些字符既不会插入应用文本框，也不会作为 Kitty 关联文本上报。

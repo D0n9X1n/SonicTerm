@@ -50,6 +50,8 @@ pub(super) struct ProgramToast {
     pub(super) more: u32,
     /// The bubble text last shown, so a replaced bubble is not mistaken for this toast.
     pub(super) message: String,
+    /// The OSC 99 id of the notification shown, which a later one from the same pane replaces.
+    pub(super) id: Option<String>,
 }
 
 /// What one progress surface wants and what it last received.
@@ -194,10 +196,11 @@ impl ProgramState {
     }
 }
 
-/// Whether a notification should also raise a desktop notification: only `desktop` on Windows,
-/// and only while its window is not focused.
-pub(super) fn wants_desktop(delivery: Osc9Delivery, on_windows: bool, focused: bool) -> bool {
-    delivery == Osc9Delivery::Desktop && on_windows && !focused
+/// Whether a notification should also raise a desktop notification: only with `desktop`, and
+/// only while `focused` is false (its window on Windows and Linux, any SonicTerm window on macOS,
+/// which hides a banner while the app is active).
+pub(super) fn wants_desktop(delivery: Osc9Delivery, focused: bool) -> bool {
+    delivery == Osc9Delivery::Desktop && !focused
 }
 
 /// `text` through the shared program-text sanitizer, then capped at `max_bytes`.
@@ -265,9 +268,16 @@ impl App {
             super::UserEvent::ProgramProgress { pane_id, report } => {
                 self.note_program_progress(pane_id, report);
             }
-            super::UserEvent::ProgramNotify { pane_id, title, body, more } => {
+            super::UserEvent::ProgramNotify { pane_id, title, body, id, occasion, more } => {
                 let now = self.dispatch_now();
-                self.handle_program_notify(pane_id, title.as_deref(), &body, more, now);
+                self.handle_program_notice(
+                    pane_id,
+                    (title.as_deref(), &body),
+                    id,
+                    occasion,
+                    more,
+                    now,
+                );
             }
             _ => {
                 // When: event is not a program-state event, the event loop routes it elsewhere.
@@ -336,12 +346,79 @@ impl App {
         backend.shutdown();
     }
 
-    /// Show a batch of program notifications from `pane_id`: the first one and `more` after it.
+    /// Show a batch of OSC 9 or 777 notifications from `pane_id`: the first one and `more` after it.
+    #[cfg(test)]
     pub(super) fn handle_program_notify(
         &mut self,
         pane_id: u64,
         title: Option<&str>,
         body: &str,
+        more: u32,
+        now: Instant,
+    ) {
+        self.show_program_notice(pane_id, (title, body), None, more, now);
+    }
+
+    /// Show a batch of notifications from `pane_id` of one `occasion`, with its OSC 99 `id`, when
+    /// the occasion allows it now: `unfocused` only while the pane is not the active pane of the
+    /// focused window, `invisible` only while it is not drawn. A suppressed one marks nothing.
+    pub(super) fn handle_program_notice(
+        &mut self,
+        pane_id: u64,
+        (title, body): (Option<&str>, &str),
+        id: Option<String>,
+        occasion: sonicterm_vt::vt::NotifyOccasion,
+        more: u32,
+        now: Instant,
+    ) {
+        if self.notice_suppressed(pane_id, occasion) {
+            // When: the `occasion` rules the notification out now, the program asked not to see it.
+            return;
+        }
+        self.show_program_notice(pane_id, (title, body), id, more, now);
+    }
+
+    /// Whether `occasion` rules out a notification from `pane_id` now.
+    fn notice_suppressed(&self, pane_id: u64, occasion: sonicterm_vt::vt::NotifyOccasion) -> bool {
+        use sonicterm_vt::vt::NotifyOccasion;
+        let place = self.registry.windows.iter().find_map(|(id, window)| {
+            let index = window.tab_states.iter().position(|tab| tab.tree.contains_pane(pane_id))?;
+            Some((*id, window, index))
+        });
+        let Some((window_id, window, tab_index)) = place else {
+            // When: no window holds the pane, there is nothing to show it in either way.
+            return false;
+        };
+        let in_active_tab = window.tabs.active_index() == tab_index;
+        let tab = &window.tab_states[tab_index];
+        match occasion {
+            NotifyOccasion::Always => false,
+            NotifyOccasion::Unfocused => {
+                let focused_window = self.registry.frontmost_window == Some(window_id);
+                focused_window && in_active_tab && tab.active_pane == pane_id
+            }
+            NotifyOccasion::Invisible => {
+                let zoomed_away = tab.tree.zoomed_pane_id().is_some_and(|zoomed| zoomed != pane_id);
+                // Windows reports no occlusion, so a minimized window is read from the window
+                // itself; a platform that cannot tell answers `None`, read as not minimized.
+                let minimized = window.window.as_ref().and_then(|native| native.is_minimized());
+                let hidden = window_hidden(
+                    window.redraw.native_occluded,
+                    window.redraw.backend_occluded,
+                    minimized,
+                );
+                in_active_tab && !zoomed_away && !hidden
+            }
+        }
+    }
+
+    /// Show notifications from `pane_id`; a toast already showing this pane's notification with
+    /// the same OSC 99 `id` is replaced, not counted.
+    fn show_program_notice(
+        &mut self,
+        pane_id: u64,
+        (title, body): (Option<&str>, &str),
+        id: Option<String>,
         more: u32,
         now: Instant,
     ) {
@@ -373,7 +450,10 @@ impl App {
                         .as_ref()
                         .is_some_and(|bubble| bubble.message == toast.message)
                 });
-            shown && (toast.pane_id == pane_id || now < toast.shown_at + TOAST_ANY_PANE_WINDOW)
+            let replaced = id.is_some() && toast.pane_id == pane_id && toast.id == id;
+            shown
+                && !replaced
+                && (toast.pane_id == pane_id || now < toast.shown_at + TOAST_ANY_PANE_WINDOW)
         });
         if coalesce {
             // When: coalesce holds, the visible toast only counts this batch.
@@ -418,16 +498,21 @@ impl App {
         );
         // Showing the toast requested its window's redraw.
         self.note_status_line(|counters| counters.program_toast_redraws += 1);
-        let focused = self.registry.frontmost_window == Some(window_id);
-        if wants_desktop(delivery, cfg!(windows), focused) {
-            // When: wants_desktop holds, Windows also raises a desktop notification, its title
-            // opening with the same origin cue.
+        // macOS hides a banner while the app is active, so there any focused window counts.
+        let focused = match cfg!(target_os = "macos") {
+            true => self.registry.frontmost_window.is_some(),
+            false => self.registry.frontmost_window == Some(window_id),
+        };
+        // A desktop notification is raised too, its title opening with the same origin cue.
+        if wants_desktop(delivery, focused) {
             let mut desktop_title = origin.clone();
             if !title.is_empty() {
                 desktop_title.push(' ');
                 desktop_title.push_str(&title);
             }
-            super::command_events::notify_program(&desktop_title, &body);
+            let native_id =
+                id.as_deref().map(|id| super::desktop_notify::native_notice_id(pane_id, id));
+            super::command_events::notify_program(&desktop_title, &body, native_id);
         }
         self.program.toast = Some(ProgramToast {
             window_id,
@@ -439,6 +524,7 @@ impl App {
             body,
             more,
             message,
+            id,
         });
     }
 
@@ -512,6 +598,20 @@ fn native_handle(window: &winit::window::Window) -> Option<isize> {
     }
 }
 
+/// Whether nothing of a window is drawn: the platform reported it covered, the presenter found
+/// its surface occluded, or it is minimized (`None` where the platform cannot tell).
+pub(super) fn window_hidden(
+    native_occluded: bool,
+    backend_occluded: bool,
+    minimized: Option<bool>,
+) -> bool {
+    native_occluded || backend_occluded || minimized.unwrap_or(false)
+}
+
 #[cfg(test)]
 #[path = "program_state_tests.rs"]
 mod program_state_tests;
+
+#[cfg(test)]
+#[path = "program_state_occasion_tests.rs"]
+mod program_state_occasion_tests;

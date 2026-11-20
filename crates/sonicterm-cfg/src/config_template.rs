@@ -128,6 +128,10 @@ scrollback = {scrollback}
 # ordinary text/Return. Numeric digits and negotiated Kitty input are unchanged.
 keypad_mode = "auto"
 
+# macOS only: which Option keys send Alt chords (ESC-prefixed or Alt-modified keys)
+# instead of composed characters: none, left, right or both.
+macos_option_as_alt = "none"
+
 # Cmd/Ctrl-click safe local files and directories after asynchronous validation.
 clickable_local_targets = true
 # Also resolve whole bare tokens (such as `ls` names) against trusted pane CWD.

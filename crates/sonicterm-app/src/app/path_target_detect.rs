@@ -199,9 +199,9 @@ impl App {
                 return None;
             }
             HardwrapUri::NotApplicable => {
-                // When: `hardwrap_uri_in` is NotApplicable, a padded markdown target, then the bare
+                // When: `hardwrap_uri_in` is NotApplicable, a numbered box line, then the bare
                 // program-broken rule, decides next.
-                let program_broken = match padded_markdown_uri_in(frame, pointed) {
+                let program_broken = match numbered_box_uri_in(frame, pointed) {
                     HardwrapUri::NotApplicable => bare_hardwrap_uri_in(frame, pointed),
                     decided => decided,
                 };

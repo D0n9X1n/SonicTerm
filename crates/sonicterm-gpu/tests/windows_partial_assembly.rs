@@ -345,7 +345,7 @@ fn frame_with_receipts(
             grid: &mut pane.grid,
             viewport_top_abs: None,
             is_active: pane.active,
-            cursor_style: CursorStyle::BlockSteady,
+            cursor_style: CursorStyle::Configured,
             is_broadcast_participant: false,
             scrollbar_alpha: 0.0,
             inline_images: Arc::new(pane.images.clone()),

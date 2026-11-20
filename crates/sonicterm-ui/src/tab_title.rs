@@ -8,7 +8,7 @@
 //! - `{parent}/{leaf}` — the last two path components of the pane's cwd.
 //!   A single-component path (e.g. `/tmp`) shows as just that component.
 //!
-//! OSC 0/2 titles take priority for rmux/tmux/screen sessions; other processes
+//! OSC 0/2 titles take priority for rmux/tmux/screen/herdr sessions; other processes
 //! use them only when no CWD is available. User title overrides live in the tab state.
 
 /// Wezterm's "fancy mode" vertical separator drawn between tabs.
@@ -50,7 +50,7 @@ pub fn format_tab_title(
 
     let raw_title = raw_title.map(str::trim).filter(|trimmed| !trimmed.is_empty());
     let multiplexer = process.is_some_and(|name| {
-        ["rmux", "tmux", "screen"].iter().any(|mux| name.eq_ignore_ascii_case(mux))
+        ["rmux", "tmux", "screen", "herdr"].iter().any(|mux| name.eq_ignore_ascii_case(mux))
     });
     let body = if let Some(title) = raw_title.filter(|_| multiplexer) {
         title.to_string()
@@ -163,7 +163,7 @@ fn icon_for_process(process: Option<&str>, has_cwd: bool) -> char {
             "emacs" | "emacsclient" => return '\u{E7CF}', // dev-emacs
             "nano" => return '\u{E838}',                  // dev-nano
             "ssh" | "mosh" => return '\u{F08C0}',         // md-ssh
-            "rmux" | "tmux" => return '\u{F0574}',        // md-view-quilt: a split-pane layout
+            "rmux" | "tmux" | "herdr" => return '\u{F0574}', // md-view-quilt: a split-pane layout
             "screen" => return '\u{EB4C}',                // cod-screen-full
             "git" | "lazygit" | "tig" => return '\u{F1D3}', // fa-git
             "gh" | "hub" => return '\u{F470}',            // oct-logo-github

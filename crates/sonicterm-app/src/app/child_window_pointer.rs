@@ -283,6 +283,13 @@ impl App {
         child.cursor_pos = (position.x, position.y);
         let pointer_cell = child_pane_cell_at(child, position.x as f32, position.y as f32)
             .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
+        if let Some(held) = child.secondary_motion(pointer_cell) {
+            // When: a right or middle press is `held`, it owns the motion until its release.
+            if let Some((pane_id, bytes)) = held {
+                self.write_to_pane(pane_id, bytes, super::PtyInputSource::PointerMotion);
+            }
+            return;
+        }
         let pointer_route = if child.mouse_down {
             let modifiers = child.modifiers;
             child.pointer_gesture.as_mut().map(|gesture| {
@@ -584,7 +591,7 @@ fn child_tab_bar_layout(child: &WindowState) -> Option<TabBarLayout> {
 /// The pane and cell under a child-window point, from the child's renderer.
 ///
 /// A headless test with a pane viewport and no renderer resolves it on that viewport's grid.
-fn child_pane_cell_at(
+pub(super) fn child_pane_cell_at(
     child: &WindowState,
     cursor_x: f32,
     cursor_y: f32,

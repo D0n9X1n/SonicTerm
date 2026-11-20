@@ -33,7 +33,7 @@ impl WorkerState {
     /// Replace keyed state in its stable slot while appending lifecycle transitions.
     fn capture(&mut self, event: BreadcrumbEvent) {
         let captured =
-            CapturedEvent { timestamp_unix_ms: chrono::Utc::now().timestamp_millis(), event };
+            CapturedEvent { timestamp_unix_ms: jiff::Timestamp::now().as_millisecond(), event };
         match event.key() {
             Some(key) => self.pinned[key.index()] = Some(captured),
             None => self.capture_lifecycle(captured),
@@ -55,7 +55,7 @@ impl WorkerState {
         while self.history.len() >= self.history_capacity {
             let _ = self.history.pop_front();
         }
-        self.history.push_back((chrono::Utc::now().timestamp_millis(), pressure));
+        self.history.push_back((jiff::Timestamp::now().as_millisecond(), pressure));
     }
 
     /// Render mandatory state first, then the newest pressure suffix that fits.

@@ -65,8 +65,14 @@ fn a_queued_mutation_is_refused() {
     let shared = McpShared::new(McpControl::Agent, None);
     let (mut client, session) = connected(&shared);
     client.send(&tool(1, "send_text", json!({ "pane_id": "7", "text": "rm -rf ~" })));
+    // The first call queues the connect notice before the worker queues the call itself, so the
+    // wait is for the tool request: a disconnect before it would refuse the call unqueued.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while shared.inbox.lock().is_empty() {
+    let tool_queued = |shared: &McpShared| {
+        let inbox = shared.inbox.lock();
+        inbox.iter().any(|request| !matches!(request.call, LoopCall::Notice { .. }))
+    };
+    while !tool_queued(&shared) {
         assert!(Instant::now() < deadline, "the call was queued");
         std::thread::sleep(Duration::from_millis(5));
     }

@@ -301,10 +301,34 @@ cargo build -p sonicterm-app
   rows: when the pointed unspaced run reaches a stopped pane edge the scan is refused, and
   any other candidate that reaches one is filtered out individually. The primary screen
   joins only recorded wraps. A bracketed URL never joins two rows across a pane border that
-  both rows draw. `padded_markdown_uri_in` (`path_target_hardwrap_markdown.rs`), tried after the
-  edge-reaching bracketed rule, joins a `](http…` target Claude Code's numbered diff/markdown box
-  wraps short of the pane edge; every refusal is `NotApplicable`, so it only adds joins. Both
-  rules share `closer_tail_ends_token`. On the alternate screen, `hyperlink_hover_cells` continues one OSC 8
+  both rows draw. `numbered_box_uri_in` (`path_target_hardwrap_markdown.rs`), tried after the
+  edge-reaching bracketed rule, rebuilds one line of Claude Code's numbered diff/markdown box (the
+  box cut is its widest text column; text starts at gutter end + 1 in markdown, + 2 in a diff,
+  whose sign column every continuation repeats; a box is markdown when any row holds other text
+  at gutter end + 1) and finds the URL under the pointer in it,
+  whatever wraps it. `BoxEvidence` reads every displayed row of the box: its cut is their widest
+  column. A box is proven by one line removed then added, or by consecutive line numbers in a
+  proven diff or with every cut-reaching row followed by a possible continuation (`cut_wrapped`);
+  in an unproven box only a URL opened by a markdown `](` is this rule's (else `NotApplicable`
+  before any refusal, or `Incomplete` when a narrower gutter nearby shows the head was misread),
+  read under the same layouts; a `](`-opened URL not closed by `)` (a link title) is `Incomplete`.
+  Text after a gutter proves markdown; a replaced line, or context rows beside a signed row
+  markdown rarely writes (`diff_only_sign`: any `+` but `+++`; a `-` that is no list item or
+  `---` rule), proves a diff; otherwise both layouts are read and `agreed` opens a URL only when
+  both find the same one. A line whose continuation no diff row could be (another character in the
+  sign column, `diff_contradicted`) is markdown whatever other rows prove; when its head is
+  signed, a URL it breaks across rows is `Incomplete` and one on a single row stays its own; a `](` target the diff
+  reading joins stands (`markdown_target`), as the padded markdown rule read signed lines. A URL
+  the pointed row holds whole (`row_local_uri`: a blank or opener before its scheme, a closer or a
+  blank before more text after it) is decided first, so no refusal for wrapped URLs reaches it. `delimited_url` (`path_target_hardwrap_delimited.rs`)
+  gives the URL under the pointer that `(`, `](`, `[`, a quote, a backtick or `<` opens the
+  extent its matching closer fixes, checked whole with `url_scan::is_url`; an opener whose closer
+  is another character or a doubled quote, or a prose-bracket URL ending in `!`/`?`, is
+  `Incomplete`, and a delimited URL in a wrapped token is this rule's even on one row. Once the URL token under the pointer spans two rows
+  the rule owns it: it opens whole or is `Incomplete` (past the displayed or rebuilt rows, the
+  caps, an unsafe cell, or a later-row second scheme), never `NotApplicable`, so no single-row
+  rule opens its prefix; caps bound the URL, not the source line. The bracketed rule keeps
+  `closer_tail_ends_token`. On the alternate screen, `hyperlink_hover_cells` continues one OSC 8
   link's fragment into the next row's fragment of the same link when, inside one pane, at
   most `LINK_CONTINUATION_MARGIN` (2) blank cells follow the upper fragment before the
   pane's right edge and only blank indentation of at most `LINK_CONTINUATION_INDENT` (8)

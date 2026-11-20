@@ -23,7 +23,9 @@ tracing-appender = "0.2"
 tracing-log = "0.2"
 serde.workspace = true
 parking_lot.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Wall-clock stamps for crash dumps, breadcrumbs, session markers and report headers. The
+# defaults read the system time zone and, on Windows, bundle the tz database it lacks.
+jiff = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

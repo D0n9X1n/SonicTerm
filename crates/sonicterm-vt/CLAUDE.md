@@ -37,7 +37,10 @@ cargo test -p sonicterm-vt
   indistinguishable from correct output.
 - DEC 2026 is stored, not acted on: `Parser::synchronized_output()` reports the mode,
   an epoch that moves only on reset-to-set, and a monotonic reset count (RIS counts
-  too; `?1049l` clears no mode). DECRQM is answered for mode 2026 only.
+  too; `?1049l` clears no mode). DECRQM answers 1/2 only for modes the parser both honours
+  and stores (`private_mode_state`), 0 for every other mode; never advertise a mode it does not
+  store. Theme updates end with `finish_theme_update`, whose mode 2031 report the host sends
+  through the pane's reply spool after the parser lock ends.
 - Every kitty APC reads its control section (at most 512 bytes) into `ApcScratch` first and
   reserves no staging; only a new transmit or query then reserves, for its payload. A
   continuation streams into its transfer's one reservation. An overlong section is refused,

@@ -262,7 +262,7 @@ Mach-O deployment targets to pretend compatibility.
 ### Requirements and command
 
 Use a Windows x64 host with the MSVC target, vcpkg, `cargo-wix` 0.3.9, and WiX
-Toolset 3.14.1.20250415. CI logic coverage uses `cargo-llvm-cov` 0.9.0.
+Toolset 3.14.1.20250415. CI logic coverage uses `cargo-llvm-cov` 0.9.1.
 `scripts/setup-windows-cairo.ps1` looks for `vcpkg.exe` through `VCPKG_ROOT`,
 `VCPKG_INSTALLATION_ROOT`, or `C:\vcpkg` and installs static Cairo plus pkgconf.
 

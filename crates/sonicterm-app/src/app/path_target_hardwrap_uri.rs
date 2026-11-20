@@ -97,7 +97,7 @@ pub(super) fn hardwrap_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) -> H
 }
 
 /// Whether `cells` from column `start` spell `https://` or `http://`, reading at most eight cells.
-pub(super) fn opens_http_scheme(cells: &[&Cell], start: usize) -> bool {
+fn opens_http_scheme(cells: &[&Cell], start: usize) -> bool {
     let spells = |prefix: &str| {
         let mut found = cells.get(start..).unwrap_or_default().iter().map(|cell| cell.ch);
         prefix.chars().all(|expected| found.next() == Some(expected))

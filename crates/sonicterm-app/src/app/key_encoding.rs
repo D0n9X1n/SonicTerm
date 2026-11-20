@@ -358,6 +358,10 @@ pub enum KeyName {
 #[path = "key_encoding_tests.rs"]
 mod key_encoding_tests;
 
+#[cfg(test)]
+#[path = "key_encoding_option_alt_tests.rs"]
+mod key_encoding_option_alt_tests;
+
 #[path = "key_encoding_legacy.rs"]
 mod legacy;
 use legacy::{

@@ -328,6 +328,7 @@ impl App {
             self.release_window_native_keys(win_id);
         }
         let mut pointer_release = None;
+        let mut secondary_release = None;
         let mut focus_report = None;
         if let Some(window) = self.registry.windows.get_mut(&win_id) {
             if focused {
@@ -345,6 +346,7 @@ impl App {
                         .and_then(|route| {
                             pointer_route_bytes(route, PointerReportKind::LeftRelease)
                         });
+                secondary_release = window.take_secondary_release();
                 // Focus loss ends the drag's hold, so the bar's fade can start.
                 window.end_scrollbar_drag(
                     self.config.appearance.scrollbar,
@@ -377,6 +379,9 @@ impl App {
             window.request_window_redraw();
         }
         if let Some((pane_id, bytes)) = pointer_release {
+            self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
+        }
+        if let Some((pane_id, bytes)) = secondary_release {
             self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
         }
         if let Some((pane_id, bytes)) = focus_report {

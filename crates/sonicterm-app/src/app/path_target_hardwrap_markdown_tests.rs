@@ -7,13 +7,40 @@ use super::*;
 const DOC_URI: &str =
     "https://github.com/D0n9X1n/bufferlines.nvim/wiki/Installation-and-Usage-zh-CN";
 
-/// Pad each line with blanks to `content_cols` display cells, then add `border` when one is given,
-/// so every row ends the same distance from the pane edge as a padded box draws it.
+/// `lines` followed by the next numbered source line replaced, as Claude Code's Update view shows
+/// it: removed, then added. The box rule reads a box only where consecutive line numbers or a
+/// replaced line prove it is one, and a replaced line also proves a diff's sign column.
+pub(super) fn with_next<Line: AsRef<str>>(lines: &[Line]) -> Vec<String> {
+    let mut out = lines.iter().map(|line| line.as_ref().to_string()).collect::<Vec<_>>();
+    // Each numbered row's gutter end and number; a continuation that opens with digits sits right
+    // of the head's gutter, so the last row with the narrowest gutter numbers the box's lines.
+    let numbered = out.iter().filter_map(|line| {
+        let indent = line.len() - line.trim_start().len();
+        let digits = line[indent..].chars().take_while(char::is_ascii_digit).count();
+        let after = line[indent + digits..].chars().next();
+        let number = line[indent..indent + digits].parse::<u64>().ok()?;
+        ((1..=6).contains(&digits) && after == Some(' ')).then_some((indent + digits, number))
+    });
+    let last = numbered.fold(None, |best: Option<(usize, u64)>, (gutter_end, number)| match best {
+        Some((best_end, _)) if best_end < gutter_end => best,
+        _ => Some((gutter_end, number)),
+    });
+    if let Some((gutter_end, number)) = last {
+        // The next line keeps the gutter's right edge, removed and then added.
+        out.push(format!("{:>gutter_end$} - x", number + 1));
+        out.push(format!("{:>gutter_end$} + y", number + 1));
+    }
+    out
+}
+
+/// Pad each line, and the box's next numbered line [`with_next`] adds below them, with blanks to
+/// `content_cols` display cells, then add `border` when one is given, so every row ends the same
+/// distance from the pane edge as a padded box draws it.
 fn padded_rows(lines: &[&str], content_cols: usize, border: Option<&str>) -> Vec<String> {
-    lines
+    with_next(lines)
         .iter()
         .map(|line| {
-            let width = unicode_width::UnicodeWidthStr::width(*line);
+            let width = unicode_width::UnicodeWidthStr::width(line.as_str());
             assert!(width <= content_cols, "line wider than the box: {line}");
             format!("{line}{}{}", " ".repeat(content_cols - width), border.unwrap_or(""))
         })
@@ -99,49 +126,94 @@ fn padded_markdown_target_skips_repeated_diff_sign() {
     assert_eq!(app.cell_target_at(window, pane, 0, 30).expect("row URL").display, whole);
 }
 
-/// Shapes the padded rule must not join keep today's single-row result: the first row's own URL.
+/// The box wraps by characters, so a URL that reaches the cut continues in the next row whatever
+/// precedes it: a prose parenthesis, a comma at the cut, a host split across rows. A lone
+/// continuation fixes the hang column wherever it starts; a space in the fragment ends the URL.
 #[test]
-fn padded_markdown_refusals_keep_single_row_detection() {
+fn padded_box_joins_every_wrapped_url_shape() {
     let prefix = "https://example.com/aaaa/bbbb";
-    let cases: [(&str, String, String, &str); 10] = [
-        // A plain prose parenthesis is not a markdown target, so word wrapping may have cut it.
-        ("plain paren", format!("    1 see ({prefix}"), "      cccc)".into(), prefix),
-        // Without a numbered gutter the row is not the padded box, even when a later row looks aligned.
-        ("no gutter", format!("See [x]({prefix}"), "    cccc) next item".into(), prefix),
-        // A first fragment ending in sentence punctuation is where a word wrapper breaks.
-        ("comma", format!("  1 [a]({prefix},"), "    cccc)".into(), prefix),
-        // A new numbered gutter row is a new line, not a hanging continuation.
-        ("gutter row", format!("    60 [a]({prefix}"), "    61)".into(), prefix),
-        // A continuation not at the content column is not owned by the target.
-        ("unaligned", format!("  1 [a]({prefix}"), "     cccc)".into(), prefix),
-        // A continuation that holds a space carries prose, not the rest of one target.
-        ("space", format!("  1 [a]({prefix}"), "    cc cc)".into(), prefix),
-        // A continuation that opens its own scheme is an independent URL.
-        ("second scheme", format!("  1 [a]({prefix}"), "    https://b.test/x)".into(), prefix),
-        // A sign that differs from the opener row's is a different diff line.
-        ("other sign", format!("    59 +[a]({prefix}"), "       -cccc)".into(), prefix),
-        // Without a sign on the opener row, a sign before the content column is URL text, not gutter.
-        ("unexpected sign", format!("    59 [a]({prefix}"), "      +cccc)".into(), prefix),
-        // A host split across rows would let the continuation choose the destination's host.
+    let split_host = "https://good.test@evil.test/cccc";
+    let cases: [(&str, String, String, &str); 6] = [
+        (
+            "plain paren",
+            format!("    1 see ({prefix}"),
+            "      cccc)".into(),
+            "https://example.com/aaaa/bbbbcccc",
+        ),
+        (
+            "comma",
+            format!("  1 [a]({prefix},"),
+            "    cccc)".into(),
+            "https://example.com/aaaa/bbbb,cccc",
+        ),
+        (
+            // A continuation one column right of the hang began with a blank: the URL ended there.
+            "unaligned",
+            format!("  1 [a]({prefix}"),
+            "     cccc)".into(),
+            "https://example.com/aaaa/bbbb",
+        ),
+        (
+            "space",
+            format!("  1 [a]({prefix}"),
+            "    cc cc)".into(),
+            "https://example.com/aaaa/bbbbcc",
+        ),
         (
             "split authority",
             "  1 [a](https://good.test".into(),
             "    @evil.test/cccc)".into(),
-            "https://good.test",
+            split_host,
+        ),
+        (
+            "bare",
+            format!("  1 see {prefix}"),
+            "    cccc and more".into(),
+            "https://example.com/aaaa/bbbbcccc",
         ),
     ];
-    for (label, first, second, row_url) in cases {
+    for (label, first, second, expected) in cases {
         let lines = padded_rows(&[&first, &second], first.len() + 6, None);
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let (window, pane) = hardwrap_pane_sized(&mut app, 90, 10, &lines);
         let col = first.find("https").unwrap() as u16 + 2;
-        // The first row keeps exactly the URL it shows on its own.
         let display = app.cell_target_at(window, pane, 0, col).map(|target| target.display);
-        assert_eq!(display.as_deref(), Some(row_url), "{label}");
+        assert_eq!(display.as_deref(), Some(expected), "{label}");
+    }
+    // The split host is the destination the source line names, which the hover preview shows.
+    let joined = sonicterm_cfg::url_scan::find_urls(&format!("{split_host})"));
+    assert_eq!(joined.first().map(|found| found.url.as_str()), Some(split_host));
+}
+
+/// Shapes that are not one numbered line never open a joined destination. Rows with no gutter
+/// keep the first row's own URL; a row shaped like a continuation that does not continue the line
+/// (another sign, a sign inside the gutter) may still hold the rest of the URL, so the first row's
+/// fragment stays inert rather than opening as a prefix.
+#[test]
+fn padded_markdown_refusals_keep_single_row_detection() {
+    let prefix = "https://example.com/aaaa/bbbb";
+    let cases: [(&str, String, String, Option<&str>); 3] = [
+        // Without a numbered gutter the row is not the box, even when a later row looks aligned.
+        ("no gutter", format!("See [x]({prefix}"), "    cccc) next item".into(), Some(prefix)),
+        // A sign that differs from the opener row's starts no continuation of this line.
+        ("other sign", format!("    59 +[a]({prefix}"), "       -cccc)".into(), None),
+        // A sign inside the gutter of an unsigned opener row is no continuation either.
+        ("unexpected sign", format!("    59 [a]({prefix}"), "      +cccc)".into(), None),
+    ];
+    for (label, first, second, row_url) in cases {
+        // The box's previous line, a diff context row, shows its consecutive numbers above the
+        // malformed row.
+        let previous = if first.starts_with("    59") { "    58  x" } else { "" };
+        let lines = padded_rows(&[previous, &first, &second], first.len() + 6, None);
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let (window, pane) = hardwrap_pane_sized(&mut app, 90, 10, &lines);
+        let col = first.find("https").unwrap() as u16 + 2;
+        let display = app.cell_target_at(window, pane, 1, col).map(|target| target.display);
+        assert_eq!(display.as_deref(), row_url, "{label}");
         // The continuation never resolves to a destination built from the first row's prefix.
         assert!(
-            app.cell_target_at(window, pane, 1, 8)
-                .is_none_or(|target| !target.display.starts_with(row_url)),
+            app.cell_target_at(window, pane, 2, 8)
+                .is_none_or(|target| !target.display.starts_with(prefix)),
             "{label} continuation"
         );
     }
@@ -196,55 +268,90 @@ fn padded_markdown_refuses_soft_wrap_after_first_continuation() {
     assert!(display.as_deref().is_none_or(|display| !display.contains("bbb")), "{display:?}");
 }
 
-/// Build a padded chain in a `cols`-wide pane whose rows after the first fill to the opener row's
-/// cut, ending with `last_body` and the closer.
-fn padded_chain(cols: usize, middle_rows: usize, last_body: &str) -> (Vec<String>, String) {
-    let head = "  1 [x](https://example.test/";
+/// One padded opener shape: the text before the target on the first row, the continuation indent,
+/// and the closer. The markdown head hangs at the column after its gutter; the quoted diff-context
+/// head keeps a blank sign column, so it hangs one column further right.
+#[derive(Clone, Copy)]
+struct PaddedShape {
+    head: &'static str,
+    indent: usize,
+    closer: char,
+}
+
+const MARKDOWN_SHAPE: PaddedShape = PaddedShape { head: "  1 [x](", indent: 4, closer: ')' };
+const QUOTED_SHAPE: PaddedShape = PaddedShape { head: "  1   Get \"", indent: 5, closer: '"' };
+
+/// Build a padded chain of `shape` in a `cols`-wide pane whose rows after the first fill to the
+/// opener row's cut, ending with `last_body` and the closer.
+fn padded_chain(
+    shape: PaddedShape,
+    cols: usize,
+    middle_rows: usize,
+    last_body: &str,
+) -> (Vec<String>, String) {
+    let head = format!("{}https://example.test/", shape.head);
     let first = format!("{head}{}", "a".repeat(cols - 1 - head.len()));
-    let middle = format!("    {}", "b".repeat(first.len() - 4));
-    let mut uri = first[8..].to_string();
+    let pad = " ".repeat(shape.indent);
+    let middle = format!("{pad}{}", "b".repeat(first.len() - shape.indent));
+    let mut uri = first[shape.head.len()..].to_string();
     let mut lines = vec![first];
     for _ in 0..middle_rows {
-        uri.push_str(&middle[4..]);
+        uri.push_str(&middle[shape.indent..]);
         lines.push(middle.clone());
     }
     uri.push_str(last_body);
-    lines.push(format!("    {last_body})"));
+    lines.push(format!("{pad}{last_body}{}", shape.closer));
     (lines, uri)
 }
 
 /// A chain of exactly `MAX_WRAPPED_PATH_ROWS` rows joins; one more row keeps the first row alone.
+/// Both opener shapes share the bound, so a quoted target cannot grow past it either.
 #[test]
 fn padded_markdown_enforces_row_bound() {
-    for (total_rows, joins) in [(MAX_WRAPPED_PATH_ROWS, true), (MAX_WRAPPED_PATH_ROWS + 1, false)] {
-        let (lines, uri) = padded_chain(50, total_rows - 2, "zz");
-        let lines = padded_rows(&lines.iter().map(String::as_str).collect::<Vec<_>>(), 49, None);
-        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-        let (window, pane) = hardwrap_pane_sized(&mut app, 60, 40, &lines);
-        let display = app.cell_target_at(window, pane, 0, 12).map(|target| target.display);
-        assert_eq!(
-            display.as_deref() == Some(uri.as_str()),
-            joins,
-            "rows {total_rows}: {display:?}"
-        );
-        assert!(joins || display.as_deref().is_none_or(|display| !display.contains("zz")));
+    for shape in [MARKDOWN_SHAPE, QUOTED_SHAPE] {
+        for (total_rows, joins) in
+            [(MAX_WRAPPED_PATH_ROWS, true), (MAX_WRAPPED_PATH_ROWS + 1, false)]
+        {
+            let (lines, uri) = padded_chain(shape, 50, total_rows - 2, "zz");
+            let lines =
+                padded_rows(&lines.iter().map(String::as_str).collect::<Vec<_>>(), 49, None);
+            let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+            let (window, pane) = hardwrap_pane_sized(&mut app, 60, 40, &lines);
+            let col = (shape.head.len() + 4) as u16;
+            let display = app.cell_target_at(window, pane, 0, col).map(|target| target.display);
+            assert_eq!(
+                display.as_deref() == Some(uri.as_str()),
+                joins,
+                "{} rows {total_rows}: {display:?}",
+                shape.head
+            );
+            // Past the cap no prefix opens either: the whole target stays inert.
+            assert!(joins || display.is_none(), "{} rows {total_rows}: {display:?}", shape.head);
+        }
     }
 }
 
-/// A joined target of exactly `MAX_LOGICAL_PATH_BYTES` joins; one byte more keeps the first row alone.
+/// A joined target of exactly `MAX_LOGICAL_PATH_BYTES` joins; one byte more keeps the first row
+/// alone. Both opener shapes share the cap, so no padded target grows without limit.
 #[test]
 fn padded_markdown_enforces_byte_bound() {
-    for (extra, joins) in [(0usize, true), (1, false)] {
-        let (probe, _) = padded_chain(140, 29, "");
-        let fixed = probe[0].len() - 8 + 29 * (probe[1].len() - 4);
-        let last_body = "z".repeat(MAX_LOGICAL_PATH_BYTES - fixed + extra);
-        let (lines, uri) = padded_chain(140, 29, &last_body);
-        assert_eq!(uri.len(), MAX_LOGICAL_PATH_BYTES + extra);
-        let lines = padded_rows(&lines.iter().map(String::as_str).collect::<Vec<_>>(), 139, None);
-        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-        let (window, pane) = hardwrap_pane_sized(&mut app, 150, 40, &lines);
-        let display = app.cell_target_at(window, pane, 0, 12).map(|target| target.display);
-        assert_eq!(display.as_deref() == Some(uri.as_str()), joins, "extra {extra}");
+    for shape in [MARKDOWN_SHAPE, QUOTED_SHAPE] {
+        for (extra, joins) in [(0usize, true), (1, false)] {
+            let (probe, _) = padded_chain(shape, 140, 29, "");
+            let fixed = probe[0].len() - shape.head.len() + 29 * (probe[1].len() - shape.indent);
+            let last_body = "z".repeat(MAX_LOGICAL_PATH_BYTES - fixed + extra);
+            let (lines, uri) = padded_chain(shape, 140, 29, &last_body);
+            assert_eq!(uri.len(), MAX_LOGICAL_PATH_BYTES + extra);
+            let lines =
+                padded_rows(&lines.iter().map(String::as_str).collect::<Vec<_>>(), 139, None);
+            let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+            let (window, pane) = hardwrap_pane_sized(&mut app, 150, 40, &lines);
+            let col = (shape.head.len() + 4) as u16;
+            let display = app.cell_target_at(window, pane, 0, col).map(|target| target.display);
+            // Past the cap no prefix opens either: the whole target stays inert.
+            let expected = joins.then_some(uri.as_str());
+            assert_eq!(display.as_deref(), expected, "{} extra {extra}", shape.head);
+        }
     }
 }
 
@@ -297,8 +404,10 @@ fn padded_markdown_closer_tail_stops_at_pane_border() {
     let second = format!("    {tail})");
     assert_eq!((first.len(), second.len()), (40, 40), "both rows must end at the border");
     for neighbour in ["X", " "] {
-        let lines =
-            [&first, &second].iter().map(|line| format!("{line}│{neighbour}")).collect::<Vec<_>>();
+        let lines = with_next(&[&first, &second])
+            .iter()
+            .map(|line| format!("{line:<40}│{neighbour}"))
+            .collect::<Vec<_>>();
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let (window, pane) = hardwrap_pane_sized(&mut app, 60, 10, &lines);
         let target = app.cell_target_at(window, pane, 1, 5).expect("continuation target");
@@ -348,8 +457,8 @@ fn padded_markdown_stays_inside_the_frame() {
     // A one-row view shows either the opener (closer below) or the closer (opener above).
     for (view_top, row, col) in [(0u64, 0u64, 12u16), (1, 1, 5)] {
         let frame = FrameRows::new(&grid, view_top);
-        let decided = padded_markdown_uri_in(&frame, AbsoluteCell { row, col });
-        assert_eq!(decided, HardwrapUri::NotApplicable, "view_top {view_top}");
+        let decided = numbered_box_uri_in(&frame, AbsoluteCell { row, col });
+        assert!(!matches!(decided, HardwrapUri::Complete(_)), "view_top {view_top}: {decided:?}");
     }
 }
 
@@ -379,8 +488,8 @@ fn hardwrapped_closer_tail_that_wraps_on_stays_inert() {
     }
 }
 
-/// Every structural cell the padded join removes (`]`, `(`, the closer and the repeated sign) must
-/// be plain: a combining mark or OSC 8 ownership on any of them prevents the join. A wide cell
+/// Every structural cell around the joined URL (the signs, `(` and the closer) must be plain: a
+/// combining mark or OSC 8 ownership on any of them prevents the join. A wide cell
 /// cannot hold these ASCII characters, so the wide-flag case does not arise from real output.
 #[test]
 fn padded_markdown_structural_cells_must_be_plain() {
@@ -390,9 +499,9 @@ fn padded_markdown_structural_cells_must_be_plain() {
     let plain = |character: char| character.to_string();
     let mutations: [(&str, &dyn Fn(char) -> String); 2] =
         [("combining", &combining), ("hyperlink", &hyperlinked)];
-    // Each structural cell is marked alone: the opener row's sign, `]`, `(`, the closer and the
+    // Each structural cell is marked alone: the opener row's sign, `(`, the closer and the
     // continuation's repeated sign.
-    for marked in ["first sign", "]", "(", ")", "second sign"] {
+    for marked in ["first sign", "(", ")", "second sign"] {
         for (label, mutate) in mutations {
             let cell = |position: &str, character: char| {
                 if position == marked {
@@ -411,7 +520,8 @@ fn padded_markdown_structural_cells_must_be_plain() {
             let second =
                 format!("       {}ts/wiki{} and more", cell("second sign", '+'), cell(")", ')'));
             let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-            let (window, pane) = hardwrap_pane_sized(&mut app, 90, 10, &[first, second]);
+            let (window, pane) =
+                hardwrap_pane_sized(&mut app, 90, 10, &with_next(&[first, second]));
             for (row, col) in [(0, 30), (1, 9)] {
                 let display =
                     app.cell_target_at(window, pane, row, col).map(|target| target.display);
@@ -426,8 +536,8 @@ fn padded_markdown_structural_cells_must_be_plain() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let first =
         format!("    59 +see [Nerd Font](https://github.com/ryanoasis/nerd-fon{}", " ".repeat(7));
-    let (window, pane) =
-        hardwrap_pane_sized(&mut app, 90, 10, &[first, "       +ts/wiki) and more".into()]);
+    let lines = with_next(&[first, "       +ts/wiki) and more".into()]);
+    let (window, pane) = hardwrap_pane_sized(&mut app, 90, 10, &lines);
     assert_eq!(
         app.cell_target_at(window, pane, 1, 9).expect("plain fixture").display,
         "https://github.com/ryanoasis/nerd-fonts/wiki"
@@ -449,31 +559,33 @@ fn hard_rows_grid(cols: u16, rows: u16, lines: &[String]) -> Grid {
     grid
 }
 
-/// A wide or wide-continuation flag on any structural cell the padded join removes refuses it;
+/// A wide or wide-continuation flag on any structural cell around the joined URL refuses it;
 /// the same grid unflagged joins.
 #[test]
 fn padded_markdown_structural_cells_refuse_wide_flags() {
     let first =
         format!("    59 +see [Nerd Font](https://github.com/ryanoasis/nerd-fon{}", " ".repeat(7));
-    let lines = [first.clone(), "       +ts/wiki) and more".to_string()];
+    let lines = with_next(&[first.clone(), "       +ts/wiki) and more".to_string()]);
     let opener = first.find('(').unwrap();
-    // The structural cells: R0's sign, `]`, `(`, the closer and the repeated sign.
-    let positions = [(0u16, 7usize), (0, opener - 1), (0, opener), (1, 15), (1, 7)];
+    // The structural cells: R0's sign, `(`, the closer and the repeated sign.
+    let positions = [(0u16, 7usize), (0, opener), (1, 15), (1, 7)];
     let decide = |grid: &Grid| {
-        padded_markdown_uri_in(&FrameRows::new(grid, 0), AbsoluteCell { row: 1, col: 9 })
+        numbered_box_uri_in(&FrameRows::new(grid, 0), AbsoluteCell { row: 1, col: 9 })
     };
     assert!(matches!(decide(&hard_rows_grid(90, 10, &lines)), HardwrapUri::Complete(_)));
     for flag in [CellFlags::WIDE, CellFlags::WIDE_CONT] {
         for (row, col) in positions {
             let mut grid = hard_rows_grid(90, 10, &lines);
             grid.row_mut(row).iter_mut().nth(col).unwrap().flags.insert(flag);
-            assert_eq!(decide(&grid), HardwrapUri::NotApplicable, "{flag:?} at {row},{col}");
+            let decided = decide(&grid);
+            assert!(!matches!(decided, HardwrapUri::Complete(_)), "{flag:?} at {row},{col}");
         }
     }
 }
 
 /// A visible closer whose tail runs to the grid edge, on a scrolled-back view whose next row is
-/// not displayed, may continue below, so neither rule joins; with no row below, the edge rule does.
+/// not displayed, may continue below, so the edge rule does not join; with no row below it does.
+/// The box rule reads the closer inside the frame, so the URL ends there either way.
 #[test]
 fn closer_tail_at_edge_above_undisplayed_row_is_not_proven() {
     let tail = "é".repeat(25);
@@ -493,53 +605,53 @@ fn closer_tail_at_edge_above_undisplayed_row_is_not_proven() {
             "live row {row}"
         );
     }
-    // The padded rule: a closer row filled to the grid edge with `é` above an undisplayed row.
-    let first = "  1 [x](https://example.test/aaaa";
-    let padded = [
-        format!("{first}{}", " ".repeat(6)),
-        format!("    bbbb){}", "é".repeat(40 - 9)),
-        "tail)".to_string(),
-    ];
-    let grid = hard_rows_grid(40, 2, &padded);
-    let pointed = AbsoluteCell { row: 1, col: 5 };
+    // The box rule: below the box's previous line, a URL row that reaches the cut, above a closer
+    // row filled to the grid edge with `é` and an undisplayed row.
+    let first = format!("  2 [x](https://example.test/{}", "a".repeat(40 - 29));
+    let padded =
+        ["  1 x".to_string(), first, format!("    bbbb){}", "é".repeat(40 - 9)), "tail)".into()];
+    let grid = hard_rows_grid(40, 3, &padded);
+    let pointed = AbsoluteCell { row: 2, col: 5 };
     let (decided, reads) = frame_rows::read_observer::observe(|| {
-        padded_markdown_uri_in(&FrameRows::new(&grid, 0), pointed)
+        numbered_box_uri_in(&FrameRows::new(&grid, 0), pointed)
     });
-    assert_eq!(decided, HardwrapUri::NotApplicable);
+    let HardwrapUri::Complete(candidate) = decided else { panic!("closer in frame: {decided:?}") };
+    let expected = format!("https://example.test/{}bbbb", "a".repeat(40 - 29));
+    assert_eq!(candidate.target, DetectedTarget::Uri(expected));
     assert!(reads.iter().all(|(_, in_frame)| *in_frame), "read outside the frame: {reads:?}");
 }
 
-/// A middle row whose text ends anywhere but the opener row's cut was not wrapped at the box width.
-/// One that runs past the cut would otherwise lose its overhang from the joined destination, and
-/// one that stops short ends at a blank; either way the first row keeps its own URL.
+/// Only a row that reaches the box's cut joins the next row directly. A middle row that stops
+/// short ended at a blank in the source, so the URL ends with it; one that runs past the cut moves
+/// the cut, so the first row stops short and keeps its own URL.
 #[test]
 fn padded_markdown_middle_row_must_end_at_the_cut() {
     let first = "  1 [doc](https://example.com/aaaa/bbbb";
-    for middle_len in [first.len() - 4 + 3, 4] {
+    for (middle_len, expected) in [
+        (first.len() - 4 + 3, "https://example.com/aaaa/bbbb"),
+        (4, "https://example.com/aaaa/bbbbcccc"),
+    ] {
         let middle = format!("    {}", "c".repeat(middle_len));
         let lines = padded_rows(&[first, &middle, "    more)."], first.len() + 8, None);
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let (window, pane) = hardwrap_pane_sized(&mut app, 90, 10, &lines);
         let display = app.cell_target_at(window, pane, 0, 12).map(|target| target.display);
-        assert_eq!(
-            display.as_deref(),
-            Some("https://example.com/aaaa/bbbb"),
-            "middle {middle_len}"
-        );
+        assert_eq!(display.as_deref(), Some(expected), "middle {middle_len}");
     }
 }
 
 /// The live twin of the padded undisplayed-tail case: with no row below the closer row, a non-ASCII
-/// tail that reaches the grid's edge ends the target, and the padded chain joins.
+/// tail that reaches the grid's edge ends the target, and the padded chain below the box's previous
+/// line joins.
 #[test]
 fn padded_markdown_closer_tail_at_edge_joins_on_the_live_view() {
-    let first = "  1 [x](https://example.test/aaaa";
-    let padded = [format!("{first}{}", " ".repeat(6)), format!("    bbbb){}", "é".repeat(40 - 9))];
-    let grid = hard_rows_grid(40, 2, &padded);
-    let decided =
-        padded_markdown_uri_in(&FrameRows::new(&grid, 0), AbsoluteCell { row: 1, col: 5 });
+    let first = format!("  2 [x](https://example.test/{}", "a".repeat(40 - 29));
+    let padded = ["  1 x".to_string(), first, format!("    bbbb){}", "é".repeat(40 - 9))];
+    let grid = hard_rows_grid(40, 3, &padded);
+    let decided = numbered_box_uri_in(&FrameRows::new(&grid, 0), AbsoluteCell { row: 2, col: 5 });
     let HardwrapUri::Complete(candidate) = decided else {
         panic!("live twin must join: {decided:?}")
     };
-    assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
+    let expected = format!("https://example.test/{}bbbb", "a".repeat(40 - 29));
+    assert_eq!(candidate.target, DetectedTarget::Uri(expected));
 }

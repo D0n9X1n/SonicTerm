@@ -189,7 +189,7 @@ impl GpuRenderer {
                 // 2 logical px scaled to physical px so the bar/underline
                 // keep a constant physical thickness across DPIs (min 1px).
                 let subshape_px: f32 = (2.0 * self.scale_factor).round().max(1.0);
-                match self.cursor_shape {
+                match self.frame_cursor_shape {
                     CursorShape::Block => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
                             (cx, cy, cw, self.cell_h),

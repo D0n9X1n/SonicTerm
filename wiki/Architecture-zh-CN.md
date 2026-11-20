@@ -178,8 +178,8 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 - macOS 负责 AppKit 菜单、关闭原生标签页、剪贴板拖动交接和 AppKit 窗口钩子。
 - Windows 负责 per-monitor-v2 DPI、`muda` 菜单、DWM 背景效果、OLE 拖放和 GDI 软件呈现钩子。
 - Linux 负责 X11/Wayland 应用标识、包内资源和字体预检。所有平台二进制都暴露共享原生运行
-  smoke；Linux 包布局还会在 X11 与 Wayland 上运行它。该平台没有原生菜单、桌面通知、材质
-  背景和跨进程标签页拖动。
+  smoke；Linux 包布局还会在 X11 与 Wayland 上运行它。该平台没有原生菜单、材质
+  背景和跨进程标签页拖动；桌面通知使用 XDG portal。
 
 可复用的键盘、终端、窗格和渲染行为都留在共享 crate 中。UI 文本编辑器在 macOS 上通过
 AppKit 纯字符串单词边界 API 实现原生 Option 删除，不创建原生视图或呈现对象。

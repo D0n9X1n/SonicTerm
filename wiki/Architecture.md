@@ -220,8 +220,9 @@ The three shipping binaries share `ShellRunner` through `MacShell`,
   drag/drop, and GDI software presentation hooks.
 - Linux owns X11/Wayland application identity, package assets, and font preflight.
   All platform binaries expose the shared native runtime smoke; Linux package
-  layouts additionally run it on X11 and Wayland. Native menus, desktop
-  notifications, material backdrops, and cross-process tab drag are absent there.
+  layouts additionally run it on X11 and Wayland. Native menus, material
+  backdrops, and cross-process tab drag are absent there; desktop notifications use
+  the XDG portal.
 
 All reusable keyboard, terminal, pane, and renderer behavior stays in shared
 crates. The UI text editor uses AppKit's string-only word-boundary API on macOS

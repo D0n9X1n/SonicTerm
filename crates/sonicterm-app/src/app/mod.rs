@@ -261,11 +261,11 @@ pub(crate) mod pane_signal;
 pub(crate) use pane_signal::PaneSignal;
 mod pane_launch;
 mod pane_refresh;
-use pane_refresh::update_terminal_ime_cursor_area;
 pub use pane_refresh::{
     invalidate_selection_for_content, mark_all_panes_dirty, resize_all_panes,
     resize_panes_to_rects, seed_parser_theme_colors,
 };
+use pane_refresh::{propagate_theme_to_pane_parsers, update_terminal_ime_cursor_area};
 mod pane_state;
 mod pane_target;
 mod perf_control;
@@ -308,10 +308,12 @@ pub mod renderer_retention;
 pub mod retention;
 mod retention_queues;
 pub use retention::{TrimDecision, TrimSkip};
+mod desktop_notify;
 mod scroll;
 pub mod scrollbar_input;
 pub mod scrollbar_visibility;
 mod search_handle;
+mod secondary_button;
 mod selection_gesture;
 pub use selection_gesture::next_click_count;
 use selection_gesture::{PointerCell, PointerGesture, PointerGestureOwner};
@@ -382,7 +384,7 @@ pub use key_encoding::{
 };
 pub use window_setup::{
     apply_terminal_window_minimum, install_native_window_background, minimum_terminal_inner_size,
-    with_app_icon, with_backdrop_transparency, with_integrated_titlebar,
+    with_app_icon, with_backdrop_transparency, with_integrated_titlebar, with_option_as_alt,
 };
 use window_setup::{
     apply_window_dpi_transition, apply_window_request, apply_window_state_minimum,

@@ -232,10 +232,13 @@ impl AckReceipt {
 /// GPU does not depend on a concrete UI cursor-state representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CursorStyle {
+    /// The configured `[terminal] cursor_shape` and `cursor_blink`: the program asked for nothing,
+    /// or restored them (DECSCUSR 0).
+    #[default]
+    Configured,
     /// Solid filled block, no blink (DECSCUSR 2).
     BlockSteady,
-    /// Solid filled block with blink (DECSCUSR 1, default).
-    #[default]
+    /// Solid filled block with blink (DECSCUSR 1).
     BlockBlink,
     /// Vertical bar (I-beam) without blink (DECSCUSR 6).
     BarSteady,
@@ -245,6 +248,41 @@ pub enum CursorStyle {
     UnderlineSteady,
     /// Underline under the cell with blink (DECSCUSR 3).
     UnderlineBlink,
+}
+
+impl CursorStyle {
+    /// The style a program's DECSCUSR request names; `None` is the configured cursor.
+    #[must_use]
+    pub fn from_request(request: Option<sonicterm_types::CursorRequest>) -> Self {
+        use sonicterm_types::CursorRequestShape as Shape;
+        let Some(request) = request else {
+            // When: the program made no request, the configured cursor is drawn.
+            return Self::Configured;
+        };
+        match (request.shape, request.steady) {
+            (Shape::Block, true) => Self::BlockSteady,
+            (Shape::Block, false) => Self::BlockBlink,
+            (Shape::Underline, true) => Self::UnderlineSteady,
+            (Shape::Underline, false) => Self::UnderlineBlink,
+            (Shape::Bar, true) => Self::BarSteady,
+            (Shape::Bar, false) => Self::BarBlink,
+        }
+    }
+
+    /// The shape to draw: this style's, or `configured` for [`CursorStyle::Configured`].
+    #[must_use]
+    pub fn shape_or(
+        self,
+        configured: sonicterm_cfg::config::CursorShape,
+    ) -> sonicterm_cfg::config::CursorShape {
+        use sonicterm_cfg::config::CursorShape as Shape;
+        match self {
+            Self::Configured => configured,
+            Self::BlockSteady | Self::BlockBlink => Shape::Block,
+            Self::BarSteady | Self::BarBlink => Shape::Bar,
+            Self::UnderlineSteady | Self::UnderlineBlink => Shape::Underline,
+        }
+    }
 }
 
 #[cfg(test)]

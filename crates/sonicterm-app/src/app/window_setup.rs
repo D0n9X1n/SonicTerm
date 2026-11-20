@@ -92,6 +92,57 @@ pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
     attrs
 }
 
+/// `attrs` with the configured macOS Option-as-Alt keys; every terminal and report window passes
+/// through here so keys typed in any window encode the same. Other platforms have no Option key.
+#[doc(hidden)]
+pub fn with_option_as_alt(
+    attrs: WindowAttributes,
+    option_as_alt: sonicterm_cfg::config::OptionAsAlt,
+) -> WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        attrs.with_option_as_alt(winit_option_as_alt(option_as_alt))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = option_as_alt;
+        attrs
+    }
+}
+
+/// Apply the configured Option-as-Alt keys to an open window, after a reload changed them.
+pub(crate) fn apply_option_as_alt(
+    window: &Window,
+    option_as_alt: sonicterm_cfg::config::OptionAsAlt,
+) {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowExtMacOS;
+        // Setting the unchanged value is harmless: winit only stores it for the next key event.
+        window.set_option_as_alt(winit_option_as_alt(option_as_alt));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, option_as_alt);
+    }
+}
+
+/// winit's name for each configured Option-as-Alt choice.
+#[cfg(target_os = "macos")]
+pub(crate) fn winit_option_as_alt(
+    option_as_alt: sonicterm_cfg::config::OptionAsAlt,
+) -> winit::platform::macos::OptionAsAlt {
+    use sonicterm_cfg::config::OptionAsAlt as Configured;
+    use winit::platform::macos::OptionAsAlt as Winit;
+    match option_as_alt {
+        Configured::None => Winit::None,
+        Configured::Left => Winit::OnlyLeft,
+        Configured::Right => Winit::OnlyRight,
+        Configured::Both => Winit::Both,
+    }
+}
+
 /// Enable OS-window alpha composition when a non-opaque compositor backdrop
 /// is requested. Without this, winit creates an opaque client area and the
 /// premultiplied swapchain is composited over that instead of Mica/acrylic.

@@ -536,6 +536,7 @@ impl GpuRenderer {
             cursor_glide_allowed: false,
             cursor_glide_basis: None,
             cursor_glide_frame: None,
+            frame_cursor_shape: CursorShape::default(),
             window_focused: true,
             inactive_pane_cursors: Vec::new(),
             pane_focus_flash: None,

@@ -95,11 +95,12 @@ Grid 尺寸始终有上限。每个轴最多是 `4096`，可见 grid 最多包�
 | `term_program` | `"SonicTerm"` | 新子 PTY 的 `TERM_PROGRAM`。`TERM_PROGRAM_VERSION` 通常是 SonicTerm 版本；`term_program = "WezTerm"` 时为 `20230712-072601`。 |
 | `scrollback` | `1000` | 每个 pane 请求保留的历史行数。`0` 关闭历史记录。Grid 和内存字节预算可能进一步降低实际值。 |
 | `keypad_mode` | `"auto"` | `auto` 保留协商的旧式小键盘映射及操作系统解析出的数字文本。显式选择 `numeric` 后，运算符和 Enter 不受 DECKPAM 影响，使用普通文本/Return 规则，导航遵循逻辑按键。Kitty 输入不变。参见[快捷键](Keybindings-zh-CN)。 |
+| `macos_option_as_alt` | `"none"` | 仅限 macOS：哪个 Option 键作为 Alt 使用，而不是组合字符。`"none"` 保留 `∫` 这类组合字符；`"left"`、`"right"` 或 `"both"` 让对应的 Option 键发送 Alt 组合键（带 Meta 前缀的按键，或在 kitty 键盘协议下带 Alt 修饰的按键），shell 的 Meta 绑定和 herdr 的 Alt 绑定需要它。另一个 Option 键仍然组合字符。重新加载后，已打开的窗口立即生效。该键在所有平台都能解析，在 macOS 以外被忽略，因此同一份配置文件在各平台都能加载。其他值会导致加载失败。参见[快捷键](Keybindings-zh-CN)。 |
 | `clickable_local_targets` | `true` | 所有平台都打开经过验证的本地目录，或在所在文件夹中选中文件。包括本地 file URI 和本机路径 OSC 8 链接；网页和邮件链接不受控制。 |
 | `clickable_bare_names` | `true` | 允许按准确 pane 的可信本机 OSC 7 工作目录解析上下文名称。带分隔符的相对路径也要求同一可信 pane CWD。在备用屏幕上两者都不会解析，因为全屏程序可能显示多个窗格。只有 `clickable_local_targets` 同时为 `true` 时才生效。 |
 | `clickable_path_max_chars` | `1024` | 考虑的自动检测路径候选的最大长度，按显示候选的 Unicode 字符数计算；更长的候选会被忽略。取值钳制在 `1`–`1024`，因此默认值即最大值。16 KiB 逻辑文字上限、8 个空格分隔部分和 32 行上限仍然适用，扫描器对每个目标的 4 KiB 上限也仍然适用。OSC 8 和 file URI 目标不受其限制。重载后值发生变化时，会撤销当前路径结果。 |
-| `cursor_blink` | `false` | 让光标闪烁：以主题的准确颜色显示 530 ms，再隐藏 530 ms。每次按键、粘贴、输入法事件、窗口获得焦点或光标移动都会让它从显示状态重新开始；最后一次之后 15 s 停止闪烁并保持常亮，因此空闲窗口不绘制闪烁帧。只有已获得焦点、光标可见、处于实时视图且不在只读模式的窗口才会闪烁；主窗口和拆出的窗口相同。 |
-| `cursor_shape` | `"block"` | 可选 `block`、`bar` 或 `underline`。 |
+| `cursor_blink` | `false` | 让光标闪烁：以主题的准确颜色显示 530 ms，再隐藏 530 ms。每次按键、粘贴、输入法事件、窗口获得焦点或光标移动都会让它从显示状态重新开始；最后一次之后 15 s 停止闪烁并保持常亮，因此空闲窗口不绘制闪烁帧。只有已获得焦点、光标可见、处于实时视图且不在只读模式的窗口才会闪烁；主窗口和拆出的窗口相同。程序请求常亮光标（DECSCUSR 2、4 或 6）时从不闪烁；本项为 `false` 时程序无法开启闪烁。 |
+| `cursor_shape` | `"block"` | 可选 `block`、`bar` 或 `underline`。程序可以用 DECSCUSR（`CSI Ps SP q`，vim、nvim 和 herdr 都会使用）为自己的窗格选择其他形状；`CSI 0 SP q` 和终端重置（RIS）恢复本设置。 |
 | `cursor_animation` | `"none"` | `"smooth"` 让光标以 90 ms 缓出滑到新单元格，而不是跳过去；位置和宽度平滑变化，高度随形状立即改变；块状光标滑过文字时不重着色，落定后再为其字形重着色。以下情况仍直接跳转：切到其他窗格或屏幕、调整大小或更换字体之后、跳转距离超过窗格对角线一半、持续输出（最近 6 帧中至少 4 帧有输出，且 250 ms 内没有按键、粘贴或输入法事件，因此键入字符的回显仍会滑动）、同步更新未结束、处于覆盖层之下，以及使用软件呈现器时。重新加载后生效。 |
 | `osc52` | `"allow"` | 程序能否用 OSC 52 设置剪贴板：`"allow"` 或 `"deny"`。设为 `"deny"` 时，每次写入都在接触剪贴板之前被拒绝，包括重载前已排队的写入；在 Windows 上会取消待执行的重新写入；状态栏 `clip` 段显示 `已禁止写入`。无论哪种设置，剪贴板读取都从不应答。运行不可信远程程序的窗格请使用 `"deny"`。 |
 
@@ -136,9 +137,9 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | Key | 默认值 | 行为 |
 | --- | --- | --- |
-| `long_command` | `false` | 在 Windows 上启用长命令桌面通知。macOS 和 Linux 目前不发送此通知。 |
+| `long_command` | `false` | 在所有平台上，运行超过 `threshold_secs` 的命令结束时（OSC 133 shell 集成）发出桌面通知，与 `osc9` 无关。它没有来源窗口，因此不受焦点规则限制。各平台使用的服务见[平台集成](Platform-Integration-zh-CN)。 |
 | `threshold_secs` | `10` | 命令报告的耗时必须大于此值。 |
-| `osc9` | `"app"` | 程序通知（OSC 9 文本与 OSC 777 `notify`）的去向：`"app"` 在窗格所在窗口显示 SonicTerm 的应用内通知；`"desktop"` 在 Windows 上且该窗口未获得焦点时额外发出桌面通知（macOS 和 Linux 与 `"app"` 相同，和 `long_command` 一样）；`"off"` 忽略它们。其他值会导致加载失败。 |
+| `osc9` | `"app"` | 程序通知（OSC 9 文本、OSC 777 `notify`，以及 herdr 的 `delivery = "terminal"` 发送的 kitty OSC 99）的去向：`"app"` 在窗格所在窗口显示 SonicTerm 的应用内通知；`"desktop"` 在该窗口未获得焦点时额外发出桌面通知（在 macOS 上为 SonicTerm 不是活动应用时，因为 macOS 不对活动应用显示横幅）；herdr 的终端通知需要 herdr 的 `delivery = "terminal"` 和这里的 `osc9 = "desktop"` 同时开启；`"off"` 忽略它们。其他值会导致加载失败。 |
 | `taskbar_progress` | `true` | 将 `OSC 9;4` 进度同步到 Windows 任务栏、macOS 程序坞徽标和 Linux 启动器条目；见[平台集成](Platform-Integration-zh-CN)。重新加载时设为 `false` 会立即清除所有位置。 |
 
 #### `[status_line]`

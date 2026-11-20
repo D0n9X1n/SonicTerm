@@ -303,7 +303,7 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
 
     preflight_linux_fonts(&config)?;
     tracing::info!(
-        "Linux native menu, desktop notifications, and cross-process tab drag are unavailable; using in-app fallbacks"
+        "Linux native menu and cross-process tab drag are unavailable; using in-app fallbacks"
     );
     let (theme, keymap, startup_loads) = if mode == StartupMode::RuntimeSmoke {
         let assets = asset_dir();

@@ -76,11 +76,14 @@ fi
 "#;
 
 /// bash: D and A from `PROMPT_COMMAND` (first, so it sees the command's status, which it
-/// restores), B at the end of `PS1`, C from `PS0` as a command starts. Whether a command ran is
-/// read from the prompt's command number (`\#`), which every executed command advances and an
-/// empty line does not, whatever the history settings. The token and the B marker that carries
-/// it are unexported (`export -n`), so even `set -a` cannot hand them to a command, and `PS1`
-/// refers to the marker by name rather than holding it. Needs bash 4.4 for `PS0` and `@P`.
+/// restores), B at the end of `PS1`, C from `PS0` as a command starts. Whether a command ran is a
+/// flag `PS0` sets as bash shows it, through an arithmetic assignment inside a parameter expansion,
+/// which prompt expansion runs in the shell itself; bash shows `PS0` before every command it runs
+/// and never for an empty line, whatever the history settings. The prompt's command number (`\#`)
+/// cannot tell: once `PS0` is set, bash 5.3 advances it lazily, so the first command after the
+/// snippet loads leaves it unchanged. The token and the B marker that carries it are unexported
+/// (`export -n`), so even `set -a` cannot hand them to a command, and `PS1` refers to the marker
+/// by name rather than holding it. Needs bash 4.4 for `PS0`.
 const BASH: &str = r#"# SonicTerm shell integration (bash 4.4+). Load with: eval "$(sonicterm-mcp --shell-integration bash)"
 if [[ $- == *i* && -n "${SONICTERM_SHELL_TOKEN-}" && -z "${__sonicterm_token-}" ]] \
    && (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
@@ -90,15 +93,14 @@ if [[ $- == *i* && -n "${SONICTERM_SHELL_TOKEN-}" && -z "${__sonicterm_token-}" 
   unset SONICTERM_SHELL_TOKEN
   printf -v __sonicterm_b '\e]133;B;sonicterm_token=%s\a' "$__sonicterm_token"
   export -n __sonicterm_b
-  __sonicterm_number='\#'
-  __sonicterm_seen=""
+  __sonicterm_ran=0
   __sonicterm_mark() { printf '\e]133;%s;sonicterm_token=%s\a' "$1" "$__sonicterm_token"; }
   __sonicterm_prompt() {
-    local __sonicterm_status=$? __sonicterm_now="${__sonicterm_number@P}"
-    if [[ -n "$__sonicterm_seen" && "$__sonicterm_now" != "$__sonicterm_seen" ]]; then
+    local __sonicterm_status=$?
+    if (( __sonicterm_ran )); then
       __sonicterm_mark "D;$__sonicterm_status;sonicterm_src=status"
     fi
-    __sonicterm_seen=$__sonicterm_now
+    __sonicterm_ran=0
     __sonicterm_mark A
     if [[ "$PS1" != *'${__sonicterm_b}'* ]]; then
       PS1="$PS1"'\[${__sonicterm_b}\]'
@@ -106,7 +108,7 @@ if [[ $- == *i* && -n "${SONICTERM_SHELL_TOKEN-}" && -z "${__sonicterm_token-}" 
     return $__sonicterm_status
   }
   PROMPT_COMMAND="__sonicterm_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
-  PS0='$(__sonicterm_mark C)'"${PS0-}"
+  PS0='${__sonicterm_ran:$((__sonicterm_ran=1, 0)):0}$(__sonicterm_mark C)'"${PS0-}"
 fi
 "#;
 

@@ -98,7 +98,7 @@ Symbols Nerd Font Mono，且不会把它安装到系统。
 
 ### 标签页进程图标
 
-手动标题优先；否则，前台为 `rmux`、`tmux` 或 `screen` 时，即使存在 CWD 也优先使用
+手动标题优先；否则，前台为 `rmux`、`tmux`、`screen` 或 `herdr` 时，即使存在 CWD 也优先使用
 非空原始 OSC 标题。其它进程保持 CWD 优先的自动标题。下表的图标查找只使用可执行文件身份。
 
 操作系统提供前台可执行文件后，`normalize_proc_name` 会按 `/` 和 `\\` 取文件名，去掉
@@ -151,7 +151,7 @@ U+F07B，否则使用终端字形 U+F489。
 | Emacs | `emacs`, `emacsclient` | `dev-emacs` | U+E7CF |
 | Nano | `nano` | `dev-nano` | U+E838 |
 | SSH / Mosh | `ssh`, `mosh` | `md-ssh` | U+F08C0 |
-| rmux / tmux | `rmux`, `tmux` | `md-view-quilt` | U+F0574 |
+| rmux / tmux / herdr | `rmux`, `tmux`, `herdr` | `md-view-quilt` | U+F0574 |
 | GNU Screen | `screen` | `cod-screen-full` | U+EB4C |
 | Git | `git`, `lazygit`, `tig` | `fa-git` | U+F1D3 |
 | GitHub CLI | `gh`, `hub` | `oct-logo-github` | U+F470 |

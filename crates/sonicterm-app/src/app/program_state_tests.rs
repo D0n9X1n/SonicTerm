@@ -176,13 +176,12 @@ fn shutdown_clears_every_shown_surface_once() {
 }
 
 #[test]
-fn desktop_notifications_only_on_windows_while_unfocused() {
-    // `desktop` adds a native notification only on Windows and only for an unfocused window;
-    // macOS and Linux behave as `app`.
-    assert!(wants_desktop(Osc9Delivery::Desktop, true, false));
-    assert!(!wants_desktop(Osc9Delivery::Desktop, true, true));
-    assert!(!wants_desktop(Osc9Delivery::Desktop, false, false));
-    assert!(!wants_desktop(Osc9Delivery::App, true, false));
+fn desktop_notifications_only_while_unfocused() {
+    // `desktop` adds a native notification on every platform, only while unfocused; `app` never.
+    assert!(wants_desktop(Osc9Delivery::Desktop, false));
+    assert!(!wants_desktop(Osc9Delivery::Desktop, true));
+    assert!(!wants_desktop(Osc9Delivery::App, false));
+    assert!(!wants_desktop(Osc9Delivery::Off, false));
 }
 
 /// The pane of each tab of `window`, in tab order; the pane map itself has no order.
