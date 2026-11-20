@@ -608,3 +608,18 @@ fn unreadable_signed_line_keeps_a_single_row_url() {
         Some("https://doc.rust-lang.org/book/")
     );
 }
+
+/// On an unreadable signed line, a markdown destination that sits whole on one row opens even
+/// when its label wraps: only a URL the line breaks across rows stays inert.
+#[test]
+fn unreadable_line_opens_a_destination_after_a_wrapped_label() {
+    let lines = [
+        "     87 - Compare the differences for the next standard revision in [C".to_string(),
+        "        ++23](https://en.cppreference.com/w/cpp/23).".to_string(),
+        "     88   Review the examples.".to_string(),
+    ];
+    assert_eq!(
+        exact_target_at(&lines, (77, 10), 1, 20).as_deref(),
+        Some("https://en.cppreference.com/w/cpp/23")
+    );
+}

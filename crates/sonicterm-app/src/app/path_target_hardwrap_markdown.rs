@@ -404,9 +404,12 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
             Some(earlier) => agreed(earlier, reading),
         });
     }
-    // An `unreadable` line opens no URL it breaks across rows in any layout.
+    // An `unreadable` line opens no URL it breaks across rows in any layout; a URL its delimiters
+    // close on one row reads the same in every layout.
     match decided {
-        Some(HardwrapUri::Complete(_)) if unreadable => HardwrapUri::Incomplete,
+        Some(HardwrapUri::Complete(candidate)) if unreadable && candidate.spans.len() > 1 => {
+            HardwrapUri::Incomplete
+        }
         Some(decided) => decided,
         None => HardwrapUri::Incomplete,
     }
