@@ -461,3 +461,99 @@ fn thematic_break_proves_no_diff() {
         );
     }
 }
+
+/// A pure-deletion Update view joins a removed markdown link: a `-` with text right after it is
+/// no markdown list item or rule, so it proves the diff, and the repeated sign is gutter.
+#[test]
+fn pure_deletion_update_joins_a_removed_link() {
+    let lines = [
+        "     86  ## SSH setup".to_string(),
+        "     87 -[SSH](https://docs.github.com/en/authentication/connecting".to_string(),
+        "        --to-github-with-ssh)".to_string(),
+    ];
+    let expected = "https://docs.github.com/en/authentication/connecting-to-github-with-ssh";
+    for (row, col) in [(1, 30), (2, 12)] {
+        assert_eq!(
+            exact_target_at(&lines, (74, 10), row, col).as_deref(),
+            Some(expected),
+            "row {row}"
+        );
+    }
+}
+
+/// The pointer on the continuation that contradicts a diff opens the markdown link too.
+#[test]
+fn contradicting_continuation_opens_from_either_row() {
+    let lines = [
+        "     87   [SSH setup](https://docs.github.com/en/authentication/connecting".to_string(),
+        "        -to-github-with-ssh)".to_string(),
+        "     88   Next steps.".to_string(),
+    ];
+    let expected = "https://docs.github.com/en/authentication/connecting-to-github-with-ssh";
+    for (row, col) in [(0, 30), (1, 12)] {
+        assert_eq!(
+            exact_target_at(&lines, (80, 10), row, col).as_deref(),
+            Some(expected),
+            "row {row}"
+        );
+    }
+}
+
+/// A `+` list item indented two blanks is markdown as well as an added line: a URL whose
+/// continuation opens with `+` is never opened without it.
+#[test]
+fn two_blank_plus_list_item_never_drops_a_plus() {
+    let lines = [
+        "     87 +  <https://www.google.com/search?q=terminal".to_string(),
+        "        +emulator>".to_string(),
+        "     88    Search terminal emulators.".to_string(),
+    ];
+    for (row, col) in [(0, 30), (1, 12)] {
+        let display = exact_target_at(&lines, (59, 10), row, col);
+        assert_ne!(
+            display.as_deref(),
+            Some("https://www.google.com/search?q=terminalemulator"),
+            "row {row}"
+        );
+    }
+}
+
+/// Claude Code's Update view joins a wrapped quoted URL on a context, removed or added row
+/// whether the hunk only removes lines, only adds them, or replaces one.
+#[test]
+fn update_views_join_on_every_row_kind() {
+    let uri = "https://example.test/aaaaaaaaaa/bbbbbbbbbb/cccccccccc";
+    let source = format!("    get \"{uri}\" -o out");
+    let hunks: [(&str, [char; 3]); 3] = [
+        ("deletion", [' ', '-', ' ']),
+        ("addition", [' ', '+', ' ']),
+        ("replacement", ['-', '+', ' ']),
+    ];
+    for (label, signs) in hunks {
+        for url_at in 0..3 {
+            let mut lines = box_line(&gutter(85, ' '), ' ', "  try {", 40, 8);
+            let mut url_row = 0;
+            for (index, sign) in signs.iter().enumerate() {
+                // A replacement repeats the line number of the line it replaces.
+                let number =
+                    if label == "replacement" && index == 1 { 86 } else { 86 + index as u32 };
+                let text = if index == url_at { source.as_str() } else { "    x = 1" };
+                if index == url_at {
+                    url_row = lines.len();
+                }
+                lines.extend(box_line(&gutter(number, *sign), *sign, text, 40, 8));
+            }
+            let start = lines[url_row].find("https").unwrap();
+            let decided = decide_in_frame(
+                &lines,
+                (60, lines.len() as u16),
+                0,
+                AbsoluteCell { row: url_row as u64, col: start as u16 + 2 },
+            );
+            let HardwrapUri::Complete(candidate) = decided else {
+                panic!("{label} row {url_at}: {decided:?}")
+            };
+            assert_eq!(candidate.target, DetectedTarget::Uri(uri.into()), "{label} row {url_at}");
+        }
+    }
+}

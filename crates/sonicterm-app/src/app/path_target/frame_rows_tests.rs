@@ -72,6 +72,7 @@ const DETECTION_SOURCES: &[(&str, &str)] = &[
     ("../path_target_detect.rs", include_str!("../path_target_detect.rs")),
     ("../path_target_hardwrap_delimited.rs", include_str!("../path_target_hardwrap_delimited.rs")),
     ("../path_target_hardwrap_markdown.rs", include_str!("../path_target_hardwrap_markdown.rs")),
+    ("../path_target_hardwrap_layout.rs", include_str!("../path_target_hardwrap_layout.rs")),
     ("../path_target_hardwrap_paths.rs", include_str!("../path_target_hardwrap_paths.rs")),
     ("../path_target_hardwrap_uri.rs", include_str!("../path_target_hardwrap_uri.rs")),
     ("../path_target_hover.rs", include_str!("../path_target_hover.rs")),
