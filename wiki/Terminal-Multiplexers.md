@@ -230,7 +230,7 @@ or a named user's home. Absolute paths do not need OSC 7.
 
 ## Titles and shell integration
 
-For a foreground `rmux`, `tmux` or `screen`, a nonempty raw OSC title is
+For a foreground `rmux`, `tmux`, `screen` or `herdr`, a nonempty raw OSC title is
 preferred even when the directory is known; manual tab titles still win. Other
 processes keep normal directory-first automatic titles. OSC 8 preserves URI
 semicolons; OSC 133 `B` ends the prompt without timing, `C` starts execution,

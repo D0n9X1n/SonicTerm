@@ -129,7 +129,7 @@ without installing it system-wide.
 ### Tab-title process icons
 
 Manual titles win. Otherwise a nonempty raw OSC title wins for foreground `rmux`,
-`tmux`, or `screen` even when CWD is present; other processes retain CWD-first
+`tmux`, `screen` or `herdr` even when CWD is present; other processes retain CWD-first
 automatic titles. The icon lookup below uses only the executable identity.
 
 When the OS supplies a foreground executable, `normalize_proc_name` takes its
@@ -201,7 +201,7 @@ Mono:
 | Emacs | `emacs`, `emacsclient` | `dev-emacs` | U+E7CF |
 | Nano | `nano` | `dev-nano` | U+E838 |
 | SSH / Mosh | `ssh`, `mosh` | `md-ssh` | U+F08C0 |
-| rmux / tmux | `rmux`, `tmux` | `md-view-quilt` | U+F0574 |
+| rmux / tmux / herdr | `rmux`, `tmux`, `herdr` | `md-view-quilt` | U+F0574 |
 | GNU Screen | `screen` | `cod-screen-full` | U+EB4C |
 | Git | `git`, `lazygit`, `tig` | `fa-git` | U+F1D3 |
 | GitHub CLI | `gh`, `hub` | `oct-logo-github` | U+F470 |

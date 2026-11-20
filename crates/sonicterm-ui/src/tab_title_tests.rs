@@ -102,8 +102,8 @@ const PROCESS_FAMILIES: &[ProcessFamily] = &[
     },
     ProcessFamily {
         category: "Remote / mux",
-        application: "rmux / tmux",
-        aliases: &["rmux", "tmux"],
+        application: "rmux / tmux / herdr",
+        aliases: &["rmux", "tmux", "herdr"],
         icon: '\u{f0574}',
         glyph: "md-view-quilt",
     },
@@ -458,7 +458,7 @@ fn cwd_takes_precedence_and_is_reduced_to_two_components() {
 // Multiplexer titles identify the selected session/window even when its shell reports a CWD.
 #[test]
 fn multiplexer_titles_take_precedence_over_cwd() {
-    for process in ["rmux", "RMUX", "tmux", "screen"] {
+    for process in ["rmux", "RMUX", "tmux", "screen", "herdr"] {
         let title = format_tab_title(
             0,
             Some("/work/project"),
@@ -469,7 +469,7 @@ fn multiplexer_titles_take_precedence_over_cwd() {
         assert!(format_tab_title(0, Some("/work/project"), Some(process), Some(" "))
             .ends_with("work/project"));
     }
-    for process in ["zsh", "rmux-helper", "/bin/rmux"] {
+    for process in ["zsh", "rmux-helper", "/bin/rmux", "herdr-core"] {
         assert!(format_tab_title(0, Some("/work/project"), Some(process), Some("session"))
             .ends_with("work/project"));
     }
