@@ -154,7 +154,7 @@ right edge.
 | --- | --- | --- |
 | `long_command` | `false` | Enables long-command desktop notifications on Windows. macOS and Linux currently do not send this notification. |
 | `threshold_secs` | `10` | A reported command duration must be greater than this value. |
-| `osc9` | `"app"` | Where program notifications (OSC 9 text and OSC 777 `notify`) go: `"app"` shows SonicTerm's in-app notification in the pane's window, `"desktop"` also raises a desktop notification on Windows while that window is not focused (macOS and Linux behave as `"app"`, as for `long_command`), and `"off"` ignores them. Any other value fails the load. |
+| `osc9` | `"app"` | Where program notifications (OSC 9 text, OSC 777 `notify` and kitty's OSC 99, which herdr's `delivery = "terminal"` sends) go: `"app"` shows SonicTerm's in-app notification in the pane's window, `"desktop"` also raises a desktop notification on Windows while that window is not focused (macOS and Linux behave as `"app"`, as for `long_command`), and `"off"` ignores them. Any other value fails the load. |
 | `taskbar_progress` | `true` | Mirrors `OSC 9;4` progress to the Windows taskbar, the macOS Dock badge and the Linux launcher entry; see [Platform Integration](Platform-Integration). A reload that sets `false` clears every surface at once. |
 
 #### `[status_line]`

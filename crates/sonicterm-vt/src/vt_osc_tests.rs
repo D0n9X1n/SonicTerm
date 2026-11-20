@@ -529,7 +529,7 @@ fn program_events(bytes: &[u8]) -> Vec<Seen> {
         .into_iter()
         .filter_map(|event| match event {
             VtEvent::Progress(report) => Some(Seen::Progress(report)),
-            VtEvent::Notify { title, body } => Some(Seen::Notify { title, body }),
+            VtEvent::Notify { title, body, .. } => Some(Seen::Notify { title, body }),
             VtEvent::ProgramStateReset => Some(Seen::Reset),
             _ => None,
         })

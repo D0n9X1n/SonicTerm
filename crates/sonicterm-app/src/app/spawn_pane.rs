@@ -416,37 +416,6 @@ impl PaneVtHandles {
     }
 }
 
-/// One batch's program notifications: the first one whole, the rest only counted, so a burst
-/// reaches the App as one event and no coalesced text is kept.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(in crate::app) struct ProgramNotices {
-    first: Option<(Option<String>, String)>,
-    more: u32,
-}
-
-impl ProgramNotices {
-    /// Record one notification; one that sanitizes to no text is neither shown nor counted.
-    pub(in crate::app) fn push(&mut self, title: Option<String>, body: String) {
-        if !super::program_state::has_visible_text(title.as_deref(), &body) {
-            // When: has_visible_text is false, the App would show nothing, so the notification
-            // must not take the batch's first place or its alert mark.
-            return;
-        }
-        if self.first.is_some() {
-            // A later notification only counts; its text is never kept.
-            self.more = self.more.saturating_add(1);
-        } else {
-            // When: first is None, this is the batch's first notification, kept whole.
-            self.first = Some((title, body));
-        }
-    }
-
-    /// The first notification's title and body and how many followed, if any arrived.
-    pub(in crate::app) fn into_parts(self) -> Option<(Option<String>, String, u32)> {
-        self.first.map(|(title, body)| (title, body, self.more))
-    }
-}
-
 /// Start the VT worker with handles cloned from its completed pane.
 pub(super) fn spawn_pane_workers(
     pane_id: u64,
@@ -779,7 +748,10 @@ mod spawn_pane_tests;
 #[path = "spawn_pane_output.rs"]
 mod output;
 pub(in crate::app) use output::send_output_redraw;
+#[path = "program_notices.rs"]
+mod program_notices;
 use output::{publish_sync_output, send_pane_output};
+pub(in crate::app) use program_notices::ProgramNotices;
 #[path = "spawn_pane_vt.rs"]
 mod vt;
 pub(in crate::app) use vt::{
@@ -926,7 +898,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 VtEvent::Media(media) => media_events.push(media),
                 VtEvent::Progress(report) => progress = Some(report),
                 VtEvent::ProgramStateReset => progress = Some(None),
-                VtEvent::Notify { title, body } => notices.push(title, body),
+                VtEvent::Notify { title, body, id, occasion } => {
+                    notices.push_notice(title, body, id, occasion)
+                }
                 VtEvent::SetTitle(_) | VtEvent::Bell | VtEvent::Hyperlink { .. } => {
                     // When: event is SetTitle, Bell, or Hyperlink, parser state already owns its effect.
                 }
@@ -940,9 +914,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 emit_event(UserEvent::ProgramProgress { pane_id: handles.pane_id, report });
             }
         }
-        if let Some((title, body, more)) = notices.into_parts() {
-            // One event per batch: the first notification and how many followed it.
-            emit_event(UserEvent::ProgramNotify { pane_id: handles.pane_id, title, body, more });
+        for notice in notices.into_notices() {
+            // One event per occasion in a batch: its kept notification and how many followed it.
+            emit_event(notice.into_event(handles.pane_id));
         }
 
         // Every accepted write is its own event, in order; refusals only count toward one summary.

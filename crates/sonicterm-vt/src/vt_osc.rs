@@ -149,12 +149,31 @@ impl Performer {
             None => Some(false),
         }
     }
+    /// Read one OSC 99: a completed notification becomes a host event, and a query is answered
+    /// with the parts and occasions SonicTerm shows.
+    fn receive_kitty_notify(&mut self, content: &[u8]) {
+        match self.kitty_notifications.receive(content) {
+            kitty_notify::KittyNotify::Show { id, title, body, occasion } => {
+                self.events.push(VtEvent::Notify { title, body, id, occasion });
+            }
+            kitty_notify::KittyNotify::Query { id } => {
+                let reply =
+                    format!("\x1b]99;i={id}:p=?;p=title,body:o=always,unfocused,invisible\x1b\\");
+                self.reply(reply.as_bytes());
+            }
+            kitty_notify::KittyNotify::Nothing => {
+                // When: the result is `Nothing`, a chunk was stored or the sequence was ignored.
+            }
+        }
+    }
+
     /// Surface one parsed program-state OSC as a host event.
     fn push_program_osc(&mut self, program: program::ProgramOsc) {
         match program {
             program::ProgramOsc::Progress(report) => self.events.push(VtEvent::Progress(report)),
             program::ProgramOsc::Notify { title, body } => {
-                self.events.push(VtEvent::Notify { title, body });
+                let occasion = NotifyOccasion::Always;
+                self.events.push(VtEvent::Notify { title, body, id: None, occasion });
             }
             program::ProgramOsc::Ignored => {
                 // When: program is ProgramOsc::Ignored, nothing changes.
@@ -178,6 +197,11 @@ impl Performer {
     }
 
     pub(super) fn handle_semantic_osc(&mut self, code: u16, content: &[u8]) {
+        if code == 99 {
+            // When: code is 99, kitty's notification grammar reads it, chunk by chunk.
+            self.receive_kitty_notify(content);
+            return;
+        }
         if is_program_osc(code) {
             // When: code is 9 or 777, the program grammar reads every `;`-separated part; its text
             // is sanitized by the host, never rejected here.
@@ -243,3 +267,7 @@ impl Performer {
 #[cfg(test)]
 #[path = "vt_osc_tests.rs"]
 mod vt_osc_tests;
+
+#[cfg(test)]
+#[path = "vt_osc_kitty_notify_tests.rs"]
+mod vt_osc_kitty_notify_tests;

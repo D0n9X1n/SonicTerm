@@ -50,6 +50,8 @@ pub(super) struct ProgramToast {
     pub(super) more: u32,
     /// The bubble text last shown, so a replaced bubble is not mistaken for this toast.
     pub(super) message: String,
+    /// The OSC 99 id of the notification shown, which a later one from the same pane replaces.
+    pub(super) id: Option<String>,
 }
 
 /// What one progress surface wants and what it last received.
@@ -265,9 +267,16 @@ impl App {
             super::UserEvent::ProgramProgress { pane_id, report } => {
                 self.note_program_progress(pane_id, report);
             }
-            super::UserEvent::ProgramNotify { pane_id, title, body, more } => {
+            super::UserEvent::ProgramNotify { pane_id, title, body, id, occasion, more } => {
                 let now = self.dispatch_now();
-                self.handle_program_notify(pane_id, title.as_deref(), &body, more, now);
+                self.handle_program_notice(
+                    pane_id,
+                    (title.as_deref(), &body),
+                    id,
+                    occasion,
+                    more,
+                    now,
+                );
             }
             _ => {
                 // When: event is not a program-state event, the event loop routes it elsewhere.
@@ -336,12 +345,71 @@ impl App {
         backend.shutdown();
     }
 
-    /// Show a batch of program notifications from `pane_id`: the first one and `more` after it.
+    /// Show a batch of OSC 9 or 777 notifications from `pane_id`: the first one and `more` after it.
+    #[cfg(test)]
     pub(super) fn handle_program_notify(
         &mut self,
         pane_id: u64,
         title: Option<&str>,
         body: &str,
+        more: u32,
+        now: Instant,
+    ) {
+        self.show_program_notice(pane_id, (title, body), None, more, now);
+    }
+
+    /// Show a batch of notifications from `pane_id` of one `occasion`, with its OSC 99 `id`, when
+    /// the occasion allows it now: `unfocused` only while the pane is not the active pane of the
+    /// focused window, `invisible` only while it is not drawn. A suppressed one marks nothing.
+    pub(super) fn handle_program_notice(
+        &mut self,
+        pane_id: u64,
+        (title, body): (Option<&str>, &str),
+        id: Option<String>,
+        occasion: sonicterm_vt::vt::NotifyOccasion,
+        more: u32,
+        now: Instant,
+    ) {
+        if self.notice_suppressed(pane_id, occasion) {
+            // When: the `occasion` rules the notification out now, the program asked not to see it.
+            return;
+        }
+        self.show_program_notice(pane_id, (title, body), id, more, now);
+    }
+
+    /// Whether `occasion` rules out a notification from `pane_id` now.
+    fn notice_suppressed(&self, pane_id: u64, occasion: sonicterm_vt::vt::NotifyOccasion) -> bool {
+        use sonicterm_vt::vt::NotifyOccasion;
+        let place = self.registry.windows.iter().find_map(|(id, window)| {
+            let index = window.tab_states.iter().position(|tab| tab.tree.contains_pane(pane_id))?;
+            Some((*id, window, index))
+        });
+        let Some((window_id, window, tab_index)) = place else {
+            // When: no window holds the pane, there is nothing to show it in either way.
+            return false;
+        };
+        let in_active_tab = window.tabs.active_index() == tab_index;
+        let tab = &window.tab_states[tab_index];
+        match occasion {
+            NotifyOccasion::Always => false,
+            NotifyOccasion::Unfocused => {
+                let focused_window = self.registry.frontmost_window == Some(window_id);
+                focused_window && in_active_tab && tab.active_pane == pane_id
+            }
+            NotifyOccasion::Invisible => {
+                let zoomed_away = tab.tree.zoomed_pane_id().is_some_and(|zoomed| zoomed != pane_id);
+                in_active_tab && !zoomed_away && !window.redraw.native_occluded
+            }
+        }
+    }
+
+    /// Show notifications from `pane_id`; a toast already showing this pane's notification with
+    /// the same OSC 99 `id` is replaced, not counted.
+    fn show_program_notice(
+        &mut self,
+        pane_id: u64,
+        (title, body): (Option<&str>, &str),
+        id: Option<String>,
         more: u32,
         now: Instant,
     ) {
@@ -373,7 +441,10 @@ impl App {
                         .as_ref()
                         .is_some_and(|bubble| bubble.message == toast.message)
                 });
-            shown && (toast.pane_id == pane_id || now < toast.shown_at + TOAST_ANY_PANE_WINDOW)
+            let replaced = id.is_some() && toast.pane_id == pane_id && toast.id == id;
+            shown
+                && !replaced
+                && (toast.pane_id == pane_id || now < toast.shown_at + TOAST_ANY_PANE_WINDOW)
         });
         if coalesce {
             // When: coalesce holds, the visible toast only counts this batch.
@@ -439,6 +510,7 @@ impl App {
             body,
             more,
             message,
+            id,
         });
     }
 
@@ -515,3 +587,7 @@ fn native_handle(window: &winit::window::Window) -> Option<isize> {
 #[cfg(test)]
 #[path = "program_state_tests.rs"]
 mod program_state_tests;
+
+#[cfg(test)]
+#[path = "program_state_occasion_tests.rs"]
+mod program_state_occasion_tests;

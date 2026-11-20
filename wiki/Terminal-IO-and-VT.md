@@ -242,7 +242,13 @@ Current protocol support includes:
   focus reporting, and kitty keyboard flag set/push/pop/query;
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12 color queries, OSC 133 prompt markers, OSC 9;4
-  progress, and OSC 9 / OSC 777 notifications;
+  progress, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
+  title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere),
+  at most eight open at once and 16 KiB in all; a later notification with the same id from the same
+  pane replaces the shown one; `o=unfocused` shows only while the pane is not the focused window's
+  active pane, `o=invisible` only while it is not drawn (another tab, zoomed away, or the window
+  covered); a `p=?` query is answered with `p=title,body:o=always,unfocused,invisible`, and other
+  parts (close, icons, buttons) are ignored;
 - DSR, DA, XTVERSION, DECRQSS SGR, DECRQM, color-scheme (DSR 996, mode 2031), cell-size
   (`CSI 16 t`), palette, and kitty keyboard replies (see [Host reports](#host-reports));
 - iTerm2 and Sixel media events, and a kitty graphics subset with Unicode placeholders;

@@ -27,9 +27,11 @@ use sonicterm_grid::{
 use sonicterm_types::ResourceAmount;
 use vte::{Params, Perform};
 
+mod kitty_notify;
 mod program;
 mod staging;
 
+pub use kitty_notify::NotifyOccasion;
 pub use program::{ProgressReport, ProgressState, MAX_NOTIFY_BYTES};
 use staging::StagingReservation;
 pub use staging::{
@@ -136,7 +138,7 @@ const MAX_SEMANTIC_OSC_BYTES: usize = 16 * 1024;
 
 /// Whether `code` is a program-state OSC (`9` or `777`) the raw capture owns.
 fn is_program_osc(code: u16) -> bool {
-    matches!(code, 9 | 777)
+    matches!(code, 9 | 99 | 777)
 }
 
 /// The program-state OSC number `prefix` names: digits then `;`, valued 9 or 777, leading zeros
@@ -211,13 +213,17 @@ pub enum VtEvent {
     CursorStyle(Option<sonicterm_types::CursorRequest>),
     /// OSC 9;4 — show this progress on the platform surfaces, or clear it on `None`.
     Progress(Option<ProgressReport>),
-    /// OSC 9 text or OSC 777 `notify`, whole and unsanitized; a sequence past
-    /// [`MAX_NOTIFY_BYTES`] is refused, never cut.
+    /// OSC 9 text, OSC 777 `notify`, or a completed OSC 99 notification, whole and unsanitized;
+    /// a notification past [`MAX_NOTIFY_BYTES`] is refused, never cut.
     Notify {
-        /// The OSC 777 title; OSC 9 has none.
+        /// The OSC 777 or OSC 99 title; OSC 9 has none.
         title: Option<String>,
         /// The text.
         body: String,
+        /// The OSC 99 id, which replaces a shown notification with the same id from this pane.
+        id: Option<String>,
+        /// When the program asked for it to show; OSC 9 and 777 are always shown.
+        occasion: NotifyOccasion,
     },
     /// RIS reset the terminal, so program-reported state (progress) is cleared.
     ProgramStateReset,
@@ -674,6 +680,8 @@ struct Performer {
     /// The cursor shape and steadiness the program asked for with DECSCUSR; `None` draws the
     /// configured cursor.
     cursor_request: Option<sonicterm_types::CursorRequest>,
+    /// OSC 99 notifications still receiving chunks, bounded.
+    kitty_notifications: kitty_notify::KittyNotifications,
     /// The cell size in pixels the host last reported, answering `CSI 16 t`; mirrors the parser's.
     report_cell_px: Option<(f32, f32)>,
     /// SonicTerm's raw OSC4 capture handles full batched queries before vte's

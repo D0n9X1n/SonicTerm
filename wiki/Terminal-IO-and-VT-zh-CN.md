@@ -183,7 +183,12 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
 - 主屏幕与备用屏幕、应用光标键、括号粘贴、焦点报告，以及 kitty 键盘标志的
   set/push/pop/query；
 - OSC 0/2 标题、带主机校验的 OSC 7 工作目录、OSC 8 超链接、OSC 52 剪贴板事件、
-  OSC 4/10/11/12 颜色查询、OSC 133 提示符标记、OSC 9;4 进度，以及 OSC 9 / OSC 777 通知；
+  OSC 4/10/11/12 颜色查询、OSC 133 提示符标记、OSC 9;4 进度，以及 OSC 9 / OSC 777 / OSC 99 通知。
+  OSC 99 遵循 kitty 协议：标题和正文可一次发送，也可在同一 `i` id 下分块发送，可为纯文本或
+  base64（`e=1`，可在任意位置分割）；同时最多保留八个未完成通知，总计 16 KiB；同一窗格以相同 id
+  发送的后续通知替换已显示的通知；`o=unfocused` 只在该窗格不是已聚焦窗口的活动窗格时显示，
+  `o=invisible` 只在它未被绘制时显示（位于其他标签页、被缩放隐藏或窗口被遮挡）；`p=?` 查询的
+  回复为 `p=title,body:o=always,unfocused,invisible`，其他部分（关闭、图标、按钮）一律忽略；
 - DSR、DA、XTVERSION、DECRQSS SGR、DECRQM、配色方案（DSR 996、模式 2031）、单元格尺寸
   （`CSI 16 t`）、调色板和 kitty 键盘回复（见[主机报告](#主机报告)）；
 - iTerm2 与 Sixel 媒体事件，以及带 Unicode 占位符的 kitty 图形协议子集；

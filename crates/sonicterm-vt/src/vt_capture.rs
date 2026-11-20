@@ -217,8 +217,10 @@ impl Parser {
             Some(RawOsc::Iterm2 { capture, .. }) => capture.retained_bytes(),
             Some(RawOsc::Probe { .. }) | None => 0,
         };
+        // OSC 99 chunks wait here until their notification completes, at most MAX_NOTIFY_BYTES.
+        let notify_bytes = self.performer.kitty_notifications.retained_bytes();
         ResourceAmount {
-            bytes: capture_bytes.saturating_add(osc_bytes),
+            bytes: capture_bytes.saturating_add(osc_bytes).saturating_add(notify_bytes),
             items: self.live_capture_count(),
         }
     }

@@ -142,14 +142,18 @@ pub enum UserEvent {
         /// The active report, or `None` when the pane's progress ended.
         report: Option<sonicterm_vt::vt::ProgressReport>,
     },
-    /// A batch's OSC 9 or OSC 777 notifications: the first one and how many followed it.
+    /// A batch's OSC 9, 777 or 99 notifications of one occasion: the kept one and how many followed.
     ProgramNotify {
         /// The pane whose program sent them.
         pane_id: u64,
-        /// The OSC 777 title, unsanitized; OSC 9 has none.
+        /// The OSC 777 or 99 title, unsanitized; OSC 9 has none.
         title: Option<String>,
-        /// The first notification's text, unsanitized.
+        /// The kept notification's text, unsanitized.
         body: String,
+        /// The OSC 99 id, which replaces this pane's shown notification with the same id.
+        id: Option<String>,
+        /// When the program asked for it to show.
+        occasion: sonicterm_vt::vt::NotifyOccasion,
         /// Notifications in the same batch after the first.
         more: u32,
     },

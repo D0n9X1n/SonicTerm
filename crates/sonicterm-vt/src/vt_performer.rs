@@ -79,6 +79,7 @@ impl Performer {
             reported_theme: None,
             color_scheme_updates: false,
             cursor_request: None,
+            kitty_notifications: kitty_notify::KittyNotifications::default(),
             report_cell_px: None,
             suppress_next_osc4: false,
             scroll_top: None,
@@ -382,6 +383,7 @@ impl Performer {
         self.mouse_tracking = MouseTracking::Off;
         self.focus_reporting = false;
         self.color_scheme_updates = false;
+        self.kitty_notifications.clear();
         // A program's cursor request ends with the reset, so the host draws the configured cursor.
         if self.cursor_request.take().is_some() {
             self.events.push(VtEvent::CursorStyle(None));
