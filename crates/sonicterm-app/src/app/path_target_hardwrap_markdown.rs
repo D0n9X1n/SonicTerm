@@ -932,9 +932,8 @@ fn box_token_uri(
         && text.get(found.start - 2..found.start) == Some("](")
         && text.get(found.end..found.end + 1) == Some(")");
     if line.markdown_pair && !pair && spans.len() > 1 {
-        // When: a `markdown_pair` URL spanning rows is not closed by `)`, as before a link title,
-        // its `](` still owns it, so it stays inert rather than opening a prefix; one on a single
-        // row ends where its own delimiters end it.
+        // When: a `markdown_pair` URL spanning rows lacks its `)`, as before a link title, its
+        // `](` still owns it, so it stays inert rather than opening a prefix.
         return HardwrapUri::Incomplete;
     }
     HardwrapUri::Complete(LogicalTargetCandidate {
