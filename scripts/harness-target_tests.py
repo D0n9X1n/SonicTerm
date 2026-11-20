@@ -17,6 +17,24 @@ gate = launcher.gate
 
 
 class TargetTests(unittest.TestCase):
+    def test_output_a_legacy_console_cannot_encode_is_escaped(self):
+        # A test log holding an emoji is printed escaped on a cp1252 console, not lost to an encode error.
+        import subprocess
+        script = Path(__file__).with_name("harness-target.py")
+        probe = ("import importlib.util, io, sys\n"
+                 f"spec = importlib.util.spec_from_file_location('__main__', {str(script)!r})\n"
+                 "sys.stdout = io.TextIOWrapper(io.BytesIO(), encoding='cp1252')\n"
+                 "sys.argv = ['harness-target.py', '--cfgs', 'none', '--', 'not-a-gate-command']\n"
+                 "module = importlib.util.module_from_spec(spec)\n"
+                 "try:\n    spec.loader.exec_module(module)\nexcept SystemExit:\n    pass\n"
+                 "print('\\U0001f600')\n"
+                 "sys.stdout.flush()\n"
+                 "sys.__stdout__.write(sys.stdout.buffer.getvalue().decode('cp1252'))\n")
+        completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                                   cwd=script.parent, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("\\U0001f600", completed.stdout)
+
     def test_artifact_selection_refuses_ordinary_or_ambiguous_binaries(self):
         # A successful compile cannot accidentally execute an old binary or the ordinary non-test example.
         record = {"reason": "compiler-artifact", "profile": {"test": True},

@@ -31,7 +31,7 @@ fn the_helper_covers_the_real_renderer() {
     let path = concat!(module_path!(), "::the_helper_covers_the_real_renderer");
     let test_name = path.split_once("::").map_or(path, |(_, rest)| rest);
     let mut child = std::process::Command::new(std::env::current_exe().expect("the test binary"))
-        .args([test_name, "--exact", "--nocapture", "--test-threads=1"])
+        .args([test_name, "--exact", "--test-threads=1"])
         .env(COVERAGE_CHILD, "1")
         .spawn()
         .expect("the coverage child process");
