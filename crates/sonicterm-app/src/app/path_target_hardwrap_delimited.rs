@@ -134,6 +134,16 @@ pub(super) fn row_local_uri(
         // When: the scheme `opens_row` text, the row above may run into it.
         return None;
     }
+    let opener_at = found.start - 1;
+    let prose_bracket = matches!(bytes[opener_at], b'(' | b'[')
+        && !(bytes[opener_at] == b'(' && opener_at >= 1 && bytes[opener_at - 1] == b']');
+    let embedded = opener_at + left <= first_text
+        || opener_at.checked_sub(1).is_some_and(|before| url_body_char(bytes[before] as char));
+    if prose_bracket && embedded {
+        // When: a `prose_bracket` opener is `embedded` in URL text or opens the row, the URL may be
+        // part of a longer one that runs into it from before.
+        return None;
+    }
     // A blank ending the URL proves its end only when more text follows it on the row.
     let inner_blank = token_end < bytes.len()
         && token_end + left < last_text

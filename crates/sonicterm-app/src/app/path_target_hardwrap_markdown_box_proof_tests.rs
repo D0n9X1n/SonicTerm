@@ -708,3 +708,17 @@ fn one_row_url_read_two_ways_opens() {
         Some("https://docs.rs/serde_json")
     );
 }
+
+/// A URL nested in another URL's query, which the box wraps, never opens as its own destination:
+/// it is the outer URL's text, and the outer URL holds a second scheme.
+#[test]
+fn nested_url_in_a_wrapped_query_never_opens_alone() {
+    let lines = [
+        "     87  const search_url = \"https://github.com/search?q=reference+".to_string(),
+        "         (https://docs.rs/serde_json)&type=code\";".to_string(),
+        "     88 -old();".to_string(),
+        "     88 +new();".to_string(),
+    ];
+    let display = exact_target_at(&lines, (74, 10), 1, 14);
+    assert_ne!(display.as_deref(), Some("https://docs.rs/serde_json"));
+}

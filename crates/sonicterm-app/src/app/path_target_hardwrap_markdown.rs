@@ -846,6 +846,22 @@ fn box_token_uri(
     }
     let matches = sonicterm_cfg::url_scan::find_urls(text);
     let scheme_start = token_start + pointed_scheme.unwrap_or(scheme_at);
+    // The token's first URL ends at its own delimiters, or where the scanner ends it; when it runs
+    // over the pointed scheme, that scheme is the first URL's text, not a URL of its own.
+    let first_start = token_start + scheme_at;
+    let first_end = match delimited_url(text, first_start, token_end) {
+        Delimited::Url(first) => first.end,
+        Delimited::Absent => matches
+            .iter()
+            .find(|found| found.start == first_start)
+            .map_or(first_start, |found| found.end),
+        Delimited::Unresolved => token_end,
+    };
+    let swallowed = scheme_start > first_start && first_end > scheme_start;
+    if swallowed {
+        // When: the pointed scheme is `swallowed` by the first URL, no row bounds the URL there.
+        return HardwrapUri::Incomplete;
+    }
     let delimited = match delimited_url(text, scheme_start, token_end) {
         Delimited::Url(found) => Some(found),
         Delimited::Unresolved => {
