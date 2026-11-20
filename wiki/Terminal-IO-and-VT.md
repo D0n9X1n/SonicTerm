@@ -653,6 +653,16 @@ scrolls local history on the primary screen and sends cursor keys on the
 alternate screen. SGR encoding alone does not change that fallback. Main and
 child windows use the same routing rule.
 
+Right and middle buttons reach a pane only while its program tracks the mouse:
+button codes 2 and 1, `32 +` the code for motion while held under `?1002` and
+`?1003`, and SGR `m` or the legacy release 3 on release. A right press on the
+status strip stays the strip's. The first right or middle press owns the button
+until its own release: a second one pressed meanwhile is ignored, and the left
+button keeps its own gesture. READONLY, Shift and tracking off keep them local,
+where they do nothing. Losing focus releases a held press. The report goes only to
+the pane under the pointer, never to broadcast receivers. Programs such as herdr
+use this for right-click menus.
+
 A press chooses and latches one gesture owner:
 
 - an unmodified press while tracking is active belongs to the TUI;

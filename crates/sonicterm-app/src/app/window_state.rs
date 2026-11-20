@@ -97,6 +97,8 @@ pub struct WindowState {
     pub mouse_down: bool,
     /// Press-latched routing for the current left-button grid gesture.
     pub(crate) pointer_gesture: Option<PointerGesture>,
+    /// The held right or middle press reported to a pane, apart from the left gesture.
+    pub(crate) secondary_press: Option<super::secondary_button::SecondaryPress>,
     pub selection: Option<Selection>,
     /// Multi-click tracking for word/line selection. `last_click_time` is
     /// the timestamp of the most recent left-press; `last_click_cell` is

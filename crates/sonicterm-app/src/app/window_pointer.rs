@@ -280,10 +280,20 @@ impl App {
                 window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
             });
             let ui_consumed_motion = splitter_hover || scrollbar_owned || target_hover || read_only;
+            let held_cell = self
+                .main_pane_cell_at(cursor_x, cursor_y)
+                .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
+            if let Some(held) =
+                self.main_mut().and_then(|window| window.secondary_motion(held_cell))
+            {
+                // When: a right or middle press is `held`, it owns the motion until its release.
+                if let Some((pane_id, bytes)) = held {
+                    self.write_to_pane(pane_id, bytes, PtyInputSource::PointerMotion);
+                }
+                return;
+            }
             if !ui_consumed_motion {
-                let pointer_cell = self
-                    .main_pane_cell_at(cursor_x, cursor_y)
-                    .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
+                let pointer_cell = held_cell;
                 let pointer_profile = pointer_cell.and_then(|cell| {
                     self.main().and_then(|window| window.panes.get(&cell.pane_id)).map(|pane| {
                         let modes = pane.pointer_modes();

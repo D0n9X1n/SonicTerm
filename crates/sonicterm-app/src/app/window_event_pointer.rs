@@ -10,16 +10,7 @@ pub(in crate::app) fn pointer_report_bytes(
     row: u16,
     col: u16,
 ) -> Vec<u8> {
-    let mut modifier_bits = 0;
-    if modifiers.shift_key() {
-        modifier_bits += 4;
-    }
-    if modifiers.alt_key() || modifiers.super_key() {
-        modifier_bits += 8;
-    }
-    if modifiers.control_key() {
-        modifier_bits += 16;
-    }
+    let modifier_bits = crate::app::secondary_button::pointer_modifier_bits(modifiers);
     let base: u32 = match kind {
         PointerReportKind::LeftPress | PointerReportKind::LeftRelease => 0,
         PointerReportKind::HeldLeftMotion => 32,
@@ -398,10 +389,20 @@ impl App {
                 }
             ));
         }
-        if let WindowEvent::MouseInput { state, button: MouseButton::Right, .. } = event {
-            // When: MouseButton::Right reaches no palette, only the strip handles it; the rest of
-            // right input is consumed unhandled, as before, and never reaches a pane.
-            let _ = self.handle_right_mouse_input(win_id, *state);
+        // A right or middle button that reached no palette never reaches the window handlers,
+        // which handle only the left one: the strip takes a right press first, else a tracking pane.
+        let secondary = match event {
+            WindowEvent::MouseInput { state, button, .. } => {
+                crate::app::secondary_button::SecondaryButton::from_winit(*button)
+                    .map(|secondary| (secondary, *state, *button == MouseButton::Right))
+            }
+            _ => None,
+        };
+        if let Some((secondary, state, right)) = secondary {
+            // When: the event is a `secondary` button, it is consumed here.
+            if !(right && self.handle_right_mouse_input(win_id, state)) {
+                self.route_secondary_button(win_id, secondary, state);
+            }
             return Some(false);
         }
         None

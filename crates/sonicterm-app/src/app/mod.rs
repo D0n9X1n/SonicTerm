@@ -312,6 +312,7 @@ mod scroll;
 pub mod scrollbar_input;
 pub mod scrollbar_visibility;
 mod search_handle;
+mod secondary_button;
 mod selection_gesture;
 pub use selection_gesture::next_click_count;
 use selection_gesture::{PointerCell, PointerGesture, PointerGestureOwner};

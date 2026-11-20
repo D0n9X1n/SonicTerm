@@ -895,6 +895,7 @@ fn report_window_state(
         cursor_pos: (0.0, 0.0),
         mouse_down: false,
         pointer_gesture: None,
+        secondary_press: None,
         selection: None,
         last_click_time: None,
         last_click_cell: (0, 0),
