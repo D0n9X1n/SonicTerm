@@ -137,9 +137,9 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | Key | 默认值 | 行为 |
 | --- | --- | --- |
-| `long_command` | `false` | 在 Windows 上启用长命令桌面通知。macOS 和 Linux 目前不发送此通知。 |
+| `long_command` | `false` | 在所有平台上，运行超过 `threshold_secs` 的命令结束时（OSC 133 shell 集成）发出桌面通知，与 `osc9` 无关。它没有来源窗口，因此不受焦点规则限制。各平台使用的服务见[平台集成](Platform-Integration-zh-CN)。 |
 | `threshold_secs` | `10` | 命令报告的耗时必须大于此值。 |
-| `osc9` | `"app"` | 程序通知（OSC 9 文本、OSC 777 `notify`，以及 herdr 的 `delivery = "terminal"` 发送的 kitty OSC 99）的去向：`"app"` 在窗格所在窗口显示 SonicTerm 的应用内通知；`"desktop"` 在 Windows 上且该窗口未获得焦点时额外发出桌面通知（macOS 和 Linux 与 `"app"` 相同，和 `long_command` 一样）；`"off"` 忽略它们。其他值会导致加载失败。 |
+| `osc9` | `"app"` | 程序通知（OSC 9 文本、OSC 777 `notify`，以及 herdr 的 `delivery = "terminal"` 发送的 kitty OSC 99）的去向：`"app"` 在窗格所在窗口显示 SonicTerm 的应用内通知；`"desktop"` 在该窗口未获得焦点时额外发出桌面通知（在 macOS 上为 SonicTerm 不是活动应用时，因为 macOS 不对活动应用显示横幅）；herdr 的终端通知需要 herdr 的 `delivery = "terminal"` 和这里的 `osc9 = "desktop"` 同时开启；`"off"` 忽略它们。其他值会导致加载失败。 |
 | `taskbar_progress` | `true` | 将 `OSC 9;4` 进度同步到 Windows 任务栏、macOS 程序坞徽标和 Linux 启动器条目；见[平台集成](Platform-Integration-zh-CN)。重新加载时设为 `false` 会立即清除所有位置。 |
 
 #### `[status_line]`

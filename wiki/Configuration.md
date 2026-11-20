@@ -152,9 +152,9 @@ right edge.
 
 | Key | Default | Behavior |
 | --- | --- | --- |
-| `long_command` | `false` | Enables long-command desktop notifications on Windows. macOS and Linux currently do not send this notification. |
+| `long_command` | `false` | Raises a desktop notification on every platform when a command that ran longer than `threshold_secs` finishes (OSC 133 shell integration), whatever `osc9` says. It has no source window, so no focus rule applies. See [Platform Integration](Platform-Integration) for the services each platform uses. |
 | `threshold_secs` | `10` | A reported command duration must be greater than this value. |
-| `osc9` | `"app"` | Where program notifications (OSC 9 text, OSC 777 `notify` and kitty's OSC 99, which herdr's `delivery = "terminal"` sends) go: `"app"` shows SonicTerm's in-app notification in the pane's window, `"desktop"` also raises a desktop notification on Windows while that window is not focused (macOS and Linux behave as `"app"`, as for `long_command`), and `"off"` ignores them. Any other value fails the load. |
+| `osc9` | `"app"` | Where program notifications (OSC 9 text, OSC 777 `notify` and kitty's OSC 99, which herdr's `delivery = "terminal"` sends) go: `"app"` shows SonicTerm's in-app notification in the pane's window, `"desktop"` also raises a desktop notification while that window is not focused (on macOS, while SonicTerm is not the active app, since macOS hides a banner from the active app), and `"off"` ignores them. herdr's terminal notifications need both herdr's `delivery = "terminal"` and `osc9 = "desktop"` here. Any other value fails the load. |
 | `taskbar_progress` | `true` | Mirrors `OSC 9;4` progress to the Windows taskbar, the macOS Dock badge and the Linux launcher entry; see [Platform Integration](Platform-Integration). A reload that sets `false` clears every surface at once. |
 
 #### `[status_line]`

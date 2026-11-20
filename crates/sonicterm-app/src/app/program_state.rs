@@ -196,10 +196,11 @@ impl ProgramState {
     }
 }
 
-/// Whether a notification should also raise a desktop notification: only `desktop` on Windows,
-/// and only while its window is not focused.
-pub(super) fn wants_desktop(delivery: Osc9Delivery, on_windows: bool, focused: bool) -> bool {
-    delivery == Osc9Delivery::Desktop && on_windows && !focused
+/// Whether a notification should also raise a desktop notification: only with `desktop`, and
+/// only while `focused` is false (its window on Windows and Linux, any SonicTerm window on macOS,
+/// which hides a banner while the app is active).
+pub(super) fn wants_desktop(delivery: Osc9Delivery, focused: bool) -> bool {
+    delivery == Osc9Delivery::Desktop && !focused
 }
 
 /// `text` through the shared program-text sanitizer, then capped at `max_bytes`.
@@ -489,16 +490,21 @@ impl App {
         );
         // Showing the toast requested its window's redraw.
         self.note_status_line(|counters| counters.program_toast_redraws += 1);
-        let focused = self.registry.frontmost_window == Some(window_id);
-        if wants_desktop(delivery, cfg!(windows), focused) {
-            // When: wants_desktop holds, Windows also raises a desktop notification, its title
-            // opening with the same origin cue.
+        // macOS hides a banner while the app is active, so there any focused window counts.
+        let focused = match cfg!(target_os = "macos") {
+            true => self.registry.frontmost_window.is_some(),
+            false => self.registry.frontmost_window == Some(window_id),
+        };
+        // A desktop notification is raised too, its title opening with the same origin cue.
+        if wants_desktop(delivery, focused) {
             let mut desktop_title = origin.clone();
             if !title.is_empty() {
                 desktop_title.push(' ');
                 desktop_title.push_str(&title);
             }
-            super::command_events::notify_program(&desktop_title, &body);
+            let native_id =
+                id.as_deref().map(|id| super::desktop_notify::native_notice_id(pane_id, id));
+            super::command_events::notify_program(&desktop_title, &body, native_id);
         }
         self.program.toast = Some(ProgramToast {
             window_id,

@@ -308,6 +308,7 @@ pub mod renderer_retention;
 pub mod retention;
 mod retention_queues;
 pub use retention::{TrimDecision, TrimSkip};
+mod desktop_notify;
 mod scroll;
 pub mod scrollbar_input;
 pub mod scrollbar_visibility;

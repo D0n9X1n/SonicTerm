@@ -367,7 +367,7 @@ application id, and X11 class all use `com.d0n9x1n.SonicTerm`; the X11 instance
 name is `sonicterm`. Keeping one identity aligns launcher activation, task
 grouping, and compositor identity.
 
-Linux has no SonicTerm native menu, desktop-notification bridge,
+Linux has no SonicTerm native menu,
 foreground-process title adapter, native material backdrop, or cross-process tab
 drag. Its shell installs a pure platform normalizer on the shared app runner.
 Startup and every explicit reload pass through that one seam before config is
@@ -557,8 +557,8 @@ boundary. Every program notification, OSC 777 included, opens with an origin
 cue naming the pane's tab, `⟨tab 3⟩`, then the title and body: `⟨tab 3⟩ CI:
 green`, or `⟨tab 3⟩ build done` for OSC 9, which has no title. The sanitizer
 replaces `⟨` `⟩` `<` `>` in program text, so a program cannot forge the cue or
-pass for SonicTerm's own message; a Windows desktop notification's title starts
-with the same cue. Of the notifications one output batch carries, the first
+pass for SonicTerm's own message; a desktop notification's title starts with
+the same cue. Of the notifications one output batch carries, the first
 with text left after sanitizing is shown and the later ones are counted; one
 that sanitizes to nothing is neither shown nor counted. A
 notification from the same pane while its toast is up, or from any pane within
@@ -567,7 +567,28 @@ notification from the same pane while its toast is up, or from any pane within
 coalesced text, and nothing is replayed after the toast expires. Coalesced
 counts, including the count a first batch already carries, are logged at debug,
 never their text. A notification also sets the
-`notify` mark of the `alerts` segment on a background tab.
+`notify` mark of the `alerts` segment on a background tab. A batch keeps one
+notification per OSC 99 occasion, so one held back by `o=unfocused` never hides an
+`always` one; a later OSC 99 notification with the same id from the same pane replaces
+the toast's text instead of counting.
+
+Desktop notifications (`osc9 = "desktop"`, `long_command`) go to one worker thread
+that sends one request at a time, so the event loop never waits on a notification
+service. A full queue (four waiting) drops the newest, counted at debug. Each request
+gets 5 seconds; a native call that cannot be withdrawn (macOS, Windows) and outlives
+it holds every later request, which then shows in-app only, until it finishes, so
+native calls never pile up. Logs name sizes and outcomes, never text. The worker is
+never joined, so a stuck service cannot hold up shutdown. Each platform:
+
+| Platform | Service |
+| --- | --- |
+| macOS | `UNUserNotificationCenter`, only from the bundled app (an unbundled binary, such as `cargo run`, stays in-app). Permission is asked once, on the first desktop notification; a denial keeps notifications in-app. A notification while SonicTerm is the active app stays in-app. |
+| Linux | The XDG notification portal, with SonicTerm registered as `com.d0n9x1n.SonicTerm`; where the portal has no Notification interface (xdg-desktop-portal-wlr: sway, i3) `org.freedesktop.Notifications`, whose body is escaped for markup. A late request is cancelled. |
+| Windows | Toasts through `notify-rust`. |
+
+An OSC 99 id becomes the native identifier `sonicterm-<session>-<pane>-<id>`, with a
+per-process nonce, so a later notification with the same id replaces the desktop one
+(Windows shows a new toast) and never one from another pane or SonicTerm process.
 
 ## Default-handler command
 

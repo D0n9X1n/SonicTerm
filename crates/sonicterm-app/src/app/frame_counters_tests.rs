@@ -311,8 +311,8 @@ pub(super) fn parser_lock_audit(
 
 /// Every plain `lock()` in the crate's non-test sources by file and receiver, each verified to
 /// lock a mutex that is not a pane parser: event-loop proxies, the reaper's state, drag
-/// snapshots, media charges, command queues, redraw targets and the per-window native-request
-/// totals. The worker's image-store and
+/// snapshots, media charges, command queues, redraw targets, the per-window native-request
+/// totals and the desktop notification worker and its completion slot. The worker's image-store and
 /// command-queue locks sit inside its exempt section.
 pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("menubar_bridge.rs", "proxy_slot()", 2),
@@ -339,6 +339,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/window_setup/windows.rs", "brushes", 1),
     ("app/media.rs", "charge", 3),
     ("app/command_events.rs", "command_events", 1),
+    ("app/desktop_notify.rs", "NOTIFIER", 1),
+    ("app/desktop_notify_macos.rs", "done", 1),
     // The request targets an accessibility adapter's handler resolves against; a plain std mutex.
     ("app/accessibility.rs", "targets", 4),
     // The event-loop proxy a default-handler completion posts its result through.

@@ -58,7 +58,7 @@ accesskit = "0.25.1"
 accesskit_winit = { version = "0.34.1", default-features = false, features = ["accesskit_unix", "async-io", "rwh_06"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.14", default-features = false, features = ["open_uri", "async-io"] }
+ashpd = { version = "0.14", default-features = false, features = ["open_uri", "notification", "async-io"] }
 async-io = "2.6"
 libc.workspace = true
 
@@ -70,9 +70,12 @@ core-text = "=22.0.0"
 objc2 = "0.6"
 # The integrated titlebar reads the traffic lights' frames, the current event's click count and
 # the system's titlebar double-click preference.
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSRunLoop", "NSString", "NSUserDefaults", "NSGeometry"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSRunLoop", "NSString", "NSUserDefaults", "NSGeometry", "NSBundle", "NSError"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow", "NSButton", "NSControl", "NSEvent", "NSApplication", "objc2-quartz-core"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CABase", "CADisplayLink", "CAFrameRateRange", "objc2-core-foundation"] }
+# Desktop notifications through the user notification center, only from a bundled app.
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger"] }
+block2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 notify-rust = "4"

@@ -214,3 +214,34 @@ fn pane_exit_makes_the_phase_unknown() {
     assert_eq!(state.phase, CommandPhase::Unknown);
     assert!(state.last.is_some());
 }
+
+/// A long command notifies on the desktop whenever `long_command` is on, whatever `osc9` says
+/// (which governs program notifications only), and never while it is off or the command was short.
+#[test]
+fn long_command_notifications_follow_only_their_own_setting() {
+    use sonicterm_cfg::config::Osc9Delivery;
+    let long = Some(Duration::from_secs(120));
+    for osc9 in [Osc9Delivery::App, Osc9Delivery::Off, Osc9Delivery::Desktop] {
+        let mut config = Config::default();
+        config.notifications.long_command = true;
+        config.notifications.osc9 = osc9;
+        assert_eq!(
+            long_command_message(&config, long, Some(0)).as_deref(),
+            Some("Command completed successfully after 120s"),
+            "{osc9:?}"
+        );
+        assert_eq!(long_command_message(&config, Some(Duration::from_secs(1)), Some(0)), None);
+        config.notifications.long_command = false;
+        assert_eq!(long_command_message(&config, long, Some(1)), None);
+    }
+}
+
+/// Native ids carry the pane and a per-process nonce, so two panes, or two SonicTerm processes,
+/// using the same OSC 99 id never replace each other's notifications.
+#[test]
+fn native_ids_are_distinct_per_pane() {
+    let first = crate::app::desktop_notify::native_notice_id(1, "job");
+    assert_eq!(first, crate::app::desktop_notify::native_notice_id(1, "job"));
+    assert_ne!(first, crate::app::desktop_notify::native_notice_id(2, "job"));
+    assert!(first.starts_with("sonicterm-") && first.ends_with("-1-job"), "{first}");
+}
