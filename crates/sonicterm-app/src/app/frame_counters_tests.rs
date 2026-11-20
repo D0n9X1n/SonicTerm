@@ -394,7 +394,7 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/child_tabs.rs", 1),
     ("app/child_window.rs", 2),
     ("app/child_window_pointer.rs", 1),
-    ("app/config_apply.rs", 2),
+    ("app/config_apply.rs", 1),
     ("app/keymap_dispatch/explicit_source.rs", 1),
     // The report pane's theme seed at creation, and the report feed that replaces its text.
     ("app/memory_report_window.rs", 2),
@@ -402,7 +402,7 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/overlays.rs", 2),
     // The local status line a held pane or a failed command launch writes into its own grid.
     ("app/pane_exit.rs", 1),
-    ("app/pane_refresh.rs", 3),
+    ("app/pane_refresh.rs", 4),
     ("app/pane_state.rs", 1),
     ("app/pane_target.rs", 1),
     ("app/mcp/control_loop.rs", 2),
