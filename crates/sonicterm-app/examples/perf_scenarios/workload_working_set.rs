@@ -273,6 +273,9 @@ fn open_palette_on_main_frame(app: &mut sonicterm_app::app::App) -> Result<(), S
 #[path = "workload_renderer_fixture.rs"]
 mod real_renderer_coverage;
 
+#[path = "workload_coverage_watchdog.rs"]
+mod coverage_watchdog;
+
 #[cfg(test)]
 #[path = "workload_working_set_tests.rs"]
 mod workload_working_set_tests;
