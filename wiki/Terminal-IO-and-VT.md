@@ -241,7 +241,8 @@ Current protocol support includes:
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12 color queries, OSC 133 prompt markers, OSC 9;4
   progress, and OSC 9 / OSC 777 notifications;
-- DSR, DA, XTVERSION, DECRQSS SGR, DECRQM for mode 2026, palette, and kitty keyboard replies;
+- DSR, DA, XTVERSION, DECRQSS SGR, DECRQM, color-scheme (DSR 996, mode 2031), cell-size
+  (`CSI 16 t`), palette, and kitty keyboard replies (see [Host reports](#host-reports));
 - iTerm2 and Sixel media events, and a kitty graphics subset with Unicode placeholders;
 - synchronized output (DEC 2026).
 
@@ -255,9 +256,25 @@ opens before that frame. And a window holds for at most 150 ms from the first fr
 it held in a stretch, whichever panes hold it. The first frame, a
 visibility change, device recovery, a changed surface size and surface recovery
 still present the live grid. DECRQM `CSI ? 2026 $ p` is answered with
-`CSI ? 2026 ; Ps $ y`, where `Ps` is 1 while an update is open and 2 otherwise; no
-other mode is answered. On Windows, ConPTY may move or drop the brackets, and the
+`CSI ? 2026 ; Ps $ y`, where `Ps` is 1 while an update is open and 2 otherwise. On Windows, ConPTY may move or drop the brackets, and the
 hold acts only on brackets that reach the parser.
+
+### Host reports
+
+Programs such as herdr ask the terminal about itself at startup and wait for each answer.
+SonicTerm answers:
+
+| Request | Reply |
+| --- | --- |
+| DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`: `Pm` 1 set, 2 reset, for modes 1, 7, 47, 67, 1000, 1002, 1003, 1004, 1006, 1047, 1049, 2004, 2026, 2031 and 9001 (each of 1000/1002/1003 reads set only while it is the selected tracking mode); 0 (not recognized) for every other mode, including 25, 1005, 1015 and 1016, so a program that probes them falls back at once. A request naming several modes gets no reply. |
+| DSR 996 `CSI ? 996 n` | `CSI ? 997 ; 1 n` for a dark theme, `; 2 n` for a light one, from the theme's `appearance`. |
+| DEC mode 2031 | While a program has set it, every theme change that alters a readable color (foreground, background, cursor, the 16 theme colors) or the scheme sends the same `CSI ? 997 ; Ps n` report, also when the scheme stays the same, so a program that re-reads colors on the report picks up the new palette. A reload, the theme picker's preview and its choice all count; the report goes through the pane's reply path. SonicTerm does not follow the system's light or dark appearance, so the report fires only when the theme changes. |
+| `OSC 4 ; N ; ?` | 0..=15 from the theme; 16..=255 from the xterm 6×6×6 cube and gray ramp, the same table the renderer draws with. |
+| `CSI 16 t` | `CSI 6 ; height ; width t`, the cell size in whole physical pixels; no reply until the window reports a cell size. Other window operations are ignored. |
+
+Programs cannot set colors: OSC 4/10/11/12 color changes and OSC 104/110/111/112
+resets are ignored, whichever program sends them. SGR pixel mouse reporting (mode 1016)
+is not supported, and DECRQM says so.
 
 On Windows, a pane's program writes to a ConPTY pseudoconsole. ConPTY
 interprets that output and passes its own rendition to SonicTerm, so the

@@ -261,11 +261,11 @@ pub(crate) mod pane_signal;
 pub(crate) use pane_signal::PaneSignal;
 mod pane_launch;
 mod pane_refresh;
-use pane_refresh::update_terminal_ime_cursor_area;
 pub use pane_refresh::{
     invalidate_selection_for_content, mark_all_panes_dirty, resize_all_panes,
     resize_panes_to_rects, seed_parser_theme_colors,
 };
+use pane_refresh::{propagate_theme_to_pane_parsers, update_terminal_ime_cursor_area};
 mod pane_state;
 mod pane_target;
 mod perf_control;

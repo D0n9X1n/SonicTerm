@@ -75,6 +75,10 @@ impl Performer {
             theme_bg: None,
             theme_cursor: None,
             theme_palette: [None; 16],
+            theme_color_scheme: None,
+            reported_theme: None,
+            color_scheme_updates: false,
+            report_cell_px: None,
             suppress_next_osc4: false,
             scroll_top: None,
             scroll_bottom: None,
@@ -191,7 +195,12 @@ impl Performer {
     }
 
     fn reply_osc4_query(&self, idx: u8, terminator: &[u8]) {
-        if let Some(Some((red, green, blue))) = self.theme_palette.get(idx as usize).copied() {
+        // 0..=15 are the seeded theme colors; 16..=255 the shared table the renderer draws with.
+        let color = match self.theme_palette.get(usize::from(idx)) {
+            Some(seeded) => *seeded,
+            None => sonicterm_types::indexed_rgb(idx),
+        };
+        if let Some((red, green, blue)) = color {
             let mut buf = Vec::with_capacity(28);
             buf.extend_from_slice(b"\x1b]4;");
             buf.extend_from_slice(idx.to_string().as_bytes());
@@ -371,6 +380,7 @@ impl Performer {
         self.modify_other_keys = 0;
         self.mouse_tracking = MouseTracking::Off;
         self.focus_reporting = false;
+        self.color_scheme_updates = false;
         self.set_synchronized_output(false);
         self.current_hyperlink = None;
         self.scroll_top = None;

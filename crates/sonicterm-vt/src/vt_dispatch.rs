@@ -57,11 +57,22 @@ impl Perform for Performer {
                     return;
                 }
                 'p' if inter == b"?$" => {
-                    // When: action is DECRQM; only mode 2026 is answered, every other mode stays silent as before.
+                    // When: action is DECRQM for one private mode, answer its stored state, or 0
+                    // when this parser does not store it; a request naming several modes stays silent.
                     let mut modes = params.iter();
-                    if let (Some([2026]), None) = (modes.next(), modes.next()) {
-                        let state = if self.synchronized_output { 1 } else { 2 };
-                        self.reply(format!("\x1b[?2026;{state}$y").as_bytes());
+                    if let (Some([mode]), None) = (modes.next(), modes.next()) {
+                        let state = self.private_mode_state(*mode);
+                        self.reply(format!("\x1b[?{mode};{state}$y").as_bytes());
+                    }
+                    return;
+                }
+                'n' => {
+                    // When: action is a private DSR, answer only the color-scheme query 996.
+                    if let (Some([996]), None) = {
+                        let mut queries = params.iter();
+                        (queries.next(), queries.next())
+                    } {
+                        self.report_color_scheme();
                     }
                     return;
                 }
@@ -351,6 +362,14 @@ impl Perform for Performer {
                         self.reply(format!("\x1b[{row};{col}R").as_bytes());
                     }
                     _ => {}
+                }
+            }
+            't' if inter.is_empty() => {
+                // Only the one-parameter cell-size request `CSI 16 t` is answered; no window is
+                // ever moved, resized or iconified.
+                let mut operations = params.iter();
+                if let (Some([16]), None) = (operations.next(), operations.next()) {
+                    self.report_cell_size();
                 }
             }
             'c' => {
@@ -840,3 +859,7 @@ mod vt_dispatch_shell_token_tests;
 #[cfg(test)]
 #[path = "vt_dispatch_exit_source_tests.rs"]
 mod vt_dispatch_exit_source_tests;
+
+#[cfg(test)]
+#[path = "vt_dispatch_host_reports_tests.rs"]
+mod vt_dispatch_host_reports_tests;

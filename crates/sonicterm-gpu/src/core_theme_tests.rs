@@ -123,3 +123,14 @@ fn indexed_color_supports_full_xterm_256_palette() {
     assert_eq!(indexed(232, &theme), Some(ChromeColor::rgb(8, 8, 8)));
     assert_eq!(indexed(255, &theme), Some(ChromeColor::rgb(238, 238, 238)));
 }
+
+/// Every cube and gray-ramp color the renderer draws is the shared table's entry, which `OSC 4`
+/// replies also read, so a program that asks for a color is told the one it gets.
+#[test]
+fn indexed_colors_above_15_are_the_shared_table() {
+    let theme = Theme::default();
+    for index in 16..=255u8 {
+        let (red, green, blue) = sonicterm_types::indexed_rgb(index).expect("16..=255 is tabled");
+        assert_eq!(indexed(index, &theme), Some(ChromeColor::rgb(red, green, blue)), "{index}");
+    }
+}

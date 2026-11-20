@@ -684,10 +684,10 @@ fn decrqm_reports_synchronized_output_state() {
     assert_eq!(parser.grid().cursor.col, 0, "a query prints nothing");
 }
 
-/// Only mode 2026 is answered: DECRQM for any other private mode, and an unhandled `?` final,
-/// stay silent and change no mode, keyboard, pointer or cursor state, as before 2026 was answered.
+/// A private-mode query changes no mode, keyboard, pointer or cursor state; a DECRQM naming two
+/// modes and an unhandled `?` final stay unanswered.
 #[test]
-fn other_private_mode_queries_stay_unanswered() {
+fn private_mode_queries_change_no_state() {
     let mut parser = Parser::new(Grid::new(8, 2));
     parser.advance(b"\x1b[?1h\x1b[?2026h");
     let before = (
@@ -697,13 +697,17 @@ fn other_private_mode_queries_stay_unanswered() {
         parser.grid().cursor.row,
         parser.grid().cursor.col,
     );
-    for query in
-        [&b"\x1b[?1$p"[..], b"\x1b[?25$p", b"\x1b[?2026;1$p", b"\x1b[?2026z", b"\x1b[?2026$q"]
-    {
+    for (query, answered) in [
+        (&b"\x1b[?1$p"[..], true),
+        (b"\x1b[?25$p", true),
+        (b"\x1b[?2026;1$p", false),
+        (b"\x1b[?2026z", false),
+        (b"\x1b[?2026$q", false),
+    ] {
         let (consumed, events, reply) = parser.advance_with_replies(query);
         assert_eq!(consumed, query.len(), "{query:?}");
         assert!(events.is_empty(), "{query:?}");
-        assert!(reply.is_empty(), "{query:?} must not be answered");
+        assert_eq!(!reply.is_empty(), answered, "{query:?}");
         let after = (
             parser.synchronized_output(),
             parser.keyboard_input_snapshot(),

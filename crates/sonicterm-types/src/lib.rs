@@ -24,6 +24,7 @@ pub mod paste_encoding;
 pub mod resource;
 pub mod script_draft;
 pub mod shell_quote;
+pub mod terminal_report;
 pub mod traits;
 pub mod window_key;
 
@@ -53,6 +54,7 @@ pub use script_draft::{
     classify_shell, format_script_draft, shell_quote_powershell, DraftRejection, ShellDialect,
 };
 pub use shell_quote::shell_quote_posix;
+pub use terminal_report::{indexed_rgb, ColorScheme};
 pub use traits::{ClipboardBackend, FrameLike, PaintError, Painter, PtyTransport, WindowBackend};
 pub use window_key::WindowKey;
 

@@ -92,18 +92,6 @@ fn resolve_runtime_asset_path(
     }
 }
 
-fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Theme) {
-    for pane in panes.values() {
-        // Config live-reload runs on the app thread, not the render hot path,
-        // so lock() is intentional here. Dropping this update would leave OSC
-        // 10/11/12 + OSC 4 palette replies stale for shells already attached to
-        // the pane. Re-seeds the full set (fg/bg/cursor + 16-colour palette) so
-        // a theme swap also refreshes the OSC 4 palette.
-        let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
-        super::seed_parser_theme_colors(&mut parser, theme);
-    }
-}
-
 /// Accepted `weight_scale` range, matching the clamp in `sonicterm-cfg`,
 /// `sonicterm-gpu`, and `sonicterm-engine`. Stepping past either end is a
 /// no-op rather than an error.
@@ -213,9 +201,7 @@ impl App {
                         }
                     }
                     self.theme = theme;
-                    for child in self.registry.windows.values() {
-                        propagate_theme_to_pane_parsers(&child.panes, &self.theme);
-                    }
+                    self.reseed_pane_themes();
                     // Theme swap changes presentation (colors) without
                     // mutating cell contents — mark every pane dirty so
                     // the renderer re-shapes with the new palette.
@@ -669,6 +655,26 @@ impl App {
 
     /// Make `theme`, already adjusted for accessibility, the live theme named `name`: every
     /// window's renderer and pane parsers take its colors and every pane redraws.
+    /// Reseed every pane parser with the live theme, then send each mode 2031 report through its
+    /// pane's reply path, never the input path, so READONLY and broadcast neither stop nor copy
+    /// it. A pane without a PTY, such as a report window's, has no program to tell.
+    fn reseed_pane_themes(&self) {
+        let mut reports = Vec::new();
+        for child in self.registry.windows.values() {
+            reports.extend(super::propagate_theme_to_pane_parsers(&child.panes, &self.theme));
+        }
+        for (pane_id, report) in reports {
+            let Some(pty) = self.registry.pane(pane_id).and_then(|pane| pane.pty.as_ref()) else {
+                // When: the pane is gone or has no PTY, the report has no listener.
+                continue;
+            };
+            // A refused report leaves the program on its old colors until it asks again.
+            if let Err(error) = pty.reply_sender().send(report) {
+                tracing::debug!(target: "sonicterm_app::app", pane_id, %error, "color-scheme report not sent");
+            }
+        }
+    }
+
     pub(super) fn install_theme(&mut self, theme: Theme, name: &str) {
         if let Some(renderer) = self.main_renderer_mut() {
             renderer.set_theme(&theme);
@@ -680,9 +686,7 @@ impl App {
         }
         self.theme = theme;
         self.config.theme = name.to_string();
-        for child in self.registry.windows.values() {
-            propagate_theme_to_pane_parsers(&child.panes, &self.theme);
-        }
+        self.reseed_pane_themes();
         // Theme swap changes presentation (colors) without mutating
         // cell contents — mark every pane dirty so the renderer
         // re-shapes with the new palette.
