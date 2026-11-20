@@ -387,10 +387,31 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
         };
         decided = Some(match decided {
             None => reading,
+            // A markdown target the diff reading joins opens as the padded markdown rule always
+            // read it, a leading sign as the diff's, so no such link stops opening.
+            Some(earlier) if markdown_target(&mut rows, &earlier) => earlier,
             Some(earlier) => agreed(earlier, reading),
         });
     }
     decided.unwrap_or(HardwrapUri::Incomplete)
+}
+
+/// Whether `decided` opens a URL a markdown `](` opens on the row where it starts.
+fn markdown_target(rows: &mut BoxRows<'_, '_>, decided: &HardwrapUri) -> bool {
+    let HardwrapUri::Complete(candidate) = decided else {
+        // When: the reading is not `Complete`, it opens no markdown target.
+        return false;
+    };
+    let Some(first) = candidate.spans.first() else {
+        // When: the candidate has no `first` span, it opens nothing.
+        return false;
+    };
+    let start = usize::from(first.start_col);
+    let Some(row) = rows.get(first.row).filter(|_| start >= 2) else {
+        // When: the URL's row is unreadable or starts too near its edge, no `](` precedes it.
+        return false;
+    };
+    row.cells[start - 2].ch == ']' && row.cells[start - 1].ch == '('
 }
 
 /// One decision from two readings of a box: the same URL with the same spans, or neither owning

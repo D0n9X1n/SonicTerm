@@ -313,10 +313,11 @@ cargo build -p sonicterm-app
   before any refusal, or `Incomplete` when a narrower gutter nearby shows the head was misread),
   read under the same layouts; a `](`-opened URL not closed by `)` (a link title) is `Incomplete`.
   Text after a gutter proves markdown; a replaced line, or context rows beside a signed row
-  markdown never writes (`diff_only_sign`: not a list item, not a `---` rule), proves a diff;
-  otherwise both layouts are read and `agreed` opens a URL only when both find the same one. An
-  unproven diff reading that a continuation of the line contradicts (another character in the sign
-  column, `diff_contradicted`) is not read. `delimited_url` (`path_target_hardwrap_delimited.rs`)
+  markdown rarely writes (`diff_only_sign`: any `+` but `+++`; a `-` that is no list item or
+  `---` rule), proves a diff; otherwise both layouts are read and `agreed` opens a URL only when
+  both find the same one. An unproven diff reading that a continuation of the line contradicts
+  (another character in the sign column, `diff_contradicted`) is not read; a `](` target the diff
+  reading joins stands (`markdown_target`), as the padded markdown rule read signed lines. `delimited_url` (`path_target_hardwrap_delimited.rs`)
   gives the URL under the pointer that `(`, `](`, `[`, a quote, a backtick or `<` opens the
   extent its matching closer fixes, checked whole with `url_scan::is_url`; an opener whose closer
   is another character or a doubled quote, or a prose-bracket URL ending in `!`/`?`, is

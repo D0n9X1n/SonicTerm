@@ -37,9 +37,10 @@ pub(super) fn diff_contradicted(
     false
 }
 
-/// Whether the sign `sign` right after a numbered row's gutter end `gutter_end` opens a line
-/// markdown never writes: not a list item (a sign then one or two blanks before text) and not a
-/// thematic break or front matter (the sign repeated to the end), so only a diff shows it.
+/// Whether the sign `sign` right after a numbered row's gutter end `gutter_end` opens a line only a
+/// diff shows. A `+` does unless the row repeats it to the end (`+++`): markdown rarely bullets
+/// with `+`, while an added line indented two blanks is common. A `-` does unless the row is a
+/// markdown list item (a sign then one or two blanks before text) or a rule (`---`), both common.
 pub(super) fn diff_only_sign(row: &BoxRow<'_>, gutter_end: usize, sign: char) -> bool {
     let diff_sign = matches!(sign, '+' | '-');
     if !diff_sign {
@@ -49,8 +50,9 @@ pub(super) fn diff_only_sign(row: &BoxRow<'_>, gutter_end: usize, sign: char) ->
     let after = |offset: usize| row.cells.get(gutter_end + 1 + offset);
     let blanks =
         (1..=3).take_while(|offset| after(*offset).is_some_and(|cell| box_blank(cell))).count();
-    let list_item =
-        (1..=2).contains(&blanks) && after(blanks + 1).is_some_and(|cell| !box_blank(cell));
+    let list_item = sign == '-'
+        && (1..=2).contains(&blanks)
+        && after(blanks + 1).is_some_and(|cell| !box_blank(cell));
     let last = row.text.map_or(gutter_end + 1, |(_, last)| last);
     let rule = (gutter_end + 1..=last)
         .all(|column| row.cells.get(column).is_some_and(|cell| cell.ch == sign));

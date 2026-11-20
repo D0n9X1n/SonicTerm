@@ -177,17 +177,23 @@ fn diff_box_with_an_exact_width_line_still_joins() {
     assert_eq!(candidate.target, DetectedTarget::Uri("https://example.test/aaaabbbb".into()));
 }
 
-/// In a box the rows do not prove, a markdown pair still joins only when both layouts read the
-/// same URL: a continuation opening with `-` in an all-signed box may be a sign or text.
+/// A markdown target on a signed line opens as the padded markdown rule always read it, the
+/// leading sign as the diff's: a removed nested list item's wrapped link joins without the sign.
 #[test]
-fn unproven_signed_markdown_pair_needs_both_readings() {
+fn signed_markdown_target_reads_the_sign_as_the_diff() {
     let lines = [
-        "     87 - [doc](https://example.test/aaaa".to_string(),
-        "        -preview.zip)".to_string(),
-        "     88 - More installation instructions.".to_string(),
+        "     86  ## SSH setup".to_string(),
+        "     87 -  - [SSH setup](https://docs.github.com/en/authentication/connec".to_string(),
+        "        -ting-to-github-with-ssh)".to_string(),
     ];
-    let decided = decide_in_frame(&lines, (60, 10), 0, AbsoluteCell { row: 0, col: 24 });
-    assert_eq!(decided, HardwrapUri::Incomplete);
+    let expected = "https://docs.github.com/en/authentication/connecting-to-github-with-ssh";
+    for (row, col) in [(1, 30), (2, 12)] {
+        assert_eq!(
+            exact_target_at(&lines, (80, 10), row, col).as_deref(),
+            Some(expected),
+            "row {row}"
+        );
+    }
 }
 
 /// Numbered tool output that holds two URLs on consecutive rows proves no box: each URL stays its
@@ -499,20 +505,20 @@ fn contradicting_continuation_opens_from_either_row() {
     }
 }
 
-/// A `+` list item indented two blanks is markdown as well as an added line: a URL whose
-/// continuation opens with `+` is never opened without it.
+/// An added line indented two blanks is an added line, not a `+` markdown list item: its
+/// wrapped URL joins without the repeated sign, as on a line indented further.
 #[test]
-fn two_blank_plus_list_item_never_drops_a_plus() {
+fn added_line_indented_two_blanks_joins() {
     let lines = [
-        "     87 +  <https://www.google.com/search?q=terminal".to_string(),
-        "        +emulator>".to_string(),
-        "     88    Search terminal emulators.".to_string(),
+        "     86  ## SSH setup".to_string(),
+        "     87 +  - [SSH setup](https://docs.github.com/en/authentication/connec".to_string(),
+        "        +ting-to-github-with-ssh)".to_string(),
     ];
-    for (row, col) in [(0, 30), (1, 12)] {
-        let display = exact_target_at(&lines, (59, 10), row, col);
-        assert_ne!(
-            display.as_deref(),
-            Some("https://www.google.com/search?q=terminalemulator"),
+    let expected = "https://docs.github.com/en/authentication/connecting-to-github-with-ssh";
+    for (row, col) in [(1, 30), (2, 12)] {
+        assert_eq!(
+            exact_target_at(&lines, (80, 10), row, col).as_deref(),
+            Some(expected),
             "row {row}"
         );
     }
@@ -523,20 +529,29 @@ fn two_blank_plus_list_item_never_drops_a_plus() {
 #[test]
 fn update_views_join_on_every_row_kind() {
     let uri = "https://example.test/aaaaaaaaaa/bbbbbbbbbb/cccccccccc";
-    let source = format!("    get \"{uri}\" -o out");
     let hunks: [(&str, [char; 3]); 3] = [
         ("deletion", [' ', '-', ' ']),
         ("addition", [' ', '+', ' ']),
         ("replacement", ['-', '+', ' ']),
     ];
-    for (label, signs) in hunks {
+    // Source lines indented two and four blanks: both are ordinary code in a diff. A deletion
+    // whose only removed line opens `-  ` reads as a markdown list item too, so its quoted URL
+    // stays inert, as the scanner alone also opens none of it whole; that hunk uses four blanks.
+    for (label, signs, indent) in
+        hunks.iter().flat_map(|(label, signs)| [(label, signs, 2), (label, signs, 4)])
+    {
+        if *label == "deletion" && indent == 2 {
+            // The two-blank deletion is the list-item case described above.
+            continue;
+        }
+        let source = format!("{}get \"{uri}\" -o out", " ".repeat(indent));
         for url_at in 0..3 {
             let mut lines = box_line(&gutter(85, ' '), ' ', "  try {", 40, 8);
             let mut url_row = 0;
             for (index, sign) in signs.iter().enumerate() {
                 // A replacement repeats the line number of the line it replaces.
                 let number =
-                    if label == "replacement" && index == 1 { 86 } else { 86 + index as u32 };
+                    if *label == "replacement" && index == 1 { 86 } else { 86 + index as u32 };
                 let text = if index == url_at { source.as_str() } else { "    x = 1" };
                 if index == url_at {
                     url_row = lines.len();
@@ -551,9 +566,10 @@ fn update_views_join_on_every_row_kind() {
                 AbsoluteCell { row: url_row as u64, col: start as u16 + 2 },
             );
             let HardwrapUri::Complete(candidate) = decided else {
-                panic!("{label} row {url_at}: {decided:?}")
+                panic!("{label} indent {indent} row {url_at}: {decided:?}")
             };
-            assert_eq!(candidate.target, DetectedTarget::Uri(uri.into()), "{label} row {url_at}");
+            let message = format!("{label} indent {indent} row {url_at}");
+            assert_eq!(candidate.target, DetectedTarget::Uri(uri.into()), "{message}");
         }
     }
 }
