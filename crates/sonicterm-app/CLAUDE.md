@@ -315,8 +315,9 @@ cargo build -p sonicterm-app
   Text after a gutter proves markdown; a replaced line, or context rows beside a signed row
   markdown rarely writes (`diff_only_sign`: any `+` but `+++`; a `-` that is no list item or
   `---` rule), proves a diff; otherwise both layouts are read and `agreed` opens a URL only when
-  both find the same one. An unproven diff reading that a continuation of the line contradicts
-  (another character in the sign column, `diff_contradicted`) is not read; a `](` target the diff
+  both find the same one. A line whose continuation no diff row could be (another character in the
+  sign column, `diff_contradicted`) is markdown whatever other rows prove, or `Incomplete` when
+  its head is signed; a `](` target the diff
   reading joins stands (`markdown_target`), as the padded markdown rule read signed lines. `delimited_url` (`path_target_hardwrap_delimited.rs`)
   gives the URL under the pointer that `(`, `](`, `[`, a quote, a backtick or `<` opens the
   extent its matching closer fixes, checked whole with `url_scan::is_url`; an opener whose closer

@@ -365,14 +365,22 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
                 false => HardwrapUri::NotApplicable,
             };
         };
+        // A continuation of this line that no diff row could be outweighs evidence elsewhere in
+        // the box: the line is markdown when its head is unsigned, and unreadable when signed.
         let contradicted = diff_contradicted(&mut rows, (head_row, gutter_end, sign), pointed.row);
-        if !contradicted || diff_proven {
-            // A diff reading stands unless a row of the line contradicts it in an unproven diff.
-            readings.push(BoxLayout::Diff(sign));
-        }
-        if !diff_proven {
-            // Not `diff_proven`: the rows may be a markdown list or indented text.
-            readings.push(BoxLayout::Markdown);
+        match (contradicted, sign) {
+            (true, Some(_)) => {
+                // When: a signed head's continuation is `contradicted`, neither layout reads it.
+                return HardwrapUri::Incomplete;
+            }
+            (true, None) => readings.push(BoxLayout::Markdown),
+            (false, _) => {
+                readings.push(BoxLayout::Diff(sign));
+                if !diff_proven {
+                    // Not `diff_proven`: the rows may be a markdown list or indented text.
+                    readings.push(BoxLayout::Markdown);
+                }
+            }
         }
     }
     let mut decided = None;

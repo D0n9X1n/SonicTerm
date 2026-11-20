@@ -447,7 +447,8 @@ rule of repeated signs (`+++`), or a `-` row that is neither a list item (`-`,
 then one or two blanks before text) nor a rule (`---`). Any other box may be
 either, so a joined URL opens only when both readings find the same one, with
 two exceptions: a continuation of the line that writes another character where a
-diff line repeats its sign, which no diff shows, makes the line markdown; and a
+diff line repeats its sign, which no diff shows, makes the line markdown whatever
+other rows of the box suggest (inert when the line itself is signed); and a
 markdown `](…)` target the diff reading joins opens that way, as SonicTerm has
 always read a signed line's leading sign. A `+` list item whose URL wraps just
 before a `+`, or a `-` list item whose link wraps just before a `-`, is then read

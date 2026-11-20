@@ -573,3 +573,23 @@ fn update_views_join_on_every_row_kind() {
         }
     }
 }
+
+/// A line whose continuation no diff row could be is markdown, whatever a `+` row elsewhere in the
+/// box suggests: a `+` list item above an indented link leaves the link joining.
+#[test]
+fn plus_bullet_elsewhere_never_blocks_an_indented_link() {
+    let lines = [
+        "     86 + Configure SSH".to_string(),
+        "     87   [SSH setup](https://docs.github.com/en/authentication/connecting".to_string(),
+        "        -to-github-with-ssh)".to_string(),
+        "     88   Next steps.".to_string(),
+    ];
+    let expected = "https://docs.github.com/en/authentication/connecting-to-github-with-ssh";
+    for (row, col) in [(1, 30), (2, 12)] {
+        assert_eq!(
+            exact_target_at(&lines, (80, 10), row, col).as_deref(),
+            Some(expected),
+            "row {row}"
+        );
+    }
+}
