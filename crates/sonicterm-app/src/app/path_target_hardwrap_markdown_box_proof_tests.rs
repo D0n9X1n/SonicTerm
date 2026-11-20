@@ -623,3 +623,17 @@ fn unreadable_line_opens_a_destination_after_a_wrapped_label() {
         Some("https://en.cppreference.com/w/cpp/23")
     );
 }
+
+/// A titled markdown destination that sits whole on one row opens even when its label wraps in
+/// a box the rows do not prove: only a titled URL broken across rows stays inert.
+#[test]
+fn titled_destination_after_a_wrapped_label_opens() {
+    let lines = [
+        "      1 - Compare the differences for the next standard revision in [C".to_string(),
+        "        ++23](https://en.cppreference.com/w/cpp/23 \"C++23\").".to_string(),
+    ];
+    assert_eq!(
+        exact_target_at(&lines, (77, 10), 1, 20).as_deref(),
+        Some("https://en.cppreference.com/w/cpp/23")
+    );
+}
