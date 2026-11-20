@@ -722,3 +722,16 @@ fn nested_url_in_a_wrapped_query_never_opens_alone() {
     let display = exact_target_at(&lines, (74, 10), 1, 14);
     assert_ne!(display.as_deref(), Some("https://docs.rs/serde_json"));
 }
+
+/// A badge whose link destination nests a URL in its wrapped query never opens the nested URL:
+/// the destination, not the badge image, runs over it.
+#[test]
+fn nested_url_in_a_badge_destination_never_opens_alone() {
+    let lines = [
+        "      1 [![Examples](https://img.shields.io/badge/Examples-search-blue)](https://github.com/search?q=reference+".to_string(),
+        "        (https://docs.rs/serde_json)&type=code)".to_string(),
+        "      2 Next steps.".to_string(),
+    ];
+    let display = exact_target_at(&lines, (118, 10), 1, 15);
+    assert_ne!(display.as_deref(), Some("https://docs.rs/serde_json"));
+}
