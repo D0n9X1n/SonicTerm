@@ -593,3 +593,18 @@ fn plus_bullet_elsewhere_never_blocks_an_indented_link() {
         );
     }
 }
+
+/// A signed line whose continuation fits no layout keeps a URL that sits whole on one row: only a
+/// URL the line breaks across rows stays inert there.
+#[test]
+fn unreadable_signed_line_keeps_a_single_row_url() {
+    let lines = [
+        "     87 - See https://doc.rust-lang.org/book/ and then check with `cargo ".to_string(),
+        "        +nightly clippy`.".to_string(),
+        "     88   Address any warnings.".to_string(),
+    ];
+    assert_eq!(
+        exact_target_at(&lines, (80, 10), 0, 25).as_deref(),
+        Some("https://doc.rust-lang.org/book/")
+    );
+}

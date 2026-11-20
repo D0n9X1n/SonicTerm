@@ -351,6 +351,7 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
     // opens only when both readings find the same one. An unproven box is read the same way, and
     // only a markdown `](`…`)` pair joins in it, as a padded markdown target.
     let mut readings = SmallVec::<[BoxLayout; 2]>::new();
+    let mut unreadable = false;
     if evidence.markdown_text {
         // Text after a gutter: no row is a diff.
         readings.push(BoxLayout::Markdown);
@@ -370,8 +371,10 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
         let contradicted = diff_contradicted(&mut rows, (head_row, gutter_end, sign), pointed.row);
         match (contradicted, sign) {
             (true, Some(_)) => {
-                // When: a signed head's continuation is `contradicted`, neither layout reads it.
-                return HardwrapUri::Incomplete;
+                // A signed head's `contradicted` continuation: neither layout reads the line, so
+                // a URL it breaks across rows stays inert, while one on a single row stays its own.
+                unreadable = true;
+                readings.push(BoxLayout::Markdown);
             }
             (true, None) => readings.push(BoxLayout::Markdown),
             (false, _) => {
@@ -401,7 +404,12 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
             Some(earlier) => agreed(earlier, reading),
         });
     }
-    decided.unwrap_or(HardwrapUri::Incomplete)
+    // An `unreadable` line opens no URL it breaks across rows in any layout.
+    match decided {
+        Some(HardwrapUri::Complete(_)) if unreadable => HardwrapUri::Incomplete,
+        Some(decided) => decided,
+        None => HardwrapUri::Incomplete,
+    }
 }
 
 /// Whether `decided` opens a URL a markdown `](` opens on the row where it starts.
