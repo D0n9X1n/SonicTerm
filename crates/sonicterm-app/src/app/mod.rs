@@ -382,7 +382,7 @@ pub use key_encoding::{
 };
 pub use window_setup::{
     apply_terminal_window_minimum, install_native_window_background, minimum_terminal_inner_size,
-    with_app_icon, with_backdrop_transparency, with_integrated_titlebar,
+    with_app_icon, with_backdrop_transparency, with_integrated_titlebar, with_option_as_alt,
 };
 use window_setup::{
     apply_window_dpi_transition, apply_window_request, apply_window_state_minimum,

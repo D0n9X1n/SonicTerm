@@ -169,6 +169,7 @@ impl App {
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,
         ));
+        let attrs = super::with_option_as_alt(attrs, self.config.terminal.macos_option_as_alt);
         // A report accepts no drops, so it is never registered as a native drop target.
         let attrs = self.native_drop_attributes(attrs);
         let window = match event_loop.create_window(attrs) {

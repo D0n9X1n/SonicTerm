@@ -72,3 +72,19 @@ fn configured_window_size_reserves_the_integrated_band_once() {
         "a bottom strip sits apart from the band"
     );
 }
+
+/// Each configured Option-as-Alt choice names the winit side it makes act as Alt.
+#[cfg(target_os = "macos")]
+#[test]
+fn option_as_alt_maps_each_choice_to_winit() {
+    use sonicterm_cfg::config::OptionAsAlt as Configured;
+    use winit::platform::macos::OptionAsAlt as Winit;
+    for (configured, expected) in [
+        (Configured::None, Winit::None),
+        (Configured::Left, Winit::OnlyLeft),
+        (Configured::Right, Winit::OnlyRight),
+        (Configured::Both, Winit::Both),
+    ] {
+        assert_eq!(winit_option_as_alt(configured), expected);
+    }
+}

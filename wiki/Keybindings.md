@@ -461,7 +461,10 @@ keyboard layouts and composed Option/AltGr characters are inserted as produced.
 Super and ordinary Control, Alt, or Ctrl+Alt command chords never become field
 text. An Option/Alt or AltGr event is accepted as composed input only when its
 produced character differs from the layout-resolved unmodified key; the exact
-Control editing chords above still take precedence.
+Control editing chords above still take precedence. On macOS, `[terminal]
+macos_option_as_alt` makes the left, right or both Option keys act as Alt: such a
+key then sends the unmodified character with Alt (`Option+B` sends `ESC b`) and
+never composes; the other Option key keeps composing.
 
 Named non-text keys, including arrows and function keys, retain their terminal
 protocol encoding even when macOS attaches private-use characters to the native

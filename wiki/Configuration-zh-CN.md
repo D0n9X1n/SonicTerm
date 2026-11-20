@@ -95,6 +95,7 @@ Grid 尺寸始终有上限。每个轴最多是 `4096`，可见 grid 最多包�
 | `term_program` | `"SonicTerm"` | 新子 PTY 的 `TERM_PROGRAM`。`TERM_PROGRAM_VERSION` 通常是 SonicTerm 版本；`term_program = "WezTerm"` 时为 `20230712-072601`。 |
 | `scrollback` | `1000` | 每个 pane 请求保留的历史行数。`0` 关闭历史记录。Grid 和内存字节预算可能进一步降低实际值。 |
 | `keypad_mode` | `"auto"` | `auto` 保留协商的旧式小键盘映射及操作系统解析出的数字文本。显式选择 `numeric` 后，运算符和 Enter 不受 DECKPAM 影响，使用普通文本/Return 规则，导航遵循逻辑按键。Kitty 输入不变。参见[快捷键](Keybindings-zh-CN)。 |
+| `macos_option_as_alt` | `"none"` | 仅限 macOS：哪个 Option 键作为 Alt 使用，而不是组合字符。`"none"` 保留 `∫` 这类组合字符；`"left"`、`"right"` 或 `"both"` 让对应的 Option 键发送 Alt 组合键（带 Meta 前缀的按键，或在 kitty 键盘协议下带 Alt 修饰的按键），shell 的 Meta 绑定和 herdr 的 Alt 绑定需要它。另一个 Option 键仍然组合字符。重新加载后，已打开的窗口立即生效。该键在所有平台都能解析，在 macOS 以外被忽略，因此同一份配置文件在各平台都能加载。其他值会导致加载失败。参见[快捷键](Keybindings-zh-CN)。 |
 | `clickable_local_targets` | `true` | 所有平台都打开经过验证的本地目录，或在所在文件夹中选中文件。包括本地 file URI 和本机路径 OSC 8 链接；网页和邮件链接不受控制。 |
 | `clickable_bare_names` | `true` | 允许按准确 pane 的可信本机 OSC 7 工作目录解析上下文名称。带分隔符的相对路径也要求同一可信 pane CWD。在备用屏幕上两者都不会解析，因为全屏程序可能显示多个窗格。只有 `clickable_local_targets` 同时为 `true` 时才生效。 |
 | `clickable_path_max_chars` | `1024` | 考虑的自动检测路径候选的最大长度，按显示候选的 Unicode 字符数计算；更长的候选会被忽略。取值钳制在 `1`–`1024`，因此默认值即最大值。16 KiB 逻辑文字上限、8 个空格分隔部分和 32 行上限仍然适用，扫描器对每个目标的 4 KiB 上限也仍然适用。OSC 8 和 file URI 目标不受其限制。重载后值发生变化时，会撤销当前路径结果。 |

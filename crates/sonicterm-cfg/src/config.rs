@@ -354,6 +354,23 @@ pub struct TerminalConfig {
     pub cursor_animation: CursorAnimation,
     /// Whether programs may write the clipboard with OSC 52; see [`Osc52Policy`].
     pub osc52: Osc52Policy,
+    /// Which macOS Option keys act as Alt instead of composing characters; read only on macOS.
+    pub macos_option_as_alt: OptionAsAlt,
+}
+
+/// Which macOS Option keys send Alt chords instead of composed characters.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionAsAlt {
+    /// Both Option keys compose characters, as macOS text input does.
+    #[default]
+    None,
+    /// Left Option acts as Alt; right Option still composes.
+    Left,
+    /// Right Option acts as Alt; left Option still composes.
+    Right,
+    /// Both Option keys act as Alt.
+    Both,
 }
 
 /// How the cursor moves from one cell to another.
@@ -618,6 +635,7 @@ impl Default for TerminalConfig {
             term_program: "SonicTerm".to_string(),
             scrollback: 1_000,
             keypad_mode: KeypadMode::default(),
+            macos_option_as_alt: OptionAsAlt::default(),
             clickable_local_targets: true,
             clickable_bare_names: true,
             clickable_path_max_chars: DEFAULT_CLICKABLE_PATH_CHARS,

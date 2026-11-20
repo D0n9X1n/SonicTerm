@@ -608,6 +608,14 @@ impl App {
             self.pending_osc52_reassert = None;
         }
         self.config = new_cfg;
+        // Open windows take a changed Option-as-Alt at once; the warm pool was emptied above, so
+        // every later window is created with it.
+        for window in self.registry.windows.values().filter_map(|window| window.window.as_deref()) {
+            super::window_setup::apply_option_as_alt(
+                window,
+                self.config.terminal.macos_option_as_alt,
+            );
+        }
         // `[mcp]` changes start, stop or downgrade the control server at once.
         self.reconcile_mcp();
         // A focused segment's ring follows a changed `strong_focus` at once.

@@ -471,6 +471,7 @@ impl App {
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,
         ));
+        let attrs = super::with_option_as_alt(attrs, self.config.terminal.macos_option_as_alt);
         let attrs = self.native_drop_attributes(attrs);
         let window_started = std::time::Instant::now();
         let window = match event_loop.create_window(attrs) {

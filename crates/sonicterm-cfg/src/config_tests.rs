@@ -394,3 +394,23 @@ fn the_starter_template_never_replaces_an_existing_config() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n", "the existing file is kept");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Option keeps composing characters unless the user picks a side to act as Alt; every value
+/// parses on every platform, so one shared config file loads everywhere, and others fail the load.
+#[test]
+fn macos_option_as_alt_defaults_none_and_round_trips() {
+    assert_eq!(Config::default().terminal.macos_option_as_alt, OptionAsAlt::None);
+    for (name, expected) in [
+        ("none", OptionAsAlt::None),
+        ("left", OptionAsAlt::Left),
+        ("right", OptionAsAlt::Right),
+        ("both", OptionAsAlt::Both),
+    ] {
+        let config: Config =
+            toml::from_str(&format!("[terminal]\nmacos_option_as_alt = \"{name}\"\n")).unwrap();
+        assert_eq!(config.terminal.macos_option_as_alt, expected);
+        assert!(config.to_toml().unwrap().contains(&format!("macos_option_as_alt = \"{name}\"")));
+    }
+    assert!(toml::from_str::<Config>("[terminal]\nmacos_option_as_alt = \"meta\"\n").is_err());
+    assert!(default_config_template().contains("macos_option_as_alt = \"none\""));
+}

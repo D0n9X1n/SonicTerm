@@ -75,19 +75,22 @@ impl App {
             None => {
                 // When: `take_warm_window` returns `None`, construct a fresh
                 // destination hidden so every failure remains invisible.
-                let mut attrs =
-                    super::super::with_app_icon(super::super::with_backdrop_transparency(
-                        with_integrated_titlebar(
-                            Window::default_attributes()
-                                .with_title(super::super::NATIVE_WINDOW_TITLE)
-                                .with_decorations(true)
-                                .with_inner_size(request.inner_size)
-                                .with_visible(false),
-                            self.config.window.titlebar,
-                        ),
-                        self.config.appearance.backdrop,
-                        self.config.appearance.software_render_mode,
-                    ));
+                let attrs = super::super::with_app_icon(super::super::with_backdrop_transparency(
+                    with_integrated_titlebar(
+                        Window::default_attributes()
+                            .with_title(super::super::NATIVE_WINDOW_TITLE)
+                            .with_decorations(true)
+                            .with_inner_size(request.inner_size)
+                            .with_visible(false),
+                        self.config.window.titlebar,
+                    ),
+                    self.config.appearance.backdrop,
+                    self.config.appearance.software_render_mode,
+                ));
+                let mut attrs = super::super::with_option_as_alt(
+                    attrs,
+                    self.config.terminal.macos_option_as_alt,
+                );
                 if let Some((screen_x, screen_y)) = screen_pos {
                     attrs =
                         attrs.with_position(winit::dpi::PhysicalPosition::new(screen_x, screen_y));
