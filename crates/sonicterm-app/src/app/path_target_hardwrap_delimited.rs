@@ -1,4 +1,10 @@
-//! The extent a URL's own delimiters fix inside a rebuilt numbered-box line.
+//! The extent a URL's own delimiters fix inside a rebuilt numbered-box line, and the URLs one row
+//! holds whole.
+
+use super::super::{
+    AbsoluteCell, AbsoluteCellSpan, CellFlags, DetectedTarget, HardwrapUri, LogicalTargetCandidate,
+};
+use super::{box_blank, plain_cell, url_body_char, BoxRows};
 
 /// What a URL's opening delimiter says about its extent.
 pub(super) enum Delimited {
@@ -91,5 +97,68 @@ fn quote_end(bytes: &[u8], (open, close): (u8, u8), token_end: usize) -> Result<
         Some(closer) if *closer == close && !doubled => Ok(token_end),
         None | Some(b' ') => Err(Delimited::Absent),
         Some(_) => Err(Delimited::Unresolved),
+    }
+}
+
+/// The URL under `pointed` when its row alone holds it whole: its scheme follows a blank or an
+/// opener on the row, and a closer or a blank followed by more text ends it there, so it cannot
+/// run into another row. A URL its delimiters fix opens on that row; one a blank ends is left to the
+/// single-row rules, which read it the same. `None` when the row does not show the URL whole.
+pub(super) fn row_local_uri(
+    rows: &mut BoxRows<'_, '_>,
+    pointed: AbsoluteCell,
+) -> Option<HardwrapUri> {
+    let (left, right) = (usize::from(rows.pane.0), usize::from(rows.pane.1));
+    let row = rows.get(pointed.row)?;
+    let (first_text, last_text) = row.text?;
+    let end = row.cells.len().min(right);
+    // One byte per column: plain ASCII text as itself, anything else as a blank no URL holds.
+    let readable = |column: usize| {
+        let cell = row.cells[column];
+        plain_cell(cell)
+            && cell.ch.is_ascii()
+            && !cell.ch.is_control()
+            && !cell.flags.contains(CellFlags::WIDE_CONT)
+    };
+    let text: String = (left..end)
+        .map(|column| if readable(column) { row.cells[column].ch } else { ' ' })
+        .collect();
+    let pointer = usize::from(pointed.col).checked_sub(left)?;
+    let found = sonicterm_cfg::url_scan::find_url_at(&text, pointer)?;
+    let bytes = text.as_bytes();
+    let token_end = (found.start..bytes.len())
+        .find(|index| !url_body_char(bytes[*index] as char))
+        .unwrap_or(bytes.len());
+    let opens_row = found.start + left <= first_text;
+    if opens_row {
+        // When: the scheme `opens_row` text, the row above may run into it.
+        return None;
+    }
+    // A blank ending the URL proves its end only when more text follows it on the row.
+    let inner_blank = token_end < bytes.len()
+        && token_end + left < last_text
+        && box_blank(row.cells[left + token_end]);
+    let span = |start: usize, end: usize| AbsoluteCellSpan {
+        row: pointed.row,
+        start_col: (left + start) as u16,
+        end_col: (left + end) as u16,
+    };
+    match delimited_url(&text, found.start, token_end) {
+        Delimited::Url(url) if (url.start..url.end).contains(&pointer) => {
+            let closer = (url.end..token_end).any(|index| matches!(bytes[index], b')' | b']'))
+                || matches!(bytes.get(token_end), Some(b'"' | b'\'' | b'`' | b'>'));
+            (closer || inner_blank).then(|| {
+                HardwrapUri::Complete(LogicalTargetCandidate {
+                    target: DetectedTarget::Uri(url.url.clone()),
+                    spans: smallvec::smallvec![span(url.start, url.end)],
+                    joined: false,
+                })
+            })
+        }
+        Delimited::Absent => {
+            let after_blank = box_blank(row.cells[left + found.start - 1]);
+            (after_blank && inner_blank).then_some(HardwrapUri::NotApplicable)
+        }
+        Delimited::Url(_) | Delimited::Unresolved => None,
     }
 }

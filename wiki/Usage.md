@@ -453,7 +453,11 @@ across rows is inert, while one on a single row keeps opening); and a
 markdown `](…)` target the diff reading joins opens that way, as SonicTerm has
 always read a signed line's leading sign. A `+` list item whose URL wraps just
 before a `+`, or a `-` list item whose link wraps just before a `-`, is then read
-as a diff and loses that character, a rare coincidence the hover preview shows. Continuation rows leave the line number blank and start their text at
+as a diff and loses that character, a rare coincidence the hover preview shows.
+A URL that one row holds whole, after a blank or an opener and before a closer
+or a blank followed by more text, opens from that row whatever the rows around
+it show, such as a wrapped link label, an emoji in the label, or a label whose
+first row scrolled out of view. Continuation rows leave the line number blank and start their text at
 that same text column. Rows are read as a view only when the view shows a line
 removed and then added, or two consecutive line numbers in a diff or with every
 row that reaches the box's widest column continuing below: indented tool output

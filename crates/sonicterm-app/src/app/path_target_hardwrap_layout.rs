@@ -1,7 +1,7 @@
 //! Which layout a numbered box's rows allow: the signed rows only a diff writes, and the
 //! continuations no diff shows.
 
-use super::{box_blank, BoxRow, BoxRows};
+use super::{box_blank, BoxRow, BoxRows, HardwrapUri};
 
 /// Whether a diff line with `sign`, headed at `head_row` (or above the frame) with gutter end
 /// `gutter_end`, is contradicted by its own rows: an unnumbered row from the head down to past
@@ -57,4 +57,43 @@ pub(super) fn diff_only_sign(row: &BoxRow<'_>, gutter_end: usize, sign: char) ->
     let rule = (gutter_end + 1..=last)
         .all(|column| row.cells.get(column).is_some_and(|cell| cell.ch == sign));
     !list_item && !rule
+}
+
+/// Whether `decided` opens a URL a markdown `](` opens on the row where it starts.
+pub(super) fn markdown_target(rows: &mut BoxRows<'_, '_>, decided: &HardwrapUri) -> bool {
+    let HardwrapUri::Complete(candidate) = decided else {
+        // When: the reading is not `Complete`, it opens no markdown target.
+        return false;
+    };
+    let Some(first) = candidate.spans.first() else {
+        // When: the candidate has no `first` span, it opens nothing.
+        return false;
+    };
+    let start = usize::from(first.start_col);
+    let Some(row) = rows.get(first.row).filter(|_| start >= 2) else {
+        // When: the URL's row is unreadable or starts too near its edge, no `](` precedes it.
+        return false;
+    };
+    row.cells[start - 2].ch == ']' && row.cells[start - 1].ch == '('
+}
+
+/// One decision from two readings of a box: the same URL with the same spans, or neither owning
+/// the token, stands; any other pair means the box's layout decides the destination, which it
+/// does not show, so nothing opens.
+pub(super) fn agreed(earlier: HardwrapUri, later: HardwrapUri) -> HardwrapUri {
+    match (earlier, later) {
+        (HardwrapUri::Complete(first), HardwrapUri::Complete(second)) if first == second => {
+            HardwrapUri::Complete(first)
+        }
+        (HardwrapUri::NotApplicable, HardwrapUri::NotApplicable) => HardwrapUri::NotApplicable,
+        // A URL one reading keeps on one row and the other leaves to the single-row rules is a
+        // one-row URL either way, so the single-row rules decide it.
+        (HardwrapUri::Complete(one_row), HardwrapUri::NotApplicable)
+        | (HardwrapUri::NotApplicable, HardwrapUri::Complete(one_row))
+            if one_row.spans.len() == 1 =>
+        {
+            HardwrapUri::NotApplicable
+        }
+        _ => HardwrapUri::Incomplete,
+    }
 }

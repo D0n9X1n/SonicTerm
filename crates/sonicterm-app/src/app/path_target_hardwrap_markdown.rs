@@ -13,8 +13,9 @@ mod delimited;
 #[path = "path_target_hardwrap_layout.rs"]
 mod layout;
 
+use delimited::row_local_uri;
 use delimited::{delimited_url, Delimited};
-use layout::{diff_contradicted, diff_only_sign};
+use layout::{agreed, diff_contradicted, diff_only_sign, markdown_target};
 
 /// One displayed row of the box, read once inside the pointed pane.
 struct BoxRow<'grid> {
@@ -334,6 +335,10 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
             return HardwrapUri::NotApplicable;
         }
     };
+    if let Some(decided) = row_local_uri(&mut rows, pointed) {
+        // When: the pointed row alone holds the URL whole, no refusal for wrapped URLs applies.
+        return decided;
+    }
     let evidence = box_evidence(&mut rows, pointed.row, gutter_end);
     // A replaced line, or signed rows beside context rows, proves a diff.
     let diff_proven = evidence.replaced_line || (evidence.signed_row && evidence.context_row);
@@ -412,37 +417,6 @@ pub(super) fn numbered_box_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) 
         }
         Some(decided) => decided,
         None => HardwrapUri::Incomplete,
-    }
-}
-
-/// Whether `decided` opens a URL a markdown `](` opens on the row where it starts.
-fn markdown_target(rows: &mut BoxRows<'_, '_>, decided: &HardwrapUri) -> bool {
-    let HardwrapUri::Complete(candidate) = decided else {
-        // When: the reading is not `Complete`, it opens no markdown target.
-        return false;
-    };
-    let Some(first) = candidate.spans.first() else {
-        // When: the candidate has no `first` span, it opens nothing.
-        return false;
-    };
-    let start = usize::from(first.start_col);
-    let Some(row) = rows.get(first.row).filter(|_| start >= 2) else {
-        // When: the URL's row is unreadable or starts too near its edge, no `](` precedes it.
-        return false;
-    };
-    row.cells[start - 2].ch == ']' && row.cells[start - 1].ch == '('
-}
-
-/// One decision from two readings of a box: the same URL with the same spans, or neither owning
-/// the token, stands; any other pair means the box's layout decides the destination, which it
-/// does not show, so nothing opens.
-fn agreed(earlier: HardwrapUri, later: HardwrapUri) -> HardwrapUri {
-    match (earlier, later) {
-        (HardwrapUri::Complete(first), HardwrapUri::Complete(second)) if first == second => {
-            HardwrapUri::Complete(first)
-        }
-        (HardwrapUri::NotApplicable, HardwrapUri::NotApplicable) => HardwrapUri::NotApplicable,
-        _ => HardwrapUri::Incomplete,
     }
 }
 

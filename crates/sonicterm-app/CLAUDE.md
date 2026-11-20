@@ -318,7 +318,9 @@ cargo build -p sonicterm-app
   both find the same one. A line whose continuation no diff row could be (another character in the
   sign column, `diff_contradicted`) is markdown whatever other rows prove; when its head is
   signed, a URL it breaks across rows is `Incomplete` and one on a single row stays its own; a `](` target the diff
-  reading joins stands (`markdown_target`), as the padded markdown rule read signed lines. `delimited_url` (`path_target_hardwrap_delimited.rs`)
+  reading joins stands (`markdown_target`), as the padded markdown rule read signed lines. A URL
+  the pointed row holds whole (`row_local_uri`: a blank or opener before its scheme, a closer or a
+  blank before more text after it) is decided first, so no refusal for wrapped URLs reaches it. `delimited_url` (`path_target_hardwrap_delimited.rs`)
   gives the URL under the pointer that `(`, `](`, `[`, a quote, a backtick or `<` opens the
   extent its matching closer fixes, checked whole with `url_scan::is_url`; an opener whose closer
   is another character or a doubled quote, or a prose-bracket URL ending in `!`/`?`, is

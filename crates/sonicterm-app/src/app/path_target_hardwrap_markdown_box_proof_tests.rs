@@ -637,3 +637,74 @@ fn titled_destination_after_a_wrapped_label_opens() {
         Some("https://en.cppreference.com/w/cpp/23")
     );
 }
+
+/// Write `lines` into a `cols` by 10 pane so the first row scrolls away, and resolve viewport row 0
+/// at `col`: the URL sits on a continuation whose numbered head is no longer displayed.
+fn target_below_a_scrolled_head(lines: &[&str], cols: u16, col: u16) -> Option<String> {
+    let mut all = lines.iter().map(|line| line.to_string()).collect::<Vec<_>>();
+    all.push("     88 Next steps.".to_string());
+    all.push("     89 Examples.".to_string());
+    all.extend((0..7).map(|_| String::new()));
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = hardwrap_pane_sized(&mut app, cols, 10, &all);
+    app.cell_target_at(window, pane, 0, col).map(|target| target.display)
+}
+
+/// A markdown destination its own delimiters close on one row opens though its label's head row
+/// scrolled away: the unread label cannot extend it.
+#[test]
+fn destination_below_a_scrolled_away_label_opens() {
+    let lines = [
+        "     87 Read the serialization reference for [serde_json::from_",
+        "        slice](https://docs.rs/serde_json).",
+    ];
+    assert_eq!(
+        target_below_a_scrolled_head(&lines, 70, 19).as_deref(),
+        Some("https://docs.rs/serde_json")
+    );
+}
+
+/// A label continuation that opens with digits, under a scrolled-away head, never blocks the
+/// destination its delimiters close on the same row.
+#[test]
+fn digit_label_continuation_keeps_its_destination() {
+    let lines = [
+        "     87 Read the security management requirements described by [ISO/IEC ",
+        "        27001 standard](https://www.iso.org/home.html).",
+    ];
+    assert_eq!(
+        target_below_a_scrolled_head(&lines, 79, 28).as_deref(),
+        Some("https://www.iso.org/home.html")
+    );
+}
+
+/// An emoji with a variation selector in a wrapped label leaves the ASCII destination after it
+/// opening: only an unsafe cell inside the URL itself keeps it inert.
+#[test]
+fn emoji_in_a_wrapped_label_keeps_the_destination() {
+    let lines = [
+        "      1 For advanced terminal preferences and keybindings, see [\u{2699}\u{fe0f}Setti"
+            .to_string(),
+        "        ngs](https://example.org/settings).".to_string(),
+        "      2 Next steps.".to_string(),
+    ];
+    assert_eq!(
+        exact_target_at(&lines, (78, 10), 1, 17).as_deref(),
+        Some("https://example.org/settings")
+    );
+}
+
+/// A URL one reading keeps on one row and the other leaves to the single-row rules opens as the
+/// single-row rules read it.
+#[test]
+fn one_row_url_read_two_ways_opens() {
+    let lines = [
+        "     87   // Rust serialization reference manual(".to_string(),
+        "         https://docs.rs/serde_json)".to_string(),
+        "     88   // Examples follow.".to_string(),
+    ];
+    assert_eq!(
+        exact_target_at(&lines, (55, 10), 1, 13).as_deref(),
+        Some("https://docs.rs/serde_json")
+    );
+}
