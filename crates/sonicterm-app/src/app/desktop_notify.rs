@@ -24,7 +24,9 @@ pub(crate) struct DesktopNotice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeliveryOutcome {
     Delivered,
-    /// The service is missing or refused permission; later requests may still succeed.
+    /// The service is missing or refused permission; later requests may still succeed. The
+    /// Windows toast service reports only failures.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Unavailable(&'static str),
     /// The request failed or timed out; Linux and Windows report it, macOS only refusals.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -161,6 +163,7 @@ pub(crate) fn native_notice_id(pane_id: u64, id: &str) -> String {
 /// The identifier a backend gives `notice`: its replaceable `native_id`, or one no other
 /// notification of any SonicTerm process shares, so a notice without an id replaces none.
 // Ordering: NEXT is Relaxed; only its unique count is read, so it orders no other memory.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn notice_identifier(notice: &DesktopNotice) -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     notice.native_id.clone().unwrap_or_else(|| {
