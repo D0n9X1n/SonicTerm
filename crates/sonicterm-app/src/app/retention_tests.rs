@@ -692,7 +692,7 @@ pub(super) fn draw_window(app: &mut App, window_id: WindowId, rows: &str) -> Res
         grid: &mut grid,
         viewport_top_abs: None,
         is_active: true,
-        cursor_style: sonicterm_render_model::CursorStyle::BlockSteady,
+        cursor_style: sonicterm_render_model::CursorStyle::Configured,
         is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
         inline_images: Default::default(),

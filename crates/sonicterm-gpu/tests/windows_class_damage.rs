@@ -251,7 +251,7 @@ fn frame(renderer: &mut GpuRenderer, layout: &Layout, scene: &mut Scene) -> Pres
         grid: &mut scene.grid,
         viewport_top_abs: None,
         is_active: true,
-        cursor_style: CursorStyle::BlockSteady,
+        cursor_style: CursorStyle::Configured,
         is_broadcast_participant: false,
         scrollbar_alpha: scene.scrollbar_alpha,
         inline_images: Default::default(),

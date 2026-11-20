@@ -262,7 +262,7 @@ fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
             grid: &mut pane.grid,
             viewport_top_abs: None,
             is_active: index == 0,
-            cursor_style: CursorStyle::BlockSteady,
+            cursor_style: CursorStyle::Configured,
             is_broadcast_participant: false,
             scrollbar_alpha: 0.0,
             inline_images: Default::default(),
