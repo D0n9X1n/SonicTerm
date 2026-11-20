@@ -233,7 +233,9 @@ ASCII runs are inserted in bulk until an escape or control byte appears.
 Current protocol support includes:
 
 - cursor movement, save/restore, insert/delete character and line, erase,
-  DECSTBM, reverse index, autowrap, cursor visibility and shape;
+  DECSTBM, reverse index, autowrap, cursor visibility, and DECSCUSR cursor shape and
+  steadiness (`CSI Ps SP q`: 1/2 block, 3/4 underline, 5/6 bar, odd blinking and even steady;
+  0 or RIS restore the configured cursor; the active pane's request is drawn);
 - SGR styles, indexed and true color, underline style and color, and
   background-color erase semantics;
 - primary and alternate screens, application cursor keys, bracketed paste,

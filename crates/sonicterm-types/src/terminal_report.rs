@@ -21,6 +21,44 @@ impl ColorScheme {
     }
 }
 
+/// The cursor shape a DECSCUSR request names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CursorRequestShape {
+    /// A full cell.
+    Block,
+    /// A line under the cell.
+    Underline,
+    /// A vertical bar at the cell's left edge.
+    Bar,
+}
+
+/// A program's DECSCUSR request: the shape, and whether it asked for a steady cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CursorRequest {
+    /// The requested shape.
+    pub shape: CursorRequestShape,
+    /// `true` for the even DECSCUSR values, which ask the cursor not to blink.
+    pub steady: bool,
+}
+
+impl CursorRequest {
+    /// The request `CSI Ps SP q` makes: `None` for 0 (the terminal's configured cursor) and for
+    /// values past 6, which change nothing.
+    #[must_use]
+    pub fn from_decscusr(value: u16) -> Option<Option<Self>> {
+        // Odd values blink and even ones are steady; each pair names one shape.
+        let shape = match value {
+            0 => Some(None),
+            1..=6 => Some(Some(
+                [CursorRequestShape::Block, CursorRequestShape::Underline, CursorRequestShape::Bar]
+                    [usize::from((value - 1) / 2)],
+            )),
+            _ => None,
+        }?;
+        Some(shape.map(|shape| Self { shape, steady: value.is_multiple_of(2) }))
+    }
+}
+
 /// The xterm 256-color palette entry for `index` 16..=255: the 6x6x6 cube, then the gray ramp.
 /// `None` for 0..=15, which come from the theme's ANSI colors.
 #[must_use]

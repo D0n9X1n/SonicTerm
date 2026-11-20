@@ -840,3 +840,18 @@ fn damage_classes_are_wired_through_the_renderer() {
     assert!(function_body(&source, "pub fn emit_pane_scrollbar(")
         .contains("crate::frame_plan::pane_scrollbar_geometry("));
 }
+
+/// The cursor is drawn and keyed with one per-frame shape taken from the active pane's request,
+/// falling back to the configured shape, so a program's DECSCUSR changes both the drawing and
+/// the frame key, and no reader uses the configured shape directly.
+#[test]
+fn the_cursor_shape_follows_the_active_panes_request() {
+    let source = crate::core::CORE_SOURCE.replace("\r\n", "\n");
+    let compact: String = source.split_whitespace().collect();
+    assert!(compact
+        .contains("self.frame_cursor_shape=cursor_pane.cursor_style.shape_or(self.cursor_shape);"));
+    assert!(compact.contains("cursor_shape:self.frame_cursor_shapeasu8,"));
+    assert!(compact.contains("matchself.frame_cursor_shape{"));
+    assert!(!compact.contains("matchself.cursor_shape{"), "no draw reads the configured shape");
+    assert!(!compact.contains("cursor_shape:self.cursor_shapeasu8"), "no key reads it either");
+}

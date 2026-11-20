@@ -262,3 +262,25 @@ fn a_real_echo_glides_and_a_real_flood_does_not() {
     }
     assert!(sustained, "a yes flood became sustained within 3 s");
 }
+
+/// A program's steady cursor request (DECSCUSR 2, 4 or 6) stops the blink and its deadlines in
+/// either window; restoring the configured cursor blinks again. A blinking request never makes a
+/// cursor blink while `cursor_blink` is off.
+#[test]
+fn a_steady_cursor_request_never_blinks() {
+    let (mut app, main, child) = owners();
+    for window_id in [main, child] {
+        let window = app.registry.windows.get_mut(&window_id).unwrap();
+        let pane_id = window.tab_states[window.tabs.active_index()].active_pane;
+        let pane = window.panes.get_mut(&pane_id).unwrap();
+        pane.cursor_steady.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(!blinks(window, true, true), "a steady request");
+        let pane = window.panes.get_mut(&pane_id).unwrap();
+        pane.cursor_steady.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(blinks(window, true, true), "the configured cursor blinks again");
+        assert!(
+            !blinks(window, false, true),
+            "a blinking request never overrides cursor_blink off"
+        );
+    }
+}

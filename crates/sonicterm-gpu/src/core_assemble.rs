@@ -181,6 +181,8 @@ impl GpuRenderer {
         };
         // The active pane and view the cursor is drawn from, resolved as `FramePlan::build` does.
         let cursor_pane = panes.iter().find(|pane| pane.is_active).unwrap_or(&panes[0]);
+        // The frame keys on and draws the shape the active pane's program asked for, if any.
+        self.frame_cursor_shape = cursor_pane.cursor_style.shape_or(self.cursor_shape);
         let cursor_live_top = cursor_pane.grid.scrollback_len() as u64;
         let cursor_view_top = viewport_top_abs.unwrap_or(cursor_live_top).min(cursor_live_top);
         let drawn_cell = drawn_cursor_cell(
@@ -222,7 +224,7 @@ impl GpuRenderer {
                         0
                     },
                     viewport_top_abs,
-                    cursor_shape: self.cursor_shape as u8,
+                    cursor_shape: self.frame_cursor_shape as u8,
                     cursor_blink_off: self.cursor_blink_off,
                     window_focused: self.window_focused,
                     pane_focus_flash_bucket,

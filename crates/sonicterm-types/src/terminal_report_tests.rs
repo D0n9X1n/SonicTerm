@@ -21,3 +21,25 @@ fn indexed_palette_matches_xterm_at_every_boundary() {
     assert_eq!(indexed_rgb(232), Some((8, 8, 8)));
     assert_eq!(indexed_rgb(255), Some((238, 238, 238)));
 }
+
+/// DECSCUSR 0 restores the configured cursor; odd values blink and even ones are steady for the
+/// block, underline and bar; a value past 6 changes nothing.
+#[test]
+fn decscusr_values_name_their_request() {
+    assert_eq!(CursorRequest::from_decscusr(0), Some(None));
+    let expected = [
+        (1, CursorRequestShape::Block, false),
+        (2, CursorRequestShape::Block, true),
+        (3, CursorRequestShape::Underline, false),
+        (4, CursorRequestShape::Underline, true),
+        (5, CursorRequestShape::Bar, false),
+        (6, CursorRequestShape::Bar, true),
+    ];
+    for (value, shape, steady) in expected {
+        assert_eq!(
+            CursorRequest::from_decscusr(value),
+            Some(Some(CursorRequest { shape, steady }))
+        );
+    }
+    assert_eq!(CursorRequest::from_decscusr(7), None);
+}

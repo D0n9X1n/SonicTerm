@@ -206,6 +206,9 @@ pub enum VtEvent {
     Media(MediaEvent),
     /// DEC private mode ?25 — host should show/hide the cursor.
     CursorVisibility(bool),
+    /// DECSCUSR (`CSI Ps SP q`) or RIS changed the program's cursor request; `None` restores the
+    /// configured cursor.
+    CursorStyle(Option<sonicterm_types::CursorRequest>),
     /// OSC 9;4 — show this progress on the platform surfaces, or clear it on `None`.
     Progress(Option<ProgressReport>),
     /// OSC 9 text or OSC 777 `notify`, whole and unsanitized; a sequence past
@@ -668,6 +671,9 @@ struct Performer {
     reported_theme: Option<ThemeFingerprint>,
     /// DEC mode 2031: the program asked to be told when the color scheme or palette changes.
     color_scheme_updates: bool,
+    /// The cursor shape and steadiness the program asked for with DECSCUSR; `None` draws the
+    /// configured cursor.
+    cursor_request: Option<sonicterm_types::CursorRequest>,
     /// The cell size in pixels the host last reported, answering `CSI 16 t`; mirrors the parser's.
     report_cell_px: Option<(f32, f32)>,
     /// SonicTerm's raw OSC4 capture handles full batched queries before vte's

@@ -175,6 +175,14 @@ impl Perform for Performer {
             }
             return;
         }
+        if inter == b" " {
+            // When: `inter` is a single space, the sequence is DECSCUSR or another space-final
+            // one, none of them an ordinary CSI action.
+            if action == 'q' {
+                self.set_cursor_request(first_param());
+            }
+            return;
+        }
         match action {
             'h' | 'l' => {
                 let set = action == 'h';
@@ -863,3 +871,7 @@ mod vt_dispatch_exit_source_tests;
 #[cfg(test)]
 #[path = "vt_dispatch_host_reports_tests.rs"]
 mod vt_dispatch_host_reports_tests;
+
+#[cfg(test)]
+#[path = "vt_dispatch_cursor_style_tests.rs"]
+mod vt_dispatch_cursor_style_tests;

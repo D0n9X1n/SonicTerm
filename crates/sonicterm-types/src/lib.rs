@@ -54,7 +54,7 @@ pub use script_draft::{
     classify_shell, format_script_draft, shell_quote_powershell, DraftRejection, ShellDialect,
 };
 pub use shell_quote::shell_quote_posix;
-pub use terminal_report::{indexed_rgb, ColorScheme};
+pub use terminal_report::{indexed_rgb, ColorScheme, CursorRequest, CursorRequestShape};
 pub use traits::{ClipboardBackend, FrameLike, PaintError, Painter, PtyTransport, WindowBackend};
 pub use window_key::WindowKey;
 

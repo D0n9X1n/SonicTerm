@@ -432,22 +432,27 @@ pub(super) fn pane_renders<'a>(
     guards
         .iter_mut()
         .zip(images)
-        .map(|((id, parser, rect), images)| PaneRender {
-            id: *id,
-            rect_px: sonicterm_render_model::geometry::PixelRect {
-                x: rect.x as i32,
-                y: rect.y as i32,
-                w: rect.w as u32,
-                h: rect.h as u32,
-            },
-            grid: parser.grid_mut(),
-            viewport_top_abs: viewports.of(*id),
-            is_active: *id == active,
-            cursor_style: sonicterm_render_model::CursorStyle::default(),
-            is_broadcast_participant: broadcast.contains(id),
-            scrollbar_alpha: scrollbar_alpha.get(id).copied().unwrap_or(0.0),
-            inline_media_revision: images.revision,
-            inline_images: std::mem::take(&mut images.images),
+        .map(|((id, parser, rect), images)| {
+            // Read before the grid is lent mutably for the frame.
+            let cursor_style =
+                sonicterm_render_model::CursorStyle::from_request(parser.cursor_request());
+            PaneRender {
+                id: *id,
+                rect_px: sonicterm_render_model::geometry::PixelRect {
+                    x: rect.x as i32,
+                    y: rect.y as i32,
+                    w: rect.w as u32,
+                    h: rect.h as u32,
+                },
+                grid: parser.grid_mut(),
+                viewport_top_abs: viewports.of(*id),
+                is_active: *id == active,
+                cursor_style,
+                is_broadcast_participant: broadcast.contains(id),
+                scrollbar_alpha: scrollbar_alpha.get(id).copied().unwrap_or(0.0),
+                inline_media_revision: images.revision,
+                inline_images: std::mem::take(&mut images.images),
+            }
         })
         .collect()
 }

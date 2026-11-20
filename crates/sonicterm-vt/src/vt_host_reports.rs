@@ -16,6 +16,13 @@ pub(super) struct ThemeFingerprint {
 }
 
 impl Parser {
+    /// The cursor shape and steadiness the program asked for with DECSCUSR; `None` when it asked
+    /// for none, or restored the configured cursor.
+    #[must_use]
+    pub fn cursor_request(&self) -> Option<sonicterm_types::CursorRequest> {
+        self.performer.cursor_request
+    }
+
     /// Tell the parser whether the theme is dark or light, which DSR 996 (`CSI ? 996 n`) and mode
     /// 2031 updates report. Call [`Parser::finish_theme_update`] after seeding every theme color.
     pub fn set_theme_color_scheme(&mut self, scheme: ColorScheme) {
@@ -71,6 +78,15 @@ impl Performer {
             Some(true) => 1,
             Some(false) => 2,
             None => 0,
+        }
+    }
+
+    /// Apply DECSCUSR `value`: store the request and report it to the host; a value past 6 changes
+    /// nothing.
+    pub(super) fn set_cursor_request(&mut self, value: u16) {
+        if let Some(request) = sonicterm_types::CursorRequest::from_decscusr(value) {
+            self.cursor_request = request;
+            self.events.push(VtEvent::CursorStyle(request));
         }
     }
 

@@ -346,6 +346,7 @@ pub(in crate::app) struct PaneVtHandles {
     redraw_target: Arc<Mutex<Option<WindowId>>>,
     command_events: Arc<Mutex<super::CommandQueue>>,
     cursor_visible: Arc<AtomicBool>,
+    cursor_steady: Arc<AtomicBool>,
     keyboard_input: Arc<AtomicU64>,
     pointer_input: Arc<std::sync::atomic::AtomicU8>,
     sync_word: Arc<AtomicU64>,
@@ -387,6 +388,7 @@ impl PaneVtHandles {
             redraw_target: pane.redraw_target.clone(),
             command_events: pane.command_events.clone(),
             cursor_visible: pane.cursor_visible.clone(),
+            cursor_steady: pane.cursor_steady.clone(),
             keyboard_input: pane.keyboard_input.clone(),
             pointer_input: pane.pointer_input.clone(),
             sync_word: pane.sync_word.clone(),
@@ -792,7 +794,7 @@ mod media_batch;
 
 // Lock order: parser -> echo slot (pre_read, post_read); inline_images -> inline_media_charge after parser releases,
 // command_events after both.
-// Ordering: cursor_visible, keyboard_input, pointer_input, bells, output_generation load are Relaxed;
+// Ordering: cursor_visible, cursor_steady, keyboard_input, pointer_input, bells, output_generation load are Relaxed;
 // self-contained words, this worker the sole writer.
 #[allow(clippy::too_many_arguments)]
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
@@ -901,6 +903,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 VtEvent::CursorVisibility(visible) => {
                     handles.cursor_visible.store(visible, Ordering::Relaxed);
                 }
+                VtEvent::CursorStyle(style) => handles.publish_cursor_style(style),
                 VtEvent::Clipboard { selection, data } => {
                     clipboard_requests.push((selection, data));
                 }

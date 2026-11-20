@@ -318,6 +318,9 @@ pub struct GpuRenderer {
     cursor_glide_basis: Option<(u64, u64, (u16, u16), [i32; 2], [u32; 4])>,
     /// This frame's sampled glide position, read by the cursor draw; `None` draws on the cell.
     cursor_glide_frame: Option<crate::cursor_glide::GlideCell>,
+    /// The cursor shape this frame draws and keys on: the active pane's DECSCUSR request, or the
+    /// configured `cursor_shape` when it made none. Set once per assembly pass.
+    frame_cursor_shape: CursorShape,
     /// Whether the OS window currently holds keyboard focus. The text
     /// cursor is hidden while the window is inactive. Defaults to
     /// `true` so a freshly created renderer draws the cursor on the

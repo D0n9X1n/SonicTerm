@@ -90,3 +90,13 @@ mod spawn_pane_vt_tests;
 #[cfg(test)]
 #[path = "spawn_pane_vt_fuzz_tests.rs"]
 mod spawn_pane_vt_fuzz_tests;
+
+impl PaneVtHandles {
+    /// Publish whether the program asked for a steady cursor, so blink deadlines stop without
+    /// locking the parser; `None` restores the configured cursor, which may blink.
+    // Ordering: cursor_steady is a self-contained Relaxed word this worker alone writes.
+    pub(super) fn publish_cursor_style(&self, style: Option<sonicterm_types::CursorRequest>) {
+        let steady = style.is_some_and(|request| request.steady);
+        self.cursor_steady.store(steady, std::sync::atomic::Ordering::Relaxed);
+    }
+}

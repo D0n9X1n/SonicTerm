@@ -743,3 +743,28 @@ fn an_update_after_the_published_epoch_wraps_still_holds() {
     assert_eq!(sends.len(), 3, "and expires once at its deadline");
     assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 2);
 }
+
+/// The worker publishes a program's steady cursor request (DECSCUSR 2) on the pane, so blink
+/// deadlines stop without locking the parser, and clears it when the program restores the
+/// configured cursor.
+#[test]
+fn worker_publishes_the_steady_cursor_request() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (pane, handles) = pane_and_worker_handles();
+    for (bytes, steady) in
+        [(&b"\x1b[2 q"[..], true), (b"\x1b[5 q", false), (b"\x1b[4 q", true), (b"\x1b[0 q", false)]
+    {
+        process_pane_vt_batch_with(
+            &handles,
+            bytes,
+            None,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            Instant::now,
+            |_| {},
+        );
+        assert_eq!(pane.cursor_steady.load(Relaxed), steady, "{bytes:?}");
+    }
+}

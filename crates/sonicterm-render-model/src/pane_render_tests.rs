@@ -101,3 +101,24 @@ fn only_untagged_and_anchored_kitty_images_draw_at_their_anchor() {
     assert!(!image(Some(KittyShow::Upload)).draws_at_anchor());
     assert!(!image(Some(KittyShow::Virtual { cols: 1, rows: 1 })).draws_at_anchor());
 }
+
+/// No request draws the configured shape; each request names its own shape whatever the config
+/// says, and a steady and a blinking request of one shape draw the same shape.
+#[test]
+fn cursor_style_resolves_requests_against_the_configured_shape() {
+    use sonicterm_cfg::config::CursorShape;
+    use sonicterm_types::{CursorRequest, CursorRequestShape};
+    assert_eq!(CursorStyle::from_request(None), CursorStyle::Configured);
+    assert_eq!(CursorStyle::Configured.shape_or(CursorShape::Bar), CursorShape::Bar);
+    for (shape, expected) in [
+        (CursorRequestShape::Block, CursorShape::Block),
+        (CursorRequestShape::Underline, CursorShape::Underline),
+        (CursorRequestShape::Bar, CursorShape::Bar),
+    ] {
+        for steady in [true, false] {
+            let style = CursorStyle::from_request(Some(CursorRequest { shape, steady }));
+            assert_ne!(style, CursorStyle::Configured);
+            assert_eq!(style.shape_or(CursorShape::Underline), expected, "{style:?}");
+        }
+    }
+}
