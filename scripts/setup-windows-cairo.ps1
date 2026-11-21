@@ -71,46 +71,21 @@ if (-not (Test-Path -LiteralPath $cairoPc)) {
     throw "Could not find cairo.pc at $cairoPc."
 }
 
-# A static link names each dependency with a bare `-l<name>`, which MSVC's linker resolves as `<name>.lib` in a
-# directory on LIB. The names do not always match the files vcpkg installs: zlib 1.4 installs `libzs.lib` and its
-# pkg-config file says `-llibzs`, but the Rust side strips the `lib` prefix and asks the linker for `zs.lib`. So
-# every name the static Cairo link lists, with and without a `lib` prefix, gets a `<name>.lib` in the target lib
-# directory, copied from whichever spelling exists, and that directory goes on LIB. A library none of whose
-# spellings exist fails here, named, instead of at link time; Windows system libraries come from the SDK.
+# Bare `-l` names in Cairo's static link that vcpkg spells differently get copies in a directory rebuilt each run.
 $targetLib = Join-Path -Path $targetRoot -ChildPath "lib"
+$scratch = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+$aliasDir = Join-Path -Path $scratch -ChildPath "sonicterm-cairo-link-aliases"
 $env:PKG_CONFIG_PATH = $pkgConfigPath
 $staticLibs = & $pkgConfig --libs --static cairo
 if ($LASTEXITCODE -ne 0) {
     throw "pkg-config could not list cairo's static libraries."
 }
 Write-Host "cairo static link flags: $staticLibs"
-$systemLibs = @("gdi32", "msimg32", "user32", "kernel32", "advapi32", "ole32", "opengl32", "dwrite", "d2d1",
-                "windowscodecs", "bcrypt", "ws2_32", "shell32", "uuid", "comdlg32")
-# `-clike` is case-sensitive, so the `-L` search directory is not read as a library.
-foreach ($flag in ($staticLibs -split '\s+' | Where-Object { $_ -clike '-l*' })) {
-    $name = $flag.Substring(2)
-    if ($name -in $systemLibs) {
-        continue
-    }
-    $stem = if ($name.StartsWith("lib")) { $name.Substring(3) } else { $name }
-    $spellings = @("$name.lib", "lib$stem.lib", "$stem.lib", "${stem}static.lib", "${stem}MT.lib") |
-        Select-Object -Unique
-    $existing = $spellings | ForEach-Object { Join-Path -Path $targetLib -ChildPath $_ } |
-        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-    if (-not $existing) {
-        throw "cairo's static link asks for $name, but $targetLib has none of: $($spellings -join ', ')."
-    }
-    foreach ($wanted in @("$name.lib", "$stem.lib") | Select-Object -Unique) {
-        $destination = Join-Path -Path $targetLib -ChildPath $wanted
-        if (-not (Test-Path -LiteralPath $destination)) {
-            Copy-Item -LiteralPath $existing -Destination $destination
-            Write-Host "linked $wanted from $(Split-Path -Leaf $existing)"
-        }
-    }
-}
+. (Join-Path -Path $PSScriptRoot -ChildPath "setup-windows-cairo-aliases.ps1")
+Update-CairoLinkAliases -LinkFlags "$staticLibs" -LibraryDir $targetLib -AliasDir $aliasDir
 
 $toolDir = Split-Path -Parent $pkgConfig
-$linkSearch = if ($env:LIB) { "$targetLib;$env:LIB" } else { $targetLib }
+$linkSearch = if ($env:LIB) { "$targetLib;$aliasDir;$env:LIB" } else { "$targetLib;$aliasDir" }
 $exports = [ordered]@{
     LIB = $linkSearch
     SONICTERM_CAIRO_BIN_DIR = (Join-Path -Path $targetRoot -ChildPath "bin")

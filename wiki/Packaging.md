@@ -267,9 +267,11 @@ Toolset 3.14.1.20250415. CI logic coverage uses `cargo-llvm-cov` 0.9.1.
 `VCPKG_INSTALLATION_ROOT`, or `C:\vcpkg` and installs static Cairo plus pkgconf.
 The library names Cairo's static link uses do not always match vcpkg's files
 (zlib 1.4 installs `libzs.lib` and lists `-llibzs`, but the linker is asked for
-`zs.lib`), so the script gives every listed library a `<name>.lib` with and
-without its `lib` prefix in the vcpkg lib directory, puts that directory on
-`LIB`, and fails naming any library it cannot find.
+`zs.lib`), so `setup-windows-cairo-aliases.ps1` copies each listed library that
+vcpkg lacks under its `<name>.lib`, with and without its `lib` prefix, into an
+alias directory it empties and rebuilds on every run, so a copy never outlives
+a vcpkg upgrade. `LIB` lists vcpkg's lib directory first, so a real library
+always wins over a copy, and setup fails naming any library it cannot find.
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc

@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import shutil
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -155,13 +157,57 @@ class TargetTests(unittest.TestCase):
             source = (Path(__file__).parent / "setup-windows-cairo.ps1").read_text(encoding="utf-8")
             self.assertIn('SONICTERM_CAIRO_BIN_DIR = (Join-Path -Path $targetRoot -ChildPath "bin")', source)
             self.assertIn('Add-Content -LiteralPath $env:GITHUB_PATH -Value $cairoBin', source)
-            # vcpkg ports spell their static libraries differently from the bare `-l<name>` Cairo's static link asks
-            # for (zlib 1.4 installs libzs.lib for `zs`), so the script gives every asked-for name a `<name>.lib` in
-            # the target lib directory and puts that directory on LIB, where MSVC's linker looks for bare names.
-            self.assertIn("& $pkgConfig --libs --static cairo", source)
-            self.assertIn("$_ -clike '-l*'", source)
-            self.assertIn('$stem = if ($name.StartsWith("lib")) { $name.Substring(3) } else { $name }', source)
+            # Cairo's static link names libraries the MSVC linker resolves from LIB, after vcpkg's own directory.
+            self.assertIn("Update-CairoLinkAliases -LinkFlags \"$staticLibs\" -LibraryDir $targetLib -AliasDir $aliasDir",
+                          source)
+            self.assertIn('"$targetLib;$aliasDir;$env:LIB"', source)
             self.assertIn("LIB = $linkSearch", source)
+
+
+class CairoLinkAliasTests(unittest.TestCase):
+    """The alias step of the Windows Cairo setup, run under PowerShell wherever pwsh exists (CI's ubuntu job)."""
+
+    FLAGS = "-LC:/vcpkg/lib -lcairo -lgdi32 -llibexpatMT -llibpng16 -llibzs -lbz2"
+
+    def run_aliases(self, library_dir, alias_dir, flags=FLAGS):
+        script = Path(__file__).with_name("setup-windows-cairo-aliases.ps1")
+        command = (f". '{script}'; Update-CairoLinkAliases -LinkFlags '{flags}' -LibraryDir '{library_dir}' "
+                   f"-AliasDir '{alias_dir}'")
+        return subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+                              capture_output=True, text=True, timeout=120)
+
+    def setUp(self):
+        if shutil.which("pwsh") is None:
+            self.skipTest("pwsh is not installed")
+
+    def test_each_listed_name_gets_a_copy_rebuilt_on_every_run(self):
+        # vcpkg spells zlib 1.4 `libzs.lib` while the linker asks for `zs.lib`: the alias directory gets `zs.lib` and
+        # the other unprefixed names, never a copy of a library vcpkg already has under the asked-for name, and a
+        # second run after an upgrade carries the new bytes rather than keeping the first copy.
+        with tempfile.TemporaryDirectory() as temp:
+            library_dir, alias_dir = Path(temp) / "lib", Path(temp) / "aliases"
+            library_dir.mkdir()
+            for name in ("cairo.lib", "libexpatMT.lib", "libpng16.lib", "libzs.lib", "bz2.lib"):
+                (library_dir / name).write_bytes(b"old " + name.encode())
+            first = self.run_aliases(library_dir, alias_dir)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(sorted(path.name for path in alias_dir.iterdir()),
+                             ["expatMT.lib", "png16.lib", "zs.lib"])
+            (library_dir / "libzs.lib").write_bytes(b"new libzs.lib")
+            (alias_dir / "stale.lib").write_bytes(b"left by an earlier run")
+            second = self.run_aliases(library_dir, alias_dir)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual((alias_dir / "zs.lib").read_bytes(), b"new libzs.lib")
+            self.assertFalse((alias_dir / "stale.lib").exists())
+
+    def test_a_library_with_no_spelling_fails_naming_it(self):
+        # A name none of whose spellings exists fails at setup with the name, not later as LNK1181.
+        with tempfile.TemporaryDirectory() as temp:
+            library_dir = Path(temp) / "lib"
+            library_dir.mkdir()
+            result = self.run_aliases(library_dir, Path(temp) / "aliases", flags="-lmissing")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
