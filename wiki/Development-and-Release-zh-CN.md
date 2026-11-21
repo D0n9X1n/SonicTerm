@@ -860,9 +860,12 @@ harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行�
 只算 job 时长不算数。
 `python3 scripts/perf-critical-path.py --run <id>` 负责核算（`--fixture <file>` 读取已记录的运行）。它把经过的时间分到每次
 attempt 与重新运行之间的等待，把每次重新运行中继承的 job 行映射到实际执行它们的唯一 attempt，并把每次 attempt 中每条
-needs 链拆成兄弟等待、创建等待、runner 排队与运行时间类别（setup、build、打包与上传、下载与解包、compare、evidence、check、
-teardown 与 gap），指出 slack 为零的关键路径。带有 `timing.json` 的运行会把 compare 步骤进一步拆成 prepare、scenarios 与
-report。没有它的旧运行按历史模式读取：每个 job 的证据是在其时间窗口内创建的同名 artifact，其 compare 步骤保持为一个类别。
+needs 链拆成兄弟等待、创建等待、runner 排队与运行时间类别（setup、build、compare、evidence、check、teardown 与 gap；
+旧布局的运行还会显示打包与上传、下载与解包），指出 slack 为零的关键路径。带有 `timing.json` 的运行会把 compare 步骤进一步
+拆成 prepare、scenarios 与 report。GitHub 只保留最新一次 attempt 的 artifact，因此 attempt 的 artifact 已不存在，或因对比
+中途停止而 artifact 中没有 `timing.json` 的 job，其 compare 步骤保持为一个类别并附注说明；与运行不符的 `timing.json` 仍会
+终止报告。没有它的旧运行按历史模式读取：每个 job 的证据是在其时间窗口内创建的同名 artifact，其 compare 步骤保持为一个类别。
+`--profile core|full|release` 选择预算；tag 推送默认为没有预算的 `release`，pull request 默认为 `core`。
 `--ci-run <id>` 额外输出 perf 与 CI 两次运行中 macOS job 的并发情况，作为争用的证据，而不是配额的证据。它在预算内退出码为 0，
 超出为 1，job 行无法对上时为 2。由作者为 pull request 的证据运行它；工作流不会运行它。
 

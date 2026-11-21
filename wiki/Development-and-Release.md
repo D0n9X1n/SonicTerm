@@ -1314,11 +1314,17 @@ job time alone does not count.
 and the waits between reruns, maps each rerun's inherited job rows to the one
 attempt that executed them, and splits each attempt's chains of needs into
 sibling wait, creation wait, runner queue and runtime classes (setup, build,
-package and upload, download and extract, compare, evidence, check, teardown
-and gap), naming the zero-slack critical path. In a run with `timing.json` the
-compare step splits further into prepare, scenarios and report. An older run
-without it is read in historical mode: each job's evidence is the same-name
-artifact created inside its window, and its compare step stays one class.
+compare, evidence, check, teardown and gap; runs of the earlier layout also
+show package and upload, download and extract), naming the zero-slack critical
+path. In a run with `timing.json` the compare step splits further into prepare,
+scenarios and report. A job whose attempt's artifact GitHub no longer keeps (it
+keeps only the newest attempt's), or whose artifact has no `timing.json`
+because the comparison stopped, keeps its compare step as one class with a
+note; a `timing.json` that disagrees with the run still stops the report. An
+older run without it is read in historical mode: each job's evidence is the
+same-name artifact created inside its window, and its compare step stays one
+class. `--profile core|full|release` chooses the budget; a tag push defaults to
+`release`, which has none, and a pull request to `core`.
 `--ci-run <id>` adds the macOS jobs' concurrency across the perf and CI runs, as
 evidence of contention, not of a quota. It exits 0 within budget, 1 over it,
 and 2 when the rows do not reconcile. The author runs it for a pull request's
