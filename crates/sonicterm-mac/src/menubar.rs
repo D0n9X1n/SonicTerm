@@ -115,7 +115,9 @@ pub fn dispatch_tag(tag: isize) -> bool {
                 "display notification \"{}\" with title \"SonicTerm\"",
                 body.replace('"', "")
             );
-            let _ = std::process::Command::new("osascript").arg("-e").arg(&script).spawn();
+            let _ = sonicterm_cfg::detached_spawn::spawn_detached(
+                std::process::Command::new("osascript").arg("-e").arg(&script),
+            );
             true
         }
     }

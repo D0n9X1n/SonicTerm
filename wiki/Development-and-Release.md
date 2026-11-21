@@ -160,12 +160,11 @@ each side needs.
 | `--laps-runs N` | valid runs of the laps set (default: `--runs`); needs `--laps` or `--laps-scenario`; under `--short` a `run_caps` cap still applies |
 | `--alloc` | reports allocations per frame from `perf_scenarios_alloc`; timed runs never use the counting allocator |
 | `--counters` | when the head's `sonicterm-app` declares the `perf-counters` feature, builds each ref that declares it with that feature and runs a counters set with the frame counters forced on (the harness's `--counters`) after the timed and laps sets, on the head and on a base that declares the feature; it is never pooled with them. A head without the feature skips the set, and the table says so |
-| `--counters-runs N` | valid runs of the counters set (default: `--runs`); needs `--counters` |
+| `--counters-scenario <ID[/VARIANT]>...` | runs the counters set only for these selected variants (a bare ID is its default variant); several values or repeated flags; an error with `--counters`. A counters-only variant (S1/atlas-retry) selected but left out is refused at the command line, before either ref builds |
+| `--counters-runs N` | valid runs of the counters set (default: `--runs`); needs `--counters` or `--counters-scenario` |
 | `--keep` | keeps the per-ref worktrees after the comparison; by default they are removed |
 | `--out <dir>` | where `comparison.md` and the raw evidence go |
 | `--require-base` | holds the base to the head's standard: a base that cannot build, `--list` or fill every set's valid runs fails the comparison (exit 1), and `comparison.md` opens with `**Incomplete comparison:**` naming each gap; a counters set on a base without `perf-counters` still reads `n/a`. Every CI comparison passes it |
-| `--build-only <dir>` | builds both refs once, lists both binaries, copies them to `<dir>/base/` and `<dir>/head/` with `manifest.json`, prints `manifest_sha256=<hex>` and measures nothing; needs `--require-base` and takes no run, counters, `--keep` or `--out` option (`--alloc` adds the alloc example); the build logs go to `<dir>/build-logs` |
-| `--prebuilt <dir>` | measures the binaries a `--build-only` run published instead of building; needs `--prebuilt-run-id`, `--prebuilt-attempt` and `--prebuilt-manifest-sha256`, and refuses any manifest or binary that disagrees with the job ([What CI measures](#what-ci-measures)) |
 
 A local run builds both refs itself. Without `--require-base` it stays
 lenient: a base that cannot build or run is reported `blocked` and the head is
@@ -285,7 +284,7 @@ are additional final-target arguments, including comparison and previous-release
 to a value, refuses the build; the cfg spec is read as rustc reads it, so
 `--cfg X` and `--cfg=X`, whitespace around the spec, a raw identifier and a
 `X="v"` form are all recognized, in either source. The decision and the composed flags are in the
-details and the build identity, and a prebuilt manifest with others is refused.
+comparison's details.
 The local gate reviews every feature set's builds once for each subset of the
 table.
 
@@ -337,8 +336,7 @@ Under `--short`, a variant whose harness `--list` entry declares a cap
 (`run_caps`) takes min(requested, cap) valid runs per side in every set (timed,
 laps, counters and alloc); its rows read `(runs N of M)`, and `comparison.md`
 lists the capped variants. A release comparison is uncapped. Each tree builds
-with exactly the perf features it supports, in building, `--build-only` and
-`--prebuilt` comparisons alike, and each build is the local gate's own reviewed
+with exactly the perf features it supports, and each build is the local gate's own reviewed
 step for that feature set: `perf-counters` when the tree declares it and has the
 filtered logging API, `perf-frame-texture` when declared, and
 `perf-hook-checkpoint-memory` when declared and the app source defines
@@ -348,7 +346,7 @@ source defines `App::__trim_covered_now`. The local gate reviews four build step
 for every ordered subset of the five perf features (base and head, each for the
 normal and the allocation-counting example): 32 subsets, 128 steps. A comparison
 builds only the subset each side supports, and only the examples its run asks
-for. The manifest records each side's features, and a mismatch is refused.
+for. `run-identity.json` records each side's features.
 
 A full comparison runs for hours with measurement windows on screen. To run one
 locally, keep the host idle, on AC power, with the display awake and the screen unlocked, for
@@ -469,19 +467,27 @@ What differs from macOS:
 
 ```mermaid
 flowchart TD
-    refs["base and head refs"] --> trees["one worktree and target directory per ref"]
+    refs["base and head refs"] --> preparing["write comparison.md: preparing, naming each step"]
+    preparing --> trees["one worktree and target directory per ref"]
     trees --> overlay["overlay the head's harness on both trees and record its hash"]
-    overlay --> build["release-build each tree, one at a time"]
-    build --> run["next run in ABBA order: a fresh harness process in a new scratch directory"]
+    overlay --> build["release-build and list each tree, one at a time"]
+    build -- a step fails or a stop signal arrives --> stopped["the comparison stops with exit 1 and writes a partial comparison.md"]
+    build --> identity["write run-identity.json and a progress comparison.md"]
+    identity --> run["next run in ABBA order: a fresh harness process in a new scratch directory"]
     run --> cleanup["clean up each terminal session through its anchor"]
     cleanup --> settled{"cleanup settled?"}
-    settled -- no --> failed["unresolved cleanup: the comparison stops with exit 1"]
+    settled -- no --> stopped
     settled -- yes --> valid{"valid run?"}
-    valid -- schema failure or refusal --> stopped["the comparison stops with exit 1"]
-    valid -- other invalid run, retried at most 3 times --> run
+    valid -- result of an unmanaged run or another harness, or an unproven teardown --> stopped
+    valid -- schema failure with a settled teardown, or refusal --> ended["the variant ends, recorded incomplete"]
+    valid -- timeout or non-occlusion invalid run on both sides twice each --> ended
+    valid -- other invalid run, retried at most 3 times per side --> run
     valid -- yes --> enough{"each side has the requested valid runs?"}
     enough -- no --> run
-    enough -- yes --> table["pool the samples and print the table"]
+    enough -- yes --> next["rewrite comparison.md after each variant"]
+    ended --> next
+    next -- more to measure --> run
+    next -- last variant done --> table["pool the samples and print the table; exit 1 if a variant is incomplete"]
 ```
 
 Each ref gets its own worktree and Cargo target directory, and the trees are
@@ -538,34 +544,75 @@ Its `covered` phase reports wall time, presented frames and redraws as counts,
 and CPU, never a frame rate or present interval, on both hosts. A Windows result
 may carry `synthetic_occlusion = true` only for this experiment.
 
-Three kinds of run stop the comparison at once with exit 1 and are never
-retried: an unresolved cleanup, a schema failure, and a refusal.
-`classify_outcome` in `perf-compare.py` checks for them before any retryable
-reason, in this order, so a run that has one stops the comparison even when it
-also has a retryable problem:
+Two kinds of run stop the comparison at once with exit 1 and are never
+retried: an unresolved cleanup, and a provenance failure, a result whose
+`managed` is not true or whose harness hash is not the hash the script passed
+(a standalone run or another harness's). Two more end only their variant, which
+is recorded incomplete with the reason while the next variant still runs: a
+schema failure whose result shows a settled teardown, and a refusal.
+`classify_outcome` in `perf-compare.py` checks for all of them before any
+retryable reason, in this order, so a run that has one is never retried even
+when it also has a retryable problem:
 
 1. an unresolved cleanup that evidence other than the result shows, such as a
    `run_step` deadline or Ctrl-C, described below;
-2. a schema failure: a `result.json` that cannot be parsed or does not match the
-   result schema, a result whose `managed` is not true, or one whose harness hash
-   is not the hash the script passed. This holds however the harness ended,
-   including a harness timeout (exit 4) and a block (exit 5). Once `run_step` has
-   reported PASS with exit 0, so the exit can be trusted, a missing `result.json`
-   (unless the harness printed `NOT_EXERCISED`) or a result whose status is not
-   `valid` is one too;
-3. an unresolved cleanup that the result shows: a `finish_session` that did not
-   settle, whatever the exit;
-4. a refusal: the harness refused the run (exit 2), for example over an unsafe
+2. a provenance failure;
+3. an unresolved cleanup that the result shows or cannot rule out: a
+   `finish_session` that did not settle, whatever the exit, or a schema failure
+   whose `result.json` is missing, cannot be parsed or does not record a settled
+   `finish_session`, so nothing proves the run's teardown. That includes an
+   exercised harness that exits invalid (3), timed out (4), blocked (5) or with
+   any other code without writing `result.json`: once its App exists, every exit
+   writes one after `finish_session`, so a missing one means a crash. Only a
+   refusal (2) ends before the App exists;
+4. a schema failure of a run whose teardown settled: a `result.json` that does
+   not match the result schema. This holds however the harness ended, including
+   a harness timeout (exit 4) and a block (exit 5). Once `run_step` has reported
+   PASS with exit 0, so the exit can be trusted, a result whose status is not
+   `valid` is a schema failure too, and a missing `result.json` (unless the
+   harness printed `NOT_EXERCISED`) is one whose teardown nothing proves;
+5. a refusal: the harness refused the run (exit 2), for example over an unsafe
    inherited setting or a scratch directory that already exists.
 
-Every other invalid run is retried, at most 3 times. That includes a run whose
-harness exits 0 while `run_step` reports a status other than PASS, TIMEOUT, or
-INTERRUPTED, and one whose harness exits 4 at its own deadline, its scenario's
-timeout. A `run_step` deadline (status TIMEOUT) or a `run_step` interrupted by
+Every other invalid run is retried, at most 3 times per side. That includes a
+run whose harness exits 0 while `run_step` reports a status other than PASS,
+TIMEOUT, or INTERRUPTED, and one whose harness exits 4 at its own deadline, its
+scenario's timeout. A head out of retries fails its variant, whose later sets
+then do not run; a base out of retries is blocked and the head still runs. One
+case ends sooner: when base and head both fail the same way, with a harness
+timeout (exit 4) or an invalidation (exit 3) that is not an occlusion, on two
+consecutive attempts each, that is after one retry a side, the variant ends at
+once and its remaining runs and sets are skipped. The runner cannot cause those
+two kinds, so more retries would only spend time. Every other kind, such as
+focus, display, renderer, session or font, keeps the per-side budget, because
+the runner can cause it. A variant whose sides fail alike has no comparison
+evidence; that does not prove a harness defect. A `run_step` deadline (status TIMEOUT) or a `run_step` interrupted by
 Ctrl-C (status INTERRUPTED), by contrast, is an unresolved cleanup: whatever the
 harness's exit, the comparison stops with exit 1 instead of starting its next
 attempt. `run_step`'s deadline is 30 s past the harness's own deadline, at or
 just before the point where the harness's watchdog would abort the harness.
+
+Failure is tracked per variant, across its timed, laps, counters and alloc
+sets. `comparison.md` is written as soon as the comparison starts, opening with
+`**Comparison preparing:**` and the step in flight (resolving the refs,
+building and listing both refs, selecting the variants), and rewritten at each
+step. `run-identity.json` follows once both refs are listed, before the first
+run, because perf-flags refuses a run whose artifacts hold an incomplete
+identity. Both are rewritten after every variant and written again on every
+exit path: a failed step, a stop, an error, and SIGINT or SIGTERM, which a
+cancelled GitHub job sends before SIGKILL. The first such signal ends the run or
+build in flight as Ctrl-C does, and a later one cannot cut the report short;
+each file is replaced through a sibling file, so a kill mid-write leaves the
+previous copy whole. Until the last variant, `comparison.md` opens with
+`**Comparison in progress:**`; after a stop it opens with
+`**Stopped comparison:**` and the reason, and a stop before measuring also names
+the step it stopped in. Its tables keep the format of a
+complete comparison and hold only the variants measured. An `Incomplete`
+section after the PR table names each variant without a complete comparison and
+why: a set that ended without its runs, a failed or blocked head, a variant not
+measured, and with `--require-base` every other gap. Any incomplete variant
+fails the comparison, with exit 1, or exit 3 for a head that is only blocked
+without `--require-base`.
 
 The harness reports the display that shows its window: its name, refresh rate,
 and scale, not its resolution. Each run's display must match the comparison's
@@ -609,9 +656,11 @@ group, so the reason says that either the group was not counted or a process
 outside it held the output open; either way a process that outlived the harness
 goes unmeasured. A harness whose exit `run_step` never collected may still run,
 so its process-group count measures nothing. The result shows the
-last cause: a `finish_session` that did not settle. That is read after the
-schema check, whatever the exit, and before any retryable reason, so such a run
-is never retried as an occlusion.
+last causes: a `finish_session` that did not settle, or a schema failure whose
+result cannot show a settled one. They are read after the provenance check,
+whatever the exit, and before any retryable reason or a variant-local schema
+failure, so such a run is never retried as an occlusion and never ends only its
+variant.
 
 ### Isolation checks
 
@@ -650,6 +699,9 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   change inside it is noise.
 - `n/a` marks a field the base does not report, and `blocked` marks a scenario
   the base cannot build or run, with the error.
+- `failed` marks a head out of retries. A set that ended without its runs (a
+  shared failure, a schema failure, a refusal, a set skipped after its variant
+  ended, or a stop) has no row; the `Incomplete` section names it and why.
 - Memory at a checkpoint comes from that checkpoint's own tagged `memory
   snapshot` line, plus a macOS `footprint` reading;
   [Logging](Logging#aggregate-snapshot-at-info) describes the line. The
@@ -896,9 +948,9 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   the flag-metrics version or the dataset settings. Anything not comparable
   exits 2.
 
-With `--counters`, two more tables follow the timed table (and the laps table,
+With `--counters` or `--counters-scenario`, two more tables follow the timed table (and the laps table,
 when run). The Frame counters table shows the counters runs of the base and the
-head, one row per scenario, phase and non-zero counter;
+head, one row per variant that ran the counters set, phase and non-zero counter;
 [Logging](Logging#frame-and-lock-counters) explains each field.
 
 - A count is the median of the runs' per-phase deltas, with their min–max.
@@ -997,7 +1049,7 @@ display with its refresh rate and scale.
 | `S1/wgpu`, `S5/wgpu`, `S11/wgpu` | Windows only: the scenario with `software_render_mode = "off"`, presenting through wgpu without degrading. |
 | `S11/release` | The image, then a switch to a media-free tab until the first frame after the switch presents (5 s bound), a 65 s hold from that frame (never shortened), the `released` checkpoint, whose memory reading counts only from a sample at least 30 s after that frame (`fresh_after_unix_s`), then a switch back until a frame with an image atlas item presents (10 s bound). |
 | `S1/role-exit` | Windows only: the role's program exits 1 right after GO, which must end the run invalid; the smoke uses it. |
-| `S1/atlas-retry` | Counters set only, and refused when no counters set runs. After 70 static rows settle, 8 recovery episodes of four forced frames each: A retries an injected glyph-atlas change, B is the first presented recovery, C and D redraw the unchanged scene. `result.json` records each frame's counter deltas as `atlas_recovery`, and the comparison adds an "Atlas retry recovery" table that sums each frame's row-cache misses and hits, shaping requests and attempts over the accepted counters runs. A scene change after settling invalidates the run with a reason that names the changed field with its settled and read values (titles escaped to ASCII), or, for row text, the first differing row. Settling also waits until the App has applied two foreground samples that each name a process and were taken strictly after the final process was observed (the sentinel on Windows, a completed harness lookup naming `sleep` on macOS), the latest naming that process and the read title equal to the one it gives. A missing or cleared sample restarts the count, an unmet barrier expires the attempt at the 10 s settle bound with a reason naming the unmet condition, and a custom tab title makes the attempt invalid at once. The harness log gets one `atlas-retry evidence` line at settle and one at failure, each taken from the reading the judge saw: the compared titles and the App's applied foreground sample captured with that reading, the role's leader pid, the cumulative title and foreground counters, and the harness's own foreground lookup, labelled separately with its own time, plus the final-process lookups' count and total time and the instant the final process was observed. |
+| `S1/atlas-retry` | Counters set only: selected without the counters set (no `--counters`, or a `--counters-scenario` that leaves it out) it is refused at the command line, and on a head without `perf-counters` before measuring. After 70 static rows settle, 8 recovery episodes of four forced frames each: A retries an injected glyph-atlas change, B is the first presented recovery, C and D redraw the unchanged scene. `result.json` records each frame's counter deltas as `atlas_recovery`, and the comparison adds an "Atlas retry recovery" table that sums each frame's row-cache misses and hits, shaping requests and attempts over the accepted counters runs. A scene change after settling invalidates the run with a reason that names the changed field with its settled and read values (titles escaped to ASCII), or, for row text, the first differing row. Settling also waits until the App has applied two foreground samples that each name a process and were taken strictly after the final process was observed (the sentinel on Windows, a completed harness lookup naming `sleep` on macOS), the latest naming that process and the read title equal to the one it gives. A missing or cleared sample restarts the count, an unmet barrier expires the attempt at the 10 s settle bound with a reason naming the unmet condition, and a custom tab title makes the attempt invalid at once. The harness log gets one `atlas-retry evidence` line at settle and one at failure, each taken from the reading the judge saw: the compared titles and the App's applied foreground sample captured with that reading, the role's leader pid, the cumulative title and foreground counters, and the harness's own foreground lookup, labelled separately with its own time, plus the final-process lookups' count and total time and the instant the final process was observed. |
 | `S1/status-line`, `S12/status-line` | The scenario's default plan with `[status_line] enabled = true` in the scratch config; `S1/status-line` instead starts with `print`, which prints 5,000 full-width rows that are all OSC 8 links into a 10,000-row history with `history` and `size` listed; linked cells cost more than plain ones, so the byte budget trims that history below its row limit. With counters on, `History: trimmed` must appear exactly once (`status_line_history_shows`) and the strip may redraw only for a sample or that appearance. After `idle` it adds `select`, a drag that selects text, and `selected`, a hold on that selection (2 s each under `--short`, 10 s otherwise). With counters on, `select` must count the selection at least once and read at most 200,000 cells per count (`status_line_sel_counts`, `status_line_sel_cells`), and `selected` must not count again. Last, `input` types 10 characters into the shell at 10 per second and settles 1 s; with counters on, `Input: held` must never appear (`status_line_held_shows`) and the strip may redraw only for a sample, so the outstanding-work checks typing arms present nothing. Then `glyphs` clears the line and, on a POSIX role, prints U+0378 (unassigned, so no font covers it) with `printf`; a Windows role types the character. With counters on, `Glyphs:` must appear at most once (exactly once on a POSIX role, `status_line_glyph_shows`) and the strip may redraw only for a sample or that appearance. Then `held` clears the line and, on a POSIX role, runs `stty raw -echo; sleep 1; head -c 262144 >/dev/null; stty sane` and pastes 256 KiB 0.3 s later (the scratch config sets `held_after_ms = 250`), so the writer blocks behind the stalled reader; with counters on, `Input: held` must appear exactly once there and hide once `head` reads the paste. A Windows role, whose shell cannot stall its reader, only presses Enter, and any side requires `held` to appear at most once. A base without the status line ignores the table and runs the plain plan. `S12/status-line` ends with `program`, after `uncovered`: a POSIX role prints an `OSC 9;4` set to 40, then a burst of 50 and 70 printed 100 ms apart inside the 250 ms taskbar interval, then an OSC 9 and an OSC 777 notification in one write, then the clear, each step 300 ms or more after the last, and settles 0.7 s; a Windows role, whose `cmd` cannot print ESC, only presses Enter. With counters on, the strip may redraw only for a sample, each notification batch at most one toast redraw (`program_notify_events`, `program_toast_redraws`) and each progress change at most one surface delivery (`program_progress_events`, `taskbar_progress_deliveries`); on every role the windows may present at most one frame per strip redraw, strip sample and toast redraw plus six per committed step (its echo, output and prompt), with cursor blink turned off in a status-line run's config; on a POSIX role the set, the burst and the clear must reach the App, every batch must be redrawn once, and the windows must present at least as many frames as toast redraws. With `perf_taskbar_progress_api` on, the counting surface's record must hold 40, the burst's 70 (50 may be absent when the PTY merged the burst into one read), then the clear last, no two deliveries closer than the interval, and as many values as `taskbar_progress_deliveries`; with it off the phase still runs without these delivery checks. A side whose App has no program counters is checked only for the strip. With counters on, each hold phase is checked against the strip's idle contract from the App's `status_line_samples`, `status_line_wakes` and `status_line_redraws`: in `idle` and `uncovered` at most one sample per 2 s interval plus one, no wake without a sample, and no more strip redraws than samples plus one; `uncovered` takes at least one sample; `covered`, when the App received `Occluded(true)`, at most one sample and one wake. A broken contract makes the run invalid. A side whose App has no status line counters is not checked. |
 | `S13/default`, `S13/sustained-4` | Multi-pane contention: role 0 runs `SustainedFlood` (`exec yes`, or the Windows program's unpaused `y` writer), which never sleeps, so its parser is busy for the whole run. Every pane spans the window's full width, stacked: `default` is that pane above one idle pane in a window two panes tall, `sustained-4` four equal rows in a window four panes tall (split down, then split each half), so the panes differ only in count. Both type 300 characters (600 full length) at 10 per second into idle role 1, then hold `tail` 5 s (10 s full) and idle to GO + 60 s. `result.json`'s `contention` records every role pane's actual grid as typing ended and, for `typing` and `tail`, the flooding pane's own progress: every 100 ms the harness reads its scrolled-line count, waiting at most 2 ms for the parser, and from each phase's start to its end the longest stretch with no reading that advanced (an unobserved start or end, busy-only looks and a stall all count). The comparison's S13 section reads each variant's head counters runs, and gives no verdict unless each has at least 200 samples, the miss attribution, `vt.parse_bytes` of at least 1 MiB in `typing` and in `tail`, both phases watched with no stretch over 1 s without progress, and flooding and typing panes of the same grid within one cell per axis (a split's rounding: stacked panes in a 17-row window get 8 and 7 rows). It is `unchanged` when the 4-pane p95 is within 10% of the 2-pane p95 and all failed collections (`contention_parser`, `contention_images` and `contention_budget_expired`) are under 1% of the 4-pane variant's collections (the `parser_lock_wait_us` count), otherwise `not unchanged`. |
 | `S13/wide-8`, `S13/wide-16`, `S13/wide-32` | Release comparisons only (the macOS smoke also opens `wide-8`, as a functional check). Every S13 layout's row also reports the typing phase's VT `parser_lock_wait_us` and `parse_us` p95 as bucket bounds, `n/a` for a base older than them; neither enters a verdict. Spill disk use is not sampled here: the harness also builds on the previous release, which has no spill pool; the Memory Usage report and the `pty queues` log line carry it. The same flood, typing and phases as `S13/default` in an equal grid four panes wide and 2, 4 or 8 rows tall, each pane 30 columns by 5 rows in a 120-column window (40 rows at most, below the macOS runner's clamp), built only from splits and directional focus moves that end on role 1. The S13 table adds a `Scaling` row: `scales` unless a layout fails 1% or more of its collections or its p95 grows more than 10% per doubling; a layout that recorded other than its 8, 16 or 32 panes, panes that differ by more than one cell from any other pane of any layout (a host may size the window differently, as long as every layout gets the same pane; one macOS host gave 31x3), fewer than 200 samples or a stopped flood gives `no verdict`, so pane count is the only thing that doubles. The result is reported, never a release gate. |
@@ -1007,7 +1059,7 @@ display with its refresh rate and scale.
 | `S11/burst`, `S11/burst-text` | Release comparisons only, on macOS. `burst` prints ten OSC 1337 inline PNGs of about 2.2 MiB, each followed by 100 numbered lines, on one pane; the first is 2,048 pixels wide, past the 1,024-pixel render cap, so its decode also resizes. `burst-text` prints the same lines alone. The counters set reports `media_decode_dus` and the decode counts; its print phase against `burst-text`'s mostly measures payload size (about 29.8 MB against 80 KB), so decode cost is read from `media_decode_dus`. Decoding stays on the pane's VT worker, which keeps image and text in stream order. An image past the cap pays a Lanczos3 resize there, during which only that pane parses no text; the cost grows with the source's pixels. Over ten attempts the nearest-rank p95 is the slowest one, so the oversized image always sets it. |
 
 The pull-request perf pipeline runs `S2/flood`, `S6/flood`, `S6/selection-drag`,
-`S6/rest`, `S1/atlas-retry`, `S1/status-line`, `S12/status-line` and `S13/sustained-4` by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
+`S6/rest`, `S1/atlas-retry`, `S1/status-line`, `S12/status-line` and `S13/sustained-4` by name on macOS and Windows: the `full` and `release` profiles run every one, and `core` runs `S2/flood`, `S6/rest` and `S13/sustained-4`; [What CI measures](#what-ci-measures) describes the profiles.
 
 Every scenario's final memory checkpoint comes at least 60 s after GO, when the
 harness releases the workloads (5 s with `--short`, which the smoke uses). Most
@@ -1106,67 +1158,58 @@ every shipping binary, declares no global allocator.
 
 ### What CI measures
 
-The `Performance comparison` workflow (`.github/workflows/perf.yml`) has two
-modes, pull request and release, which share one job graph:
+The `Performance comparison` workflow (`.github/workflows/perf.yml`) runs one
+job graph for three profiles, which `scripts/perf-shards.json` defines:
 
 ```mermaid
 flowchart LR
-  producer["perf-build-macos<br/>builds base and head once"] -->|"binaries + manifest.json"| macos["compare-macos<br/>5 shards, --prebuilt"]
-  windows["compare-windows<br/>5 shards, each builds"]
-  producer --> result["perf-result<br/>Performance comparison result"]
+  plan["plan<br/>Plan the comparison"] -->|"base, head, length, matrices"| macos["compare-macos<br/>one job per partition, each builds"]
+  plan -->|"base, head, length, matrices"| windows["compare-windows<br/>one job per partition, each builds"]
+  plan --> result["perf-result<br/>Performance comparison result"]
   macos --> result
   windows --> result
 ```
 
-- `perf-build-macos` (`macos-15`) resolves the refs and builds both once
-  through the gate's reviewed build steps with `--require-base --build-only`.
-  It recomputes the manifest's sha256 from the file, fails if that differs
-  from the digest the script printed, and uploads the binaries as a tarball,
-  which keeps the executable bit, named `perf-binaries-macOS-<run id>-<attempt>`
-  and kept for one day. Its build logs are uploaded as evidence.
-- Each `compare-macos` shard needs the producer's success. It resolves the refs
-  itself and fails when they differ from the producer's, or when a base was
-  resolved and the producer published no manifest. It downloads the producer
-  attempt's tarball and runs `--require-base --prebuilt`, bound to this run's
-  id, the producer's attempt and its manifest digest. Before measuring,
-  `perf-compare.py` refuses a missing directory or manifest or another schema;
-  a manifest whose sha256 is not the producer's; another run or attempt;
-  another base or head SHA; another harness hash; other Cargo features; another
-  target, toolchain (`rustc -vV`, `cargo -V`) or runner image (`ImageOS`,
-  `ImageVersion`); another profile (each side's LTO and the
-  `CARGO_PROFILE_RELEASE_*` overrides); a binary that is missing, a symlink,
-  not executable or misdigested, or an example a set needs that was not built;
-  and a copy that cannot `--list` or would not find its own tree's assets. A
-  toolchain or image rollover between the producer and a shard therefore fails
-  closed. Only the executable moves: the copies sit under the work directory
-  with no `assets` beside them, so each ref still runs from its own worktree
-  with its own assets. The binaries link Homebrew's Cairo dynamically, so each
-  shard still installs it.
-- "Re-run failed jobs" keeps a successful producer, so its `attempt` output
-  stays the attempt that built the artifact, and a rerun shard downloads that
-  one. "Re-run all jobs" runs a new producer, and its shards refuse the earlier
-  attempt's manifest.
-- Each `compare-windows` shard builds both refs itself, with `--require-base`.
-- `perf-result` needs all three jobs and runs with `always()` under the same
-  eligibility. It checks out nothing and uses no action: one inline step passes
-  only when the producer and both comparison jobs succeeded. Only an eligible
-  run names it `Performance comparison result`. An ineligible run, such as
-  another label added to a `perf` pull request, skips every job. GitHub never
+- `plan` (`Plan the comparison`, `ubuntu-latest`) runs only for an eligible
+  event: a pushed `v*` tag, or a pull request carrying `perf` or `perf-full`
+  whose event is not another label being added. It resolves the base and head
+  SHAs once: a pull request's merge base with its head, in short runs, or a
+  tag's previous release tag with the tag, at full length. A tag chooses the
+  `release` profile, a pull request carrying `perf-full` chooses `full`, and any
+  other eligible pull request `core`. `python3 scripts/perf_shards.py <profile>`
+  checks the whole partition file and prints each platform's matrix; a file
+  that breaks a rule fails the plan, so no runner builds anything.
+- Each `compare-macos` (`macos-15`) and `compare-windows` (`windows-latest`) job
+  is one partition, named `<platform> before/after comparison (<partition>)`. It
+  needs the plan and reads its SHAs, run length and partition from the plan's
+  outputs, so a job that starts late never re-resolves a moving base. It builds
+  both refs itself through the gate's reviewed build steps and runs them
+  interleaved on its own runner, each from its own worktree, with
+  `--require-base`. Windows installs Cairo from vcpkg, restoring CI's cache
+  without writing it, and runs the same bash steps under Git Bash.
+- `perf-result` needs the plan and both comparison jobs and runs with
+  `always()` under the same eligibility, which it reads itself, so a skipped
+  plan never lets it pass. It checks out nothing and uses no action: one inline
+  step passes only when the plan and both comparison jobs succeeded. Only an
+  eligible run names it `Performance comparison result`. An ineligible run, such
+  as another label added to a `perf` pull request, skips every job. GitHub never
   evaluates a skipped job's `name:`, so its result check shows the raw name
   expression (which quotes both `Performance comparison result` and
   `Performance comparison result (not run)`), never the real name.
-- A first release has no earlier tag: the producer builds nothing, each macOS
-  shard plans no comparison and skips the download, the Windows shards skip
-  their comparison, and all four jobs succeed.
+- A first release has no earlier tag: the plan resolves no base but still emits
+  the release matrices, each comparison job skips its comparison, summary and
+  evidence, and all four jobs succeed.
 
 Eligible runs of one pull request, or one tag, share a workflow-level
 concurrency group. A newer eligible pull-request run cancels the older run
 whole; the older run's result job still runs under `always()` and fails, so a
-superseded run never reads as success. Each ineligible run has a group of its
-own, keyed by its run id, and cancels nothing. A running release comparison is
-never cancelled: a newer run of the same tag waits, and GitHub keeps one waiting
-run per group. Re-running an older eligible run rejoins the group and cancels a
-newer one, so re-run only the newest eligible run.
+superseded run never reads as success. Adding `perf-full` to a `perf` pull
+request is such a run, so the full comparison replaces a running core one. Each
+ineligible run has a group of its own, keyed by its run id, and cancels nothing.
+A running release comparison is never cancelled: a newer run of the same tag
+waits, and GitHub keeps one waiting run per group. Re-running an older eligible
+run rejoins the group and cancels a newer one, so re-run only the newest
+eligible run.
 
 Merge evidence is the exact eligible run's `Performance comparison result` job:
 SUCCESS, in the run whose head SHA is the pull request's exact head, read by
@@ -1179,29 +1222,51 @@ result job finishes. A superseded, cancelled or skipped run is never counted as
 success.
 
 `--require-base` holds the base to the head's standard in every CI comparison:
-a base that cannot build, list or fill a set's valid runs fails the shard, and
-its `comparison.md` opens with `**Incomplete comparison:**`. Two gaps are
-allowed: a counters set on a base that does not declare `perf-counters`, which
-still reads `n/a`, and a diagnostic declared unavailable on both sides because
-its harness API cfg is off, which runs nothing. Any other blocked side still
-fails, and a selection with nothing runnable never passes. The three macOS shards run S7, S4, S1/atlas-retry, S8 and
-S6/selection-drag; S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line, S12, S12/status-line and S3;
-and S10, S11/release, S2, S2/flood, S6/flood, S13 and S13/sustained-4.
-The five Windows shards run S7; S9, S10, S6/flood,
-S6/selection-drag and S2/flood; S2, S10/sync, S6/rest, S13 and S13/sustained-4; S4, S5, S11, S11/release,
-S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, with the macOS partition rebalanced from measured phase costs; exact-head timing still verifies the 35-minute margin; Windows S7 also runs S1/status-line and S12/status-line. On each platform the shard holding S9 (macOS
-S9-S10sync, Windows S9-S10) also runs S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
-`laps` field; the other entries pass no laps flags), and each platform's table
-gives its own `fallback_receive` verdict. A bare scenario ID selects only its default
-variant, so every variant is named explicitly. Under `--short`, `S7` is capped at 3 runs per side (it alone set
-the critical path past 35 minutes), `S2/flood` at 2, `S11/release`, `S1/status-line`, `S12/status-line`, `S13/default` and `S13/sustained-4` at 1, and `S11/gdi`, `S11/wgpu`,
-`S1/atlas-retry` and `S6/rest` at 2. The `S2/flood` cap only keeps the pull-request comparison within 35 minutes:
-a release comparison runs it in full. A release comparison also runs the release-only variants (S13's wide
-layouts, and on macOS `S2/spawn`, `S3/history`, `S3/resize`, `S11/burst` and `S11/burst-text`). On Windows each
-matrix entry's `release_scenarios` field (S13's wide layouts on the shard holding S13, empty elsewhere) is appended
-only when the run is not short. On macOS each entry's `release_partition` replaces its `scenarios` when the run is
-not short: the three partitions hold every variant once, each release-only variant beside its scenario, balanced
-from measured release times so no job nears GitHub's 6-hour limit. Pull requests never run either. With `perf-frame-texture`, S11's
+a base that cannot build, list or fill a set's valid runs fails the job, and
+its `comparison.md` opens with `**Incomplete comparison:**`; a comparison that
+stops opens with `**Stopped comparison:**` instead ([How a comparison
+runs](#how-a-comparison-runs)). Two gaps are allowed: a counters set on a base
+that does not declare `perf-counters`, which still reads `n/a`, and a
+diagnostic declared unavailable on both sides because its harness API cfg is
+off, which runs nothing. Any other blocked side still fails, and a selection
+with nothing runnable never passes.
+
+| Profile | When | Compares | Partitions | Runs | Release profile | Time |
+| --- | --- | --- | --- | --- | --- | --- |
+| `core` | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | 2 macOS, 2 Windows | `--short --runs 5 --counters --counters-runs 1`, no laps | LTO off, 16 codegen units, for both refs | within 25 minutes of the run's creation, queue included |
+| `full` | a pull request labelled `perf-full`, on the same events | the merge base with the head | 3 macOS, 3 Windows | `--short --runs 5 --counters --counters-runs 2`, S9's laps with `--laps-runs 2` | LTO off, 16 codegen units, for both refs | within 45 minutes of the run's creation, queue included |
+| `release` | a pushed `v*` tag | the previous release tag with the tag | 4 macOS, 4 Windows | full length, `--runs 3`, `--counters-scenario <listed variants> --counters-runs 2`, S9's laps with `--laps-runs 2` | the shipping profile | may take hours; each job stays under GitHub's 6-hour limit |
+
+`core` runs the reviewed core variants on both platforms: S1, S2, S2/flood, S3,
+S6/rest, S9, S10/sync, S11, S12, S13 and S13/sustained-4. `full` runs every
+pull-request variant: the catalogue's variants except the release-only ones and
+S1/gdi, S1/wgpu, S1/role-exit, S5/gdi and S5/wgpu, which no profile compares;
+S2/glide and S11/kitty-placeholders run only on macOS, S11/gdi and S11/wgpu only
+on Windows. `release` adds the release-only variants: S13's wide layouts on both
+platforms, and on macOS `S2/spawn`, `S3/history`, `S3/resize`, `S11/burst` and
+`S11/burst-text`. A release runs the counters set only for S1, S1/atlas-retry,
+S2, S2/flood, S3, S6/rest, S10, S10/sync, S12 and every S13 variant, where the
+platform measures them: each partition's `counters` list becomes
+`--counters-scenario`, and every other variant runs its timed set alone. Its four
+partitions a platform are each sized to about three hours from measured
+per-variant release times. `scripts/perf-shards.json` lists each partition's variants,
+balanced from measured per-variant times. Variants one report reads together
+share a partition: S13 and S13/sustained-4 (the contention verdict), S13's
+three wide layouts (its scaling rule), and S11/burst with S11/burst-text. In
+`full` and `release` the partition holding S9 also runs its laps set, and each
+platform's table gives its own `fallback_receive` verdict. A bare scenario ID
+selects only its default variant, so every variant is named explicitly.
+`scripts/perf_workflow_identity_tests.py` checks these rules on the file itself:
+every variant is in the harness catalogue and runs once per platform per
+profile, `release` holds `full` and `full` holds `core`, laps run only where
+declared, and every variant has a set it may run (S1/atlas-retry runs only the
+counters set, so its partition must give it one).
+
+Under `--short`, `S7` is capped at 3 runs per side, `S2/flood` at 2,
+`S11/release`, `S1/status-line`, `S12/status-line`, `S13/default` and
+`S13/sustained-4` at 1, and `S11/gdi`, `S11/wgpu`, `S1/atlas-retry` and
+`S6/rest` at 2. The caps only keep a pull-request profile within its budget: a
+release comparison runs every variant in full. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
 on a base without the feature. S9's and S12's `end` checkpoints record the
 renderer's glyph completeness: at each presented `Full` frame the renderer stores
@@ -1221,44 +1286,45 @@ run's attempt directory, measured SHA, side, platform, fixture, set and scale)
 and lists them in `comparison.md`. These are perf-end rows only; helper and
 real-renderer rows come from the working-set test. The combined gate steps
 `perf-scenarios-harness-api-clippy` and `perf-scenarios-harness-api-tests` lint
-and test the harness with this cfg on, together with every other entry. Each shard runs its sets' base and head runs
-interleaved on its own runner, so a comparison never crosses runners or
-platforms. The macOS shard count, three today, matches the macOS
-runner slots that reached perf while CI's macOS jobs ran in the measured trials; it is chosen from measured critical paths. Both modes add the counters set, on the
-head and on a base that declares `perf-counters`: a pull request takes two
-counters runs per scenario and side to stay within 35 minutes, a release takes
-three, which keeps every counters-derived figure above its sample floor. The Windows runner has no GPU and no user session: its table measures
-the software-rendering path, and a foreground change there is recorded, not
-judged.
-
-| Mode | When | Compares | Runs | Release profile | Time |
-| --- | --- | --- | --- | --- | --- |
-| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5 --counters --counters-runs 2` | LTO off, 16 codegen units, for both refs | within 35 minutes of the run's creation, queue included |
-| Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5 --counters --counters-runs 3` | the shipping profile | may take hours; each job stays under GitHub's 6-hour limit |
+and test the harness with this cfg on, together with every other entry. Every
+profile adds the counters set, on the head and on a base that declares
+`perf-counters`: `core` takes one counters run per scenario and side (a short
+S13 run types 300 characters, above the contention verdict's 200-sample floor),
+`full` two, and a release two for the variants whose counters it reads (a
+full-length S13 run types 600 characters, so the verdict's floor still holds). The Windows runner has no GPU and no user session: its table
+measures the software-rendering path, and a foreground change there is
+recorded, not judged.
 
 Each comparison job writes its `comparison.md` to the job summary and uploads
-it, its `timing.json` and each run's logs and records as an artifact whose name
-ends in the run attempt, so a rerun's evidence never replaces the first
-attempt's. The table's details record the run
-length, any release-profile override and, on macOS, the producer run, attempt
-and manifest digest. The workflow is not one of the required CI jobs; its table
-is the pull request's evidence. A pull request's short runs, on a relaxed
-profile, are a quick check; the release comparison measures the shipped profile
-at full length. A shared runner is noisier than an idle desk, so read a change
-against an A/A comparison from the same runner type and mode.
+it, its `timing.json` and each run's logs and records as an artifact named for
+the platform, the partition and the run attempt, so a rerun's evidence never
+replaces the first attempt's. The table's details record the run length, any
+release-profile override and the build command. The workflow is not one of the
+required CI jobs; its table is the pull request's evidence. A pull request's
+short runs, on a relaxed profile, are a quick check; the release comparison
+measures the shipped profile at full length. A shared runner is noisier than an
+idle desk, so read a change against an A/A comparison from the same runner type
+and profile.
 
-The pull-request budget is 35 minutes from the run's creation to its last job's
-finish, queue time and reruns included; shard time alone does not count.
+The `core` budget is 25 minutes and the `perf-full` budget 45 minutes, each from
+the run's creation to its last job's finish, queue time and reruns included;
+job time alone does not count.
 `python3 scripts/perf-critical-path.py --run <id>` accounts for it (`--fixture
 <file>` reads a recorded run). It partitions the elapsed time into each attempt
 and the waits between reruns, maps each rerun's inherited job rows to the one
 attempt that executed them, and splits each attempt's chains of needs into
 sibling wait, creation wait, runner queue and runtime classes (setup, build,
-package and upload, download and extract, compare, evidence, check, teardown
-and gap), naming the zero-slack critical path. In a run with `timing.json` the
-compare step splits further into prepare, scenarios and report. An older run
-without it is read in historical mode: each job's evidence is the same-name
-artifact created inside its window, and its compare step stays one class.
+compare, evidence, check, teardown and gap; runs of the earlier layout also
+show package and upload, download and extract), naming the zero-slack critical
+path. In a run with `timing.json` the compare step splits further into prepare,
+scenarios and report. A job whose attempt's artifact GitHub no longer keeps (it
+keeps only the newest attempt's), or whose artifact has no `timing.json`
+because the comparison stopped, keeps its compare step as one class with a
+note; a `timing.json` that disagrees with the run still stops the report. An
+older run without it is read in historical mode: each job's evidence is the
+same-name artifact created inside its window, and its compare step stays one
+class. `--profile core|full|release` chooses the budget; a tag push defaults to
+`release`, which has none, and a pull request to `core`.
 `--ci-run <id>` adds the macOS jobs' concurrency across the perf and CI runs, as
 evidence of contention, not of a quota. It exits 0 within budget, 1 over it,
 and 2 when the rows do not reconcile. The author runs it for a pull request's

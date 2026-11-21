@@ -15,7 +15,6 @@ import perf_latency_tests
 import perf_memory
 import perf_memory_tests
 import perf_metrics
-import perf_prebuilt_tests
 import perf_result_schema
 import perf_result_tests
 import perf_scenarios
@@ -329,20 +328,6 @@ class S10AttributionConsistencyTests(unittest.TestCase):
         sound = perf_attribution_report.attribution_run(armed_outcome(lines), synchronized=False)
         self.assertEqual(sound.state, "unsupported")
         self.assertTrue(perf_attribution_report.attribution_verdict([sound], False, [2]).startswith("unsupported"))
-
-
-class S10AttributionPrebuiltTests(perf_prebuilt_tests.PrebuiltHarness, unittest.TestCase):
-    """A prebuilt manifest's harness cfg decision is compared exactly."""
-
-    def test_a_manifest_cfg_value_must_be_a_list_of_names(self):
-        # A number, a boolean, a bare name, null or a per-side object is refused for its type, never compared
-        # loosely, so `0` can never stand for an absent cfg.
-        binaries, _digest = self.produce()
-        for value in ([0], [True], "perf_atlas_retry_api", None, {"base": True, "head": True}):
-            with self.subTest(value=value):
-                changed = self.rewrite(binaries, lambda data, value=value: data.update(harness_cfgs=value))
-                with self.assertRaisesRegex(ValueError, "harness_cfgs .* is not a list of strings"):
-                    self.consume(binaries, changed)
 
 
 CERTIFIED = {"state": "certified", "missing_terminal": 2, "missing_chrome": 0, "atlas_width": 512,

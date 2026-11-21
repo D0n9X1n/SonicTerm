@@ -488,7 +488,7 @@ class EchoTimelineTests(perf_driver_tests.CompareHarness, unittest.TestCase):
         self.assertEqual(rows[-1][5], "pass (base 100.0%, head 100.0%)")
         self.assertEqual(len(perf_counter_rows.timeline_rows("S2/flood", side, side)), len(rows))
         self.assertEqual(perf_counter_rows.timeline_rows("S1/default", side, side), [])
-        self.assertIn("timeline_rows(result.label, result.base, result.head)", inspect.getsource(perf_driver._compare))
+        self.assertIn("timeline_rows(result.label, result.base, result.head)", inspect.getsource(perf_driver._compare_steps))
         # A credited sample without a timeline object stays in its side's credited denominator.
         gapped = {row[2]: row[3:] for row in perf_counter_rows.timeline_rows("S2/default", timeline_side([timeline(), None]), side)}
         self.assertEqual(gapped["echo timeline ordered / credited"][0], "1/2 (50.0%)")

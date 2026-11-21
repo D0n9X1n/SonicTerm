@@ -66,9 +66,7 @@ pub fn open_in_default_app(path: &Path) -> Result<()> {
 /// Open `path` in the OS default editor/application.
 #[cfg(target_os = "macos")]
 pub fn open_in_default_app(path: &Path) -> Result<()> {
-    std::process::Command::new("open")
-        .arg(path)
-        .spawn()
+    crate::detached_spawn::spawn_detached(std::process::Command::new("open").arg(path))
         .with_context(|| format!("open {path:?}"))?;
     Ok(())
 }
@@ -76,9 +74,7 @@ pub fn open_in_default_app(path: &Path) -> Result<()> {
 /// Open `path` in the OS default editor/application.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn open_in_default_app(path: &Path) -> Result<()> {
-    std::process::Command::new("xdg-open")
-        .arg(path)
-        .spawn()
+    crate::detached_spawn::spawn_detached(std::process::Command::new("xdg-open").arg(path))
         .with_context(|| format!("open {path:?}"))?;
     Ok(())
 }

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "core": {
+      "description": "A pull request labelled perf: the reviewed core variants in two partitions a platform, short runs.",
+      "runs": 5,
+      "counters_runs": 1,
+      "partitions": {
+        "macOS": [
+          {"name": "core-1", "variants": ["S1", "S2", "S2/flood", "S3", "S6/rest"]},
+          {"name": "core-2", "variants": ["S9", "S10/sync", "S11", "S12", "S13", "S13/sustained-4"]}
+        ],
+        "Windows": [
+          {"name": "core-1", "variants": ["S1", "S2", "S2/flood", "S3", "S6/rest"]},
+          {"name": "core-2", "variants": ["S9", "S10/sync", "S11", "S12", "S13", "S13/sustained-4"]}
+        ]
+      }
+    },
+    "full": {
+      "description": "A pull request labelled perf-full: every pull-request variant in three partitions a platform, short runs.",
+      "runs": 5,
+      "counters_runs": 2,
+      "laps_runs": 2,
+      "partitions": {
+        "macOS": [
+          {"name": "full-1", "variants": ["S1/status-line", "S4", "S5", "S6/rest", "S7", "S8", "S12"]},
+          {"name": "full-2", "variants": ["S1", "S1/atlas-retry", "S2", "S2/flood", "S2/glide", "S3", "S6", "S10/sync",
+                                          "S12/status-line"]},
+          {"name": "full-3", "variants": ["S6/flood", "S6/selection-drag", "S9", "S10", "S11", "S11/release",
+                                          "S11/kitty-placeholders", "S13", "S13/sustained-4"], "laps": ["S9"]}
+        ],
+        "Windows": [
+          {"name": "full-1", "variants": ["S1", "S6", "S6/rest", "S7", "S11/gdi", "S12", "S12/status-line"]},
+          {"name": "full-2", "variants": ["S1/atlas-retry", "S1/status-line", "S2", "S2/flood", "S3", "S6/flood",
+                                          "S6/selection-drag", "S10/sync", "S11"]},
+          {"name": "full-3", "variants": ["S4", "S5", "S8", "S9", "S10", "S11/release", "S11/wgpu", "S13",
+                                          "S13/sustained-4"], "laps": ["S9"]}
+        ]
+      }
+    },
+    "release": {
+      "description": "A release tag: every variant at full length with the shipping profile; counters only where a release reads them.",
+      "runs": 3,
+      "counters_runs": 2,
+      "laps_runs": 2,
+      "partitions": {
+        "macOS": [
+          {"name": "release-1", "variants": ["S3/history", "S4", "S6", "S7", "S9", "S13/wide-8", "S13/wide-16",
+                                             "S13/wide-32"],
+           "laps": ["S9"], "counters": ["S13/wide-8", "S13/wide-16", "S13/wide-32"]},
+          {"name": "release-2", "variants": ["S1", "S2/flood", "S2/glide", "S3/resize", "S11", "S11/kitty-placeholders",
+                                             "S13", "S13/sustained-4"],
+           "counters": ["S1", "S2/flood", "S13", "S13/sustained-4"]},
+          {"name": "release-3", "variants": ["S1/status-line", "S2", "S5", "S6/flood", "S8", "S10/sync", "S11/burst",
+                                             "S11/burst-text", "S12/status-line"],
+           "counters": ["S2", "S10/sync"]},
+          {"name": "release-4", "variants": ["S1/atlas-retry", "S2/spawn", "S3", "S6/selection-drag", "S6/rest", "S10",
+                                             "S11/release", "S12"],
+           "counters": ["S1/atlas-retry", "S3", "S6/rest", "S10", "S12"]}
+        ],
+        "Windows": [
+          {"name": "release-1", "variants": ["S2/flood", "S6/selection-drag", "S8", "S9", "S13/wide-8", "S13/wide-16",
+                                             "S13/wide-32"],
+           "laps": ["S9"], "counters": ["S2/flood", "S13/wide-8", "S13/wide-16", "S13/wide-32"]},
+          {"name": "release-2", "variants": ["S6/flood", "S6/rest", "S7", "S10/sync", "S11/wgpu", "S13", "S13/sustained-4"],
+           "counters": ["S6/rest", "S10/sync", "S13", "S13/sustained-4"]},
+          {"name": "release-3", "variants": ["S2", "S5", "S6", "S10", "S11/release", "S11/gdi", "S12"],
+           "counters": ["S2", "S10", "S12"]},
+          {"name": "release-4", "variants": ["S1", "S1/atlas-retry", "S1/status-line", "S3", "S4", "S11",
+                                             "S12/status-line"],
+           "counters": ["S1", "S1/atlas-retry", "S3"]}
+        ]
+      }
+    }
+  }
+}

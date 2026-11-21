@@ -210,6 +210,10 @@ Windows 执行阶段。阶段元数据保留在原始日志中，子进程字节
 Toolset 3.14.1.20250415。CI 逻辑覆盖率使用 `cargo-llvm-cov` 0.9.1。
 `scripts/setup-windows-cairo.ps1` 会通过 `VCPKG_ROOT`、
 `VCPKG_INSTALLATION_ROOT` 或 `C:\vcpkg` 查找 `vcpkg.exe`，再安装静态 Cairo 和 pkgconf。
+Cairo 静态链接所用的库名与 vcpkg 的文件名并不总是一致（zlib 1.4 安装的是 `libzs.lib` 并列出 `-llibzs`，
+但链接器被要求查找 `zs.lib`），因此 `setup-windows-cairo-aliases.ps1` 会把 vcpkg 缺少的每个所列库，以带与
+不带 `lib` 前缀的 `<name>.lib` 复制到一个每次运行都会清空并重建的别名目录，因此复制件不会在 vcpkg 升级后
+残留。`LIB` 中 vcpkg 的 lib 目录排在前面，因此真实的库总是优先于复制件；找不到某个库时 setup 会报错并给出其名称。
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc

@@ -9,10 +9,10 @@ import unittest
 
 import perf_atlas_tests
 import perf_build_tests
+import perf_driver_tests
 import perf_fallback_tests
 import perf_harness_sources
 import perf_home_tests
-import perf_prebuilt_tests
 import perf_settings
 
 
@@ -56,7 +56,7 @@ class HookSourceScanTests(unittest.TestCase):
         self.assertNotIn("tail", blanked)
 
 
-class CheckpointMemoryFeatureTests(perf_prebuilt_tests.PrebuiltHarness, unittest.TestCase):
+class CheckpointMemoryFeatureTests(perf_driver_tests.CompareHarness, unittest.TestCase):
     """perf-hook-checkpoint-memory reaches only a tree that defines the hook, through the gate's reviewed steps."""
 
     def build_step(self, gate, side):
@@ -106,15 +106,6 @@ class CheckpointMemoryFeatureTests(perf_prebuilt_tests.PrebuiltHarness, unittest
     def test_a_declaration_without_the_method_builds_without_the_feature(self):
         _code, gate, *_rest = self.compare(head_manifest=perf_fallback_tests.HOOK_MANIFEST)
         self.assertNotIn("--features", self.build_step(gate, "head").argv)
-
-    def test_the_manifest_records_each_sides_features_and_a_mismatch_fails(self):
-        binaries, digest = self.produce(head_manifest=perf_fallback_tests.HOOK_MANIFEST, hook_trees=("head",))
-        manifest = json.loads((binaries / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["features"], {"base": [], "head": [perf_harness_sources.CHECKPOINT_MEMORY_FEATURE]})
-        with self.assertRaisesRegex(ValueError, "refusing the prebuilt binaries: features"):
-            self.consume(binaries, digest, head_manifest=perf_fallback_tests.HOOK_MANIFEST)
-        code, *_rest = self.consume(binaries, digest, head_manifest=perf_fallback_tests.HOOK_MANIFEST, hook_trees=("head",))
-        self.assertEqual(code, perf_settings.EXIT_PASS)
 
     def test_the_gate_rejects_a_lookalike_build_step(self):
         # A copy of a reviewed step with the same id and argv is not the gate's own step.

@@ -23,7 +23,7 @@ pub(crate) struct ScenarioSpec {
 /// Every scenario the harness can run, in id order.
 pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     // S1/atlas-retry runs only in the counters set (perf-compare enforces it), capped at 2 short runs
-    // per side; perf.yml places it in a shard with measured slack and records the projection.
+    // per side; scripts/perf-shards.json lists it with the counters variants of each profile that runs it.
     // S1/status-line is the idle shell with the status line on, one short run per side.
     capped(
         spec(
@@ -35,7 +35,7 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
         ),
         &[("atlas-retry", 2), ("status-line", 1)],
     ),
-    // S2/flood is capped at 2 short runs to keep the PR comparison within 30 minutes; a release
+    // S2/flood is capped at 2 short runs to keep the PR comparison within its budget; a release
     // comparison is never capped, so its full-length runs remain the variant's complete evidence.
     // S2/spawn types as S2/default does and opens a tab every tenth character, so the echo samples
     // around each pane creation show what it cost typing; the workflow runs it for a release tag.
@@ -61,9 +61,9 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
         spec("S6", "pointer motion", &["default", "flood", "selection-drag", "rest"], 300, 240),
         &[("rest", 2)],
     ),
-    // S7 is the longest variant (about 1.5 min a run on macOS, 21 min of a 14-run short comparison)
-    // and alone set the PR pipeline's critical path past its 35-minute budget, before and with this
-    // catalog's S13; 3 short runs a side keep it inside. A release comparison runs it uncapped.
+    // S7 is the longest variant: its scroll phase walks the whole retained history at a fixed wheel
+    // rate, so `--short` cannot shorten it; 3 short runs a side keep a `perf-full` comparison inside
+    // its budget, and the `core` profile leaves it out. A release comparison runs it uncapped.
     capped(spec("S7", "scrollback wheel", &["default"], 420, 360), &[("default", 3)]),
     spec("S8", "search", &["default"], 300, 240),
     spec("S9", "emoji and CJK text", &["default"], 300, 240),

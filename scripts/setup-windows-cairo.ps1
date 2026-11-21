@@ -71,8 +71,23 @@ if (-not (Test-Path -LiteralPath $cairoPc)) {
     throw "Could not find cairo.pc at $cairoPc."
 }
 
+# Bare `-l` names in Cairo's static link that vcpkg spells differently get copies in a directory rebuilt each run.
+$targetLib = Join-Path -Path $targetRoot -ChildPath "lib"
+$scratch = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+$aliasDir = Join-Path -Path $scratch -ChildPath "sonicterm-cairo-link-aliases"
+$env:PKG_CONFIG_PATH = $pkgConfigPath
+$staticLibs = & $pkgConfig --libs --static cairo
+if ($LASTEXITCODE -ne 0) {
+    throw "pkg-config could not list cairo's static libraries."
+}
+Write-Host "cairo static link flags: $staticLibs"
+. (Join-Path -Path $PSScriptRoot -ChildPath "setup-windows-cairo-aliases.ps1")
+Update-CairoLinkAliases -LinkFlags "$staticLibs" -LibraryDir $targetLib -AliasDir $aliasDir
+
 $toolDir = Split-Path -Parent $pkgConfig
+$linkSearch = if ($env:LIB) { "$targetLib;$aliasDir;$env:LIB" } else { "$targetLib;$aliasDir" }
 $exports = [ordered]@{
+    LIB = $linkSearch
     SONICTERM_CAIRO_BIN_DIR = (Join-Path -Path $targetRoot -ChildPath "bin")
     PKG_CONFIG = $pkgConfig
     PKG_CONFIG_PATH = $pkgConfigPath

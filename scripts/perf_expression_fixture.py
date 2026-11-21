@@ -1,6 +1,7 @@
 """Perf expression fixture."""
 
 from __future__ import annotations
+import json
 import re
 
 
@@ -20,15 +21,17 @@ class UnsupportedExpression(ValueError):
 _EXPRESSION_TOKEN = re.compile(r"\s*(?:(?P<string>'(?:[^']|'')*')|(?P<operator>==|!=|&&|\|\||[!(),])"
                                r"|(?P<name>[A-Za-z_][A-Za-z0-9_.*-]*))")
 STATUS_FUNCTIONS = ("always", "success", "failure", "cancelled")
-# What an `if:` may read (eligibility reads the pull request's action and labels); a `${{ }}` value may
-# also read the rest of github, needs, matrix and runner.temp.
+# What an `if:` may read: eligibility reads the pull request's action and labels, and a step guard reads a step's
+# or the plan job's outputs. A `${{ }}` value may also read the rest of github, a job's result, matrix and
+# runner.temp.
 IF_REFERENCES = (re.compile(r"steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+"), re.compile(r"runner\.os"),
+                 re.compile(r"needs\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+"),
                  re.compile(r"github\.event_name"), re.compile(r"github\.event\.action"),
                  re.compile(r"github\.event\.label\.name"),
                  re.compile(r"github\.event\.pull_request\.labels\.\*\.name"))
 VALUE_REFERENCES = IF_REFERENCES + (
     re.compile(r"github\.[A-Za-z0-9_.]+"), re.compile(r"matrix\.[A-Za-z0-9_]+"), re.compile(r"runner\.temp"),
-    re.compile(r"needs\.[A-Za-z0-9_-]+\.(?:result|outputs\.[A-Za-z0-9_-]+)"))
+    re.compile(r"needs\.[A-Za-z0-9_-]+\.result"))
 
 
 class _ExpressionParser:
@@ -148,6 +151,9 @@ def evaluate_expression(tree, context, references):
             if isinstance(arguments[0], list):
                 return any(str(item).lower() == needle for item in arguments[0])
             return needle in str(arguments[0]).lower()
+        if tree[1] == "fromJSON" and len(arguments) == 1:
+            # A job output is text; a matrix built from it is the parsed list.
+            return json.loads(str(arguments[0]))
         if tree[1] == "format" and arguments:
             result = str(arguments[0])
             for index, argument in enumerate(arguments[1:]):
@@ -181,6 +187,14 @@ def condition_holds(text, context, default_status):
         tree = ("and", ("call", "success", []), tree)
     status = {"always": True, "success": default_status}
     return _truthy(evaluate_expression(tree, dict(context, status=status), IF_REFERENCES))
+
+
+def evaluate_value(text, context):
+    """Evaluate a value that is one whole `${{ }}`, keeping its type, so a fromJSON matrix stays a list."""
+    match = re.fullmatch(r"\s*\$\{\{(.*?)\}\}\s*", text, flags=re.S)
+    if match is None:
+        raise UnsupportedExpression(f"{text!r} is not one whole expression")
+    return evaluate_expression(_ExpressionParser(match.group(1)).parse(), context, VALUE_REFERENCES)
 
 
 def substitute(text, context):

@@ -302,13 +302,18 @@ def variant_sets(scenario_id: str, variant: str, sets: Sequence[tuple]) -> list[
     return list(sets)
 
 
-def counters_only_problem(selected: Sequence[tuple[str, str]], counters_set: bool) -> str | None:
-    """Why the selection cannot run: a counters-only variant selected when no counters set runs."""
+def counters_only_problem(selected: Sequence[tuple[str, str]],
+                          counters: Sequence[tuple[str, str]] | None) -> str | None:
+    """Why the selection cannot run: a counters-only variant selected without the counters set.
+
+    `counters` holds the variants that run the counters set; None is every selected variant (`--counters`).
+    """
     named = [f"{scenario_id}/{variant}" for scenario_id, variant in selected
-             if (scenario_id, variant) in COUNTERS_ONLY_VARIANTS]
-    if named and not counters_set:
-        return (f"{', '.join(named)} runs only in the counters set; pass --counters with a head that "
-                "declares perf-counters")
+             if (scenario_id, variant) in COUNTERS_ONLY_VARIANTS
+             and counters is not None and (scenario_id, variant) not in counters]
+    if named:
+        return (f"{', '.join(named)} runs only in the counters set; pass --counters, or name it in "
+                "--counters-scenario, with a head that declares perf-counters")
     return None
 
 

@@ -103,3 +103,43 @@ class AbbaScheduleTests(unittest.TestCase):
                               "head": [False, False, False, True, True]})
         self.assertTrue(schedule.complete)
         self.assertEqual(schedule.invalid_runs, {"base": 3, "head": 3})
+
+
+class FailureStreakTests(unittest.TestCase):
+    def test_both_sides_need_two_of_one_kind_in_a_row(self):
+        # One retry a side: the failure is shared once each side's latest two attempts failed with the same kind.
+        streaks = perf_statistics.FailureStreaks(("timeout", "invalid"))
+        streaks.record("base", "timeout", "exit 4")
+        streaks.record("head", "timeout", "exit 4")
+        streaks.record("head", "timeout", "exit 4")
+        self.assertIsNone(streaks.shared)
+        streaks.record("base", "timeout", "exit 4")
+        self.assertEqual(streaks.shared, "timeout")
+        self.assertEqual(streaks.reasons, {"base": "exit 4", "head": "exit 4"})
+
+    def test_another_kind_a_valid_run_or_a_clear_ends_a_run(self):
+        # A run counts consecutive attempts of one shared kind; anything else starts it over.
+        cases = {"another shared kind": "invalid", "a kind outside the set": "focus", "a valid run": "valid"}
+        for name, interruption in cases.items():
+            with self.subTest(name):
+                streaks = perf_statistics.FailureStreaks(("timeout", "invalid"))
+                for side in ("base", "head"):
+                    streaks.record(side, "timeout")
+                streaks.record("head", interruption)
+                streaks.record("base", "timeout")
+                streaks.record("head", "timeout")
+                self.assertIsNone(streaks.shared)
+        streaks = perf_statistics.FailureStreaks(("timeout",))
+        for side in ("base", "head", "base", "head"):
+            streaks.record(side, "timeout")
+        streaks.clear("base")
+        self.assertIsNone(streaks.shared)
+        self.assertEqual(streaks.count["base"], 0)
+
+    def test_different_kinds_on_each_side_are_never_shared(self):
+        # A base timeout beside a head invalidation is two failures, however long each run is.
+        streaks = perf_statistics.FailureStreaks(("timeout", "invalid"))
+        for _attempt in range(3):
+            streaks.record("base", "timeout")
+            streaks.record("head", "invalid")
+        self.assertIsNone(streaks.shared)

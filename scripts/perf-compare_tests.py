@@ -35,6 +35,10 @@ from perf_test_fixture import (
 from perf_statistics_tests import (
     StatisticsTests,
     AbbaScheduleTests,
+    FailureStreakTests,
+)
+from perf_signals_tests import (
+    StopSignalTests,
 )
 from perf_focus_tests import (
     command,
@@ -121,6 +125,7 @@ from perf_smoke_tests import (
 )
 from perf_sets_tests import (
     RunSetTests,
+    VariantFailureTests,
 )
 from perf_host_tests import (
     FakeGit,
@@ -133,15 +138,15 @@ from perf_driver_tests import (
     CompareHarness,
     CompareDriverTests,
     StrictBaseTests,
+    FailureDriverTests,
+    PreparingReportTests,
+    BuildingComparisonRecordTests,
 )
-from perf_prebuilt_tests import (
-    PRODUCER_ENV,
-    PrebuiltHarness,
-    BuildOnlyTests,
-    PrebuiltManifestTests,
-    PrebuiltRefusalTests,
-    PrebuiltRerunTests,
-    PrebuiltCompareTests,
+from perf_shards_tests import (
+    minimal_document,
+    ShardLoaderTests,
+    PartitionArgumentTests,
+    ShardCommandTests,
 )
 from perf_display_tests import (
     display_run,
@@ -153,25 +158,35 @@ from perf_display_tests import (
 )
 from perf_workflow_fixture import (
     PERF_WORKFLOW,
+    SCENARIO_CATALOGUE,
     ELIGIBILITY,
     PERF_JOBS,
     COMPARISON_JOBS,
+    COMPARISON_PLATFORMS,
+    COMPARISON_RUNNERS,
+    COMPARISON_OUTPUTS,
+    PLAN_NAME,
     REF_STEP,
+    PARTITION_STEP,
     PROFILE_STEP,
-    BUILD_STEP,
-    PACKAGE_STEP,
-    UPLOAD_BINARIES_STEP,
-    BUILD_EVIDENCE_STEP,
-    PLAN_STEP,
-    DOWNLOAD_STEP,
-    UNPACK_STEP,
     COMPARE_STEP,
     SUMMARY_STEP,
     EVIDENCE_STEP,
     RESULT_STEP,
-    ALL_SCENARIOS,
-    PLATFORM_SCENARIOS,
+    RESULT_NAME,
+    RESULT_NOT_RUN,
     JOB_RESULTS,
+    PLATFORM_ONLY,
+    RELEASE_ONLY,
+    NOT_COMPARED,
+    CORE_VARIANTS,
+    RELEASE_COUNTERS,
+    SHARED_PARTITION,
+    FAKE_GIT,
+    PR_HEAD_SHA,
+    pull_request_github,
+    push_github,
+    harness_catalogue,
     _YAML_ENTRY,
     _indent,
     _strip_yaml_comment,
@@ -193,38 +208,32 @@ from perf_expression_fixture import (
     evaluate_expression,
     _lookup,
     condition_holds,
+    evaluate_value,
     substitute,
     read_key_values,
 )
 from perf_workflow_tests import (
     RECORD_ARGV,
     UNEXPECTED_COMMAND,
+    FAKE_PYTHON,
     run_bash_step,
     PushSimulator,
+    step_states,
     WorkflowModelTests,
     FirstReleaseWorkflowTests,
-    PlanStepTests,
+    ComparisonRunTests,
     PerfResultJobTests,
     EligibilityTests,
 )
 from perf_workflow_identity_tests import (
-    pull_request_github,
-    push_github,
-    RESULT_NAME,
-    RESULT_NOT_RUN,
     ELIGIBILITY_CASES,
     ResultIdentityTests,
     ProfileStepTests,
-    comparison_context,
-    compare_argv,
-    CountersWorkflowTests,
-    PrebuiltDownloadTests,
-    FAKE_PRODUCER,
-    ProducerBuildStepTests,
+    PlanJobTests,
+    ComparisonJobTests,
     EvidenceArtifactTests,
-    FAKE_GIT,
     ReleaseRefSelectionTests,
-    WindowsComparisonLegTests,
+    ShardProfileTests,
 )
 from perf_counter_schema_tests import (
     COUNTER_CONTRACT,
@@ -340,24 +349,6 @@ from perf_hook_tests import (
     CheckpointMemoryFeatureTests,
     CELL_MIB,
 )
-from perf_cell_layout_tests import (
-    cell_layout_run,
-    cell_layout_runs,
-    PASSING,
-    FAILING,
-    CellLayoutBoundaryTests,
-    CellLayoutAggregationTests,
-    CellLayoutOutcomeTests,
-    CellLayoutHeadOnlyTests,
-    cell_line,
-    CellLayoutParsedLineTests,
-    CELL_HEAD,
-    write_cell_artifact,
-    HEAD_OUTCOME,
-    CellLayoutArtifactTests,
-    CellLayoutDamagedEvidenceTests,
-    CellLayoutUndecodableEvidenceTests,
-)
 from perf_row_cache_tests import (
     RowGlyphCacheReportTests,
 )
@@ -409,7 +400,6 @@ from perf_cfg_tests import (
     HarnessCfgDetectionTests,
     TaskbarProgressCfgTests,
     AtlasRetryAvailabilityTests,
-    HarnessCfgPrebuiltTests,
     PreviousReleaseCheckTests,
 )
 from perf_attribution_tests import (
@@ -424,7 +414,6 @@ from perf_attribution_tests import (
     S10AttributionAnalysisTests,
     PRESENT_TEXT,
     S10AttributionConsistencyTests,
-    S10AttributionPrebuiltTests,
     CERTIFIED,
 )
 from perf_completeness_tests import (

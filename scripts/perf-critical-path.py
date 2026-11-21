@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Account for a Performance comparison run's time, from its creation to its last attempt's finish.
 
-The PR pipeline's budget is 35 minutes measured that way, queue included. This report reads the run, each
+A pull request's `core` comparison has 25 minutes measured that way, queue included, a `perf-full` one 45,
+and a release none (`--profile`; a pull request defaults to `core`, a tag push to `release`). This report reads the run, each
 attempt and each attempt's job rows and artifacts with `gh api` (or a recorded `--fixture`), and splits
 the time into the attempts and the waits between them, then, inside each attempt, each chain of needs
 into sibling wait, creation wait, runner queue and runtime classes. A comparison job's compare step is
@@ -14,9 +15,15 @@ finish, runner and conclusion; no match, or two, stops the report. Skipped rows 
 
 Evidence. A run whose rows include the result job (by its name, or by the unevaluated name expression a skipped job shows), or whose
 evidence artifacts end in `-<attempt>`, is new-design: each comparison job that ran its compare step must have that attempt's
-artifact with a `timing.json` naming this run, attempt, job and shard, its marks inside the step. Any
+artifact with a `timing.json` naming this run, attempt, job and shard, its marks inside the step. GitHub keeps
+only the newest attempt's artifacts, and a stopped comparison uploads its partial table without timing.json, so
+a job with no artifact of its attempt, or an artifact without timing.json, reports its compare step as one
+class, "scenario split unavailable"; a timing.json that is there but disagrees still stops the report. Any
 other run is historical: the evidence is the one same-name artifact created inside the job's window,
 and the compare step stays one class.
+
+Jobs. The current layout's `plan` job comes first and every comparison and the result need it; the earlier
+layout's macOS producer job came before its macOS comparisons. A role a run does not have needs nothing.
 
 Exit 0 within budget, 1 over it, 2 when the rows do not reconcile or cannot be read. The author runs
 this for the PR's evidence; perf.yml does not.
@@ -41,12 +48,14 @@ from typing import Callable, Mapping, Sequence
 import zipfile
 
 DEFAULT_REPOSITORY = "D0n9X1n/SonicTerm"
-BUDGET_S = 35 * 60
+# Seconds from a run's creation to its last finish, by comparison profile; a release has no budget.
+PROFILE_BUDGETS_S = {"core": 25 * 60, "full": 45 * 60, "release": None}
 # Timestamps are whole seconds, so sums and window checks allow one second of rounding.
 TOLERANCE_S = 1
 GH_TIMEOUT_S = 120
 PAGE_SIZE = 100
 PRODUCER = "macOS perf binaries (base and head)"
+PLAN = "Plan the comparison"
 RESULT = "Performance comparison result"
 # The name an ineligible run's result job would take. GitHub never evaluates a skipped job's `name:`, so an
 # ineligible run actually lists the raw expression, which quotes both names; either way it is never `RESULT`.
@@ -205,21 +214,24 @@ def evidence_mode(record: Mapping) -> str:
 
 
 def needs_of(name: str, mode: str) -> tuple[str, ...]:
-    """Which job roles a job needs: the producer, `comparison`, or nothing; an unknown job is an error."""
+    """Which job roles a job needs; a role the run has no job for needs nothing. Unknown jobs are errors."""
     if name == RESULT:
-        return ("producer", "comparison")
-    if name == PRODUCER:
+        return ("plan", "producer", "comparison")
+    if name in (PLAN, PRODUCER):
         return ()
     match = _COMPARISON.fullmatch(name)
     if match is None:
         raise AccountingError(f"unknown job {name!r}")
-    return ("producer",) if match.group(1) == "macOS" and mode == "new-design" else ()
+    producer = ("producer",) if match.group(1) == "macOS" and mode == "new-design" else ()
+    return ("plan",) + producer
 
 
 def _role(name: str) -> str:
     """A job's role in the graph: producer, result or comparison."""
     if name == PRODUCER:
         return "producer"
+    if name == PLAN:
+        return "plan"
     if name == RESULT:
         return "result"
     return "comparison"
@@ -266,11 +278,19 @@ def bind_evidence(record: Mapping, rows: Mapping[int, list[Row]], mode: str,
                 suffix = f"-{platform_name}-{shard}-{number}"
                 found = [item for item in record["artifacts"]
                          if item["name"].startswith("perf-comparison-") and item["name"].endswith(suffix)]
+                if not found:
+                    # When: `found` is empty, GitHub dropped this attempt's artifact, as it does for every attempt
+                    # but the newest; the job is still accounted, with its compare step as one class.
+                    continue
                 if len(found) != 1:
                     raise AccountingError(f"{where}: {len(found)} evidence artifacts end {suffix}")
                 timing = read_timing(found[0]["name"])
                 if timing is None:
-                    raise AccountingError(f"{where}: {found[0]['name']} has no timing.json")
+                    # When: `timing` is None, the comparison stopped before it finished: perf-compare writes a
+                    # partial table on every stop but timing.json only once every mark exists, so the job is
+                    # accounted with its compare step as one class. Timing that is there is still checked.
+                    bound[(number, row.name)] = Evidence(found[0], None)
+                    continue
                 _check_timing(timing, run_id, number, row.name, shard, compare, where)
                 bound[(number, row.name)] = Evidence(found[0], timing)
             else:
@@ -405,7 +425,9 @@ def classify(row: Row, evidence: Evidence | None, mode: str, required: bool = Tr
         elif name.startswith("Post "):
             kind = "teardown"
         else:
-            raise AccountingError(f"attempt {row.attempt} {row.name}: unclassified step {name!r}")
+            # A step the table does not name is preparation the workflow added (a plan or matrix step), so it
+            # counts as setup rather than stopping a report over a renamed step.
+            kind = "setup"
         classes[kind] += parse_time(item["completed_at"]) - parse_time(item["started_at"])
     classes["gap"] = row.runtime_s - sum(classes.values())
     # Step and job times round separately, so the gap may read -1 s; anything lower means overlapping steps.
@@ -421,6 +443,10 @@ def classify(row: Row, evidence: Evidence | None, mode: str, required: bool = Tr
         compare = {key: round(value) for key, value in compare.items()}
     elif _COMPARISON.fullmatch(row.name) and mode == "historical":
         note = "unavailable (historical run: no timing.json)"
+    elif _COMPARISON.fullmatch(row.name) and evidence is not None:
+        note = "scenario split unavailable (the comparison stopped before writing timing.json)"
+    elif _COMPARISON.fullmatch(row.name):
+        note = "scenario split unavailable (GitHub keeps only the newest attempt's artifacts)"
     return classes, compare, note
 
 
@@ -545,12 +571,24 @@ def account(record: Mapping, read_timing: Callable[[str], dict | None]) -> Repor
     return Report(str(record["run"]["id"]), mode, totals, attempts, evidence)
 
 
-def render(report: Report) -> str:
+def report_budget_s(record: Mapping, profile: str | None) -> int | None:
+    """The budget for `profile`, or for the run's own kind: a tag push is a release, a pull request `core`."""
+    if profile is None:
+        profile = "release" if record["run"].get("event") == "push" else "core"
+    return PROFILE_BUDGETS_S[profile]
+
+
+def render(report: Report, limit_s: int | None = PROFILE_BUDGETS_S["core"]) -> str:
     """The report as text: the budget line, each attempt's critical path and runtime classes, other paths."""
     totals = report.budget
-    verdict = "within" if totals.elapsed_s <= BUDGET_S else "OVER"
+    if limit_s is None:
+        budget_note = "a release has no budget"
+    else:
+        # When: `limit_s` is set, the elapsed time is judged against it.
+        verdict = "within" if totals.elapsed_s <= limit_s else "OVER"
+        budget_note = f"{verdict} the {limit_s} s budget"
     lines = [f"Run {report.run_id} ({report.mode} evidence)",
-             f"Elapsed, creation to last finish: {totals.elapsed_s} s ({verdict} the {BUDGET_S} s budget)",
+             f"Elapsed, creation to last finish: {totals.elapsed_s} s ({budget_note})",
              f"  queue before attempt 1: {totals.first_wait_s} s"]
     for index, span_s in enumerate(totals.spans_s):
         lines.append(f"  attempt {index + 1}: {span_s} s")
@@ -773,6 +811,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     source.add_argument("--fixture", type=Path, metavar="FILE",
                         help="a recorded run: run, attempts, jobs per attempt, artifacts and timing by artifact name")
     parser.add_argument("--repo", default=DEFAULT_REPOSITORY, help=f"owner/name (default: {DEFAULT_REPOSITORY})")
+    parser.add_argument("--profile", choices=sorted(PROFILE_BUDGETS_S),
+                        help="the comparison profile whose budget applies (default: release for a tag, core otherwise)")
     parser.add_argument("--ci-run", metavar="ID",
                         help="also print the macOS jobs' concurrency across this CI run and the perf run")
     return parser.parse_args(argv)
@@ -790,14 +830,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             record = fetch_record(args.repo, args.run)
             read_timing = live_timing(args.repo, record)
         report = account(record, read_timing)
-        print(render(report), end="")
+        print(render(report, report_budget_s(record, args.profile)), end="")
         if args.ci_run:
             print()
             print(render_timeline(macos_timeline([record, fetch_record(args.repo, args.ci_run)])), end="")
     except (AccountingError, OSError, ValueError, KeyError) as error:
         print(f"perf-critical-path: {error}", file=sys.stderr)
         return 2
-    return 0 if report.budget.elapsed_s <= BUDGET_S else 1
+    limit_s = report_budget_s(record, args.profile)
+    return 0 if limit_s is None or report.budget.elapsed_s <= limit_s else 1
 
 
 if __name__ == "__main__":

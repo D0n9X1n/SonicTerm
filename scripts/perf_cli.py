@@ -121,13 +121,6 @@ def compare_main(args: argparse.Namespace) -> int:
         return perf_settings.EXIT_FAIL
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
     out = (args.out or perf_settings.ROOT / "target" / "perf-compare" / f"out-{stamp}").resolve()
-    if args.build_only is not None:
-        destination = args.build_only = args.build_only.resolve()
-        if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
-            print(f"[perf-compare] --build-only {destination} is not an empty directory", file=sys.stderr)
-            return perf_report.EXIT_USAGE
-        # The build logs sit beside the published files; the workflow tars only the manifest and binaries.
-        out = destination / "build-logs"
     work = perf_worktrees.work_directory(stamp)
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         print(f"[perf-compare] --out {out} is not an empty directory; two comparisons never share evidence",
@@ -162,7 +155,6 @@ def compare_main(args: argparse.Namespace) -> int:
             # Everything under `work` was created by this run: it did not exist before it started.
             for side in perf_settings.SIDES:
                 shutil.rmtree(work / f"target-{side}", ignore_errors=True)
-            shutil.rmtree(work / perf_build_policy.PREBUILT_DIRECTORY, ignore_errors=True)
             try:
                 work.rmdir()
             except OSError:

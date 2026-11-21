@@ -12,6 +12,8 @@ SIDES = ("base", "head")
 DEFAULT_RUNS = 5
 # Invalid runs retried per side and scenario before the scenario stops.
 RETRY_LIMIT = 3
+# Retries per side before base and head failing the same shared way end the variant (perf_outcomes.SHARED_FAILURE_KINDS).
+SHARED_FAILURE_RETRIES = 1
 HARNESS_EXAMPLE = "perf_scenarios"
 ALLOC_EXAMPLE = "perf_scenarios_alloc"
 HARNESS_DIRECTORY = "crates/sonicterm-app/examples/perf_scenarios"

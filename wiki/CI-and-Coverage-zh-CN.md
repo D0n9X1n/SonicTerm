@@ -15,8 +15,9 @@ SHA 区分的 group，且不会在运行中被取消，因此后续合并不能�
 重跑通过的失败属于偶发，pull request 记录两次结果。只有能复现、且原因追溯到代码缺陷的失败才修复并提
 issue；仅因 runner 负载或时序失败的测试不算代码缺陷。
 
-`.github/workflows/perf.yml`（`Performance comparison`）单独运行，且不是必需的 job。它为带 `perf` 标签的
-pull request 在从运行创建起的 35 分钟内（包含排队时间）测量一张快速的前后对比表，并为每个 release tag 运行完整对比，均在 GitHub 托管的 macOS 与 Windows runner 上运行，两个平台都运行帧计数器组及其表格。一个 macOS job 把两个 ref 各构建一次，并把二进制作为保留一天的 artifact 发布，绑定运行、其 attempt 与 manifest 摘要；macOS 对比分片测量这些二进制，每个 Windows 分片自行构建。每个对比都传入 `--require-base`，因此无法构建或测量的 base 会让其分片失败。最后一个 job 不 checkout，仅当构建 job 与两个对比 job 都成功时才通过。只有符合条件的运行把它命名为 `Performance comparison result`；不符合条件的运行被跳过的结果显示未求值的名称表达式，从不显示真正的名称。合并证据是该 job 在确切 head 上那次符合条件的运行中的 SUCCESS，按 run id 读取，绝不只按检查名称读取；被取代的运行从不算作成功。两种模式、job 布局与 concurrency 详见
+`.github/workflows/perf.yml`（`Performance comparison`）单独运行，且不是必需的 job。带 `perf` 标签的
+pull request 运行 `core` 配置，在从运行创建起的 25 分钟内（包含排队时间）测量一张快速的前后对比表；带 `perf-full` 标签的
+pull request 在 45 分钟内运行每个 pull request 变体；每个 release tag 运行完整对比。它们均在 GitHub 托管的 macOS 与 Windows runner 上运行，两个平台都运行帧计数器组及其表格。一个 `plan` job 只解析一次 base 与 head，并从 `scripts/perf-shards.json` 输出每个平台的分区；每个对比 job 自行构建两个 ref，并在自己的 runner 上测量它们。每个对比都传入 `--require-base`，因此无法构建或测量的 base 会让其 job 失败。最后一个 job 不 checkout，仅当 plan 与两个对比 job 都成功时才通过。只有符合条件的运行把它命名为 `Performance comparison result`；不符合条件的运行被跳过的结果显示未求值的名称表达式，从不显示真正的名称。合并证据是该 job 在确切 head 上那次符合条件的运行中的 SUCCESS，按 run id 读取，绝不只按检查名称读取；被取代的运行从不算作成功。各配置、job 布局与 concurrency 详见
 [开发与发布](Development-and-Release-zh-CN#ci-能测量什么)。
 
 只要任一必需的 pull-request job 仍在排队、运行、缺失、被取消、意外跳过或失败，就绝不能
@@ -89,7 +90,7 @@ macOS 专用逻辑（`sonicterm-ui` 的 `text_edit.rs` 中的 AppKit 单词边�
 原生运行时 smoke 分别在 macOS 15 Apple Silicon（作为 `macos-core` 末尾的步骤）和 macOS 15
 Intel（单分支的 `macos-smoke` 矩阵）上构建 release 二进制，使用不同依赖缓存键。Intel lane
 仅在推送到 `main` 时可保存依赖；Apple Silicon lane 共用 `macos-core` 的缓存条目。它不单独占用
-job，是因为本仓库同时最多运行五个 macOS job，单独的分支会占用一个性能对比分片等待的槽位。这些
+job，是因为本仓库同时最多运行五个 macOS job，单独的分支会占用一个性能对比 job 等待的槽位。这些
 步骤排在 core gates 之后，因此前面的 core gate 失败时会跳过它们；Intel lane 仍独立报告结果。
 在 release 构建之前，两个 lane 先构建并运行原生分屏选择 fixture（[原生分屏选择](Local-Gate-zh-CN#原生分屏选择)），
 再运行性能场景 smoke，它检查对比工具本身而不计时（[性能场景 smoke](Local-Gate-zh-CN#性能场景-smoke)）；
@@ -164,18 +165,12 @@ Windows 缓存分为 `check-windows-latest`（`windows-checks` 写入）、`test
 缓存策略不变。编译器及环境哈希仍启用；静态检查归档不能再占据测试 codegen key。
 重叠的 main run 仍可能竞争保存同一不可变 key。
 
-三个 macOS perf shard 保留 artifact 名称，每个场景恰好运行一次，按各变体的实测时间划分，使任何分片都不
-决定关键路径；最长的变体 S7 只与较短的变体同在一个分片：
-`S7-S4` 运行 S7、S4、atlas-retry、S8 与 S6/selection-drag；`S9-S10sync` 运行 S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line、S12、S12/status-line 与 S3；
-`S10-S11release` 运行 S10、S11/release、S2、S2/flood、S6/flood、S13 与 S13/sustained-4。release tag 完整运行
-每个变体，因此每个 macOS 条目改为运行其 `release_partition`，按实测的发布时间均衡，使每个分片都远低于 GitHub
-的 6 小时 job 上限：`S7-S4` 运行其 pull request 组外加 S10/sync、S11、S11/burst、S11/burst-text 与
-S1/status-line；`S9-S10sync` 运行 S9、S12、S12/status-line、S6、S6/rest、S1、S3、S3/history、S3/resize 与 S5；
-`S10-S11release` 运行其 pull request 组外加 S13 的宽布局与 S2/spawn。Windows 把 S13 的宽布局追加到其 S13
-分片（`release_scenarios`）。三组在二进制产物就绪时同时开始：
-本仓库同时最多运行五个 macOS job，CI 占用其中两个（同时运行 aarch64 smoke 的 core gates，以及 Intel
-smoke）。PR 的 35 分钟预算包含排队时间；余量由 exact-head CI 计时验证，而不是本地估算。release 每侧
-运行三次计数器运行。
+每个 perf 配置的分区列在 `scripts/perf-shards.json` 中，在每个平台上恰好运行该配置的每个变体一次，并按各变体的实测时间均衡，
+使任何分区都不决定关键路径：`core` 有两个 macOS 与两个 Windows 分区，`full` 各有三个，`release` 各有四个，按实测的发布时间均衡到每个 job 约三小时，
+远低于 GitHub 的 6 小时 job 上限。每个对比 job 自行构建两个 ref，因此分区从不等待其他 job 的二进制。
+本仓库同时最多运行五个 macOS job，在 perf 运行的大部分时间里 CI 占用其中两个（同时运行 aarch64 smoke 的 core gates，以及 Intel
+smoke）。`core` 的 25 分钟与 `perf-full` 的 45 分钟预算都包含排队时间；余量由 exact-head CI 计时验证，而不是本地估算。release 每侧
+运行三次计时运行，只为其读取计数器的变体每侧运行两次计数器运行。
 
 兼容且成功的 `main` job 必须先填充 key，后续 run 才可能命中；编译器或依赖变化仍可能
 导致 miss。缓存复用可减少依赖编译，不能缩短托管 runner 的排队时间。冷缓存构建以及

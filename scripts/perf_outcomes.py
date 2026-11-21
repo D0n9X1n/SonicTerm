@@ -20,10 +20,18 @@ import perf_settings
 # --- One run: execution and classification --------------------------------------------------
 
 _NOT_EXERCISED = re.compile(r"\bNOT_EXERCISED\b")
-# The smoke retries only an occlusion; a comparison retries every invalid run and stops on a schema failure.
+# The smoke retries only an occlusion; a comparison retries every other invalid run.
 _SMOKE_VERDICTS = {"valid": "pass", "occluded": "retry", "blocked": "blocked"}
-# An unresolved cleanup may leave processes that disturb every later run, so it stops a comparison too.
-_COMPARE_VERDICTS = {"valid": "valid", "blocked": "blocked", "schema": "stop", "refused": "stop", "cleanup": "stop"}
+# A schema failure or a refusal ends only its variant, which is recorded incomplete. An unresolved cleanup may leave
+# processes that disturb every later run, and a result of another harness or an unmanaged run disproves every
+# binary, so either stops the whole comparison.
+_COMPARE_VERDICTS = {"valid": "valid", "blocked": "blocked", "schema": "incomplete", "refused": "incomplete",
+                     "cleanup": "stop", "provenance": "stop"}
+# The failures base and head can share that the runner cannot cause: the harness's own deadline (exit 4) and an
+# invalidation (exit 3) that is not an occlusion. Both sides failing one of them the same way ends the variant.
+SHARED_FAILURE_KINDS = ("timeout", "invalid")
+# validate_result's problems that say the result is not this comparison's managed run of this harness.
+PROVENANCE_PREFIXES = ("managed is ", "harness_hash ")
 
 
 # SIGKILL is signal 9 on every POSIX host that runs the harness; signal.SIGKILL does not exist on Windows.
@@ -128,6 +136,9 @@ class RunOutcome:
 
 
 UNSETTLED_TEARDOWN = "finish_session did not settle, so the run fails before any retry"
+# A schema failure whose result.json cannot show a settled finish_session leaves the run's teardown unproven.
+UNPROVEN_TEARDOWN = ("result.json does not show that finish_session settled, so the run's teardown is unproven "
+                     "and the comparison stops")
 # run_step statuses that end its wait early: what stopped it, for the reason.
 STOPPED_WAITS = {"TIMEOUT": "run_step reached its deadline", "INTERRUPTED": "run_step was interrupted"}
 # Why a stopped wait is unresolved cleanup. run_step stops before counting the group or while the output is still
@@ -160,6 +171,11 @@ def _deliberately_killed(outcome: RunOutcome) -> bool:
             and outcome.exit_code == outcome.deadline_exit_code and outcome.leftover_processes == 0)
 
 
+def provenance_problems(problems: Iterable[str]) -> list[str]:
+    """The schema problems that say a result is a standalone run or another harness's: no managed or matching hash."""
+    return [problem for problem in problems if problem.startswith(PROVENANCE_PREFIXES)]
+
+
 def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
     """Return a run's fatal kind and reasons, or None; classify_outcome explains the order."""
     result, code = outcome.result, outcome.exit_code
@@ -183,16 +199,30 @@ def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
         return "cleanup", cleanup
     notes = [str(note) for note in (result or {}).get("notes") or []]
     if not _deliberately_killed(outcome):
-        if outcome.schema_problems:
-            return "schema", list(outcome.schema_problems)
+        provenance = provenance_problems(outcome.schema_problems)
+        if provenance:
+            return "provenance", provenance
+        schema = list(outcome.schema_problems)
         # Exit 0 is trusted only when run_step reported PASS; the exit-code mapping names any other status.
-        if code == perf_settings.HARNESS_VALID and outcome.status == "PASS":
+        if not schema and code == perf_settings.HARNESS_VALID and outcome.status == "PASS":
             if result is None and not outcome.not_exercised:
-                return "schema", ["exit 0 without result.json"]
-            if result is not None and result.get("status") != "valid":
-                return "schema", [f"exit 0 with status {result.get('status')!r}"]
+                schema = ["exit 0 without result.json"]
+            elif result is not None and result.get("status") != "valid":
+                schema = [f"exit 0 with status {result.get('status')!r}"]
+        elif (not schema and result is None and not outcome.not_exercised and outcome.status != "LAUNCH"
+              and code not in (perf_settings.HARNESS_VALID, perf_settings.HARNESS_REFUSED)):
+            # When: an exercised harness exited invalid, timed out, blocked or crashed without result.json: once its
+            # App exists every exit writes one after finish_session, so a missing one means nothing records whether
+            # it settled. Only a refusal (exit 2) ends before the App exists.
+            schema = [f"exit {code} without result.json"]
+        if schema and (result is None or result.get("finish_session_settled") is not True):
+            # When: the result cannot show a settled teardown, sessions may outlive the run, so a schema failure
+            # stops every variant instead of ending only its own.
+            return "cleanup", [UNPROVEN_TEARDOWN] + schema
         if _teardown_unsettled(result):
             return "cleanup", [UNSETTLED_TEARDOWN] + notes
+        if schema:
+            return "schema", schema
     if code == perf_settings.HARNESS_REFUSED:
         return "refused", ["the harness refused the run (exit 2)"] + notes
     return None
@@ -210,20 +240,22 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
        harness's process group or while a process outside the group held the output open, whatever
        exit it then collected; a harness exit run_step never collected (its process-group count is
        then no measurement); and process-group members that outlived the harness;
-    2. `schema`: result.json unreadable, unmanaged or another harness's, and, once run_step
-       reported PASS so that exit 0 can be trusted, exit 0 without result.json or with another status;
-    3. `cleanup` from the result: finish_session did not settle. It is read only after the schema
-       check, since a field of an untrusted result means nothing;
-    4. `refused`: the harness refused the run (exit 2).
+    2. `provenance`: result.json is unmanaged or another harness's;
+    3. `cleanup` from the result: finish_session did not settle, or a schema failure (below) whose
+       result.json is missing, unreadable or does not record a settled finish_session, so nothing
+       proves the run's teardown;
+    4. `schema`, only with a settled teardown: result.json not matching the schema, and, once run_step
+       reported PASS so that exit 0 can be trusted, a result with another status;
+    5. `refused`: the harness refused the run (exit 2).
 
-    The deadline case skips 2 and 3 only when run_step reaped the harness it killed at GO (FAIL,
+    The deadline case skips 2 to 4 only when run_step reaped the harness it killed at GO (FAIL,
     the kill's exit, -SIGKILL or 124 on Windows; an empty group or verified job custody): its result
     is expected to be missing or partial, and run_step and the anchor cleanup or the job's custody
     prove its teardown instead. Then come the retryable reasons (session
     records, home writes, focus and the primary font), the deadline case and the exit code; the
     harness's own deadline (exit 4, its group counted) is a retryable `timeout`. The reasons of an
     occlusion or an invalidation start with the harness's invalid_reason, then its notes.
-    `compare_verdict` and `smoke_verdict` decide which kinds stop a comparison or the smoke.
+    `compare_verdict` and `smoke_verdict` decide which kinds end a variant, stop a comparison or fail the smoke.
     """
     fatal = _fatal_outcome(outcome)
     if fatal is not None:
@@ -305,7 +337,8 @@ def smoke_verdict(kind: str) -> str:
 
 
 def compare_verdict(kind: str) -> str:
-    """Map a run kind to a comparison's verdict: `valid`, `invalid` (retried), `blocked` or `stop`."""
+    """Map a run kind to a comparison's verdict: `valid`, `invalid` (retried), `blocked`, `incomplete` (ends the
+    variant) or `stop` (ends the comparison)."""
     return _COMPARE_VERDICTS.get(kind, "invalid")
 
 

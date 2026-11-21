@@ -2,7 +2,8 @@
 //!
 //! Used for OSC 8 hyperlink clicks and plain-text URI clicks. Dispatch is
 //! fire-and-forget: the call returns once the request has been handed to the
-//! platform, never after the handler has finished starting.
+//! platform, never after the handler has finished starting. On macOS and
+//! freedesktop the opener's exit is collected by the shared helper reaper.
 //!
 //! ## Dispatch boundary
 //!
@@ -74,7 +75,10 @@ pub fn open(url: &str) -> io::Result<()> {
 #[cfg(not(target_os = "windows"))]
 fn open_validated(url: &str) -> io::Result<()> {
     let mut cmd = build_command(url);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|_| ())
+    // The opener exits once the desktop has the URI; the reaper collects it so it is no zombie.
+    crate::detached_spawn::spawn_detached(
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()),
+    )
 }
 
 /// Strict allow-list check applied to every URI before dispatch: only `http`,

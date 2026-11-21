@@ -131,3 +131,41 @@ class AbbaSchedule:
         self.invalid_runs[side] += 1
         if self.invalid_runs[side] > self.retry_limit:
             self.failed_side = side
+
+
+class FailureStreaks:
+    """Each side's run of consecutive attempts that failed with one shared kind, across a variant's sets.
+
+    Any other attempt, valid or failed another way, ends that side's run. `shared` names the kind once both sides'
+    latest attempts failed with it at least `length` times in a row, that is after `length - 1` retries per side.
+    """
+
+    def __init__(self, kinds: Sequence[str], length: int = perf_settings.SHARED_FAILURE_RETRIES + 1) -> None:
+        self.kinds = tuple(kinds)
+        self.length = length
+        # Per side: the kind of its current run, how many attempts the run holds, and the latest attempt's reasons.
+        self.kind: dict[str, str | None] = {side: None for side in perf_settings.SIDES}
+        self.count = {side: 0 for side in perf_settings.SIDES}
+        self.reasons: dict[str, str] = {side: "" for side in perf_settings.SIDES}
+
+    def record(self, side: str, kind: str, reasons: str = "") -> None:
+        """Count one attempt of `side`; a kind outside `kinds` (valid included) ends its run."""
+        if kind not in self.kinds:
+            self.clear(side)
+            return
+        # When: the side fails with the kind of its current run, the run grows; another shared kind starts a new one.
+        self.count[side] = self.count[side] + 1 if self.kind[side] == kind else 1
+        self.kind[side] = kind
+        self.reasons[side] = reasons
+
+    def clear(self, side: str) -> None:
+        """End `side`'s run, as when it cannot run at all (blocked) and so cannot share a failure."""
+        self.kind[side], self.count[side], self.reasons[side] = None, 0, ""
+
+    @property
+    def shared(self) -> str | None:
+        """The kind both sides' current runs share once each holds `length` attempts, else None."""
+        kinds = {self.kind[side] for side in perf_settings.SIDES}
+        if len(kinds) == 1 and None not in kinds and all(self.count[side] >= self.length for side in perf_settings.SIDES):
+            return kinds.pop()
+        return None

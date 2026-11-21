@@ -61,7 +61,7 @@ class ScopeTests(unittest.TestCase):
     def test_a_test_source_reads_comments_not_string_data(self):
         # A fixture run id in a test string is data; the same id in a test comment is a citation.
         source = 'RUN = "37118041050"\n# the run 37118041050 shows it\n'
-        self.assertEqual(flagged_lines("scripts/perf_prebuilt_tests.py", source), [2])
+        self.assertEqual(flagged_lines("scripts/perf_driver_tests.py", source), [2])
         self.assertEqual(flagged_lines("crates/x/src/a_tests.rs", 'let run = "run 37118041050";\n'), [])
 
     def test_a_production_script_reads_its_strings(self):
