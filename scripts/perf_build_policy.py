@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import os
+from pathlib import Path
 import re
 from typing import Callable, Iterable, Mapping, NamedTuple, Sequence
 
@@ -76,10 +77,6 @@ def comparison_command(args: argparse.Namespace) -> str:
         words += ["--laps-runs", str(args.laps_runs)]
     if args.keep:
         words.append("--keep")
-    if args.prebuilt is not None:
-        words += ["--prebuilt", str(args.prebuilt), "--prebuilt-run-id", args.prebuilt_run_id,
-                  "--prebuilt-attempt", args.prebuilt_attempt,
-                  "--prebuilt-manifest-sha256", args.prebuilt_manifest_sha256]
     return " ".join(words)
 
 
@@ -93,13 +90,35 @@ def comparison_renderer(results: Iterable[perf_sets.SetResult]) -> dict | None:
     return None
 
 
-# --- Build once, measure on many runners: the producer's manifest and the consumer's checks -------
+_RELEASE_PROFILE = re.compile(r"\s*\[\s*profile\.release\s*\]\s*(?:#.*)?")
+_LTO_KEY = re.compile(r"\s*lto\s*=\s*(.+?)\s*(?:#.*)?")
 
-PREBUILT_SCHEMA_VERSION = 1
-MANIFEST_FILE = "manifest.json"
-# Under a comparison's work directory: the consumer's copies, with no `assets` beside them.
-PREBUILT_DIRECTORY = "prebuilt"
+
+def release_lto(root: Path, environ: Mapping[str, str]) -> str:
+    """The LTO setting a release build of `root` uses: the environment override, else `[profile.release]` lto.
+
+    Returns `unset` when neither names one. Only the workspace manifest's own table is read.
+    """
+    override = environ.get("CARGO_PROFILE_RELEASE_LTO")
+    if override is not None:
+        return override
+    try:
+        lines = (root / "Cargo.toml").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return "unset"
+    in_release = False
+    for line in lines:
+        if line.lstrip().startswith("["):
+            in_release = _RELEASE_PROFILE.fullmatch(line) is not None
+            continue
+        match = _LTO_KEY.fullmatch(line) if in_release else None
+        if match:
+            return match.group(1).strip('"\'')
+    return "unset"
+
+
+# --- When each phase of a comparison ran -----------------------------------------------------------
+
 TIMING_FILE = "timing.json"
 # The marks timing.json records, in the order they happen.
 TIMING_MARKS = ("start", "listed", "measure_start", "measure_end", "report_written")
-_HEX_SHA256 = re.compile(r"[0-9a-f]{64}")

@@ -5,7 +5,6 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import perf_cell_layout
 import perf_font_diagnostics
 import perf_memory
 import perf_processes_tests
@@ -81,13 +80,6 @@ class MemoryLineTests(unittest.TestCase):
         self.assertEqual(perf_memory.parse_memory_line(memory_line()).glyph_atlases, ())
         unknown = memory_line().replace("renderers=[main warm]", f"renderers={facts(512, 'tiny')}")
         self.assertEqual(perf_memory.parse_memory_line(unknown).glyph_atlases, ())
-
-    def test_checkpoint_takes_the_latest_line_at_or_before_it(self):
-        # A line written after the checkpoint never describes it.
-        samples = [perf_memory.MemorySample(unix_s, None, int(unix_s), 0) for unix_s in (10.0, 20.0, 30.0)]
-        self.assertEqual(perf_cell_layout.memory_at(samples, 25.0).unix_s, 20.0)
-        self.assertEqual(perf_cell_layout.memory_at(samples, 20.0).unix_s, 20.0)
-        self.assertIsNone(perf_cell_layout.memory_at(samples, 5.0))
 
     def test_log_directory_reads_every_rolled_file_but_not_breadcrumbs(self):
         # Rolled daily files are all read; subdirectories such as breadcrumbs are not.

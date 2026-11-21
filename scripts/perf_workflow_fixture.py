@@ -10,36 +10,115 @@ from pathlib import Path
 # --- perf.yml as a job graph: a YAML reader, an `if:` evaluator and a push simulator ---------------
 
 PERF_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "perf.yml"
-# Every perf.yml job's eligibility: a tag push, or a `perf` pull request whose event is not another label.
-ELIGIBILITY = ("github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'perf') && "
-               "(github.event.action != 'labeled' || github.event.label.name == 'perf'))")
-PERF_JOBS = ("perf-build-macos", "compare-macos", "compare-windows", "perf-result")
+# The harness's scenario catalogue, the source `--list` prints; every variant a profile names must be in it.
+SCENARIO_CATALOGUE = (Path(__file__).resolve().parent.parent / "crates" / "sonicterm-app" / "examples"
+                      / "perf_scenarios" / "scenarios.rs")
+# The plan's and the result's eligibility: a tag push, or a `perf` or `perf-full` pull request whose event is not
+# another label.
+ELIGIBILITY = ("github.event_name == 'push' || ((contains(github.event.pull_request.labels.*.name, 'perf') || "
+               "contains(github.event.pull_request.labels.*.name, 'perf-full')) && "
+               "(github.event.action != 'labeled' || github.event.label.name == 'perf' || "
+               "github.event.label.name == 'perf-full'))")
+PERF_JOBS = ("plan", "compare-macos", "compare-windows", "perf-result")
 COMPARISON_JOBS = ("compare-macos", "compare-windows")
+# Each comparison job's platform, its fixed runner and the plan output its matrix reads.
+COMPARISON_PLATFORMS = {"compare-macos": "macOS", "compare-windows": "Windows"}
+COMPARISON_RUNNERS = {"compare-macos": "macos-15", "compare-windows": "windows-latest"}
+COMPARISON_OUTPUTS = {"compare-macos": "macos", "compare-windows": "windows"}
+PLAN_NAME = "Plan the comparison"
 REF_STEP = "Choose the refs and the run length"
+PARTITION_STEP = "Choose the profile and its partitions"
 PROFILE_STEP = "Relax the release profile for a pull request"
-BUILD_STEP = "Build both refs once"
-PACKAGE_STEP = "Package the binaries"
-UPLOAD_BINARIES_STEP = "Upload the binaries"
-BUILD_EVIDENCE_STEP = "Upload the build evidence"
-PLAN_STEP = "Check the producer's refs"
-DOWNLOAD_STEP = "Download the binaries"
-UNPACK_STEP = "Unpack the binaries"
 COMPARE_STEP = "Compare the base and the head"
 SUMMARY_STEP = "Publish the table in the job summary"
 EVIDENCE_STEP = "Upload the comparison evidence"
 RESULT_STEP = "Require every comparison job to succeed"
-# Every scenario set a comparison measures: each runs in exactly one shard per platform. The named variants
-# run beside their scenario's default, since a bare ID selects only the default; S1/atlas-retry runs only
-# its counters set.
-ALL_SCENARIOS = ["S1", "S1/atlas-retry", "S1/status-line", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood",
-                 "S6/selection-drag", "S6/rest", "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12", "S12/status-line", "S13",
-                 "S13/sustained-4"]
-# The variants only one platform's shards add: S11/release on both (capped at 1), the presenter controls on Windows.
-# S2/glide and S11/kitty-placeholders are macOS-only: the Windows shards present in software, where the cursor
-# never glides, and kitty graphics are not routed through ConPTY there.
-PLATFORM_SCENARIOS = {"macOS": ["S11/release", "S2/glide", "S11/kitty-placeholders"],
-                      "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
+RESULT_NAME = "Performance comparison result"
+RESULT_NOT_RUN = "Performance comparison result (not run)"
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
+# Variants only one platform measures. The Windows runner presents in software, where the cursor never glides,
+# and kitty graphics do not pass through ConPTY there; S11/gdi and S11/wgpu are Windows' presenter controls. The
+# other macOS-only variants are release-only workloads the Windows partitions never ran.
+PLATFORM_ONLY = {"S2/glide": "macOS", "S11/kitty-placeholders": "macOS", "S2/spawn": "macOS",
+                 "S3/history": "macOS", "S3/resize": "macOS", "S11/burst": "macOS", "S11/burst-text": "macOS",
+                 "S11/gdi": "Windows", "S11/wgpu": "Windows"}
+# Variants only a release tag measures: full-length workloads a pull request's budget cannot hold.
+RELEASE_ONLY = ("S2/spawn", "S3/history", "S3/resize", "S11/burst", "S11/burst-text", "S13/wide-8", "S13/wide-16",
+                "S13/wide-32")
+# Catalogue variants no profile compares: the Windows smoke's presenter and role-exit cases, and S5's presenter runs.
+NOT_COMPARED = ("S1/gdi", "S1/wgpu", "S1/role-exit", "S5/gdi", "S5/wgpu")
+# The pull-request core set, as reviewed: the variants the PR default must keep measuring.
+CORE_VARIANTS = ("S1/default", "S2/default", "S2/flood", "S3/default", "S6/rest", "S9/default", "S10/sync",
+                 "S11/default", "S12/default", "S13/default", "S13/sustained-4")
+# Variants one report reads together, so each group shares a partition: S13's contention verdict reads both two-
+# and four-pane runs, its scaling rule all three wide layouts, and S11/burst is read against S11/burst-text.
+SHARED_PARTITION = (("S13/default", "S13/sustained-4"), ("S13/wide-8", "S13/wide-16", "S13/wide-32"),
+                    ("S11/burst", "S11/burst-text"))
+
+FAKE_GIT = """#!/usr/bin/env bash
+# Answers the ref step's Git calls for one mode: previous, first, root, broken or unreadable for a tag push; a pull
+# request's fetch and merge-base in every mode.
+mode=$FAKE_GIT_MODE
+case "$1" in
+  fetch) exit 0 ;;
+  merge-base) echo merge-base-commit ;;
+  rev-list)
+    # `rev-list --parents -n 1 <sha>` prints the commit, then its parents.
+    case "$mode" in
+      root) echo tag-commit ;;
+      unreadable) echo "fatal: unable to read commit object" >&2; exit 128 ;;
+      *) echo "tag-commit parent-commit" ;;
+    esac ;;
+  rev-parse)
+    if [[ "$*" == *"{commit}"* ]]; then echo base-commit; exit 0; fi
+    if [ "$mode" = root ]; then exit 1; fi
+    if [ "$mode" = unreadable ]; then echo "fatal: unable to read commit object" >&2; exit 128; fi
+    echo parent-commit ;;
+  tag)
+    case "$mode" in
+      previous) echo v1.3.8 ;;
+      broken) echo "fatal: unable to read tree: object missing" >&2; exit 128 ;;
+    esac ;;
+  describe)
+    if [ "$mode" = previous ]; then echo v1.3.8; else echo "fatal: No names found" >&2; exit 128; fi ;;
+  *) echo "unexpected git $*" >&2; exit 2 ;;
+esac
+"""
+PR_HEAD_SHA = "c" * 40
+
+
+def pull_request_github(action, labels, label=None, run_id="70"):
+    """A pull_request event's context: its action, the labels the PR carries and the label just added."""
+    event = {"action": action, "pull_request": {"number": 1575, "labels": [{"name": name} for name in labels],
+                                                "head": {"sha": PR_HEAD_SHA}, "base": {"ref": "main"}}}
+    if label is not None:
+        event["label"] = {"name": label}
+    return {"github": {"event_name": "pull_request", "event": event, "run_id": run_id, "ref_name": "1575/merge",
+                       "run_attempt": "1", "sha": "merge-commit", "workspace": "/w"}}
+
+
+def push_github(run_id="71"):
+    """A tag push's context."""
+    return {"github": {"event_name": "push", "event": {}, "run_id": run_id, "ref_name": "v1.4.0",
+                       "run_attempt": "1", "sha": "tag-commit", "workspace": "/w"}}
+
+
+_CATALOGUE_ENTRY = re.compile(r'spec\(\s*"(?P<id>S[0-9]+)",\s*"[^"]*",\s*&\[(?P<variants>[^\]]*)\]', re.S)
+
+
+def harness_catalogue():
+    """Every `ID/variant` label the harness catalogue declares, read from the source `--list` prints."""
+    source = SCENARIO_CATALOGUE.read_text(encoding="utf-8")
+    labels = set()
+    scenarios = set()
+    for entry in _CATALOGUE_ENTRY.finditer(source):
+        scenarios.add(entry["id"])
+        labels.update(f"{entry['id']}/{variant}" for variant in re.findall(r'"([^"]+)"', entry["variants"]))
+    # A format change that read nothing must fail here, not pass every membership test against an empty set.
+    if len(scenarios) != 13:
+        raise AssertionError(f"read {len(scenarios)} scenarios from {SCENARIO_CATALOGUE}, expected S1 to S13")
+    return labels
+
 
 _YAML_ENTRY = re.compile(r"(?P<key>[A-Za-z0-9_.-]+)\s*:(?:\s+(?P<value>.*))?$")
 

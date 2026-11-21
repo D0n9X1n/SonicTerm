@@ -25,7 +25,6 @@ import perf_host_tests
 import perf_inventory
 import perf_metrics
 import perf_outcomes_tests
-import perf_prebuilt
 import perf_scenarios
 import perf_sets
 import perf_sets_tests
@@ -37,23 +36,21 @@ import perf_worktrees
 
 
 class CompareHarness:
-    """Drives `_compare` with fake git, Cargo and runs; shared by the driver, strict-base and prebuilt tests."""
+    """Drives `_compare` with fake git, Cargo and runs; shared by the driver, strict-base and feature tests."""
 
     SHAS = {"main": "1" * 40, "HEAD": "2" * 40}
 
     def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None,
                 head_manifest=perf_home_tests.HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=perf_home_tests.BASE_MANIFEST,
                 logging_api=("base", "head"), build_status="PASS", list_fail=(), base_run=None,
-                head_build="PASS", real_binaries=False, toolchain=None, hook_trees=(), head_run=None,
+                head_build="PASS", hook_trees=(), head_run=None,
                 trim_trees=(), counters_run=None, api_trees=("base", "head")):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
         `list_fail` names the sides whose `--list` fails; `base_run`, when given, answers every base run,
         and `head_run` every head run outside the counters set.
-        `real_binaries` writes each build's executable under the test's directory, so build-only can copy
-        it; `toolchain` replaces the `rustc -vV` text, and a `--build-only` or `--prebuilt` run takes no
-        `--scenario` or `--runs`. `trim_trees` names the trees whose app source defines the trim hook method;
+        `trim_trees` names the trees whose app source defines the trim hook method;
         `hook_trees` names the trees whose app source defines the
         checkpoint-memory hook method; `api_trees` the trees that define S1/atlas-retry's App and renderer
         methods (by default both, as two current trees do).
@@ -71,7 +68,7 @@ class CompareHarness:
             import perf_fallback_tests
             git_calls.append(tuple(argv))
             if tuple(argv) == ("rustc", "-vV"):
-                return perf_focus_tests.command(argv, toolchain or perf_host_tests.RUSTC_VV)
+                return perf_focus_tests.command(argv, perf_host_tests.RUSTC_VV)
             if tuple(argv) == ("cargo", "-V"):
                 return perf_focus_tests.command(argv, "cargo 1.99.0 (abcdef 2026-09-01)\n")
             if tuple(argv[:2]) == ("git", "rev-parse"):
@@ -109,24 +106,16 @@ class CompareHarness:
                 side, example = step.id.split("-", 2)[1:]
                 if (side == "base" and base_build != "PASS") or (side == "head" and head_build != "PASS"):
                     return "FAIL", 101, "error[E0599]: no method named `run_action` found\n"
-                executable = f"/{side}/{example}"
-                if real_binaries:
-                    # A file that exists and is executable, under a directory with no `assets` of its own.
-                    built = root / "cargo" / side / perf_prebuilt.executable_name(example)
-                    built.parent.mkdir(parents=True, exist_ok=True)
-                    built.write_bytes(f"{side} {example} binary".encode("utf-8"))
-                    built.chmod(0o755)
-                    executable = str(built)
                 artifact = {"reason": "compiler-artifact", "target": {"name": example, "kind": ["example"]},
-                            "executable": executable}
+                            "executable": f"/{side}/{example}"}
                 return build_status, 0, json.dumps(artifact) + "\n"
             # A listing step's argv[0] is the binary, whose path names its side.
             if any(f"/{side}/" in step.argv[0].replace(os.sep, "/") for side in list_fail):
                 return "FAIL", 1, "dyld: Library not loaded: libcairo.2.dylib\n"
             return "PASS", 0, json.dumps(listing or perf_build_tests.LIST_JSON) + "\n"
         gate = perf_watcher_tests.FakeGate(answer)
-        selection = () if "--build-only" in options else ("--scenario", *scenarios, "--runs", "1")
-        args = perf_arguments.parse_args(["--base", "main", "--head", "HEAD", *selection, *options])
+        args = perf_arguments.parse_args(["--base", "main", "--head", "HEAD", "--scenario", *scenarios, "--runs", "1",
+                                          *options])
         plans = []
         # Kept on the test, so a test whose comparison raises still reads its evidence and the runs it planned.
         self.out, self.plans = out, plans
@@ -597,3 +586,34 @@ class PreparingReportTests(CompareHarness, unittest.TestCase):
         self.assert_stopped_while_preparing("cancelled by SIGTERM")
         self.assertIs(signal.getsignal(signal.SIGTERM), before)
 
+
+class BuildingComparisonRecordTests(CompareHarness, unittest.TestCase):
+    """What a comparison that builds both refs itself records about those builds and its own timing."""
+
+    def test_timing_marks_are_written_in_order(self):
+        # timing.json carries the run, attempt, job, partition and ordered marks the critical-path report reads.
+        environ = {"GITHUB_RUN_ID": "37118041050", "GITHUB_RUN_ATTEMPT": "2",
+                   "PERF_JOB_NAME": "macOS before/after comparison (core-1)", "PERF_SHARD": "core-1"}
+        with mock.patch.dict(os.environ, environ):
+            _code, _gate, _calls, _plans, _work, out = self.compare()
+        timing = json.loads((out / "timing.json").read_text(encoding="utf-8"))
+        self.assertEqual((timing["run_id"], timing["run_attempt"], timing["job"], timing["shard"]),
+                         ("37118041050", "2", "macOS before/after comparison (core-1)", "core-1"))
+        marks = [timing["marks"][name] for name in perf_driver.perf_build_policy.TIMING_MARKS]
+        self.assertEqual(marks, sorted(marks))
+
+    def test_the_details_name_this_jobs_own_builds(self):
+        # Every comparison builds both refs on its own runner, one target directory per ref.
+        _code, _gate, _calls, _plans, _work, out = self.compare()
+        self.assertIn("in each worktree, one CARGO_TARGET_DIR per ref", (out / "comparison.md").read_text(encoding="utf-8"))
+
+    def test_the_lto_setting_is_read_from_the_tree_without_an_override(self):
+        # run-identity.json's profile: the CARGO_PROFILE_RELEASE_LTO override when set, else the tree's own
+        # [profile.release] lto, else `unset`; another table's lto never counts.
+        manifest_text = '[workspace]\n\n[profile.release]\nopt-level = 3\nlto = "fat"\n\n[profile.dev]\nlto = false\n'
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / "Cargo.toml").write_text(manifest_text, encoding="utf-8")
+            release_lto = perf_driver.perf_build_policy.release_lto
+            self.assertEqual(release_lto(Path(temp), {}), "fat")
+            self.assertEqual(release_lto(Path(temp), {"CARGO_PROFILE_RELEASE_LTO": "off"}), "off")
+            self.assertEqual(release_lto(Path(temp) / "missing", {}), "unset")

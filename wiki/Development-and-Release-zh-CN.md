@@ -151,8 +151,6 @@ python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario <ID|ID/vari
 | `--keep` | 对比结束后保留每个 ref 的 worktree；默认会删除它们 |
 | `--out <dir>` | `comparison.md` 与原始证据的输出位置 |
 | `--require-base` | 让 base 与 head 适用同样的标准：base 无法构建、无法 `--list` 或无法凑满每组的有效运行时，对比失败（退出码 1），`comparison.md` 以 `**Incomplete comparison:**` 开头并列出每个缺口；base 未声明 `perf-counters` 时其计数器组仍显示 `n/a`。每个 CI 对比都传入它 |
-| `--build-only <dir>` | 把两个 ref 各构建一次、对两个二进制运行 `--list`，把它们连同 `manifest.json` 复制到 `<dir>/base/` 与 `<dir>/head/`，打印 `manifest_sha256=<hex>`，不做任何测量；需要 `--require-base`，不接受运行、计数器、`--keep` 或 `--out` 选项（`--alloc` 会加入 alloc 示例）；构建日志写入 `<dir>/build-logs` |
-| `--prebuilt <dir>` | 测量 `--build-only` 发布的二进制而不自行构建；需要 `--prebuilt-run-id`、`--prebuilt-attempt` 与 `--prebuilt-manifest-sha256`，并拒绝任何与本 job 不一致的 manifest 或二进制（见[CI 能测量什么](#ci-能测量什么)） |
 
 本地运行自己构建两个 ref。不传 `--require-base` 时保持宽松：无法构建或运行的 base 被报告为 `blocked`，head 仍会被测量。
 
@@ -210,7 +208,7 @@ harness 还会调用较旧的树所没有的 App 与渲染器方法。每个这�
 `CARGO_ENCODED_RUSTFLAGS` 时用它，否则按空格拆分 `RUSTFLAGS`（从不同时使用两者）。无关的继承标志保持不变；一致的继承 API cfg 移到最终目标；每项的 `--check-cfg cfg(<name>)` 及开启项的
 `--cfg <name>` 仅追加到最终目标参数，比较构建及上一发布版本检查也相同。若继承的标志设置了决定为关闭的项，或把某项设为某个值（cfg 规格按 rustc 的方式读取：`--cfg X` 与 `--cfg=X`、规格两侧的
 空白、原始标识符以及 `X="v"` 形式，在两种来源中都会被识别），
-该构建会被拒绝。该决定与组合后的标志记录在详情与构建身份中，带有其他决定或标志的预构建清单会被拒绝。本地关卡为每个
+该构建会被拒绝。该决定与组合后的标志记录在对比的详情中。本地关卡为每个
 特性组合、对该表的每个子集各审阅一次构建。
 
 cfg 关闭的诊断在两侧都不可用：此时 S1/atlas-retry 不运行任何组，表中显示 `unavailable` 及原因。不带该 cfg 直接运行时，
@@ -238,13 +236,13 @@ S10 的计数器运行还会把每个呈现的帧归属到它显示的更新。A
 
 在 `--short` 下，harness 的 `--list` 条目声明了上限（`run_caps`）的变体在每个组（计时、lap、计数器与分配）中每侧取
 min(请求次数, 上限) 次有效运行；其行显示 `(runs N of M)`，`comparison.md` 列出被限制的变体。release 对比不受限制。
-每棵树在构建、`--build-only` 与 `--prebuilt` 对比中都恰好以它支持的 perf feature 构建，每次构建都是本地
+每棵树都恰好以它支持的 perf feature 构建，每次构建都是本地
 门禁为该 feature 组合审阅过的步骤：声明了 `perf-counters` 且有带过滤器的日志 API 时用 `perf-counters`，声明了
 `perf-frame-texture` 时用它，声明了 `perf-hook-checkpoint-memory` 且 app 源码定义了
 `App::__perf_checkpoint_memory` 时用它，声明了 `perf-echo-trace` 且该树也支持 `perf-counters` 时用它，
 声明了 `perf-hook-trim` 且 app 源码定义了 `App::__trim_covered_now` 时用它。本地门禁为五个 perf feature 的
 每个有序子集各审阅四个构建步骤（base 与 head，各自针对普通示例与分配计数示例）：32 个子集，128 个步骤。一次
-对比只构建每侧支持的那一个子集，且只构建其运行所需的示例。manifest 记录每一侧的 feature，不一致时拒绝。
+对比只构建每侧支持的那一个子集，且只构建其运行所需的示例。`run-identity.json` 记录每一侧的 feature。
 
 一次完整对比要运行数小时，期间测量窗口一直显示在屏幕上。在本地运行时，请让主机保持空闲、接通交流电源、
 显示器保持唤醒且屏幕不锁定，例如在 `caffeinate -dis` 下运行脚本：
@@ -409,8 +407,7 @@ perf-flags 都会拒绝整次运行。两者在每个变体结束后重写，并
 以及 SIGINT 或 SIGTERM（被取消的 GitHub job 会在 SIGKILL 之前发送）。第一个这样的信号像 Ctrl-C 一样结束
 正在进行的运行或构建，之后的信号无法打断报告的写入；每个文件都通过同目录的临时文件替换，因此写到一半被杀死时
 会留下完整的上一版。在最后一个变体之前，`comparison.md` 以 `**Comparison in progress:**` 开头；停止之后以
-`**Stopped comparison:**` 与原因开头，测量之前的停止还会写明停在哪个步骤。`--build-only` 不做测量，不写
-`comparison.md`。
+`**Stopped comparison:**` 与原因开头，测量之前的停止还会写明停在哪个步骤。
 其中的表格保持完整对比的格式，只包含已测量的变体。PR 表之后的 `Incomplete` 部分列出每个没有完整对比的
 变体及原因：未凑满运行就结束的组、失败或被阻止的 head、未测量的变体，以及在 `--require-base` 下的其它
 所有缺口。任何不完整的变体都会使对比失败，退出码为 1；不传 `--require-base` 且 head 仅被阻止时退出码为 3。
@@ -700,7 +697,7 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | `S11/burst`、`S11/burst-text` | 仅用于 release 对比，仅在 macOS 上运行。`burst` 在一个窗格中打印十张约 2.2 MiB 的 OSC 1337 内联 PNG，每张之后是 100 行编号文本；第一张宽 2,048 像素，超过 1,024 像素的渲染上限，因此其解码还会缩放。`burst-text` 只打印同样的文本行。计数器组报告 `media_decode_dus` 和解码计数；其 print 阶段与 `burst-text` 的比较主要反映载荷大小（约 29.8 MB 对 80 KB），因此解码代价从 `media_decode_dus` 读取。解码留在该窗格的 VT 工作线程上，从而保持图像与文本的流顺序。超过上限的图像在那里进行 Lanczos3 缩放，期间只有该窗格不解析文本；代价随源图像素数增长。十次尝试的最近秩 p95 就是最慢的那一次，因此总由那张超尺寸图像决定。 |
 
 pull request 性能流水线在 macOS 和 Windows 上按名称运行 `S2/flood`、`S6/flood`、
-`S6/selection-drag`、`S6/rest`、`S1/atlas-retry`、`S1/status-line`、`S12/status-line` 和 `S13/sustained-4`；它们所在的分片见 [CI 能测量什么](#ci-能测量什么)。
+`S6/selection-drag`、`S6/rest`、`S1/atlas-retry`、`S1/status-line`、`S12/status-line` 和 `S13/sustained-4`：`full` 与 `release` 配置运行全部这些变体，`core` 运行 `S2/flood`、`S6/rest` 与 `S13/sustained-4`；各配置见 [CI 能测量什么](#ci-能测量什么)。
 
 每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
 5 秒，smoke 即如此）。多数场景以一段至少持续到那时的空闲期结束；S4 与 S5 则结束于 60 秒的输出流阶段，此时
@@ -771,44 +768,41 @@ perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scrat
 
 ### CI 能测量什么
 
-`Performance comparison` 工作流（`.github/workflows/perf.yml`）有 pull request 与 release 两种模式，两者共用一张 job 图：
+`Performance comparison` 工作流（`.github/workflows/perf.yml`）用一张 job 图运行三个配置，它们由
+`scripts/perf-shards.json` 定义：
 
 ```mermaid
 flowchart LR
-  producer["perf-build-macos<br/>base 与 head 只构建一次"] -->|"二进制 + manifest.json"| macos["compare-macos<br/>5 个分片，--prebuilt"]
-  windows["compare-windows<br/>5 个分片，各自构建"]
-  producer --> result["perf-result<br/>Performance comparison result"]
+  plan["plan<br/>Plan the comparison"] -->|"base、head、时长、矩阵"| macos["compare-macos<br/>每个分区一个 job，各自构建"]
+  plan -->|"base、head、时长、矩阵"| windows["compare-windows<br/>每个分区一个 job，各自构建"]
+  plan --> result["perf-result<br/>Performance comparison result"]
   macos --> result
   windows --> result
 ```
 
-- `perf-build-macos`（`macos-15`）解析 ref，并以 `--require-base --build-only` 通过 gate 已审核的构建步骤把两个 ref
-  各构建一次。它从文件重新计算 manifest 的 sha256，与脚本打印的摘要不一致时失败，然后把二进制打成 tarball（保留可执行位）上传，
-  名为 `perf-binaries-macOS-<run id>-<attempt>`，保留一天。它的构建日志作为证据上传。
-- 每个 `compare-macos` 分片需要 producer 成功。它自行解析 ref，与 producer 的不一致时失败；解析出 base 而 producer 没有发布
-  manifest 时也失败。它下载 producer 那次 attempt 的 tarball，并以 `--require-base --prebuilt` 运行，绑定本次运行的 id、
-  producer 的 attempt 与其 manifest 摘要。测量之前，`perf-compare.py` 会拒绝：目录或 manifest 缺失、schema 不同；manifest 的
-  sha256 不是 producer 发布的；运行或 attempt 不同；base 或 head SHA 不同；harness hash 不同；Cargo feature 不同；target、
-  工具链（`rustc -vV`、`cargo -V`）或 runner 镜像（`ImageOS`、`ImageVersion`）不同；profile 不同（每侧的 LTO 与
-  `CARGO_PROFILE_RELEASE_*` 覆盖）；二进制缺失、是符号链接、不可执行或摘要不符，或某组需要的示例没有构建；以及副本无法
-  `--list` 或找不到其所在树自己的资源。因此 producer 与分片之间工具链或镜像的更替会以拒绝告终。只有可执行文件被转移：副本位于
-  工作目录下，旁边没有 `assets`，所以每个 ref 仍从自己的 worktree 运行并使用自己的资源。二进制动态链接 Homebrew 的 Cairo，
-  因此每个分片仍会安装它。
-- “Re-run failed jobs” 保留成功的 producer，其 `attempt` 输出仍是构建 artifact 的那次 attempt，重新运行的分片下载的就是它。
-  “Re-run all jobs” 会运行新的 producer，其分片拒绝之前 attempt 的 manifest。
-- 每个 `compare-windows` 分片自行构建两个 ref，并传入 `--require-base`。
-- `perf-result` 需要全部三个 job，在同样的触发条件下以 `always()` 运行。它不 checkout，也不使用任何 action：只有一个
-  内联步骤，仅当 producer 与两个对比 job 都成功时才通过。只有符合条件的运行把它命名为 `Performance comparison result`；
-  不符合条件的运行（例如给带 `perf` 标签的 pull request 再加一个标签）会跳过每个 job。GitHub 从不求值被跳过 job 的
-  `name:`，因此它的结果检查显示原始的名称表达式（其中同时引用 `Performance comparison result` 与
-  `Performance comparison result (not run)`），从不显示真正的名称。
-- 首个 release 没有更早的 tag：producer 什么也不构建，每个 macOS 分片不计划对比并跳过下载，Windows 分片跳过对比，四个 job
-  全部成功。
+- `plan`（`Plan the comparison`，`ubuntu-latest`）只在符合条件的事件下运行：推送的 `v*` tag，或带 `perf` 或
+  `perf-full` 标签、且事件不是另加一个标签的 pull request。它只解析一次 base 与 head SHA：pull request 用其 merge base
+  与 head，短运行；tag 用上一个 release tag 与该 tag，完整时长。tag 选择 `release` 配置，带 `perf-full` 的 pull request
+  选择 `full`，其他符合条件的 pull request 选择 `core`。`python3 scripts/perf_shards.py <profile>` 检查整个分区文件并输出
+  每个平台的矩阵；违反任何规则的文件会让 plan 失败，因此没有 runner 会构建任何东西。
+- 每个 `compare-macos`（`macos-15`）与 `compare-windows`（`windows-latest`）job 是一个分区，名为
+  `<platform> before/after comparison (<partition>)`。它需要 plan，并从 plan 的输出读取 SHA、运行时长与分区，因此晚开始的
+  job 从不重新解析一个已移动的 base。它通过 gate 已审核的构建步骤自行构建两个 ref，并在自己的 runner 上交错运行它们，
+  每个 ref 从自己的 worktree 运行，并传入 `--require-base`。Windows 从 vcpkg 安装 Cairo，只恢复 CI 的缓存而不写入，
+  并在 Git Bash 下运行同样的 bash 步骤。
+- `perf-result` 需要 plan 与两个对比 job，在同样的触发条件下以 `always()` 运行，并自己读取该条件，因此被跳过的 plan
+  从不能让它通过。它不 checkout，也不使用任何 action：只有一个内联步骤，仅当 plan 与两个对比 job 都成功时才通过。只有
+  符合条件的运行把它命名为 `Performance comparison result`；不符合条件的运行（例如给带 `perf` 标签的 pull request 再加一个
+  标签）会跳过每个 job。GitHub 从不求值被跳过 job 的 `name:`，因此它的结果检查显示原始的名称表达式（其中同时引用
+  `Performance comparison result` 与 `Performance comparison result (not run)`），从不显示真正的名称。
+- 首个 release 没有更早的 tag：plan 不解析出 base，但仍输出 release 矩阵，每个对比 job 跳过其对比、summary 与证据，
+  四个 job 全部成功。
 
 同一 pull request（或同一 tag）的符合条件的运行共用一个工作流级 concurrency group。较新的符合条件的 pull request 运行会
-整个取消较旧的运行；较旧运行的结果 job 仍以 `always()` 运行并失败，因此被取代的运行从不显示为成功。每个不符合条件的运行
-都有以其 run id 为键的独立 group，不取消任何运行。正在运行的 release 对比从不被取消：同一 tag 的较新运行会等待，GitHub
-每个 group 只保留一个等待中的运行。重新运行较旧的符合条件的运行会重新加入该 group 并取消较新的运行，因此只重新运行最新的
+整个取消较旧的运行；较旧运行的结果 job 仍以 `always()` 运行并失败，因此被取代的运行从不显示为成功。给带 `perf` 的
+pull request 加上 `perf-full` 就是这样的运行，因此完整对比会取代正在运行的 core 对比。每个不符合条件的运行都有以其
+run id 为键的独立 group，不取消任何运行。正在运行的 release 对比从不被取消：同一 tag 的较新运行会等待，GitHub 每个
+group 只保留一个等待中的运行。重新运行较旧的符合条件的运行会重新加入该 group 并取消较新的运行，因此只重新运行最新的
 符合条件的运行。
 
 合并证据是那次符合条件的运行中的 `Performance comparison result` job：结论为 SUCCESS，所在运行的 head SHA 正是该 pull
@@ -818,20 +812,30 @@ request 的确切 head，并按该运行的 id 读取（`gh run view <run-id> --
 job 完成。被取代、被取消或被跳过的运行从不算作成功。
 
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
-该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。允许两种缺口：base 未声明 `perf-counters` 时的计数器组，
-它仍显示 `n/a`；以及因 harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行任何内容。其他任何被阻止的一侧仍会失败，
-没有可运行内容的选择也永远不会通过。三个 macOS 分片运行 S7、S4、S1/atlas-retry、S8 与 S6/selection-drag；
-S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line、S12、S12/status-line 与 S3；以及 S10、S11/release、S2、S2/flood、S6/flood、S13 与 S13/sustained-4。五个 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
-S2、S10/sync、S6/rest、S13 与 S13/sustained-4；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，其中 macOS 分配根据实测阶段成本重新均衡，35 分钟余量仍由 exact-head 计时验证；Windows 的 S7 还运行 S1/status-line 与 S12/status-line。
-各平台包含 S9 的分片（macOS 的 S9-S10sync，Windows 的 S9-S10）还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
-lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
-裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S7` 每侧上限 3 次（仅它就使关键路径超过 35 分钟），`S2/flood` 每侧上限 2 次，`S11/release`、`S1/status-line`、`S12/status-line`、`S13/default` 与 `S13/sustained-4` 上限 1 次，
-`S11/gdi`、`S11/wgpu`、`S1/atlas-retry` 与 `S6/rest` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 35 分钟内：release 对比完整运行它。release 对比还会运行仅限
-发布的变体（S13 的宽布局，以及 macOS 上的 `S2/spawn`、`S3/history`、`S3/resize`、`S11/burst` 与
-`S11/burst-text`）。在 Windows 上，每个矩阵条目的 `release_scenarios` 字段（包含 S13 的分片上为 S13 的宽布局，
-其余为空）只在非 short 运行时追加。在 macOS 上，非 short 运行时每个条目的 `release_partition` 取代其
-`scenarios`：三个分区恰好各包含每个变体一次，每个仅限发布的变体与其场景同在一个分片，并按实测的发布时间均衡，
-使任何 job 都不接近 GitHub 的 6 小时上限。pull request 从不运行两者。
+该 job 失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头；停止的对比则以 `**Stopped comparison:**` 开头
+（见[对比的执行过程](#对比的执行过程)）。允许两种缺口：base 未声明 `perf-counters` 时的计数器组，它仍显示 `n/a`；以及因
+harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行任何内容。其他任何被阻止的一侧仍会失败，没有可运行内容的选择
+也永远不会通过。
+
+| 配置 | 时机 | 对比 | 分区 | 运行 | Release profile | 时长 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `core` | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | 2 个 macOS、2 个 Windows | `--short --runs 5 --counters --counters-runs 1`，无 lap | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 从运行创建起 25 分钟内，包含排队时间 |
+| `full` | 带 `perf-full` 标签的 pull request，事件相同 | merge base 与 head | 3 个 macOS、3 个 Windows | `--short --runs 5 --counters --counters-runs 2`，S9 的 lap 组用 `--laps-runs 2` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 从运行创建起 45 分钟内，包含排队时间 |
+| `release` | 推送的 `v*` tag | 上一个 release tag 与该 tag | 3 个 macOS、5 个 Windows | 完整时长，`--runs 5 --counters --counters-runs 3`，S9 的 lap 组用 `--laps-runs 2` | 发布用的 profile | 可能数小时；每个 job 保持在 GitHub 的 6 小时上限之内 |
+
+`core` 在两个平台上运行经审阅的核心变体：S1、S2、S2/flood、S3、S6/rest、S9、S10/sync、S11、S12、S13 与 S13/sustained-4。
+`full` 运行每个 pull request 变体：目录中除仅限发布的变体，以及任何配置都不对比的 S1/gdi、S1/wgpu、S1/role-exit、S5/gdi
+与 S5/wgpu 之外的全部变体；S2/glide 与 S11/kitty-placeholders 只在 macOS 上运行，S11/gdi 与 S11/wgpu 只在 Windows 上运行。
+`release` 再加上仅限发布的变体：两个平台上 S13 的宽布局，以及 macOS 上的 `S2/spawn`、`S3/history`、`S3/resize`、
+`S11/burst` 与 `S11/burst-text`。`scripts/perf-shards.json` 列出每个分区的变体，按实测的各变体时长均衡。同一报告一起读取的
+变体共用一个分区：S13 与 S13/sustained-4（争用结论）、S13 的三个宽布局（其扩展规则），以及 S11/burst 与 S11/burst-text。
+在 `full` 与 `release` 中，包含 S9 的分区还运行它的 lap 组，每个平台的对比表给出各自的 `fallback_receive` 结论。裸场景 ID
+只选择其默认变体，因此每个变体都按名称列出。`scripts/perf_workflow_identity_tests.py` 直接在该文件上检查这些规则：每个
+变体都在 harness 目录中，每个配置在每个平台上各运行一次；`release` 包含 `full`，`full` 包含 `core`；lap 组只在声明处运行。
+
+在 `--short` 下，`S7` 每侧上限 3 次，`S2/flood` 上限 2 次，`S11/release`、`S1/status-line`、`S12/status-line`、`S13/default`
+与 `S13/sustained-4` 上限 1 次，`S11/gdi`、`S11/wgpu`、`S1/atlas-retry` 与 `S6/rest` 上限 2 次。这些上限只为让 pull request
+配置保持在预算内：release 对比完整运行每个变体。
 带 `perf-frame-texture` 时，S11 的 `end` 检查点记录 `frame_texture_bytes`：head 在 GDI 下为 4 B，未声明该 feature 的 base
 为 `n/a`。S9 与 S12 的 `end` 检查点记录渲染器的字形完整性：每次呈现 `Full` 帧时，渲染器保存一份证书，包含该帧的场景
 （去掉窗格 revision 与 dirty generation 的帧键）、字形图集的内容戳与尺寸，以及终端与界面各自缺失的不同字符。之后同一场景、同一图集的帧会并入
@@ -840,23 +844,19 @@ lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结�
 `api-disabled`。证书在每个构建中都会保存：每次成功呈现都会投影其帧键的场景，每个 `Full` 帧都会构建两个字符集合。perf-compare 为每次 S9/S12
 运行的每一侧在 `completeness.json` 中写一行（运行 ID 与 `GITHUB_RUN_ATTEMPT`、该运行的尝试目录、所测 SHA、侧、平台、fixture、组与缩放），
 并在 `comparison.md` 中列出。这些只是 perf 结束行；helper 行与真实渲染器行来自工作集测试。合并的关卡步骤 `perf-scenarios-harness-api-clippy` 与
-`perf-scenarios-harness-api-tests` 在开启该 cfg（以及其他每一项）时对 harness 做 lint 与测试。每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为三个，与实测试验中 CI 的 macOS job 运行期间分给 perf 的 macOS runner 数一致）
-根据实测的关键路径选定。两种模式都会运行计数器组，在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、
-每一侧运行两次计数器运行以保持在 35 分钟内，release 运行三次，使每个由计数器得出的数值都高于其样本下限。Windows runner 没有 GPU，也没有用户会话：其对比表测量
-软件渲染路径，前台变化在那里只被记录，不被判定。
-
-| 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |
-| --- | --- | --- | --- | --- | --- |
-| Pull request | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | `--short --runs 5 --counters --counters-runs 2` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 从运行创建起 35 分钟内，包含排队时间 |
-| Release | 推送的 `v*` tag | 上一个 release tag 与该 tag | 完整时长，`--runs 5 --counters --counters-runs 3` | 发布用的 profile | 可能数小时；每个 job 保持在 GitHub 的 6 小时上限之内 |
+`perf-scenarios-harness-api-tests` 在开启该 cfg（以及其他每一项）时对 harness 做 lint 与测试。每个配置都会运行计数器组，在 head 上，
+以及在声明 `perf-counters` 的 base 上：`core` 每个场景、每一侧运行一次计数器运行（一次短 S13 运行输入 300 个字符，高于争用结论的
+200 个样本下限），`full` 运行两次，release 运行三次，使每个由计数器得出的数值都高于其样本下限。Windows runner 没有 GPU，也没有
+用户会话：其对比表测量软件渲染路径，前台变化在那里只被记录，不被判定。
 
 每个对比 job 把它的 `comparison.md` 写入 job summary，并把它、它的 `timing.json` 与每次运行的日志和记录一起作为 artifact
-上传，artifact 名称以运行的 attempt 结尾，因此重新运行的证据从不替换第一次 attempt 的证据。对比表的细节记录运行时长、任何 release profile 覆盖，以及在 macOS 上 producer 的
-运行、attempt 与 manifest 摘要。该工作流不是必需的 CI job 之一；它输出的表就是该 pull request 的证据。Pull request 在放宽的
-profile 上的短运行只是快速检查；release 对比在完整时长下测量发布用的 profile。共享 runner 的噪声比空闲的桌面主机大，因此
-应以同类 runner、同一模式的 A/A 对比来解读一项改动。
+上传，artifact 名称包含平台、分区与运行的 attempt，因此重新运行的证据从不替换第一次 attempt 的证据。对比表的细节记录运行时长、
+任何 release profile 覆盖以及构建命令。该工作流不是必需的 CI job 之一；它输出的表就是该 pull request 的证据。Pull request
+在放宽的 profile 上的短运行只是快速检查；release 对比在完整时长下测量发布用的 profile。共享 runner 的噪声比空闲的桌面主机大，
+因此应以同类 runner、同一配置的 A/A 对比来解读一项改动。
 
-Pull request 的预算是从运行创建到其最后一个 job 结束的 35 分钟，包含排队时间与重新运行；只算分片时长不算数。
+`core` 的预算是 25 分钟，`perf-full` 的预算是 45 分钟，都从运行创建算到其最后一个 job 结束，包含排队时间与重新运行；
+只算 job 时长不算数。
 `python3 scripts/perf-critical-path.py --run <id>` 负责核算（`--fixture <file>` 读取已记录的运行）。它把经过的时间分到每次
 attempt 与重新运行之间的等待，把每次重新运行中继承的 job 行映射到实际执行它们的唯一 attempt，并把每次 attempt 中每条
 needs 链拆成兄弟等待、创建等待、runner 排队与运行时间类别（setup、build、打包与上传、下载与解包、compare、evidence、check、

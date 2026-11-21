@@ -35,7 +35,6 @@ import argparse
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, NamedTuple, Sequence
 
-import perf_build_policy
 import perf_cli
 import perf_echo_analysis
 import perf_settings
@@ -76,17 +75,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--counters-runs", type=perf_cli.positive_int, metavar="N",
                         help="valid runs of the counters set (default: --runs)")
     parser.add_argument("--keep", action="store_true", help="keep the worktrees and target directories")
-    parser.add_argument("--build-only", type=Path, metavar="DIR",
-                        help="build both refs once, list both binaries and publish them with manifest.json under "
-                             "an empty DIR, printing manifest_sha256=<hex>; measures nothing (needs "
-                             "--require-base)")
-    parser.add_argument("--prebuilt", type=Path, metavar="DIR",
-                        help="measure the binaries a --build-only job published in DIR instead of building; "
-                             "refused unless its manifest matches this job")
-    parser.add_argument("--prebuilt-run-id", metavar="ID", help="the workflow run that must have built --prebuilt")
-    parser.add_argument("--prebuilt-attempt", metavar="N", help="the producer job's run attempt")
-    parser.add_argument("--prebuilt-manifest-sha256", metavar="HEX",
-                        help="the manifest digest the producer job published")
     parser.add_argument("--require-base", action="store_true",
                         help="fail unless the base builds, lists and gets every valid run the head does (CI "
                              "passes it); a counters set on a base without perf-counters still reads n/a")
@@ -104,9 +92,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                              "(default: macos)")
     args = parser.parse_args(argv)
     if args.echo_attribution is not None:
-        options = (args.base, args.head, args.scenario, args.runs, args.counters_runs, args.build_only, args.prebuilt,
-                   args.prebuilt_run_id, args.prebuilt_attempt, args.prebuilt_manifest_sha256, args.laps_runs,
-                   args.out)
+        options = (args.base, args.head, args.scenario, args.runs, args.counters_runs, args.laps_runs, args.out)
         if any(value is not None for value in options) or args.smoke or args.check_previous_release or args.short \
                 or args.laps or args.alloc or args.keep or args.counters or args.require_base or args.laps_scenario:
             parser.error("--echo-attribution is analysis only: it takes no comparison, build, smoke or --out option")
@@ -117,18 +103,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if args.echo_control or args.echo_platform:
         parser.error("--echo-control and --echo-platform need --echo-attribution")
     if args.check_previous_release:
-        options = (args.base, args.head, args.scenario, args.runs, args.counters_runs, args.build_only,
-                   args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt, args.prebuilt_manifest_sha256,
-                   args.laps_runs)
+        options = (args.base, args.head, args.scenario, args.runs, args.counters_runs, args.laps_runs)
         if any(value is not None for value in options) or args.smoke or args.short or args.laps or args.alloc \
                 or args.keep or args.counters or args.require_base or args.laps_scenario:
             parser.error("--check-previous-release takes only --out")
         return args
     if args.smoke:
         options = (args.base, args.head, args.scenario, args.runs, args.out, args.counters_runs)
-        binding = (args.build_only, args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt,
-                   args.prebuilt_manifest_sha256)
-        if any(value is not None for value in options + binding) or args.short or args.laps or args.alloc \
+        if any(value is not None for value in options) or args.short or args.laps or args.alloc \
                 or args.keep or args.counters or args.require_base or args.laps_scenario \
                 or args.laps_runs is not None:
             parser.error("--smoke takes no comparison option")
@@ -140,22 +122,4 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--laps-runs needs --laps or --laps-scenario")
     elif args.counters_runs is not None and not args.counters:
         parser.error("--counters-runs needs --counters")
-    elif args.build_only is not None:
-        measured = (args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt, args.prebuilt_manifest_sha256,
-                    args.scenario, args.runs, args.counters_runs, args.out, args.laps_scenario, args.laps_runs)
-        if any(value is not None for value in measured) or args.short or args.laps or args.counters or args.keep:
-            parser.error("--build-only measures nothing: it takes no --prebuilt*, run, counters, --keep or --out "
-                         "option (only --alloc)")
-        if not args.require_base:
-            parser.error("--build-only needs --require-base: a manifest always holds both refs")
-    else:
-        binding = (args.prebuilt_run_id, args.prebuilt_attempt, args.prebuilt_manifest_sha256)
-        if args.prebuilt is not None and any(value is None for value in binding):
-            parser.error("--prebuilt needs --prebuilt-run-id, --prebuilt-attempt and --prebuilt-manifest-sha256")
-        if args.prebuilt is None and any(value is not None for value in binding):
-            parser.error("--prebuilt-run-id, --prebuilt-attempt and --prebuilt-manifest-sha256 need --prebuilt")
-        if args.prebuilt is not None and not (args.prebuilt_run_id.isdigit() and args.prebuilt_attempt.isdigit()
-                                              and perf_build_policy._HEX_SHA256.fullmatch(args.prebuilt_manifest_sha256)):
-            parser.error("--prebuilt-run-id and --prebuilt-attempt are numbers; --prebuilt-manifest-sha256 is 64 "
-                         "lowercase hex digits")
     return args

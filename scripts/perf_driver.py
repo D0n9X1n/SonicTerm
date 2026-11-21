@@ -24,7 +24,6 @@ import perf_host_info
 import perf_inventory
 import perf_metrics
 import perf_outcomes
-import perf_prebuilt
 import perf_report
 import perf_result_schema
 import perf_scenarios
@@ -36,12 +35,8 @@ import perf_worktrees
 
 
 def builds_line(args: argparse.Namespace, work: Path) -> str:
-    """The details line saying where the binaries came from: this job's builds or the producer's."""
+    """The details line saying how this job built both refs; every comparison builds its own binaries."""
     command_text = " ".join(perf_scenarios.build_argv(perf_settings.HARNESS_EXAMPLE, release=True))
-    if args.prebuilt is not None:
-        return (f"- Builds: prebuilt by run {args.prebuilt_run_id} attempt {args.prebuilt_attempt}, manifest "
-                f"sha256 `{args.prebuilt_manifest_sha256}`: `{command_text}` in each worktree, copied to "
-                f"`{work / perf_build_policy.PREBUILT_DIRECTORY}`")
     return f"- Builds: `{command_text}` in each worktree, one CARGO_TARGET_DIR per ref"
 
 
@@ -120,24 +115,13 @@ def build_sides(args: argparse.Namespace, gate, trees: Mapping[str, Path], featu
     return builds, index
 
 
-def _list_side(gate, binary: Path, out: Path, index: int, side: str, prebuilt: bool) -> list[perf_scenarios.Scenario]:
-    """List one side's scenarios; a prebuilt binary that cannot list refuses the artifact."""
-    try:
-        return perf_smoke.list_scenarios(gate, binary, out, index)
-    except ValueError as error:
-        # When: the binary came from the producer, its failure to start is the artifact's refusal.
-        if prebuilt:
-            raise ValueError(f"refusing the prebuilt binaries: the {side} binary failed: {error}") from error
-        raise
-
-
 @dataclass
 class ComparisonProgress:
     """Where a comparison is, so a stop at any step finalizes a report that names it."""
 
     signals: perf_signals.StopSignals
     step: str = "resolving the refs and adding the worktrees"
-    # Rewrites the preparing comparison.md for a step; None when the run reports nothing (--build-only).
+    # Rewrites the preparing comparison.md for a step; None until the guard installs the writer.
     on_step: Callable[[str], None] | None = None
     # Set once measuring starts: the measured report's writer, the results so far and the variant in flight.
     write: Callable[[str | None], str] | None = None
@@ -195,24 +179,19 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: p
 
     comparison.md reads `preparing` with the step in flight from the start; a failed step, a stop or a cancel
     finalizes it with the reason and the step, and once measuring has started with every variant measured.
-    `--build-only` publishes binaries, measures nothing and writes no comparison.md. compare_main owns the
-    worktrees' removal, which runs whatever this raises.
+    compare_main owns the worktrees' removal, which runs whatever this raises.
     """
     progress = ComparisonProgress(perf_signals.StopSignals())
-    # When: --build-only publishes binaries for other jobs, there is no comparison to report.
-    reporting = getattr(args, "build_only", None) is None
     with progress.signals:
         try:
-            if reporting:
-                progress.on_step = lambda step: write_preparing(args, out, step)
-                progress.on_step(progress.step)
+            progress.on_step = lambda step: write_preparing(args, out, step)
+            progress.on_step(progress.step)
             return _compare_steps(args, gate, out, work, worktrees, host_run, progress)
         except BaseException as error:
             # From here a later signal is only recorded, so a second one cannot cut the partial report short.
             progress.signals.hold()
             stop = stop_reason(error, progress.signals)
-            if reporting:
-                finalize_report(args, out, progress, stop)
+            finalize_report(args, out, progress, stop)
             # When: a signal arrived, even one a build turned into a failed step, the comparison was cancelled.
             if isinstance(error, KeyboardInterrupt) or progress.signals.received:
                 # A cancel ends the comparison like any stop: exit 1, after compare_main removes the worktrees.
@@ -222,11 +201,9 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: p
 
 def _compare_steps(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: perf_worktrees.Worktrees,
                    host_run: Callable, progress: ComparisonProgress) -> int:
-    """Build (or load) both refs with the head's harness, run every selected set and write comparison.md.
+    """Build both refs with the head's harness, run every selected set and write comparison.md.
 
-    With `--build-only` it publishes the binaries and their manifest instead of measuring; with
-    `--prebuilt` it measures binaries the producer job built. compare_main owns the worktrees' removal,
-    which runs whatever this raises.
+    compare_main owns the worktrees' removal, which runs whatever this raises.
     """
     marks = {"start": time.time()}
     runs = args.runs or perf_settings.DEFAULT_RUNS
@@ -240,29 +217,13 @@ def _compare_steps(args: argparse.Namespace, gate, out: Path, work: Path, worktr
     harness_cfgs, tree_cfgs = perf_harness_sources.harness_cfg_decision(trees, gate.HARNESS_API_CFGS)
     rustflags = gate.compose_harness_rustflags(os.environ, harness_cfgs)
     print(f"[perf-compare] harness cfgs (both sides): {', '.join(harness_cfgs) or 'none'}", flush=True)
-    prebuilt = args.prebuilt is not None
-    identity = None
-    if prebuilt or args.build_only is not None:
-        identity = perf_prebuilt.build_identity(trees, features, host_run, os.environ, harness_cfgs, rustflags)
-    index = 0
-    if prebuilt:
-        builds = perf_prebuilt.load_prebuilt(args, shas, digest, identity, examples, work / perf_build_policy.PREBUILT_DIRECTORY)
-        # The copies run from each ref's own tree, which must hold that ref's assets.
-        for side in ("head", "base"):
-            for example in examples:
-                problem = perf_scenarios.asset_problem(builds[side][example], trees[side])
-                if problem is not None:
-                    raise ValueError(f"refusing the prebuilt binaries: the {side} cannot run {example}: {problem}")
-    else:
-        builds, index = build_sides(args, gate, trees, features, examples, out, work, harness_cfgs)
+    builds, index = build_sides(args, gate, trees, features, examples, out, work, harness_cfgs)
     index += 1
-    scenarios = _list_side(gate, builds["head"][perf_settings.HARNESS_EXAMPLE], out, index, "head", prebuilt)
-    if args.require_base or prebuilt or args.build_only is not None:
+    scenarios = perf_smoke.list_scenarios(gate, builds["head"][perf_settings.HARNESS_EXAMPLE], out, index)
+    if args.require_base:
         # The base must load and list too, so a binary that cannot start fails before anything is measured.
         index += 1
-        _list_side(gate, builds["base"][perf_settings.HARNESS_EXAMPLE], out, index, "base", prebuilt)
-    if args.build_only is not None:
-        return perf_prebuilt.publish_binaries(args.build_only, builds, shas, digest, identity, os.environ)
+        perf_smoke.list_scenarios(gate, builds["base"][perf_settings.HARNESS_EXAMPLE], out, index)
     marks["listed"] = time.time()
     progress.advance("selecting the variants and reading the host")
     by_id = {scenario.id: scenario for scenario in scenarios}
@@ -305,7 +266,7 @@ def _compare_steps(args: argparse.Namespace, gate, out: Path, work: Path, worktr
         for name, argv in perf_worktrees.HOST_COMMANDS.items():
             record = host_run(argv, perf_host_info.HOST_COMMAND_TIMEOUT_S)
             host_outputs[name] = "" if perf_focus._command_failure(record) else record.stdout
-    profile = {"lto": {side: perf_prebuilt.release_lto(trees[side], os.environ) for side in perf_settings.SIDES},
+    profile = {"lto": {side: perf_build_policy.release_lto(trees[side], os.environ) for side in perf_settings.SIDES},
                "overrides": perf_build_policy.release_profile_overrides(os.environ)}
     # One reference for every set, so all valid runs of the comparison share one refresh rate and scale.
     display = perf_sets.DisplayReference()

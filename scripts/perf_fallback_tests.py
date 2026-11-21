@@ -88,13 +88,12 @@ class LapsSelectionTests(perf_driver_tests.CompareHarness, unittest.TestCase):
         return sorted((plan.scenario.id, plan.variant, plan.side) for plan in plans if plan.laps)
 
     def test_bad_combinations_are_usage_errors(self):
-        # With --laps, --laps-runs without a laps selection or below 1, and either flag on a smoke or a
-        # build-only run all stop at the command line.
+        # With --laps, --laps-runs without a laps selection or below 1, and either flag on a smoke run all
+        # stop at the command line.
         comparison = ["--base", "main", "--head", "HEAD"]
         for argv in (comparison + ["--laps", "--laps-scenario", "S1"], comparison + ["--laps-runs", "2"],
                      comparison + ["--laps-scenario", "S1", "--laps-runs", "0"],
-                     ["--smoke", "--laps-scenario", "S1"], ["--smoke", "--laps-runs", "1"],
-                     comparison + ["--build-only", "/tmp/x", "--require-base", "--laps-scenario", "S1"]):
+                     ["--smoke", "--laps-scenario", "S1"], ["--smoke", "--laps-runs", "1"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit), \
                     contextlib.redirect_stderr(io.StringIO()):
                 perf_arguments.parse_args(argv)

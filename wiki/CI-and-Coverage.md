@@ -22,21 +22,22 @@ reproduces and is traced to a defect in the code gets a fix and an issue; a test
 that fails only from a runner's load or timing is not one.
 
 `.github/workflows/perf.yml` (`Performance comparison`) runs separately and is
-not a required job. It measures a quick before/after table, within 35 minutes
-of the run's creation, queue included, for pull requests labelled `perf`, and the
-full comparison for each release tag, on GitHub-hosted macOS and Windows
-runners, with the frame-counter set and its tables on both. One macOS job builds
-both refs once and publishes the binaries as a one-day artifact bound to the
-run, its attempt and a manifest digest; the macOS comparison shards measure
-those binaries, and each Windows shard builds its own. Every comparison passes
-`--require-base`, so a base that cannot build or measure fails its shard. The
-last job checks out nothing and passes only when the build job and both
-comparison jobs succeeded. Only an eligible run names it `Performance
+not a required job. A pull request labelled `perf` gets the `core` profile, a
+quick before/after table within 25 minutes of the run's creation, queue
+included; one labelled `perf-full` gets every pull-request variant within 45
+minutes; each release tag gets the full comparison. All run on GitHub-hosted
+macOS and Windows runners, with the frame-counter set and its tables on both.
+One `plan` job resolves the base and head once and emits each platform's
+partitions from `scripts/perf-shards.json`; every comparison job builds both refs
+itself and measures them on its own runner. Every comparison passes
+`--require-base`, so a base that cannot build or measure fails its job. The
+last job checks out nothing and passes only when the plan and both comparison
+jobs succeeded. Only an eligible run names it `Performance
 comparison result`; an ineligible run's skipped result shows its unevaluated
 name expression, never the real name. Merge evidence is that job's SUCCESS in the exact
 eligible run on the exact head, read by run id, never by check name alone; a
 superseded run is never counted as success. [Development and
-Release](Development-and-Release#what-ci-measures) describes both modes, the job
+Release](Development-and-Release#what-ci-measures) describes the profiles, the job
 layout and the concurrency.
 
 Never merge or enable auto-merge while a required pull-request job is queued,
@@ -147,7 +148,7 @@ as steps at the end of `macos-core`, and on macOS 15 Intel, in the one-leg
 `macos-smoke` matrix, with distinct dependency-cache keys. The Intel lane may save
 dependencies only on a push to `main`; the Apple Silicon lane shares `macos-core`'s
 cache entry. It has no job of its own because the repository runs at most five macOS
-jobs at once, and a separate leg would hold a slot the perf comparison's shards wait
+jobs at once, and a separate leg would hold a slot the perf comparison's jobs wait
 for. Those steps follow the core gates, so an earlier core-gate failure skips them;
 the Intel lane still reports on its own.
 Before the release build, both lanes build and run the native split-selection
@@ -252,22 +253,17 @@ other macOS and Linux cache policies are unchanged. Compiler/environment hashing
 enabled; a static-check archive can no longer occupy the test-codegen cache key.
 Overlapping main runs can still race to save an immutable key.
 
-The three macOS perf shards keep their artifact names and run every scenario
-exactly once, partitioned from measured per-variant times so that no shard sets the
-critical path; S7, the longest variant, shares its shard only with short ones:
-`S7-S4` runs S7, S4, atlas-retry, S8 and S6/selection-drag;
-`S9-S10sync` runs S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line, S12,
-S12/status-line and S3;
-`S10-S11release` runs S10, S11/release, S2, S2/flood, S6/flood, S13 and S13/sustained-4. A release tag runs
-every variant in full, so each macOS entry runs its `release_partition` instead, balanced from measured release
-times so each shard stays well under GitHub's 6-hour job limit: `S7-S4` runs its pull-request set plus S10/sync,
-S11, S11/burst, S11/burst-text and S1/status-line; `S9-S10sync` runs S9, S12, S12/status-line, S6, S6/rest, S1,
-S3, S3/history, S3/resize and S5; `S10-S11release` runs its pull-request set plus S13's wide layouts and S2/spawn.
-Windows appends S13's wide layouts to its S13 shard (`release_scenarios`). All three start
-when the binaries land: this repository runs at most five macOS jobs at once, and CI
-holds two (core gates, which also runs the aarch64 smoke, and the Intel smoke). The
-35-minute PR budget includes queues; exact-head CI timing, not local estimates,
-verifies the remaining margin. A release takes three counters runs a side.
+Each perf profile's partitions are listed in `scripts/perf-shards.json` and run
+every variant of the profile exactly once per platform, balanced from measured
+per-variant times so that no partition sets the critical path: two macOS and two
+Windows partitions for `core`, three each for `full`, and the `release` partitions
+balanced from measured release times so each job stays well under GitHub's 6-hour
+job limit. Every comparison job builds both refs itself, so a partition never waits
+for another job's binaries. This repository runs at most five macOS jobs at once,
+and CI holds two (core gates, which also runs the aarch64 smoke, and the Intel
+smoke) for most of a perf run. The 25-minute `core` and 45-minute `perf-full`
+budgets include queues; exact-head CI timing, not local estimates, verifies the
+remaining margin. A release takes three counters runs a side.
 
 A compatible successful `main` job must populate a key before a later run can
 hit it; compiler or dependency changes can still cause a miss. Cache reuse can

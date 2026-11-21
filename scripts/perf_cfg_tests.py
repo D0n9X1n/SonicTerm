@@ -19,7 +19,6 @@ import perf_harness_sources
 import perf_home_tests
 import perf_metrics
 import perf_outcomes_tests
-import perf_prebuilt_tests
 import perf_scenarios
 import perf_sets
 import perf_settings
@@ -184,25 +183,6 @@ class AtlasRetryAvailabilityTests(perf_driver_tests.CompareHarness, unittest.Tes
         blocked = [perf_sets.SetResult("S1/default", "timed", perf_metrics.SideRuns(blocked="the base cannot build"),
                                   perf_metrics.SideRuns([perf_outcomes_tests.make_outcome()]), target_runs=1)]
         self.assertEqual(perf_sets.comparison_exit(blocked, require_base=True), perf_settings.EXIT_FAIL)
-
-
-class HarnessCfgPrebuiltTests(perf_prebuilt_tests.PrebuiltHarness, unittest.TestCase):
-    """The harness cfg decision and the composed flags are part of the build identity a consumer checks."""
-
-    def test_load_prebuilt_refuses_another_cfg_decision_or_other_flags(self):
-        # The producer records the decision and the flags; a manifest naming other ones is refused.
-        binaries, digest = self.produce()
-        manifest = json.loads((binaries / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["harness_cfgs"], ["perf_atlas_retry_api"])
-        declared = [token for name in perf_build_tests.REAL_GATE.HARNESS_API_CFG_NAMES for token in ("--check-cfg", f"cfg({name})")]
-        self.assertEqual(manifest["rustflags"], [*declared, "--cfg", "perf_atlas_retry_api"])
-        for key, value, message in (("harness_cfgs", [], "harness cfgs"),
-                                    ("rustflags", declared, "compiler flags")):
-            with self.subTest(key=key):
-                changed = self.rewrite(binaries, lambda data, key=key, value=value: data.update({key: value}))
-                with self.assertRaisesRegex(ValueError, f"refusing the prebuilt binaries: {message}"):
-                    self.consume(binaries, changed)
-                self.rewrite(binaries, lambda data, key=key: data.update({key: manifest[key]}))
 
 
 class PreviousReleaseCheckTests(unittest.TestCase):

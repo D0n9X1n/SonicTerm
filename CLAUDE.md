@@ -381,67 +381,85 @@ a reproduction.
   Local and native process deadlines are independent and remain required. Scripts that capture child-process output must bound and reap the
   child process tree so timeout evidence and checksums survive. Keep the timeout
   policy tests green when adding or renaming workflow jobs and steps.
-- **Performance is measured in CI: a 35-minute PR pipeline and an unbounded
-  release pipeline. Local runs only make sure it works.** Every before/after
+- **Performance is measured in CI: a 25-minute PR pipeline, a 45-minute
+  `perf-full` pipeline and an unbounded release pipeline. Local runs only make
+  sure it works.** Every before/after
   perf number comes from the `Performance comparison` workflow
   (`.github/workflows/perf.yml`) on GitHub-hosted macOS and Windows runners,
   never from a local comparison: a developer's machine is in use, and its
   input, focus changes and load invalidate runs or widen the noise.
-  - **PR pipeline:** runs for every PR labelled `perf` and must finish within
-    35 minutes. It compares the merge base with the head using
-    `--short --runs 5 --counters --counters-runs 2` and a release profile without
-    LTO (the same for both refs). Under `--short` a variant whose `--list` entry
-    declares `run_caps` takes min(requested, cap) runs per side in every set
-    (`S7` 3, `S2/flood` 2, `S1/atlas-retry` 2, `S6/rest` 2, `S11/release` 1, `S1/status-line` 1,
-    `S12/status-line` 1, `S13/default` 1 and `S13/sustained-4` 1 on both platforms, `S11/gdi` and
-    `S11/wgpu` 2 on Windows, `S2/glide` 1 and `S11/kitty-placeholders` 2 on macOS),
-    its rows read `(runs N of M)`, and release runs are uncapped. One macOS job
-    builds both refs once; three macOS
-    shards measure its binaries, bound to the run, attempt and manifest digest;
-    five Windows shards each build; every comparison passes `--require-base`; and
-    the `Performance comparison result` job passes only when all of them did.
-    Only an eligible run publishes that name (an ineligible run's skipped result
-    shows its unevaluated name expression), and eligible runs share one workflow-level concurrency
-    group. Merge evidence is that job's SUCCESS in the exact eligible run on the
-    exact head, read by run id (`gh run view <run-id>`), never by check name
-    alone as `gh pr checks` reads it; a superseded run never counts. The
-    counters set runs with the frame counters forced on, on the head and on the
-    base when it declares `perf-counters`, giving a counters table and a head
-    counters-on vs counters-off overhead table. The two matrix entries holding S9 (macOS
-    S9-S10sync, Windows S9-S10) pass `--laps-scenario S9 --laps-runs 2` through a per-entry `laps`
-    field, adding S9's laps set and its `fallback_receive` verdict; the other
-    entries pass no laps flags. Its table is the PR's before/after
-    evidence. Keep it
-    within 35 minutes, from the run's creation to its last job's finish with
-    queue time included (`scripts/perf-critical-path.py` accounts for it), when
-    you add scenarios or change the workflow: rebalance the shards or shorten
-    the runs, never drop the budget.
-  - **Release pipeline:** runs for each pushed release tag and may take hours.
-    It compares the previous release tag with the new one using full-length
-    runs, `--counters --counters-runs 3` and the shipping release profile. Every job
-    must stay under GitHub's 6-hour job limit: a release runs each macOS entry's
-    `release_partition` instead of its PR `scenarios`, balanced from measured
-    per-variant release times; rebalance it when you add a release scenario. Put any
-    long or exhaustive perf measurement here, not in the PR pipeline: S13's release-only
-    wide layouts (`S13/wide-8`, `S13/wide-16`, `S13/wide-32`, through the Windows S13
-    entry's `release_scenarios` and the macOS partition) report a `Scaling` row that is
-    not a gate; macOS also runs `S3/history`, a flood into budget-filling history,
-    `S3/resize`, twenty window resizes over a flooded history, `S11/burst` against
-    `S11/burst-text`, ten inline PNGs between text against the same text alone, and
-    `S2/spawn`, typing while a tab opens after every tenth character, each beside its
-    scenario.
+  - **Layout:** `scripts/perf-shards.json` holds three profiles, `core`, `full`
+    and `release`, each a list of partitions per platform (a name, its variants
+    and the variants that also run S9's laps set). One `plan` job (`Plan the
+    comparison`, on Ubuntu) decides eligibility, resolves the base and head SHAs
+    once and emits each platform's matrix through `scripts/perf_shards.py`, which
+    refuses a layout that breaks a rule. Every comparison job
+    (`<platform> before/after comparison (<partition>)`) builds both refs itself
+    and runs them interleaved on its own runner; every comparison passes
+    `--require-base`. The `Performance comparison result` job reads the
+    eligibility itself and passes only when the plan and every comparison job
+    succeeded, so a skipped plan never passes. Only an eligible run publishes
+    that name (an ineligible run's skipped result shows its unevaluated name
+    expression), and eligible runs share one workflow-level concurrency group.
+    Merge evidence is that job's SUCCESS in the exact eligible run on the exact
+    head, read by run id (`gh run view <run-id>`), never by check name alone as
+    `gh pr checks` reads it; a superseded run never counts.
+    `scripts/perf_workflow_identity_tests.py` checks the file's invariants: every
+    variant is in the harness catalogue, runs once per platform per profile and
+    stays on its platform when only one runner measures it, `release` ⊇ `full`
+    ⊇ `core`, laps run only where declared, and variants one report reads
+    together share a partition.
+  - **PR pipeline (`perf` label, `core` profile):** must finish within
+    25 minutes of the run's creation, queue time included. Two macOS and two
+    Windows partitions compare the merge base with the head on the reviewed core
+    variants (S1, S2, S2/flood, S3, S6/rest, S9, S10/sync, S11, S12, S13,
+    S13/sustained-4) using `--short --runs 5 --counters --counters-runs 1`, no
+    laps, and a release profile without LTO (16 codegen units, the same for both
+    refs). Under `--short` a variant whose `--list` entry declares `run_caps`
+    takes min(requested, cap) runs per side in every set (`S7` 3, `S2/flood` 2,
+    `S1/atlas-retry` 2, `S6/rest` 2, `S11/release` 1, `S1/status-line` 1,
+    `S12/status-line` 1, `S13/default` 1 and `S13/sustained-4` 1 on both
+    platforms, `S11/gdi` and `S11/wgpu` 2 on Windows, `S2/glide` 1 and
+    `S11/kitty-placeholders` 2 on macOS), its rows read `(runs N of M)`, and
+    release runs are uncapped. The counters set runs with the frame counters
+    forced on, on the head and on the base when it declares `perf-counters`,
+    giving a counters table and a head counters-on vs counters-off overhead
+    table. Its table is the PR's before/after evidence.
+  - **`perf-full` label (`full` profile):** every pull-request variant with
+    `--counters-runs 2` and S9's laps set (`--laps-scenario S9 --laps-runs 2`,
+    and its `fallback_receive` verdict) in three macOS and three Windows
+    partitions, within 45 minutes. Adding `perf-full` to a `perf` pull request
+    replaces the running core comparison. Keep both budgets, from the run's
+    creation to its last job's finish with queue time included
+    (`scripts/perf-critical-path.py` accounts for it), when you add scenarios or
+    change the workflow: rebalance the partitions from measured per-variant
+    times or shorten the runs, never drop the budget.
+  - **Release pipeline (`release` profile):** runs for each pushed release tag
+    and may take hours. It compares the previous release tag with the new one
+    using full-length runs, `--counters --counters-runs 3` and the shipping
+    release profile. Every job must stay under GitHub's 6-hour job limit, so its
+    partitions are balanced from measured per-variant release times; rebalance
+    them when you add a release scenario. Put any long or exhaustive perf
+    measurement here, not in a PR profile: S13's release-only wide layouts
+    (`S13/wide-8`, `S13/wide-16`, `S13/wide-32`) report a `Scaling` row that is
+    not a gate; macOS also runs `S3/history`, a flood into budget-filling
+    history, `S3/resize`, twenty window resizes over a flooded history,
+    `S11/burst` against `S11/burst-text`, ten inline PNGs between text against
+    the same text alone, and `S2/spawn`, typing while a tab opens after every
+    tenth character.
   - **Locally:** build and run the functional checks only. The local gate,
     including `macos-perf-smoke` and `windows-perf-smoke`, proves the tooling
     works and asserts no timing.
-  - **Windows:** `perf.yml` runs the same five shards on `windows-latest`.
-    That runner has no GPU, so its table measures the software-rendering path
-    (GDI by default; the `wgpu` variants measure wgpu on its software adapter).
-    Numbers for a hardware GPU come from a comparison on an idle Windows host
-    with no user input during the runs, and the PR names that host. The Windows
-    CI smoke checks the tooling, the wgpu presenter and role-exit handling,
-    never timing. The counters set and its tables run on Windows too: under
-    GDI a frame counts as `software_frames`, and the comparison names any run
-    whose frame counts contradict the presenter its `result.json` records.
+  - **Windows:** `perf.yml` runs each profile's Windows partitions on
+    `windows-latest`. That runner has no GPU, so its table measures the
+    software-rendering path (GDI by default; the `wgpu` variants measure wgpu on
+    its software adapter). Numbers for a hardware GPU come from a comparison on
+    an idle Windows host with no user input during the runs, and the PR names
+    that host. The Windows CI smoke checks the tooling, the wgpu presenter and
+    role-exit handling, never timing. The counters set and its tables run on
+    Windows too: under GDI a frame counts as `software_frames`, and the
+    comparison names any run whose frame counts contradict the presenter its
+    `result.json` records.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without

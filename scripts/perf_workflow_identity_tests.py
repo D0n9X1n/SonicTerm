@@ -1,46 +1,38 @@
 """Perf workflow identity tests."""
 
 from __future__ import annotations
+import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 import tempfile
 import unittest
 
-import perf_cell_layout
 import perf_execution
 import perf_expression_fixture
+import perf_shards
 import perf_workflow_fixture
+import perf_workflow_tests
 
 
-def pull_request_github(action, labels, label=None, run_id="70"):
-    """A pull_request event's context: its action, the labels the PR carries and the label just added."""
-    event = {"action": action, "pull_request": {"number": 1575, "labels": [{"name": name} for name in labels]}}
-    if label is not None:
-        event["label"] = {"name": label}
-    return {"github": {"event_name": "pull_request", "event": event, "run_id": run_id, "ref_name": "1575/merge",
-                       "run_attempt": "1", "sha": "merge-commit", "workspace": "/w"}}
-
-
-def push_github(run_id="71"):
-    """A tag push's context."""
-    return {"github": {"event_name": "push", "event": {}, "run_id": run_id, "ref_name": "v1.4.0",
-                       "run_attempt": "1", "sha": "tag-commit", "workspace": "/w"}}
-
-
-RESULT_NAME = "Performance comparison result"
-RESULT_NOT_RUN = "Performance comparison result (not run)"
-# (context, eligible): a tag push; perf added; a push while perf is set; another label on a perf PR; a PR
-# without perf; perf added to a PR that also carries bug.
+# (context, eligible): a tag push; perf or perf-full added, alone or together; a push while either is set; another
+# label on a perf or perf-full pull request; a pull request with neither, or with a label that only starts alike.
 ELIGIBILITY_CASES = (
-    (push_github(), True),
-    (pull_request_github("labeled", ["perf"], "perf"), True),
-    (pull_request_github("synchronize", ["perf", "bug"]), True),
-    (pull_request_github("labeled", ["perf", "bug"], "bug"), False),
-    (pull_request_github("opened", ["bug"]), False),
-    (pull_request_github("synchronize", []), False),
+    (perf_workflow_fixture.push_github(), True),
+    (perf_workflow_fixture.pull_request_github("labeled", ["perf"], "perf"), True),
+    (perf_workflow_fixture.pull_request_github("labeled", ["perf-full"], "perf-full"), True),
+    (perf_workflow_fixture.pull_request_github("labeled", ["perf", "perf-full"], "perf-full"), True),
+    (perf_workflow_fixture.pull_request_github("synchronize", ["perf", "bug"]), True),
+    (perf_workflow_fixture.pull_request_github("synchronize", ["perf-full"]), True),
+    (perf_workflow_fixture.pull_request_github("labeled", ["perf", "bug"], "bug"), False),
+    (perf_workflow_fixture.pull_request_github("labeled", ["perf-full", "bug"], "bug"), False),
+    (perf_workflow_fixture.pull_request_github("opened", ["bug"]), False),
+    (perf_workflow_fixture.pull_request_github("synchronize", ["perf-fullish"]), False),
+    (perf_workflow_fixture.pull_request_github("synchronize", []), False),
 )
+SKIP_WITHOUT_BASH = (os.name == "nt" or shutil.which("bash") is None, "runs a workflow bash step with fake tools")
 
 
 class ResultIdentityTests(unittest.TestCase):
@@ -48,69 +40,72 @@ class ResultIdentityTests(unittest.TestCase):
 
     def test_only_an_eligible_run_publishes_the_result_name(self):
         # An ineligible run's skipped result job reads "(not run)", so it can never hide an eligible run's check.
-        workflow = perf_workflow_fixture.load_perf_workflow()
-        job = workflow["jobs"]["perf-result"]
+        job = perf_workflow_fixture.load_perf_workflow()["jobs"]["perf-result"]
         for context, eligible in ELIGIBILITY_CASES:
             with self.subTest(event=context["github"]["event"].get("action", "push"), eligible=eligible):
-                self.assertEqual(perf_expression_fixture.substitute(job["name"], context), RESULT_NAME if eligible else RESULT_NOT_RUN)
+                self.assertEqual(perf_expression_fixture.substitute(job["name"], context),
+                                 perf_workflow_fixture.RESULT_NAME if eligible else perf_workflow_fixture.RESULT_NOT_RUN)
                 self.assertEqual(perf_expression_fixture.condition_holds(job["if"], context, False), eligible)
 
     def concurrency(self, context):
         """The workflow-level group and cancel-in-progress for one event."""
         block = perf_workflow_fixture.load_perf_workflow()["concurrency"]
-        return perf_expression_fixture.substitute(block["group"], context), perf_expression_fixture.substitute(block["cancel-in-progress"], context)
+        return (perf_expression_fixture.substitute(block["group"], context),
+                perf_expression_fixture.substitute(block["cancel-in-progress"], context))
 
     def test_eligible_runs_share_a_group_and_ineligible_runs_cancel_nothing(self):
-        # Two eligible runs of one PR share a cancelling group; each ineligible run has a group of its own.
-        first = self.concurrency(pull_request_github("labeled", ["perf"], "perf", run_id="70"))
-        newer = self.concurrency(pull_request_github("synchronize", ["perf"], run_id="80"))
+        # Two eligible runs of one PR share a cancelling group, so adding perf-full replaces a running core
+        # comparison; each ineligible run has a group of its own; a release run never cancels.
+        first = self.concurrency(perf_workflow_fixture.pull_request_github("labeled", ["perf"], "perf", run_id="70"))
+        newer = self.concurrency(perf_workflow_fixture.pull_request_github("synchronize", ["perf"], run_id="80"))
+        full = self.concurrency(perf_workflow_fixture.pull_request_github("labeled", ["perf", "perf-full"], "perf-full",
+                                                                          run_id="90"))
         self.assertEqual(first, ("perf-comparison-1575", "true"))
-        self.assertEqual(newer, first)
-        ineligible = [self.concurrency(pull_request_github("labeled", ["perf", "bug"], "bug", run_id=str(run_id)))
+        self.assertEqual((newer, full), (first, first))
+        ineligible = [self.concurrency(perf_workflow_fixture.pull_request_github("labeled", ["perf", "bug"], "bug",
+                                                                                 run_id=str(run_id)))
                       for run_id in (81, 82)]
         self.assertEqual([group for group, _cancel in ineligible], ["perf-ineligible-81", "perf-ineligible-82"])
-        self.assertNotIn(first[0], [group for group, _cancel in ineligible])
-        self.assertEqual(self.concurrency(push_github()), ("perf-comparison-v1.4.0", "false"))
+        self.assertEqual(self.concurrency(perf_workflow_fixture.push_github()), ("perf-comparison-v1.4.0", "false"))
 
+    @unittest.skipIf(*SKIP_WITHOUT_BASH)
     def test_a_skipped_duplicate_run_is_all_skipped_under_its_own_name(self):
         # Another label on a perf PR starts a run whose every job skips; its result check reads "(not run)".
-        # Resolve this runtime-only dependency after module initialization.
-        import perf_workflow_tests
+        context = perf_workflow_fixture.pull_request_github("labeled", ["perf", "bug"], "bug")
         with tempfile.TemporaryDirectory() as temp:
-            context = pull_request_github("labeled", ["perf", "bug"], "bug")
-            simulator = perf_workflow_tests.PushSimulator(perf_workflow_fixture.load_perf_workflow(), Path(temp), "first", github=context["github"]).run()
+            simulator = perf_workflow_tests.PushSimulator(perf_workflow_fixture.load_perf_workflow(), Path(temp),
+                                                          "first", github=context["github"]).run()
         self.assertEqual(simulator.results, {job: "skipped" for job in perf_workflow_fixture.PERF_JOBS})
-        self.assertEqual(simulator.names["perf-result"], RESULT_NOT_RUN)
+        self.assertEqual(simulator.names["perf-result"], perf_workflow_fixture.RESULT_NOT_RUN)
         self.assertEqual(self.concurrency(context)[0], "perf-ineligible-70")
 
-    @unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the result job's bash step")
+    @unittest.skipIf(*SKIP_WITHOUT_BASH)
     def test_a_superseded_eligible_run_never_reports_success(self):
         # A newer eligible run cancels this one: its result job still runs (always()), under the real name, and fails.
-        # Resolve this runtime-only dependency after module initialization.
-        import perf_workflow_tests
-        workflow = perf_workflow_fixture.load_perf_workflow()
-        job = workflow["jobs"]["perf-result"]
-        context = pull_request_github("labeled", ["perf"], "perf")
+        job = perf_workflow_fixture.load_perf_workflow()["jobs"]["perf-result"]
+        context = perf_workflow_fixture.pull_request_github("labeled", ["perf"], "perf")
         self.assertTrue(perf_expression_fixture.condition_holds(job["if"], context, False))
-        self.assertEqual(perf_expression_fixture.substitute(job["name"], context), RESULT_NAME)
+        self.assertEqual(perf_expression_fixture.substitute(job["name"], context), perf_workflow_fixture.RESULT_NAME)
         for results in (("cancelled", "cancelled", "cancelled"), ("success", "cancelled", "success"),
-                        ("success", "skipped", "cancelled")):
+                        ("success", "skipped", "cancelled"), ("skipped", "skipped", "skipped")):
             with self.subTest(results=results):
-                environ = dict(zip(("PRODUCER", "MACOS", "WINDOWS"), results))
+                environ = dict(zip(("PLAN", "MACOS", "WINDOWS"), results))
                 self.assertEqual(perf_workflow_tests.run_bash_step(job["steps"][0]["run"], environ).code, 1)
 
 
-@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
+@unittest.skipIf(*SKIP_WITHOUT_BASH)
 class ProfileStepTests(unittest.TestCase):
-    """The producer and both comparison jobs set the same release profile, which the manifest then binds."""
+    """Both comparison jobs relax the release profile the same way on a pull request, and not on a tag."""
 
-    def test_every_job_sets_the_same_profile(self):
-        # Byte-for-byte the same step, writing the same GITHUB_ENV on a pull request and nothing on a push.
-        # Resolve this runtime-only dependency after module initialization.
-        import perf_workflow_tests
+    def test_every_comparison_job_sets_the_same_profile(self):
+        # Byte-for-byte the same step, writing the same GITHUB_ENV on a pull request and nothing on a push; the
+        # plan builds nothing, so it has no such step.
         workflow = perf_workflow_fixture.load_perf_workflow()
-        steps = [perf_expression_fixture.job_step(workflow, job_id, perf_workflow_fixture.PROFILE_STEP) for job_id in ("perf-build-macos", *perf_workflow_fixture.COMPARISON_JOBS)]
-        self.assertEqual(steps[1:], steps[:1] * 2)
+        steps = [perf_expression_fixture.job_step(workflow, job_id, perf_workflow_fixture.PROFILE_STEP)
+                 for job_id in perf_workflow_fixture.COMPARISON_JOBS]
+        self.assertEqual(steps[1:], steps[:1])
+        self.assertFalse([step for step in workflow["jobs"]["plan"]["steps"]
+                          if step.get("name") == perf_workflow_fixture.PROFILE_STEP])
         for event, expected in (("pull_request", {"CARGO_PROFILE_RELEASE_LTO": "off",
                                                   "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"}), ("push", None)):
             with self.subTest(event=event):
@@ -120,141 +115,119 @@ class ProfileStepTests(unittest.TestCase):
                     self.assertEqual(perf_workflow_tests.run_bash_step(steps[0]["run"], {}).env, expected)
 
 
-def comparison_context(job_id, run_length, attempt="2", manifest="d" * 64):
-    """A pull request's context for a comparison step: the producer of `attempt` published `manifest`."""
-    platform_name = "Windows" if job_id == "compare-windows" else "macOS"
-    return {"github": {"event_name": "pull_request", "run_id": "7", "run_attempt": "3"},
-            "matrix": {"platform": platform_name, "shard": "S2-S10sync", "scenarios": "S2 S10/sync"},
-            "steps": {"refs": {"outputs": {"base": "b" * 40, "head": "c" * 40, "length": run_length}},
-                      "plan": {"outputs": {"prebuilt": "true"}}},
-            "needs": {"perf-build-macos": {"result": "success",
-                                           "outputs": {"attempt": attempt, "manifest_sha256": manifest}}},
-            "runner": {"os": platform_name, "temp": "/runner/temp"}}
+class PlanJobTests(unittest.TestCase):
+    """The plan: the one job that resolves both SHAs and emits each platform's matrix from the chosen profile."""
+
+    def job(self):
+        return perf_workflow_fixture.load_perf_workflow()["jobs"]["plan"]
+
+    def test_the_plan_runs_on_ubuntu_and_publishes_the_refs_and_matrices(self):
+        # It builds nothing: a full-history checkout, the ref step and the partition step, whose outputs the other
+        # jobs read, so a comparison job that starts late never resolves a base of its own.
+        job = self.job()
+        self.assertEqual((job["name"], job["runs-on"]), (perf_workflow_fixture.PLAN_NAME, "ubuntu-latest"))
+        self.assertEqual(job["outputs"], {
+            "base": "${{ steps.refs.outputs.base }}", "head": "${{ steps.refs.outputs.head }}",
+            "length": "${{ steps.refs.outputs.length }}", "profile": "${{ steps.partitions.outputs.profile }}",
+            "macos": "${{ steps.partitions.outputs.macos }}", "windows": "${{ steps.partitions.outputs.windows }}"})
+        names = [step.get("name") or step["uses"].split("@")[0] for step in job["steps"]]
+        self.assertEqual(names, ["actions/checkout", perf_workflow_fixture.REF_STEP, perf_workflow_fixture.PARTITION_STEP])
+        self.assertEqual(job["steps"][0]["with"]["fetch-depth"], "0")
+        self.assertEqual([step.get("id") for step in job["steps"][1:]], ["refs", "partitions"])
+
+    def partition(self, event, labels, shards="real"):
+        """Run the partition step for an event and the pull request's labels, with the real partition script."""
+        step = perf_expression_fixture.job_step(perf_workflow_fixture.load_perf_workflow(), "plan",
+                                                perf_workflow_fixture.PARTITION_STEP)
+        context = {"github": {"event_name": event,
+                              "event": {"pull_request": {"labels": [{"name": name} for name in labels]}}}}
+        environ = {name: perf_expression_fixture.substitute(value, context) for name, value in step["env"].items()}
+        environ.update(REAL_PYTHON=sys.executable, SCRIPTS_DIR=str(Path(__file__).resolve().parent), FAKE_SHARDS=shards)
+        return perf_workflow_tests.run_bash_step(step["run"], environ, fakes={"python3": perf_workflow_tests.FAKE_PYTHON})
+
+    @unittest.skipIf(*SKIP_WITHOUT_BASH)
+    def test_the_event_and_labels_choose_the_profile(self):
+        # A tag runs release; perf-full runs full, also beside perf; perf alone runs core. Each output is the
+        # profile's matrix exactly as perf_shards.py builds it.
+        profiles = perf_shards.load_profiles()
+        for event, labels, expected in (("push", [], "release"), ("pull_request", ["perf"], "core"),
+                                        ("pull_request", ["perf-full"], "full"),
+                                        ("pull_request", ["perf", "perf-full"], "full")):
+            with self.subTest(event=event, labels=labels):
+                result = self.partition(event, labels)
+                self.assertEqual(result.code, 0, result.stderr)
+                self.assertEqual(result.outputs["profile"], expected)
+                for platform_name in perf_shards.PLATFORMS:
+                    self.assertEqual(json.loads(result.outputs[perf_shards.OUTPUT_KEYS[platform_name]]),
+                                     perf_shards.matrix(profiles[expected], platform_name))
+                self.assertIn(f"`{expected}`", result.summary)
+
+    @unittest.skipIf(*SKIP_WITHOUT_BASH)
+    def test_a_partition_file_that_breaks_a_rule_fails_the_plan(self):
+        # The script's failure fails the step before any matrix is written, so no comparison job starts.
+        result = self.partition("pull_request", ["perf"], shards="fail")
+        self.assertNotEqual(result.code, 0)
+        self.assertNotIn("macos", result.outputs)
 
 
-def compare_argv(job_id, run_length):
-    """Run a comparison job's compare step with fake pythons; return the argv perf-compare.py received."""
-    # Resolve this runtime-only dependency after module initialization.
-    import perf_workflow_tests
-    step = perf_expression_fixture.job_step(perf_workflow_fixture.load_perf_workflow(), job_id, perf_workflow_fixture.COMPARE_STEP)
-    context = comparison_context(job_id, run_length)
-    environ = {name: perf_expression_fixture.substitute(value, context) for name, value in step["env"].items()}
-    result = perf_workflow_tests.run_bash_step(step["run"], dict(environ, GITHUB_RUN_ID="7"),
-                           fakes={"python3": perf_workflow_tests.RECORD_ARGV, "python": perf_workflow_tests.RECORD_ARGV})
-    if result.code != 0:
-        raise AssertionError(result.stderr)
-    return [argument.replace(str(result.root), "$RUNNER_TEMP") for argument in result.argv]
+class ComparisonJobTests(unittest.TestCase):
+    """Each comparison job runs the plan's partitions for its platform, building both refs on its own runner."""
 
-
-# The release-only variants: S13's wide layouts on both platforms, then the macOS-only ones.
-MACOS_RELEASE_ONLY = ["S13/wide-8", "S13/wide-16", "S13/wide-32", "S2/spawn", "S3/history", "S3/resize",
-                      "S11/burst", "S11/burst-text"]
-
-
-@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake python3")
-class CountersWorkflowTests(unittest.TestCase):
-    """Each comparison job's step: which run and counters options each mode passes."""
-
-    def test_a_pull_request_runs_two_counters_runs_and_a_release_three(self):
-        # The PR budget allows two counters runs per scenario; a release takes three, enough for every
-        # counters-derived figure's sample floor, while its timed set keeps --runs. Both are strict.
+    def test_each_comparison_job_takes_its_matrix_and_refs_from_the_plan(self):
+        # It needs the plan and nothing else; its matrix and SHAs are the plan's outputs; it resolves no refs itself,
+        # and its comparison, summary and evidence steps run only when the plan resolved a base.
+        workflow = perf_workflow_fixture.load_perf_workflow()
         for job_id in perf_workflow_fixture.COMPARISON_JOBS:
             with self.subTest(job=job_id):
-                pull_request = compare_argv(job_id, "short")
-                self.assertIn("--short", pull_request)
-                self.assertIn("--counters", pull_request)
-                self.assertEqual(pull_request[pull_request.index("--counters-runs") + 1], "2")
-                release = compare_argv(job_id, "full")
-                self.assertIn("--counters", release)
-                self.assertEqual(release[release.index("--counters-runs") + 1], "3")
-                self.assertNotIn("--short", release)
-                for argv in (pull_request, release):
-                    self.assertIn("--require-base", argv)
-                    self.assertEqual(argv[argv.index("--runs") + 1], "5")
-                    self.assertEqual(argv[argv.index("--scenario") + 1:argv.index("--scenario") + 3],
-                                     ["S2", "S10/sync"])
+                job = workflow["jobs"][job_id]
+                self.assertEqual((job["needs"], job["runs-on"]), ("plan", perf_workflow_fixture.COMPARISON_RUNNERS[job_id]))
+                self.assertEqual(job["name"], "${{ matrix.platform }} before/after comparison (${{ matrix.partition }})")
+                self.assertEqual(job["strategy"]["fail-fast"], "false")
+                output = perf_workflow_fixture.COMPARISON_OUTPUTS[job_id]
+                self.assertEqual(job["strategy"]["matrix"], {"include": f"${{{{ fromJSON(needs.plan.outputs.{output}) }}}}"})
+                self.assertFalse([step for step in job["steps"] if step.get("name") == perf_workflow_fixture.REF_STEP])
+                step = perf_expression_fixture.job_step(workflow, job_id, perf_workflow_fixture.COMPARE_STEP)
+                self.assertEqual(step["if"], "needs.plan.outputs.base != ''")
+                self.assertEqual({key: step["env"][key] for key in ("BASE_SHA", "HEAD_SHA", "RUN_LENGTH", "SELECTION",
+                                                                    "PERF_SHARD")},
+                                 {"BASE_SHA": "${{ needs.plan.outputs.base }}", "HEAD_SHA": "${{ needs.plan.outputs.head }}",
+                                  "RUN_LENGTH": "${{ needs.plan.outputs.length }}", "SELECTION": "${{ matrix.selection }}",
+                                  "PERF_SHARD": "${{ matrix.partition }}"})
+                for name in (perf_workflow_fixture.SUMMARY_STEP, perf_workflow_fixture.EVIDENCE_STEP):
+                    self.assertEqual(perf_expression_fixture.job_step(workflow, job_id, name)["if"],
+                                     "always() && needs.plan.outputs.base != ''")
 
-
-@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
-class PrebuiltDownloadTests(unittest.TestCase):
-    """compare-macos measures exactly the producer attempt's artifact, bound by run, attempt and digest."""
-
-    def test_the_download_names_the_producers_attempt(self):
-        # The consumer's name uses the producer's recorded attempt, so a failed-job rerun still finds attempt n.
+    @unittest.skipIf(*SKIP_WITHOUT_BASH)
+    def test_the_compare_step_passes_the_selection_and_shortens_only_a_pull_request(self):
+        # The partition's words reach perf-compare.py unchanged after --require-base; a short run adds --short.
         workflow = perf_workflow_fixture.load_perf_workflow()
-        context = comparison_context("compare-macos", "short", attempt="2")
-        download = perf_expression_fixture.job_step(workflow, "compare-macos", perf_workflow_fixture.DOWNLOAD_STEP)
-        self.assertEqual(download["uses"], "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333")
-        self.assertEqual(perf_expression_fixture.substitute(download["with"]["name"], context), "perf-binaries-macOS-7-2")
-        upload = perf_expression_fixture.job_step(workflow, "perf-build-macos", perf_workflow_fixture.UPLOAD_BINARIES_STEP)
-        producer = {"github": {"run_id": "7", "run_attempt": "2"}, "runner": {"temp": "/t"}}
-        self.assertEqual(perf_expression_fixture.substitute(upload["with"]["name"], producer), "perf-binaries-macOS-7-2")
-        self.assertEqual((upload["with"]["retention-days"], upload["with"]["if-no-files-found"]), ("1", "error"))
+        for job_id, platform_name in perf_workflow_fixture.COMPARISON_PLATFORMS.items():
+            step = perf_expression_fixture.job_step(workflow, job_id, perf_workflow_fixture.COMPARE_STEP)
+            for run_length, short in (("short", True), ("full", False)):
+                with self.subTest(job=job_id, run_length=run_length):
+                    context = {"github": {}, "needs": {"plan": {"outputs": {"base": "b" * 40, "head": "c" * 40,
+                                                                            "length": run_length}}},
+                               "matrix": {"platform": platform_name, "partition": "core-1",
+                                          "selection": "--scenario S1 S2/flood --runs 5 --counters --counters-runs 1"}}
+                    environ = {name: perf_expression_fixture.substitute(value, context) for name, value in step["env"].items()}
+                    result = perf_workflow_tests.run_bash_step(step["run"], environ, fakes={
+                        "python3": perf_workflow_tests.RECORD_ARGV, "python": perf_workflow_tests.RECORD_ARGV})
+                    self.assertEqual(result.code, 0, result.stderr)
+                    self.assertEqual(result.argv, ["scripts/perf-compare.py", "--base", "b" * 40, "--head", "c" * 40,
+                                                   "--require-base", "--scenario", "S1", "S2/flood", "--runs", "5",
+                                                   "--counters", "--counters-runs", "1", *(["--short"] if short else []),
+                                                   "--out", f"{result.root}/perf-comparison"])
 
-    def test_every_artifact_step_is_gated_on_the_plan(self):
-        # Download, unpack and compare run only when the plan chose prebuilt; summary and evidence also on failure.
+    def test_windows_legs_get_cairo_and_bash(self):
+        # Windows builds need Cairo from vcpkg, restored from CI's cache and never written, and the shared step
+        # scripts need bash; no job or step sets timeout-minutes.
         workflow = perf_workflow_fixture.load_perf_workflow()
-        for name in (perf_workflow_fixture.DOWNLOAD_STEP, perf_workflow_fixture.UNPACK_STEP, perf_workflow_fixture.COMPARE_STEP):
-            self.assertEqual(perf_expression_fixture.job_step(workflow, "compare-macos", name)["if"], "steps.plan.outputs.prebuilt == 'true'")
-        for name in (perf_workflow_fixture.SUMMARY_STEP, perf_workflow_fixture.EVIDENCE_STEP):
-            self.assertEqual(perf_expression_fixture.job_step(workflow, "compare-macos", name)["if"],
-                             "always() && steps.plan.outputs.prebuilt == 'true'")
-
-    def test_the_compare_step_binds_the_producer(self):
-        # --require-base plus the prebuilt directory, this run's id, the producer's attempt and its manifest digest.
-        argv = compare_argv("compare-macos", "short")
-        self.assertIn("--require-base", argv)
-        self.assertEqual(argv[argv.index("--prebuilt") + 1], "$RUNNER_TEMP/perf-binaries")
-        self.assertEqual(argv[argv.index("--prebuilt-run-id") + 1], "7")
-        self.assertEqual(argv[argv.index("--prebuilt-attempt") + 1], "2")
-        self.assertEqual(argv[argv.index("--prebuilt-manifest-sha256") + 1], "d" * 64)
-        self.assertNotIn("--prebuilt", compare_argv("compare-windows", "short"))
-
-
-# The producer's fake perf-compare: it writes manifest.json under --build-only and prints a digest, the file's
-# own unless FAKE_DIGEST says otherwise.
-FAKE_PRODUCER = """#!/usr/bin/env bash
-printf '%s\\n' "$@" >"$RUNNER_TEMP/argv"
-while [ $# -gt 0 ]; do
-  if [ "$1" = "--build-only" ]; then directory=$2; fi
-  shift
-done
-mkdir -p "$directory"
-printf '{"schema_version": 1}\\n' >"$directory/manifest.json"
-if [ "$FAKE_DIGEST" = "wrong" ]; then
-  echo "manifest_sha256=$(printf '0%.0s' $(seq 64))"
-else
-  echo "manifest_sha256=$(shasum -a 256 "$directory/manifest.json" | cut -d ' ' -f 1)"
-fi
-"""
-
-
-@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None or shutil.which("shasum") is None,
-                 "runs the producer's bash step with fake tools")
-class ProducerBuildStepTests(unittest.TestCase):
-    """perf-build-macos publishes the digest of the manifest file it built, never just what the script printed."""
-
-    def build(self, digest_mode):
-        # Resolve this runtime-only dependency after module initialization.
-        import perf_workflow_tests
-        step = perf_expression_fixture.job_step(perf_workflow_fixture.load_perf_workflow(), "perf-build-macos", perf_workflow_fixture.BUILD_STEP)
-        context = {"steps": {"refs": {"outputs": {"base": "b" * 40, "head": "c" * 40}}}, "github": {}}
-        environ = {name: perf_expression_fixture.substitute(value, context) for name, value in step["env"].items()}
-        return perf_workflow_tests.run_bash_step(step["run"], dict(environ, FAKE_DIGEST=digest_mode), fakes={"python3": FAKE_PRODUCER})
-
-    def test_the_output_is_the_manifest_files_digest(self):
-        # A strict build-only run of both refs, whose printed digest matches manifest.json.
-        result = self.build("right")
-        self.assertEqual(result.code, 0, result.stderr)
-        self.assertRegex(result.outputs["manifest_sha256"], r"^[0-9a-f]{64}$")
-        self.assertIn("--require-base", result.argv)
-        self.assertEqual(result.argv[result.argv.index("--build-only") + 1], f"{result.root}/perf-binaries")
-
-    def test_a_printed_digest_that_differs_from_the_file_fails(self):
-        # The workflow recomputes the digest; a disagreement publishes nothing.
-        result = self.build("wrong")
-        self.assertNotEqual(result.code, 0)
-        self.assertNotIn("manifest_sha256", result.outputs)
+        cairo = perf_expression_fixture.job_step(workflow, "compare-windows", "Install Cairo for Windows")
+        self.assertEqual((cairo["shell"], cairo["run"]), ("pwsh", ".\\scripts\\setup-windows-cairo.ps1"))
+        self.assertEqual(workflow["jobs"]["compare-windows"]["defaults"]["run"]["shell"], "bash")
+        restore = perf_expression_fixture.job_step(workflow, "compare-windows", "Restore vcpkg binaries (Cairo)")
+        self.assertTrue(restore["uses"].startswith("actions/cache/restore@"))
+        self.assertNotIn("timeout-minutes", perf_workflow_fixture.PERF_WORKFLOW.read_text(encoding="utf-8"))
 
 
 class EvidenceArtifactTests(unittest.TestCase):
@@ -264,7 +237,8 @@ class EvidenceArtifactTests(unittest.TestCase):
 
     def upload_patterns(self, job_id):
         """Return a comparison job's evidence `path:` lines, each as (excluded, pattern relative to the evidence root)."""
-        step = perf_expression_fixture.job_step(perf_workflow_fixture.load_perf_workflow(), job_id, perf_workflow_fixture.EVIDENCE_STEP)
+        step = perf_expression_fixture.job_step(perf_workflow_fixture.load_perf_workflow(), job_id,
+                                                perf_workflow_fixture.EVIDENCE_STEP)
         patterns = []
         for entry in step["with"]["path"].splitlines():
             entry = entry.strip()
@@ -282,13 +256,14 @@ class EvidenceArtifactTests(unittest.TestCase):
         expression = re.escape(pattern).replace(r"\*\*", "\0").replace(r"\*", "[^/]*").replace("\0", ".*")
         return re.fullmatch(f"{expression}(/.*)?", relative) is not None
 
-    def test_every_evidence_name_carries_its_attempt(self):
-        # A rerun's evidence never shares a name with the attempt before it.
+    def test_every_evidence_name_carries_its_platform_partition_and_attempt(self):
+        # A rerun's evidence never shares a name with the attempt before it, and the platforms' partitions never
+        # share a name with each other.
         workflow = perf_workflow_fixture.load_perf_workflow()
-        for job_id, name in (("compare-macos", perf_workflow_fixture.EVIDENCE_STEP), ("compare-windows", perf_workflow_fixture.EVIDENCE_STEP),
-                             ("perf-build-macos", perf_workflow_fixture.BUILD_EVIDENCE_STEP)):
+        for job_id in perf_workflow_fixture.COMPARISON_JOBS:
             with self.subTest(job=job_id):
-                self.assertTrue(perf_expression_fixture.job_step(workflow, job_id, name)["with"]["name"].endswith("-${{ github.run_attempt }}"))
+                name = perf_expression_fixture.job_step(workflow, job_id, perf_workflow_fixture.EVIDENCE_STEP)["with"]["name"]
+                self.assertTrue(name.endswith("-${{ matrix.platform }}-${{ matrix.partition }}-${{ github.run_attempt }}"))
 
     def test_the_artifact_keeps_every_record_a_run_copies_from_its_scratch(self):
         # The workflow uploads the evidence tree; excluding a run's kept scratch would drop result.json,
@@ -327,57 +302,35 @@ class EvidenceArtifactTests(unittest.TestCase):
                 self.assertFalse(any("workload" in name for name in archived), archived)
 
 
-FAKE_GIT = """#!/usr/bin/env bash
-# Answers the release-ref step's Git calls for one mode: previous, first, root, broken or unreadable.
-mode=$FAKE_GIT_MODE
-case "$1" in
-  rev-list)
-    # `rev-list --parents -n 1 <sha>` prints the commit, then its parents.
-    case "$mode" in
-      root) echo tag-commit ;;
-      unreadable) echo "fatal: unable to read commit object" >&2; exit 128 ;;
-      *) echo "tag-commit parent-commit" ;;
-    esac ;;
-  rev-parse)
-    if [[ "$*" == *"{commit}"* ]]; then echo base-commit; exit 0; fi
-    if [ "$mode" = root ]; then exit 1; fi
-    if [ "$mode" = unreadable ]; then echo "fatal: unable to read commit object" >&2; exit 128; fi
-    echo parent-commit ;;
-  tag)
-    case "$mode" in
-      previous) echo v1.3.8 ;;
-      broken) echo "fatal: unable to read tree: object missing" >&2; exit 128 ;;
-    esac ;;
-  describe)
-    if [ "$mode" = previous ]; then echo v1.3.8; else echo "fatal: No names found" >&2; exit 128; fi ;;
-  *) echo "unexpected git $*" >&2; exit 2 ;;
-esac
-"""
-
-
-@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake git")
+@unittest.skipIf(*SKIP_WITHOUT_BASH)
 class ReleaseRefSelectionTests(unittest.TestCase):
-    """The release mode's ref step: only a real first release may skip the comparison."""
+    """The plan's ref step: only a real first release may skip the comparison."""
 
     def step_script(self):
-        """Return the `run:` block of the producer's ref-selection step."""
-        return perf_expression_fixture.job_step(perf_workflow_fixture.load_perf_workflow(), "perf-build-macos", perf_workflow_fixture.REF_STEP)["run"]
+        """Return the `run:` block of the plan's ref-selection step."""
+        return perf_expression_fixture.job_step(perf_workflow_fixture.load_perf_workflow(), "plan",
+                                                perf_workflow_fixture.REF_STEP)["run"]
 
-    def test_every_job_resolves_its_refs_with_the_same_step(self):
-        # A shard recomputes the refs itself and compares them with the producer's, so the steps must agree.
+    def test_only_the_plan_resolves_refs(self):
+        # The SHAs are resolved once, so a late comparison job can never measure a base that moved.
         workflow = perf_workflow_fixture.load_perf_workflow()
-        steps = [perf_expression_fixture.job_step(workflow, job_id, perf_workflow_fixture.REF_STEP) for job_id in ("perf-build-macos", *perf_workflow_fixture.COMPARISON_JOBS)]
-        self.assertEqual(steps[1:], steps[:1] * 2)
-        self.assertEqual(steps[0]["id"], "refs")
+        counts = {job_id: sum(step.get("name") == perf_workflow_fixture.REF_STEP for step in job["steps"])
+                  for job_id, job in workflow["jobs"].items()}
+        self.assertEqual(counts, {"plan": 1, "compare-macos": 0, "compare-windows": 0, "perf-result": 0})
 
-    def run_step(self, mode):
-        """Run the step as a tag push with a fake git; return its exit code, outputs and summary."""
-        # Resolve this runtime-only dependency after module initialization.
-        import perf_workflow_tests
-        result = perf_workflow_tests.run_bash_step(self.step_script(), {"EVENT": "push", "GITHUB_SHA": "tag-commit",
-                                                    "FAKE_GIT_MODE": mode}, fakes={"git": FAKE_GIT})
+    def run_step(self, mode, environ=None):
+        """Run the step with a fake git (a tag push by default); return its exit code, outputs and summary."""
+        result = perf_workflow_tests.run_bash_step(self.step_script(), environ or {
+            "EVENT": "push", "GITHUB_SHA": "tag-commit", "FAKE_GIT_MODE": mode}, fakes={"git": perf_workflow_fixture.FAKE_GIT})
         outputs = "".join(f"{name}={value}\n" for name, value in result.outputs.items())
         return result.code, outputs, result.summary
+
+    def test_a_pull_request_compares_its_merge_base_with_its_head_in_short_runs(self):
+        # The base branch is fetched and the merge base with the pull request's head is the base.
+        code, outputs, _summary = self.run_step("previous", {"EVENT": "pull_request", "PR_HEAD_SHA": "c" * 40,
+                                                             "PR_BASE_REF": "main", "FAKE_GIT_MODE": "previous"})
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs.split(), ["base=merge-base-commit", f"head={'c' * 40}", "length=short"])
 
     def test_a_release_with_an_earlier_tag_compares_against_it(self):
         # The previous release tag's commit is the base, the tag the head, at full length.
@@ -408,166 +361,114 @@ class ReleaseRefSelectionTests(unittest.TestCase):
         self.assertNotIn("No earlier release tag", summary)
 
 
-class WindowsComparisonLegTests(unittest.TestCase):
-    """perf.yml compares on Windows too: every scenario once per platform, on a runner with Cairo and Git Bash."""
+class ShardProfileTests(unittest.TestCase):
+    """scripts/perf-shards.json's invariants, checked on the real file rather than as an exact layout."""
 
-    def matrix(self, job_id):
-        return perf_workflow_fixture.load_perf_workflow()["jobs"][job_id]["strategy"]["matrix"]["include"]
+    @classmethod
+    def setUpClass(cls):
+        cls.profiles = perf_shards.load_profiles()
+        cls.catalogue = perf_workflow_fixture.harness_catalogue()
 
-    def test_every_scenario_runs_once_per_platform(self):
-        # Each platform's shards partition the common scenario sets plus its own S11 variants. macOS runs three
-        # shards, one per macOS slot that reaches perf beside CI's two macOS jobs; Windows keeps five.
-        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-15", (3,)),
-                                                       ("compare-windows", "Windows", "windows-latest", (5,))):
-            with self.subTest(job=job_id):
-                entries = self.matrix(job_id)
-                self.assertIn(len(entries), counts)
-                self.assertEqual({(entry["platform"], entry["runner"]) for entry in entries},
-                                 {(platform_name, runner)})
-                scenarios = [scenario for entry in entries for scenario in entry["scenarios"].split()]
-                self.assertEqual(sorted(scenarios), sorted(perf_workflow_fixture.ALL_SCENARIOS + perf_workflow_fixture.PLATFORM_SCENARIOS[platform_name]))
-                self.assertEqual(len({entry["shard"] for entry in entries}), len(entries))
-        # Windows keeps its S11 variants in S4-S5-S11, after S4, S5 and S11.
-        shard = next(entry for entry in self.matrix("compare-windows") if entry["shard"] == "S4-S5-S11")
-        self.assertEqual(shard["scenarios"].split()[:6], ["S4", "S5", "S11"] + perf_workflow_fixture.PLATFORM_SCENARIOS["Windows"])
+    def labels(self, profile_name, platform_name):
+        """Each variant label a profile runs on a platform, in partition order; a repeat would appear twice."""
+        return [perf_shards.variant_label(variant) for partition in self.profiles[profile_name].partitions[platform_name]
+                for variant in partition.variants]
 
-    def test_the_macos_shards_are_the_reviewed_three_set_partition(self):
-        # Three sets balanced from measured per-variant times: S7, the longest variant, leads the first with only
-        # short ones; S12, S12/status-line and S3 join the S9 set; S2 and S13's two variants the release set.
-        # Exact-head CI measures it including runner queues against the 35-minute budget. S2/glide and S11/kitty-placeholders
-        # run in S7-S4, the shard with the most slack, so they stay off the critical path.
-        self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
-            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S8", "S6/selection-drag", "S2/glide", "S11/kitty-placeholders"],
-            "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5", "S6/rest", "S1/status-line", "S12",
-                           "S12/status-line", "S3"],
-            "S10-S11release": ["S10", "S11/release", "S2", "S2/flood", "S6/flood", "S13", "S13/sustained-4"],
-        })
+    def each_layout(self):
+        """Every (profile name, profile, platform) the file declares."""
+        return [(name, profile, platform_name) for name, profile in self.profiles.items()
+                for platform_name in perf_shards.PLATFORMS]
 
-    def test_the_cell_layout_reader_names_the_shard_that_holds_s12(self):
-        # The cell-layout decision reads S12/default runs only from the shards CELL_LAYOUT_SHARDS names, so on each
-        # platform the one matrix entry that runs S12 must be among them.
-        for job_id, platform_name in (("compare-macos", "macOS"), ("compare-windows", "Windows")):
-            with self.subTest(job=job_id):
-                holders = [entry["shard"] for entry in self.matrix(job_id) if "S12" in entry["scenarios"].split()]
-                self.assertEqual(len(holders), 1, holders)
-                self.assertIn(holders[0], perf_cell_layout.CELL_LAYOUT_SHARDS[platform_name])
+    def test_every_listed_variant_is_in_the_harness_catalogue(self):
+        # A variant the harness does not list would fail its comparison's selection after both builds.
+        for name, _profile, platform_name in self.each_layout():
+            with self.subTest(profile=name, platform=platform_name):
+                self.assertEqual(set(self.labels(name, platform_name)) - self.catalogue, set())
 
-    def test_the_atlas_retry_variant_runs_in_the_shard_its_projection_names(self):
-        # S1/atlas-retry runs where its shard has room: macOS S7-S4 in the three-set partition, and Windows
-        # S1-S3-S6-S8-S12, since Windows S4-S5-S11 was critical once.
-        for job_id, shard_name in (("compare-macos", "S7-S4"), ("compare-windows", "S1-S3-S6-S8-S12")):
-            with self.subTest(job=job_id):
-                holders = [entry["shard"] for entry in self.matrix(job_id)
-                           if "S1/atlas-retry" in entry["scenarios"].split()]
-                self.assertEqual(holders, [shard_name])
+    def test_each_variant_runs_once_per_platform_per_profile(self):
+        # A second copy would cost a second set of runs and two rows for one variant.
+        for name, _profile, platform_name in self.each_layout():
+            with self.subTest(profile=name, platform=platform_name):
+                labels = self.labels(name, platform_name)
+                self.assertEqual(len(labels), len(set(labels)))
 
-    def test_only_the_s9_s10_shards_run_s9_laps(self):
-        # Every matrix entry carries a laps field: S9 on the shard holding S9 (macOS S9-S10sync, Windows S9-S10),
-        # empty elsewhere; each comparison step passes the laps flags only when the field is set, and no step sets
-        # timeout-minutes.
-        for job_id, laps_shard in (("compare-macos", "S9-S10sync"), ("compare-windows", "S9-S10")):
-            with self.subTest(job=job_id):
-                entries = self.matrix(job_id)
-                self.assertEqual({entry["shard"]: entry["laps"] for entry in entries if entry["laps"]},
-                                 {laps_shard: "S9"})
-                holder = next(entry for entry in entries if entry["shard"] == laps_shard)
-                self.assertIn("S9", holder["scenarios"].split())
-                self.assertTrue(all("laps" in entry for entry in entries))
-                step = next(step for step in perf_workflow_fixture.load_perf_workflow()["jobs"][job_id]["steps"]
-                            if step.get("name") == "Compare the base and the head")
-                self.assertEqual(step["env"]["LAPS"], "${{ matrix.laps }}")
-                self.assertIn('if [ -n "$LAPS" ]; then\n  run_flags+=(--laps-scenario "$LAPS" --laps-runs 2)\nfi',
-                              step["run"])
-        self.assertNotIn("timeout-minutes", (Path(__file__).resolve().parent.parent / ".github" / "workflows"
-                                             / "perf.yml").read_text(encoding="utf-8"))
+    def test_platform_only_variants_stay_on_their_platform(self):
+        # Neither platform runs a variant the other's runner alone can measure.
+        for name, _profile, platform_name in self.each_layout():
+            for label in self.labels(name, platform_name):
+                self.assertIn(perf_workflow_fixture.PLATFORM_ONLY.get(label), (None, platform_name), (name, label))
 
-    def test_only_a_release_run_adds_the_release_only_scenarios(self):
-        # Windows entries carry release_scenarios: S13's three wide layouts on the shard holding S13, empty
-        # elsewhere, appended only when the run is not short, so a pull request never runs them.
-        entries = self.matrix("compare-windows")
-        self.assertTrue(all("release_scenarios" in entry for entry in entries))
-        release_only = [name for entry in entries for name in entry["release_scenarios"].split()]
-        self.assertEqual(sorted(release_only), sorted(MACOS_RELEASE_ONLY[:3]))
-        for entry in entries:
-            for name in entry["release_scenarios"].split():
-                self.assertIn(name.split("/")[0], entry["scenarios"].split(), name)
-        step = next(step for step in perf_workflow_fixture.load_perf_workflow()["jobs"]["compare-windows"]["steps"]
-                    if step.get("name") == "Compare the base and the head")
-        self.assertEqual(step["env"]["RELEASE_SCENARIOS"], "${{ matrix.release_scenarios }}")
-        self.assertIn('if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_SCENARIOS" ]; then', step["run"])
+    def test_release_holds_full_and_full_holds_core(self):
+        # A pull request never measures a variant the release comparison would not, and perf-full covers perf.
+        for platform_name in perf_shards.PLATFORMS:
+            with self.subTest(platform=platform_name):
+                core, full, release = (set(self.labels(name, platform_name)) for name in perf_shards.PROFILES)
+                self.assertLessEqual(core, full)
+                self.assertLessEqual(full, release)
 
-    def test_the_macos_release_partition_covers_every_variant_once(self):
-        # A release runs each macOS entry's release_partition instead of its scenarios. Together they hold every
-        # pull-request variant and every release-only one exactly once; each release-only variant runs beside its
-        # scenario, S12 stays in a CELL_LAYOUT_SHARDS shard, and S9 stays on the shard with its laps.
-        entries = self.matrix("compare-macos")
-        pull_request = [name for entry in entries for name in entry["scenarios"].split()]
-        release = [name for entry in entries for name in entry["release_partition"].split()]
-        self.assertEqual(len(release), len(set(release)), release)
-        self.assertEqual(sorted(release), sorted(pull_request + MACOS_RELEASE_ONLY))
-        for entry in entries:
-            partition = entry["release_partition"].split()
-            for name in set(partition) & set(MACOS_RELEASE_ONLY):
-                self.assertIn(name.split("/")[0], partition, name)
-            if "S12" in partition:
-                self.assertIn(entry["shard"], perf_cell_layout.CELL_LAYOUT_SHARDS["macOS"])
-            if entry["laps"]:
-                self.assertIn(entry["laps"], partition)
-        self.assertIn("S12", " ".join(entry["release_partition"] for entry in entries).split())
-        step = next(step for step in perf_workflow_fixture.load_perf_workflow()["jobs"]["compare-macos"]["steps"]
-                    if step.get("name") == "Compare the base and the head")
-        self.assertEqual(step["env"]["RELEASE_PARTITION"], "${{ matrix.release_partition }}")
-        self.assertIn('if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_PARTITION" ]; then\n'
-                      '  read -ra scenarios <<<"$RELEASE_PARTITION"\nfi', step["run"])
+    def test_core_is_the_reviewed_set_in_two_partitions_a_platform(self):
+        # The pull-request default keeps the reviewed core variants, with S13/sustained-4 for the contention verdict.
+        for platform_name in perf_shards.PLATFORMS:
+            with self.subTest(platform=platform_name):
+                self.assertEqual(sorted(self.labels("core", platform_name)), sorted(perf_workflow_fixture.CORE_VARIANTS))
+                self.assertEqual(len(self.profiles["core"].partitions[platform_name]), 2)
 
-    @unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake python3")
-    def test_each_macos_step_runs_its_release_partition_only_on_a_release(self):
-        # Run the real bash step with every macOS entry's own matrix values: a release passes exactly that
-        # entry's release_partition, in order, and a pull request exactly its scenarios. This catches a YAML
-        # block style that would keep only one line of a folded partition.
-        step = perf_expression_fixture.job_step(perf_workflow_fixture.load_perf_workflow(), "compare-macos",
-                                                perf_workflow_fixture.COMPARE_STEP)
-        # Resolve this runtime-only dependency after module initialization.
-        import perf_workflow_tests
-        for entry in self.matrix("compare-macos"):
-            for run_length, expected in (("full", entry["release_partition"].split()),
-                                         ("short", entry["scenarios"].split())):
-                with self.subTest(shard=entry["shard"], run_length=run_length):
-                    context = comparison_context("compare-macos", run_length)
-                    context["matrix"] = dict(entry)
-                    environ = {name: perf_expression_fixture.substitute(value, context)
-                               for name, value in step["env"].items()}
-                    result = perf_workflow_tests.run_bash_step(
-                        step["run"], dict(environ, GITHUB_RUN_ID="7"),
-                        fakes={"python3": perf_workflow_tests.RECORD_ARGV})
-                    self.assertEqual(result.code, 0, result.stderr)
-                    argv = result.argv
-                    start = argv.index("--scenario") + 1
-                    self.assertEqual(argv[start:argv.index("--runs")], expected)
+    def test_full_runs_every_pull_request_variant_in_three_partitions_a_platform(self):
+        # Every catalogue variant the platform measures, except the release-only ones and those no profile compares.
+        for platform_name in perf_shards.PLATFORMS:
+            with self.subTest(platform=platform_name):
+                expected = {label for label in self.catalogue
+                            if label not in perf_workflow_fixture.RELEASE_ONLY
+                            and label not in perf_workflow_fixture.NOT_COMPARED
+                            and perf_workflow_fixture.PLATFORM_ONLY.get(label, platform_name) == platform_name}
+                self.assertEqual(set(self.labels("full", platform_name)), expected)
+                self.assertEqual(len(self.profiles["full"].partitions[platform_name]), 3)
 
-    def test_the_macos_release_partition_is_the_reviewed_balanced_set(self):
-        # Balanced from measured per-variant release times so no set nears GitHub's 6-hour job limit, which
-        # cancels a job with no table; a pull-request shard plus its release-only variants can exceed it.
-        self.assertEqual({entry["shard"]: entry["release_partition"].split() for entry in self.matrix("compare-macos")}, {
-            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S8", "S6/selection-drag", "S2/glide", "S11/kitty-placeholders",
-                      "S10/sync", "S11", "S11/burst", "S11/burst-text", "S1/status-line"],
-            "S9-S10sync": ["S9", "S12", "S12/status-line", "S6", "S6/rest", "S1", "S3", "S3/history", "S3/resize",
-                           "S5"],
-            "S10-S11release": ["S10", "S11/release", "S2", "S2/flood", "S6/flood", "S13", "S13/sustained-4",
-                               "S13/wide-8", "S13/wide-16", "S13/wide-32", "S2/spawn"],
-        })
+    def test_release_adds_only_the_release_only_variants(self):
+        # Every full variant, plus each release-only one the platform measures (S13's wide layouts on both).
+        for platform_name in perf_shards.PLATFORMS:
+            with self.subTest(platform=platform_name):
+                extra = {label for label in perf_workflow_fixture.RELEASE_ONLY
+                         if perf_workflow_fixture.PLATFORM_ONLY.get(label, platform_name) == platform_name}
+                self.assertEqual(set(self.labels("release", platform_name)), set(self.labels("full", platform_name)) | extra)
 
-    def test_windows_legs_get_cairo_bash_and_their_own_names(self):
-        # Windows builds need Cairo from vcpkg, the shared step scripts need bash, and the two platforms'
-        # shards must not share an artifact name.
-        workflow = perf_workflow_fixture.load_perf_workflow()
-        windows = workflow["jobs"]["compare-windows"]
-        cairo = perf_expression_fixture.job_step(workflow, "compare-windows", "Install Cairo for Windows")
-        self.assertEqual((cairo["shell"], cairo["run"]), ("pwsh", ".\\scripts\\setup-windows-cairo.ps1"))
-        self.assertEqual(windows["defaults"]["run"]["shell"], "bash")
-        for job_id in perf_workflow_fixture.COMPARISON_JOBS:
-            job = workflow["jobs"][job_id]
-            self.assertEqual(job["runs-on"], "${{ matrix.runner }}")
-            self.assertIn("-${{ matrix.platform }}-${{ matrix.shard }}-",
-                          perf_expression_fixture.job_step(workflow, job_id, perf_workflow_fixture.EVIDENCE_STEP)["with"]["name"])
-            self.assertEqual(job["strategy"]["fail-fast"], "false")
+    def test_laps_run_only_where_declared(self):
+        # Only S9 runs the laps set, in full and release and never in core; a partition passes laps flags exactly
+        # when it declares laps (the loader refuses laps for a variant the partition does not run).
+        for name, profile, platform_name in self.each_layout():
+            with self.subTest(profile=name, platform=platform_name):
+                laps = [variant for partition in profile.partitions[platform_name] for variant in partition.laps]
+                self.assertEqual(laps, [] if name == "core" else ["S9"])
+                for partition in profile.partitions[platform_name]:
+                    arguments = perf_shards.partition_arguments(profile, partition)
+                    self.assertEqual("--laps-scenario" in arguments, bool(partition.laps))
+
+    def test_variants_one_report_reads_together_share_a_partition(self):
+        # S13's verdict and scaling rule and the S11 burst pair read their variants from one comparison.
+        for name, profile, platform_name in self.each_layout():
+            holder = {perf_shards.variant_label(variant): partition.name
+                      for partition in profile.partitions[platform_name] for variant in partition.variants}
+            for group in perf_workflow_fixture.SHARED_PARTITION:
+                present = [label for label in group if label in holder]
+                with self.subTest(profile=name, platform=platform_name, group=group):
+                    self.assertIn(present, ([], list(group)))
+                    self.assertLessEqual(len({holder[label] for label in present}), 1)
+
+    def test_a_counters_only_variant_always_runs_the_counters_set(self):
+        # S1/atlas-retry measures nothing outside the counters set, so its partition must pass --counters.
+        for name, profile, platform_name in self.each_layout():
+            for partition in profile.partitions[platform_name]:
+                if "S1/atlas-retry" in partition.variants:
+                    self.assertIn("--counters", perf_shards.partition_arguments(profile, partition), (name, partition.name))
+
+    def test_partition_names_carry_their_profile(self):
+        # A name is part of a check name and an artifact name, so it says which profile measured it.
+        for name, profile, platform_name in self.each_layout():
+            for partition in profile.partitions[platform_name]:
+                self.assertTrue(partition.name.startswith(f"{name}-"), (platform_name, partition.name))
+
+    def test_the_core_sampling_is_five_timed_runs_and_one_counters_run(self):
+        # The pull-request default's reviewed sampling: one short S13 counters run still types 300 characters,
+        # above the contention verdict's 200-sample floor.
+        core = self.profiles["core"]
+        self.assertEqual((core.runs, core.counters_runs, core.laps_runs), (5, 1, None))

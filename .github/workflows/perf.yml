@@ -5,28 +5,28 @@ name: Performance comparison
 # and load invalidate runs or widen the noise. A local run only shows that the tooling works. The hosted
 # Windows runner has no GPU, so its table measures the software-rendering path.
 #
-# Two modes:
-# - A pull request labelled `perf` (when the label is added, and on every push while it is set) gets a
-#   quick comparison that must finish within 35 minutes of the run's creation, queue time included:
-#   `--short` runs (every hold 5 s, smaller floods) and a release profile without LTO, the same for both
-#   refs, plus two frame-counter runs per scenario on the head, and on the base too when it declares
-#   perf-counters (`--counters --counters-runs 2`).
-# - A release tag gets the full comparison against the previous release tag, with the shipping release
-#   profile, full-length runs and three counters runs a side (`--counters --counters-runs 3`). It may take
-#   hours, and each job must stay under GitHub's 6-hour job limit.
+# scripts/perf-shards.json holds three profiles, each a list of partitions per platform; each partition is one
+# comparison job:
+# - `core`: a pull request labelled `perf` (when the label is added, and on every push while it is set). Two
+#   partitions a platform run the reviewed core variants with `--short` runs (every hold 5 s, smaller floods),
+#   five timed runs and one counters run a side, on a release profile without LTO that both refs share. It
+#   must finish within 25 minutes of the run's creation, queue time included.
+# - `full`: a pull request labelled `perf-full`. Three partitions a platform run every pull-request variant
+#   with two counters runs a side and S9's laps set, on the same relaxed profile, within 45 minutes.
+# - `release`: a release tag, compared with the previous release tag, every variant at full length with the
+#   shipping release profile. It may take hours, and each job must stay under GitHub's 6-hour job limit.
 #
-# Jobs: `perf-build-macos` builds both refs once and publishes the binaries with a manifest that binds them
-# to this run, the producer's attempt, both SHAs, the harness, toolchain, profile, features and runner
-# image. Each `compare-macos` shard recomputes the refs, refuses binaries that disagree with its own job,
-# and runs base and head interleaved on its own runner from each ref's own worktree. Each `compare-windows`
-# shard still builds both refs itself. Every comparison passes `--require-base`, so a base that cannot
-# build, list or fill its runs fails the shard. `perf-result` passes only when all three jobs succeeded. A
-# first release resolves no base, so every job succeeds without comparing.
+# Jobs: `plan` decides eligibility, resolves both SHAs once and emits each platform's matrix from the profile, so
+# a comparison job that starts late never re-resolves a moving base. Each comparison job builds both refs itself
+# and runs them interleaved on its own runner, each from its own worktree, so a comparison never crosses
+# runners. Every comparison passes `--require-base`, so a base that cannot build, list or fill its runs fails the
+# job. `perf-result` passes only when the plan and both comparison jobs succeeded. A first release resolves no
+# base, so every job succeeds without comparing.
 #
 # Only an eligible run publishes the check `Performance comparison result`. An ineligible run (another label
 # on a perf pull request) skips every job; GitHub never evaluates a skipped job's `name:`, so its result check
-# shows the raw name expression, never the real name, and it can never hide an eligible run's check. Merge evidence is that exact eligible run's result job,
-# SUCCESS on the exact head, never a reading by check name alone.
+# shows the raw name expression, never the real name, and it can never hide an eligible run's check. Merge
+# evidence is that exact eligible run's result job, SUCCESS on the exact head, never a reading by check name alone.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
@@ -38,15 +38,18 @@ permissions:
   contents: read
 
 # Eligible runs of one pull request (or tag) share a group, so a newer eligible run cancels the older one
-# whole; a cancelled run's result job still runs under always() and fails, never succeeds. Each ineligible
-# run has a group of its own and cancels nothing. A running release comparison is never cancelled: a newer
-# run of the same tag waits (GitHub keeps one waiting run per group). Re-running an older eligible run
+# whole; a cancelled run's result job still runs under always() and fails, never succeeds. Adding `perf-full`
+# to a `perf` pull request is a newer eligible run, so the full comparison replaces the core one. Each
+# ineligible run has a group of its own and cancels nothing. A running release comparison is never cancelled:
+# a newer run of the same tag waits (GitHub keeps one waiting run per group). Re-running an older eligible run
 # rejoins the group and cancels a newer one, so only the newest eligible run is re-run.
 concurrency:
   group: >-
     ${{ (github.event_name == 'push' ||
-    (contains(github.event.pull_request.labels.*.name, 'perf') &&
-    (github.event.action != 'labeled' || github.event.label.name == 'perf'))) && format('perf-comparison-{0}', github.event.pull_request.number || github.ref_name) ||
+    ((contains(github.event.pull_request.labels.*.name, 'perf') ||
+    contains(github.event.pull_request.labels.*.name, 'perf-full')) &&
+    (github.event.action != 'labeled' || github.event.label.name == 'perf' ||
+    github.event.label.name == 'perf-full'))) && format('perf-comparison-{0}', github.event.pull_request.number || github.ref_name) ||
     format('perf-ineligible-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -56,25 +59,27 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  perf-build-macos:
-    name: macOS perf binaries (base and head)
-    # Adding another label to a `perf` pull request does not start a second comparison.
+  plan:
+    name: Plan the comparison
+    # Adding another label to a perf pull request does not start a second comparison. The comparison jobs need
+    # this job, so they run only when it ran and succeeded.
     if: >-
       github.event_name == 'push' ||
-      (contains(github.event.pull_request.labels.*.name, 'perf') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'perf'))
-    runs-on: macos-15
+      ((contains(github.event.pull_request.labels.*.name, 'perf') ||
+      contains(github.event.pull_request.labels.*.name, 'perf-full')) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'perf' ||
+      github.event.label.name == 'perf-full'))
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
-    # The consumers check these against their own refs and bind the artifact to this attempt and digest.
-    # A rerun of failed jobs keeps a successful producer, so `attempt` stays the attempt that built it.
     outputs:
       base: ${{ steps.refs.outputs.base }}
       head: ${{ steps.refs.outputs.head }}
       length: ${{ steps.refs.outputs.length }}
-      attempt: ${{ github.run_attempt }}
-      manifest_sha256: ${{ steps.build.outputs.manifest_sha256 }}
+      profile: ${{ steps.partitions.outputs.profile }}
+      macos: ${{ steps.partitions.outputs.macos }}
+      windows: ${{ steps.partitions.outputs.windows }}
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
       # itself, not a pull request's merge ref.
@@ -82,14 +87,6 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
-
-      - name: Install native dependencies
-        run: brew install cairo pkg-config
 
       # A pull request compares its merge base with its head; a release tag compares the previous
       # release tag with itself. The first release has nothing to compare against.
@@ -134,123 +131,44 @@ jobs:
           } >>"$GITHUB_OUTPUT"
           echo "base $base_sha, head $head_sha, $length runs"
 
-      # A pull request's comparison must fit 35 minutes, and fat LTO with one codegen unit dominates its
-      # two release builds. Both refs build with the same overrides, and the table's details name them.
-      - name: Relax the release profile for a pull request
-        if: github.event_name == 'pull_request'
-        run: |
-          {
-            echo "CARGO_PROFILE_RELEASE_LTO=off"
-            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
-          } >>"$GITHUB_ENV"
-
-      # Both refs, once, through the gate's reviewed build steps; the base is held to the head's standard. The
-      # published digest is recomputed from the manifest file, never taken from the script's output alone.
-      - name: Build both refs once
-        id: build
-        if: steps.refs.outputs.base != ''
+      # A tag runs `release`; a pull request runs `full` while it carries `perf-full`, else `core`. The script
+      # checks the whole partition file first, so a layout that cannot run fails here, before any runner builds.
+      # A first release still emits its matrices: each comparison job then skips its comparison.
+      - name: Choose the profile and its partitions
+        id: partitions
         env:
-          BASE_SHA: ${{ steps.refs.outputs.base }}
-          HEAD_SHA: ${{ steps.refs.outputs.head }}
+          EVENT: ${{ github.event_name }}
+          FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'perf-full') }}
         run: |
-          binaries="$RUNNER_TEMP/perf-binaries"
-          python3 scripts/perf-compare.py --base "$BASE_SHA" --head "$HEAD_SHA" --require-base \
-            --build-only "$binaries" | tee "$RUNNER_TEMP/build-only.log"
-          printed=$(sed -n 's/^manifest_sha256=//p' "$RUNNER_TEMP/build-only.log")
-          actual=$(shasum -a 256 "$binaries/manifest.json" | cut -d ' ' -f 1)
-          if [ -z "$printed" ] || [ "$printed" != "$actual" ]; then
-            echo "printed manifest digest '$printed' is not manifest.json's $actual" >&2
-            exit 1
+          profile=core
+          if [ "$EVENT" = "push" ]; then
+            profile=release
+          elif [ "$FULL_LABEL" = "true" ]; then
+            profile=full
           fi
-          echo "manifest_sha256=$actual" >>"$GITHUB_OUTPUT"
-
-      # tar keeps the executable bit, which an artifact upload alone would drop. The build logs stay out.
-      - name: Package the binaries
-        if: steps.refs.outputs.base != ''
-        run: tar -cf "$RUNNER_TEMP/perf-binaries.tar" -C "$RUNNER_TEMP/perf-binaries" manifest.json base head
-
-      - name: Upload the binaries
-        if: steps.refs.outputs.base != ''
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: perf-binaries-macOS-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/perf-binaries.tar
-          retention-days: 1
-          if-no-files-found: error
-
-      - name: Upload the build evidence
-        if: always() && steps.refs.outputs.base != ''
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: perf-build-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event.pull_request.head.sha || github.sha }}-macOS-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/perf-binaries/build-logs
-            ${{ runner.temp }}/build-only.log
-          if-no-files-found: warn
+          matrices=$(python3 scripts/perf_shards.py "$profile")
+          {
+            echo "profile=$profile"
+            echo "$matrices"
+          } >>"$GITHUB_OUTPUT"
+          echo "Profile \`$profile\` (scripts/perf-shards.json)." >>"$GITHUB_STEP_SUMMARY"
 
   compare-macos:
-    name: ${{ matrix.platform }} before/after comparison (${{ matrix.shard }})
-    needs: perf-build-macos
-    # Implicitly also the producer's success: a shard never runs after a failed or cancelled build.
-    if: >-
-      github.event_name == 'push' ||
-      (contains(github.event.pull_request.labels.*.name, 'perf') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'perf'))
-    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.platform }} before/after comparison (${{ matrix.partition }})
+    # Implicitly also the plan's success: no partition runs after a skipped, failed or cancelled plan.
+    needs: plan
+    runs-on: macos-15
     defaults:
       run:
         shell: bash
     strategy:
-      # Every shard reports: one shard's failure must not hide the other sets' tables.
+      # Every partition reports: one partition's failure must not hide the others' tables.
       fail-fast: false
-      # The macOS shards do not build: each is its scenarios' runs plus setup, download, listing and report.
-      # GitHub runs at most five of this repository's macOS jobs at once, across workflows, and CI holds two
-      # (core gates, which also runs the aarch64 smoke, and the Intel smoke) for most of a perf run, so three
-      # slots reach these shards when the binaries land; a fourth would queue behind CI's macOS jobs and set the
-      # critical path. Every scenario runs once, and the sets are balanced so that no shard sets the pull-request
-      # critical path: rebalance them from measured per-variant times (scripts/perf-critical-path.py reads an
-      # exact-head run) when a scenario is added or grows. Exact-head elapsed time, including queues, must stay
-      # below 35 min. S7 is the longest variant, so it shares its shard only with short ones and --short caps it
-      # at 3 runs a side (--list run_caps); a release comparison runs it uncapped. S11/release holds 65 s after its
-      # media-free frame, so --short caps it at one run per side; S2/flood, S1/atlas-retry and S6/rest run twice
-      # per side. S2/glide (one short run a side) and S11/kitty-placeholders (two) run in S7-S4, the shard with
-      # the most slack, so they stay off the critical path. S12 runs in S9-S10sync, a shard perf-compare.py's
-      # cell-layout decision reads (CELL_LAYOUT_SHARDS). Shard names remain stable artifact identities.
-      # A release comparison runs every variant in full, so the pull-request sets do not balance it, and a job
-      # past GitHub's 6-hour limit is cancelled with no table: each entry's release_partition replaces its
-      # scenarios on a release. It holds every pull-request variant and every release-only one (S13's wide
-      # layouts, S2/spawn, S3/history, S3/resize, S11/burst, S11/burst-text), each release-only variant beside its
-      # scenario, S12 in a CELL_LAYOUT_SHARDS shard and S9 with its laps, balanced from measured per-variant
-      # release times so each set stays well under that limit with room for a slow runner; rebalance it when a
-      # release scenario is added. Shard names stay the artifact identities, so a release's S7-S4 also runs
-      # S10/sync and S11.
       matrix:
-        include:
-          - platform: macOS
-            runner: macos-15
-            shard: S7-S4
-            scenarios: S7 S4 S1/atlas-retry S8 S6/selection-drag S2/glide S11/kitty-placeholders
-            laps: ""
-            release_partition: >-
-              S7 S4 S1/atlas-retry S8 S6/selection-drag S2/glide S11/kitty-placeholders S10/sync S11 S11/burst
-              S11/burst-text S1/status-line
-          - platform: macOS
-            runner: macos-15
-            shard: S9-S10sync
-            scenarios: S10/sync S9 S11 S6 S1 S5 S6/rest S1/status-line S12 S12/status-line S3
-            laps: S9
-            release_partition: S9 S12 S12/status-line S6 S6/rest S1 S3 S3/history S3/resize S5
-          - platform: macOS
-            runner: macos-15
-            shard: S10-S11release
-            scenarios: S10 S11/release S2 S2/flood S6/flood S13 S13/sustained-4
-            laps: ""
-            release_partition: >-
-              S10 S11/release S2 S2/flood S6/flood S13 S13/sustained-4 S13/wide-8 S13/wide-16 S13/wide-32
-              S2/spawn
+        include: ${{ fromJSON(needs.plan.outputs.macos) }}
     steps:
-      # The full history and tags, so the merge base and the previous release tag resolve; the commit
-      # itself, not a pull request's merge ref.
+      # The full history, so the base commit is in the clone for its worktree; the commit itself, not a pull
+      # request's merge ref.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -261,54 +179,10 @@ jobs:
         with:
           toolchain: stable
 
-      # The binaries link Homebrew's Cairo dynamically, so the runtime libraries are still installed here.
       - name: Install native dependencies
         run: brew install cairo pkg-config
 
-      # A pull request compares its merge base with its head; a release tag compares the previous
-      # release tag with itself. The first release has nothing to compare against.
-      - name: Choose the refs and the run length
-        id: refs
-        env:
-          EVENT: ${{ github.event_name }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          if [ "$EVENT" = "pull_request" ]; then
-            git fetch --no-tags origin "refs/heads/$PR_BASE_REF:refs/remotes/origin/$PR_BASE_REF"
-            base_sha=$(git merge-base "origin/$PR_BASE_REF" "$PR_HEAD_SHA")
-            head_sha=$PR_HEAD_SHA
-            length=short
-          else
-            head_sha=$GITHUB_SHA
-            # Only a tag list that Git returned successfully and empty means a first release; any Git
-            # error fails the job instead of passing as "nothing to compare".
-            # `rev-list --parents` prints the commit and then its parents; a failed read fails the job.
-            commit_and_parents=$(git rev-list --parents -n 1 "$GITHUB_SHA") || exit 1
-            read -r _ parent_sha _ <<<"$commit_and_parents"
-            if [ -z "$parent_sha" ]; then
-              echo "The tagged commit has no parent, so there is no earlier release to compare." >>"$GITHUB_STEP_SUMMARY"
-              echo "base=" >>"$GITHUB_OUTPUT"
-              exit 0
-            fi
-            earlier_tags=$(git tag --list 'v[0-9]*' --merged "$parent_sha") || exit 1
-            if [ -z "$earlier_tags" ]; then
-              echo "No earlier release tag, so there is nothing to compare." >>"$GITHUB_STEP_SUMMARY"
-              echo "base=" >>"$GITHUB_OUTPUT"
-              exit 0
-            fi
-            previous_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$parent_sha") || exit 1
-            base_sha=$(git rev-parse --verify "$previous_tag^{commit}") || exit 1
-            length=full
-          fi
-          {
-            echo "base=$base_sha"
-            echo "head=$head_sha"
-            echo "length=$length"
-          } >>"$GITHUB_OUTPUT"
-          echo "base $base_sha, head $head_sha, $length runs"
-
-      # A pull request's comparison must fit 35 minutes, and fat LTO with one codegen unit dominates its
+      # A pull request's comparison must fit its budget, and fat LTO with one codegen unit dominates its
       # two release builds. Both refs build with the same overrides, and the table's details name them.
       - name: Relax the release profile for a pull request
         if: github.event_name == 'pull_request'
@@ -318,77 +192,29 @@ jobs:
             echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
           } >>"$GITHUB_ENV"
 
-      # This shard's own refs must be the producer's, and a base means the producer published a manifest.
-      - name: Check the producer's refs
-        id: plan
-        env:
-          PRODUCER_BASE: ${{ needs.perf-build-macos.outputs.base }}
-          PRODUCER_HEAD: ${{ needs.perf-build-macos.outputs.head }}
-          PRODUCER_MANIFEST: ${{ needs.perf-build-macos.outputs.manifest_sha256 }}
-          BASE: ${{ steps.refs.outputs.base }}
-          HEAD: ${{ steps.refs.outputs.head }}
-        run: |
-          if [ "$PRODUCER_BASE" != "$BASE" ] || [ "$PRODUCER_HEAD" != "$HEAD" ]; then
-            echo "producer resolved $PRODUCER_BASE..$PRODUCER_HEAD, this shard $BASE..$HEAD" >&2; exit 1
-          fi
-          if [ -n "$BASE" ] && [ -z "$PRODUCER_MANIFEST" ]; then echo "producer published no manifest" >&2; exit 1; fi
-          if [ -n "$BASE" ]; then echo "prebuilt=true" >>"$GITHUB_OUTPUT"; else echo "prebuilt=false" >>"$GITHUB_OUTPUT"; fi
-
-      # The producer's attempt, not this job's: a rerun of failed shards reuses the producer that succeeded.
-      - name: Download the binaries
-        if: steps.plan.outputs.prebuilt == 'true'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: perf-binaries-macOS-${{ github.run_id }}-${{ needs.perf-build-macos.outputs.attempt }}
-          path: ${{ runner.temp }}/perf-binaries-download
-
-      - name: Unpack the binaries
-        if: steps.plan.outputs.prebuilt == 'true'
-        run: |
-          mkdir -p "$RUNNER_TEMP/perf-binaries"
-          tar -xf "$RUNNER_TEMP/perf-binaries-download/perf-binaries.tar" -C "$RUNNER_TEMP/perf-binaries"
-
-      # perf-compare.py refuses binaries whose manifest disagrees with this run, the producer's attempt and
-      # digest, either SHA, the harness, features, target, toolchain, image or profile, then bounds every run
-      # itself. A head that does not declare perf-counters skips the counters set, and the table says so.
+      # The comparison builds both refs, bounds every build and run itself, and stops on a cleanup or schema
+      # failure; --require-base fails it when the base cannot build, list or fill its runs. A head that does not
+      # declare perf-counters skips the counters set, and the table says so.
       - name: Compare the base and the head
-        if: steps.plan.outputs.prebuilt == 'true'
+        if: needs.plan.outputs.base != ''
         env:
-          BASE_SHA: ${{ steps.refs.outputs.base }}
-          HEAD_SHA: ${{ steps.refs.outputs.head }}
-          RUN_LENGTH: ${{ steps.refs.outputs.length }}
-          SCENARIOS: ${{ matrix.scenarios }}
-          LAPS: ${{ matrix.laps }}
-          RELEASE_PARTITION: ${{ matrix.release_partition }}
-          PRODUCER_ATTEMPT: ${{ needs.perf-build-macos.outputs.attempt }}
-          PRODUCER_MANIFEST: ${{ needs.perf-build-macos.outputs.manifest_sha256 }}
-          PERF_JOB_NAME: ${{ matrix.platform }} before/after comparison (${{ matrix.shard }})
-          PERF_SHARD: ${{ matrix.shard }}
+          BASE_SHA: ${{ needs.plan.outputs.base }}
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
+          RUN_LENGTH: ${{ needs.plan.outputs.length }}
+          SELECTION: ${{ matrix.selection }}
+          PERF_JOB_NAME: ${{ matrix.platform }} before/after comparison (${{ matrix.partition }})
+          PERF_SHARD: ${{ matrix.partition }}
         run: |
-          read -ra scenarios <<<"$SCENARIOS"
-          # A release comparison (full-length runs) runs this entry's release partition instead: the release-only
-          # variants beside their scenarios, balanced for full-length runs.
-          if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_PARTITION" ]; then
-            read -ra scenarios <<<"$RELEASE_PARTITION"
-          fi
-          # A pull request fits 35 minutes with short runs and two counters runs. A release runs --runs timed runs
-          # and three counters runs a side: the counters set reports counts and ratios, not timing, and three runs
-          # keep every counters-derived figure above its sample floor.
-          run_flags=(--counters --counters-runs 3)
+          # The partition's variants and sampling, as scripts/perf_shards.py wrote them; a pull request runs short.
+          read -ra selection <<<"$SELECTION"
           if [ "$RUN_LENGTH" = "short" ]; then
-            run_flags=(--short --counters --counters-runs 2)
-          fi
-          # Only an entry with a laps field runs the separate laps set, for that scenario and two runs.
-          if [ -n "$LAPS" ]; then
-            run_flags+=(--laps-scenario "$LAPS" --laps-runs 2)
+            selection+=(--short)
           fi
           python3 scripts/perf-compare.py --base "$BASE_SHA" --head "$HEAD_SHA" --require-base \
-            --prebuilt "$RUNNER_TEMP/perf-binaries" --prebuilt-run-id "$GITHUB_RUN_ID" \
-            --prebuilt-attempt "$PRODUCER_ATTEMPT" --prebuilt-manifest-sha256 "$PRODUCER_MANIFEST" \
-            --scenario "${scenarios[@]}" --runs 5 "${run_flags[@]}" --out "$RUNNER_TEMP/perf-comparison"
+            "${selection[@]}" --out "$RUNNER_TEMP/perf-comparison"
 
       - name: Publish the table in the job summary
-        if: always() && steps.plan.outputs.prebuilt == 'true'
+        if: always() && needs.plan.outputs.base != ''
         run: |
           table="$RUNNER_TEMP/perf-comparison/comparison.md"
           if [ -f "$table" ]; then
@@ -401,21 +227,18 @@ jobs:
       # progress.json, timing.json, App logs and checkpoint footprints. perf-compare.py already leaves the
       # workload fixtures out. The attempt in the name keeps a rerun's evidence apart from the first attempt's.
       - name: Upload the comparison evidence
-        if: always() && steps.plan.outputs.prebuilt == 'true'
+        if: always() && needs.plan.outputs.base != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.platform }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          name: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.platform }}-${{ matrix.partition }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/perf-comparison
           if-no-files-found: warn
 
   compare-windows:
-    name: ${{ matrix.platform }} before/after comparison (${{ matrix.shard }})
-    if: >-
-      github.event_name == 'push' ||
-      (contains(github.event.pull_request.labels.*.name, 'perf') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'perf'))
-    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.platform }} before/after comparison (${{ matrix.partition }})
+    needs: plan
+    runs-on: windows-latest
     defaults:
       run:
         # Git Bash, so Windows runs the same step scripts as macOS.
@@ -424,52 +247,11 @@ jobs:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     strategy:
       fail-fast: false
-      # Each Windows shard builds both refs itself, then runs its sets. Rebalance here when a scenario is added or
-      # grows, from measured per-variant times: the exact-head run, read with scripts/perf-critical-path.py, is
-      # the measurement, never a local estimate. S2/flood's cap of 2 short runs keeps S9-S10 within the budget; a
-      # release comparison runs it uncapped. S9's laps set, two runs a side, runs on the shard holding S9.
-      # S1/status-line and S12/status-line run in S7, the one-scenario shard, one run per side in each set; S13
-      # and S13/sustained-4 run in S2-S10sync on the same caps.
       matrix:
-        include:
-          - platform: Windows
-            runner: windows-latest
-            shard: S7
-            scenarios: S7 S1/status-line S12/status-line
-            laps: ""
-            release_scenarios: ""
-          - platform: Windows
-            runner: windows-latest
-            shard: S9-S10
-            scenarios: S9 S10 S6/flood S6/selection-drag S2/flood
-            laps: S9
-            release_scenarios: ""
-          - platform: Windows
-            runner: windows-latest
-            shard: S2-S10sync
-            scenarios: S2 S10/sync S6/rest S13 S13/sustained-4
-            laps: ""
-            release_scenarios: S13/wide-8 S13/wide-16 S13/wide-32
-          - platform: Windows
-            runner: windows-latest
-            shard: S4-S5-S11
-            # S11/release runs once per side under --short, and the S11/gdi (frame texture) and S11/wgpu
-            # (CPU-adapter control) presenter variants twice, which keeps this shard within the budget.
-            scenarios: S4 S5 S11 S11/release S11/gdi S11/wgpu
-            laps: ""
-            release_scenarios: ""
-          - platform: Windows
-            runner: windows-latest
-            shard: S1-S3-S6-S8-S12
-            # S1/atlas-retry runs only in the counters set, twice per side, and is retried up to 3 times a side
-            # when a run is slow or invalid; this shard has the slack to absorb that. The exact-head CI run is
-            # the measurement.
-            scenarios: S1 S3 S6 S8 S12 S1/atlas-retry
-            laps: ""
-            release_scenarios: ""
+        include: ${{ fromJSON(needs.plan.outputs.windows) }}
     steps:
-      # The full history and tags, so the merge base and the previous release tag resolve; the commit
-      # itself, not a pull request's merge ref.
+      # The full history, so the base commit is in the clone for its worktree; the commit itself, not a pull
+      # request's merge ref.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -501,50 +283,7 @@ jobs:
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
-      # A pull request compares its merge base with its head; a release tag compares the previous
-      # release tag with itself. The first release has nothing to compare against.
-      - name: Choose the refs and the run length
-        id: refs
-        env:
-          EVENT: ${{ github.event_name }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          if [ "$EVENT" = "pull_request" ]; then
-            git fetch --no-tags origin "refs/heads/$PR_BASE_REF:refs/remotes/origin/$PR_BASE_REF"
-            base_sha=$(git merge-base "origin/$PR_BASE_REF" "$PR_HEAD_SHA")
-            head_sha=$PR_HEAD_SHA
-            length=short
-          else
-            head_sha=$GITHUB_SHA
-            # Only a tag list that Git returned successfully and empty means a first release; any Git
-            # error fails the job instead of passing as "nothing to compare".
-            # `rev-list --parents` prints the commit and then its parents; a failed read fails the job.
-            commit_and_parents=$(git rev-list --parents -n 1 "$GITHUB_SHA") || exit 1
-            read -r _ parent_sha _ <<<"$commit_and_parents"
-            if [ -z "$parent_sha" ]; then
-              echo "The tagged commit has no parent, so there is no earlier release to compare." >>"$GITHUB_STEP_SUMMARY"
-              echo "base=" >>"$GITHUB_OUTPUT"
-              exit 0
-            fi
-            earlier_tags=$(git tag --list 'v[0-9]*' --merged "$parent_sha") || exit 1
-            if [ -z "$earlier_tags" ]; then
-              echo "No earlier release tag, so there is nothing to compare." >>"$GITHUB_STEP_SUMMARY"
-              echo "base=" >>"$GITHUB_OUTPUT"
-              exit 0
-            fi
-            previous_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$parent_sha") || exit 1
-            base_sha=$(git rev-parse --verify "$previous_tag^{commit}") || exit 1
-            length=full
-          fi
-          {
-            echo "base=$base_sha"
-            echo "head=$head_sha"
-            echo "length=$length"
-          } >>"$GITHUB_OUTPUT"
-          echo "base $base_sha, head $head_sha, $length runs"
-
-      # A pull request's comparison must fit 35 minutes, and fat LTO with one codegen unit dominates its
+      # A pull request's comparison must fit its budget, and fat LTO with one codegen unit dominates its
       # two release builds. Both refs build with the same overrides, and the table's details name them.
       - name: Relax the release profile for a pull request
         if: github.event_name == 'pull_request'
@@ -557,40 +296,26 @@ jobs:
       # The comparison builds both refs, bounds every build and run itself, and stops on a cleanup or schema
       # failure; --require-base fails it when the base cannot build, list or fill its runs.
       - name: Compare the base and the head
-        if: steps.refs.outputs.base != ''
+        if: needs.plan.outputs.base != ''
         env:
-          BASE_SHA: ${{ steps.refs.outputs.base }}
-          HEAD_SHA: ${{ steps.refs.outputs.head }}
-          RUN_LENGTH: ${{ steps.refs.outputs.length }}
-          SCENARIOS: ${{ matrix.scenarios }}
-          LAPS: ${{ matrix.laps }}
-          RELEASE_SCENARIOS: ${{ matrix.release_scenarios }}
-          PERF_JOB_NAME: ${{ matrix.platform }} before/after comparison (${{ matrix.shard }})
-          PERF_SHARD: ${{ matrix.shard }}
+          BASE_SHA: ${{ needs.plan.outputs.base }}
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
+          RUN_LENGTH: ${{ needs.plan.outputs.length }}
+          SELECTION: ${{ matrix.selection }}
+          PERF_JOB_NAME: ${{ matrix.platform }} before/after comparison (${{ matrix.partition }})
+          PERF_SHARD: ${{ matrix.partition }}
         run: |
-          read -ra scenarios <<<"$SCENARIOS"
-          # A release comparison (full-length runs) adds the release-only scenarios, S13's wide layouts.
-          if [ "$RUN_LENGTH" != "short" ] && [ -n "$RELEASE_SCENARIOS" ]; then
-            read -ra release_scenarios <<<"$RELEASE_SCENARIOS"
-            scenarios+=("${release_scenarios[@]}")
-          fi
-          # A pull request fits 35 minutes with short runs and two counters runs. A release runs --runs timed runs
-          # and three counters runs a side: the counters set reports counts and ratios, not timing, and three runs
-          # keep every counters-derived figure above its sample floor.
-          run_flags=(--counters --counters-runs 3)
+          # The partition's variants and sampling, as scripts/perf_shards.py wrote them; a pull request runs short.
+          read -ra selection <<<"$SELECTION"
           if [ "$RUN_LENGTH" = "short" ]; then
-            run_flags=(--short --counters --counters-runs 2)
-          fi
-          # Only an entry with a laps field runs the separate laps set, for that scenario and two runs.
-          if [ -n "$LAPS" ]; then
-            run_flags+=(--laps-scenario "$LAPS" --laps-runs 2)
+            selection+=(--short)
           fi
           # The hosted Windows image names its interpreter `python`.
           python scripts/perf-compare.py --base "$BASE_SHA" --head "$HEAD_SHA" --require-base \
-            --scenario "${scenarios[@]}" --runs 5 "${run_flags[@]}" --out "$RUNNER_TEMP/perf-comparison"
+            "${selection[@]}" --out "$RUNNER_TEMP/perf-comparison"
 
       - name: Publish the table in the job summary
-        if: always() && steps.refs.outputs.base != ''
+        if: always() && needs.plan.outputs.base != ''
         run: |
           table="$RUNNER_TEMP/perf-comparison/comparison.md"
           if [ -f "$table" ]; then
@@ -603,36 +328,41 @@ jobs:
       # progress.json, timing.json, App logs and checkpoint footprints. perf-compare.py already leaves the
       # workload fixtures out. The attempt in the name keeps a rerun's evidence apart from the first attempt's.
       - name: Upload the comparison evidence
-        if: always() && steps.refs.outputs.base != ''
+        if: always() && needs.plan.outputs.base != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.platform }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          name: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.platform }}-${{ matrix.partition }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/perf-comparison
           if-no-files-found: warn
 
-  # The one check to read: no checkout and no action, so nothing from the pull request's tree decides it. Its
-  # name is the real one only in an eligible run; a skipped run shows this expression unevaluated, never the real name.
+  # The one check to read: no checkout and no action, so nothing from the pull request's tree decides it. It
+  # carries the eligibility itself, so a skipped plan never lets it pass. Its name is the real one only in an
+  # eligible run; a skipped run shows this expression unevaluated, never the real name.
   perf-result:
     name: >-
       ${{ (github.event_name == 'push' ||
-      (contains(github.event.pull_request.labels.*.name, 'perf') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'perf'))) && 'Performance comparison result' ||
+      ((contains(github.event.pull_request.labels.*.name, 'perf') ||
+      contains(github.event.pull_request.labels.*.name, 'perf-full')) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'perf' ||
+      github.event.label.name == 'perf-full'))) && 'Performance comparison result' ||
       'Performance comparison result (not run)' }}
     runs-on: ubuntu-latest
-    needs: [perf-build-macos, compare-macos, compare-windows]
+    needs: [plan, compare-macos, compare-windows]
     if: >-
       always() && (github.event_name == 'push' ||
-      (contains(github.event.pull_request.labels.*.name, 'perf') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'perf')))
+      ((contains(github.event.pull_request.labels.*.name, 'perf') ||
+      contains(github.event.pull_request.labels.*.name, 'perf-full')) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'perf' ||
+      github.event.label.name == 'perf-full')))
     steps:
       - name: Require every comparison job to succeed
         shell: bash
         env:
-          PRODUCER: ${{ needs.perf-build-macos.result }}
+          PLAN: ${{ needs.plan.result }}
           MACOS: ${{ needs.compare-macos.result }}
           WINDOWS: ${{ needs.compare-windows.result }}
         run: |
-          for pair in "producer=$PRODUCER" "macOS=$MACOS" "Windows=$WINDOWS"; do
+          for pair in "plan=$PLAN" "macOS=$MACOS" "Windows=$WINDOWS"; do
             [ "${pair#*=}" = "success" ] || { echo "${pair%%=*} job result: '${pair#*=}'" >&2; exit 1; }
           done

@@ -6,7 +6,6 @@ import json
 import unittest
 
 import perf_build_tests
-import perf_cell_layout
 import perf_comparison_rows
 import perf_comparison_tests
 import perf_counter_schema_tests
@@ -17,7 +16,6 @@ import perf_memory
 import perf_memory_tests
 import perf_metrics
 import perf_outcomes_tests
-import perf_prebuilt_tests
 import perf_result_schema
 import perf_result_tests
 import perf_scenarios
@@ -123,22 +121,7 @@ def memory_sample(unix_s, renderer_bytes=16 * 1024 * 1024):
 
 
 class MemoryFreshnessTests(unittest.TestCase):
-    """A checkpoint with fresh_after_unix_s reads memory only from a sample taken at or after that time."""
-
-    def test_absent_metadata_keeps_the_latest_earlier_sample(self):
-        samples = [memory_sample(10.0), memory_sample(40.0)]
-        self.assertEqual(perf_cell_layout.memory_at(samples, 50.0).unix_s, 40.0)
-
-    def test_a_sample_before_the_threshold_reads_unavailable(self):
-        # The latest sample at or before the checkpoint predates freshness, so the reading is unavailable.
-        samples = [memory_sample(10.0), memory_sample(40.0)]
-        self.assertIsNone(perf_cell_layout.memory_at(samples, 80.0, fresh_after_unix_s=45.0))
-
-    def test_samples_exactly_at_and_after_the_threshold_are_used(self):
-        for sample_s in (45.0, 70.0):
-            with self.subTest(sample_s=sample_s):
-                samples = [memory_sample(10.0), memory_sample(sample_s)]
-                self.assertEqual(perf_cell_layout.memory_at(samples, 80.0, fresh_after_unix_s=45.0).unix_s, sample_s)
+    """A checkpoint's fresh_after_unix_s is schema-checked, and a reading older than it is unavailable."""
 
     def test_non_finite_or_negative_values_are_schema_problems(self):
         # fresh_after_unix_s and frame_texture_bytes must be finite and non-negative; anything else fails the schema.
@@ -207,8 +190,8 @@ class FrameTextureRowTests(unittest.TestCase):
         self.assertEqual(row[2:4], ["n/a", "4.00 (4.00–4.00)"])
 
 
-class FrameTextureFeatureTests(perf_prebuilt_tests.PrebuiltHarness, unittest.TestCase):
-    """perf-frame-texture reaches only a tree that declares it, in every build path, and binds a prebuilt artifact."""
+class FrameTextureFeatureTests(perf_driver_tests.CompareHarness, unittest.TestCase):
+    """perf-frame-texture reaches only a tree that declares it, through the gate's reviewed build steps."""
 
     def build_argv(self, gate, side):
         return next(step.argv for step in gate.steps if step.id == f"build-{side}-perf_scenarios")
@@ -224,19 +207,6 @@ class FrameTextureFeatureTests(perf_prebuilt_tests.PrebuiltHarness, unittest.Tes
         _code, gate, _calls, _plans, _work, _out = self.compare(head_manifest=BOTH_MANIFEST)
         head = self.build_argv(gate, "head")
         self.assertEqual(head[head.index("--features") + 1], "perf-counters,perf-frame-texture")
-
-    def test_build_only_records_the_feature_in_the_manifest(self):
-        binaries, _digest = self.produce(head_manifest=FRAME_MANIFEST)
-        manifest = json.loads((binaries / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["features"], {"base": [], "head": [perf_harness_sources.FRAME_TEXTURE_FEATURE]})
-
-    def test_load_prebuilt_refuses_a_feature_mismatch(self):
-        # A consumer whose head tree does not declare the feature refuses binaries built with it.
-        binaries, digest = self.produce(head_manifest=FRAME_MANIFEST)
-        with self.assertRaisesRegex(ValueError, "refusing the prebuilt binaries: features"):
-            self.consume(binaries, digest)
-        code, *_rest = self.consume(binaries, digest, head_manifest=FRAME_MANIFEST)
-        self.assertEqual(code, perf_settings.EXIT_PASS)
 
     def test_the_gate_reviews_one_build_per_feature_set(self):
         # Every feature combination has the gate's own reviewed steps; the plain and counters sets are the old ones.
