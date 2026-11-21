@@ -155,6 +155,12 @@ class TargetTests(unittest.TestCase):
             source = (Path(__file__).parent / "setup-windows-cairo.ps1").read_text(encoding="utf-8")
             self.assertIn('SONICTERM_CAIRO_BIN_DIR = (Join-Path -Path $targetRoot -ChildPath "bin")', source)
             self.assertIn('Add-Content -LiteralPath $env:GITHUB_PATH -Value $cairoBin', source)
+            # vcpkg ports spell their static libraries differently from the bare `-l<name>` Cairo's static link asks
+            # for (zlib 1.4 installs libzs.lib for `zs`), so the script gives every asked-for name a `<name>.lib` in
+            # the target lib directory and puts that directory on LIB, where MSVC's linker looks for bare names.
+            self.assertIn("& $pkgConfig --libs --static cairo", source)
+            self.assertIn('@("lib$name.lib", "${name}static.lib", "${name}MT.lib")', source)
+            self.assertIn("LIB = $linkSearch", source)
 
 
 if __name__ == "__main__":
