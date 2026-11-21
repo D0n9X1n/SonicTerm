@@ -382,8 +382,9 @@ scratch 目录，以 `--managed` 启动，并以本侧的 worktree 为工作目�
 2. 来源失败；
 3. 由结果表明或无法排除的未解决清理：`finish_session` 未完成（无论以哪种退出码结束），或 `result.json`
    缺失、无法解析或未记录 `finish_session` 已完成的 schema 失败，此时没有任何证据证明该运行的清理已完成。
-   这也包括已实际运行、以退出码 4 结束或崩溃却未写出 `result.json` 的 harness：它自身的截止会先写出该文件，
-   因此缺少它即表示崩溃；
+   这也包括已实际运行、以无效（3）、超时（4）、阻塞（5）或其他退出码结束却未写出 `result.json` 的 harness：
+   App 一旦存在，每条退出路径都会在 `finish_session` 之后写出该文件，因此缺少它即表示崩溃。只有拒绝（2）
+   发生在 App 存在之前；
 4. 清理已完成的运行的 schema 失败：不符合结果 schema 的 `result.json`。无论 harness 如何结束都是如此，
    包括 harness 超时（退出码 4）与当前树不支持该场景（退出码 5）。`run_step` 报告 PASS 且退出码为 0、
    因而退出状态可信时，结果状态不是 `valid` 也属于 schema 失败，而缺少 `result.json`（除非 harness 输出了

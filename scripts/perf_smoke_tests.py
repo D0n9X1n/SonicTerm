@@ -69,7 +69,9 @@ def outcome_of(kind):
             return perf_outcomes_tests.make_outcome(plan=plan, exit_code=3, result=perf_result_tests.valid_result(
                 status="invalid", exit_code=3, invalid_reason=perf_watcher_tests.STARTUP_OCCLUSION_REASON))
         if kind == "blocked":
-            return perf_outcomes_tests.make_outcome(plan=plan, exit_code=5, result=None)
+            # A blocked harness still runs finish_session and writes its result, as every exit after the App does.
+            return perf_outcomes_tests.make_outcome(plan=plan, exit_code=5, result=perf_result_tests.valid_result(
+                status="blocked", exit_code=5))
         if kind == "schema":
             return perf_outcomes_tests.make_outcome(plan=plan, schema_problems=["managed is False, not true"])
         if kind == "theft":

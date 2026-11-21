@@ -292,8 +292,11 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(self.kind(exit_code=4, result=perf_result_tests.valid_result(status="timeout", exit_code=4)),
                          "timeout")
         self.assertEqual(self.kind(status="TIMEOUT", exit_code=-9, result=None), "cleanup")
-        self.assertEqual(self.kind(exit_code=5, result=None), "blocked")
-        self.assertEqual(self.kind(exit_code=101, result=None), "cleanup")
+        self.assertEqual(self.kind(exit_code=5, result=perf_result_tests.valid_result(status="blocked", exit_code=5)), "blocked")
+        # Once the App exists every exit writes result.json after finish_session, so exit 3, 4, 5 or a crash without
+        # one proves no settled teardown; only a refusal (exit 2) ends before the App exists.
+        for code in (3, 5, 101):
+            self.assertEqual(self.kind(exit_code=code, result=None), "cleanup", code)
 
     def test_not_exercised_without_a_result_is_blocked(self):
         # NOT_EXERCISED with exit 0 and no result.json means the host cannot exercise the scenario; without it the
@@ -322,9 +325,11 @@ class ClassificationTests(unittest.TestCase):
                     self.assertEqual(reasons[0], perf_outcomes.UNPROVEN_TEARDOWN)
 
     def test_a_harness_that_exits_nonzero_without_a_result_stops_the_comparison(self):
-        # The harness writes result.json before its own deadline exit and every invalidation, so an exercised run
-        # that exits 4 or crashes without one proves no settled teardown: it stops every variant, never retries.
-        for code, status in ((perf_settings.HARNESS_TIMEOUT, "FAIL"), (101, "FAIL")):
+        # Once its App exists the harness writes result.json after finish_session on every exit, so an exercised run
+        # that exits invalid, timed out, blocked or crashed without one proves no settled teardown: it stops every
+        # variant, never retries.
+        for code, status in ((perf_settings.HARNESS_INVALID, "FAIL"), (perf_settings.HARNESS_TIMEOUT, "FAIL"),
+                             (perf_settings.HARNESS_BLOCKED, "FAIL"), (101, "FAIL")):
             with self.subTest(code=code):
                 kind, reasons = perf_outcomes.classify_outcome(make_outcome(exit_code=code, status=status, result=None))
                 self.assertEqual((kind, perf_outcomes.compare_verdict(kind)), ("cleanup", "stop"))
@@ -362,7 +367,7 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(self.kind(watcher_problems=["session 0 failed validation"]), "session")
         self.assertEqual(self.kind(home=["config.toml: added"]), "home")
         self.assertEqual(self.kind(focus=perf_focus.FocusVerdict(True, (), ["focus theft"], True)), "focus")
-        self.assertEqual(self.kind(exit_code=5, result=None, home=["config.toml: added"]), "home")
+        self.assertEqual(self.kind(exit_code=5, result=perf_result_tests.valid_result(status="blocked", exit_code=5), home=["config.toml: added"]), "home")
 
     def test_deadline_case_is_judged_by_cleanup_not_by_its_result(self):
         # A run ended at GO has no complete result; its kill, cleanup, focus and home writes decide.
@@ -373,7 +378,7 @@ class ClassificationTests(unittest.TestCase):
                                    home=["config.toml: added"]), "home")
         refused = {"sent": False, "problem": "harness pid 900 runs 'zsh'", "pid": perf_watcher_tests.HARNESS_PID}
         self.assertEqual(self.kind(plan=plan, deadline=refused), "deadline")
-        self.assertEqual(self.kind(plan=plan, exit_code=5, result=None), "blocked")
+        self.assertEqual(self.kind(plan=plan, exit_code=5, result=perf_result_tests.valid_result(status="blocked", exit_code=5)), "blocked")
         self.assertEqual(self.kind(plan=plan), "unexpected")
 
     def test_verdicts_per_mode(self):

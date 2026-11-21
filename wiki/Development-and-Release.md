@@ -563,8 +563,10 @@ when it also has a retryable problem:
    `finish_session` that did not settle, whatever the exit, or a schema failure
    whose `result.json` is missing, cannot be parsed or does not record a settled
    `finish_session`, so nothing proves the run's teardown. That includes an
-   exercised harness that exits 4 or crashes without writing `result.json`: its
-   own deadline writes one first, so a missing one means a crash;
+   exercised harness that exits invalid (3), timed out (4), blocked (5) or with
+   any other code without writing `result.json`: once its App exists, every exit
+   writes one after `finish_session`, so a missing one means a crash. Only a
+   refusal (2) ends before the App exists;
 4. a schema failure of a run whose teardown settled: a `result.json` that does
    not match the result schema. This holds however the harness ended, including
    a harness timeout (exit 4) and a block (exit 5). Once `run_step` has reported
