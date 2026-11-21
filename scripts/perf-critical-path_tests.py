@@ -36,6 +36,7 @@ ORIGIN_S = calendar.timegm((2026, 10, 3, 12, 0, 0))
 RUN_ID = 99
 SHA = "c" * 40
 PRODUCER = "macOS perf binaries (base and head)"
+PLAN = "Plan the comparison"
 RESULT = "Performance comparison result"
 
 
@@ -301,7 +302,8 @@ class AttemptResolutionTests(unittest.TestCase):
 
 
 class BudgetTests(unittest.TestCase):
-    """The 35-minute budget runs from the run's creation to its last attempt's finish, reruns included."""
+    """A run's elapsed time runs from its creation to its last attempt's finish, reruns included; the budget is
+    the comparison profile's."""
 
     def test_budget_from_original_creation_to_final_finish(self):
         # Two attempts: 2524 s = 1413 + 48 + 1063; three: 5001 s = 1413 + 48 + 1063 + 1277 + 1200.
@@ -309,7 +311,14 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual((two.elapsed_s, two.spans_s, two.rerun_waits_s, two.first_wait_s), (2524, [1413, 1063], [48], 0))
         three = accounting.budget(three_attempts())
         self.assertEqual((three.elapsed_s, three.spans_s, three.rerun_waits_s), (5001, [1413, 1063, 1200], [48, 1277]))
-        self.assertGreater(two.elapsed_s, accounting.BUDGET_S)
+        self.assertGreater(two.elapsed_s, accounting.PROFILE_BUDGETS_S["core"])
+
+    def test_each_profile_has_its_budget_and_a_tag_push_is_a_release(self):
+        # core 25 min and full 45 min judge a pull request; a tag push defaults to release, which has no budget.
+        pull_request = {"run": {"event": "pull_request"}}
+        self.assertEqual(accounting.report_budget_s(pull_request, None), 25 * 60)
+        self.assertEqual(accounting.report_budget_s(pull_request, "full"), 45 * 60)
+        self.assertIsNone(accounting.report_budget_s({"run": {"event": "push"}}, None))
 
 
 class EvidenceTests(unittest.TestCase):
@@ -569,11 +578,55 @@ class BoundedCleanupTests(unittest.TestCase):
             accounting.run_bounded(["gh"], timeout_s=1, popen=popen)
 
 
+class CurrentLayoutTests(unittest.TestCase):
+    """Runs of the current layout: a plan job every comparison needs, and reruns whose earlier artifacts are gone."""
+
+    def test_the_plan_job_starts_every_chain(self):
+        # Every comparison and the result need the plan job, so it is first on the critical path.
+        rows = [job(PLAN, 0, 2, 30), job("macOS before/after comparison (core-1)", 30, 35, 900),
+                job("Windows before/after comparison (core-1)", 30, 33, 1000), job(RESULT, 1000, 1004, 1010)]
+        attempt = accounting.account(synthetic(rows, 1011), no_timing).attempts[0]
+        self.assertEqual(attempt.critical.names, [PLAN, "Windows before/after comparison (core-1)", RESULT])
+        self.assertTrue(all(path.names[0] == PLAN for path in attempt.paths))
+
+    def test_a_rerun_whose_first_attempt_artifacts_are_gone_still_reports(self):
+        # GitHub keeps only the newest attempt's artifacts: attempt 1's job has none, so its compare step stays one
+        # class with a note, and attempt 2's job is still split by its timing.json.
+        name = "Windows before/after comparison (core-1)"
+        steps_one = [step("Set up job", 0, 10, 1), step("Compare the base and the head", 10, 500, 2),
+                     step("Complete job", 500, 505, 3)]
+        steps_two = [step("Set up job", 600, 610, 1), step("Compare the base and the head", 610, 1100, 2),
+                     step("Complete job", 1100, 1105, 3)]
+        attempt_one = {"id": RUN_ID, "run_attempt": 1, "created_at": stamp(0), "run_started_at": stamp(0),
+                       "updated_at": stamp(510)}
+        attempt_two = {"id": RUN_ID, "run_attempt": 2, "created_at": stamp(590), "run_started_at": stamp(590),
+                       "updated_at": stamp(1110)}
+        evidence = f"perf-comparison-1-{SHA}-Windows-core-1-2"
+        timing = {"schema_version": 1, "run_id": str(RUN_ID), "run_attempt": "2", "job": name, "shard": "core-1",
+                  "marks": {mark: ORIGIN_S + offset for mark, offset in (
+                      ("start", 612), ("listed", 620), ("measure_start", 622), ("measure_end", 1099),
+                      ("report_written", 1100))}}
+        record = {"run": dict(attempt_two, created_at=stamp(0)), "attempts": {"1": attempt_one, "2": attempt_two},
+                  "jobs": {"1": [job(name, 0, 0, 505, steps=steps_one, conclusion="failure")],
+                           "2": [job(name, 595, 600, 1105, attempt=2, steps=steps_two)]},
+                  "artifacts": [artifact(evidence, 1101)], "timing": {evidence: timing}}
+        report = accounting.account(record, lambda artifact_name: record["timing"].get(artifact_name))
+        first, second = (attempt.critical.segments[0] for attempt in report.attempts)
+        self.assertIsNone(first.compare)
+        self.assertIn("scenario split unavailable", first.compare_note)
+        self.assertEqual(second.compare["scenarios"], 477)
+
+    def test_an_artifact_that_disagrees_still_stops_the_report(self):
+        # Only a missing artifact is tolerated; one whose timing.json names another attempt is refused.
+        with self.assertRaisesRegex(accounting.AccountingError, "timing.json"):
+            PathAccountingTests.evidence_run(PathAccountingTests(), timing_overrides={"run_attempt": "2"})
+
+
 class CommandLineTests(unittest.TestCase):
     """The command's exit codes, its GitHub reads and its bounded child process."""
 
     def test_the_recorded_run_is_over_budget(self):
-        # Exit 1 when the run took longer than 35 minutes; the report still prints.
+        # Exit 1 when the pull request run took longer than its profile's budget; the report still prints.
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             self.assertEqual(accounting.main(["--fixture", str(FIXTURE)]), 1)
