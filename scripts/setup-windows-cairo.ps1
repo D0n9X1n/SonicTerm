@@ -72,10 +72,11 @@ if (-not (Test-Path -LiteralPath $cairoPc)) {
 }
 
 # A static link names each dependency with a bare `-l<name>`, which MSVC's linker resolves as `<name>.lib` in a
-# directory on LIB. vcpkg ports do not agree on that file name: zlib 1.4 installs `libzs.lib` while its pkg-config
-# file asks for `zs`. So every library the static Cairo link asks for gets a `<name>.lib` in the target lib
-# directory, copied from the one file that matches it, and that directory goes on LIB, so a bare name resolves
-# whichever spelling a port installed. A name with no such file fails here, naming it, instead of at link time.
+# directory on LIB. The names do not always match the files vcpkg installs: zlib 1.4 installs `libzs.lib` and its
+# pkg-config file says `-llibzs`, but the Rust side strips the `lib` prefix and asks the linker for `zs.lib`. So
+# every name the static Cairo link lists, with and without a `lib` prefix, gets a `<name>.lib` in the target lib
+# directory, copied from whichever spelling exists, and that directory goes on LIB. A library none of whose
+# spellings exist fails here, named, instead of at link time; Windows system libraries come from the SDK.
 $targetLib = Join-Path -Path $targetRoot -ChildPath "lib"
 $env:PKG_CONFIG_PATH = $pkgConfigPath
 $staticLibs = & $pkgConfig --libs --static cairo
@@ -83,22 +84,28 @@ if ($LASTEXITCODE -ne 0) {
     throw "pkg-config could not list cairo's static libraries."
 }
 Write-Host "cairo static link flags: $staticLibs"
-foreach ($flag in ($staticLibs -split '\s+' | Where-Object { $_ -like '-l*' })) {
+$systemLibs = @("gdi32", "msimg32", "user32", "kernel32", "advapi32", "ole32", "opengl32", "dwrite", "d2d1",
+                "windowscodecs", "bcrypt", "ws2_32", "shell32", "uuid", "comdlg32")
+# `-clike` is case-sensitive, so the `-L` search directory is not read as a library.
+foreach ($flag in ($staticLibs -split '\s+' | Where-Object { $_ -clike '-l*' })) {
     $name = $flag.Substring(2)
-    $wanted = Join-Path -Path $targetLib -ChildPath "$name.lib"
-    if (Test-Path -LiteralPath $wanted) {
+    if ($name -in $systemLibs) {
         continue
     }
-    $spellings = @("lib$name.lib", "${name}static.lib", "${name}MT.lib") |
-        ForEach-Object { Join-Path -Path $targetLib -ChildPath $_ } |
-        Where-Object { Test-Path -LiteralPath $_ }
-    if ($spellings) {
-        $source = @($spellings)[0]
-        Copy-Item -LiteralPath $source -Destination $wanted
-        Write-Host "linked $name as $(Split-Path -Leaf $source)"
-    } elseif ($name -notin @("gdi32", "msimg32", "user32", "kernel32", "advapi32", "ole32", "opengl32", "dwrite",
-                               "d2d1", "windowscodecs", "bcrypt", "ws2_32", "shell32", "uuid", "comdlg32")) {
-        throw "cairo's static link asks for $name, but $targetLib has no $name.lib or a known spelling of it."
+    $stem = if ($name.StartsWith("lib")) { $name.Substring(3) } else { $name }
+    $spellings = @("$name.lib", "lib$stem.lib", "$stem.lib", "${stem}static.lib", "${stem}MT.lib") |
+        Select-Object -Unique
+    $existing = $spellings | ForEach-Object { Join-Path -Path $targetLib -ChildPath $_ } |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $existing) {
+        throw "cairo's static link asks for $name, but $targetLib has none of: $($spellings -join ', ')."
+    }
+    foreach ($wanted in @("$name.lib", "$stem.lib") | Select-Object -Unique) {
+        $destination = Join-Path -Path $targetLib -ChildPath $wanted
+        if (-not (Test-Path -LiteralPath $destination)) {
+            Copy-Item -LiteralPath $existing -Destination $destination
+            Write-Host "linked $wanted from $(Split-Path -Leaf $existing)"
+        }
     }
 }
 

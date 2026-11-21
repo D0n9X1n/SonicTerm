@@ -265,10 +265,11 @@ Use a Windows x64 host with the MSVC target, vcpkg, `cargo-wix` 0.3.9, and WiX
 Toolset 3.14.1.20250415. CI logic coverage uses `cargo-llvm-cov` 0.9.1.
 `scripts/setup-windows-cairo.ps1` looks for `vcpkg.exe` through `VCPKG_ROOT`,
 `VCPKG_INSTALLATION_ROOT`, or `C:\vcpkg` and installs static Cairo plus pkgconf.
-vcpkg ports do not always install a static library under the name Cairo's
-pkg-config file links (zlib 1.4 installs `libzs.lib` for `-lzs`), so the script
-gives every library that link names a `<name>.lib` in the vcpkg lib directory,
-puts that directory on `LIB`, and fails naming any library it cannot find.
+The library names Cairo's static link uses do not always match vcpkg's files
+(zlib 1.4 installs `libzs.lib` and lists `-llibzs`, but the linker is asked for
+`zs.lib`), so the script gives every listed library a `<name>.lib` with and
+without its `lib` prefix in the vcpkg lib directory, puts that directory on
+`LIB`, and fails naming any library it cannot find.
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc

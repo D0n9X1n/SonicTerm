@@ -159,7 +159,8 @@ class TargetTests(unittest.TestCase):
             # for (zlib 1.4 installs libzs.lib for `zs`), so the script gives every asked-for name a `<name>.lib` in
             # the target lib directory and puts that directory on LIB, where MSVC's linker looks for bare names.
             self.assertIn("& $pkgConfig --libs --static cairo", source)
-            self.assertIn('@("lib$name.lib", "${name}static.lib", "${name}MT.lib")', source)
+            self.assertIn("$_ -clike '-l*'", source)
+            self.assertIn('$stem = if ($name.StartsWith("lib")) { $name.Substring(3) } else { $name }', source)
             self.assertIn("LIB = $linkSearch", source)
 
 
