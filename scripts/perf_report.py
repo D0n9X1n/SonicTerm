@@ -1,6 +1,9 @@
 """Perf report."""
 
 from __future__ import annotations
+import json
+import os
+from pathlib import Path
 import platform
 import re
 import sys
@@ -16,6 +19,41 @@ import perf_settings
 COMPLETENESS_SOURCES = {"S9/default": ("perf_s9_end", "S9"), "S12/default": ("perf_s12_end", "S12")}
 COMPLETENESS_FILE = "completeness.json"
 _HOST_PLATFORMS = {"darwin": "macos", "win32": "windows"}
+INCOMPLETE_NOTE = ("Each variant below has no complete comparison, so the comparison fails (exit 1) even when every "
+                   "other row passed. A failure both sides share is missing comparison evidence, not proof of a "
+                   "harness defect.")
+
+
+def write_atomically(path: Path, text: str) -> None:
+    """Replace `path` with `text` through a sibling file, so a kill mid-write leaves the previous whole file."""
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(text, encoding="utf-8")
+    os.replace(partial, path)
+
+
+def write_json_atomically(path: Path, data: object) -> None:
+    """Write `data` as indented JSON through write_atomically, as perf_outcomes._write_json formats it."""
+    write_atomically(path, json.dumps(data, indent=2, default=str) + "\n")
+
+
+def incomplete_lines(results: Sequence[perf_sets.SetResult], pending: Mapping[str, str],
+                     require_base: bool = False) -> list[str]:
+    """The Incomplete section's lines: each stopped set, each head that failed or was blocked, with `require_base`
+    every other strict gap, and each variant in `pending` (not measured, or cut short) with its reason."""
+    lines = []
+    for result in results:
+        if result.unavailable is not None:
+            # When: the diagnostic is declared unavailable on both sides, the table already says so; it is no gap.
+            continue
+        if result.stopped is not None:
+            lines.append(f"- {result.label} {result.set_name}: {result.stopped}")
+        elif result.head.failed or result.head.blocked:
+            lines.append(f"- {result.label} {result.set_name} head: "
+                         f"{'failed' if result.head.failed else 'blocked'}: {result.head.failed or result.head.blocked}")
+        elif require_base:
+            lines.extend(f"- {problem}" for problem in perf_sets.strict_problems([result]))
+    lines.extend(f"- {label}: {reason}" for label, reason in pending.items())
+    return lines
 
 
 def completeness_rows(results: Sequence[perf_sets.SetResult], shas: Mapping[str, str], environ: Mapping[str, str],
@@ -72,12 +110,14 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
                         unclassified_rows: Sequence[Sequence[str]] = (),
                         counters_only_rows: Sequence[Sequence[str]] = (),
                         attribution_rows: Sequence[Sequence[str]] = (),
-                        contention_rows: Sequence[Sequence[str]] = ()) -> str:
+                        contention_rows: Sequence[Sequence[str]] = (),
+                        incomplete: Sequence[str] = ()) -> str:
     """Assemble comparison.md: the PR table, the laps, counters, overhead and allocation tables when run,
     the host block and details.
 
     The counters section appears when the counters set ran or was skipped; `counters_note` says which.
-    `capped_note` names the variants whose short-mode runs were capped, under the PR table.
+    `capped_note` names the variants whose short-mode runs were capped, under the PR table. `incomplete`
+    lists the variants without a complete comparison (incomplete_lines), in a section after the PR table.
     """
     # Resolve this runtime-only dependency after module initialization.
     import perf_attribution_report
@@ -88,6 +128,8 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
     import perf_inventory
     parts = ["## Performance comparison\n\n" + perf_inventory.render_table(rows)
              + (f"\n{capped_note}\n" if capped_note else "")]
+    if incomplete:
+        parts.append(f"### Incomplete\n\n{INCOMPLETE_NOTE}\n\n" + "\n".join(incomplete) + "\n")
     if counters_only_rows:
         parts.append("### Counters-only workloads (`--counters` runs, never pooled with timed runs)\n\n"
                      f"{perf_comparison_rows.COUNTERS_ONLY_NOTE}\n\n" + perf_inventory.render_table(counters_only_rows))

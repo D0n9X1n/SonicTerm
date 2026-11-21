@@ -64,7 +64,7 @@ class DisplayReference:
 
 
 class StopComparison(Exception):
-    """A schema failure, a refusal or an unresolved cleanup: the comparison stops with exit 1 and the reason."""
+    """An unresolved cleanup, a result of another harness or a cancel: the comparison stops with exit 1 and the reason."""
 
 
 @dataclass
@@ -82,6 +82,48 @@ class SetResult:
     requested_runs: int = 0
     # Why a declared diagnostic is unavailable on both sides (its harness cfg is off); such a set never runs.
     unavailable: str | None = None
+    # Why the set ended without its runs: its variant ended (a shared failure, a schema failure, a refusal, a failed
+    # head) or the comparison stopped. Every side that could run is then failed with this reason and keeps no run.
+    stopped: str | None = None
+
+
+@dataclass
+class VariantFailure:
+    """How one variant's sets are failing, carried from each set to the next.
+
+    `streaks` holds each side's run of shared failures (perf_outcomes.SHARED_FAILURE_KINDS); `ended` is why the
+    variant runs no further attempt and `ended_in` the set that ended it; `current` is the set in progress, so a
+    comparison that stops keeps its attempts.
+    """
+
+    streaks: perf_statistics.FailureStreaks = field(
+        default_factory=lambda: perf_statistics.FailureStreaks(perf_outcomes.SHARED_FAILURE_KINDS))
+    ended: str | None = None
+    ended_in: str = ""
+    current: SetResult | None = None
+
+    def end(self, set_name: str, reason: str) -> str:
+        """Record that `set_name` ended the variant for `reason`; return the reason."""
+        self.ended, self.ended_in = reason, set_name
+        return reason
+
+
+def end_set(result: SetResult, reason: str) -> SetResult:
+    """Record that `result` ended without its runs: each side not blocked fails with `reason` and keeps no run."""
+    result.stopped = reason
+    for side in (result.base, result.head):
+        side.outcomes = []
+        # When: the side was blocked before the set ended, it never ran, and its blocked reason stays.
+        if not side.blocked:
+            side.failed = reason
+    return result
+
+
+def shared_failure_reason(kind: str, streaks: perf_statistics.FailureStreaks) -> str:
+    """Why a variant ended on a failure both sides share; it is missing evidence, not proof of a harness defect."""
+    return (f"base and head both failed with {kind} on {streaks.length} consecutive runs each, so this variant has "
+            f"no comparison evidence; both sides failing alike does not prove a harness defect "
+            f"(base: {streaks.reasons['base']}; head: {streaks.reasons['head']})")
 
 
 def grid_size(grid: object) -> tuple[int, int] | None:
@@ -105,7 +147,7 @@ def renderer_identity(renderer: Mapping | None) -> dict | None:
 
 def run_set(label: str, plans: Mapping[str, perf_outcomes.RunPlan], base_blocked: str | None, runs: int,
             run_case: Callable[[perf_outcomes.RunPlan, Path], perf_outcomes.RunOutcome], evidence: Path, set_name: str = "timed",
-            display: DisplayReference | None = None) -> SetResult:
+            display: DisplayReference | None = None, variant: VariantFailure | None = None) -> SetResult:
     """Run one set A B B A until each side has `runs` valid runs.
 
     An invalid run is retried, at most RETRY_LIMIT times per side. A grid that differs from
@@ -115,17 +157,32 @@ def run_set(label: str, plans: Mapping[str, perf_outcomes.RunPlan], base_blocked
     whatever grid its display allows, an adapter or presenter that differs from the first valid
     run's makes the pair invalid too. A base that cannot build or run is
     `blocked` and the head still runs; a head that cannot is blocked, and one that exhausts
-    its retries fails. A schema failure, a refusal or an unresolved cleanup stops the comparison.
+    its retries fails.
+
+    `variant` carries failures across the variant's sets. Base and head failing the same shared
+    way (a harness timeout, or an invalidation that is not an occlusion) on SHARED_FAILURE_RETRIES + 1
+    consecutive attempts each end the variant; so do a schema failure, a refusal and a head that
+    exhausted its retries. The set that ends it is stopped, and every later set of the variant runs
+    nothing. An unresolved cleanup or a result of another harness stops the comparison.
     """
     # Resolve this runtime-only dependency after module initialization.
     import perf_inventory
     import perf_metrics
     sides = {side: perf_metrics.SideRuns() for side in perf_settings.SIDES}
     result = SetResult(label, set_name, sides["base"], sides["head"], target_runs=runs)
+    if variant is None:
+        variant = VariantFailure()
+    variant.current = result
+    if base_blocked:
+        sides["base"].blocked = base_blocked
+    if variant.ended is not None:
+        # When: an earlier set ended the variant, this set runs nothing and names that set, whose line holds the reason.
+        return end_set(result, f"not run: the variant ended in its {variant.ended_in} set")
     reasons: dict[str, list[str]] = {side: [] for side in perf_settings.SIDES}
     schedule = perf_statistics.AbbaSchedule(runs)
     if base_blocked:
-        sides["base"].blocked = base_blocked
+        # A base that cannot run this set shares no failure with the head.
+        variant.streaks.clear("base")
         schedule.retire("base")
     reference_grid = None
     # The first valid run's adapter and presenter; every later run of the set must match them.
@@ -177,9 +234,13 @@ def run_set(label: str, plans: Mapping[str, perf_outcomes.RunPlan], base_blocked
         verdict = perf_outcomes.compare_verdict(kind)
         if verdict == "stop":
             raise StopComparison(f"{label} {set_name} {side}: {kind}: {'; '.join(why)}")
+        if verdict == "incomplete":
+            # When: a schema failure or a refusal leaves this run untrusted, only its variant ends.
+            return end_set(result, variant.end(set_name, f"{side}: {kind}: {'; '.join(why)}"))
         if verdict == "blocked":
             sides[side].blocked = "; ".join(why) or kind
             sides[side].outcomes = []
+            variant.streaks.clear(side)
             schedule.retire(side)
             if side == "head":
                 return result
@@ -188,6 +249,11 @@ def run_set(label: str, plans: Mapping[str, perf_outcomes.RunPlan], base_blocked
             sides[side].outcomes.append(outcome)
         else:
             reasons[side].append(f"{kind}: {'; '.join(why)}")
+        variant.streaks.record(side, kind, "; ".join(why))
+        shared = variant.streaks.shared
+        if shared is not None:
+            # When: both sides fail alike, more retries would only spend the budget; checked before the head's budget.
+            return end_set(result, variant.end(set_name, shared_failure_reason(shared, variant.streaks)))
         schedule.record(side, verdict == "valid")
         failed = schedule.failed_side
         if failed is not None:
@@ -195,6 +261,8 @@ def run_set(label: str, plans: Mapping[str, perf_outcomes.RunPlan], base_blocked
             sides[failed].outcomes = []
             if failed == "head":
                 sides[failed].failed = summary
+                # A failed head fails the variant, so its later sets would add time but no evidence.
+                variant.end(set_name, f"head failed: {summary}")
                 return result
             sides[failed].blocked = summary
             schedule.retire(failed)
@@ -222,6 +290,10 @@ def strict_problems(results: Iterable[SetResult]) -> list[str]:
     problems = []
     # A declared-unavailable diagnostic is reported, never a strict problem; every other gap stays one.
     for result in runnable:
+        if result.stopped is not None:
+            # When: the set ended without its runs, one reason covers both sides.
+            problems.append(f"{result.label} {result.set_name}: stopped: {result.stopped}")
+            continue
         for side_name, side in (("base", result.base), ("head", result.head)):
             where = f"{result.label} {result.set_name} {side_name}"
             # When: the base has no counters feature, its counters cells are n/a by design, not missing runs.
@@ -247,7 +319,8 @@ def capped_label(result: SetResult) -> str:
 
 
 def comparison_exit(results: Iterable[SetResult], require_base: bool = False) -> int:
-    """Exit 1 when a head set failed, 3 when the head was blocked, else 0; a blocked base is reported, not failed.
+    """Exit 1 when a head set failed or a set stopped, 3 when the head was blocked, else 0; a blocked base is
+    reported, not failed.
 
     With `require_base`, any strict problem (either side blocked, failed or short) exits 1 instead.
     """
@@ -259,7 +332,8 @@ def comparison_exit(results: Iterable[SetResult], require_base: bool = False) ->
         # When: only declared-unavailable diagnostics were selected, nothing ran, so the comparison is blocked.
         return perf_settings.EXIT_BLOCKED
     results = runnable
-    if any(result.head.failed for result in results):
+    # A stopped set has no evidence on either side, so it fails the comparison like a failed head.
+    if any(result.head.failed or result.stopped for result in results):
         return perf_settings.EXIT_FAIL
     if any(result.head.blocked for result in results):
         return perf_settings.EXIT_BLOCKED

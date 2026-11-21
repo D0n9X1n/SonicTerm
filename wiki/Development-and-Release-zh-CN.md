@@ -320,16 +320,22 @@ flowchart TD
     refs["base 与 head ref"] --> trees["每个 ref 一个 worktree 与 target 目录"]
     trees --> overlay["把 head 的 harness 覆盖到两棵树上并记录其哈希"]
     overlay --> build["逐个对每棵树做 release 构建"]
-    build --> run["按 ABBA 顺序进行下一次运行：新的 harness 进程与新的 scratch 目录"]
+    build --> identity["写入 run-identity.json 与进行中的 comparison.md"]
+    identity --> run["按 ABBA 顺序进行下一次运行：新的 harness 进程与新的 scratch 目录"]
     run --> cleanup["通过锚进程清理每个终端会话"]
     cleanup --> settled{"清理已完成？"}
-    settled -- 否 --> failed["清理未解决：对比以退出码 1 停止"]
+    settled -- 否 --> stopped["对比以退出码 1 停止并写出部分 comparison.md"]
     settled -- 是 --> valid{"运行有效？"}
-    valid -- schema 失败或拒绝运行 --> stopped["对比以退出码 1 停止"]
-    valid -- 其它无效运行，最多重试 3 次 --> run
+    valid -- 非托管运行或其它 harness 的结果 --> stopped
+    valid -- schema 失败或拒绝运行 --> ended["该变体结束，记为不完整"]
+    valid -- 两侧各连续两次超时或非遮挡的无效运行 --> ended
+    valid -- 其它无效运行，每侧最多重试 3 次 --> run
     valid -- 是 --> enough{"两侧都达到要求的有效运行次数？"}
     enough -- 否 --> run
-    enough -- 是 --> table["汇总样本并输出对比表"]
+    enough -- 是 --> next["每个变体结束后重写 comparison.md"]
+    ended --> next
+    next -- 仍有待测项 --> run
+    next -- 最后一个变体完成 --> table["汇总样本并输出对比表；有不完整变体时退出码为 1"]
 ```
 
 每个 ref 使用独立的 worktree 与 Cargo target 目录，逐个做 release 构建。head 的 harness，即 example
@@ -364,23 +370,38 @@ scratch 目录，以 `--managed` 启动，并以本侧的 worktree 为工作目�
 墙钟时长、以计数表示的已呈现帧与重绘请求以及 CPU，从不报告帧率或呈现间隔。Windows 结果只有在该实验中才可以
 带有 `synthetic_occlusion = true`。
 
-有三类运行会使对比立即以退出码 1 停止，且从不重试：未解决的清理、schema 失败与拒绝运行。
-`perf-compare.py` 中的 `classify_outcome` 在任何可重试的原因之前按以下顺序检查它们，因此带有其中之一的
-运行即使同时有可重试的问题，也会使对比停止：
+有两类运行会使对比立即以退出码 1 停止，且从不重试：未解决的清理，以及来源失败，即 `managed` 不为 true
+或 harness 哈希不是脚本所传哈希的结果（独立运行或其它 harness 的运行）。另有两类只结束所属变体：schema
+失败与拒绝运行，该变体连同原因记为不完整，下一个变体照常运行。`perf-compare.py` 中的 `classify_outcome`
+在任何可重试的原因之前按以下顺序检查它们，因此带有其中之一的运行即使同时有可重试的问题，也从不重试：
 
 1. 由结果之外的证据表明的未解决清理，例如 `run_step` 的截止时间或 Ctrl-C，见下文；
-2. schema 失败：无法解析或不符合结果 schema 的 `result.json`、`managed` 不为 true 的结果，或 harness
-   哈希不是脚本所传哈希的结果。无论 harness 如何结束都是如此，包括 harness 超时（退出码 4）与当前树
-   不支持该场景（退出码 5）。`run_step` 报告 PASS 且退出码为 0、因而退出状态可信时，缺少 `result.json`
-   （除非 harness 输出了 `NOT_EXERCISED`）或结果状态不是 `valid` 也属于 schema 失败；
+2. 来源失败，然后是 schema 失败：无法解析或不符合结果 schema 的 `result.json`。无论 harness 如何结束
+   都是如此，包括 harness 超时（退出码 4）与当前树不支持该场景（退出码 5）。`run_step` 报告 PASS 且
+   退出码为 0、因而退出状态可信时，缺少 `result.json`（除非 harness 输出了 `NOT_EXERCISED`）或结果状态
+   不是 `valid` 也属于 schema 失败；
 3. 由结果表明的未解决清理：`finish_session` 未完成，无论以哪种退出码结束；
 4. 拒绝运行：harness 拒绝了该次运行（退出码 2），例如因为继承了不安全的设置，或 scratch 目录已经存在。
 
-其它无效运行都会重试，最多 3 次。其中包括 harness 以退出码 0 结束、但 `run_step` 报告 PASS、TIMEOUT 与
-INTERRUPTED 以外状态的运行，以及 harness 在自己的截止时间（即其场景的超时）以退出码 4 结束的运行。相比之下，
+其它无效运行都会重试，每侧最多 3 次。其中包括 harness 以退出码 0 结束、但 `run_step` 报告 PASS、TIMEOUT 与
+INTERRUPTED 以外状态的运行，以及 harness 在自己的截止时间（即其场景的超时）以退出码 4 结束的运行。用尽重试的
+head 使其变体失败，该变体之后的组不再运行；用尽重试的 base 被标为 blocked，head 仍继续运行。有一种情况会更早
+结束：base 与 head 以相同方式失败，即 harness 超时（退出码 4）或非遮挡的无效运行（退出码 3），且各自连续
+两次，也就是每侧重试一次之后，该变体立即结束，其余运行与组都被跳过。运行环境无法造成这两类失败，更多重试
+只会耗费时间。其它各类失败，例如焦点、显示器、渲染器、会话或字体，保留每侧的重试预算，因为运行环境可能
+造成它们。两侧以相同方式失败的变体没有对比证据；这并不证明 harness 有缺陷。相比之下，
 `run_step` 的截止时间（状态 TIMEOUT）或被 Ctrl-C 中断的 `run_step`（状态 INTERRUPTED）属于未解决的清理：
 无论 harness 的退出码如何，对比都会以退出码 1 停止，而不是开始下一次尝试。`run_step` 的截止时间比 harness
 自己的截止时间晚 30 秒，正好在 harness 的 watchdog 将要中止 harness 的时刻或之前。
+
+失败按变体跟踪，贯穿其 timed、laps、counters 与 alloc 组。`run-identity.json` 与 `comparison.md` 在首次运行
+之前写入，每个变体结束后重写，并在每条退出路径上再次写入：停止、错误，以及 SIGINT 或 SIGTERM（被取消的
+GitHub job 会在 SIGKILL 之前发送）。第一个这样的信号像 Ctrl-C 一样结束正在进行的运行，之后的信号无法打断
+报告的写入；每个文件都通过同目录的临时文件替换，因此写到一半被杀死时会留下完整的上一版。在最后一个变体之前，
+`comparison.md` 以 `**Comparison in progress:**` 开头；停止之后以 `**Stopped comparison:**` 与原因开头。
+其中的表格保持完整对比的格式，只包含已测量的变体。PR 表之后的 `Incomplete` 部分列出每个没有完整对比的
+变体及原因：未凑满运行就结束的组、失败或被阻止的 head、未测量的变体，以及在 `--require-base` 下的其它
+所有缺口。任何不完整的变体都会使对比失败，退出码为 1；不传 `--require-base` 且 head 仅被阻止时退出码为 3。
 
 harness 报告显示其窗口的显示器：名称、刷新率与缩放，不包括分辨率。每次运行的显示器必须在双方都报告的
 每个字段上与对比的参考显示器一致；任一方为 null 的字段不检查，参考显示器缺少的字段取自之后的运行。
@@ -437,6 +458,8 @@ PR 与 Change。
 - 运行级指标（例如 CPU 时间）给出各次运行的中位数与最小–最大值。
 - 噪声下限就是这一逐次运行的离散范围，而不是合并后帧样本的极值；落在其中的变化视为噪声。
 - `n/a` 表示 base 不报告该字段，`blocked` 表示 base 无法构建或运行该场景，并附带错误。
+- `failed` 表示 head 用尽了重试。未凑满运行就结束的组（共同失败、schema 失败、拒绝运行、变体结束后被跳过的组，
+  或停止）没有对应的行；`Incomplete` 部分列出它及其原因。
 - 检查点的内存取自该检查点自己带标注的 `memory snapshot` 行，再加上 macOS `footprint` 读数；
   该日志行见[日志](Logging-zh-CN#info-级别的聚合快照)。权威样本是尝试次数最高的完整样本；没有完整样本时取
   最后一次不完整的尝试，它仍计入，单元格会加上 `, N partial`。从不以周期性样本替代。同一次尝试的两个完整样本

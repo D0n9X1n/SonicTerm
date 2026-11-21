@@ -472,16 +472,22 @@ flowchart TD
     refs["base and head refs"] --> trees["one worktree and target directory per ref"]
     trees --> overlay["overlay the head's harness on both trees and record its hash"]
     overlay --> build["release-build each tree, one at a time"]
-    build --> run["next run in ABBA order: a fresh harness process in a new scratch directory"]
+    build --> identity["write run-identity.json and a progress comparison.md"]
+    identity --> run["next run in ABBA order: a fresh harness process in a new scratch directory"]
     run --> cleanup["clean up each terminal session through its anchor"]
     cleanup --> settled{"cleanup settled?"}
-    settled -- no --> failed["unresolved cleanup: the comparison stops with exit 1"]
+    settled -- no --> stopped["the comparison stops with exit 1 and writes a partial comparison.md"]
     settled -- yes --> valid{"valid run?"}
-    valid -- schema failure or refusal --> stopped["the comparison stops with exit 1"]
-    valid -- other invalid run, retried at most 3 times --> run
+    valid -- result of an unmanaged run or another harness --> stopped
+    valid -- schema failure or refusal --> ended["the variant ends, recorded incomplete"]
+    valid -- timeout or non-occlusion invalid run on both sides twice each --> ended
+    valid -- other invalid run, retried at most 3 times per side --> run
     valid -- yes --> enough{"each side has the requested valid runs?"}
     enough -- no --> run
-    enough -- yes --> table["pool the samples and print the table"]
+    enough -- yes --> next["rewrite comparison.md after each variant"]
+    ended --> next
+    next -- more to measure --> run
+    next -- last variant done --> table["pool the samples and print the table; exit 1 if a variant is incomplete"]
 ```
 
 Each ref gets its own worktree and Cargo target directory, and the trees are
@@ -538,34 +544,61 @@ Its `covered` phase reports wall time, presented frames and redraws as counts,
 and CPU, never a frame rate or present interval, on both hosts. A Windows result
 may carry `synthetic_occlusion = true` only for this experiment.
 
-Three kinds of run stop the comparison at once with exit 1 and are never
-retried: an unresolved cleanup, a schema failure, and a refusal.
-`classify_outcome` in `perf-compare.py` checks for them before any retryable
-reason, in this order, so a run that has one stops the comparison even when it
-also has a retryable problem:
+Two kinds of run stop the comparison at once with exit 1 and are never
+retried: an unresolved cleanup, and a provenance failure, a result whose
+`managed` is not true or whose harness hash is not the hash the script passed
+(a standalone run or another harness's). Two more end only their variant, which
+is recorded incomplete with the reason while the next variant still runs: a
+schema failure and a refusal. `classify_outcome` in `perf-compare.py` checks for
+all of them before any retryable reason, in this order, so a run that has one is
+never retried even when it also has a retryable problem:
 
 1. an unresolved cleanup that evidence other than the result shows, such as a
    `run_step` deadline or Ctrl-C, described below;
-2. a schema failure: a `result.json` that cannot be parsed or does not match the
-   result schema, a result whose `managed` is not true, or one whose harness hash
-   is not the hash the script passed. This holds however the harness ended,
-   including a harness timeout (exit 4) and a block (exit 5). Once `run_step` has
-   reported PASS with exit 0, so the exit can be trusted, a missing `result.json`
-   (unless the harness printed `NOT_EXERCISED`) or a result whose status is not
-   `valid` is one too;
+2. a provenance failure, then a schema failure: a `result.json` that cannot be
+   parsed or does not match the result schema. This holds however the harness
+   ended, including a harness timeout (exit 4) and a block (exit 5). Once
+   `run_step` has reported PASS with exit 0, so the exit can be trusted, a
+   missing `result.json` (unless the harness printed `NOT_EXERCISED`) or a result
+   whose status is not `valid` is a schema failure too;
 3. an unresolved cleanup that the result shows: a `finish_session` that did not
    settle, whatever the exit;
 4. a refusal: the harness refused the run (exit 2), for example over an unsafe
    inherited setting or a scratch directory that already exists.
 
-Every other invalid run is retried, at most 3 times. That includes a run whose
-harness exits 0 while `run_step` reports a status other than PASS, TIMEOUT, or
-INTERRUPTED, and one whose harness exits 4 at its own deadline, its scenario's
-timeout. A `run_step` deadline (status TIMEOUT) or a `run_step` interrupted by
+Every other invalid run is retried, at most 3 times per side. That includes a
+run whose harness exits 0 while `run_step` reports a status other than PASS,
+TIMEOUT, or INTERRUPTED, and one whose harness exits 4 at its own deadline, its
+scenario's timeout. A head out of retries fails its variant, whose later sets
+then do not run; a base out of retries is blocked and the head still runs. One
+case ends sooner: when base and head both fail the same way, with a harness
+timeout (exit 4) or an invalidation (exit 3) that is not an occlusion, on two
+consecutive attempts each, that is after one retry a side, the variant ends at
+once and its remaining runs and sets are skipped. The runner cannot cause those
+two kinds, so more retries would only spend time. Every other kind, such as
+focus, display, renderer, session or font, keeps the per-side budget, because
+the runner can cause it. A variant whose sides fail alike has no comparison
+evidence; that does not prove a harness defect. A `run_step` deadline (status TIMEOUT) or a `run_step` interrupted by
 Ctrl-C (status INTERRUPTED), by contrast, is an unresolved cleanup: whatever the
 harness's exit, the comparison stops with exit 1 instead of starting its next
 attempt. `run_step`'s deadline is 30 s past the harness's own deadline, at or
 just before the point where the harness's watchdog would abort the harness.
+
+Failure is tracked per variant, across its timed, laps, counters and alloc
+sets. `run-identity.json` and `comparison.md` are written before the first run,
+rewritten after every variant, and written again on every exit path: a stop, an
+error, and SIGINT or SIGTERM, which a cancelled GitHub job sends before SIGKILL.
+The first such signal ends the run in flight as Ctrl-C does, and a later one
+cannot cut the report short; each file is replaced through a sibling file, so a
+kill mid-write leaves the previous copy whole. Until the last variant,
+`comparison.md` opens with `**Comparison in progress:**`; after a stop it opens
+with `**Stopped comparison:**` and the reason. Its tables keep the format of a
+complete comparison and hold only the variants measured. An `Incomplete`
+section after the PR table names each variant without a complete comparison and
+why: a set that ended without its runs, a failed or blocked head, a variant not
+measured, and with `--require-base` every other gap. Any incomplete variant
+fails the comparison, with exit 1, or exit 3 for a head that is only blocked
+without `--require-base`.
 
 The harness reports the display that shows its window: its name, refresh rate,
 and scale, not its resolution. Each run's display must match the comparison's
@@ -650,6 +683,9 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   change inside it is noise.
 - `n/a` marks a field the base does not report, and `blocked` marks a scenario
   the base cannot build or run, with the error.
+- `failed` marks a head out of retries. A set that ended without its runs (a
+  shared failure, a schema failure, a refusal, a set skipped after its variant
+  ended, or a stop) has no row; the `Incomplete` section names it and why.
 - Memory at a checkpoint comes from that checkpoint's own tagged `memory
   snapshot` line, plus a macOS `footprint` reading;
   [Logging](Logging#aggregate-snapshot-at-info) describes the line. The

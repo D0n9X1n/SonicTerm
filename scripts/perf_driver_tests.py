@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import tempfile
 import unittest
 from unittest import mock
@@ -21,11 +22,13 @@ import perf_focus_tests
 import perf_harness_sources
 import perf_home_tests
 import perf_host_tests
+import perf_inventory
 import perf_metrics
 import perf_outcomes_tests
 import perf_prebuilt
 import perf_scenarios
 import perf_sets
+import perf_sets_tests
 import perf_settings
 import perf_smoke
 import perf_smoke_tests
@@ -125,6 +128,8 @@ class CompareHarness:
         selection = () if "--build-only" in options else ("--scenario", *scenarios, "--runs", "1")
         args = perf_arguments.parse_args(["--base", "main", "--head", "HEAD", *selection, *options])
         plans = []
+        # Kept on the test, so a test whose comparison raises still reads its evidence and the runs it planned.
+        self.out, self.plans = out, plans
         monitor = {"name": "Built-in Display", "refresh_rate_millihertz": 60000, "scale_factor": 2.0}
 
         def fake_run(plan, host, evidence):
@@ -399,3 +404,135 @@ class StrictBaseTests(CompareHarness, unittest.TestCase):
         code, _gate, _calls, _plans, _work, out = self.compare(base_run=perf_smoke_tests.outcome_of("blocked"))
         self.assertEqual(code, perf_settings.EXIT_PASS)
         self.assertNotIn("Incomplete comparison", (out / "comparison.md").read_text(encoding="utf-8"))
+
+
+# S1 and S2, so a test can show what happens to the variant after the one that failed.
+TWO_VARIANTS = {"schema_version": 1, "scenarios": perf_build_tests.LIST_JSON["scenarios"] + [
+    {"id": "S2", "variants": ["default"], "title": "Typing", "timeout_s": 120, "short_timeout_s": 30}]}
+
+
+def on_scenario(scenario_id, failing, otherwise=None):
+    """A run answer that gives `failing(plan)` for `scenario_id`'s runs and a valid display run for the others."""
+    def answer(plan):
+        if plan.scenario.id == scenario_id:
+            return failing(plan)
+        return (otherwise or perf_display_tests.display_run(60000))(plan)
+    return answer
+
+
+class FailureDriverTests(CompareHarness, unittest.TestCase):
+    """A failing variant costs little time, stops only itself unless the host is unsafe, and always leaves a table."""
+
+    def document(self):
+        return (self.out / "comparison.md").read_text(encoding="utf-8")
+
+    def incomplete(self):
+        """The Incomplete section's lines."""
+        return self.document().split("### Incomplete", 1)[1].split("###", 1)[0]
+
+    def test_a_shared_timeout_stops_after_one_retry_a_side_and_skips_the_counters_set(self):
+        # Both sides time out on every run: two runs a side end the variant, the counters set never runs, and the
+        # comparison fails quickly, naming the gap as missing evidence.
+        code, _gate, _calls, plans, _work, _out = self.compare(
+            options=("--counters",), head_manifest=perf_counter_schema_tests.COUNTERS_MANIFEST,
+            base_run=perf_sets_tests.timeout_run, head_run=perf_sets_tests.timeout_run)
+        self.assertEqual(code, perf_settings.EXIT_FAIL)
+        self.assertEqual([plan.side for plan in plans], ["base", "head", "head", "base"])
+        self.assertFalse(any(plan.counters for plan in plans))
+        incomplete = self.incomplete()
+        self.assertIn("- S1/default timed: base and head both failed with timeout on 2 consecutive runs each", incomplete)
+        self.assertIn("missing comparison evidence, not proof of a harness defect", incomplete)
+        self.assertIn("- S1/default counters: not run: the variant ended in its timed set", incomplete)
+        self.assertNotIn("| S1/default | status", self.document())
+
+    def test_a_head_only_timeout_keeps_the_full_budget_and_fails(self):
+        # The base measures; the head is retried RETRY_LIMIT times, keeps its failed row, and its counters set is
+        # skipped because the variant already failed.
+        code, _gate, _calls, plans, _work, _out = self.compare(
+            options=("--counters",), head_manifest=perf_counter_schema_tests.COUNTERS_MANIFEST,
+            head_run=perf_sets_tests.timeout_run)
+        self.assertEqual(code, perf_settings.EXIT_FAIL)
+        self.assertEqual([plan.side for plan in plans], ["base"] + ["head"] * (perf_settings.RETRY_LIMIT + 1))
+        self.assertIn("| S1/default | status | 1 valid run | failed: no 1 valid runs", self.document())
+        self.assertIn("- S1/default timed head: failed: no 1 valid runs after 3 retries", self.incomplete())
+        self.assertIn("- S1/default counters: not run: the variant ended in its timed set", self.incomplete())
+
+    def test_a_focus_failure_on_both_sides_still_retries(self):
+        # The runner can cause a focus failure, so both sides keep their budgets: seven runs before the head fails.
+        theft = perf_smoke_tests.outcome_of("theft")
+        code, _gate, _calls, plans, _work, _out = self.compare(base_run=theft, head_run=theft)
+        self.assertEqual(code, perf_settings.EXIT_FAIL)
+        self.assertEqual([plan.side for plan in plans], ["base", "head", "head", "base", "base", "head", "head"])
+        self.assertIn("- S1/default timed head: failed: no 1 valid runs after 3 retries: focus", self.incomplete())
+
+    def test_a_schema_error_mid_set_marks_only_its_variant_incomplete(self):
+        # S1's head result breaks the schema: S1 is recorded incomplete with the reason, S2 still runs and keeps its
+        # table row, and the comparison fails because S1 has no evidence.
+        code, _gate, _calls, plans, _work, _out = self.compare(
+            scenarios=("S1", "S2"), listing=TWO_VARIANTS, head_run=on_scenario("S1", perf_sets_tests.schema_run))
+        self.assertEqual(code, perf_settings.EXIT_FAIL)
+        self.assertEqual([(plan.scenario.id, plan.side) for plan in plans],
+                         [("S1", "base"), ("S1", "head"), ("S2", "base"), ("S2", "head")])
+        document = self.document()
+        self.assertTrue(document.startswith("## Performance comparison"), document[:120])
+        self.assertIn("| S2/default | status | 1 valid run | 1 valid run |", document)
+        self.assertNotIn("| S1/default | status", document)
+        self.assertIn("- S1/default timed: head: schema: phases is not a list of objects", self.incomplete())
+
+    def test_a_cleanup_failure_stops_everything_and_leaves_a_partial_report(self):
+        # Survivors of S1's head run may disturb every later run, so the comparison stops at once: S2 never runs,
+        # and comparison.md and run-identity.json still name both variants' state.
+        with self.assertRaises(perf_sets.StopComparison) as raised:
+            self.compare(scenarios=("S1", "S2"), listing=TWO_VARIANTS,
+                         head_run=on_scenario("S1", perf_smoke_tests.outcome_of("survivor")))
+        self.assertIn("S1/default timed head: cleanup", str(raised.exception))
+        self.assertEqual([(plan.scenario.id, plan.side) for plan in self.plans], [("S1", "base"), ("S1", "head")])
+        document = self.document()
+        self.assertTrue(document.startswith("**Stopped comparison:** S1/default timed head: cleanup"), document[:200])
+        incomplete = self.incomplete()
+        self.assertIn("- S1/default timed: stopped: S1/default timed head: cleanup", incomplete)
+        self.assertIn("- S2/default: not measured: the comparison stopped before reaching it", incomplete)
+        identity = json.loads((self.out / perf_inventory.RUN_IDENTITY_FILE).read_text(encoding="utf-8"))
+        self.assertEqual([(entry["label"], entry["dataset"]) for entry in identity["sets"]], [("S1/default", "timed")])
+        self.assertTrue(identity["sets"][0]["head"]["status"].startswith("stopped: "))
+        self.assertEqual(identity["sets"][0]["base"]["accepted"], [])
+
+    def test_sigterm_mid_comparison_writes_a_partial_report(self):
+        # A cancelled job sends SIGTERM: the handler the comparison installed ends the run in flight, the measured S1
+        # keeps its row in its existing format, S2 is named incomplete, and the previous handler is restored.
+        before = signal.getsignal(signal.SIGTERM)
+        progress = []
+
+        def cancel(plan):
+            progress.append(self.document())
+            handler = signal.getsignal(signal.SIGTERM)
+            self.assertTrue(callable(handler) and handler is not before, handler)
+            handler(signal.SIGTERM, None)
+            raise AssertionError("the handler did not end the run")
+        with self.assertRaises(perf_sets.StopComparison) as raised:
+            self.compare(scenarios=("S1", "S2"), listing=TWO_VARIANTS, head_run=on_scenario("S2", cancel))
+        self.assertEqual(str(raised.exception), "cancelled by SIGTERM")
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+        self.assertTrue(progress[0].startswith("**Comparison in progress:** 1 of 2 variants measured."), progress[0][:120])
+        document = self.document()
+        self.assertTrue(document.startswith("**Stopped comparison:** cancelled by SIGTERM."), document[:200])
+        self.assertIn("| S1/default | status | 1 valid run | 1 valid run |", document)
+        incomplete = self.incomplete()
+        self.assertIn("- S2/default timed: stopped: cancelled by SIGTERM", incomplete)
+        self.assertIn("- S2/default: the comparison stopped while measuring it", incomplete)
+
+    def test_run_identity_and_a_progress_report_exist_before_the_first_run(self):
+        # A job killed outright still leaves both files: they are written before measuring and on every variant.
+        seen = []
+
+        def first(plan):
+            identity = json.loads((self.out / perf_inventory.RUN_IDENTITY_FILE).read_text(encoding="utf-8"))
+            seen.append((identity["sets"], self.document().split("\n", 1)[0]))
+            return perf_display_tests.display_run(60000)(plan)
+        code, _gate, _calls, _plans, _work, _out = self.compare(base_run=first)
+        self.assertEqual(code, perf_settings.EXIT_PASS)
+        self.assertEqual(seen[0], ([], "**Comparison in progress:** 0 of 1 variants measured."))
+        self.assertNotIn("Comparison in progress", self.document())
+        self.assertNotIn("### Incomplete", self.document())
+        self.assertFalse(any(path.name.endswith(".partial") for path in self.out.iterdir()))
+

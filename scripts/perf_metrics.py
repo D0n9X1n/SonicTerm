@@ -14,7 +14,8 @@ import perf_statistics
 
 @dataclass
 class SideRuns:
-    """One side's valid runs of a scenario, or why it has none: `blocked` (cannot run) or `failed` (head only)."""
+    """One side's valid runs of a scenario, or why it has none: `blocked` (cannot run) or `failed` (a head out of
+    retries, or either side of a set that stopped)."""
 
     outcomes: list = field(default_factory=list)
     blocked: str | None = None

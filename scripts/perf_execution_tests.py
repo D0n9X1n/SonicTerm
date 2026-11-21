@@ -236,7 +236,8 @@ class ExecuteRunTests(unittest.TestCase):
         self.assertTrue(any("native_request_redraw_unregistered" in problem for problem in outcome.schema_problems))
 
     def test_a_counters_run_whose_harness_ignored_the_flag_is_a_schema_failure(self):
-        # A harness that ignored --counters measured nothing, so the run stops the comparison instead of a row of 0.
+        # A harness that ignored --counters measured nothing, so the run is a schema failure that ends its variant,
+        # never a row of 0.
         outcome, _evidence, _gate = self.run_plan(smoke=False, counters=True)
         self.assertEqual(perf_outcomes.classify_outcome(outcome)[0], "schema")
         self.assertTrue(any("--counters" in problem for problem in outcome.schema_problems), outcome.schema_problems)

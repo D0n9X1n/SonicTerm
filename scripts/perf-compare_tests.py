@@ -35,6 +35,10 @@ from perf_test_fixture import (
 from perf_statistics_tests import (
     StatisticsTests,
     AbbaScheduleTests,
+    FailureStreakTests,
+)
+from perf_signals_tests import (
+    StopSignalTests,
 )
 from perf_focus_tests import (
     command,
@@ -121,6 +125,7 @@ from perf_smoke_tests import (
 )
 from perf_sets_tests import (
     RunSetTests,
+    VariantFailureTests,
 )
 from perf_host_tests import (
     FakeGit,
@@ -133,6 +138,7 @@ from perf_driver_tests import (
     CompareHarness,
     CompareDriverTests,
     StrictBaseTests,
+    FailureDriverTests,
 )
 from perf_prebuilt_tests import (
     PRODUCER_ENV,

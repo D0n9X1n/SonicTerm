@@ -20,10 +20,18 @@ import perf_settings
 # --- One run: execution and classification --------------------------------------------------
 
 _NOT_EXERCISED = re.compile(r"\bNOT_EXERCISED\b")
-# The smoke retries only an occlusion; a comparison retries every invalid run and stops on a schema failure.
+# The smoke retries only an occlusion; a comparison retries every other invalid run.
 _SMOKE_VERDICTS = {"valid": "pass", "occluded": "retry", "blocked": "blocked"}
-# An unresolved cleanup may leave processes that disturb every later run, so it stops a comparison too.
-_COMPARE_VERDICTS = {"valid": "valid", "blocked": "blocked", "schema": "stop", "refused": "stop", "cleanup": "stop"}
+# A schema failure or a refusal ends only its variant, which is recorded incomplete. An unresolved cleanup may leave
+# processes that disturb every later run, and a result of another harness or an unmanaged run disproves every
+# binary, so either stops the whole comparison.
+_COMPARE_VERDICTS = {"valid": "valid", "blocked": "blocked", "schema": "incomplete", "refused": "incomplete",
+                     "cleanup": "stop", "provenance": "stop"}
+# The failures base and head can share that the runner cannot cause: the harness's own deadline (exit 4) and an
+# invalidation (exit 3) that is not an occlusion. Both sides failing one of them the same way ends the variant.
+SHARED_FAILURE_KINDS = ("timeout", "invalid")
+# validate_result's problems that say the result is not this comparison's managed run of this harness.
+PROVENANCE_PREFIXES = ("managed is ", "harness_hash ")
 
 
 # SIGKILL is signal 9 on every POSIX host that runs the harness; signal.SIGKILL does not exist on Windows.
@@ -160,6 +168,11 @@ def _deliberately_killed(outcome: RunOutcome) -> bool:
             and outcome.exit_code == outcome.deadline_exit_code and outcome.leftover_processes == 0)
 
 
+def provenance_problems(problems: Iterable[str]) -> list[str]:
+    """The schema problems that say a result is a standalone run or another harness's: no managed or matching hash."""
+    return [problem for problem in problems if problem.startswith(PROVENANCE_PREFIXES)]
+
+
 def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
     """Return a run's fatal kind and reasons, or None; classify_outcome explains the order."""
     result, code = outcome.result, outcome.exit_code
@@ -183,6 +196,9 @@ def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
         return "cleanup", cleanup
     notes = [str(note) for note in (result or {}).get("notes") or []]
     if not _deliberately_killed(outcome):
+        provenance = provenance_problems(outcome.schema_problems)
+        if provenance:
+            return "provenance", provenance
         if outcome.schema_problems:
             return "schema", list(outcome.schema_problems)
         # Exit 0 is trusted only when run_step reported PASS; the exit-code mapping names any other status.
@@ -210,8 +226,9 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
        harness's process group or while a process outside the group held the output open, whatever
        exit it then collected; a harness exit run_step never collected (its process-group count is
        then no measurement); and process-group members that outlived the harness;
-    2. `schema`: result.json unreadable, unmanaged or another harness's, and, once run_step
-       reported PASS so that exit 0 can be trusted, exit 0 without result.json or with another status;
+    2. `provenance`: result.json is unmanaged or another harness's; then `schema`: result.json
+       unreadable or not matching the schema, and, once run_step reported PASS so that exit 0 can be
+       trusted, exit 0 without result.json or with another status;
     3. `cleanup` from the result: finish_session did not settle. It is read only after the schema
        check, since a field of an untrusted result means nothing;
     4. `refused`: the harness refused the run (exit 2).
@@ -223,7 +240,7 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
     records, home writes, focus and the primary font), the deadline case and the exit code; the
     harness's own deadline (exit 4, its group counted) is a retryable `timeout`. The reasons of an
     occlusion or an invalidation start with the harness's invalid_reason, then its notes.
-    `compare_verdict` and `smoke_verdict` decide which kinds stop a comparison or the smoke.
+    `compare_verdict` and `smoke_verdict` decide which kinds end a variant, stop a comparison or fail the smoke.
     """
     fatal = _fatal_outcome(outcome)
     if fatal is not None:
@@ -305,7 +322,8 @@ def smoke_verdict(kind: str) -> str:
 
 
 def compare_verdict(kind: str) -> str:
-    """Map a run kind to a comparison's verdict: `valid`, `invalid` (retried), `blocked` or `stop`."""
+    """Map a run kind to a comparison's verdict: `valid`, `invalid` (retried), `blocked`, `incomplete` (ends the
+    variant) or `stop` (ends the comparison)."""
     return _COMPARE_VERDICTS.get(kind, "invalid")
 
 

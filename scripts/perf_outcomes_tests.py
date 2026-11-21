@@ -56,26 +56,33 @@ class ClassificationTests(unittest.TestCase):
         self.assertTrue(any("wgpu adapter selected" in reason for reason in reasons), reasons)
         self.assertEqual(self.kind(platform="darwin", renderer=None), "valid")
 
-    def test_schema_failures_stop_a_timed_out_or_blocked_run(self):
+    def test_provenance_and_schema_failures_outrank_a_timed_out_or_blocked_run(self):
         # A harness timeout (exit 4) or block (exit 5) whose result is unmanaged, or another harness's, is a
-        # schema failure, which stops a comparison; without one each keeps its kind. A run_step deadline is
-        # unresolved cleanup either way, decided before the schema check, since run_step never counted the group.
-        problems = ["managed is False, not true"]
-        # Each case: how the run ended, the result's status, and the kind with and without the schema problem.
+        # provenance failure, which stops a comparison; another schema problem ends only the variant; without
+        # either each keeps its kind. A run_step deadline is unresolved cleanup either way, decided before the
+        # schema check, since run_step never counted the group.
+        # Each problem with the kind and comparison verdict it gives a timed-out or blocked run.
+        problems = {"managed is False, not true": ("provenance", "stop"),
+                    "phases is not a list of objects": ("schema", "incomplete")}
+        # Each case: how the run ended, the result's status, and its kind without a problem.
         cases = {
-            "harness timeout": (dict(status="FAIL", exit_code=perf_settings.HARNESS_TIMEOUT), "timeout", "schema", "timeout"),
-            "harness block": (dict(status="FAIL", exit_code=perf_settings.HARNESS_BLOCKED), "blocked", "schema", "blocked"),
-            "run_step deadline": (dict(status="TIMEOUT", exit_code=-9), "timeout", "cleanup", "cleanup"),
+            "harness timeout": (dict(status="FAIL", exit_code=perf_settings.HARNESS_TIMEOUT), "timeout", "timeout"),
+            "harness block": (dict(status="FAIL", exit_code=perf_settings.HARNESS_BLOCKED), "blocked", "blocked"),
         }
-        for name, (launch, status, with_problem, without_problem) in cases.items():
-            with self.subTest(name):
-                result = perf_result_tests.valid_result(status=status, exit_code=launch["exit_code"], finish_session_settled=True)
-                kind, reasons = perf_outcomes.classify_outcome(make_outcome(result=result, schema_problems=problems, **launch))
-                self.assertEqual(kind, with_problem)
-                if with_problem == "schema":
-                    self.assertEqual(reasons, problems)
-                self.assertEqual(perf_outcomes.compare_verdict(kind), "stop")
-                self.assertEqual(perf_outcomes.classify_outcome(make_outcome(result=result, **launch))[0], without_problem)
+        for name, (launch, status, without_problem) in cases.items():
+            result = perf_result_tests.valid_result(status=status, exit_code=launch["exit_code"], finish_session_settled=True)
+            for problem, (expected, verdict) in problems.items():
+                with self.subTest(name, problem=problem):
+                    kind, reasons = perf_outcomes.classify_outcome(make_outcome(result=result, schema_problems=[problem], **launch))
+                    self.assertEqual((kind, reasons), (expected, [problem]))
+                    self.assertEqual(perf_outcomes.compare_verdict(kind), verdict)
+            self.assertEqual(perf_outcomes.classify_outcome(make_outcome(result=result, **launch))[0], without_problem)
+        deadline = dict(status="TIMEOUT", exit_code=-9)
+        result = perf_result_tests.valid_result(status="timeout", exit_code=-9, finish_session_settled=True)
+        for problem in problems:
+            with self.subTest("run_step deadline", problem=problem):
+                kind = perf_outcomes.classify_outcome(make_outcome(result=result, schema_problems=[problem], **deadline))[0]
+                self.assertEqual((kind, perf_outcomes.compare_verdict(kind)), ("cleanup", "stop"))
 
     def test_a_launcher_failure_with_exit_0_is_never_valid(self):
         # run_step can report FAIL with exit 0 (a lost leader, a failed final log write), so only PASS can be valid.
@@ -251,24 +258,25 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(self.kind(plan=plan, status="FAIL", exit_code=-9, result=partial, deadline=killed), "valid")
 
     def test_fatal_outcomes_are_decided_before_any_retryable_reason(self):
-        # A retry would rerun on a host that may hold this run's processes, or trust an untrusted result.
+        # A retry would rerun on a host that may hold this run's processes, or trust an untrusted result. A result of
+        # an unmanaged run stops the comparison; a missing result or a refusal ends only its variant. None is retried.
         theft = perf_focus.FocusVerdict(True, (), ["focus theft"], True)
         unmanaged = perf_result_tests.valid_result(status="timeout", exit_code=4, managed=False)
         cases = {
             "unmanaged result and a home write": (
-                "schema", make_outcome(schema_problems=["managed is False, not true"], home=["config.toml: added"])),
+                "provenance", "stop", make_outcome(schema_problems=["managed is False, not true"], home=["config.toml: added"])),
             "exit 0 without result.json and a home write": (
-                "schema", make_outcome(result=None, home=["config.toml: added"])),
-            "refusal and focus theft": ("refused", make_outcome(status="FAIL", exit_code=2, result=None, focus=theft)),
+                "schema", "incomplete", make_outcome(result=None, home=["config.toml: added"])),
+            "refusal and focus theft": ("refused", "incomplete", make_outcome(status="FAIL", exit_code=2, result=None, focus=theft)),
             "unmanaged exit-4 result and focus theft": (
-                "schema", make_outcome(status="FAIL", exit_code=4, result=unmanaged,
-                                       schema_problems=["managed is False, not true"], focus=theft)),
+                "provenance", "stop", make_outcome(status="FAIL", exit_code=4, result=unmanaged,
+                                                   schema_problems=["managed is False, not true"], focus=theft)),
         }
-        for name, (expected, outcome) in cases.items():
+        for name, (expected, verdict, outcome) in cases.items():
             with self.subTest(name):
                 kind, _reasons = perf_outcomes.classify_outcome(outcome)
                 self.assertEqual(kind, expected)
-                self.assertEqual(perf_outcomes.compare_verdict(kind), "stop")
+                self.assertEqual(perf_outcomes.compare_verdict(kind), verdict)
 
     def test_harness_exit_codes(self):
         # 2 refuses, 3 invalidates, 4 is the harness's timeout, 5 is blocked, others are unexpected; run_step's
@@ -289,11 +297,24 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(self.kind(result=None), "schema")
 
     def test_schema_problems_are_never_retried_as_invalid(self):
-        # An unmanaged result, another harness's hash, or a missing result is a schema failure.
-        self.assertEqual(self.kind(schema_problems=["managed is False, not true"]), "schema")
+        # An unmanaged result or another harness's hash is a provenance failure; a result with another status
+        # than its exit says is a schema failure. Neither is an invalid run.
+        self.assertEqual(self.kind(schema_problems=["managed is False, not true"]), "provenance")
         self.assertEqual(self.kind(exit_code=3, result=perf_result_tests.valid_result(status="invalid", exit_code=3),
-                                   schema_problems=["harness_hash differs"]), "schema")
+                                   schema_problems=["harness_hash differs"]), "provenance")
         self.assertEqual(self.kind(result=perf_result_tests.valid_result(status="invalid")), "schema")
+
+    def test_provenance_problems_are_the_ones_validate_result_writes(self):
+        # The prefixes must match validate_result's own wording, or an unmanaged or foreign result would only end
+        # its variant instead of stopping the comparison; another problem is not provenance.
+        # Resolve this runtime-only dependency after module initialization.
+        import perf_result_schema
+        for overrides in ({"managed": False}, {"harness_hash": "cd" * 32}):
+            with self.subTest(overrides=overrides):
+                problems = perf_result_schema.validate_result(perf_result_tests.valid_result(**overrides),
+                                                              perf_memory_tests.HARNESS_HASH, 0)
+                self.assertEqual(len(perf_outcomes.provenance_problems(problems)), 1, problems)
+        self.assertEqual(perf_outcomes.provenance_problems(["schema_version is 2, not 1", "phases is not a list of objects"]), [])
 
     def test_safety_failures_outrank_the_exit_code(self):
         # Cleanup, session records, home writes and focus are judged even when the harness passed.
@@ -318,15 +339,17 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(self.kind(plan=plan), "unexpected")
 
     def test_verdicts_per_mode(self):
-        # The smoke retries only an occlusion; a comparison retries any invalid run and stops on schema.
+        # The smoke retries only an occlusion. A comparison retries any invalid run, ends the variant on a schema
+        # failure or a refusal, and stops on unresolved cleanup or another harness's result.
         self.assertEqual([perf_outcomes.smoke_verdict(kind) for kind in ("valid", "occluded", "blocked", "focus")],
                          ["pass", "retry", "blocked", "fail"])
-        for kind in ("schema", "refused", "cleanup", "home", "session", "timeout", "unexpected", "invalid", "deadline"):
+        for kind in ("schema", "provenance", "refused", "cleanup", "home", "session", "timeout", "unexpected", "invalid",
+                     "deadline"):
             with self.subTest(kind=kind):
                 self.assertEqual(perf_outcomes.smoke_verdict(kind), "fail")
         self.assertEqual([perf_outcomes.compare_verdict(kind) for kind in ("valid", "focus", "occluded", "blocked",
-                                                                  "schema", "refused")],
-                         ["valid", "invalid", "invalid", "blocked", "stop", "stop"])
+                                                                  "schema", "refused", "cleanup", "provenance")],
+                         ["valid", "invalid", "invalid", "blocked", "incomplete", "incomplete", "stop", "stop"])
 
     def test_windows_deadline_case_is_valid_only_with_verified_custody(self):
         # TerminateProcess ends the harness with 124; the job's members alive at that moment are expected
