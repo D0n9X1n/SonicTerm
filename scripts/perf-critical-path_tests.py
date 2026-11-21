@@ -387,10 +387,13 @@ class EvidenceTests(unittest.TestCase):
                                     "created_at": "2026-10-03T11:00:00Z"})
         self.assertEqual(accounting.evidence_mode(record), "new-design")
 
-    def test_new_design_missing_timing_json_fails(self):
-        # A new-design comparison without timing.json cannot split its compare step, so the report stops.
-        with self.assertRaisesRegex(accounting.AccountingError, "timing.json"):
-            PathAccountingTests.evidence_run(PathAccountingTests(), read=lambda name: None)
+    def test_a_stopped_comparison_without_timing_json_reports_one_compare_class(self):
+        # A stopped comparison uploads its partial table but no timing.json: the job is still accounted, its compare
+        # step one class with a note, rather than the whole report stopping.
+        report = PathAccountingTests.evidence_run(PathAccountingTests(), read=lambda name: None)
+        segment_part = report.attempts[0].critical.segments[0]
+        self.assertIsNone(segment_part.compare)
+        self.assertIn("stopped before writing timing.json", segment_part.compare_note)
 
     def test_new_design_timing_json_wrong_run_attempt_or_shard_fails(self):
         # timing.json must name this run, this attempt and this shard (and its job).

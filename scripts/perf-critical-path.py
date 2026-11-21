@@ -16,8 +16,9 @@ finish, runner and conclusion; no match, or two, stops the report. Skipped rows 
 Evidence. A run whose rows include the result job (by its name, or by the unevaluated name expression a skipped job shows), or whose
 evidence artifacts end in `-<attempt>`, is new-design: each comparison job that ran its compare step must have that attempt's
 artifact with a `timing.json` naming this run, attempt, job and shard, its marks inside the step. GitHub keeps
-only the newest attempt's artifacts, so a job with no artifact of its attempt reports its compare step as one
-class, "scenario split unavailable"; an artifact that is there but disagrees still stops the report. Any
+only the newest attempt's artifacts, and a stopped comparison uploads its partial table without timing.json, so
+a job with no artifact of its attempt, or an artifact without timing.json, reports its compare step as one
+class, "scenario split unavailable"; a timing.json that is there but disagrees still stops the report. Any
 other run is historical: the evidence is the one same-name artifact created inside the job's window,
 and the compare step stays one class.
 
@@ -285,7 +286,11 @@ def bind_evidence(record: Mapping, rows: Mapping[int, list[Row]], mode: str,
                     raise AccountingError(f"{where}: {len(found)} evidence artifacts end {suffix}")
                 timing = read_timing(found[0]["name"])
                 if timing is None:
-                    raise AccountingError(f"{where}: {found[0]['name']} has no timing.json")
+                    # When: `timing` is None, the comparison stopped before it finished: perf-compare writes a
+                    # partial table on every stop but timing.json only once every mark exists, so the job is
+                    # accounted with its compare step as one class. Timing that is there is still checked.
+                    bound[(number, row.name)] = Evidence(found[0], None)
+                    continue
                 _check_timing(timing, run_id, number, row.name, shard, compare, where)
                 bound[(number, row.name)] = Evidence(found[0], timing)
             else:
@@ -438,6 +443,8 @@ def classify(row: Row, evidence: Evidence | None, mode: str, required: bool = Tr
         compare = {key: round(value) for key, value in compare.items()}
     elif _COMPARISON.fullmatch(row.name) and mode == "historical":
         note = "unavailable (historical run: no timing.json)"
+    elif _COMPARISON.fullmatch(row.name) and evidence is not None:
+        note = "scenario split unavailable (the comparison stopped before writing timing.json)"
     elif _COMPARISON.fullmatch(row.name):
         note = "scenario split unavailable (GitHub keeps only the newest attempt's artifacts)"
     return classes, compare, note
