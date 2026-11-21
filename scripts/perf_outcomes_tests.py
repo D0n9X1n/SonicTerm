@@ -287,10 +287,13 @@ class ClassificationTests(unittest.TestCase):
                                                                     notes=["native occlusion change"])), "occluded")
         self.assertEqual(self.kind(exit_code=3, result=perf_result_tests.valid_result(status="invalid", exit_code=3,
                                                                     notes=["unexpected keyboard input"])), "invalid")
-        self.assertEqual(self.kind(exit_code=4, result=None), "timeout")
+        # The harness's deadline writes result.json first, so an exit 4 without one proves no settled teardown.
+        self.assertEqual(self.kind(exit_code=4, result=None), "cleanup")
+        self.assertEqual(self.kind(exit_code=4, result=perf_result_tests.valid_result(status="timeout", exit_code=4)),
+                         "timeout")
         self.assertEqual(self.kind(status="TIMEOUT", exit_code=-9, result=None), "cleanup")
         self.assertEqual(self.kind(exit_code=5, result=None), "blocked")
-        self.assertEqual(self.kind(exit_code=101, result=None), "unexpected")
+        self.assertEqual(self.kind(exit_code=101, result=None), "cleanup")
 
     def test_not_exercised_without_a_result_is_blocked(self):
         # NOT_EXERCISED with exit 0 and no result.json means the host cannot exercise the scenario; without it the
@@ -317,6 +320,19 @@ class ClassificationTests(unittest.TestCase):
                 self.assertIn(problem, reasons)
                 if expected == "cleanup":
                     self.assertEqual(reasons[0], perf_outcomes.UNPROVEN_TEARDOWN)
+
+    def test_a_harness_that_exits_nonzero_without_a_result_stops_the_comparison(self):
+        # The harness writes result.json before its own deadline exit and every invalidation, so an exercised run
+        # that exits 4 or crashes without one proves no settled teardown: it stops every variant, never retries.
+        for code, status in ((perf_settings.HARNESS_TIMEOUT, "FAIL"), (101, "FAIL")):
+            with self.subTest(code=code):
+                kind, reasons = perf_outcomes.classify_outcome(make_outcome(exit_code=code, status=status, result=None))
+                self.assertEqual((kind, perf_outcomes.compare_verdict(kind)), ("cleanup", "stop"))
+                self.assertEqual(reasons[0], perf_outcomes.UNPROVEN_TEARDOWN)
+                self.assertIn(f"exit {code} without result.json", reasons)
+        # A run that never exercised the scenario, or never launched, has nothing to tear down.
+        self.assertNotEqual(self.kind(exit_code=perf_settings.HARNESS_TIMEOUT, status="FAIL", result=None,
+                                      not_exercised=True), "cleanup")
 
     def test_schema_problems_are_never_retried_as_invalid(self):
         # An unmanaged result or another harness's hash is a provenance failure; a result with another status

@@ -562,7 +562,9 @@ when it also has a retryable problem:
 3. an unresolved cleanup that the result shows or cannot rule out: a
    `finish_session` that did not settle, whatever the exit, or a schema failure
    whose `result.json` is missing, cannot be parsed or does not record a settled
-   `finish_session`, so nothing proves the run's teardown;
+   `finish_session`, so nothing proves the run's teardown. That includes an
+   exercised harness that exits 4 or crashes without writing `result.json`: its
+   own deadline writes one first, so a missing one means a crash;
 4. a schema failure of a run whose teardown settled: a `result.json` that does
    not match the result schema. This holds however the harness ended, including
    a harness timeout (exit 4) and a block (exit 5). Once `run_step` has reported

@@ -209,6 +209,13 @@ def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
                 schema = ["exit 0 without result.json"]
             elif result is not None and result.get("status") != "valid":
                 schema = [f"exit 0 with status {result.get('status')!r}"]
+        elif (not schema and result is None and not outcome.not_exercised and outcome.status != "LAUNCH"
+              and code not in (perf_settings.HARNESS_VALID, perf_settings.HARNESS_REFUSED,
+                               perf_settings.HARNESS_INVALID, perf_settings.HARNESS_BLOCKED)):
+            # When: an exercised harness ended on its deadline (exit 4) or crashed (any other unknown code) without
+            # result.json: its deadline writes one first, so nothing records whether finish_session settled. A
+            # refusal or a blocked scenario never starts a session, and an invalid run is judged by its result.
+            schema = [f"exit {code} without result.json"]
         if schema and (result is None or result.get("finish_session_settled") is not True):
             # When: the result cannot show a settled teardown, sessions may outlive the run, so a schema failure
             # stops every variant instead of ending only its own.
