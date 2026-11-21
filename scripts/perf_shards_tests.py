@@ -108,6 +108,21 @@ class ShardLoaderTests(unittest.TestCase):
         self.refused(lambda document: document["profiles"]["full"].pop("laps_runs"), "laps_runs exactly")
         self.refused(lambda document: document["profiles"]["core"].update(laps_runs=2), "laps_runs exactly")
 
+    def test_a_counters_list_is_a_nonempty_subset_that_covers_every_counters_only_variant(self):
+        # Counters for a variant the partition does not run, an empty list, a counters-only variant left without
+        # the counters set, and laps asked of a counters-only variant are all refused.
+        def partition(document):
+            return document["profiles"]["full"]["partitions"]["macOS"][0]
+        self.refused(lambda document: partition(document).update(counters=["S2"]), "does not run")
+        self.refused(lambda document: partition(document).update(counters=[]), "nonempty")
+        self.refused(lambda document: partition(document).update(variants=["S1", "S1/atlas-retry", "S9"],
+                                                                 counters=["S1"]), "no set to run")
+        self.refused(lambda document: partition(document).update(variants=["S1/atlas-retry", "S9"],
+                                                                 laps=["S9", "S1/atlas-retry"]), "runs only the counters set")
+        document = copy.deepcopy(minimal_document())
+        partition(document).update(variants=["S1", "S1/atlas-retry", "S9"], counters=["S1/atlas-retry"])
+        self.assertEqual(self.load(document)["full"].partitions["macOS"][0].counters, ("S1/atlas-retry",))
+
     def test_both_platforms_need_partitions(self):
         self.refused(lambda document: document["profiles"]["core"]["partitions"].pop("Windows"), "exactly macOS")
         self.refused(lambda document: document["profiles"]["core"]["partitions"].update(Windows=[]), "no partitions")
@@ -126,6 +141,25 @@ class PartitionArgumentTests(unittest.TestCase):
         self.assertEqual(perf_shards.partition_arguments(profiles["full"], profiles["full"].partitions["macOS"][0]),
                          ["--scenario", "S1", "S9", "--runs", "5", "--counters", "--counters-runs", "2",
                           "--laps-scenario", "S9", "--laps-runs", "2"])
+
+    def test_a_counters_list_selects_the_counters_set_by_variant(self):
+        # With a counters list the partition passes --counters-scenario for those variants instead of --counters.
+        profile = TestDocument.profiles()["full"]
+        partition = perf_shards.Partition("full-1", ("S1", "S9"), ("S9",), ("S1",))
+        self.assertEqual(perf_shards.partition_arguments(profile, partition),
+                         ["--scenario", "S1", "S9", "--runs", "5", "--counters-scenario", "S1", "--counters-runs", "2",
+                          "--laps-scenario", "S9", "--laps-runs", "2"])
+
+    def test_the_permitted_datasets_follow_the_partition(self):
+        # Timed always (but for a counters-only variant), laps where declared, counters where listed or for all.
+        every = perf_shards.Partition("p", ("S1", "S9", "S1/atlas-retry"), ("S9",))
+        listed = perf_shards.Partition("p", ("S1", "S9", "S1/atlas-retry"), ("S9",), ("S1/atlas-retry",))
+        self.assertEqual(perf_shards.permitted_datasets(every, "S1"), ("timed", "counters"))
+        self.assertEqual(perf_shards.permitted_datasets(every, "S9"), ("timed", "laps", "counters"))
+        self.assertEqual(perf_shards.permitted_datasets(listed, "S1"), ("timed",))
+        self.assertEqual(perf_shards.permitted_datasets(listed, "S1/atlas-retry"), ("counters",))
+        self.assertEqual(perf_shards.permitted_datasets(perf_shards.Partition("p", ("S1/atlas-retry",), (), ("S1",)),
+                                                        "S1/atlas-retry"), ())
 
     def test_a_matrix_entry_names_its_platform_partition_and_selection(self):
         # `selection` is the arguments joined by spaces, which the compare step splits back into words.

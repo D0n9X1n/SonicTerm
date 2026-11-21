@@ -166,11 +166,11 @@ Windows 缓存分为 `check-windows-latest`（`windows-checks` 写入）、`test
 重叠的 main run 仍可能竞争保存同一不可变 key。
 
 每个 perf 配置的分区列在 `scripts/perf-shards.json` 中，在每个平台上恰好运行该配置的每个变体一次，并按各变体的实测时间均衡，
-使任何分区都不决定关键路径：`core` 有两个 macOS 与两个 Windows 分区，`full` 各有三个，`release` 的分区按实测的发布时间均衡，
-使每个 job 都远低于 GitHub 的 6 小时 job 上限。每个对比 job 自行构建两个 ref，因此分区从不等待其他 job 的二进制。
+使任何分区都不决定关键路径：`core` 有两个 macOS 与两个 Windows 分区，`full` 各有三个，`release` 各有四个，按实测的发布时间均衡到每个 job 约三小时，
+远低于 GitHub 的 6 小时 job 上限。每个对比 job 自行构建两个 ref，因此分区从不等待其他 job 的二进制。
 本仓库同时最多运行五个 macOS job，在 perf 运行的大部分时间里 CI 占用其中两个（同时运行 aarch64 smoke 的 core gates，以及 Intel
 smoke）。`core` 的 25 分钟与 `perf-full` 的 45 分钟预算都包含排队时间；余量由 exact-head CI 计时验证，而不是本地估算。release 每侧
-运行三次计数器运行。
+运行三次计时运行，只为其读取计数器的变体每侧运行两次计数器运行。
 
 兼容且成功的 `main` job 必须先填充 key，后续 run 才可能命中；编译器或依赖变化仍可能
 导致 miss。缓存复用可减少依赖编译，不能缩短托管 runner 的排队时间。冷缓存构建以及

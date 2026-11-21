@@ -180,6 +180,7 @@ from perf_workflow_fixture import (
     RELEASE_ONLY,
     NOT_COMPARED,
     CORE_VARIANTS,
+    RELEASE_COUNTERS,
     SHARED_PARTITION,
     FAKE_GIT,
     PR_HEAD_SHA,

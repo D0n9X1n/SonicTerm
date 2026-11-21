@@ -389,8 +389,9 @@ a reproduction.
   never from a local comparison: a developer's machine is in use, and its
   input, focus changes and load invalidate runs or widen the noise.
   - **Layout:** `scripts/perf-shards.json` holds three profiles, `core`, `full`
-    and `release`, each a list of partitions per platform (a name, its variants
-    and the variants that also run S9's laps set). One `plan` job (`Plan the
+    and `release`, each a list of partitions per platform (a name, its variants,
+    the variants that also run S9's laps set and, optionally, the only variants
+    that run the counters set). One `plan` job (`Plan the
     comparison`, on Ubuntu) decides eligibility, resolves the base and head SHAs
     once and emits each platform's matrix through `scripts/perf_shards.py`, which
     refuses a layout that breaks a rule. Every comparison job
@@ -407,8 +408,8 @@ a reproduction.
     `scripts/perf_workflow_identity_tests.py` checks the file's invariants: every
     variant is in the harness catalogue, runs once per platform per profile and
     stays on its platform when only one runner measures it, `release` ⊇ `full`
-    ⊇ `core`, laps run only where declared, and variants one report reads
-    together share a partition.
+    ⊇ `core`, laps run only where declared, every variant has a set it may run,
+    and variants one report reads together share a partition.
   - **PR pipeline (`perf` label, `core` profile):** must finish within
     25 minutes of the run's creation, queue time included. Two macOS and two
     Windows partitions compare the merge base with the head on the reviewed core
@@ -436,10 +437,16 @@ a reproduction.
     times or shorten the runs, never drop the budget.
   - **Release pipeline (`release` profile):** runs for each pushed release tag
     and may take hours. It compares the previous release tag with the new one
-    using full-length runs, `--counters --counters-runs 3` and the shipping
-    release profile. Every job must stay under GitHub's 6-hour job limit, so its
-    partitions are balanced from measured per-variant release times; rebalance
-    them when you add a release scenario. Put any long or exhaustive perf
+    using full-length runs and the shipping release profile: three timed runs a
+    side, S9's laps set, and two counters runs a side only for the variants whose
+    counters a release reads (S1, S1/atlas-retry, S2, S2/flood, S3, S6/rest,
+    S10, S10/sync, S12 and every S13 variant, where the platform measures them),
+    which each partition's `counters` list passes as `--counters-scenario`.
+    Selecting a counters-only variant (S1/atlas-retry) without the counters set
+    is refused at planning time. Every job must stay under GitHub's 6-hour job
+    limit, so four macOS and four Windows partitions are each sized to about
+    three hours from measured per-variant release times, a partitioning target
+    rather than an enforced bound; rebalance them when you add a release scenario. Put any long or exhaustive perf
     measurement here, not in a PR profile: S13's release-only wide layouts
     (`S13/wide-8`, `S13/wide-16`, `S13/wide-32`) report a `Scaling` row that is
     not a gate; macOS also runs `S3/history`, a flood into budget-filling

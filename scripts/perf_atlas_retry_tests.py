@@ -1,12 +1,17 @@
 """Perf atlas retry tests."""
 
 from __future__ import annotations
+import contextlib
+import io
+import json
 from pathlib import Path
 import unittest
 
+import perf_arguments
 import perf_attribution_report
 import perf_counter_schema_tests
 import perf_driver_tests
+import perf_inventory
 import perf_latency_tests
 import perf_memory_tests
 import perf_metrics
@@ -58,18 +63,48 @@ class AtlasRetryVariantTests(perf_driver_tests.CompareHarness, unittest.TestCase
 
     def test_a_counters_only_variant_is_refused_when_no_counters_set_runs(self):
         # Selecting the variant without a counters set would measure nothing, so the selection is refused,
-        # naming the variant; ordinary selections are never refused.
-        self.assertIsNone(perf_result_schema.counters_only_problem([("S1", "default")], False))
-        self.assertIsNone(perf_result_schema.counters_only_problem([("S1", "atlas-retry")], True))
-        problem = perf_result_schema.counters_only_problem([("S1", "default"), ("S1", "atlas-retry")], False)
-        self.assertIn("S1/atlas-retry", problem)
-        self.assertIn("--counters", problem)
+        # naming the variant; ordinary selections are never refused. None is every selected variant (--counters);
+        # a list holds the only variants that run the counters set (--counters-scenario).
+        self.assertIsNone(perf_result_schema.counters_only_problem([("S1", "default")], []))
+        self.assertIsNone(perf_result_schema.counters_only_problem([("S1", "atlas-retry")], None))
+        self.assertIsNone(perf_result_schema.counters_only_problem([("S1", "atlas-retry")], [("S1", "atlas-retry")]))
+        for counters in ([], [("S1", "default")]):
+            with self.subTest(counters=counters):
+                problem = perf_result_schema.counters_only_problem([("S1", "default"), ("S1", "atlas-retry")], counters)
+                self.assertIn("S1/atlas-retry", problem)
+                self.assertIn("--counters-scenario", problem)
 
-    def test_the_comparison_refuses_the_variant_without_counters(self):
-        # The refusal reaches the driver before any run: nothing is planned, and compare_main's ValueError
-        # handling turns it into a failed comparison.
-        with self.assertRaisesRegex(ValueError, "S1/atlas-retry runs only in the counters set"):
-            self.compare(listing=perf_trim_tests.ATLAS_RETRY_LIST, scenarios=("S1/atlas-retry",), head_manifest=perf_counter_schema_tests.COUNTERS_MANIFEST)
+    def test_the_command_line_refuses_the_variant_without_counters(self):
+        # The refusal comes at planning time, before either ref builds: without --counters, or with a
+        # --counters-scenario that leaves the variant out, the selection is a usage error.
+        comparison = ["--base", "main", "--head", "HEAD", "--scenario", "S1", "S1/atlas-retry"]
+        for extra in ((), ("--counters-scenario", "S1"), ("--counters-scenario", "S1/default", "--counters-runs", "2")):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                perf_arguments.parse_args([*comparison, *extra])
+        for extra in (("--counters",), ("--counters-scenario", "S1/atlas-retry")):
+            with self.subTest(extra=extra):
+                self.assertEqual(perf_arguments.parse_args([*comparison, *extra]).scenario, ["S1", "S1/atlas-retry"])
+
+    def test_a_counters_scenario_runs_the_counters_set_for_the_named_variants_only(self):
+        # S1/default runs its timed set only; S1/atlas-retry, named, runs its counters set only. The run identity
+        # records that a counters set was requested, and the details record the selection.
+        code, _gate, _calls, plans, _work, out = self.compare(
+            listing=perf_trim_tests.ATLAS_RETRY_LIST, scenarios=("S1", "S1/atlas-retry"),
+            options=("--counters-scenario", "S1/atlas-retry", "--counters-runs", "2"),
+            head_manifest=perf_counter_schema_tests.COUNTERS_MANIFEST)
+        self.assertEqual(code, 0, self.printed)
+        self.assertEqual({(plan.variant, plan.counters) for plan in plans}, {("default", False), ("atlas-retry", True)})
+        self.assertEqual(sum(plan.counters for plan in plans), 2)
+        identity = json.loads((out / perf_inventory.RUN_IDENTITY_FILE).read_text(encoding="utf-8"))
+        self.assertTrue(identity["settings"]["counters"])
+        self.assertIn("--counters-scenario S1/atlas-retry --counters-runs 2", (out / "comparison.md").read_text(encoding="utf-8"))
+
+    def test_a_counters_scenario_must_be_selected(self):
+        # A --counters-scenario value --scenario does not select is refused, as --laps-scenario's is.
+        with self.assertRaisesRegex(ValueError, "--counters-scenario 'S1' is not selected by --scenario"):
+            self.compare(listing=perf_trim_tests.ATLAS_RETRY_LIST, scenarios=("S1/atlas-retry",),
+                         options=("--counters-scenario", "S1/atlas-retry", "S1"),
+                         head_manifest=perf_counter_schema_tests.COUNTERS_MANIFEST)
 
     def test_the_comparison_refuses_the_variant_when_the_head_has_no_counters(self):
         # --counters with a head that does not declare perf-counters builds no counters set, so it is refused too.

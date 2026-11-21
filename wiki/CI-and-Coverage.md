@@ -256,14 +256,15 @@ Overlapping main runs can still race to save an immutable key.
 Each perf profile's partitions are listed in `scripts/perf-shards.json` and run
 every variant of the profile exactly once per platform, balanced from measured
 per-variant times so that no partition sets the critical path: two macOS and two
-Windows partitions for `core`, three each for `full`, and the `release` partitions
-balanced from measured release times so each job stays well under GitHub's 6-hour
-job limit. Every comparison job builds both refs itself, so a partition never waits
+Windows partitions for `core`, three each for `full`, and four each for `release`,
+balanced from measured release times to about three hours a job, well under
+GitHub's 6-hour job limit. Every comparison job builds both refs itself, so a partition never waits
 for another job's binaries. This repository runs at most five macOS jobs at once,
 and CI holds two (core gates, which also runs the aarch64 smoke, and the Intel
 smoke) for most of a perf run. The 25-minute `core` and 45-minute `perf-full`
 budgets include queues; exact-head CI timing, not local estimates, verifies the
-remaining margin. A release takes three counters runs a side.
+remaining margin. A release takes three timed runs a side, and two counters runs
+a side only for the variants whose counters it reads.
 
 A compatible successful `main` job must populate a key before a later run can
 hit it; compiler or dependency changes can still cause a miss. Cache reuse can

@@ -147,7 +147,8 @@ python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario <ID|ID/vari
 | `--laps-runs N` | lap 组的有效运行次数（默认取 `--runs`）；需要 `--laps` 或 `--laps-scenario`；在 `--short` 下 `run_caps` 上限仍然适用 |
 | `--alloc` | 通过 `perf_scenarios_alloc` 报告每帧分配次数；计时运行从不使用计数分配器 |
 | `--counters` | 当 head 的 `sonicterm-app` 声明 `perf-counters` feature 时，以该 feature 构建每个声明它的 ref，并在计时组与 lap 组之后运行强制开启帧计数器的计数器组（harness 的 `--counters`）：在 head 上运行，base 也声明该 feature 时也在 base 上运行；它从不与这些组合并统计。不声明该 feature 的 head 会跳过该组，对比表会注明 |
-| `--counters-runs N` | 计数器组的有效运行次数（默认取 `--runs`）；需要 `--counters` |
+| `--counters-scenario <ID[/VARIANT]>...` | 只为这些已选中的变体运行计数器组（裸 ID 是其默认变体）；可给多个值或重复该选项；与 `--counters` 同用是错误。只在计数器组中运行的变体（S1/atlas-retry）被选中却不在其中时，在任一 ref 构建之前就在命令行被拒绝 |
+| `--counters-runs N` | 计数器组的有效运行次数（默认取 `--runs`）；需要 `--counters` 或 `--counters-scenario` |
 | `--keep` | 对比结束后保留每个 ref 的 worktree；默认会删除它们 |
 | `--out <dir>` | `comparison.md` 与原始证据的输出位置 |
 | `--require-base` | 让 base 与 head 适用同样的标准：base 无法构建、无法 `--list` 或无法凑满每组的有效运行时，对比失败（退出码 1），`comparison.md` 以 `**Incomplete comparison:**` 开头并列出每个缺口；base 未声明 `perf-counters` 时其计数器组仍显示 `n/a`。每个 CI 对比都传入它 |
@@ -615,8 +616,8 @@ PR 与 Change。
   会被拒绝，除非 `--allow-different-heads` 把它们的标记并排列出，但这从不豁免标记指标版本或数据集设置。
   任何不可比较的情况都以退出码 2 结束。
 
-使用 `--counters` 时，计时对比表（以及运行了 lap 组时的 lap 表）之后还有两张表。Frame counters 表
-给出 base 与 head 的计数器运行，每个场景、阶段与非零计数器一行；各字段的含义见[日志](Logging-zh-CN#帧与锁计数器)。
+使用 `--counters` 或 `--counters-scenario` 时，计时对比表（以及运行了 lap 组时的 lap 表）之后还有两张表。Frame counters 表
+给出 base 与 head 的计数器运行，每个运行了计数器组的变体、阶段与非零计数器一行；各字段的含义见[日志](Logging-zh-CN#帧与锁计数器)。
 
 - 计数是各次运行该阶段增量的中位数，并附最小–最大值。
 - 直方图的 p95 与 max 是所有运行事件合并后的桶边界（`≤17 ms`，溢出桶为 `>100 ms`），从不是精确值；
@@ -687,7 +688,7 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | `S1/wgpu`、`S5/wgpu`、`S11/wgpu` | 仅 Windows：该场景使用 `software_render_mode = "off"`，通过 wgpu 呈现且不降级。 |
 | `S11/release` | 显示图像后切换到没有媒体的标签页，直到切换后第一帧呈现（上限 5 秒），从该帧起保持 65 秒（从不缩短），记录 `released` 检查点，其内存读数只采用该帧之后至少 30 秒的样本（`fresh_after_unix_s`），然后切换回来，直到呈现一个图像图集含有条目的帧（上限 10 秒）。 |
 | `S1/role-exit` | 仅 Windows：角色程序在 GO 之后立即以 1 退出，该次运行必须以无效结束；smoke 使用它。 |
-| `S1/atlas-retry` | 只在计数器组中运行；没有计数器组时被拒绝。70 行静态文本稳定后，运行 8 个恢复回合，每回合四个强制帧：A 重试一次注入的字形图集变更，B 是第一次呈现的恢复帧，C 与 D 重绘不变的画面。`result.json` 以 `atlas_recovery` 记录每帧的计数器增量，对比增加一张 "Atlas retry recovery" 表，在被接受的计数器运行上汇总每帧的行缓存未命中与命中、塑形请求和尝试次数。稳定后画面一旦变化，运行即判为无效，原因写明变化的字段及其稳定值与读取值（标题转义为 ASCII）；行文本变化则只写出第一个不同的行号。稳定还要等待 App 已应用两个前台进程样本：每个都给出进程名，且采样时间严格晚于观察到最终进程的时刻（Windows 上为看到哨兵行，macOS 上为 harness 自己的查询完成并给出 `sleep`），最新一个给出该进程名，读取到的标题等于该进程对应的标题。缺失或被清除的样本会使计数重新开始；屏障未满足时，尝试在 10 秒稳定上限处过期，原因写明未满足的条件；标签页带自定义标题时，尝试立即判为无效。harness 日志在稳定时和失败时各记一行 `atlas-retry evidence`，内容取自判定所依据的那次读取：比较的两个标题、与该次读取一同采集的 App 已应用前台进程样本、角色的 leader pid、标题与前台进程相关的累计计数器，以及 harness 自己的前台进程查询（单独标注，带有自己的时间），另外还有最终进程查询的次数与总耗时，以及观察到最终进程的时刻。 |
+| `S1/atlas-retry` | 只在计数器组中运行：被选中却没有计数器组（没有 `--counters`，或 `--counters-scenario` 未包含它）时在命令行被拒绝，head 未声明 `perf-counters` 时在测量前被拒绝。70 行静态文本稳定后，运行 8 个恢复回合，每回合四个强制帧：A 重试一次注入的字形图集变更，B 是第一次呈现的恢复帧，C 与 D 重绘不变的画面。`result.json` 以 `atlas_recovery` 记录每帧的计数器增量，对比增加一张 "Atlas retry recovery" 表，在被接受的计数器运行上汇总每帧的行缓存未命中与命中、塑形请求和尝试次数。稳定后画面一旦变化，运行即判为无效，原因写明变化的字段及其稳定值与读取值（标题转义为 ASCII）；行文本变化则只写出第一个不同的行号。稳定还要等待 App 已应用两个前台进程样本：每个都给出进程名，且采样时间严格晚于观察到最终进程的时刻（Windows 上为看到哨兵行，macOS 上为 harness 自己的查询完成并给出 `sleep`），最新一个给出该进程名，读取到的标题等于该进程对应的标题。缺失或被清除的样本会使计数重新开始；屏障未满足时，尝试在 10 秒稳定上限处过期，原因写明未满足的条件；标签页带自定义标题时，尝试立即判为无效。harness 日志在稳定时和失败时各记一行 `atlas-retry evidence`，内容取自判定所依据的那次读取：比较的两个标题、与该次读取一同采集的 App 已应用前台进程样本、角色的 leader pid、标题与前台进程相关的累计计数器，以及 harness 自己的前台进程查询（单独标注，带有自己的时间），另外还有最终进程查询的次数与总耗时，以及观察到最终进程的时刻。 |
 | `S1/status-line`、`S12/status-line` | 该场景的默认计划，临时配置中加入 `[status_line] enabled = true`；`S1/status-line` 先运行 `print`：在列出 `history` 与 `size` 的情况下，把 5,000 行全宽、全部为 OSC 8 链接的行打印进 10,000 行的历史；链接单元格比普通单元格占用更多内存，因此字节预算会把历史截断到行数上限以下。启用计数器时，`History: trimmed` 必须恰好出现一次（`status_line_history_shows`），状态栏只能因采样或这次出现而重绘。`idle` 之后加入 `select`（拖动选中文本）与 `selected`（保持该选区；`--short` 下各 2 秒，否则各 10 秒）。启用计数器时，`select` 必须至少计数一次选区，且每次计数最多读取 200,000 个单元格（`status_line_sel_counts`、`status_line_sel_cells`），`selected` 不得再次计数。最后，`input` 以每秒 10 个字符向 shell 输入 10 个字符并静置 1 秒；启用计数器时，`Input: held` 不得出现（`status_line_held_shows`），状态栏只能因采样而重绘，因此键入安排的未完成写入检查不会呈现任何帧。随后 `glyphs` 清空当前行，在 POSIX 角色中用 `printf` 打印 U+0378（未分配，任何字体都不覆盖）；Windows 角色直接输入该字符。启用计数器时，`Glyphs:` 至多出现一次（POSIX 角色中恰好一次，`status_line_glyph_shows`），状态栏只能因采样或这次出现而重绘。随后 `held` 清空当前行，在 POSIX 角色中运行 `stty raw -echo; sleep 1; head -c 262144 >/dev/null; stty sane`，并在 0.3 秒后粘贴 256 KiB（临时配置设置 `held_after_ms = 250`），使写入端阻塞在停止读取的程序之后；启用计数器时，`Input: held` 必须恰好出现一次，并在 `head` 读完粘贴后隐藏。Windows 角色的 shell 无法停止读取，只按下 Enter；任何一侧都要求 `held` 至多出现一次。没有状态栏的 base 忽略该表，运行普通计划。`S12/status-line` 在 `uncovered` 之后以 `program` 结束：POSIX 角色先输出 `OSC 9;4` 设置为 40，再在 250 ms 任务栏间隔内以 100 ms 间隔连续输出 50 与 70，然后在一次写入中输出一条 OSC 9 与一条 OSC 777 通知，最后清除，各步之间至少间隔 300 ms，然后等待 0.7 s；Windows 角色的 `cmd` 无法输出 ESC，只按回车。开启计数器时，状态栏只能因采样重绘，每批通知最多一次提示重绘（`program_notify_events`、`program_toast_redraws`），每次进度变化最多一次显示位置投递（`program_progress_events`、`taskbar_progress_deliveries`）；在每种角色上，窗口呈现的帧数不超过状态栏重绘次数、状态栏采样次数与提示重绘次数之和，再加上每个提交步骤六帧（其回显、输出与提示符），状态栏运行的配置关闭光标闪烁；POSIX 角色上设置、连续变化与清除都必须到达 App，每批通知恰好重绘一次，且窗口呈现的帧数不少于提示重绘次数。开启 `perf_taskbar_progress_api` 时，计数显示位置的记录必须依次为 40、连续变化的最后值 70（PTY 把两者合并为一次读取时可以没有 50）、最后为清除，任意两次投递的间隔不小于该间隔，且值的个数等于 `taskbar_progress_deliveries`；关闭时该阶段照常运行，只是没有这些投递检查。App 没有程序计数器的一侧只检查状态栏。启用计数器时，每个保持阶段都依据 App 的 `status_line_samples`、`status_line_wakes` 与 `status_line_redraws` 检查状态栏的空闲约定：`idle` 与 `uncovered` 中每个 2 秒间隔最多一次采样再加一次，没有无采样的唤醒，状态栏重绘不超过采样次数加一；`uncovered` 至少采样一次；`covered` 在 App 收到 `Occluded(true)` 时最多一次采样和一次唤醒。违反约定时运行无效。App 没有状态栏计数器的一侧不做检查。 |
 | `S13/default`、`S13/sustained-4` | 多窗格竞争：角色 0 运行 `SustainedFlood`（`exec yes`，或 Windows 程序中不暂停的 `y` 写入器），它从不休眠，因此其解析器在整个运行期间都忙碌。每个窗格都占满窗口宽度并上下堆叠：`default` 是该窗格位于一个空闲窗格之上、窗口高两个窗格；`sustained-4` 是四个等高的行、窗口高四个窗格（向下拆分，再拆分上下两半），因此窗格只在数量上不同。两者都以每秒 10 个字符向空闲的角色 1 输入 300 个字符（完整长度 600 个），然后保持 `tail` 5 秒（完整长度 10 秒），再空闲到 GO + 60 秒。`result.json` 的 `contention` 记录输入结束时每个角色窗格的实际网格，并针对 `typing` 与 `tail` 记录持续输出窗格自身的进展：harness 每 100 毫秒读取一次它的已滚动行数，最多等待解析器 2 毫秒，并记录从每个阶段开始到结束、没有任何前进读数的最长区间（未观测的开头或结尾、只有忙碌的读取以及停滞都计入）。对比的 S13 部分读取每个变体在 head 上的计数器运行；只有当每个变体都有至少 200 个样本、失败归因、`typing` 与 `tail` 中各至少 1 MiB 的 `vt.parse_bytes`、两个阶段都被观测且没有超过 1 秒无进展的区间，并且持续输出窗格与输入窗格的网格在每个方向上相差不超过一个单元（拆分的取整：17 行窗口中上下堆叠的窗格分别为 8 行与 7 行）时才给出结论。当 4 窗格的 p95 不超过 2 窗格 p95 的 10%，且 4 窗格变体中所有失败的帧收集（`contention_parser`、`contention_images` 与 `contention_budget_expired`）少于其帧收集次数（`parser_lock_wait_us` 的计数）的 1% 时为 `unchanged`，否则为 `not unchanged`。 |
 | `S13/wide-8`、`S13/wide-16`、`S13/wide-32` | 仅用于 release 对比（macOS smoke 也会打开 `wide-8`，作为功能检查）。每个 S13 布局的行还报告 `typing` 阶段 VT 的 `parser_lock_wait_us` 与 `parse_us` 的 p95（以桶上界表示），基线早于这些字段时为 `n/a`；二者都不参与判定。这里不采样溢出文件的磁盘占用：harness 也要在上一个 release 上构建，而那里没有溢出预算池；内存使用报告和 `pty queues` 日志行会给出它。与 `S13/default` 相同的洪泛、输入与阶段，但窗格排成四列宽、2、4 或 8 行高的等分网格，每个窗格 30 列 × 5 行，窗口 120 列（至多 40 行，低于 macOS runner 的高度限制），只用拆分和方向焦点移动构建，并以焦点停在角色 1 结束。S13 表格增加 `Scaling` 行：除非某个布局有 1% 或以上的收集失败，或其 p95 每翻倍增长超过 10%，否则为 `scales`；记录的窗格数不是 8、16 或 32、任一窗格与任一布局的其他窗格相差超过一格（主机可能以不同大小显示窗口，只要每个布局得到相同的窗格；某台 macOS 主机得到 31x3）、样本少于 200 或洪泛停止时给出 `no verdict`，因此翻倍的只有窗格数。结果只作报告，从不作为发布门禁。 |
@@ -821,17 +822,17 @@ harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行�
 | --- | --- | --- | --- | --- | --- | --- |
 | `core` | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | 2 个 macOS、2 个 Windows | `--short --runs 5 --counters --counters-runs 1`，无 lap | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 从运行创建起 25 分钟内，包含排队时间 |
 | `full` | 带 `perf-full` 标签的 pull request，事件相同 | merge base 与 head | 3 个 macOS、3 个 Windows | `--short --runs 5 --counters --counters-runs 2`，S9 的 lap 组用 `--laps-runs 2` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 从运行创建起 45 分钟内，包含排队时间 |
-| `release` | 推送的 `v*` tag | 上一个 release tag 与该 tag | 3 个 macOS、5 个 Windows | 完整时长，`--runs 5 --counters --counters-runs 3`，S9 的 lap 组用 `--laps-runs 2` | 发布用的 profile | 可能数小时；每个 job 保持在 GitHub 的 6 小时上限之内 |
+| `release` | 推送的 `v*` tag | 上一个 release tag 与该 tag | 4 个 macOS、4 个 Windows | 完整时长，`--runs 3`，`--counters-scenario <所列变体> --counters-runs 2`，S9 的 lap 组用 `--laps-runs 2` | 发布用的 profile | 可能数小时；每个 job 保持在 GitHub 的 6 小时上限之内 |
 
 `core` 在两个平台上运行经审阅的核心变体：S1、S2、S2/flood、S3、S6/rest、S9、S10/sync、S11、S12、S13 与 S13/sustained-4。
 `full` 运行每个 pull request 变体：目录中除仅限发布的变体，以及任何配置都不对比的 S1/gdi、S1/wgpu、S1/role-exit、S5/gdi
 与 S5/wgpu 之外的全部变体；S2/glide 与 S11/kitty-placeholders 只在 macOS 上运行，S11/gdi 与 S11/wgpu 只在 Windows 上运行。
 `release` 再加上仅限发布的变体：两个平台上 S13 的宽布局，以及 macOS 上的 `S2/spawn`、`S3/history`、`S3/resize`、
-`S11/burst` 与 `S11/burst-text`。`scripts/perf-shards.json` 列出每个分区的变体，按实测的各变体时长均衡。同一报告一起读取的
+`S11/burst` 与 `S11/burst-text`。release 只为 S1、S1/atlas-retry、S2、S2/flood、S3、S6/rest、S10、S10/sync、S12 与每个 S13 变体（在测量它们的平台上）运行计数器组：每个分区的 `counters` 列表成为 `--counters-scenario`，其他变体只运行计时组。它在每个平台上的四个分区各按实测的各变体发布时长控制在约三小时。`scripts/perf-shards.json` 列出每个分区的变体，按实测的各变体时长均衡。同一报告一起读取的
 变体共用一个分区：S13 与 S13/sustained-4（争用结论）、S13 的三个宽布局（其扩展规则），以及 S11/burst 与 S11/burst-text。
 在 `full` 与 `release` 中，包含 S9 的分区还运行它的 lap 组，每个平台的对比表给出各自的 `fallback_receive` 结论。裸场景 ID
 只选择其默认变体，因此每个变体都按名称列出。`scripts/perf_workflow_identity_tests.py` 直接在该文件上检查这些规则：每个
-变体都在 harness 目录中，每个配置在每个平台上各运行一次；`release` 包含 `full`，`full` 包含 `core`；lap 组只在声明处运行。
+变体都在 harness 目录中，每个配置在每个平台上各运行一次；`release` 包含 `full`，`full` 包含 `core`；lap 组只在声明处运行；每个变体都有可运行的组（S1/atlas-retry 只运行计数器组，因此其分区必须给它该组）。
 
 在 `--short` 下，`S7` 每侧上限 3 次，`S2/flood` 上限 2 次，`S11/release`、`S1/status-line`、`S12/status-line`、`S13/default`
 与 `S13/sustained-4` 上限 1 次，`S11/gdi`、`S11/wgpu`、`S1/atlas-retry` 与 `S6/rest` 上限 2 次。这些上限只为让 pull request
@@ -846,7 +847,7 @@ harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行�
 并在 `comparison.md` 中列出。这些只是 perf 结束行；helper 行与真实渲染器行来自工作集测试。合并的关卡步骤 `perf-scenarios-harness-api-clippy` 与
 `perf-scenarios-harness-api-tests` 在开启该 cfg（以及其他每一项）时对 harness 做 lint 与测试。每个配置都会运行计数器组，在 head 上，
 以及在声明 `perf-counters` 的 base 上：`core` 每个场景、每一侧运行一次计数器运行（一次短 S13 运行输入 300 个字符，高于争用结论的
-200 个样本下限），`full` 运行两次，release 运行三次，使每个由计数器得出的数值都高于其样本下限。Windows runner 没有 GPU，也没有
+200 个样本下限），`full` 运行两次，release 为其读取计数器的变体运行两次（一次完整时长的 S13 运行输入 600 个字符，因此结论的下限仍成立）。Windows runner 没有 GPU，也没有
 用户会话：其对比表测量软件渲染路径，前台变化在那里只被记录，不被判定。
 
 每个对比 job 把它的 `comparison.md` 写入 job summary，并把它、它的 `timing.json` 与每次运行的日志和记录一起作为 artifact

@@ -232,20 +232,26 @@ def _compare_steps(args: argparse.Namespace, gate, out: Path, work: Path, worktr
     # Only these variants run the laps set; every selected one with --laps, none without a laps selection.
     laps_selection = (perf_scenarios.select_laps_scenarios(args.laps_scenario, scenarios, selected) if args.laps_scenario
                       else selected if args.laps else [])
+    # Only these variants run the counters set: every selected one with --counters, the named ones with
+    # --counters-scenario, none without either.
+    counters_selection = (perf_scenarios.select_counters_scenarios(args.counters_scenario, scenarios, selected)
+                          if args.counters_scenario else selected if args.counters else [])
+    counters_requested = bool(args.counters or args.counters_scenario)
     # Each set is (name, example, laps, counters, valid runs per side).
     sets = [("timed", perf_settings.HARNESS_EXAMPLE, False, False, runs)]
     if laps_selection:
         sets.append(("laps", perf_settings.HARNESS_EXAMPLE, True, False, args.laps_runs or runs))
     counters_note = ""
-    if args.counters and supports["head"]:
+    if counters_requested and supports["head"]:
         sets.append(("counters", perf_settings.HARNESS_EXAMPLE, False, True, args.counters_runs or runs))
-    elif args.counters:
+    elif counters_requested:
         counters_note = perf_counter_rows.COUNTERS_UNSUPPORTED
         print(f"[perf-compare] {perf_counter_rows.COUNTERS_UNSUPPORTED}", flush=True)
     if args.alloc:
         sets.append(("alloc", perf_settings.ALLOC_EXAMPLE, False, False, runs))
-    # Checked once the sets are known: --counters on a head without perf-counters runs no counters set either.
-    refusal = perf_result_schema.counters_only_problem(selected, any(set_name == "counters" for set_name, *_ in sets))
+    # Checked once the sets are known: a head without perf-counters runs no counters set for any variant.
+    counters_run = counters_selection if any(set_name == "counters" for set_name, *_ in sets) else []
+    refusal = perf_result_schema.counters_only_problem(selected, counters_run)
     if refusal is not None:
         raise ValueError(refusal)
     results = []
@@ -433,7 +439,7 @@ def _compare_steps(args: argparse.Namespace, gate, out: Path, work: Path, worktr
             # When: S9 or S12 ran, their perf-end rows are kept for the start-size table.
             perf_outcomes._write_json(out / perf_report.COMPLETENESS_FILE, {"schema_version": perf_settings.SCHEMA_VERSION, "rows": completeness})
         perf_report.write_json_atomically(out / perf_inventory.RUN_IDENTITY_FILE, perf_inventory.run_identity_document(shas, digest, features, args.short, profile,
-                                                                   args.counters, os.environ, results,
+                                                                   counters_requested, os.environ, results,
                                                                    perf_inventory.listed_capabilities(scenarios),
                                                                    perf_attribution_report.GUARD_SPANS_CFG in harness_cfgs))
         return document
@@ -458,11 +464,15 @@ def _compare_steps(args: argparse.Namespace, gate, out: Path, work: Path, worktr
             # When: the replay could not show how ConPTY delivered the scenario, no set of it is measured.
             results.extend(perf_comparison_rows.blocked_set_results(label, delivery_problem, [
                 set_name for set_name, *_ in perf_result_schema.variant_sets(scenario_id, variant, sets)
-                if set_name != "laps" or (scenario_id, variant) in laps_selection]))
+                if (set_name != "laps" or (scenario_id, variant) in laps_selection)
+                and (set_name != "counters" or (scenario_id, variant) in counters_selection)]))
             return
         for set_name, example, laps, counters, requested_runs in perf_result_schema.variant_sets(scenario_id, variant, sets):
             if laps and (scenario_id, variant) not in laps_selection:
                 # When: --laps-scenario does not name this variant, it runs no laps set.
+                continue
+            if counters and (scenario_id, variant) not in counters_selection:
+                # When: --counters-scenario does not name this variant, it runs no counters set.
                 continue
             # A capped variant takes min(requested, cap) runs in every set under --short.
             set_runs = perf_scenarios.capped_runs(by_id[scenario_id], variant, requested_runs, args.short)

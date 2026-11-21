@@ -50,6 +50,12 @@ NOT_COMPARED = ("S1/gdi", "S1/wgpu", "S1/role-exit", "S5/gdi", "S5/wgpu")
 # The pull-request core set, as reviewed: the variants the PR default must keep measuring.
 CORE_VARIANTS = ("S1/default", "S2/default", "S2/flood", "S3/default", "S6/rest", "S9/default", "S10/sync",
                  "S11/default", "S12/default", "S13/default", "S13/sustained-4")
+# The variants a release runs the counters set for, where a platform measures them: the counters-derived figures a
+# release reads (atlas recovery, echo and flood counters, S10's attribution, S12's covered window, S13's verdict and
+# scaling rule). Every other release variant runs its timed set only, and S9 its laps set too.
+RELEASE_COUNTERS = ("S1/default", "S1/atlas-retry", "S2/default", "S2/flood", "S3/default", "S6/rest", "S10/default",
+                    "S10/sync", "S12/default", "S13/default", "S13/sustained-4", "S13/wide-8", "S13/wide-16",
+                    "S13/wide-32")
 # Variants one report reads together, so each group shares a partition: S13's contention verdict reads both two-
 # and four-pane runs, its scaling rule all three wide layouts, and S11/burst is read against S11/burst-text.
 SHARED_PARTITION = (("S13/default", "S13/sustained-4"), ("S13/wide-8", "S13/wide-16", "S13/wide-32"),

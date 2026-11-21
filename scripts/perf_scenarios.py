@@ -228,21 +228,33 @@ def select_scenarios(requested: Sequence[str], scenarios: Sequence[Scenario]) ->
     return selected
 
 
-def select_laps_scenarios(requested: Sequence[str], scenarios: Sequence[Scenario],
-                          selected: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Expand `--laps-scenario` values: a bare ID is its default variant, and each must be listed and selected."""
+def _select_named(flag: str, requested: Sequence[str], scenarios: Sequence[Scenario],
+                  selected: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Expand a set-restricting flag's values: a bare ID is its default variant, and each must be listed and selected."""
     by_id = {scenario.id: scenario for scenario in scenarios}
     chosen: list[tuple[str, str]] = []
     for value in requested:
         scenario_id, _separator, variant = value.partition("/")
         pair = (scenario_id, variant or "default")
         if scenario_id not in by_id or pair[1] not in by_id[scenario_id].variants:
-            raise ValueError(f"--laps-scenario names an unknown scenario {value!r}")
+            raise ValueError(f"{flag} names an unknown scenario {value!r}")
         if pair not in selected:
-            raise ValueError(f"--laps-scenario {value!r} is not selected by --scenario")
+            raise ValueError(f"{flag} {value!r} is not selected by --scenario")
         if pair not in chosen:
             chosen.append(pair)
     return chosen
+
+
+def select_laps_scenarios(requested: Sequence[str], scenarios: Sequence[Scenario],
+                          selected: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Expand `--laps-scenario` values: a bare ID is its default variant, and each must be listed and selected."""
+    return _select_named("--laps-scenario", requested, scenarios, selected)
+
+
+def select_counters_scenarios(requested: Sequence[str], scenarios: Sequence[Scenario],
+                              selected: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Expand `--counters-scenario` values: a bare ID is its default variant, and each must be listed and selected."""
+    return _select_named("--counters-scenario", requested, scenarios, selected)
 
 
 def harness_argv(binary: Path, scenario_id: str, variant: str, harness_hash: str, scratch: Path, *,

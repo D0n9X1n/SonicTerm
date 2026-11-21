@@ -69,6 +69,8 @@ def comparison_command(args: argparse.Namespace) -> str:
     words += [flag for flag, chosen in (("--short", args.short), ("--laps", args.laps), ("--alloc", args.alloc),
                                         ("--counters", args.counters), ("--require-base", args.require_base))
               if chosen]
+    for value in args.counters_scenario or []:
+        words += ["--counters-scenario", value]
     if args.counters_runs is not None:
         words += ["--counters-runs", str(args.counters_runs)]
     for value in args.laps_scenario or []:

@@ -3,7 +3,10 @@
 `scripts/perf-shards.json` holds three profiles. `core` is a pull request labelled `perf`, `full` one labelled
 `perf-full`, and `release` a release tag. Each profile names its sampling (timed runs a side, counters runs a side
 and, when a partition declares laps, laps runs a side) and, per platform, a list of partitions: a name, the
-variants it runs and the variants that also run the separate laps set. A bare scenario ID is its default variant.
+variants it runs, the variants that also run the separate laps set and, optionally, the only variants that run the
+counters set (without that list every variant does). A bare scenario ID is its default variant. Every variant must
+have a dataset it may run: a counters-only variant runs nothing outside the counters set, so its partition must
+give it that set and may not ask laps of it.
 
 perf.yml's plan job runs `python3 scripts/perf_shards.py <profile>`, which checks the whole file and prints
 `macos=<json>` and `windows=<json>` for GITHUB_OUTPUT: each a list of matrix entries holding the platform, the
@@ -19,6 +22,8 @@ import re
 import sys
 from typing import NamedTuple, Sequence
 
+import perf_result_schema
+
 SHARDS_FILE = Path(__file__).with_name("perf-shards.json")
 SCHEMA_VERSION = 1
 PROFILES = ("core", "full", "release")
@@ -30,7 +35,7 @@ _PARTITION_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 # `S<n>` or `S<n>/<variant>`, the spelling perf-compare.py's --scenario takes.
 _VARIANT = re.compile(r"S[0-9]+(?:/[a-z0-9]+(?:-[a-z0-9]+)*)?")
 _PROFILE_KEYS = frozenset({"description", "runs", "counters_runs", "laps_runs", "partitions"})
-_PARTITION_KEYS = frozenset({"name", "variants", "laps"})
+_PARTITION_KEYS = frozenset({"name", "variants", "laps", "counters"})
 
 
 class ShardError(ValueError):
@@ -38,11 +43,13 @@ class ShardError(ValueError):
 
 
 class Partition(NamedTuple):
-    """One comparison job's share of a platform: its name, its variants in run order and its laps variants."""
+    """One comparison job's share of a platform: its name, its variants in run order, its laps variants and the
+    variants that run the counters set, None when every variant does."""
 
     name: str
     variants: tuple[str, ...]
     laps: tuple[str, ...]
+    counters: tuple[str, ...] | None = None
 
 
 class Profile(NamedTuple):
@@ -59,6 +66,24 @@ class Profile(NamedTuple):
 def variant_label(variant: str) -> str:
     """The `ID/variant` label of a selection; a bare ID is its default variant."""
     return variant if "/" in variant else f"{variant}/default"
+
+
+def permitted_datasets(partition: Partition, variant: str) -> tuple[str, ...]:
+    """The sets one of a partition's variants runs: timed, laps and counters, as perf-compare.py plans them.
+
+    A counters-only variant (`perf_result_schema.COUNTERS_ONLY_VARIANTS`) runs only the counters set, and only when
+    the partition gives it one.
+    """
+    label = variant_label(variant)
+    counters_only = tuple(label.split("/", 1)) in perf_result_schema.COUNTERS_ONLY_VARIANTS
+    datasets = []
+    if not counters_only:
+        datasets.append("timed")
+        if label in {variant_label(item) for item in partition.laps}:
+            datasets.append("laps")
+    if partition.counters is None or label in {variant_label(item) for item in partition.counters}:
+        datasets.append("counters")
+    return tuple(datasets)
 
 
 def _positive(value: object, where: str) -> int:
@@ -84,18 +109,37 @@ def _variant_list(value: object, where: str) -> tuple[str, ...]:
 def _partition(entry: object, where: str) -> Partition:
     """Read one partition: its name, its variants and the laps variants, which it must also run."""
     if not isinstance(entry, dict) or not {"name", "variants"} <= set(entry) or not set(entry) <= _PARTITION_KEYS:
-        raise ShardError(f"{where} needs name and variants, and takes only laps besides")
+        raise ShardError(f"{where} needs name and variants, and takes only laps and counters besides")
     name = entry["name"]
     if not isinstance(name, str) or not _PARTITION_NAME.fullmatch(name):
         raise ShardError(f"{where} has name {name!r}, not a lowercase word with hyphens")
     variants = _variant_list(entry["variants"], f"{where} ({name}) variants")
+    runs = {variant_label(run) for run in variants}
     laps: tuple[str, ...] = ()
     if "laps" in entry:
         laps = _variant_list(entry["laps"], f"{where} ({name}) laps")
-        missing = [item for item in laps if variant_label(item) not in {variant_label(run) for run in variants}]
+        missing = [item for item in laps if variant_label(item) not in runs]
         if missing:
             raise ShardError(f"{where} ({name}) runs laps for {', '.join(missing)}, which it does not run")
-    return Partition(name, variants, laps)
+    counters: tuple[str, ...] | None = None
+    if "counters" in entry:
+        # Nonempty: every partition of a profile requests the counters set, so each artifact's run-identity.json
+        # records the same settings and perf-flags.py pools them.
+        counters = _variant_list(entry["counters"], f"{where} ({name}) counters")
+        missing = [item for item in counters if variant_label(item) not in runs]
+        if missing:
+            raise ShardError(f"{where} ({name}) runs counters for {', '.join(missing)}, which it does not run")
+    partition = Partition(name, variants, laps, counters)
+    for variant in variants:
+        label = variant_label(variant)
+        counters_only = tuple(label.split("/", 1)) in perf_result_schema.COUNTERS_ONLY_VARIANTS
+        # When: a counters-only variant is asked for laps, the laps set would be dropped without a word.
+        if counters_only and label in {variant_label(item) for item in laps}:
+            raise ShardError(f"{where} ({name}) asks laps of {label}, which runs only the counters set")
+        if not permitted_datasets(partition, variant):
+            raise ShardError(f"{where} ({name}) gives {label} no set to run: it runs only the counters set, so "
+                             "name it in counters")
+    return partition
 
 
 def _profile(name: str, entry: object) -> Profile:
@@ -157,8 +201,12 @@ def load_profiles(path: Path = SHARDS_FILE) -> dict[str, Profile]:
 
 def partition_arguments(profile: Profile, partition: Partition) -> list[str]:
     """The perf-compare.py options that select and sample one partition; the run length is the workflow's."""
-    arguments = ["--scenario", *partition.variants, "--runs", str(profile.runs),
-                 "--counters", "--counters-runs", str(profile.counters_runs)]
+    arguments = ["--scenario", *partition.variants, "--runs", str(profile.runs)]
+    if partition.counters is None:
+        arguments += ["--counters"]
+    else:
+        arguments += ["--counters-scenario", *partition.counters]
+    arguments += ["--counters-runs", str(profile.counters_runs)]
     for variant in partition.laps:
         arguments += ["--laps-scenario", variant]
     if partition.laps:

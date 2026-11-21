@@ -454,12 +454,44 @@ class ShardProfileTests(unittest.TestCase):
                     self.assertIn(present, ([], list(group)))
                     self.assertLessEqual(len({holder[label] for label in present}), 1)
 
-    def test_a_counters_only_variant_always_runs_the_counters_set(self):
-        # S1/atlas-retry measures nothing outside the counters set, so its partition must pass --counters.
+    def test_every_selected_variant_has_a_permitted_dataset(self):
+        # A variant that runs no set would pass with no evidence: S1/atlas-retry runs only the counters set, so its
+        # partition must give it one, and every other variant keeps its timed set.
         for name, profile, platform_name in self.each_layout():
             for partition in profile.partitions[platform_name]:
-                if "S1/atlas-retry" in partition.variants:
-                    self.assertIn("--counters", perf_shards.partition_arguments(profile, partition), (name, partition.name))
+                for variant in partition.variants:
+                    with self.subTest(profile=name, platform=platform_name, variant=variant):
+                        datasets = perf_shards.permitted_datasets(partition, variant)
+                        self.assertTrue(datasets)
+                        counters_only = perf_shards.variant_label(variant) == "S1/atlas-retry"
+                        self.assertEqual("timed" in datasets, not counters_only)
+
+    def test_every_partition_requests_the_counters_set(self):
+        # perf-flags pools a platform's artifacts only when their run-identity settings agree, so no partition of a
+        # profile may drop the counters set altogether.
+        for name, profile, platform_name in self.each_layout():
+            for partition in profile.partitions[platform_name]:
+                arguments = perf_shards.partition_arguments(profile, partition)
+                self.assertTrue({"--counters", "--counters-scenario"} & set(arguments), (name, partition.name))
+
+    def test_release_runs_counters_only_for_the_listed_variants(self):
+        # A release's counters set costs a full-length run per side: it runs only for the variants whose counters
+        # figures a release reads, each where its platform measures it; S9 keeps its laps set.
+        release = self.profiles["release"]
+        for platform_name in perf_shards.PLATFORMS:
+            with self.subTest(platform=platform_name):
+                counted = {perf_shards.variant_label(variant) for partition in release.partitions[platform_name]
+                           for variant in partition.variants
+                           if "counters" in perf_shards.permitted_datasets(partition, variant)}
+                expected = set(perf_workflow_fixture.RELEASE_COUNTERS) & set(self.labels("release", platform_name))
+                self.assertEqual(counted, expected)
+
+    def test_release_samples_three_timed_and_two_counters_runs_in_four_partitions_a_platform(self):
+        # Four partitions a platform, each sized from measured release times to about half GitHub's job limit.
+        release = self.profiles["release"]
+        self.assertEqual((release.runs, release.counters_runs, release.laps_runs), (3, 2, 2))
+        for platform_name in perf_shards.PLATFORMS:
+            self.assertEqual(len(release.partitions[platform_name]), 4, platform_name)
 
     def test_partition_names_carry_their_profile(self):
         # A name is part of a check name and an artifact name, so it says which profile measured it.

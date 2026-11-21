@@ -14,7 +14,9 @@ name: Performance comparison
 # - `full`: a pull request labelled `perf-full`. Three partitions a platform run every pull-request variant
 #   with two counters runs a side and S9's laps set, on the same relaxed profile, within 45 minutes.
 # - `release`: a release tag, compared with the previous release tag, every variant at full length with the
-#   shipping release profile. It may take hours, and each job must stay under GitHub's 6-hour job limit.
+#   shipping release profile: three timed runs a side, S9's laps set, and two counters runs a side only for the
+#   variants whose counters a release reads. It may take hours, and each job must stay under GitHub's 6-hour
+#   job limit, so its four partitions a platform are each sized to about three hours from measured release times.
 #
 # Jobs: `plan` decides eligibility, resolves both SHAs once and emits each platform's matrix from the profile, so
 # a comparison job that starts late never re-resolves a moving base. Each comparison job builds both refs itself

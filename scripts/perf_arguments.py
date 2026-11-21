@@ -37,6 +37,7 @@ from typing import Callable, Iterable, Mapping, NamedTuple, Sequence
 
 import perf_cli
 import perf_echo_analysis
+import perf_result_schema
 import perf_settings
 
 
@@ -72,8 +73,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                         help="when the head declares the perf-counters feature, also run a --counters set on "
                              "it, and on the base too when the base declares it; print the frame-counter "
                              "table and the S2/S3 overhead table")
+    parser.add_argument("--counters-scenario", action="extend", nargs="+", metavar="ID[/VARIANT]",
+                        help="run the counters set for these selected variants only (a bare ID is its default "
+                             "variant); several values or repeated flags; an error with --counters")
     parser.add_argument("--counters-runs", type=perf_cli.positive_int, metavar="N",
-                        help="valid runs of the counters set (default: --runs)")
+                        help="valid runs of the counters set (default: --runs); needs --counters or "
+                             "--counters-scenario")
     parser.add_argument("--keep", action="store_true", help="keep the worktrees and target directories")
     parser.add_argument("--require-base", action="store_true",
                         help="fail unless the base builds, lists and gets every valid run the head does (CI "
@@ -92,7 +97,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                              "(default: macos)")
     args = parser.parse_args(argv)
     if args.echo_attribution is not None:
-        options = (args.base, args.head, args.scenario, args.runs, args.counters_runs, args.laps_runs, args.out)
+        options = (args.base, args.head, args.scenario, args.runs, args.counters_runs, args.laps_runs, args.out,
+                   args.counters_scenario)
         if any(value is not None for value in options) or args.smoke or args.check_previous_release or args.short \
                 or args.laps or args.alloc or args.keep or args.counters or args.require_base or args.laps_scenario:
             parser.error("--echo-attribution is analysis only: it takes no comparison, build, smoke or --out option")
@@ -103,13 +109,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if args.echo_control or args.echo_platform:
         parser.error("--echo-control and --echo-platform need --echo-attribution")
     if args.check_previous_release:
-        options = (args.base, args.head, args.scenario, args.runs, args.counters_runs, args.laps_runs)
+        options = (args.base, args.head, args.scenario, args.runs, args.counters_runs, args.laps_runs,
+                   args.counters_scenario)
         if any(value is not None for value in options) or args.smoke or args.short or args.laps or args.alloc \
                 or args.keep or args.counters or args.require_base or args.laps_scenario:
             parser.error("--check-previous-release takes only --out")
         return args
     if args.smoke:
-        options = (args.base, args.head, args.scenario, args.runs, args.out, args.counters_runs)
+        options = (args.base, args.head, args.scenario, args.runs, args.out, args.counters_runs, args.counters_scenario)
         if any(value is not None for value in options) or args.short or args.laps or args.alloc \
                 or args.keep or args.counters or args.require_base or args.laps_scenario \
                 or args.laps_runs is not None:
@@ -120,6 +127,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--laps-scenario restricts the laps set; it is an error with --laps")
     elif args.laps_runs is not None and not (args.laps or args.laps_scenario):
         parser.error("--laps-runs needs --laps or --laps-scenario")
-    elif args.counters_runs is not None and not args.counters:
-        parser.error("--counters-runs needs --counters")
+    elif args.counters and args.counters_scenario:
+        parser.error("--counters-scenario restricts the counters set; it is an error with --counters")
+    elif args.counters_runs is not None and not (args.counters or args.counters_scenario):
+        parser.error("--counters-runs needs --counters or --counters-scenario")
+    else:
+        # A counters-only variant measures nothing outside the counters set, so a selection that leaves one without
+        # it is refused here, before either ref is built.
+        problem = perf_result_schema.counters_only_problem(
+            [_variant_pair(value) for value in args.scenario or [] if value != "all"],
+            None if args.counters else [_variant_pair(value) for value in args.counters_scenario or []])
+        if problem is not None:
+            parser.error(problem)
     return args
+
+
+def _variant_pair(value: str) -> tuple[str, str]:
+    """An `ID[/VARIANT]` value as (ID, variant); a bare ID is its default variant."""
+    scenario_id, _separator, variant = value.partition("/")
+    return scenario_id, variant or "default"
