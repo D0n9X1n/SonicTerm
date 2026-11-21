@@ -317,17 +317,19 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
 
 ```mermaid
 flowchart TD
-    refs["base 与 head ref"] --> trees["每个 ref 一个 worktree 与 target 目录"]
+    refs["base 与 head ref"] --> preparing["写入 comparison.md：preparing，并写明每个步骤"]
+    preparing --> trees["每个 ref 一个 worktree 与 target 目录"]
     trees --> overlay["把 head 的 harness 覆盖到两棵树上并记录其哈希"]
-    overlay --> build["逐个对每棵树做 release 构建"]
+    overlay --> build["逐个对每棵树做 release 构建并列出场景"]
+    build -- 某个步骤失败或收到停止信号 --> stopped["对比以退出码 1 停止并写出部分 comparison.md"]
     build --> identity["写入 run-identity.json 与进行中的 comparison.md"]
     identity --> run["按 ABBA 顺序进行下一次运行：新的 harness 进程与新的 scratch 目录"]
     run --> cleanup["通过锚进程清理每个终端会话"]
     cleanup --> settled{"清理已完成？"}
-    settled -- 否 --> stopped["对比以退出码 1 停止并写出部分 comparison.md"]
+    settled -- 否 --> stopped
     settled -- 是 --> valid{"运行有效？"}
-    valid -- 非托管运行或其它 harness 的结果 --> stopped
-    valid -- schema 失败或拒绝运行 --> ended["该变体结束，记为不完整"]
+    valid -- 非托管运行或其它 harness 的结果，或无法证明的清理 --> stopped
+    valid -- 清理已完成时的 schema 失败，或拒绝运行 --> ended["该变体结束，记为不完整"]
     valid -- 两侧各连续两次超时或非遮挡的无效运行 --> ended
     valid -- 其它无效运行，每侧最多重试 3 次 --> run
     valid -- 是 --> enough{"两侧都达到要求的有效运行次数？"}
@@ -371,17 +373,20 @@ scratch 目录，以 `--managed` 启动，并以本侧的 worktree 为工作目�
 带有 `synthetic_occlusion = true`。
 
 有两类运行会使对比立即以退出码 1 停止，且从不重试：未解决的清理，以及来源失败，即 `managed` 不为 true
-或 harness 哈希不是脚本所传哈希的结果（独立运行或其它 harness 的运行）。另有两类只结束所属变体：schema
-失败与拒绝运行，该变体连同原因记为不完整，下一个变体照常运行。`perf-compare.py` 中的 `classify_outcome`
-在任何可重试的原因之前按以下顺序检查它们，因此带有其中之一的运行即使同时有可重试的问题，也从不重试：
+或 harness 哈希不是脚本所传哈希的结果（独立运行或其它 harness 的运行）。另有两类只结束所属变体：结果表明
+清理已完成的 schema 失败与拒绝运行，该变体连同原因记为不完整，下一个变体照常运行。`perf-compare.py` 中的
+`classify_outcome` 在任何可重试的原因之前按以下顺序检查它们，因此带有其中之一的运行即使同时有可重试的问题，
+也从不重试：
 
 1. 由结果之外的证据表明的未解决清理，例如 `run_step` 的截止时间或 Ctrl-C，见下文；
-2. 来源失败，然后是 schema 失败：无法解析或不符合结果 schema 的 `result.json`。无论 harness 如何结束
-   都是如此，包括 harness 超时（退出码 4）与当前树不支持该场景（退出码 5）。`run_step` 报告 PASS 且
-   退出码为 0、因而退出状态可信时，缺少 `result.json`（除非 harness 输出了 `NOT_EXERCISED`）或结果状态
-   不是 `valid` 也属于 schema 失败；
-3. 由结果表明的未解决清理：`finish_session` 未完成，无论以哪种退出码结束；
-4. 拒绝运行：harness 拒绝了该次运行（退出码 2），例如因为继承了不安全的设置，或 scratch 目录已经存在。
+2. 来源失败；
+3. 由结果表明或无法排除的未解决清理：`finish_session` 未完成（无论以哪种退出码结束），或 `result.json`
+   缺失、无法解析或未记录 `finish_session` 已完成的 schema 失败，此时没有任何证据证明该运行的清理已完成；
+4. 清理已完成的运行的 schema 失败：不符合结果 schema 的 `result.json`。无论 harness 如何结束都是如此，
+   包括 harness 超时（退出码 4）与当前树不支持该场景（退出码 5）。`run_step` 报告 PASS 且退出码为 0、
+   因而退出状态可信时，结果状态不是 `valid` 也属于 schema 失败，而缺少 `result.json`（除非 harness 输出了
+   `NOT_EXERCISED`）则属于无法证明清理的 schema 失败；
+5. 拒绝运行：harness 拒绝了该次运行（退出码 2），例如因为继承了不安全的设置，或 scratch 目录已经存在。
 
 其它无效运行都会重试，每侧最多 3 次。其中包括 harness 以退出码 0 结束、但 `run_step` 报告 PASS、TIMEOUT 与
 INTERRUPTED 以外状态的运行，以及 harness 在自己的截止时间（即其场景的超时）以退出码 4 结束的运行。用尽重试的
@@ -394,11 +399,15 @@ head 使其变体失败，该变体之后的组不再运行；用尽重试的 ba
 无论 harness 的退出码如何，对比都会以退出码 1 停止，而不是开始下一次尝试。`run_step` 的截止时间比 harness
 自己的截止时间晚 30 秒，正好在 harness 的 watchdog 将要中止 harness 的时刻或之前。
 
-失败按变体跟踪，贯穿其 timed、laps、counters 与 alloc 组。`run-identity.json` 与 `comparison.md` 在首次运行
-之前写入，每个变体结束后重写，并在每条退出路径上再次写入：停止、错误，以及 SIGINT 或 SIGTERM（被取消的
-GitHub job 会在 SIGKILL 之前发送）。第一个这样的信号像 Ctrl-C 一样结束正在进行的运行，之后的信号无法打断
-报告的写入；每个文件都通过同目录的临时文件替换，因此写到一半被杀死时会留下完整的上一版。在最后一个变体之前，
-`comparison.md` 以 `**Comparison in progress:**` 开头；停止之后以 `**Stopped comparison:**` 与原因开头。
+失败按变体跟踪，贯穿其 timed、laps、counters 与 alloc 组。`comparison.md` 在对比开始时即写入，以
+`**Comparison preparing:**` 与正在进行的步骤（解析 ref、构建并列出两个 ref、选择变体）开头，并在每个步骤
+重写。`run-identity.json` 在两个 ref 都列出场景之后、首次运行之前写入，因为任一 artifact 带有不完整的身份时
+perf-flags 都会拒绝整次运行。两者在每个变体结束后重写，并在每条退出路径上再次写入：失败的步骤、停止、错误，
+以及 SIGINT 或 SIGTERM（被取消的 GitHub job 会在 SIGKILL 之前发送）。第一个这样的信号像 Ctrl-C 一样结束
+正在进行的运行或构建，之后的信号无法打断报告的写入；每个文件都通过同目录的临时文件替换，因此写到一半被杀死时
+会留下完整的上一版。在最后一个变体之前，`comparison.md` 以 `**Comparison in progress:**` 开头；停止之后以
+`**Stopped comparison:**` 与原因开头，测量之前的停止还会写明停在哪个步骤。`--build-only` 不做测量，不写
+`comparison.md`。
 其中的表格保持完整对比的格式，只包含已测量的变体。PR 表之后的 `Incomplete` 部分列出每个没有完整对比的
 变体及原因：未凑满运行就结束的组、失败或被阻止的 head、未测量的变体，以及在 `--require-base` 下的其它
 所有缺口。任何不完整的变体都会使对比失败，退出码为 1；不传 `--require-base` 且 head 仅被阻止时退出码为 3。
@@ -426,9 +435,9 @@ shell 是自己会话的首进程，进程组终止无法触及它；锚进程�
 存活得更久或无法计数的进程组成员、`run_step` 的截止时间或 Ctrl-C，以及 `run_step` 从未收集到的 harness
 退出。在截止时间或 Ctrl-C 时，`run_step` 终止并回收 harness，但不对其进程组计数，因此原因会说明：要么进程组
 没有被计数，要么进程组之外的某个进程占用了输出；无论哪种情况，比 harness 存活得更久的进程都无从测量。
-`run_step` 从未收集其退出的 harness 可能仍在运行，因此其进程组计数说明不了什么。最后一个原因由结果表明：
-`finish_session` 未完成。它在 schema 检查之后、任何可重试的原因之前读取，无论以哪种退出码结束，因此这样的
-运行从不作为遮挡重试。
+`run_step` 从未收集其退出的 harness 可能仍在运行，因此其进程组计数说明不了什么。最后几个原因由结果表明：
+`finish_session` 未完成，或结果无法表明其已完成的 schema 失败。它们在来源检查之后、任何可重试的原因与只结束
+变体的 schema 失败之前读取，无论以哪种退出码结束，因此这样的运行从不作为遮挡重试，也从不只结束其变体。
 
 ### 隔离检查
 

@@ -259,14 +259,15 @@ class ClassificationTests(unittest.TestCase):
 
     def test_fatal_outcomes_are_decided_before_any_retryable_reason(self):
         # A retry would rerun on a host that may hold this run's processes, or trust an untrusted result. A result of
-        # an unmanaged run stops the comparison; a missing result or a refusal ends only its variant. None is retried.
+        # an unmanaged run or a missing result, which cannot prove its teardown, stops the comparison; a refusal ends
+        # only its variant. None is retried.
         theft = perf_focus.FocusVerdict(True, (), ["focus theft"], True)
         unmanaged = perf_result_tests.valid_result(status="timeout", exit_code=4, managed=False)
         cases = {
             "unmanaged result and a home write": (
                 "provenance", "stop", make_outcome(schema_problems=["managed is False, not true"], home=["config.toml: added"])),
             "exit 0 without result.json and a home write": (
-                "schema", "incomplete", make_outcome(result=None, home=["config.toml: added"])),
+                "cleanup", "stop", make_outcome(result=None, home=["config.toml: added"])),
             "refusal and focus theft": ("refused", "incomplete", make_outcome(status="FAIL", exit_code=2, result=None, focus=theft)),
             "unmanaged exit-4 result and focus theft": (
                 "provenance", "stop", make_outcome(status="FAIL", exit_code=4, result=unmanaged,
@@ -292,9 +293,30 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(self.kind(exit_code=101, result=None), "unexpected")
 
     def test_not_exercised_without_a_result_is_blocked(self):
-        # NOT_EXERCISED with exit 0 and no result.json means the host cannot exercise the scenario.
+        # NOT_EXERCISED with exit 0 and no result.json means the host cannot exercise the scenario; without it the
+        # missing result is a schema failure that cannot prove its teardown, so it is unresolved cleanup.
         self.assertEqual(self.kind(result=None, not_exercised=True), "blocked")
-        self.assertEqual(self.kind(result=None), "schema")
+        self.assertEqual(self.kind(result=None), "cleanup")
+
+    def test_a_schema_failure_is_variant_local_only_with_a_settled_teardown(self):
+        # A schema failure ends only its variant when its result records a settled finish_session. An unsettled or
+        # unrecorded teardown, or no result at all, may leave sessions behind, so the run is cleanup and stops every
+        # variant, whatever else is wrong with it.
+        problem = "phases is not a list of objects"
+        cases = {
+            "settled": (perf_result_tests.valid_result(finish_session_settled=True), "schema", "incomplete"),
+            "unsettled": (perf_result_tests.valid_result(finish_session_settled=False), "cleanup", "stop"),
+            "unrecorded": ({key: value for key, value in perf_result_tests.valid_result().items()
+                            if key != "finish_session_settled"}, "cleanup", "stop"),
+            "no result": (None, "cleanup", "stop"),
+        }
+        for name, (result, expected, verdict) in cases.items():
+            with self.subTest(name):
+                kind, reasons = perf_outcomes.classify_outcome(make_outcome(result=result, schema_problems=[problem]))
+                self.assertEqual((kind, perf_outcomes.compare_verdict(kind)), (expected, verdict))
+                self.assertIn(problem, reasons)
+                if expected == "cleanup":
+                    self.assertEqual(reasons[0], perf_outcomes.UNPROVEN_TEARDOWN)
 
     def test_schema_problems_are_never_retried_as_invalid(self):
         # An unmanaged result or another harness's hash is a provenance failure; a result with another status

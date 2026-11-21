@@ -469,17 +469,19 @@ What differs from macOS:
 
 ```mermaid
 flowchart TD
-    refs["base and head refs"] --> trees["one worktree and target directory per ref"]
+    refs["base and head refs"] --> preparing["write comparison.md: preparing, naming each step"]
+    preparing --> trees["one worktree and target directory per ref"]
     trees --> overlay["overlay the head's harness on both trees and record its hash"]
-    overlay --> build["release-build each tree, one at a time"]
+    overlay --> build["release-build and list each tree, one at a time"]
+    build -- a step fails or a stop signal arrives --> stopped["the comparison stops with exit 1 and writes a partial comparison.md"]
     build --> identity["write run-identity.json and a progress comparison.md"]
     identity --> run["next run in ABBA order: a fresh harness process in a new scratch directory"]
     run --> cleanup["clean up each terminal session through its anchor"]
     cleanup --> settled{"cleanup settled?"}
-    settled -- no --> stopped["the comparison stops with exit 1 and writes a partial comparison.md"]
+    settled -- no --> stopped
     settled -- yes --> valid{"valid run?"}
-    valid -- result of an unmanaged run or another harness --> stopped
-    valid -- schema failure or refusal --> ended["the variant ends, recorded incomplete"]
+    valid -- result of an unmanaged run or another harness, or an unproven teardown --> stopped
+    valid -- schema failure with a settled teardown, or refusal --> ended["the variant ends, recorded incomplete"]
     valid -- timeout or non-occlusion invalid run on both sides twice each --> ended
     valid -- other invalid run, retried at most 3 times per side --> run
     valid -- yes --> enough{"each side has the requested valid runs?"}
@@ -549,21 +551,25 @@ retried: an unresolved cleanup, and a provenance failure, a result whose
 `managed` is not true or whose harness hash is not the hash the script passed
 (a standalone run or another harness's). Two more end only their variant, which
 is recorded incomplete with the reason while the next variant still runs: a
-schema failure and a refusal. `classify_outcome` in `perf-compare.py` checks for
-all of them before any retryable reason, in this order, so a run that has one is
-never retried even when it also has a retryable problem:
+schema failure whose result shows a settled teardown, and a refusal.
+`classify_outcome` in `perf-compare.py` checks for all of them before any
+retryable reason, in this order, so a run that has one is never retried even
+when it also has a retryable problem:
 
 1. an unresolved cleanup that evidence other than the result shows, such as a
    `run_step` deadline or Ctrl-C, described below;
-2. a provenance failure, then a schema failure: a `result.json` that cannot be
-   parsed or does not match the result schema. This holds however the harness
-   ended, including a harness timeout (exit 4) and a block (exit 5). Once
-   `run_step` has reported PASS with exit 0, so the exit can be trusted, a
-   missing `result.json` (unless the harness printed `NOT_EXERCISED`) or a result
-   whose status is not `valid` is a schema failure too;
-3. an unresolved cleanup that the result shows: a `finish_session` that did not
-   settle, whatever the exit;
-4. a refusal: the harness refused the run (exit 2), for example over an unsafe
+2. a provenance failure;
+3. an unresolved cleanup that the result shows or cannot rule out: a
+   `finish_session` that did not settle, whatever the exit, or a schema failure
+   whose `result.json` is missing, cannot be parsed or does not record a settled
+   `finish_session`, so nothing proves the run's teardown;
+4. a schema failure of a run whose teardown settled: a `result.json` that does
+   not match the result schema. This holds however the harness ended, including
+   a harness timeout (exit 4) and a block (exit 5). Once `run_step` has reported
+   PASS with exit 0, so the exit can be trusted, a result whose status is not
+   `valid` is a schema failure too, and a missing `result.json` (unless the
+   harness printed `NOT_EXERCISED`) is one whose teardown nothing proves;
+5. a refusal: the harness refused the run (exit 2), for example over an unsafe
    inherited setting or a scratch directory that already exists.
 
 Every other invalid run is retried, at most 3 times per side. That includes a
@@ -585,14 +591,21 @@ attempt. `run_step`'s deadline is 30 s past the harness's own deadline, at or
 just before the point where the harness's watchdog would abort the harness.
 
 Failure is tracked per variant, across its timed, laps, counters and alloc
-sets. `run-identity.json` and `comparison.md` are written before the first run,
-rewritten after every variant, and written again on every exit path: a stop, an
-error, and SIGINT or SIGTERM, which a cancelled GitHub job sends before SIGKILL.
-The first such signal ends the run in flight as Ctrl-C does, and a later one
-cannot cut the report short; each file is replaced through a sibling file, so a
-kill mid-write leaves the previous copy whole. Until the last variant,
-`comparison.md` opens with `**Comparison in progress:**`; after a stop it opens
-with `**Stopped comparison:**` and the reason. Its tables keep the format of a
+sets. `comparison.md` is written as soon as the comparison starts, opening with
+`**Comparison preparing:**` and the step in flight (resolving the refs,
+building and listing both refs, selecting the variants), and rewritten at each
+step. `run-identity.json` follows once both refs are listed, before the first
+run, because perf-flags refuses a run whose artifacts hold an incomplete
+identity. Both are rewritten after every variant and written again on every
+exit path: a failed step, a stop, an error, and SIGINT or SIGTERM, which a
+cancelled GitHub job sends before SIGKILL. The first such signal ends the run or
+build in flight as Ctrl-C does, and a later one cannot cut the report short;
+each file is replaced through a sibling file, so a kill mid-write leaves the
+previous copy whole. Until the last variant, `comparison.md` opens with
+`**Comparison in progress:**`; after a stop it opens with
+`**Stopped comparison:**` and the reason, and a stop before measuring also names
+the step it stopped in. A `--build-only` run measures nothing and writes no
+`comparison.md`. Its tables keep the format of a
 complete comparison and hold only the variants measured. An `Incomplete`
 section after the PR table names each variant without a complete comparison and
 why: a set that ended without its runs, a failed or blocked head, a variant not
@@ -642,9 +655,11 @@ group, so the reason says that either the group was not counted or a process
 outside it held the output open; either way a process that outlived the harness
 goes unmeasured. A harness whose exit `run_step` never collected may still run,
 so its process-group count measures nothing. The result shows the
-last cause: a `finish_session` that did not settle. That is read after the
-schema check, whatever the exit, and before any retryable reason, so such a run
-is never retried as an occlusion.
+last causes: a `finish_session` that did not settle, or a schema failure whose
+result cannot show a settled one. They are read after the provenance check,
+whatever the exit, and before any retryable reason or a variant-local schema
+failure, so such a run is never retried as an occlusion and never ends only its
+variant.
 
 ### Isolation checks
 

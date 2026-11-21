@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import argparse
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import sys
@@ -56,7 +57,7 @@ def write_timing(out: Path, marks: Mapping[str, float], environ: Mapping[str, st
 
 
 def stop_reason(error: BaseException, signals: perf_signals.StopSignals) -> str:
-    """Why measuring stopped: the signals received, for a cancel, else the error's own words."""
+    """Why the comparison stopped: the signals received, for a cancel, else the error's own words."""
     if signals.received:
         cancelled = f"cancelled by {signals.describe()}"
         # When: run_step turned the signal into an interrupted run, the stop that run raised is named too.
@@ -130,8 +131,97 @@ def _list_side(gate, binary: Path, out: Path, index: int, side: str, prebuilt: b
         raise
 
 
+@dataclass
+class ComparisonProgress:
+    """Where a comparison is, so a stop at any step finalizes a report that names it."""
+
+    signals: perf_signals.StopSignals
+    step: str = "resolving the refs and adding the worktrees"
+    # Rewrites the preparing comparison.md for a step; None when the run reports nothing (--build-only).
+    on_step: Callable[[str], None] | None = None
+    # Set once measuring starts: the measured report's writer, the results so far and the variant in flight.
+    write: Callable[[str | None], str] | None = None
+    results: list = field(default_factory=list)
+    failure: perf_sets.VariantFailure | None = None
+
+    def advance(self, step: str) -> None:
+        """Enter a preparation step; the preparing comparison.md names it, so a kill leaves the step on disk."""
+        self.step = step
+        if self.on_step is not None:
+            self.on_step(step)
+
+
+def write_preparing(args: argparse.Namespace, out: Path, step: str, stop: str | None = None) -> None:
+    """Write comparison.md before measuring: preparing with the step in flight, or stopped during it.
+
+    run-identity.json waits until the listing makes its identity complete (SHAs, harness hash, capabilities):
+    perf-flags refuses a run when any of its artifacts holds an incomplete identity.
+    """
+    details = [f"- Base: `{args.base}`", f"- Head: `{args.head}`",
+               f"- Command: `{perf_build_policy.comparison_command(args)}`", f"- Evidence: `{out}`"]
+    if stop is None:
+        banner = f"**Comparison preparing:** {step}; no variant is measured yet."
+    else:
+        # A build or listing error carries its log tail; the banner keeps its first line, the details the rest.
+        first, *rest = stop.splitlines() or [""]
+        banner = (f"**Stopped comparison:** {first}, while {step}. No variant was measured, so the comparison has no "
+                  "evidence for any of them.")
+        if rest:
+            details += ["", "```text", *rest, "```"]
+    perf_report.write_atomically(out / "comparison.md",
+                                 f"{banner}\n\n## Performance comparison\n\n" + "\n".join(details) + "\n")
+
+
+def finalize_report(args: argparse.Namespace, out: Path, progress: ComparisonProgress, stop: str) -> None:
+    """Write the report a stopped comparison leaves: the measured one once measuring started, else the preparing one."""
+    try:
+        if progress.write is None:
+            write_preparing(args, out, progress.step, stop)
+            return
+        failure = progress.failure
+        if failure is not None and failure.current is not None and not any(
+                result is failure.current for result in progress.results):
+            # When: the stop came mid-set, that set is kept as stopped, so its attempts stay in the inventory.
+            progress.results.append(perf_sets.end_set(failure.current, f"stopped: {stop}"))
+        progress.write(stop)
+    except Exception as report_error:
+        # The stop's own reason is what the comparison reports; a partial report that failed is named beside it.
+        print(f"[perf-compare] the partial report could not be written: {report_error}", file=sys.stderr, flush=True)
+
+
 def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: perf_worktrees.Worktrees,
              host_run: Callable) -> int:
+    """Run the comparison's steps under the stop signals, so every exit path leaves comparison.md.
+
+    comparison.md reads `preparing` with the step in flight from the start; a failed step, a stop or a cancel
+    finalizes it with the reason and the step, and once measuring has started with every variant measured.
+    `--build-only` publishes binaries, measures nothing and writes no comparison.md. compare_main owns the
+    worktrees' removal, which runs whatever this raises.
+    """
+    progress = ComparisonProgress(perf_signals.StopSignals())
+    # When: --build-only publishes binaries for other jobs, there is no comparison to report.
+    reporting = getattr(args, "build_only", None) is None
+    with progress.signals:
+        try:
+            if reporting:
+                progress.on_step = lambda step: write_preparing(args, out, step)
+                progress.on_step(progress.step)
+            return _compare_steps(args, gate, out, work, worktrees, host_run, progress)
+        except BaseException as error:
+            # From here a later signal is only recorded, so a second one cannot cut the partial report short.
+            progress.signals.hold()
+            stop = stop_reason(error, progress.signals)
+            if reporting:
+                finalize_report(args, out, progress, stop)
+            # When: a signal arrived, even one a build turned into a failed step, the comparison was cancelled.
+            if isinstance(error, KeyboardInterrupt) or progress.signals.received:
+                # A cancel ends the comparison like any stop: exit 1, after compare_main removes the worktrees.
+                raise perf_sets.StopComparison(stop) from error
+            raise
+
+
+def _compare_steps(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: perf_worktrees.Worktrees,
+                   host_run: Callable, progress: ComparisonProgress) -> int:
     """Build (or load) both refs with the head's harness, run every selected set and write comparison.md.
 
     With `--build-only` it publishes the binaries and their manifest instead of measuring; with
@@ -141,6 +231,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: p
     marks = {"start": time.time()}
     runs = args.runs or perf_settings.DEFAULT_RUNS
     shas, trees, digest = prepare_trees(args, worktrees, host_run)
+    progress.advance("building and listing both refs")
     examples = (perf_settings.HARNESS_EXAMPLE,) + ((perf_settings.ALLOC_EXAMPLE,) if args.alloc else ())
     # A tree builds every harness with the perf features it declares, and only with those.
     features = {side: perf_harness_sources.tree_features(trees[side]) for side in perf_settings.SIDES}
@@ -173,6 +264,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: p
     if args.build_only is not None:
         return perf_prebuilt.publish_binaries(args.build_only, builds, shas, digest, identity, os.environ)
     marks["listed"] = time.time()
+    progress.advance("selecting the variants and reading the host")
     by_id = {scenario.id: scenario for scenario in scenarios}
     selected = perf_scenarios.select_scenarios(args.scenario or ["all"], scenarios)
     host = perf_smoke.production_host(gate)
@@ -221,7 +313,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: p
     deliveries: dict[str, DeliveryOutcome] = {}
     # The variants whose every set has its final result; each report lists the others as pending.
     finished: set[str] = set()
-    signals = perf_signals.StopSignals()
+    signals = progress.signals
 
     def write_report(stop: str | None = None) -> str:
         """Write comparison.md, run-identity.json and their companions for the results so far; return the document.
@@ -437,51 +529,36 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: p
             result.requested_runs = requested_runs
             results.append(result)
 
-    failure = None
-    with signals:
-        try:
-            # run-identity.json and comparison.md exist before the first run, and every pending variant is listed.
-            document = write_report()
-            # One untimed replay per delivered scenario, before any measured run; both sides share the overlaid harness.
-            replay_evidence = out / "delivery"
-            for scenario_id, variant in selected:
-                if f"{scenario_id}/{variant}" in unavailable:
-                    # When: the diagnostic is unavailable, it is not measured, so its delivery is not replayed either.
-                    continue
-                if perf_delivery.delivery_replayed(scenario_id, sys.platform):
-                    replay_evidence.mkdir(parents=True, exist_ok=True)
-                    index += 1
-                    deliveries[f"{scenario_id}/{variant}"] = perf_delivery.run_delivery_replay(
-                        gate, builds["head"][perf_settings.HARNESS_EXAMPLE], scenario_id, variant, replay_evidence, index + 1,
-                        short=args.short, timeout_s=perf_scenarios.run_timeout_s(by_id[scenario_id], False, args.short),
-                        temp_root=host.temp_root, environ=host.environ)
-            for scenario_id, variant in selected:
-                failure = perf_sets.VariantFailure()
-                measure_variant(scenario_id, variant, failure)
-                finished.add(f"{scenario_id}/{variant}")
-                failure = None
-                if len(finished) < len(selected):
-                    # When: variants remain, the progress copy is rewritten; the final report follows the loop.
-                    write_report()
-            marks["measure_end"] = time.time()
-            document = write_report()
-        except BaseException as error:
-            # From here a later signal is only recorded, so a second one cannot cut the partial report short.
-            signals.hold()
-            stop = stop_reason(error, signals)
-            if failure is not None and failure.current is not None and not any(
-                    result is failure.current for result in results):
-                # When: the stop came mid-set, that set is kept as stopped, so its attempts stay in the inventory.
-                results.append(perf_sets.end_set(failure.current, f"stopped: {stop}"))
-            try:
-                write_report(stop)
-            except Exception as report_error:
-                # The stop's own reason is what the comparison reports; a partial report that failed is named beside it.
-                print(f"[perf-compare] the partial report could not be written: {report_error}", file=sys.stderr, flush=True)
-            if isinstance(error, KeyboardInterrupt):
-                # A cancel ends the comparison like any stop: exit 1, after compare_main removes the worktrees.
-                raise perf_sets.StopComparison(stop) from error
-            raise
+    # Measuring writes the measured report itself, so the step is recorded without a preparing copy.
+    progress.step = "measuring"
+    progress.results, progress.write = results, write_report
+    # A signal a build turned into a failed lenient base step was recorded; it stops the comparison here.
+    signals.check()
+    # run-identity.json and comparison.md exist before the first run, and every pending variant is listed.
+    document = write_report()
+    # One untimed replay per delivered scenario, before any measured run; both sides share the overlaid harness.
+    replay_evidence = out / "delivery"
+    for scenario_id, variant in selected:
+        if f"{scenario_id}/{variant}" in unavailable:
+            # When: the diagnostic is unavailable, it is not measured, so its delivery is not replayed either.
+            continue
+        if perf_delivery.delivery_replayed(scenario_id, sys.platform):
+            replay_evidence.mkdir(parents=True, exist_ok=True)
+            index += 1
+            deliveries[f"{scenario_id}/{variant}"] = perf_delivery.run_delivery_replay(
+                gate, builds["head"][perf_settings.HARNESS_EXAMPLE], scenario_id, variant, replay_evidence, index + 1,
+                short=args.short, timeout_s=perf_scenarios.run_timeout_s(by_id[scenario_id], False, args.short),
+                temp_root=host.temp_root, environ=host.environ)
+    for scenario_id, variant in selected:
+        progress.failure = perf_sets.VariantFailure()
+        measure_variant(scenario_id, variant, progress.failure)
+        finished.add(f"{scenario_id}/{variant}")
+        progress.failure = None
+        if len(finished) < len(selected):
+            # When: variants remain, the progress copy is rewritten; the final report follows the loop.
+            write_report()
+    marks["measure_end"] = time.time()
+    document = write_report()
     marks["report_written"] = time.time()
     write_timing(out, marks, os.environ)
     print(document, flush=True)

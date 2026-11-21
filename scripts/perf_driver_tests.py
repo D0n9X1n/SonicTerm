@@ -536,3 +536,64 @@ class FailureDriverTests(CompareHarness, unittest.TestCase):
         self.assertNotIn("### Incomplete", self.document())
         self.assertFalse(any(path.name.endswith(".partial") for path in self.out.iterdir()))
 
+
+class PreparingReportTests(CompareHarness, unittest.TestCase):
+    """A comparison that stops before measuring still leaves comparison.md naming the step, and its handlers."""
+
+    PREPARING = "**Comparison preparing:** building and listing both refs; no variant is measured yet."
+
+    def document(self):
+        return (self.out / "comparison.md").read_text(encoding="utf-8")
+
+    def assert_stopped_while_preparing(self, reason):
+        """comparison.md opens stopped with `reason` during the build-and-list step; nothing measured, no identity."""
+        document = self.document()
+        self.assertTrue(document.startswith(f"**Stopped comparison:** {reason}"), document[:300])
+        self.assertIn(", while building and listing both refs. No variant was measured", document)
+        self.assertEqual(self.plans, [])
+        # An incomplete identity would make perf-flags refuse the run's other artifacts, so none is written.
+        self.assertFalse((self.out / perf_inventory.RUN_IDENTITY_FILE).exists())
+
+    def test_a_head_build_failure_leaves_a_report_and_restores_the_handler(self):
+        # The head's compiler error ends the comparison as before (ValueError, exit 1 in compare_main), and the
+        # report says so instead of being absent.
+        before = signal.getsignal(signal.SIGTERM)
+        with self.assertRaisesRegex(ValueError, "the head cannot build perf_scenarios"):
+            self.compare(head_build="FAIL")
+        self.assert_stopped_while_preparing("ValueError: the head cannot build perf_scenarios")
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+
+    def test_a_failed_listing_leaves_a_report_and_restores_the_handler(self):
+        # A head binary that cannot load fails its `--list`; the banner keeps the error's first line and the
+        # details keep its log tail.
+        before = signal.getsignal(signal.SIGTERM)
+        with self.assertRaisesRegex(ValueError, "--list"):
+            self.compare(list_fail=("head",))
+        self.assert_stopped_while_preparing("ValueError: `")
+        self.assertIn("libcairo.2.dylib", self.document())
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+
+    def test_sigterm_during_a_build_is_a_cancel_with_a_report(self):
+        # A cancelled job's SIGTERM reaches the comparison's handler mid-build; run_step turns the interrupt into a
+        # failed build, which the comparison reports as the cancel it was, while the report read preparing.
+        before = signal.getsignal(signal.SIGTERM)
+        during = []
+
+        def cancelled_build(*_args, **_kwargs):
+            during.append(self.document())
+            handler = signal.getsignal(signal.SIGTERM)
+            self.assertTrue(callable(handler) and handler is not before, handler)
+            try:
+                handler(signal.SIGTERM, None)
+            except KeyboardInterrupt:
+                # run_step catches the interrupt, kills the build and reports it INTERRUPTED, a failed build.
+                pass
+            raise ValueError("the head cannot build perf_scenarios: interrupted")
+        with mock.patch.object(perf_driver, "build_sides", side_effect=cancelled_build), \
+                self.assertRaises(perf_sets.StopComparison) as raised:
+            self.compare()
+        self.assertEqual(str(raised.exception), "cancelled by SIGTERM")
+        self.assertTrue(during[0].startswith(self.PREPARING), during[0][:200])
+        self.assert_stopped_while_preparing("cancelled by SIGTERM")
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+

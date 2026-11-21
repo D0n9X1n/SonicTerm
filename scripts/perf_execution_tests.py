@@ -111,7 +111,7 @@ class ExecuteRunTests(unittest.TestCase):
         self.assertIs(identity["guard_api"], True)
         self.assertIsNone(perf_inventory.run_identity_document({"base": "1" * 40, "head": "2" * 40}, "ab" * 32,
                                                      {"base": [], "head": []}, True, {}, False, {})["guard_api"])
-        self.assertIn("GUARD_SPANS_CFG in harness_cfgs))", inspect.getsource(perf_driver._compare))
+        self.assertIn("GUARD_SPANS_CFG in harness_cfgs))", inspect.getsource(perf_driver._compare_steps))
 
     def test_a_malformed_middle_take_is_incomplete_through_execute_run(self):
         # Finding 3 through the production path: execute_run joins a run whose middle take is malformed into
@@ -316,12 +316,14 @@ class ExecuteRunTests(unittest.TestCase):
         self.assertEqual(perf_outcomes.classify_outcome(outcome)[0], "valid")
 
     def test_progress_never_stands_in_for_a_missing_result(self):
-        # Without result.json a run classifies as before, even when progress.json looks like a valid result.
+        # Without result.json a run classifies as if progress.json were absent, even when it looks like a valid
+        # result: a schema failure whose teardown nothing proves, so unresolved cleanup.
         self.progress, self.write_result = True, False
         outcome, evidence, _gate = self.run_plan()
         self.assertTrue((evidence / "scratch" / "progress.json").is_file())
         self.assertIsNone(outcome.result)
-        self.assertEqual(perf_outcomes.classify_outcome(outcome), ("schema", ["exit 0 without result.json"]))
+        self.assertEqual(perf_outcomes.classify_outcome(outcome),
+                         ("cleanup", [perf_outcomes.UNPROVEN_TEARDOWN, "exit 0 without result.json"]))
 
     def test_a_deadline_kill_run_step_never_collected_fails(self):
         # kill_group was accepted, but run_step's bounded reap never collected the harness: cleanup is unresolved.

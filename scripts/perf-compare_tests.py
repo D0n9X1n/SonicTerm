@@ -139,6 +139,7 @@ from perf_driver_tests import (
     CompareDriverTests,
     StrictBaseTests,
     FailureDriverTests,
+    PreparingReportTests,
 )
 from perf_prebuilt_tests import (
     PRODUCER_ENV,
