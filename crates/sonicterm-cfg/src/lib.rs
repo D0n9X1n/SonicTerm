@@ -7,6 +7,7 @@
 
 pub mod assets;
 pub mod config;
+pub mod detached_spawn;
 pub mod dimension;
 pub mod keymap;
 pub mod launch_url;
