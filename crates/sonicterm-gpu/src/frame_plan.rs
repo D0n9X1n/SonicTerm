@@ -108,6 +108,8 @@ pub(crate) struct WindowIdentity {
     pub close_override: u8,
     pub broadcast_participants_hash: u64,
     pub inline_media_hash: u64,
+    /// Digest of every pane's program colors; 0 while no pane has any.
+    pub pane_colors: u64,
     pub hovered_url_cells: Option<HoveredUrlCells>,
     pub process_privileged: bool,
     pub subpixel_aa: SubpixelAaMode,

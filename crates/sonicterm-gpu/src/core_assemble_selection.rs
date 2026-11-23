@@ -16,6 +16,7 @@ impl GpuRenderer {
         let AssemblyGeometry {
             grid,
             plan,
+            pane_views,
             active_origin_x,
             active_origin_y,
             active_pane_x,
@@ -178,7 +179,10 @@ impl GpuRenderer {
                 // Keep every cursor shape at its exact theme color. Alpha
                 // fading over the terminal background makes Gruvbox yellow
                 // read as olive/green during real redraws.
-                let color = active_cursor_color(self.cursor_color);
+                // The terminal cursor takes the active pane's OSC 12 color when its program set one.
+                let pane_cursor = PaneColors::new(theme, pane_views[plan.active_index].overrides)
+                    .cursor_rgba(self.cursor_color);
+                let color = active_cursor_color(pane_cursor);
                 // Wezterm cursor shapes:
                 //   Block     → full-cell quad, glyph re-rendered in bg
                 //   Bar       → 2px vertical bar pinned to the left edge

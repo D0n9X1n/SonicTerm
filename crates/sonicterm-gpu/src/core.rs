@@ -697,6 +697,12 @@ pub use settings::start_dim;
 pub use settings::GlyphAtlasStart;
 pub use settings::RendererSettings;
 
+#[path = "core_pane_colors.rs"]
+mod pane_colors;
+use pane_colors::pane_colors_identity;
+#[doc(hidden)]
+pub use pane_colors::PaneColors;
+
 #[path = "core_theme.rs"]
 mod theme;
 use theme::active_cursor_color;

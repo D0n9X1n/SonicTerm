@@ -66,8 +66,19 @@ impl GpuRenderer {
                 .map(|r| r - x)
                 .unwrap_or_else(|| f32::from(run.end_col - run.start_col + 1) * self.cell_w);
             let y = *origin_y + f32::from(*row) * self.cell_h;
-            let underline_color =
-                chrome_color_to_linear_rgba(color_to_chrome(run.color, theme, self.fg_default));
+            // The underline draws in its own pane's colors, found by the origin it was recorded at.
+            let colors = pane_views
+                .iter()
+                .find(|pane| {
+                    pane.origin_x.to_bits() == pad_bits
+                        && pane.origin_y.to_bits() == origin_y.to_bits()
+                })
+                .map_or(PaneColors::from(theme), |pane| PaneColors::new(theme, pane.overrides));
+            let underline_color = chrome_color_to_linear_rgba(color_to_chrome(
+                run.color,
+                colors,
+                colors.default_foreground(self.fg_default),
+            ));
             let quads_before = quads.len();
             push_underline_quads(
                 &mut *quads,

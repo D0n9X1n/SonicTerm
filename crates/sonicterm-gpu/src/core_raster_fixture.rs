@@ -41,7 +41,7 @@ pub(in crate::core) fn shape_run_for_test(
         fixture.row,
         fixture.style,
         &borrowed,
-        fixture.theme,
+        fixture.theme.into(),
         fixture.fg_default,
         fixture.cell_size.0,
         fixture.cell_size.1,

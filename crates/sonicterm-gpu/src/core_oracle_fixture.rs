@@ -102,7 +102,7 @@ pub(in crate::core) fn build_run_records(
         0,
         style,
         cells,
-        &theme,
+        (&theme).into(),
         ChromeColor::rgb(230, 230, 230),
         10.0,
         20.0,

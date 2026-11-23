@@ -36,7 +36,7 @@ impl GpuRenderer {
         style: RunStyle,
         // The run's cells borrowed from the grid, in strictly increasing column order.
         cells: &[(u16, &Cell)],
-        theme: &Theme,
+        colors: PaneColors<'_>,
         fg_default: ChromeColor,
         cell_w: f32,
         cell_h: f32,
@@ -115,7 +115,11 @@ impl GpuRenderer {
                     // as missing, so a printable cell draws the same outline box as the shaped path.
                     if !cell.ch.is_whitespace() {
                         // Blanks are intentionally tile-less and are not reported as missing.
-                        records.tofu.push(tofu_box(*col, cell_w, cell_fg(cell, theme, fg_default)));
+                        records.tofu.push(tofu_box(
+                            *col,
+                            cell_w,
+                            cell_fg(cell, colors, fg_default),
+                        ));
                         records.missing_chars.push(cell.ch);
                     }
                     continue;
@@ -125,7 +129,7 @@ impl GpuRenderer {
                     // tile, which is what a space rasterizes to.
                     continue;
                 }
-                let color = cell_fg(cell, theme, fg_default);
+                let color = cell_fg(cell, colors, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
@@ -335,7 +339,7 @@ impl GpuRenderer {
                     complete = false;
                     continue;
                 }
-                let color = cell_fg(lead_cell, theme, fg_default);
+                let color = cell_fg(lead_cell, colors, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
@@ -406,7 +410,7 @@ impl GpuRenderer {
                     records.tofu.push(tofu_box(
                         g.lead_col,
                         cell_pixel_width,
-                        cell_fg(lead_cell, theme, fg_default),
+                        cell_fg(lead_cell, colors, fg_default),
                     ));
                     records.missing_chars.push(ch);
                     continue;
@@ -416,7 +420,7 @@ impl GpuRenderer {
                     // face produced a zero-area tile, which has no pixels.
                     continue;
                 }
-                let color = cell_fg(lead_cell, theme, fg_default);
+                let color = cell_fg(lead_cell, colors, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
@@ -487,7 +491,7 @@ impl GpuRenderer {
             }
             // Multi-cell ligature halves keep their natural overhang so paired
             // glyphs such as `=>` continue to fuse across adjacent cells.
-            let color = cell_fg(lead_cell, theme, fg_default);
+            let color = cell_fg(lead_cell, colors, fg_default);
             let rgba = if info.is_color {
                 [1.0, 1.0, 1.0, 1.0]
             } else {
@@ -563,20 +567,25 @@ pub(super) fn drawable_or_tofu(
     info.filter(|info| !info.missing)
 }
 
-pub(super) fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
+pub(super) fn cell_fg<'frame>(
+    cell: &Cell,
+    colors: impl Into<PaneColors<'frame>>,
+    default: ChromeColor,
+) -> ChromeColor {
+    let colors = colors.into();
     // Resolve the foreground and the cell's effective background. INVERSE
     // swaps the two (foreground is painted in the bg color and vice versa),
     // so resolve both consistently and let DIM blend toward whichever
     // background the glyph is actually drawn over.
     let (fg, bg) = if cell.flags.contains(CellFlags::INVERSE) {
-        let default_bg = hex_to_chrome_color(theme.colors.background.0.as_str());
-        let default_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
-        (color_to_chrome(cell.bg, theme, default_bg), color_to_chrome(cell.fg, theme, default_fg))
+        let default_bg = colors.background();
+        let default_fg = colors.foreground();
+        (color_to_chrome(cell.bg, colors, default_bg), color_to_chrome(cell.fg, colors, default_fg))
     } else {
         // When: no `INVERSE` flag — the ordinary case, where the cell's own
         // fg and bg are used as written.
-        let default_bg = hex_to_chrome_color(theme.colors.background.0.as_str());
-        (color_to_chrome(cell.fg, theme, default), color_to_chrome(cell.bg, theme, default_bg))
+        let default_bg = colors.background();
+        (color_to_chrome(cell.fg, colors, default), color_to_chrome(cell.bg, colors, default_bg))
     };
     // Dim / faint (SGR 2): pull the foreground toward its background so
     // faint text is visibly de-emphasized instead of identical to normal
@@ -597,11 +606,15 @@ pub(super) fn shaped_glyph_columns_are_monotonic(
     glyphs.windows(2).all(|pair| pair[0].lead_col <= pair[1].lead_col)
 }
 
-pub(super) fn color_to_chrome(color: Color, theme: &Theme, default: ChromeColor) -> ChromeColor {
+pub(super) fn color_to_chrome<'frame>(
+    color: Color,
+    colors: impl Into<PaneColors<'frame>>,
+    default: ChromeColor,
+) -> ChromeColor {
     match color {
         Color::Default => default,
         Color::Rgb(r, g, b) => ChromeColor::rgb(r, g, b),
-        Color::Indexed(i) => indexed(i, theme).unwrap_or(default),
+        Color::Indexed(i) => colors.into().indexed(i).unwrap_or(default),
     }
 }
 

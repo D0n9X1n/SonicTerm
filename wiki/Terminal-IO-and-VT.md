@@ -68,7 +68,7 @@ travels with the pane across windows.
 Production parsing yields after a reply-producing dispatch. Outside
 parser and side-effect locks, the VT worker submits replies to a separate FIFO:
 64 KiB of RAM followed by a private, automatically deleted temporary spill file.
-One dispatch stages less than 32 KiB, bounded by the 4 KiB raw OSC 4 input limit.
+One dispatch stages less than 32 KiB, bounded by the 4 KiB limit on one color request.
 Complete dispatches are batched up to 32 KiB and flushed at each output-batch end;
 small replies do not require a file write per query. Admission may perform synchronous file I/O but never waits for native input
 capacity, so a finite output-before-input query burst can continue draining.
@@ -241,7 +241,8 @@ Current protocol support includes:
 - primary and alternate screens, application cursor keys, bracketed paste,
   focus reporting, and kitty keyboard flag set/push/pop/query;
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
-  clipboard events, OSC 4/10/11/12 color queries, OSC 133 prompt markers, OSC 9;4
+  clipboard events, OSC 4/10/11/12 color queries and sets, OSC 104/110/111/112 color
+  resets, OSC 133 prompt markers, OSC 9;4
   progress, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
   title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere,
   the final padding optional), at most eight open at once and 16 KiB in all, and all of them dropped
@@ -278,12 +279,43 @@ SonicTerm answers:
 | DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`: `Pm` 1 set, 2 reset, for modes 1, 7, 47, 67, 1000, 1002, 1003, 1004, 1006, 1047, 1049, 2004, 2026, 2031 and 9001 (each of 1000/1002/1003 reads set only while it is the selected tracking mode); 0 (not recognized) for every other mode, including 25, 1005, 1015 and 1016, so a program that probes them falls back at once. A request naming several modes gets no reply. |
 | DSR 996 `CSI ? 996 n` | `CSI ? 997 ; 1 n` for a dark theme, `; 2 n` for a light one, from the theme's `appearance`. |
 | DEC mode 2031 | While a program has set it, every theme change that alters a readable color (foreground, background, cursor, the 16 theme colors) or the scheme sends the same `CSI ? 997 ; Ps n` report, also when the scheme stays the same, so a program that re-reads colors on the report picks up the new palette. A reload, the theme picker's preview and its choice all count; the report goes through the pane's reply path. SonicTerm does not follow the system's light or dark appearance, so the report fires only when the theme changes. |
-| `OSC 4 ; N ; ?` | 0..=15 from the theme; 16..=255 from the xterm 6×6×6 cube and gray ramp, the same table the renderer draws with. |
+| `OSC 4 ; N ; ?` | `OSC 4 ; N ; rgb:rrrr/gggg/bbbb` with the request's terminator: the color the program set, else 0..=15 from the theme and 16..=255 from the xterm 6×6×6 cube and gray ramp, the same table the renderer draws with. |
+| `OSC 10/11/12 ; ?` | `OSC 1x ; rgb:rrrr/gggg/bbbb` with the request's terminator: the foreground, background or cursor the program set, else the theme's; a cursor with neither reads as the foreground. Each further `?` asks for the next color, so `OSC 10 ; ? ; ?` answers 10 and 11; 13-19 are not answered. |
 | `CSI 16 t` | `CSI 6 ; height ; width t`, the cell size in whole physical pixels; no reply until the window reports a cell size. Other window operations are ignored. |
 
-Programs cannot set colors: OSC 4/10/11/12 color changes and OSC 104/110/111/112
-resets are ignored, whichever program sends them. SGR pixel mouse reporting (mode 1016)
-is not supported, and DECRQM says so.
+Programs can set and reset the colors of their own pane:
+
+- `OSC 4 ; N ; spec` sets palette entry N (0..=255), and one message can carry many pairs.
+  `OSC 10`, `11` and `12` set the default foreground, background and cursor; each further
+  value targets the next dynamic color, so `OSC 10 ; #fff ; ?` sets the foreground and asks
+  for the background, and an empty value only moves on (`OSC 10 ; ; ?` asks for the
+  background). OSC 13-19 are accepted and ignored.
+- A spec is `rgb:r/g/b` with 1 to 4 hex digits per channel, `rgbi:` intensities from 0 to 1,
+  `#rgb`, `#rrggbb`, `#rrrgggbbb`, `#rrrrggggbbbb`, 3 or 6 hex digits without `#`, or an X11
+  color name in any case.
+- Requests in one message apply in order. An invalid OSC 4 pair, OSC 104 index or dynamic
+  value is skipped and the rest still apply.
+- `OSC 104 ; N ; …` resets the listed palette entries; a bare `OSC 104`, or one that lists
+  only blanks, resets every entry, and a list of only invalid indices changes nothing.
+  `OSC 110`, `111` and `112` reset the foreground, background and cursor with no argument or
+  any argument but `?`; a `?` asks for that color instead, answered under the request's own
+  number. OSC 113-119 are accepted and ignored.
+- A program's colors sit over the theme: a reload, the theme picker's preview, cancel and
+  choice change only the theme defaults underneath, and a color the program set equal to
+  today's default still hides a later theme change. RIS clears the palette colors and keeps
+  the foreground, background and cursor.
+- A program's own sets and resets send no mode 2031 report, so a program that re-sets colors
+  when it gets the report cannot loop; RIS turns mode 2031 off, so it sends none either.
+  DSR 996 keeps answering the theme's appearance.
+- The colors apply to the pane that set them: its cells, blank area, inverse and dim text,
+  underlines and cursor. The tab bar, window padding outside panes, splitters and the macOS
+  titlebar band keep the theme, so split panes can differ. This is an intentional difference
+  from Ghostty, which retints its single-surface window. Replies are always the 16-bit
+  `rgb:rrrr/gggg/bbbb` form, Ghostty's default; there is no 8-bit reply option.
+- Below a background opacity of 1, a program's background is drawn over the theme background
+  at the same opacity, so it blends with the theme background rather than replacing it.
+
+SGR pixel mouse reporting (mode 1016) is not supported, and DECRQM says so.
 
 On Windows, a pane's program writes to a ConPTY pseudoconsole. ConPTY
 interprets that output and passes its own rendition to SonicTerm, so the
@@ -411,8 +443,10 @@ URI to 8 KiB and client id to 1 KiB.
   events resets the state before its retained tail, a pane whose process exited is
   `Unknown`, and the state moves with the pane to another tab or window.
 
-The raw OSC 4 collector retains queries beyond vte's parameter count, up to
-4 KiB, and suppresses the truncated duplicate callback. Parser-owned sequence
+The raw color collector owns OSC 4, 10-19, 104 and 110-119 whole, beyond vte's
+parameter count and up to 4 KiB. It applies a message only once its ST or BEL arrived, and
+drops a longer one, or one cut by CAN, SUB or an ESC that does not start ST, without applying
+any part; vte never dispatches the same message. Parser-owned sequence
 state recognizes kitty APC after completed escapes, including C1 APC and chunk-split
 `ESC` / `_`. A bounded prefix probe takes only confirmed `OSC 1337;File=` media
 out of vte's private OSC buffer.

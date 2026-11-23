@@ -199,7 +199,13 @@ impl Performer {
         }
     }
 
-    pub(super) fn handle_semantic_osc(&mut self, code: u16, content: &[u8]) {
+    pub(super) fn handle_semantic_osc(&mut self, code: u16, content: &[u8], bell_terminated: bool) {
+        if vt_color::is_color_osc(code) {
+            // When: code is a color request, apply its whole payload in order; its replies end
+            // with the request's own terminator, BEL when `bell_terminated`.
+            self.apply_color_osc(code, content, bell_terminated);
+            return;
+        }
         if code == 99 {
             // When: code is 99, kitty's notification grammar reads it, chunk by chunk.
             self.receive_kitty_notify(content);

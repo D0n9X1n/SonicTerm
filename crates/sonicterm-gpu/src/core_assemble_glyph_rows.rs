@@ -96,15 +96,18 @@ impl GpuRenderer {
                 // same row and columns never inherits another pane's accent.
                 let pane_hovered_url =
                     hovered_url_cells.filter(|hovered| hovered.pane_id == pv.pane_id);
+                // Each pane draws with its own program colors; a pane without them keeps the theme
+                // rows and revision every such pane shares.
+                let colors = PaneColors::new(theme, pv.overrides);
                 assemble_pane_glyph_rows(
                     GlyphShaping {
                         atlas: &mut self.glyph_atlas,
                         row_cache: &mut self.row_glyph_cache,
                         font_stack: self.font_stack.as_ref(),
                         wt_raster: wt_raster.as_mut(),
-                        style_rev: self.style_rev,
-                        theme,
-                        fg_default,
+                        style_rev: colors.style_rev(self.style_rev),
+                        colors,
+                        fg_default: colors.default_foreground(fg_default),
                         raster_px,
                         cell_size: (cell_w, cell_h),
                         surface: (sw, sh),

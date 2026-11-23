@@ -595,6 +595,10 @@ fn shader_source(dual_source: bool) -> String {
 #[path = "wezterm_pipeline_tests.rs"]
 mod wezterm_pipeline_tests;
 
+#[cfg(test)]
+#[path = "wezterm_pipeline_pane_colors_tests.rs"]
+mod wezterm_pipeline_pane_colors_tests;
+
 #[path = "wezterm_pipeline_vertices.rs"]
 mod vertices;
 pub(crate) use vertices::{assemble_vertices, draw_index_ranges};

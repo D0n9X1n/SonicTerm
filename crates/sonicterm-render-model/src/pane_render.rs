@@ -123,6 +123,9 @@ pub struct PaneRender<'a> {
     /// two lists share one, so a renderer may reuse what it derived from a revision it has seen.
     /// 0 means untracked, and the renderer recomputes.
     pub inline_media_revision: u64,
+    /// The colors the pane's program set (OSC 4/10/11/12), borrowed from its parser for the frame;
+    /// `None` while it set none, so the pane draws with the theme alone.
+    pub colors: Option<&'a sonicterm_types::ColorOverrides>,
 }
 
 /// A frame's panes, lent to the renderer once. The renderer assembles the frame inside `lend`'s

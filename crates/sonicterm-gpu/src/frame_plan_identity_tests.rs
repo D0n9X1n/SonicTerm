@@ -332,6 +332,7 @@ fn window_identity_mutations_require_full_repaint() {
         |w| w.pane_focus_flash_bucket = 1,
         |w| w.broadcast_participants_hash = 1,
         |w| w.inline_media_hash = 1,
+        |w| w.pane_colors = 1,
         |w| w.subpixel_aa = SubpixelAaMode::Rgb,
         |w| w.background[3] = 0.5_f64.to_bits(),
         |w| w.style_rev = 1,

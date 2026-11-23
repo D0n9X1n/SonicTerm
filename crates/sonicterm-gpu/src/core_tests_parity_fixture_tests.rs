@@ -185,7 +185,7 @@ pub(in crate::core) fn render_parity_frame(
         font_stack: Some(stack),
         wt_raster: Some(&mut raster),
         style_rev: 0,
-        theme: &theme,
+        colors: (&theme).into(),
         fg_default: ChromeColor::rgb(230, 230, 230),
         raster_px: 14.0,
         cell_size: (cell_w, cell_h),
@@ -205,7 +205,7 @@ pub(in crate::core) fn render_parity_frame(
             &mut caches.background_rows,
             RowBackgroundRow { pane_id: 7, grid, view_top_abs: frame.view_top_abs, slot },
             row.iter(),
-            (0, &theme, sel_bbox),
+            (0, (&theme).into(), sel_bbox),
             &background_geometry,
             &snapped,
             &mut quads,
@@ -389,6 +389,7 @@ impl sonicterm_render_model::FrameSource for OwningSource {
                 scrollbar_alpha: 0.0,
                 inline_images: Default::default(),
                 inline_media_revision: 0,
+                colors: None,
             })
             .collect();
         assemble(&mut panes)

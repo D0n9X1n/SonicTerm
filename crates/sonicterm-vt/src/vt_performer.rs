@@ -71,6 +71,7 @@ impl Performer {
             reply_tx,
             captured_replies: std::cell::RefCell::new(None),
             reply_queue_full_warned: std::sync::atomic::AtomicBool::new(false),
+            color_overrides: sonicterm_types::ColorOverrides::default(),
             theme_fg: None,
             theme_bg: None,
             theme_cursor: None,
@@ -81,7 +82,6 @@ impl Performer {
             cursor_request: None,
             kitty_notifications: kitty_notify::KittyNotifications::default(),
             report_cell_px: None,
-            suppress_next_osc4: false,
             scroll_top: None,
             scroll_bottom: None,
             fast_path_ready: true,
@@ -140,7 +140,7 @@ impl Performer {
     // Ordering: reply_queue_full_warned uses Relaxed because it suppresses duplicate warnings without publishing reply bytes.
     pub(super) fn reply(&self, bytes: &[u8]) {
         if let Some(captured) = self.captured_replies.borrow_mut().as_mut() {
-            // When: captured_replies is enabled, stage one dispatch before yielding; OSC 4 input is capped at 4096 bytes.
+            // When: captured_replies is enabled, stage one dispatch before yielding; a color request is capped at 4096 bytes.
             captured.extend_from_slice(bytes);
             return;
         }
@@ -161,57 +161,6 @@ impl Performer {
                     // When: TrySendError::Disconnected means no host can receive bytes, so dropping the reply avoids blocking parser progress.
                 }
             }
-        }
-    }
-
-    pub(super) fn handle_osc4_raw(&self, raw_pairs: &[u8], bell_terminated: bool) {
-        let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
-        let mut parts = raw_pairs.split(|&byte| byte == b';');
-        while let Some(idx) = parts.next() {
-            let Some(spec) = parts.next() else {
-                // When: spec is missing from the index/spec pair, stop before replying with a mismatched palette entry.
-                break;
-            };
-            let idx =
-                std::str::from_utf8(idx).ok().and_then(|digits| digits.trim().parse::<u8>().ok());
-            let spec = std::str::from_utf8(spec).ok().map(str::trim);
-            if let (Some(idx), Some("?")) = (idx, spec) {
-                self.reply_osc4_query(idx, terminator);
-            }
-        }
-    }
-
-    pub(super) fn handle_osc4_pairs(&self, params: &[&[u8]], bell_terminated: bool) {
-        let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
-        let mut param_index = 1;
-        while param_index + 1 < params.len() {
-            let idx = std::str::from_utf8(params[param_index])
-                .ok()
-                .and_then(|digits| digits.trim().parse::<u8>().ok());
-            let spec = std::str::from_utf8(params[param_index + 1]).ok().map(str::trim);
-            if let (Some(idx), Some("?")) = (idx, spec) {
-                self.reply_osc4_query(idx, terminator);
-            }
-            param_index += 2;
-        }
-    }
-
-    fn reply_osc4_query(&self, idx: u8, terminator: &[u8]) {
-        // 0..=15 are the seeded theme colors; 16..=255 the shared table the renderer draws with.
-        let color = match self.theme_palette.get(usize::from(idx)) {
-            Some(seeded) => *seeded,
-            None => sonicterm_types::indexed_rgb(idx),
-        };
-        if let Some((red, green, blue)) = color {
-            let mut buf = Vec::with_capacity(28);
-            buf.extend_from_slice(b"\x1b]4;");
-            buf.extend_from_slice(idx.to_string().as_bytes());
-            buf.extend_from_slice(
-                format!(";rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}")
-                    .as_bytes(),
-            );
-            buf.extend_from_slice(terminator);
-            self.reply(&buf);
         }
     }
 
@@ -383,6 +332,8 @@ impl Performer {
         self.mouse_tracking = MouseTracking::Off;
         self.focus_reporting = false;
         self.color_scheme_updates = false;
+        // RIS resets the palette a program set, but not its foreground, background or cursor.
+        self.color_overrides.clear_palette();
         self.kitty_notifications.clear();
         // A program's cursor request ends with the reset, so the host draws the configured cursor.
         if self.cursor_request.take().is_some() {

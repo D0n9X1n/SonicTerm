@@ -118,6 +118,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         scrollbar_alpha: 0.0,
         inline_images: Default::default(),
         inline_media_revision: 0,
+        colors: None,
     }];
     let tabs = TabBar::new();
     let mut no_panes: [PaneRender<'_>; 0] = [];

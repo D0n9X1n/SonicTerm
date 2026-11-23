@@ -66,6 +66,19 @@ impl GpuRenderer {
             // Mirror RowGlyphCache's dirty-row invalidation: drop the absolute
             // rows of every live row the VT thread mutated since the last frame.
             invalidate_planned_quad_rows(&mut self.line_quad_cache, pv.planned);
+            let colors = PaneColors::new(theme, pv.overrides);
+            if let (Some(fill), Some(clip)) =
+                (colors.background_fill(self.bg_opacity), pv.planned.full_clip)
+            {
+                // A program background (`fill`) covers the pane's clip under its cell
+                // backgrounds, so blank cells and padding take it; chrome keeps the theme.
+                // shortcut: drawn over the theme clear, so below opacity 1 it blends with the theme
+                // background instead of replacing it; exact at the default opacity of 1.
+                quads.push(QuadInstance::sharp(
+                    px_to_ndc(clip.x as f32, clip.y as f32, clip.w as f32, clip.h as f32, sw, sh),
+                    fill,
+                ));
+            }
             let pad_bg = pane_rect.x;
             let top_inset_bg = pane_rect.y;
             let max_cols = pv.planned.background_cols;
@@ -117,7 +130,7 @@ impl GpuRenderer {
                         slot: r,
                     },
                     row_cells.iter(),
-                    (self.style_rev, theme, sel_bbox_for_quads),
+                    (colors.style_rev(self.style_rev), colors, sel_bbox_for_quads),
                     &geometry,
                     snapped_cell_x_bg,
                     &mut *quads,

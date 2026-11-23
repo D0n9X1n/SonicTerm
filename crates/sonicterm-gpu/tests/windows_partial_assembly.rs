@@ -350,6 +350,7 @@ fn frame_with_receipts(
             scrollbar_alpha: 0.0,
             inline_images: Arc::new(pane.images.clone()),
             inline_media_revision: 0,
+            colors: None,
         })
         .collect();
     let released = renderer.render_releasing(

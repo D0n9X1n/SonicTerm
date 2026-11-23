@@ -211,9 +211,7 @@ impl Parser {
             .map(MediaCapture::retained_bytes)
             .sum::<usize>();
         let osc_bytes = match &self.raw_osc {
-            Some(RawOsc::Palette { content }) | Some(RawOsc::Semantic { content, .. }) => {
-                content.capacity()
-            }
+            Some(RawOsc::Semantic { content, .. }) => content.capacity(),
             Some(RawOsc::Iterm2 { capture, .. }) => capture.retained_bytes(),
             Some(RawOsc::Probe { .. }) | None => 0,
         };
@@ -251,15 +249,12 @@ impl Parser {
             });
         let osc = match &self.raw_osc {
             Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
-            Some(RawOsc::Probe { .. })
-            | Some(RawOsc::Palette { .. })
-            | Some(RawOsc::Semantic { .. })
-            | None => 0,
+            Some(RawOsc::Probe { .. }) | Some(RawOsc::Semantic { .. }) | None => 0,
         };
         direct.saturating_add(osc)
     }
 
-    /// Abandon any capture or raw OSC palette accumulation in flight, releasing
+    /// Abandon any capture or raw OSC accumulation in flight, releasing
     /// its retained allocation.
     ///
     /// Returns the bytes released. The partially-received payload is

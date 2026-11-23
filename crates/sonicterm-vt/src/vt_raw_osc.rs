@@ -43,9 +43,28 @@ impl Parser {
             // When: raw_osc is absent, leave this byte for vte or APC ownership.
             return false;
         };
-        // When: raw_osc selects prefix probing, OSC 4 accumulation, or OSC 1337 media staging.
+        // When: raw_osc selects prefix probing, whole-payload capture, or OSC 1337 media staging.
         match raw_osc {
             RawOsc::Probe { mut content, mut content_len } => {
+                // A bare color number in the probe ends at BEL or ESC.
+                let bare_color = matches!(byte, 0x07 | 0x1b)
+                    .then(|| vt_color::color_osc_number(&content[..usize::from(content_len)]))
+                    .flatten();
+                if let Some(code) = bare_color {
+                    // When: bare_color holds a bare color request (`104`, `110`), own it: BEL
+                    // applies it now, ESC waits for the `\` that completes ST.
+                    self.inner = vte::Parser::new();
+                    self.pending_esc = false;
+                    if byte == 0x07 {
+                        self.performer.handle_semantic_osc(code, &[], true);
+                        self.finish_escape();
+                    } else {
+                        // When: byte is ESC, only a following `\` completes the request.
+                        self.raw_osc =
+                            Some(RawOsc::Semantic { code, content: Vec::new(), pending_esc: true });
+                    }
+                    return true;
+                }
                 let index = usize::from(content_len);
                 if index < content.len() {
                     content[index] = byte;
@@ -72,10 +91,19 @@ impl Parser {
                         Some(RawOsc::Semantic { code, content: Vec::new(), pending_esc: false });
                     return true;
                 }
-                // A digit run with room left in the probe may still become `9;` or `777;`.
+                if let Some(code) = prefix.strip_suffix(b";").and_then(vt_color::color_osc_number) {
+                    // When: the prefix names a color request, own its whole payload so it applies
+                    // only once complete and no part is lost to vte's parameter cap.
+                    self.inner = vte::Parser::new();
+                    self.pending_esc = false;
+                    self.raw_osc =
+                        Some(RawOsc::Semantic { code, content: Vec::new(), pending_esc: false });
+                    return true;
+                }
+                // A digit run with room left in the probe may still become `9;`, `777;` or a
+                // color request.
                 let digits_pending = prefix.iter().all(u8::is_ascii_digit) && index < content.len();
                 if !ITERM2_OSC_PREFIX.starts_with(prefix)
-                    && !OSC4_PREFIX.starts_with(prefix)
                     && ![b"0;".as_slice(), b"2;", b"7;", b"8;"]
                         .iter()
                         .any(|value| value.starts_with(prefix))
@@ -84,10 +112,8 @@ impl Parser {
                     // When: prefix matches no owned OSC family, return ownership to vte.
                     return false;
                 }
-                // When: prefix selects OSC 4, complete OSC 1337, or continued bounded probing.
-                if prefix == OSC4_PREFIX {
-                    self.raw_osc = Some(RawOsc::Palette { content: Vec::new() });
-                } else if prefix == ITERM2_OSC_PREFIX {
+                // When: prefix selects complete OSC 1337, or continued bounded probing.
+                if prefix == ITERM2_OSC_PREFIX {
                     self.inner = vte::Parser::new();
                     // An open kitty upload releases its reservation before this capture asks for one.
                     self.performer.abort_kitty_transfer_for_other_media();
@@ -118,7 +144,7 @@ impl Parser {
                     // When: pending_esc is set, only backslash completes ST; other escapes retain normal parser ownership.
                     if byte == b'\\' {
                         // When: byte completes ST, apply only the complete semantic payload.
-                        self.performer.handle_semantic_osc(code, &content);
+                        self.performer.handle_semantic_osc(code, &content, false);
                         self.finish_escape();
                         return true;
                     }
@@ -129,14 +155,15 @@ impl Parser {
                 }
                 if byte == 0x07 {
                     // When: byte is BEL, dispatch the complete bounded semantic payload.
-                    self.performer.handle_semantic_osc(code, &content);
+                    self.performer.handle_semantic_osc(code, &content, true);
                     self.finish_escape();
                     return true;
                 }
                 if byte == 0x1b {
                     pending_esc = true;
-                } else if byte < 0x20 && is_program_osc(code) {
-                    // When: byte is a C0 control inside a program payload, drop it as vte does in an OSC string.
+                } else if byte < 0x20 && (is_program_osc(code) || vt_color::is_color_osc(code)) {
+                    // When: byte is a C0 control inside a program or color payload, drop it as vte
+                    // does in an OSC string.
                 } else if content.len() == raw_osc_cap(code) {
                     // When: content reaches raw_osc_cap, refuse the whole update and swallow its remaining payload.
                     self.performer.invalidate_semantic_osc(code);
@@ -150,22 +177,6 @@ impl Parser {
                 }
                 self.raw_osc = Some(RawOsc::Semantic { code, content, pending_esc });
                 true
-            }
-            RawOsc::Palette { mut content } => {
-                match byte {
-                    0x07 | 0x1b => {
-                        self.performer.handle_osc4_raw(&content, byte == 0x07);
-                        self.performer.suppress_next_osc4 = true;
-                        self.pending_esc = byte == 0x1b;
-                    }
-                    _ => {
-                        if content.len() < MAX_RAW_OSC4_BYTES {
-                            content.push(byte);
-                            self.raw_osc = Some(RawOsc::Palette { content });
-                        }
-                    }
-                }
-                false
             }
             RawOsc::Iterm2 { mut capture, mut metadata_done, mut pending_esc } => {
                 if matches!(byte, 0x18 | 0x1a) {

@@ -267,6 +267,7 @@ fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
             scrollbar_alpha: 0.0,
             inline_images: Default::default(),
             inline_media_revision: 0,
+            colors: None,
         })
         .collect();
     let released = renderer.render_releasing(

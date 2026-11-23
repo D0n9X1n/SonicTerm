@@ -18,10 +18,13 @@ use super::*;
 /// `Color::Indexed(1)` (ANSI red) ends up identical to the theme's `ansi.red`
 /// rendered through the LoadOp clear path.
 #[doc(hidden)]
-pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
+pub fn cell_bg_rgba<'frame>(
+    cell: &Cell,
+    colors: impl Into<PaneColors<'frame>>,
+) -> Option<[f32; 4]> {
+    let colors = colors.into();
     let color = if cell.flags.contains(CellFlags::INVERSE) {
-        let default_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
-        color_to_chrome(cell.fg, theme, default_fg)
+        color_to_chrome(cell.fg, colors, colors.foreground())
     } else {
         // When: INVERSE is clear, so the cell keeps its own bg and the glyph keeps fg; swapping them here too would cancel out reverse-video runs.
         match cell.bg {
@@ -29,7 +32,7 @@ pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
                 // When: `Color::Default` is used, the attachment clear or replacement reset supplies this cell's background.
                 return None;
             }
-            bg => color_to_chrome(bg, theme, ChromeColor::rgb(0, 0, 0)),
+            bg => color_to_chrome(bg, colors, ChromeColor::rgb(0, 0, 0)),
         }
     };
     let lut = super::super::color::srgb_u8_to_linear_lut();
@@ -55,10 +58,10 @@ pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
 /// cursor / overlay quads in the draw vector so those still paint on top.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)] // mirrors flush_shape_run / collect_hyperlink_runs siblings — all geometry must be threaded in explicitly to keep this a free function (testable without a full GpuRenderer)
-pub fn emit_cell_bg_quads(
+pub fn emit_cell_bg_quads<'frame>(
     grid: &Grid,
     view_top_abs: u64,
-    theme: &Theme,
+    colors: impl Into<PaneColors<'frame>>,
     pad: f32,
     top_inset: f32,
     cell_w: f32,
@@ -70,7 +73,7 @@ pub fn emit_cell_bg_quads(
     emit_cell_bg_quads_clipped(
         grid,
         view_top_abs,
-        theme,
+        colors,
         PaneRect {
             x: pad,
             y: top_inset,
@@ -90,10 +93,10 @@ pub fn emit_cell_bg_quads(
 /// current tile must never emit quads into its neighbour's rectangle.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub fn emit_cell_bg_quads_clipped(
+pub fn emit_cell_bg_quads_clipped<'frame>(
     grid: &Grid,
     view_top_abs: u64,
-    theme: &Theme,
+    colors: impl Into<PaneColors<'frame>>,
     pane_rect: PaneRect,
     cell_w: f32,
     cell_h: f32,
@@ -111,11 +114,12 @@ pub fn emit_cell_bg_quads_clipped(
     }
     // Snap this pane's raster-pixel edges so its background aligns with its glyphs, not the active pane's grid.
     let snapped_cell_x = build_snapped_cell_x(pad, cell_w, grid.cols);
+    let colors = colors.into();
     for r in 0..max_rows {
         emit_cell_bg_quads_for_row(
             grid,
             view_top_abs,
-            theme,
+            colors,
             pad,
             top_inset,
             cell_w,
@@ -212,7 +216,7 @@ pub(crate) fn emit_row_background<'cell, Cells>(
     cache: &mut crate::row_quad_cache::LineQuadCache,
     row: RowBackgroundRow<'_>,
     cells: Cells,
-    (style_rev, theme, selection): (u64, &Theme, Option<(u64, u16, u64, u16)>),
+    (style_rev, colors, selection): (u64, PaneColors<'_>, Option<(u64, u16, u64, u16)>),
     geometry: &RowBackgroundGeometry,
     snapped_cell_x: &[f32],
     out: &mut Vec<QuadInstance>,
@@ -244,7 +248,7 @@ where
     emit_cell_bg_quads_for_row(
         row.grid,
         row.view_top_abs,
-        theme,
+        colors,
         geometry.origin.0,
         geometry.origin.1,
         geometry.cell_size.0,
@@ -266,10 +270,10 @@ where
 /// at a time and capture the resulting quads into the cache.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub fn emit_cell_bg_quads_for_row(
+pub fn emit_cell_bg_quads_for_row<'frame>(
     grid: &Grid,
     view_top_abs: u64,
-    theme: &Theme,
+    colors: impl Into<PaneColors<'frame>>,
     pad: f32,
     top_inset: f32,
     cell_w: f32,
@@ -281,6 +285,7 @@ pub fn emit_cell_bg_quads_for_row(
     out: &mut Vec<QuadInstance>,
     snapped_cell_x: &[f32],
 ) {
+    let colors = colors.into();
     {
         let row_abs = view_top_abs + r as u64;
         let Some(row) = grid.row_at_abs(row_abs) else {
@@ -315,7 +320,7 @@ pub fn emit_cell_bg_quads_for_row(
                 out.push(QuadInstance::sharp(px_to_ndc(x, y, w, cell_h, sw, sh), color));
             };
         for cell in row.iter().take(max_cols as usize) {
-            let bg = cell_bg_rgba(cell, theme);
+            let bg = cell_bg_rgba(cell, colors);
             match (run_color, bg) {
                 (Some(prev), Some(cur)) if prev == cur => {
                     // When: cur repeats prev, so the cell joins the open run and an 80-column fill stays one quad instead of eighty.

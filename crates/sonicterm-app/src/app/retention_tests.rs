@@ -697,6 +697,7 @@ pub(super) fn draw_window(app: &mut App, window_id: WindowId, rows: &str) -> Res
         scrollbar_alpha: 0.0,
         inline_images: Default::default(),
         inline_media_revision: 0,
+        colors: None,
     }];
     renderer
         .render(

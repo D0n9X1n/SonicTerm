@@ -232,6 +232,9 @@ impl GpuRenderer {
                     close_override: u8::from(self.tab_close_override.is_some()),
                     broadcast_participants_hash,
                     inline_media_hash,
+                    pane_colors: pane_colors_identity(
+                        panes.iter().map(|pane| (pane.id, pane.colors)),
+                    ),
                     hovered_url_cells,
                     process_privileged,
                     subpixel_aa,
@@ -352,6 +355,7 @@ impl GpuRenderer {
                 rect_h: planned.layout.h,
                 scrollbar_alpha: planned.scrollbar_alpha,
                 inline_images: &pane.inline_images,
+                overrides: pane.colors,
             })
             .collect();
         let active = &plan.panes[plan.active_index];

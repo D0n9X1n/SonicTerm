@@ -133,7 +133,6 @@ pub const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 /// many rejections bounds the scan to roughly one per that many links instead
 /// of one per link, while still recovering as soon as content scrolls away.
 const HYPERLINK_RECLAIM_BACKOFF_LINKS: u32 = 256;
-const MAX_RAW_OSC4_BYTES: usize = 4096;
 const MAX_SEMANTIC_OSC_BYTES: usize = 16 * 1024;
 
 /// Whether `code` is a program-state OSC (`9` or `777`) the raw capture owns.
@@ -162,6 +161,9 @@ fn program_osc_number(prefix: &[u8]) -> Option<u16> {
 fn raw_osc_cap(code: u16) -> usize {
     if is_program_osc(code) {
         MAX_NOTIFY_BYTES
+    } else if vt_color::is_color_osc(code) {
+        // When: code is a color request, its own bound applies.
+        vt_color::MAX_COLOR_OSC_BYTES
     } else {
         // When: code is a title, CWD or hyperlink, the semantic bound applies.
         MAX_SEMANTIC_OSC_BYTES
@@ -169,7 +171,6 @@ fn raw_osc_cap(code: u16) -> usize {
 }
 const MAX_ITERM2_METADATA_BYTES: usize = 1024;
 const ITERM2_OSC_PREFIX: &[u8; 10] = b"1337;File=";
-const OSC4_PREFIX: &[u8; 2] = b"4;";
 /// Public for the same reason as [`MAX_MEDIA_PAYLOAD_BYTES`]: the backstop is
 /// derived from the caps, not parallel to them.
 pub const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
@@ -363,11 +364,9 @@ pub struct Parser {
 enum RawOsc {
     /// Checking a bounded OSC prefix before choosing vte or media ownership.
     Probe { content: [u8; ITERM2_OSC_PREFIX.len()], content_len: u8 },
-    /// Complete title, CWD, hyperlink or program-state (`9`, `777`) payload, independent of vte's
-    /// parameter count.
+    /// Complete title, CWD, hyperlink, program-state (`9`, `777`) or color request payload,
+    /// independent of vte's parameter count.
     Semantic { code: u16, content: Vec<u8>, pending_esc: bool },
-    /// Capturing bytes after `OSC 4 ;` until BEL or ST.
-    Palette { content: Vec<u8> },
     /// Streaming an iTerm2 file payload through the parser's staging reservation.
     Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
 }
@@ -653,7 +652,9 @@ struct Performer {
     reply_tx: Option<Sender<Vec<u8>>>,
     captured_replies: std::cell::RefCell<Option<Vec<u8>>>,
     reply_queue_full_warned: std::sync::atomic::AtomicBool,
-    /// Theme default foreground (sRGB), used to answer OSC 10 `?` queries.
+    /// The colors the program set for this pane (OSC 4/10/11/12), over the theme defaults below.
+    color_overrides: sonicterm_types::ColorOverrides,
+    /// Theme default foreground (sRGB), answering OSC 10 `?` while the program set none.
     /// `None` means the parser was never told a theme — query replies are
     /// suppressed in that case so we don't lie to the shell.
     theme_fg: Option<(u8, u8, u8)>,
@@ -684,9 +685,6 @@ struct Performer {
     kitty_notifications: kitty_notify::KittyNotifications,
     /// The cell size in pixels the host last reported, answering `CSI 16 t`; mirrors the parser's.
     report_cell_px: Option<(f32, f32)>,
-    /// SonicTerm's raw OSC4 capture handles full batched queries before vte's
-    /// capped `osc_dispatch`; suppress the immediately-following duplicate.
-    suppress_next_osc4: bool,
     /// DECSTBM scrolling region top margin (visible-row, 0-based,
     /// inclusive). `None` means "no region set — full screen".
     scroll_top: Option<u16>,
@@ -759,6 +757,15 @@ mod vt_performer;
 
 #[path = "vt_raw_osc.rs"]
 mod vt_raw_osc;
+
+#[path = "vt_color.rs"]
+mod vt_color;
+
+#[path = "vt_color_spec.rs"]
+mod vt_color_spec;
+
+#[path = "vt_x11_colors.rs"]
+mod vt_x11_colors;
 
 #[path = "vt_kitty.rs"]
 mod vt_kitty;

@@ -445,7 +445,7 @@ impl Perform for Performer {
         }
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         self.fast_path_ready = false;
         let code = params
             .first()
@@ -577,73 +577,10 @@ impl Perform for Performer {
                     }
                 }
             }
-            Some(4) => {
-                // OSC 4 ; <index> ; ? ST — query a palette colour. xterm
-                // allows multiple `index ; spec` pairs in one OSC 4, so we
-                // walk the params two at a time. A `?` spec is a query → reply
-                // `ESC ] 4 ; <index> ; rgb:RRRR/GGGG/BBBB ST` (16-bit channels,
-                // xterm canonical). A non-`?` spec would be a *set*, which we
-                // don't implement yet (theme owns the palette) — skip it.
-                //
-                // Some CLIs (GitHub Copilot's prompt frame) gate their richer
-                // UI on being able to read backgroundSecondary via the full
-                // OSC 4 palette + OSC 10/11 set; without these replies they
-                // treat SonicTerm as colourless and disable the frame.
-                //
-                // vte 0.15 keeps the full OSC payload in a private buffer but
-                // exposes only MAX_OSC_PARAMS split params here. Parser::advance
-                // therefore captures raw OSC 4 bytes in parallel and handles
-                // full 16-colour batch queries before this capped callback. Keep
-                // this path as a fallback for synthetic/direct Performer tests
-                // for any capture miss, but avoid duplicate replies.
-                if self.suppress_next_osc4 {
-                    // When: suppress_next_osc4 marks a query already answered from raw bytes, avoid sending a duplicate palette reply.
-                    self.suppress_next_osc4 = false;
-                    return;
-                }
-                self.handle_osc4_pairs(params, bell_terminated);
-            }
-            Some(code @ 10..=12) => {
-                // OSC 10/11/12 ; ? ST — query default fg/bg/cursor colour.
-                // Reply format (xterm): `ESC ] N ; rgb:RRRR/GGGG/BBBB ST`
-                // where each channel is duplicated to 16 bits (xterm
-                // canonical form, accepted by every consumer including
-                // nvim). Terminator matches the request's terminator
-                // (BEL → BEL, ST → ST) so we don't surprise the client.
-                //
-                // Without this reply nvim falls back to a hard-coded
-                // guess for the bg (NeoTreeNormal 27,29,30), which
-                // doesn't match SonicTerm's actual theme bg — neo-tree
-                // icon cells (painted with `bg=NONE`) then visibly
-                // differ from the surrounding theme-clear surface.
-                // OSC 10/11/12 *set* (payload is a colour, not `?`)
-                // is intentionally not implemented yet — diagnosis
-                // shows query-reply is sufficient to fix.
-                let payload = params.get(1).and_then(|param| std::str::from_utf8(param).ok());
-                if payload != Some("?") {
-                    // When: payload is not a query marker, ignore unsupported OSC color-setting input rather than changing the theme.
-                    return;
-                }
-                let rgb = match code {
-                    10 => self.theme_fg,
-                    11 => self.theme_bg,
-                    12 => self.theme_cursor.or(self.theme_fg),
-                    _ => None,
-                };
-                let Some((red, green, blue)) = rgb else {
-                    // When: rgb is unavailable, omit the reply rather than reporting a color the host never supplied.
-                    return;
-                };
-                let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
-                let mut buf = Vec::with_capacity(24);
-                buf.extend_from_slice(b"\x1b]");
-                buf.extend_from_slice(code.to_string().as_bytes());
-                buf.extend_from_slice(
-                    format!(";rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}")
-                        .as_bytes(),
-                );
-                buf.extend_from_slice(terminator);
-                self.reply(&buf);
+            Some(4 | 10..=19 | 104 | 110..=119) => {
+                // The raw collector owns every color request spelled as Ghostty reads it and
+                // applies it only once complete; a spelling it does not own (a zero-padded or
+                // signed number) is not a color request in Ghostty either, so it is dropped.
             }
             Some(9) | Some(777) => {
                 // Raw capture owns every OSC 9 and 777 it recognizes; one that reaches vte has a

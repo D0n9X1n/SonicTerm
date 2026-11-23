@@ -643,3 +643,34 @@ fn every_production_parser_write_is_published() {
     let exit = std::fs::read_to_string(app_dir.join("pane_exit.rs")).unwrap();
     assert!(exit.contains("publish_grid_change(&pane.output_generation, &pane.change_signal)"));
 }
+
+/// A program that sets colors in every batch costs one publication and one redraw per batch, not
+/// one per color: 64 OSC 4 sets in one batch raise no host event, advance the output generation
+/// once, and flush a single redraw, and the parser holds every color for the next frame.
+#[test]
+fn a_batch_of_color_sets_publishes_and_redraws_once() {
+    let (pane, handles, _watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    let batch: Vec<u8> = (0..64u8)
+        .flat_map(|index| format!("\x1b]4;{index};rgb:{index:02x}/00/00\x07").into_bytes())
+        .collect();
+    let mut events = 0usize;
+    publish_pane_vt_batch_with(
+        &handles,
+        &batch[..],
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| events += 1,
+        || base,
+        |_| {},
+    );
+    assert_eq!(events, 0, "a color set raises no host event");
+    assert_eq!(handles.output_generation.load(Ordering::Acquire), 1, "one batch, one publication");
+    assert_eq!(echo_flush(&handles, base, true), [echo_window()], "one redraw for the batch");
+    assert_eq!(echo_flush(&handles, base, true), Vec::<WindowId>::new(), "and no second one");
+    let parser = pane.parser.lock();
+    let overrides = parser.color_overrides().expect("the batch's colors");
+    assert_eq!(overrides.palette(63), Some((63, 0, 0)));
+}

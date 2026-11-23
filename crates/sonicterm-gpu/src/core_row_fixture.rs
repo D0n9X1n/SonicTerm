@@ -111,7 +111,7 @@ impl GlyphRig {
             font_stack: self.stack.as_ref(),
             wt_raster: self.raster.as_mut(),
             style_rev: 0,
-            theme: &self.theme,
+            colors: (&self.theme).into(),
             fg_default: ChromeColor::rgb(230, 230, 230),
             raster_px: 14.0,
             cell_size: self.cell_size,
@@ -686,6 +686,7 @@ impl FallbackFixture {
             scrollbar_alpha: 0.0,
             inline_images: Default::default(),
             inline_media_revision: 0,
+            colors: None,
         }];
         let ended = GpuRenderer::finish_assembly_pass(&mut plan, &panes, pass_end);
         drop(panes);
