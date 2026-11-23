@@ -137,6 +137,14 @@ impl std::fmt::Debug for OwnerGuard {
     }
 }
 
+/// Runs the two-phase governor close and returns any refusal to the caller.
+fn close_owner(
+    governor: &ResourceGovernor,
+    owner: ResourceOwnerId,
+) -> Result<(), sonicterm_types::BudgetError> {
+    governor.begin_close(owner).and_then(|()| governor.finish_close(owner))
+}
+
 // Lifecycle: dropping an `OwnerGuard` closes `owner` in the governor, releasing
 // its ledger record; a refusal leaves that record retained rather than retried.
 impl Drop for OwnerGuard {
@@ -345,3 +353,7 @@ impl App {
         drop(window.owner.take());
     }
 }
+
+#[cfg(test)]
+#[path = "owners_tests.rs"]
+mod owners_tests;

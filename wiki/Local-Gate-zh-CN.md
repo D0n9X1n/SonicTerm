@@ -213,10 +213,10 @@ DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低�
 
 可选的 `windows-target` 步骤是 macOS 上的 pre-push 辅助检查，绝不是 CI gate。
 `scripts/check-windows-target.sh` 在某个 workspace 成员不属于它的两个列表中任何一个时失败，
-随后对不需要 Windows C 工具链的 14 个成员运行
+随后对不需要 Windows C 工具链的 13 个成员运行
 `cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`：
 `sonicterm-types`、`-grid`、`-vt`、`-cfg`、`-logging`、`-mcp`、`-resource`、`-text`、`-ui`、
-`-app-core`、`-io`（包括其 ConPTY 代码与 Windows-gated 测试）、`-render-model`、
+`-io`（包括其 ConPTY 代码与 Windows-gated 测试）、`-render-model`、
 `-block-glyph` 与 `-font-config`。检查范围是默认 feature、全部 target，以及该 target 专属的
 dev 与 build 依赖闭包，并使用独立的 target 目录。它还对固定版本的 winit 以 `serde` 运行
 `cargo check --locked`，使其 Windows 键盘测试得到编译；缺少该 target 时，它会给出

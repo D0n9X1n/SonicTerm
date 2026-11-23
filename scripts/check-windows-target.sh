@@ -20,7 +20,6 @@ verified=(
     sonicterm-resource
     sonicterm-text
     sonicterm-ui
-    sonicterm-app-core
     sonicterm-io
     sonicterm-render-model
     sonicterm-block-glyph

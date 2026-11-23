@@ -316,8 +316,8 @@ The optional `windows-target` step is a pre-push aid on macOS, never a CI gate.
 `scripts/check-windows-target.sh` fails when a workspace member is in neither of
 its two lists, then runs
 `cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`
-on the 14 members that need no Windows C toolchain: `sonicterm-types`, `-grid`,
-`-vt`, `-cfg`, `-logging`, `-mcp`, `-resource`, `-text`, `-ui`, `-app-core`, `-io`
+on the 13 members that need no Windows C toolchain: `sonicterm-types`, `-grid`,
+`-vt`, `-cfg`, `-logging`, `-mcp`, `-resource`, `-text`, `-ui`, `-io`
 (including its ConPTY code and Windows-gated tests), `-render-model`,
 `-block-glyph`, and `-font-config`. That scope is default features, all targets,
 and the target-specific dev and build closure, in a separate target directory. It

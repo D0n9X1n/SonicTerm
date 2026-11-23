@@ -166,7 +166,7 @@ retain the matching click identity and do not infer its CWD from another shell.
 The default `warn` level reports input that was refused, including terminal
 parser replies. The producer assigns `source`: `Keyboard`, `Paste`, `FileDrop`,
 `Ime`, `PointerButton`, `PointerMotion`, `Wheel`, `FocusReport`, `TerminalReply`,
-`ScriptDraft`, or `StateMachine`. Sources are never guessed from payload bytes.
+`ScriptDraft`, `Agent`, or `AgentRun`. Sources are never guessed from payload bytes.
 
 | Field | Meaning |
 | --- | --- |

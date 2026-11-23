@@ -156,3 +156,13 @@ fn registry_invariants_hold_across_lifecycle_sequences() {
     assert!(transfers >= 10, "only {transfers} transfers ran");
     assert!(resizes >= 10, "only {resizes} resizes ran");
 }
+
+/// Synthetic child window ids come from winit's safe `u64` conversion, never a transmute.
+#[test]
+fn synthetic_window_ids_use_winit_safe_conversion() {
+    const SOURCE: &str = include_str!("window_registry.rs");
+
+    assert!(!SOURCE.contains("transmute::<u64, WindowId>"));
+    assert!(SOURCE.contains("WindowId::from(u64::MAX - tag)"));
+    assert!(SOURCE.contains("WindowId::from(u64::MAX)"));
+}

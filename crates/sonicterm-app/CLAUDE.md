@@ -1,8 +1,8 @@
 # sonicterm-app
 
 ## Purpose
-Cross-platform application glue around `sonicterm-app-core`. This crate
-owns the winit `ApplicationHandler`, window lifecycle, keymap dispatch,
+Cross-platform application glue and the single authority for live application
+state. This crate owns the winit `ApplicationHandler`, window lifecycle, keymap dispatch,
 PTY thread wiring, redraw scheduling, explicit config reload, overlays, tab
 drag/tear-out, and the platform shell abstractions.
 
@@ -18,9 +18,9 @@ drag/tear-out, and the platform shell abstractions.
   `DiagnosticsState` (`diagnostics`, `diagnostics.rs`), `FontState` (`fonts`, `font_state.rs`: font
   sizes, families, catalog) and `ReportWindows` (`reports`, `report_windows.rs`: Memory Usage,
   About). `user_event.rs` owns typed events and `application_handler.rs` forwards callbacks.
-  Window, pane, session, input, and effect orchestration live in
-  `window_state.rs`, `window_registry.rs`, `pane_state.rs`, `session.rs`,
-  `input_dispatch.rs`, and `effects.rs`.
+  Window, pane, session, and input orchestration live in
+  `window_state.rs`, `window_registry.rs`, `pane_state.rs`, `session.rs`, and
+  `input_dispatch.rs`.
 - `src/app/window_event.rs` - `WindowEvent` dispatch, main redraw, shared pointer/wheel helpers.
 - `src/app/window_keyboard.rs` - source-window keyboard, IME, focus, search, READONLY routing.
 - `src/app/field_input.rs`, `field_pointer.rs` - source-field clipboard/selection commands and press-owned query dragging; field IME uses presented renderer caret geometry.
@@ -342,7 +342,7 @@ cargo build -p sonicterm-app
   the screen cannot show which pane holds the text.
 
 ## Cross-references
-- Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,
+- Consumes: `sonicterm-vt`, `sonicterm-grid`,
   `sonicterm-io`, `sonicterm-cfg`, `sonicterm-render-model`,
   `sonicterm-ui`, `sonicterm-gpu`.
 - Consumed by: `sonicterm-mac`, `sonicterm-windows`, `sonicterm-linux`.

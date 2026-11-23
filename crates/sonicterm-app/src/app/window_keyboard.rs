@@ -306,23 +306,12 @@ impl App {
     /// Apply native focus and release only the source window's held input owners.
     pub(super) fn handle_window_focus_changed(&mut self, win_id: WindowId, focused: bool) {
         if !self.registry.windows.contains_key(&win_id) {
-            // When: win_id is gone, late focus cannot publish reducer state or touch another terminal.
+            // When: win_id is gone, late focus cannot touch another terminal.
             return;
         }
         if !focused {
             // Losing focus ends strip focus, so the next keys go to the terminal.
             self.end_status_focus(win_id);
-        }
-        if Some(win_id) == self.registry.main_window_id {
-            // Only main contributes this compatibility observation; live child focus stays in WindowState.
-            let window = sonicterm_types::WindowKey::new(0);
-            let intent = if focused {
-                sonicterm_app_core::AppIntent::WindowFocused { window }
-            } else {
-                // When: focused is false, preserve the main compatibility blur observation.
-                sonicterm_app_core::AppIntent::WindowBlurred { window }
-            };
-            self.observe_intent(intent);
         }
         if !focused {
             self.release_window_native_keys(win_id);

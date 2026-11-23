@@ -45,10 +45,6 @@ fn enabled_at(filter: &str, target: &str) -> bool {
         "memory::reclaimed" => {
             tracing::enabled!(target: "memory::reclaimed", tracing::Level::DEBUG)
         }
-        "state_machine" => tracing::enabled!(target: "state_machine", tracing::Level::DEBUG),
-        "state_machine.log" => {
-            tracing::enabled!(target: "state_machine.log", tracing::Level::DEBUG)
-        }
         "render_timing" => tracing::enabled!(target: "render_timing", tracing::Level::DEBUG),
         "render_policy" => tracing::enabled!(target: "render_policy", tracing::Level::DEBUG),
         "tear_out_timing" => tracing::enabled!(target: "tear_out_timing", tracing::Level::DEBUG),
@@ -159,10 +155,8 @@ fn setting_the_documented_debug_level_enables_memory_diagnostics() {
 /// Every custom target the source emits must be admitted at debug level.
 ///
 /// Scans the workspace rather than trusting a hand-kept list, because the
-/// defect this guards is exactly a hand-kept list falling behind: `memory`
-/// (25 sites) and `state_machine` (16 sites) were both missing while
-/// `render_timing` (4) and `tear_out_timing` (2) were present. The two most
-/// used custom targets were the two nobody had added.
+/// defect this guards is exactly a hand-kept list falling behind: a target
+/// with many call sites can be missing while rarely used ones are present.
 #[test]
 fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
     // Sources scanned at compile time, so this cannot drift from the tree.
@@ -175,7 +169,6 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
         include_str!("../../sonicterm-app/src/app/mod.rs"),
         include_str!("../../sonicterm-app/src/app/broadcast.rs"),
         include_str!("../../sonicterm-app/src/app/command_events.rs"),
-        include_str!("../../sonicterm-app/src/app/effects.rs"),
         include_str!("../../sonicterm-app/src/app/frame_pacing.rs"),
         include_str!("../../sonicterm-app/src/app/input_dispatch.rs"),
         include_str!("../../sonicterm-app/src/app/locale.rs"),
@@ -213,7 +206,6 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
         include_str!("../../sonicterm-app/src/app/child_window_redraw.rs"),
         include_str!("../../sonicterm-app/src/app/render_timing.rs"),
         include_str!("../../sonicterm-app/src/app/frame_counters.rs"),
-        include_str!("../../sonicterm-app-core/src/state_machine.rs"),
         include_str!("../../sonicterm-gpu/src/core.rs"),
         include_str!("../../sonicterm-gpu/src/atlas_lifecycle.rs"),
         include_str!("../../sonicterm-gpu/src/software_frame.rs"),

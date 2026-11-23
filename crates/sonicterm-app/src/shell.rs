@@ -1,10 +1,8 @@
-//! Platform shells that drive the winit event loop on top of
-//! [`sonicterm_app_core::AppStateMachine`].
+//! Platform shells that drive the winit event loop around [`App`].
 //!
-//! [`MacShell`], [`WindowsShell`], and [`LinuxShell`] receive an externally
-//! constructed state machine and delegate shared event-loop setup to one
-//! platform-neutral runner. Platform wrappers expose only the hooks supported
-//! by their native binary.
+//! [`MacShell`], [`WindowsShell`], and [`LinuxShell`] delegate shared
+//! event-loop setup to one platform-neutral runner. Platform wrappers expose
+//! only the hooks supported by their native binary.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +18,6 @@ use crate::app::{
 use crate::default_handlers::DefaultHandlerBackend;
 use crate::os_drag::{OsDragSink, TabPayload};
 use crate::ProcessPrivilege;
-use sonicterm_app_core::AppStateMachine;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
@@ -98,7 +95,6 @@ pub fn finish_session_diagnostics(
 }
 
 struct ShellRunner {
-    machine: AppStateMachine,
     theme: Theme,
     config: Config,
     keymap: Keymap,
@@ -118,9 +114,8 @@ struct ShellRunner {
 }
 
 impl ShellRunner {
-    fn new(machine: AppStateMachine, theme: Theme, config: Config, keymap: Keymap) -> Self {
+    fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
         Self {
-            machine,
             theme,
             config,
             keymap,
@@ -151,12 +146,11 @@ impl ShellRunner {
     }
 
     fn into_app_with_proxy(self, proxy: Option<EventLoopProxy<UserEvent>>) -> App {
-        let mut app = App::new_with_proxy_machine_and_normalizer(
+        let mut app = App::new_with_proxy_and_normalizer(
             self.theme,
             self.config,
             self.keymap,
             proxy,
-            self.machine,
             self.config_normalizer,
         );
         app.set_process_privilege(self.process_privilege);
@@ -292,10 +286,10 @@ pub struct MacShell {
 }
 
 impl MacShell {
-    /// Build a shell around the caller-constructed state machine.
+    /// Build a shell for the given theme, config and keymap.
     #[must_use]
-    pub fn new(machine: AppStateMachine, theme: Theme, config: Config, keymap: Keymap) -> Self {
-        Self { runner: ShellRunner::new(machine, theme, config, keymap) }
+    pub fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
+        Self { runner: ShellRunner::new(theme, config, keymap) }
     }
 
     /// Install the process privilege observed by the macOS startup boundary.
@@ -411,10 +405,10 @@ pub struct WindowsShell {
 }
 
 impl WindowsShell {
-    /// Build a shell around the caller-constructed state machine.
+    /// Build a shell for the given theme, config and keymap.
     #[must_use]
-    pub fn new(machine: AppStateMachine, theme: Theme, config: Config, keymap: Keymap) -> Self {
-        Self { runner: ShellRunner::new(machine, theme, config, keymap) }
+    pub fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
+        Self { runner: ShellRunner::new(theme, config, keymap) }
     }
 
     /// Install the Windows config policy used by startup and every reload.
@@ -536,10 +530,10 @@ pub struct LinuxShell {
 }
 
 impl LinuxShell {
-    /// Build a shell around the caller-constructed state machine.
+    /// Build a shell for the given theme, config and keymap.
     #[must_use]
-    pub fn new(machine: AppStateMachine, theme: Theme, config: Config, keymap: Keymap) -> Self {
-        Self { runner: ShellRunner::new(machine, theme, config, keymap) }
+    pub fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
+        Self { runner: ShellRunner::new(theme, config, keymap) }
     }
 
     /// Install the process privilege observed by the Linux startup boundary.

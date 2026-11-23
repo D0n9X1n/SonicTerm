@@ -324,10 +324,9 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
         };
         (theme, keymap, Some(loads))
     };
-    let machine = sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
     let process_privilege = detect_process_privilege();
     tracing::info!(privileged = process_privilege.is_privileged(), "process privilege observed");
-    let mut shell = sonicterm_app::shell::LinuxShell::new(machine, theme, config, keymap)
+    let mut shell = sonicterm_app::shell::LinuxShell::new(theme, config, keymap)
         .with_process_privilege(process_privilege)
         .with_config_normalizer(Box::new(normalize_linux_config));
     if let Some(loads) = startup_loads {

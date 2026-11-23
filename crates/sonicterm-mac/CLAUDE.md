@@ -43,6 +43,6 @@ cargo build -p sonicterm-mac
   Tests never call them; they run against pure functions and refuse as a missing bundle.
 
 ## Cross-references
-- Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,
+- Consumes: `sonicterm-app`, `sonicterm-cfg`,
   `sonicterm-logging`, `sonicterm-types`.
 - Consumed by: release packaging.

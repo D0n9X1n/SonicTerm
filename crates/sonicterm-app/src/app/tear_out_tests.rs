@@ -298,22 +298,6 @@ impl Drop for CleanupDropProbe {
     }
 }
 
-pub(super) fn app_with_reducer_counts(tab_count: u32, live_window_count: u32) -> App {
-    let state = sonicterm_app_core::AppState {
-        tab_count,
-        live_window_count,
-        active_tab_idx: Some(tab_count.saturating_sub(1) as usize),
-        ..Default::default()
-    };
-    App::new_with_proxy_and_machine(
-        Theme::default(),
-        Config::default(),
-        Keymap::default(),
-        None,
-        sonicterm_app_core::AppStateMachine::new(state),
-    )
-}
-
 #[test]
 pub(super) fn existing_window_transfer_refusal_preserves_the_complete_source() {
     // Destination readiness and charge admission are checked before any source-owned state can be lost.
@@ -364,7 +348,7 @@ pub(super) enum FailureRoute {
 }
 
 pub(super) fn run_failed_route(route: FailureRoute, stage: TearOutStage) {
-    let mut app = app_with_reducer_counts(3, 2);
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let (source_window, pane_id, tab_id) = match route {
         FailureRoute::Main | FailureRoute::DeferredMain => {
             let pane_id = app.__test_seed_tab("source");
@@ -384,11 +368,6 @@ pub(super) fn run_failed_route(route: FailureRoute, stage: TearOutStage) {
     let window_keys: HashSet<_> = app.registry.windows.keys().copied().collect();
     let frontmost = app.registry.frontmost_window;
     let hidden = app.__test_main_hidden();
-    let reducer = {
-        let state = app.machine.state();
-        assert!(state.tab_count > 0 && state.live_window_count > 0);
-        (state.tab_count, state.live_window_count, state.active_tab_idx)
-    };
     let pending_new_window = app.pending_new_window;
     let redraws = app.redraw_request_count.load(Ordering::Relaxed);
     let reaps = app.reap_call_count.load(Ordering::Relaxed);
@@ -446,8 +425,6 @@ pub(super) fn run_failed_route(route: FailureRoute, stage: TearOutStage) {
     assert_eq!(app.registry.windows.keys().copied().collect::<HashSet<_>>(), window_keys);
     assert_eq!(app.registry.frontmost_window, frontmost);
     assert_eq!(app.__test_main_hidden(), hidden);
-    let state = app.machine.state();
-    assert_eq!((state.tab_count, state.live_window_count, state.active_tab_idx), reducer);
     assert_eq!(app.pending_new_window, pending_new_window);
     assert_eq!(app.redraw_request_count.load(Ordering::Relaxed), redraws);
     assert_eq!(app.reap_call_count.load(Ordering::Relaxed), reaps);

@@ -193,11 +193,6 @@ impl App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(window) = self.window_key(win_id) {
-                    self.observe_intent(sonicterm_app_core::AppIntent::WindowCloseRequested {
-                        window,
-                    });
-                }
                 // If child windows still own tabs, hide the main
                 // window instead of exiting the app — the children
                 // are independent live terminals and must keep
@@ -234,31 +229,6 @@ impl App {
                     // A changed surface size owes a frame that a synchronized hold cannot keep back.
                     window.redraw.note_resize(outcome);
                 }
-                // Notify the reducer of the new logical grid dimensions.
-                // Derive cols/rows from
-                // the renderer's cell size; fall back to zero when
-                // unavailable (smoke-test environments). The
-                // reducer's `WindowResize` Effect is observability-
-                // only — the boundary above already drove the wgpu
-                // resize, and the existing `request_redraw` below is
-                // the production paint path.
-                let (cols_u16, rows_u16) = {
-                    let cell = self.main_renderer().map(GpuRenderer::cell_size);
-                    match cell {
-                        Some((cell_w, cell_h)) if cell_w > 0.0 && cell_h > 0.0 => (
-                            ((size.width as f32 / cell_w).floor() as u32).min(u16::MAX as u32)
-                                as u16,
-                            ((size.height as f32 / cell_h).floor() as u32).min(u16::MAX as u32)
-                                as u16,
-                        ),
-                        _ => (0u16, 0u16),
-                    }
-                };
-                self.observe_intent(sonicterm_app_core::AppIntent::WindowResized {
-                    window: sonicterm_types::WindowKey::new(0),
-                    cols: cols_u16,
-                    rows: rows_u16,
-                });
                 // Per-pane sizing: each pane's grid + PTY is resized to
                 // its own PaneRect within the new window content area,
                 // never to the whole window's dimensions.

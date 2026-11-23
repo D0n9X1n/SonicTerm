@@ -16,7 +16,6 @@ flowchart TD
     platform["sonicterm-mac / sonicterm-windows / sonicterm-linux"]
     shell["MacShell / WindowsShell / LinuxShell"]
     app["sonicterm-app<br/>存活窗口、标签页、窗格和事件路由"]
-    core["sonicterm-app-core<br/>纯数据意图、状态和效果"]
     io["sonicterm-io<br/>PTY 与进程 I/O"]
     vt["sonicterm-vt<br/>ANSI/VT 解析器"]
     grid["sonicterm-grid<br/>单元格、历史记录和脏行"]
@@ -27,15 +26,13 @@ flowchart TD
     resource["sonicterm-resource<br/>所有者树与账本"]
 
     platform --> shell --> app
-    app --> core
     app --> io --> vt --> grid --> model --> gpu --> screen
     font --> gpu
     app --> resource
 ```
 
-箭头表示运行时数据流，不是全部 Cargo 依赖。实时拓扑由 `sonicterm-app` 持有。
-`sonicterm-app-core` 持有另一套不依赖后端的状态机。`sonicterm-gpu` 通过渲染模型边界
-接收终端和界面类型。
+箭头表示运行时数据流，不是全部 Cargo 依赖。实时拓扑由 `sonicterm-app` 持有，它也是
+唯一的状态权威。`sonicterm-gpu` 通过渲染模型边界接收终端和界面类型。
 
 ### Crate 边界
 
@@ -43,7 +40,6 @@ flowchart TD
 | --- | --- | --- |
 | `sonicterm-types` | 小型值类型和不依赖后端的 trait 契约 | winit、wgpu、原生 PTY |
 | `sonicterm-resource` | 资源所有者、账本记录、预留令牌和关闭检查 | 常驻数据本身和各接缝的回收策略 |
-| `sonicterm-app-core` | `AppState`、`AppIntent`、`AppEffect`、归约器和效果排序 | 原生句柄、阻塞 I/O、winit、wgpu |
 | `sonicterm-io` | 本地 PTY 与进程工作 | ANSI 解释和界面状态 |
 | `sonicterm-vt` / `sonicterm-grid` | 终端解析、单元格、回滚历史、光标状态和脏行 | 原生窗口和 GPU 资源 |
 | `sonicterm-cfg` / `sonicterm-ui` | 配置、主题、键位、标签页、窗格、搜索、选区和输入法 | 原生呈现调用 |
@@ -112,27 +108,13 @@ governor owner；`scripts/check-window-owner-registration.sh` 强制这一点。
 `PaneState` 持有解析器、可选 `PtyHandle`、重绘目标、终端模式原子值、内联图像和
 资源计费令牌。
 
-`AppStateMachine` 保存不依赖后端的兼容观察值，不决定实时 GUI 拓扑：它是兼容与测试模型，
-只有测试会读取其状态。`App::observe_intent` 用结构性意图（标签页、窗格、窗口、焦点）更新它
-并丢弃效果；光标移动等高频输入不会上报，因为没有任何地方读取它。让归约器成为权威来源将是另一项
-行为迁移。实时 App 执行哪些意图只在一处说明：app-core 中的 `AppIntent::authority()`，它是穷尽匹配，新变体无法遗漏：
-
-| 权限 | 意图 | 由谁执行 |
-| --- | --- | --- |
-| `Drives` | PTY 写入、退出、突发与前台进程变化；重绘请求；按键按下；IME 开始、预编辑、提交与结束；URL 悬停与点击；滚动与滚轮；粘贴；退出 | `App::dispatch_intent` 在实时状态上执行每一项。 |
-| `Observes` | 窗口、标签页与窗格的生命周期与焦点；按键释放；鼠标按键与移动；选区；搜索；命令面板；系统拖放与文件拖入；配置、主题与字号；广播范围；tick | App 自己的处理函数已完成工作；该意图只更新归约器的模型。 |
-
-`dispatch_intent` 把 `Observes` 意图直接交给归约器；`observe_intent` 在调试构建中断言从不收到 `Drives` 意图，因此被驱动的意图不会被悄悄丢弃；
-有一个测试会在实时 App 上分派每个 `Drives` 意图。缺失、已移除或零窗口 key 不会选择主窗口或最前窗口。原生输入通过有界 PTY
-队列发送给源窗口的活动窗格。完整状态/意图/效果清单，以及记录效果与原生完成的区别，见
-[运行时生命周期](Runtime-Lifecycle-zh-CN)。
+`App` 的类型化所有者是唯一的状态权威：窗口注册表及其 `WindowMap` 和每个窗口的
+`PaneMap`、`retire_pane` 与每个窗格的 `ReapSlot`，以及 GPU 恢复。没有第二套模型镜像它们，
+所以每个处理函数都直接修改实时状态。
+缺失、已移除或零窗口 key 不会选择主窗口或最前窗口。原生输入通过有界 PTY 队列发送给
+源窗口的活动窗格。输入路由与窗格拆除见[运行时生命周期](Runtime-Lifecycle-zh-CN)。
 
 ### 边界契约
-
-#### 意图与效果
-
-不依赖后端的归约器保持稳定效果顺序。GUI 观察值不会执行其效果批次；显式目标操作
-单独进入实时应用。准确顺序、级联上限与未启用队列见[运行时生命周期](Runtime-Lifecycle-zh-CN)。
 
 #### 终端
 
@@ -223,7 +205,7 @@ agent 控制服务器运行期间，在进程根下另有一个 `Mcp` owner，�
 | 界面模型 | `sonicterm-cfg` 和 `sonicterm-grid` 输入 `sonicterm-ui`；三者再输入 `sonicterm-render-model` |
 | 字体 | `sonicterm-font-config` 和原生包装 crate 输入 `sonicterm-font`；`sonicterm-font` 与 `sonicterm-text` 分别输入 `sonicterm-engine` |
 | 渲染 | 渲染模型、字体引擎、文本、公共类型和块字符输入 `sonicterm-gpu` |
-| 应用 | 应用核心、终端、界面、渲染、日志和资源 crate 输入 `sonicterm-app` |
+| 应用 | 终端、界面、渲染、日志和资源 crate 输入 `sonicterm-app` |
 | 平台 | `sonicterm-app` 输入 `sonicterm-mac`、`sonicterm-windows` 和 `sonicterm-linux` |
 
 ### 源码索引
@@ -231,7 +213,6 @@ agent 控制服务器运行期间，在进程根下另有一个 `Mcp` owner，�
 | 主题 | 主要路径 |
 | --- | --- |
 | 应用状态与拓扑 | `crates/sonicterm-app/src/app/{mod,window_state,window_registry}.rs` |
-| 意图、效果和归约器 | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine,app_state}.rs` |
 | Shell 边界 | `crates/sonicterm-app/src/shell.rs` |
 | PTY 与进程边界 | `crates/sonicterm-io/src/pty.rs` |
 | VT 与网格 | `crates/sonicterm-vt/src/vt.rs`、`crates/sonicterm-grid/src/grid.rs` |

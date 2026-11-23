@@ -152,11 +152,6 @@ impl App {
         self.interaction.palette_pointer_capture = None;
         self.refresh_command_palette_context();
         let now_open = self.interaction.command_palette.toggle();
-        // Notify the reducer of the toggle. The reducer flips `palette_open`
-        // and emits Render(Overlay) on every transition.
-        self.observe_intent(sonicterm_app_core::AppIntent::ToggleCommandPalette {
-            window: sonicterm_types::WindowKey::new(0),
-        });
         if now_open {
             // Tag with the frontmost window so the palette appears on
             // whatever window the user is looking at, rather than on the
@@ -200,12 +195,6 @@ impl App {
         );
     }
     pub(super) fn open_search(&mut self) {
-        // Notify the reducer of the open transition (Render(Overlay) —
-        // transition-guarded so a re-open against an already-open overlay
-        // is a no-op).
-        self.observe_intent(sonicterm_app_core::AppIntent::OpenSearch {
-            window: sonicterm_types::WindowKey::new(0),
-        });
         // Cmd+F typed in a torn-out child opens a search bar on THAT child's
         // active tab, not the main window's.
         if let FrontmostKind::Child(id) = self.frontmost_kind() {

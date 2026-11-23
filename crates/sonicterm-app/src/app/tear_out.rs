@@ -475,18 +475,14 @@ impl App {
             .is_some_and(|target| Some(target.window) != self.registry.main_window_id);
         if has_target {
             // When: has_target selects a merge, refusal restores source custody instead of falling through to another move.
-            if self.try_cross_window_merge(index) {
-                self.dispatch_tear_out_intent(index);
-            }
+            self.try_cross_window_merge(index);
             return true;
         }
         // OS handoff must run before local detachment because an acknowledged
         // receiver becomes the new owner, while an unacknowledged publication
         // leaves this live session available for in-process tear-out.
         if self.try_os_drag_handoff(index) {
-            // When: `try_os_drag_handoff` returns true, account for departure
-            // only after the handoff reports that the local route must stop.
-            self.dispatch_tear_out_intent(index);
+            // When: `try_os_drag_handoff` returns true, the handoff reports that the local route must stop.
             return true;
         }
         let Some(main_id) = self.registry.main_window_id else {
@@ -496,7 +492,7 @@ impl App {
         let Some(transaction) = self.detach_for_tear_out(TearOutSource::Main(main_id), index)
         else {
             // When: `detach_for_tear_out` returns `None`, end the gesture without
-            // changing either live topology or its reducer mirror.
+            // changing the live topology.
             return true;
         };
         if install(self, transaction, None, "main").is_none() {
@@ -504,20 +500,9 @@ impl App {
             // the source; success-only activation and hiding must not run.
             return true;
         }
-        self.dispatch_tear_out_intent(index);
         self.tear_out_apply_source_side(index);
         tracing::info!("tab torn out as new window; windows={}", self.registry.windows.len());
         true
-    }
-
-    /// Record reducer state only after a main tab has left its source strip.
-    fn dispatch_tear_out_intent(&mut self, index: usize) {
-        if let Some(src_window) = self.registry.main_window_id.and_then(|id| self.window_key(id)) {
-            self.observe_intent(sonicterm_app_core::AppIntent::TearOutTab {
-                src_window,
-                src_tab: index,
-            });
-        }
     }
 
     /// Install a detached transaction through the native preparation boundary.

@@ -104,8 +104,7 @@ fn run_mac_runtime_smoke() -> Result<i32> {
                 }
             }
         });
-    let machine = sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
-    let mut shell = sonicterm_app::shell::MacShell::new(machine, theme, config, keymap)
+    let mut shell = sonicterm_app::shell::MacShell::new(theme, config, keymap)
         .with_process_privilege(detect_process_privilege())
         .with_on_window_ready(on_window_ready);
     if let Some(recorder) = breadcrumb_recorder.clone() {
@@ -291,18 +290,13 @@ fn main() -> Result<std::process::ExitCode> {
         if let Some(payload) = &pending {
             tracing::info!(tab = %payload.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
         }
-        // Construct the state machine in the binary and hand it to the
-        // platform shell. State mutation routes through the reducer the shell
-        // owns, so the binary never reaches into `App`'s field layout.
         open_documents::install();
-        let machine =
-            sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
         let process_privilege = detect_process_privilege();
         tracing::info!(
             privileged = process_privilege.is_privileged(),
             "process privilege observed"
         );
-        let mut shell = sonicterm_app::shell::MacShell::new(machine, theme, config, keymap)
+        let mut shell = sonicterm_app::shell::MacShell::new(theme, config, keymap)
             .with_process_privilege(process_privilege)
             .with_startup_loads(startup_loads)
             .with_asset_loaders(theme_loader, keymap_loader)

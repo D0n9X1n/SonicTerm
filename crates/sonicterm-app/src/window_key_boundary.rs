@@ -7,7 +7,7 @@
 //! a [`WindowKeyRegistry`] to assign a stable monotonically-increasing
 //! `u64` to every distinct `winit::WindowId` on first sight.
 //!
-//! Keeping the registry at this boundary lets reducers use stable identifiers
+//! Keeping the registry at this boundary lets app code use stable identifiers
 //! without taking a dependency on winit's opaque window handles.
 
 use std::collections::HashMap;

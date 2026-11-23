@@ -161,12 +161,11 @@ flowchart LR
     write --> pane["live PaneState / PtyHandle"] --> queue["bounded input queue"]
 ```
 
-There is no transient state machine on the native input or broadcast path.
-Explicit `AppIntent::PtyWrite` and `AppEffect::PtyWrite` enter the same bounded
-write boundary with their named pane id. Window-targeted compatibility input
-resolves that live window's active pane, never a zero sentinel or guessed
-frontmost window, and is dropped while that window is READONLY. A missing target
-cannot redirect bytes to another terminal.
+Native input and broadcast destinations all reach this boundary with their pane
+id. Window-targeted input, an IME commit or a paste, resolves that live window's
+active pane, never a zero sentinel or guessed frontmost window, and is dropped
+while that window is READONLY. A missing target cannot redirect bytes to another
+terminal.
 
 `PtyHandle::send_input_nonblocking` uses `try_send`:
 
@@ -464,7 +463,7 @@ Validation and release evidence are described in
 | --- | --- |
 | Keyboard and IME routing | `crates/sonicterm-app/src/app/{window_event,window_keyboard}.rs` |
 | Key encoding | `crates/sonicterm-app/src/app/key_encoding.rs` |
-| Intent/effect PTY boundary | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs`, `crates/sonicterm-app/src/app/{effects,input_dispatch}.rs` |
+| PTY write boundary | `crates/sonicterm-app/src/app/input_dispatch.rs` |
 | PTY queues and threads | `crates/sonicterm-io/src/pty.rs` |
 | VT workers and redraw coalescing | `crates/sonicterm-app/src/app/{spawn_pane,child_tabs,child_window,child_window_redraw,redraw_target}.rs` |
 | VT parsing | `crates/sonicterm-vt/src/vt.rs` |

@@ -45,9 +45,6 @@ impl App {
     }
 
     /// Build an app that posts user events through `event_loop_proxy`.
-    ///
-    /// The state machine is built here rather than supplied, so callers that
-    /// already own one should hand it in instead.
     #[doc(hidden)]
     pub fn new_with_proxy(
         theme: Theme,
@@ -55,45 +52,21 @@ impl App {
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     ) -> Self {
-        Self::new_with_proxy_and_machine(
+        Self::new_with_proxy_and_normalizer(
             theme,
             config,
             keymap,
             event_loop_proxy,
-            sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
-        )
-    }
-
-    /// Build an app around an externally-built
-    /// [`sonicterm_app_core::AppStateMachine`].
-    ///
-    /// The platform shell constructs the machine first and hands it in, so all
-    /// state mutation routes through the reducer the shell already owns rather
-    /// than a second machine built here.
-    pub fn new_with_proxy_and_machine(
-        theme: Theme,
-        config: Config,
-        keymap: Keymap,
-        event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
-        machine: sonicterm_app_core::AppStateMachine,
-    ) -> Self {
-        Self::new_with_proxy_machine_and_normalizer(
-            theme,
-            config,
-            keymap,
-            event_loop_proxy,
-            machine,
             identity_config_normalizer(),
         )
     }
 
     /// Build an app after applying the supplied native capability policy.
-    pub(crate) fn new_with_proxy_machine_and_normalizer(
+    pub(crate) fn new_with_proxy_and_normalizer(
         mut theme: Theme,
         config: Config,
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
-        machine: sonicterm_app_core::AppStateMachine,
         config_normalizer: ConfigNormalizer,
     ) -> Self {
         let config = Self::normalize_config(&config_normalizer, config);
@@ -256,7 +229,6 @@ impl App {
             quit_hold: quit_hold::QuitHold::new(),
             on_resumed: None,
             on_window_ready: None,
-            machine,
         }
     }
 

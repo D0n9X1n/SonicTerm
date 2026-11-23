@@ -174,7 +174,6 @@ fn rejection_event_preserves_identity_and_observations_without_payload() {
         PtyInputSource::FocusReport,
         PtyInputSource::TerminalReply,
         PtyInputSource::ScriptDraft,
-        PtyInputSource::StateMachine,
     ] {
         let event = pty_input_rejected_event(
             7,
@@ -445,13 +444,9 @@ fn accepted_windows_pty_input_arms_foreground_probe() {
         .get_mut(&pane_id)
         .expect("synthetic pane")
         .pty = Some(pty);
-    let effect = sonicterm_app_core::AppEffect::PtyWrite {
-        pane: sonicterm_app_core::PaneId(pane_id),
-        data: bytes::Bytes::from_static(b"ver\r"),
-    };
     let before = std::time::Instant::now();
 
-    app.dispatch_pty_write_effect(&effect, PtyInputSource::Keyboard);
+    app.write_to_pane(pane_id, b"ver\r".to_vec(), PtyInputSource::Keyboard);
 
     let wake = app.services.foreground_schedule.activity_wake.expect("accepted input arms a probe");
     assert!(wake.fixed);

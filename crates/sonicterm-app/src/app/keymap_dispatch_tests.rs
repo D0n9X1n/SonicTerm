@@ -785,6 +785,21 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
     }
 }
 
+/// A queued action for a closed window is refused and is not authority to change whichever window
+/// now has focus.
+#[test]
+fn missing_explicit_action_source_cannot_fall_back_to_main() {
+    let mut app = App::new(Default::default(), Default::default(), Default::default());
+    app.__test_seed_tab("main");
+    let main = app.registry.main_window_id.unwrap();
+    let active = app.registry.windows[&main].tabs.active().unwrap().id;
+    let missing = WindowId::from(7);
+    assert!(!app.run_action_for_window(&Action::NewTab, missing));
+    assert!(!app.run_action_for_window(&Action::CloseTab, missing));
+    assert_eq!(app.registry.windows[&main].tabs.len(), 1);
+    assert_eq!(app.registry.windows[&main].tabs.active().unwrap().id, active);
+}
+
 #[path = "test_hooks_keymap_field_fixture.rs"]
 mod test_hooks_keymap_field_fixture;
 use test_hooks_keymap_field_fixture::*;

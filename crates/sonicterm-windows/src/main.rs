@@ -113,12 +113,11 @@ fn run_windows_runtime_smoke() -> Result<i32> {
                 unsafe { backdrop::apply_backdrop(hwnd, backdrop_kind) };
             }
         });
-    let machine = sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
     let process_privilege = privilege::detect_process_privilege().unwrap_or_else(|error| {
         tracing::warn!(%error, "process privilege query failed; treating process as unprivileged");
         sonicterm_app::ProcessPrivilege::Unprivileged
     });
-    let mut shell = sonicterm_app::shell::WindowsShell::new(machine, theme, config, keymap)
+    let mut shell = sonicterm_app::shell::WindowsShell::new(theme, config, keymap)
         .with_config_normalizer(Box::new(normalize_windows_config))
         .with_process_privilege(process_privilege)
         .with_on_window_ready(on_window_ready);
@@ -435,11 +434,6 @@ fn main() -> Result<std::process::ExitCode> {
                 }
             });
         let result = {
-            // Construct the state machine in the binary and hand it to the
-            // platform shell. State mutation routes through the reducer the shell
-            // owns, so the binary never reaches into `App`'s field layout.
-            let machine =
-                sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
             let process_privilege = privilege::detect_process_privilege().unwrap_or_else(|error| {
                 tracing::warn!(%error, "process privilege query failed; treating process as unprivileged");
                 sonicterm_app::ProcessPrivilege::Unprivileged
@@ -449,7 +443,7 @@ fn main() -> Result<std::process::ExitCode> {
                 "process privilege observed"
             );
             // Only the palette command reaches this backend; installing it changes nothing.
-            let mut shell = sonicterm_app::shell::WindowsShell::new(machine, theme, config, keymap)
+            let mut shell = sonicterm_app::shell::WindowsShell::new(theme, config, keymap)
                 .with_config_normalizer(Box::new(normalize_windows_config))
                 .with_process_privilege(process_privilege)
                 .with_startup_loads(startup_loads)

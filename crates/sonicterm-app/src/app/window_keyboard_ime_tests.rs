@@ -152,23 +152,6 @@ fn source_focus_cleanup_preserves_peer_state_and_report_destinations() {
 }
 
 #[test]
-fn source_focus_keeps_main_only_compatibility_observations() {
-    // Shared GUI cleanup must not turn the compatibility reducer into a second live child-focus owner.
-    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.__test_seed_tab("main");
-    let main = app.registry.main_window_id.unwrap();
-    let child = app.__test_seed_child_window(&["child"]);
-    app.handle_window_focus_changed(main, true);
-    assert_eq!(app.machine.state().focused_window, Some(sonicterm_types::WindowKey::new(0)));
-    app.handle_window_focus_changed(child, true);
-    assert_eq!(app.machine.state().focused_window, Some(sonicterm_types::WindowKey::new(0)));
-    assert_eq!(app.registry.frontmost_window, Some(child));
-    app.handle_window_focus_changed(main, false);
-    assert_eq!(app.machine.state().focused_window, None);
-    assert_eq!(app.registry.frontmost_window, Some(child));
-}
-
-#[test]
 fn unknown_focus_and_modifiers_never_mutate_main_or_emit_input() {
     // Late events for a removed window cannot cancel main composition, alter modifiers, or write a focus report.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -186,7 +169,6 @@ fn unknown_focus_and_modifiers_never_mutate_main_or_emit_input() {
     assert_eq!(app.registry.windows[&main].ime.preedit(), "keep");
     assert_eq!(app.registry.windows[&main].modifiers, ModifiersState::empty());
     assert_eq!(app.registry.frontmost_window, Some(main));
-    assert_eq!(app.machine.state().focused_window, None);
     assert!(app.__test_drain_pty_writes().is_empty());
 }
 

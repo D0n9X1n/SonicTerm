@@ -2,7 +2,7 @@
 
 [English](Crate-Reference)
 
-本页是 Cargo workspace 中 24 个 Rust crate 的规范映射。根 `Cargo.toml`
+本页是 Cargo workspace 中 23 个 Rust crate 的规范映射。根 `Cargo.toml`
 统一提供版本、edition、Rust 版本、作者、许可证和仓库信息。默认 workspace member
 是 `sonicterm-app`。发布的二进制 crate 是 `sonicterm-mac`、
 `sonicterm-windows` 和 `sonicterm-linux`；Linux 可执行文件名为 `sonicterm`。
@@ -36,7 +36,6 @@ flowchart BT
     engine["sonicterm-engine"]
     block["sonicterm-block-glyph"]
     gpu["sonicterm-gpu"]
-    core["sonicterm-app-core"]
     app["sonicterm-app"]
     platforms["mac · windows · linux"]
     mcp["sonicterm-mcp"]
@@ -62,8 +61,6 @@ flowchart BT
     gpu --> model
     gpu --> engine
     gpu --> text
-    core --> types
-    app --> core
     app --> vt
     app --> io
     app --> cfg
@@ -73,7 +70,6 @@ flowchart BT
     app --> resource
     app --> logging
     platforms --> app
-    platforms --> core
 ```
 
 图中只画主要架构依赖。下方每个条目列出准确的第一方 Cargo 依赖。除非条目另有说明，
@@ -107,7 +103,6 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 | `sonicterm-engine` | `FontStack` 共享 `Rc<FontConfiguration>`，拥有每个 stack 的字号/字重/度量状态；渲染器保留 stack。 | `FontStack`、`CellMetricsPx`、塑形与图集 tile 转换；直接 text 依赖传递 CPU 数据，不形成另一个终端状态所有者。 |
 | `sonicterm-block-glyph` | 调用方拥有返回的 CPU bitmap tile；块几何使用临时栅格状态，不拥有共享渲染器或 font face。 | `BlockKey`、`SizedBlockKey`、`block_sprite_with_cell_metrics` 和 `glue::BlockRasterTile`；没有第一方依赖，保留 WezTerm 署名。 |
 | `sonicterm-gpu` | `GpuRenderer` 拥有每窗口 surface、保留帧、pipeline、图集、缓存、软件帧和字体 stack。`GpuSharedContext` 共享 wgpu 引用计数 device/queue 句柄，不创建第二个 device。 | `GpuRenderer::new`、`new_with_shared_context`、`render`、`render_releasing`、`render_with_outcome`、`try_resize`、`retained_amounts` 和 `live_renderer_count`；UI/grid 类型经 render-model。保留量描述当前实例，live count 跟踪生命周期。CPU 成功可观察；此处 wgpu 成功仅指 submit/present 调用。 |
-| `sonicterm-app-core` | `AppStateMachine` 拥有不依赖后端的状态转换/effect 值，不拥有实时 `WindowState`、解析器锁或 PTY。 | `AppState`、`AppIntent`、`AppEffect`、`handle` 与 effect 顺序；生产拓扑仍在 App 中，而非从该模型推断。 |
 | `sonicterm-app` | `App` 拥有实时 `WindowState`、预热渲染器、路由和资源协调。每个窗口拥有标签页/窗格；每个窗格拥有 parser/PTY/image 状态。 | `App`、`WindowState`、`PaneState`、`run_action_for_window` 和平台 `Shell` 封装；重绘以 `try_lock` 收集可见解析器 guard，并移入仅在组装期间持有的帧源；帧源及其 guard 在呈现前释放，已呈现帧的回执在下一次收集时确认。原生 worker 不解析 UI 窗口身份。 |
 | `sonicterm-mac` | 二进制启动保留 logging/session guard，安装 AppKit hook，并将事件循环交给 `MacShell`。 | `src/main.rs` 和 menu/open-document/drag 模块；AppKit 调用留在主线程，终端行为留在共享 app/IO crate。 |
 | `sonicterm-windows` | 二进制启动保留 logging/session guard，安装 Win32 menu/backdrop/OLE hook，并运行 `WindowsShell`。 | `src/main.rs`、CLI 和原生 GUI 模块，以及 WiX 资源；PTY/ConPTY 进程所有权保留在 `sonicterm-io`。 |
@@ -405,15 +400,6 @@ FreeType 名称、尺寸与库/流操作放在私有 `ftwrap_*` 同级文件中�
 仅测试使用的 `core_source.rs` 汇集每个拆出的渲染阶段，因此源代码守卫及其变异测试
 仍覆盖设备门控可达性。
 
-### `sonicterm-app-core`
-
-**职责：** 不依赖后端的 `AppIntent`、`AppEffect`、`AppState`、reducer、稳定的
-effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm-app` 持有。
-
-**第一方依赖：** `sonicterm-types`。
-
-**阅读：** `src/{app_state,intent,effect,reducer,state_machine}.rs`。
-
 ### `sonicterm-app`
 
 `app/user_event.rs` 保存类型化事件，`app/application_handler.rs` 转发原生回调；
@@ -430,7 +416,7 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 `finish_session` 在关闭前退役全部窗格，并缓存拆除是否完成；`ShellRunResult` 将该
 结果与原应用运行结果分开保存。
 
-**第一方依赖：** `sonicterm-app-core`、`sonicterm-cfg`、`sonicterm-gpu`、
+**第一方依赖：** `sonicterm-cfg`、`sonicterm-gpu`、
 `sonicterm-grid`、`sonicterm-io`、`sonicterm-logging`、
 `sonicterm-render-model`、`sonicterm-resource`、`sonicterm-text`、
 `sonicterm-types`、`sonicterm-ui`、`sonicterm-vt`。
@@ -443,7 +429,7 @@ workspace 的 `windows` 0.62）和 `accesskit_unix`（使用 `zbus` 5 与 `async
 **macOS 依赖：** `objc2`、`objc2-foundation`、`objc2-app-kit` 和 `objc2-quartz-core`，已经通过其他
 crate 存在于 lockfile 中，用于每窗口的 `NSView.displayLink` 及其 tick target（`src/app/display_link.rs`）。
 
-**阅读：** `src/app/{mod,window_state,window_registry,session,input_dispatch,effects}.rs`、
+**阅读：** `src/app/{mod,window_state,window_registry,session,input_dispatch}.rs`、
 `src/app/{event_loop,window_event,window_keyboard,window_pointer,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`、
 `src/shell.rs`。
 
@@ -454,7 +440,7 @@ crate 存在于 lockfile 中，用于每窗口的 `NSView.displayLink` 及其 ti
 **职责：** macOS 二进制与 AppKit 胶水，包括启动、NSMenu、带可执行文件分类的打开文档
 与打开 URL 事件、NSPasteboard 标签页交接、NSWindow 设置和 app bundle 入口。
 
-**第一方依赖：** `sonicterm-app`、`sonicterm-app-core`、`sonicterm-cfg`、
+**第一方依赖：** `sonicterm-app`、`sonicterm-cfg`、
 `sonicterm-logging`、`sonicterm-types`。
 
 **阅读：** `src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs`。
@@ -466,7 +452,7 @@ crate 存在于 lockfile 中，用于每窗口的 `NSView.displayLink` 及其 ti
 DWM backdrop、OLE 标签页拖放、软件呈现支持、Win32 资源和 WiX metadata。
 ConPTY 仍封装在 `sonicterm-io` 后。
 
-**第一方依赖：** `sonicterm-app`、`sonicterm-app-core`、`sonicterm-cfg`、
+**第一方依赖：** `sonicterm-app`、`sonicterm-cfg`、
 `sonicterm-logging`、`sonicterm-types`。
 
 **阅读：** `src/{main,cli,startup,backdrop,menubar,os_drag_win,software_presenter}.rs`、
@@ -477,7 +463,7 @@ ConPTY 仍封装在 `sonicterm-io` 后。
 **职责：** 发布用 Linux `sonicterm` 二进制，包括 X11/Wayland identity、能力收敛、
 诊断、打包字体预检和 desktop/AppStream metadata。
 
-**第一方依赖：** `sonicterm-app`、`sonicterm-app-core`、`sonicterm-cfg`、
+**第一方依赖：** `sonicterm-app`、`sonicterm-cfg`、
 `sonicterm-engine`、`sonicterm-logging`。
 
 **阅读：** `src/main.rs`、`resources/`。

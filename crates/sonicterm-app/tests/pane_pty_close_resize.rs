@@ -1,8 +1,8 @@
 #![warn(clippy::min_ident_chars)]
 
 use sonicterm_app::app::App;
-use sonicterm_app_core::{AppIntent, PaneId};
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+use sonicterm_types::PaneExitStatus;
 use sonicterm_ui::pane::Rect;
 
 fn test_app() -> App {
@@ -11,6 +11,8 @@ fn test_app() -> App {
     app
 }
 
+/// A clean child exit in one leaf of a split, delivered through the live exit handler, closes that
+/// leaf and refits the surviving pane to the tab's full width.
 #[test]
 fn pty_close_refits_surviving_split_pane_to_full_width() {
     let mut app = test_app();
@@ -22,7 +24,7 @@ fn pty_close_refits_surviving_split_pane_to_full_width() {
     assert_eq!(app.__test_pane_count_in_tab(0), Some(2));
     assert_eq!(app.__test_pane_grid_size(survivor), Some((40, 24)));
 
-    app.dispatch_intent(AppIntent::PtyExit { pane: PaneId(closing), status: 0 });
+    app.__test_pane_process_exited(closing, PaneExitStatus::Code(0));
 
     assert_eq!(app.__test_pane_count_in_tab(0), Some(1));
     assert_eq!(app.__test_pane_ids(), vec![survivor]);

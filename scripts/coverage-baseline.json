@@ -12,11 +12,6 @@
       "covered": 25748,
       "percent": 70.05
     },
-    "sonicterm-app-core": {
-      "lines": 397,
-      "covered": 388,
-      "percent": 97.73
-    },
     "sonicterm-block-glyph": {
       "lines": 4812,
       "covered": 4707,

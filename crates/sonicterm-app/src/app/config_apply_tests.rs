@@ -242,19 +242,14 @@ fn startup_and_reload_store_the_normalized_backdrop() {
 
     let mut startup = Config::default();
     startup.appearance.backdrop = BackdropKind::Mica;
-    let mut app = crate::shell::LinuxShell::new(
-        sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
-        Theme::default(),
-        startup,
-        Keymap::default(),
-    )
-    .with_config_normalizer(Box::new(|mut config| {
-        if config.appearance.backdrop != BackdropKind::Opaque {
-            config.appearance.backdrop = BackdropKind::Opaque;
-        }
-        (config, Vec::new())
-    }))
-    .into_app_for_test();
+    let mut app = crate::shell::LinuxShell::new(Theme::default(), startup, Keymap::default())
+        .with_config_normalizer(Box::new(|mut config| {
+            if config.appearance.backdrop != BackdropKind::Opaque {
+                config.appearance.backdrop = BackdropKind::Opaque;
+            }
+            (config, Vec::new())
+        }))
+        .into_app_for_test();
     assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
 
     let mut reloaded = Config::default();
@@ -272,17 +267,12 @@ fn windows_reload_stores_the_normalized_config() {
 
     let mut startup = Config::default();
     startup.appearance.backdrop = BackdropKind::Mica;
-    let mut app = crate::shell::WindowsShell::new(
-        sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
-        Theme::default(),
-        startup,
-        Keymap::default(),
-    )
-    .with_config_normalizer(Box::new(|mut config| {
-        config.appearance.backdrop = BackdropKind::Opaque;
-        (config, Vec::new())
-    }))
-    .into_app_for_test();
+    let mut app = crate::shell::WindowsShell::new(Theme::default(), startup, Keymap::default())
+        .with_config_normalizer(Box::new(|mut config| {
+            config.appearance.backdrop = BackdropKind::Opaque;
+            (config, Vec::new())
+        }))
+        .into_app_for_test();
     assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
 
     let mut reloaded = Config::default();

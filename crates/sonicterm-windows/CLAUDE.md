@@ -43,7 +43,7 @@ Release MSI builds require the Windows Cairo setup script and WiX.
   only after `AttachConsole(ATTACH_PARENT_PROCESS)` succeeds; the log always records it.
 
 ## Cross-references
-- Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,
+- Consumes: `sonicterm-app`, `sonicterm-cfg`,
   `sonicterm-logging`; local PTY/ConPTY behavior is reached through
   `sonicterm-app` and `sonicterm-io`.
 - Consumed by: Windows release packaging.

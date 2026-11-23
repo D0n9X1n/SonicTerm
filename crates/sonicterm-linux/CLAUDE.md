@@ -25,6 +25,6 @@ cargo clippy -p sonicterm-linux --all-targets -- -D warnings
   integrations must degrade without blocking the event loop.
 
 ## Cross-references
-- Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,
+- Consumes: `sonicterm-app`, `sonicterm-cfg`,
   `sonicterm-engine`, `sonicterm-logging`.
 - Consumed by: Linux package and release workflows.

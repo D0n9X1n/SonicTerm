@@ -133,7 +133,7 @@ pending 不是文件不存在的证据。事件包含可能敏感的路径，但
 
 默认 `warn` 级别会报告被拒绝的输入，包括终端解析器回复。生产者直接指定 `source`：
 `Keyboard`、`Paste`、`FileDrop`、`Ime`、`PointerButton`、`PointerMotion`、`Wheel`、
-`FocusReport`、`TerminalReply`、`ScriptDraft` 或 `StateMachine`；不会从负载字节猜测来源。
+`FocusReport`、`TerminalReply`、`ScriptDraft`、`Agent` 或 `AgentRun`；不会从负载字节猜测来源。
 
 | 字段 | 含义 |
 | --- | --- |

@@ -151,8 +151,6 @@ pub enum PtyInputSource {
     TerminalReply,
     /// Initial shell draft for an opened script.
     ScriptDraft,
-    /// Input supplied directly through the backend-free intent API.
-    StateMachine,
     /// Text or keys an agent sent through the control server.
     Agent,
     /// The command an agent's `run_command` writes; not counted as interfering typing.
@@ -351,19 +349,6 @@ impl App {
     #[cfg(test)]
     fn record_test_write_source(&self, pane_id: u64, source: PtyInputSource) {
         self.testing.test_pty_write_sources.borrow_mut().push((pane_id, source));
-    }
-
-    /// Deliver an explicitly targeted PTY effect through the same bounded queue as native input.
-    pub(crate) fn dispatch_pty_write_effect(
-        &mut self,
-        effect: &sonicterm_app_core::AppEffect,
-        source: PtyInputSource,
-    ) -> bool {
-        let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect else {
-            // When: the effect is not a PTY write, this boundary cannot accept its work.
-            return false;
-        };
-        self.write_to_pane(pane.0, data.to_vec(), source)
     }
 
     pub(super) fn queue_pane_input(

@@ -87,8 +87,6 @@ pub struct LoggingGuard {
 pub const CUSTOM_DEBUG_TARGETS: &[&str] = &[
     "memory",
     "memory::reclaimed",
-    "state_machine",
-    "state_machine.log",
     "render_timing",
     "render_policy",
     "tear_out_timing",
@@ -157,8 +155,8 @@ pub fn filter_for_level(level: LogLevel) -> &'static str {
         // turn on the diagnostics that documentation describes.
         LogLevel::Debug => {
             "sonic_exit=warn,sonic=debug,sonicterm=debug,sonicterm_vt=warn,sonicterm_grid=warn,\
-             memory=debug,memory::reclaimed=debug,state_machine=debug,state_machine.log=debug,\
-             render_timing=debug,render_policy=debug,tear_out_timing=debug,frame_counters=debug,\
+             memory=debug,memory::reclaimed=debug,render_timing=debug,\
+             render_policy=debug,tear_out_timing=debug,frame_counters=debug,\
              mcp=debug,wgpu=warn,naga=warn"
         }
     }

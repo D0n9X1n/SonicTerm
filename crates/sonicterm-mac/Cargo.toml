@@ -15,7 +15,6 @@ workspace = true
 
 [dependencies]
 sonicterm-app.workspace = true
-sonicterm-app-core.workspace = true
 sonicterm-cfg.workspace = true
 sonicterm-logging.workspace = true
 sonicterm-types.workspace = true

@@ -1,12 +1,11 @@
 //! Platform-agnostic window identifier.
 //!
 //! `WindowKey` is a winit-free stand-in for `winit::window::WindowId`
-//! used by platform-agnostic crates (e.g. `sonicterm-app-core`,
-//! `sonicterm-types`). Platform shells maintain a
+//! for platform-agnostic code. Platform shells maintain a
 //! `HashMap<winit::WindowId, WindowKey>` registry, assigning
 //! monotonically-increasing `u64` ids on first sight.
 //!
-//! The opaque numeric key lets reducers and serialized state identify windows
+//! The opaque numeric key lets serialized state identify windows
 //! without depending on winit's platform-specific handle type.
 
 use std::fmt;

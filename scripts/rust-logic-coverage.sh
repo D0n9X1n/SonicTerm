@@ -5,7 +5,7 @@ set -euo pipefail
 # regression floor over every workspace member. The 80% subset gate leaves out
 # native window/GPU/PTY paths, generated FFI, platform font discovery, and large
 # renderer-facing controllers, which use their build, integration, and
-# release-smoke substitutes. Exact crate roots keep app-core and font-config in
+# release-smoke substitutes. Exact crate roots keep font-config in
 # the measured surface while the audited cfg/grid/render/type/UI/font
 # helpers remain visible. The same profiles then feed scripts/coverage-floor.py,
 # which prints line coverage for every member and holds each measured crate to

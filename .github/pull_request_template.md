@@ -10,7 +10,7 @@
 - [ ] chore / ci
 
 ## Scope
-- [ ] contracts / app-core (`sonicterm-types`, `sonicterm-app-core`)
+- [ ] contracts (`sonicterm-types`)
 - [ ] terminal / IO (`sonicterm-vt`, `sonicterm-grid`, `sonicterm-io`)
 - [ ] config / UI (`sonicterm-cfg`, `sonicterm-ui`)
 - [ ] text / fonts (`sonicterm-text`, `sonicterm-font*`, `sonicterm-engine`)

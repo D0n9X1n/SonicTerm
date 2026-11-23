@@ -108,8 +108,7 @@ impl App {
         if let Some(window) = self.main_mut() {
             window.cursor_pos = (position.x, position.y);
         }
-        // The compatibility reducer is not told about cursor motion: nothing reads its cursor
-        // state, and this runs on every move. Hover repaints come from the app's checks below.
+        // Hover repaints come from the app's checks below.
         let mut hover_redraw = false;
         if let Some(window) = self.main_mut() {
             if let Some(renderer) = window.renderer.as_mut() {
@@ -396,23 +395,6 @@ impl App {
         match state {
             ElementState::Pressed => {
                 // When: state is ElementState::Pressed, begin primary-pointer interaction.
-
-                // Notify the reducer of the press transition so selection
-                // observability emits Render(Selection).
-                {
-                    let cursor = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
-                    let (cursor_x, cursor_y) = (cursor.0 as f32, cursor.1 as f32);
-                    self.observe_intent(sonicterm_app_core::AppIntent::MouseButton {
-                        window: sonicterm_types::WindowKey::new(0),
-                        pressed: true,
-                        button: sonicterm_app_core::MouseButton::Left,
-                        mods: sonicterm_types::ModKey::empty(),
-                        pos: sonicterm_app_core::LogicalPos {
-                            pixel_x: cursor_x as f64,
-                            pixel_y: cursor_y as f64,
-                        },
-                    });
-                }
                 if self.handle_main_left_press_chrome(win_id) {
                     // When: `handle_main_left_press_chrome` consumed the press, no pane or tab bar sees it.
                     return;
@@ -670,23 +652,6 @@ impl App {
             }
             ElementState::Released => {
                 // When: `state` is Released, commit or cancel the press-latched pointer gesture.
-
-                // Notify the reducer of the release transition so selection
-                // observability emits Render(Selection).
-                {
-                    let cursor = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
-                    let (cursor_x, cursor_y) = (cursor.0 as f32, cursor.1 as f32);
-                    self.observe_intent(sonicterm_app_core::AppIntent::MouseButton {
-                        window: sonicterm_types::WindowKey::new(0),
-                        pressed: false,
-                        button: sonicterm_app_core::MouseButton::Left,
-                        mods: sonicterm_types::ModKey::empty(),
-                        pos: sonicterm_app_core::LogicalPos {
-                            pixel_x: cursor_x as f64,
-                            pixel_y: cursor_y as f64,
-                        },
-                    });
-                }
                 let (terminal_owned, pointer_release) = self
                     .main_mut()
                     .map(|window| {

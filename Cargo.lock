@@ -3613,7 +3613,6 @@ dependencies = [
  "async-io",
  "base64",
  "block2 0.6.2",
- "bytes",
  "core-text",
  "crossbeam-channel",
  "enum-map",
@@ -3635,7 +3634,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "sonicterm-app",
- "sonicterm-app-core",
  "sonicterm-cfg",
  "sonicterm-gpu",
  "sonicterm-grid",
@@ -3657,16 +3655,6 @@ dependencies = [
  "wgpu",
  "windows",
  "winit",
-]
-
-[[package]]
-name = "sonicterm-app-core"
-version = "1.5.2"
-dependencies = [
- "bytes",
- "smallvec",
- "sonicterm-types",
- "tracing",
 ]
 
 [[package]]
@@ -3836,7 +3824,6 @@ dependencies = [
  "libc",
  "roxmltree",
  "sonicterm-app",
- "sonicterm-app-core",
  "sonicterm-cfg",
  "sonicterm-engine",
  "sonicterm-logging",
@@ -3878,7 +3865,6 @@ dependencies = [
  "raw-window-handle",
  "roxmltree",
  "sonicterm-app",
- "sonicterm-app-core",
  "sonicterm-cfg",
  "sonicterm-gpu",
  "sonicterm-io",
@@ -3980,7 +3966,6 @@ dependencies = [
  "raw-window-handle",
  "roxmltree",
  "sonicterm-app",
- "sonicterm-app-core",
  "sonicterm-cfg",
  "sonicterm-logging",
  "sonicterm-types",

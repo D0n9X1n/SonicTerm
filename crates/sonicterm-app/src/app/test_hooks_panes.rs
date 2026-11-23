@@ -681,6 +681,17 @@ impl App {
         Some(pane.parser.lock().grid().rows)
     }
 
+    /// Test-only: deliver a pane's child exit to the live exit handler, as the event loop does.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn __test_pane_process_exited(
+        &mut self,
+        pane_id: u64,
+        status: sonicterm_types::PaneExitStatus,
+    ) {
+        self.handle_pane_process_exited(pane_id, status);
+    }
+
     /// Test-only: current grid size for a pane.
     #[doc(hidden)]
     pub fn __test_pane_grid_size(&self, pane_id: u64) -> Option<(u16, u16)> {

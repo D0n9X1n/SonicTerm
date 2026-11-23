@@ -82,21 +82,16 @@ impl App {
             // When: `locate_exited_pane(pane_id)` returns no `site`, teardown raced and nothing remains to close.
             return;
         };
-        // The intent describes what happened regardless of how much topology
-        // follows from it, and its `PtyClose` effect owns the multi-leaf case
-        // — closing the tree node and resizing the survivor.
-        self.dispatch_intent(sonicterm_app_core::AppIntent::PtyExit {
-            pane: sonicterm_app_core::PaneId(pane_id),
-            status: 0,
-        });
+        // Retires the pane in every case; for a split it also closes the tree node and resizes the
+        // survivor, while a sole leaf stays in its tab's tree for the tab close below.
+        let closed = self.close_pty_pane(pane_id);
+        tracing::debug!(pane = pane_id, ?status, closed, "pane child exited cleanly; pane closed");
         if !site.sole_leaf {
-            // When: `site.sole_leaf` is false, reducer cleanup resized the surviving sibling and the tab remains usable.
+            // When: `site.sole_leaf` is false, `close_pty_pane` resized the surviving sibling and the tab remains usable.
             return;
         }
-        // The tab's only pane is gone, so the tab has nothing left to show.
-        // The reducer does not reach this: its pane close deliberately leaves
-        // a sole leaf in place, which is why the tab used to survive its own
-        // shell.
+        // The tab's only pane is gone, so the tab has nothing left to show; `close_pty_pane` leaves
+        // a sole leaf in its tree, so the tab itself closes here.
         tracing::info!(
             pane = pane_id,
             tab = site.tab_index,

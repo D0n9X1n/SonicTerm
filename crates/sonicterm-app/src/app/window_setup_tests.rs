@@ -88,3 +88,12 @@ fn option_as_alt_maps_each_choice_to_winit() {
         assert_eq!(winit_option_as_alt(configured), expected);
     }
 }
+
+/// The Windows background-colour parser refuses a value that is not exactly six ASCII hex bytes.
+#[test]
+fn windows_native_background_parser_rejects_non_ascii_byte_slices() {
+    const SOURCE: &str = include_str!("window_setup/windows.rs");
+
+    assert!(SOURCE.contains("if hex_digits.len() != 6 || !hex_digits.is_ascii()"));
+    assert!(SOURCE.contains("not exactly six ASCII bytes"));
+}

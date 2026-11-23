@@ -159,7 +159,7 @@ pub use child_window::{
 mod child_window_pointer;
 mod child_window_redraw;
 mod command_events;
-use command_events::{append_bounded_command_events, notify_command_done};
+use command_events::append_bounded_command_events;
 pub use command_events::{poll_command_events_for_child_window, poll_command_events_for_tab_state};
 mod config_apply;
 mod dispatch_timeline;
@@ -191,8 +191,6 @@ pub use echo_watch::{
     ArmOutcome, ArmToken, EchoAppearance, EchoDelivery, EchoDeliveryOutcome, EchoPublication,
     EchoRowIdentity, EchoTrace, EchoWatchTarget, TakeOutcome,
 };
-mod effects;
-use effects::close_owner;
 mod config_state;
 mod event_loop;
 mod fg_probe;
@@ -615,8 +613,6 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    /// Compatibility reducer observations; live topology decisions and native effect targets belong to App.
-    pub(crate) machine: sonicterm_app_core::AppStateMachine,
 }
 
 impl App {

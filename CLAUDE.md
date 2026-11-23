@@ -95,7 +95,6 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-render-model` | Renderer-agnostic frame data. |
 | `sonicterm-ui` | Tabs, palette, search, selection, IME. |
 | `sonicterm-gpu` | wgpu renderer. |
-| `sonicterm-app-core` | Winit-independent reducer/state. |
 | `sonicterm-app` | Cross-platform app orchestration, path probes, and native direct-open. |
 | `sonicterm-mac` | macOS binary/glue. |
 | `sonicterm-windows` | Windows binary/glue. |
@@ -267,7 +266,7 @@ force removal or discard dirty, unmerged, or locked worktrees or any stash.
 Before trusting a green run:
 
 - `rust-logic-coverage.sh` gates a deterministic-logic subset at 80% and skips
-  9 of the 24 crates outright, including `sonicterm-app` and `sonicterm-gpu`, so
+  9 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`, so
   a passing subset figure says nothing about code in those crates. The per-crate
   floor in `scripts/coverage-baseline.json` catches regressions, not low coverage.
   CI measures it on Linux (`linux-coverage`), so those floors do not measure

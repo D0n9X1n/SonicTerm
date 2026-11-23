@@ -19,9 +19,7 @@ workspace = true
 # fully built and unreachable from the shipping binary.
 sonicterm-resource.workspace = true
 enum-map = { workspace = true }
-sonicterm-app-core.workspace = true
 sonicterm-types.workspace = true
-bytes = "1"
 smallvec = "1"
 sonicterm-logging.workspace = true
 sonicterm-cfg.workspace = true

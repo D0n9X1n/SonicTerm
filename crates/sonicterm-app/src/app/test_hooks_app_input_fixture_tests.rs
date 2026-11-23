@@ -226,14 +226,15 @@ fn real_pty_alltabs_byte_fanout_excludes_readonly_receivers() {
     }
 }
 
-/// Explicit IME and paste intents admit only their live destination, and READONLY never redirects to an unprotected peer.
+/// Native IME commits and clipboard pastes reach only their source window's active pane, never the
+/// frontmost peer; READONLY consumes both, and ordinary copy mode drops only the IME commit.
 #[cfg(any(windows, unix))]
 #[test]
-fn real_pty_intent_ime_and_paste_respect_readonly_admission() {
+fn real_pty_source_ime_and_paste_respect_readonly_admission() {
     if isolated() {
         return;
     }
-    use sonicterm_app_core::AppIntent;
+    use winit::event::Ime;
     for target_index in 0..3 {
         for copy_kind in ["none", "copy", "readonly"] {
             for ime in [false, true] {
@@ -245,22 +246,24 @@ fn real_pty_intent_ime_and_paste_respect_readonly_admission() {
                     "readonly" => Some(CopyModeState::read_only_at((0, 0))),
                     _ => None,
                 };
-                let window = app.window_key(target).unwrap();
-                let intent = if ime {
-                    AppIntent::ImeCommit { window, text: "intent".into() }
-                } else {
-                    AppIntent::Paste { window, text: "intent".into(), bracketed: false }
-                };
+                app.__test_set_memory_clipboard("source");
                 app.wait_for_input_queues();
                 let submitted = PtySubmissions::start();
-                app.dispatch_intent(intent);
+                if ime {
+                    app.handle_window_ime(target, Ime::Commit("source".into()));
+                } else {
+                    assert!(app.run_action_for_window(&Action::PasteFromClipboard, target));
+                }
+                // Copy mode owns the keyboard, so an IME commit is dropped there; a paste is not
+                // keyboard input and still reaches a pane whose window is not READONLY.
+                let delivered = match copy_kind {
+                    "readonly" => false,
+                    "copy" => !ime,
+                    _ => true,
+                };
                 assert_eq!(
                     submitted.take(),
-                    if copy_kind == "readonly" {
-                        Vec::new()
-                    } else {
-                        vec![(pane, b"intent".to_vec())]
-                    },
+                    if delivered { vec![(pane, b"source".to_vec())] } else { Vec::new() },
                     "target={target_index} copy={copy_kind} ime={ime}"
                 );
             }

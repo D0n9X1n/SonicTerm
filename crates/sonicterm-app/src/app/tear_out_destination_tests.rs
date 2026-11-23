@@ -65,23 +65,31 @@ fn destination_failure_disposition_is_total() {
     }
 }
 
-/// A committed OS handoff retains the reducer accounting that formerly ran
-/// before every route, while failed native setup performs none.
+/// A handoff the OS drag sink accepts moves the source tab and its pane out of the source window,
+/// and no local window is installed or queued for it: the receiving process owns the tab now.
 #[test]
-fn committed_handoff_accounts_only_after_the_sink_accepts() {
-    let mut app = app_with_reducer_counts(3, 2);
-    app.__test_seed_tab("handoff");
+fn committed_handoff_removes_the_source_tab_without_local_installation() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane_id = app.__test_seed_tab("handoff");
+    let source = app.__test_main_window_id().expect("synthetic main");
+    let tab_id = app.tab_id_at(source, 0).expect("source tab");
     app.__test_set_os_drag_sink(Arc::new(AcceptedSink));
-    let before = app.machine.state();
-    let before = (before.tab_count, before.live_window_count);
+    let windows: std::collections::HashSet<_> = app.registry.windows.keys().copied().collect();
 
     assert!(app.tear_out_tab_with_installer(0, |_, _, _, _| {
         panic!("accepted handoff must not enter native installation")
     }));
 
-    let after = app.machine.state();
-    assert_eq!(after.tab_count, before.0 - 1);
-    assert_eq!(after.live_window_count, before.1 + 1);
+    assert!(app.tab_index_of_id(source, tab_id).is_none(), "the tab left its source window");
+    assert!(
+        app.registry.windows.values().all(|window| !window.panes.contains_key(&pane_id)),
+        "the tab's pane left with it"
+    );
+    assert_eq!(
+        app.registry.windows.keys().copied().collect::<std::collections::HashSet<_>>(),
+        windows,
+        "no local window was installed"
+    );
     assert!(app.pending_new_window.is_none(), "the committed route creates its own destination");
 }
 
@@ -149,7 +157,7 @@ fn rollback_skips_source_cleanup_for_every_route() {
         FailureRoute::DeferredMain,
         FailureRoute::DeferredChild,
     ] {
-        let mut app = app_with_reducer_counts(3, 2);
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let source = match route {
             FailureRoute::Main | FailureRoute::DeferredMain => {
                 for title in ["a", "b", "c"] {
@@ -196,24 +204,19 @@ fn rollback_skips_source_cleanup_for_every_route() {
     }
 }
 
-/// An invalid main tear-out does not invoke installation or mutate reducer
-/// accounting for a tab that never left.
+/// An invalid main tear-out does not invoke installation or change the source window.
 #[test]
 fn out_of_range_tear_out_is_a_complete_no_op() {
-    let mut app = app_with_reducer_counts(3, 2);
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("source");
     let source = app.__test_main_window_id().expect("synthetic main");
     let before = source_snapshot(&app, source);
-    let reducer = app.machine.state();
-    let reducer = (reducer.tab_count, reducer.live_window_count, reducer.active_tab_idx);
 
     assert!(app.tear_out_tab_with_installer(99, |_, _, _, _| {
         panic!("an invalid source must not reach destination installation")
     }));
 
     assert_eq!(source_snapshot(&app, source), before);
-    let after = app.machine.state();
-    assert_eq!((after.tab_count, after.live_window_count, after.active_tab_idx), reducer);
 }
 
 /// Rollback restores the exact middle slot without stealing focus from either
@@ -320,7 +323,7 @@ fn a_rolled_back_tear_out_keeps_the_same_live_shell_usable() {
         resize(cols, rows)
     });
 
-    let mut app = app_with_reducer_counts(1, 1);
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("live shell");
     let window = app.__test_main_window_id().expect("synthetic main");
     assert!(app.__test_set_pane_pty(pane_id, Some(pty)));

@@ -241,7 +241,7 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
 
 ## Gate 盲区
 
-- 一次性 workspace gate 包含全部 24 个 package 的 integration test，但仍只能运行当前 host
+- 一次性 workspace gate 包含全部 23 个 package 的 integration test，但仍只能运行当前 host
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 9 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
