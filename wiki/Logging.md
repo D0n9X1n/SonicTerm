@@ -76,7 +76,7 @@ artifact cleanup runs on a background thread.
 | `error` | errors only |
 | `warn` | warnings, errors, `sonic_exit`, `sonic::gpu` device records, and user-visible reclamation/exhaustion warnings |
 | `info` | normal SonicTerm information plus the aggregate `memory snapshot` |
-| `debug` | detailed SonicTerm diagnostics, pane/renderer memory lines, state-machine events, `render_timing`, `tear_out_timing`, and `frame_counters` |
+| `debug` | detailed SonicTerm diagnostics, pane/renderer memory lines, `render_timing`, `tear_out_timing`, and `frame_counters` |
 
 The `mcp` target belongs to the agent control server. Its warnings reach every
 session, including the default `warn`: a listener that could not start, a refused

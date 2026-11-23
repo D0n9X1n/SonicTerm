@@ -24,7 +24,7 @@ flowchart TD
 终端解析位于 `sonicterm-vt`；本地 PTY/ConPTY 封装在
 `sonicterm-io::PtyHandle` 后；渲染位于 `sonicterm-gpu`。
 
-三个二进制共用诊断、配置、日志、资源、状态机和 shell 启动流程；准确顺序见
+三个二进制共用诊断、配置、日志、资源和 shell 启动流程；准确顺序见
 [运行时生命周期](Runtime-Lifecycle-zh-CN)。用户状态位于 `~/.sonicterm`；打包资源由
 `sonicterm-cfg::assets` 查找。
 

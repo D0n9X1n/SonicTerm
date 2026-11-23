@@ -151,6 +151,35 @@ fn source_focus_cleanup_preserves_peer_state_and_report_destinations() {
     }
 }
 
+/// Focus moves between main and child windows: the newest focused window becomes frontmost, and a
+/// late blur of a window that already lost focus leaves the current frontmost window in place.
+#[test]
+fn late_main_blur_keeps_the_newly_focused_child_frontmost() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.registry.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.handle_window_focus_changed(main, true);
+    assert_eq!(app.registry.frontmost_window, Some(main));
+    app.handle_window_focus_changed(child, true);
+    assert_eq!(app.registry.frontmost_window, Some(child));
+    app.handle_window_focus_changed(main, false);
+    assert_eq!(app.registry.frontmost_window, Some(child));
+}
+
+/// Every main-window cursor move is recorded, so the live cursor position ends at the last
+/// reported point after a run of moves.
+#[test]
+fn repeated_main_cursor_moves_keep_the_latest_position() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    for step in 0..20 {
+        let position = winit::dpi::PhysicalPosition::new(10.0 + f64::from(step), 15.0);
+        app.handle_main_cursor_moved(position);
+    }
+    assert_eq!(app.main().unwrap().cursor_pos, (29.0, 15.0));
+}
+
 #[test]
 fn unknown_focus_and_modifiers_never_mutate_main_or_emit_input() {
     // Late events for a removed window cannot cancel main composition, alter modifiers, or write a focus report.

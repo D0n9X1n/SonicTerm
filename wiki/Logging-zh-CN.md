@@ -64,7 +64,7 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 | `error` | 仅错误 |
 | `warn` | warning、error、`sonic_exit`、`sonic::gpu` 设备记录，以及用户可见的回收或耗尽提示 |
 | `info` | SonicTerm 常规信息和聚合 `memory snapshot` |
-| `debug` | 详细诊断、窗格/渲染器内存、状态机事件、`render_timing`、`tear_out_timing` 和 `frame_counters` |
+| `debug` | 详细诊断、窗格/渲染器内存、`render_timing`、`tear_out_timing` 和 `frame_counters` |
 
 `mcp` target 属于 agent 控制服务器。它的 warning 在包括默认 `warn` 在内的所有会话中都会记录：
 监听器无法启动、拒绝其他用户的连接、连接数超限，以及控制服务器 owner 无法注册。`info` 级别另外记录

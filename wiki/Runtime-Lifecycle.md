@@ -171,7 +171,7 @@ flowchart TD
     pane --> paneowner["AppPane owner + class charges"]
 ```
 
-The main window is one entry in `App::windows`. `main_window_id` identifies it.
+The main window is one entry in the window registry. `main_window_id` identifies it.
 Torn-out windows use the same `WindowState` type and the same event map.
 
 `TabBar` stores tab identity, title, order, and active index. The parallel
@@ -327,16 +327,19 @@ flowchart TD
     source --> live --> boundary
 ```
 
-`App`'s typed owners hold all live state: windows, geometry and focus in
-`App::windows`, `main_window_id` and native focus; tabs in each window's `TabBar`
-and parallel `TabState` vector; panes in the active `TabState`'s `PaneTree`;
-pointer gestures, cursor and selection in each window; tab search and the
-palette's attached window; live pane process observations and `App::broadcast`.
-No second model mirrors them.
+`App`'s typed owners hold all live state: windows, geometry and focus in the
+window registry (its `WindowMap`, `main_window_id` and `frontmost_window`) and
+native focus; tabs in each window's `TabBar` and parallel `TabState` vector;
+panes in each `TabState`'s `PaneTree` and the window's `PaneMap`; pointer
+gestures, cursor and selection in each window; tab search and the palette's
+attached window in the interaction state, which also holds broadcast scope; and
+live pane process observations. No second model mirrors them.
 
 Window keys start at one, are monotonic, and are removed on closure without
 reuse. Missing, removed, and zero keys do not mean main or frontmost. Native
-window close, tab and pane actions, and quit decide from live topology only.
+window close, tab and pane actions, and the exit that follows the last window
+closing decide from live topology only; an explicit Quit (menu, palette or the
+held chord) exits directly, whatever is open.
 Source-less menu actions may select the current window, but an explicitly named
 missing source never falls through to a different terminal.
 
@@ -527,7 +530,7 @@ The hidden warm-window pool reduces tear-out latency:
 
 `about_to_wait` removes excess entries and creates at most one missing warm
 window per pass. Adoption is last-in, first-out. A consumed or failed-adoption
-entry is replaced on a later idle pass. Warm windows stay outside `App::windows`
+entry is replaced on a later idle pass. Warm windows stay outside the window registry
 and have no resource owner until promoted.
 
 New-window tear-out holds the detached tab, tab state, panes, source index, and
@@ -546,7 +549,7 @@ After native preparation succeeds, native drop-target registration must succeed
 before accounting admission. Registration failure drops the hidden destination
 and restores the source transaction before any ownership transfer. The app then
 prepares destination owners and transfers all pane charges before changing redraw
-targets, inserting the live window into `App::windows`, or sizing its panes. An
+targets, inserting the live window into the window registry, or sizing its panes. An
 accounting refusal revokes the native registration, drops the hidden artifacts,
 and restores the source transaction. Success reveals the destination once and
 requests its first frame; only then may source neighbour activation, hiding, or

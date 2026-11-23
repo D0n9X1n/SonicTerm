@@ -39,6 +39,9 @@ struct ExitedPaneSite {
     tab_index: usize,
     /// Whether the pane is its tab's only leaf, so closing it empties the tab.
     sole_leaf: bool,
+    /// Whether the pane's tab is its window's active tab, so closing a split leaf refits the
+    /// surviving panes on screen; a split in a background tab is refitted when it is shown.
+    visible_tab: bool,
 }
 
 impl App {
@@ -82,12 +85,21 @@ impl App {
             // When: `locate_exited_pane(pane_id)` returns no `site`, teardown raced and nothing remains to close.
             return;
         };
-        // Retires the pane in every case; for a split it also closes the tree node and resizes the
-        // survivor, while a sole leaf stays in its tab's tree for the tab close below.
+        // Retires the pane in every case; for a split it also closes the tree node, and in the
+        // window's active tab it resizes the survivor. A sole leaf stays in its tab's tree for the
+        // tab close below.
         let closed = self.close_pty_pane(pane_id);
-        tracing::debug!(pane = pane_id, ?status, closed, "pane child exited cleanly; pane closed");
+        let survivor_resized = closed && !site.sole_leaf && site.visible_tab;
+        tracing::debug!(
+            pane = pane_id,
+            ?status,
+            closed,
+            sole_leaf = site.sole_leaf,
+            survivor_resized,
+            "pane child exited cleanly; pane closed"
+        );
         if !site.sole_leaf {
-            // When: `site.sole_leaf` is false, `close_pty_pane` resized the surviving sibling and the tab remains usable.
+            // When: `site.sole_leaf` is false, the tab keeps its other panes and stays open.
             return;
         }
         // The tab's only pane is gone, so the tab has nothing left to show; `close_pty_pane` leaves
@@ -148,6 +160,7 @@ impl App {
                     window: *window_id,
                     tab_index,
                     sole_leaf: tab_state.tree.leaf_count() == 1,
+                    visible_tab: tab_index == window.tabs.active_index(),
                 })
             })
         })

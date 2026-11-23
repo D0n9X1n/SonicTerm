@@ -27,7 +27,7 @@ main-thread object, platform ABI, desktop identity, or installer metadata.
 Terminal parsing is in `sonicterm-vt`; local PTY/ConPTY transport is behind
 `sonicterm-io::PtyHandle`; rendering is in `sonicterm-gpu`.
 
-The binaries share diagnostic, config, logging, asset, state-machine, and shell
+The binaries share diagnostic, config, logging, asset, and shell
 startup; the ordered sequence is in [Runtime Lifecycle](Runtime-Lifecycle).
 User state is under `~/.sonicterm`; `sonicterm-cfg::assets` resolves packaged assets.
 
