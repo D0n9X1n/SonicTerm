@@ -1,4 +1,4 @@
-//! Colors a program set for its own pane with OSC 4, 10, 11 and 12, over the theme defaults.
+//! Colors a program set for its own pane with OSC 4, 10, 11, 12 and 21, over the theme defaults.
 //!
 //! The parser owns one store per pane and the renderer reads it borrowed for a frame, so both
 //! agree on which entries a program overrode. An entry records presence, not a difference from

@@ -163,7 +163,7 @@ fn raw_osc_cap(code: u16) -> usize {
         MAX_NOTIFY_BYTES
     } else if vt_color::is_color_osc(code) {
         // When: code is a color request, its own bound applies.
-        vt_color::MAX_COLOR_OSC_BYTES
+        vt_color::color_osc_cap(code)
     } else {
         // When: code is a title, CWD or hyperlink, the semantic bound applies.
         MAX_SEMANTIC_OSC_BYTES
@@ -652,7 +652,7 @@ struct Performer {
     reply_tx: Option<Sender<Vec<u8>>>,
     captured_replies: std::cell::RefCell<Option<Vec<u8>>>,
     reply_queue_full_warned: std::sync::atomic::AtomicBool,
-    /// The colors the program set for this pane (OSC 4/10/11/12), over the theme defaults below.
+    /// The colors the program set for this pane (OSC 4/10/11/12/21), over the theme defaults.
     color_overrides: sonicterm_types::ColorOverrides,
     /// Theme default foreground (sRGB), answering OSC 10 `?` while the program set none.
     /// `None` means the parser was never told a theme — query replies are

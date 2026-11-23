@@ -140,7 +140,7 @@ impl Performer {
     // Ordering: reply_queue_full_warned uses Relaxed because it suppresses duplicate warnings without publishing reply bytes.
     pub(super) fn reply(&self, bytes: &[u8]) {
         if let Some(captured) = self.captured_replies.borrow_mut().as_mut() {
-            // When: captured_replies is enabled, stage one dispatch before yielding; a color request is capped at 4096 bytes.
+            // When: captured_replies is enabled, stage one dispatch before yielding; a color request's payload is bounded.
             captured.extend_from_slice(bytes);
             return;
         }

@@ -68,7 +68,8 @@ travels with the pane across windows.
 Production parsing yields after a reply-producing dispatch. Outside
 parser and side-effect locks, the VT worker submits replies to a separate FIFO:
 64 KiB of RAM followed by a private, automatically deleted temporary spill file.
-One dispatch stages less than 32 KiB, bounded by the 4 KiB limit on one color request.
+One dispatch stages less than 32 KiB: a color request is bounded at 4 KiB, and OSC 21 at 16 KiB
+and 526 answering fields, which answer in under 28.2 KB.
 Complete dispatches are batched up to 32 KiB and flushed at each output-batch end;
 small replies do not require a file write per query. Admission may perform synchronous file I/O but never waits for native input
 capacity, so a finite output-before-input query burst can continue draining.
@@ -241,8 +242,8 @@ Current protocol support includes:
 - primary and alternate screens, application cursor keys, bracketed paste,
   focus reporting, and kitty keyboard flag set/push/pop/query;
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
-  clipboard events, OSC 4/10/11/12 color queries and sets, OSC 104/110/111/112 color
-  resets, OSC 133 prompt markers, OSC 9;4
+  clipboard events, OSC 4/10/11/12 color queries and sets, the OSC 21 kitty color protocol,
+  OSC 104/110/111/112 color resets, OSC 133 prompt markers, OSC 9;4
   progress, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
   title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere,
   the final padding optional), at most eight open at once and 16 KiB in all, and all of them dropped
@@ -281,6 +282,7 @@ SonicTerm answers:
 | DEC mode 2031 | While a program has set it, every theme change that alters a readable color (foreground, background, cursor, the 16 theme colors) or the scheme sends the same `CSI ? 997 ; Ps n` report, also when the scheme stays the same, so a program that re-reads colors on the report picks up the new palette. A reload, the theme picker's preview and its choice all count; the report goes through the pane's reply path. SonicTerm does not follow the system's light or dark appearance, so the report fires only when the theme changes. |
 | `OSC 4 ; N ; ?` | `OSC 4 ; N ; rgb:rrrr/gggg/bbbb` with the request's terminator: the color the program set, else 0..=15 from the theme and 16..=255 from the xterm 6×6×6 cube and gray ramp, the same table the renderer draws with. |
 | `OSC 10/11/12 ; ?` | `OSC 1x ; rgb:rrrr/gggg/bbbb` with the request's terminator: the foreground, background or cursor the program set, else the theme's; a cursor with neither reads as the foreground. Each further `?` asks for the next color, so `OSC 10 ; ? ; ?` answers 10 and 11; 13-19 are not answered. |
+| `OSC 21 ; key=? ; …` | `OSC 21 ; key=rgb:rr/gg/bb ; …` in request order with the request's terminator; see the kitty color protocol below. |
 | `CSI 16 t` | `CSI 6 ; height ; width t`, the cell size in whole physical pixels; no reply until the window reports a cell size. Other window operations are ignored. |
 
 Programs can set and reset the colors of their own pane:
@@ -310,10 +312,35 @@ Programs can set and reset the colors of their own pane:
 - The colors apply to the pane that set them: its cells, blank area, inverse and dim text,
   underlines and cursor. The tab bar, window padding outside panes, splitters and the macOS
   titlebar band keep the theme, so split panes can differ. This is an intentional difference
-  from Ghostty, which retints its single-surface window. Replies are always the 16-bit
-  `rgb:rrrr/gggg/bbbb` form, Ghostty's default; there is no 8-bit reply option.
+  from Ghostty, which retints its single-surface window. OSC 4 and 10-12 replies are always
+  the 16-bit `rgb:rrrr/gggg/bbbb` form, Ghostty's default; there is no 8-bit reply option.
 - Below a background opacity of 1, a program's background is drawn over the theme background
   at the same opacity, so it blends with the theme background rather than replacing it.
+
+`OSC 21 ; key=value ; …`, the kitty color protocol, reads every `;`-separated field in order and
+answers in one `OSC 21 ; key=value ; …` reply with the request's terminator, sent only when the
+packet asks something:
+
+| Key | `key=?` | `key=spec` | `key=` or bare `key` |
+| --- | --- | --- | --- |
+| Palette `0`-`255` (digits, leading zeros allowed as in kitty) | the effective entry | sets it | resets it to the theme |
+| `foreground`, `background`, `cursor` | the effective color; `cursor` answers what OSC 12 reports | sets it | resets it to the theme |
+| `selection_background`, `selection_foreground`, `cursor_text`, `visual_bell`, `transparent_background_color1`-`8` | `key=` (not held) | ignored | ignored |
+| any other key, including `256` and `second_transparent_background` | `unknown=` and the key in unpadded base64 | the same | the same |
+
+- Colors are answered in 8-bit `rgb:rr/gg/bb`, and a color with no value as `key=`. A set drops
+  an `@opacity` suffix and accepts every spec form above; an invalid spec or an empty field is
+  skipped. Bytes outside printable ASCII are removed before reading, and values, not keys, are
+  trimmed of spaces.
+- A packet is limited to 16 KiB and 526 fields that answer, set, reset or name an unknown key;
+  a longer packet, or one with a 527th such field, changes and answers nothing. The largest
+  reply stays under 28.2 KB, so it is one reply-path submission.
+- Intentional differences: kitty accepts 256 KiB and any number of fields, while 16 KiB keeps
+  every reply within one 32 KiB submission. An empty value resets a color, as in Ghostty, where
+  kitty sets "none" or its null color. Unknown keys are answered as kitty does, where Ghostty
+  skips them, and Ghostty's `second_transparent_background` is unknown here, as in kitty. Values
+  are trimmed, as in Ghostty. The selection, cursor-text, visual-bell and transparent-background
+  colors are recognized but not held. WezTerm does not implement OSC 21.
 
 SGR pixel mouse reporting (mode 1016) is not supported, and DECRQM says so.
 
@@ -443,8 +470,8 @@ URI to 8 KiB and client id to 1 KiB.
   events resets the state before its retained tail, a pane whose process exited is
   `Unknown`, and the state moves with the pane to another tab or window.
 
-The raw color collector owns OSC 4, 10-19, 104 and 110-119 whole, beyond vte's
-parameter count and up to 4 KiB. It applies a message only once its ST or BEL arrived, and
+The raw color collector owns OSC 4, 10-19, 21, 104 and 110-119 whole, beyond vte's
+parameter count and up to 4 KiB (16 KiB for OSC 21). It applies a message only once its ST or BEL arrived, and
 drops a longer one, or one cut by CAN, SUB or an ESC that does not start ST, without applying
 any part; vte never dispatches the same message. Parser-owned sequence
 state recognizes kitty APC after completed escapes, including C1 APC and chunk-split

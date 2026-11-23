@@ -674,3 +674,39 @@ fn a_batch_of_color_sets_publishes_and_redraws_once() {
     let overrides = parser.color_overrides().expect("the batch's colors");
     assert_eq!(overrides.palette(63), Some((63, 0, 0)));
 }
+
+/// The largest OSC 21 answer is one reply-path submission the pane's spool admits: 526 unknown keys
+/// filling the 16 KiB input cap reach `send_reply` once, at most 32 KiB, after the parser guard ends.
+#[test]
+fn the_largest_kitty_color_reply_is_one_spool_submission() {
+    let (_pane, handles, _watch) = echo_worker(80, 24, 100);
+    let payload_cap = 16 * 1024;
+    let key_count = 526;
+    // Keys of 30 or 31 bytes and their 525 separators fill the cap exactly.
+    let key_bytes = payload_cap - (key_count - 1);
+    let keys: Vec<String> = (0..key_count)
+        .map(|index| "k".repeat(key_bytes / key_count + usize::from(index < key_bytes % key_count)))
+        .collect();
+    let payload = keys.join(";");
+    assert_eq!(payload.len(), payload_cap);
+    let mut submissions = Vec::new();
+    publish_pane_vt_batch_with(
+        &handles,
+        format!("\x1b]21;{payload}\x1b\\").as_bytes(),
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        test_base,
+        |bytes: Vec<u8>| {
+            assert!(handles.parser.try_lock().is_some(), "the reply is written after the guard");
+            submissions.push(bytes);
+        },
+    );
+    assert_eq!(submissions.len(), 1, "one submission");
+    let reply = &submissions[0];
+    assert!(reply.len() <= 32 * 1024, "{} bytes fit one spool submission", reply.len());
+    let answers = reply.windows(8).filter(|window| window == b"unknown=").count();
+    assert_eq!(answers, key_count, "every key is answered");
+}

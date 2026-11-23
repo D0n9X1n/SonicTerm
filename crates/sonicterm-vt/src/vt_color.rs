@@ -1,4 +1,5 @@
-//! Program color requests: OSC 4 and 10-19 sets and queries, and the 104 and 110-119 resets.
+//! Program color requests: OSC 4 and 10-19 sets and queries, the 104 and 110-119 resets, and
+//! OSC 21, the kitty color protocol, which its own module reads.
 //!
 //! The raw OSC collector hands a whole message here only after its ST or BEL arrived, so a cut
 //! or aborted message never applies a part. Requests apply in order and take the most accepting
@@ -13,15 +14,26 @@
 use super::*;
 use sonicterm_types::{ColorOverrides, DynamicColor, Rgb};
 
-/// The byte bound of one color request's payload; a longer message is refused whole.
-pub(super) const MAX_COLOR_OSC_BYTES: usize = 4096;
+/// The byte bound of one color request's payload other than OSC 21; a longer message is refused
+/// whole.
+const MAX_COLOR_OSC_BYTES: usize = 4096;
 
 /// The OSC number of the last dynamic color; a chained request stops after it.
 const LAST_DYNAMIC_OSC: u16 = 19;
 
 /// Whether `code` is a color request this module consumes.
 pub(super) fn is_color_osc(code: u16) -> bool {
-    matches!(code, 4 | 10..=19 | 104 | 110..=119)
+    matches!(code, 4 | 10..=19 | 21 | 104 | 110..=119)
+}
+
+/// The whole-payload byte bound of color request `code`; a longer message is refused whole.
+pub(super) fn color_osc_cap(code: u16) -> usize {
+    if code == 21 {
+        vt_kitty_color::MAX_KITTY_COLOR_BYTES
+    } else {
+        // When: `code` is any color request but OSC 21, the shared bound applies.
+        MAX_COLOR_OSC_BYTES
+    }
 }
 
 /// The color request `digits` names, spelled exactly as Ghostty reads it (digits only, no
@@ -74,7 +86,7 @@ fn palette_target(index: &[u8]) -> Option<PaletteTarget> {
 }
 
 impl Parser {
-    /// The colors the program set for this pane with OSC 4, 10, 11 and 12; `None` while it has
+    /// The colors the program set for this pane with OSC 4, 10, 11, 12 and 21; `None` while it has
     /// set none, so a pane draws with its theme alone.
     #[must_use]
     pub fn color_overrides(&self) -> Option<&ColorOverrides> {
@@ -97,8 +109,10 @@ impl Performer {
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         // Every `;`-separated field, empty ones included: an empty dynamic value still advances.
         let fields = payload.split(|byte| *byte == b';');
-        // The code selects the palette, a palette reset, a dynamic reset or a dynamic request.
+        // The code selects the palette, the kitty protocol, a palette reset, a dynamic reset or a
+        // dynamic request.
         match code {
+            21 => self.apply_kitty_color_osc(payload, terminator),
             // OSC 4 skips empty fields, as Ghostty's tokenizer does, before pairing them.
             4 => self
                 .apply_palette_requests(&mut fields.filter(|field| !field.is_empty()), terminator),
@@ -258,6 +272,9 @@ impl Performer {
         self.reply(&reply);
     }
 }
+
+#[path = "vt_kitty_color.rs"]
+mod vt_kitty_color;
 
 #[cfg(test)]
 #[path = "vt_color_tests.rs"]

@@ -1,4 +1,4 @@
-//! A pane's colors: the window theme under the colors its program set with OSC 4, 10, 11 and 12.
+//! A pane's colors: the window theme under the colors its program set with OSC 4, 10-12 and 21.
 //!
 //! Every cell color path resolves through [`PaneColors`], so a pane's glyphs, inverse and dim
 //! cells, backgrounds, decorations and cursor agree. A pane without program colors carries no

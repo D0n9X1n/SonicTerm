@@ -3949,6 +3949,7 @@ dependencies = [
 name = "sonicterm-vt"
 version = "1.5.2"
 dependencies = [
+ "base64",
  "crossbeam-channel",
  "memchr",
  "sonicterm-grid",
