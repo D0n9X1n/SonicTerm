@@ -353,13 +353,16 @@ fn selection_frame(
             });
         }
     }
-    let row_spans = [RowGlyphSpan::new(&glyphs, 0..glyphs.len(), surface_w, surface_h)];
-    // Each pane emitted three glyphs; the selection recolor reads only the active pane's rows.
-    let (origin, overrides, pane_range) = match active {
-        ActivePane::Left => (0.0, left_overrides, 0..3),
-        ActivePane::Right => (40.0, None, 3..6),
+    // Each pane emitted one row of three glyphs; the selection recolor reads only the active
+    // pane's row, and the cursor recolor reads every row.
+    let mut row_spans = [
+        RowGlyphSpan::new(&glyphs, 0..3, surface_w, surface_h),
+        RowGlyphSpan::new(&glyphs, 3..6, surface_w, surface_h),
+    ];
+    let (origin, overrides, pane) = match active {
+        ActivePane::Left => (0.0, left_overrides, 0..1),
+        ActivePane::Right => (40.0, None, 1..2),
     };
-    let pane_rows = [RowGlyphSpan::new(&glyphs, pane_range, surface_w, surface_h)];
     let colors = PaneColors::new(theme, overrides);
     let theme_highlight =
         crate::color::hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
@@ -384,7 +387,15 @@ fn selection_frame(
         colors.selection_rgba(theme_highlight),
     );
     if let Some(selected) = colors.selection_foreground_rgba() {
-        recolor_selected_glyphs(&mut glyphs, &pane_rows, &selection, &geometry, &[], selected);
+        recolor_selected_glyphs(
+            &mut glyphs,
+            &mut row_spans,
+            pane,
+            &selection,
+            &geometry,
+            &[],
+            selected,
+        );
     }
     let _ = recolor_cursor_glyphs_in(
         &mut glyphs,
@@ -563,7 +574,7 @@ fn cluster_frame(
         ActivePane::Left => (0.0, 0..left_count),
         ActivePane::Right => (40.0, left_count..instances.len()),
     };
-    let pane_rows = [RowGlyphSpan::new(&instances, pane_range, surface_w, surface_h)];
+    let mut pane_rows = [RowGlyphSpan::new(&instances, pane_range, surface_w, surface_h)];
     let mut overrides = ColorOverrides::default();
     let (red, green, blue) = CLUSTER_SELECTION_BG;
     overrides.set_dynamic(DynamicColor::SelectionBackground, Some((red, green, blue)));
@@ -591,7 +602,15 @@ fn cluster_frame(
         colors.selection_rgba(theme_highlight),
     );
     let selected = colors.selection_foreground_rgba().expect("the program set one");
-    recolor_selected_glyphs(&mut instances, &pane_rows, &selection, &geometry, &[], selected);
+    recolor_selected_glyphs(
+        &mut instances,
+        &mut pane_rows,
+        0..1,
+        &selection,
+        &geometry,
+        &[],
+        selected,
+    );
     (atlas, quads, instances)
 }
 
@@ -731,7 +750,7 @@ fn copy_mode_frame(
             flags: [0.0; 4],
         })
         .collect();
-    let rows = [RowGlyphSpan::new(&glyphs, 0..glyphs.len(), surface_w, surface_h)];
+    let mut rows = [RowGlyphSpan::new(&glyphs, 0..glyphs.len(), surface_w, surface_h)];
     let colors = PaneColors::new(theme, Some(overrides));
     let theme_highlight =
         crate::color::hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
@@ -767,7 +786,16 @@ fn copy_mode_frame(
         &[],
     );
     if let Some(selected) = colors.selection_foreground_rgba() {
-        recolor_copy_mode_glyphs(&mut glyphs, &rows, &copy_mode, &grid, &geometry, &[], selected);
+        recolor_copy_mode_glyphs(
+            &mut glyphs,
+            &mut rows,
+            0..1,
+            &copy_mode,
+            &grid,
+            &geometry,
+            &[],
+            selected,
+        );
     }
     let (cursor_x, cursor_y) = cursor.expect("copy mode draws its cursor");
     let _ = recolor_cursor_glyphs_in(

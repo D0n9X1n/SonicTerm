@@ -196,18 +196,23 @@ impl Parser {
                 true
             }
             RawOsc::Refused { pending_esc } => {
-                if matches!(byte, 0x07 | 0x18 | 0x1a) || (pending_esc && byte == b'\\') {
-                    // When: byte is BEL, CAN, SUB or completes ST, the refused message ends and
-                    // nothing of it applies.
+                if matches!(byte, 0x18 | 0x1a) || (pending_esc && byte == b'\\') {
+                    // When: byte is CAN, SUB or completes ST, the refused message ends and nothing
+                    // of it applies.
                     self.finish_escape();
                     return true;
                 }
                 if pending_esc {
                     // When: pending_esc did not start ST, the ESC ends the refused message as it
-                    // ends an accepted one, and it and this byte reach vte.
+                    // ends an accepted one, and it and this byte, a BEL included, reach vte.
                     self.finish_escape();
                     self.feed_vte_byte(0x1b);
                     return false;
+                }
+                if byte == 0x07 {
+                    // When: byte is a BEL inside the refused payload, it ends the message.
+                    self.finish_escape();
+                    return true;
                 }
                 self.raw_osc = Some(RawOsc::Refused { pending_esc: byte == 0x1b });
                 true

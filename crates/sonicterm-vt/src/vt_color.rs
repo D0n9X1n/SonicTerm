@@ -234,7 +234,8 @@ impl Performer {
                 // which is not kept, this pair is skipped.
                 continue;
             };
-            if spec == b"?" {
+            if spec.trim_ascii() == b"?" {
+                // A `?` padded with ASCII blanks still asks, as the earlier query handler read it.
                 self.reply_palette(entry, terminator);
             } else if let Some(rgb) = vt_color_spec::parse_color_spec(spec) {
                 // When: `parse_color_spec` reads the spec, `entry` takes the color; an

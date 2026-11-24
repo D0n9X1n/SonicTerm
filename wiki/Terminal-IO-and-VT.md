@@ -302,7 +302,9 @@ Programs can set and reset the colors of their own pane:
   `OSC 4 ; 1 ; ; 2 ; #fff` skips the pair (1, empty) and sets entry 2. An OSC 4 or 104 index is
   read as kitty reads it: blanks around it, a `+` sign, leading zeros and single underscores
   between digits are accepted, and the value must be 0..=255. The OSC number itself may be
-  zero-padded or carry a `+` (`OSC 010 ; ?`), and replies use the plain number.
+  zero-padded or carry a `+` (`OSC 010 ; ?`), and replies use the plain number. The number is
+  read in at most nine characters before its `;`, padding and sign included; a longer spelling
+  is ignored whole.
 - `OSC 104 ; N ; …` resets the listed palette entries; a bare `OSC 104`, or one that lists
   only blanks, resets every entry, and a list of only invalid indices changes nothing.
   `OSC 110`, `111`, `112`, `117` and `119` reset the foreground, background, cursor and
@@ -335,8 +337,9 @@ Programs can set and reset the colors of their own pane:
   mouse or from copy mode, takes the selection foreground only once a program set one; until then
   it keeps its own colors, so existing themes look unchanged, and color glyphs and images always
   keep theirs. Only the ink inside the selected cells changes: a ligature, wide glyph or
-  overhanging glyph that crosses the selection's edge is cut there, and its unselected part keeps
-  its color. The glyph under a block cursor takes the cursor-text color, which wins over the
+  overhanging glyph that crosses the selection's edge is cut there, on the pixel row or column
+  where the highlight begins, and its unselected part keeps its color and its place in the
+  drawing order, under any later glyph that overlaps it. The glyph under a block cursor takes the cursor-text color, which wins over the
   selection foreground. A selection is clipped to its pane and never recolors a neighbour's
   glyphs, even where they overhang into it, and the palette and search fields always keep the
   theme's selection colors. A
@@ -438,8 +441,8 @@ Each window decides its native cursor in one place, once per event-loop turn, an
 only when it changed. SonicTerm's own owners come first: an open command palette (the arrow), a
 splitter hovered or dragged (column or row resize), the scrollbar, a pressed or dragged tab (the
 arrow), a titlebar-band resize edge, a modifier link hover (the hand) and a local selection drag
-(the I-beam). Otherwise the pane under the pointer shows its shape, and anywhere outside a pane
-shows the arrow. The pane's shape is read without the parser lock, so a program's change shows
+(the I-beam). Otherwise the terminal pane under the pointer shows its shape, and anywhere outside
+a pane, and over the pane of a report window (About, Memory Usage), shows the arrow. The pane's shape is read without the parser lock, so a program's change shows
 with the pointer stationary, and releasing an owner returns the pane's shape without motion.
 
 Intentional differences:
@@ -839,7 +842,8 @@ Control 16) and motion (32) bits:
 | `?1016` SGR pixels | `CSI < Cb ; Px ; Py M`, `m` on release, where `Px ; Py` are zero-based physical pixels from the pane's cell area: signed and unclamped, so a drag out of the pane reports negative or past-edge pixels. |
 
 In 1016 every motion is reported, also within one cell; only a report identical to the last 1016
-motion sent to that pane under the same tracking mode is dropped, so the same pixel with a new
+motion that pane admitted under the same tracking mode is dropped (a refused motion is not
+recorded), so the same pixel with a new
 modifier or button is still sent. The cell encodings report motion as before. A queued motion is
 dropped when the pane's tracking, encoding or screen changes before it is sent, so it is never
 sent in another encoding.

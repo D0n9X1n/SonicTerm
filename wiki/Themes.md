@@ -132,7 +132,8 @@ derives UI colors such as hyperlink tint strength. Window transparency and
 native materials belong to `[appearance]` in `sonicterm.toml`, not to the theme.
 
 Use six-digit RGB strings in `#rrggbb` form. The TOML loader accepts any string,
-but a malformed color renders as black. Missing required fields make the theme
+but a malformed color renders as black, and a program's color query (OSC 4, 10-12, 17, 19,
+the OSC 21 `cursor_text` key) answers that black. Missing required fields make the theme
 fail to parse. `colors.tab.hover_fg` is the only color slot with a schema
 default; when omitted, it becomes `#d5c4a1`.
 

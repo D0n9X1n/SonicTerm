@@ -675,12 +675,13 @@ fn a_batch_of_color_sets_publishes_and_redraws_once() {
     assert_eq!(overrides.palette(63), Some((63, 0, 0)));
 }
 
-/// The largest OSC 21 answer is one reply-path submission the pane's spool admits: 526 unknown keys
-/// filling the 16 KiB input cap reach `send_reply` once, at most 32 KiB, after the parser guard ends.
+/// The OSC 21 answer to an all-unknown packet filling the input cap is one reply-path submission
+/// the pane's spool admits: 526 unknown keys reach `send_reply` once, at most 32 KiB, after the
+/// parser guard ends. The VT unit tests also cover the mixed packet, whose reply is longer.
 #[test]
-fn the_largest_kitty_color_reply_is_one_spool_submission() {
+fn an_all_unknown_kitty_color_reply_is_one_spool_submission() {
     let (_pane, handles, _watch) = echo_worker(80, 24, 100);
-    let payload = worst_case_kitty_color_payload();
+    let payload = all_unknown_kitty_color_payload();
     let mut submissions = Vec::new();
     publish_pane_vt_batch_with(
         &handles,
@@ -706,9 +707,9 @@ fn the_largest_kitty_color_reply_is_one_spool_submission() {
 /// The most counted fields one OSC 21 packet may hold.
 const KITTY_COLOR_ITEM_CAP: usize = 526;
 
-/// The worst-case OSC 21 payload: 526 unknown keys of 30 or 31 bytes and their 525 separators fill
-/// the 16 KiB input cap exactly, so its reply is the largest one packet can produce.
-fn worst_case_kitty_color_payload() -> String {
+/// An all-unknown OSC 21 payload: 526 unknown keys of 30 or 31 bytes and their 525 separators fill
+/// the 16 KiB input cap exactly, the most fields one packet may answer.
+fn all_unknown_kitty_color_payload() -> String {
     let payload_cap = 16 * 1024;
     let key_bytes = payload_cap - (KITTY_COLOR_ITEM_CAP - 1);
     let keys: Vec<String> = (0..KITTY_COLOR_ITEM_CAP)
@@ -786,13 +787,13 @@ fn terminal_line(
     }
 }
 
-/// The largest OSC 21 answer travels the pane's real reply path intact: the worst-case packet's one
-/// reply is admitted whole by a live PTY's reply spool (one submission of at most 32 KiB, none
+/// An all-unknown OSC 21 answer travels the pane's real reply path intact: the cap-filling packet's
+/// one reply is admitted whole by a live PTY's reply spool (one submission of at most 32 KiB, none
 /// dropped), and the child on the other end reads exactly those bytes. The child is this test
 /// binary re-run under a marker in raw mode; every wait is bounded by a 30 s deadline.
 #[cfg(unix)]
 #[test]
-fn the_largest_kitty_color_reply_reaches_the_pty_child_intact() {
+fn an_all_unknown_kitty_color_reply_reaches_the_pty_child_intact() {
     use crate::app::pty_test_support::isolated;
     use sonicterm_io::pty::{CommandSpawn, PtyHandle, ShellSpawnOpts};
     let name = std::thread::current().name().expect("named unit test").to_owned();
@@ -823,7 +824,7 @@ fn the_largest_kitty_color_reply_reaches_the_pty_child_intact() {
     let mut submitted = Vec::new();
     publish_pane_vt_batch_with(
         &handles,
-        format!("\x1b]21;{}\x1b\\", worst_case_kitty_color_payload()).as_bytes(),
+        format!("\x1b]21;{}\x1b\\", all_unknown_kitty_color_payload()).as_bytes(),
         None,
         &mut None,
         &mut SyncLatch::default(),

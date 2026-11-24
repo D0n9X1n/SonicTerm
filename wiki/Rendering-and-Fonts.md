@@ -358,8 +358,10 @@ geometry parameters separate from HSV color transforms, so a curly underline's
 shape cannot alter its resolved color.
 
 Strikethrough (SGR 9) draws one bar through the middle of each struck run, as thick as a
-single underline and in the color an underline would take: the SGR 58 color when set, else
-the cell foreground, through the pane's program colors. The parser also stores blink and
+single underline and in the color the struck glyphs draw with: the cell foreground after
+inverse, dim and the pane's program colors, so an inverse cell's bar stays visible. SGR 58 colors
+only underlines. A run reaching the row's right edge covers a wide glyph's both columns. The
+parser also stores blink and
 hidden flags; the current terminal renderer has no flag-specific draw branch for those two.
 
 ### Rasterization

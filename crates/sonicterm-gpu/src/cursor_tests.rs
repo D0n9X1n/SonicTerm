@@ -566,3 +566,79 @@ fn glyph_ink_bounds_union_every_glyph_and_refuse_non_finite_ones() {
     );
     assert_eq!(glyph_ink_bounds(&[short], 0.0, 512.0), RecolorBounds::Unbounded);
 }
+
+/// Green, for a glyph drawn over another so paint order shows in the pixels.
+const OVERLAP: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+
+/// Cutting a selected glyph keeps paint order: the part outside the selection stays under a later
+/// glyph that overlaps it, so the unselected pixels are the same as with no selection.
+#[test]
+fn a_cut_glyph_keeps_its_paint_order() {
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
+    let surface = (WIDTH as f32, HEIGHT as f32);
+    let mut atlas = sonicterm_text::glyph_atlas::GlyphAtlas::new(4, 16);
+    let tile = atlas
+        .get_or_insert(sonicterm_types::GlyphKey::new('T', false, false), &mut SolidTile)
+        .expect("solid tile inserts");
+    // A wide glyph across both cells, then a later glyph over its right half.
+    let mut wide = glyph_px(0.0, 0.0, 16.0, 16.0, surface);
+    wide.uv = tile.uv;
+    let mut later = glyph_px(10.0, 0.0, 6.0, 16.0, surface);
+    later.uv = tile.uv;
+    later.color = OVERLAP;
+    let glyphs = vec![wide, later];
+    // The row, then a later row's glyph the cut must not move ahead of.
+    let mut tail = glyphs.clone();
+    tail.push(later);
+    let mut rows = vec![
+        RowGlyphSpan::new(&tail, 0..2, surface.0, surface.1),
+        RowGlyphSpan::new(&tail, 2..3, surface.0, surface.1),
+    ];
+    let unselected = composite(&atlas, &glyphs, WIDTH, HEIGHT);
+    let mut selected = tail;
+    recolor_selected_cells(&mut selected, &mut rows, 0..1, [(0.0, 0.0, 8.0, 16.0)], surface, MARK);
+    assert_eq!(selected.len(), 4, "the wide glyph is cut in two");
+    assert_eq!(selected[2].color, OVERLAP, "the later glyph still draws after both parts");
+    assert_eq!(rows[0].glyphs, 0..3, "the row covers its glyphs and the part");
+    assert_eq!(rows[1].glyphs, 3..4, "the next row moves past the part");
+    selected.truncate(3);
+    let pixels = composite(&atlas, &selected, WIDTH, HEIGHT);
+    for row in 0..HEIGHT {
+        for column in 8..WIDTH {
+            let index = (row * WIDTH + column) as usize;
+            assert_eq!(pixels[index], unselected[index], "unselected pixel ({column}, {row})");
+        }
+    }
+}
+
+/// A selection edge between pixel centres cuts a glyph where the highlight's first row begins
+/// (`ceil(edge - 0.5)`), so the parts tile the glyph: no inked row is lost on the software path,
+/// and the rows the highlight covers take the selection color.
+#[test]
+fn a_fractional_selection_edge_cuts_on_the_highlight_row() {
+    const WIDTH: u32 = 4;
+    const HEIGHT: u32 = 40;
+    let surface = (WIDTH as f32, HEIGHT as f32);
+    let mut atlas = sonicterm_text::glyph_atlas::GlyphAtlas::new(4, 16);
+    let tile = atlas
+        .get_or_insert(sonicterm_types::GlyphKey::new('T', false, false), &mut SolidTile)
+        .expect("solid tile inserts");
+    let mut glyph = glyph_px(0.0, 16.0, 4.0, 16.0, surface);
+    glyph.uv = tile.uv;
+    let mut glyphs = vec![glyph];
+    let mut rows = vec![RowGlyphSpan::new(&glyphs, 0..1, surface.0, surface.1)];
+    // The highlight's top edge at 20.5 covers rows 20 and below.
+    recolor_selected_cells(&mut glyphs, &mut rows, 0..1, [(0.0, 20.5, 4.0, 19.5)], surface, MARK);
+    let pixels = composite(&atlas, &glyphs, WIDTH, HEIGHT);
+    let at_row = |row: u32| pixels[(row * WIDTH + 1) as usize];
+    let ink = at_row(17);
+    let mark = at_row(25);
+    assert_ne!(ink, mark, "precondition: the two colors differ");
+    for row in 16..20 {
+        assert_eq!(at_row(row), ink, "row {row} keeps the glyph color");
+    }
+    for row in 20..32 {
+        assert_eq!(at_row(row), mark, "row {row} takes the selection color");
+    }
+}

@@ -517,3 +517,32 @@ fn the_color_cap_counts_wire_bytes_and_survives_a_split_terminator() {
         }
     }
 }
+
+/// An OSC 4 query spec padded with ASCII blanks still asks for the entry, as the earlier query
+/// handler trimmed it; the reply carries the canonical index.
+#[test]
+fn a_blank_padded_osc4_query_is_answered() {
+    let mut parser = themed_parser();
+    for spec in [" ?", "? ", " ? "] {
+        let query = format!("\x1b]4;5;{spec}\x07");
+        assert_eq!(
+            reply_to(&mut parser, query.as_bytes()),
+            b"\x1b]4;5;rgb:0505/0505/0505\x07",
+            "{spec:?}"
+        );
+    }
+}
+
+/// The collector's prefix probe holds nine characters before the `;`, so a color number spelled
+/// in at most nine (zero padding and `+` included) is a color request, and a longer spelling is
+/// ignored whole: it neither applies nor prints.
+#[test]
+fn a_color_number_spelled_past_the_probe_is_ignored() {
+    let mut parser = themed_parser();
+    let _ = reply_to(&mut parser, b"\x1b]000000004;1;#ffffff\x07");
+    assert_eq!(palette_override(&parser, 1), Some((255, 255, 255)), "nine characters apply");
+    let _ = reply_to(&mut parser, b"\x1b]0000000004;2;#ffffff\x07");
+    assert_eq!(palette_override(&parser, 2), None, "ten characters are ignored");
+    parser.advance(b"Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z', "nothing of either request printed");
+}

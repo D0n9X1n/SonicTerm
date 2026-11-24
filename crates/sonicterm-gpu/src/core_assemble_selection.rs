@@ -70,8 +70,8 @@ impl GpuRenderer {
             clip: (active_pane_x, active_pane_y, active_pane_w, active_pane_h),
             surface: (sw, sh),
         };
-        // A selection recolors only the active pane's glyph rows, the pane it belongs to.
-        let pane_rows = row_spans.get(active_rows).unwrap_or_default();
+        // A selection recolors only the active pane's glyph rows (`active_rows` of `row_spans`),
+        // the pane it belongs to; a glyph it cuts moves every row span by its parts.
         if let Some(sel) = selection {
             if !sel.is_empty() {
                 push_selection_quads(
@@ -86,7 +86,8 @@ impl GpuRenderer {
                     // below run later, so cursor text wins on the cursor cell.
                     recolor_selected_glyphs(
                         &mut *glyph_instances,
-                        pane_rows,
+                        &mut *row_spans,
+                        active_rows.clone(),
                         sel,
                         &geometry,
                         active_snapped_cell_x,
@@ -133,7 +134,8 @@ impl GpuRenderer {
                 // mouse selection's rule, before its cursor recolors so cursor text wins there.
                 recolor_copy_mode_glyphs(
                     &mut *glyph_instances,
-                    pane_rows,
+                    &mut *row_spans,
+                    active_rows.clone(),
                     copy_mode,
                     grid,
                     &geometry,

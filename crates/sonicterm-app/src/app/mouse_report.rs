@@ -89,6 +89,8 @@ pub(in crate::app) fn pane_pixel_in(
             .find(|(id, _)| *id == pane_id)
             .map(|(_, rect)| (rect.x, rect.y)),
     };
+    // shortcut: a pane no frame laid out yet measures from the window origin; resolve it from the
+    // collector's layout if a program needs exact pixels before a pane's first frame.
     let (origin_x, origin_y) = origin.unwrap_or((0.0, 0.0));
     (
         (window.cursor_pos.0 - f64::from(origin_x)).round() as i32,
@@ -125,8 +127,9 @@ impl App {
     }
 
     /// Send one motion report to `pane_id`, encoded in `format`. In 1016 a report identical to the
-    /// last 1016 motion sent to that pane under the same tracking mode is dropped: its bytes carry
-    /// the pixel, the held buttons and the modifiers, so any change among them is still sent.
+    /// last 1016 motion the pane admitted under the same tracking mode is dropped: its bytes carry
+    /// the pixel, the held buttons and the modifiers, so any change among them is still sent. A
+    /// motion the pane refuses is not recorded, so it never suppresses the next identical one.
     pub(in crate::app) fn write_pointer_motion(
         &mut self,
         pane_id: u64,
@@ -143,9 +146,15 @@ impl App {
             // When: key repeats the last 1016 motion under the same tracking mode, it says nothing new.
             return;
         }
-        // A cell-format motion clears the key, so a 1016 report is compared only with 1016 reports.
-        pane.last_pixel_motion = key;
-        self.write_to_pane(pane_id, bytes, PtyInputSource::PointerMotion);
+        if !self.write_to_pane(pane_id, bytes, PtyInputSource::PointerMotion) {
+            // When: write_to_pane refused the motion, the last admitted one stays the comparison.
+            return;
+        }
+        if let Some(pane) = self.registry.pane_mut(pane_id) {
+            // An admitted cell-format motion clears the key, so a 1016 report is compared only with
+            // 1016 reports.
+            pane.last_pixel_motion = key;
+        }
     }
 }
 

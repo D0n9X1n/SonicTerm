@@ -208,12 +208,14 @@ fn selection_rects(
 }
 
 /// Draw the selected cells' glyph ink in `color`, the program's selection foreground, over the
-/// same clipped rectangles as the highlight. `pane_rows` are the owning pane's glyph rows, so a
-/// neighbour's overhang is never read; a glyph crossing a selected cell's edge is cut there. Runs
-/// on the frame's emitted instances after the row glyph cache, so cache keys are unchanged.
+/// same clipped rectangles as the highlight. `rows[pane]` are the owning pane's glyph rows, so a
+/// neighbour's overhang is never read; a glyph crossing a selected cell's edge is cut there, and
+/// every span of `rows` follows the parts. Runs on the frame's emitted instances after the row
+/// glyph cache, so cache keys are unchanged.
 pub(crate) fn recolor_selected_glyphs(
     glyphs: &mut Vec<GlyphInstance>,
-    pane_rows: &[RowGlyphSpan],
+    rows: &mut [RowGlyphSpan],
+    pane: std::ops::Range<usize>,
     sel: &sonicterm_render_model::boundary::ui::selection::Selection,
     geometry: &SelectionGeometry,
     snapped_cell_x: &[f32],
@@ -221,7 +223,8 @@ pub(crate) fn recolor_selected_glyphs(
 ) {
     recolor_selected_rects(
         glyphs,
-        pane_rows,
+        rows,
+        pane,
         selection_rects(sel, geometry, snapped_cell_x),
         geometry,
         color,
@@ -231,9 +234,11 @@ pub(crate) fn recolor_selected_glyphs(
 /// Draw the glyph ink of copy mode's selected range in `color`, the program's selection
 /// foreground, by the mouse selection's rule: the owning pane's rows only, clipped to the pane,
 /// and a glyph crossing a selected cell's edge cut there.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn recolor_copy_mode_glyphs(
     glyphs: &mut Vec<GlyphInstance>,
-    pane_rows: &[RowGlyphSpan],
+    rows: &mut [RowGlyphSpan],
+    pane: std::ops::Range<usize>,
     copy_mode: &CopyModeState,
     grid: &Grid,
     geometry: &SelectionGeometry,
@@ -248,7 +253,7 @@ pub(crate) fn recolor_copy_mode_glyphs(
         geometry.cell_size,
         snapped_cell_x,
     );
-    recolor_selected_rects(glyphs, pane_rows, rects, geometry, color);
+    recolor_selected_rects(glyphs, rows, pane, rects, geometry, color);
 }
 
 /// Draw the owning pane's glyph ink inside `rects`, clipped to the pane, in `color`: the mouse
@@ -257,14 +262,16 @@ pub(crate) fn recolor_copy_mode_glyphs(
 /// extended by them; the glyphs examined are counted.
 fn recolor_selected_rects(
     glyphs: &mut Vec<GlyphInstance>,
-    pane_rows: &[RowGlyphSpan],
+    rows: &mut [RowGlyphSpan],
+    pane: std::ops::Range<usize>,
     rects: impl IntoIterator<Item = (f32, f32, f32, f32)>,
     geometry: &SelectionGeometry,
     color: [f32; 4],
 ) {
     let visited = crate::cursor::recolor_selected_cells(
         glyphs,
-        pane_rows,
+        rows,
+        pane,
         clip_to_selection_pane(rects, geometry),
         geometry.surface,
         color,

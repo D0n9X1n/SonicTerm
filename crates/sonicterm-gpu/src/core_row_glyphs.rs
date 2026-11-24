@@ -176,14 +176,17 @@ pub(crate) fn emit_row_glyphs(
     // First pass: per-cell underline coalescing; underlines are a cell-level decoration,
     // independent of shaping.
     for (col, cell) in row.iter().enumerate() {
+        // A run still open at the row's end covers through its last column, the trailing half of
+        // a wide glyph included.
+        last_visible_col = col as u16;
         if cell.flags.contains(CellFlags::WIDE_CONT) {
             // When: `WIDE_CONT` — the trailing half of a wide
             // glyph, whose decoration belongs to its lead cell.
             continue;
         }
-        last_visible_col = col as u16;
-        // Strikethrough runs coalesce by decoration color, beside the underline runs.
-        let strike = strikethrough_key(cell);
+        // Strikethrough runs coalesce by the color their glyphs draw with, beside the underline
+        // runs.
+        let strike = strikethrough_key(cell, colors, fg_default);
         if strike_start.is_some_and(|(_, open)| Some(open) != strike) {
             // The open run's color differs from this cell's, so the open run ends here.
             let (start, color) = strike_start.take().expect("checked open");

@@ -1,6 +1,7 @@
 //! The native pointer cursor of each window, decided in one place: the UI owners first (an
 //! overlay, a splitter, the scrollbar, the tab bar, the titlebar band, a modifier link hover, a
-//! local selection), else the OSC 22 shape of the pane under the pointer.
+//! local selection), else the OSC 22 shape of the terminal pane under the pointer; a report
+//! window's pane shows the arrow.
 //!
 //! The decision runs once per event-loop turn for every window, after input, output and owner
 //! changes, and writes to the OS only when its result changed.
@@ -125,10 +126,15 @@ impl App {
     fn window_cursor(&self, window_id: WindowId) -> Option<CursorIcon> {
         let window = self.registry.windows.get(&window_id)?;
         let (pointer_x, pointer_y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
-        let hovered = if Some(window_id) == self.registry.main_window_id {
+        let hovered = if window.role.is_report() {
+            // A report window's (About, Memory Usage) pane is no terminal, so no pane shape
+            // applies and the arrow shows.
+            None
+        } else if Some(window_id) == self.registry.main_window_id {
+            // When: window_id is the main window, its pane layout resolves the hovered cell.
             self.main_pane_cell_at(pointer_x, pointer_y)
         } else {
-            // When: window_id is a child or report window, its own renderer lays out the panes.
+            // When: window_id is a child terminal window, its own renderer lays out the panes.
             super::child_window_pointer::child_pane_cell_at(window, pointer_x, pointer_y)
         };
         let pane_shape = hovered

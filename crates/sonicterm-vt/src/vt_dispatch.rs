@@ -578,9 +578,10 @@ impl Perform for Performer {
                 }
             }
             Some(4 | 10..=19 | 104 | 110..=119) => {
-                // The raw collector owns every color request whose number fits its probe and
-                // applies it only once complete; a spelling it does not own (a digit run past the
-                // probe, a C1 introducer) is dropped, never applied from vte's capped parameters.
+                // The raw collector owns every color request whose number fits its probe (at most
+                // nine characters before the `;`, zero padding and `+` included) and applies it only
+                // once complete; a longer spelling or a C1 introducer is dropped on purpose, never
+                // applied from vte's capped parameters.
             }
             Some(9) | Some(777) => {
                 // Raw capture owns every OSC 9 and 777 it recognizes; one that reaches vte has a

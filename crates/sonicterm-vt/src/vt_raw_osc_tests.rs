@@ -181,3 +181,75 @@ fn mixed_media_protocols_share_the_process_staging_pool() {
     assert_eq!(refused.live_capture_count(), 1);
     assert_eq!(refused.retained_amount().bytes, 0);
 }
+
+/// A host cancel that reclaims an open kitty upload while an over-cap title is being refused
+/// keeps the refusal: the rest of the title, its newline and a UTF-8 `“` (which holds 0x9c) are
+/// swallowed up to its BEL, and the upload's staging is released.
+#[test]
+fn reclaiming_an_upload_keeps_a_refused_title_swallowing() {
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
+    parser.advance(b"\x1b_Ga=T,f=100,i=7,q=2,m=1;AAAA\x1b\\");
+    let mut title = b"\x1b]2;".to_vec();
+    title.resize(title.len() + MAX_SEMANTIC_OSC_BYTES + 1, b't');
+    parser.advance(&title);
+    assert!(matches!(parser.raw_osc, Some(RawOsc::Refused { .. })), "precondition: refused");
+    assert!(parser.cancel_capture() > 0, "the upload's bytes are released");
+    assert_eq!(pool.live_captures(), 0);
+    parser.advance("tail\n\u{201c}more\x07Z".as_bytes());
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z', "no byte of the refused title printed");
+    assert_eq!(parser.grid().row(1)[0].ch, ' ', "its newline was not the terminal's");
+    assert_eq!(parser.title(), None);
+}
+
+/// A host cancel of an incomplete title discards it with the semantic collector's own framing: a
+/// UTF-8 `“` (which holds 0x9c) and a newline are payload, and only its BEL ends it, with or
+/// without an open kitty upload being reclaimed at the same time.
+#[test]
+fn cancelling_a_semantic_osc_keeps_its_framing() {
+    for with_upload in [false, true] {
+        let pool = CaptureStagingPool::new();
+        let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
+        if with_upload {
+            parser.advance(b"\x1b_Ga=T,f=100,i=7,q=2,m=1;AAAA\x1b\\");
+        }
+        parser.advance(b"\x1b]2;pending");
+        assert!(parser.cancel_capture() > 0, "upload {with_upload}");
+        parser.advance("\u{201c}tail\nmore\x07Z".as_bytes());
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "upload {with_upload}: nothing printed");
+        assert_eq!(parser.title(), None, "upload {with_upload}: the cut title never applies");
+    }
+}
+
+/// A cancel that lands between the ESC and the `\` of a title's ST still ends at that `\`.
+#[test]
+fn cancelling_a_semantic_osc_at_a_pending_esc_ends_at_its_backslash() {
+    let mut parser = Parser::new(Grid::new(16, 2));
+    parser.advance(b"\x1b]2;pending\x1b");
+    assert!(parser.cancel_capture() > 0);
+    parser.advance(b"\\Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    assert_eq!(parser.title(), None);
+}
+
+/// An ESC that does not start ST ends an accepted and a refused title alike: the ESC starts the
+/// next sequence, so a BEL after it is that sequence's control and rings, and the `CSI 1 m` that
+/// follows applies.
+#[test]
+fn an_esc_then_bel_ends_accepted_and_refused_titles_alike() {
+    for payload_bytes in [8, MAX_SEMANTIC_OSC_BYTES + 1] {
+        let mut parser = Parser::new(Grid::new(16, 2));
+        let mut message = b"\x1b]2;".to_vec();
+        message.resize(message.len() + payload_bytes, b't');
+        message.extend_from_slice(b"\x1b\x07\x1b[1mX");
+        let events = parser.advance(&message);
+        assert!(
+            events.iter().any(|event| matches!(event, VtEvent::Bell)),
+            "{payload_bytes}: the BEL after the ESC rings"
+        );
+        let cell = &parser.grid().row(0)[0];
+        assert_eq!(cell.ch, 'X', "{payload_bytes} payload bytes");
+        assert!(cell.flags.contains(CellFlags::BOLD), "{payload_bytes}: the CSI applied");
+        assert_eq!(parser.title(), None, "{payload_bytes}: the cut title never applies");
+    }
+}

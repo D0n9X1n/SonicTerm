@@ -269,6 +269,9 @@ impl Parser {
     /// megabytes of base64 into the grid — the user would lose the image
     /// *and* the screen. The discard ends at the transfer's terminator, or at
     /// the first newline if the sender died and no terminator is ever coming.
+    /// A title, CWD, link, program or color OSC in flight is discarded through
+    /// its own collector's terminators instead, as an over-cap one is, and an
+    /// open kitty upload reclaimed beside it leaves that discard in place.
     ///
     /// Intended for a capture the host has determined is stalled — see
     /// [`Parser::capture_progress`]. Cancelling one that is merely slow costs
@@ -279,8 +282,11 @@ impl Parser {
     /// OSC palette accumulation is retaining bytes.
     pub fn cancel_capture(&mut self) -> usize {
         let released = self.retained_amount().bytes;
+        // A title, CWD, link, program or color OSC in flight, accepted (with its code) or already
+        // refused, and whether its last byte was an ESC that may start ST.
         let semantic = match self.raw_osc.as_ref() {
-            Some(RawOsc::Semantic { code, pending_esc, .. }) => Some((*code, *pending_esc)),
+            Some(RawOsc::Semantic { code, pending_esc, .. }) => Some((Some(*code), *pending_esc)),
+            Some(RawOsc::Refused { pending_esc }) => Some((None, *pending_esc)),
             _ => None,
         };
         if released == 0 && self.live_capture_count() == 0 && semantic.is_none() {
@@ -292,26 +298,32 @@ impl Parser {
             || self.performer.dcs_capture.is_some()
             || self.raw_osc.is_some();
         self.abort_kitty_transfer();
+        if let Some((code, pending_esc)) = semantic {
+            // When: semantic holds an OSC in flight, it becomes a refusal in the collector's own
+            // framing: only its BEL, ST, CAN or SUB ends it, never 0x9c or a newline.
+            if let Some(code) = code {
+                self.performer.invalidate_semantic_osc(code);
+            }
+            self.raw_osc = Some(RawOsc::Refused { pending_esc });
+            return released;
+        }
         if !in_sequence {
             // When: in_sequence is false, only a kitty transfer was open between chunks; ground stays, later chunks are swallowed.
             return released;
         }
-        let escape_family =
-            if matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. } | RawOsc::Semantic { .. })) {
-                EscapeFamily::Osc
-            } else {
-                EscapeFamily::String
-            };
-        if let Some((code, _)) = semantic {
-            self.performer.invalidate_semantic_osc(code);
-        }
+        let escape_family = if matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })) {
+            EscapeFamily::Osc
+        } else {
+            // With no iTerm2 capture, the cancelled sequence is an APC or DCS string.
+            EscapeFamily::String
+        };
         self.inner = vte::Parser::new();
         self.reset_cancelled_escape();
         // OSC payloads also accept BEL, unlike APC/DCS strings.
         self.escape_family = escape_family;
         self.discarding_oversized_escape = true;
-        self.discard_escape_pending_esc = semantic.is_some_and(|(_, pending)| pending);
-        self.discard_exits_on_newline = semantic.is_none();
+        self.discard_escape_pending_esc = false;
+        self.discard_exits_on_newline = true;
         self.performer.fast_path_ready = false;
         released
     }

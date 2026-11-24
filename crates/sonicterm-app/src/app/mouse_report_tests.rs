@@ -187,11 +187,24 @@ fn writes(app: &App) -> Vec<Vec<u8>> {
     app.__test_pty_write_log().into_iter().map(|(_, bytes)| bytes).collect()
 }
 
+/// Give main-window pane `pane_id` a real shell PTY, so its input is admitted rather than refused.
+fn attach_shell(app: &mut App, pane_id: u64) {
+    #[cfg(windows)]
+    let (program, args) = ("cmd.exe", vec!["/D".to_owned(), "/Q".to_owned()]);
+    #[cfg(unix)]
+    let (program, args) = ("/bin/sh", vec!["-s".to_owned()]);
+    let pty =
+        sonicterm_io::pty::PtyHandle::spawn_with_args(program, &args, 80, 24).expect("PTY fixture");
+    assert!(app.__test_set_pane_pty(pane_id, Some(pty)));
+}
+
 /// In 1016 two motions within one cell report their own pixels, an identical second report is
-/// dropped, the same pixel with Shift held is sent, and the wheel reports the pixel too.
+/// dropped, the same pixel with Shift held is sent, and the wheel reports the pixel too. The pane
+/// has a PTY, so each sent motion is admitted and becomes the one the next is compared with.
 #[test]
 fn pixel_motion_reports_each_pixel_and_drops_only_an_identical_report() {
     let (mut app, main, left, _right) = split_main();
+    attach_shell(&mut app, left);
     publish(&app, main, left, b"\x1b[?1003h\x1b[?1016h");
     app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
     app.handle_main_cursor_moved(PhysicalPosition::new(57.0, 85.0));
@@ -209,6 +222,17 @@ fn pixel_motion_reports_each_pixel_and_drops_only_an_identical_report() {
             b"\x1b[<64;57;85M".repeat(3),
         ]
     );
+}
+
+/// A 1016 motion the pane refuses (here it has no PTY) is not recorded as sent, so the next
+/// identical motion is still offered to the pane rather than dropped as a repeat.
+#[test]
+fn a_refused_pixel_motion_does_not_suppress_the_next_identical_one() {
+    let (mut app, main, left, _right) = split_main();
+    publish(&app, main, left, b"\x1b[?1003h\x1b[?1016h");
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    assert_eq!(writes(&app), [b"\x1b[<35;55;85M".to_vec(), b"\x1b[<35;55;85M".to_vec()]);
 }
 
 /// The cell formats keep today's motion bytes: under 1006 every motion is sent, an identical one

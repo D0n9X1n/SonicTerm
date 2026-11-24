@@ -430,7 +430,8 @@ fn retained_selection_frame(
         colors.selection_rgba(theme_highlight),
     );
     let selected = colors.selection_foreground_rgba().expect("the program set one");
-    recolor_selected_glyphs(&mut glyphs, &rows, selection, &geometry, &[], selected);
+    let pane = 0..rows.len();
+    recolor_selected_glyphs(&mut glyphs, &mut rows, pane, selection, &geometry, &[], selected);
     (quads, glyphs)
 }
 

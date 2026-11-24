@@ -138,3 +138,42 @@ fn an_unparsable_selection_color_reseeds_the_drawn_fallback() {
         b"\x1b]17;rgb:0000/0000/0000\x07\x1b]19;rgb:0000/0000/0000\x07\x1b]21;cursor_text=rgb:00/00/00\x07"
     );
 }
+
+/// A theme color that does not parse seeds the black the renderer draws for it, so the parser's
+/// default is the drawn color: with a white foreground and an unparsable cursor, OSC 12 answers
+/// black and an OSC 12 set to white moves the override generation, since it changes the drawn
+/// cursor. Unparsable foreground, background and palette slots answer black too.
+#[test]
+fn an_unparsable_theme_color_seeds_the_drawn_black() {
+    let mut theme = theme_with("#101010", Appearance::Dark);
+    theme.colors.foreground = Hex("#ffffff".into());
+    theme.colors.cursor = Hex("not a color".into());
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &theme);
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]12;?\x07");
+    assert_eq!(reply, b"\x1b]12;rgb:0000/0000/0000\x07", "the cursor answers the drawn black");
+    parser.advance(b"\x1b]12;#ffffff\x07");
+    // Generations come from one process-wide counter, so the test checks only that it moved.
+    let generation = parser.color_overrides().map(|overrides| overrides.generation());
+    assert!(
+        generation.is_some_and(|generation| generation != 0),
+        "a white cursor over the drawn black repaints: {generation:?}"
+    );
+
+    let mut invalid = theme_with("not a color", Appearance::Dark);
+    invalid.colors.foreground = Hex("not a color".into());
+    invalid.colors.ansi.red = Hex("not a color".into());
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &invalid);
+    let mut replies = Vec::new();
+    let mut remaining: &[u8] = b"\x1b]10;?\x07\x1b]11;?\x07\x1b]4;1;?\x07";
+    while !remaining.is_empty() {
+        let (consumed, _, reply) = parser.advance_with_replies(remaining);
+        replies.extend(reply);
+        remaining = &remaining[consumed..];
+    }
+    assert_eq!(
+        replies,
+        b"\x1b]10;rgb:0000/0000/0000\x07\x1b]11;rgb:0000/0000/0000\x07\x1b]4;1;rgb:0000/0000/0000\x07"
+    );
+}

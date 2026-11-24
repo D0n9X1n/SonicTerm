@@ -40,30 +40,54 @@ impl GpuRenderer {
         // the cache from `grid.cols` (== ACTIVE pane), which clamped
         // and truncated underlines on wider INACTIVE panes. Key the
         // cache by (pad_bits, pane_cols) and size it accordingly.
-        // Each memo entry also holds its pane's colors, resolved once when the entry is built, so
-        // no underline searches the panes; the origin's y keeps stacked panes' colors apart.
-        let mut underline_caches: Vec<(u32, u32, u16, Vec<f32>, PaneColors<'_>)> = Vec::new();
+        let mut underline_caches: Vec<(u32, u16, Vec<f32>)> = Vec::new();
+        // Pane colors differ only while some pane's program set colors; otherwise every
+        // decoration draws with the theme and no pane is looked up. With overrides, each pane's
+        // colors are resolved once, by the origin its decorations were recorded at; the origin's
+        // y keeps vertically stacked panes, which share column edges, apart.
+        let any_overrides =
+            !underlines.is_empty() && pane_views.iter().any(|pane| pane.overrides.is_some());
+        let mut pane_colors: Vec<(u32, u32, PaneColors<'_>)> = Vec::new();
         for (entry, (origin_x, origin_y, pane_cols, row, run)) in underlines.iter().enumerate() {
             let pad_bits = origin_x.to_bits();
-            let top_bits = origin_y.to_bits();
-            let slot = underline_caches.iter().position(|(pad, top, cols, _, _)| {
-                *pad == pad_bits && *top == top_bits && *cols == *pane_cols
-            });
-            let slot = slot.unwrap_or_else(|| {
-                // No memo entry exists for this origin and column count, so one is built with the
-                // colors of the pane recorded at that origin.
+            let cache = if let Some((_, _, edges)) = underline_caches
+                .iter()
+                .find(|(pad, cols, _)| *pad == pad_bits && *cols == *pane_cols)
+            {
+                edges
+            } else {
+                // When: the `find` returned None — no cache exists yet for this
+                // origin and column count, so one is built and memoized.
                 let edges = build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols);
-                let colors = pane_views
-                    .iter()
-                    .find(|pane| {
-                        pane.origin_x.to_bits() == pad_bits && pane.origin_y.to_bits() == top_bits
-                    })
-                    .map_or(PaneColors::from(theme), |pane| PaneColors::new(theme, pane.overrides));
-                underline_caches.push((pad_bits, top_bits, *pane_cols, edges, colors));
-                underline_caches.len() - 1
-            });
-            let (_, _, _, cache, colors) = &underline_caches[slot];
-            let colors = *colors;
+                underline_caches.push((pad_bits, *pane_cols, edges));
+                &underline_caches.last().expect("just pushed").2
+            };
+            let colors = if any_overrides {
+                let top_bits = origin_y.to_bits();
+                match pane_colors.iter().find(|(pad, top, _)| *pad == pad_bits && *top == top_bits)
+                {
+                    Some((_, _, colors)) => *colors,
+                    None => {
+                        // This origin's pane has not been looked up yet, so its colors are
+                        // resolved and memoized.
+                        let colors = pane_views
+                            .iter()
+                            .find(|pane| {
+                                pane.origin_x.to_bits() == pad_bits
+                                    && pane.origin_y.to_bits() == top_bits
+                            })
+                            .map_or(PaneColors::from(theme), |pane| {
+                                PaneColors::new(theme, pane.overrides)
+                            });
+                        pane_colors.push((pad_bits, top_bits, colors));
+                        colors
+                    }
+                }
+            } else {
+                // When: any_overrides is false, no pane holds program colors, so every decoration
+                // draws with the theme.
+                PaneColors::from(theme)
+            };
             let end_exclusive = (run.end_col as usize).saturating_add(1);
             let cache_end = end_exclusive.min(cache.len().saturating_sub(1));
             let col_a_usize = (run.start_col as usize).min(cache_end);

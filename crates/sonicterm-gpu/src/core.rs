@@ -886,7 +886,6 @@ mod assemble;
 
 #[path = "core_row_shaping.rs"]
 mod row_shaping;
-#[cfg(test)]
 use row_shaping::cell_fg;
 use row_shaping::color_to_chrome;
 #[path = "core_inline_images.rs"]

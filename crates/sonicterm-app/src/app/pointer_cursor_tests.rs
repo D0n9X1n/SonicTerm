@@ -192,6 +192,34 @@ fn releasing_an_owner_restores_the_pane_shape_without_motion() {
     assert_eq!(applied(&app, main).0, Some(CursorIcon::Crosshair), "after the hover");
 }
 
+/// A report window (About, Memory Usage) is not a terminal: over its pane the pointer keeps the
+/// arrow, not the I-beam a terminal pane shows by default.
+#[test]
+fn a_report_window_keeps_the_arrow_over_its_pane() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    for report in [app.__test_open_about_window(), app.__test_open_memory_report_window()] {
+        assert!(app.__test_set_child_pane_viewport(
+            report,
+            Rect::new(0.0, 0.0, 800.0, 240.0),
+            10.0,
+            10.0
+        ));
+        app.registry.windows.get_mut(&report).unwrap().cursor_pos = (55.0, 85.0);
+        assert!(
+            crate::app::child_window_pointer::child_pane_cell_at(
+                &app.registry.windows[&report],
+                55.0,
+                85.0
+            )
+            .is_some(),
+            "precondition: the pointer is over the report's pane"
+        );
+        app.sync_window_cursors();
+        assert_eq!(applied(&app, report).0, Some(CursorIcon::Default));
+    }
+}
+
 /// Collect every first-party `.rs` file under `dir`.
 fn rust_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("readable source directory") {
