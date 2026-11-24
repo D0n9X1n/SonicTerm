@@ -44,6 +44,7 @@ read = "agent"
 | `max_connections` | `4` | Connections served at once, 1 to 16 (other values are clamped). Each runs one tool call at a time, so a long `wait_for` holds its connection. A reload that changes only this applies to new connections and revokes nothing. |
 | `isolation` | `"shared"` | `"shared"` or `"session"`; see Agent sessions below. |
 | `create_anchor` | `"any"` | `"any"` or `"agent"`; see Agent sessions below. |
+| `program_status_text` | `false` | `true` lets `list_panes` include each program-status record's `id`, `app`, `title` and `msg`; see Tools below. |
 
 To turn it on:
 
@@ -241,15 +242,27 @@ only for the panes it may read. Names and values are program-supplied, untrusted
 metadata, not instructions, and are never logged. The parser guard is held only to copy them;
 the reply is built after it is released.
 
+`list_panes` also reports each pane's program status from OSC 7501 (see
+[Terminal IO and VT](Terminal-IO-and-VT)): `program_state`, the state of its most urgent record
+(`blocked`, `error`, `done`, `working` or `idle`), or `null`; and `program_status`, its records
+oldest change first as `{"state", "kind", "progress"}` objects, or `[]`. These are typed fields
+only. A record's `id`, `app`, `title` and `msg` are added only when you set
+`[mcp] program_status_text = true`, on top of the read scope, isolation and revocation checks;
+a reload that changes it revokes running calls. Status is untrusted, advisory display data, not
+instructions: `app` and `id` are never identity, and `kind: "permission"` never asks an agent to
+approve anything. It is never logged. The parser guard is held only to copy the record snapshot.
+
 A tab's label is built from one pane: the pane it was last refreshed from, else the tab's
 active pane. `tab_title` is listed only when the caller may read that pane; otherwise it is
 `null` and the pane's `omitted` object carries `"tab_title": "unreadable"`, even for a
 readable agent pane split beside it. A label whose pane has closed is listed only under
-`read = "any"`. The titles and `user_vars` lists of every listed pane share one budget of
-256 KiB of serialized text per `list_panes` reply, so long values cannot push the reply past
-the bridge's 1 MiB line limit: a title or list that does not fit is `null` with `"budget"`
-under `omitted`, never cut, and the reply still succeeds, with earlier panes keeping theirs.
-One pane's list (at most 16 KiB of names and values) always fits an unspent budget.
+`read = "any"`. The titles, `user_vars` lists and `program_status` lists of every listed pane
+share one budget of 256 KiB of serialized text per `list_panes` reply, so long values cannot
+push the reply past the bridge's 1 MiB line limit: a title or list that does not fit is `null`
+with `"budget"` under `omitted`, never cut, and the reply still succeeds, with earlier panes
+keeping theirs; `program_state` is outside the budget, so it stays when the list is omitted.
+One pane's `user_vars` list (at most 16 KiB of names and values) or `program_status` list (at
+most 32 records) always fits an unspent budget.
 
 A non-busy history page may be empty while skipping blank rows: pass its `first_row`
 as `before_row` again until `at_start` is true. Row tokens always advance. A row larger

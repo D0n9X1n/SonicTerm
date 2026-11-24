@@ -67,6 +67,9 @@ impl Performer {
             title: None,
             icon_title: None,
             user_vars: Arc::default(),
+            program_status: Arc::default(),
+            program_status_dirty: false,
+            program_status_refusals: 0,
             cwd: None,
             osc7_cwd: None,
             cwd_revision: 0,
@@ -329,6 +332,8 @@ impl Performer {
         self.reset_attrs();
         // A reset program has named no tab; the window title stays, as before.
         self.icon_title = None;
+        // A reset program reports no status.
+        self.end_program_status(|_| true);
         self.saved_cursor = None;
         self.bracketed_paste = false;
         self.mouse_format = MouseFormat::X10;

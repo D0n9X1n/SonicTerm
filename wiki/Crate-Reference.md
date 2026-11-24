@@ -262,8 +262,8 @@ bar was last laid out with (`tab_width_limits_of`): config sets the process-wide
 limits at startup and on reload, and each measurement pass records them on the
 bar. Crowding and the overflow threshold use only the font/scale-derived readable
 width. While a tab
-is pressed or dragged, or the pointer rests on the bar, a changed title, badge
-or privilege marker is measured but laid out only once no tab is pressed or
+is pressed or dragged, or the pointer rests on the bar, a changed title, badge,
+privilege marker or program-status marker is measured but laid out only once no tab is pressed or
 dragged and the pointer leaves the bar; a font, scale or width-limit change
 lays the bar out at once. Whether the pointer rests on the bar comes from the
 window's own pointer, which the dispatcher records on every move and leave

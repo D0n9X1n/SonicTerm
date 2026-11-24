@@ -95,6 +95,34 @@ impl TabMarks {
     }
 }
 
+/// The program-status marker a tab draws before its title: the most urgent OSC 7501 record of
+/// its panes. ASCII, so it needs no symbol font; idle draws nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StatusMarker {
+    /// A program waits for the user: `[!]`.
+    Blocked,
+    /// A program failed: `[x]`.
+    Error,
+    /// A program finished: `[done]`.
+    Done,
+    /// A program is working, with its percentage when it gave one: `[NN%]` or `[...]`.
+    Working(Option<u8>),
+}
+
+impl StatusMarker {
+    /// The text drawn before the title, its trailing space included.
+    #[must_use]
+    pub fn prefix(self) -> Cow<'static, str> {
+        match self {
+            Self::Blocked => Cow::Borrowed("[!] "),
+            Self::Error => Cow::Borrowed("[x] "),
+            Self::Done => Cow::Borrowed("[done] "),
+            Self::Working(Some(percent)) => Cow::Owned(format!("[{percent}%] ")),
+            Self::Working(None) => Cow::Borrowed("[...] "),
+        }
+    }
+}
+
 /// Activation-log entries a tab bar keeps before it reports overflow.
 pub const ACTIVATION_LOG_LIMIT: usize = 64;
 
@@ -124,6 +152,8 @@ pub struct Tab {
     pub foreground_privileged: bool,
     /// Whether any pane in this tab was created by an agent; such a tab draws the agent marker.
     pub agent: bool,
+    /// The most urgent program status of the tab's panes; separate from the title.
+    pub status: Option<StatusMarker>,
     pub command: CommandStatus,
     /// Why this tab needs the user; travels with the tab when it moves to another window.
     pub marks: TabMarks,
@@ -152,6 +182,7 @@ impl Tab {
             custom_color: None,
             foreground_privileged: false,
             agent: false,
+            status: None,
             command: CommandStatus::default(),
             marks: TabMarks::default(),
             icon_hint: None,
@@ -204,6 +235,8 @@ pub struct TabContent<'a> {
     /// Whether an agent created a pane in the tab; the renderer draws a vector marker before the
     /// text and reserves its width, as for the privilege badge.
     pub agent: bool,
+    /// The program-status marker, drawn as an ASCII prefix after the alert mark.
+    pub status: Option<StatusMarker>,
 }
 
 impl<'a> TabContent<'a> {
@@ -217,18 +250,22 @@ impl<'a> TabContent<'a> {
             privileged: process_privileged || tab.foreground_privileged,
             marked: !is_active && tab.marks.is_marked(),
             agent: tab.agent,
+            status: tab.status,
         }
     }
 
-    /// The text drawn after the privilege marker: `"{badge} {title}"` while a
-    /// badge is shown, otherwise the title alone.
+    /// The text drawn after the privilege marker: the alert mark, the status marker and the
+    /// badge, each when shown, then the title.
     #[must_use]
     pub fn display_text(&self) -> Cow<'a, str> {
         let mark = if self.marked { "\u{25CF} " } else { "" };
+        let status = self.status.map(StatusMarker::prefix).unwrap_or_default();
         match self.badge {
-            Some(badge) => Cow::Owned(format!("{mark}{badge} {}", self.title)),
-            None if self.marked => Cow::Owned(format!("{mark}{}", self.title)),
-            // No badge and no mark: the title is drawn as it is.
+            Some(badge) => Cow::Owned(format!("{mark}{status}{badge} {}", self.title)),
+            None if self.marked || self.status.is_some() => {
+                Cow::Owned(format!("{mark}{status}{}", self.title))
+            }
+            // No badge, mark or status: the title is drawn as it is.
             None => Cow::Borrowed(self.title),
         }
     }
@@ -419,6 +456,17 @@ impl TabBar {
         };
         let changed = tab.agent != agent;
         tab.agent = agent;
+        changed
+    }
+
+    /// Show or clear the program-status marker on tab `index`; returns whether it changed.
+    pub fn set_status_marker(&mut self, index: usize, status: Option<StatusMarker>) -> bool {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            // When: `index` addresses no tab, there is no marker to set.
+            return false;
+        };
+        let changed = tab.status != status;
+        tab.status = status;
         changed
     }
 

@@ -789,3 +789,46 @@ fn insert_inactive_keeps_the_active_tab_and_renumbers() {
     assert_eq!((bar.active_id(), bar.active), (Some(active), 2), "appending moves nothing");
     assert_eq!(bar.tabs[0].id, helper);
 }
+
+/// The program-status marker is separate chrome: an ASCII prefix in the drawn text, never part of
+/// the title, set on any tab by index, reporting whether it changed.
+#[test]
+fn the_status_marker_prefixes_the_drawn_text_not_the_title() {
+    let mut bar = marked_bar(2);
+    let now = Instant::now();
+    for (marker, prefix) in [
+        (StatusMarker::Blocked, "[!] "),
+        (StatusMarker::Error, "[x] "),
+        (StatusMarker::Done, "[done] "),
+        (StatusMarker::Working(Some(42)), "[42%] "),
+        (StatusMarker::Working(None), "[...] "),
+    ] {
+        assert!(bar.set_status_marker(1, Some(marker)), "{marker:?}");
+        assert!(!bar.set_status_marker(1, Some(marker)), "an unchanged marker reports no change");
+        let content = TabContent::of(&bar.tabs()[1], now, false, false);
+        assert_eq!(content.display_text(), format!("{prefix}#2 tab"));
+        assert_eq!(bar.tabs()[1].title, "#2 tab");
+    }
+    bar.mark(1, |marks| marks.bell = true);
+    let both = TabContent::of(&bar.tabs()[1], now, false, false);
+    assert_eq!(both.display_text(), "\u{25CF} [...] #2 tab");
+    assert!(bar.set_status_marker(1, None));
+    assert!(!bar.set_status_marker(9, Some(StatusMarker::Done)), "a missing tab has no marker");
+}
+
+/// A marker that appears while the bar is held changes the measured content but waits for the
+/// release before the laid-out width moves, like a title or badge change.
+#[test]
+fn the_status_marker_is_measured_and_held_like_other_content() {
+    let now = Instant::now();
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("zsh"));
+    bar.refresh_content_widths(now, false, 1, false, column_width);
+    let plain = bar.tabs()[0].content_width_px().unwrap();
+    bar.set_status_marker(0, Some(StatusMarker::Blocked));
+    let held = bar.refresh_content_widths(now, false, 1, true, column_width);
+    assert_eq!(held, ContentWidthRefresh { measured: 1, applied: 0, held: 1 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(plain), "a held bar keeps its width");
+    bar.refresh_content_widths(now, false, 1, false, column_width);
+    assert!(bar.tabs()[0].content_width_px().unwrap() > plain);
+}

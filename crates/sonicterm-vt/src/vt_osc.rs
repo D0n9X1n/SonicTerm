@@ -224,6 +224,11 @@ impl Performer {
             vt_user_vars::apply_payload(&mut self.user_vars, content);
             return;
         }
+        if code == 7501 {
+            // When: code is an OSC 7501 program-status report or query, kitty's grammar reads it.
+            self.apply_program_status_osc(content, bell_terminated);
+            return;
+        }
         if code == 99 {
             // When: code is 99, kitty's notification grammar reads it, chunk by chunk.
             self.receive_kitty_notify(content);

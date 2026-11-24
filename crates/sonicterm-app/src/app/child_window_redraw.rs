@@ -55,6 +55,8 @@ impl App {
             .is_some_and(|child| child.redraw.status_only_attempt());
         let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
             .then(|| std::sync::Arc::clone(&self.services.fg_probes));
+        // Focus acknowledges before the markers are read, so a seen record is not drawn.
+        self.acknowledge_focused_status_in(win_id);
         let Some(child) = self.registry.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so this child closed and
             // has no frame left to render.

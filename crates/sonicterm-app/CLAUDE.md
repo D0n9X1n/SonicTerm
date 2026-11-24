@@ -200,7 +200,7 @@ cargo build -p sonicterm-app
   investigating.
 - Tab widths are measured only in the two redraw paths, right before
   `render_with_outcome`; pointer, drag, tear-out and snapshot paths read the stored
-  widths. A title, badge or privilege change is held while any window has a pressed
+  widths. A title, badge, privilege or program-status marker change is held while any window has a pressed
   or dragged tab, or while that window's own pointer rests on the bar; the dispatcher
   records the pointer (`record_window_pointer`) on every move and leave before any
   overlay or handler. A redraw whose frame does not present restores the widths and

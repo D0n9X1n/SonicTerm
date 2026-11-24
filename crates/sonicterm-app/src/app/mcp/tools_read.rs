@@ -107,11 +107,12 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
     let budget_ends = Instant::now() + LIST_BUDGET;
     // One byte budget for every pane's titles, so many long ones cannot outgrow the bridge's line.
     let mut text_budget = ReplyBudget::new();
+    let status_text = shared.program_status_text();
     let live = |session| shared.sessions.contains(session);
     let panes: Vec<Value> = entries
         .iter()
         .map(|entry| {
-            let mut pane = pane_summary(entry, budget_ends, &mut text_budget);
+            let mut pane = pane_summary(entry, budget_ends, &mut text_budget, status_text);
             pane["owner"] = json!(OwnerView::of(entry.creator, scope.session, live).as_str());
             pane
         })
@@ -134,9 +135,14 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
 
 /// One pane's entry in `list_panes`. Its parser is taken once, waiting at most until
 /// `budget_ends` and never longer than [`PARSER_WAIT`]; a pane reached after the budget is listed
-/// with `"details": "skipped"` and no live fields. Its titles and user variables are charged to
-/// `text_budget`.
-fn pane_summary(entry: &PaneEntry, budget_ends: Instant, text_budget: &mut ReplyBudget) -> Value {
+/// with `"details": "skipped"` and no live fields. Its titles, user variables and program status
+/// records are charged to `text_budget`; `status_text` adds the records' free text.
+fn pane_summary(
+    entry: &PaneEntry,
+    budget_ends: Instant,
+    text_budget: &mut ReplyBudget,
+    status_text: bool,
+) -> Value {
     // The loop always fills the position for `list_panes`; an entry without one lists nulls
     // rather than failing the whole call.
     let metadata = entry.metadata;
@@ -176,6 +182,7 @@ fn pane_summary(entry: &PaneEntry, budget_ends: Instant, text_budget: &mut Reply
     let cwd = guard.osc7_cwd().map(|cwd| cwd.path.clone());
     let shell_state = guard.shell_integration_state();
     let user_vars = guard.user_vars();
+    let program_status = guard.program_status();
     drop(guard);
     #[cfg(test)]
     SUMMARY_HOOK.with_borrow(|hook| hook.as_ref().map(|hook| hook(entry)));
@@ -185,6 +192,15 @@ fn pane_summary(entry: &PaneEntry, budget_ends: Instant, text_budget: &mut Reply
     let user_vars: Vec<Value> =
         user_vars.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect();
     text_budget.place(&mut pane, "user_vars", Value::Array(user_vars));
+    // The most urgent state is fixed-size and outside the budget, so it stays when the list is
+    // omitted; the list is charged as a whole and never cut.
+    let top = program_status.summary().top;
+    pane["program_state"] = json!(top.map(|top| top.state.as_str()));
+    text_budget.place(
+        &mut pane,
+        "program_status",
+        super::read::program_status_json(&program_status, status_text),
+    );
     pane["cwd"] = json!(cwd);
     pane["cols"] = json!(cols);
     pane["rows"] = json!(rows);

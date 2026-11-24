@@ -596,6 +596,10 @@ impl Perform for Performer {
                 // Raw capture owns every OSC 9 and 777 it recognizes; one that reaches vte has a
                 // spelling it missed (a digit run past the probe, a C1 introducer) and is dropped.
             }
+            Some(7501) => {
+                // The raw collector owns `7501;`; a spelling it missed (`07501`, a C1 introducer)
+                // is dropped, never stored from vte's split parameters.
+            }
             Some(52) => {
                 let sel =
                     params.get(1).and_then(|param| param.first().copied()).unwrap_or(b'c') as char;
@@ -642,6 +646,9 @@ impl Perform for Performer {
                 match kind {
                     Some(b'A') => {
                         self.grid.record_prompt_start();
+                        // A new prompt ends the program-status records a running program left, at
+                        // this point in the stream, so a later report in the same batch survives.
+                        self.end_transient_program_status();
                         self.events.push(VtEvent::Command(CommandEvent::PromptStart));
                     }
                     Some(b'B') => {

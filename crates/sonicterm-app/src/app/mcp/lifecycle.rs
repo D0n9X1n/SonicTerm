@@ -86,6 +86,10 @@ impl App {
                 // scope, as a `control` change does.
                 server.shared.set_agent_scope(wanted.isolation, wanted.create_anchor);
             }
+            if previous.program_status_text != wanted.program_status_text {
+                // A changed free-text opt-in revokes calls admitted under the old one.
+                server.shared.set_program_status_text(wanted.program_status_text);
+            }
             server.config = wanted;
             tracing::info!(
                 target: "mcp",
@@ -100,6 +104,7 @@ impl App {
         let shared = McpShared::new(wanted.control, self.event_loop_proxy.clone());
         shared.set_read(wanted.read());
         shared.set_agent_scope(wanted.isolation, wanted.create_anchor);
+        shared.set_program_status_text(wanted.program_status_text);
         shared.set_connection_limit(wanted.max_connections());
         match super::start_listener(&shared) {
             Ok((endpoint, guard)) => {

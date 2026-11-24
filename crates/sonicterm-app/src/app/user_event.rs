@@ -142,6 +142,13 @@ pub enum UserEvent {
         /// The active report, or `None` when the pane's progress ended.
         report: Option<sonicterm_vt::vt::ProgressReport>,
     },
+    /// A batch changed the pane's OSC 7501 records; the summary is the batch's last state.
+    ProgramStatus {
+        /// The pane whose program reported it.
+        pane_id: u64,
+        /// The most urgent record and the store's generation.
+        summary: sonicterm_vt::vt::StatusSummary,
+    },
     /// A batch's OSC 9, 777 or 99 notifications of one occasion: the kept one and how many followed.
     ProgramNotify {
         /// The pane whose program sent them.

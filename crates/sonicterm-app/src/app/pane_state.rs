@@ -185,6 +185,11 @@ pub struct PaneState {
     /// lives on the pane, so it survives tab transfer and tear-out; agents may control their own
     /// panes by default.
     pub(crate) creator: crate::app::mcp::agents::PaneOwner,
+    /// The OSC 7501 summary the tab marker reads; replaced only by a newer generation.
+    pub(crate) program_status: sonicterm_vt::vt::StatusSummary,
+    /// Whether the pane was the focused pane of the frontmost window at the last frame, so focus
+    /// acknowledges its done and error records once, on the edge.
+    pub(crate) status_focused: bool,
     /// The child process's exit status, set once when the exit is first handled, so a waiter on
     /// another thread reads it without the event loop.
     pub(crate) exit_status: Arc<std::sync::OnceLock<sonicterm_types::PaneExitStatus>>,
@@ -380,6 +385,8 @@ impl PaneState {
             hold_on_exit: false,
             exit_reported: false,
             creator: crate::app::mcp::agents::PaneOwner::User,
+            program_status: sonicterm_vt::vt::StatusSummary::default(),
+            status_focused: false,
             exit_status: Arc::new(std::sync::OnceLock::new()),
             change_signal: Arc::default(),
             run_typed_at: Arc::new(AtomicU64::new(0)),

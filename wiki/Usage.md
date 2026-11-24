@@ -186,6 +186,19 @@ Tab** wins over both, and clearing the rename brings back the automatic or OSC 1
 The window title never shows an OSC 1 name. This follows WezTerm and is an intentional
 difference from kitty and Ghostty, which ignore OSC 1.
 
+### Program status marker
+
+A program can report what it is doing with OSC 7501, as Claude Code does (see
+[Terminal IO and VT](Terminal-IO-and-VT)). The most urgent report of a tab's panes shows as an
+ASCII marker before the tab's text: `[!]` blocked (waiting for you), `[x]` error, `[done]` done,
+`[NN%]` working with a percentage and `[...]` working without one; idle shows nothing. Ties go
+to the most recently changed report. The marker is separate from the title, so it never changes
+the tab name, the window title or a rename, and it updates for a background tab or an inactive
+split too. Working, blocked and idle reports end at the next shell prompt or when the program
+exits; done and error stay until you focus that pane or type into it. The marker is a hint only:
+it never switches tabs, focuses a window, types or notifies. It uses ASCII rather than kitty's
+symbol glyphs, so it needs no symbol font.
+
 ### Window names and numbers
 
 Terminal windows receive process-local numbers starting at 1. A window without

@@ -459,3 +459,92 @@ fn list_panes_bounds_user_vars_by_the_reply_budget() {
     assert_eq!(last["user_vars"], Value::Null);
     assert_eq!(last["omitted"]["user_vars"], "budget", "{}", last["omitted"]);
 }
+
+/// Through the real tool and loop paths under `read = "agent"`, `list_panes` lists a readable
+/// pane's OSC 7501 status as typed metadata only (`program_state` and `program_status` records
+/// with state, kind and progress); its id, app, title and message appear only after the user's
+/// `program_status_text` opt-in, and an unreadable pane's status never reaches the reply.
+#[test]
+fn list_panes_lists_typed_program_status_and_text_only_on_opt_in() {
+    use base64::Engine;
+    let encode = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
+    let mut app = app();
+    let user = app.__test_seed_tab("user");
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+        10.0,
+        10.0,
+    );
+    app.__test_split_active_right();
+    let window = app.main_mut().unwrap();
+    let agent = window.tab_states[0].active_pane;
+    window.panes.get_mut(&agent).unwrap().creator =
+        crate::app::mcp::agents::PaneOwner::agent_if(true);
+    let private = format!("\x1b]7501;app=userapp:state=error:msg={}\x07", encode("user-secret"));
+    window.panes[&user].parser.lock().advance(private.as_bytes());
+    let report = format!(
+        "\x1b]7501;id=job:app=claude-code:state=blocked:kind=permission:progress=30:title={}:msg={}\x07",
+        encode("Approve?"),
+        encode("agent-message")
+    );
+    window.panes[&agent].parser.lock().advance(report.as_bytes());
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Agent);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let pane = listed(&result, agent);
+    assert_eq!(pane["program_state"], "blocked");
+    assert_eq!(
+        pane["program_status"],
+        json!([{ "state": "blocked", "kind": "permission", "progress": 30 }])
+    );
+    let wire = result.to_string();
+    for hidden in ["job", "claude-code", "Approve?", "agent-message", "userapp", "user-secret"] {
+        assert!(!wire.contains(hidden), "{hidden} leaked without the opt-in: {wire}");
+    }
+    shared.set_program_status_text(true);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let pane = listed(&result, agent);
+    assert_eq!(
+        pane["program_status"],
+        json!([{
+            "state": "blocked", "kind": "permission", "progress": 30,
+            "id": "job", "app": "claude-code", "title": "Approve?", "msg": "agent-message"
+        }])
+    );
+    let wire = result.to_string();
+    assert!(!wire.contains("userapp") && !wire.contains("user-secret"), "leaked: {wire}");
+}
+
+/// Many panes with full opted-in status stores share the one reply budget: later panes list
+/// `program_status` as `null` with a `"budget"` marker, never a cut list, yet keep the
+/// lightweight `program_state`, and the reply stays well inside the bridge's line limit.
+#[test]
+fn list_panes_bounds_program_status_by_the_reply_budget() {
+    // The bridge's relay line limit (`sonicterm_mcp::relay::MAX_LINE_BYTES`).
+    const RELAY_LINE_BYTES: usize = 1 << 20;
+    use base64::Engine;
+    let msg = base64::engine::general_purpose::STANDARD.encode([b'"'; 2048]);
+    let sequence: String =
+        (0..32).map(|index| format!("\x1b]7501;id=r{index}:state=working:msg={msg}\x07")).collect();
+    let mut app = app();
+    let mut panes = Vec::new();
+    for _ in 0..12 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        window.panes[&pane_id].parser.lock().advance(sequence.as_bytes());
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    shared.set_program_status_text(true);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    assert_eq!(result["isError"], false);
+    let wire_bytes = result.to_string().len();
+    assert!(wire_bytes < RELAY_LINE_BYTES / 2, "the reply took {wire_bytes} bytes");
+    let first = listed(&result, panes[0]);
+    assert_eq!(first["program_status"].as_array().map(Vec::len), Some(32), "kept whole");
+    let last = listed(&result, panes[11]);
+    assert_eq!(last["program_status"], Value::Null);
+    assert_eq!(last["omitted"]["program_status"], "budget");
+    assert_eq!(last["program_state"], "working", "the lightweight state stays");
+}

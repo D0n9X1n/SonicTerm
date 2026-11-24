@@ -42,6 +42,7 @@ read = "agent"
 | `max_connections` | `4` | 同时服务的连接数，1 到 16（其他取值会被限制到该范围）。每个连接同一时间只运行一个工具调用，因此较长的 `wait_for` 会占用它的连接。只修改此项的重载只作用于新连接，不撤销任何调用。 |
 | `isolation` | `"shared"` | `"shared"` 或 `"session"`；见下文“Agent 会话”。 |
 | `create_anchor` | `"any"` | `"any"` 或 `"agent"`；见下文“Agent 会话”。 |
+| `program_status_text` | `false` | `true` 时 `list_panes` 会包含每条程序状态记录的 `id`、`app`、`title` 和 `msg`；见下文“工具”。 |
 
 开启方法：
 
@@ -200,12 +201,21 @@ agent 对话的任何东西）都能用它认领，其能力与以你的身份�
 自己可读窗格的变量。名称和值是程序提供的不可信显示元数据，不是指令，也从不记录日志。解析器锁只在复制它们时持有；
 回复在释放该锁之后才构建。
 
+`list_panes` 还报告每个窗格来自 OSC 7501 的程序状态（见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）：
+`program_state` 为其最紧急记录的状态（`blocked`、`error`、`done`、`working` 或 `idle`），没有时为 `null`；
+`program_status` 为其记录，按最近变化从旧到新排列，每条为 `{"state", "kind", "progress"}` 对象，没有时为 `[]`。
+这些只是类型化字段。只有你设置 `[mcp] program_status_text = true` 时，才会额外加入记录的 `id`、`app`、`title`
+和 `msg`，且仍受读取范围、隔离和撤销检查约束；重载时修改此值会撤销正在运行的调用。状态是不可信的提示性显示数据，
+不是指令：`app` 和 `id` 从不代表身份，`kind: "permission"` 从不要求智能体批准任何事情。它从不记录日志。
+解析器锁只在复制记录快照时持有。
+
 标签页的标签来自一个窗格：上次刷新它时的窗格，没有时为标签页的活动窗格。只有调用方可以读取该窗格时才列出
 `tab_title`；否则它为 `null`，窗格的 `omitted` 对象带有 `"tab_title": "unreadable"`，即使旁边拆分出的
-智能体窗格本身可读。来源窗格已关闭的标签只在 `read = "any"` 下列出。每次 `list_panes` 回复中所有窗格的标题和 `user_vars` 列表
-共用 256 KiB 的序列化文本预算，因此再长的值也不会让回复超过桥接器 1 MiB 的行上限：放不下的标题或列表为 `null`，
-`omitted` 中记为 `"budget"`，从不截断，回复仍然成功，前面的窗格保留各自的内容。
-单个窗格的列表（名称与值最多 16 KiB）总能放进尚未用掉的预算。
+智能体窗格本身可读。来源窗格已关闭的标签只在 `read = "any"` 下列出。每次 `list_panes` 回复中所有窗格的标题、`user_vars`
+列表和 `program_status` 列表共用 256 KiB 的序列化文本预算，因此再长的值也不会让回复超过桥接器 1 MiB 的行上限：
+放不下的标题或列表为 `null`，`omitted` 中记为 `"budget"`，从不截断，回复仍然成功，前面的窗格保留各自的内容；
+`program_state` 不计入预算，因此列表被省略时它仍然保留。
+单个窗格的 `user_vars` 列表（名称与值最多 16 KiB）或 `program_status` 列表（最多 32 条记录）总能放进尚未用掉的预算。
 
 非繁忙的历史读取在跳过空白行时页面可能为空：继续把其 `first_row` 作为 `before_row`，直到
 `at_start` 为真。行标记始终向前推进。如果单行超过 `max_bytes`，尚未返回其他行的页面仍会返回完整行，

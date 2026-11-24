@@ -330,3 +330,72 @@ fn only_the_collector_sets_user_vars() {
     parser.advance(b"\x1b]1337;SetUserVar=canonical=MQ==\x07");
     assert_eq!(user_vars(&parser), one_var("canonical", "1"));
 }
+
+/// The parser's OSC 7501 records as `(id, state)`, oldest change first.
+fn status_ids(parser: &Parser) -> Vec<(String, &'static str)> {
+    parser
+        .program_status()
+        .records()
+        .map(|record| (record.id().to_owned(), record.state().as_str()))
+        .collect()
+}
+
+/// An OSC 7501 body of exactly 4087 wire bytes applies, under BEL and under ST; one byte more is
+/// refused whole, leaves the earlier record and prints no suffix. Padding is a skipped pair, so
+/// the bytes count on the wire before any filtering.
+#[test]
+fn a_program_status_body_uses_its_exact_wire_cap() {
+    let cap = crate::vt::vt_program_status::MAX_STATUS_BODY_BYTES;
+    assert_eq!(cap, 4087);
+    for terminator in [b"\x07".as_slice(), b"\x1b\\"] {
+        for (body_bytes, applies) in [(cap, true), (cap + 1, false)] {
+            let mut parser = Parser::new(Grid::new(16, 2));
+            parser.advance(b"\x1b]7501;id=kept:state=working\x07");
+            let mut body = b"id=kept:state=done:pad=".to_vec();
+            body.resize(body_bytes, b'\x01');
+            let mut sequence = b"\x1b]7501;".to_vec();
+            sequence.extend_from_slice(&body);
+            sequence.extend_from_slice(terminator);
+            sequence.push(b'Z');
+            parser.advance(&sequence);
+            let expected = if applies { "done" } else { "working" };
+            let label = format!("{body_bytes} bytes, {terminator:?}");
+            assert_eq!(status_ids(&parser), vec![("kept".to_owned(), expected)], "{label}");
+            assert_eq!(parser.grid().row(0)[0].ch, 'Z', "{label}: no suffix printed");
+        }
+    }
+}
+
+/// A report split at every byte, ST included, applies once; CAN, SUB or an ESC that does not
+/// complete ST ends it with nothing applied, and the bytes after it are ordinary output.
+#[test]
+fn a_program_status_report_splits_and_cuts_cleanly() {
+    let sequence = b"\x1b]7501;id=x:state=blocked:kind=auth\x1b\\Z";
+    for split in 0..=sequence.len() {
+        let mut parser = Parser::new(Grid::new(16, 2));
+        parser.advance(&sequence[..split]);
+        parser.advance(&sequence[split..]);
+        assert_eq!(status_ids(&parser), vec![("x".to_owned(), "blocked")], "split {split}");
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "split {split}");
+    }
+    for cut in [b"\x18".as_slice(), b"\x1a", b"\x1b[1m"] {
+        let mut parser = Parser::new(Grid::new(16, 2));
+        let mut sequence = b"\x1b]7501;id=x:state=working".to_vec();
+        sequence.extend_from_slice(cut);
+        sequence.push(b'Z');
+        parser.advance(&sequence);
+        assert!(status_ids(&parser).is_empty(), "{cut:?}");
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "{cut:?}");
+    }
+}
+
+/// Only the collector applies OSC 7501: a spelling it does not own (`07501`) reaches vte, which
+/// never stores a record, while the canonical spelling after it applies.
+#[test]
+fn only_the_collector_stores_program_status() {
+    let mut parser = Parser::new(Grid::new(16, 2));
+    parser.advance(b"\x1b]07501;state=working\x07");
+    assert!(status_ids(&parser).is_empty(), "vte's fallback stored a record");
+    parser.advance(b"\x1b]7501;state=working\x07");
+    assert_eq!(status_ids(&parser), vec![(String::new(), "working")]);
+}

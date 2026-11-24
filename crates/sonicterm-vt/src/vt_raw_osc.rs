@@ -125,6 +125,18 @@ impl Parser {
                     });
                     return true;
                 }
+                if prefix == b"7501;" {
+                    // When: the prefix names OSC 7501, own the whole report so kitty's 4087-byte
+                    // wire bound drops an over-cap one whole and vte never stores a record.
+                    self.inner = vte::Parser::new();
+                    self.pending_esc = false;
+                    self.raw_osc = Some(RawOsc::Semantic {
+                        code: 7501,
+                        content: Vec::new(),
+                        pending_esc: false,
+                    });
+                    return true;
+                }
                 if prefix == USER_VAR_OSC_PREFIX {
                     // When: the prefix names OSC 1337 `SetUserVar=`, own the whole payload so it
                     // applies only once complete and vte's split parameters never set a variable.

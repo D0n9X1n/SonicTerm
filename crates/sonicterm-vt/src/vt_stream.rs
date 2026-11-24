@@ -224,6 +224,8 @@ impl Parser {
             self.feed_vte_byte(bytes[offset]);
             offset += 1;
         }
+        // One summary per advance, after every change in it.
+        self.performer.publish_program_status();
         (offset, std::mem::take(&mut self.performer.events))
     }
 

@@ -56,15 +56,23 @@ impl App {
     pub(super) fn handle_pane_process_exited(&mut self, pane_id: u64, status: PaneExitStatus) {
         // Any exit, clean or not, clears the pane's process name and warning; an unclean pane stays.
         self.clear_exited_foreground(pane_id, std::time::Instant::now());
+        let mut status_ended = false;
         if let Some(pane) = self.registry.pane_mut(pane_id) {
             // When: the exited pane is still live, its phase resets and its first status is kept.
             // The shell is gone, so no prompt is confirmed; the last command is kept.
             pane.command_state.phase = super::CommandPhase::Unknown;
+            // The program is gone, so its working, blocked and idle reports end; done and error
+            // stay until the user sees them.
+            status_ended = pane.end_transient_program_status();
             // Recorded before the repeat check below, so a waiter sees the first status and a
             // repeated report cannot replace it.
             let _ = pane.exit_status.set(status.clone());
             // Announced after the cell is set, so a woken exit wait finds the status.
             pane.change_signal.notify();
+        }
+        if status_ended {
+            // The tab marker follows at once, even for a pane in an inactive tab or split.
+            self.redraw_window_of_pane(pane_id);
         }
         let Some(hold) = self.mark_exit_reported(pane_id) else {
             // When: `mark_exit_reported` finds no live pane, or one already reported, nothing remains to do.

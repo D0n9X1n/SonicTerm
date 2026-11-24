@@ -363,6 +363,8 @@ impl App {
         let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
             .then(|| std::sync::Arc::clone(&self.services.fg_probes));
         if let Some(id) = main_id_opt {
+            // Focus acknowledges before the markers are read, so a seen record is not drawn.
+            self.acknowledge_focused_status_in(id);
             if let Some(window) = self.registry.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(
                     &mut window.tabs,

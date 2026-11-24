@@ -217,8 +217,13 @@ impl Parser {
         };
         // OSC 99 chunks wait here until their notification completes, at most MAX_NOTIFY_BYTES.
         let notify_bytes = self.performer.kitty_notifications.retained_bytes();
+        // OSC 7501 records: at most 32 of their capped fields.
+        let status_bytes = self.performer.program_status.retained_bytes();
         ResourceAmount {
-            bytes: capture_bytes.saturating_add(osc_bytes).saturating_add(notify_bytes),
+            bytes: capture_bytes
+                .saturating_add(osc_bytes)
+                .saturating_add(notify_bytes)
+                .saturating_add(status_bytes),
             items: self.live_capture_count(),
         }
     }

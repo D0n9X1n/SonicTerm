@@ -1,5 +1,6 @@
 //! Program-reported state outside the grid: `OSC 9;4` progress mirrored to the platform progress
-//! surfaces, and OSC 9 / OSC 777 notifications shown as one coalescing toast.
+//! surfaces, OSC 9 / OSC 777 notifications shown as one coalescing toast, and the OSC 7501 tab
+//! marker with its focus, key and exit lifetimes.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -598,6 +599,120 @@ fn native_handle(window: &winit::window::Window) -> Option<isize> {
     }
 }
 
+/// The program-status marker of a tab whose panes are `leaves`: the most urgent record of any of
+/// them, ties going to the most recent change, as kitty ranks them; idle shows nothing.
+pub(super) fn tab_status_marker(
+    leaves: &[u64],
+    panes: &HashMap<u64, super::PaneState>,
+) -> Option<sonicterm_ui::tabs::StatusMarker> {
+    use sonicterm_ui::tabs::StatusMarker;
+    use sonicterm_vt::vt::StatusState;
+    let top = leaves
+        .iter()
+        .filter_map(|pane_id| panes.get(pane_id)?.program_status.top)
+        .max_by_key(|top| (top.state.urgency(), top.changed_at))?;
+    match top.state {
+        StatusState::Blocked => Some(StatusMarker::Blocked),
+        StatusState::Error => Some(StatusMarker::Error),
+        StatusState::Done => Some(StatusMarker::Done),
+        StatusState::Working => Some(StatusMarker::Working(top.progress)),
+        StatusState::Idle => None,
+    }
+}
+
+impl super::PaneState {
+    /// Store `summary` when it is newer than the stored one; returns whether it was stored. A
+    /// worker summary older than an acknowledgment the App already applied is dropped.
+    pub(super) fn store_program_status(
+        &mut self,
+        summary: sonicterm_vt::vt::StatusSummary,
+    ) -> bool {
+        if summary.generation <= self.program_status.generation {
+            // When: `summary` is not newer, it would bring back a record the App already ended.
+            return false;
+        }
+        self.program_status = summary;
+        true
+    }
+
+    /// The user saw the pane: end its done and error records under the parser lock and store the
+    /// new summary. Locks only while such a record is held. Returns whether any ended.
+    pub(super) fn acknowledge_program_status(&mut self) -> bool {
+        if !self.program_status.unseen {
+            // When: `program_status.unseen` is false, no done or error record is held to end.
+            return false;
+        }
+        let mut parser = crate::app::frame_counters::lock_parser(&self.parser);
+        let ended = parser.acknowledge_program_status();
+        let summary = parser.program_status_summary();
+        drop(parser);
+        self.store_program_status(summary);
+        ended
+    }
+
+    /// The child exited: end working, blocked and idle records and store the new summary.
+    /// Returns whether any ended.
+    pub(super) fn end_transient_program_status(&mut self) -> bool {
+        let mut parser = crate::app::frame_counters::lock_parser(&self.parser);
+        let ended = parser.end_transient_program_status();
+        let summary = parser.program_status_summary();
+        drop(parser);
+        self.store_program_status(summary);
+        ended
+    }
+}
+
+/// Acknowledge, on its focus edge, the active pane of `window` when it is the frontmost window:
+/// a pane that just gained focus sees its done and error records end. Returns whether any ended.
+pub(super) fn acknowledge_focused_status(window: &mut super::WindowState, frontmost: bool) -> bool {
+    let focused = frontmost
+        .then(|| window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane))
+        .flatten();
+    let mut ended = false;
+    for (pane_id, pane) in window.panes.iter_mut() {
+        let now_focused = Some(*pane_id) == focused;
+        if now_focused && !pane.status_focused {
+            ended |= pane.acknowledge_program_status();
+        }
+        pane.status_focused = now_focused;
+    }
+    ended
+}
+
+impl App {
+    /// Store a pane's OSC 7501 summary from its VT worker and redraw the window holding it, so the
+    /// owning tab's marker follows even when the pane's split or tab is not shown. Advisory only:
+    /// nothing is focused, typed or notified.
+    pub(super) fn note_program_status(
+        &mut self,
+        pane_id: u64,
+        summary: sonicterm_vt::vt::StatusSummary,
+    ) {
+        let stored =
+            self.registry.pane_mut(pane_id).is_some_and(|pane| pane.store_program_status(summary));
+        if stored {
+            self.redraw_window_of_pane(pane_id);
+        }
+    }
+
+    /// Ask the window holding `pane_id` for a frame, so its tab markers are read again.
+    pub(super) fn redraw_window_of_pane(&self, pane_id: u64) {
+        if let Some(window) =
+            self.registry.window_of_pane(pane_id).and_then(|id| self.registry.windows.get(&id))
+        {
+            window.request_window_redraw();
+        }
+    }
+
+    /// Acknowledge focus in window `win_id` before its markers are read for a frame.
+    pub(super) fn acknowledge_focused_status_in(&mut self, win_id: WindowId) {
+        let frontmost = self.registry.frontmost_window == Some(win_id);
+        if let Some(window) = self.registry.windows.get_mut(&win_id) {
+            acknowledge_focused_status(window, frontmost);
+        }
+    }
+}
+
 /// Whether nothing of a window is drawn: the platform reported it covered, the presenter found
 /// its surface occluded, or it is minimized (`None` where the platform cannot tell).
 pub(super) fn window_hidden(
@@ -615,3 +730,7 @@ mod program_state_tests;
 #[cfg(test)]
 #[path = "program_state_occasion_tests.rs"]
 mod program_state_occasion_tests;
+
+#[cfg(test)]
+#[path = "program_state_status_tests.rs"]
+mod program_state_status_tests;

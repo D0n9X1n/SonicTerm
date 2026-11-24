@@ -174,6 +174,9 @@ impl App {
             event @ (UserEvent::ProgramProgress { .. } | UserEvent::ProgramNotify { .. }) => {
                 self.handle_program_event(event);
             }
+            UserEvent::ProgramStatus { pane_id, summary } => {
+                self.note_program_status(pane_id, summary);
+            }
             UserEvent::PathProbeFinished(result) => {
                 self.handle_path_probe_finished(*result);
             }

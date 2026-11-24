@@ -400,7 +400,7 @@ fn a_busy_list_stops_probing_after_its_budget() {
     let budget_ends = started + LIST_BUDGET;
     let panes: Vec<Value> = entries
         .iter()
-        .map(|entry| pane_summary(entry, budget_ends, &mut ReplyBudget::new()))
+        .map(|entry| pane_summary(entry, budget_ends, &mut ReplyBudget::new(), false))
         .collect();
     let elapsed = started.elapsed();
     drop(guards);
@@ -428,7 +428,8 @@ fn reads_report_the_shell_integration_state() {
         active: true,
         readonly: false,
     });
-    let summary = pane_summary(&listed, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new());
+    let summary =
+        pane_summary(&listed, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new(), false);
     assert_eq!(summary["shell_integration_state"], "unverified");
     assert_eq!(summary["shell_integration"], true, "the boolean keeps its meaning");
 }
@@ -461,7 +462,7 @@ fn list_panes_reports_the_tab_label_and_each_panes_icon_title() {
     let listed: Vec<Value> = app
         .mcp_pane_entries()
         .iter()
-        .map(|entry| pane_summary(entry, budget_ends, &mut ReplyBudget::new()))
+        .map(|entry| pane_summary(entry, budget_ends, &mut ReplyBudget::new(), false))
         .collect();
     let summary = |pane_id: u64| {
         let wanted = pane_id.to_string();
@@ -500,7 +501,8 @@ fn a_pane_summary_serializes_after_the_parser_guard_is_released() {
             *record.lock().unwrap() = Some(entry.parser.is_locked());
         }));
     });
-    let summary = pane_summary(&entry, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new());
+    let summary =
+        pane_summary(&entry, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new(), false);
     SUMMARY_HOOK.with_borrow_mut(|hook| *hook = None);
     assert_eq!(*observed.lock().unwrap(), Some(false), "the parser was held while serializing");
     assert_eq!(summary["title"], "title");
@@ -555,7 +557,8 @@ fn user_var_names_and_values_are_never_logged() {
         entry.parser.lock().advance(
             b"\x1b]1337;SetUserVar=secret-name=c2VjcmV0LXZhbHVl;SetUserVar=secret-bad=!!\x07",
         );
-        summary = pane_summary(&entry, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new());
+        summary =
+            pane_summary(&entry, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new(), false);
     });
     assert_eq!(summary["user_vars"], json!([{ "name": "secret-name", "value": "secret-value" }]));
     assert!(fields.iter().any(|field| field == "reason=\"value_base64\""), "{fields:?}");

@@ -187,6 +187,9 @@ fn raw_osc_cap(code: u16) -> usize {
     } else if code == 1337 {
         // When: code is an OSC 1337 `SetUserVar` payload, its own bound applies.
         vt_user_vars::MAX_USER_VAR_OSC_BYTES
+    } else if code == 7501 {
+        // When: code is an OSC 7501 program-status report, kitty's wire bound applies.
+        vt_program_status::MAX_STATUS_BODY_BYTES
     } else {
         // When: code is a title, CWD or hyperlink, the semantic bound applies.
         MAX_SEMANTIC_OSC_BYTES
@@ -253,6 +256,8 @@ pub enum VtEvent {
     },
     /// RIS reset the terminal, so program-reported state (progress) is cleared.
     ProgramStateReset,
+    /// A batch changed the pane's OSC 7501 records; the summary is the batch's last state.
+    ProgramStatus(StatusSummary),
 }
 
 /// One in-flight media capture and its claim on a staging pool.
@@ -389,8 +394,8 @@ pub struct Parser {
 enum RawOsc {
     /// Checking a bounded OSC prefix before choosing vte or media ownership.
     Probe { content: [u8; USER_VAR_OSC_PREFIX.len()], content_len: u8 },
-    /// Complete title, CWD, hyperlink, program-state (`9`, `777`), color request or OSC 1337
-    /// `SetUserVar` payload, independent of vte's parameter count.
+    /// Complete title, CWD, hyperlink, program-state (`9`, `777`, `7501`), color request or
+    /// OSC 1337 `SetUserVar` payload, independent of vte's parameter count.
     Semantic { code: u16, content: Vec<u8>, pending_esc: bool },
     /// Streaming an iTerm2 file payload through the parser's staging reservation.
     Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
@@ -689,6 +694,12 @@ struct Performer {
     icon_title: Option<String>,
     /// OSC 1337 `SetUserVar` variables, shared with readers as a snapshot; RIS keeps them.
     user_vars: Arc<UserVars>,
+    /// OSC 7501 records, shared with readers as a snapshot; RIS removes them.
+    program_status: Arc<ProgramStatus>,
+    /// Set when the current advance changed `program_status`, so it publishes one summary.
+    program_status_dirty: bool,
+    /// Discarded OSC 7501 reports, counted so their log line is rate-limited.
+    program_status_refusals: u64,
     /// Latest permissively-decoded OSC 7 path used only for tab titles.
     cwd: Option<String>,
     /// Latest strictly parsed host-aware snapshot used for path resolution.
@@ -843,9 +854,15 @@ mod vt_pointer_shape;
 
 #[path = "vt_user_vars.rs"]
 mod vt_user_vars;
+
+#[path = "vt_program_status.rs"]
+mod vt_program_status;
 use vt_host_reports::ThemeFingerprint;
 pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
 pub use vt_pointer_shape::{pointer_shape_of_snapshot, PointerShape};
+pub use vt_program_status::{
+    ProgramStatus, StatusKind, StatusRecord, StatusState, StatusSummary, StatusTop,
+};
 pub use vt_tap::{TapAppend, TapHold, TapText, OUTPUT_TAP_CHARS};
 pub use vt_user_vars::UserVars;
 

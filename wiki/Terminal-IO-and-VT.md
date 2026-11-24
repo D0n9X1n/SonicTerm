@@ -244,7 +244,7 @@ Current protocol support includes:
 - OSC 0/2 titles, the OSC 1 tab name, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12/17/19 color queries and sets, the OSC 21 kitty color
   protocol, OSC 22 pointer shapes, OSC 104/110/111/112/117/119 color resets, OSC 133 prompt markers, OSC 9;4
-  progress, OSC 1337 `SetUserVar` user variables, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
+  progress, OSC 1337 `SetUserVar` user variables, OSC 7501 program status, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
   title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere,
   the final padding optional), at most eight open at once and 16 KiB in all, and all of them dropped
   when a chunk is refused or cancelled, so none completes cut; a later notification with the same id from the same
@@ -614,6 +614,39 @@ URI to 8 KiB and client id to 1 KiB.
   WezTerm requires, where kitty replaces invalid bytes; the 64-entry cap is exact and paired
   with the 16 KiB budget, where kitty can hold 65 entries and has no byte budget; neither
   reference bounds a name or a value; WezTerm accepts one record per payload and no delete form.
+- **OSC 7501 program status:** kitty's Program Status Protocol, which Claude Code emits and
+  Herdr reads (`ESC ] 7501 ; app=claude-code:state=blocked:kind=permission BEL`). The raw
+  collector owns the canonical `7501;` spelling and applies a report only once its BEL or ST
+  arrived; the body after `7501;` is at most 4087 wire bytes under either terminator, counted
+  before any filtering, and a longer one, or one cut by CAN, SUB or an ESC that does not
+  complete ST, changes nothing and prints nothing. Any other spelling stores nothing.
+  `7501;?` is answered, with the request's terminator, by the fixed
+  `ESC ] 7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth`, which
+  discloses no stored record. A report is `:`-separated `key=value` pairs, each trimmed: a pair
+  without `=`, a key outside `[a-z]+` or a value outside `[A-Za-z0-9_.,+/=-]` is skipped, and
+  the last pair for a key wins. The report is discarded when a key is over 16 characters, an
+  `id` is empty or malformed (`/`-separated `[A-Za-z0-9_.+-]+` segments, at most 32 bytes each
+  and 8 deep; an omitted `id` is the root record), `app` is over 32 bytes, `title` is over 256
+  encoded or 192 decoded bytes, `msg` is over 2732 encoded or 2048 decoded bytes, either text is
+  not base64 (padding optional) of strict UTF-8 without control characters, or the state is not
+  `idle`, `working`, `done`, `blocked`, `error` or `clear`. `kind` (`permission`, `question`,
+  `auth`) is kept only for `blocked`, `progress` (0-100) only for `working` and `blocked`, and
+  an `app` outside `[A-Za-z0-9_.+-]` reads as empty. `state=clear` removes the `id` and its
+  descendants, or every record without one. A pane holds at most 32 records; past that the
+  least recently reported goes first, and an identical report refreshes only that recency.
+  `working`, `blocked` and `idle` records end at an admitted OSC 133 `A` prompt start, in stream
+  order, so a report after it in the same output survives, and when the pane's process exits;
+  `done` and `error` end when the pane gains focus (its window becomes frontmost, or its tab or
+  split becomes active there) or the user types a key into it; RIS ends every record. The most
+  urgent record of a tab's panes is the tab marker described in [Usage](Usage). A discarded
+  report logs a fixed reason code, rate-limited, never its text; ids, apps, titles and messages
+  are untrusted display data, never evaluated. Status is advisory: it never focuses, types or
+  notifies. Agents read it through `list_panes` on [MCP Server](MCP-Server). Intentional
+  differences from kitty: 32 records per pane instead of 256; an ASCII tab marker instead of
+  symbol glyphs, without a pane count or a title template; a record without `app` does not
+  inherit its ancestor's; kitty's private `process-exited` body is an invalid report; focus and
+  a typed key stand for kitty's "seen by the user". Ghostty's library parses the protocol and its
+  app ignores it; WezTerm has none.
 
 The raw color collector owns OSC 4, 10-19, 21, 22, 104 and 110-119 whole, beyond vte's
 parameter count and up to 4 KiB (16 KiB for OSC 21). It applies a message only once its ST or BEL arrived, and
@@ -621,8 +654,8 @@ drops a longer one, or one cut by CAN, SUB or an ESC that does not start ST, wit
 any part; vte never dispatches the same message. Parser-owned sequence
 state recognizes kitty APC after completed escapes, including C1 APC and chunk-split
 `ESC` / `_`. A bounded prefix probe takes only confirmed `OSC 1337;File=` media and
-`OSC 1337;SetUserVar=` payloads out of vte's private OSC buffer; other OSC 1337 commands
-reach vte and change nothing.
+`OSC 1337;SetUserVar=` payloads and `OSC 7501;` reports out of vte's private OSC buffer; other
+OSC 1337 commands reach vte and change nothing.
 
 An escape sequence may retain at most 1 MiB. After that, the parser discards
 through the sequence terminator instead of treating the payload as printable

@@ -408,6 +408,8 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/pane_refresh.rs", 4),
     ("app/pane_state.rs", 1),
     ("app/pane_target.rs", 1),
+    // OSC 7501: a focus or key acknowledgment, and a child exit, end records and read the summary.
+    ("app/program_state.rs", 2),
     ("app/mcp/control_loop.rs", 2),
     // run_command's start: the prompt check and pin, and the unpin after a refused write, both bounded.
     ("app/mcp/run.rs", 2),

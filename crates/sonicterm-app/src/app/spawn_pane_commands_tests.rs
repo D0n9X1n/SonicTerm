@@ -806,3 +806,30 @@ fn a_batch_keeps_the_first_notification_that_sanitizes_to_text() {
     blank.push(None, "\u{200B}".to_owned());
     assert_eq!(blank.into_parts(), None, "a batch of blank notifications sends no event");
 }
+
+/// A batch that changes OSC 7501 records sends one `ProgramStatus` event with its last summary,
+/// even when a query reply splits it into several parser sections; a batch that changes no
+/// record (a query, an identical report) sends none.
+#[test]
+fn a_batch_reports_its_last_program_status_once() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let statuses = |events: &[UserEvent]| -> Vec<sonicterm_vt::vt::StatusSummary> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                UserEvent::ProgramStatus { summary, .. } => Some(*summary),
+                _ => None,
+            })
+            .collect()
+    };
+    let batch = program_batch(
+        &handles,
+        "\x1b]7501;state=working\x07\x1b]7501;?\x07\x1b]7501;id=a:state=blocked\x07",
+    );
+    let sent = statuses(&batch);
+    assert_eq!(sent.len(), 1, "one event per batch");
+    let top = sent[0].top.expect("a record");
+    assert_eq!(top.state, sonicterm_vt::vt::StatusState::Blocked, "the batch's last state");
+    assert!(statuses(&program_batch(&handles, "\x1b]7501;?\x07")).is_empty());
+    assert!(statuses(&program_batch(&handles, "\x1b]7501;id=a:state=blocked\x07")).is_empty());
+}

@@ -28,9 +28,9 @@ pub(super) fn demand_frame_foreground(
     }
 }
 
-/// Show the agent marker on every tab holding a pane an agent created, and clear it elsewhere;
-/// returns whether any marker changed. Read from the panes each frame, so a split, a close or a
-/// transfer never leaves a stale marker.
+/// Show the agent marker on every tab holding a pane an agent created, and each tab's most urgent
+/// program-status marker; returns whether any marker changed. Read from the panes each frame, so
+/// a split, a close, a transfer or an inactive tab's report never leaves a stale marker.
 pub(super) fn refresh_window_agent_tabs(
     tabs: &mut sonicterm_ui::tabs::TabBar,
     tab_states: &[TabState],
@@ -44,6 +44,8 @@ pub(super) fn refresh_window_agent_tabs(
             .iter()
             .any(|pane_id| panes.get(pane_id).is_some_and(|pane| pane.creator.is_agent()));
         changed |= tabs.set_agent(tab_idx, agent);
+        let status = super::program_state::tab_status_marker(&tab_state.tree.leaves(), panes);
+        changed |= tabs.set_status_marker(tab_idx, status);
     }
     changed
 }

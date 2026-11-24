@@ -790,6 +790,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 {
     let mut remaining = bytes.as_ref();
     let mut reply_batch = Vec::new();
+    // The batch's last OSC 7501 summary; a reply can split a batch, and it is sent once at its end.
+    let mut program_status = None;
     let counters = handles.frame_counters.as_ref();
     if let Some(counters) = counters {
         // the App's gate is on, a nonempty batch counts once however often it takes the lock.
@@ -901,6 +903,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 VtEvent::Media(media) => media_events.push(media),
                 VtEvent::Progress(report) => progress = Some(report),
                 VtEvent::ProgramStateReset => progress = Some(None),
+                VtEvent::ProgramStatus(summary) => program_status = Some(summary),
                 VtEvent::Notify { title, body, id, occasion } => {
                     notices.push_notice(title, body, id, occasion)
                 }
@@ -973,5 +976,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             }
             break;
         }
+    }
+    if let Some(summary) = program_status {
+        emit_event(UserEvent::ProgramStatus { pane_id: handles.pane_id, summary });
     }
 }
