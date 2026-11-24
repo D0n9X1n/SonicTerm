@@ -194,7 +194,8 @@ impl super::App {
         Ok(())
     }
 
-    /// Revoke `ticket` silently; dropping it frees its slots.
+    /// Revoke `ticket`; dropping it frees its slots. Only an OSC 5522 write is answered, `EPERM`,
+    /// and only while the program that asked still reads the pane: the same PTY and command.
     pub(in crate::app) fn cancel_ticket(
         &mut self,
         mut ticket: ConsentTicket,
@@ -204,6 +205,17 @@ impl super::App {
         let pane_id = ticket.binding().pane_id;
         tracing::debug!(pane_id, reason = ?ticket.cancel_reason(), "OSC 52 read cancelled");
         self.clip_state.reads.last_cancel = Some(reason);
+        let asker_present = self.pane_by_id(pane_id).is_some_and(|pane| {
+            pane.pty.as_ref().map_or(0, |pty| pty.incarnation()) == ticket.binding().incarnation
+                && pane.read_identity.command_epoch() == ticket.binding().command_epoch
+        });
+        let kitty = ticket.take_write().and_then(|job| job.kitty.clone());
+        drop(ticket);
+        if asker_present {
+            // The waiting program hears the refusal; another PTY or command would read the
+            // status as input, so it is never sent there.
+            self.send_kitty_status(pane_id, kitty, super::event_loop::ClipWriteOutcome::Denied);
+        }
     }
 
     /// Run the read pipeline now.

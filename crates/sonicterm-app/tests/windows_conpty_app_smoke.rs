@@ -4,8 +4,9 @@
 //! (`App::__test_clipboard_reply_pane`), so
 //! the child reports the exact reply bytes a pane's reply path wrote back through ConPTY. The
 //! expected reply comes from a fresh reference pane fed only that case's output, except the
-//! clipboard read's, which is the literal [`OSC52_READ_REPLY`]. Every pane reads clipboard text
-//! under `osc52_read = "allow"` from a fake clipboard holding [`CLIPBOARD_FIXTURE`], never the
+//! clipboard read's and the OSC 5522 write's, which are the literal [`OSC52_READ_REPLY`] and
+//! [`KITTY_WRITE_DONE`]. Every pane settles clipboard writes against a fake clipboard and reads
+//! clipboard text under `osc52_read = "allow"` from one holding [`CLIPBOARD_FIXTURE`], never the
 //! user's clipboard.
 //!
 //! Opt-in: `cargo test --locked -p sonicterm-io -p sonicterm-app --test windows_conpty_protocol_forms
@@ -26,6 +27,18 @@ const OSC52_READ_REPLY: &[u8] = b"\x1b]52;c;Zml4dHVyZQ==\x1b\\\x1b]52;p;\x1b\\";
 /// The name of the clipboard-read row, whose expectation is [`OSC52_READ_REPLY`].
 const OSC52_READ_CASE: &str = "osc52-read";
 
+/// An OSC 5522 write of the fixture as `text/plain`: open, one chunk, then the BEL commit.
+const KITTY_WRITE: &[u8] = b"\x1b]5522;type=write:id=fixture\x07\
+\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=wdata\x07";
+
+/// The exact status [`KITTY_WRITE`] earns under `allow`: `DONE` with the opening id, terminated as
+/// the commit was.
+const KITTY_WRITE_DONE: &[u8] = b"\x1b]5522;type=write:status=DONE:id=fixture\x07";
+
+/// The name of the OSC 5522 write row, whose expectation is [`KITTY_WRITE_DONE`].
+const KITTY_WRITE_CASE: &str = "osc5522-write-done";
+
 /// A reply pane whose clipboard reads answer from the fake clipboard.
 fn clipboard_pane() -> TestReplyPane {
     App::__test_clipboard_reply_pane(PTY_COLS, PTY_ROWS, CLIPBOARD_FIXTURE)
@@ -45,6 +58,10 @@ impl Engine for AppEngine {
         if case.name == OSC52_READ_CASE {
             // When: the case is the clipboard read, its exact bytes are pinned, not recomputed.
             return OSC52_READ_REPLY.to_vec();
+        }
+        if case.name == KITTY_WRITE_CASE {
+            // When: the case is the OSC 5522 write, `DONE` is pinned, so no other status passes.
+            return KITTY_WRITE_DONE.to_vec();
         }
         clipboard_pane().replies(&case.output)
     }
@@ -67,13 +84,14 @@ fn cases() -> Vec<Case> {
         Case::new("osc22-query", "\x1b]22;?pointer,nonsense\x07").input(reply()).input_required(),
         Case::new("osc7501-query", "\x1b]7501;?\x07").input(reply()).input_required(),
         Case::new(OSC52_READ_CASE, "\x1b]52;cp;?\x07").input(reply()).input_required(),
+        Case::new(KITTY_WRITE_CASE, KITTY_WRITE).input(reply()).input_required(),
     ]
 }
 
 /// Contract: a pane's replies to color, pointer, program-status and clipboard-read queries reach
 /// a program behind a real pseudoconsole byte for byte on the packaged runtime, the clipboard
-/// read under `allow` as the exact fake-clipboard reply; the positive control is exact on both
-/// runtimes.
+/// read under `allow` as the exact fake-clipboard reply and an OSC 5522 write as exactly
+/// `type=write:status=DONE`; the positive control is exact on both runtimes.
 #[test]
 #[ignore = "needs a staged ConPTY runtime; run with --ignored (the windows-conpty-forms gate step)"]
 fn windows_conpty_app_smoke() {

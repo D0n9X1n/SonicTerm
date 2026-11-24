@@ -128,3 +128,79 @@ fn waiting_ticket_shows_the_clip_hint() {
     press(&mut harness, NamedKey::Escape);
     assert_eq!(harness.app.waiting_clip_record(later), None, "the hint ends with the ticket");
 }
+
+/// Run one OSC 5522 write of `text` from the harness pane through a real parser and the pane's
+/// transaction, admitting its `ask` ticket as the VT worker posts it.
+fn kitty_write(harness: &mut Harness, text: &str) {
+    use crate::app::kitty_clipboard_tx::{KittyClipboardTx, KittyStep};
+    use base64::Engine as _;
+    use sonicterm_vt::vt::CaptureStagingPool;
+    let identity = harness.app.pane_by_id(harness.pane).expect("a live pane").read_identity.clone();
+    let mut tx = KittyClipboardTx::new(harness.staging.clone(), identity);
+    tx.bind_pane(harness.pane);
+    let mut parser =
+        Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());
+    let data = base64::engine::general_purpose::STANDARD.encode(text);
+    let wire = format!(
+        "\x1b]5522;type=write:id=k\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;{data}\x1b\\\
+         \x1b]5522;type=wdata\x1b\\"
+    );
+    let events = parser.advance(wire.as_bytes());
+    let inbox = parser.kitty_clipboard_inbox().clone();
+    for event in events {
+        if let VtEvent::KittyClipboard { stream, request, bel } = event {
+            if let KittyStep::Ticket(ticket) =
+                tx.handle(&inbox, stream, request, bel, 0, Instant::now())
+            {
+                harness.app.admit_clipboard_ticket(ClipboardTicketHandle::new(ticket));
+            }
+        }
+    }
+}
+
+/// The bytes delivered so far, in order.
+fn delivered_bytes(harness: &Harness) -> Vec<Vec<u8>> {
+    harness.take_delivered().into_iter().map(|(_, reply)| reply.bytes().to_vec()).collect()
+}
+
+/// Contract: an asked OSC 5522 write whose consent ends without an answer, because its page was
+/// lost or its pane left its window, is answered `EPERM` on the program that still waits; when
+/// the pane's PTY or command changed, the program that asked is gone and nothing is sent.
+#[test]
+fn cancelled_kitty_write_consent_answers_eperm_to_the_same_program() {
+    let eperm = b"\x1b]5522;type=write:status=EPERM:id=k\x1b\\".to_vec();
+    for case in ["page-lost", "owner", "pty", "command"] {
+        let mut harness = asking();
+        if case == "pty" {
+            // The ticket binds a PTY the pane no longer has, as after a respawn.
+            let pane = harness.app.pane_by_id(harness.pane).expect("the source pane");
+            pane.read_identity.set_incarnation(99);
+        }
+        kitty_write(&mut harness, "hi");
+        // A ticket bound to another PTY is cancelled at admission, before any page opens.
+        assert_eq!(page_open(&harness), case != "pty", "{case}");
+        match case {
+            "page-lost" => {
+                let palette = &mut harness.app.interaction.command_palette;
+                palette.start_confirm("other", "Apply", "Cancel", Vec::new());
+            }
+            "owner" => {
+                let pane = harness.app.pane_by_id(harness.pane).expect("the source pane");
+                pane.read_identity.bump_owner();
+            }
+            "command" => {
+                let pane = harness.app.pane_by_id(harness.pane).expect("the source pane");
+                pane.read_identity.set_command_epoch(1);
+            }
+            _ => {}
+        }
+        harness.app.pump_clipboard_reads();
+        assert!(harness.app.clip_state.reads.last_cancel.is_some(), "{case}: cancelled");
+        let expected =
+            if matches!(case, "page-lost" | "owner") { vec![eperm.clone()] } else { vec![] };
+        assert_eq!(delivered_bytes(&harness), expected, "{case}");
+        assert_eq!(clipboard(&harness).as_deref(), Some("before"), "{case}: nothing written");
+        let slots = (harness.staging.ticket_slots_in_use(), harness.staging.program_slots_in_use());
+        assert_eq!(slots, (0, 0), "{case}");
+    }
+}

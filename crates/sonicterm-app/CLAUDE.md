@@ -157,7 +157,9 @@ cargo build -p sonicterm-app
   (`osc52_read_consent.rs`), opened in the source window while it is frontmost and the palette is
   closed, never raising, focusing, reusing or replacing a palette; the title names the tab and
   pane by position only. Apply also requires the palette still hosted by that window; Deny,
-  Escape, an outside click or expiry answer empty, and a lost page cancels silently. Native reads run one at a time on a disposable reader thread that keeps the ticket and
+  Escape, an outside click or expiry answer empty, and a lost page cancels silently, except that an
+  OSC 5522 write answers `EPERM` while its PTY and command are unchanged; a stopped clipboard
+  worker answers its unreported 5522 writes `EIO`. Native reads run one at a time on a disposable reader thread that keeps the ticket and
   its reply-budget lease until the native call returns. Replies go only to the source PTY through
   `PtyHandle::try_send_reply`, never the reply spool, a broadcast receiver or a log.
 - Main and child keyboard, IME, focus and modifier events share source-WindowId

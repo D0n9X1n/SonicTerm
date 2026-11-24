@@ -8,7 +8,8 @@
 //! never by a title a program set, and Deny is highlighted first. Apply consumes the session, and
 //! the approved ticket then takes the ordinary revalidated read path. Deny, Escape, an outside
 //! click or expiry answer empty, as a rejected prompt is; a lost page or an identity or policy
-//! change ends the ticket silently.
+//! change ends the ticket silently, except an OSC 5522 write's, which is answered `EPERM` while the
+//! same PTY and command still own its pane.
 
 use std::time::Instant;
 

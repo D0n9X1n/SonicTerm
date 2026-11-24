@@ -41,3 +41,21 @@ fn clipboard_reply_pane_answers_reads_from_its_fake_clipboard() {
     // OSC 52 prints nothing, so the cursor is still home.
     assert_eq!(pane.replies(b"\x1b[6n"), b"\x1b[1;1R".to_vec(), "other replies are unchanged");
 }
+
+/// Contract: the F-ConPTY app smoke's clipboard pane settles an OSC 5522 write under `allow`
+/// against its fake clipboard and answers exactly `type=write:status=DONE` with the opening id and
+/// the commit's terminator, whether the packets arrive in one batch or one per batch, so the
+/// smoke's expected reply is the bytes this pins.
+#[test]
+fn clipboard_reply_pane_answers_a_kitty_write_done() {
+    let write = b"\x1b]5522;type=write:id=fixture\x07";
+    let data = b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\";
+    let commit = b"\x1b]5522;type=wdata\x07";
+    let done = b"\x1b]5522;type=write:status=DONE:id=fixture\x07".to_vec();
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    assert!(pane.replies(write).is_empty());
+    assert!(pane.replies(data).is_empty());
+    assert_eq!(pane.replies(commit), done);
+    let whole = [&write[..], &data[..], &commit[..]].concat();
+    assert_eq!(App::__test_clipboard_reply_pane(80, 24, "fixture").replies(&whole), done);
+}

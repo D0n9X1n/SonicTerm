@@ -907,6 +907,7 @@ impl TestReplyPane {
     pub fn replies(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
         let mut reads = Vec::new();
+        let mut writes = Vec::new();
         super::spawn_pane::publish_pane_vt_batch_with(
             &self.handles,
             bytes,
@@ -914,9 +915,12 @@ impl TestReplyPane {
             &mut None,
             &mut self.sync_latch,
             super::media::decode_inline_image,
-            |event| {
-                if let UserEvent::ClipboardTicket { ticket, .. } = event {
-                    reads.push(ticket);
+            |event| match event {
+                UserEvent::ClipboardTicket { ticket, .. } => reads.push(ticket),
+                UserEvent::ClipboardWrite { job, .. } => writes.push(job),
+                _ => {
+                    // When: the event is neither a ticket nor a write, a reply pane has no
+                    // window or App to deliver it to, so it is dropped.
                 }
             },
             Instant::now,
@@ -930,6 +934,13 @@ impl TestReplyPane {
                     super::osc52_read_source::read_replies(source.as_ref(), ticket.labels()),
                 ),
                 _ => replies.extend(super::osc52_read::empty_frames(ticket.labels())),
+            }
+        }
+        // The fake clipboard takes every posted write, so an OSC 5522 write is answered `DONE`
+        // through the production status builder; an OSC 52 write has no status.
+        for job in writes.iter().filter_map(|write| write.take()) {
+            if let Some(kitty) = &job.kitty {
+                replies.extend(kitty.status(sonicterm_vt::vt::KittyClipboardStatus::Done));
             }
         }
         replies

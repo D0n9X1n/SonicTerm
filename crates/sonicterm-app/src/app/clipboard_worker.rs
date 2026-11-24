@@ -283,6 +283,9 @@ pub(in crate::app) struct ClipboardDomain {
     follow_ups: VecDeque<FollowUp>,
     /// Per pane, its program writes in flight.
     program_panes: HashMap<u64, usize>,
+    /// Each posted program write's pane and OSC 5522 reply, in posting order; the worker reports
+    /// writes in that order, so a lost worker leaves exactly the unreported ones here.
+    program_replies: VecDeque<(u64, Option<super::kitty_clipboard_tx::KittyReply>)>,
 }
 
 impl std::fmt::Debug for ClipboardDomain {
@@ -302,8 +305,13 @@ enum Settled {
     Program { pane_id: u64, committed: Committed },
     /// A user copy's follow-up and whether the clipboard took it.
     User { follow_up: FollowUp, written: bool },
-    /// The worker stopped: the panes whose writes it held and the copies it never reported.
-    Lost { panes: Vec<u64>, follow_ups: Vec<FollowUp> },
+    /// The worker stopped: the panes whose writes it held, the OSC 5522 statuses those writes
+    /// still owe, and the copies it never reported.
+    Lost {
+        panes: Vec<u64>,
+        replies: Vec<(u64, super::kitty_clipboard_tx::KittyReply)>,
+        follow_ups: Vec<FollowUp>,
+    },
 }
 
 impl ClipboardDomain {
@@ -373,9 +381,11 @@ impl ClipboardDomain {
     /// Post a program write from `pane_id` under the current policy epoch.
     fn post_program(&mut self, pane_id: u64, job: ClipboardJob) -> bool {
         let epoch = self.policy_epoch.load(Ordering::SeqCst);
+        let reply = job.kitty.clone();
         let posted = self.post(Job::Program { pane_id, job, epoch });
         if posted {
             *self.program_panes.entry(pane_id).or_default() += 1;
+            self.program_replies.push_back((pane_id, reply));
         }
         posted
     }
@@ -428,6 +438,8 @@ impl ClipboardDomain {
                     *count = count.saturating_sub(1);
                 }
                 self.program_panes.retain(|_, count| *count > 0);
+                // The reported write is the oldest posted one; its status rides `committed`.
+                self.program_replies.pop_front();
                 Some(Settled::Program { pane_id, committed })
             }
             Done::ReassertSettled => {
@@ -447,8 +459,10 @@ impl ClipboardDomain {
         tracing::warn!(in_flight = self.in_flight, "clipboard worker stopped; its writes failed");
         self.worker = None;
         self.in_flight = 0;
+        let replies = self.program_replies.drain(..);
         Settled::Lost {
             panes: self.program_panes.drain().map(|(pane_id, _)| pane_id).collect(),
+            replies: replies.filter_map(|(pane_id, reply)| Some((pane_id, reply?))).collect(),
             follow_ups: self.follow_ups.drain(..).collect(),
         }
     }
@@ -587,7 +601,11 @@ impl super::App {
                     }
                     follow_up(self, written);
                 }
-                Settled::Lost { panes, follow_ups } => {
+                Settled::Lost { panes, replies, follow_ups } => {
+                    // An OSC 5522 write the worker never reported failed natively: `EIO`.
+                    for (pane_id, reply) in replies {
+                        self.send_kitty_status(pane_id, Some(reply), ClipWriteOutcome::Failed);
+                    }
                     for pane_id in panes {
                         self.note_clip_write(pane_id, 0, ClipWriteOutcome::Failed);
                         self.release_deferred_attempts(pane_id);

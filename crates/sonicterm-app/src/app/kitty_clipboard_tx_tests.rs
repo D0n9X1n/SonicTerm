@@ -388,3 +388,45 @@ fn event_loop_denial_answers_eperm_on_source_pane() {
     assert_eq!(outcome, Some(super::super::event_loop::ClipWriteOutcome::Denied));
     assert_eq!(*delivered.lock().unwrap(), vec![(7, status("EPERM", "d").into_bytes())]);
 }
+
+/// A native clipboard whose every write panics, as a crashing clipboard worker does.
+struct PanickingSink;
+
+impl super::super::clipboard_worker::ClipboardSink for PanickingSink {
+    fn write(&mut self, _text: &str, _targets: ClipTargets) -> bool {
+        panic!("the clipboard worker dies in its native call");
+    }
+}
+
+/// Contract: an OSC 5522 write posted to the clipboard worker is answered `EIO` on its source
+/// pane when the worker dies before reporting it, never dropped without a status.
+#[test]
+fn worker_loss_answers_eio_on_source_pane() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut rig = rig();
+    rig.send("type=write:id=lost");
+    rig.data("text/plain", &b64("x"));
+    let job = match rig.send("type=wdata").pop() {
+        Some(KittyStep::Post(job)) => job,
+        other => panic!("expected a posted write, got {other:?}"),
+    };
+    let mut app = super::super::App::new(Theme::default(), Config::default(), Keymap::default());
+    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = delivered.clone();
+    app.clip_state.reads.port = Some(Box::new(move |pane_id, reply| {
+        sink.lock().unwrap().push((pane_id, reply.bytes().to_vec()));
+        Ok(())
+    }));
+    let started =
+        app.clip_state.domain.start_worker(Box::new(PanickingSink), None, Box::new(|| {}));
+    assert!(started);
+    assert_eq!(app.submit_program_clipboard(9, job, false), None, "posted to the worker");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.clip_state.domain.has_worker() {
+        assert!(Instant::now() < deadline, "the worker's loss was never noticed");
+        app.drain_clipboard_completions();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(*delivered.lock().unwrap(), vec![(9, status("EIO", "lost").into_bytes())]);
+    assert_eq!(rig.staging.reserved_bytes(), 0, "the lost job's lease was released");
+}

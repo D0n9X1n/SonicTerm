@@ -350,7 +350,7 @@ that page's ticket, and only on that page's own palette session in the window th
 closing the palette afterwards keeps the approval. Deny, Escape, a click outside the page, or
 120 s without an answer close the page and send an empty reply, as a declined prompt is. A page
 closed or replaced by another palette page, moved to another window, or any cancellation above
-ends the ticket silently. An approved or `"allow"` read runs on a
+ends the ticket silently, except an OSC 5522 write's (below). An approved or `"allow"` read runs on a
 disposable reader thread, one read at a time, never on the event loop. A read returns at most
 8 MiB of UTF-8 text (4 MiB per destination for `cp`); a larger value, a failed read, or no
 clipboard owner is answered empty. Text that is not valid UTF-8 becomes U+FFFD. Each destination
@@ -408,8 +408,12 @@ type still yields text. A commit with nothing staged clears the clipboard. Nothi
 or `loc=primary` off Linux, answers `ENOSYS`. The `osc52` policy is checked again: `deny`
 answers `EPERM`, `ask` opens the same consent page as an OSC 52 write, and a refusal there
 answers `EPERM`. The write then follows the OSC 52 write path to the clipboard worker, and the
-event loop answers `DONE`, `EIO` (native failure) or `EPERM` on the source pane's PTY. Other
-representations are released at the commit.
+event loop answers `DONE`, `EIO` (native failure) or `EPERM` on the source pane's PTY. A write
+the clipboard worker held when it stopped answers `EIO`. An asked write whose consent ends without
+an answer (its page lost, its pane moved, the policy changed) answers `EPERM` while the same PTY
+and command still own the pane; after a PTY or command change, or once the pane closed, nothing
+is sent, because another program would read it as input. Other representations are released at
+the commit.
 
 An open write ends `EBUSY` 30 s after its last packet or 10 min after it opened, and `EPERM`
 when the policy becomes `deny`; the VT worker wakes for both even while the child prints
