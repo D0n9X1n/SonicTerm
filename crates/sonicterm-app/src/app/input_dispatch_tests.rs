@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::input_dispatch::MotionProfile;
 use crate::app::spawn_pane::{
     osc52_decision, Osc52Outcome, Osc52Refusal, MAX_OSC52_CLIPBOARD_BYTES,
 };
@@ -77,24 +78,37 @@ fn pointer_motion_isolated_slots_clear_on_disconnect() {
     assert_eq!(second.take(), b"second");
 }
 
-// A shell or encoding transition invalidates deferred bytes before retry or a following key.
+/// The profile of a no-button motion under 1003 with SGR reports on the alternate screen.
+fn any_motion_sgr() -> MotionProfile {
+    MotionProfile {
+        tracking: MouseTracking::AnyMotion,
+        format: sonicterm_vt::vt::MouseFormat::Sgr,
+        is_alt: true,
+        held: false,
+    }
+}
+
+// A shell or encoding transition invalidates deferred bytes before retry or a following key: the
+// queued report keeps its encode-time profile, so any live change of mode, format or screen drops it.
 #[test]
 fn pointer_motion_profile_change_discards_stale_report() {
     let mut motion = PendingPointerMotion::default();
-    let active = Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, true));
-    motion.validate_profile(active);
-    motion.replace(b"motion");
-    motion.validate_profile(active);
+    let active = (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, true);
+    motion.offer(any_motion_sgr(), b"motion");
+    motion.validate(Some(active));
     assert_eq!(motion.len, 6);
     for changed in [
-        Some((MouseTracking::Off, sonicterm_vt::vt::MouseFormat::Sgr, true)),
-        Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::X10, true)),
-        Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::SgrPixels, true)),
-        Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, false)),
+        (MouseTracking::Off, sonicterm_vt::vt::MouseFormat::Sgr, true),
+        (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::X10, true),
+        (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::SgrPixels, true),
+        (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, false),
     ] {
-        motion.validate_profile(active);
-        motion.replace(b"motion");
-        motion.validate_profile(changed);
+        motion.offer(any_motion_sgr(), b"motion");
+        motion.validate(Some(changed));
+        assert_eq!(motion.len, 0, "{changed:?}");
+        // The profile is never retagged: the original modes do not revive a dropped report, and a
+        // later report under them is still validated against its own encode-time profile.
+        motion.validate(Some(active));
         assert_eq!(motion.len, 0);
     }
 }
@@ -103,14 +117,45 @@ fn pointer_motion_profile_change_discards_stale_report() {
 #[test]
 fn pointer_motion_unknown_profile_retains_pending_position() {
     let mut motion = PendingPointerMotion::default();
-    let active = Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, true));
-    motion.validate_profile(active);
-    motion.replace(b"latest");
-    motion.validate_profile(None);
-    assert_eq!(motion.profile, active);
+    let active = (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, true);
+    motion.offer(any_motion_sgr(), b"latest");
+    motion.validate(None);
+    assert_eq!(motion.profile, Some(any_motion_sgr()));
     assert_eq!(motion.len, 6);
-    motion.validate_profile(active);
+    motion.validate(Some(active));
     assert_eq!(motion.take(), b"latest");
+}
+
+// Writer admission alone records a 1016 report as sent: a flush the writer refuses keeps the report
+// pending and unrecorded, so it is offered again; once admitted, an identical offer is dropped, and a
+// motion prepended to admitted discrete input counts as admitted too.
+#[test]
+fn pixel_motion_is_recorded_only_when_the_writer_admits_it() {
+    let pixels =
+        MotionProfile { format: sonicterm_vt::vt::MouseFormat::SgrPixels, ..any_motion_sgr() };
+    let report = b"\x1b[<35;5;7M";
+    let mut motion = PendingPointerMotion::default();
+    motion.offer(pixels, report);
+    motion.flush(|bytes| Err(PtyInputError::QueueFull(bytes))).unwrap();
+    assert_eq!(motion.last_admitted, None, "a refused flush is not admission");
+    motion.offer(pixels, report);
+    assert_eq!(motion.len, report.len(), "the refused report is still offered");
+    let mut disconnected = PendingPointerMotion::default();
+    disconnected.offer(pixels, report);
+    assert!(disconnected.flush(|bytes| Err(PtyInputError::WriterDisconnected(bytes))).is_err());
+    assert_eq!(disconnected.last_admitted, None, "a disconnected writer admits nothing");
+    motion.flush(|_| Ok(())).unwrap();
+    motion.offer(pixels, report);
+    assert_eq!(motion.len, 0, "an identical report after admission is dropped");
+    let mut prefixed = PendingPointerMotion::default();
+    prefixed.offer(pixels, report);
+    prefixed.send_ordered(b"key".to_vec(), |_| Ok(())).unwrap();
+    prefixed.offer(pixels, report);
+    assert_eq!(prefixed.len, 0, "a motion admitted ahead of discrete input counts as sent");
+    let mut refused = PendingPointerMotion::default();
+    refused.offer(pixels, report);
+    let _ = refused.send_ordered(b"key".to_vec(), |bytes| Err(PtyInputError::QueueFull(bytes)));
+    assert_eq!(refused.last_admitted, None, "a refused combined write admits no motion");
 }
 
 // Real app admission retains motion across parser contention and drains it after the lock is released.
@@ -123,9 +168,18 @@ fn pointer_motion_app_retries_after_parser_contention() {
     let pane = app.main_mut().unwrap().panes.get_mut(&pane_id).unwrap();
     pane.pty = Some(pty);
     let parser = pane.parser.clone();
-    parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    {
+        let mut locked = parser.lock();
+        locked.advance(b"\x1b[?1003h\x1b[?1006h");
+        pane.__test_publish_input_modes(&locked);
+    }
     let guard = parser.lock();
-    assert!(app.write_to_pane(pane_id, b"\x1b[<35;1;1M".to_vec(), PtyInputSource::PointerMotion));
+    app.write_pointer_motion(
+        pane_id,
+        sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
+        b"\x1b[<35;1;1M".to_vec(),
+    );
     let now = Instant::now();
     assert_eq!(app.flush_pointer_motion(now), Some(now + Duration::from_millis(10)));
     assert_ne!(app.pane_by_id(pane_id).unwrap().pending_pointer_motion.len, 0);

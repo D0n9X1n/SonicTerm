@@ -1,11 +1,12 @@
 //! Mouse report encodings: one function per DECSET format, used by every pointer, wheel and
-//! secondary-button report, the pane-local pixel position 1016 reports, and the rule that drops
-//! an identical 1016 motion.
+//! secondary-button report, the pane-local pixel position 1016 reports, and the queueing of
+//! motion under the profile it was encoded in.
 
 use sonicterm_ui::pane::Rect;
 use sonicterm_vt::vt::MouseFormat;
 use winit::window::WindowId;
 
+use super::input_dispatch::MotionProfile;
 use super::{App, PtyInputSource, WindowState};
 
 /// One mouse event to encode.
@@ -126,34 +127,38 @@ impl App {
         press_pane.map_or((0, 0), |pane_id| self.pane_pixel(window_id, pane_id))
     }
 
-    /// Send one motion report to `pane_id`, encoded in `format`. In 1016 a report identical to the
-    /// last 1016 motion the pane admitted under the same tracking mode is dropped: its bytes carry
-    /// the pixel, the held buttons and the modifiers, so any change among them is still sent. A
-    /// motion the pane refuses is not recorded, so it never suppresses the next identical one.
+    /// Queue one motion report for `pane_id`, encoded in `format` with a button `held` or not. The
+    /// report carries the profile it was encoded under (the pane's published tracking, format and
+    /// screen), so the writer admits it only while the parser's live modes still match. A held
+    /// motion latched to a format the pane no longer publishes is dropped: the program reads new
+    /// motion in the new format, and only the release keeps the press-time format. In 1016 a report
+    /// identical to the last one the writer admitted under the same tracking mode is dropped.
     pub(in crate::app) fn write_pointer_motion(
         &mut self,
         pane_id: u64,
         format: MouseFormat,
+        held: bool,
         bytes: Vec<u8>,
     ) {
-        let Some(pane) = self.registry.pane_mut(pane_id) else {
+        let Some(modes) = self.registry.pane_mut(pane_id).map(|pane| pane.pointer_modes()) else {
             // When: pane_id names no live pane, the motion has no destination.
             return;
         };
-        let key = (format == MouseFormat::SgrPixels)
-            .then(|| (pane.pointer_modes().tracking(), bytes.clone()));
-        if key.is_some() && pane.last_pixel_motion == key {
-            // When: key repeats the last 1016 motion under the same tracking mode, it says nothing new.
+        let profile = MotionProfile {
+            tracking: modes.tracking(),
+            format: modes.format(),
+            is_alt: modes.is_alt(),
+            held,
+        };
+        if profile.format != format || !profile.reports_motion() {
+            // When: the published format is not the encoding, or its tracking reports no such
+            // motion, the program would misread the report.
             return;
         }
-        if !self.write_to_pane(pane_id, bytes, PtyInputSource::PointerMotion) {
-            // When: write_to_pane refused the motion, the last admitted one stays the comparison.
-            return;
-        }
-        if let Some(pane) = self.registry.pane_mut(pane_id) {
-            // An admitted cell-format motion clears the key, so a 1016 report is compared only with
-            // 1016 reports.
-            pane.last_pixel_motion = key;
+        self.log_test_write(pane_id, &bytes, PtyInputSource::PointerMotion);
+        if let Some(pane) = self.registry.pane_mut(pane_id).filter(|pane| pane.pty.is_some()) {
+            // The pane has a writer, so the report waits in its coalescing slot for admission.
+            pane.pending_pointer_motion.offer(profile, &bytes);
         }
     }
 }

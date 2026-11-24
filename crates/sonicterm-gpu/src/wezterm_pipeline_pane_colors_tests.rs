@@ -840,7 +840,8 @@ fn copy_mode_selection_takes_the_program_selection_foreground() {
 /// A palette or search field keeps the theme's selection colors with every selection and
 /// cursor-text color a program can set on the active pane: the field (an overlay over the left
 /// pane's selected cells) draws its selected glyph in the theme's `selection_fg` on the theme's
-/// `selection_bg` and its other glyph in the theme foreground, through the production field marks,
+/// `selection_bg`, sampled both under the glyph and on the uncovered selected background, and its
+/// other glyph in the theme foreground on its backdrop, through the production field marks,
 /// while the terminal's own selected glyph beside it takes the program's selection foreground.
 #[test]
 fn ui_fields_keep_the_theme_selection_colors_beside_a_program_selection() {
@@ -869,7 +870,9 @@ fn ui_fields_keep_the_theme_selection_colors_beside_a_program_selection() {
     let mut overlay_glyphs: Vec<GlyphInstance> = [10.0, 20.0]
         .into_iter()
         .map(|left_px| GlyphInstance {
-            rect: px_to_ndc(left_px, 0.0, 10.0, 20.0, surface_w, surface_h),
+            // Half-cell glyphs leave each cell's right half uncovered, so the field's selected
+            // background is sampled as well as its glyphs.
+            rect: px_to_ndc(left_px, 0.0, 5.0, 20.0, surface_w, surface_h),
             uv: text.uv,
             color: foreground,
             flags: [0.0; 4],
@@ -890,8 +893,10 @@ fn ui_fields_keep_the_theme_selection_colors_beside_a_program_selection() {
     );
     let expected = [
         (5, CLUSTER_SELECTION_FG),
-        (15, theme_rgb(&theme.colors.selection_fg)),
-        (25, theme_rgb(&theme.colors.foreground)),
+        (12, theme_rgb(&theme.colors.selection_fg)),
+        (17, theme_rgb(&theme.colors.selection_bg)),
+        (22, theme_rgb(&theme.colors.foreground)),
+        (27, theme_rgb(&theme.colors.background)),
     ];
     let software = software_pixels_with_overlay(
         clear,

@@ -198,23 +198,47 @@ fn attach_shell(app: &mut App, pane_id: u64) {
     assert!(app.__test_set_pane_pty(pane_id, Some(pty)));
 }
 
-/// In 1016 two motions within one cell report their own pixels, an identical second report is
-/// dropped, the same pixel with Shift held is sent, and the wheel reports the pixel too. The pane
-/// has a PTY, so each sent motion is admitted and becomes the one the next is compared with.
+/// Flush every pane's coalesced motion until the writer has admitted or discarded it, as the
+/// event loop's motion wake does; a full writer queue retries after a short wait.
+fn flush_all(app: &mut App) {
+    for _ in 0..200 {
+        if app.flush_pointer_motion(std::time::Instant::now()).is_none() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("pointer motion was never admitted");
+}
+
+/// The bytes the writer admitted since `submitted` started, in order.
+fn admitted(submitted: &crate::app::mod_tests::PtySubmissions) -> Vec<Vec<u8>> {
+    submitted.take().into_iter().map(|(_, bytes)| bytes).collect()
+}
+
+/// In 1016 two motions within one cell report their own pixels, a motion identical to the last
+/// one the writer admitted is dropped, the same pixel with Shift held is sent, and the wheel
+/// reports the pixel too. Each motion is flushed, so the writer admits it before the next one is
+/// compared with it.
 #[test]
 fn pixel_motion_reports_each_pixel_and_drops_only_an_identical_report() {
     let (mut app, main, left, _right) = split_main();
     attach_shell(&mut app, left);
     publish(&app, main, left, b"\x1b[?1003h\x1b[?1016h");
-    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
-    app.handle_main_cursor_moved(PhysicalPosition::new(57.0, 85.0));
-    app.handle_main_cursor_moved(PhysicalPosition::new(57.0, 85.0));
-    app.main_mut().unwrap().modifiers = ModifiersState::SHIFT;
-    app.handle_main_cursor_moved(PhysicalPosition::new(57.0, 85.0));
+    let submitted = crate::app::mod_tests::PtySubmissions::start();
+    for (pointer_x, modifiers) in [
+        (55.0, ModifiersState::empty()),
+        (57.0, ModifiersState::empty()),
+        (57.0, ModifiersState::empty()),
+        (57.0, ModifiersState::SHIFT),
+    ] {
+        app.main_mut().unwrap().modifiers = modifiers;
+        app.handle_main_cursor_moved(PhysicalPosition::new(pointer_x, 85.0));
+        flush_all(&mut app);
+    }
     app.main_mut().unwrap().modifiers = ModifiersState::empty();
     app.handle_main_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0));
     assert_eq!(
-        writes(&app),
+        admitted(&submitted),
         [
             b"\x1b[<35;55;85M".to_vec(),
             b"\x1b[<35;57;85M".to_vec(),
@@ -222,6 +246,42 @@ fn pixel_motion_reports_each_pixel_and_drops_only_an_identical_report() {
             b"\x1b[<64;57;85M".repeat(3),
         ]
     );
+}
+
+/// A motion encoded in a cell format from the published 1006 is never sent once the program has
+/// switched to 1016 before the writer admits it: the queued report keeps the profile it was
+/// encoded under, so admission drops it rather than sending cell bytes to a program reading pixels.
+#[test]
+fn a_cell_motion_queued_before_a_switch_to_pixels_is_not_sent() {
+    let (mut app, main, left, _right) = split_main();
+    attach_shell(&mut app, left);
+    publish(&app, main, left, b"\x1b[?1003h\x1b[?1006h");
+    // The parser has switched to 1016; the VT worker has not published the switch yet.
+    app.registry.windows[&main].panes[&left].parser.lock().advance(b"\x1b[?1016h");
+    let submitted = crate::app::mod_tests::PtySubmissions::start();
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    flush_all(&mut app);
+    assert!(admitted(&submitted).is_empty(), "cell bytes are not sent under a pixel profile");
+}
+
+/// A 1016 motion counts as sent only when the writer admits it: a queued motion that a mode switch
+/// discards before admission does not suppress the same pixel once the program returns to 1016.
+#[test]
+fn a_pixel_motion_discarded_before_admission_does_not_suppress_the_same_pixel() {
+    let (mut app, main, left, _right) = split_main();
+    attach_shell(&mut app, left);
+    publish(&app, main, left, b"\x1b[?1003h\x1b[?1016h");
+    let submitted = crate::app::mod_tests::PtySubmissions::start();
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    flush_all(&mut app);
+    app.handle_main_cursor_moved(PhysicalPosition::new(57.0, 85.0));
+    // The program leaves 1016 before the queued motion reaches the writer, which discards it.
+    publish(&app, main, left, b"\x1b[?1016l");
+    flush_all(&mut app);
+    publish(&app, main, left, b"\x1b[?1016h");
+    app.handle_main_cursor_moved(PhysicalPosition::new(57.0, 85.0));
+    flush_all(&mut app);
+    assert_eq!(admitted(&submitted), [b"\x1b[<35;55;85M".to_vec(), b"\x1b[<35;57;85M".to_vec()]);
 }
 
 /// A 1016 motion the pane refuses (here it has no PTY) is not recorded as sent, so the next
@@ -257,9 +317,10 @@ fn cell_formats_keep_reporting_every_motion() {
     );
 }
 
-/// A left press in the right pane measures pixels from that pane's own origin; a drag out of it
-/// reports a negative pixel, and after the program switches to 1006 the held motion and the
-/// release still use the press-time 1016.
+/// A left press in the right pane measures pixels from that pane's own origin, and its release
+/// keeps the press-time 1016 with the pointer's negative pixel after a drag out of the pane; a held
+/// motion after the program switched to 1006 is dropped, since neither format is now the one the
+/// program reads for new motion.
 #[test]
 fn a_held_press_keeps_its_pane_origin_and_press_time_format() {
     let (mut app, main, _left, right) = split_main();
@@ -281,15 +342,15 @@ fn a_held_press_keeps_its_pane_origin_and_press_time_format() {
     window.mouse_down = true;
     publish(&app, main, right, b"\x1b[?1006h");
     app.handle_main_cursor_moved(PhysicalPosition::new(origin_x - 20.0, 85.0));
-    assert_eq!(writes(&app), [b"\x1b[<32;-20;85M".to_vec()]);
+    assert!(writes(&app).is_empty(), "held motion after a format change is dropped");
     let route =
         take_pointer_release(&mut app.main_mut().unwrap().pointer_gesture, ModifiersState::empty());
     let (_, release) = pointer_route_bytes(route.unwrap(), PointerReportKind::LeftRelease).unwrap();
     assert_eq!(release, b"\x1b[<0;-20;85m");
 }
 
-/// A right press keeps the format it was reported in: under 1015 its press, its held motion after
-/// the program switched to 1016, and its legacy release are all urxvt.
+/// A right press keeps the format it was reported in for its release: under 1015 its press and its
+/// legacy release are urxvt, and a held motion after the program switched to 1016 is dropped.
 #[test]
 fn a_secondary_press_keeps_its_press_time_format() {
     let (mut app, main, left, _right) = split_main();
@@ -299,10 +360,7 @@ fn a_secondary_press_keeps_its_press_time_format() {
     publish(&app, main, left, b"\x1b[?1016h");
     app.handle_main_cursor_moved(PhysicalPosition::new(57.0, 85.0));
     app.route_secondary_button(main, SecondaryButton::Right, ElementState::Released);
-    assert_eq!(
-        writes(&app),
-        [b"\x1b[34;6;9M".to_vec(), b"\x1b[66;6;9M".to_vec(), b"\x1b[35;6;9M".to_vec()]
-    );
+    assert_eq!(writes(&app), [b"\x1b[34;6;9M".to_vec(), b"\x1b[35;6;9M".to_vec()]);
 }
 
 /// A child window measures from its own pane's origin and rounds a fractional pointer position:

@@ -93,6 +93,7 @@ impl App {
         // Record the window's own pointer before an overlay, a modal or a handler can consume
         // the move or leave, so the tab-width hold never reads a stale position.
         self.record_window_pointer(win_id, &event);
+        self.track_pointer_owner(win_id, &event);
         if let WindowEvent::Occluded(occluded) = &event {
             // When: `Occluded` arrives for a live owner, apply visibility before either role can collect a frame.
             self.handle_window_occlusion(win_id, *occluded);

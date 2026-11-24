@@ -1,6 +1,7 @@
 //! Native input submission observations and source-window fixtures. regression contracts.
 
 use super::*;
+use sonicterm_vt::vt::MouseFormat;
 
 /// Moving a live pane keeps its task reservation and never schedules teardown before an actual close.
 #[cfg(any(windows, unix))]
@@ -84,6 +85,15 @@ fn real_pty_submission_observer_excludes_failed_input() {
     assert!(submitted.take().is_empty());
 }
 
+/// Switch `pane` to 1003 with SGR reports and publish the modes, as the VT worker does after a batch.
+#[cfg(any(windows, unix))]
+fn publish_any_motion_sgr(app: &App, pane: u64) {
+    let state = app.pane_by_id(pane).unwrap();
+    let mut parser = state.parser.lock();
+    parser.advance(b"\x1b[?1003h\x1b[?1006h");
+    state.__test_publish_input_modes(&parser);
+}
+
 /// Pending motion is not submission, even though staging returns accepted ownership to the caller.
 #[cfg(any(windows, unix))]
 #[test]
@@ -92,12 +102,12 @@ fn real_pty_submission_observer_excludes_staged_motion() {
         return;
     }
     let (mut app, _, pane) = input_test_app();
-    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    publish_any_motion_sgr(&app, pane);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     assert!(app.write_to_pane(pane, b"control".to_vec(), PtyInputSource::Keyboard));
     assert_eq!(submitted.take(), vec![(pane, b"control".to_vec())]);
-    assert!(app.write_to_pane(pane, b"\x1b[<35;2;3M".to_vec(), PtyInputSource::PointerMotion));
+    app.write_pointer_motion(pane, MouseFormat::Sgr, false, b"\x1b[<35;2;3M".to_vec());
     assert_ne!(app.pane_by_id(pane).unwrap().pending_pointer_motion.len, 0);
     assert!(submitted.take().is_empty());
 }
@@ -110,11 +120,11 @@ fn real_pty_submission_observer_records_flushed_motion() {
         return;
     }
     let (mut app, _, pane) = input_test_app();
-    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    publish_any_motion_sgr(&app, pane);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     for report in [b"\x1b[<35;1;3M", b"\x1b[<35;2;3M"] {
-        assert!(app.write_to_pane(pane, report.to_vec(), PtyInputSource::PointerMotion));
+        app.write_pointer_motion(pane, MouseFormat::Sgr, false, report.to_vec());
     }
     assert!(submitted.take().is_empty());
     assert_eq!(app.flush_pointer_motion(Instant::now()), None);
@@ -130,10 +140,10 @@ fn real_pty_submission_observer_records_motion_with_discrete_input() {
         return;
     }
     let (mut app, _, pane) = input_test_app();
-    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    publish_any_motion_sgr(&app, pane);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
-    assert!(app.write_to_pane(pane, b"\x1b[<35;2;3M".to_vec(), PtyInputSource::PointerMotion));
+    app.write_pointer_motion(pane, MouseFormat::Sgr, false, b"\x1b[<35;2;3M".to_vec());
     assert!(submitted.take().is_empty());
     assert!(app.write_to_pane(pane, b"key".to_vec(), PtyInputSource::Keyboard));
     assert_eq!(submitted.take(), vec![(pane, b"\x1b[<35;2;3Mkey".to_vec())]);

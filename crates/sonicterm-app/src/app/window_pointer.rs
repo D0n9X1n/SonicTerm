@@ -180,7 +180,7 @@ impl App {
                         if let Some((pane_id, bytes)) =
                             pointer_route_bytes(report, PointerReportKind::HeldLeftMotion)
                         {
-                            self.write_pointer_motion(pane_id, format, bytes);
+                            self.write_pointer_motion(pane_id, format, true, bytes);
                         }
                         return;
                     }
@@ -297,7 +297,7 @@ impl App {
             {
                 // When: a right or middle press is `held`, it owns the motion until its release.
                 if let Some((pane_id, format, bytes)) = held {
-                    self.write_pointer_motion(pane_id, format, bytes);
+                    self.write_pointer_motion(pane_id, format, true, bytes);
                 }
                 return;
             }
@@ -321,7 +321,7 @@ impl App {
                         if let Some((pane_id, bytes)) =
                             pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
                         {
-                            self.write_pointer_motion(pane_id, format, bytes);
+                            self.write_pointer_motion(pane_id, format, false, bytes);
                         }
                     }
                 }

@@ -489,8 +489,10 @@ impl App {
             | WindowEvent::Resized(_)
             | WindowEvent::ScaleFactorChanged { .. } => {
                 // CursorLeft, Focused(false), Resized or ScaleFactorChanged, a caption press
-                // can no longer complete, so hover and press clear.
+                // can no longer complete, so hover and press clear, and the edge under the
+                // pointer is reclassified against the new geometry at the turn's cursor sync.
                 self.cancel_window_band(window_id);
+                self.mark_cursor_stale(window_id);
             }
             _ => {
                 // When: any other event, the band's state stays.

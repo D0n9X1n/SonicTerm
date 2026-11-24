@@ -127,6 +127,7 @@ impl App {
                 window_rename_target: None,
                 tab_edit_target: None,
                 agent_disconnect: None,
+                pointer_window: None,
                 palette_pointer_capture: None,
                 field_pointer_capture: None,
                 field_owed_releases: Vec::new(),

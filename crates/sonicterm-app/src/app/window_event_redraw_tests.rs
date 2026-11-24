@@ -257,7 +257,6 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
     use crate::app::{
         mod_tests::{input_test_windows, PtySubmissions},
         pty_test_support::isolated,
-        PtyInputSource,
     };
     use sonicterm_ui::copy_mode::CopyModeState;
     if isolated() {
@@ -272,10 +271,13 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
             } else {
                 CopyModeState::new_at((0, 0))
             });
-            app.registry.windows[&window].panes[&pane]
-                .parser
-                .lock()
-                .advance(b"\x1b[?1003h\x1b[?1006h");
+            {
+                // The VT worker publishes the modes the motion is encoded under.
+                let state = &app.registry.windows[&window].panes[&pane];
+                let mut parser = state.parser.lock();
+                parser.advance(b"\x1b[?1003h\x1b[?1006h");
+                state.__test_publish_input_modes(&parser);
+            }
             app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             let route = child_no_button_motion_report(
@@ -288,7 +290,7 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
             if let Some((pane, bytes)) = route.and_then(|route| {
                 super::super::pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
             }) {
-                app.write_to_pane(pane, bytes, PtyInputSource::PointerMotion);
+                app.write_pointer_motion(pane, sonicterm_vt::vt::MouseFormat::Sgr, false, bytes);
             }
             assert!(submitted.take().is_empty(), "staging is not submission");
             app.flush_pointer_motion(std::time::Instant::now());

@@ -357,7 +357,7 @@ fn retained_selection_frame(
     theme: &Theme,
     atlas: &mut GlyphAtlas,
     selection: &Selection,
-    emitted: std::ops::Range<u16>,
+    emitted: impl IntoIterator<Item = u16>,
 ) -> (Vec<QuadInstance>, Vec<GlyphInstance>) {
     use sonicterm_types::{ColorOverrides, DynamicColor, GlyphKey};
     let (surface_w, surface_h) = (40.0, 60.0);
@@ -435,10 +435,55 @@ fn retained_selection_frame(
     (quads, glyphs)
 }
 
-/// A selection that moves after a full frame is repainted by a partial frame over the rows it left
-/// and entered, and that frame's retained pixels equal a full repaint of the new state: the row it
-/// left draws its glyphs in their own color again, the ligature its new range cuts keeps its
-/// unselected cell's color, and the untouched row is retained.
+/// The production planner's plan for the retained selection fixture's 4x3 pane of 10x20 cells
+/// with `selection`, after `previous` presented.
+fn selection_plan(
+    selection: &Selection,
+    previous: Option<&crate::frame_plan::FrameKey>,
+) -> crate::frame_plan::FramePlan {
+    use crate::frame_plan::{FrameFacts, FramePlan, PaneMetadata, WindowIdentity};
+    let facts = FrameFacts {
+        window: WindowIdentity {
+            width: 40,
+            height: 60,
+            selection: Some(*selection),
+            ..Default::default()
+        },
+        cell_w: 10.0,
+        cell_h: 20.0,
+        padding: [0.0; 4],
+        vertical_ink_pad: 0.0,
+        scrollbar_mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode::Never,
+        degraded: false,
+        tab_bar_top: None,
+        status_band: None,
+        scale: 1.0,
+        previous_recolor: Default::default(),
+    };
+    let pane = PaneMetadata {
+        id: 7,
+        revision: 1,
+        dirty_generation: 0,
+        rect: PixelRect { x: 0, y: 0, w: 40, h: 60 },
+        cols: 4,
+        rows: 3,
+        scrollback_len: 0,
+        viewport_top_abs: None,
+        is_active: true,
+        is_alt: false,
+        scrollbar_alpha: 0.0,
+        dirty_rows: Vec::new(),
+        row_ink: Vec::new(),
+    };
+    FramePlan::build(facts, [pane], previous)
+}
+
+/// A selection that moves after a full frame is repainted by the frame the production planner
+/// plans for the move, and that frame's retained pixels equal a full repaint of the new state: the
+/// planner's damage and emitted rows (not hand-picked ones) restore the row the selection left to
+/// its own glyph color, the ligature its new range cuts keeps its unselected cell's color, and the
+/// untouched row is retained. A planner that skipped the row the selection left would leave it
+/// green and fail the comparison.
 #[test]
 fn a_moved_selection_restores_the_glyph_colors_of_rows_it_left() {
     let theme = Theme::default();
@@ -448,6 +493,7 @@ fn a_moved_selection_restores_the_glyph_colors_of_rows_it_left() {
     let full = full_surface_rect(40, 60);
     let mut first = Selection::new(0, 0);
     first.extend(0, 3);
+    let presented = selection_plan(&first, None);
     let (quads, glyphs) = retained_selection_frame(&theme, &mut atlas, &first, 0..3);
     fixture.upload_glyphs(&mut atlas);
     fixture.draw_glyphs(true, full, background, &quads, &glyphs);
@@ -456,19 +502,27 @@ fn a_moved_selection_restores_the_glyph_colors_of_rows_it_left() {
         pixels_close(selected_green, [0, 200, 0, 255]),
         "row 0 drew selected: {selected_green:?}"
     );
-    // The selection moves to cells 1-2 of row 1: the planner damages rows 0 and 1, which emit.
+    // The selection moves to cells 1-2 of row 1; the planner decides what repaints.
     let mut moved = Selection::new(1, 1);
     moved.extend(1, 2);
-    let damage = PixelRect { x: 0, y: 0, w: 40, h: 40 };
-    let (quads, glyphs) = retained_selection_frame(&theme, &mut atlas, &moved, 0..2);
-    fixture.draw_glyphs(false, damage, background, &quads, &glyphs);
+    let plan = selection_plan(&moved, Some(&presented.key));
+    assert_ne!(plan.damage, full, "the move plans a partial repaint, not the whole surface");
+    let emitted: Vec<u16> = plan.panes[0]
+        .emit_rows
+        .iter()
+        .enumerate()
+        .filter(|(_, emit)| **emit)
+        .map(|(row, _)| row as u16)
+        .collect();
+    let (quads, glyphs) = retained_selection_frame(&theme, &mut atlas, &moved, emitted);
+    fixture.draw_glyphs(false, plan.damage, background, &quads, &glyphs);
     let narrow = fixture.pixels();
     let (quads, glyphs) = retained_selection_frame(&theme, &mut atlas, &moved, 0..3);
     fixture.draw_glyphs(true, full, background, &quads, &glyphs);
     let repainted = fixture.pixels();
     let differing: Vec<usize> =
         (0..narrow.len()).filter(|&pixel| !pixels_close(narrow[pixel], repainted[pixel])).collect();
-    assert!(differing.is_empty(), "the partial frame differs at pixels {differing:?}");
+    assert!(differing.is_empty(), "the planned frame differs at pixels {differing:?}");
     let foreground =
         clear_bgra(crate::color::hex_to_wgpu_with_alpha(theme.colors.foreground.0.as_str(), 1.0));
     // Row 0 (left) and row 1's ligature half in its unselected cell 0 keep the foreground.

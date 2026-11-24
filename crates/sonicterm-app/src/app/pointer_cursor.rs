@@ -3,8 +3,12 @@
 //! local selection), else the OSC 22 shape of the terminal pane under the pointer; a report
 //! window's pane shows the arrow.
 //!
-//! The decision runs once per event-loop turn for every window, after input, output and owner
-//! changes, and writes to the OS only when its result changed.
+//! The decision runs once per event-loop turn for the window under the pointer, after input,
+//! output and owner changes, and writes to the OS only when its result changed. Only that window
+//! writes: Windows sets the cursor for the whole thread, so another window's write would replace
+//! the icon of the window the pointer is over. A window whose hidden owners may have gone stale
+//! (its overlay closed, the pointer left, a resize, a scale or focus change) is reclassified from
+//! the pointer's current position and geometry before its decision.
 
 use sonicterm_ui::pane::SplitAxis;
 use sonicterm_vt::vt::PointerShape;
@@ -115,12 +119,135 @@ pub(crate) struct NativeCursorState {
     pub(in crate::app) on_scrollbar: bool,
     /// The icon last written to the window; `None` before the first decision.
     pub(in crate::app) applied: Option<CursorIcon>,
+    /// The splitter, scrollbar and band-edge owners are reclassified at the next decision.
+    pub(in crate::app) reclassify: bool,
+    /// The palette was open over this window at the last decision; its closing reclassifies.
+    pub(in crate::app) overlay_shown: bool,
     /// Decisions that changed `applied`, each standing for one OS write.
     #[cfg(test)]
     pub(in crate::app) applied_writes: u32,
 }
 
 impl App {
+    /// Follow which window owns the pointer: the one it entered or moved in, until it leaves that
+    /// window. A leave, a resize, a scale or a focus change marks `window_id`'s owners stale.
+    pub(in crate::app) fn track_pointer_owner(
+        &mut self,
+        window_id: WindowId,
+        event: &winit::event::WindowEvent,
+    ) {
+        use winit::event::WindowEvent;
+        match event {
+            WindowEvent::CursorEntered { .. } | WindowEvent::CursorMoved { .. } => {
+                self.interaction.pointer_window = Some(window_id);
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if self.interaction.pointer_window == Some(window_id) {
+                    // The owner itself is left; a leave reported after another window's enter
+                    // keeps that window the owner.
+                    self.interaction.pointer_window = None;
+                }
+                self.mark_cursor_stale(window_id);
+            }
+            WindowEvent::Resized(_)
+            | WindowEvent::ScaleFactorChanged { .. }
+            | WindowEvent::Focused(_) => self.mark_cursor_stale(window_id),
+            _ => {
+                // When: any other event, the pointer's owner and the hover owners stand.
+            }
+        }
+    }
+
+    /// Reclassify `window_id`'s splitter, scrollbar and band-edge owners at its next decision.
+    pub(in crate::app) fn mark_cursor_stale(&mut self, window_id: WindowId) {
+        if let Some(window) = self.registry.windows.get_mut(&window_id) {
+            window.native_cursor.reclassify = true;
+        }
+    }
+
+    /// Recompute `window_id`'s splitter hover, scrollbar gutter and band edge from the pointer's
+    /// recorded position and the current geometry, so an owner a modal, a leave or a geometry
+    /// change hid never outlives the position that made it.
+    fn reclassify_pointer_owners(&mut self, window_id: WindowId) {
+        let Some(window) = self.registry.windows.get_mut(&window_id) else {
+            // When: window_id closed, it has no owners left to reclassify.
+            return;
+        };
+        window.native_cursor.reclassify = false;
+        let (pointer_x, pointer_y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
+        if pointer_x < 0.0 || pointer_y < 0.0 {
+            // When: pointer_x or pointer_y is negative, the pointer is off the window and on no owner.
+            window.splitter_hover = None;
+            window.native_cursor.on_scrollbar = false;
+            window.native_cursor.band_edge = None;
+            return;
+        }
+        window.native_cursor.band_edge =
+            match super::titlebar_band::classify_band_press(window, pointer_x, pointer_y, false) {
+                super::titlebar_band::BandPress::Edge(edge) => {
+                    Some(super::titlebar_band::edge_cursor(edge))
+                }
+                _ => None,
+            };
+        if Some(window_id) == self.registry.main_window_id {
+            self.refresh_splitter_hover(pointer_x, pointer_y);
+        } else {
+            // When: window_id is a child, its own layout places the splitters.
+            self.refresh_child_splitter_hover(window_id, pointer_x, pointer_y);
+        }
+        let on_scrollbar = self.pointer_on_scrollbar(window_id, pointer_x, pointer_y);
+        if let Some(window) = self.registry.windows.get_mut(&window_id) {
+            window.native_cursor.on_scrollbar = on_scrollbar;
+        }
+    }
+
+    /// Whether the pointer at (`pointer_x`, `pointer_y`) in `window_id` is in the scrollbar gutter
+    /// of the pane under it, by the one calculation main and child motion use.
+    pub(in crate::app) fn pointer_on_scrollbar(
+        &self,
+        window_id: WindowId,
+        pointer_x: f32,
+        pointer_y: f32,
+    ) -> bool {
+        let Some(window) = self.registry.windows.get(&window_id) else {
+            // When: window_id closed, no gutter is under the pointer.
+            return false;
+        };
+        let pane = if Some(window_id) == self.registry.main_window_id {
+            self.pane_at_cursor(pointer_x, pointer_y).and_then(|pane_id| {
+                let rect = self
+                    .compute_active_pane_rects()
+                    .into_iter()
+                    .find_map(|(id, rect)| (id == pane_id).then_some(rect))?;
+                Some((pane_id, rect))
+            })
+        } else {
+            // When: window_id is a child, its own layout places the pane.
+            super::child_window_pointer::child_pane_cell_at(window, pointer_x, pointer_y).and_then(
+                |(pane_id, _, _)| App::pane_rect_for(window, pane_id).map(|rect| (pane_id, rect)),
+            )
+        };
+        let Some((pane_id, rect)) = pane else {
+            // When: no pane is under the pointer, no gutter is either.
+            return false;
+        };
+        let (edge_active, visible) =
+            window.scrollbar_vis.get(&pane_id).map_or((false, false), |state| {
+                (
+                    state.mouse_near_right_edge,
+                    state.alpha > crate::app::scrollbar_visibility::ALPHA_EMIT_FLOOR,
+                )
+            });
+        super::window_event::pane_scrollbar_owns_pointer(
+            self.config.appearance.scrollbar,
+            rect,
+            window.renderer.as_ref().map(super::window_event::ScrollbarMetrics::of),
+            (pointer_x, pointer_y),
+            edge_active,
+            visible,
+        )
+    }
+
     /// The cursor window `window_id` should show now, from its owners and the hovered pane's
     /// published shape (one atomic load, no parser lock); `None` for a closed window.
     fn window_cursor(&self, window_id: WindowId) -> Option<CursorIcon> {
@@ -140,11 +267,8 @@ impl App {
         let pane_shape = hovered
             .and_then(|(pane_id, _, _)| window.panes.get(&pane_id))
             .map(|pane| pane.pointer_shape());
-        let palette_window =
-            self.interaction.palette_attached_window.or(self.registry.main_window_id);
         Some(decide_cursor(CursorOwners {
-            overlay: self.interaction.command_palette.is_open()
-                && palette_window == Some(window_id),
+            overlay: self.palette_window() == Some(window_id),
             splitter: window.splitter_drag.as_ref().map(|drag| drag.axis).or(window.splitter_hover),
             scrollbar: window.scrollbar_drag.is_some() || window.native_cursor.on_scrollbar,
             tab_bar: window.drag_session.is_some() || window.pressed_tab.is_some(),
@@ -158,32 +282,51 @@ impl App {
         }))
     }
 
-    /// Decide every window's cursor and write each one whose decision changed; the one place
-    /// that sets a native cursor.
+    /// Reclassify every window whose owners went stale, then decide the cursor of the window under
+    /// the pointer and write it when the decision changed; the one place that sets a native cursor.
     pub(in crate::app) fn sync_window_cursors(&mut self) {
-        // Empty in the common unchanged case, so a turn with nothing to write allocates nothing.
-        let changed: Vec<(WindowId, CursorIcon)> = self
+        let palette_window = self.palette_window();
+        // Empty in the common case, so a turn with nothing stale allocates nothing.
+        let stale: Vec<WindowId> = self
             .registry
             .windows
             .iter()
-            .filter_map(|(window_id, window)| {
-                let icon = self.window_cursor(*window_id)?;
-                (window.native_cursor.applied != Some(icon)).then_some((*window_id, icon))
+            .filter(|(window_id, window)| {
+                let overlay_closed =
+                    window.native_cursor.overlay_shown && palette_window != Some(**window_id);
+                window.native_cursor.reclassify || overlay_closed
             })
+            .map(|(window_id, _)| *window_id)
             .collect();
-        for (window_id, icon) in changed {
-            let Some(window) = self.registry.windows.get_mut(&window_id) else {
-                // When: window_id closed since the decision, nothing is left to write.
-                continue;
-            };
-            window.native_cursor.applied = Some(icon);
-            #[cfg(test)]
-            {
-                window.native_cursor.applied_writes += 1;
-            }
-            if let Some(native) = window.window.as_ref() {
-                native.set_cursor(icon);
-            }
+        for window_id in stale {
+            self.reclassify_pointer_owners(window_id);
+        }
+        for (window_id, window) in self.registry.windows.iter_mut() {
+            window.native_cursor.overlay_shown = palette_window == Some(*window_id);
+        }
+        let Some(window_id) = self.interaction.pointer_window else {
+            // When: pointer_window is None, the pointer is over no client window and the OS owns it.
+            return;
+        };
+        let Some(icon) = self.window_cursor(window_id) else {
+            // When: window_cursor finds no icon, the pointer's window closed and nothing is written.
+            return;
+        };
+        let Some(window) = self.registry.windows.get_mut(&window_id) else {
+            // When: window_id closed since the decision, nothing is left to write.
+            return;
+        };
+        if window.native_cursor.applied == Some(icon) {
+            // When: the window already shows this icon, the OS needs no write.
+            return;
+        }
+        window.native_cursor.applied = Some(icon);
+        #[cfg(test)]
+        {
+            window.native_cursor.applied_writes += 1;
+        }
+        if let Some(native) = window.window.as_ref() {
+            native.set_cursor(icon);
         }
     }
 }

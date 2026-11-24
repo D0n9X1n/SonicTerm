@@ -437,8 +437,12 @@ aliases are accepted too:
 | `nwse-resize` | `size_fdiag`, `size-fdiag` |
 | `zoom-in`, `zoom-out` | `zoom_in`, `zoom_out` |
 
-Each window decides its native cursor in one place, once per event-loop turn, and writes it
-only when it changed. SonicTerm's own owners come first: an open command palette (the arrow), a
+The window under the pointer decides its native cursor in one place, once per event-loop turn,
+and writes it only when it changed; no other window writes, because Windows sets one cursor for
+the whole thread and a departing or unrelated window would replace the icon of the window the
+pointer is over. A window whose owners may have gone stale (its palette closed, the pointer left,
+a resize, a scale or focus change) first reclassifies its splitter, scrollbar and titlebar-band
+edge from the pointer's current position. SonicTerm's own owners come first: an open command palette (the arrow), a
 splitter hovered or dragged (column or row resize), the scrollbar, a pressed or dragged tab (the
 arrow), a titlebar-band resize edge, a modifier link hover (the hand) and a local selection drag
 (the I-beam). Otherwise the terminal pane under the pointer shows its shape, and anywhere outside

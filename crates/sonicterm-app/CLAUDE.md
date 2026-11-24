@@ -30,7 +30,9 @@ drag/tear-out, and the platform shell abstractions.
   rule that drops an identical 1016 motion; every pointer, wheel and secondary report encodes here.
 - `src/app/pointer_cursor.rs` - the one native cursor writer: each window's owners (palette,
   splitter, scrollbar, tab, band edge, link, selection) else the hovered pane's OSC 22 shape,
-  decided once per `about_to_wait` and written only on change.
+  decided once per `about_to_wait` for the window under the pointer only and written only on
+  change; a closed palette, a leave, a resize, a scale or focus change reclassifies the hidden
+  splitter, scrollbar and band-edge owners from the current pointer and geometry first.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
 - `src/app/event_loop.rs` - window creation and window-ready hooks; `event_loop_wait.rs` owns
   due-work deadlines and wait servicing.

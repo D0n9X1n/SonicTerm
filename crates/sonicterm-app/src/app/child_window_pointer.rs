@@ -311,7 +311,7 @@ impl App {
         if let Some(held) = child.secondary_motion(pointer_cell, press_pixel) {
             // When: a right or middle press is `held`, it owns the motion until its release.
             if let Some((pane_id, format, bytes)) = held {
-                self.write_pointer_motion(pane_id, format, bytes);
+                self.write_pointer_motion(pane_id, format, true, bytes);
             }
             return;
         }
@@ -373,7 +373,8 @@ impl App {
                 }
                 report @ super::window_event::PointerMotionRoute::Report { format, .. } => {
                     // When: `route` contains Report data, encode terminal motion for the child pane.
-                    let kind = if child.mouse_down {
+                    let held = child.mouse_down;
+                    let kind = if held {
                         super::window_event::PointerReportKind::HeldLeftMotion
                     } else {
                         super::window_event::PointerReportKind::NoButtonMotion
@@ -383,7 +384,7 @@ impl App {
                     // bounded effect path resolves and enqueues the PTY write.
                     let _ = child;
                     if let Some((pane_id, bytes)) = report {
-                        self.write_pointer_motion(pane_id, format, bytes);
+                        self.write_pointer_motion(pane_id, format, held, bytes);
                     }
                     return;
                 }

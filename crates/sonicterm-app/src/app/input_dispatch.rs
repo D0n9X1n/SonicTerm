@@ -34,40 +34,90 @@ pub fn pick_prompt_target(
     pick.and_then(|prompt| prompt.start_row)
 }
 
+/// The pointer modes a motion report was encoded under, carried with its queued bytes: the
+/// tracking mode, format and screen the pane had published, and whether a button is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MotionProfile {
+    pub(super) tracking: MouseTracking,
+    pub(super) format: sonicterm_vt::vt::MouseFormat,
+    pub(super) is_alt: bool,
+    /// A button is held: 1002 and 1003 report the motion; without one only 1003 does.
+    pub(super) held: bool,
+}
+
+impl MotionProfile {
+    /// Whether the profile's tracking mode reports this motion at all.
+    pub(super) fn reports_motion(self) -> bool {
+        match self.tracking {
+            MouseTracking::AnyMotion => true,
+            MouseTracking::ButtonMotion => self.held,
+            MouseTracking::Off | MouseTracking::Button => false,
+        }
+    }
+}
+
+/// A pane's coalesced pointer motion: the newest report with the profile it was encoded under,
+/// and the last 1016 report the writer admitted, which an identical report repeats.
 #[derive(Debug)]
 pub(super) struct PendingPointerMotion {
     bytes: [u8; 64],
     pub(super) len: usize,
-    profile: Option<(MouseTracking, sonicterm_vt::vt::MouseFormat, bool)>,
+    profile: Option<MotionProfile>,
+    /// The tracking mode and bytes of the last 1016 report the writer admitted; `None` after an
+    /// admitted report in a cell format.
+    last_admitted: Option<(MouseTracking, Vec<u8>)>,
 }
 
 impl Default for PendingPointerMotion {
     fn default() -> Self {
-        Self { bytes: [0; 64], len: 0, profile: None }
+        Self { bytes: [0; 64], len: 0, profile: None, last_admitted: None }
     }
 }
 
 impl PendingPointerMotion {
-    fn validate_profile(
-        &mut self,
-        profile: Option<(MouseTracking, sonicterm_vt::vt::MouseFormat, bool)>,
-    ) {
-        let Some(current) = profile else {
-            // When: profile is unavailable, retain the position until a later retry can validate it.
+    /// Queue `bytes`, encoded under `profile`, in place of any older motion. A 1016 report
+    /// identical to the last one the writer admitted says nothing new: the child already has that
+    /// position, so the queued older motion is dropped too.
+    pub(super) fn offer(&mut self, profile: MotionProfile, bytes: &[u8]) {
+        let repeats_admitted = profile.format == sonicterm_vt::vt::MouseFormat::SgrPixels
+            && self
+                .last_admitted
+                .as_ref()
+                .is_some_and(|(tracking, last)| *tracking == profile.tracking && last == bytes);
+        if repeats_admitted {
+            // When: repeats_admitted, the bytes repeat the last admitted 1016 report the child holds.
+            self.len = 0;
+            return;
+        }
+        self.replace(bytes);
+        self.profile = Some(profile);
+    }
+
+    /// Drop the queued motion unless the pane's `live` modes (tracking, format, alternate screen)
+    /// are still the ones it was encoded under; the profile is never retagged. `None` (the parser
+    /// is busy) keeps it for a later retry.
+    fn validate(&mut self, live: Option<(MouseTracking, sonicterm_vt::vt::MouseFormat, bool)>) {
+        let (Some(live), Some(profile)) = (live, self.profile) else {
+            // When: live or profile is unknown, keep the position until a later retry can validate it.
             return;
         };
-        if self.profile.is_some_and(|previous| previous != current)
-            || matches!(current.0, MouseTracking::Off | MouseTracking::Button)
-        {
-            // A changed or disabled tracking mode cannot receive a deferred position.
+        if (profile.tracking, profile.format, profile.is_alt) != live {
+            // A changed tracking mode, format or screen cannot receive a report encoded for another.
             self.len = 0;
         }
-        self.profile = Some(current);
+    }
+
+    /// Record `bytes`, encoded under `profile`, as admitted by the writer: only a 1016 report is
+    /// kept for comparison, so an admitted cell-format report clears the comparison.
+    fn remember_admitted(&mut self, profile: Option<MotionProfile>, bytes: Vec<u8>) {
+        self.last_admitted = profile
+            .filter(|profile| profile.format == sonicterm_vt::vt::MouseFormat::SgrPixels)
+            .map(|profile| (profile.tracking, bytes));
     }
 
     fn replace(&mut self, bytes: &[u8]) {
         // A report is at most 31 bytes (1016: a code and two signed 32-bit pixels), so every
-        // encoding fits this fixed slot; the profile includes the format, so none is replayed in another.
+        // encoding fits this fixed slot; its profile travels with it, so none is replayed in another.
         assert!(bytes.len() <= self.bytes.len());
         self.bytes[..bytes.len()].copy_from_slice(bytes);
         self.len = bytes.len();
@@ -88,13 +138,19 @@ impl PendingPointerMotion {
             // When: self.len is zero, do not consume a writer queue slot.
             return Ok(());
         }
-        match send(self.take()) {
+        let bytes = self.take();
+        match send(bytes.clone()) {
+            Ok(()) => {
+                // Only the writer's admission makes the report the one the child last received.
+                self.remember_admitted(self.profile, bytes);
+                Ok(())
+            }
             Err(PtyInputError::QueueFull(bytes)) => {
                 // QueueFull retains the latest position for a later non-rendering wake.
                 self.replace(&bytes);
                 Ok(())
             }
-            result => result,
+            Err(error) => Err(error),
         }
     }
 
@@ -113,22 +169,29 @@ impl PendingPointerMotion {
         let mut combined = Vec::with_capacity(prefix_len + bytes.len());
         combined.extend_from_slice(&pending);
         combined.extend_from_slice(&bytes);
-        send(combined).map_err(|error| {
-            // Rejection attribution covers only discrete input; stale motion cannot replay after it.
-            let strip = |mut rejected: Vec<u8>| {
-                rejected.drain(..prefix_len);
-                rejected
-            };
-            match error {
-                PtyInputError::QueueFull(bytes) => PtyInputError::QueueFull(strip(bytes)),
-                PtyInputError::WriterDisconnected(bytes) => {
-                    PtyInputError::WriterDisconnected(strip(bytes))
-                }
-                PtyInputError::MessageTooLarge(bytes) => {
-                    PtyInputError::MessageTooLarge(strip(bytes))
-                }
+        match send(combined) {
+            Ok(()) => {
+                // The prepended motion reached the writer with the discrete input.
+                self.remember_admitted(self.profile, pending);
+                Ok(())
             }
-        })
+            Err(error) => {
+                // Rejection attribution covers only discrete input; stale motion cannot replay after it.
+                let strip = |mut rejected: Vec<u8>| {
+                    rejected.drain(..prefix_len);
+                    rejected
+                };
+                Err(match error {
+                    PtyInputError::QueueFull(bytes) => PtyInputError::QueueFull(strip(bytes)),
+                    PtyInputError::WriterDisconnected(bytes) => {
+                        PtyInputError::WriterDisconnected(strip(bytes))
+                    }
+                    PtyInputError::MessageTooLarge(bytes) => {
+                        PtyInputError::MessageTooLarge(strip(bytes))
+                    }
+                })
+            }
+        }
     }
 }
 
@@ -317,36 +380,44 @@ impl App {
         }
     }
 
+    /// Write discrete input to `pane_id`. Pointer motion goes through `write_pointer_motion`, which
+    /// carries the profile each report was encoded under.
     pub(super) fn write_to_pane(
         &mut self,
         pane_id: u64,
         bytes: Vec<u8>,
         source: PtyInputSource,
     ) -> bool {
-        // Test-only ledger: skipped entirely in production so we don't
-        // lock+clone+push on every PTY write (— unbounded
-        // growth + per-keystroke overhead over a long session).
-        if self.testing.pty_write_log_enabled {
-            self.testing.test_pty_writes.lock().push((pane_id, bytes.clone()));
-            #[cfg(test)]
-            self.record_test_write_source(pane_id, source);
-        }
+        debug_assert_ne!(source, PtyInputSource::PointerMotion, "motion carries its profile");
+        self.log_test_write(pane_id, &bytes, source);
         let Some(pane) = self.registry.pane_mut(pane_id) else {
             // When: find_map cannot resolve pane_id, its input has no live destination.
             return false;
         };
         let queued =
             Self::queue_pane_input(self.event_loop_proxy.as_ref(), pane, pane_id, source, bytes);
-        if queued && source != PtyInputSource::PointerMotion {
+        if queued {
             // Accepted discrete input may stay outstanding; the status line checks on it later.
             self.arm_held_input(pane_id);
         }
         #[cfg(windows)]
-        if queued && source != PtyInputSource::PointerMotion {
-            // Accepted discrete input can launch a silent command; coalesced motion must not schedule process probes.
+        if queued {
+            // Accepted discrete input can launch a silent command; motion never comes here, so it schedules no probe.
             self.arm_foreground_probe_after_input(Instant::now());
         }
         queued
+    }
+
+    /// Record an attempted write in the test ledger: skipped entirely in production, so no write
+    /// locks, clones or grows a log over a long session.
+    pub(super) fn log_test_write(&self, pane_id: u64, bytes: &[u8], source: PtyInputSource) {
+        if self.testing.pty_write_log_enabled {
+            self.testing.test_pty_writes.lock().push((pane_id, bytes.to_vec()));
+            #[cfg(test)]
+            self.record_test_write_source(pane_id, source);
+        }
+        #[cfg(not(test))]
+        let _ = source;
     }
 
     /// Unit-test ledger of each logged write's producer source, kept apart from the shared byte log.
@@ -362,36 +433,22 @@ impl App {
         source: PtyInputSource,
         bytes: Vec<u8>,
     ) -> bool {
-        let profile =
-            if source == PtyInputSource::PointerMotion || pane.pending_pointer_motion.len != 0 {
-                // Profile checks never block discrete input behind parser output.
-                pane.parser.try_lock().map(|parser| {
-                    (parser.mouse_tracking(), parser.mouse_format(), parser.grid().is_alt())
-                })
-            } else {
-                // When: source is discrete and no motion is pending, the parser is irrelevant to admission.
-                None
-            };
-        pane.pending_pointer_motion.validate_profile(profile);
+        if pane.pending_pointer_motion.len != 0 {
+            // Queued motion is checked against the parser's live modes; the check never blocks
+            // discrete input behind parser output.
+            let live = pane.parser.try_lock().map(|parser| {
+                (parser.mouse_tracking(), parser.mouse_format(), parser.grid().is_alt())
+            });
+            pane.pending_pointer_motion.validate(live);
+            if live.is_none() {
+                // An unknown profile at a discrete barrier supersedes motion rather than delaying the key or replaying stale bytes.
+                pane.pending_pointer_motion.len = 0;
+            }
+        }
         let Some(pty) = pane.pty.as_ref() else {
             // When: a pane has no writer, input cannot acquire delivery ownership.
             return false;
         };
-        if source == PtyInputSource::PointerMotion {
-            // When: source is PointerMotion, coalesce the turn's positions in fixed pane-owned storage.
-            if profile.is_some_and(|current| {
-                matches!(current.0, MouseTracking::Off | MouseTracking::Button)
-            }) {
-                // When: profile disables motion, do not retain a stale native report.
-                return false;
-            }
-            pane.pending_pointer_motion.replace(&bytes);
-            return true;
-        }
-        if profile.is_none() {
-            // An unknown profile at a discrete barrier supersedes motion rather than delaying the key or replaying stale bytes.
-            pane.pending_pointer_motion.len = 0;
-        }
         let typing = source.is_typing();
         // Typing is stamped before the bytes can reach the shell, so a run never sees its C first;
         // a refused write takes the stamp back.
@@ -446,7 +503,7 @@ impl App {
                 let profile = pane.parser.try_lock().map(|parser| {
                     (parser.mouse_tracking(), parser.mouse_format(), parser.grid().is_alt())
                 });
-                pane.pending_pointer_motion.validate_profile(profile);
+                pane.pending_pointer_motion.validate(profile);
                 let Some(pty) = pane.pty.as_ref() else {
                     // When: a pane loses its PTY, discard its unsendable position without arming a timer.
                     pane.pending_pointer_motion.len = 0;
