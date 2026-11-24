@@ -820,6 +820,9 @@ mod vt_dispatch;
 #[path = "vt_osc.rs"]
 mod vt_osc;
 
+#[path = "vt_semantic.rs"]
+mod vt_semantic;
+
 #[path = "vt_performer.rs"]
 mod vt_performer;
 

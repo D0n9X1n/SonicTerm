@@ -307,6 +307,45 @@ fn prompt_end_does_not_start_command_timer() {
     assert_eq!(started, None);
 }
 
+/// An authenticated C's command text reaches the drain paired with its own D when the command ran
+/// at least a second, across batches and past the next prompt that clears it in the grid; a
+/// shorter run leaves no text held.
+#[test]
+fn authenticated_cmdline_reaches_a_long_commands_end() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let token = "0123456789abcdef0123456789abcdef";
+    handles.parser.lock().set_shell_token(Some(token.to_owned()));
+    let base = Instant::now();
+    let mut times =
+        [0, 0, 0, 5, 5, 6, 6, 6].into_iter().map(|secs| base + Duration::from_secs(secs));
+    let mut started = None;
+    let mut batch = |text: String| {
+        process_pane_vt_batch_with(
+            &handles,
+            text.as_bytes(),
+            None,
+            &mut started,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            || times.next().unwrap(),
+            |_| {},
+        );
+    };
+    let mark = |body: &str| format!("\x1b]133;{body};sonicterm_token={token}\x07");
+    batch([mark("A"), mark("B"), mark("C;cmdline_url=make%20test")].concat());
+    batch([mark("D;0"), mark("A")].concat());
+    let drained = crate::app::command_events::drain_paired(&mut handles.command_events.lock());
+    let ends: Vec<_> = drained
+        .iter()
+        .filter(|(event, _)| matches!(event.event, CommandEvent::CmdEnd(_)))
+        .map(|(_, text)| text.as_ref().map(|text| text.as_str().to_owned()))
+        .collect();
+    assert_eq!(ends, vec![Some("make test".to_owned())]);
+    batch([mark("C;cmdline_url=ls"), mark("D;0"), mark("A")].concat());
+    assert!(handles.command_events.lock().cmdline.is_none(), "a short run holds no text");
+}
+
 /// Execution duration starts at C, not B, and B/D without execution has no duration.
 #[test]
 fn command_duration_excludes_prompt_editing_time() {

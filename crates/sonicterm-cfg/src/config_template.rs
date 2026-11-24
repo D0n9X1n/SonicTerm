@@ -200,6 +200,8 @@ strong_focus = false
 # Desktop notification for long-running commands.
 long_command = false
 threshold_secs = 10
+# Append the command's text (from shell integration) to that notification.
+long_command_cmdline = false
 
 [status_line]
 # A strip with SonicTerm's own state: memory, modes, scroll position,

@@ -202,3 +202,42 @@ fn the_finish_budget_is_what_the_close_drain_has_left() {
     // Just closed: the drain's remainder exceeds the finish wait, which still caps it.
     assert_eq!(close_budget(Some(Instant::now())), FINISH_WAIT);
 }
+
+/// OSC 133 annotations (P, I, N, L, the options on A) and 9;12 change only the semantic state:
+/// after a ready prompt they leave every region and `run_command`'s readiness exactly as they were.
+#[test]
+fn annotations_never_change_regions_or_mcp_readiness() {
+    let mut parser = parsed(b"\x1b]133;A;redraw=last;click_events=2\x07$ \x1b]133;B\x07");
+    let regions: Vec<_> = parser.grid().prompts().copied().collect();
+    let ready = check_prompt(parser.grid(), None);
+    assert!(ready.is_ok());
+    for annotation in [
+        &b"\x1b]133;P;k=i\x07"[..],
+        b"\x1b]133;P;k=c\x07",
+        b"\x1b]133;I\x07",
+        b"\x1b]133;N\x07",
+        b"\x1b]9;12\x07",
+        b"\x1b]133;L\x07",
+    ] {
+        parser.advance(annotation);
+        let after: Vec<_> = parser.grid().prompts().copied().collect();
+        assert_eq!(after, regions, "{annotation:?} changed a region");
+        assert_eq!(check_prompt(parser.grid(), None), ready, "{annotation:?} changed readiness");
+    }
+}
+
+/// A pinned run keeps waiting through N, P and 9;12 after its C: only an A closes or evicts it.
+#[test]
+fn n_does_not_evict_pinned_run() {
+    let mut parser = parsed(READY);
+    let seq = check_prompt(parser.grid(), None).expect("ready");
+    assert!(parser.grid_mut().pin_run(seq));
+    parser.advance(b"make\r\n\x1b]133;C\x07");
+    parser.advance(b"\x1b]133;N\x07\x1b]9;12\x07\x1b]133;P;k=i\x07");
+    let run = parser.grid().pinned_run().expect("pinned");
+    assert!(!run.evicted, "an annotation evicted the run");
+    parser.advance(b"\x1b]133;D;0\x07\x1b]133;N\x07");
+    let run = parser.grid().pinned_run().expect("pinned");
+    assert_eq!(run.exit, Some(Some(0)));
+    assert!(!run.prompt_after_end, "only an A says the shell took control back");
+}

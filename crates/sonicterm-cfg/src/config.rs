@@ -419,6 +419,9 @@ pub struct NotificationsConfig {
     /// Minimum command duration, in seconds, before completion can notify.
     #[serde(default = "default_threshold_secs")]
     pub threshold_secs: u64,
+    /// Append the command's text, from an authenticated OSC 133 C, to the long-command
+    /// notification. Off by default: command text can hold secrets.
+    pub long_command_cmdline: bool,
     /// Where OSC 9 and OSC 777 program notifications go.
     pub osc9: Osc9Delivery,
     /// Mirror `OSC 9;4` progress to the taskbar, Dock or launcher.
@@ -477,6 +480,7 @@ impl Default for NotificationsConfig {
         Self {
             long_command: default_notifications_enabled(),
             threshold_secs: default_threshold_secs(),
+            long_command_cmdline: false,
             osc9: Osc9Delivery::default(),
             taskbar_progress: default_taskbar_progress(),
         }

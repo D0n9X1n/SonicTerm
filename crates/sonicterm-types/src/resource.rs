@@ -296,8 +296,8 @@ impl ResourceClass {
             // each reply's `Vec` header too: measured at 4,480 bytes for a
             // full queue, against the 2,048 the payloads alone predict.
             Self::ParserReply => ClassCoverage::MeasuredNegligible { per_pane_bytes: 8 * 1024 },
-            // 1024 bounded records of 40 bytes.
-            Self::CommandEvents => ClassCoverage::MeasuredNegligible { per_pane_bytes: 40 * 1024 },
+            // 1024 bounded records of 40 bytes, and one command text of at most 1 KiB.
+            Self::CommandEvents => ClassCoverage::MeasuredNegligible { per_pane_bytes: 41 * 1024 },
 
             // Decode buffers live inside `decode_inline_image`; the retained
             // result is charged as `InlineMediaRetained`.

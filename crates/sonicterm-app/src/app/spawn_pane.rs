@@ -808,12 +808,13 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         // Gate on: one clock read before lock(), three under the guard (four when a new sync epoch opens);
         // an armed echo watch reads the target cell around the parse and may lock its slot, all before the guard drops.
         let before_lock = counters.map(|_| now());
-        let (result, section) = {
+        let (result, section, started_cmdline) = {
             let mut parser = handles.parser.lock();
             let locked_at = before_lock.map(|_| now());
             let echo_before = counters
                 .and_then(|counters| counters.echo.pre_read(&handles.echo_cache, parser.grid()));
             let result = parser.advance_with_replies(remaining);
+            let started_cmdline = super::command_events::started_cmdline(&result.1, &parser);
             let parsed_at = before_lock.map(|_| now());
             if let (Some(counters), Some(before), Some(parsed_at)) =
                 (counters, echo_before, parsed_at)
@@ -841,7 +842,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             // A fair release hands the parser to a selected parked waiter, such as a frame collection,
             // before this worker can relock. On unwind the guard still drops through ordinary RAII release.
             MutexGuard::unlock_fair(parser);
-            (result, (locked_at, parsed_at, released_at))
+            (result, (locked_at, parsed_at, released_at), started_cmdline)
         };
         let (consumed, events, replies) = result;
         if let (
@@ -957,10 +958,13 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         }
 
         if !command_side_effects.is_empty() {
-            super::append_bounded_command_events(
-                &mut handles.command_events.lock(),
-                command_side_effects,
+            let mut queue = handles.command_events.lock();
+            super::command_events::track_cmdline(
+                &mut queue,
+                &command_side_effects,
+                started_cmdline,
             );
+            super::append_bounded_command_events(&mut queue, command_side_effects);
         }
         if reply_batch.len() + replies.len() + kitty_replies.len() > 32 * 1024 {
             // Flush before appending a complete dispatch that would exceed the batch bound; never split a reply.

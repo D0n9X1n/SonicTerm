@@ -613,65 +613,9 @@ impl Perform for Performer {
                 }
             }
             Some(133) => {
-                // OSC 133 ; <kind> [; <args>] ST — FinalTerm/WezTerm shell
-                // integration. Kinds:
-                //   A → prompt start
-                //   B → prompt end / editable input start
-                //   C → command output start
-                //   D [; exit_code] → command finished
-                let kind = params.get(1).and_then(|param| param.first().copied());
-                let admitted = self.admit_shell_marker(params.get(2..).unwrap_or(&[]));
-                // The newest marker decides the observed state, a dropped one included: a nested
-                // shell's tokenless markers mean the shell in front is not the verified one.
-                self.shell_state = if admitted == Some(true) {
-                    super::ShellIntegrationState::Verified
-                } else {
-                    // Not authenticated: admitted without a token, or refused.
-                    super::ShellIntegrationState::Unverified
-                };
-                let Some(authenticated) = admitted else {
-                    // When: `admit_shell_marker` refused the marker (a wrong token, or tokenless
-                    // after the pane authenticated), it changes neither the grid nor the events.
-                    tracing::debug!(target: "vt", "dropped an unauthenticated OSC 133 marker");
-                    return;
-                };
-                match kind {
-                    Some(b'A') => {
-                        self.grid.record_prompt_start();
-                        // A new prompt ends the program-status records a running program left, at
-                        // this point in the stream, so a later report in the same batch survives.
-                        self.end_transient_program_status();
-                        self.events.push(VtEvent::Command(CommandEvent::PromptStart));
-                    }
-                    Some(b'B') => {
-                        self.grid.record_input_start();
-                        self.events.push(VtEvent::Command(CommandEvent::PromptEnd));
-                    }
-                    Some(b'C') => {
-                        self.grid.record_output_start_marked(authenticated);
-                        self.events.push(VtEvent::Command(CommandEvent::CmdStart));
-                    }
-                    Some(b'D') => {
-                        let exit_i32 = params
-                            .get(2)
-                            .and_then(|param| std::str::from_utf8(param).ok())
-                            .and_then(|text| text.parse::<i32>().ok());
-                        // The source is read by key, the last one winning, wherever it sits.
-                        let source = params
-                            .get(2..)
-                            .unwrap_or(&[])
-                            .iter()
-                            .rev()
-                            .find_map(|param| param.strip_prefix(super::vt_osc::EXIT_SOURCE_PARAM))
-                            .and_then(sonicterm_grid::grid::ExitSource::from_param);
-                        self.grid.record_prompt_end_sourced(exit_i32, source, authenticated);
-                        let exit = exit_i32.and_then(|status| u8::try_from(status).ok());
-                        self.events.push(VtEvent::Command(CommandEvent::CmdEnd(exit)));
-                    }
-                    _ => {
-                        // When: kind is not a recognized shell marker, preserve prompt boundaries and emit no command event.
-                    }
-                }
+                // OSC 133 ; <kind> [; <args>] ST — FinalTerm/WezTerm shell integration: A-D
+                // markers and the L, N, P and I annotations.
+                self.shell_marker(params.get(1..).unwrap_or(&[]));
             }
             _ => {}
         }

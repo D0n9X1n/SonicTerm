@@ -47,6 +47,8 @@ cargo test -p sonicterm-vt
   never cut and run. Keep `live_capture_count` at most one, count the APC and the open
   transfer in `retained_amount` and `capture_progress`, end an open upload before a Sixel or
   iTerm2 capture reserves, and never read a file, temporary file or shared-memory medium.
+- OSC 133 annotations (L/N/P/I, A options) and OSC 9;12 pass `admit_annotation`, which never
+  latches, and update only the per-screen semantic state, never prompt regions.
 - `cancel_capture` is called by the host on a stalled transfer, and the
   sender is never told. It must leave the parser swallowing the remaining
   payload rather than returning to ground — a payload is printable ASCII

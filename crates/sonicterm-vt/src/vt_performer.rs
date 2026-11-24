@@ -132,6 +132,8 @@ impl Performer {
     }
 
     pub(super) fn advance_hard_line(&mut self, fill: Cell, carriage_return: bool) {
+        // LF, IND and NEL all end input an OSC 133 I said runs to the end of the line.
+        self.grid.end_semantic_line();
         let (top, bottom) = self.effective_scroll_region();
         let col = self.physical_cursor_col();
         let col = if carriage_return { 0 } else { col };
@@ -372,6 +374,8 @@ impl Performer {
         }
         self.grid.erase_screen_with(Cell::default());
         self.grid.goto(0, 0);
+        // The alternate screen's state left with it above; the primary's resets.
+        self.grid.reset_semantic();
         // RIS erases every screen and drops the alt buffer above, so no cell
         // can still reference an interned link. Clearing outright is cheaper
         // and no less correct than scanning to prove the set is empty.

@@ -11,6 +11,12 @@ if ($env:SONICTERM_SHELL_TOKEN -and -not (Test-Path variable:global:__sonicterm_
   $global:__sonicterm_prompt = $function:prompt
   $global:__sonicterm_readline = $function:PSConsoleHostReadLine
   function global:__sonicterm_mark([string]$kind) { "`e]133;$kind;sonicterm_token=$($global:__sonicterm_token)`a" }
+  # C with the line percent-encoded when its UTF-8 form is at most 1 KiB; SonicTerm shows the text
+  # only when the user opted in. A line that cannot be encoded (a lone surrogate) gets a bare C.
+  function global:__sonicterm_command([string]$line) {
+    if ([Text.Encoding]::UTF8.GetByteCount($line) -gt 1024) { return 'C' }
+    try { "C;cmdline_url=$([Uri]::EscapeDataString($line))" } catch { 'C' }
+  }
   # Whether $line can run a native program: any command that is not a cmdlet (an application, a
   # function or script that may call one, a dynamic or unknown name) counts. Only cmdlets are certain.
   # It runs only for a failed line, after the line ran. A line over 16,384 UTF-16 code units, one
@@ -83,7 +89,7 @@ if ($env:SONICTERM_SHELL_TOKEN -and -not (Test-Path variable:global:__sonicterm_
       # The newest error record is taken before anything else here could add one.
       $global:__sonicterm_error = if ($global:Error.Count -gt 0) { $global:Error[0] } else { $null }
       $global:__sonicterm_line = $line
-      [Console]::Write((__sonicterm_mark 'C'))
+      [Console]::Write((__sonicterm_mark (__sonicterm_command $line)))
     }
     $line
   }

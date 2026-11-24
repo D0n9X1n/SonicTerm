@@ -599,8 +599,9 @@ URI to 8 KiB and client id to 1 KiB.
   from the parameter field; other parameters are not treated as the client id.
 - **OSC 9 and OSC 777:** the parser validates and bounds these; the host applies its policy.
   - `9;<n>` whose `n` is all digits with a value in `1..=12`, leading zeros included (`001`),
-    is a ConEmu subcommand and never a notification. Only `4` (progress) and `9` (working
-    directory, above) are implemented; the others are ignored.
+    is a ConEmu subcommand and never a notification. Only `4` (progress), `9` (working
+    directory, above) and `12` (a prompt mark, under OSC 133 below) are implemented; the
+    others are ignored.
   - `9;4;<st>[;<pr>]`: `st` is one digit, `0` clear, `1` normal, `2` error, `3` indeterminate,
     `4` paused. `pr` is one to three digits, clamped to 100; a missing `pr` is 0. Any other
     form (a fraction, a sign, an empty value after a separator, four digits) is ignored and
@@ -627,6 +628,52 @@ URI to 8 KiB and client id to 1 KiB.
   which marks the command abandoned). No exit code is kept. A queue that dropped
   events resets the state before its retained tail, a pane whose process exited is
   `Unknown`, and the state moves with the pane to another tab or window.
+  - **Annotations.** `L`, `N`, `P` and `I`, the options on `A`, and ConEmu's `9;12` change only
+    a per-screen semantic state: a mode (output, prompt of a kind, input), an anchor row, a
+    generation, the prompt options and the newest command text. They never open, close or
+    evict a prompt region, so `run_command` readiness, pinned runs and exit trust depend on
+    `A`, `B`, `C` and `D` alone. The primary and alternate screens keep separate states.
+  - `A`, `N` and `9;12` start a fresh line (CR then index when the cursor is off column 0; at
+    the bottom margin the index scrolls and can evict the oldest history row), start a new
+    generation anchored at the cursor row, and reset the options before reading their own.
+    `L` is the fresh line alone, accepted bare or with only `sonicterm_token=`; any other
+    parameter makes it invalid. `P` with `k=c` or `k=s` joins the current anchor (as `k=i`
+    without one); `P` with `k=i`, `k=r` or no `k` starts a generation without a fresh line
+    and keeps the options. `B` starts input, `I` starts input that ends at the next LF, IND or
+    NEL, and `C` and `D` return to output, keeping the anchor until the next prompt. RIS
+    resets both screens, and an anchor whose row leaves history is dropped; each also starts
+    a new generation.
+  - Annotations pass the token check without latching: with no pane token, or with the right
+    one, they are admitted; a wrong token is refused; a tokenless one is refused once the pane
+    latched. Only `A`, `B`, `C` and `D` latch. The right token leaves the observed shell state
+    as it was; a tokenless or refused annotation marks it unverified. A refused annotation
+    changes nothing, not even the cursor.
+  - Options are read from their first occurrence; a malformed value is unset. `k` takes `i`,
+    `r`, `c` or `s`; `redraw` takes `0`, `1` or `last`; `click_events` `1` or `2`; `cl`
+    `line`, `m`, `v` or `w`; `special_key` `0` or `1`. They are stored for later use. `aid` and
+    `err` are ignored, and WezTerm's `D;<code>;aid=…` keeps its positional exit code.
+  - Command text is taken only from an authenticated `C`. `cmdline=` (bash `printf %q`
+    quoting: `\x`, `'…'` and `$'…'` escapes) wins over `cmdline_url=` (percent-encoded) in
+    any position. A value over 4 KiB raw or 1 KiB decoded, malformed or not UTF-8 is dropped.
+    One text is kept per screen, on its newest region, until the next prompt; it is charged to
+    the grid's retained bytes and its `Debug` shows only its length. It is never evaluated and
+    is shown only in the long-command notification with `long_command_cmdline` on; for that the
+    pane's command-event queue holds one copy from `C` until the drain after a `D` that ended a
+    run of a second or more, counted in its class. SonicTerm's
+    shell integration sends `cmdline_url=` on every `C` (bash only for a line history
+    recorded) and `redraw=last` on bash's `A`.
+  - Reference behavior, Ghostty (G), kitty (K) and WezTerm (W):
+
+    | Form | G | K | W | SonicTerm |
+    | --- | --- | --- | --- | --- |
+    | `L` fresh line | bare only | no | yes | bare or with only the token |
+    | `N` | as `A` | no | fresh line and prompt | as `A`, no region |
+    | `P` `k=` | yes | no | yes | yes, no region |
+    | `I` input to end of line | yes | no | yes | yes |
+    | options when absent on `A` | kept | reset | not read | reset |
+    | `redraw`, `click_events`, `cl`, `special_key` | read | read | `cl` parsed | stored |
+    | `C` `cmdline`, `cmdline_url` | parsed | shown | no | authenticated `C` only, shown when opted in |
+    | `9;12` | as `A` | no | no | as `A` without options, no region |
 - **OSC 1337 `SetUserVar`:** per-pane user variables, as WezTerm's shell integration sends
   them (`ESC ] 1337 ; SetUserVar=NAME=<base64> BEL`). The raw collector owns the whole payload,
   at most 64 KiB after `1337;`, and applies it only once its BEL or ST arrived; a longer one, or

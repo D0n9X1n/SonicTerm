@@ -221,6 +221,10 @@ pub struct CommandQueue {
     /// The bound dropped older events since the drain last ran, so the state they would have set
     /// is unknown and the drain resets before applying the retained tail.
     pub overflowed: bool,
+    /// The one command text this pane holds for its long-command notification: the newest C's
+    /// text, with the instant of the D that ended it after a run of a second or more. The drain
+    /// takes a stamped text and pairs it with that D; a new C replaces it.
+    pub cmdline: Option<(sonicterm_grid::grid::CmdlineText, Option<Instant>)>,
 }
 
 impl std::ops::Deref for CommandQueue {

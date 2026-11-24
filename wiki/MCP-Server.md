@@ -367,6 +367,10 @@ in the pane can print them. A program that printed a fake `D;0` could otherwise 
   first prompt, before you can type, so input typed while a slow startup file is still
   loading leaves that pane unverified. A script opened in a new tab is typed without its
   Enter and runs nothing, so it does not count as input.
+- OSC 133 annotations (`L`, `N`, `P`, `I`, the options on `A`) and ConEmu's `9;12` never
+  latch the pane and never change `run_command` readiness, a pinned run or `exit_verified`:
+  they update only the screen's semantic state. A tokenless one after the latch is dropped
+  like any other marker. See [Terminal IO and VT](Terminal-IO-and-VT).
 - SonicTerm removes any `SONICTERM_SHELL_TOKEN` it inherited, for example when started
   from another SonicTerm pane, so a pane's process holds only its own secret.
 - A pane started with a program to run directly (`-e` or `--command`, a
@@ -402,6 +406,11 @@ eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+, in ~/.bashrc
 ```powershell
 sonicterm-mcp --shell-integration pwsh | Out-String | Invoke-Expression   # PowerShell 7+, in $PROFILE
 ```
+
+Each integration's `C` carries the command line, percent-encoded as `cmdline_url=` when it is
+at most 1 KiB; bash sends it only for a line its history recorded, so a line history ignored
+never carries an older command's text. bash's `A` declares `redraw=last`. SonicTerm shows the
+text only in the long-command notification, and only with `long_command_cmdline` on.
 
 The PowerShell integration needs PSReadLine, which PowerShell 7 loads in every
 interactive console; without it the script loads nothing, so `run_command` refuses

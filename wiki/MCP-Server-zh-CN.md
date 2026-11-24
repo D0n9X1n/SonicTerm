@@ -296,6 +296,9 @@ OSC 133 标记与命令自身的输出走同一条数据流，因此窗格中的
   每个命令的环境中，因此一旦有输入到达窗格，正确的密钥也不再锁定该窗格；其标记按未验证处理，与没有密钥
   时相同。该集成在第一个提示符处锁定，早于你能输入的时刻，因此在缓慢的启动文件仍在加载时输入，会使该
   窗格保持未验证。在新标签页中打开的脚本只键入、不带回车，不运行任何内容，因此不算输入。
+- OSC 133 注解（`L`、`N`、`P`、`I`，以及 `A` 上的选项）和 ConEmu 的 `9;12` 从不锁定窗格，也从不改变
+  `run_command` 的就绪判断、固定的运行或 `exit_verified`：它们只更新该屏幕的语义状态。锁定之后不带密钥的
+  注解与其他标记一样被丢弃。见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。
 - SonicTerm 会移除它继承的任何 `SONICTERM_SHELL_TOKEN`（例如从另一个 SonicTerm 窗格启动时），因此窗格
   中的进程只持有自己的密钥。
 - 直接运行某个程序启动的窗格（`-e` 或 `--command`、在 SonicTerm 中打开的链接或可执行文件）不会得到密钥：没有 shell 集成
@@ -327,6 +330,10 @@ eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+，写入 ~/.bashr
 ```powershell
 sonicterm-mcp --shell-integration pwsh | Out-String | Invoke-Expression   # PowerShell 7+，写入 $PROFILE
 ```
+
+每个集成的 `C` 都携带命令行：不超过 1 KiB 时以 `cmdline_url=` 百分号编码发送；bash 只对其历史记录下的行
+发送，因此被历史忽略的行绝不会携带更早命令的文本。bash 的 `A` 声明 `redraw=last`。SonicTerm 只在长命令
+通知中显示该文本，且只在开启 `long_command_cmdline` 时显示。
 
 PowerShell 集成需要 PSReadLine，PowerShell 7 会在每个交互式控制台中加载它；没有它时脚本不加载任何内容，
 因此 `run_command` 会拒绝该窗格（`no_shell_integration`），而不是等待标记。它包装 `prompt`（D、A，以及在你的

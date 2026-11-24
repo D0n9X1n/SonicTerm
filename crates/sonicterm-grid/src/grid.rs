@@ -318,6 +318,10 @@ pub struct Grid {
     /// The one command run an agent is waiting on, kept apart from the evictable deque; see
     /// [`Grid::pin_run`]. Never moves with the alternate-screen swap.
     pinned_run: Option<PinnedRun>,
+    /// This screen's semantic prompt state; moves with the alternate-screen swap.
+    semantic: SemanticState,
+    /// The last alternate screen's final semantic generation, so the next one starts past it.
+    alt_semantic_floor: u64,
     autowrap: bool,
     pending_wrap: bool,
 }
@@ -360,6 +364,8 @@ impl Grid {
             prompts: VecDeque::new(),
             prompt_seq_next: 0,
             pinned_run: None,
+            semantic: SemanticState::default(),
+            alt_semantic_floor: 0,
             autowrap: true,
             pending_wrap: false,
         }
@@ -575,6 +581,13 @@ mod grid_retention;
 #[path = "grid_prompts.rs"]
 mod grid_prompts;
 pub use grid_prompts::{CommandRegion, CommandSpan, ExitSource, PinnedRun, RowToken};
+
+#[path = "grid_semantic.rs"]
+mod grid_semantic;
+pub use grid_semantic::{
+    ClickEvents, ClickLine, CmdlineText, PromptClick, PromptKind, PromptOptions, PromptRedraw,
+    SemanticMode, SemanticState, MAX_CMDLINE_BYTES,
+};
 
 #[cfg(test)]
 #[path = "grid_test_support.rs"]

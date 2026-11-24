@@ -139,6 +139,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 | --- | --- | --- |
 | `long_command` | `false` | 在所有平台上，运行超过 `threshold_secs` 的命令结束时（OSC 133 shell 集成）发出桌面通知，与 `osc9` 无关。它没有来源窗口，因此不受焦点规则限制。各平台使用的服务见[平台集成](Platform-Integration-zh-CN)。 |
 | `threshold_secs` | `10` | 命令报告的耗时必须大于此值。 |
+| `long_command_cmdline` | `false` | 在长命令通知后附加该命令的文本，控制字符和格式字符替换为空格，并截断到 120 个字符。该文本只来自经过认证的 OSC 133 `C`（SonicTerm 的 shell 集成），从不被执行；由于命令行可能包含机密，默认关闭。 |
 | `osc9` | `"app"` | 程序通知（OSC 9 文本、OSC 777 `notify`，以及 herdr 的 `delivery = "terminal"` 发送的 kitty OSC 99）的去向：`"app"` 在窗格所在窗口显示 SonicTerm 的应用内通知；`"desktop"` 在该窗口未获得焦点时额外发出桌面通知（在 macOS 上为 SonicTerm 不是活动应用时，因为 macOS 不对活动应用显示横幅）；herdr 的终端通知需要 herdr 的 `delivery = "terminal"` 和这里的 `osc9 = "desktop"` 同时开启；`"off"` 忽略它们。其他值会导致加载失败。 |
 | `taskbar_progress` | `true` | 将 `OSC 9;4` 进度同步到 Windows 任务栏、macOS 程序坞徽标和 Linux 启动器条目；见[平台集成](Platform-Integration-zh-CN)。重新加载时设为 `false` 会立即清除所有位置。 |
 

@@ -102,6 +102,9 @@ impl Grid {
             self.row_content_seq.push_back(changed_at);
         }
         if self.scrollback_limit == 0 {
+            // Without history each scrolled row was recycled, so the semantic anchor moves up with
+            // its row and is evicted with it.
+            self.rebase_semantic(line_count as u64);
             // With no history, absolute rows are fixed screen positions. Every
             // one received different content after the rotation, not just the
             // newly blank row at the bottom.

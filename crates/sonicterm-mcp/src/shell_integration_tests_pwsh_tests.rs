@@ -212,6 +212,9 @@ fn an_interactive_pwsh_emits_tokened_markers_in_order() {
         "the D sources: {found:?}"
     );
     assert!(output.contains("seen=[3]"), "a command saw a changed $LASTEXITCODE: {output:?}");
+    // Each C carries the line PSReadLine returned, percent-encoded.
+    let first = cmdlines(&output).into_iter().next().flatten();
+    assert_eq!(first.as_deref(), Some(child_exit.trim_end_matches('\r')), "{found:?}");
     // The cancelled line's D follows its prompt's A B with no C between: `run_command` reads it
     // as `not_started`.
     assert!(kinds.contains("ABDAB"), "a cancelled line ends without a C: {kinds}");

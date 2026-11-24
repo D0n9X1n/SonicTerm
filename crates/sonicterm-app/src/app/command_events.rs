@@ -1,6 +1,8 @@
 //! Shell-integration command events: bounded per-pane queues, tab status polling, and
 //! long-command notifications.
 
+use sonicterm_grid::grid::CmdlineText;
+
 use super::desktop_notify::DesktopNotice;
 use super::*;
 
@@ -105,7 +107,7 @@ pub fn poll_command_events_for_tab_state(
             for event in queue.iter() {
                 pane.command_state.apply(event);
             }
-            events.extend(queue.drain(..));
+            events.extend(drain_paired(&mut queue));
         }
     }
     if events.is_empty() {
@@ -114,13 +116,13 @@ pub fn poll_command_events_for_tab_state(
         return false;
     }
     let mut marked = false;
-    for pane_event in events {
+    for (pane_event, cmdline) in events {
         match pane_event.event {
             CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(pane_event.at),
             CommandEvent::CmdEnd(exit) => {
                 tab_state.command =
                     CommandStatus::Done { exit, until: pane_event.at + Duration::from_secs(3) };
-                maybe_notify_long_command(config, pane_event.duration, exit);
+                maybe_notify_long_command(config, pane_event.duration, exit, cmdline.as_ref());
                 let ran = pane_event.duration.zip(finished_min);
                 if let Some((duration, _)) = ran.filter(|(duration, min)| duration >= min) {
                     // `mark` refuses the active tab, so a command the user watched marks nothing.
@@ -164,18 +166,85 @@ pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Co
     marked
 }
 
-fn maybe_notify_long_command(config: &Config, duration: Option<Duration>, exit: Option<u8>) {
-    if let Some(body) = long_command_message(config, duration, exit) {
+/// Keep `queue`'s one command-text slot in step with `events`, in parse order: a C holds `started`
+/// (read under the parser lock for this section), a D after a run of a second or more stamps the
+/// held text with its instant for the drain, and any other D drops an unstamped text. Only a run
+/// that long can pass the notification threshold, so a burst of short commands holds no text.
+pub(super) fn track_cmdline(
+    queue: &mut CommandQueue,
+    events: &[PaneCommandEvent],
+    started: Option<CmdlineText>,
+) {
+    for event in events {
+        match event.event {
+            CommandEvent::CmdStart => queue.cmdline = started.clone().map(|text| (text, None)),
+            CommandEvent::CmdEnd(_) => {
+                let unstamped = matches!(queue.cmdline, Some((_, None)));
+                let long = event.duration.is_some_and(|ran| ran >= Duration::from_secs(1));
+                if let Some((_, ended)) = queue.cmdline.as_mut().filter(|_| unstamped && long) {
+                    *ended = Some(event.at);
+                } else if unstamped {
+                    // When: the held text is `unstamped` and this D ended a short run (or none),
+                    // no notification can follow, so the text is dropped now.
+                    queue.cmdline = None;
+                }
+            }
+            CommandEvent::PromptStart | CommandEvent::PromptEnd => {
+                // When: the event is a prompt mark, it neither starts nor ends a command.
+            }
+        }
+    }
+}
+
+/// Drain `queue` in parse order, pairing a stamped command text with the D it was stamped by.
+/// The stamped text is taken either way, so it never outlives the drain.
+pub(super) fn drain_paired(
+    queue: &mut CommandQueue,
+) -> Vec<(PaneCommandEvent, Option<CmdlineText>)> {
+    let mut stamped = queue.cmdline.take_if(|slot| slot.1.is_some());
+    queue
+        .events
+        .drain(..)
+        .map(|event| {
+            let owns = matches!(event.event, CommandEvent::CmdEnd(_))
+                && stamped.as_ref().is_some_and(|(_, ended)| *ended == Some(event.at));
+            let text = owns.then(|| stamped.take()).flatten().map(|(text, _)| text);
+            (event, text)
+        })
+        .collect()
+}
+
+/// The primary screen's command text when `events` started a command, read under the parser lock
+/// before the event loop: an A later in the same batch clears it in the grid.
+pub(super) fn started_cmdline(
+    events: &[sonicterm_vt::vt::VtEvent],
+    parser: &sonicterm_vt::vt::Parser,
+) -> Option<CmdlineText> {
+    let started = events
+        .iter()
+        .any(|event| matches!(event, sonicterm_vt::vt::VtEvent::Command(CommandEvent::CmdStart)));
+    started.then(|| parser.grid().primary_screen().semantic().cmdline.clone()).flatten()
+}
+
+fn maybe_notify_long_command(
+    config: &Config,
+    duration: Option<Duration>,
+    exit: Option<u8>,
+    cmdline: Option<&CmdlineText>,
+) {
+    if let Some(body) = long_command_message(config, duration, exit, cmdline) {
         notify_command_done(body);
     }
 }
 
 /// The desktop notification a finished command raises: only with `long_command` on (whatever
-/// `osc9` is) and after it ran past `threshold_secs`.
+/// `osc9` is) and after it ran past `threshold_secs`. Its `cmdline` is appended only with
+/// `long_command_cmdline` on, sanitized and cut to [`CMDLINE_NOTICE_CHARS`].
 pub(super) fn long_command_message(
     config: &Config,
     duration: Option<Duration>,
     exit: Option<u8>,
+    cmdline: Option<&CmdlineText>,
 ) -> Option<String> {
     let duration = duration?;
     if !config.notifications.long_command {
@@ -188,11 +257,33 @@ pub(super) fn long_command_message(
         // waiting long enough for a desktop interruption to be welcome.
         return None;
     }
-    Some(match exit {
+    let message = match exit {
         Some(0) => format!("Command completed successfully after {}s", duration.as_secs()),
         Some(code) => format!("Command failed with exit code {code}"),
         None => format!("Command completed after {}s", duration.as_secs()),
+    };
+    let shown = cmdline.filter(|_| config.notifications.long_command_cmdline);
+    Some(match shown {
+        Some(cmdline) => format!("{message}: {}", cmdline_display(cmdline.as_str())),
+        None => message,
     })
+}
+
+/// The most characters of a command's text a long-command notification shows.
+const CMDLINE_NOTICE_CHARS: usize = 120;
+
+/// Command `text` for display: control and format characters (Unicode Cc, Cf) become spaces, so
+/// it stays one line and cannot reorder or hide the message, then it is cut to
+/// [`CMDLINE_NOTICE_CHARS`]. The text is only shown, never evaluated.
+fn cmdline_display(text: &str) -> String {
+    use unicode_general_category::{get_general_category, GeneralCategory};
+    text.chars()
+        .map(|character| match get_general_category(character) {
+            GeneralCategory::Control | GeneralCategory::Format => ' ',
+            _ => character,
+        })
+        .take(CMDLINE_NOTICE_CHARS)
+        .collect()
 }
 
 /// Raise a desktop notification for a finished command, on every platform; it has no source

@@ -97,7 +97,7 @@ fn strip_one_quote_pair(text: &str) -> &str {
     text.strip_prefix('"').and_then(|inner| inner.strip_suffix('"')).unwrap_or(text)
 }
 
-fn percent_decode_strict(encoded: &str) -> Option<String> {
+pub(super) fn percent_decode_strict(encoded: &str) -> Option<String> {
     let bytes = encoded.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -153,7 +153,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 }
 
 /// The OSC 133 parameter a SonicTerm shell integration appends to every marker.
-const SHELL_TOKEN_PARAM: &[u8] = b"sonicterm_token=";
+pub(super) const SHELL_TOKEN_PARAM: &[u8] = b"sonicterm_token=";
 /// The OSC 133 D parameter naming where its exit code came from; SonicTerm's own key.
 pub(super) const EXIT_SOURCE_PARAM: &[u8] = b"sonicterm_src=";
 
@@ -200,6 +200,25 @@ impl Performer {
             None => Some(false),
         }
     }
+    /// Whether an OSC 133 annotation (L, N, P, I) or a 9;12 with parameters `extra` is admitted.
+    /// It never latches: with no pane token or the right token it is admitted, a wrong token is
+    /// refused, and a tokenless one is admitted only while the pane is not latched. The right
+    /// token leaves the observed shell state as it was; anything else marks it unverified.
+    pub(super) fn admit_annotation(&mut self, extra: &[&[u8]]) -> bool {
+        let carried = extra.iter().find_map(|param| param.strip_prefix(SHELL_TOKEN_PARAM));
+        let Some(expected) = self.shell_token.as_deref() else {
+            // When: the pane has no `shell_token`, every annotation is admitted unauthenticated.
+            self.shell_state = super::ShellIntegrationState::Unverified;
+            return true;
+        };
+        if carried.is_some_and(|token| constant_time_eq(token, expected.as_bytes())) {
+            // When: the right token is `carried`, admit it and keep the observed state.
+            return true;
+        }
+        self.shell_state = super::ShellIntegrationState::Unverified;
+        // A wrong token is a forgery and, after the latch, a tokenless one is a downgrade.
+        carried.is_none() && !self.shell_authenticated
+    }
     /// Read one OSC 99: a completed notification becomes a host event, and a query is answered
     /// with the parts and occasions SonicTerm shows.
     fn receive_kitty_notify(&mut self, content: &[u8]) {
@@ -226,6 +245,7 @@ impl Performer {
                 let occasion = NotifyOccasion::Always;
                 self.events.push(VtEvent::Notify { title, body, id: None, occasion });
             }
+            program::ProgramOsc::PromptMark => self.conemu_prompt_mark(),
             program::ProgramOsc::Ignored => {
                 // When: program is ProgramOsc::Ignored, nothing changes.
             }

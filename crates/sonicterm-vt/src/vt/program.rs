@@ -42,7 +42,9 @@ pub(super) enum ProgramOsc {
         /// The text.
         body: String,
     },
-    /// Malformed, a ConEmu subcommand other than `4`, or another OSC 777 subcommand.
+    /// `9;12`: ConEmu's prompt start, whatever follows it.
+    PromptMark,
+    /// Malformed, a ConEmu subcommand other than `4` or `12`, or another OSC 777 subcommand.
     Ignored,
 }
 
@@ -53,12 +55,12 @@ pub(super) fn parse_osc9(params: &[&[u8]]) -> ProgramOsc {
         return ProgramOsc::Ignored;
     };
     if let Some(subcommand) = conemu_subcommand(first) {
-        // When: conemu_subcommand names 1..=12, it is never a notification; only 4 is implemented.
-        return if subcommand == 4 {
-            parse_progress(&params[1..])
-        } else {
-            // When: subcommand is not 4, that ConEmu command is not implemented.
-            ProgramOsc::Ignored
+        // When: conemu_subcommand names 1..=12, it is never a notification; 4 and 12 are read.
+        return match subcommand {
+            4 => parse_progress(&params[1..]),
+            // Ghostty reads `9;12` as a prompt start and ignores what follows it.
+            12 => ProgramOsc::PromptMark,
+            _ => ProgramOsc::Ignored,
         };
     }
     let Some(body) = joined_text(params) else {

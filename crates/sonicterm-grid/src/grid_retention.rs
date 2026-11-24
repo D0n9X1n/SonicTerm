@@ -118,12 +118,17 @@ impl Grid {
             rows.saturating_add(dirty)
                 .saturating_add(content_stamps)
                 .saturating_add(prompts)
+                .saturating_add(screen.semantic_bytes())
                 .saturating_add(std::mem::size_of::<Grid>())
         });
         let dirty = self.dirty_rows.capacity() * std::mem::size_of::<bool>()
             + self.dirty_stamps.capacity() * std::mem::size_of::<u64>();
         let content_stamps = self.row_content_seq.capacity() * std::mem::size_of::<u64>();
-        primary.saturating_add(saved).saturating_add(dirty).saturating_add(content_stamps)
+        primary
+            .saturating_add(saved)
+            .saturating_add(dirty)
+            .saturating_add(content_stamps)
+            .saturating_add(self.semantic_bytes())
     }
 
     /// Rows retained across primary and alternate screens.
