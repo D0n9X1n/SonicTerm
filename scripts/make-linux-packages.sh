@@ -84,6 +84,7 @@ install -m 0644 \
   "$root/assets/fonts/LICENSE-SymbolsNerdFont.txt" \
   "$payload/LICENSE-SymbolsNerdFont-MIT"
 install -m 0644 "$root/crates/sonicterm-winit/LICENSE" "$payload/LICENSE-winit-Apache-2.0"
+install -m 0644 "$root/crates/sonicterm-vt/LICENSE-X11-rgb" "$payload/LICENSE-X11-rgb"
 install -m 0644 "$root/README.md" "$payload/README.md"
 find "$payload" -type d -exec chmod 0755 {} +
 find "$payload" -type f ! -path "$payload/sonicterm" ! -path "$payload/sonicterm-mcp" \
@@ -168,6 +169,7 @@ install -m 0644 "$payload/LICENSE-SymbolsNerdFont-MIT" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-SymbolsNerdFont-MIT"
 install -m 0644 "$payload/LICENSE-winit-Apache-2.0" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"
+install -m 0644 "$payload/LICENSE-X11-rgb" "$deb_root/usr/share/doc/sonicterm/LICENSE-X11-rgb"
 install -m 0644 "$payload/README.md" "$deb_root/usr/share/doc/sonicterm/README.md"
 
 substvars="$work/substvars"

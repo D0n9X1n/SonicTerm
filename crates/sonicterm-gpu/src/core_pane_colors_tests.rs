@@ -10,6 +10,8 @@ fn program_colors() -> ColorOverrides {
     overrides.set_dynamic(DynamicColor::Cursor, Some((7, 8, 9)));
     overrides.set_palette(1, Some((100, 110, 120)));
     overrides.set_palette(200, Some((130, 140, 150)));
+    // The parser moves the generation once for a request that changed a drawn color.
+    overrides.advance_generation();
     overrides
 }
 
@@ -100,6 +102,7 @@ fn caches_and_the_frame_key_follow_the_override_generation() {
     assert_ne!(first_identity, 0);
     assert_ne!(pane_colors_identity([(8, Some(&overrides))]), first_identity);
     overrides.set_palette(1, Some((0, 0, 0)));
+    overrides.advance_generation();
     assert_ne!(PaneColors::new(&theme, Some(&overrides)).style_rev(42), first_rev);
     assert_ne!(pane_colors_identity([(7, Some(&overrides))]), first_identity);
     let changed = WindowIdentity { pane_colors: first_identity, ..Default::default() };
@@ -131,4 +134,20 @@ fn selection_and_cursor_text_follow_the_program_colors() {
     assert_eq!(program.selection_rgba(highlight), [0.5, 0.0, 0.0, 0.5]);
     assert_eq!(program.selection_foreground_rgba(), Some([0.0, 1.0, 0.0, 1.0]));
     assert_eq!(program.cursor_text_rgba(cursor_text), [0.0, 0.0, 1.0, 1.0]);
+}
+
+/// A store whose generation never moved holds only overrides equal to the colors already drawn:
+/// it keeps the theme rows' revision and adds nothing to the frame key, so a storage-only set
+/// repaints nothing; its first drawn change gives it its own revision and identity.
+#[test]
+fn a_presence_only_store_shares_the_theme_rows_and_frame_key() {
+    let theme = Theme::default();
+    let mut overrides = ColorOverrides::default();
+    overrides.set_dynamic(DynamicColor::Foreground, Some((1, 2, 3)));
+    assert_eq!(overrides.generation(), 0);
+    assert_eq!(PaneColors::new(&theme, Some(&overrides)).style_rev(42), 42);
+    assert_eq!(pane_colors_identity([(7, Some(&overrides)), (8, None)]), 0);
+    overrides.advance_generation();
+    assert_ne!(PaneColors::new(&theme, Some(&overrides)).style_rev(42), 42);
+    assert_ne!(pane_colors_identity([(7, Some(&overrides)), (8, None)]), 0);
 }

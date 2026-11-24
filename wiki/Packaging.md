@@ -29,7 +29,9 @@ check-version` rejects a tag that does not match every workspace package.
 First-party packaging executables are direct children of `scripts/`.
 
 Every package includes the pinned, statically linked winit dependency's
-`crates/sonicterm-winit/LICENSE` as `LICENSE-winit-Apache-2.0`.
+`crates/sonicterm-winit/LICENSE` as `LICENSE-winit-Apache-2.0`, and the X.Org notice of the
+X11 color-name table compiled into the parser, `crates/sonicterm-vt/LICENSE-X11-rgb`, as
+`LICENSE-X11-rgb`.
 
 ## App icon
 
@@ -181,7 +183,7 @@ the bundle seal: an Intel linker leaves it unsigned, and the seal refuses an
 unsigned nested executable.
 
 After native dependency collection, the script adds `LICENSE-winit-Apache-2.0`
-to `Contents/Resources/licenses`. After assembling all resources, it applies and
+and `LICENSE-X11-rgb` to `Contents/Resources/licenses`. After assembling all resources, it applies and
 verifies an ad-hoc signature. It does not use an Apple Developer ID and does not
 notarize. A downloaded package can therefore show the standard
 unidentified-developer warning; Finder's **Open** context-menu action allows the first launch.
@@ -331,6 +333,7 @@ SonicTerm/
 ├── sonicterm-windows.exe
 ├── sonicterm-mcp.exe
 ├── LICENSE-winit-Apache-2.0
+├── LICENSE-X11-rgb
 ├── conpty/
 │   ├── conpty.dll
 │   ├── OpenConsole.exe
@@ -427,6 +430,7 @@ SonicTerm-<tag>-linux-x86_64/
 ├── LICENSE
 ├── LICENSE-SymbolsNerdFont-MIT
 ├── LICENSE-winit-Apache-2.0
+├── LICENSE-X11-rgb
 └── README.md
 ```
 
@@ -442,7 +446,7 @@ The Debian package is `SonicTerm-<tag>-linux-x86_64.deb` and installs:
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 /usr/share/icons/hicolor/{16,22,24,32,48,64,128,256,512}x…/apps/com.d0n9x1n.SonicTerm.png
 /usr/share/icons/hicolor/scalable/apps/com.d0n9x1n.SonicTerm.svg
-/usr/share/doc/sonicterm/{copyright,LICENSE-SymbolsNerdFont-MIT,LICENSE-winit-Apache-2.0,README.md}
+/usr/share/doc/sonicterm/{copyright,LICENSE-SymbolsNerdFont-MIT,LICENSE-winit-Apache-2.0,LICENSE-X11-rgb,README.md}
 ```
 
 The builder checks x86_64 ELF identity and rejects GLIBC requirements newer

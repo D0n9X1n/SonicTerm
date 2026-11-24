@@ -75,6 +75,7 @@ fn row(width: usize) -> CachedRow {
                 end_col: 1,
                 style: UnderlineStyle::Single,
                 color: Color::Default,
+                strikethrough: false,
             };
             width / 8
         ],

@@ -164,6 +164,38 @@ pub(super) fn underline_key(cell: &Cell) -> Option<(UnderlineStyle, Color)> {
         .then(|| (cell.underline_style(), cell.underline_color().unwrap_or(cell.fg)))
 }
 
+/// The decoration color of an SGR 9 `cell`: the color an underline would take (the SGR 58 color,
+/// else the cell foreground); `None` for a cell that is not struck through.
+pub(super) fn strikethrough_key(cell: &Cell) -> Option<Color> {
+    cell.flags.contains(CellFlags::STRIKETHROUGH).then(|| cell.underline_color().unwrap_or(cell.fg))
+}
+
+/// Push one strikethrough bar `thickness` tall across `width` pixels from `left`, centred on the
+/// middle of the cell row whose top is `top` and height `cell_h`, in `color`; nothing for an empty
+/// span.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_strikethrough_quad(
+    out: &mut Vec<QuadInstance>,
+    left: f32,
+    top: f32,
+    width: f32,
+    cell_h: f32,
+    thickness: f32,
+    surface_w: f32,
+    surface_h: f32,
+    color: [f32; 4],
+) {
+    if width <= 0.0 {
+        // When: `width` is not positive, the span covers no pixels.
+        return;
+    }
+    let bar_top = top + (cell_h - thickness) * 0.5;
+    out.push(QuadInstance::sharp(
+        px_to_ndc(left, bar_top, width, thickness, surface_w, surface_h),
+        color,
+    ));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_underline_quads(
     out: &mut Vec<QuadInstance>,

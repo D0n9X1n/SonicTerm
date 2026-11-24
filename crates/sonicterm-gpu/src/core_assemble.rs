@@ -39,8 +39,16 @@ impl GpuRenderer {
             };
         }
         let now = Instant::now();
-        let broadcast_participant_ids: Vec<u64> =
-            panes.iter().filter(|pane| pane.is_broadcast_participant).map(|pane| pane.id).collect();
+        // One pass over the panes collects the broadcast participants and the color identity, so
+        // a frame without program colors makes no extra pane scan for them.
+        let mut broadcast_participant_ids: Vec<u64> = Vec::new();
+        let mut pane_colors_digest = PaneColorsDigest::default();
+        for pane in panes.iter() {
+            if pane.is_broadcast_participant {
+                broadcast_participant_ids.push(pane.id);
+            }
+            pane_colors_digest.add(pane.id, pane.colors);
+        }
         // Reused while every pane's media revision matches the last frame's.
         let (retained_inline_media_bytes, inline_media_hash) = self.media_identity.figures(panes);
         self.retained_inline_media_bytes = retained_inline_media_bytes;
@@ -232,9 +240,7 @@ impl GpuRenderer {
                     close_override: u8::from(self.tab_close_override.is_some()),
                     broadcast_participants_hash,
                     inline_media_hash,
-                    pane_colors: pane_colors_identity(
-                        panes.iter().map(|pane| (pane.id, pane.colors)),
-                    ),
+                    pane_colors: pane_colors_digest.finish(),
                     hovered_url_cells,
                     process_privileged,
                     subpixel_aa,

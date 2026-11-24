@@ -699,9 +699,9 @@ pub use settings::RendererSettings;
 
 #[path = "core_pane_colors.rs"]
 mod pane_colors;
-use pane_colors::pane_colors_identity;
 #[doc(hidden)]
 pub use pane_colors::PaneColors;
+use pane_colors::PaneColorsDigest;
 
 #[path = "core_theme.rs"]
 mod theme;
@@ -784,9 +784,11 @@ pub use decorations::command_status_hash;
 use decorations::emit_broadcast_borders;
 pub use decorations::emit_pane_scrollbar;
 use decorations::fold_u64_to_u32;
+use decorations::push_strikethrough_quad;
 use decorations::push_underline_quads;
 pub use decorations::selection_quad_rects;
 use decorations::splitter_rects_from_panes;
+use decorations::strikethrough_key;
 use decorations::underline_key;
 
 #[path = "core_atlas_policy.rs"]

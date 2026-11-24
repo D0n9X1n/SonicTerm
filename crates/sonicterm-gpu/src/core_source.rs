@@ -39,6 +39,8 @@ pub(crate) const SOURCE: &str = concat!(
     "\n",
     include_str!("core_settings.rs"),
     "\n",
+    include_str!("core_pane_colors.rs"),
+    "\n",
     include_str!("core_theme.rs"),
     "\n",
     include_str!("core_font.rs"),

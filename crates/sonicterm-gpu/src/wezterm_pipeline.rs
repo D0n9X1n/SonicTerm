@@ -312,7 +312,8 @@ impl WeztermPipeline {
         &self.glyph_bind_group_layout
     }
 
-    /// Upload one batch, replace optional damage pixels, then blend layers in final painter order.
+    /// Upload one batch, replace optional damage pixels and then `pane_fills` (program pane
+    /// backgrounds at the window opacity), then blend layers in final painter order.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_frame<'p>(
         &'p mut self,
@@ -325,6 +326,7 @@ impl WeztermPipeline {
         surface_h: f32,
         subpixel_aa: SubpixelAaMode,
         reset: Option<QuadInstance>,
+        pane_fills: &[QuadInstance],
         quads: &[QuadInstance],
         images: &[ImageInstance],
         glyphs: &[GlyphInstance],
@@ -337,6 +339,7 @@ impl WeztermPipeline {
         let reset_vertices = assemble_vertices(
             &mut vertices,
             reset.as_ref(),
+            pane_fills,
             &layers,
             surface_w,
             surface_h,
@@ -383,7 +386,8 @@ impl WeztermPipeline {
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
         if !reset_range.is_empty() {
-            // Retained ink must be erased independently of content alpha and LCD mode.
+            // Retained ink and pane fills replace pixels independently of content alpha and LCD
+            // mode.
             pass.set_pipeline(&self.reset_pipeline);
             pass.draw_indexed(reset_range, 0, 0..1);
         }

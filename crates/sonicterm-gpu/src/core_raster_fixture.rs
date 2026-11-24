@@ -223,6 +223,20 @@ impl RetainedPixelFixture {
         mode: SubpixelAaMode,
         quads: &[QuadInstance],
     ) {
+        self.draw_layers(first, damage, background, mode, &[], quads);
+    }
+
+    /// Draw one retained frame through the production retained draw, `pane_fills` replacing
+    /// before `quads` blend.
+    fn draw_layers(
+        &mut self,
+        first: bool,
+        damage: PixelRect,
+        background: wgpu::Color,
+        mode: SubpixelAaMode,
+        pane_fills: &[QuadInstance],
+        quads: &[QuadInstance],
+    ) {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         draw_retained_frame(
             &mut self.pipeline,
@@ -238,6 +252,7 @@ impl RetainedPixelFixture {
             damage,
             background,
             mode,
+            pane_fills,
             quads,
             &[],
             &[],
@@ -245,6 +260,18 @@ impl RetainedPixelFixture {
             &[],
         );
         self.queue.submit([encoder.finish()]);
+    }
+
+    /// Draw one retained frame as [`Self::draw`] does, with `pane_fills` as a program
+    /// background's pane fills.
+    pub(in crate::core) fn draw_filled(
+        &mut self,
+        first: bool,
+        damage: PixelRect,
+        background: wgpu::Color,
+        pane_fills: &[QuadInstance],
+    ) {
+        self.draw_layers(first, damage, background, SubpixelAaMode::Off, pane_fills, &[]);
     }
 
     pub(in crate::core) fn pixels(&self) -> Vec<[u8; 4]> {

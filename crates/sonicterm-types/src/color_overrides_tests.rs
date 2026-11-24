@@ -9,19 +9,25 @@ fn a_new_store_holds_no_override() {
     assert_eq!(overrides.palette(200), None);
 }
 
-/// Setting a color changes the generation once; setting the same color again stores nothing new,
-/// so a program that repeats one color every batch does not repaint every frame.
+/// A setter reports whether it changed a stored entry and never moves the generation itself: the
+/// owner advances it once per request, and only when a drawn color changed, so a storage-only
+/// change causes no repaint.
 #[test]
-fn only_a_stored_change_moves_the_generation() {
+fn setters_report_a_stored_change_and_leave_the_generation() {
     let mut overrides = ColorOverrides::default();
-    let start = overrides.generation();
-    overrides.set_dynamic(DynamicColor::Background, Some((1, 2, 3)));
-    let after_set = overrides.generation();
-    assert_ne!(after_set, start);
-    overrides.set_dynamic(DynamicColor::Background, Some((1, 2, 3)));
-    assert_eq!(overrides.generation(), after_set, "the same color stores nothing new");
-    overrides.set_dynamic(DynamicColor::Cursor, None);
-    assert_eq!(overrides.generation(), after_set, "resetting an absent override changes nothing");
+    assert!(overrides.set_dynamic(DynamicColor::Background, Some((1, 2, 3))));
+    assert!(overrides.set_palette(9, Some((4, 5, 6))));
+    assert_eq!(overrides.generation(), 0, "no setter moves the generation");
+    assert!(!overrides.set_dynamic(DynamicColor::Background, Some((1, 2, 3))), "same color");
+    assert!(!overrides.set_palette(9, Some((4, 5, 6))), "same entry");
+    assert!(!overrides.set_dynamic(DynamicColor::Cursor, None), "absent override");
+    assert!(!overrides.set_palette(10, None), "absent entry");
+    overrides.advance_generation();
+    let advanced = overrides.generation();
+    assert_ne!(advanced, 0);
+    assert!(overrides.clear_palette());
+    assert!(!overrides.clear_palette(), "clearing an empty palette changes nothing");
+    assert_eq!(overrides.generation(), advanced);
     assert_eq!(overrides.dynamic(DynamicColor::Background), Some((1, 2, 3)));
 }
 
@@ -38,25 +44,20 @@ fn palette_entries_are_set_and_cleared_without_touching_dynamic_colors() {
     assert_eq!(overrides.palette(1), None);
     overrides.set_palette(0, None);
     assert_eq!(overrides.palette(0), None);
-    let before_clear = overrides.generation();
     overrides.clear_palette();
     assert_eq!(overrides.palette(255), None);
-    assert_ne!(overrides.generation(), before_clear);
     assert_eq!(overrides.dynamic(DynamicColor::Foreground), Some((9, 9, 9)));
     assert!(!overrides.is_empty());
-    let after_clear = overrides.generation();
-    overrides.clear_palette();
-    assert_eq!(overrides.generation(), after_clear, "clearing an empty palette changes nothing");
 }
 
-/// Two stores never share a generation once either changed, so a renderer cache salted with it
+/// Two stores never share a generation once either advanced, so a renderer cache salted with it
 /// cannot replay one pane's colors for another pane with different overrides.
 #[test]
 fn generations_are_unique_across_stores() {
     let mut first = ColorOverrides::default();
     let mut second = ColorOverrides::default();
-    first.set_palette(3, Some((3, 3, 3)));
-    second.set_palette(3, Some((4, 4, 4)));
+    first.advance_generation();
+    second.advance_generation();
     assert_ne!(first.generation(), second.generation());
 }
 
@@ -73,8 +74,8 @@ fn a_store_is_empty_again_after_every_reset() {
 }
 
 /// The selection background, selection foreground and cursor text are held like the other dynamic
-/// colors: each set makes the store non-empty and moves the generation, a palette clear (RIS)
-/// keeps them, and a reset removes them.
+/// colors: each set makes the store non-empty, a palette clear (RIS) keeps them, and a reset
+/// removes them.
 #[test]
 fn selection_and_cursor_text_are_held_dynamic_colors() {
     for target in [
@@ -83,10 +84,8 @@ fn selection_and_cursor_text_are_held_dynamic_colors() {
         DynamicColor::CursorText,
     ] {
         let mut overrides = ColorOverrides::default();
-        let start = overrides.generation();
-        overrides.set_dynamic(target, Some((9, 8, 7)));
+        assert!(overrides.set_dynamic(target, Some((9, 8, 7))), "{target:?}");
         assert!(!overrides.is_empty(), "{target:?}");
-        assert_ne!(overrides.generation(), start, "{target:?}");
         overrides.clear_palette();
         assert_eq!(overrides.dynamic(target), Some((9, 8, 7)), "{target:?} survives RIS");
         overrides.set_dynamic(target, None);

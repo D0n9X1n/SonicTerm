@@ -100,9 +100,10 @@ impl Parser {
                         Some(RawOsc::Semantic { code, content: Vec::new(), pending_esc: false });
                     return true;
                 }
-                // A digit run with room left in the probe may still become `9;`, `777;` or a
-                // color request.
-                let digits_pending = prefix.iter().all(u8::is_ascii_digit) && index < content.len();
+                // A digit run, optionally signed `+`, with room left in the probe may still become
+                // `9;`, `777;` or a color request.
+                let digits = prefix.strip_prefix(b"+").unwrap_or(prefix);
+                let digits_pending = digits.iter().all(u8::is_ascii_digit) && index < content.len();
                 if !ITERM2_OSC_PREFIX.starts_with(prefix)
                     && ![b"0;".as_slice(), b"2;", b"7;", b"8;"]
                         .iter()
@@ -144,6 +145,7 @@ impl Parser {
                     // When: pending_esc is set, only backslash completes ST; other escapes retain normal parser ownership.
                     if byte == b'\\' {
                         // When: byte completes ST, apply only the complete semantic payload.
+                        drop_payload_controls(code, &mut content);
                         self.performer.handle_semantic_osc(code, &content, false);
                         self.finish_escape();
                         return true;
@@ -155,27 +157,42 @@ impl Parser {
                 }
                 if byte == 0x07 {
                     // When: byte is BEL, dispatch the complete bounded semantic payload.
+                    drop_payload_controls(code, &mut content);
                     self.performer.handle_semantic_osc(code, &content, true);
                     self.finish_escape();
                     return true;
                 }
                 if byte == 0x1b {
                     pending_esc = true;
-                } else if byte < 0x20 && (is_program_osc(code) || vt_color::is_color_osc(code)) {
-                    // When: byte is a C0 control inside a program or color payload, drop it as vte
-                    // does in an OSC string.
                 } else if content.len() == raw_osc_cap(code) {
-                    // When: content reaches raw_osc_cap, refuse the whole update and swallow its remaining payload.
+                    // When: content reaches raw_osc_cap, refuse the whole update and swallow the rest
+                    // through this collector's own terminators, so no suffix of it prints.
                     self.performer.invalidate_semantic_osc(code);
-                    self.discarding_oversized_escape = true;
-                    self.escape_family = EscapeFamily::Osc;
-                    self.discard_escape_pending_esc = false;
+                    self.raw_osc = Some(RawOsc::Refused { pending_esc: false });
                     return true;
                 } else {
-                    // When: byte is payload and content remains below its cap, retain it for whole-message validation.
+                    // When: byte is payload below its cap, retain it, C0 controls included, so the
+                    // cap counts wire bytes; program and color payloads drop those at dispatch.
                     content.push(byte);
                 }
                 self.raw_osc = Some(RawOsc::Semantic { code, content, pending_esc });
+                true
+            }
+            RawOsc::Refused { pending_esc } => {
+                if matches!(byte, 0x07 | 0x18 | 0x1a) || (pending_esc && byte == b'\\') {
+                    // When: byte is BEL, CAN, SUB or completes ST, the refused message ends and
+                    // nothing of it applies.
+                    self.finish_escape();
+                    return true;
+                }
+                if pending_esc {
+                    // When: pending_esc did not start ST, the ESC ends the refused message as it
+                    // ends an accepted one, and it and this byte reach vte.
+                    self.finish_escape();
+                    self.feed_vte_byte(0x1b);
+                    return false;
+                }
+                self.raw_osc = Some(RawOsc::Refused { pending_esc: byte == 0x1b });
                 true
             }
             RawOsc::Iterm2 { mut capture, mut metadata_done, mut pending_esc } => {
@@ -222,6 +239,15 @@ impl Parser {
                 true
             }
         }
+    }
+}
+
+/// Remove the C0 controls a program or color `code` payload carried, as vte drops them in an OSC
+/// string; the collector kept them only so its cap counted every wire byte.
+fn drop_payload_controls(code: u16, content: &mut Vec<u8>) {
+    if is_program_osc(code) || vt_color::is_color_osc(code) {
+        // A program or color request's controls are not payload.
+        content.retain(|byte| *byte >= 0x20);
     }
 }
 

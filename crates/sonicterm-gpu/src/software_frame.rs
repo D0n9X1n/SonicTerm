@@ -184,6 +184,34 @@ impl SoftwareFrame {
         }
     }
 
+    /// Write each pane fill's color over the pixels it covers, replacing rather than blending, as
+    /// the wgpu replacing draw does, so a translucent pane shows its fill at the fill's opacity.
+    pub(crate) fn replace_quads(&mut self, fills: &[QuadInstance]) {
+        let (width_px, height_px) = (self.width as f32, self.height as f32);
+        for fill in fills {
+            let Some((left, top, width, height)) =
+                ndc_rect_to_pixels(fill.rect, width_px, height_px)
+            else {
+                // When: `ndc_rect_to_pixels` returns None, the frame has zero extent and no pixel
+                // can be replaced.
+                continue;
+            };
+            // The covered span uses fill_rect's pixel-centre rule, so both write the same pixels.
+            let first_col = (left - 0.5).ceil().max(0.0) as usize;
+            let first_row = (top - 0.5).ceil().max(0.0) as usize;
+            let end_col = (left + width - 0.5).ceil().clamp(0.0, width_px) as usize;
+            let end_row = (top + height - 0.5).ceil().clamp(0.0, height_px) as usize;
+            let encoded = linear_rgba_to_bgra(fill.color);
+            for row in first_row..end_row {
+                let row_start = row * self.width as usize;
+                for col in first_col..end_col {
+                    let offset = (row_start + col) * 4;
+                    self.pixels[offset..offset + 4].copy_from_slice(&encoded);
+                }
+            }
+        }
+    }
+
     fn draw_quads(&mut self, quads: &[QuadInstance]) {
         let sw = self.width as f32;
         let sh = self.height as f32;

@@ -69,6 +69,7 @@ for required in \
     LICENSE \
   LICENSE-SymbolsNerdFont-MIT \
   LICENSE-winit-Apache-2.0 \
+  LICENSE-X11-rgb \
   README.md; do
   [[ -f "$stage/$required" ]] || fail "staged payload is missing $required"
 done
@@ -82,6 +83,8 @@ for icon in "${hicolor_icons[@]}"; do
 done
 cmp -s "$root/crates/sonicterm-winit/LICENSE" "$stage/LICENSE-winit-Apache-2.0" || \
   fail "staged winit license differs from the pinned source license"
+cmp -s "$root/crates/sonicterm-vt/LICENSE-X11-rgb" "$stage/LICENSE-X11-rgb" || \
+  fail "staged X11 color table notice differs from the source notice"
 cmp -s "$root/assets/fonts/LICENSE-SymbolsNerdFont.txt" "$stage/LICENSE-SymbolsNerdFont-MIT" || \
   fail "staged symbols font license differs from the bundled license"
 # The text face comes from fontconfig, so the payload carries no monospace text family.
@@ -101,6 +104,7 @@ for required_text in \
   'debian/control' \
   'libxkbcommon-x11-0' \
   '"$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"' \
+  '"$deb_root/usr/share/doc/sonicterm/LICENSE-X11-rgb"' \
   '"$deb_root/usr/share/doc/sonicterm/LICENSE-SymbolsNerdFont-MIT"' \
   'SOURCE_DATE_EPOCH' \
   '--sort=name' \
@@ -172,6 +176,11 @@ for license in "$portable_root/LICENSE-winit-Apache-2.0" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"; do
   cmp -s "$root/crates/sonicterm-winit/LICENSE" "$license" || \
     fail "package winit license is missing or differs from the pinned source license: $license"
+done
+for license in "$portable_root/LICENSE-X11-rgb" \
+  "$deb_root/usr/share/doc/sonicterm/LICENSE-X11-rgb"; do
+  cmp -s "$root/crates/sonicterm-vt/LICENSE-X11-rgb" "$license" || \
+    fail "package X11 color table notice is missing or differs from the source notice: $license"
 done
 for license in "$portable_root/LICENSE-SymbolsNerdFont-MIT" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-SymbolsNerdFont-MIT"; do

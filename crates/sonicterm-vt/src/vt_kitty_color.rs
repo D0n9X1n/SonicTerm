@@ -128,16 +128,18 @@ fn decimal(digits: &[u8]) -> Option<u32> {
 impl Performer {
     /// Apply one whole OSC 21 `payload` in request order and answer its queries and unknown keys
     /// in one reply ending in `terminator`; a packet past the item budget changes and answers
-    /// nothing, and a packet with nothing to answer sends no reply.
-    pub(super) fn apply_kitty_color_osc(&mut self, payload: &[u8], terminator: &[u8]) {
+    /// nothing, and a packet with nothing to answer sends no reply. Whether a drawn color changed,
+    /// so the caller moves the override generation once for the whole packet.
+    pub(super) fn apply_kitty_color_osc(&mut self, payload: &[u8], terminator: &[u8]) -> bool {
         // Only printable ASCII is read, because the reply echoes keys back to the program.
         let printable: Vec<u8> =
             payload.iter().copied().filter(|byte| (0x20..=0x7e).contains(byte)).collect();
         let Some(items) = kitty_color_items(&printable) else {
             // When: `kitty_color_items` refuses the packet past its item budget, nothing applies.
-            return;
+            return false;
         };
         let mut answers = Vec::new();
+        let mut drawn_changed = false;
         for item in items {
             match item {
                 KittyItem::Query(key, color) => {
@@ -150,7 +152,7 @@ impl Performer {
                         answers.extend_from_slice(rgb.as_bytes());
                     }
                 }
-                KittyItem::Store(color, rgb) => self.store_kitty_color(color, rgb),
+                KittyItem::Store(color, rgb) => drawn_changed |= self.store_kitty_color(color, rgb),
                 KittyItem::Unknown(key) => {
                     let name = base64::engine::general_purpose::STANDARD_NO_PAD.encode(key);
                     answers.extend_from_slice(b";unknown=");
@@ -160,12 +162,13 @@ impl Performer {
         }
         if answers.is_empty() {
             // When: `answers` is empty, the packet only set or reset colors and gets no reply.
-            return;
+            return drawn_changed;
         }
         let mut reply = b"\x1b]21".to_vec();
         reply.extend_from_slice(&answers);
         reply.extend_from_slice(terminator);
         self.reply(&reply);
+        drawn_changed
     }
 
     /// The color an OSC 21 query answers: the effective palette entry or dynamic color, and none
@@ -179,13 +182,14 @@ impl Performer {
     }
 
     /// Store `rgb` as the program's override of `color`, `None` resetting it to the theme; an
-    /// unheld color ignores it.
-    fn store_kitty_color(&mut self, color: KittyColor, rgb: Option<Rgb>) {
+    /// unheld color ignores it. Whether a drawn color changed.
+    fn store_kitty_color(&mut self, color: KittyColor, rgb: Option<Rgb>) -> bool {
         match color {
-            KittyColor::Palette(index) => self.color_overrides.set_palette(index, rgb),
-            KittyColor::Dynamic(target) => self.color_overrides.set_dynamic(target, rgb),
+            KittyColor::Palette(index) => self.store_palette(index, rgb),
+            KittyColor::Dynamic(target) => self.store_dynamic(target, rgb),
             KittyColor::Unheld => {
-                // When: `color` is Unheld, this terminal keeps no such color, so the set is dropped.
+                // This terminal keeps no Unheld color, so the set is dropped and draws nothing.
+                false
             }
         }
     }

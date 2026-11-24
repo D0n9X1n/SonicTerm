@@ -357,8 +357,10 @@ wins; otherwise underline uses foreground color. GPU line endpoints travel in
 geometry parameters separate from HSV color transforms, so a curly underline's
 shape cannot alter its resolved color.
 
-The parser stores blink, hidden, and strikethrough flags. The current terminal
-renderer has no flag-specific draw branch for those three.
+Strikethrough (SGR 9) draws one bar through the middle of each struck run, as thick as a
+single underline and in the color an underline would take: the SGR 58 color when set, else
+the cell foreground, through the pane's program colors. The parser also stores blink and
+hidden flags; the current terminal renderer has no flag-specific draw branch for those two.
 
 ### Rasterization
 

@@ -60,6 +60,12 @@
                             Name='LICENSE-winit-Apache-2.0'
                             DiskId='1'
                             Source='..\..\crates\sonicterm-winit\LICENSE'/>
+                        <!-- The X.Org notice of the X11 color-name table compiled into the parser. -->
+                        <File
+                            Id='license_x11_rgb'
+                            Name='LICENSE-X11-rgb'
+                            DiskId='1'
+                            Source='..\..\crates\sonicterm-vt\LICENSE-X11-rgb'/>
                     </Component>
 
                     <Directory Id='ConptyDir' Name='conpty'>

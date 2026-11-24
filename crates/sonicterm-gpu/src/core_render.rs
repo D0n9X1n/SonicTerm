@@ -340,6 +340,7 @@ impl GpuRenderer {
             partial: plan.mode == RenderMode::Partial,
             subpixel_aa,
             batches: FrameBatches {
+                pane_fills: &batches.pane_fills,
                 quads: &batches.quads,
                 images: &batches.images,
                 glyphs: &batches.glyphs,

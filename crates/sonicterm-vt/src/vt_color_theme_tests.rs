@@ -41,6 +41,51 @@ fn an_override_equal_to_the_default_masks_a_later_theme_change() {
     assert_eq!(reply_to(&mut parser, b"\x1b]10;?\x07"), b"\x1b]10;rgb:c8c8/c8c8/c8c8\x07");
 }
 
+/// The override generation the renderer reads, `None` while the parser lends it no store.
+fn lent_generation(parser: &mut Parser) -> Option<u64> {
+    parser.grid_and_color_overrides().1.map(sonicterm_types::ColorOverrides::generation)
+}
+
+/// A set equal to the color already drawn records presence without moving the override
+/// generation, so it costs no repaint yet still masks a later theme change; a reset of it moves
+/// nothing either, and the store is no longer lent.
+#[test]
+fn a_set_equal_to_the_drawn_color_moves_no_generation() {
+    let mut parser = themed_parser();
+    let _ = reply_to(&mut parser, b"\x1b]10;#c8c8c8\x07\x1b]4;3;#030303\x07\x1b]19;?\x07");
+    assert_eq!(dynamic_override(&parser, DynamicColor::Foreground), Some((200, 200, 200)));
+    assert_eq!(palette_override(&parser, 3), Some((3, 3, 3)));
+    assert_eq!(lent_generation(&mut parser), Some(0), "nothing drawn changed");
+    let _ = reseed(&mut parser, 50, ColorScheme::Dark);
+    assert_eq!(reply_to(&mut parser, b"\x1b]10;?\x07"), b"\x1b]10;rgb:c8c8/c8c8/c8c8\x07");
+    let mut fresh = themed_parser();
+    let _ =
+        reply_to(&mut fresh, b"\x1b]10;#c8c8c8\x07\x1b]110\x07\x1b]4;3;#030303\x07\x1b]104\x07");
+    assert_eq!(lent_generation(&mut fresh), None, "a presence-only store emptied is not lent");
+}
+
+/// A request that changes a drawn color moves the generation, and a store emptied after a drawn
+/// change is still lent with a fresh generation, so the renderer repaints the pane to the theme.
+#[test]
+fn a_drawn_change_moves_the_generation_and_keeps_the_store_lent() {
+    let mut parser = themed_parser();
+    let _ = reply_to(&mut parser, b"\x1b]4;1;#ffffff;2;#ffffff\x07");
+    let after_set = lent_generation(&mut parser).expect("a set store is lent");
+    assert_ne!(after_set, 0);
+    let _ = reply_to(&mut parser, b"\x1b]4;1;#ffffff\x07");
+    assert_eq!(lent_generation(&mut parser), Some(after_set), "a repeated set changes nothing");
+    let _ = reply_to(&mut parser, b"\x1b]104\x07");
+    assert!(parser.color_overrides().is_none());
+    let after_reset = lent_generation(&mut parser).expect("an emptied store is still lent");
+    assert_ne!(after_reset, after_set);
+    let _ = reply_to(&mut parser, b"\x1b]19;#c8c8c8\x07");
+    assert_ne!(
+        lent_generation(&mut parser),
+        Some(after_reset),
+        "a selection foreground recolors selected glyphs even when it equals the theme"
+    );
+}
+
 /// A program set or reset never produces a mode 2031 report, and the next theme update compares
 /// theme defaults only, so a program override is not a palette change to report.
 #[test]

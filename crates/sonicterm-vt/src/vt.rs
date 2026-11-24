@@ -369,6 +369,9 @@ enum RawOsc {
     Semantic { code: u16, content: Vec<u8>, pending_esc: bool },
     /// Streaming an iTerm2 file payload through the parser's staging reservation.
     Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
+    /// Swallowing the rest of a refused over-cap `Semantic` payload through the same terminators
+    /// an accepted one ends on, retaining nothing; `pending_esc` holds an ESC that may start ST.
+    Refused { pending_esc: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

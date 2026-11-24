@@ -113,6 +113,8 @@ test -f "$APP/Contents/Resources/assets/fonts/LICENSE-SymbolsNerdFont.txt"
 python3 "$ROOT/scripts/macos-bundle.py" bundle "$APP" --max-minimum-macos "$MAX_MINIMUM"
 mkdir -p "$APP/Contents/Resources/licenses"
 cp "$ROOT/crates/sonicterm-winit/LICENSE" "$APP/Contents/Resources/licenses/LICENSE-winit-Apache-2.0"
+# The X.Org notice of the X11 color-name table compiled into the parser.
+cp "$ROOT/crates/sonicterm-vt/LICENSE-X11-rgb" "$APP/Contents/Resources/licenses/LICENSE-X11-rgb"
 
 # Seal the fully-assembled bundle with an ad-hoc signature.
 #

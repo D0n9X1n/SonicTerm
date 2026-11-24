@@ -103,11 +103,12 @@ fn osc4_applies_in_order_and_skips_an_invalid_pair() {
 }
 
 /// An OSC 4 pair in the middle whose index is not a palette entry (a special color 256..=260,
-/// a value past 260, or anything but digits) is skipped and the next pair still applies.
+/// a value past 260, a negative value, or no integer at all) is skipped and the next pair still
+/// applies.
 #[test]
 fn osc4_skips_a_pair_with_a_bad_index() {
     let mut parser = themed_parser();
-    for skipped in ["256", "260", "261", "999", "+5", "0_5", " 5", "x"] {
+    for skipped in ["256", "260", "261", "999", "-5", "5_", "x"] {
         let _ = reply_to(&mut parser, b"\x1b]104;3\x07");
         let input = format!("\x1b]4;{skipped};#fff;3;#fff\x07");
         let _ = reply_to(&mut parser, input.as_bytes());
@@ -359,16 +360,6 @@ fn each_query_is_answered_once_with_its_terminator() {
     assert!(rx.try_recv().is_err(), "no duplicate reply");
 }
 
-/// Only the exact OSC numbers are color requests: a zero-padded `04`, which Ghostty does not read
-/// as OSC 4, neither sets nor answers.
-#[test]
-fn only_exact_osc_numbers_are_color_requests() {
-    let mut parser = themed_parser();
-    assert_eq!(reply_to(&mut parser, b"\x1b]04;1;#ffffff;1;?\x07"), b"");
-    assert_eq!(reply_to(&mut parser, b"\x1b]010;?\x07"), b"");
-    assert_eq!(palette_override(&parser, 1), None);
-}
-
 /// A fresh parser reports no overrides, so a pane that never set a color takes the theme-only
 /// render path; it reports them once set, and none again once every one is reset.
 #[test]
@@ -381,4 +372,148 @@ fn overrides_are_reported_only_while_a_program_holds_one() {
     assert_eq!(overrides.and_then(|overrides| overrides.palette(9)), Some((255, 255, 255)));
     let _ = reply_to(&mut parser, b"\x1b]111\x07\x1b]104;9\x07");
     assert!(parser.color_overrides().is_none());
+}
+
+/// An empty OSC 4 field keeps its place: `4;1;;2;#fff` pairs index 1 with an empty spec, which is
+/// skipped, and still applies the pair (2, #fff) after it, as kitty pairs the fields.
+#[test]
+fn osc4_empty_fields_keep_pair_positions() {
+    let mut parser = themed_parser();
+    let _ = reply_to(&mut parser, b"\x1b]4;1;;2;#ffffff\x07");
+    assert_eq!(palette_override(&parser, 1), None, "the empty spec sets nothing");
+    assert_eq!(palette_override(&parser, 2), Some((255, 255, 255)), "the next pair applies");
+    let _ = reply_to(&mut parser, b"\x1b]4;;#010101;3;#030303\x07");
+    assert_eq!(palette_override(&parser, 3), Some((3, 3, 3)), "an empty index skips one pair");
+    assert_eq!(reply_to(&mut parser, b"\x1b]4;;?;3;?\x07"), b"\x1b]4;3;rgb:0303/0303/0303\x07");
+}
+
+/// An OSC 4 or 104 index is read as kitty's integer parser reads it: surrounding blanks, a sign,
+/// leading zeros and single underscores between digits name the entry, always checked to 0-255.
+#[test]
+fn palette_indices_accept_padded_and_signed_spellings() {
+    for spelling in [" 5", "5 ", " 05 ", "05", "005", "+5", "0_5", "-0"] {
+        let mut parser = themed_parser();
+        let entry: u8 = if spelling == "-0" { 0 } else { 5 };
+        let set = format!("\x1b]4;{spelling};#0a0b0c\x07");
+        let _ = reply_to(&mut parser, set.as_bytes());
+        assert_eq!(palette_override(&parser, entry), Some((10, 11, 12)), "{spelling:?} sets");
+        let query = format!("\x1b]4;{spelling};?\x07");
+        assert_eq!(
+            reply_to(&mut parser, query.as_bytes()),
+            format!("\x1b]4;{entry};rgb:0a0a/0b0b/0c0c\x07").into_bytes(),
+            "{spelling:?} answers under the canonical index"
+        );
+        let reset = format!("\x1b]104;{spelling}\x07");
+        let _ = reply_to(&mut parser, reset.as_bytes());
+        assert_eq!(palette_override(&parser, entry), None, "{spelling:?} resets");
+    }
+    for refused in ["256", "999", "-5", "5x", "_5", "5_", "1__0", "+ 5", "0x5", "++5"] {
+        let mut parser = themed_parser();
+        let set = format!("\x1b]4;{refused};#0a0b0c;7;#070707\x07");
+        let _ = reply_to(&mut parser, set.as_bytes());
+        assert_eq!(palette_override(&parser, 7), Some((7, 7, 7)), "{refused:?} skips one pair");
+        let overrides = parser.color_overrides().expect("entry 7 is set");
+        let set_count = (0..=255u8).filter(|index| overrides.palette(*index).is_some()).count();
+        assert_eq!(set_count, 1, "{refused:?} names no entry");
+    }
+}
+
+/// Only a `?` in the first OSC 110-112 field asks for the named color; a `?` in any later field is
+/// an ignored parameter, so the request resets that color and answers nothing.
+#[test]
+fn a_dynamic_reset_queries_only_on_a_first_field_question_mark() {
+    for (code, target) in [
+        (110, DynamicColor::Foreground),
+        (111, DynamicColor::Background),
+        (112, DynamicColor::Cursor),
+    ] {
+        let set = format!("\x1b]{};#123456\x07", code - 100);
+        for query in [format!("\x1b]{code};?\x07"), format!("\x1b]{code};?;x\x07")] {
+            let mut parser = themed_parser();
+            let _ = reply_to(&mut parser, set.as_bytes());
+            assert_eq!(
+                reply_to(&mut parser, query.as_bytes()),
+                format!("\x1b]{code};rgb:1212/3434/5656\x07").into_bytes(),
+                "{query:?} answers under its own number"
+            );
+            assert_eq!(dynamic_override(&parser, target), Some((0x12, 0x34, 0x56)), "{query:?}");
+        }
+        for reset in [format!("\x1b]{code};x;?\x07"), format!("\x1b]{code};;?\x07")] {
+            let mut parser = themed_parser();
+            let _ = reply_to(&mut parser, set.as_bytes());
+            assert_eq!(reply_to(&mut parser, reset.as_bytes()), b"", "{reset:?} answers nothing");
+            assert_eq!(dynamic_override(&parser, target), None, "{reset:?} resets");
+        }
+    }
+}
+
+/// A zero-padded or plus-signed OSC number names the same color request as its plain spelling,
+/// as the earlier query handler read it; replies carry the canonical number.
+#[test]
+fn padded_and_signed_osc_numbers_are_color_requests() {
+    let mut parser = themed_parser();
+    assert_eq!(
+        reply_to(&mut parser, b"\x1b]04;1;#ffffff;1;?\x07"),
+        b"\x1b]4;1;rgb:ffff/ffff/ffff\x07"
+    );
+    assert_eq!(reply_to(&mut parser, b"\x1b]010;?\x07"), b"\x1b]10;rgb:c8c8/c8c8/c8c8\x07");
+    assert_eq!(reply_to(&mut parser, b"\x1b]+11;?\x1b\\"), b"\x1b]11;rgb:0a0a/0a0a/0a0a\x1b\\");
+    let _ = reply_to(&mut parser, b"\x1b]0104\x07");
+    assert_eq!(palette_override(&parser, 1), None, "a padded bare 104 resets the palette");
+    let _ = reply_to(&mut parser, b"\x1b]010;#010203\x07\x1b]0110;x\x07");
+    assert_eq!(dynamic_override(&parser, DynamicColor::Foreground), None);
+    parser.advance(b"Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z', "nothing was printed before the Z");
+}
+
+/// An over-cap color request is swallowed through the same terminators an accepted one ends on:
+/// BEL, `ESC \` or an ESC that starts another sequence. A C1 ST byte inside UTF-8 text (`”` holds
+/// 0x9d, `“` holds 0x9c) is payload, so no suffix of the refused message prints.
+#[test]
+fn an_over_cap_color_request_is_discarded_whole() {
+    for terminator in ["\x07", "\x1b\\", "\x1b[0m"] {
+        let mut message = String::from("\x1b]4;1;#ffffff");
+        message.push_str(&"x".repeat(5000));
+        message.push_str("\u{201c}tail\u{201d}");
+        message.push_str(terminator);
+        let mut parser = themed_parser();
+        assert_eq!(reply_to(&mut parser, message.as_bytes()), b"", "{terminator:?}");
+        assert_eq!(palette_override(&parser, 1), None, "{terminator:?}");
+        parser.advance(b"Z");
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "{terminator:?} prints no suffix");
+        assert_eq!(parser.grid().row(0)[1].ch, ' ', "{terminator:?} prints no suffix");
+    }
+}
+
+/// The 4 KiB color cap counts wire bytes, discarded C0 controls included: a payload of exactly
+/// 4096 bytes applies and one more byte refuses it whole, with BEL or with an ST split across two
+/// reads at the boundary.
+#[test]
+fn the_color_cap_counts_wire_bytes_and_survives_a_split_terminator() {
+    for (payload_bytes, applies) in [(4096, true), (4097, false)] {
+        let mut payload = b"1;#ffffff;".to_vec();
+        payload.resize(payload_bytes, 0x01);
+        for split_terminator in [false, true] {
+            let mut parser = themed_parser();
+            let mut message = b"\x1b]4;".to_vec();
+            message.extend_from_slice(&payload);
+            if split_terminator {
+                message.push(0x1b);
+                parser.advance(&message);
+                parser.advance(b"\\");
+            } else {
+                // When: not split, the request ends with BEL in the same read.
+                message.push(0x07);
+                parser.advance(&message);
+            }
+            let expected = applies.then_some((255, 255, 255));
+            assert_eq!(
+                palette_override(&parser, 1),
+                expected,
+                "{payload_bytes} wire bytes after `4;`, split ST {split_terminator}"
+            );
+            parser.advance(b"Z");
+            assert_eq!(parser.grid().row(0)[0].ch, 'Z', "{payload_bytes} leaves ground");
+        }
+    }
 }

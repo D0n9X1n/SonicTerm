@@ -26,6 +26,7 @@ impl GpuRenderer {
             glyphs: glyph_instances,
             quads,
             overlay_quads: quads_overlay,
+            pane_fills,
             staged_ranges,
             snapped,
             snapped_peak,
@@ -67,14 +68,15 @@ impl GpuRenderer {
             // rows of every live row the VT thread mutated since the last frame.
             invalidate_planned_quad_rows(&mut self.line_quad_cache, pv.planned);
             let colors = PaneColors::new(theme, pv.overrides);
+            // The pane's row-cache revision, resolved once for all of its rows.
+            let style_rev = colors.style_rev(self.style_rev);
             if let (Some(fill), Some(clip)) =
                 (colors.background_fill(self.bg_opacity), pv.planned.full_clip)
             {
-                // A program background (`fill`) covers the pane's clip under its cell
-                // backgrounds, so blank cells and padding take it; chrome keeps the theme.
-                // shortcut: drawn over the theme clear, so below opacity 1 it blends with the theme
-                // background instead of replacing it; exact at the default opacity of 1.
-                quads.push(QuadInstance::sharp(
+                // A program background (`fill`) replaces the theme clear over the pane's clip
+                // before cell backgrounds blend, so blank cells and padding take it at the window
+                // opacity on full and partial frames; chrome keeps the theme.
+                pane_fills.push(QuadInstance::sharp(
                     px_to_ndc(clip.x as f32, clip.y as f32, clip.w as f32, clip.h as f32, sw, sh),
                     fill,
                 ));
@@ -130,7 +132,7 @@ impl GpuRenderer {
                         slot: r,
                     },
                     row_cells.iter(),
-                    (colors.style_rev(self.style_rev), colors, sel_bbox_for_quads),
+                    (style_rev, colors, sel_bbox_for_quads),
                     &geometry,
                     snapped_cell_x_bg,
                     &mut *quads,

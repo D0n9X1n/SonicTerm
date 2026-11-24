@@ -233,13 +233,16 @@ fn frame_batches_preserve_borrowed_slice_identity_and_order() {
     let glyphs = [GlyphInstance { rect: [1.0; 4], uv: [2.0; 4], color: [0.5; 4], flags: [0.0; 4] }];
     let overlay_glyphs = [GlyphInstance { rect: [3.0; 4], ..glyphs[0] }];
     let images = [ImageInstance { rect_px: [4.0; 4], uv: [0.0; 4], sample_uv: [1.0; 4] }];
+    let pane_fills = [QuadInstance::default()];
     let batches = FrameBatches {
+        pane_fills: &pane_fills,
         quads: &quads,
         images: &images,
         glyphs: &glyphs,
         overlay_quads: &overlay_quads,
         overlay_glyphs: &overlay_glyphs,
     };
+    assert!(std::ptr::eq(batches.pane_fills, pane_fills.as_slice()));
     assert!(std::ptr::eq(batches.quads, quads.as_slice()));
     assert!(std::ptr::eq(batches.images, images.as_slice()));
     assert!(std::ptr::eq(batches.glyphs, glyphs.as_slice()));

@@ -518,3 +518,24 @@ fn an_injected_row_glyph_draws_in_a_blank_row_emitted_first() {
     push_injected_row_glyph(&mut atlas, Some(seam), 7, 11, &mut glyphs, &mut row_spans, surface);
     assert_eq!(glyphs.len(), 1, "another row draws nothing");
 }
+
+/// The renderer source corpus is complete: every production `core_*` part `core.rs` declares by
+/// path is in it, so a structural contract never passes by missing the file that breaks it.
+#[test]
+fn the_source_corpus_includes_every_declared_production_module() {
+    let declarations = include_str!("core.rs");
+    let corpus = include_str!("core_source.rs");
+    let missing: Vec<&str> = declarations
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("#[path = \""))
+        .filter_map(|rest| rest.split_once('"').map(|(path, _)| path))
+        .filter(|path| {
+            path.starts_with("core_")
+                && !path.ends_with("_tests.rs")
+                && !path.ends_with("_fixture.rs")
+                && *path != "core_source.rs"
+        })
+        .filter(|path| !corpus.contains(&format!("include_str!(\"{path}\")")))
+        .collect();
+    assert!(missing.is_empty(), "core_source.rs lacks {missing:?}");
+}

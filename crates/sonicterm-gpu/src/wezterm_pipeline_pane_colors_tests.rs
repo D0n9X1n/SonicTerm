@@ -211,6 +211,7 @@ fn wgpu_pixels(
             HEIGHT_PX as f32,
             SubpixelAaMode::Off,
             None,
+            &[],
             quads,
             &[],
             glyphs,

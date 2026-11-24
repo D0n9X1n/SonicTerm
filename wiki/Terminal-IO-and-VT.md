@@ -279,7 +279,7 @@ SonicTerm answers:
 | --- | --- |
 | DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`: `Pm` 1 set, 2 reset, for modes 1, 7, 47, 67, 1000, 1002, 1003, 1004, 1006, 1047, 1049, 2004, 2026, 2031 and 9001 (each of 1000/1002/1003 reads set only while it is the selected tracking mode); 0 (not recognized) for every other mode, including 25, 1005, 1015 and 1016, so a program that probes them falls back at once. A request naming several modes gets no reply. |
 | DSR 996 `CSI ? 996 n` | `CSI ? 997 ; 1 n` for a dark theme, `; 2 n` for a light one, from the theme's `appearance`. |
-| DEC mode 2031 | While a program has set it, every theme change that alters a readable color (foreground, background, cursor, selection background and foreground, cursor text, the 16 theme colors) or the scheme sends the same `CSI ? 997 ; Ps n` report, also when the scheme stays the same, so a program that re-reads colors on the report picks up the new palette. A reload, the theme picker's preview and its choice all count; the report goes through the pane's reply path. SonicTerm does not follow the system's light or dark appearance, so the report fires only when the theme changes. |
+| DEC mode 2031 | While a program has set it, every theme change that alters a readable color (foreground, background, cursor, selection background and foreground, cursor text, the 16 theme colors) or the scheme sends the same `CSI ? 997 ; Ps n` report, also when the scheme stays the same, so a program that re-reads colors on the report picks up the new palette. A reload, the theme picker's preview and its choice all count; the report goes through the pane's reply path. It fingerprints the theme defaults, so it fires even when a program's override hides the changed default from a query. SonicTerm does not follow the system's light or dark appearance, so the report fires only when the theme changes. |
 | `OSC 4 ; N ; ?` | `OSC 4 ; N ; rgb:rrrr/gggg/bbbb` with the request's terminator: the color the program set, else 0..=15 from the theme and 16..=255 from the xterm 6×6×6 cube and gray ramp, the same table the renderer draws with. |
 | `OSC 10/11/12/17/19 ; ?` | `OSC 1x ; rgb:rrrr/gggg/bbbb` with the request's terminator: the foreground, background, cursor, selection background or selection foreground the program set, else the theme's; a cursor with neither reads as the foreground. Each further `?` asks for the next color, so `OSC 10 ; ? ; ?` answers 10 and 11; 13-16 and 18 are not answered. |
 | `OSC 21 ; key=? ; …` | `OSC 21 ; key=rgb:rr/gg/bb ; …` in request order with the request's terminator; see the kitty color protocol below. |
@@ -297,13 +297,19 @@ Programs can set and reset the colors of their own pane:
   `#rgb`, `#rrggbb`, `#rrrgggbbb`, `#rrrrggggbbbb`, 3 or 6 hex digits without `#`, or an X11
   color name in any case.
 - Requests in one message apply in order. An invalid OSC 4 pair, OSC 104 index or dynamic
-  value is skipped and the rest still apply.
+  value is skipped and the rest still apply; an empty OSC 4 field keeps its place, so
+  `OSC 4 ; 1 ; ; 2 ; #fff` skips the pair (1, empty) and sets entry 2. An OSC 4 or 104 index is
+  read as kitty reads it: blanks around it, a `+` sign, leading zeros and single underscores
+  between digits are accepted, and the value must be 0..=255. The OSC number itself may be
+  zero-padded or carry a `+` (`OSC 010 ; ?`), and replies use the plain number.
 - `OSC 104 ; N ; …` resets the listed palette entries; a bare `OSC 104`, or one that lists
   only blanks, resets every entry, and a list of only invalid indices changes nothing.
   `OSC 110`, `111`, `112`, `117` and `119` reset the foreground, background, cursor and
-  selection background and foreground with no argument or any argument but `?`; a `?` asks for
-  that color instead, answered under the request's own number. OSC 113-116 and 118 are
-  accepted and ignored.
+  selection background and foreground with no argument or a first argument other than `?`;
+  later arguments are ignored, so `OSC 110 ; x ; ?` resets. A first argument of `?` asks for
+  that color instead, answered under the request's own number as kitty does (`OSC 110 ; ?`
+  answers `OSC 110 ; rgb:…`). kitty's chaining of further arguments is not copied. OSC 113-116
+  and 118 are accepted and ignored.
 - A program's colors sit over the theme: a reload, the theme picker's preview, cancel and
   choice change only the theme defaults underneath, and a color the program set equal to
   today's default still hides a later theme change. RIS clears the palette colors and keeps
@@ -312,12 +318,17 @@ Programs can set and reset the colors of their own pane:
   when it gets the report cannot loop; RIS turns mode 2031 off, so it sends none either.
   DSR 996 keeps answering the theme's appearance.
 - The colors apply to the pane that set them: its cells, blank area, inverse and dim text,
-  underlines and cursor. The tab bar, window padding outside panes, splitters and the macOS
+  underlines, strikethroughs and cursor. The tab bar, window padding outside panes, splitters and the macOS
   titlebar band keep the theme, so split panes can differ. This is an intentional difference
   from Ghostty, which retints its single-surface window. OSC 4 and 10-12 replies are always
   the 16-bit `rgb:rrrr/gggg/bbbb` form, Ghostty's default; there is no 8-bit reply option.
-- Below a background opacity of 1, a program's background is drawn over the theme background
-  at the same opacity, so it blends with the theme background rather than replacing it.
+- Below a background opacity of 1, a program's background replaces the theme background over
+  its pane at the same opacity, on full and partial frames, on GDI and wgpu, so the pane shows
+  the program's color at the configured opacity.
+- A set equal to the color already drawn is still kept, so it hides a later theme change, but it
+  does not repaint the window; only a change of a drawn color repaints it once per message.
+- On Windows, the parser sees only what ConPTY forwards; whether ConPTY forwards these color
+  sequences and their replies unchanged has not been verified.
 - In the active pane, the selection highlight and copy mode's selection use the pane's
   selection background at the theme highlight's 50% opacity. Glyphs in a selection take the
   selection foreground only once a program set one (copy mode's selection keeps glyph colors);
@@ -346,6 +357,10 @@ packet asks something:
   an `@opacity` suffix and accepts every spec form above; an invalid spec or an empty field is
   skipped. Bytes outside printable ASCII are removed before reading, and values, not keys, are
   trimmed of spaces.
+- A color request other than OSC 21 is limited to 4 KiB of bytes on the wire, C0 controls
+  included. A longer message is discarded whole through its own terminator (BEL, `ESC \` or an
+  ESC that starts another sequence), so no part of it is applied or printed. CAN or SUB aborts
+  it. C1 OSC and ST bytes are not color-request framing.
 - A packet is limited to 16 KiB and 526 fields that answer, set, reset or name an unknown key;
   a longer packet, or one with a 527th such field, changes and answers nothing. The largest
   reply stays under 28.2 KB, so it is one reply-path submission.

@@ -63,7 +63,7 @@ pub(crate) const MEDIA_REVISIONS_CAP_BYTES: usize = KIB;
 pub(crate) const FRAME_SCRATCH_CAP: usize = GLYPHS_CAP_BYTES
     + QUADS_CAP_BYTES
     + 7 * OVERLAY_CAP_BYTES
-    + 2 * SMALL_CAP_BYTES
+    + 3 * SMALL_CAP_BYTES
     + 3 * INDEX_CAP_BYTES
     + SNAPPED_CAP_BYTES
     + 2 * PLACEHOLDER_INDEX_CAP_BYTES
@@ -209,6 +209,9 @@ pub(crate) struct FrameScratch {
     pub(crate) quads: Vec<QuadInstance>,
     /// Overlay quads, drawn after the terminal text.
     pub(crate) overlay_quads: Vec<QuadInstance>,
+    /// Program-background pane fills, which replace the pixels under them before any quad
+    /// blends, so a translucent window shows them at its opacity; one per overridden pane.
+    pub(crate) pane_fills: Vec<QuadInstance>,
     /// Inline image draws.
     pub(crate) images: Vec<ImageInstance>,
     /// Inline-image emission's two sort buffers.
@@ -247,6 +250,7 @@ impl FrameScratch {
         finish_part(&mut self.overlay_glyphs, OVERLAY_CAP_BYTES, completed);
         finish_part(&mut self.quads, QUADS_CAP_BYTES, completed);
         finish_part(&mut self.overlay_quads, OVERLAY_CAP_BYTES, completed);
+        finish_part(&mut self.pane_fills, SMALL_CAP_BYTES, completed);
         finish_part(&mut self.images, OVERLAY_CAP_BYTES, completed);
         finish_part(&mut self.image_sort.allocation_order, INDEX_CAP_BYTES, completed);
         finish_part(&mut self.image_sort.emitted, OVERLAY_CAP_BYTES, completed);
@@ -291,6 +295,7 @@ impl FrameScratch {
             reserved(&self.overlay_glyphs),
             reserved(&self.quads),
             reserved(&self.overlay_quads),
+            reserved(&self.pane_fills),
             reserved(&self.images),
             reserved(&self.image_sort.allocation_order),
             reserved(&self.image_sort.emitted),

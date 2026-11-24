@@ -3,7 +3,9 @@
 //!
 //! The parser owns one store per pane and the renderer reads it borrowed for a frame, so both
 //! agree on which entries a program overrode. An entry records presence, not a difference from
-//! the theme: an override equal to today's default still masks a later theme change.
+//! the theme: an override equal to today's default still masks a later theme change. The
+//! generation is separate from presence: the owner advances it once per request that changed a
+//! drawn color, so a storage-only change costs no repaint.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,7 +47,7 @@ pub struct ColorOverrides {
     palette: [Rgb; 256],
     /// One bit per palette index: set while that index holds a program override.
     palette_mask: [u64; 4],
-    /// Changes whenever a stored override changes; 0 until the first change.
+    /// Changes when the owner commits a drawn color change; 0 until the first one.
     generation: u64,
 }
 
@@ -78,8 +80,9 @@ impl ColorOverrides {
             && self.palette_mask == [0; 4]
     }
 
-    /// An identity of the stored overrides: it changes exactly when a stored entry changes and
-    /// is unique across every store in the process, so caches can key on it.
+    /// An identity of the drawn overrides: it changes each time the owner calls
+    /// [`ColorOverrides::advance_generation`] and is unique across every store in the process, so
+    /// caches can key on it; 0 until the first advance.
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generation
@@ -105,8 +108,9 @@ impl ColorOverrides {
         (self.palette_mask[word] & bit != 0).then(|| self.palette[usize::from(index)])
     }
 
-    /// Store `color` as the override of `target`, or remove the override on `None`.
-    pub fn set_dynamic(&mut self, target: DynamicColor, color: Option<Rgb>) {
+    /// Store `color` as the override of `target`, or remove the override on `None`; whether the
+    /// stored entry changed. The generation does not move.
+    pub fn set_dynamic(&mut self, target: DynamicColor, color: Option<Rgb>) -> bool {
         let slot = match target {
             DynamicColor::Foreground => &mut self.foreground,
             DynamicColor::Background => &mut self.background,
@@ -115,18 +119,17 @@ impl ColorOverrides {
             DynamicColor::SelectionForeground => &mut self.selection_foreground,
             DynamicColor::CursorText => &mut self.cursor_text,
         };
-        if *slot != color {
-            // Only a changed entry moves the generation, so a repeated set causes no repaint.
-            *slot = color;
-            self.advance_generation();
-        }
+        let changed = *slot != color;
+        *slot = color;
+        changed
     }
 
-    /// Store `color` as the override of palette entry `index`, or remove it on `None`.
-    pub fn set_palette(&mut self, index: u8, color: Option<Rgb>) {
+    /// Store `color` as the override of palette entry `index`, or remove it on `None`; whether
+    /// the stored entry changed. The generation does not move.
+    pub fn set_palette(&mut self, index: u8, color: Option<Rgb>) -> bool {
         if self.palette(index) == color {
             // When: the stored `palette` entry already equals `color`, nothing changes.
-            return;
+            return false;
         }
         let (word, bit) = mask_position(index);
         match color {
@@ -136,21 +139,22 @@ impl ColorOverrides {
             }
             None => self.palette_mask[word] &= !bit,
         }
-        self.advance_generation();
+        true
     }
 
-    /// Remove every palette override, keeping the dynamic colors (RIS and a bare OSC 104).
-    pub fn clear_palette(&mut self) {
-        if self.palette_mask != [0; 4] {
-            // Clearing is a change only while an entry is still marked.
-            self.palette_mask = [0; 4];
-            self.advance_generation();
-        }
+    /// Remove every palette override, keeping the dynamic colors (RIS and a bare OSC 104);
+    /// whether any entry was stored. The generation does not move.
+    pub fn clear_palette(&mut self) -> bool {
+        let changed = self.palette_mask != [0; 4];
+        self.palette_mask = [0; 4];
+        changed
     }
 
+    /// Give the store a new process-unique generation, once per request that changed a drawn
+    /// color, so every renderer cache keyed on the old one misses.
     // Ordering: NEXT_GENERATION.fetch_add is Relaxed: it hands out distinct values and
     // publishes no other memory.
-    fn advance_generation(&mut self) {
+    pub fn advance_generation(&mut self) {
         self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
 }

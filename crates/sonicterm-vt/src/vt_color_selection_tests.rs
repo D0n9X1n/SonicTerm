@@ -42,8 +42,8 @@ fn osc17_and_osc19_set_and_query_the_selection_colors() {
     );
 }
 
-/// OSC 117 and 119 reset only their own color with no argument, an empty one or any non-`?`
-/// argument, and answer it under their own number for `?`.
+/// OSC 117 and 119 reset only their own color with no argument, an empty one or any first argument
+/// but `?`, and answer it under their own number only for a first-field `?`.
 #[test]
 fn osc117_and_osc119_reset_or_answer_their_own_color() {
     for (code, target, theme) in [
@@ -74,6 +74,13 @@ fn osc117_and_osc119_reset_or_answer_their_own_color() {
             reply_to(&mut parser, query.as_bytes()),
             format!("\x1b]{code};rgb:{theme}\x07").into_bytes()
         );
+        // A `?` after the first field is an ignored parameter: the color resets, nothing answers.
+        for mixed in [format!("\x1b]{code};x;?\x07"), format!("\x1b]{code};;?\x07")] {
+            let mut parser = selection_parser();
+            let _ = reply_to(&mut parser, b"\x1b]17;#010101\x07\x1b]19;#020202\x07");
+            assert_eq!(reply_to(&mut parser, mixed.as_bytes()), b"", "{mixed:?}");
+            assert_eq!(dynamic_override(&parser, target), None, "{mixed:?} resets");
+        }
     }
 }
 

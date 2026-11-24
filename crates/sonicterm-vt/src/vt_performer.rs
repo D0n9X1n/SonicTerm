@@ -336,7 +336,10 @@ impl Performer {
         self.focus_reporting = false;
         self.color_scheme_updates = false;
         // RIS resets the palette a program set, but not its foreground, background or cursor.
-        self.color_overrides.clear_palette();
+        if self.clear_palette_overrides() {
+            // A removed palette entry drew another color, so the pane repaints once.
+            self.color_overrides.advance_generation();
+        }
         self.kitty_notifications.clear();
         // A program's cursor request ends with the reset, so the host draws the configured cursor.
         if self.cursor_request.take().is_some() {

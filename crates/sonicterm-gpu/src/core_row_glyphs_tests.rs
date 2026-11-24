@@ -506,3 +506,24 @@ fn unwinding_while_row_keys_are_in_use_keeps_the_key_buffer() {
     assert!(row_keys.capacity() >= 64, "the key buffer stays in the scratch with its capacity");
     assert_eq!(row_keys.as_ptr(), warm_pointer, "and keeps its warm allocation");
 }
+
+/// SGR 9 cells record a strikethrough run beside the underline runs, in the color an underline
+/// would take (the SGR 58 color, else the cell foreground), so the decoration pass can draw it.
+#[test]
+fn struck_cells_record_a_strikethrough_run() {
+    let mut grid = Grid::new(4, 1);
+    for character in ['a', 'b'] {
+        grid.put_char(character, Color::Indexed(1), Color::Default, CellFlags::STRIKETHROUGH);
+    }
+    grid.put_char('c', Color::Default, Color::Default, CellFlags::empty());
+    let mut rig = GlyphRig::new(false);
+    rig.begin(&grid);
+    let row = rig.emit(&grid, 0, 0);
+    assert!(
+        row.decorations.contains(
+            "start_col: 0, end_col: 1, style: Single, color: Indexed(1), strikethrough: true"
+        ),
+        "{}",
+        row.decorations
+    );
+}

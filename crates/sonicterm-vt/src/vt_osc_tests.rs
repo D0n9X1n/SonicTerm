@@ -120,7 +120,7 @@ fn osc_semantic_capture_is_bounded_and_recovers() {
         parser.advance(&vec![b'a'; cap]);
         assert!(parser.retained_amount().bytes <= cap);
         parser.advance(b"b");
-        assert!(parser.discarding_oversized_escape);
+        assert!(matches!(parser.raw_osc, Some(super::RawOsc::Refused { .. })));
         assert_eq!(parser.retained_amount().bytes, 0);
         parser.advance(b"\x1b\\X");
         assert_eq!(parser.grid().row(0)[0].ch, 'X');

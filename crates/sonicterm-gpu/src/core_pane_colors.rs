@@ -126,12 +126,13 @@ impl<'frame> PaneColors<'frame> {
         ])
     }
 
-    /// The row-cache style revision for this pane: `base` without overrides, else `base` mixed
-    /// with the override generation, so a cached row never replays another color state.
+    /// The row-cache style revision for this pane: `base` without overrides or while their
+    /// generation never moved (every held override equals the color already drawn), else `base`
+    /// mixed with the override generation, so a cached row never replays another color state.
     #[must_use]
     pub fn style_rev(&self, base: u64) -> u64 {
-        let Some(overrides) = self.overrides else {
-            // When: `overrides` is absent, the pane shares the theme rows every pane draws.
+        let Some(overrides) = self.overrides.filter(|overrides| overrides.generation() != 0) else {
+            // When: no `overrides` changed a drawn color, the pane shares the theme rows.
             return base;
         };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -140,27 +141,45 @@ impl<'frame> PaneColors<'frame> {
     }
 }
 
-/// The frame key's color identity: 0 while no pane has program colors, else a digest of each
-/// overridden pane's id and override generation, so any color change repaints the whole window.
+/// Accumulates the frame key's color identity one pane at a time, inside a pass over the panes
+/// the frame already makes.
+#[derive(Default)]
+pub struct PaneColorsDigest {
+    hasher: Option<std::collections::hash_map::DefaultHasher>,
+}
+
+impl PaneColorsDigest {
+    /// Add pane `pane_id` drawn under `overrides`; only a store whose generation moved counts,
+    /// since one that never moved draws exactly as the theme does.
+    pub fn add(&mut self, pane_id: u64, overrides: Option<&ColorOverrides>) {
+        let Some(generation) =
+            overrides.map(ColorOverrides::generation).filter(|generation| *generation != 0)
+        else {
+            // When: the pane has no overrides or none changed a drawn color, it adds nothing.
+            return;
+        };
+        (pane_id, generation).hash(self.hasher.get_or_insert_with(Default::default));
+    }
+
+    /// The identity: 0 while no pane counted, else a digest of each counted pane's id and
+    /// generation, so any drawn color change repaints the whole window.
+    #[must_use]
+    pub fn finish(&self) -> u64 {
+        self.hasher.as_ref().map_or(0, Hasher::finish)
+    }
+}
+
+/// The frame key's color identity of `panes`, as [`PaneColorsDigest`] accumulates it.
+#[cfg(test)]
 #[must_use]
 pub fn pane_colors_identity<'frame>(
     panes: impl IntoIterator<Item = (u64, Option<&'frame ColorOverrides>)>,
 ) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let mut any = false;
+    let mut digest = PaneColorsDigest::default();
     for (pane_id, overrides) in panes {
-        if let Some(overrides) = overrides {
-            // A pane with program colors adds its id and generation to the digest.
-            any = true;
-            (pane_id, overrides.generation()).hash(&mut hasher);
-        }
+        digest.add(pane_id, overrides);
     }
-    if any {
-        hasher.finish()
-    } else {
-        // When: `any` stayed false, no pane has program colors and the identity is 0.
-        0
-    }
+    digest.finish()
 }
 
 #[cfg(test)]

@@ -213,7 +213,7 @@ impl Parser {
         let osc_bytes = match &self.raw_osc {
             Some(RawOsc::Semantic { content, .. }) => content.capacity(),
             Some(RawOsc::Iterm2 { capture, .. }) => capture.retained_bytes(),
-            Some(RawOsc::Probe { .. }) | None => 0,
+            Some(RawOsc::Probe { .. } | RawOsc::Refused { .. }) | None => 0,
         };
         // OSC 99 chunks wait here until their notification completes, at most MAX_NOTIFY_BYTES.
         let notify_bytes = self.performer.kitty_notifications.retained_bytes();
@@ -249,7 +249,8 @@ impl Parser {
             });
         let osc = match &self.raw_osc {
             Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
-            Some(RawOsc::Probe { .. }) | Some(RawOsc::Semantic { .. }) | None => 0,
+            Some(RawOsc::Probe { .. } | RawOsc::Semantic { .. } | RawOsc::Refused { .. })
+            | None => 0,
         };
         direct.saturating_add(osc)
     }

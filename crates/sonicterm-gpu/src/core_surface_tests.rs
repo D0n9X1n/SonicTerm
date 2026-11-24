@@ -108,6 +108,7 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             None,
             &[],
             &[],
+            &[],
             &glyphs,
             &[],
             &[],
@@ -184,6 +185,7 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             HEIGHT as f32,
             SubpixelAaMode::Off,
             Some(clear),
+            &[],
             &[],
             &[],
             &[],
@@ -288,6 +290,31 @@ fn retained_full_clear_preserves_content_blending_and_replaces_prior_frame() {
         pixels_close(pixels[0], clear_bgra(expected)),
         "content must retain source-over blending"
     );
+}
+
+/// A program background's pane fill replaces the theme clear at the window opacity, on a full
+/// frame and on a partial frame, so a translucent pane shows the override at the configured
+/// opacity instead of blending over the theme; a partial frame without the fill (the override
+/// reset) shows the theme clear again.
+#[test]
+fn a_pane_fill_replaces_the_theme_clear_at_the_window_opacity() {
+    let mut fixture = RetainedPixelFixture::new();
+    let full = full_surface_rect(4, 2);
+    let background = reset_background(0.5);
+    let fill_color = [0.25, 0.125, 0.0625, 0.5];
+    let pane_fill = [QuadInstance::sharp(px_to_ndc(0.0, 0.0, 2.0, 2.0, 4.0, 2.0), fill_color)];
+    let fill_bgra = clear_bgra(wgpu::Color { r: 0.25, g: 0.125, b: 0.0625, a: 0.5 });
+    fixture.draw_filled(true, full, background, &pane_fill);
+    let first = fixture.pixels();
+    assert!(pixels_close(first[0], fill_bgra), "full frame: {:?} vs {fill_bgra:?}", first[0]);
+    assert!(pixels_close(first[3], clear_bgra(background)), "the sibling keeps the theme");
+    let damage = PixelRect { x: 0, y: 0, w: 2, h: 2 };
+    fixture.draw_filled(false, damage, background, &pane_fill);
+    let partial = fixture.pixels();
+    assert!(pixels_close(partial[0], fill_bgra), "partial frame: {:?}", partial[0]);
+    fixture.draw_filled(false, damage, background, &[]);
+    let reset = fixture.pixels();
+    assert!(pixels_close(reset[0], clear_bgra(background)), "reset: {:?}", reset[0]);
 }
 
 #[test]
