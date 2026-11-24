@@ -90,14 +90,31 @@ pub enum MouseTracking {
     AnyMotion,
 }
 
+/// The encoding of mouse reports a program selected with DECSET 1005, 1006, 1015 or 1016. Only one
+/// is active: the last one set wins, and resetting any of them returns to X10.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum MouseFormat {
+    /// `CSI M` and three bytes, each coordinate clamped to 223.
+    #[default]
+    X10,
+    /// DECSET 1005: `CSI M`, the button byte, then each coordinate as UTF-8.
+    Utf8,
+    /// DECSET 1006: `CSI < Cb ; Cx ; Cy M`, lowercase `m` on release, one-based cells.
+    Sgr,
+    /// DECSET 1015: `CSI Cb+32 ; Cx ; Cy M` in decimal, one-based cells.
+    Urxvt,
+    /// DECSET 1016: the SGR form with zero-based pane pixels instead of cells.
+    SgrPixels,
+}
+
 /// Terminal modes that decide how host pointer events are routed and encoded.
 ///
-/// Packed into one byte so the VT worker can publish all five bits with one store
-/// and a pointer handler can read them without the parser lock.
+/// Packed into one byte so the VT worker can publish them with one store and a pointer handler can
+/// read them without the parser lock.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct PointerModes {
     tracking: MouseTracking,
-    sgr: bool,
+    format: MouseFormat,
     is_alt: bool,
     application_cursor: bool,
 }
@@ -621,7 +638,8 @@ struct Performer {
     /// Cursor saved by DECSET ?1049 when entering the alt screen.
     saved_cursor: Option<Pos>,
     bracketed_paste: bool,
-    mouse_sgr: bool,
+    /// DECSET 1005/1006/1015/1016 mouse report encoding.
+    mouse_format: MouseFormat,
     /// DECCKM ?1 — application cursor keys. When set, the arrow keys (and the
     /// synthetic arrow sequences SonicTerm emits for alt-screen wheel scroll)
     /// must use the `ESC O A` form instead of `ESC [ A`.

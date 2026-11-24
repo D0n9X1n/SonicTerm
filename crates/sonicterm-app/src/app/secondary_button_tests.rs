@@ -14,27 +14,69 @@ fn secondary_reports_encode_like_xterm() {
     let middle = SecondaryButton::Middle;
     let none = ModifiersState::empty();
     assert_eq!(
-        secondary_report_bytes(true, SecondaryEvent::Press, right, none, at),
+        secondary_report_bytes(
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            SecondaryEvent::Press,
+            right,
+            none,
+            at,
+            (0, 0)
+        ),
         b"\x1b[<2;10;5M"
     );
     assert_eq!(
-        secondary_report_bytes(true, SecondaryEvent::Release, right, none, at),
+        secondary_report_bytes(
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            SecondaryEvent::Release,
+            right,
+            none,
+            at,
+            (0, 0)
+        ),
         b"\x1b[<2;10;5m"
     );
     assert_eq!(
-        secondary_report_bytes(true, SecondaryEvent::HeldMotion, right, none, at),
+        secondary_report_bytes(
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            SecondaryEvent::HeldMotion,
+            right,
+            none,
+            at,
+            (0, 0)
+        ),
         b"\x1b[<34;10;5M"
     );
     assert_eq!(
-        secondary_report_bytes(true, SecondaryEvent::Press, middle, ModifiersState::CONTROL, at),
+        secondary_report_bytes(
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            SecondaryEvent::Press,
+            middle,
+            ModifiersState::CONTROL,
+            at,
+            (0, 0)
+        ),
         b"\x1b[<17;10;5M"
     );
     assert_eq!(
-        secondary_report_bytes(false, SecondaryEvent::Press, right, none, at),
+        secondary_report_bytes(
+            sonicterm_vt::vt::MouseFormat::X10,
+            SecondaryEvent::Press,
+            right,
+            none,
+            at,
+            (0, 0)
+        ),
         [0x1b, b'[', b'M', 34, 42, 37]
     );
     assert_eq!(
-        secondary_report_bytes(false, SecondaryEvent::Release, right, none, at),
+        secondary_report_bytes(
+            sonicterm_vt::vt::MouseFormat::X10,
+            SecondaryEvent::Release,
+            right,
+            none,
+            at,
+            (0, 0)
+        ),
         [0x1b, b'[', b'M', 35, 42, 37]
     );
 }
@@ -50,7 +92,7 @@ fn tracking_app(tracking: MouseTracking) -> (App, Vec<(WindowId, u64)>) {
     assert!(app.__test_set_main_pane_viewport(outer, 10.0, 20.0));
     assert!(app.__test_set_child_pane_viewport(child, outer, 10.0, 20.0));
     let child_pane = app.__test_child_active_pane(child).expect("child pane");
-    let modes = PointerModes::new(tracking, true, false, false);
+    let modes = PointerModes::new(tracking, sonicterm_vt::vt::MouseFormat::Sgr, false, false);
     for window in app.registry.windows.values() {
         for pane in window.panes.values() {
             // Ordering: pointer_input stores Relaxed; this thread is the handler's only reader.

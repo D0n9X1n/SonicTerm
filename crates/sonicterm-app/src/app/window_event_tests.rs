@@ -40,7 +40,7 @@ pub(super) const CHILD_SOURCES: &str = concat!(
 );
 
 pub(super) fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
-    PointerCell { pane_id, row, col }
+    PointerCell { pane_id, row, col, pixel: (0, 0) }
 }
 
 #[cfg(windows)]

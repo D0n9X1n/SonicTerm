@@ -10,7 +10,7 @@ use sonicterm_cfg::{config::ScrollbarMode, keymap::Action};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::selection::Selection;
-use sonicterm_vt::vt::MouseTracking;
+use sonicterm_vt::vt::{MouseFormat, MouseTracking};
 use winit::{
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
@@ -38,7 +38,14 @@ pub(super) enum PointerReportKind {
 pub(super) enum PointerMotionRoute {
     Local,
     None,
-    Report { pane_id: u64, sgr: bool, row: u16, col: u16, modifiers: ModifiersState },
+    Report {
+        pane_id: u64,
+        format: MouseFormat,
+        row: u16,
+        col: u16,
+        pixel: (i32, i32),
+        modifiers: ModifiersState,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

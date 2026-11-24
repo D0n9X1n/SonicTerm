@@ -52,7 +52,7 @@ pub(super) fn child_no_button_motion_report(
     child: &WindowState,
     cell: PointerCell,
     tracking: sonicterm_vt::vt::MouseTracking,
-    sgr: bool,
+    format: sonicterm_vt::vt::MouseFormat,
     scrollbar_owned: bool,
 ) -> Option<super::window_event::PointerMotionRoute> {
     let ui_consumed = child.splitter_hover.is_some()
@@ -63,7 +63,13 @@ pub(super) fn child_no_button_motion_report(
             .copy_mode
             .as_ref()
             .is_some_and(sonicterm_ui::copy_mode::CopyModeState::is_read_only);
-    super::window_event::no_button_motion_report(cell, tracking, sgr, child.modifiers, ui_consumed)
+    super::window_event::no_button_motion_report(
+        cell,
+        tracking,
+        format,
+        child.modifiers,
+        ui_consumed,
+    )
 }
 
 /// Resize `renderer` to `width × height` and size every pane in `panes` to the

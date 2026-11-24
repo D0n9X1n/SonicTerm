@@ -378,22 +378,44 @@ fn ris_resets_every_keyboard_mode() {
     assert_eq!(parser.keyboard_modes(), super::KeyboardModes::default());
 }
 
-/// SGR report encoding can toggle independently without selecting a tracking mode.
+/// Each encoding mode selects its own report format without selecting a tracking mode: 1005
+/// UTF-8, 1006 SGR, 1015 urxvt and 1016 SGR pixels.
 #[test]
-fn sgr_mouse_encoding_does_not_enable_tracking() {
-    let mut parser = Parser::new(Grid::new(8, 2));
-
-    parser.advance(b"\x1b[?1006h");
-    assert!(parser.mouse_sgr_enabled());
-    assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
-
-    parser.advance(b"\x1b[?1002h\x1b[?1006l");
-    assert!(!parser.mouse_sgr_enabled());
-    assert_eq!(parser.mouse_tracking(), MouseTracking::ButtonMotion);
+fn each_mouse_encoding_mode_selects_its_format() {
+    for (mode, format) in [
+        (1005u16, MouseFormat::Utf8),
+        (1006, MouseFormat::Sgr),
+        (1015, MouseFormat::Urxvt),
+        (1016, MouseFormat::SgrPixels),
+    ] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        assert_eq!(parser.mouse_format(), MouseFormat::X10);
+        parser.advance(format!("\x1b[?{mode}h").as_bytes());
+        assert_eq!(parser.mouse_format(), format, "{mode}");
+        assert_eq!(parser.mouse_tracking(), MouseTracking::Off, "{mode}");
+    }
 }
 
-/// Every combination of the five pointer bits survives a pack and decode unchanged,
-/// so a reader of the published byte sees exactly the modes the worker stored.
+/// The last encoding set wins, so crossterm's `?1015h` then `?1006h` ends in SGR; resetting any
+/// of the four returns to X10 whichever is active; RIS returns to X10.
+#[test]
+fn the_last_encoding_set_wins_and_any_reset_returns_to_x10() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[?1015h\x1b[?1006h");
+    assert_eq!(parser.mouse_format(), MouseFormat::Sgr);
+    parser.advance(b"\x1b[?1005l");
+    assert_eq!(parser.mouse_format(), MouseFormat::X10);
+    parser.advance(b"\x1b[?1002h\x1b[?1016h\x1b[?1015l");
+    assert_eq!(parser.mouse_format(), MouseFormat::X10);
+    assert_eq!(parser.mouse_tracking(), MouseTracking::ButtonMotion);
+    parser.advance(b"\x1b[?1016;1005h");
+    assert_eq!(parser.mouse_format(), MouseFormat::Utf8);
+    parser.advance(b"\x1bc");
+    assert_eq!(parser.mouse_format(), MouseFormat::X10);
+}
+
+/// Every combination of tracking, report format, screen and DECCKM survives a pack and decode
+/// unchanged, so a reader of the published byte sees exactly the modes the worker stored.
 #[test]
 fn pointer_modes_round_trip_every_combination() {
     let trackings = [
@@ -402,26 +424,31 @@ fn pointer_modes_round_trip_every_combination() {
         MouseTracking::ButtonMotion,
         MouseTracking::AnyMotion,
     ];
+    let formats = [
+        MouseFormat::X10,
+        MouseFormat::Utf8,
+        MouseFormat::Sgr,
+        MouseFormat::Urxvt,
+        MouseFormat::SgrPixels,
+    ];
     for tracking in trackings {
-        for flag_bits in 0u8..8 {
-            let modes = PointerModes::new(
-                tracking,
-                flag_bits & 1 != 0,
-                flag_bits & 2 != 0,
-                flag_bits & 4 != 0,
-            );
-            let decoded = PointerModes::from_bits(modes.bits());
-            assert_eq!(decoded, modes);
-            assert_eq!(decoded.tracking(), tracking);
-            assert_eq!(decoded.sgr(), flag_bits & 1 != 0);
-            assert_eq!(decoded.is_alt(), flag_bits & 2 != 0);
-            assert_eq!(decoded.application_cursor(), flag_bits & 4 != 0);
+        for format in formats {
+            for flag_bits in 0u8..4 {
+                let modes =
+                    PointerModes::new(tracking, format, flag_bits & 1 != 0, flag_bits & 2 != 0);
+                let decoded = PointerModes::from_bits(modes.bits());
+                assert_eq!(decoded, modes);
+                assert_eq!(decoded.tracking(), tracking);
+                assert_eq!(decoded.format(), format);
+                assert_eq!(decoded.is_alt(), flag_bits & 1 != 0);
+                assert_eq!(decoded.application_cursor(), flag_bits & 2 != 0);
+            }
         }
     }
-    // The documented layout: tracking in bits 0-1, SGR bit 2, alt bit 3, app cursor bit 4.
-    let all = PointerModes::new(MouseTracking::AnyMotion, true, true, true);
-    assert_eq!(all.bits(), 0b1_1111);
-    assert_eq!(PointerModes::new(MouseTracking::Button, false, false, false).bits(), 0b01);
+    // The documented layout: tracking in bits 0-1, format in bits 2-4, alt bit 5, app cursor bit 6.
+    let all = PointerModes::new(MouseTracking::AnyMotion, MouseFormat::SgrPixels, true, true);
+    assert_eq!(all.bits(), 0b0111_0011);
+    assert_eq!(PointerModes::new(MouseTracking::Button, MouseFormat::X10, false, false).bits(), 1);
 }
 
 /// The parser's pointer snapshot follows tracking, SGR, alternate-screen and DECCKM
@@ -431,15 +458,17 @@ fn pointer_input_snapshot_follows_mode_changes() {
     let mut parser = Parser::new(Grid::new(8, 2));
     assert_eq!(parser.pointer_input_snapshot(), 0);
 
-    parser.advance(b"\x1b[?1003h\x1b[?1006h\x1b[?1049h\x1b[?1h");
+    parser.advance(b"\x1b[?1003h\x1b[?1016h\x1b[?1049h\x1b[?1h");
     let modes = PointerModes::from_bits(parser.pointer_input_snapshot());
     assert_eq!(modes.tracking(), MouseTracking::AnyMotion);
-    assert!(modes.sgr() && modes.is_alt() && modes.application_cursor());
+    assert_eq!(modes.format(), MouseFormat::SgrPixels);
+    assert!(modes.is_alt() && modes.application_cursor());
 
-    parser.advance(b"\x1b[?1049l\x1b[?1006l");
+    parser.advance(b"\x1b[?1049l\x1b[?1016l");
     let modes = PointerModes::from_bits(parser.pointer_input_snapshot());
     assert_eq!(modes.tracking(), MouseTracking::AnyMotion);
-    assert!(!modes.sgr() && !modes.is_alt() && modes.application_cursor());
+    assert_eq!(modes.format(), MouseFormat::X10);
+    assert!(!modes.is_alt() && modes.application_cursor());
 
     parser.advance(b"\x1bc");
     assert_eq!(parser.pointer_input_snapshot(), 0);

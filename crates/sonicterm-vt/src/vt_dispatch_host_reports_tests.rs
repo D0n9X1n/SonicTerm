@@ -50,12 +50,37 @@ fn decrqm_reports_only_the_selected_mouse_mode() {
     assert_eq!(reply_to(&mut parser, b"\x1b[?1000$p"), b"\x1b[?1000;2$y");
 }
 
-/// A mode the parser does not store answers 0 (not recognized), so a program that probes it, such
-/// as for SGR pixel mouse 1016, falls back at once instead of waiting out a timeout; nothing changes.
+/// Each mouse encoding mode reports 1 while it is the active format and 2 otherwise, so a program
+/// that probes 1005, 1006, 1015 or 1016 learns which one its reports use.
+#[test]
+fn decrqm_reports_the_active_mouse_encoding() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let modes = [1005u16, 1006, 1015, 1016];
+    for active in modes {
+        parser.advance(format!("\x1b[?{active}h").as_bytes());
+        for mode in modes {
+            let state = if mode == active { 1 } else { 2 };
+            let query = format!("\x1b[?{mode}$p");
+            assert_eq!(
+                reply_to(&mut parser, query.as_bytes()),
+                format!("\x1b[?{mode};{state}$y").as_bytes(),
+                "{active} active, {mode} asked"
+            );
+        }
+    }
+    parser.advance(b"\x1b[?1015l");
+    for mode in modes {
+        let query = format!("\x1b[?{mode}$p");
+        assert_eq!(reply_to(&mut parser, query.as_bytes()), format!("\x1b[?{mode};2$y").as_bytes());
+    }
+}
+
+/// A mode the parser does not store answers 0 (not recognized), so a program that probes it falls
+/// back at once instead of waiting out a timeout; nothing changes.
 #[test]
 fn decrqm_answers_zero_for_modes_it_does_not_store() {
     let mut parser = Parser::new(Grid::new(8, 2));
-    for mode in [6u16, 12, 25, 66, 1005, 1015, 1016, 1048, 2048, 4242] {
+    for mode in [6u16, 12, 25, 66, 1048, 2048, 4242] {
         let query = format!("\x1b[?{mode}$p");
         assert_eq!(reply_to(&mut parser, query.as_bytes()), format!("\x1b[?{mode};0$y").as_bytes());
     }

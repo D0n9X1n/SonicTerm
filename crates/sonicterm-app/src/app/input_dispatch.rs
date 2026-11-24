@@ -38,7 +38,7 @@ pub fn pick_prompt_target(
 pub(super) struct PendingPointerMotion {
     bytes: [u8; 64],
     pub(super) len: usize,
-    profile: Option<(MouseTracking, bool, bool)>,
+    profile: Option<(MouseTracking, sonicterm_vt::vt::MouseFormat, bool)>,
 }
 
 impl Default for PendingPointerMotion {
@@ -48,7 +48,10 @@ impl Default for PendingPointerMotion {
 }
 
 impl PendingPointerMotion {
-    fn validate_profile(&mut self, profile: Option<(MouseTracking, bool, bool)>) {
+    fn validate_profile(
+        &mut self,
+        profile: Option<(MouseTracking, sonicterm_vt::vt::MouseFormat, bool)>,
+    ) {
         let Some(current) = profile else {
             // When: profile is unavailable, retain the position until a later retry can validate it.
             return;
@@ -63,7 +66,8 @@ impl PendingPointerMotion {
     }
 
     fn replace(&mut self, bytes: &[u8]) {
-        // SGR reports contain at most three u32 fields; both supported encodings fit this fixed slot.
+        // A report is at most 31 bytes (1016: a code and two signed 32-bit pixels), so every
+        // encoding fits this fixed slot; the profile includes the format, so none is replayed in another.
         assert!(bytes.len() <= self.bytes.len());
         self.bytes[..bytes.len()].copy_from_slice(bytes);
         self.len = bytes.len();
@@ -362,7 +366,7 @@ impl App {
             if source == PtyInputSource::PointerMotion || pane.pending_pointer_motion.len != 0 {
                 // Profile checks never block discrete input behind parser output.
                 pane.parser.try_lock().map(|parser| {
-                    (parser.mouse_tracking(), parser.mouse_sgr_enabled(), parser.grid().is_alt())
+                    (parser.mouse_tracking(), parser.mouse_format(), parser.grid().is_alt())
                 })
             } else {
                 // When: source is discrete and no motion is pending, the parser is irrelevant to admission.
@@ -440,7 +444,7 @@ impl App {
                     continue;
                 }
                 let profile = pane.parser.try_lock().map(|parser| {
-                    (parser.mouse_tracking(), parser.mouse_sgr_enabled(), parser.grid().is_alt())
+                    (parser.mouse_tracking(), parser.mouse_format(), parser.grid().is_alt())
                 });
                 pane.pending_pointer_motion.validate_profile(profile);
                 let Some(pty) = pane.pty.as_ref() else {

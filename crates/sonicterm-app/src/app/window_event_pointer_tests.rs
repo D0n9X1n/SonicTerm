@@ -5,14 +5,17 @@ use super::*;
 
 #[test]
 fn sgr_wheel_down_is_button_65() {
-    assert_eq!(wheel_report_bytes(true, false, 5, 3, 1), b"\x1b[<65;5;3M".to_vec());
+    assert_eq!(
+        wheel_report_bytes(sonicterm_vt::vt::MouseFormat::Sgr, false, (2, 4), (0, 0), 1),
+        b"\x1b[<65;5;3M".to_vec()
+    );
 }
 
 #[test]
 fn sgr_emits_one_report_per_line() {
     // 3 ticks → three concatenated reports.
     assert_eq!(
-        wheel_report_bytes(true, true, 1, 1, 3),
+        wheel_report_bytes(sonicterm_vt::vt::MouseFormat::Sgr, true, (0, 0), (0, 0), 3),
         b"\x1b[<64;1;1M\x1b[<64;1;1M\x1b[<64;1;1M".to_vec()
     );
 }
@@ -20,13 +23,17 @@ fn sgr_emits_one_report_per_line() {
 #[test]
 fn legacy_x10_encodes_button_and_coords_plus_32() {
     // up=button 64 → 64+32=96 ('`'); col 5 → 37 ('%'); row 3 → 35 ('#').
-    assert_eq!(wheel_report_bytes(false, true, 5, 3, 1), vec![0x1b, b'[', b'M', 96, 37, 35]);
+    assert_eq!(
+        wheel_report_bytes(sonicterm_vt::vt::MouseFormat::X10, true, (2, 4), (0, 0), 1),
+        vec![0x1b, b'[', b'M', 96, 37, 35]
+    );
 }
 
 #[test]
 fn legacy_x10_clamps_large_coords() {
     // col/row clamp to 223 so +32 stays within a byte (255).
-    let out = wheel_report_bytes(false, false, 9999, 9999, 1);
+    let out =
+        wheel_report_bytes(sonicterm_vt::vt::MouseFormat::X10, false, (9998, 9998), (0, 0), 1);
     assert_eq!(out, vec![0x1b, b'[', b'M', 97, 255, 255]); // 65+32=97
 }
 
@@ -35,29 +42,58 @@ fn sgr_pointer_reports_encode_press_release_and_motion_modifiers() {
     // SGR keeps left-button Cb on release, uses lowercase `m`, and adds the
     // current modifier and motion bits without changing one-based coordinates.
     assert_eq!(
-        pointer_report_bytes(true, PointerReportKind::LeftPress, ModifiersState::empty(), 0, 0,),
+        pointer_report_bytes(
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            PointerReportKind::LeftPress,
+            ModifiersState::empty(),
+            0,
+            0,
+            (0, 0),
+        ),
         b"\x1b[<0;1;1M".to_vec()
     );
     assert_eq!(
-        pointer_report_bytes(true, PointerReportKind::LeftRelease, ModifiersState::empty(), 0, 0,),
+        pointer_report_bytes(
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            PointerReportKind::LeftRelease,
+            ModifiersState::empty(),
+            0,
+            0,
+            (0, 0),
+        ),
         b"\x1b[<0;1;1m".to_vec()
     );
     assert_eq!(
-        pointer_report_bytes(true, PointerReportKind::HeldLeftMotion, ModifiersState::ALT, 0, 0),
+        pointer_report_bytes(
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            PointerReportKind::HeldLeftMotion,
+            ModifiersState::ALT,
+            0,
+            0,
+            (0, 0)
+        ),
         b"\x1b[<40;1;1M".to_vec()
     );
     assert_eq!(
         pointer_report_bytes(
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
             PointerReportKind::NoButtonMotion,
             ModifiersState::SHIFT | ModifiersState::CONTROL,
             0,
             0,
+            (0, 0),
         ),
         b"\x1b[<55;1;1M".to_vec()
     );
     assert_eq!(
-        pointer_report_bytes(true, PointerReportKind::LeftPress, ModifiersState::SUPER, 0, 0,),
+        pointer_report_bytes(
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            PointerReportKind::LeftPress,
+            ModifiersState::SUPER,
+            0,
+            0,
+            (0, 0),
+        ),
         b"\x1b[<8;1;1M".to_vec()
     );
 }
@@ -74,12 +110,26 @@ fn legacy_pointer_reports_encode_exact_codes_and_zero_cell() {
     ];
     for (kind, button_byte) in cases {
         assert_eq!(
-            pointer_report_bytes(false, kind, ModifiersState::empty(), 0, 0),
+            pointer_report_bytes(
+                sonicterm_vt::vt::MouseFormat::X10,
+                kind,
+                ModifiersState::empty(),
+                0,
+                0,
+                (0, 0)
+            ),
             vec![0x1b, b'[', b'M', button_byte, 33, 33]
         );
     }
     assert_eq!(
-        pointer_report_bytes(false, PointerReportKind::LeftRelease, ModifiersState::ALT, 0, 0),
+        pointer_report_bytes(
+            sonicterm_vt::vt::MouseFormat::X10,
+            PointerReportKind::LeftRelease,
+            ModifiersState::ALT,
+            0,
+            0,
+            (0, 0)
+        ),
         vec![0x1b, b'[', b'M', 43, 33, 33]
     );
 }
@@ -90,11 +140,12 @@ fn legacy_pointer_reports_clamp_large_coordinates() {
     // yielding protocol coordinate 223 and a final encoded byte of 255.
     assert_eq!(
         pointer_report_bytes(
-            false,
+            sonicterm_vt::vt::MouseFormat::X10,
             PointerReportKind::LeftPress,
             ModifiersState::empty(),
             u16::MAX,
             u16::MAX,
+            (0, 0),
         ),
         vec![0x1b, b'[', b'M', 32, 255, 255]
     );
@@ -112,7 +163,14 @@ fn window_press_uses_live_shift_and_latches_the_real_owner() {
     window.selection = Some(Selection::new(2, 3));
     window.modifiers = ModifiersState::SHIFT;
 
-    assert_eq!(window.begin_pointer_press(cell, MouseTracking::ButtonMotion, true), None);
+    assert_eq!(
+        window.begin_pointer_press(
+            cell,
+            MouseTracking::ButtonMotion,
+            sonicterm_vt::vt::MouseFormat::Sgr
+        ),
+        None
+    );
     assert!(matches!(
         window.pointer_gesture.map(|gesture| gesture.owner),
         Some(PointerGestureOwner::Local)
@@ -123,12 +181,19 @@ fn window_press_uses_live_shift_and_latches_the_real_owner() {
     window.selection = Some(Selection::new(2, 3));
     window.modifiers = ModifiersState::empty();
     assert_eq!(
-        window.begin_pointer_press(cell, MouseTracking::ButtonMotion, true),
+        window.begin_pointer_press(
+            cell,
+            MouseTracking::ButtonMotion,
+            sonicterm_vt::vt::MouseFormat::Sgr
+        ),
         Some(b"\x1b[<0;4;3M".to_vec())
     );
     assert!(matches!(
         window.pointer_gesture.map(|gesture| gesture.owner),
-        Some(PointerGestureOwner::Terminal { tracking: MouseTracking::ButtonMotion, sgr: true })
+        Some(PointerGestureOwner::Terminal {
+            tracking: MouseTracking::ButtonMotion,
+            format: sonicterm_vt::vt::MouseFormat::Sgr
+        })
     ));
     assert!(window.selection.is_none());
 }
@@ -139,18 +204,35 @@ fn tracked_press_chooses_terminal_unless_shift_or_tracking_off() {
     // unmodified active mode latches terminal ownership and Off stays local.
     let cell = pointer_cell(7, 3, 4);
     for tracking in [MouseTracking::Button, MouseTracking::ButtonMotion, MouseTracking::AnyMotion] {
-        let terminal = begin_pointer_gesture(cell, tracking, true, ModifiersState::empty(), false)
-            .expect("grid press must create a gesture");
+        let terminal = begin_pointer_gesture(
+            cell,
+            tracking,
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            ModifiersState::empty(),
+            false,
+        )
+        .expect("grid press must create a gesture");
         assert!(matches!(terminal.owner, PointerGestureOwner::Terminal { .. }));
     }
 
-    let shifted =
-        begin_pointer_gesture(cell, MouseTracking::AnyMotion, true, ModifiersState::SHIFT, false)
-            .expect("shifted grid press must create a local gesture");
+    let shifted = begin_pointer_gesture(
+        cell,
+        MouseTracking::AnyMotion,
+        sonicterm_vt::vt::MouseFormat::Sgr,
+        ModifiersState::SHIFT,
+        false,
+    )
+    .expect("shifted grid press must create a local gesture");
     assert_eq!(shifted.owner, PointerGestureOwner::Local);
 
-    let off = begin_pointer_gesture(cell, MouseTracking::Off, true, ModifiersState::empty(), false)
-        .expect("untracked grid press must create a local gesture");
+    let off = begin_pointer_gesture(
+        cell,
+        MouseTracking::Off,
+        sonicterm_vt::vt::MouseFormat::Sgr,
+        ModifiersState::empty(),
+        false,
+    )
+    .expect("untracked grid press must create a local gesture");
     assert_eq!(off.owner, PointerGestureOwner::Local);
 }
 
@@ -162,7 +244,7 @@ fn consumed_ui_press_creates_no_terminal_gesture_or_report() {
         begin_pointer_gesture(
             pointer_cell(7, 0, 0),
             MouseTracking::AnyMotion,
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
             ModifiersState::empty(),
             true,
         ),
@@ -177,7 +259,7 @@ fn terminal_owner_latches_press_pane_mode_profile_and_last_cell() {
     let mut gesture = begin_pointer_gesture(
         pointer_cell(7, 3, 4),
         MouseTracking::ButtonMotion,
-        true,
+        sonicterm_vt::vt::MouseFormat::Sgr,
         ModifiersState::empty(),
         false,
     )
@@ -186,15 +268,17 @@ fn terminal_owner_latches_press_pane_mode_profile_and_last_cell() {
     let route = route_pressed_pointer_motion(
         &mut gesture,
         Some(pointer_cell(8, 9, 9)),
+        (0, 0),
         ModifiersState::SHIFT,
     );
     assert_eq!(
         route,
         PointerMotionRoute::Report {
             pane_id: 7,
-            sgr: true,
+            format: sonicterm_vt::vt::MouseFormat::Sgr,
             row: 3,
             col: 4,
+            pixel: (0, 0),
             modifiers: ModifiersState::SHIFT,
         }
     );
@@ -208,7 +292,7 @@ fn local_owner_survives_shift_release() {
     let mut gesture = begin_pointer_gesture(
         pointer_cell(7, 1, 2),
         MouseTracking::AnyMotion,
-        true,
+        sonicterm_vt::vt::MouseFormat::Sgr,
         ModifiersState::SHIFT,
         false,
     )
@@ -217,6 +301,7 @@ fn local_owner_survives_shift_release() {
         route_pressed_pointer_motion(
             &mut gesture,
             Some(pointer_cell(7, 2, 3)),
+            (0, 0),
             ModifiersState::empty(),
         ),
         PointerMotionRoute::Local
@@ -236,7 +321,7 @@ fn terminal_motion_obeys_latched_tracking_mode() {
         let mut gesture = begin_pointer_gesture(
             pointer_cell(7, 1, 2),
             tracking,
-            false,
+            sonicterm_vt::vt::MouseFormat::X10,
             ModifiersState::empty(),
             false,
         )
@@ -246,6 +331,7 @@ fn terminal_motion_obeys_latched_tracking_mode() {
                 route_pressed_pointer_motion(
                     &mut gesture,
                     Some(pointer_cell(7, 4, 5)),
+                    (0, 0),
                     ModifiersState::ALT,
                 ),
                 PointerMotionRoute::Report { .. }
@@ -403,15 +489,16 @@ fn any_motion_without_pressed_gesture_uses_current_pane_profile_and_modifiers() 
         no_button_motion_report(
             pointer_cell(9, 2, 5),
             MouseTracking::AnyMotion,
-            false,
+            sonicterm_vt::vt::MouseFormat::X10,
             ModifiersState::SHIFT | ModifiersState::CONTROL,
             false,
         ),
         Some(PointerMotionRoute::Report {
             pane_id: 9,
-            sgr: false,
+            format: sonicterm_vt::vt::MouseFormat::X10,
             row: 2,
             col: 5,
+            pixel: (0, 0),
             modifiers: ModifiersState::SHIFT | ModifiersState::CONTROL,
         })
     );
@@ -419,7 +506,7 @@ fn any_motion_without_pressed_gesture_uses_current_pane_profile_and_modifiers() 
         no_button_motion_report(
             pointer_cell(9, 2, 5),
             MouseTracking::ButtonMotion,
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
             ModifiersState::empty(),
             false,
         ),
@@ -429,7 +516,7 @@ fn any_motion_without_pressed_gesture_uses_current_pane_profile_and_modifiers() 
         no_button_motion_report(
             pointer_cell(9, 2, 5),
             MouseTracking::AnyMotion,
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
             ModifiersState::empty(),
             true,
         ),
@@ -444,7 +531,7 @@ fn terminal_release_uses_press_pane_profile_and_last_same_pane_cell() {
     let mut gesture = begin_pointer_gesture(
         pointer_cell(7, 1, 2),
         MouseTracking::AnyMotion,
-        false,
+        sonicterm_vt::vt::MouseFormat::X10,
         ModifiersState::empty(),
         false,
     )
@@ -452,22 +539,25 @@ fn terminal_release_uses_press_pane_profile_and_last_same_pane_cell() {
     let _ = route_pressed_pointer_motion(
         &mut gesture,
         Some(pointer_cell(7, 4, 5)),
+        (0, 0),
         ModifiersState::empty(),
     );
     let _ = route_pressed_pointer_motion(
         &mut gesture,
         Some(pointer_cell(8, 9, 10)),
+        (0, 0),
         ModifiersState::empty(),
     );
-    let _ = route_pressed_pointer_motion(&mut gesture, None, ModifiersState::empty());
+    let _ = route_pressed_pointer_motion(&mut gesture, None, (0, 0), ModifiersState::empty());
 
     assert_eq!(
         take_pointer_release(&mut Some(gesture), ModifiersState::ALT),
         Some(PointerMotionRoute::Report {
             pane_id: 7,
-            sgr: false,
+            format: sonicterm_vt::vt::MouseFormat::X10,
             row: 4,
             col: 5,
+            pixel: (0, 0),
             modifiers: ModifiersState::ALT,
         })
     );
@@ -480,7 +570,7 @@ fn focus_loss_releases_terminal_owner_and_silently_clears_local_owner() {
     let mut terminal = begin_pointer_gesture(
         pointer_cell(7, 1, 2),
         MouseTracking::ButtonMotion,
-        false,
+        sonicterm_vt::vt::MouseFormat::X10,
         ModifiersState::empty(),
         false,
     );
@@ -488,6 +578,7 @@ fn focus_loss_releases_terminal_owner_and_silently_clears_local_owner() {
         let _ = route_pressed_pointer_motion(
             gesture,
             Some(pointer_cell(7, 4, 5)),
+            (0, 0),
             ModifiersState::empty(),
         );
     }
@@ -495,9 +586,10 @@ fn focus_loss_releases_terminal_owner_and_silently_clears_local_owner() {
         take_focus_loss_pointer_release(&mut terminal, ModifiersState::ALT),
         Some(PointerMotionRoute::Report {
             pane_id: 7,
-            sgr: false,
+            format: sonicterm_vt::vt::MouseFormat::X10,
             row: 4,
             col: 5,
+            pixel: (0, 0),
             modifiers: ModifiersState::ALT,
         })
     );
@@ -506,7 +598,7 @@ fn focus_loss_releases_terminal_owner_and_silently_clears_local_owner() {
     let mut local = begin_pointer_gesture(
         pointer_cell(9, 3, 6),
         MouseTracking::AnyMotion,
-        true,
+        sonicterm_vt::vt::MouseFormat::Sgr,
         ModifiersState::SHIFT,
         false,
     );
@@ -573,7 +665,7 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
 
     let child = app.registry.windows.get(&window).expect("seeded child state");
     assert!(matches!(
-        child_no_button_motion_report(child, cell, MouseTracking::AnyMotion, true, false),
+        child_no_button_motion_report(child, cell, MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, false),
         Some(PointerMotionRoute::Report { pane_id, .. }) if pane_id == pane
     ));
 
@@ -583,7 +675,7 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
             app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
             false,
         ),
         None
@@ -601,7 +693,7 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
             app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
             false,
         ),
         None
@@ -614,7 +706,7 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
             app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
             false,
         ),
         None
@@ -626,7 +718,7 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
             app.registry.windows.get(&window).unwrap(),
             cell,
             MouseTracking::AnyMotion,
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
             true,
         ),
         None
@@ -640,7 +732,7 @@ fn pointer_cleanup_clears_latched_gesture() {
     let mut gesture = begin_pointer_gesture(
         pointer_cell(7, 0, 0),
         MouseTracking::Button,
-        true,
+        sonicterm_vt::vt::MouseFormat::Sgr,
         ModifiersState::empty(),
         false,
     );

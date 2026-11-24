@@ -195,7 +195,8 @@ impl WindowState {
         self.pointer_gesture = Some(PointerGesture {
             owner: PointerGestureOwner::Local,
             press_pane: pane_id,
-            last_cell: PointerCell { pane_id, row, col },
+            // A local gesture reports nothing, so its pixel is never read.
+            last_cell: PointerCell { pane_id, row, col, pixel: (0, 0) },
             anchor: Some(anchor),
         });
         if let Some(change) = focus_change {
@@ -367,6 +368,8 @@ pub(super) struct PointerCell {
     pub(super) pane_id: u64,
     pub(super) row: u16,
     pub(super) col: u16,
+    /// The pointer's physical pixel from the pane's cell-area origin, which 1016 reports.
+    pub(super) pixel: (i32, i32),
 }
 
 /// Owner chosen once when a left-button grid gesture begins.
@@ -375,7 +378,7 @@ pub(super) enum PointerGestureOwner {
     /// SonicTerm selection owns the gesture until release.
     Local,
     /// The terminal owns the gesture with its press-time protocol profile.
-    Terminal { tracking: MouseTracking, sgr: bool },
+    Terminal { tracking: MouseTracking, format: sonicterm_vt::vt::MouseFormat },
 }
 
 /// Left-button gesture retained independently by each terminal window.

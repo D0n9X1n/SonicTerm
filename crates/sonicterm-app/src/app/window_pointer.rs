@@ -2,7 +2,7 @@
 
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::tabbar_view::TabBarLayout;
-use sonicterm_vt::vt::MouseTracking;
+use sonicterm_vt::vt::{MouseFormat, MouseTracking};
 use winit::{
     dpi::PhysicalPosition,
     event::{ElementState, MouseScrollDelta},
@@ -153,16 +153,17 @@ impl App {
         if self.main().map(|window| window.mouse_down).unwrap_or(false) {
             // When: mouse_down is true, apply scrollbar, terminal, or text-selection drag semantics.
 
-            let cell = self
-                .main_renderer()
-                .and_then(|renderer| renderer.pixel_to_pane_cell(cursor_x, cursor_y))
-                .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
+            let main_id = self.registry.main_window_id;
+            let cell = self.main_pane_cell_at(cursor_x, cursor_y).map(|(pane_id, row, col)| {
+                let pixel = main_id.map_or((0, 0), |window_id| self.pane_pixel(window_id, pane_id));
+                PointerCell { pane_id, row, col, pixel }
+            });
+            let press_pixel = main_id.map_or((0, 0), |window_id| self.held_press_pixel(window_id));
             let gesture_route = self.main_mut().and_then(|window| {
                 let modifiers = window.modifiers;
-                window
-                    .pointer_gesture
-                    .as_mut()
-                    .map(|gesture| route_pressed_pointer_motion(gesture, cell, modifiers))
+                window.pointer_gesture.as_mut().map(|gesture| {
+                    route_pressed_pointer_motion(gesture, cell, press_pixel, modifiers)
+                })
             });
             if let Some(route) = gesture_route {
                 // When: `gesture_route` exists, its press-time owner wins before local continuation paths.
@@ -174,12 +175,12 @@ impl App {
                         // When: `route` is None, Button mode suppresses held motion and consumes the move.
                         return;
                     }
-                    report @ PointerMotionRoute::Report { .. } => {
+                    report @ PointerMotionRoute::Report { format, .. } => {
                         // When: `route` carries Report data, encode and enqueue held-left motion.
                         if let Some((pane_id, bytes)) =
                             pointer_route_bytes(report, PointerReportKind::HeldLeftMotion)
                         {
-                            self.write_to_pane(pane_id, bytes, PtyInputSource::PointerMotion);
+                            self.write_pointer_motion(pane_id, format, bytes);
                         }
                         return;
                     }
@@ -283,15 +284,20 @@ impl App {
                 window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
             });
             let ui_consumed_motion = splitter_hover || scrollbar_owned || target_hover || read_only;
-            let held_cell = self
-                .main_pane_cell_at(cursor_x, cursor_y)
-                .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
+            let main_id = self.registry.main_window_id;
+            let held_cell =
+                self.main_pane_cell_at(cursor_x, cursor_y).map(|(pane_id, row, col)| {
+                    let pixel =
+                        main_id.map_or((0, 0), |window_id| self.pane_pixel(window_id, pane_id));
+                    PointerCell { pane_id, row, col, pixel }
+                });
+            let press_pixel = main_id.map_or((0, 0), |window_id| self.held_press_pixel(window_id));
             if let Some(held) =
-                self.main_mut().and_then(|window| window.secondary_motion(held_cell))
+                self.main_mut().and_then(|window| window.secondary_motion(held_cell, press_pixel))
             {
                 // When: a right or middle press is `held`, it owns the motion until its release.
-                if let Some((pane_id, bytes)) = held {
-                    self.write_to_pane(pane_id, bytes, PtyInputSource::PointerMotion);
+                if let Some((pane_id, format, bytes)) = held {
+                    self.write_pointer_motion(pane_id, format, bytes);
                 }
                 return;
             }
@@ -300,22 +306,22 @@ impl App {
                 let pointer_profile = pointer_cell.and_then(|cell| {
                     self.main().and_then(|window| window.panes.get(&cell.pane_id)).map(|pane| {
                         let modes = pane.pointer_modes();
-                        (cell, modes.tracking(), modes.sgr())
+                        (cell, modes.tracking(), modes.format())
                     })
                 });
-                if let Some((cell, tracking, sgr)) = pointer_profile {
+                if let Some((cell, tracking, format)) = pointer_profile {
                     // The published modes are read without the parser lock before the bounded PTY effect path.
                     let modifiers = self
                         .main()
                         .map(|window| window.modifiers)
                         .unwrap_or_else(ModifiersState::empty);
                     if let Some(route) =
-                        no_button_motion_report(cell, tracking, sgr, modifiers, false)
+                        no_button_motion_report(cell, tracking, format, modifiers, false)
                     {
                         if let Some((pane_id, bytes)) =
                             pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
                         {
-                            self.write_to_pane(pane_id, bytes, PtyInputSource::PointerMotion);
+                            self.write_pointer_motion(pane_id, format, bytes);
                         }
                     }
                 }
@@ -350,17 +356,21 @@ impl App {
         // All four modes come from one published byte; no parser lock.
         let modes = self.main().and_then(|window| window.panes.get(&pane_id)).map(|pane| {
             let modes = pane.pointer_modes();
-            (modes.is_alt(), modes.tracking(), modes.sgr(), modes.application_cursor())
+            (modes.is_alt(), modes.tracking(), modes.format(), modes.application_cursor())
         });
-        let (alt_screen, tracking, sgr, application_cursor) =
-            modes.unwrap_or((false, MouseTracking::Off, false, false));
+        let (alt_screen, tracking, format, application_cursor) =
+            modes.unwrap_or((false, MouseTracking::Off, MouseFormat::X10, false));
         let target = super::wheel_plan::WheelTarget {
             tracking,
             alt_screen,
-            sgr,
+            format,
             application_cursor,
             readonly: !self.admits_new_user_input(pane_id),
             cell,
+            pixel: self
+                .registry
+                .main_window_id
+                .map_or((0, 0), |window_id| self.pane_pixel(window_id, pane_id)),
         };
         match super::wheel_plan::plan_wheel(lines, target) {
             super::wheel_plan::WheelPlan::None => {
@@ -600,8 +610,12 @@ impl App {
                             }
                             return;
                         }
-                        let pointer_cell =
-                            clicked_pane.map(|pane_id| PointerCell { pane_id, row, col });
+                        let pointer_cell = clicked_pane.map(|pane_id| PointerCell {
+                            pane_id,
+                            row,
+                            col,
+                            pixel: self.pane_pixel(win_id, pane_id),
+                        });
                         if let Some(cell) = pointer_cell {
                             // When: `pointer_cell` resolves the rendered grid, snapshot that exact pane's protocol profile.
                             let profile = self
@@ -609,9 +623,9 @@ impl App {
                                 .and_then(|window| window.panes.get(&cell.pane_id))
                                 .map(|pane| {
                                     let modes = pane.pointer_modes();
-                                    (modes.tracking(), modes.sgr())
+                                    (modes.tracking(), modes.format())
                                 })
-                                .unwrap_or((MouseTracking::Off, false));
+                                .unwrap_or((MouseTracking::Off, MouseFormat::X10));
                             let terminal_press = self.main_mut().and_then(|window| {
                                 window.begin_pointer_press(cell, profile.0, profile.1)
                             });

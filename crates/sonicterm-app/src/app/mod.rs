@@ -244,6 +244,7 @@ mod memory_report_queues;
 mod memory_report_window;
 pub mod memory_snapshot;
 mod misc;
+mod mouse_report;
 mod native_title;
 mod native_title_font;
 pub mod os_drag;

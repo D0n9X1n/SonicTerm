@@ -51,7 +51,7 @@ impl Performer {
             hyperlink_reclaim_backoff: 0,
             saved_cursor: None,
             bracketed_paste: false,
-            mouse_sgr: false,
+            mouse_format: MouseFormat::X10,
             app_cursor_keys: false,
             app_keypad: false,
             backarrow_key: false,
@@ -327,7 +327,7 @@ impl Performer {
         self.reset_attrs();
         self.saved_cursor = None;
         self.bracketed_paste = false;
-        self.mouse_sgr = false;
+        self.mouse_format = MouseFormat::X10;
         self.app_cursor_keys = false;
         self.app_keypad = false;
         self.backarrow_key = false;

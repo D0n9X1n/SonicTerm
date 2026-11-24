@@ -454,7 +454,11 @@ fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
     assert_eq!(published, handles.parser.lock().pointer_input_snapshot());
     let modes = sonicterm_vt::vt::PointerModes::from_bits(published);
     assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::ButtonMotion);
-    assert!(modes.sgr() && modes.is_alt() && modes.application_cursor());
+    assert!(
+        (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr)
+            && modes.is_alt()
+            && modes.application_cursor()
+    );
 
     // A later batch that resets the modes republishes them; the byte never keeps a stale mode.
     process_pane_vt_batch_with(
@@ -471,7 +475,11 @@ fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
     let modes =
         sonicterm_vt::vt::PointerModes::from_bits(handles.pointer_input.load(Ordering::Relaxed));
     assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::Off);
-    assert!(modes.sgr() && !modes.is_alt() && modes.application_cursor());
+    assert!(
+        (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr)
+            && !modes.is_alt()
+            && modes.application_cursor()
+    );
 }
 
 /// A pane attached to a parser that already negotiated mouse tracking starts with that

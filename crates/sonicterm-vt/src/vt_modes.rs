@@ -2,18 +2,19 @@ use super::*;
 
 impl PointerModes {
     const TRACKING_MASK: u8 = 0b11;
-    const SGR: u8 = 1 << 2;
-    const IS_ALT: u8 = 1 << 3;
-    const APPLICATION_CURSOR: u8 = 1 << 4;
+    const FORMAT_SHIFT: u8 = 2;
+    const FORMAT_MASK: u8 = 0b111 << Self::FORMAT_SHIFT;
+    const IS_ALT: u8 = 1 << 5;
+    const APPLICATION_CURSOR: u8 = 1 << 6;
 
     /// Build an explicit pointer-mode snapshot for a router or test.
     pub const fn new(
         tracking: MouseTracking,
-        sgr: bool,
+        format: MouseFormat,
         is_alt: bool,
         application_cursor: bool,
     ) -> Self {
-        Self { tracking, sgr, is_alt, application_cursor }
+        Self { tracking, format, is_alt, application_cursor }
     }
 
     /// Decode the byte [`Parser::pointer_input_snapshot`] produced; unknown high bits are ignored.
@@ -24,15 +25,23 @@ impl PointerModes {
             2 => MouseTracking::ButtonMotion,
             _ => MouseTracking::AnyMotion,
         };
+        let format = match (bits & Self::FORMAT_MASK) >> Self::FORMAT_SHIFT {
+            1 => MouseFormat::Utf8,
+            2 => MouseFormat::Sgr,
+            3 => MouseFormat::Urxvt,
+            4 => MouseFormat::SgrPixels,
+            _ => MouseFormat::X10,
+        };
         Self {
             tracking,
-            sgr: bits & Self::SGR != 0,
+            format,
             is_alt: bits & Self::IS_ALT != 0,
             application_cursor: bits & Self::APPLICATION_CURSOR != 0,
         }
     }
 
-    /// Pack the snapshot: tracking in bits 0-1, SGR bit 2, alternate screen bit 3, DECCKM bit 4.
+    /// Pack the snapshot: tracking in bits 0-1, report format in bits 2-4, alternate screen bit 5,
+    /// DECCKM bit 6.
     pub fn bits(self) -> u8 {
         let tracking = match self.tracking {
             MouseTracking::Off => 0,
@@ -40,8 +49,15 @@ impl PointerModes {
             MouseTracking::ButtonMotion => 2,
             MouseTracking::AnyMotion => 3,
         };
+        let format: u8 = match self.format {
+            MouseFormat::X10 => 0,
+            MouseFormat::Utf8 => 1,
+            MouseFormat::Sgr => 2,
+            MouseFormat::Urxvt => 3,
+            MouseFormat::SgrPixels => 4,
+        };
         tracking
-            | (u8::from(self.sgr) * Self::SGR)
+            | (format << Self::FORMAT_SHIFT)
             | (u8::from(self.is_alt) * Self::IS_ALT)
             | (u8::from(self.application_cursor) * Self::APPLICATION_CURSOR)
     }
@@ -51,9 +67,9 @@ impl PointerModes {
         self.tracking
     }
 
-    /// Whether reports use the SGR (?1006) encoding instead of the legacy one.
-    pub fn sgr(self) -> bool {
-        self.sgr
+    /// The mouse report encoding (?1005, ?1006, ?1015, ?1016, else X10).
+    pub fn format(self) -> MouseFormat {
+        self.format
     }
 
     /// Whether the alternate screen is active.
@@ -161,9 +177,9 @@ impl Parser {
         self.performer.bracketed_paste
     }
 
-    /// Whether DECSET ?1006 (SGR mouse reporting) is currently enabled.
-    pub fn mouse_sgr_enabled(&self) -> bool {
-        self.performer.mouse_sgr
+    /// The mouse report encoding the program selected (DECSET 1005, 1006, 1015 or 1016).
+    pub fn mouse_format(&self) -> MouseFormat {
+        self.performer.mouse_format
     }
 
     /// Whether DECCKM ?1 (application cursor keys) is currently enabled. When
@@ -209,7 +225,7 @@ impl Parser {
     pub fn pointer_input_snapshot(&self) -> u8 {
         PointerModes::new(
             self.mouse_tracking(),
-            self.mouse_sgr_enabled(),
+            self.mouse_format(),
             self.performer.grid.is_alt(),
             self.application_cursor_keys(),
         )
@@ -378,7 +394,16 @@ impl Performer {
                 }
                 9001 => self.win32_input = set,
                 2004 => self.bracketed_paste = set,
-                1006 => self.mouse_sgr = set,
+                1005 | 1006 | 1015 | 1016 => {
+                    self.mouse_format = match (set, code) {
+                        (true, 1005) => MouseFormat::Utf8,
+                        (true, 1006) => MouseFormat::Sgr,
+                        (true, 1015) => MouseFormat::Urxvt,
+                        (true, _) => MouseFormat::SgrPixels,
+                        // Resetting any of the four returns to X10, whichever is active.
+                        (false, _) => MouseFormat::X10,
+                    };
+                }
                 1000 | 1002 | 1003 => {
                     let mode = match code {
                         1000 => MouseTracking::Button,

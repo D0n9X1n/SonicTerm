@@ -146,6 +146,9 @@ pub struct PaneState {
     pub cursor_steady: Arc<std::sync::atomic::AtomicBool>,
     /// Coherent keyboard modes, Kitty flags, and protocol epoch published after each parser batch.
     pub keyboard_input: Arc<AtomicU64>,
+    /// The tracking mode and bytes of the last 1016 motion report sent here, so an identical one is
+    /// dropped; `None` after a motion in another format.
+    pub(crate) last_pixel_motion: Option<(sonicterm_vt::vt::MouseTracking, Vec<u8>)>,
     /// Pointer-routing modes (`Parser::pointer_input_snapshot`) published after each parser batch,
     /// so pointer handlers route without taking the parser lock.
     pub pointer_input: Arc<std::sync::atomic::AtomicU8>,
@@ -351,6 +354,7 @@ impl PaneState {
             pty,
             reap_slot: None,
             pending_pointer_motion: PendingPointerMotion::default(),
+            last_pixel_motion: None,
             resize_warned: std::sync::atomic::AtomicBool::new(false),
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,

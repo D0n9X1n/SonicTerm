@@ -277,7 +277,7 @@ SonicTerm answers:
 
 | Request | Reply |
 | --- | --- |
-| DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`: `Pm` 1 set, 2 reset, for modes 1, 7, 47, 67, 1000, 1002, 1003, 1004, 1006, 1047, 1049, 2004, 2026, 2031 and 9001 (each of 1000/1002/1003 reads set only while it is the selected tracking mode); 0 (not recognized) for every other mode, including 25, 1005, 1015 and 1016, so a program that probes them falls back at once. A request naming several modes gets no reply. |
+| DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`: `Pm` 1 set, 2 reset, for modes 1, 7, 47, 67, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 1047, 1049, 2004, 2026, 2031 and 9001 (each of 1000/1002/1003 reads set only while it is the selected tracking mode, and each of 1005/1006/1015/1016 only while it is the selected report format); 0 (not recognized) for every other mode, including 25, so a program that probes them falls back at once. A request naming several modes gets no reply. |
 | DSR 996 `CSI ? 996 n` | `CSI ? 997 ; 1 n` for a dark theme, `; 2 n` for a light one, from the theme's `appearance`. |
 | DEC mode 2031 | While a program has set it, every theme change that alters a readable color (foreground, background, cursor, selection background and foreground, cursor text, the 16 theme colors) or the scheme sends the same `CSI ? 997 ; Ps n` report, also when the scheme stays the same, so a program that re-reads colors on the report picks up the new palette. A reload, the theme picker's preview and its choice all count; the report goes through the pane's reply path. It fingerprints the theme defaults, so it fires even when a program's override hides the changed default from a query. SonicTerm does not follow the system's light or dark appearance, so the report fires only when the theme changes. |
 | `OSC 4 ; N ; ?` | `OSC 4 ; N ; rgb:rrrr/gggg/bbbb` with the request's terminator: the color the program set, else 0..=15 from the theme and 16..=255 from the xterm 6×6×6 cube and gray ramp, the same table the renderer draws with. |
@@ -456,7 +456,8 @@ Intentional differences:
 - WezTerm does not implement OSC 22.
 - On Windows, whether ConPTY forwards OSC 22 and its replies is not yet verified.
 
-SGR pixel mouse reporting (mode 1016) is not supported, and DECRQM says so.
+Mouse reports can use any of the five xterm encodings, including SGR pixels (mode 1016); see
+[Mouse tracking and selection](#mouse-tracking-and-selection).
 
 On Windows, a pane's program writes to a ConPTY pseudoconsole. ConPTY
 interprets that output and passes its own rendition to SonicTerm, so the
@@ -822,11 +823,34 @@ restore an older mode. RIS also restores `Off`.
 A TUI is a terminal user interface: a full-screen text application running
 inside the terminal.
 
-`DECSET ?1006` controls SGR mouse encoding independently; it does not enable
-tracking. Application-owned clicks, releases, wheel input, and eligible motion
-use SGR reports when `?1006` is active and the current legacy report otherwise.
-SGR uses one-based `CSI < Cb ; Cx ; Cy M` and lowercase `m` for release. Legacy
-uses `CSI M` plus three biased bytes and clamps the protocol coordinates to 223.
+The report encoding is chosen independently of tracking; setting an encoding does not enable
+tracking. `DECSET ?1005`, `?1006`, `?1015` and `?1016` each select one encoding, the last one set
+wins (crossterm's `?1015h` then `?1006h` ends in SGR), and resetting any of the four, or RIS,
+returns to X10. Application-owned clicks, releases, wheel input, and eligible motion use the
+selected encoding, where `Cb` is the button code with its modifier (Shift 4, Alt or Super 8,
+Control 16) and motion (32) bits:
+
+| Mode | Report |
+| --- | --- |
+| none (X10) | `CSI M` and three bytes, each value + 32; one-based coordinates clamped to 223; a release is button 3. |
+| `?1005` UTF-8 | `CSI M`, the byte `Cb + 32`, then the column and the row each as the UTF-8 encoding of the zero-based index + 33; each index is clamped to 2014, so a coordinate is at most two bytes; a release is button 3. |
+| `?1006` SGR | `CSI < Cb ; Cx ; Cy M` with one-based cells; a release keeps its button and ends in lowercase `m`. |
+| `?1015` urxvt | `CSI Cb+32 ; Cx ; Cy M` in decimal with one-based cells and no cap; a release is button 3 and still ends in `M`. |
+| `?1016` SGR pixels | `CSI < Cb ; Px ; Py M`, `m` on release, where `Px ; Py` are zero-based physical pixels from the pane's cell area: signed and unclamped, so a drag out of the pane reports negative or past-edge pixels. |
+
+In 1016 every motion is reported, also within one cell; only a report identical to the last 1016
+motion sent to that pane under the same tracking mode is dropped, so the same pixel with a new
+modifier or button is still sent. The cell encodings report motion as before. A queued motion is
+dropped when the pane's tracking, encoding or screen changes before it is sent, so it is never
+sent in another encoding.
+
+Intentional differences: 1016 is zero-based (Ghostty, kitty; WezTerm adds 1). 1005 clamps each
+coordinate to index 2014 (two UTF-8 bytes), where Ghostty and kitty send longer sequences and
+WezTerm a 0 byte. A 1015 release is legacy button 3 (Ghostty), where kitty keeps the button;
+WezTerm has no 1015. An identical 1016 motion is dropped (WezTerm drops an unmoved pixel motion);
+Ghostty reports it. On Windows, whether ConPTY forwards the 1005, 1015 and 1016 mode sequences and
+their reports is not yet verified.
+
 Wheel reports use button codes 64 for up and 65 for down and have no release
 report. Any active tracking mode receives wheel reports on both the primary and
 alternate screens; primary-screen tracking therefore prevents the same wheel
@@ -854,9 +878,10 @@ A press chooses and latches one gesture owner:
 - a press consumed by tabs, splitters, scrollbars, or other chrome creates no
   terminal gesture.
 
-The gesture owner, press pane, tracking mode, and SGR/legacy profile are latched
-until release. Later modifier, pane-focus, mode, or `?1006` changes do not steal
-the gesture. A terminal release uses the press pane/profile and the last valid
+The gesture owner, press pane, tracking mode, and report encoding are latched
+until release. Later modifier, pane-focus, mode, or encoding changes do not steal
+the gesture; its motion and release use the press-time encoding, and in 1016 its pixels are
+measured from the press pane's cell area. A terminal release uses the press pane/profile and the last valid
 cell seen in that pane. `Button` suppresses held motion; `ButtonMotion` and
 `AnyMotion` report it. With no button held, only the current `AnyMotion` mode
 reports motion, using the current pane and encoding profile.
@@ -951,6 +976,7 @@ fixed screen positions that changed.
 | Pane worker and redraw coalescing | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | Main/child input routing | `crates/sonicterm-app/src/app/{window_event,window_keyboard,window_pointer,child_window,child_window_pointer}.rs` |
 | Native pointer cursor decision | `crates/sonicterm-app/src/app/pointer_cursor.rs` |
+| Mouse report encodings | `crates/sonicterm-app/src/app/mouse_report.rs` |
 | OSC 22 pointer shapes | `crates/sonicterm-vt/src/vt_pointer_shape.rs` |
 | VT parser and modes | `crates/sonicterm-vt/src/vt.rs` |
 | Seeded fuzz tests | `crates/sonicterm-vt/src/vt_fuzz_tests.rs` (parser; `SONICTERM_FUZZ_ITERS` raises its 20,000 iterations), `crates/sonicterm-io/src/reply_spool_tests.rs` (reply spool), `crates/sonicterm-app/src/app/spawn_pane_vt_fuzz_tests.rs` (image fragments through the batch publisher) |

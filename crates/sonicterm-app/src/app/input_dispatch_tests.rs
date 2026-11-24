@@ -81,15 +81,16 @@ fn pointer_motion_isolated_slots_clear_on_disconnect() {
 #[test]
 fn pointer_motion_profile_change_discards_stale_report() {
     let mut motion = PendingPointerMotion::default();
-    let active = Some((MouseTracking::AnyMotion, true, true));
+    let active = Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, true));
     motion.validate_profile(active);
     motion.replace(b"motion");
     motion.validate_profile(active);
     assert_eq!(motion.len, 6);
     for changed in [
-        Some((MouseTracking::Off, true, true)),
-        Some((MouseTracking::AnyMotion, false, true)),
-        Some((MouseTracking::AnyMotion, true, false)),
+        Some((MouseTracking::Off, sonicterm_vt::vt::MouseFormat::Sgr, true)),
+        Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::X10, true)),
+        Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::SgrPixels, true)),
+        Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, false)),
     ] {
         motion.validate_profile(active);
         motion.replace(b"motion");
@@ -102,7 +103,7 @@ fn pointer_motion_profile_change_discards_stale_report() {
 #[test]
 fn pointer_motion_unknown_profile_retains_pending_position() {
     let mut motion = PendingPointerMotion::default();
-    let active = Some((MouseTracking::AnyMotion, true, true));
+    let active = Some((MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, true));
     motion.validate_profile(active);
     motion.replace(b"latest");
     motion.validate_profile(None);

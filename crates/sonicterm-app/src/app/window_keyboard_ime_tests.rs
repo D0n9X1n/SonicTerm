@@ -119,7 +119,7 @@ fn source_focus_cleanup_preserves_peer_state_and_report_destinations() {
         window.pointer_gesture = begin_pointer_gesture(
             pointer_cell(pointer_pane, 2, 3),
             MouseTracking::ButtonMotion,
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
             ModifiersState::empty(),
             false,
         );

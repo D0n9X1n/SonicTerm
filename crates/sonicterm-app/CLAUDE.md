@@ -26,6 +26,8 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/field_input.rs`, `field_pointer.rs` - source-field clipboard/selection commands and press-owned query dragging; field IME uses presented renderer caret geometry.
 - `src/app/window_pointer.rs` - main-window cursor, wheel and left-button handlers.
 - `src/app/splitter_input.rs` - main and child pane-divider hit-tests, hover and drag.
+- `src/app/mouse_report.rs` - the five DECSET mouse encodings, the pane-local 1016 pixel, and the
+  rule that drops an identical 1016 motion; every pointer, wheel and secondary report encodes here.
 - `src/app/pointer_cursor.rs` - the one native cursor writer: each window's owners (palette,
   splitter, scrollbar, tab, band edge, link, selection) else the hovered pane's OSC 22 shape,
   decided once per `about_to_wait` and written only on change.

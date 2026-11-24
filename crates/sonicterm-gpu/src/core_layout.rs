@@ -661,6 +661,15 @@ impl GpuRenderer {
 }
 
 impl GpuRenderer {
+    /// The physical-pixel origin of pane `pane_id`'s cell area as last laid out, where row 0 and
+    /// column 0 begin; `None` for a pane no frame has laid out.
+    pub fn pane_cell_origin(&self, pane_id: u64) -> Option<(f32, f32)> {
+        self.last_pane_layout
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .map(|pane| (pane.origin_x_logical, pane.origin_y_logical))
+    }
+
     /// Translate physical pixels into the exact rendered pane and cell.
     ///
     /// The pane identity and cell coordinates come from one layout snapshot, so

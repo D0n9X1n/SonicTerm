@@ -11,10 +11,11 @@ fn primary() -> WheelTarget {
     WheelTarget {
         tracking: MouseTracking::Off,
         alt_screen: false,
-        sgr: false,
+        format: sonicterm_vt::vt::MouseFormat::X10,
         application_cursor: false,
         readonly: false,
         cell: Some((4, 9)),
+        pixel: (0, 0),
     }
 }
 
@@ -49,9 +50,13 @@ fn an_untracked_alternate_screen_gets_arrows() {
 /// Tracking sends one report per line at the hovered cell, 1-based, in SGR or X10.
 #[test]
 fn tracking_reports_carry_the_hovered_cell() {
-    let sgr = WheelTarget { tracking: MouseTracking::Button, sgr: true, ..primary() };
+    let sgr = WheelTarget {
+        tracking: MouseTracking::Button,
+        format: sonicterm_vt::vt::MouseFormat::Sgr,
+        ..primary()
+    };
     assert_eq!(plan_wheel(-1, sgr), WheelPlan::Input(b"\x1b[<64;10;5M".to_vec()));
-    let x10 = WheelTarget { sgr: false, ..sgr };
+    let x10 = WheelTarget { format: sonicterm_vt::vt::MouseFormat::X10, ..sgr };
     assert_eq!(plan_wheel(2, x10), WheelPlan::Input([0x1b, b'[', b'M', 97, 42, 37].repeat(2)));
     let nowhere = WheelTarget { cell: None, ..sgr };
     assert_eq!(plan_wheel(-1, nowhere), WheelPlan::Input(b"\x1b[<64;1;1M".to_vec()));

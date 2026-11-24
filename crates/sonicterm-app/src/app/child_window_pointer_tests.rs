@@ -27,7 +27,12 @@ fn child_motion_over_each_panes_gutter_belongs_to_the_scrollbar() {
     assert!(app.__test_set_child_pane_viewport(child, outer, 10.0, 10.0));
     assert!(app.__test_child_split_active_right(child));
     app.__test_enable_pty_write_log();
-    let tracking = PointerModes::new(MouseTracking::AnyMotion, true, false, false);
+    let tracking = PointerModes::new(
+        MouseTracking::AnyMotion,
+        sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
+        false,
+    );
     for pane in app.registry.windows[&child].panes.values() {
         pane.pointer_input.store(tracking.bits(), Ordering::Relaxed);
     }

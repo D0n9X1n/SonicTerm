@@ -30,7 +30,7 @@ fn real_pty_readonly_pointer_press_latches_local() {
             let bytes = app.registry.windows.get_mut(&window).unwrap().begin_pointer_press(
                 pointer_cell(pane, 2, 3),
                 MouseTracking::AnyMotion,
-                true,
+                sonicterm_vt::vt::MouseFormat::Sgr,
             );
             if let Some(bytes) = bytes {
                 app.write_to_pane(pane, bytes, PtyInputSource::PointerButton);
@@ -153,7 +153,11 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
                 .windows
                 .get_mut(&window)
                 .unwrap()
-                .begin_pointer_press(pointer_cell(pane, 2, 3), MouseTracking::ButtonMotion, true)
+                .begin_pointer_press(
+                    pointer_cell(pane, 2, 3),
+                    MouseTracking::ButtonMotion,
+                    sonicterm_vt::vt::MouseFormat::Sgr,
+                )
                 .unwrap();
             assert!(app.write_to_pane(pane, press, PtyInputSource::PointerButton));
             assert_eq!(submitted.take(), vec![(pane, b"\x1b[<0;4;3M".to_vec())]);
@@ -278,7 +282,7 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
                 &app.registry.windows[&window],
                 pointer_cell(pane, 2, 3),
                 MouseTracking::AnyMotion,
-                true,
+                sonicterm_vt::vt::MouseFormat::Sgr,
                 false,
             );
             if let Some((pane, bytes)) = route.and_then(|route| {
@@ -382,7 +386,8 @@ fn wheel_route_sgr_encoding_alone_does_not_enable_tracking() {
         }
         parser.advance(b"\x1b[?1006h");
         let modes = sonicterm_vt::vt::PointerModes::from_bits(parser.pointer_input_snapshot());
-        let (tracking, sgr) = (modes.tracking(), modes.sgr());
+        let (tracking, sgr) =
+            (modes.tracking(), (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr));
         assert!(sgr);
         assert_eq!(tracking, MouseTracking::Off);
         assert_eq!(
@@ -414,14 +419,16 @@ fn wheel_route_parser_tracking_resets_restore_screen_fallback() {
                 parser.advance(format!("\x1b[?{mode}h").as_bytes());
                 let modes =
                     sonicterm_vt::vt::PointerModes::from_bits(parser.pointer_input_snapshot());
-                let (tracking, sgr) = (modes.tracking(), modes.sgr());
+                let (tracking, sgr) =
+                    (modes.tracking(), (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr));
                 assert_eq!(tracking, expected);
                 assert_eq!(sgr, sgr_enabled);
                 assert_eq!(wheel_route(tracking, parser.grid().is_alt()), WheelRoute::MouseReport);
                 parser.advance(format!("\x1b[?{mode}l").as_bytes());
                 let modes =
                     sonicterm_vt::vt::PointerModes::from_bits(parser.pointer_input_snapshot());
-                let (tracking, sgr) = (modes.tracking(), modes.sgr());
+                let (tracking, sgr) =
+                    (modes.tracking(), (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr));
                 assert_eq!(tracking, MouseTracking::Off);
                 assert_eq!(sgr, sgr_enabled);
                 assert_eq!(
@@ -436,5 +443,8 @@ fn wheel_route_parser_tracking_resets_restore_screen_fallback() {
 #[test]
 fn sgr_wheel_up_is_button_64() {
     // col=5, row=3, one tick up → ESC[<64;5;3M
-    assert_eq!(wheel_report_bytes(true, true, 5, 3, 1), b"\x1b[<64;5;3M".to_vec());
+    assert_eq!(
+        wheel_report_bytes(sonicterm_vt::vt::MouseFormat::Sgr, true, (2, 4), (0, 0), 1),
+        b"\x1b[<64;5;3M".to_vec()
+    );
 }

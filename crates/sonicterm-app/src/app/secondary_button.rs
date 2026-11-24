@@ -3,6 +3,7 @@
 //! left-button gesture, so neither button's release ever ends the other's press.
 
 use super::*;
+use sonicterm_vt::vt::MouseFormat;
 use winit::event::{ElementState, MouseButton};
 
 /// The xterm mouse-report modifier bits: Shift 4, Alt or Super 8, Control 16.
@@ -45,12 +46,14 @@ impl SecondaryButton {
 pub(crate) struct SecondaryPress {
     pub(crate) button: SecondaryButton,
     pub(crate) pane_id: u64,
-    /// Whether the press was reported in SGR form; its motion and release use the same form.
-    pub(crate) sgr: bool,
+    /// The report format at the press; its motion and release use the same format.
+    pub(crate) format: MouseFormat,
     /// The tracking mode at the press; held motion is reported only under 1002 and 1003.
     pub(crate) tracking: MouseTracking,
     /// The last cell reported, as (row, column).
     pub(crate) cell: (u16, u16),
+    /// The last pixel reported, from the press pane's cell-area origin.
+    pub(crate) pixel: (i32, i32),
 }
 
 /// Which report a secondary button sends.
@@ -61,67 +64,56 @@ pub(crate) enum SecondaryEvent {
     HeldMotion,
 }
 
-/// Encode one secondary-button report at (`row`, `col`), zero-based, in SGR or X10 form.
+/// Encode one secondary-button report at zero-based cell `cell` (row, column) and pane pixel
+/// `pixel` in `format`.
 pub(crate) fn secondary_report_bytes(
-    sgr: bool,
+    format: MouseFormat,
     event: SecondaryEvent,
     button: SecondaryButton,
     modifiers: ModifiersState,
-    (row, col): (u16, u16),
+    cell: (u16, u16),
+    pixel: (i32, i32),
 ) -> Vec<u8> {
-    let modifier_bits = pointer_modifier_bits(modifiers);
-    let code = match event {
-        SecondaryEvent::Press | SecondaryEvent::Release => button.code(),
-        SecondaryEvent::HeldMotion => 32 + button.code(),
-    } + modifier_bits;
-    let (col, row) = (u32::from(col) + 1, u32::from(row) + 1);
-    let release = event == SecondaryEvent::Release;
-    if sgr {
-        // When: `sgr` is set, the report names its button, and `m` ends a release.
-        let terminator = match release {
-            true => 'm',
-            false => 'M',
-        };
-        return format!("\x1b[<{code};{col};{row}{terminator}").into_bytes();
-    }
-    // X10 has no button in a release: every release is button 3.
-    let code = match release {
-        true => 3 + modifier_bits,
-        false => code,
+    let report = super::mouse_report::MouseReport {
+        button: match event {
+            SecondaryEvent::Press | SecondaryEvent::Release => button.code(),
+            SecondaryEvent::HeldMotion => 32 + button.code(),
+        },
+        modifiers: pointer_modifier_bits(modifiers),
+        release: event == SecondaryEvent::Release,
+        cell,
+        pixel,
     };
-    vec![
-        0x1b,
-        b'[',
-        b'M',
-        (code + 32).min(255) as u8,
-        (col.min(223) + 32) as u8,
-        (row.min(223) + 32) as u8,
-    ]
+    super::mouse_report::encode_mouse_report(format, report)
 }
 
 impl WindowState {
     /// Report motion while a secondary press is held: `None` when none is held (the caller goes
     /// on); otherwise the press owns the motion, and `Some(report)` carries the held-motion report
-    /// under 1002 or 1003, or nothing under 1000. Motion over another pane keeps the last cell.
+    /// under 1002 or 1003 with its format, or nothing under 1000. Motion over another pane keeps
+    /// the last cell; `press_pixel` is the pointer measured from the press pane's origin.
     pub(in crate::app) fn secondary_motion(
         &mut self,
         cell: Option<PointerCell>,
-    ) -> Option<Option<(u64, Vec<u8>)>> {
+        press_pixel: (i32, i32),
+    ) -> Option<Option<(u64, MouseFormat, Vec<u8>)>> {
         let modifiers = self.modifiers;
         let press = self.secondary_press.as_mut()?;
         if let Some(cell) = cell.filter(|cell| cell.pane_id == press.pane_id) {
             press.cell = (cell.row, cell.col);
         }
+        press.pixel = press_pixel;
         let held = matches!(press.tracking, MouseTracking::ButtonMotion | MouseTracking::AnyMotion);
         Some(held.then(|| {
             let bytes = secondary_report_bytes(
-                press.sgr,
+                press.format,
                 SecondaryEvent::HeldMotion,
                 press.button,
                 modifiers,
                 press.cell,
+                press.pixel,
             );
-            (press.pane_id, bytes)
+            (press.pane_id, press.format, bytes)
         }))
     }
 
@@ -129,11 +121,12 @@ impl WindowState {
     pub(crate) fn take_secondary_release(&mut self) -> Option<(u64, Vec<u8>)> {
         let press = self.secondary_press.take()?;
         let bytes = secondary_report_bytes(
-            press.sgr,
+            press.format,
             SecondaryEvent::Release,
             press.button,
             self.modifiers,
             press.cell,
+            press.pixel,
         );
         Some((press.pane_id, bytes))
     }
@@ -169,8 +162,14 @@ impl App {
         };
         let modifiers =
             self.registry.windows.get(&win_id).map(|window| window.modifiers).unwrap_or_default();
-        let bytes =
-            secondary_report_bytes(press.sgr, SecondaryEvent::Press, button, modifiers, press.cell);
+        let bytes = secondary_report_bytes(
+            press.format,
+            SecondaryEvent::Press,
+            button,
+            modifiers,
+            press.cell,
+            press.pixel,
+        );
         if let Some(window) = self.registry.windows.get_mut(&win_id) {
             window.secondary_press = Some(press);
         }
@@ -206,9 +205,10 @@ impl App {
         (tracking != MouseTracking::Off).then_some(SecondaryPress {
             button,
             pane_id,
-            sgr: modes.sgr(),
+            format: modes.format(),
             tracking,
             cell: (row, col),
+            pixel: self.pane_pixel(win_id, pane_id),
         })
     }
 }

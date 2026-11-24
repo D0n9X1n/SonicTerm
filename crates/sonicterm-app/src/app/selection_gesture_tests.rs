@@ -457,9 +457,9 @@ fn inactive_pane_local_press_commits_focus_only_after_snapshot_admission() {
         let right_parser = state.panes[&right].parser.clone();
         let profile = {
             let modes = state.panes[&right].pointer_modes();
-            (modes.tracking(), modes.sgr())
+            (modes.tracking(), modes.format())
         };
-        let cell = PointerCell { pane_id: right, row: 0, col: 0 };
+        let cell = PointerCell { pane_id: right, row: 0, col: 0, pixel: (0, 0) };
         assert!(state.begin_pointer_press(cell, profile.0, profile.1).is_none());
         // Model the parser becoming busy between profile lookup and the local snapshot attempt.
         let held = right_parser.lock();
