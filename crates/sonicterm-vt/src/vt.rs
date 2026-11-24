@@ -346,6 +346,9 @@ pub struct Osc7Cwd {
     pub authority: String,
     /// Percent-decoded filesystem path.
     pub path: String,
+    /// Whether `path` is a URI path (any OSC 7, or a `file://` or `kitty-shell-cwd://` URI from any
+    /// source), which may write a Windows drive after a separator (`/C:/x`); a bare 9;9 path is not.
+    pub uri_path: bool,
 }
 
 /// Synchronized output (DEC private mode 2026) as the parser holds it.

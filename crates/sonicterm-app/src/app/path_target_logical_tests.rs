@@ -40,19 +40,19 @@ fn row_lookup_returns_contextual_bare_name_span() {
 #[test]
 fn bare_name_resolution_is_host_aware() {
     let target = DetectedTarget::BareName("sonicterm".into());
-    let local = Osc7Cwd { authority: "localhost".into(), path: "/work".into() };
+    let local = Osc7Cwd { authority: "localhost".into(), path: "/work".into(), uri_path: true };
     assert_eq!(
         resolve_detected_path(&target, PathStyle::Posix, Some(&local), None, "host"),
         Some(PathBuf::from("/work/sonicterm"))
     );
-    let foreign = Osc7Cwd { authority: "remote".into(), path: "/work".into() };
+    let foreign = Osc7Cwd { authority: "remote".into(), path: "/work".into(), uri_path: true };
     assert_eq!(
         resolve_detected_path(&target, PathStyle::Posix, Some(&foreign), None, "host"),
         None
     );
     assert_eq!(resolve_detected_path(&target, PathStyle::Posix, None, None, "host"), None);
 
-    let root = Osc7Cwd { authority: String::new(), path: "/".into() };
+    let root = Osc7Cwd { authority: String::new(), path: "/".into(), uri_path: true };
     assert_eq!(
         resolve_detected_path(&target, PathStyle::Posix, Some(&root), None, "host"),
         Some(PathBuf::from("/sonicterm"))

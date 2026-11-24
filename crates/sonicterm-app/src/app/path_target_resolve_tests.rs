@@ -527,8 +527,48 @@ fn source_location_feedback_excludes_unverified_prose() {
 /// terminal cannot know, so it is never a base for relative targets; a drive root still is.
 #[test]
 fn a_bare_drive_is_not_a_working_directory_base() {
-    assert_eq!(normalize_windows_cwd("C:"), None);
-    assert_eq!(normalize_windows_cwd("/C:"), None);
-    assert_eq!(normalize_windows_cwd("C:/"), Some("C:\\".to_string()));
-    assert_eq!(normalize_windows_cwd("/C:/Users"), Some("C:\\Users".to_string()));
+    assert_eq!(normalize_windows_cwd("C:", true), None);
+    assert_eq!(normalize_windows_cwd("/C:", true), None);
+    assert_eq!(normalize_windows_cwd("C:/", true), Some("C:\\".to_string()));
+    assert_eq!(normalize_windows_cwd("/C:/Users", true), Some("C:\\Users".to_string()));
+    assert_eq!(normalize_windows_cwd("/C:/Users", false), None);
+}
+
+/// The pane's directory as an OSC 7 `file://` report of exactly `len` bytes of path that collapses
+/// lexically to `/work`.
+fn reported_base(len: usize) -> Osc7Cwd {
+    let path = format!("/work{}", "/".repeat(len - "/work".len()));
+    let mut parser = sonicterm_vt::vt::Parser::new(Grid::new(20, 2));
+    parser.advance(format!("\x1b]7;file://{path}\x07").as_bytes());
+    let cwd = parser.osc7_cwd().cloned().unwrap();
+    assert_eq!(cwd.path.len(), len);
+    cwd
+}
+
+/// Every consumer of the pane's directory (relative, contextual and bare-name links, and the launch
+/// directory) applies the 4,096-byte base limit to the path as reported, before `/` and `..`
+/// collapse it, so a base launch refuses is never a link base either.
+#[test]
+fn every_directory_consumer_refuses_a_base_over_the_limit_as_reported() {
+    let resolve = |cwd: &Osc7Cwd, target: DetectedTarget| {
+        resolve_detected_path(&target, PathStyle::Posix, Some(cwd), None, "host")
+    };
+    let at_limit = reported_base(4096);
+    assert_eq!(local_launch_cwd(&at_limit, PathStyle::Posix, "host"), Some("/work".into()));
+    for (target, expected) in [
+        (DetectedTarget::PathCandidate("./f".into()), "/work/f"),
+        (DetectedTarget::PathCandidate("src/f".into()), "/work/src/f"),
+        (DetectedTarget::BareName("f".into()), "/work/f"),
+    ] {
+        assert_eq!(resolve(&at_limit, target.clone()), Some(expected.into()), "{target:?}");
+    }
+    let over = reported_base(4097);
+    assert_eq!(local_launch_cwd(&over, PathStyle::Posix, "host"), None);
+    for target in [
+        DetectedTarget::PathCandidate("./f".into()),
+        DetectedTarget::PathCandidate("src/f".into()),
+        DetectedTarget::BareName("f".into()),
+    ] {
+        assert_eq!(resolve(&over, target.clone()), None, "{target:?}");
+    }
 }

@@ -46,23 +46,24 @@ impl Parser {
         // When: raw_osc selects prefix probing, whole-payload capture, or OSC 1337 media staging.
         match raw_osc {
             RawOsc::Probe { mut content, mut content_len } => {
-                // A bare color or pointer-shape number in the probe ends at BEL or ESC.
+                // A bare color, pointer-shape, OSC 1 or OSC 7 number in the probe ends at BEL or ESC.
                 let bare_code = matches!(byte, 0x07 | 0x1b)
                     .then(|| {
                         let probed = &content[..usize::from(content_len)];
                         (probed == b"22")
                             .then_some(22)
-                            .or_else(|| is_icon_title_number(probed).then_some(1))
+                            .or_else(|| osc_number_is(probed, 1).then_some(1))
+                            .or_else(|| osc_number_is(probed, 7).then_some(7))
                             .or_else(|| vt_color::color_osc_number(probed))
                     })
                     .flatten();
                 if let Some(code) = bare_code {
-                    // When: bare_code holds a bare color request (`104`, `110`), a bare `22` or a
-                    // bare OSC 1, own it: BEL applies it now, ESC waits for the `\` that completes ST.
+                    // When: bare_code holds a bare color request (`104`, `110`), a bare `22`, OSC 1 or
+                    // OSC 7, own it: BEL applies it now, ESC waits for the `\` that completes ST.
                     self.inner = vte::Parser::new();
                     self.pending_esc = false;
                     if byte == 0x07 {
-                        self.performer.handle_semantic_osc(code, &[], true);
+                        self.performer.handle_semantic_osc(code, Vec::new(), true);
                         self.finish_escape();
                     } else {
                         // When: byte is ESC, only a following `\` completes the request.
@@ -88,18 +89,17 @@ impl Parser {
                     content_len += 1;
                 }
                 let prefix = &content[..usize::from(content_len)];
-                // OSC 1 in any numeric spelling, else the canonical 0, 2, 7 or 8.
-                let text_code = prefix
-                    .strip_suffix(b";")
-                    .is_some_and(is_icon_title_number)
-                    .then_some(1)
+                // OSC 1 and OSC 7 in any numeric spelling, else the canonical 0, 2 or 8.
+                let number = prefix.strip_suffix(b";");
+                let text_code = [1u16, 7]
+                    .into_iter()
+                    .find(|code| number.is_some_and(|number| osc_number_is(number, *code)))
                     .or_else(|| {
-                        matches!(prefix, b"0;" | b"2;" | b"7;" | b"8;")
-                            .then(|| u16::from(prefix[0] - b'0'))
+                        matches!(prefix, b"0;" | b"2;" | b"8;").then(|| u16::from(prefix[0] - b'0'))
                     });
                 if let Some(code) = text_code {
-                    // When: text_code names OSC 1 in any spelling, or 0, 2, 7 or 8, own its
-                    // payload before vte can split or truncate it.
+                    // When: text_code names OSC 1 or OSC 7 in any spelling, or 0, 2 or 8, own its
+                    // payload before vte can split, truncate or dispatch a cut one.
                     self.inner = vte::Parser::new();
                     self.pending_esc = false;
                     self.raw_osc =
@@ -216,8 +216,7 @@ impl Parser {
                     // When: pending_esc is set, only backslash completes ST; other escapes retain normal parser ownership.
                     if byte == b'\\' {
                         // When: byte completes ST, apply only the complete semantic payload.
-                        drop_payload_controls(code, &mut content);
-                        self.performer.handle_semantic_osc(code, &content, false);
+                        self.performer.handle_semantic_osc(code, content, false);
                         self.finish_escape();
                         return true;
                     }
@@ -228,8 +227,7 @@ impl Parser {
                 }
                 if byte == 0x07 {
                     // When: byte is BEL, dispatch the complete bounded semantic payload.
-                    drop_payload_controls(code, &mut content);
-                    self.performer.handle_semantic_osc(code, &content, true);
+                    self.performer.handle_semantic_osc(code, content, true);
                     self.finish_escape();
                     return true;
                 }
@@ -318,15 +316,15 @@ impl Parser {
     }
 }
 
-/// Whether `spelling` (digits, optionally signed `+`) names OSC 1, as vte's number parse would
-/// read it, so `01` and `+1` reach the same bounded owner as the canonical `1`.
-fn is_icon_title_number(spelling: &[u8]) -> bool {
+/// Whether `spelling` (digits, optionally signed `+`) names OSC `code`, as vte's number parse
+/// would read it, so `01` and `+1`, or `07` and `+7`, reach the same bounded owner as the canonical.
+fn osc_number_is(spelling: &[u8], code: u16) -> bool {
     let digits = spelling.strip_prefix(b"+").unwrap_or(spelling);
     !digits.is_empty()
         && digits.iter().all(u8::is_ascii_digit)
         && digits.iter().fold(0u32, |value, digit| {
             value.saturating_mul(10).saturating_add(u32::from(digit - b'0'))
-        }) == 1
+        }) == u32::from(code)
 }
 
 /// Whether `probed` is a prefix of `1337;CurrentDir=` in any ASCII case, as Ghostty matches
@@ -334,20 +332,6 @@ fn is_icon_title_number(spelling: &[u8]) -> bool {
 fn is_current_dir_prefix(probed: &[u8]) -> bool {
     probed.len() <= CURRENT_DIR_OSC_PREFIX.len()
         && probed.eq_ignore_ascii_case(&CURRENT_DIR_OSC_PREFIX[..probed.len()])
-}
-
-/// Remove the C0 controls a program or color `code` payload carried, as vte drops them in an OSC
-/// string; the collector kept them only so its cap counted every wire byte.
-fn drop_payload_controls(code: u16, content: &mut Vec<u8>) {
-    if vt_osc::cwd_report(code, content).is_some() {
-        // When: content is a 9;9 directory report, a control in its path refuses it as one in an
-        // OSC 7 path does, so the controls stay for the report rule to see.
-        return;
-    }
-    if is_program_osc(code) || vt_color::is_color_osc(code) {
-        // A program or color request's controls are not payload.
-        content.retain(|byte| *byte >= 0x20);
-    }
 }
 
 #[cfg(test)]

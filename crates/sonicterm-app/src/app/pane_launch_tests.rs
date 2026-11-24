@@ -16,7 +16,7 @@ fn inherited_cwd_validates_local_authority_and_native_paths() {
             (PathStyle::Windows, "/C:/", "C:\\"),
             (PathStyle::Windows, "/c:/work/a b;c", r"C:\work\a b;c"),
         ] {
-            let cwd = Osc7Cwd { authority: authority.into(), path: path.into() };
+            let cwd = Osc7Cwd { authority: authority.into(), path: path.into(), uri_path: true };
             let launch = PaneLaunch::default().inherit_cwd(Some(&cwd), style, "my-host");
             assert_eq!(launch.cwd, Some(PathBuf::from(expected)));
         }
@@ -31,17 +31,21 @@ fn inherited_cwd_validates_local_authority_and_native_paths() {
         (PathStyle::Posix, "", "//server/share"),
         (PathStyle::Posix, "", "/work\nunsafe"),
     ] {
-        let cwd = Osc7Cwd { authority: authority.into(), path: path.into() };
+        let cwd = Osc7Cwd { authority: authority.into(), path: path.into(), uri_path: true };
         assert_eq!(PaneLaunch::default().inherit_cwd(Some(&cwd), style, "my-host").cwd, None);
     }
-    let huge = Osc7Cwd { authority: String::new(), path: format!("/{}", "x".repeat(4096)) };
+    let huge = Osc7Cwd {
+        authority: String::new(),
+        path: format!("/{}", "x".repeat(4096)),
+        uri_path: true,
+    };
     assert_eq!(PaneLaunch::default().inherit_cwd(Some(&huge), PathStyle::Posix, "host").cwd, None);
 }
 
 /// Explicit launch directories, script parents and command launches outrank a source pane's OSC 7.
 #[test]
 fn inherited_cwd_never_overrides_explicit_or_script_launch() {
-    let inherited = Osc7Cwd { authority: String::new(), path: "/different".into() };
+    let inherited = Osc7Cwd { authority: String::new(), path: "/different".into(), uri_path: true };
     let script = PaneLaunch::for_script(request("scripts/build.sh"));
     let explicit = PaneLaunch { cwd: Some(PathBuf::from("/explicit")), ..PaneLaunch::default() };
     let command = PaneLaunch {
@@ -325,5 +329,36 @@ fn a_later_untrusted_report_revokes_the_launch_cwd() {
         parser.advance(&[b"\x1b]".as_slice(), report, b"\x07"].concat());
         assert_eq!(launch(&parser), None, "{report:?}");
         assert_ne!(parser.cwd_revision(), revision, "{report:?}");
+    }
+}
+
+/// Only a URI path may write a Windows drive after a separator (`/C:/x`); a bare 9;9 path is read
+/// as sent, so one that was not drive-rooted gives neither a launch directory nor a link base.
+#[test]
+fn only_a_uri_path_drops_the_separator_before_a_windows_drive() {
+    let link_base = |report: &[u8]| {
+        let mut parser = sonicterm_vt::vt::Parser::new(sonicterm_grid::grid::Grid::new(20, 2));
+        parser.advance(&[b"\x1b]".as_slice(), report, b"\x07"].concat());
+        let target = sonicterm_cfg::url_scan::DetectedTarget::PathCandidate(r".\f".into());
+        super::super::path_target::resolve_detected_path(
+            &target,
+            PathStyle::Windows,
+            parser.osc7_cwd(),
+            None,
+            "my-host",
+        )
+    };
+    for report in [
+        b"7;file:///C:/x".as_slice(),
+        b"7;/C:/x",
+        b"9;9;file:///C:/x",
+        b"1337;CurrentDir=kitty-shell-cwd://localhost/C:/x",
+    ] {
+        assert_eq!(launch_cwd_after(report, PathStyle::Windows), Some(PathBuf::from(r"C:\x")));
+        assert_eq!(link_base(report), Some(PathBuf::from(r"C:\x\f")), "{report:?}");
+    }
+    for report in [b"9;9;/C:/x".as_slice(), b"9;9;\\C:\\x", b"9;9;\"/C:/x\""] {
+        assert_eq!(launch_cwd_after(report, PathStyle::Windows), None, "{report:?}");
+        assert_eq!(link_base(report), None, "{report:?}");
     }
 }

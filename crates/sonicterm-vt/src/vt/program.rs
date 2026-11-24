@@ -111,9 +111,20 @@ pub(super) fn parse_osc777(params: &[&[u8]]) -> ProgramOsc {
 
 /// The path a ConEmu `9;9;<path>` report carries, everything after its second `;`, separators
 /// included; `None` for any other OSC 9 payload, a bare `9;9` without the separator included.
+/// The subcommand is read with its C0 controls ignored, as the notification grammar will read it,
+/// and a report with a control there returns the whole payload, so the report rule refuses it.
 pub(super) fn osc9_cwd_payload(content: &[u8]) -> Option<&[u8]> {
     let (subcommand, rest) = content.split_at(content.iter().position(|byte| *byte == b';')?);
-    (conemu_subcommand(subcommand) == Some(9)).then(|| &rest[1..])
+    let digits: Vec<u8> = subcommand.iter().copied().filter(|byte| *byte >= 0x20).collect();
+    if conemu_subcommand(&digits) != Some(9) {
+        // When: conemu_subcommand reads `digits` (controls ignored) as anything but 9, no report.
+        return None;
+    }
+    if digits.len() != subcommand.len() {
+        // When: a control sits in the subcommand, keep it in the value so the report is refused.
+        return Some(content);
+    }
+    Some(&rest[1..])
 }
 
 /// The ConEmu subcommand `param` names: an all-digit value in `1..=12`, leading zeros included.

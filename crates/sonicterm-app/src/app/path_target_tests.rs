@@ -306,7 +306,7 @@ pub(super) fn probe_key(path: &str, view_top: u64) -> PathProbeKey {
         view_top,
         candidates: vec![probe_candidate_at("./file", path, 4, row)],
         rows: smallvec::smallvec![PathRowIdentity { row, fingerprint: 11 }],
-        cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
+        cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into(), uri_path: true }),
         cwd_revision: 3,
         link_destination: None,
         scrollback_evicted: 0,

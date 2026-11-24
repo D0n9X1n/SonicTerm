@@ -470,11 +470,9 @@ impl Perform for Performer {
                 // SUB or an ESC before a complete ST, so this path changes nothing.
             }
             Some(7) => {
-                // OSC 7 ; <uri or path> ST — shell-reported cwd. The raw collector owns `7;`; one
-                // that reaches vte (a C1 introducer) reads through the same rule as every source.
-                if let Some(raw) = params.get(1) {
-                    self.report_cwd(super::vt_osc::CwdSource::Osc7, raw);
-                }
+                // The raw collector owns OSC 7 in every spelling its probe reads and applies it only
+                // once complete; vte reaches here for a spelling it missed (a C1 introducer, a long
+                // digit run) and on CAN, SUB or a cut ESC, so this path sets and trusts nothing.
             }
             Some(8) => {
                 // OSC 8;params;uri ST — hyperlink. Empty uri = end of link.

@@ -41,7 +41,7 @@ pub fn parse_osc7_cwd_snapshot(raw: &str) -> Option<Osc7Cwd> {
         // When: decoded `path` is empty or contains control characters, reject it as an unsafe filesystem base.
         return None;
     }
-    Some(Osc7Cwd { authority: authority.to_string(), path })
+    Some(Osc7Cwd { authority: authority.to_string(), path, uri_path: true })
 }
 
 /// Parse an OSC 7 payload into its filesystem path for legacy callers.
@@ -306,8 +306,11 @@ impl Performer {
             // When: text is a bare 9;9 or `CurrentDir` path, it shows literally; only 9;9 stores it
             // with an empty authority, for native validation to accept or reject later.
             self.cwd = Some(text.to_string());
-            self.osc7_cwd = (source == CwdSource::ConEmu)
-                .then(|| Osc7Cwd { authority: String::new(), path: text.to_string() });
+            self.osc7_cwd = (source == CwdSource::ConEmu).then(|| Osc7Cwd {
+                authority: String::new(),
+                path: text.to_string(),
+                uri_path: false,
+            });
         }
     }
 
@@ -332,13 +335,27 @@ impl Performer {
         }
     }
 
-    pub(super) fn handle_semantic_osc(&mut self, code: u16, content: &[u8], bell_terminated: bool) {
-        if let Some((source, value)) = cwd_report(code, content) {
+    /// Apply one complete collected OSC `code` payload. A directory report is classified once, on
+    /// the bytes as they arrived; only another program or color payload then loses its C0
+    /// controls, as vte drops them, so a stripped payload is never read as a directory.
+    pub(super) fn handle_semantic_osc(
+        &mut self,
+        code: u16,
+        mut content: Vec<u8>,
+        bell_terminated: bool,
+    ) {
+        if let Some((source, value)) = cwd_report(code, &content) {
             // When: content is a directory report (OSC 7, a ConEmu 9;9 or an OSC 1337
             // `CurrentDir=`), one rule reads every source before any other grammar sees it.
             self.report_cwd(source, value);
             return;
         }
+        if is_program_osc(code) || vt_color::is_color_osc(code) {
+            // A program or color request's controls are not payload; the collector kept them
+            // only so its cap counted every wire byte.
+            content.retain(|byte| *byte >= 0x20);
+        }
+        let content = content.as_slice();
         if code == 22 {
             // When: code is 22, the pointer-shape grammar reads the names; an unknown or non-UTF-8
             // name matches nothing and is ignored there.

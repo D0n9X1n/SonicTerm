@@ -359,7 +359,7 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
             view_top: 20,
             candidates: vec![candidate.clone()],
             rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
-            cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
+            cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into(), uri_path: true }),
             cwd_revision: 3,
             link_destination: None,
             scrollback_evicted: 0,
@@ -420,7 +420,11 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
                     joined: false,
                 }],
                 rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
-                cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
+                cwd: Some(Osc7Cwd {
+                    authority: String::new(),
+                    path: "/work".into(),
+                    uri_path: true
+                }),
                 cwd_revision: 3,
                 link_destination: None,
                 scrollback_evicted: 0,

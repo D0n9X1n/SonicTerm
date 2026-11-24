@@ -584,7 +584,7 @@ URI to 8 KiB and client id to 1 KiB.
 
   | Payload | OSC 7 | OSC 9;9 | OSC 1337 `CurrentDir` |
   | --- | --- | --- | --- |
-  | empty | clears path and snapshot | clears path and snapshot (`9;9;""` too) | ignored |
+  | empty | clears path and snapshot (a bare OSC 7 with no `;` too, as kitty reads it) | clears path and snapshot (`9;9;""` too) | ignored |
   | `file://host/path` (percent-decoded) | path; snapshot `{host, path}` | as OSC 7 | as OSC 7 |
   | `kitty-shell-cwd://host/path` (raw, `%` kept) | path; snapshot `{host, path}` | as OSC 7 | as OSC 7 |
   | `file:///path` (empty host) | snapshot with an empty host, which is local | as OSC 7 | as OSC 7 |
@@ -592,21 +592,28 @@ URI to 8 KiB and client id to 1 KiB.
   | bare path | percent-decoded path; snapshot `{"", path}` | literal path after one pair of surrounding `"`; snapshot `{"", path}` | path shown; snapshot revoked |
 
   Local use requires an empty host, `localhost` or the exact local hostname (any ASCII case), a
-  native absolute path (`/…`; on Windows `C:\…`, `C:/…` or `/C:/…`) and at most 4,096 decoded
-  UTF-8 bytes. A remote host stays in the snapshot, so every consumer rejects it. Drive-relative
-  (`C:foo`), bare-drive (`C:`), UNC (`\\host\share`, `//host`), relative and other-OS paths are
-  stored and shown but never used. Each of these, a payload that is not UTF-8 or holds a control
-  character, and a report from any source cut by CAN, SUB, an ESC that does not complete ST, its
-  byte cap or host cancellation replace an earlier trusted directory. Ordinary tabs and splits in
+  native absolute path (`/…`; on Windows `C:\…` or `C:/…`, and `/C:/…` or `\C:\…` only for a URI
+  path, which is any OSC 7 or a URI from any source; a bare 9;9 path is read as sent) and at most
+  4,096 decoded UTF-8 bytes as reported, before `/` and `..` collapse it. The launch directory and
+  every relative and bare-name link base apply the same rules. A remote host stays in the
+  snapshot, so every consumer rejects it. Drive-relative (`C:foo`), bare-drive (`C:`), UNC
+  (`\\host\share`, `//host`), relative and other-OS paths are stored and shown but never used.
+  Each of these, a payload that is not UTF-8 or holds a control character (in a 9;9 report its
+  subcommand included: a report is classified on the bytes it arrived with, so removing a control
+  never makes it a directory), and a report from any source cut by CAN, SUB, an ESC that does not
+  complete ST, its byte cap or host cancellation replace an earlier trusted directory. Ordinary tabs and splits in
   main and child windows may inherit the source pane's validated CWD; an explicit CWD wins; new
   windows do not inherit it. Clearing the directory never clears an explicit OSC 0/2 title.
   WezTerm's Windows forms `file://localhost/C:\Users\x` and `file://HOST/C:/Users/x` resolve to
-  `C:\Users\x`. The raw collector owns `7;`, `9;` (16 KiB after `9;`) and `1337;CurrentDir=`
-  with its key in any ASCII case (64 KiB after `1337;`), and applies a report only once its BEL
-  or ST arrived. Intentional differences: a bare native-absolute 9;9 path is trusted, as in
-  kitty, where Ghostty requires a URI; Windows drive-rooted 9;9 paths are a SonicTerm extension,
-  since kitty accepts only `/…`; a bare `CurrentDir` is display-only and revokes trust, because
-  iTerm2 pairs it with a `RemoteHost` SonicTerm does not read, where Ghostty ignores it;
+  `C:\Users\x`. The raw collector owns OSC 7 in any numeric spelling its 10-byte probe reads
+  (`7`, `07`, `+7`, bare or with `;`), `9;` (16 KiB after `9;`) and `1337;CurrentDir=` with its key
+  in any ASCII case (64 KiB after `1337;`), and applies a report only once its BEL or ST arrived;
+  an OSC 7 it does not read (a C1 introducer, a longer digit run) sets and trusts nothing.
+  Intentional differences: a bare native-absolute 9;9 path is trusted, as in kitty, where Ghostty
+  requires a URI; a bare OSC 7 clears, as in kitty, where Ghostty ignores it; Windows drive-rooted
+  9;9 paths are a SonicTerm extension, since kitty accepts only `/…`; a bare `CurrentDir` is
+  display-only and revokes trust, because iTerm2 pairs it with a `RemoteHost` SonicTerm does not
+  read, where Ghostty ignores it;
   `file:///path` is local for every source, where Ghostty rejects an empty host; reports apply
   on Windows, where Ghostty skips them; WezTerm parses `CurrentDir` and ignores it.
 - **OSC 8:** preserve the full URI, including semicolons. Only `id=` is extracted

@@ -45,11 +45,11 @@ pub(in crate::app) fn resolve_path_candidate(
         }
     } else if relative {
         // When: `candidate` is dot-relative or separator-relative, resolve it only from this pane's trusted local CWD.
-        let cwd = cwd.filter(|cwd| authority_is_local(&cwd.authority, local_hostname))?;
+        let cwd = local_cwd_base(cwd?, local_hostname)?;
         match style {
             PathStyle::Posix => format!("{}/{}", cwd.path.trim_end_matches('/'), candidate),
             PathStyle::Windows => {
-                let cwd = normalize_windows_cwd(&cwd.path)?;
+                let cwd = normalize_windows_cwd(&cwd.path, cwd.uri_path)?;
                 format!("{}\\{}", cwd.trim_end_matches(['/', '\\']), candidate)
             }
         }
@@ -95,7 +95,7 @@ pub(in crate::app) fn resolve_detected_path(
                 // When: `candidate` is empty, overlong, special, separated, or controlled, reject contextual resolution.
                 return None;
             }
-            let cwd = cwd.filter(|cwd| authority_is_local(&cwd.authority, local_hostname))?;
+            let cwd = local_cwd_base(cwd?, local_hostname)?;
             match style {
                 PathStyle::Posix => {
                     let cwd = normalize_posix_cwd(&cwd.path)?;
@@ -113,7 +113,7 @@ pub(in crate::app) fn resolve_detected_path(
                         // When: Windows `candidate` contains reserved, ADS, or normalization-sensitive syntax, leave it inert.
                         return None;
                     }
-                    let cwd = normalize_windows_cwd(&cwd.path)?;
+                    let cwd = normalize_windows_cwd(&cwd.path, cwd.uri_path)?;
                     normalize_windows_absolute(&format!(
                         "{}\\{candidate}",
                         cwd.trim_end_matches(['/', '\\'])
@@ -162,19 +162,26 @@ pub(super) fn unsafe_path_cell(cell: &&Cell) -> bool {
         || cell.extras().is_some_and(|extras| !extras.is_empty())
 }
 
+/// The longest reported directory path, in bytes, any consumer takes as a base.
+const MAX_CWD_BASE_BYTES: usize = 4096;
+
+/// The pane's directory `cwd` as a base for local launches and links: only a local one whose path,
+/// as reported and before `/` and `..` collapse it, is within the byte limit and has no control.
+fn local_cwd_base<'cwd>(cwd: &'cwd Osc7Cwd, local_hostname: &str) -> Option<&'cwd Osc7Cwd> {
+    (cwd.path.len() <= MAX_CWD_BASE_BYTES
+        && !cwd.path.chars().any(char::is_control)
+        && authority_is_local(&cwd.authority, local_hostname))
+    .then_some(cwd)
+}
+
 /// Resolve a bounded local OSC 7 snapshot to a native absolute launch directory without filesystem I/O.
 pub(in crate::app) fn local_launch_cwd(
     cwd: &Osc7Cwd,
     style: PathStyle,
     local_hostname: &str,
 ) -> Option<PathBuf> {
-    if cwd.path.len() > 4096
-        || cwd.path.chars().any(char::is_control)
-        || !authority_is_local(&cwd.authority, local_hostname)
-    {
-        // When: cwd is oversized, controlled, or remote, it must not redirect a new local shell.
-        return None;
-    }
+    // An oversized, controlled or remote directory must not redirect a new local shell.
+    let cwd = local_cwd_base(cwd, local_hostname)?;
     match style {
         PathStyle::Posix => normalize_posix_cwd(&cwd.path).map(PathBuf::from),
         PathStyle::Windows => {
@@ -183,7 +190,7 @@ pub(in crate::app) fn local_launch_cwd(
                 // When: cwd.path is a bare drive designator, do not promote it to that drive's root.
                 return None;
             }
-            normalize_windows_cwd(&cwd.path).map(PathBuf::from)
+            normalize_windows_cwd(&cwd.path, cwd.uri_path).map(PathBuf::from)
         }
     }
 }
@@ -270,7 +277,9 @@ pub(super) fn normalize_windows_home(path: &str) -> Option<String> {
     normalize_windows_absolute(path)
 }
 
-pub(super) fn normalize_windows_cwd(path: &str) -> Option<String> {
+/// Normalize a reported Windows directory `path`. Only a `uri_path` may write its drive after a
+/// separator (`/C:/x`); a bare 9;9 path is read as sent.
+pub(super) fn normalize_windows_cwd(path: &str, uri_path: bool) -> Option<String> {
     let normalized = path.replace('/', "\\");
     let drive_part = normalized.strip_prefix('\\').unwrap_or(&normalized);
     if drive_part.len() == 2
@@ -281,7 +290,8 @@ pub(super) fn normalize_windows_cwd(path: &str) -> Option<String> {
         // its root, so it is no base for relative targets.
         return None;
     }
-    let normalized = if normalized.len() >= 4
+    let normalized = if uri_path
+        && normalized.len() >= 4
         && normalized.starts_with('\\')
         && normalized.as_bytes()[1].is_ascii_alphabetic()
         && normalized.as_bytes()[2] == b':'
@@ -289,7 +299,7 @@ pub(super) fn normalize_windows_cwd(path: &str) -> Option<String> {
     {
         normalized[1..].to_string()
     } else {
-        // When: `normalized` is not the OSC 7 `/C:/...` drive form, retain it for ordinary absolute validation.
+        // When: `normalized` is not a URI path's `/C:/...` drive form, retain it for ordinary absolute validation.
         normalized
     };
     normalize_windows_absolute(&normalized)

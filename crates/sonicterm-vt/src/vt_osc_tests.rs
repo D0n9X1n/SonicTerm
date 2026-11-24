@@ -22,11 +22,15 @@ fn osc52_clipboard_write_is_typed_for_the_host() {
 fn osc7_snapshot_preserves_authority_and_decodes_path() {
     assert_eq!(
         parse_osc7_cwd_snapshot("file://remote-host/home/user/My%20Files"),
-        Some(Osc7Cwd { authority: "remote-host".into(), path: "/home/user/My Files".into() })
+        Some(Osc7Cwd {
+            authority: "remote-host".into(),
+            path: "/home/user/My Files".into(),
+            uri_path: true
+        })
     );
     assert_eq!(
         parse_osc7_cwd_snapshot("file:///tmp/work"),
-        Some(Osc7Cwd { authority: String::new(), path: "/tmp/work".into() })
+        Some(Osc7Cwd { authority: String::new(), path: "/tmp/work".into(), uri_path: true })
     );
 }
 
@@ -50,7 +54,11 @@ fn parser_exposes_typed_osc7_snapshot_without_changing_cwd() {
     assert_eq!(parser.cwd(), Some("/home/user"));
     assert_eq!(
         parser.osc7_cwd(),
-        Some(&Osc7Cwd { authority: "remote-host".into(), path: "/home/user".into() })
+        Some(&Osc7Cwd {
+            authority: "remote-host".into(),
+            path: "/home/user".into(),
+            uri_path: true
+        })
     );
     let revision = parser.cwd_revision();
 
