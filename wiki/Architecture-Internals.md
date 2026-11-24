@@ -872,7 +872,10 @@ and the last successful size stays cached. The first request always reaches the
 native call, because the cache starts empty rather than seeded from the spawn
 dimensions.
 
-The host first calls `Parser::resize`: grid bounds apply, and an effective row or
+The host first resizes the grid through `resize_terminal_grid` (`pane_refresh.rs`), which
+calls `Parser::resize_terminal` off Windows and `Parser::resize` on Windows; the first
+keeps a live prompt's cursor row on a rows shrink and otherwise is `Parser::resize`. Grid
+bounds apply, and an effective row or
 column change clears parser-owned scrolling margins without homing the cursor.
 Duplicate-size relayouts preserve partial margins. The grid is never rolled back
 when the native call fails: the pane keeps the requested geometry and only the

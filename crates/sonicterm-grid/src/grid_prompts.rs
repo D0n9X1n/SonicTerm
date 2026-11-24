@@ -426,21 +426,25 @@ impl Grid {
             .find(|prompt| prompt.start_row.is_some_and(|row| row > from_absolute_row))
     }
 
-    /// Rebase every region after `removed` rows left the front of history: a coordinate on a
-    /// removed row becomes `None`. A region whose start left is kept while its command is running
-    /// (C seen, no D) or while it is the pinned run's, so a long command's completion is not
-    /// lost; any other such region can no longer name a prompt and is dropped.
+    /// Rebase every region after `removed` rows left the front of history, or were discarded by a
+    /// scroll with history off: a coordinate on a removed row becomes `None`. A region whose start
+    /// left is kept while its command is running (C seen, no D), while it is the pinned run's, so a
+    /// long command's completion is not lost, or while it is the newest and has no C, so readiness
+    /// refuses its lost prompt instead of reading an older one; any other such region is dropped.
     pub(super) fn rebase_prompts_after_drain(&mut self, removed: u64) {
         let rebase = |row: Option<u64>| row.and_then(|row| row.checked_sub(removed));
         // The pinned run's region is kept until the run ends, so its C and D still reach the pin.
         let is_alt = self.is_alt();
         let pinned = self.pinned_run.filter(|run| run.alt == is_alt).map(|run| run.seq);
+        let open_newest =
+            self.prompts.back().filter(|prompt| !prompt.output_seen).map(|prompt| prompt.seq);
         self.prompts.retain_mut(|prompt| {
             let start = rebase(prompt.start_row);
             let running = prompt.output_seen && !prompt.completed;
-            if start.is_none() && !running && Some(prompt.seq) != pinned {
-                // When: the start left history and the region is neither `running` nor `pinned`,
-                // nothing can still complete it.
+            let kept = Some(prompt.seq) == pinned || Some(prompt.seq) == open_newest;
+            if start.is_none() && !running && !kept {
+                // When: the start left history and the region is neither `running` nor `kept` (the
+                // pinned run's or the open newest), nothing can still complete it.
                 return false;
             }
             prompt.start_row = start;

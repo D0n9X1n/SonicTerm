@@ -108,6 +108,12 @@ pub(crate) fn check_prompt(grid: &Grid, last_typing: Option<Instant>) -> Result<
         // When: the newest region already saw C (`output_seen`), its command is still running.
         return Err(Refusal::Busy);
     }
+    let bottom = grid.scrollback_len() as u64 + u64::from(grid.rows);
+    if newest.start_row.is_none() || input_row >= bottom || input_col >= grid.cols {
+        // When: `start_row` was evicted, or `input_row` is past `bottom` or `input_col` past
+        // `cols` after a clip, the marks cannot locate the input, so readiness fails closed.
+        return Err(Refusal::NoShellIntegration);
+    }
     let previous_start = newest_first.next().and_then(|region| region.output_start_at);
     let typed_during_previous = match (last_typing, previous_start) {
         (None, _) => false,
@@ -119,7 +125,6 @@ pub(crate) fn check_prompt(grid: &Grid, last_typing: Option<Instant>) -> Result<
         // When: typing arrived `typed_during_previous` command, it may still be in flight.
         return Err(Refusal::DraftPresent);
     }
-    let bottom = grid.scrollback_len() as u64 + u64::from(grid.rows);
     for abs in input_row..bottom {
         let Some(row) = grid.row_at_abs(abs) else {
             // When: `row_at_abs` has no row, the screen ended.

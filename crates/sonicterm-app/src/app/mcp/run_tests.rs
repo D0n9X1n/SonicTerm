@@ -241,3 +241,73 @@ fn n_does_not_evict_pinned_run() {
     assert_eq!(run.exit, Some(Some(0)));
     assert!(!run.prompt_after_end, "only an A says the shell took control back");
 }
+
+/// A parser of `cols` x `rows` with `scrollback` rows of history that received `bytes`.
+fn parsed_sized(cols: u16, rows: u16, scrollback: usize, bytes: &[u8]) -> Parser {
+    let mut parser =
+        Parser::new_with_staging_pool(Grid::new(cols, rows), None, CaptureStagingPool::new());
+    parser.grid_mut().set_scrollback_limit(scrollback);
+    parser.advance(bytes);
+    parser
+}
+
+/// With history off, a rows shrink under a live prompt discards the rows above the cursor's row.
+/// B moves up with its row, so a shell-prefilled draft on B's row (no typing stamp) still refuses
+/// `run_command`; reading B's old position would see the blank row that took it and run.
+#[test]
+fn a_no_history_prompt_shrink_keeps_the_draft_refused() {
+    let mut parser = parsed_sized(40, 4, 0, b"o0\r\no1\r\n\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+    assert_eq!(parser.resize_terminal(40, 3).scrolled_rows, 1);
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+}
+
+/// Readiness fails closed when the marks can no longer locate the input: a plain clip (Windows'
+/// resize) cut B's row or a narrower grid cut B's column, so no cell is left to read as blank.
+/// A newest prompt whose A row was discarded refuses rather than handing readiness to an older
+/// prompt below it (a cleared screen), whose rows would then be read in its place.
+#[test]
+fn readiness_fails_closed_when_the_marks_no_longer_locate_the_input() {
+    let mut cut_row = parsed(b"\r\n\r\n\r\n\r\n\r\n\x1b]133;A\x07$ \x1b]133;B\x07ls");
+    cut_row.resize(40, 3);
+    assert_eq!(check_prompt(cut_row.grid(), None), Err(Refusal::NoShellIntegration));
+    let mut cut_col = parsed(b"\x1b]133;A\x07prompt> \x1b]133;B\x07ls");
+    cut_col.resize(5, 8);
+    assert_eq!(check_prompt(cut_col.grid(), None), Err(Refusal::NoShellIntegration));
+    // An abandoned prompt on row 3, then Ctrl-L: the screen is erased and the next prompt opens on
+    // row 0, above the old prompt's region, which keeps its (now blank) rows.
+    let mut cleared = parsed_sized(
+        40,
+        4,
+        0,
+        b"\x1b[4;1H\x1b]133;A\x07$ \x1b]133;B\x07\x1b[H\x1b[2J\x1b]133;A\x07$ \x1b]133;B\x07",
+    );
+    assert!(check_prompt(cleared.grid(), None).is_ok());
+    cleared.grid_mut().scroll_up(1);
+    assert_eq!(check_prompt(cleared.grid(), None), Err(Refusal::NoShellIntegration));
+}
+
+/// Physical row eviction is the one way an annotation reaches the regions: a fresh line (`L`, `N`,
+/// `9;12`) at a full bottom margin scrolls like any line feed, and the scroll moves or evicts
+/// regions. Once the prompt's A row is discarded (history off) or leaves history, readiness
+/// refuses instead of reading the rows that replaced the prompt.
+#[test]
+fn a_fresh_line_at_a_full_bottom_margin_fails_readiness_closed() {
+    let annotations = [&b"\x1b]133;L\x07"[..], b"\x1b]133;N\x07", b"\x1b]9;12\x07"];
+    let prompts = [
+        (0, &b"\x1b]133;A\x07~/src\r\n$ \x1b]133;B\x07"[..]),
+        (1, b"\x1b]133;A\x07~/src\r\nmain\r\n$ \x1b]133;B\x07"),
+    ];
+    for annotation in annotations {
+        for (scrollback, prompt) in prompts {
+            let mut parser = parsed_sized(40, 2, scrollback, prompt);
+            assert!(check_prompt(parser.grid(), None).is_ok(), "{scrollback}");
+            parser.advance(annotation);
+            assert_eq!(
+                check_prompt(parser.grid(), None),
+                Err(Refusal::NoShellIntegration),
+                "{annotation:?} with {scrollback} history row(s)"
+            );
+        }
+    }
+}

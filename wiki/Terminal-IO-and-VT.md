@@ -557,6 +557,8 @@ primary screen: the semantic mode is a prompt or input with an anchor (OSC 133, 
 `redraw` is not `0`, and the cursor would fall at or past the new height. The rows above
 the cursor then scroll through the ordinary scroll path, into history, or discarded when
 scrollback is off, so the cursor's row keeps its cells and column on the new bottom row.
+Prompt regions and the semantic anchor move up with their rows on either path, so
+`run_command` reads the prompt's `B` where its row now is.
 Only that row is promised: input rows below the cursor are cut as before, and the shell
 redraws its own buffer on SIGWINCH. Nothing is blanked, so a shell that does not redraw
 loses nothing `resize` would keep. `redraw=1` and `redraw=last` act alike, since
@@ -651,9 +653,13 @@ URI to 8 KiB and client id to 1 KiB.
   `Unknown`, and the state moves with the pane to another tab or window.
   - **Annotations.** `L`, `N`, `P` and `I`, the options on `A`, and ConEmu's `9;12` change only
     a per-screen semantic state: a mode (output, prompt of a kind, input), an anchor row, a
-    generation, the prompt options and the newest command text. They never open, close or
-    evict a prompt region, so `run_command` readiness, pinned runs and exit trust depend on
-    `A`, `B`, `C` and `D` alone. The primary and alternate screens keep separate states.
+    generation, the prompt options and the newest command text. They never open or close a
+    prompt region, end a pinned run or change exit trust; those depend on `A`, `B`, `C` and
+    `D` alone. The one exception is physical: a fresh line at a full bottom margin scrolls like
+    any line feed, and the scroll moves the regions with their rows and evicts the newest
+    prompt's `A` when its row is discarded or leaves history. `run_command` then refuses that
+    prompt (`no_shell_integration`) rather than reading the rows that replaced it. The primary
+    and alternate screens keep separate states.
   - `A`, `N` and `9;12` start a fresh line (CR then index when the cursor is off column 0; at
     the bottom margin the index scrolls and can evict the oldest history row), start a new
     generation anchored at the cursor row, and reset the options before reading their own.
