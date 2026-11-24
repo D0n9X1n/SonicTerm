@@ -611,9 +611,8 @@ impl Perform for Performer {
                 }
             }
             Some(133) => {
-                // OSC 133 ; <kind> [; <args>] ST — FinalTerm/WezTerm shell integration: A-D
-                // markers and the L, N, P and I annotations.
-                self.shell_marker(params.get(1..).unwrap_or(&[]));
+                // The raw collector owns `133;` and applies a marker only once BEL or ST completes
+                // it; a spelling it missed (`0133`, a C1 introducer, a bare `133`) is dropped.
             }
             _ => {}
         }

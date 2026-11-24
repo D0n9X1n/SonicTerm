@@ -15,14 +15,21 @@ use super::*;
 const MAX_CMDLINE_RAW_BYTES: usize = 4 * 1024;
 
 impl Performer {
-    /// Apply one OSC 133 marker whose `params` follow the `133`.
+    /// Apply one complete OSC 133 marker whose `params` follow the `133`. Only the kinds A-D and
+    /// L, N, P, I are read, each one byte; any other first parameter is ignored before admission,
+    /// so it never latches the pane or changes the observed shell state.
     pub(super) fn shell_marker(&mut self, params: &[&[u8]]) {
-        let kind = params.first().and_then(|param| param.first().copied());
+        let Some(&[kind @ (b'A'..=b'D' | b'L' | b'N' | b'P' | b'I')]) = params.first().copied()
+        else {
+            // When: `params` does not start with exactly one known `kind` byte, nothing is read.
+            tracing::debug!(target: "vt", "ignored an OSC 133 marker of an unknown kind");
+            return;
+        };
         let extra = params.get(1..).unwrap_or(&[]);
-        if matches!(kind, Some(b'L' | b'N' | b'P' | b'I')) {
+        if matches!(kind, b'L' | b'N' | b'P' | b'I') {
             // When: `matches!` finds an annotation `kind`, it never latches and never touches a
             // prompt region.
-            self.shell_annotation(kind.unwrap_or_default(), extra);
+            self.shell_annotation(kind, extra);
             return;
         }
         let admitted = self.admit_shell_marker(extra);
@@ -41,7 +48,7 @@ impl Performer {
             return;
         };
         match kind {
-            Some(b'A') => {
+            b'A' => {
                 self.semantic_prompt_start(extra);
                 self.grid.record_prompt_start();
                 // A new prompt ends the program-status records a running program left, at
@@ -49,12 +56,12 @@ impl Performer {
                 self.end_transient_program_status();
                 self.events.push(VtEvent::Command(CommandEvent::PromptStart));
             }
-            Some(b'B') => {
+            b'B' => {
                 self.grid.record_input_start();
                 self.grid.mark_semantic_input(false);
                 self.events.push(VtEvent::Command(CommandEvent::PromptEnd));
             }
-            Some(b'C') => {
+            b'C' => {
                 self.grid.record_output_start_marked(authenticated);
                 self.grid.mark_semantic_output();
                 // Command text comes only from an authenticated C; any other C clears it.
@@ -62,10 +69,15 @@ impl Performer {
                     .then(|| parse_cmdline(extra))
                     .flatten()
                     .and_then(CmdlineText::new);
+                // The section keeps a copy of the newest C's text, only from the primary screen,
+                // so the host pairs it with this C alone.
+                let alternate = self.grid.is_alt();
+                self.section_commands.alternate |= alternate;
+                self.section_commands.cmdline = cmdline.clone().filter(|_| !alternate);
                 self.grid.set_semantic_cmdline(cmdline);
                 self.events.push(VtEvent::Command(CommandEvent::CmdStart));
             }
-            Some(b'D') => {
+            b'D' => {
                 let exit_i32 = extra
                     .first()
                     .and_then(|param| std::str::from_utf8(param).ok())
@@ -77,12 +89,13 @@ impl Performer {
                     .find_map(|param| param.strip_prefix(super::vt_osc::EXIT_SOURCE_PARAM))
                     .and_then(sonicterm_grid::grid::ExitSource::from_param);
                 self.grid.record_prompt_end_sourced(exit_i32, source, authenticated);
+                self.section_commands.alternate |= self.grid.is_alt();
                 self.grid.mark_semantic_output();
                 let exit = exit_i32.and_then(|status| u8::try_from(status).ok());
                 self.events.push(VtEvent::Command(CommandEvent::CmdEnd(exit)));
             }
             _ => {
-                // When: kind is not a recognized shell marker, preserve prompt boundaries and emit no command event.
+                // When: `kind` is an annotation, it was applied above and nothing more happens.
             }
         }
     }
@@ -90,10 +103,11 @@ impl Performer {
     /// Apply one admitted-or-refused annotation `kind` (L, N, P or I) with parameters `extra`.
     fn shell_annotation(&mut self, kind: u8, extra: &[&[u8]]) {
         if kind == b'L'
-            && !extra.iter().all(|param| param.starts_with(super::vt_osc::SHELL_TOKEN_PARAM))
+            && (extra.len() > 1
+                || !extra.iter().all(|param| param.starts_with(super::vt_osc::SHELL_TOKEN_PARAM)))
         {
-            // When: `kind` is L and `extra` holds a `param` that is not the token, the L is
-            // invalid, so nothing changes, the observed shell state included.
+            // When: `kind` is L and `extra` holds more than one `param` or one that is not the
+            // token, the L is invalid, so nothing changes, the observed shell state included.
             return;
         }
         if !self.admit_annotation(extra) {
@@ -140,6 +154,48 @@ impl Performer {
         }
         self.advance_hard_line(self.erase_fill_cell(), true);
     }
+}
+
+/// The command markers one parse section admitted, taken by the host after the section through
+/// [`Parser::take_section_commands`], so command text pairs only with the C that carried it.
+#[derive(Debug, Default)]
+pub struct SectionCommands {
+    /// The newest admitted C's command text, when that C was on the primary screen and carried
+    /// one; an earlier C in the same section holds none.
+    pub cmdline: Option<CmdlineText>,
+    /// An admitted C or D arrived on the alternate screen, so a held text's owner is ambiguous.
+    pub alternate: bool,
+}
+
+impl Parser {
+    /// Take what this parse section's command markers recorded, leaving the record empty.
+    pub fn take_section_commands(&mut self) -> SectionCommands {
+        std::mem::take(&mut self.performer.section_commands)
+    }
+}
+
+/// The parameters of an OSC 133 `payload`, split at each `;` no backslash escapes, so bash's `%q`
+/// writing a semicolon as `\;` keeps it inside its `cmdline=` value; the escape stays for that
+/// value's own decoder.
+pub(super) fn split_marker_params(payload: &[u8]) -> Vec<&[u8]> {
+    let mut params = Vec::new();
+    let mut start = 0;
+    let mut escaped = false;
+    for (index, byte) in payload.iter().enumerate() {
+        if escaped {
+            // The previous byte escaped this one, so it is literal, a `;` included.
+            escaped = false;
+        } else if *byte == b'\\' {
+            // When: `byte` is a backslash, the next byte is escaped.
+            escaped = true;
+        } else if *byte == b';' {
+            // When: `byte` is an unescaped `;`, it ends the current parameter.
+            params.push(&payload[start..index]);
+            start = index + 1;
+        }
+    }
+    params.push(&payload[start..]);
+    params
 }
 
 /// The value of the first `key=` parameter in `extra`; later ones are ignored, as in Ghostty.
@@ -302,3 +358,7 @@ fn escape_digits(bytes: &[u8], radix: u32, max_digits: usize) -> Option<(u8, usi
 #[cfg(test)]
 #[path = "vt_semantic_tests.rs"]
 mod vt_semantic_tests;
+
+#[cfg(test)]
+#[path = "vt_semantic_frame_tests.rs"]
+mod vt_semantic_frame_tests;

@@ -872,3 +872,48 @@ fn a_batch_reports_its_last_program_status_once() {
     assert!(statuses(&program_batch(&handles, "\x1b]7501;?\x07")).is_empty());
     assert!(statuses(&program_batch(&handles, "\x1b]7501;id=a:state=blocked\x07")).is_empty());
 }
+
+/// The command text the drain pairs with each D queued in `handles`, in parse order.
+fn drained_end_texts(handles: &PaneVtHandles) -> Vec<Option<String>> {
+    crate::app::command_events::drain_paired(&mut handles.command_events.lock())
+        .into_iter()
+        .filter(|(event, _)| matches!(event.event, CommandEvent::CmdEnd(_)))
+        .map(|(_, text)| text.map(|text| text.as_str().to_owned()))
+        .collect()
+}
+
+/// Command text pairs only with the C that carried it: a primary command's text never reaches an
+/// alternate-screen command ended in the same section (its owner is ambiguous, so it is omitted),
+/// and of two Cs in one section only the last holds text, its own.
+#[test]
+fn cmdline_never_attaches_to_another_command() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let token = "0123456789abcdef0123456789abcdef";
+    handles.parser.lock().set_shell_token(Some(token.to_owned()));
+    let base = Instant::now();
+    // One instant per command event, in parse order.
+    let mut times = [0, 0, 0, 5, 10, 10, 10, 10, 20, 20, 20, 20, 30]
+        .into_iter()
+        .map(|secs| base + Duration::from_secs(secs));
+    let mut started = None;
+    let mut batch = |text: String| {
+        process_pane_vt_batch_with(
+            &handles,
+            text.as_bytes(),
+            None,
+            &mut started,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            || times.next().unwrap(),
+            |_| {},
+        );
+    };
+    let mark = |body: &str| format!("\x1b]133;{body};sonicterm_token={token}\x07");
+    let primary = [mark("A"), mark("B"), mark("C;cmdline_url=make")].concat();
+    batch(format!("{primary}\x1b[?1049h{}{}\x1b[?1049l", mark("C"), mark("D;0")));
+    assert_eq!(drained_end_texts(&handles), vec![None], "the alternate command shows no text");
+    let first = [mark("A"), mark("B"), mark("C"), mark("D;0")].concat();
+    batch([first, mark("A"), mark("B"), mark("C;cmdline_url=ls"), mark("D;0")].concat());
+    assert_eq!(drained_end_texts(&handles), vec![None, Some("ls".to_owned())]);
+}

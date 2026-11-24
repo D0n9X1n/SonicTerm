@@ -210,13 +210,14 @@ fn pane_summary(
         user_vars.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect();
     text_budget.place(&mut pane, "user_vars", Value::Array(user_vars));
     // The most urgent state is fixed-size and outside the budget, so it stays when the list is
-    // omitted; the list is charged as a whole and never cut.
+    // omitted; past the status sublimit only the records' free text is dropped, never cut.
     let top = program_status.summary().top;
     pane["program_state"] = json!(top.map(|top| top.state.as_str()));
     text_budget.place_status(
         &mut pane,
         "program_status",
         super::read::program_status_json(&program_status, status_text),
+        super::read::program_status_json(&program_status, false),
     );
     text_budget.place(&mut pane, "cwd", json!(cwd));
     pane["cols"] = json!(cols);

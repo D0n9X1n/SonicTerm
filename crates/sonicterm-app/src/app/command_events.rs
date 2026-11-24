@@ -2,6 +2,7 @@
 //! long-command notifications.
 
 use sonicterm_grid::grid::CmdlineText;
+use sonicterm_vt::vt::SectionCommands;
 
 use super::desktop_notify::DesktopNotice;
 use super::*;
@@ -166,18 +167,32 @@ pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Co
     marked
 }
 
-/// Keep `queue`'s one command-text slot in step with `events`, in parse order: a C holds `started`
-/// (read under the parser lock for this section), a D after a run of a second or more stamps the
-/// held text with its instant for the drain, and any other D drops an unstamped text. Only a run
-/// that long can pass the notification threshold, so a burst of short commands holds no text.
+/// Keep `queue`'s one command-text slot in step with `events`, in parse order. Only the section's
+/// last C holds text: its own primary-screen text from `section` (taken under the parser lock);
+/// an earlier C holds none. A D after a run of a second or more stamps the held text with its
+/// instant for the drain, and any other D drops an unstamped text. A section with an
+/// alternate-screen C or D holds no text and drops an unstamped one, whose owner is ambiguous.
+/// Only a run that long can pass the notification threshold, so short commands hold no text.
 pub(super) fn track_cmdline(
     queue: &mut CommandQueue,
     events: &[PaneCommandEvent],
-    started: Option<CmdlineText>,
+    section: SectionCommands,
 ) {
+    if section.alternate && matches!(queue.cmdline, Some((_, None))) {
+        // An alternate-screen section makes an unstamped held text's owner ambiguous, so it goes.
+        queue.cmdline = None;
+    }
+    let mut cmdline = section.cmdline.filter(|_| !section.alternate);
+    let mut starts_left =
+        events.iter().filter(|event| matches!(event.event, CommandEvent::CmdStart)).count();
     for event in events {
         match event.event {
-            CommandEvent::CmdStart => queue.cmdline = started.clone().map(|text| (text, None)),
+            CommandEvent::CmdStart => {
+                starts_left -= 1;
+                // Only the section's last C carried the recorded text.
+                let text = (starts_left == 0).then(|| cmdline.take()).flatten();
+                queue.cmdline = text.map(|text| (text, None));
+            }
             CommandEvent::CmdEnd(_) => {
                 let unstamped = matches!(queue.cmdline, Some((_, None)));
                 let long = event.duration.is_some_and(|ran| ran >= Duration::from_secs(1));
@@ -212,18 +227,6 @@ pub(super) fn drain_paired(
             (event, text)
         })
         .collect()
-}
-
-/// The primary screen's command text when `events` started a command, read under the parser lock
-/// before the event loop: an A later in the same batch clears it in the grid.
-pub(super) fn started_cmdline(
-    events: &[sonicterm_vt::vt::VtEvent],
-    parser: &sonicterm_vt::vt::Parser,
-) -> Option<CmdlineText> {
-    let started = events
-        .iter()
-        .any(|event| matches!(event, sonicterm_vt::vt::VtEvent::Command(CommandEvent::CmdStart)));
-    started.then(|| parser.grid().primary_screen().semantic().cmdline.clone()).flatten()
 }
 
 fn maybe_notify_long_command(

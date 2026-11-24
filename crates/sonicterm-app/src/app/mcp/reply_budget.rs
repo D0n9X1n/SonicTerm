@@ -4,8 +4,9 @@
 //! Every such field is placed through [`ReplyBudget::place`]: it is written while its serialized
 //! form fits what is left, and otherwise written as `null` with the field named under the pane's
 //! `omitted` object and the reason, so an agent can tell an omitted value from an absent one.
-//! OSC 7501 status lists are also charged to their own [`STATUS_TEXT_BUDGET_BYTES`] sublimit,
-//! and any omission is recorded so the reply can say it is partial.
+//! OSC 7501 status lists are also charged to their own [`STATUS_TEXT_BUDGET_BYTES`] sublimit; a
+//! list past it keeps its typed records and drops only their free text. Any omission is recorded
+//! so the reply can say it is partial.
 
 use serde_json::Value;
 
@@ -103,16 +104,36 @@ impl ReplyBudget {
         pane[field] = value;
     }
 
-    /// [`Self::place`] for a status list, which must also fit the status sublimit: it is placed
-    /// against the smaller of the two rooms, and what it took is charged to both.
-    pub(crate) fn place_status(&mut self, pane: &mut Value, field: &str, value: Value) {
-        let shared_bytes = self.remaining_bytes;
-        self.remaining_bytes = shared_bytes.min(self.status_remaining_bytes);
-        let room_bytes = self.remaining_bytes;
-        self.place(pane, field, value);
-        let spent_bytes = room_bytes - self.remaining_bytes;
-        self.status_remaining_bytes -= spent_bytes;
-        self.remaining_bytes = shared_bytes - spent_bytes;
+    /// [`Self::place`] for a status list, given in `full` and in its `typed` form (each record's
+    /// state, kind and progress only). The full list is placed when it fits both the shared room
+    /// and the status sublimit, and is charged to both; otherwise the typed form is placed against
+    /// the shared room alone and the free text it drops is marked [`Omission::Budget`].
+    pub(crate) fn place_status(
+        &mut self,
+        pane: &mut Value,
+        field: &str,
+        full: Value,
+        typed: Value,
+    ) {
+        let cost_bytes = if full.is_null() {
+            0
+        } else {
+            // When: `full` is a list, its serialized length is what it costs.
+            full.to_string().len()
+        };
+        if cost_bytes <= self.remaining_bytes.min(self.status_remaining_bytes) {
+            // When: the full list's `cost_bytes` fit both rooms, it is placed and charged to both.
+            self.status_remaining_bytes -= cost_bytes;
+            self.place(pane, field, full);
+            return;
+        }
+        let dropped_text = typed != full;
+        self.place(pane, field, typed);
+        if dropped_text {
+            // The typed form dropped free text, so the field is marked omitted beside it.
+            pane["omitted"][field] = Value::from(Omission::Budget.as_str());
+            self.omitted = true;
+        }
     }
 }
 

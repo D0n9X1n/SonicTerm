@@ -350,6 +350,13 @@ impl Performer {
             self.report_cwd(source, value);
             return;
         }
+        if code == 133 {
+            // When: code is a complete OSC 133 marker, its controls are dropped as vte drops them,
+            // and its parameters split only at unescaped semicolons.
+            content.retain(|byte| *byte >= 0x20);
+            self.shell_marker(&super::vt_semantic::split_marker_params(&content));
+            return;
+        }
         if is_program_osc(code) || vt_color::is_color_osc(code) {
             // A program or color request's controls are not payload; the collector kept them
             // only so its cap counted every wire byte.

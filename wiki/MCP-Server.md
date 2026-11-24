@@ -261,10 +261,12 @@ pane share one budget of 256 KiB of serialized text per `list_panes` reply: a ti
 or list that does not fit is `null` with `"budget"` under `omitted`, never cut, and the reply
 still succeeds, with earlier panes keeping theirs; `program_state` is outside the budget, so it
 stays when the list is omitted. The `program_status` lists also share a 64 KiB sublimit inside
-that budget, so status alone cannot spend what titles and paths share: a list past what is left
-of either is omitted the same way. One pane's `user_vars` list (at most 16 KiB of names and
-values) always fits an unspent budget, as does a typed `program_status` list; an opted-in list of
-long messages can pass the sublimit on its own and is then omitted. Any such omission makes the
+that budget, so status alone cannot spend what titles and paths share: a list past the sublimit
+keeps each record's typed `state`, `kind` and `progress`, charged to the shared budget alone, and
+drops only the opted-in `id`, `app`, `title` and `msg`, with `"budget"` under `omitted`; it is
+`null` only when even the typed list does not fit the shared budget. One pane's `user_vars` list
+(at most 16 KiB of names and values) always fits an unspent budget, as does a typed
+`program_status` list. Any such omission makes the
 top-level `partial` `true`.
 
 The whole `list_panes` result, its fixed fields and every pane record together, is also bounded

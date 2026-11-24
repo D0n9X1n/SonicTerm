@@ -663,13 +663,20 @@ URI to 8 KiB and client id to 1 KiB.
   - `A`, `N` and `9;12` start a fresh line (CR then index when the cursor is off column 0; at
     the bottom margin the index scrolls and can evict the oldest history row), start a new
     generation anchored at the cursor row, and reset the options before reading their own.
-    `L` is the fresh line alone, accepted bare or with only `sonicterm_token=`; any other
+    `L` is the fresh line alone, accepted bare or with a single `sonicterm_token=`; any other
     parameter makes it invalid. `P` with `k=c` or `k=s` joins the current anchor (as `k=i`
     without one); `P` with `k=i`, `k=r` or no `k` starts a generation without a fresh line
     and keeps the options. `B` starts input, `I` starts input that ends at the next LF, IND or
     NEL, and `C` and `D` return to output, keeping the anchor until the next prompt. RIS
     resets both screens, and an anchor whose row leaves history is dropped; each also starts
     a new generation.
+  - Framing. The raw collector owns every `133;` marker and applies it only once BEL or a
+    complete `ESC \` ends it; one cut by CAN, SUB or an ESC that does not complete ST applies
+    nothing, and a spelling it misses (`0133`, a C1 introducer, a bare `133`) is dropped. The
+    kind must be exactly one of `A`-`D`, `L`, `N`, `P` or `I`, checked before admission, so any
+    other kind never latches the pane or changes the observed state. Parameters split only at a
+    `;` no backslash escapes, so `%q`'s `\;` stays inside a `cmdline=` value; a `;` inside a
+    quoted `'…'` or `$'…'` still splits, and that text is then dropped as malformed.
   - Annotations pass the token check without latching: with no pane token, or with the right
     one, they are admitted; a wrong token is refused; a tokenless one is refused once the pane
     latched. Only `A`, `B`, `C` and `D` latch. The right token leaves the observed shell state
@@ -687,7 +694,10 @@ URI to 8 KiB and client id to 1 KiB.
     the grid's retained bytes and its `Debug` shows only its length. It is never evaluated and
     is shown only in the long-command notification with `long_command_cmdline` on; for that the
     pane's command-event queue holds one copy from `C` until the drain after a `D` that ended a
-    run of a second or more, counted in its class. SonicTerm's
+    run of a second or more, counted in its class. Only the last `C` of a parse section holds
+    text, its own, from the primary screen; a section with an alternate-screen `C` or `D` holds
+    none and drops an unstamped one, so text is omitted rather than shown for another command.
+    SonicTerm's
     shell integration sends `cmdline_url=` on every `C` (bash only for a line history
     recorded) and `redraw=last` on bash's `A`.
   - Reference behavior, Ghostty (G), kitty (K) and WezTerm (W):

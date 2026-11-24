@@ -259,7 +259,8 @@ impl Parser {
     /// Abandon any capture or raw OSC accumulation in flight, releasing
     /// its retained allocation.
     ///
-    /// Returns the bytes released. The partially-received payload is
+    /// Returns the bytes released; pending OSC 99 chunks count only when an OSC 99 in flight is
+    /// cancelled, which drops them. The partially-received payload is
     /// discarded rather than dispatched: a fragment of an image decodes to
     /// nothing useful, so surfacing it would trade memory for a broken
     /// picture instead of no picture.
@@ -282,7 +283,16 @@ impl Parser {
     /// Returns 0 and does nothing only when neither a media capture nor a raw
     /// OSC palette accumulation is retaining bytes.
     pub fn cancel_capture(&mut self) -> usize {
-        let released = self.retained_amount().bytes;
+        // Pending OSC 99 chunks are freed only when the cancelled OSC is itself an OSC 99 chunk;
+        // otherwise they stay, so they are not counted as released.
+        let notify_freed = matches!(self.raw_osc, Some(RawOsc::Semantic { code: 99, .. }));
+        let kept_bytes = if notify_freed {
+            0
+        } else {
+            // When: no OSC 99 is in flight (`notify_freed` false), its pending chunks are kept.
+            self.performer.kitty_notifications.retained_bytes()
+        };
+        let released = self.retained_amount().bytes.saturating_sub(kept_bytes);
         // Whether a title, CWD, link, program or color OSC is in flight, accepted or already
         // refused, and whether its last byte was an ESC that may start ST.
         let semantic = match self.raw_osc.as_ref() {

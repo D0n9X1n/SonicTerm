@@ -35,8 +35,8 @@ fn escapes_count_against_the_budget() {
 }
 
 /// Status lists are charged to their own [`STATUS_TEXT_BUDGET_BYTES`] sublimit as well as the
-/// shared budget: a list past the sublimit is omitted whole while the shared budget still writes
-/// other fields, and only an actual omission marks the budget as having omitted something.
+/// shared budget: a list past the sublimit with no typed form is omitted whole while the shared
+/// budget still writes other fields, and only an actual omission marks the budget as omitted.
 #[test]
 fn status_lists_have_their_own_sublimit_inside_the_shared_budget() {
     let mut budget = ReplyBudget::new();
@@ -46,11 +46,11 @@ fn status_lists_have_their_own_sublimit_inside_the_shared_budget() {
     // `["…"]` adds four bytes to the text, so two such lists just fit the sublimit and a third
     // does not.
     let list = json!(["s".repeat(STATUS_TEXT_BUDGET_BYTES / 2 - 4)]);
-    budget.place_status(&mut pane, "first", list.clone());
-    budget.place_status(&mut pane, "second", list.clone());
+    budget.place_status(&mut pane, "first", list.clone(), Value::Null);
+    budget.place_status(&mut pane, "second", list.clone(), Value::Null);
     assert_eq!(pane["first"], list);
     assert!(!budget.omitted());
-    budget.place_status(&mut pane, "third", list);
+    budget.place_status(&mut pane, "third", list, Value::Null);
     assert_eq!(pane["third"], Value::Null);
     assert_eq!(pane["omitted"]["third"], "budget");
     assert!(budget.omitted(), "the sublimit's omission is recorded");
@@ -65,4 +65,23 @@ fn a_shared_budget_omission_is_recorded() {
     let mut pane = json!({});
     budget.place(&mut pane, "cwd", json!("x".repeat(REPLY_TEXT_BUDGET_BYTES)));
     assert!(budget.omitted());
+}
+
+/// A status list past the sublimit keeps each record's typed state, kind and progress and omits
+/// only the free text, marked `budget`; a list with no text to drop is placed whole, unmarked.
+#[test]
+fn a_status_list_past_the_sublimit_keeps_its_typed_records() {
+    let mut budget = ReplyBudget::new();
+    let mut pane = json!({});
+    let typed = json!([{ "state": "working", "kind": null, "progress": 40 }]);
+    let long_msg = "m".repeat(STATUS_TEXT_BUDGET_BYTES);
+    let full = json!([{ "state": "working", "kind": null, "progress": 40, "msg": long_msg }]);
+    budget.place_status(&mut pane, "program_status", full, typed.clone());
+    assert_eq!(pane["program_status"], typed, "the typed records stay");
+    assert_eq!(pane["omitted"]["program_status"], "budget", "the dropped text is marked");
+    assert!(budget.omitted());
+    let mut quiet = json!({});
+    budget.place_status(&mut quiet, "program_status", typed.clone(), typed.clone());
+    assert_eq!(quiet["program_status"], typed);
+    assert_eq!(quiet.get("omitted"), None, "nothing was dropped");
 }

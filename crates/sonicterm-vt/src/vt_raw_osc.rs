@@ -139,6 +139,18 @@ impl Parser {
                     });
                     return true;
                 }
+                if prefix == b"133;" {
+                    // When: the prefix names an OSC 133 marker, own the whole frame so it acts only
+                    // once BEL or ST completes it and a `\;` stays inside its value.
+                    self.inner = vte::Parser::new();
+                    self.pending_esc = false;
+                    self.raw_osc = Some(RawOsc::Semantic {
+                        code: 133,
+                        content: Vec::new(),
+                        pending_esc: false,
+                    });
+                    return true;
+                }
                 if prefix == USER_VAR_OSC_PREFIX {
                     // When: the prefix names OSC 1337 `SetUserVar=`, own the whole payload so it
                     // applies only once complete and vte's split parameters never set a variable.

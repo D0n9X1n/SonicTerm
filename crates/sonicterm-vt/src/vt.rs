@@ -191,7 +191,7 @@ fn raw_osc_cap(code: u16) -> usize {
         // When: code is an OSC 7501 program-status report, kitty's wire bound applies.
         vt_program_status::MAX_STATUS_BODY_BYTES
     } else {
-        // When: code is a title, CWD or hyperlink, the semantic bound applies.
+        // When: code is a title, CWD, hyperlink or OSC 133 marker, the semantic bound applies.
         MAX_SEMANTIC_OSC_BYTES
     }
 }
@@ -684,6 +684,8 @@ struct Performer {
     shell_state: ShellIntegrationState,
     /// Set once the pane took input; a token first seen after it never latches the pane.
     shell_input_seen: Option<Arc<AtomicBool>>,
+    /// The command markers this parse section admitted, until the host takes them.
+    section_commands: vt_semantic::SectionCommands,
     fg: Color,
     bg: Color,
     flags: CellFlags,
@@ -923,6 +925,7 @@ pub use vt_pointer_shape::{pointer_shape_of_snapshot, PointerShape};
 pub use vt_program_status::{
     ProgramStatus, StatusKind, StatusRecord, StatusState, StatusSummary, StatusTop,
 };
+pub use vt_semantic::SectionCommands;
 pub use vt_tap::{TapAppend, TapHold, TapText, OUTPUT_TAP_CHARS};
 pub use vt_user_vars::UserVars;
 

@@ -39,6 +39,7 @@ impl Performer {
             shell_authenticated: false,
             shell_state: super::ShellIntegrationState::None,
             shell_input_seen: None,
+            section_commands: Default::default(),
             fg: Color::Default,
             bg: Color::Default,
             flags: CellFlags::empty(),

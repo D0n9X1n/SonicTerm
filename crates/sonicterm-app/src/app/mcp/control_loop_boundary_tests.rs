@@ -540,9 +540,10 @@ fn list_panes_lists_typed_program_status_and_text_only_on_opt_in() {
 }
 
 /// Opted-in status lists have their own 64 KiB sublimit inside the shared reply budget: once the
-/// lists listed so far fill it, a later pane lists `program_status` as `null` with a `"budget"`
-/// marker, never a cut list, while the shared budget still lists its title and its lightweight
-/// `program_state`, and the omission makes the whole result `partial`.
+/// lists listed so far fill it, a later pane keeps every record's typed state, kind and progress
+/// and drops only the free text, with a `"budget"` marker, never a cut list, while the shared
+/// budget still lists its title and its lightweight `program_state`, and the omission makes the
+/// whole result `partial`.
 #[test]
 fn list_panes_bounds_program_status_by_its_own_sublimit() {
     use base64::Engine;
@@ -571,8 +572,10 @@ fn list_panes_bounds_program_status_by_its_own_sublimit() {
     let first = listed(&result, panes[0]);
     assert_eq!(first["program_status"].as_array().map(Vec::len), Some(8), "kept whole");
     let second = listed(&result, panes[1]);
-    assert_eq!(second["program_status"], Value::Null, "past the sublimit");
-    assert_eq!(second["omitted"]["program_status"], "budget");
+    let typed = second["program_status"].as_array().expect("the typed records stay");
+    assert_eq!(typed.len(), 8, "past the sublimit every record stays");
+    assert!(typed.iter().all(|record| record["state"] == "working" && record.get("msg").is_none()));
+    assert_eq!(second["omitted"]["program_status"], "budget", "the dropped text is marked");
     assert_eq!(second["program_state"], "working", "the lightweight state stays");
     let last = listed(&result, panes[11]);
     assert_eq!(last["title"], "job", "the shared budget is not spent by the status lists");
