@@ -1,6 +1,7 @@
 //! Source-owned terminal pointer gesture and protocol routing.
 
 use super::*;
+use crate::app::input_dispatch::MotionProfile;
 
 /// Encode one pane-local pointer report at zero-based cell (`row`, `col`) and pane pixel `pixel`
 /// in `format`.
@@ -38,11 +39,13 @@ pub(in crate::app) fn terminal_repeat_targets(
     repeat.then(|| pressed_keys.get(&physical_key).cloned()).flatten()
 }
 
-/// Choose and latch the owner of a left-button grid press.
+/// Choose and latch the owner of a left-button grid press with the press-time `tracking`, `format`
+/// and screen (`is_alt`).
 pub(in crate::app) fn begin_pointer_gesture(
     cell: PointerCell,
     tracking: MouseTracking,
     format: MouseFormat,
+    is_alt: bool,
     modifiers: ModifiersState,
     ui_consumed: bool,
 ) -> Option<PointerGesture> {
@@ -53,19 +56,21 @@ pub(in crate::app) fn begin_pointer_gesture(
     let owner = match (tracking, modifiers.shift_key()) {
         (MouseTracking::Off, _) | (_, true) => PointerGestureOwner::Local,
         (MouseTracking::Button | MouseTracking::ButtonMotion | MouseTracking::AnyMotion, false) => {
-            PointerGestureOwner::Terminal { tracking, format }
+            PointerGestureOwner::Terminal { tracking, format, is_alt }
         }
     };
     Some(PointerGesture { owner, press_pane: cell.pane_id, last_cell: cell, anchor: None })
 }
 
 impl WindowState {
-    /// Begin one grid press from this window's live modifier state.
+    /// Begin one grid press from this window's live modifier state, latching the press-time
+    /// `tracking`, `format` and screen (`is_alt`) its held motion is stamped with.
     pub(in crate::app) fn begin_pointer_press(
         &mut self,
         cell: PointerCell,
         tracking: MouseTracking,
         format: MouseFormat,
+        is_alt: bool,
     ) -> Option<Vec<u8>> {
         let gesture = if self.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only) {
             // READONLY selects local ownership only at the press; an earlier terminal hold keeps its route.
@@ -77,7 +82,7 @@ impl WindowState {
             })
         } else {
             // When: copy_mode is not READONLY, retain the normal Shift and tracking ownership decision.
-            begin_pointer_gesture(cell, tracking, format, self.modifiers, false)
+            begin_pointer_gesture(cell, tracking, format, is_alt, self.modifiers, false)
         };
         self.pointer_gesture = gesture;
         let PointerGestureOwner::Terminal { format, .. } = gesture?.owner else {
@@ -104,7 +109,7 @@ pub(in crate::app) fn route_pressed_pointer_motion(
     press_pixel: (i32, i32),
     modifiers: ModifiersState,
 ) -> PointerMotionRoute {
-    let PointerGestureOwner::Terminal { tracking, format } = gesture.owner else {
+    let PointerGestureOwner::Terminal { tracking, format, .. } = gesture.owner else {
         // When: local selection owns the gesture, current parser/modifier state cannot steal it.
         return PointerMotionRoute::Local;
     };
@@ -241,6 +246,18 @@ pub(in crate::app) fn no_button_motion_report(
         pixel: cell.pixel,
         modifiers,
     })
+}
+
+impl PointerGesture {
+    /// The profile a terminal-owned gesture's held motion is stamped with: its press-time
+    /// tracking, format and screen, with the button held; `None` for a local gesture.
+    pub(in crate::app) fn held_profile(&self) -> Option<MotionProfile> {
+        let PointerGestureOwner::Terminal { tracking, format, is_alt } = self.owner else {
+            // When: owner is Local, the gesture reports nothing to the terminal.
+            return None;
+        };
+        Some(MotionProfile { tracking, format, is_alt, held: true })
+    }
 }
 
 /// Consume a left-button gesture and return its terminal release route, if any.

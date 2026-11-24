@@ -377,8 +377,9 @@ pub(super) struct PointerCell {
 pub(super) enum PointerGestureOwner {
     /// SonicTerm selection owns the gesture until release.
     Local,
-    /// The terminal owns the gesture with its press-time protocol profile.
-    Terminal { tracking: MouseTracking, format: sonicterm_vt::vt::MouseFormat },
+    /// The terminal owns the gesture with its press-time protocol profile: tracking, format and
+    /// whether the alternate screen was showing, all from one read of the pane's published modes.
+    Terminal { tracking: MouseTracking, format: sonicterm_vt::vt::MouseFormat, is_alt: bool },
 }
 
 /// Left-button gesture retained independently by each terminal window.

@@ -311,16 +311,19 @@ impl App {
         };
         if let Some(held) = child.secondary_motion(pointer_cell, press_pixel) {
             // When: a right or middle press is `held`, it owns the motion until its release.
-            if let Some((pane_id, format, bytes)) = held {
-                self.write_pointer_motion(pane_id, format, true, bytes);
+            if let Some((pane_id, profile, bytes)) = held {
+                self.write_pointer_motion(pane_id, profile, bytes);
             }
             return;
         }
         // The modes a no-button report is encoded under, so they, not a later read, stamp it.
         let mut encoded_modes = None;
+        // The press-time profile a held gesture's motion is stamped with.
+        let mut held_profile = None;
         let pointer_route = if child.mouse_down {
             let modifiers = child.modifiers;
             child.pointer_gesture.as_mut().map(|gesture| {
+                held_profile = gesture.held_profile();
                 super::window_event::route_pressed_pointer_motion(
                     gesture,
                     pointer_cell,
@@ -375,7 +378,7 @@ impl App {
                     // When: `route` is None, Button mode consumes the child move without bytes.
                     return;
                 }
-                report @ super::window_event::PointerMotionRoute::Report { format, .. } => {
+                report @ super::window_event::PointerMotionRoute::Report { .. } => {
                     // When: `route` contains Report data, encode terminal motion for the child pane.
                     let held = child.mouse_down;
                     let kind = if held {
@@ -389,13 +392,19 @@ impl App {
                     let _ = child;
                     if let Some((pane_id, bytes)) = report {
                         // A no-button report is stamped by the modes it was encoded under; a held
-                        // gesture, encoded in its press-time `format`, by the live modes.
-                        match encoded_modes {
-                            Some(modes) => {
+                        // gesture by its press-time profile.
+                        match (encoded_modes, held_profile) {
+                            (Some(modes), _) => {
                                 let profile = MotionProfile::of(modes, held);
                                 self.queue_pointer_motion(pane_id, profile, bytes);
                             }
-                            None => self.write_pointer_motion(pane_id, format, held, bytes),
+                            (None, Some(profile)) => {
+                                self.write_pointer_motion(pane_id, profile, bytes);
+                            }
+                            (None, None) => {
+                                // When: neither encoded_modes nor held_profile exists, no profile
+                                // can stamp the report, so it is dropped.
+                            }
                         }
                     }
                     return;
@@ -516,19 +525,20 @@ impl App {
                     let PointerCell { pane_id, row, col, .. } = pointer_cell;
                     if pane_id != 0 {
                         // When: `pane_id` is nonzero, snapshot that live pane's terminal mouse profile.
-                        let (tracking, format) = child
+                        let (tracking, format, is_alt) = child
                             .panes
                             .get(&pane_id)
                             .map(|pane| {
                                 let modes = pane.pointer_modes();
-                                (modes.tracking(), modes.format())
+                                (modes.tracking(), modes.format(), modes.is_alt())
                             })
                             .unwrap_or((
                                 sonicterm_vt::vt::MouseTracking::Off,
                                 sonicterm_vt::vt::MouseFormat::X10,
+                                false,
                             ));
                         let terminal_press =
-                            child.begin_pointer_press(pointer_cell, tracking, format);
+                            child.begin_pointer_press(pointer_cell, tracking, format, is_alt);
                         if let Some(bytes) = terminal_press {
                             // When: `terminal_press` contains bytes, the child latched terminal ownership before the unguarded enqueue.
                             if let Some(change) = child.begin_pointer_pane_focus_change(pane_id) {

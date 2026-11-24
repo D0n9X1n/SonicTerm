@@ -174,10 +174,15 @@ fn pointer_motion_app_retries_after_parser_contention() {
         pane.__test_publish_input_modes(&locked);
     }
     let guard = parser.lock();
+    // The pane publishes 1003 and 1006 on the primary screen, the profile this no-button report has.
     app.write_pointer_motion(
         pane_id,
-        sonicterm_vt::vt::MouseFormat::Sgr,
-        false,
+        crate::app::input_dispatch::MotionProfile {
+            tracking: sonicterm_vt::vt::MouseTracking::AnyMotion,
+            format: sonicterm_vt::vt::MouseFormat::Sgr,
+            is_alt: false,
+            held: false,
+        },
         b"\x1b[<35;1;1M".to_vec(),
     );
     let now = Instant::now();

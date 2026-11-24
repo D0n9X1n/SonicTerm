@@ -338,8 +338,12 @@ fn a_held_press_keeps_its_pane_origin_and_press_time_format() {
     assert_eq!(pixel, (5, 85));
     let cell = PointerCell { pane_id: right, row: 8, col: 0, pixel };
     let window = app.main_mut().unwrap();
-    let press =
-        window.begin_pointer_press(cell, MouseTracking::ButtonMotion, MouseFormat::SgrPixels);
+    let press = window.begin_pointer_press(
+        cell,
+        MouseTracking::ButtonMotion,
+        MouseFormat::SgrPixels,
+        false,
+    );
     assert_eq!(press.unwrap(), b"\x1b[<0;5;85M");
     window.mouse_down = true;
     publish(&app, main, right, b"\x1b[?1006h");
@@ -428,9 +432,9 @@ fn a_main_motion_keeps_its_encode_time_screen() {
     );
 }
 
-/// A child-window no-button motion keeps its encode-time screen the same way as the main window's.
-#[test]
-fn a_child_motion_keeps_its_encode_time_screen() {
+/// A headless child window on an 800x240 viewport of 10-pixel cells whose one pane has a real
+/// shell PTY; returns it with the child window and its pane id.
+fn child_with_shell() -> (App, WindowId, u64) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
@@ -448,6 +452,13 @@ fn a_child_motion_keeps_its_encode_time_screen() {
     let pty =
         sonicterm_io::pty::PtyHandle::spawn_with_args(program, &args, 80, 24).expect("PTY fixture");
     app.registry.windows.get_mut(&child).unwrap().panes.get_mut(&pane_id).unwrap().pty = Some(pty);
+    (app, child, pane_id)
+}
+
+/// A child-window no-button motion keeps its encode-time screen the same way as the main window's.
+#[test]
+fn a_child_motion_keeps_its_encode_time_screen() {
+    let (mut app, child, pane_id) = child_with_shell();
     publish(&app, child, pane_id, b"\x1b[?1003h\x1b[?1006h");
     let submitted = crate::app::mod_tests::PtySubmissions::start();
     switch_screen_before_queueing(&app, child, pane_id);
@@ -474,4 +485,62 @@ fn the_first_alternate_screen_pixel_motion_is_not_a_repeat() {
     app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
     flush_all(&mut app);
     assert_eq!(admitted(&submitted), [b"\x1b[<35;55;85M".to_vec(), b"\x1b[<35;55;85M".to_vec()]);
+}
+
+/// A held left press is stamped with its press-time profile: after the program switches to the
+/// alternate screen with the same tracking and format, held motion is dropped rather than sent to
+/// a screen the press never saw.
+#[test]
+fn a_held_left_motion_keeps_its_press_time_screen() {
+    let (mut app, main, left, _right) = split_main();
+    attach_shell(&mut app, left);
+    publish(&app, main, left, b"\x1b[?1002h\x1b[?1006h");
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    let cell = PointerCell { pane_id: left, row: 8, col: 5, pixel: app.pane_pixel(main, left) };
+    let window = app.main_mut().unwrap();
+    let press =
+        window.begin_pointer_press(cell, MouseTracking::ButtonMotion, MouseFormat::Sgr, false);
+    assert!(press.is_some(), "the press is the terminal's");
+    window.mouse_down = true;
+    publish(&app, main, left, b"\x1b[?1049h");
+    let submitted = crate::app::mod_tests::PtySubmissions::start();
+    app.handle_main_cursor_moved(PhysicalPosition::new(75.0, 85.0));
+    flush_all(&mut app);
+    assert!(admitted(&submitted).is_empty(), "a primary-screen drag reached the alternate screen");
+}
+
+/// A held right press is stamped with its press-time profile the same way: held motion after a
+/// switch to the alternate screen is dropped.
+#[test]
+fn a_held_secondary_motion_keeps_its_press_time_screen() {
+    let (mut app, main, left, _right) = split_main();
+    attach_shell(&mut app, left);
+    publish(&app, main, left, b"\x1b[?1002h\x1b[?1006h");
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    app.route_secondary_button(main, SecondaryButton::Right, ElementState::Pressed);
+    publish(&app, main, left, b"\x1b[?1049h");
+    let submitted = crate::app::mod_tests::PtySubmissions::start();
+    app.handle_main_cursor_moved(PhysicalPosition::new(75.0, 85.0));
+    flush_all(&mut app);
+    assert!(admitted(&submitted).is_empty(), "a primary-screen drag reached the alternate screen");
+}
+
+/// A child window's held left press keeps its press-time profile as the main window's does.
+#[test]
+fn a_child_held_left_motion_keeps_its_press_time_screen() {
+    let (mut app, child, pane_id) = child_with_shell();
+    publish(&app, child, pane_id, b"\x1b[?1002h\x1b[?1006h");
+    let config = app.config.clone();
+    app.handle_child_cursor_moved(child, PhysicalPosition::new(55.0, 85.0), &config);
+    let cell = PointerCell { pane_id, row: 8, col: 5, pixel: app.pane_pixel(child, pane_id) };
+    let window = app.registry.windows.get_mut(&child).unwrap();
+    let press =
+        window.begin_pointer_press(cell, MouseTracking::ButtonMotion, MouseFormat::Sgr, false);
+    assert!(press.is_some(), "the press is the terminal's");
+    window.mouse_down = true;
+    publish(&app, child, pane_id, b"\x1b[?1049h");
+    let submitted = crate::app::mod_tests::PtySubmissions::start();
+    app.handle_child_cursor_moved(child, PhysicalPosition::new(75.0, 85.0), &config);
+    flush_all(&mut app);
+    assert!(admitted(&submitted).is_empty(), "a primary-screen drag reached the alternate screen");
 }

@@ -977,10 +977,13 @@ A press chooses and latches one gesture owner:
 - a press consumed by tabs, splitters, scrollbars, or other chrome creates no
   terminal gesture.
 
-The gesture owner, press pane, tracking mode, and report encoding are latched
-until release. Later modifier, pane-focus, mode, or encoding changes do not steal
-the gesture; its motion and release use the press-time encoding, and in 1016 its pixels are
-measured from the press pane's cell area. A terminal release uses the press pane/profile and the last valid
+The gesture owner, press pane, tracking mode, report encoding and screen are latched
+until release, read together from one snapshot of the pane's published modes. Later modifier,
+pane-focus, mode, or encoding changes do not steal the gesture; its motion and release use the
+press-time encoding, and in 1016 its pixels are measured from the press pane's cell area. Held
+motion, of the left button or a right or middle press, is stamped with the press-time tracking,
+encoding and screen and is dropped once the pane publishes different ones, so a drag begun on
+the primary screen never reaches the alternate screen. A terminal release uses the press pane/profile and the last valid
 cell seen in that pane. `Button` suppresses held motion; `ButtonMotion` and
 `AnyMotion` report it. With no button held, only the current `AnyMotion` mode
 reports motion, using the current pane and encoding profile.

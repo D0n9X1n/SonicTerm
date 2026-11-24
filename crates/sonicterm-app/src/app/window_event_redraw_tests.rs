@@ -31,6 +31,7 @@ fn real_pty_readonly_pointer_press_latches_local() {
                 pointer_cell(pane, 2, 3),
                 MouseTracking::AnyMotion,
                 sonicterm_vt::vt::MouseFormat::Sgr,
+                false,
             );
             if let Some(bytes) = bytes {
                 app.write_to_pane(pane, bytes, PtyInputSource::PointerButton);
@@ -157,6 +158,7 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
                     pointer_cell(pane, 2, 3),
                     MouseTracking::ButtonMotion,
                     sonicterm_vt::vt::MouseFormat::Sgr,
+                    false,
                 )
                 .unwrap();
             assert!(app.write_to_pane(pane, press, PtyInputSource::PointerButton));
@@ -290,7 +292,16 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
             if let Some((pane, bytes)) = route.and_then(|route| {
                 super::super::pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
             }) {
-                app.write_pointer_motion(pane, sonicterm_vt::vt::MouseFormat::Sgr, false, bytes);
+                app.write_pointer_motion(
+                    pane,
+                    crate::app::input_dispatch::MotionProfile {
+                        tracking: sonicterm_vt::vt::MouseTracking::AnyMotion,
+                        format: sonicterm_vt::vt::MouseFormat::Sgr,
+                        is_alt: false,
+                        held: false,
+                    },
+                    bytes,
+                );
             }
             assert!(submitted.take().is_empty(), "staging is not submission");
             app.flush_pointer_motion(std::time::Instant::now());

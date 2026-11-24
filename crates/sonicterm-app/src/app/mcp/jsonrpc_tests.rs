@@ -150,3 +150,28 @@ fn initialize_instructions_describe_the_workflow() {
         assert!(instructions.contains(needle), "{needle}: {instructions}");
     }
 }
+
+/// A request id is echoed in its response outside every reply bound, so an id whose serialized
+/// form passes 1 KiB is refused with a null id, with or without a method: no response line can then
+/// pass the bridge's 1 MiB limit. An id of exactly 1 KiB is accepted.
+#[test]
+fn an_oversized_request_id_is_refused_with_a_null_id() {
+    // A string of n characters serializes to n + 2 bytes with its quotes.
+    let fits = "a".repeat(1022);
+    let line = json!({ "jsonrpc": "2.0", "id": fits, "method": "ping" }).to_string();
+    assert!(matches!(parse_line(&line), Incoming::Request { .. }));
+    let over = "a".repeat(1023);
+    for value in [
+        json!({ "jsonrpc": "2.0", "id": over, "method": "ping" }),
+        json!({ "jsonrpc": "2.0", "id": over }),
+    ] {
+        assert_eq!(
+            parse_line(&value.to_string()),
+            Incoming::Invalid {
+                id: Value::Null,
+                code: INVALID_REQUEST,
+                message: "request id too long"
+            }
+        );
+    }
+}

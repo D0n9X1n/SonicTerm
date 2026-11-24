@@ -94,6 +94,16 @@ fn publish_any_motion_sgr(app: &App, pane: u64) {
     state.__test_publish_input_modes(&parser);
 }
 
+/// The profile a no-button report has once `publish_any_motion_sgr` ran: 1003, SGR, primary screen.
+#[cfg(any(windows, unix))]
+const ANY_MOTION_SGR: crate::app::input_dispatch::MotionProfile =
+    crate::app::input_dispatch::MotionProfile {
+        tracking: sonicterm_vt::vt::MouseTracking::AnyMotion,
+        format: MouseFormat::Sgr,
+        is_alt: false,
+        held: false,
+    };
+
 /// Pending motion is not submission, even though staging returns accepted ownership to the caller.
 #[cfg(any(windows, unix))]
 #[test]
@@ -107,7 +117,7 @@ fn real_pty_submission_observer_excludes_staged_motion() {
     let submitted = PtySubmissions::start();
     assert!(app.write_to_pane(pane, b"control".to_vec(), PtyInputSource::Keyboard));
     assert_eq!(submitted.take(), vec![(pane, b"control".to_vec())]);
-    app.write_pointer_motion(pane, MouseFormat::Sgr, false, b"\x1b[<35;2;3M".to_vec());
+    app.write_pointer_motion(pane, ANY_MOTION_SGR, b"\x1b[<35;2;3M".to_vec());
     assert_ne!(app.pane_by_id(pane).unwrap().pending_pointer_motion.len, 0);
     assert!(submitted.take().is_empty());
 }
@@ -124,7 +134,7 @@ fn real_pty_submission_observer_records_flushed_motion() {
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     for report in [b"\x1b[<35;1;3M", b"\x1b[<35;2;3M"] {
-        app.write_pointer_motion(pane, MouseFormat::Sgr, false, report.to_vec());
+        app.write_pointer_motion(pane, ANY_MOTION_SGR, report.to_vec());
     }
     assert!(submitted.take().is_empty());
     assert_eq!(app.flush_pointer_motion(Instant::now()), None);
@@ -143,7 +153,7 @@ fn real_pty_submission_observer_records_motion_with_discrete_input() {
     publish_any_motion_sgr(&app, pane);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
-    app.write_pointer_motion(pane, MouseFormat::Sgr, false, b"\x1b[<35;2;3M".to_vec());
+    app.write_pointer_motion(pane, ANY_MOTION_SGR, b"\x1b[<35;2;3M".to_vec());
     assert!(submitted.take().is_empty());
     assert!(app.write_to_pane(pane, b"key".to_vec(), PtyInputSource::Keyboard));
     assert_eq!(submitted.take(), vec![(pane, b"\x1b[<35;2;3Mkey".to_vec())]);

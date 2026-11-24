@@ -120,6 +120,7 @@ fn source_focus_cleanup_preserves_peer_state_and_report_destinations() {
             pointer_cell(pointer_pane, 2, 3),
             MouseTracking::ButtonMotion,
             sonicterm_vt::vt::MouseFormat::Sgr,
+            false,
             ModifiersState::empty(),
             false,
         );

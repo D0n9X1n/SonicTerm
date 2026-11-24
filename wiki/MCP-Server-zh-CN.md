@@ -220,7 +220,8 @@ agent 对话的任何东西）都能用它认领，其能力与以你的身份�
 整个 `list_panes` 结果（固定字段与所有窗格记录合计）的序列化 JSON 还以 768 KiB 为上限，低于桥接器 1 MiB 的行上限，
 因此无论打开多少窗格，回复都不会让桥接器关闭连接。窗格按顺序列出，直到下一条记录会超过该上限；该窗格及其后的所有窗格
 不再列出，`partial` 为 `true`，`truncated_panes` 记录其数量（全部列出时为 `0`）。解析器探测预算用完、部分窗格以
-`"details": "skipped"` 列出时，`partial` 也为 `true`。
+`"details": "skipped"` 列出时，`partial` 也为 `true`。响应会回显请求的 `id`，因此序列化后超过 1 KiB 的
+请求 `id` 会以 JSON-RPC 错误 `-32600`（"request id too long"）和 `null` id 拒绝，任何响应行都不会超过桥接器的上限。
 
 非繁忙的历史读取在跳过空白行时页面可能为空：继续把其 `first_row` 作为 `before_row`，直到
 `at_start` 为真。行标记始终向前推进。如果单行超过 `max_bytes`，尚未返回其他行的页面仍会返回完整行，

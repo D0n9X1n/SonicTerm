@@ -65,6 +65,7 @@ fn palette_pointer_event_preserves_existing_gesture_ownership() {
         super::super::PointerCell { pane_id: pane, row: 0, col: 0, pixel: (0, 0) },
         sonicterm_vt::vt::MouseTracking::Button,
         sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
     );
     assert!(!app.command_palette_handle_pointer_event(window_id, &release));
     assert!(app.main().unwrap().pointer_gesture.is_some());

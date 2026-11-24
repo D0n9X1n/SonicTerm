@@ -269,7 +269,9 @@ bridge close the connection, however many panes are open. Panes are listed in or
 next record would cross that bound; that pane and every later one are left out, `partial` is
 `true`, and `truncated_panes` counts them (`0` when every pane is listed). `partial` is also
 `true` when the parser-probe budget ran out and some panes are listed with
-`"details": "skipped"`.
+`"details": "skipped"`. A response echoes its request's `id`, so a request whose serialized
+`id` passes 1 KiB is refused with JSON-RPC error `-32600` ("request id too long") and a `null`
+id, and no response line can cross the bridge's limit.
 
 A non-busy history page may be empty while skipping blank rows: pass its `first_row`
 as `before_row` again until `at_start` is true. Row tokens always advance. A row larger

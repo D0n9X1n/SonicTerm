@@ -167,7 +167,8 @@ fn window_press_uses_live_shift_and_latches_the_real_owner() {
         window.begin_pointer_press(
             cell,
             MouseTracking::ButtonMotion,
-            sonicterm_vt::vt::MouseFormat::Sgr
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            false
         ),
         None
     );
@@ -184,7 +185,8 @@ fn window_press_uses_live_shift_and_latches_the_real_owner() {
         window.begin_pointer_press(
             cell,
             MouseTracking::ButtonMotion,
-            sonicterm_vt::vt::MouseFormat::Sgr
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            false
         ),
         Some(b"\x1b[<0;4;3M".to_vec())
     );
@@ -192,7 +194,8 @@ fn window_press_uses_live_shift_and_latches_the_real_owner() {
         window.pointer_gesture.map(|gesture| gesture.owner),
         Some(PointerGestureOwner::Terminal {
             tracking: MouseTracking::ButtonMotion,
-            format: sonicterm_vt::vt::MouseFormat::Sgr
+            format: sonicterm_vt::vt::MouseFormat::Sgr,
+            is_alt: false
         })
     ));
     assert!(window.selection.is_none());
@@ -208,6 +211,7 @@ fn tracked_press_chooses_terminal_unless_shift_or_tracking_off() {
             cell,
             tracking,
             sonicterm_vt::vt::MouseFormat::Sgr,
+            false,
             ModifiersState::empty(),
             false,
         )
@@ -219,6 +223,7 @@ fn tracked_press_chooses_terminal_unless_shift_or_tracking_off() {
         cell,
         MouseTracking::AnyMotion,
         sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
         ModifiersState::SHIFT,
         false,
     )
@@ -229,6 +234,7 @@ fn tracked_press_chooses_terminal_unless_shift_or_tracking_off() {
         cell,
         MouseTracking::Off,
         sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
         ModifiersState::empty(),
         false,
     )
@@ -245,8 +251,9 @@ fn consumed_ui_press_creates_no_terminal_gesture_or_report() {
             pointer_cell(7, 0, 0),
             MouseTracking::AnyMotion,
             sonicterm_vt::vt::MouseFormat::Sgr,
+            false,
             ModifiersState::empty(),
-            true,
+            true
         ),
         None
     );
@@ -260,6 +267,7 @@ fn terminal_owner_latches_press_pane_mode_profile_and_last_cell() {
         pointer_cell(7, 3, 4),
         MouseTracking::ButtonMotion,
         sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
         ModifiersState::empty(),
         false,
     )
@@ -293,6 +301,7 @@ fn local_owner_survives_shift_release() {
         pointer_cell(7, 1, 2),
         MouseTracking::AnyMotion,
         sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
         ModifiersState::SHIFT,
         false,
     )
@@ -322,6 +331,7 @@ fn terminal_motion_obeys_latched_tracking_mode() {
             pointer_cell(7, 1, 2),
             tracking,
             sonicterm_vt::vt::MouseFormat::X10,
+            false,
             ModifiersState::empty(),
             false,
         )
@@ -532,6 +542,7 @@ fn terminal_release_uses_press_pane_profile_and_last_same_pane_cell() {
         pointer_cell(7, 1, 2),
         MouseTracking::AnyMotion,
         sonicterm_vt::vt::MouseFormat::X10,
+        false,
         ModifiersState::empty(),
         false,
     )
@@ -571,6 +582,7 @@ fn focus_loss_releases_terminal_owner_and_silently_clears_local_owner() {
         pointer_cell(7, 1, 2),
         MouseTracking::ButtonMotion,
         sonicterm_vt::vt::MouseFormat::X10,
+        false,
         ModifiersState::empty(),
         false,
     );
@@ -599,6 +611,7 @@ fn focus_loss_releases_terminal_owner_and_silently_clears_local_owner() {
         pointer_cell(9, 3, 6),
         MouseTracking::AnyMotion,
         sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
         ModifiersState::SHIFT,
         false,
     );
@@ -733,6 +746,7 @@ fn pointer_cleanup_clears_latched_gesture() {
         pointer_cell(7, 0, 0),
         MouseTracking::Button,
         sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
         ModifiersState::empty(),
         false,
     );

@@ -127,27 +127,25 @@ impl App {
         press_pane.map_or((0, 0), |pane_id| self.pane_pixel(window_id, pane_id))
     }
 
-    /// Queue one held-button motion report for `pane_id`, encoded in the press-time `format` with
-    /// a button `held` or not. Its bytes depend only on that latched format, so the pane's published
-    /// modes, read once here, stamp it. A held motion latched to a format the pane no longer
-    /// publishes is dropped: the program reads new motion in the new format, and only the release
-    /// keeps the press-time format.
+    /// Queue one held-button motion report for `pane_id` under `profile`, the press-time tracking,
+    /// format and screen it was encoded for. It is dropped when the pane's published modes no
+    /// longer match: the program reads new motion under its new modes, and only the release keeps
+    /// the press-time format. The writer checks the same profile again before admitting it.
     pub(in crate::app) fn write_pointer_motion(
         &mut self,
         pane_id: u64,
-        format: MouseFormat,
-        held: bool,
+        profile: MotionProfile,
         bytes: Vec<u8>,
     ) {
         let Some(modes) = self.registry.pane_mut(pane_id).map(|pane| pane.pointer_modes()) else {
             // When: pane_id names no live pane, the motion has no destination.
             return;
         };
-        if modes.format() != format {
-            // When: the published format is not the encoding, the program would misread the report.
+        if MotionProfile::of(modes, profile.held) != profile {
+            // When: the published modes no longer match the profile, the program would misread it.
             return;
         }
-        self.queue_pointer_motion(pane_id, MotionProfile::of(modes, held), bytes);
+        self.queue_pointer_motion(pane_id, profile, bytes);
     }
 
     /// Queue one motion report for `pane_id` under `profile`, the modes it was encoded with; the

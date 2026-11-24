@@ -163,10 +163,11 @@ impl App {
             let gesture_route = self.main_mut().and_then(|window| {
                 let modifiers = window.modifiers;
                 window.pointer_gesture.as_mut().map(|gesture| {
-                    route_pressed_pointer_motion(gesture, cell, press_pixel, modifiers)
+                    let route = route_pressed_pointer_motion(gesture, cell, press_pixel, modifiers);
+                    (route, gesture.held_profile())
                 })
             });
-            if let Some(route) = gesture_route {
+            if let Some((route, held_profile)) = gesture_route {
                 // When: `gesture_route` exists, its press-time owner wins before local continuation paths.
                 match route {
                     PointerMotionRoute::Local => {
@@ -176,12 +177,14 @@ impl App {
                         // When: `route` is None, Button mode suppresses held motion and consumes the move.
                         return;
                     }
-                    report @ PointerMotionRoute::Report { format, .. } => {
-                        // When: `route` carries Report data, encode and enqueue held-left motion.
-                        if let Some((pane_id, bytes)) =
-                            pointer_route_bytes(report, PointerReportKind::HeldLeftMotion)
-                        {
-                            self.write_pointer_motion(pane_id, format, true, bytes);
+                    report @ PointerMotionRoute::Report { .. } => {
+                        // When: `route` carries Report data, encode and enqueue held-left motion
+                        // under the gesture's press-time profile.
+                        if let (Some((pane_id, bytes)), Some(profile)) = (
+                            pointer_route_bytes(report, PointerReportKind::HeldLeftMotion),
+                            held_profile,
+                        ) {
+                            self.write_pointer_motion(pane_id, profile, bytes);
                         }
                         return;
                     }
@@ -297,8 +300,8 @@ impl App {
                 self.main_mut().and_then(|window| window.secondary_motion(held_cell, press_pixel))
             {
                 // When: a right or middle press is `held`, it owns the motion until its release.
-                if let Some((pane_id, format, bytes)) = held {
-                    self.write_pointer_motion(pane_id, format, true, bytes);
+                if let Some((pane_id, profile, bytes)) = held {
+                    self.write_pointer_motion(pane_id, profile, bytes);
                 }
                 return;
             }
@@ -629,11 +632,11 @@ impl App {
                                 .and_then(|window| window.panes.get(&cell.pane_id))
                                 .map(|pane| {
                                     let modes = pane.pointer_modes();
-                                    (modes.tracking(), modes.format())
+                                    (modes.tracking(), modes.format(), modes.is_alt())
                                 })
-                                .unwrap_or((MouseTracking::Off, MouseFormat::X10));
+                                .unwrap_or((MouseTracking::Off, MouseFormat::X10, false));
                             let terminal_press = self.main_mut().and_then(|window| {
-                                window.begin_pointer_press(cell, profile.0, profile.1)
+                                window.begin_pointer_press(cell, profile.0, profile.1, profile.2)
                             });
                             if let Some(bytes) = terminal_press {
                                 // When: `terminal_press` contains bytes, the window latched terminal ownership before the unguarded enqueue.

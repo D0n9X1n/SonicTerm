@@ -2,6 +2,7 @@
 //! herdr's right-click menu. A press belongs to one pane until its release, kept apart from the
 //! left-button gesture, so neither button's release ever ends the other's press.
 
+use super::input_dispatch::MotionProfile;
 use super::*;
 use sonicterm_vt::vt::MouseFormat;
 use winit::event::{ElementState, MouseButton};
@@ -50,6 +51,8 @@ pub(crate) struct SecondaryPress {
     pub(crate) format: MouseFormat,
     /// The tracking mode at the press; held motion is reported only under 1002 and 1003.
     pub(crate) tracking: MouseTracking,
+    /// Whether the alternate screen showed at the press; held motion is stamped with it.
+    pub(crate) is_alt: bool,
     /// The last cell reported, as (row, column).
     pub(crate) cell: (u16, u16),
     /// The last pixel reported, from the press pane's cell-area origin.
@@ -90,13 +93,13 @@ pub(crate) fn secondary_report_bytes(
 impl WindowState {
     /// Report motion while a secondary press is held: `None` when none is held (the caller goes
     /// on); otherwise the press owns the motion, and `Some(report)` carries the held-motion report
-    /// under 1002 or 1003 with its format, or nothing under 1000. Motion over another pane keeps
-    /// the last cell; `press_pixel` is the pointer measured from the press pane's origin.
+    /// under 1002 or 1003 with its press-time profile, or nothing under 1000. Motion over another
+    /// pane keeps the last cell; `press_pixel` is the pointer measured from the press pane's origin.
     pub(in crate::app) fn secondary_motion(
         &mut self,
         cell: Option<PointerCell>,
         press_pixel: (i32, i32),
-    ) -> Option<Option<(u64, MouseFormat, Vec<u8>)>> {
+    ) -> Option<Option<(u64, MotionProfile, Vec<u8>)>> {
         let modifiers = self.modifiers;
         let press = self.secondary_press.as_mut()?;
         if let Some(cell) = cell.filter(|cell| cell.pane_id == press.pane_id) {
@@ -113,7 +116,13 @@ impl WindowState {
                 press.cell,
                 press.pixel,
             );
-            (press.pane_id, press.format, bytes)
+            let profile = MotionProfile {
+                tracking: press.tracking,
+                format: press.format,
+                is_alt: press.is_alt,
+                held: true,
+            };
+            (press.pane_id, profile, bytes)
         }))
     }
 
@@ -207,6 +216,7 @@ impl App {
             pane_id,
             format: modes.format(),
             tracking,
+            is_alt: modes.is_alt(),
             cell: (row, col),
             pixel: self.pane_pixel(win_id, pane_id),
         })
