@@ -116,7 +116,7 @@ Windows 测试分为五个并行 shard，每个都重复 checkout、Rust、Cairo
 - `windows-tests-harness` 运行场景 harness 的单元测试，再运行启用帧计数器的同一组测试。
 - `windows-tests-harness-features` 运行启用帧纹理读取和 echo trace 的 harness 测试。
 - `windows-tests-harness-api` 运行启用全部 harness API cfg 的 harness 测试；这些编译器标志只传给 example 目标。
-- `windows-tests-runtime` 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，使其测试二进制仍是冷构建，然后运行 host probe、fail-closed GDI 呈现验证、WARP allocator、software-selection presentation，
+- `windows-tests-runtime` 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，使其测试二进制仍是冷构建，然后运行 host probe、fail-closed GDI 呈现验证、WARP allocator、software-selection presentation、真实 ConPTY 协议夹具（`windows-conpty-forms`），
   以及性能场景 harness 的构建及其 smoke（在软件适配器上检查对比工具，不检查计时，见 [Windows](Local-Gate-zh-CN#windows)）；
   GDI probe 或性能 smoke 失败时，该 shard 上传其证据。它的 probe 重跑只为打印报告，对应的集成测试已由
   `windows-tests-workspace` 运行。GDI wrapper 只接受

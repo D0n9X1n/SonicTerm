@@ -357,6 +357,9 @@ mod test_hooks_media;
 mod test_hooks_overlays;
 mod test_hooks_owners;
 mod test_hooks_panes;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use test_hooks_panes::TestReplyPane;
 mod test_hooks_windows;
 mod text_edit;
 #[doc(hidden)]

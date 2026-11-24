@@ -188,7 +188,8 @@ checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longe
 - `windows-tests-harness-api` runs the harness tests with every harness API cfg; only the example receives those flags.
 - `windows-tests-runtime` first measures the real PTY close baseline after Cargo restore, so its test-binary
   build stays cold, then runs the host probes, fail-closed GDI presentation verification, the WARP allocator,
-  software-selection presentation, and the perf scenario harness build and its smoke, which checks the
+  software-selection presentation, the real-ConPTY protocol fixture (`windows-conpty-forms`), and the perf
+  scenario harness build and its smoke, which checks the
   comparison tooling on a software adapter without timing ([Windows](Local-Gate#windows)); when the GDI probe or
   the perf smoke fails, the shard uploads its evidence. Its probe reruns print reports for integration tests that
   `windows-tests-workspace` already runs. The GDI wrapper accepts only one `capability=EXERCISED` verdict;

@@ -3808,6 +3808,7 @@ dependencies = [
  "libproc",
  "parking_lot 0.13.0",
  "portable-pty",
+ "sonicterm-io",
  "sonicterm-types",
  "tempfile",
  "thiserror 2.0.21",

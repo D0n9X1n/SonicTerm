@@ -824,3 +824,59 @@ impl TestPaneWorker {
         queued
     }
 }
+
+impl App {
+    /// Test-only: a standalone pane of `cols` x `rows`, seeded with the default theme as a new pane
+    /// is, whose replies come from the production VT publisher; see [`TestReplyPane`].
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn __test_reply_pane(cols: u16, rows: u16) -> TestReplyPane {
+        let parser =
+            Parser::new_with_staging_pool(Grid::new(cols, rows), None, CaptureStagingPool::new());
+        let parser = Arc::new(Mutex::new(parser));
+        super::seed_parser_theme_colors(
+            &mut super::frame_counters::lock_parser(&parser),
+            &Theme::default(),
+        );
+        let pane =
+            PaneState::new_with_media_pool(parser, None, &super::media::InlineMediaPool::new());
+        let handles = super::spawn_pane::PaneVtHandles::from_pane_state(&pane);
+        TestReplyPane { handles, sync_latch: super::spawn_pane::SyncLatch::default(), _pane: pane }
+    }
+}
+
+/// Test-only: a pane without a PTY or window whose batches run the production publisher,
+/// `publish_pane_vt_batch_with`, and return the bytes it hands the pane's reply path.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestReplyPane {
+    handles: super::spawn_pane::PaneVtHandles,
+    sync_latch: super::spawn_pane::SyncLatch,
+    /// Keeps the pane state the handles were cloned from alive for the pane's whole life.
+    _pane: PaneState,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestReplyPane {
+    /// Parse and publish `bytes` as one output batch; return every reply byte it produced.
+    #[doc(hidden)]
+    pub fn replies(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut replies = Vec::new();
+        super::spawn_pane::publish_pane_vt_batch_with(
+            &self.handles,
+            bytes,
+            None,
+            &mut None,
+            &mut self.sync_latch,
+            super::media::decode_inline_image,
+            |_| {},
+            Instant::now,
+            |reply: Vec<u8>| replies.extend_from_slice(&reply),
+        );
+        replies
+    }
+}
+
+#[cfg(test)]
+#[path = "test_hooks_panes_tests.rs"]
+mod test_hooks_panes_tests;

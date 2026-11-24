@@ -378,6 +378,24 @@ ConPTY。日志以 `Windows console runtime selected` 记录所选结果：`kind
 源码构建可用 `python scripts/setup-windows-conpty.py --destination target/debug`
 放置同样的文件。
 
+转发情况由真实 ConPTY 协议夹具取证，Windows 上由 `windows-conpty-forms` gate 步骤运行。
+两个 `#[ignore]` 测试二进制 `windows_conpty_protocol_forms`（传输行，位于 `sonicterm-io`）
+和 `windows_conpty_app_smoke`（应用行，位于 `sonicterm-app`）各自把可执行文件复制到旁边放有
+运行时的 `packaged` 文件夹和没有运行时的 `system` 文件夹，并在关闭时会结束其进程的 job
+object 中把每个副本作为宿主运行。packaged 宿主带 `SONICTERM_REQUIRE_CONPTY=1` 运行；
+system 宿主不带该变量运行，且必须显示未加载 `conpty.dll` 并出现 `development-discovery`
+记录。每个宿主通过伪控制台把同一可执行文件作为子进程启动；子进程在 `@@BEGIN` 与 `@@END`
+哨兵之间打印每个用例，并以十六进制报告它收到的输入。宿主在数据流入时对每段计算哈希，只保留
+首尾各 256 字节，并在自己的 stdout（绝不经过 PTY）上每行输出一个 JSON：`exact`（摘要等于
+预期形式）、`transformed`（含有其他字节，包括前缀被改动）、`dropped`（只有 CR/LF）或
+`inconclusive`（缺少结束哨兵、运行时检查或正向对照失败、或启动失败）。传输行只回答控制台
+自身的光标与设备属性查询并注入预置回复，因此只证明转发，不证明行为；应用行由运行生产 VT
+发布器的窗格回答。正向对照在两种运行时上都必须为 `exact`，每个必需行在 packaged 运行时上
+必须为 `exact`；其他行作为证据打印。宿主连续 5 s 没有哨兵即停止扫描，单个宿主上限 60 s，
+整次运行上限 150 s，子进程输入读取上限 2 s 和 64 KiB，拆除后 5 s 内 job 中必须没有进程。
+`SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR` 指向已由 `setup-windows-conpty.py --destination`
+放置好的目录；未设置时每个二进制自行放置。
+
 因此，哪些图像序列能到达解析器取决于控制台运行时。Windows 11 build 26300.9457 的
 系统 ConPTY（`conhost.exe` 10.0.26100.9444）原样转发 iTerm2 `OSC 1337;File=` 序列
 （以 4 字节、48 KiB 和 1 MiB 负载检查），并丢弃 Sixel DCS 与 kitty APC 序列。附带的

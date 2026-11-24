@@ -1151,6 +1151,10 @@ jobs:
       - name: Verify Windows selection presentation
         run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
 
+      - name: Require F-ConPTY protocol forms
+        # Each binary stages the pinned runtime itself, then runs a packaged and a system host behind real ConPTY.
+        run: cargo test --locked -p sonicterm-io -p sonicterm-app --test windows_conpty_protocol_forms --test windows_conpty_app_smoke -- --ignored --nocapture
+
       - name: Build Windows perf scenario harness
         run: cargo build --locked -p sonicterm-app --example perf_scenarios
 

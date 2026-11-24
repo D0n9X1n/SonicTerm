@@ -6,6 +6,8 @@
 #![warn(clippy::min_ident_chars)]
 
 pub mod command_resolve;
+#[cfg(feature = "test-support")]
+pub mod conpty_fixture;
 #[cfg(windows)]
 mod conpty_runtime;
 #[cfg(windows)]

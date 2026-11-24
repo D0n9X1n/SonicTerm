@@ -32,6 +32,8 @@ RUSTDOCFLAGS="-D warnings -A rustdoc::invalid_html_tags" cargo doc --locked \
     --manifest-path crates/sonicterm-winit/Cargo.toml \
     --target-dir "$winit_target_dir" --features serde --no-deps --lib || status=1
 
+# The F-ConPTY binaries (windows_conpty_protocol_forms, windows_conpty_app_smoke) are #[ignore]:
+# this pass compiles them and runs neither; the windows-conpty-forms step runs them with --ignored.
 echo "[workspace-gate] cargo test --workspace --lib --bins --tests --no-fail-fast"
 set +e
 cargo test --workspace --lib --bins --tests --no-fail-fast

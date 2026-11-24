@@ -112,6 +112,8 @@ wgpu.workspace = true
 sonicterm-app = { workspace = true, features = ["test-support"] }
 # Drives that test's asynchronous adapter enumeration to completion.
 pollster.workspace = true
+# The shared real-ConPTY protocol fixture the Windows app smoke drives a pane through.
+sonicterm-io = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # The close baseline identifies only its own console hosts and shell descendants from a native snapshot.

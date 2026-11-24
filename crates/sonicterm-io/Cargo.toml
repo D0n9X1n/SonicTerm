@@ -40,6 +40,16 @@ windows = { workspace = true, features = [
 # shell pid before invoking portable-pty's `Child::kill`.
 libc = "0.2"
 
+[features]
+# The shared real-ConPTY protocol fixture (`conpty_fixture`) for this crate's and sonicterm-app's
+# tests; dev-dependency features never reach release binaries under resolver 2. The job object
+# that reaps each fixture host is the only Windows API it adds.
+test-support = ["windows/Win32_System_JobObjects"]
+
+[dev-dependencies]
+# Turns on `test-support` for this crate's own unit and integration tests.
+sonicterm-io = { path = ".", features = ["test-support"] }
+
 # Spawns itself through `PtyHandle::spawn_command` and checks the exact argv, so it owns its main.
 [[test]]
 name = "argv_echo"

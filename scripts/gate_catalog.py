@@ -199,6 +199,15 @@ STEPS = (
           "--", "--nocapture"),
          ("windows",), 300, "local", ("rust", "native", "warp"), (_WINDOWS_RUNTIME,),
          windows_preparations=(gate_model.Preparation(),)),
+    # The F-ConPTY fixture: both binaries are #[ignore], so the workspace pass compiles them without running them.
+    # Each stages the pinned runtime (setup-windows-conpty.py) unless SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR names
+    # a staged one, then runs a packaged and a system host bounded at 150 s; the rest of the budget is the build.
+    gate_model.Step("windows-conpty-forms",
+         ("cargo", "test", "--locked", "-p", "sonicterm-io", "-p", "sonicterm-app",
+          "--test", "windows_conpty_protocol_forms", "--test", "windows_conpty_app_smoke",
+          "--", "--ignored", "--nocapture"),
+         ("windows",), 1500, "local", ("rust", "native", "network"), (_WINDOWS_RUNTIME,),
+         windows_preparations=(gate_model.Preparation(),)),
     gate_model.Step("msi-validator-tests", (".\\scripts\\validate-windows-msi_tests.ps1",), ("windows",), 300,
          "local", ("pwsh",), (_WINDOWS_WORKSPACE,), shell="pwsh"),
     # A compiler can need forced cleanup on Windows, which only a compile-only step may accept; the harness

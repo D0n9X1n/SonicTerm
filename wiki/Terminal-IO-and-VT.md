@@ -493,6 +493,29 @@ folder an error; the Windows CI and release smokes set it, enable the record wit
 it), and then require the `packaged` record. A source build stages the same files with
 `python scripts/setup-windows-conpty.py --destination target/debug`.
 
+Forwarding is evidenced by a real-ConPTY protocol fixture that the `windows-conpty-forms`
+gate step runs on Windows. Two `#[ignore]` test binaries, `windows_conpty_protocol_forms`
+(transport rows, in `sonicterm-io`) and `windows_conpty_app_smoke` (app rows, in
+`sonicterm-app`), each copy their executable into a `packaged` folder with the staged runtime
+beside it and a `system` folder without one, and run each copy as a host inside a job object
+that kills its processes when closed. The packaged host runs with
+`SONICTERM_REQUIRE_CONPTY=1`; the system host runs without it and must show no loaded
+`conpty.dll` and the `development-discovery` record. Each host spawns the same executable as
+a child through a pseudoconsole; the child prints every case between `@@BEGIN` and `@@END`
+sentinels and reports the input it received as hex. The host hashes each section as it
+streams, keeps only its first and last 256 bytes, and prints one JSON line per row on its own
+stdout, never through the PTY: `exact` (the digest equals the expected form), `transformed`
+(other bytes, including a changed prefix), `dropped` (nothing but CR/LF) or `inconclusive`
+(no end sentinel, a failed runtime check or positive control, or a failed launch). Transport
+rows answer only the console's own cursor and device-attribute queries and inject canned
+replies, so they prove forwarding, not behavior; app rows answer through a pane that runs the
+production VT publisher. The positive control must be `exact` on both runtimes and every
+required row on the packaged runtime; the other rows are printed as evidence. A host stops
+scanning after 5 s without a sentinel and is bounded at 60 s, a run at 150 s, a child's input
+read at 2 s and 64 KiB, and the job must hold no process 5 s after teardown.
+`SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR` names a directory that
+`setup-windows-conpty.py --destination` already staged; without it each binary stages its own.
+
 Which image sequences reach the parser therefore depends on the console
 runtime. The system ConPTY in Windows 11 build 26300.9457 (`conhost.exe`
 10.0.26100.9444) forwards iTerm2 `OSC 1337;File=` sequences unchanged (checked
