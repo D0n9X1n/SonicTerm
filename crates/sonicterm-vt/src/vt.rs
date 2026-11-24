@@ -199,6 +199,9 @@ const MAX_ITERM2_METADATA_BYTES: usize = 1024;
 const ITERM2_OSC_PREFIX: &[u8; 10] = b"1337;File=";
 /// The OSC 1337 prefix whose whole payload the raw collector owns as user variables.
 const USER_VAR_OSC_PREFIX: &[u8; 16] = b"1337;SetUserVar=";
+/// The OSC 1337 prefix, matched in any ASCII case, whose whole payload the raw collector owns as a
+/// working-directory report; its length fits the probe, which `USER_VAR_OSC_PREFIX` sizes.
+const CURRENT_DIR_OSC_PREFIX: &[u8; 16] = b"1337;CurrentDir=";
 /// Public for the same reason as [`MAX_MEDIA_PAYLOAD_BYTES`]: the backstop is
 /// derived from the caps, not parallel to them.
 pub const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
@@ -395,7 +398,7 @@ enum RawOsc {
     /// Checking a bounded OSC prefix before choosing vte or media ownership.
     Probe { content: [u8; USER_VAR_OSC_PREFIX.len()], content_len: u8 },
     /// Complete title, CWD, hyperlink, program-state (`9`, `777`, `7501`), color request or
-    /// OSC 1337 `SetUserVar` payload, independent of vte's parameter count.
+    /// OSC 1337 `SetUserVar` or `CurrentDir` payload, independent of vte's parameter count.
     Semantic { code: u16, content: Vec<u8>, pending_esc: bool },
     /// Streaming an iTerm2 file payload through the parser's staging reservation.
     Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
@@ -597,19 +600,20 @@ impl Parser {
         Arc::clone(&self.performer.user_vars)
     }
 
-    /// Latest OSC 7 working-directory path (sticky), or `None` if the shell
-    /// has not reported one. Kept for tab-title compatibility; security-sensitive
-    /// consumers must use [`Self::osc7_cwd`] so authority provenance is retained.
+    /// Latest displayed working-directory path from OSC 7, OSC 9;9 or OSC 1337 `CurrentDir`, or
+    /// `None` if none was reported or an empty report cleared it. Kept for tab titles;
+    /// security-sensitive consumers must use [`Self::osc7_cwd`] so authority provenance is retained.
     pub fn cwd(&self) -> Option<&str> {
         self.performer.cwd.as_deref()
     }
 
-    /// Latest host-aware OSC 7 working-directory snapshot.
+    /// Latest host-aware working-directory snapshot, from any source; `None` when the latest report
+    /// was empty, malformed, cut or a bare `CurrentDir`. The app still checks its host and path.
     pub fn osc7_cwd(&self) -> Option<&Osc7Cwd> {
         self.performer.osc7_cwd.as_ref()
     }
 
-    /// Monotonic identity of the latest accepted OSC 7 update.
+    /// Monotonic identity of the latest working-directory report, revocations included.
     pub fn cwd_revision(&self) -> u64 {
         self.performer.cwd_revision
     }
@@ -700,11 +704,11 @@ struct Performer {
     program_status_dirty: bool,
     /// Discarded OSC 7501 reports, counted so their log line is rate-limited.
     program_status_refusals: u64,
-    /// Latest permissively-decoded OSC 7 path used only for tab titles.
+    /// Latest permissively read directory path, from any source, used only for tab titles.
     cwd: Option<String>,
     /// Latest strictly parsed host-aware snapshot used for path resolution.
     osc7_cwd: Option<Osc7Cwd>,
-    /// Monotonic identity of OSC 7 updates, including same-value ABA changes.
+    /// Monotonic identity of directory reports, including same-value ABA changes.
     cwd_revision: u64,
     reply_tx: Option<Sender<Vec<u8>>>,
     captured_replies: std::cell::RefCell<Option<Vec<u8>>>,

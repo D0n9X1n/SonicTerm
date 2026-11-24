@@ -1,5 +1,5 @@
-//! Program-state OSC grammar: ConEmu `OSC 9` (progress subcommand and plain
-//! notifications) and `OSC 777 ; notify`.
+//! Program-state OSC grammar: ConEmu `OSC 9` (progress subcommand, the `9;9` working-directory
+//! split-off and plain notifications) and `OSC 777 ; notify`.
 //!
 //! The parser only validates and bounds these strings; it never sanitizes, cuts,
 //! rate-limits or holds config. The host sanitizes first, then applies its display caps.
@@ -105,6 +105,13 @@ pub(super) fn parse_osc777(params: &[&[u8]]) -> ProgramOsc {
     }
     let title = (!title.trim().is_empty()).then_some(title);
     ProgramOsc::Notify { title, body }
+}
+
+/// The path a ConEmu `9;9;<path>` report carries, everything after its second `;`, separators
+/// included; `None` for any other OSC 9 payload, a bare `9;9` without the separator included.
+pub(super) fn osc9_cwd_payload(content: &[u8]) -> Option<&[u8]> {
+    let (subcommand, rest) = content.split_at(content.iter().position(|byte| *byte == b';')?);
+    (conemu_subcommand(subcommand) == Some(9)).then(|| &rest[1..])
 }
 
 /// The ConEmu subcommand `param` names: an all-digit value in `1..=12`, leading zeros included.

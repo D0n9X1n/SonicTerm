@@ -241,7 +241,8 @@ Current protocol support includes:
   background-color erase semantics;
 - primary and alternate screens, application cursor keys, bracketed paste,
   focus reporting, and kitty keyboard flag set/push/pop/query;
-- OSC 0/2 titles, the OSC 1 tab name, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
+- OSC 0/2 titles, the OSC 1 tab name, the host-aware working directory from OSC 7, OSC 9;9 and OSC
+  1337 `CurrentDir`, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12/17/19 color queries and sets, the OSC 21 kitty color
   protocol, OSC 22 pointer shapes, OSC 104/110/111/112/117/119 color resets, OSC 133 prompt markers, OSC 9;4
   progress, OSC 1337 `SetUserVar` user variables, OSC 7501 program status, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
@@ -562,18 +563,44 @@ ignored rather than applied. OSC 8 still limits each retained
 URI to 8 KiB and client id to 1 KiB.
 
 
-- **OSC 7:** decoded path and authority stay separate. Local CWD use requires an
-  empty authority, `localhost`, or the exact local hostname, a native absolute
-  path, and at most 4,096 decoded UTF-8 bytes. Ordinary tabs and splits in main
-  and child windows may inherit the source pane's validated CWD. An explicit CWD
-  wins; new windows do not inherit it. Missing, invalid, or foreign-host reports
-  never authorize local relative paths or substitute another pane's directory.
+- **Working directory (OSC 7, OSC 9;9, OSC 1337 `CurrentDir`):** every source reads through one
+  rule. The displayed path names the tab; the host-aware snapshot, its decoded path and host kept
+  apart, is what relative links and an inherited launch directory may use. Every report, a
+  revocation included, moves the pane's CWD revision, which invalidates the relative-path cache.
+
+  | Payload | OSC 7 | OSC 9;9 | OSC 1337 `CurrentDir` |
+  | --- | --- | --- | --- |
+  | empty | clears path and snapshot | clears path and snapshot (`9;9;""` too) | ignored |
+  | `file://host/path` (percent-decoded) | path; snapshot `{host, path}` | as OSC 7 | as OSC 7 |
+  | `kitty-shell-cwd://host/path` (raw, `%` kept) | path; snapshot `{host, path}` | as OSC 7 | as OSC 7 |
+  | `file:///path` (empty host) | snapshot with an empty host, which is local | as OSC 7 | as OSC 7 |
+  | malformed URI with a known scheme | path from the permissive read; snapshot revoked | as OSC 7 | as OSC 7 |
+  | bare path | percent-decoded path; snapshot `{"", path}` | literal path after one pair of surrounding `"`; snapshot `{"", path}` | path shown; snapshot revoked |
+
+  Local use requires an empty host, `localhost` or the exact local hostname (any ASCII case), a
+  native absolute path (`/…`; on Windows `C:\…`, `C:/…` or `/C:/…`) and at most 4,096 decoded
+  UTF-8 bytes. A remote host stays in the snapshot, so every consumer rejects it. Drive-relative
+  (`C:foo`), bare-drive (`C:`), UNC (`\\host\share`, `//host`), relative and other-OS paths are
+  stored and shown but never used. Each of these, a payload that is not UTF-8 or holds a control
+  character, and a report from any source cut by CAN, SUB, an ESC that does not complete ST, its
+  byte cap or host cancellation replace an earlier trusted directory. Ordinary tabs and splits in
+  main and child windows may inherit the source pane's validated CWD; an explicit CWD wins; new
+  windows do not inherit it. Clearing the directory never clears an explicit OSC 0/2 title.
+  WezTerm's Windows forms `file://localhost/C:\Users\x` and `file://HOST/C:/Users/x` resolve to
+  `C:\Users\x`. The raw collector owns `7;`, `9;` (16 KiB after `9;`) and `1337;CurrentDir=`
+  with its key in any ASCII case (64 KiB after `1337;`), and applies a report only once its BEL
+  or ST arrived. Intentional differences: a bare native-absolute 9;9 path is trusted, as in
+  kitty, where Ghostty requires a URI; Windows drive-rooted 9;9 paths are a SonicTerm extension,
+  since kitty accepts only `/…`; a bare `CurrentDir` is display-only and revokes trust, because
+  iTerm2 pairs it with a `RemoteHost` SonicTerm does not read, where Ghostty ignores it;
+  `file:///path` is local for every source, where Ghostty rejects an empty host; reports apply
+  on Windows, where Ghostty skips them; WezTerm parses `CurrentDir` and ignores it.
 - **OSC 8:** preserve the full URI, including semicolons. Only `id=` is extracted
   from the parameter field; other parameters are not treated as the client id.
 - **OSC 9 and OSC 777:** the parser validates and bounds these; the host applies its policy.
   - `9;<n>` whose `n` is all digits with a value in `1..=12`, leading zeros included (`001`),
-    is a ConEmu subcommand and never a notification. Only `4` is implemented; the others are
-    ignored.
+    is a ConEmu subcommand and never a notification. Only `4` (progress) and `9` (working
+    directory, above) are implemented; the others are ignored.
   - `9;4;<st>[;<pr>]`: `st` is one digit, `0` clear, `1` normal, `2` error, `3` indeterminate,
     `4` paused. `pr` is one to three digits, clamped to 100; a missing `pr` is 0. Any other
     form (a fraction, a sign, an empty value after a separator, four digits) is ignored and
@@ -607,7 +634,8 @@ URI to 8 KiB and client id to 1 KiB.
   `1337;SetUserVar=` spelling is owned; any other spelling, a C1 introducer included, sets
   nothing. Every `SetUserVar=` record of one payload applies in order, as kitty does:
   `NAME=<base64>` sets, `NAME=` sets an empty value, and `NAME` alone deletes; other records,
-  such as `CurrentDir=`, are skipped. A name is 1 to 128 bytes; a value is standard base64,
+  such as `CurrentDir=`, are skipped (a payload that starts with `CurrentDir=` is a working
+  directory report instead). A name is 1 to 128 bytes; a value is standard base64,
   padding optional, decoding to at most 4 KiB. Names and values must be valid UTF-8, and their
   C0, DEL and C1 controls are shown as spaces. A record that breaks any rule is dropped alone.
   A pane holds at most 64 variables and 16 KiB of name and value bytes; setting a name makes
@@ -657,9 +685,10 @@ parameter count and up to 4 KiB (16 KiB for OSC 21). It applies a message only o
 drops a longer one, or one cut by CAN, SUB or an ESC that does not start ST, without applying
 any part; vte never dispatches the same message. Parser-owned sequence
 state recognizes kitty APC after completed escapes, including C1 APC and chunk-split
-`ESC` / `_`. A bounded prefix probe takes only confirmed `OSC 1337;File=` media and
-`OSC 1337;SetUserVar=` payloads and `OSC 7501;` reports out of vte's private OSC buffer; other
-OSC 1337 commands reach vte and change nothing.
+`ESC` / `_`. A bounded prefix probe takes only confirmed `OSC 1337;File=` media,
+`OSC 1337;SetUserVar=` payloads, `OSC 1337;CurrentDir=` reports (the key in any ASCII case) and
+`OSC 7501;` reports out of vte's private OSC buffer; other OSC 1337 commands reach vte and change
+nothing.
 
 An escape sequence may retain at most 1 MiB. After that, the parser discards
 through the sequence terminator instead of treating the payload as printable

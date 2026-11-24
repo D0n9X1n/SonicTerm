@@ -158,8 +158,9 @@ tmux 中的长 URL 依赖这类连接。到达链停止处窗格边缘的候选�
 
 ### 工作目录
 
-SonicTerm 通过 OSC 7 获知窗格的目录。每个窗格内的 shell
-必须在工作目录变化时发出 OSC 7。tmux 与 rmux 会记录该报告；启用 `osc7` 和
+SonicTerm 通过 OSC 7、OSC 9;9 或 OSC 1337 `CurrentDir` 获知窗格的目录
+（见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）。每个窗格内的 shell
+必须在工作目录变化时发出其中之一。tmux 与 rmux 会记录该报告；启用 `osc7` 和
 `set-titles on` 后，它们会把活动窗格的目录发给 SonicTerm，并在另一个窗格变为活动窗格时
 再次发送。`#{pane_current_path}` 是复用器 format 使用的进程检查元数据；shell 没有报告时，
 它不会代替 OSC 7。
@@ -175,7 +176,7 @@ Zellij 完全不发送目录。
 
 同一报告也让主窗口和子窗口中的普通新标签页与分屏继承窗格的目录。继承只接受空主机、
 `localhost` 或准确本机主机名，以及解码后 UTF-8 不超过 4,096 字节的原生绝对路径。显式
-目录优先，新窗口不继承。OSC 7 缺失、格式错误或声明远端主机时，SonicTerm 仍会 fail
+目录优先，新窗口不继承。报告缺失、格式错误、为裸 `CurrentDir` 或声明远端主机时，SonicTerm 仍会 fail
 closed：它不会从进程目录、复用器状态元数据、其它窗格或命名用户的 home 猜测目录。绝对
 路径不依赖 OSC 7。
 

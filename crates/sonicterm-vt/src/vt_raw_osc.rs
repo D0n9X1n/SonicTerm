@@ -72,13 +72,15 @@ impl Parser {
                     return true;
                 }
                 let index = usize::from(content_len);
-                // Past `1337;File=`'s length the probe reads on only while `1337;SetUserVar=` still
-                // matches, so every other spelling keeps the bound it had.
-                let probe_len = if USER_VAR_OSC_PREFIX.starts_with(&content[..index]) {
+                // Past `1337;File=`'s length the probe reads on only while `1337;SetUserVar=` or
+                // `1337;CurrentDir=` still matches, so every other spelling keeps the bound it had.
+                let probe_len = if USER_VAR_OSC_PREFIX.starts_with(&content[..index])
+                    || is_current_dir_prefix(&content[..index])
+                {
                     content.len()
                 } else {
-                    // When: `content` no longer starts `USER_VAR_OSC_PREFIX`, the probe keeps the
-                    // `1337;File=` length it had, so color and program digit runs stop as before.
+                    // When: `content` starts neither `USER_VAR_OSC_PREFIX` nor `1337;CurrentDir=`,
+                    // the probe keeps the `1337;File=` length, so color and program digit runs stop.
                     ITERM2_OSC_PREFIX.len()
                 };
                 if index < probe_len {
@@ -147,6 +149,16 @@ impl Parser {
                         Some(RawOsc::Semantic { code: 1337, content, pending_esc: false });
                     return true;
                 }
+                if prefix.len() == CURRENT_DIR_OSC_PREFIX.len() && is_current_dir_prefix(prefix) {
+                    // When: the prefix names OSC 1337 `CurrentDir=` in any ASCII case, own the whole
+                    // report under its canonical key so vte never sees it and it applies once complete.
+                    self.inner = vte::Parser::new();
+                    self.pending_esc = false;
+                    let content = vt_osc::CURRENT_DIR_KEY.to_vec();
+                    self.raw_osc =
+                        Some(RawOsc::Semantic { code: 1337, content, pending_esc: false });
+                    return true;
+                }
                 if let Some(code) = prefix.strip_suffix(b";").and_then(vt_color::color_osc_number) {
                     // When: the prefix names a color request, own its whole payload so it applies
                     // only once complete and no part is lost to vte's parameter cap.
@@ -163,6 +175,7 @@ impl Parser {
                     digits.iter().all(u8::is_ascii_digit) && index < ITERM2_OSC_PREFIX.len();
                 if !ITERM2_OSC_PREFIX.starts_with(prefix)
                     && !USER_VAR_OSC_PREFIX.starts_with(prefix)
+                    && !is_current_dir_prefix(prefix)
                     && ![b"0;".as_slice(), b"1;", b"2;", b"7;", b"8;"]
                         .iter()
                         .any(|value| value.starts_with(prefix))
@@ -195,7 +208,7 @@ impl Parser {
             RawOsc::Semantic { code, mut content, mut pending_esc } => {
                 if matches!(byte, 0x18 | 0x1a) {
                     // When: byte matches 0x18 or 0x1a, discard semantic state before returning to ground.
-                    self.performer.invalidate_semantic_osc(code);
+                    self.performer.invalidate_semantic_osc(code, &content);
                     self.finish_escape();
                     return true;
                 }
@@ -208,7 +221,7 @@ impl Parser {
                         self.finish_escape();
                         return true;
                     }
-                    self.performer.invalidate_semantic_osc(code);
+                    self.performer.invalidate_semantic_osc(code, &content);
                     self.finish_escape();
                     self.feed_vte_byte(0x1b);
                     return false;
@@ -225,7 +238,7 @@ impl Parser {
                 } else if content.len() == raw_osc_cap(code) {
                     // When: content reaches raw_osc_cap, refuse the whole update and swallow the rest
                     // through this collector's own terminators, so no suffix of it prints.
-                    self.performer.invalidate_semantic_osc(code);
+                    self.performer.invalidate_semantic_osc(code, &content);
                     self.raw_osc = Some(RawOsc::Refused { pending_esc: false });
                     return true;
                 } else {
@@ -316,9 +329,21 @@ fn is_icon_title_number(spelling: &[u8]) -> bool {
         }) == 1
 }
 
+/// Whether `probed` is a prefix of `1337;CurrentDir=` in any ASCII case, as Ghostty matches
+/// OSC 1337 keys.
+fn is_current_dir_prefix(probed: &[u8]) -> bool {
+    probed.len() <= CURRENT_DIR_OSC_PREFIX.len()
+        && probed.eq_ignore_ascii_case(&CURRENT_DIR_OSC_PREFIX[..probed.len()])
+}
+
 /// Remove the C0 controls a program or color `code` payload carried, as vte drops them in an OSC
 /// string; the collector kept them only so its cap counted every wire byte.
 fn drop_payload_controls(code: u16, content: &mut Vec<u8>) {
+    if vt_osc::cwd_report(code, content).is_some() {
+        // When: content is a 9;9 directory report, a control in its path refuses it as one in an
+        // OSC 7 path does, so the controls stay for the report rule to see.
+        return;
+    }
     if is_program_osc(code) || vt_color::is_color_osc(code) {
         // A program or color request's controls are not payload.
         content.retain(|byte| *byte >= 0x20);

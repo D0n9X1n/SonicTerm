@@ -287,11 +287,12 @@ impl Parser {
     /// OSC palette accumulation is retaining bytes.
     pub fn cancel_capture(&mut self) -> usize {
         let released = self.retained_amount().bytes;
-        // A title, CWD, link, program or color OSC in flight, accepted (with its code) or already
+        // Whether a title, CWD, link, program or color OSC is in flight, accepted or already
         // refused, and whether its last byte was an ESC that may start ST.
         let semantic = match self.raw_osc.as_ref() {
-            Some(RawOsc::Semantic { code, pending_esc, .. }) => Some((Some(*code), *pending_esc)),
-            Some(RawOsc::Refused { pending_esc }) => Some((None, *pending_esc)),
+            Some(RawOsc::Semantic { pending_esc, .. } | RawOsc::Refused { pending_esc }) => {
+                Some(*pending_esc)
+            }
             _ => None,
         };
         if released == 0 && self.live_capture_count() == 0 && semantic.is_none() {
@@ -303,11 +304,11 @@ impl Parser {
             || self.performer.dcs_capture.is_some()
             || self.raw_osc.is_some();
         self.abort_kitty_transfer();
-        if let Some((code, pending_esc)) = semantic {
+        if let Some(pending_esc) = semantic {
             // When: semantic holds an OSC in flight, it becomes a refusal in the collector's own
             // framing: only its BEL, ST, CAN or SUB ends it, never 0x9c or a newline.
-            if let Some(code) = code {
-                self.performer.invalidate_semantic_osc(code);
+            if let Some(RawOsc::Semantic { code, content, .. }) = self.raw_osc.as_ref() {
+                self.performer.invalidate_semantic_osc(*code, content);
             }
             self.raw_osc = Some(RawOsc::Refused { pending_esc });
             return released;

@@ -470,19 +470,10 @@ impl Perform for Performer {
                 // SUB or an ESC before a complete ST, so this path changes nothing.
             }
             Some(7) => {
-                // OSC 7 ; file://<host>/<path> ST — shell-reported cwd.
-                // Used by the tab-title renderer to show `parent/leaf`.
-                // We are permissive: accept the raw payload even when it
-                // doesn't start with `file://` (some shells skip the
-                // scheme), strip the host component when present, and
-                // percent-decode the path so spaces/unicode survive.
-                if let Some(raw) = params.get(1).and_then(|param| std::str::from_utf8(param).ok()) {
-                    self.cwd_revision = self.cwd_revision.wrapping_add(1);
-                    self.osc7_cwd = parse_osc7_cwd_snapshot(raw);
-                    let title_path = parse_osc7_cwd(raw);
-                    if !title_path.is_empty() {
-                        self.cwd = Some(title_path);
-                    }
+                // OSC 7 ; <uri or path> ST — shell-reported cwd. The raw collector owns `7;`; one
+                // that reaches vte (a C1 introducer) reads through the same rule as every source.
+                if let Some(raw) = params.get(1) {
+                    self.report_cwd(super::vt_osc::CwdSource::Osc7, raw);
                 }
             }
             Some(8) => {
@@ -612,7 +603,8 @@ impl Perform for Performer {
             }
             Some(1337) => {
                 // Only a `File=` image reads vte's joined parameters; the raw collector owns
-                // `SetUserVar=`, so a spelling it missed (`01337`, a C1 introducer) sets nothing.
+                // `SetUserVar=` and `CurrentDir=`, so a spelling it missed (`01337`, a C1
+                // introducer) sets nothing.
                 let payload = join_osc_params(params.get(1..).unwrap_or(&[]));
                 let row = self.grid.cursor.row;
                 let col = self.grid.cursor.col;

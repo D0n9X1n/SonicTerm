@@ -199,8 +199,9 @@ end.
 
 ### Working directory
 
-SonicTerm learns a pane's directory from OSC 7. The shell inside each pane must
-emit OSC 7 when its directory changes. tmux and rmux record that report and, with `osc7` and
+SonicTerm learns a pane's directory from OSC 7, OSC 9;9 or OSC 1337 `CurrentDir`
+(see [Terminal IO and VT](Terminal-IO-and-VT)). The shell inside each pane must
+emit one when its directory changes. tmux and rmux record that report and, with `osc7` and
 `set-titles on`, send the active pane's directory to SonicTerm, and send it
 again whenever a different pane becomes active. `#{pane_current_path}` is
 process-inspection metadata for multiplexer formats; it is not substituted for a
@@ -224,7 +225,8 @@ The same report gives ordinary new tabs and splits in main and child windows the
 pane's directory. Inheritance accepts only an empty host, `localhost`, or the
 exact local hostname, and a native absolute path of at most 4,096 decoded UTF-8
 bytes. An explicit directory wins; new windows do not inherit it. SonicTerm
-fails closed when OSC 7 is absent, malformed, or names a foreign host: it never
+fails closed when the report is absent, malformed, a bare `CurrentDir`, or names
+a foreign host: it never
 guesses from the process's directory, multiplexer status metadata, another pane,
 or a named user's home. Absolute paths do not need OSC 7.
 
