@@ -790,7 +790,8 @@ fn terminal_line(
 /// An all-unknown OSC 21 answer travels the pane's real reply path intact: the cap-filling packet's
 /// one reply is admitted whole by a live PTY's reply spool (one submission of at most 32 KiB, none
 /// dropped), and the child on the other end reads exactly those bytes. The child is this test
-/// binary re-run under a marker in raw mode; every wait is bounded by a 30 s deadline.
+/// binary re-run under a marker in raw mode, and it exits cleanly by itself before its PTY is
+/// dropped, so a coverage run keeps its whole profile; every wait is bounded by a 30 s deadline.
 #[cfg(unix)]
 #[test]
 fn an_all_unknown_kitty_color_reply_reaches_the_pty_child_intact() {
@@ -846,4 +847,15 @@ fn an_all_unknown_kitty_color_reply_reaches_the_pty_child_intact() {
         format!("GOT {} {:016x}", reply.len(), fnv1a(reply)),
         "the child read the reply"
     );
+    // The child is an instrumented test binary under coverage: dropping the PTY while it is still
+    // exiting stops it mid-way through writing its profile, which llvm-profdata then refuses to
+    // merge. So the child must end on its own, and cleanly, before `pty` drops.
+    let probe = pty.child_exit_probe();
+    while !probe.has_exited().expect("observe the reader's exit") {
+        assert!(Instant::now() < deadline, "the reader did not exit before the deadline");
+        // Draining keeps the child's last writes from blocking on a full terminal.
+        while pty.out_rx.try_recv().is_ok() {}
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(probe.exit_status(), Some(sonicterm_io::pty::PaneExitStatus::Code(0)));
 }
