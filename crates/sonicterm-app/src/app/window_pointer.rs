@@ -328,6 +328,8 @@ impl App {
                         if let Some((pane_id, bytes)) =
                             pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
                         {
+                            #[cfg(test)]
+                            super::mouse_report::run_motion_queue_hook();
                             // The modes read for encoding stamp the report; none is read again.
                             let profile = MotionProfile::of(modes, false);
                             self.queue_pointer_motion(pane_id, profile, bytes);

@@ -89,6 +89,12 @@ pub struct PaneRetention {
     /// figure is maintained exactly by the queue rather than derived from the
     /// slot count.
     pub pty_input: ResourceAmount,
+    /// The parser's OSC 7501 program-status records and OSC 1337 user variables.
+    ///
+    /// Persistent pane state rather than capture: it stays live until the program replaces or
+    /// clears it, so a stalled-capture cancel never reports it as reclaimed. Its owned
+    /// allocations (vector capacity, record blocks and strings) are counted.
+    pub program_metadata: ResourceAmount,
 }
 
 /// Bring every pane's inline media back inside the process ceiling.
@@ -209,7 +215,9 @@ pub fn retention_sample_due(last_sample: &mut Option<Instant>, now: Instant) -> 
 ///
 /// `hyperlinks` maps to `ProtocolMetadata` rather than a grid class because
 /// the registry owns those strings independently of any cell — that
-/// disjointness is what makes summing the seams valid at all.
+/// disjointness is what makes summing the seams valid at all. The program
+/// metadata seam is persistent protocol state too, so it is charged with them:
+/// each class appears once, and the two seams are disjoint.
 #[must_use]
 pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmount); 8] {
     [
@@ -217,7 +225,7 @@ pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmoun
         (ResourceClass::GridHistory, retention.grid_history),
         (ResourceClass::GridAlternate, retention.grid_alternate),
         (ResourceClass::ParserCapture, retention.parser),
-        (ResourceClass::ProtocolMetadata, retention.hyperlinks),
+        (ResourceClass::ProtocolMetadata, add(retention.hyperlinks, retention.program_metadata)),
         (ResourceClass::InlineMediaRetained, retention.inline_media),
         (ResourceClass::PtyOutput, retention.pty_output),
         (ResourceClass::PtyInput, retention.pty_input),
@@ -366,6 +374,7 @@ pub fn log_sampled_panes<'a>(
             inline_media: add(session.inline_media, retention.inline_media),
             pty_output: add(session.pty_output, retention.pty_output),
             pty_input: add(session.pty_input, retention.pty_input),
+            program_metadata: add(session.program_metadata, retention.program_metadata),
         };
         sampled += 1;
     }
@@ -386,6 +395,7 @@ pub fn log_sampled_panes<'a>(
         inline_media_bytes = session.inline_media.bytes,
         pty_output_bytes = session.pty_output.bytes,
         pty_input_bytes = session.pty_input.bytes,
+        program_metadata_bytes = session.program_metadata.bytes,
         "session retention"
     );
     session
@@ -903,6 +913,7 @@ pub fn log_pane_retention(label: &str, retention: &PaneRetention) {
         inline_media_bytes = retention.inline_media.bytes,
         pty_output_bytes = retention.pty_output.bytes,
         pty_input_bytes = retention.pty_input.bytes,
+        program_metadata_bytes = retention.program_metadata.bytes,
         largest_seam = seam,
         largest_seam_bytes = largest.bytes,
         "pane retention"

@@ -195,7 +195,8 @@ impl Parser {
     /// Bytes and buffers this parser is holding mid-sequence.
     ///
     /// Covers the in-flight media capture, the raw OSC palette accumulator, and
-    /// reserved capacity in both. Excludes the grid and the hyperlink registry,
+    /// reserved capacity in both. Excludes the grid, the hyperlink registry and
+    /// the persistent program metadata ([`Self::program_metadata_amount`]),
     /// which report their own retention: a pane composes these figures rather
     /// than any one of them restating another.
     ///
@@ -217,13 +218,8 @@ impl Parser {
         };
         // OSC 99 chunks wait here until their notification completes, at most MAX_NOTIFY_BYTES.
         let notify_bytes = self.performer.kitty_notifications.retained_bytes();
-        // OSC 7501 records: at most 32 of their capped fields.
-        let status_bytes = self.performer.program_status.retained_bytes();
         ResourceAmount {
-            bytes: capture_bytes
-                .saturating_add(osc_bytes)
-                .saturating_add(notify_bytes)
-                .saturating_add(status_bytes),
+            bytes: capture_bytes.saturating_add(osc_bytes).saturating_add(notify_bytes),
             items: self.live_capture_count(),
         }
     }

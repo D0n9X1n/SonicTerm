@@ -382,16 +382,25 @@ fn terminal_key_dispatch_excludes_attempted_but_undelivered_panes() {
     );
     let pane_id = app.__test_seed_tab("missing-pty");
 
-    let delivered = app.dispatch_terminal_key_writes(vec![
-        (
-            pane_id,
-            super::keyboard_protocol::EncodedKey { bytes: b"a".to_vec(), held: HeldKey::Legacy },
-        ),
-        (
-            u64::MAX,
-            super::keyboard_protocol::EncodedKey { bytes: b"b".to_vec(), held: HeldKey::Legacy },
-        ),
-    ]);
+    let delivered = app.dispatch_terminal_key_writes(
+        vec![
+            (
+                pane_id,
+                super::keyboard_protocol::EncodedKey {
+                    bytes: b"a".to_vec(),
+                    held: HeldKey::Legacy,
+                },
+            ),
+            (
+                u64::MAX,
+                super::keyboard_protocol::EncodedKey {
+                    bytes: b"b".to_vec(),
+                    held: HeldKey::Legacy,
+                },
+            ),
+        ],
+        true,
+    );
 
     assert!(delivered.is_empty());
 }

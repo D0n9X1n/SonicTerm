@@ -34,6 +34,9 @@ pub(super) fn tab_bar_hash_with_limits(
         tab.foreground_privileged.hash(&mut hash);
         // The agent marker is drawn before the text, so it appearing or clearing repaints the bar.
         tab.agent.hash(&mut hash);
+        // The program-status marker is drawn in the tab text and can change without its width
+        // (`[10%]` to `[20%]`, or any change while widths are held), so it repaints the bar.
+        tab.status.hash(&mut hash);
         // A marked inactive tab draws `●`, so a mark appearing or clearing repaints the bar.
         (index != active_index && tab.marks.is_marked()).hash(&mut hash);
         command_status_hash(&tab.command, now, index == active_index).hash(&mut hash);

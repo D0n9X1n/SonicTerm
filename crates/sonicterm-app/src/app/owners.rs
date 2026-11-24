@@ -38,7 +38,8 @@ pub const fn pane_seam_cap_terms() -> [PaneSeamCapTerm; 8] {
         },
         PaneSeamCapTerm {
             class: ResourceClass::ProtocolMetadata,
-            bytes: sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES,
+            bytes: sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES
+                + sonicterm_vt::vt::MAX_PROGRAM_METADATA_BYTES,
         },
         PaneSeamCapTerm {
             class: ResourceClass::InlineMediaRetained,

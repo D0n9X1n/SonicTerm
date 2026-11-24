@@ -260,8 +260,12 @@ readable agent pane split beside it. A label whose pane has closed is listed onl
 pane share one budget of 256 KiB of serialized text per `list_panes` reply: a title, directory
 or list that does not fit is `null` with `"budget"` under `omitted`, never cut, and the reply
 still succeeds, with earlier panes keeping theirs; `program_state` is outside the budget, so it
-stays when the list is omitted. One pane's `user_vars` list (at most 16 KiB of names and values)
-or `program_status` list (at most 32 records) always fits an unspent budget.
+stays when the list is omitted. The `program_status` lists also share a 64 KiB sublimit inside
+that budget, so status alone cannot spend what titles and paths share: a list past what is left
+of either is omitted the same way. One pane's `user_vars` list (at most 16 KiB of names and
+values) always fits an unspent budget, as does a typed `program_status` list; an opted-in list of
+long messages can pass the sublimit on its own and is then omitted. Any such omission makes the
+top-level `partial` `true`.
 
 The whole `list_panes` result, its fixed fields and every pane record together, is also bounded
 at 768 KiB of serialized JSON, below the bridge's 1 MiB line limit, so a reply never makes the
@@ -269,7 +273,7 @@ bridge close the connection, however many panes are open. Panes are listed in or
 next record would cross that bound; that pane and every later one are left out, `partial` is
 `true`, and `truncated_panes` counts them (`0` when every pane is listed). `partial` is also
 `true` when the parser-probe budget ran out and some panes are listed with
-`"details": "skipped"`. A response echoes its request's `id`, so a request whose serialized
+`"details": "skipped"`, or when a listed pane has a value omitted for the budget. A response echoes its request's `id`, so a request whose serialized
 `id` passes 1 KiB is refused with JSON-RPC error `-32600` ("request id too long") and a `null`
 id, and no response line can cross the bridge's limit.
 

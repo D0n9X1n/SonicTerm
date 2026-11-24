@@ -5,7 +5,7 @@
 //! is dropped whole, a bad pair is skipped. Each pane keeps at most [`MAX_STATUS_RECORDS`]
 //! records. Ids, apps, titles and messages are program-supplied display data: never logged.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
@@ -31,6 +31,19 @@ const MAX_MSG_BYTES: usize = 2048;
 /// One `id` segment's cap in bytes, and the most segments.
 const MAX_ID_SEGMENT_BYTES: usize = 32;
 const MAX_ID_DEPTH: usize = 8;
+/// The most heap one pane's store owns: a record vector that doubles up to twice
+/// [`MAX_STATUS_RECORDS`] slots before its eviction, and each record's shared block and strings.
+/// Decoded text is sized from its encoding, so the encoded caps bound `title` and `msg`.
+pub(super) const MAX_PROGRAM_STATUS_BYTES: usize =
+    2 * MAX_STATUS_RECORDS * std::mem::size_of::<StoredRecord>()
+        + MAX_STATUS_RECORDS
+            * (2 * std::mem::size_of::<usize>()
+                + std::mem::size_of::<StatusRecord>()
+                + MAX_ID_SEGMENT_BYTES * MAX_ID_DEPTH
+                + MAX_ID_DEPTH
+                + MAX_APP_BYTES
+                + MAX_TITLE_ENCODED_BYTES
+                + MAX_MSG_ENCODED_BYTES);
 /// The fixed query reply body; it lists what SonicTerm accepts and discloses no stored data.
 const QUERY_REPLY: &str =
     "7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth";
@@ -173,13 +186,15 @@ impl StatusRecord {
         &self.msg
     }
 
-    /// Bytes this record holds: its text and its fixed part.
-    fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<StoredRecord>()
-            + self.id.len()
-            + self.app.len()
-            + self.title.len()
-            + self.msg.len()
+    /// Heap bytes this record owns: its shared block (two counts and the record) and the
+    /// capacity of each of its strings.
+    fn owned_bytes(&self) -> usize {
+        2 * std::mem::size_of::<usize>()
+            + std::mem::size_of::<StatusRecord>()
+            + self.id.capacity()
+            + self.app.capacity()
+            + self.title.capacity()
+            + self.msg.capacity()
     }
 }
 
@@ -251,9 +266,11 @@ impl ProgramStatus {
         StatusSummary { generation: self.generation, top, unseen }
     }
 
-    /// Bytes the records hold, at most 32 records of their capped fields.
+    /// Heap bytes the store owns: its record vector's capacity and every record's shared block,
+    /// its share of [`super::MAX_PROGRAM_METADATA_BYTES`]. Persistent pane state, never capture.
     pub fn retained_bytes(&self) -> usize {
-        self.records.iter().map(|stored| stored.record.retained_bytes()).sum()
+        self.records.capacity() * std::mem::size_of::<StoredRecord>()
+            + self.records.iter().map(|stored| stored.record.owned_bytes()).sum::<usize>()
     }
 
     /// Apply one parsed report; returns whether anything changed.
@@ -386,8 +403,8 @@ fn decode_text(
         // When: `encoded` is past its encoded cap, the report is discarded undecoded.
         return Err("text_length");
     }
-    let unpadded = encoded.trim_end_matches('=');
-    let decoded = TEXT_ENGINE.decode(unpadded).map_err(|_| "text_base64")?;
+    // Padding is checked as supplied: canonical or none decodes, excess `=` or padding alone fails.
+    let decoded = TEXT_ENGINE.decode(encoded).map_err(|_| "text_base64")?;
     if decoded.len() > max_decoded {
         // When: `decoded` is past its decoded cap, the report is discarded, never cut.
         return Err("text_length");
@@ -506,7 +523,7 @@ impl Performer {
                 // The store is copied only when a reader still holds the previous snapshot, and
                 // records are shared, so the copy is one vector of pointers.
                 if Arc::make_mut(&mut self.program_status).apply(report) {
-                    self.program_status_dirty = true;
+                    self.note_program_status_change();
                 }
             }
             Err(reason) => {
@@ -529,10 +546,16 @@ impl Performer {
         let selected = self.program_status.records().any(&ends);
         // When: nothing is selected, the shared snapshot is not copied.
         if selected && Arc::make_mut(&mut self.program_status).remove_where(ends) {
-            self.program_status_dirty = true;
+            self.note_program_status_change();
             return true;
         }
         false
+    }
+
+    /// Mark the batch for a summary and publish whether a `done` or `error` record is held.
+    fn note_program_status_change(&mut self) {
+        self.program_status_dirty = true;
+        self.program_status_unseen.store(self.program_status.summary().unseen, Ordering::SeqCst);
     }
 
     /// An admitted OSC 133 prompt start ends working, blocked and idle records, in stream order.
@@ -553,6 +576,24 @@ impl Parser {
     /// read after it. Program-supplied display metadata: never logged or evaluated.
     pub fn program_status(&self) -> Arc<ProgramStatus> {
         Arc::clone(&self.performer.program_status)
+    }
+
+    /// The flag the parser sets while it holds a `done` or `error` record, updated at every change
+    /// under its lock, so the host reads its state without the lock and without the summary event.
+    pub fn program_status_unseen_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.performer.program_status_unseen)
+    }
+
+    /// Heap the pane's OSC 7501 records and OSC 1337 user variables own, and how many of each it
+    /// holds. Persistent pane state, separate from [`Parser::retained_amount`]'s capture bytes, so
+    /// cancelling a capture never reports it as released; at most [`super::MAX_PROGRAM_METADATA_BYTES`].
+    pub fn program_metadata_amount(&self) -> sonicterm_types::ResourceAmount {
+        let status = &self.performer.program_status;
+        let user_vars = &self.performer.user_vars;
+        sonicterm_types::ResourceAmount {
+            bytes: status.retained_bytes() + user_vars.retained_bytes(),
+            items: status.len() + user_vars.len(),
+        }
     }
 
     /// The summary of the pane's records, for the tab marker.

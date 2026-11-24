@@ -158,10 +158,6 @@ impl App {
         profile: MotionProfile,
         bytes: Vec<u8>,
     ) {
-        #[cfg(test)]
-        if let Some(hook) = MOTION_QUEUE_HOOK.take() {
-            hook();
-        }
         if !profile.reports_motion() {
             // When: the profile's tracking reports no such motion, the program would misread it.
             return;
@@ -176,10 +172,18 @@ impl App {
 
 #[cfg(test)]
 thread_local! {
-    /// Run once where an encoded motion report reaches the queue, so a test can publish a mode
-    /// change after the route read the modes it encoded under.
+    /// Run once where a no-button route stamps a report with the modes it encoded under, so a test
+    /// can publish a mode change between encoding and the stamp; a reread there would be caught.
     pub(in crate::app) static MOTION_QUEUE_HOOK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::Cell::new(None) };
+}
+
+/// Run the armed motion hook once, at a no-button route's profile stamp.
+#[cfg(test)]
+pub(in crate::app) fn run_motion_queue_hook() {
+    if let Some(hook) = MOTION_QUEUE_HOOK.take() {
+        hook();
+    }
 }
 
 #[cfg(test)]

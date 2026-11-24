@@ -344,11 +344,23 @@ impl App {
             .collect()
     }
 
+    /// Write encoded keys to their panes. `acknowledge` is set only for a key the user pressed or
+    /// released, never for synthetic focus-loss cleanup: such a key ends the pane's done and error
+    /// records first, as the user saw the pane.
     pub(super) fn dispatch_terminal_key_writes(
         &mut self,
         writes: Vec<(u64, keyboard_protocol::EncodedKey)>,
+        acknowledge: bool,
     ) -> keyboard_protocol::KeyRoutes {
         keyboard_protocol::dispatch_key_writes(writes, |pane_id, bytes| {
+            let acknowledged = acknowledge
+                && self
+                    .registry
+                    .pane_mut(pane_id)
+                    .is_some_and(|pane| pane.acknowledge_program_status());
+            if acknowledged {
+                self.redraw_window_of_pane(pane_id);
+            }
             self.write_to_pane(pane_id, bytes, PtyInputSource::Keyboard)
         })
     }
@@ -400,14 +412,8 @@ impl App {
             // When: find_map cannot resolve pane_id, its input has no live destination.
             return false;
         };
-        // A key the user typed means they saw the pane: its done and error records end. Agent
-        // input, replies and pointer reports are not the user looking.
-        let acknowledged = source == PtyInputSource::Keyboard && pane.acknowledge_program_status();
         let queued =
             Self::queue_pane_input(self.event_loop_proxy.as_ref(), pane, pane_id, source, bytes);
-        if acknowledged {
-            self.redraw_window_of_pane(pane_id);
-        }
         if queued {
             // Accepted discrete input may stay outstanding; the status line checks on it later.
             self.arm_held_input(pane_id);

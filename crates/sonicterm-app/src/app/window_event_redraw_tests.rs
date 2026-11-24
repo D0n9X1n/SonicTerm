@@ -222,7 +222,7 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
             .collect()
     };
     let writes = encode(app.terminal_key_targets(source), b"press");
-    let accepted = app.dispatch_terminal_key_writes(writes);
+    let accepted = app.dispatch_terminal_key_writes(writes, true);
     let key = PhysicalKey::Code(KeyCode::ArrowUp);
     app.registry
         .windows
@@ -239,7 +239,7 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
         terminal_repeat_targets(&app.registry.windows[&source_window].pty_pressed_keys, key, true)
             .unwrap();
     app.wait_for_input_queues();
-    app.dispatch_terminal_key_writes(encode(repeat.keys().copied().collect(), b"repeat"));
+    app.dispatch_terminal_key_writes(encode(repeat.keys().copied().collect(), b"repeat"), true);
     assert_eq!(
         submitted.take().into_iter().map(|(pane, _)| pane).collect::<BTreeSet<_>>(),
         accepted.keys().copied().collect()

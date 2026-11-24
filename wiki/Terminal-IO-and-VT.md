@@ -730,7 +730,8 @@ URI to 8 KiB and client id to 1 KiB.
   `id` is empty or malformed (`/`-separated `[A-Za-z0-9_.+-]+` segments, at most 32 bytes each
   and 8 deep; an omitted `id` is the root record), `app` is over 32 bytes, `title` is over 256
   encoded or 192 decoded bytes, `msg` is over 2732 encoded or 2048 decoded bytes, either text is
-  not base64 (padding optional) of strict UTF-8 without control characters, or the state is not
+  not base64 (unpadded, or with exactly its canonical padding; an extra `=` or padding alone is
+invalid) of strict UTF-8 without control characters, or the state is not
   `idle`, `working`, `done`, `blocked`, `error` or `clear`. `kind` (`permission`, `question`,
   `auth`) is kept only for `blocked`, `progress` (0-100) only for `working` and `blocked`, and
   an `app` outside `[A-Za-z0-9_.+-]` reads as empty. `state=clear` removes the `id` and its
@@ -739,7 +740,11 @@ URI to 8 KiB and client id to 1 KiB.
   `working`, `blocked` and `idle` records end at an admitted OSC 133 `A` prompt start, in stream
   order, so a report after it in the same output survives, and when the pane's process exits;
   `done` and `error` end when the pane gains focus (its window becomes frontmost, or its tab or
-  split becomes active there) or the user types a key into it; RIS ends every record. The most
+  split becomes active there) or the user types a key into it, checked against the pane's own
+  records, so one the tab marker does not show yet ends too. A window focus change applies on
+  its native focus event, so a blur and refocus between two frames still counts; a tab or split
+  switch applies at the window's next frame. The key releases SonicTerm sends for keys still held when a
+  window loses focus are not the user typing and end nothing. RIS ends every record. The most
   urgent record of a tab's panes is the tab marker described in [Usage](Usage). A discarded
   report logs a fixed reason code, rate-limited, never its text; ids, apps, titles and messages
   are untrusted display data, never evaluated. Status is advisory: it never focuses, types or

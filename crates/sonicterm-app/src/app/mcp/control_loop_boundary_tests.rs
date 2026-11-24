@@ -367,7 +367,8 @@ fn list_panes_withholds_a_tab_label_from_an_unreadable_pane() {
 
 /// Many panes with maximal titles cannot push a `list_panes` reply toward the bridge's 1 MiB line
 /// limit: the title fields share one byte budget per reply, a field past it is `null` with an
-/// explicit `"budget"` marker, the reply still succeeds, and the first panes keep their titles.
+/// explicit `"budget"` marker, the reply still succeeds and is `partial`, and the first panes keep
+/// their titles.
 #[test]
 fn list_panes_bounds_every_title_by_one_reply_budget() {
     // The bridge's relay line limit (`sonicterm_mcp::relay::MAX_LINE_BYTES`).
@@ -397,6 +398,9 @@ fn list_panes_bounds_every_title_by_one_reply_budget() {
     assert_eq!(last["omitted"]["title"], "budget", "{}", last["omitted"]);
     assert_eq!(last["omitted"]["icon_title"], "budget");
     assert_eq!(last["omitted"]["tab_title"], "budget");
+    // Every pane is listed, so only the budget omission makes the result partial.
+    assert_eq!(result["structuredContent"]["truncated_panes"], 0);
+    assert_eq!(result["structuredContent"]["partial"], true, "a title omission is partial");
 }
 
 /// A pane's OSC 1337 user variables as `list_panes` lists them: `(name, value)` pairs in order.
@@ -444,7 +448,8 @@ fn list_panes_lists_readable_user_vars_in_insertion_order() {
 
 /// Many panes with full user-variable stores share the one reply budget with the titles: later
 /// panes list `user_vars` as `null` with a `"budget"` marker, never a cut list, the first pane
-/// keeps its whole list, and the reply stays well inside the bridge's line limit.
+/// keeps its whole list, the omission makes the reply `partial`, and the reply stays well inside
+/// the bridge's line limit.
 #[test]
 fn list_panes_bounds_user_vars_by_the_reply_budget() {
     // The bridge's relay line limit (`sonicterm_mcp::relay::MAX_LINE_BYTES`).
@@ -473,6 +478,8 @@ fn list_panes_bounds_user_vars_by_the_reply_budget() {
     let last = listed(&result, panes[19]);
     assert_eq!(last["user_vars"], Value::Null);
     assert_eq!(last["omitted"]["user_vars"], "budget", "{}", last["omitted"]);
+    assert_eq!(result["structuredContent"]["truncated_panes"], 0);
+    assert_eq!(result["structuredContent"]["partial"], true, "a user_vars omission is partial");
 }
 
 /// Through the real tool and loop paths under `read = "agent"`, `list_panes` lists a readable
@@ -528,25 +535,32 @@ fn list_panes_lists_typed_program_status_and_text_only_on_opt_in() {
     );
     let wire = result.to_string();
     assert!(!wire.contains("userapp") && !wire.contains("user-secret"), "leaked: {wire}");
+    // An unreadable pane is filtered by scope, not omitted by a budget, so nothing is partial.
+    assert_eq!(result["structuredContent"]["partial"], false);
 }
 
-/// Many panes with full opted-in status stores share the one reply budget: later panes list
-/// `program_status` as `null` with a `"budget"` marker, never a cut list, yet keep the
-/// lightweight `program_state`, and the reply stays well inside the bridge's line limit.
+/// Opted-in status lists have their own 64 KiB sublimit inside the shared reply budget: once the
+/// lists listed so far fill it, a later pane lists `program_status` as `null` with a `"budget"`
+/// marker, never a cut list, while the shared budget still lists its title and its lightweight
+/// `program_state`, and the omission makes the whole result `partial`.
 #[test]
-fn list_panes_bounds_program_status_by_the_reply_budget() {
-    // The bridge's relay line limit (`sonicterm_mcp::relay::MAX_LINE_BYTES`).
-    const RELAY_LINE_BYTES: usize = 1 << 20;
+fn list_panes_bounds_program_status_by_its_own_sublimit() {
     use base64::Engine;
+    // Each quote serializes as two bytes, so one record's message costs about 4 KiB on the wire
+    // and eight of them about 33 KiB: one pane's list fits the 64 KiB sublimit, two do not, and
+    // twelve lists together stay far below the shared 256 KiB budget.
     let msg = base64::engine::general_purpose::STANDARD.encode([b'"'; 2048]);
     let sequence: String =
-        (0..32).map(|index| format!("\x1b]7501;id=r{index}:state=working:msg={msg}\x07")).collect();
+        (0..8).map(|index| format!("\x1b]7501;id=r{index}:state=working:msg={msg}\x07")).collect();
     let mut app = app();
     let mut panes = Vec::new();
     for _ in 0..12 {
         let pane_id = app.__test_seed_tab("tab");
         let window = app.main_mut().unwrap();
-        window.panes[&pane_id].parser.lock().advance(sequence.as_bytes());
+        let mut parser = window.panes[&pane_id].parser.lock();
+        parser.advance(sequence.as_bytes());
+        parser.advance(b"\x1b]2;job\x07");
+        drop(parser);
         panes.push(pane_id);
     }
     let shared = install(&mut app, McpControl::Agent);
@@ -554,19 +568,23 @@ fn list_panes_bounds_program_status_by_the_reply_budget() {
     shared.set_program_status_text(true);
     let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
     assert_eq!(result["isError"], false);
-    let wire_bytes = result.to_string().len();
-    assert!(wire_bytes < RELAY_LINE_BYTES / 2, "the reply took {wire_bytes} bytes");
     let first = listed(&result, panes[0]);
-    assert_eq!(first["program_status"].as_array().map(Vec::len), Some(32), "kept whole");
+    assert_eq!(first["program_status"].as_array().map(Vec::len), Some(8), "kept whole");
+    let second = listed(&result, panes[1]);
+    assert_eq!(second["program_status"], Value::Null, "past the sublimit");
+    assert_eq!(second["omitted"]["program_status"], "budget");
+    assert_eq!(second["program_state"], "working", "the lightweight state stays");
     let last = listed(&result, panes[11]);
-    assert_eq!(last["program_status"], Value::Null);
+    assert_eq!(last["title"], "job", "the shared budget is not spent by the status lists");
     assert_eq!(last["omitted"]["program_status"], "budget");
-    assert_eq!(last["program_state"], "working", "the lightweight state stays");
+    assert_eq!(result["structuredContent"]["truncated_panes"], 0);
+    assert_eq!(result["structuredContent"]["partial"], true, "a status omission is partial");
 }
 
 /// Many panes with long OSC 7 directories share the one reply budget with the titles, so the
 /// complete JSON-RPC response line stays below the bridge's 1 MiB limit instead of closing the
-/// connection: later panes list `cwd` as `null` with a `"budget"` marker, the first keeps its own.
+/// connection: later panes list `cwd` as `null` with a `"budget"` marker, the first keeps its own,
+/// and the omission makes the reply `partial`.
 #[test]
 fn list_panes_charges_every_cwd_to_the_reply_budget() {
     use crate::app::mcp::jsonrpc::{response, MAX_LINE_BYTES};
@@ -592,6 +610,8 @@ fn list_panes_charges_every_cwd_to_the_reply_budget() {
     let last = listed(&result, panes[79]);
     assert_eq!(last["cwd"], Value::Null);
     assert_eq!(last["omitted"]["cwd"], "budget", "{}", last["omitted"]);
+    assert_eq!(result["structuredContent"]["truncated_panes"], 0);
+    assert_eq!(result["structuredContent"]["partial"], true, "a cwd omission is partial");
 }
 
 /// The whole `list_panes` result, fixed fields and every pane record, stays within its bound:

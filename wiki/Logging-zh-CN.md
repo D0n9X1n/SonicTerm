@@ -747,6 +747,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 graphics_requested_created="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
                 graphics_requested_released="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
                 graphics_os_unavailable_reason="<reason>|none"
+                program_metadata_bytes=<bytes>
 ```
 
 进程数据来自操作系统，因此包含 SonicTerm 自身接缝未统计的分配器碎片、尚未归还的页、
@@ -784,8 +785,9 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 | `graphics_renderers` | 每个渲染器按类别（`surface`、`frame_texture`、`glyph_atlas`、`image_atlas`、`present_buffers`）请求的字节数与资源数，排序方式与 `renderers` 相同，每项以 `surface_count=exact`（Metal、DX12）或 `estimated`（Vulkan、GL）结尾；尚无渲染器时为 `none` |
 | `graphics_requested_created` / `graphics_requested_released` | 各存活渲染器自创建以来按类别已创建与已释放的请求字节数和资源数，在所有存活渲染器间求和；已丢弃渲染器的总量记录在它的 `renderer graphics teardown` 记录中 |
 | `graphics_os_unavailable_reason` | 操作系统查询拒绝给出数值时的原因（例如两个 DXGI 适配器共享渲染器的厂商 id 与设备 id）；否则为 `none` |
+| `program_metadata_bytes` | 会话中的 OSC 7501 程序状态记录与 OSC 1337 用户变量，是计入 `session_total_bytes` 的窗格接缝 |
 
-图形字段位于所有其他字段之后，因此它们之前的字段保持原有名称与顺序。渲染器被丢弃时，会在
+图形字段位于所有更早的字段之后，`program_metadata_bytes` 又位于图形字段之后，因此各自之前的字段保持原有名称与顺序。渲染器被丢弃时，会在
 `memory` 目标上以 `info` 级别写一条 `renderer graphics teardown` 记录，包含 `renderer_role`、
 `window_id`、`graphics_live`、`graphics_created`、`graphics_released`（每项均为按类别的
 `class=bytes/resources`）与 `surface_count`。各数值能看到什么、
@@ -822,11 +824,13 @@ pane retention pane="<window-id>/<pane-id>" total_bytes=<bytes>
                grid_visible_bytes=<bytes> grid_history_bytes=<bytes>
                grid_alternate_bytes=<bytes> parser_bytes=<bytes> hyperlink_bytes=<bytes>
                inline_media_bytes=<bytes> pty_output_bytes=<bytes> pty_input_bytes=<bytes>
+               program_metadata_bytes=<bytes>
                largest_seam="<seam-name>" largest_seam_bytes=<bytes>
 session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
                   grid_history_bytes=<bytes> grid_alternate_bytes=<bytes> parser_bytes=<bytes>
                   hyperlink_bytes=<bytes> inline_media_bytes=<bytes>
                   pty_output_bytes=<bytes> pty_input_bytes=<bytes>
+                  program_metadata_bytes=<bytes>
 pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
            writer_in_flight_bytes=<bytes> reply_resident_bytes=<bytes>
            reply_spill_disk_bytes=<bytes> reply_spill_file_bytes=<bytes>
@@ -844,7 +848,7 @@ pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
 超过 50 ms 的回退还会在 `warn` 级别记录 `synchronous PTY teardown fallback blocked the event loop`，包含
 `owner` 与 `blocked_ms`。
 
-八个接缝互不重叠，相加等于 `total_bytes`：
+九个接缝互不重叠，相加等于 `total_bytes`：
 
 | 字段 | 归属内容 | 首先处理 |
 | --- | --- | --- |
@@ -856,6 +860,7 @@ pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
 | `inline_media_bytes` | 窗格保留的已解码内联图像 | 减少图像或关闭图像较多的窗格 |
 | `pty_output_bytes` | 已排队或传输中的本地 PTY 输出 | 等待输出排空 |
 | `pty_input_bytes` | 等待送往 shell 或正在写入的输入（通常是大段粘贴），以及常驻的解析器回复；溢出到磁盘的回复不计入 | 等待 shell 读取 |
+| `program_metadata_bytes` | OSC 7501 程序状态记录与 OSC 1337 用户变量：向量容量、记录块与字符串；持久状态，取消捕获时从不回收 | 无需处理；每个窗格有上限，由程序替换或清除 |
 
 先读 `largest_seam`，再比较至少五次连续采样。数值很大但保持平稳，与每次采样都增长
 不是同一问题。窗格标签包含窗口 id 和窗格 id；标签页移动后窗格 id 不变，窗口 id 会变。

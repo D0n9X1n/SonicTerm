@@ -89,7 +89,7 @@ impl App {
                     Some(&mut targets),
                     is_synthetic,
                 );
-                self.dispatch_terminal_key_writes(writes);
+                self.dispatch_terminal_key_writes(writes, !is_synthetic);
             }
             return;
         }
@@ -114,7 +114,7 @@ impl App {
             if let Some(window) = self.registry.windows.get_mut(&win_id) {
                 window.pty_pressed_keys.insert(event.physical_key, targets);
             }
-            self.dispatch_terminal_key_writes(writes);
+            self.dispatch_terminal_key_writes(writes, !is_synthetic);
             return;
         }
         if let Some(chord) = key_event_to_string(event, modifiers) {
@@ -261,7 +261,7 @@ impl App {
         let targets = self.terminal_key_targets(active_pane);
         let writes =
             self.encoded_terminal_key_writes(event, modifiers, &targets, None, is_synthetic);
-        let delivered = self.dispatch_terminal_key_writes(writes);
+        let delivered = self.dispatch_terminal_key_writes(writes, !is_synthetic);
         if delivered.is_empty() {
             // When: delivered is empty, refused input must not clear selection or move the viewport.
             return;
@@ -367,6 +367,9 @@ impl App {
             // IME stays enabled; focus-in resets only its caret throttle to avoid native context churn.
             window.request_window_redraw();
         }
+        // Focus is applied on its native event, not sampled by the next frame: a blur clears every
+        // pane's focus, so a refocus between two redraws is still an edge that acknowledges.
+        self.acknowledge_focused_status_in(win_id);
         if let Some((pane_id, bytes)) = pointer_release {
             self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
         }

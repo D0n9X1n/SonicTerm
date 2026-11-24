@@ -143,7 +143,10 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
         panes.push(pane);
     }
     let truncated_panes = entries.len() - panes.len();
-    let partial = truncated_panes > 0 || panes.iter().any(|pane| pane["details"] == "skipped");
+    // Any budget omission, a pane left out or a skipped probe means the listing is incomplete.
+    let partial = truncated_panes > 0
+        || text_budget.omitted()
+        || panes.iter().any(|pane| pane["details"] == "skipped");
     listing(panes, partial, truncated_panes)
 }
 
@@ -210,7 +213,7 @@ fn pane_summary(
     // omitted; the list is charged as a whole and never cut.
     let top = program_status.summary().top;
     pane["program_state"] = json!(top.map(|top| top.state.as_str()));
-    text_budget.place(
+    text_budget.place_status(
         &mut pane,
         "program_status",
         super::read::program_status_json(&program_status, status_text),

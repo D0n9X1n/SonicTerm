@@ -137,13 +137,16 @@ fn a_real_key_acknowledges_and_agent_input_does_not() {
         app.write_to_pane(front, b"x".to_vec(), source);
         assert_eq!(markers(&mut app, child)[0], Some(StatusMarker::Error), "{source:?}");
     }
-    app.dispatch_terminal_key_writes(vec![(
-        front,
-        crate::app::keyboard_protocol::EncodedKey {
-            bytes: b"x".to_vec(),
-            held: crate::app::keyboard_protocol::HeldKey::Legacy,
-        },
-    )]);
+    app.dispatch_terminal_key_writes(
+        vec![(
+            front,
+            crate::app::keyboard_protocol::EncodedKey {
+                bytes: b"x".to_vec(),
+                held: crate::app::keyboard_protocol::HeldKey::Legacy,
+            },
+        )],
+        true,
+    );
     assert_eq!(markers(&mut app, child)[0], None);
 }
 
@@ -174,6 +177,56 @@ fn focus_acknowledges_on_its_edge_only() {
     app.handle_window_focus_changed(child, true);
     app.acknowledge_focused_status_in(child);
     assert_eq!(markers(&mut app, child), vec![None, None], "refocus is a new edge");
+}
+
+/// A key acknowledges against the parser's records, not the App's delayed summary: a done record
+/// the parser holds while its summary event is still queued ends on the key, and the late summary
+/// never brings it back.
+#[test]
+fn a_key_acknowledges_a_record_whose_summary_is_still_queued() {
+    let (mut app, child, front, _) = two_tabs();
+    let queued = {
+        let pane = app.registry.pane_mut(front).unwrap();
+        let mut parser = pane.parser.lock();
+        parser.advance(b"\x1b]7501;state=done\x07");
+        parser.program_status_summary()
+    };
+    app.dispatch_terminal_key_writes(
+        vec![(
+            front,
+            crate::app::keyboard_protocol::EncodedKey {
+                bytes: b"x".to_vec(),
+                held: crate::app::keyboard_protocol::HeldKey::Legacy,
+            },
+        )],
+        true,
+    );
+    app.note_program_status(front, queued);
+    assert_eq!(markers(&mut app, child)[0], None);
+}
+
+/// Focus acknowledges on the native focus event, not on the frame that samples it: a blur and a
+/// refocus between two redraws is a new edge, so a record that arrived while focused ends.
+#[test]
+fn a_blur_and_refocus_between_redraws_acknowledges() {
+    let (mut app, child, _, back) = two_tabs();
+    app.handle_window_focus_changed(child, true);
+    app.acknowledge_focused_status_in(child);
+    feed(&mut app, back, "\x1b]7501;state=done\x07");
+    app.handle_window_focus_changed(child, false);
+    app.handle_window_focus_changed(child, true);
+    app.acknowledge_focused_status_in(child);
+    assert_eq!(markers(&mut app, child)[1], None);
+}
+
+/// Focus-loss key cleanup is not the user looking: the release bytes it writes as keyboard input
+/// leave a done or error record in place.
+#[test]
+fn focus_loss_key_cleanup_never_acknowledges() {
+    let (mut app, child, front, _) = two_tabs();
+    feed(&mut app, front, "\x1b]7501;state=error\x07");
+    app.write_to_pane(front, b"\x1b[13;28;0;0;0;1_".to_vec(), PtyInputSource::Keyboard);
+    assert_eq!(markers(&mut app, child)[0], Some(StatusMarker::Error));
 }
 
 /// Both redraw paths acknowledge focus before they refresh the tab markers.

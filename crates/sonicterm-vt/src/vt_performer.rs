@@ -69,6 +69,7 @@ impl Performer {
             user_vars: Arc::default(),
             program_status: Arc::default(),
             program_status_dirty: false,
+            program_status_unseen: Arc::default(),
             program_status_refusals: 0,
             cwd: None,
             osc7_cwd: None,

@@ -187,9 +187,12 @@ pub struct PaneState {
     pub(crate) creator: crate::app::mcp::agents::PaneOwner,
     /// The OSC 7501 summary the tab marker reads; replaced only by a newer generation.
     pub(crate) program_status: sonicterm_vt::vt::StatusSummary,
-    /// Whether the pane was the focused pane of the frontmost window at the last frame, so focus
-    /// acknowledges its done and error records once, on the edge.
+    /// Whether the pane was the focused pane of the frontmost window when focus was last applied,
+    /// so focus acknowledges its done and error records once, on the edge.
     pub(crate) status_focused: bool,
+    /// The parser's own flag for a held `done` or `error` record, set before its summary event
+    /// reaches the App, so an acknowledgment never waits on that event.
+    pub(crate) status_unseen: Arc<std::sync::atomic::AtomicBool>,
     /// The child process's exit status, set once when the exit is first handled, so a waiter on
     /// another thread reads it without the event loop.
     pub(crate) exit_status: Arc<std::sync::OnceLock<sonicterm_types::PaneExitStatus>>,
@@ -333,13 +336,14 @@ impl PaneState {
         pty: Option<PtyHandle>,
         media_pool: &Arc<media::InlineMediaPool>,
     ) -> Self {
-        let (keyboard_input, pointer_input, pointer_shape, sync_state) = {
+        let (keyboard_input, pointer_input, pointer_shape, sync_state, status_unseen) = {
             let parser = crate::app::frame_counters::lock_parser(&parser);
             (
                 parser.keyboard_input_snapshot(),
                 parser.pointer_input_snapshot(),
                 parser.pointer_shape_snapshot(),
                 parser.synchronized_output(),
+                parser.program_status_unseen_flag(),
             )
         };
         Self {
@@ -391,6 +395,7 @@ impl PaneState {
             creator: crate::app::mcp::agents::PaneOwner::User,
             program_status: sonicterm_vt::vt::StatusSummary::default(),
             status_focused: false,
+            status_unseen,
             exit_status: Arc::new(std::sync::OnceLock::new()),
             change_signal: Arc::default(),
             run_typed_at: Arc::new(AtomicU64::new(0)),

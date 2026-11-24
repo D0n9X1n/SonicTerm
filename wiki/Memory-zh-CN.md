@@ -18,6 +18,7 @@
 | OSC 0/2/7/8 原始收集器 | 整个负载 16 KiB | 拒绝超长输入；报告保留容量，不增加媒体捕获计数 |
 | 媒体负载 | 每个传输 16 MiB | 拒绝，不截断也不局部显示 |
 | 媒体捕获暂存 | 进程共 64 MiB；下限 4 MiB；保证 13 个并发下限预留 | 无法暂存时拒绝；连续两次 30 s 采样无进度后取消 |
+| 程序元数据 | 每个窗格 32 条 OSC 7501 状态记录与 64 个 OSC 1337 用户变量（名称与值共 16 KiB）；`MAX_PROGRAM_METADATA_BYTES` 限定它们拥有的堆内存，含向量容量与字符串容量 | 淘汰最久未报告的记录或最老的变量；属于持久状态，取消捕获从不释放或报告它 |
 | 已解码内联图像 | 每窗格 64 MiB 且最多 128 张（kitty 图像的多个放置共享一个缓冲，只计一次）；256 MiB 进程目标按存活窗格平分；最小 4 MiB 且保留最新一张 | 删除最老图像；在空闲窗格扫描收敛前，受压进程最多可在目标之外为每个存活窗格保留一份 4 MiB 最新图像余量 |
 | 编码图像尺寸 | 像素数 ≤ 2,048²，声明宽高 ≤ 8,192；预算内的较大图像按长边缩小到 1,024 px | 解码前拒绝 |
 | 渲染图像尺寸 | 宽高 ≤ 1,024；BGRA8 ≤ 4 MiB | 缩放 iTerm2/kitty 图像；Sixel 解码进按绘制范围分配的缓冲，裁剪在 1,024 以内 |
@@ -133,7 +134,8 @@ worker 继续持有整组 grant。计数表示持有的资源，不只是正在�
 每个 `AppPane` 所有者仍有一个已提交字节绊线。类型化的
 `pane_seam_cap_terms()` 清单让每个实际计费的窗格类别恰好出现一次。可见区、历史区与已保存
 主屏幕共用同一个网格上限，因此由 `GridVisible` 携带该值，`GridHistory` 与
-`GridAlternate` 携带零；`ParserCapture` 同时携带两个解析器上限；PTY 输入的队列上限只计一次：
+`GridAlternate` 携带零；`ParserCapture` 同时携带两个解析器上限；`ProtocolMetadata` 携带超链接注册表上限加
+`MAX_PROGRAM_METADATA_BYTES`；PTY 输入的队列上限只计一次：
 
 ```text
 PANE_SEAM_CAP_SUM_BYTES = sum(pane_seam_cap_terms().bytes)
@@ -148,7 +150,7 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 
 ### 记账内容
 
-单个窗格报告包含八个互不重叠的接缝：
+单个窗格报告包含九个互不重叠的接缝：
 
 | 字段 | 所属内存 |
 | --- | --- |
@@ -160,8 +162,9 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 | `inline_media_bytes` | 窗格保留的已解码图像像素 |
 | `pty_output_bytes` | 排队 PTY 输出固定的环形缓冲内存 |
 | `pty_input_bytes` | 输入侧内存：排队输入向量、写入线程正在写的消息，以及回复暂存区的常驻环形缓冲（溢出到磁盘的回复不计入） |
+| `program_metadata_bytes` | OSC 7501 程序状态记录与 OSC 1337 用户变量：向量容量、每条记录的共享块与每个字符串的容量。属于持久的窗格状态，与超链接一起计入 `ProtocolMetadata`；`parser_bytes` 不含它，因此取消停滞的捕获只释放并记录捕获字节 |
 
-`total_bytes` 是八项之和，`largest_seam` 指出最大项。`session retention` 行会对所有
+`total_bytes` 是九项之和，`largest_seam` 指出最大项。`session retention` 行会对所有
 已采样窗格汇总同样字段。
 
 状态栏的辅助功能状态不属于窗格分项。屏幕阅读器连接期间，每个终端窗口保留已公开的段、播报文本、
@@ -348,7 +351,7 @@ PTY 队列分别读取；各窗格、渲染器、共享分配器及操作系统�
 
 - 操作系统给出的 `process_private_committed_bytes`、`process_resident_bytes`、
   `process_virtual_bytes` 及其变化量；
-- 会话总量和全部八个窗格接缝；
+- 会话总量和全部九个窗格接缝（`program_metadata_bytes` 位于图形字段之后）；
 - `panes_total`、`panes_sampled`、`panes_contended`；
 - 渲染器总量、角色和 `live_renderers`；
 - `live_fg_probe_workers`，即该 App 的前台探测 worker 线程数；
@@ -406,7 +409,7 @@ allocator_largest_block_bytes
 | `DIFFERENCE` | 操作系统 footprint 减去 SonicTerm 统计的容量，带符号且不截断。它是诊断值而非对账：分配器空闲、GPU 内存、字体和未跟踪的分配都会计入这里，各数值也可能重叠。 |
 | `SAMPLE` | 已测量的窗格数，以及因锁被占用而跳过的窗格数（`busy, skipped`），因此不完整的总量不会被当成整个会话。 |
 | `WINDOWS / RENDERERS` | 每个窗口渲染器的各部分（字形图集的尺寸、条目数与 fit、行缓存、临时缓冲），报告窗口自身的渲染器，以及预热渲染器。每个渲染器下的 `GPU requested` 按类别列出其请求的 GPU 字节数与资源数：surface、帧纹理、字形图集、图像图集与呈现缓冲区。 |
-| `PANES` | 按标签页标题列出每个窗格，分为网格可见区、历史、备用屏、解析器、超链接、内联媒体以及 PTY 输出与输入。各窗格行之和等于窗格总量。 |
+| `PANES` | 按标签页标题列出每个窗格，分为网格可见区、历史、备用屏、解析器、超链接、内联媒体、PTY 输出与输入，以及程序状态 / 用户变量。各窗格行之和等于窗格总量。 |
 | `PTY QUEUES` | 所有窗格的 PTY 队列汇总：内存中的字节（通道中等待的输入、writer 正在写入的消息，以及常驻回复层的已分配内存，排空后仍保留）与磁盘上的回复溢出，分开显示。`reply spill files` 一行显示进程预算已计入的文件字节与预算大小；`reply spill compactions` 一行显示压缩次数、最长一次，以及等待暂存区锁的最长时间。随后是回收器的同步 teardown 回退：次数、阻塞超过 50 ms 的次数、最长与总耗时；一旦发生过回退，还按 4 的幂次微秒分桶列出阻塞时间。每个窗格的数值读取时不获取其队列的锁。 |
 | `THREADS` | 线程数量与名称。线程共享进程内存，自身不持有内存。 |
 | `CHILD PROCESSES` | 每个窗格的 shell 及其后代进程，并给出各自的操作系统数值（`footprint`、`private` 或 `RSS`），每个窗格最多 64 个后代。它们是独立进程，不计入 SonicTerm 的 footprint。已离开 shell 进程树的进程（例如守护化的 tmux server）不会列出，WSL 与远程进程也不可见。 |

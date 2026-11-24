@@ -205,6 +205,10 @@ const CURRENT_DIR_OSC_PREFIX: &[u8; 16] = b"1337;CurrentDir=";
 /// Public for the same reason as [`MAX_MEDIA_PAYLOAD_BYTES`]: the backstop is
 /// derived from the caps, not parallel to them.
 pub const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
+/// The most heap one parser's persistent program metadata owns: its OSC 7501 records and OSC 1337
+/// user variables. Public for the same reason: the pane backstop is derived from it.
+pub const MAX_PROGRAM_METADATA_BYTES: usize =
+    vt_program_status::MAX_PROGRAM_STATUS_BYTES + vt_user_vars::MAX_USER_VARS_BYTES;
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
@@ -744,6 +748,9 @@ struct Performer {
     program_status: Arc<ProgramStatus>,
     /// Set when the current advance changed `program_status`, so it publishes one summary.
     program_status_dirty: bool,
+    /// Whether `program_status` holds a `done` or `error` record, stored at each change under the
+    /// parser lock, so the host's key and focus paths read the parser's state without locking.
+    program_status_unseen: Arc<std::sync::atomic::AtomicBool>,
     /// Discarded OSC 7501 reports, counted so their log line is rate-limited.
     program_status_refusals: u64,
     /// Latest permissively read directory path, from any source, used only for tab titles.

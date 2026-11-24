@@ -198,7 +198,7 @@ fn real_pty_alltabs_keyboard_excludes_readonly_receivers() {
                 })
                 .collect();
             input_phase(source, "write-begin");
-            let delivered = app.dispatch_terminal_key_writes(writes);
+            let delivered = app.dispatch_terminal_key_writes(writes, true);
             input_phase(source, "write-end");
             let expected = if read_only {
                 BTreeSet::from([source, peer])

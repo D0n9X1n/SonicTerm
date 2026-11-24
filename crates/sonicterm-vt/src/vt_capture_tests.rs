@@ -808,3 +808,28 @@ fn live_capture_count_is_per_parser_while_the_pool_counts_all_sharers() {
     assert_eq!(sixel.live_capture_count(), 0);
     assert_eq!(pool.live_captures(), 1, "only the kitty capture is still live");
 }
+
+/// Program status and user variables are persistent pane state, not capture: an idle parser that
+/// holds them retains no capture bytes, and cancelling a stalled capture beside them releases
+/// exactly the capture's bytes while the records stay live, so nothing persistent is reported as
+/// reclaimed.
+#[test]
+fn cancelling_a_capture_releases_only_capture_bytes_beside_retained_status() {
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool);
+    // `Build` and `value` in base64: a held `done` record and one user variable.
+    parser.advance(b"\x1b]7501;state=done:title=QnVpbGQ=\x07");
+    parser.advance(b"\x1b]1337;SetUserVar=name=dmFsdWU=\x07");
+    assert_eq!(parser.program_status().len(), 1, "precondition: a record is held");
+    assert_eq!(parser.retained_amount().bytes, 0, "persistent state is not capture");
+
+    let mut chunk = b"\x1b_Gf=100;".to_vec();
+    chunk.resize(64 * 1024, b'A');
+    parser.advance(&chunk);
+    let held = parser.retained_amount().bytes;
+    assert!(held > 0, "precondition: the capture holds staging");
+    assert_eq!(parser.cancel_capture(), held, "only the capture's bytes are released");
+    assert_eq!(parser.retained_amount().bytes, 0);
+    assert_eq!(parser.program_status().len(), 1, "the status record stays live");
+    assert_eq!(parser.user_vars().iter().count(), 1, "the user variable stays live");
+}

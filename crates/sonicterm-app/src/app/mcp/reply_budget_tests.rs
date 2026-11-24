@@ -33,3 +33,36 @@ fn escapes_count_against_the_budget() {
     budget.place(&mut pane, "title", json!(escaped));
     assert_eq!(pane["omitted"]["title"], "budget");
 }
+
+/// Status lists are charged to their own [`STATUS_TEXT_BUDGET_BYTES`] sublimit as well as the
+/// shared budget: a list past the sublimit is omitted whole while the shared budget still writes
+/// other fields, and only an actual omission marks the budget as having omitted something.
+#[test]
+fn status_lists_have_their_own_sublimit_inside_the_shared_budget() {
+    let mut budget = ReplyBudget::new();
+    let mut pane = json!({});
+    budget.place(&mut pane, "title", json!("t"));
+    assert!(!budget.omitted(), "a value that fits omits nothing");
+    // `["…"]` adds four bytes to the text, so two such lists just fit the sublimit and a third
+    // does not.
+    let list = json!(["s".repeat(STATUS_TEXT_BUDGET_BYTES / 2 - 4)]);
+    budget.place_status(&mut pane, "first", list.clone());
+    budget.place_status(&mut pane, "second", list.clone());
+    assert_eq!(pane["first"], list);
+    assert!(!budget.omitted());
+    budget.place_status(&mut pane, "third", list);
+    assert_eq!(pane["third"], Value::Null);
+    assert_eq!(pane["omitted"]["third"], "budget");
+    assert!(budget.omitted(), "the sublimit's omission is recorded");
+    budget.place(&mut pane, "cwd", json!("c".repeat(STATUS_TEXT_BUDGET_BYTES)));
+    assert_eq!(pane["cwd"], "c".repeat(STATUS_TEXT_BUDGET_BYTES), "the shared budget has room");
+}
+
+/// A shared-budget omission of any field is recorded, so the reply can say it is partial.
+#[test]
+fn a_shared_budget_omission_is_recorded() {
+    let mut budget = ReplyBudget::new();
+    let mut pane = json!({});
+    budget.place(&mut pane, "cwd", json!("x".repeat(REPLY_TEXT_BUDGET_BYTES)));
+    assert!(budget.omitted());
+}

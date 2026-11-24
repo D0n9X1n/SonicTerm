@@ -636,10 +636,11 @@ impl super::PaneState {
     }
 
     /// The user saw the pane: end its done and error records under the parser lock and store the
-    /// new summary. Locks only while such a record is held. Returns whether any ended.
+    /// new summary. Locks only while the parser's own flag says such a record is held, so a record
+    /// whose summary event is still queued is acknowledged too. Returns whether any ended.
     pub(super) fn acknowledge_program_status(&mut self) -> bool {
-        if !self.program_status.unseen {
-            // When: `program_status.unseen` is false, no done or error record is held to end.
+        if !self.status_unseen.load(std::sync::atomic::Ordering::SeqCst) {
+            // When: `status_unseen` is clear, the parser holds no done or error record to end.
             return false;
         }
         let mut parser = crate::app::frame_counters::lock_parser(&self.parser);

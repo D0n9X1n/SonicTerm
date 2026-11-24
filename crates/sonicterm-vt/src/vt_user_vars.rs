@@ -22,6 +22,10 @@ pub(super) const MAX_USER_VAR_NAME_BYTES: usize = 128;
 pub(super) const MAX_USER_VAR_VALUE_BYTES: usize = 4 * 1024;
 /// The record key the collector owns, and each record's prefix.
 pub(super) const SET_USER_VAR_KEY: &[u8] = b"SetUserVar=";
+/// The most heap one pane's variables own: an entry vector that doubles up to twice
+/// [`MAX_USER_VARS`] slots, and strings collected by character, which may double their content.
+pub(super) const MAX_USER_VARS_BYTES: usize =
+    2 * MAX_USER_VARS * std::mem::size_of::<(String, String)>() + 2 * MAX_USER_VAR_STORE_BYTES;
 
 /// Standard base64 with optional padding, as WezTerm and kitty accept.
 const VALUE_ENGINE: GeneralPurpose = GeneralPurpose::new(
@@ -42,6 +46,28 @@ impl UserVars {
     /// Each name and value, oldest first.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.entries.iter().map(|(name, value)| (name.as_str(), value.as_str()))
+    }
+
+    /// How many variables are held.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no variable is held.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Heap bytes the store owns: its entry vector's capacity and every name's and value's
+    /// capacity, its share of [`super::MAX_PROGRAM_METADATA_BYTES`]. Persistent pane state, never
+    /// capture.
+    pub fn retained_bytes(&self) -> usize {
+        self.entries.capacity() * std::mem::size_of::<(String, String)>()
+            + self
+                .entries
+                .iter()
+                .map(|(name, value)| name.capacity() + value.capacity())
+                .sum::<usize>()
     }
 
     /// Set `name` to `value` as the newest entry, evicting the oldest until both caps hold.

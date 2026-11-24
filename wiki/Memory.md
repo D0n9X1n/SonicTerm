@@ -19,6 +19,7 @@ This page explains what those figures count; protocol and atlas details are in
 | OSC 0/2/7/8 raw collector | 16 KiB whole payload | reject oversized input; report retained capacity, without incrementing media-capture count |
 | Media payload | 16 MiB per transfer | refuse rather than truncate or partially render |
 | Media capture staging | 64 MiB process-wide; 4 MiB floor; 13 concurrent floor reservations guaranteed | refuse an unstaged capture; cancel after two unchanged 30 s progress samples |
+| Program metadata | 32 OSC 7501 status records and 64 OSC 1337 user variables (16 KiB of names and values) per pane; `MAX_PROGRAM_METADATA_BYTES` bounds their owned heap, vector capacity and string capacity included | evict the least recently reported record or the oldest variable; persistent, so a capture cancel never releases or reports it |
 | Decoded inline images | 64 MiB and 128 images per pane (a kitty image's placements share one buffer and count once); 256 MiB process target divided across live panes; 4 MiB minimum and newest image retained | discard oldest images; a process under pressure may retain at most one 4 MiB newest-image residual per live pane beyond the target until the idle-pane pass converges |
 | Encoded image dimensions | pixels ≤ 2,048² and declared width/height ≤ 8,192; a larger image inside the budget is downscaled to 1,024 px on its long side | reject before decode |
 | Rendered image dimensions | width/height ≤ 1,024; BGRA8 ≤ 4 MiB | resize iTerm2/kitty images; Sixel decodes into a buffer sized to the painted extent, clipped at 1,024 |
@@ -168,7 +169,8 @@ Each `AppPane` owner does have one committed-byte tripwire. The typed
 `pane_seam_cap_terms()` inventory contains every charged pane class exactly
 once. Because visible, history, and saved-primary cells share one grid bound,
 `GridVisible` carries that cap while `GridHistory` and `GridAlternate` carry
-zero. `ParserCapture` carries both parser caps, and PTY input carries its queue
+zero. `ParserCapture` carries both parser caps, `ProtocolMetadata` carries the
+hyperlink registry cap plus `MAX_PROGRAM_METADATA_BYTES`, and PTY input carries its queue
 cap once:
 
 ```text
@@ -188,7 +190,7 @@ are observational, not a globally linearizable total.
 
 ### What is counted
 
-One pane report contains eight disjoint seams:
+One pane report contains nine disjoint seams:
 
 | Field | Owned memory |
 | --- | --- |
@@ -200,6 +202,7 @@ One pane report contains eight disjoint seams:
 | `inline_media_bytes` | decoded image pixels retained by the pane |
 | `pty_output_bytes` | ring memory pinned by queued PTY output |
 | `pty_input_bytes` | input-side memory: queued input vectors, the message the writer is writing, and the reply spool's resident ring (spilled replies are on disk and not counted) |
+| `program_metadata_bytes` | OSC 7501 program-status records and OSC 1337 user variables: vector capacity, each record's shared block and every string's capacity. Persistent pane state, charged to `ProtocolMetadata` with the hyperlinks; `parser_bytes` excludes it, so a stalled-capture cancel releases and logs only capture bytes |
 
 `total_bytes` is their sum. `largest_seam` names the largest part. A
 `session retention` line sums the same fields across sampled panes.
@@ -468,7 +471,7 @@ The line combines:
 
 - `process_private_committed_bytes`, `process_resident_bytes`, and
   `process_virtual_bytes` from the OS, with deltas;
-- the session total and all eight pane seams;
+- the session total and all nine pane seams (`program_metadata_bytes` after the graphics fields);
 - `panes_total`, `panes_sampled`, and `panes_contended`;
 - renderer totals, roles, and `live_renderers`;
 - `live_fg_probe_workers`, the App's foreground-probe worker threads;
@@ -534,7 +537,7 @@ selection is never wiped while you make or copy it. Pressing `R` always shows a 
 | `DIFFERENCE` | The OS footprint minus SonicTerm's counted capacity, signed and never clamped. It is a diagnostic, not a reconciliation: allocator slack, GPU memory, fonts and untracked allocations land here, and the figures can overlap. |
 | `SAMPLE` | Panes measured and panes skipped because their lock was held (`busy, skipped`), so a partial total is never shown as the whole session. |
 | `WINDOWS / RENDERERS` | Each window's renderer by part (glyph atlas with size, entries and fit, row caches, scratch buffers), the report window's own renderer, and any warm renderer. Under each renderer, `GPU requested` lists its requested GPU bytes and resource count by class: surface, frame texture, glyph atlas, image atlas and present buffers. |
-| `PANES` | Each pane by tab title, split into grid visible, history and alternate, parser, hyperlinks, inline media, and PTY output and input. The per-pane rows sum to the pane total. |
+| `PANES` | Each pane by tab title, split into grid visible, history and alternate, parser, hyperlinks, inline media, PTY output and input, and program status / user vars. The per-pane rows sum to the pane total. |
 | `PTY QUEUES` | Every pane's PTY queues summed: bytes in memory (input waiting in the channel, the message the writer is writing, and the resident reply tier's allocation, which a drain keeps) and reply spill on disk, shown apart. A `reply spill files` line shows the process budget's charged file bytes against its size, and a `reply spill compactions` line their count, the longest, and the longest wait for a spool lock. Then the reaper's synchronous teardown fallbacks: how many, how many blocked past 50 ms, the longest and the total, and once any ran, their blocked times in power-of-four microsecond buckets. Each pane's figures are read without taking its queue's lock. |
 | `THREADS` | Thread count and names. Threads share the process's memory and hold none of their own. |
 | `CHILD PROCESSES` | Each pane shell and its descendants with the OS figure for each (`footprint`, `private` or `RSS`), at most 64 descendants per pane. These are separate processes, not part of SonicTerm's footprint. A process that left its shell's tree, such as a daemonized tmux server, is not listed, and WSL or remote processes are not visible. |

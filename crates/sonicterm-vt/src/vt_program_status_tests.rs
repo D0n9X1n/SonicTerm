@@ -304,3 +304,50 @@ fn debug_prints_no_payload() {
         format!("{:?} {:?}", parser.program_status(), parser.program_status().records().next());
     assert!(!printed.contains("secret"), "{printed}");
 }
+
+/// `title` and `msg` padding is checked as supplied: canonical padding or none is accepted, and
+/// excess `=` or a value of padding alone is invalid base64 that discards the report.
+#[test]
+fn text_padding_is_validated_as_supplied() {
+    let mut parser = parser();
+    let padded = encode("Build".as_bytes());
+    assert!(padded.ends_with('='), "the fixture carries canonical padding");
+    report(&mut parser, &format!("state=done:title={padded}"));
+    assert_eq!(records(&parser)[0].1, "done", "canonical padding is accepted");
+    for bad in [
+        format!("title={padded}="),
+        format!("msg={padded}=="),
+        "title====".to_owned(),
+        "msg==".to_owned(),
+    ] {
+        report(&mut parser, &format!("state=error:{bad}"));
+        assert_eq!(records(&parser)[0].1, "done", "{bad} discards");
+    }
+}
+
+/// The persistent program metadata figure counts what the records and user variables really own:
+/// zero for a fresh parser, more than their text once full (vector slots and shared blocks), one
+/// item per record and variable, never past `MAX_PROGRAM_METADATA_BYTES`, and back to the user
+/// variables alone once RIS ends every record.
+#[test]
+fn program_metadata_counts_owned_allocations_within_its_cap() {
+    let mut parser = parser();
+    assert_eq!(parser.program_metadata_amount(), sonicterm_types::ResourceAmount::default());
+    let (title, msg) = (encode(&[b't'; 192]), encode(&[b'm'; 2048]));
+    for index in 0..MAX_STATUS_RECORDS {
+        report(&mut parser, &format!("id=r{index}:app=tool:state=done:title={title}:msg={msg}"));
+    }
+    let value = encode(&[b'v'; 4000]);
+    let vars: Vec<String> = (0..4).map(|index| format!("SetUserVar=n{index}={value}")).collect();
+    parser.advance(format!("\x1b]1337;{}\x07", vars.join(";")).as_bytes());
+    let text_bytes = MAX_STATUS_RECORDS * (192 + 2048) + 4 * 4002;
+    let full = parser.program_metadata_amount();
+    assert_eq!(full.items, MAX_STATUS_RECORDS + 4, "one item per record and variable");
+    assert!(full.bytes > text_bytes, "{} bytes owned for {text_bytes} of text", full.bytes);
+    assert!(full.bytes <= crate::vt::MAX_PROGRAM_METADATA_BYTES, "{} past the cap", full.bytes);
+    assert_eq!(parser.retained_amount().bytes, 0, "none of it is capture");
+    parser.advance(b"\x1bc");
+    let after_reset = parser.program_metadata_amount();
+    assert_eq!(after_reset.items, 4, "RIS ends the records and keeps the variables");
+    assert!(after_reset.bytes < full.bytes);
+}

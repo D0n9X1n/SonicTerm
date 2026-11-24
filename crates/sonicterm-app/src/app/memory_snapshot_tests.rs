@@ -145,6 +145,7 @@ pub(super) fn populated_snapshot() -> MemorySnapshot {
             inline_media: ResourceAmount { bytes: 32, items: 32 },
             pty_output: ResourceAmount { bytes: 64, items: 64 },
             pty_input: ResourceAmount { bytes: 128, items: 128 },
+            program_metadata: ResourceAmount { bytes: 256, items: 256 },
         },
         panes_total: 4,
         panes_sampled: 3,

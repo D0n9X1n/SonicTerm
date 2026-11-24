@@ -395,6 +395,8 @@ impl App {
                         // gesture by its press-time profile.
                         match (encoded_modes, held_profile) {
                             (Some(modes), _) => {
+                                #[cfg(test)]
+                                super::mouse_report::run_motion_queue_hook();
                                 let profile = MotionProfile::of(modes, held);
                                 self.queue_pointer_motion(pane_id, profile, bytes);
                             }

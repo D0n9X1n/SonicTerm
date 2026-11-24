@@ -21,6 +21,7 @@ impl PaneRetention {
             self.inline_media,
             self.pty_output,
             self.pty_input,
+            self.program_metadata,
         ]
         .into_iter()
         .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
@@ -41,6 +42,7 @@ impl PaneRetention {
             ("inline_media", self.inline_media),
             ("pty_output", self.pty_output),
             ("pty_input", self.pty_input),
+            ("program_metadata", self.program_metadata),
         ]
         .into_iter()
         .max_by_key(|(_, amount)| amount.bytes)
@@ -61,6 +63,7 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
     let hyperlink_bytes = parser.hyperlinks().retained_bytes();
     let hyperlink_items = parser.hyperlinks().len();
     let parser_amount = parser.retained_amount();
+    let program_metadata = parser.program_metadata_amount();
     drop(parser);
 
     let inline_images = pane.inline_images.try_lock()?;
@@ -93,6 +96,7 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
         inline_media,
         pty_output,
         pty_input,
+        program_metadata,
     })
 }
 
@@ -114,6 +118,7 @@ pub fn measure_panes<'a>(panes: impl IntoIterator<Item = &'a PaneState>) -> Pane
             inline_media: add(acc.inline_media, pane.inline_media),
             pty_output: add(acc.pty_output, pane.pty_output),
             pty_input: add(acc.pty_input, pane.pty_input),
+            program_metadata: add(acc.program_metadata, pane.program_metadata),
         }
     })
 }
