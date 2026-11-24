@@ -146,6 +146,9 @@ cursor_shape = "block"
 cursor_animation = "none"
 # Programs may set the clipboard with OSC 52: "allow" or "deny".
 osc52 = "allow"
+# Programs may ask for the clipboard with OSC 52 reads: "ask", "allow" or "deny".
+# "deny" stays silent; "ask" and "allow" answer each read empty, sending no data.
+osc52_read = "ask"
 # Most decoded bytes one OSC 52 write may hold in memory (at most 536870912).
 clipboard_write_limit_bytes = {clipboard_write_limit_bytes}
 # A plain click in a shell prompt moves its cursor there: "any-prompt" (every

@@ -363,6 +363,62 @@ pub(super) fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
     emitted
 }
 
+/// A read in a VT batch is answered through the batch's reply path (the reply spool), with the
+/// empty ST reply and no clipboard bytes, and still reaches the App only as a refused attempt.
+#[test]
+fn read_reply_rides_the_batch_reply_path() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let staging = crate::app::osc52_stream::ClipboardStaging::with_budget(1 << 20, 1 << 20);
+    let handles = handles.with_pane_id(7).with_clipboard_staging(staging);
+    let mut emitted = Vec::new();
+    let mut replies = Vec::new();
+    process_pane_vt_batch_with(
+        &handles,
+        b"\x1b]52;c;?\x07",
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |event| emitted.push(event),
+        Instant::now,
+        |batch| replies.extend(batch),
+    );
+    assert_eq!(replies, b"\x1b]52;c;\x1b\\");
+    assert!(clip_writes(&emitted).is_empty(), "a read writes nothing");
+    let refused = emitted.iter().any(|event| {
+        matches!(event, UserEvent::ClipboardAttempts { attempts, .. }
+            if attempts.refused == 1 && attempts.latest == Some(Osc52Refusal::Read))
+    });
+    assert!(refused, "the read is summarised as refused");
+}
+
+/// A flood of reads in one batch never builds a reply submission past the reply spool's 32 KiB
+/// record cap, which would latch the spool failed; every empty reply still arrives, in order.
+#[test]
+fn read_reply_flood_stays_within_the_submission_cap() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let staging = crate::app::osc52_stream::ClipboardStaging::with_budget(1 << 20, 1 << 20);
+    let handles = handles.with_pane_id(7).with_clipboard_staging(staging);
+    // 4,000 `cp` reads: 40 KB in, 72 KB of replies, more than two submissions' worth.
+    let read_count = 4_000;
+    let mut submissions: Vec<Vec<u8>> = Vec::new();
+    process_pane_vt_batch_with(
+        &handles,
+        b"\x1b]52;cp;?\x07".repeat(read_count),
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        Instant::now,
+        |batch| submissions.push(batch),
+    );
+    assert!(submissions.iter().all(|batch| batch.len() <= 32 * 1024), "a submission over the cap");
+    // Splits fall only between whole answers, so every submission starts a fresh reply.
+    assert!(submissions.iter().all(|batch| batch.starts_with(b"\x1b]52;")), "an answer was split");
+    assert_eq!(submissions.concat(), b"\x1b]52;c;\x1b\\\x1b]52;p;\x1b\\".repeat(read_count));
+}
+
 /// Each event as `(pane, text)` for a write, so tests compare writes by their payload.
 pub(super) fn clip_writes(events: &[UserEvent]) -> Vec<(u64, Option<String>)> {
     events

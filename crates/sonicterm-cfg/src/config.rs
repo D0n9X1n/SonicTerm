@@ -354,6 +354,8 @@ pub struct TerminalConfig {
     pub cursor_animation: CursorAnimation,
     /// Whether programs may write the clipboard with OSC 52; see [`Osc52Policy`].
     pub osc52: Osc52Policy,
+    /// Whether programs may read the clipboard with OSC 52; see [`Osc52ReadPolicy`].
+    pub osc52_read: Osc52ReadPolicy,
     /// Most decoded bytes one OSC 52 write may stage in memory; see
     /// [`TerminalConfig::effective_clipboard_write_limit_bytes`].
     pub clipboard_write_limit_bytes: usize,
@@ -403,8 +405,8 @@ pub enum CursorAnimation {
     Smooth,
 }
 
-/// Whether OSC 52 clipboard writes from programs in a pane reach the system clipboard. Reads are
-/// never answered either way. `Deny` suits panes that run untrusted remote programs, since any
+/// Whether OSC 52 clipboard writes from programs in a pane reach the system clipboard. Reads
+/// follow [`Osc52ReadPolicy`] instead. `Deny` suits panes that run untrusted remote programs, since any
 /// program printing to the terminal can otherwise replace the local clipboard.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -413,6 +415,22 @@ pub enum Osc52Policy {
     #[default]
     Allow,
     /// Every write is refused before the clipboard is touched.
+    Deny,
+}
+
+/// How an OSC 52 clipboard read (`?`) from a program is answered. `Deny` stays silent, as
+/// Ghostty and WezTerm do; `Ask` and `Allow` answer every read with an empty reply terminated by
+/// ST, one per requested destination, so a waiting program never hangs and no clipboard data is
+/// sent.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Osc52ReadPolicy {
+    /// Reads are answered empty, as a declined consent prompt answers them.
+    #[default]
+    Ask,
+    /// Reads are answered empty; no clipboard contents are read.
+    Allow,
+    /// Reads are dropped silently.
     Deny,
 }
 
@@ -677,6 +695,7 @@ impl Default for TerminalConfig {
             cursor_shape: CursorShape::default(),
             cursor_animation: CursorAnimation::default(),
             osc52: Osc52Policy::default(),
+            osc52_read: Osc52ReadPolicy::default(),
             clipboard_write_limit_bytes: DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES,
             click_to_move: ClickToMove::default(),
         }

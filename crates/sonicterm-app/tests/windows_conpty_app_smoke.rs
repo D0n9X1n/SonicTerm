@@ -43,12 +43,13 @@ fn cases() -> Vec<Case> {
             .input_required(),
         Case::new("osc22-query", "\x1b]22;?pointer,nonsense\x07").input(reply()).input_required(),
         Case::new("osc7501-query", "\x1b]7501;?\x07").input(reply()).input_required(),
+        Case::new("osc52-read", "\x1b]52;cp;?\x07").input(reply()).input_required(),
     ]
 }
 
-/// Contract: a pane's replies to color, pointer and program-status queries reach a program behind
-/// a real pseudoconsole byte for byte on the packaged runtime; the positive control is exact on
-/// both runtimes.
+/// Contract: a pane's replies to color, pointer, program-status and clipboard-read queries reach
+/// a program behind a real pseudoconsole byte for byte on the packaged runtime; the positive
+/// control is exact on both runtimes.
 #[test]
 #[ignore = "needs a staged ConPTY runtime; run with --ignored (the windows-conpty-forms gate step)"]
 fn windows_conpty_app_smoke() {

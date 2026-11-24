@@ -68,6 +68,10 @@ fn cases() -> Vec<Case> {
         Case::new("osc52-c", "\x1b]52;c;Zml4dHVyZQ==\x07").output_required(),
         Case::new("osc52-cp", "\x1b]52;cp;Zml4dHVyZQ==\x1b\\").output_required(),
         Case::new("osc52-bare-c", "\x1b]52;c\x07").output_required(),
+        Case::new("osc52-read", "\x1b]52;c;?\x07")
+            .input(echo(b"\x1b]52;c;\x1b\\"))
+            .output_required()
+            .input_required(),
         Case::new("osc1337-copy", "\x1b]1337;Copy=:Zml4dHVyZQ==\x07").output_required(),
         Case::new("osc7501-report", "\x1b]7501;app=fixture:state=working:progress=40\x07"),
         Case::new("osc7501-clear", "\x1b]7501;state=clear\x07"),

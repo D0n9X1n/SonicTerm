@@ -7,11 +7,12 @@
 //! one [`ClipboardJobHandle`], whose lease is held until the native clipboard call returns.
 
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU8, AtomicUsize, Ordering},
     Arc, OnceLock,
 };
 use std::time::{Duration, Instant};
 
+use sonicterm_cfg::config::Osc52ReadPolicy;
 use sonicterm_vt::vt::{ClipboardInbox, ClipboardPhase};
 
 pub(super) use super::spawn_pane::Osc52Refusal;
@@ -43,6 +44,17 @@ pub(in crate::app) struct ClipboardStaging {
     stream_limit_bytes: AtomicUsize,
     /// Program writes posted and not yet handled.
     program_slots: AtomicUsize,
+    /// `[terminal] osc52_read`, as [`read_policy_code`] encodes it; VT workers read it per read.
+    read_policy: AtomicU8,
+}
+
+/// The stored form of `policy`.
+fn read_policy_code(policy: Osc52ReadPolicy) -> u8 {
+    match policy {
+        Osc52ReadPolicy::Ask => 0,
+        Osc52ReadPolicy::Allow => 1,
+        Osc52ReadPolicy::Deny => 2,
+    }
 }
 
 impl ClipboardStaging {
@@ -61,7 +73,24 @@ impl ClipboardStaging {
             reserved_bytes: AtomicUsize::new(0),
             stream_limit_bytes: AtomicUsize::new(stream_limit_bytes),
             program_slots: AtomicUsize::new(0),
+            read_policy: AtomicU8::new(read_policy_code(Osc52ReadPolicy::default())),
         })
+    }
+
+    /// Publish `[terminal] osc52_read`; reads that end from now on follow it.
+    // Ordering: read_policy is Relaxed; each read samples one whole value and orders no data.
+    pub(in crate::app) fn set_read_policy(&self, policy: Osc52ReadPolicy) {
+        self.read_policy.store(read_policy_code(policy), Ordering::Relaxed);
+    }
+
+    /// The `[terminal] osc52_read` policy a read ending now follows.
+    // Ordering: read_policy is Relaxed; each read samples one whole value and orders no data.
+    pub(in crate::app) fn read_policy(&self) -> Osc52ReadPolicy {
+        match self.read_policy.load(Ordering::Relaxed) {
+            0 => Osc52ReadPolicy::Ask,
+            1 => Osc52ReadPolicy::Allow,
+            _ => Osc52ReadPolicy::Deny,
+        }
     }
 
     /// The staging every production pane shares, sized by the startup config through
@@ -486,12 +515,19 @@ struct OpenStream {
 pub(in crate::app) struct Osc52Intake {
     staging: Arc<ClipboardStaging>,
     open: Option<OpenStream>,
+    /// Empty read replies queued since the last [`Self::take_read_replies`]; never clipboard data.
+    read_replies: Vec<u8>,
 }
 
 impl Osc52Intake {
     /// An intake with no open stream, reserving from `staging`.
     pub(in crate::app) fn new(staging: Arc<ClipboardStaging>) -> Self {
-        Self { staging, open: None }
+        Self { staging, open: None, read_replies: Vec::new() }
+    }
+
+    /// Take the empty read replies queued since the last call, for the batch's reply path.
+    pub(in crate::app) fn take_read_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.read_replies)
     }
 
     /// Track `stream`, replacing (and releasing) a different stream the parser abandoned.
@@ -530,7 +566,12 @@ impl Osc52Intake {
                 let decoder = std::mem::replace(&mut decoder.decoder, Err(Osc52Refusal::Invalid));
                 self.open = None;
                 if query {
-                    // When: query is set, the payload was `?`, a read, which is never answered.
+                    // When: query is set, the payload was `?`, a read: it reads no clipboard and
+                    // is answered empty unless `osc52_read` is deny, which stays silent.
+                    if self.staging.read_policy() != Osc52ReadPolicy::Deny {
+                        self.read_replies
+                            .extend(super::osc52_read::empty_replies(kinds.as_bytes()));
+                    }
                     return Some(Err(Osc52Refusal::Read));
                 }
                 Some(self.finish(decoder, kinds.as_bytes()))

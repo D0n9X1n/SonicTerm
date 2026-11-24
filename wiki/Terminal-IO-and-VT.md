@@ -307,7 +307,7 @@ are refused, and user copies stay on the event-loop thread.
 | `52;c` (no data), `52;c;` | clears the clipboard |
 | Base64 padding | optional; any other byte discards the write |
 | non-UTF-8 payload | invalid sequences become U+FFFD |
-| `?` (any kinds) | read, refused; reads are never answered |
+| `?` (any kinds) | read: no clipboard contents are read; answered with empty `ESC ] 52 ; <label> ; ESC \` replies, or silent under `osc52_read = "deny"` |
 | `1337;Copy=:<b64>` | `c` write; an empty or `?` value writes nothing |
 | `1337;Copy=;<b64>` | not supported |
 
@@ -317,6 +317,15 @@ rejects them); the limit defaults to 64 MiB and is at most 512 MiB, held in memo
 on disk (kitty: 512 MB with disk spill); Windows reasserts only writes of at most 512 KiB of
 UTF-16; WezTerm's `Copy=;` spelling is not supported (WezTerm parses it but never acts on it).
 No DECRQM or OSC 5522 clipboard capability is advertised.
+
+A read is answered on the pane's ordinary parser-reply path, after the section's other
+replies, and every reply is ST-terminated whatever ended the request. One letter is echoed
+when it is `c`, `s` or `p` and any other single letter answers `c` (Ghostty; kitty answers `s`
+with `c`); a longer field answers once per destination it names, `c` before `p` (kitty), and
+`c` when it names neither. The reply is always empty, as Ghostty and kitty answer a declined
+prompt, so it carries no clipboard bytes and nothing is reserved for it. `osc52_read = "deny"`
+drops the read silently (Ghostty and WezTerm; kitty sends an empty reply). WezTerm ignores
+reads under every policy.
 
 ### Host reports
 
@@ -561,8 +570,9 @@ scanning after 5 s without a sentinel and is bounded at 60 s, a run at 150 s, a 
 read at 2 s and 64 KiB, and the job must hold no process 5 s after teardown.
 `SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR` names a directory that
 `setup-windows-conpty.py --destination` already staged; without it each binary stages its own.
-The required clipboard transport rows are `52;c;<b64>`, `52;cp;<b64>`, `52;c` and
-`1337;Copy=:<b64>`; a 4 MiB `52;c;` payload is recorded.
+The required clipboard transport rows are `52;c;<b64>`, `52;cp;<b64>`, `52;c`,
+`1337;Copy=:<b64>` and the read `52;c;?` with its injected reply; a 4 MiB `52;c;` payload is
+recorded. The app smoke requires the exact empty replies to `52;cp;?`.
 
 Which image sequences reach the parser therefore depends on the console
 runtime. The system ConPTY in Windows 11 build 26300.9457 (`conhost.exe`

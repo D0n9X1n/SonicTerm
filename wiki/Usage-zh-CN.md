@@ -211,7 +211,8 @@ hyperlink、宽字符结构和组合字符重新绘制，选区会保留；实�
 SonicTerm 会在复制前清除它；自动换行连接所选各行的位置发生变化时也会清除。
 终端程序也可通过 OSC 52 与 OSC 1337 `Copy=:` 写入剪贴板，解码后最多
 `[terminal] clipboard_write_limit_bytes`（默认 64 MiB）；空写入会清空剪贴板，Linux 上 `p`
-写入 PRIMARY。剪贴板读取/查询、格式错误的 Base64 和超限写入都会被忽略。见
+写入 PRIMARY。格式错误的 Base64 和超限写入都会被忽略。剪贴板读取（`52;c;?`）从不返回剪贴板
+内容：它得到一个空应答；`[terminal] osc52_read = "deny"` 时则被静默丢弃。见
 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。
 
 复制遵循终端记录的换行。因输出到达右边缘而接续上一行的行，会与上一行直接相连，

@@ -280,8 +280,10 @@ keeps the selection; an actual selected-cell change clears it before copy, and s
 does a change to where automatic wrapping joins the selected rows.
 Terminal applications may also write the clipboard through OSC 52 and OSC 1337
 `Copy=:`, up to `[terminal] clipboard_write_limit_bytes` decoded (64 MiB by default); an
-empty write clears it, and on Linux `p` writes PRIMARY. Clipboard reads/queries, malformed
-Base64 and oversized writes are ignored. See [Terminal IO and VT](Terminal-IO-and-VT).
+empty write clears it, and on Linux `p` writes PRIMARY. Malformed Base64 and oversized writes
+are ignored. A clipboard read (`52;c;?`) never returns clipboard contents: it is answered with
+an empty reply, or silently dropped under `[terminal] osc52_read = "deny"`. See
+[Terminal IO and VT](Terminal-IO-and-VT).
 
 Copy follows the wraps the terminal recorded. A row that continues the previous
 one because output reached the right edge joins it with no line break, and a

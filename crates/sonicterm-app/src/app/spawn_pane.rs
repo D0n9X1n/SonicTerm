@@ -61,7 +61,7 @@ const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Why an OSC 52 request did not write the clipboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc52Refusal {
-    /// A clipboard read (`?`); reads are never answered.
+    /// A clipboard read (`?`); no clipboard contents are read, and the reply, if any, is empty.
     Read,
     /// A kinds field with no destination this platform has.
     Selection(char),
@@ -909,6 +909,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 
         // Every accepted write is its own event, in order; refusals only count toward one summary.
         let mut attempts = ClipAttempts::default();
+        // Empty OSC 52 read replies of this section; they join the section's parser replies.
+        let mut read_replies = Vec::new();
         if clipboard_inbox.is_some() || clipboard_open.is_some() {
             // When: clipboard_inbox or clipboard_open is set, the intake follows this section's
             // clipboard events outside the parser lock; other sections never touch the intake.
@@ -937,6 +939,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 }
             }
             intake.reconcile(clipboard_open, at);
+            read_replies = intake.take_read_replies();
         } else {
             // When: neither clipboard_inbox nor clipboard_open is set, an intake still tracking a
             // stream the parser reset without an event releases it.
@@ -971,6 +974,14 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             send_reply(std::mem::take(&mut reply_batch));
         }
         reply_batch.extend(replies);
+        // Read answers join whole, keeping room for the kitty replies that follow them.
+        let reserved = kitty_replies.len();
+        super::osc52_read::append_answers(
+            &mut reply_batch,
+            &read_replies,
+            reserved,
+            &mut send_reply,
+        );
         // A kitty reply ends its advance prefix, so it follows every VT reply of that prefix.
         reply_batch.extend(kitty_replies);
         if remaining.is_empty() {

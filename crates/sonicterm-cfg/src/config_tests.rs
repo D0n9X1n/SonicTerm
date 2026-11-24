@@ -381,6 +381,25 @@ fn osc52_policy_defaults_to_allow_and_parses_deny() {
     assert!(crate::config::default_config_template().contains("\nosc52 = \"allow\"\n"));
 }
 
+/// `[terminal] osc52_read` defaults to `"ask"`, parses each policy, refuses any other value, and
+/// the starter template names the default.
+#[test]
+fn osc52_read_policy_defaults_to_ask_and_parses_each_value() {
+    use crate::config::Osc52ReadPolicy;
+    assert_eq!(Config::default().terminal.osc52_read, Osc52ReadPolicy::Ask);
+    for (name, expected) in [
+        ("ask", Osc52ReadPolicy::Ask),
+        ("allow", Osc52ReadPolicy::Allow),
+        ("deny", Osc52ReadPolicy::Deny),
+    ] {
+        let parsed: Config =
+            toml::from_str(&format!("[terminal]\nosc52_read = \"{name}\"\n")).unwrap();
+        assert_eq!(parsed.terminal.osc52_read, expected, "{name}");
+    }
+    assert!(toml::from_str::<Config>("[terminal]\nosc52_read = \"yes\"\n").is_err());
+    assert!(crate::config::default_config_template().contains("\nosc52_read = \"ask\"\n"));
+}
+
 /// The starter template is written only into an absent file: a config that already exists,
 /// such as one another writer created a moment earlier, keeps its bytes.
 #[test]

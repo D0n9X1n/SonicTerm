@@ -1,5 +1,6 @@
 use super::*;
 use base64::Engine as _;
+use sonicterm_cfg::config::Osc52ReadPolicy;
 use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::{Parser, VtEvent};
 
@@ -208,6 +209,53 @@ fn reads_still_refused() {
     for kinds in ["c", "p", "", "x"] {
         assert_eq!(run(&staging, &osc52(kinds, "?")), [Err(Osc52Refusal::Read)], "{kinds}");
     }
+}
+
+/// The read replies one request queues on a fresh intake over `staging`.
+fn read_replies(staging: &Arc<ClipboardStaging>, bytes: &[u8]) -> Vec<u8> {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut intake = Osc52Intake::new(staging.clone());
+    for event in parser.advance(bytes) {
+        if let VtEvent::ClipboardStream { stream, phase } = event {
+            let _ = intake.handle(parser.clipboard_inbox(), stream, phase, Instant::now());
+        }
+    }
+    intake.take_read_replies()
+}
+
+/// Under the default `ask`, and under `allow`, a BEL-terminated read is answered with one empty
+/// ST-terminated reply per destination; nothing is reserved from the staging budget.
+#[test]
+fn ask_default_and_allow_answer_reads_empty() {
+    let staging = staging(1 << 20, 1 << 20);
+    assert_eq!(staging.read_policy(), Osc52ReadPolicy::Ask, "the default policy");
+    for policy in [Osc52ReadPolicy::Ask, Osc52ReadPolicy::Allow] {
+        staging.set_read_policy(policy);
+        assert_eq!(read_replies(&staging, &osc52("c", "?")), b"\x1b]52;c;\x1b\\", "{policy:?}");
+        assert_eq!(
+            read_replies(&staging, &osc52("cp", "?")),
+            b"\x1b]52;c;\x1b\\\x1b]52;p;\x1b\\",
+            "{policy:?}"
+        );
+    }
+    assert_eq!(staging.reserved_bytes(), 0);
+}
+
+/// Under `deny` a read is dropped silently: no reply, nothing reserved, still counted refused.
+#[test]
+fn deny_silent_no_reservation() {
+    let staging = staging(1 << 20, 1 << 20);
+    staging.set_read_policy(Osc52ReadPolicy::Deny);
+    assert_eq!(read_replies(&staging, &osc52("c", "?")), b"");
+    assert_eq!(run(&staging, &osc52("c", "?")), [Err(Osc52Refusal::Read)]);
+    assert_eq!(staging.reserved_bytes(), 0);
+}
+
+/// A write is never answered: only a `?` read queues a reply.
+#[test]
+fn writes_queue_no_read_reply() {
+    let staging = staging(1 << 20, 1 << 20);
+    assert_eq!(read_replies(&staging, &osc52("c", &encode(b"hi"))), b"");
 }
 
 /// `p` alone targets PRIMARY and never the clipboard, and only where PRIMARY exists.

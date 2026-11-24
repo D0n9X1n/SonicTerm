@@ -142,7 +142,8 @@ cargo build -p sonicterm-app
   and rechecks the policy epoch at the commit point; the lease moves into the job and is released
   when the native call returns. The event loop writes a user copy itself only when nothing is in
   flight and it is at most 512 KiB. macOS has no worker and refuses program writes over 512 KiB.
-  Clipboard reads/queries remain unsupported.
+  Clipboard reads (`osc52_read.rs`) never read the native clipboard: under `ask` and `allow`
+  each is answered with empty ST replies on the parser-reply path, under `deny` silently.
 - Main and child keyboard, IME, focus and modifier events share source-WindowId
   ownership. Search input has priority over READONLY; quick-select retains its
   hint keys. In READONLY, only the explicit safe action whitelist may execute.

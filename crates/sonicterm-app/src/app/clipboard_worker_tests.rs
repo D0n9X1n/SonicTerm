@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::osc52_stream::{ClipState, ClipboardStaging};
 use crate::app::{App, FrontmostKind};
-use sonicterm_cfg::config::{Config, Osc52Policy};
+use sonicterm_cfg::config::{Config, Osc52Policy, Osc52ReadPolicy};
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
 use sonicterm_grid::grid::{CellFlags, Color};
@@ -288,6 +288,21 @@ fn policy_revoked_while_queued_refused_at_worker_commit() {
     settle(&mut app);
     assert_eq!(fake.state().writes, ["committed"], "the queued write was refused");
     assert_eq!(app.clip_state.staging.program_slots_in_use(), 0);
+}
+
+/// Every reload hands `[terminal] osc52_read` to the staging the VT workers read, so a reload to
+/// `deny` silences reads from the next request on and a reload back restores `ask`.
+#[test]
+fn reload_publishes_the_read_policy_to_staging() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    // A private staging keeps this reload off the process default sibling tests read.
+    app.clip_state = ClipState::new(ClipboardStaging::with_budget(1 << 20, 1 << 20));
+    let mut deny = Config::default();
+    deny.terminal.osc52_read = Osc52ReadPolicy::Deny;
+    app.apply_new_config(deny);
+    assert_eq!(app.clip_state.staging.read_policy(), Osc52ReadPolicy::Deny);
+    app.apply_new_config(Config::default());
+    assert_eq!(app.clip_state.staging.read_policy(), Osc52ReadPolicy::Ask);
 }
 
 /// Commit `text` over a fake clipboard holding `previous`, with any reassertion due at once.

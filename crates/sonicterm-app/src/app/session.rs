@@ -75,6 +75,7 @@ impl App {
         let clip_limit = config.terminal.effective_clipboard_write_limit_bytes();
         let clip_staging = osc52_stream::ClipboardStaging::init_process_default(clip_limit);
         clip_staging.set_stream_limit(clip_limit);
+        clip_staging.set_read_policy(config.terminal.osc52_read);
         theme.apply_accessibility(&config.accessibility);
         // Seed the process-global tab width limits from config before any tab
         // bar is laid out, so configured values take effect on the very first
