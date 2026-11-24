@@ -34,16 +34,16 @@ pub(super) fn reseed_parser_theme_colors(
     if let Some((red, green, blue)) = theme.colors.cursor.rgb() {
         parser.set_theme_cursor(red, green, blue);
     }
-    // OSC 17, OSC 19 and the OSC 21 `cursor_text` key answer these while a program set none.
-    if let Some((red, green, blue)) = theme.colors.selection_bg.rgb() {
-        parser.set_theme_selection_bg(red, green, blue);
-    }
-    if let Some((red, green, blue)) = theme.colors.selection_fg.rgb() {
-        parser.set_theme_selection_fg(red, green, blue);
-    }
-    if let Some((red, green, blue)) = theme.colors.cursor_text.rgb() {
-        parser.set_theme_cursor_text(red, green, blue);
-    }
+    // OSC 17, OSC 19 and the OSC 21 `cursor_text` key answer these while a program set none. A
+    // value that does not parse answers the opaque black the renderer draws for it, so a reply
+    // and the mode 2031 fingerprint never keep the previous theme's color.
+    let drawn = |hex: &sonicterm_cfg::theme::Hex| hex.rgb().unwrap_or((0, 0, 0));
+    let (red, green, blue) = drawn(&theme.colors.selection_bg);
+    parser.set_theme_selection_bg(red, green, blue);
+    let (red, green, blue) = drawn(&theme.colors.selection_fg);
+    parser.set_theme_selection_fg(red, green, blue);
+    let (red, green, blue) = drawn(&theme.colors.cursor_text);
+    parser.set_theme_cursor_text(red, green, blue);
     // OSC 4 palette: indices 0..=7 from `ansi.*`, 8..=15 from `bright.*`,
     // in the standard xterm slot order.
     let normal = [

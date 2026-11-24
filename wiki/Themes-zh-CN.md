@@ -137,7 +137,7 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 | `foreground` | 默认终端文字和应用文字 |
 | `cursor` | 光标、link 下划线和 link tint 来源 |
 | `cursor_text` | 块状光标下的字符，除非窗格中的程序设置了自己的颜色 |
-| `selection_bg` | 选区 overlay，以 50% alpha 绘制，除非窗格中的程序设置了自己的颜色；也是命令面板和搜索框中选中文字的背景 |
+| `selection_bg` | 选区 overlay，以 50% alpha 绘制；窗格中的程序可以设置自己的颜色，仍保持 50% alpha；也是命令面板和搜索框中选中文字的背景 |
 | `selection_fg` | 命令面板和搜索框中选中的文字；终端选区保持字形自身颜色，除非窗格中的程序设置了选区前景色 |
 | `colors.ansi` | ANSI 颜色 0–7 和派生 UI accent |
 | `colors.bright` | ANSI 颜色 8–15 和派生 UI accent |

@@ -103,3 +103,38 @@ fn selection_or_cursor_text_change_alone_sends_the_report() {
     let report = reseed_parser_theme_colors(&mut parser, &cursor_text);
     assert_eq!(report.as_deref(), Some(&b"\x1b[?997;1n"[..]), "cursor text");
 }
+
+/// A theme whose selection or cursor-text color does not parse reseeds the color the renderer
+/// draws for it, opaque black, instead of keeping the previous theme's value: OSC 17, 19 and the
+/// OSC 21 `cursor_text` key answer black, and mode 2031 reports the change.
+#[test]
+fn an_unparsable_selection_color_reseeds_the_drawn_fallback() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let mut valid = theme_with("#101010", Appearance::Dark);
+    valid.colors.selection_bg = Hex("#336699".into());
+    valid.colors.selection_fg = Hex("#ddeeff".into());
+    valid.colors.cursor_text = Hex("#123456".into());
+    seed_parser_theme_colors(&mut parser, &valid);
+    parser.advance(b"\x1b[?2031h");
+    let mut invalid = valid.clone();
+    for hex in [
+        &mut invalid.colors.selection_bg,
+        &mut invalid.colors.selection_fg,
+        &mut invalid.colors.cursor_text,
+    ] {
+        *hex = Hex("not a color".into());
+    }
+    let report = reseed_parser_theme_colors(&mut parser, &invalid);
+    assert_eq!(report.as_deref(), Some(&b"\x1b[?997;1n"[..]), "the drawn defaults changed");
+    let mut replies = Vec::new();
+    let mut remaining: &[u8] = b"\x1b]17;?\x07\x1b]19;?\x07\x1b]21;cursor_text=?\x07";
+    while !remaining.is_empty() {
+        let (consumed, _, reply) = parser.advance_with_replies(remaining);
+        replies.extend(reply);
+        remaining = &remaining[consumed..];
+    }
+    assert_eq!(
+        replies,
+        b"\x1b]17;rgb:0000/0000/0000\x07\x1b]19;rgb:0000/0000/0000\x07\x1b]21;cursor_text=rgb:00/00/00\x07"
+    );
+}

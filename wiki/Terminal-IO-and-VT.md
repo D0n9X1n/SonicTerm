@@ -343,7 +343,7 @@ Programs can set and reset the colors of their own pane:
 
 `OSC 21 ; key=value ; …`, the kitty color protocol, reads every `;`-separated field in order and
 answers in one `OSC 21 ; key=value ; …` reply with the request's terminator, sent only when the
-packet asks something:
+packet queries a color or names an unknown key in any form:
 
 | Key | `key=?` | `key=spec` | `key=` or bare `key` |
 | --- | --- | --- | --- |
@@ -361,7 +361,8 @@ packet asks something:
   included. A longer message is discarded whole through its own terminator (BEL, `ESC \` or an
   ESC that starts another sequence), so no part of it is applied or printed. CAN or SUB aborts
   it. C1 OSC and ST bytes are not color-request framing.
-- A packet is limited to 16 KiB and 526 fields that answer, set, reset or name an unknown key;
+- A packet is limited to 16 KiB and 526 counted fields: queries, sets and resets (including the
+  ones a not-held key ignores) and fields naming an unknown key;
   a longer packet, or one with a 527th such field, changes and answers nothing. The largest
   reply stays under 28.2 KB, so it is one reply-path submission.
 - Intentional differences: kitty accepts 256 KiB and any number of fields, while 16 KiB keeps

@@ -144,7 +144,7 @@ default; when omitted, it becomes `#d5c4a1`.
 | `foreground` | Default terminal and application text |
 | `cursor` | Cursor, link underline, and link tint source |
 | `cursor_text` | Character under a block cursor, unless the pane's program set its own |
-| `selection_bg` | Selection overlay, drawn at 50% alpha unless the pane's program set its own, and the background of selected text in the palette and search fields |
+| `selection_bg` | Selection overlay, drawn at 50% alpha; a pane's program can set its own color, which keeps that 50% alpha; also the background of selected text in the palette and search fields |
 | `selection_fg` | Selected text in the palette and search fields; a terminal selection keeps its glyph colors unless the pane's program set a selection foreground |
 | `colors.ansi` | ANSI colors 0–7 and derived UI accents |
 | `colors.bright` | ANSI colors 8–15 and derived UI accents |
