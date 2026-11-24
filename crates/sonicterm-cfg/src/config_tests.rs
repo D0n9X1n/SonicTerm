@@ -433,3 +433,22 @@ fn click_to_move_defaults_to_any_prompt_and_parses_each_mode() {
     assert!(toml::from_str::<Config>("[terminal]\nclick_to_move = \"always\"\n").is_err());
     assert!(crate::config::default_config_template().contains("click_to_move = \"any-prompt\""));
 }
+
+/// `clipboard_write_limit_bytes` defaults to 64 MiB, the template documents it, and values clamp
+/// to at most 512 MiB, so one program write can never stage more than that in memory.
+#[test]
+fn clipboard_write_limit_defaults_and_clamps() {
+    let defaults = Config::default();
+    assert_eq!(defaults.terminal.clipboard_write_limit_bytes, DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES);
+    assert_eq!(DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES, 64 * 1024 * 1024);
+    assert!(default_config_template().contains("clipboard_write_limit_bytes = 67108864"));
+    let unset: Config = toml::from_str("[terminal]\nosc52 = \"allow\"\n").unwrap();
+    assert_eq!(unset.terminal.effective_clipboard_write_limit_bytes(), 64 * 1024 * 1024);
+    for (configured, effective) in [(0, 0), (1024, 1024), (usize::MAX, 512 * 1024 * 1024)] {
+        let cfg: Config =
+            toml::from_str(&format!("[terminal]\nclipboard_write_limit_bytes = {configured}\n"))
+                .unwrap();
+        assert_eq!(cfg.terminal.effective_clipboard_write_limit_bytes(), effective);
+    }
+    assert_eq!(MAX_CLIPBOARD_WRITE_LIMIT_BYTES, 512 * 1024 * 1024);
+}

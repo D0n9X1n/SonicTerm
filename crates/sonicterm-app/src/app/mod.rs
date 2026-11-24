@@ -339,6 +339,7 @@ pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
 pub(crate) use shared_gpu::{font_fallback_waker, gpu_device_state_waker};
+mod osc52_stream;
 mod reply_delivery;
 mod report_windows;
 mod spawn_pane;
@@ -477,6 +478,8 @@ pub struct App {
     #[cfg(target_os = "windows")]
     /// One delayed OSC 52 write that survives a failing clipboard helper's cleanup.
     pub(super) pending_osc52_reassert: Option<PendingOsc52Reassert>,
+    /// Program clipboard writes: the shared staging, its charge, and retained native copies.
+    pub(in crate::app) clip_state: osc52_stream::ClipState,
     // `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`

@@ -70,6 +70,11 @@ impl App {
         config_normalizer: ConfigNormalizer,
     ) -> Self {
         let config = Self::normalize_config(&config_normalizer, config);
+        // The process staging is sized once by the first config; each App then sets the limit new
+        // streams read, which a reload changes.
+        let clip_limit = config.terminal.effective_clipboard_write_limit_bytes();
+        let clip_staging = osc52_stream::ClipboardStaging::init_process_default(clip_limit);
+        clip_staging.set_stream_limit(clip_limit);
         theme.apply_accessibility(&config.accessibility);
         // Seed the process-global tab width limits from config before any tab
         // bar is laid out, so configured values take effect on the very first
@@ -196,6 +201,7 @@ impl App {
             },
             #[cfg(target_os = "windows")]
             pending_osc52_reassert: None,
+            clip_state: osc52_stream::ClipState::new(clip_staging),
             pending_new_window: None,
             reports: Default::default(),
             pending_tear_out: None,

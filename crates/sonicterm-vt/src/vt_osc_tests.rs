@@ -1,22 +1,6 @@
 use super::*;
 use crate::vt::vt_test_support::*;
 
-/// OSC 52 surfaces the selection and encoded payload without decoding on the parser thread.
-#[test]
-fn osc52_clipboard_write_is_typed_for_the_host() {
-    let mut parser = Parser::new(Grid::new(80, 24));
-
-    let events = parser.advance(b"\x1b]52;c;Q29waWxvdCBjb3B5\x07");
-
-    assert!(events.iter().any(|event| {
-        matches!(
-            event,
-            VtEvent::Clipboard { selection: 'c', data }
-                if data == "Q29waWxvdCBjb3B5"
-        )
-    }));
-}
-
 /// OSC 7 parsing keeps authority provenance while decoding the filesystem path.
 #[test]
 fn osc7_snapshot_preserves_authority_and_decodes_path() {

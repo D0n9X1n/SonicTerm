@@ -607,6 +607,11 @@ impl App {
         if new_cfg.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
             self.pending_osc52_reassert = None;
         }
+        // A changed write limit applies to streams opened from now on; open streams and leases
+        // keep what they reserved.
+        self.clip_state
+            .staging
+            .set_stream_limit(new_cfg.terminal.effective_clipboard_write_limit_bytes());
         self.config = new_cfg;
         // Open windows take a changed Option-as-Alt at once; the warm pool was emptied above, so
         // every later window is created with it.

@@ -244,7 +244,7 @@ Current protocol support includes:
   focus reporting, and kitty keyboard flag set/push/pop/query;
 - OSC 0/2 titles, the OSC 1 tab name, the host-aware working directory from OSC 7, OSC 9;9 and OSC
   1337 `CurrentDir`, OSC 8 hyperlinks, OSC 52
-  clipboard events, OSC 4/10/11/12/17/19 color queries and sets, the OSC 21 kitty color
+  and OSC 1337 `Copy=:` clipboard writes, OSC 4/10/11/12/17/19 color queries and sets, the OSC 21 kitty color
   protocol, OSC 22 pointer shapes, OSC 104/110/111/112/117/119 color resets, OSC 133 prompt markers, OSC 9;4
   progress, OSC 1337 `SetUserVar` user variables, OSC 7501 program status, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
   title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere,
@@ -271,6 +271,47 @@ visibility change, device recovery, a changed surface size and surface recovery
 still present the live grid. DECRQM `CSI ? 2026 $ p` is answered with
 `CSI ? 2026 ; Ps $ y`, where `Ps` is 1 while an update is open and 2 otherwise. On Windows, ConPTY may move or drop the brackets, and the
 hold acts only on brackets that reach the parser.
+
+### Clipboard writes (OSC 52, OSC 1337 `Copy=:`)
+
+The raw collector owns `52;` and `1337;Copy=:` (key in any ASCII case). The kinds field is
+at most 16 bytes; a longer one is swallowed to its terminator. Encoded payload bytes move in
+chunks of at most 64 KiB through the parser's `ClipboardInbox`, which is not `Clone` and whose
+`Debug` prints only lengths, and the parser raises only payload-free
+`VtEvent::ClipboardStream { stream, phase }` events (`Data`, `End { kinds, query }`, `Abort`).
+A write commits only after BEL or ST. CAN, SUB, an unrelated ESC, or 60 s without a
+terminator abort the stream, release its queued chunks and swallow the rest of the OSC.
+
+The pane's VT worker decodes outside the parser lock: a strict Base64 alphabet, optional final
+padding, at most 3 characters carried between chunks, and the
+`[terminal] clipboard_write_limit_bytes` limit read when the stream opens. Every buffer is
+reserved from the process clipboard staging budget before it is allocated (see
+[Memory](Memory)), and a program slot (8 at most) is taken before the write is posted to the
+event loop, even for a clear. The event loop rechecks `[terminal] osc52` and calls the native
+clipboard; that call is the commit point, and the write's lease is released when it returns.
+Program writes and user copies commit on the event-loop thread in the order it handles them,
+so a later user copy always wins. macOS refuses program writes over 512 KiB, because
+`NSPasteboard` stays on the event-loop thread.
+
+| Form | SonicTerm |
+| --- | --- |
+| `c`, `s`, `0`–`9`, empty kinds | standard clipboard |
+| `p` | Linux PRIMARY; dropped on macOS and Windows |
+| `cp` | every destination the platform has |
+| unknown letter | ignored; a kinds field with no known letter is dropped |
+| `52;c` (no data), `52;c;` | clears the clipboard |
+| Base64 padding | optional; any other byte discards the write |
+| non-UTF-8 payload | invalid sequences become U+FFFD |
+| `?` (any kinds) | read, refused; reads are never answered |
+| `1337;Copy=:<b64>` | `c` write; an empty or `?` value writes nothing |
+| `1337;Copy=;<b64>` | not supported |
+
+Intentional differences from the reference terminals: `p` is dropped where there is no
+PRIMARY (kitty); non-UTF-8 payloads become U+FFFD (Ghostty and kitty keep raw bytes, WezTerm
+rejects them); the limit defaults to 64 MiB and is at most 512 MiB, held in memory and never
+on disk (kitty: 512 MB with disk spill); Windows reasserts only writes of at most 512 KiB of
+UTF-16; WezTerm's `Copy=;` spelling is not supported (WezTerm parses it but never acts on it).
+No DECRQM or OSC 5522 clipboard capability is advertised.
 
 ### Host reports
 
@@ -515,6 +556,8 @@ scanning after 5 s without a sentinel and is bounded at 60 s, a run at 150 s, a 
 read at 2 s and 64 KiB, and the job must hold no process 5 s after teardown.
 `SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR` names a directory that
 `setup-windows-conpty.py --destination` already staged; without it each binary stages its own.
+The required clipboard transport rows are `52;c;<b64>`, `52;cp;<b64>`, `52;c` and
+`1337;Copy=:<b64>`; a 4 MiB `52;c;` payload is recorded.
 
 Which image sequences reach the parser therefore depends on the console
 runtime. The system ConPTY in Windows 11 build 26300.9457 (`conhost.exe`

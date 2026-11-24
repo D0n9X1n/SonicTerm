@@ -475,9 +475,11 @@ visible, history, and saved-primary rows without reflow or later resurrection.
 
 Clipboard serialization keeps isolated or incomplete right-edge box drawing.
 It removes only a coherent multi-row side that ends in a lower-right frame
-corner. On Windows, a successful OSC 52 write gets one delayed reassertion only
-when the clipboard has reverted to the exact text observed before that write;
-a newer or unreadable clipboard owner is never overwritten.
+corner. On Windows, a successful OSC 52 write of at most 262,144 UTF-16 units
+(512 KiB) gets one delayed reassertion only when the clipboard has reverted to the
+exact text observed before that write, itself within the same bound; a newer,
+larger or unreadable clipboard owner is never overwritten, and a clear is never
+reasserted.
 
 Nested applications under rmux/tmux emit OSC 52 through `DCS tmux` passthrough.
 Trusted sessions require both options; `set-clipboard` alone does not relay the

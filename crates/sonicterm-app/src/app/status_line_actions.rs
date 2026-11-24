@@ -119,6 +119,7 @@ impl App {
             }
             Some(Osc52Refusal::TooLarge) => Some(ClipOutcome::TooLarge),
             Some(Osc52Refusal::Invalid) => Some(ClipOutcome::Invalid),
+            Some(Osc52Refusal::Busy) => Some(ClipOutcome::Busy),
         };
         let Some(outcome) = outcome else {
             // When: outcome is None, the batch's accepted write left no result, so nothing is shown.

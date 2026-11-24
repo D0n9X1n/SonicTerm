@@ -325,6 +325,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("os_drag.rs", "inner", 2),
     ("taskbar_progress.rs", "slot", 2),
     ("taskbar_progress.rs", "thread_slot", 1),
+    // A posted clipboard job's one-shot slot: `take` and the length-only `Debug`.
+    ("app/osc52_stream.rs", "0", 2),
     ("app/fg_probe.rs", "map", 9),
     ("app/fg_probe.rs", "proxy", 1),
     ("app/fg_probe.rs", "worker", 3),
@@ -427,6 +429,8 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
 /// the event-loop thread, and the counting helper that lock_parser wraps.
 pub(super) const WORKER_LOCK_SECTIONS: &[(&str, &str)] = &[
     ("app/spawn_pane.rs", "process_pane_vt_batch_with"),
+    // The worker aborting an expired clipboard stream, between batches on the same thread.
+    ("app/spawn_pane_vt.rs", "expire_clipboard_stream"),
     ("app/frame_counters.rs", "lock_counted"),
 ];
 

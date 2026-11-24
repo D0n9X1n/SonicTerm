@@ -692,6 +692,11 @@ pub(super) fn format_clip(
             StatusTone::Name,
             env.i18n.translate("status-spoken-clip-invalid"),
         ),
+        ClipOutcome::Busy => (
+            env.i18n.translate("status-value-clip-busy"),
+            StatusTone::Name,
+            env.i18n.translate("status-spoken-clip-busy"),
+        ),
     };
     let mut parts = vec![name_part(env, "status-name-clip"), StatusPart::new(text, tone)];
     let mut spoken = vec![spoken];

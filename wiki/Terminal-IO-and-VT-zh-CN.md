@@ -183,7 +183,7 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
 - 主屏幕与备用屏幕、应用光标键、括号粘贴、焦点报告，以及 kitty 键盘标志的
   set/push/pop/query；
 - OSC 0/2 标题、OSC 1 标签页名称、来自 OSC 7、OSC 9;9 与 OSC 1337 `CurrentDir` 的带主机校验的工作目录、
-  OSC 8 超链接、OSC 52 剪贴板事件、
+  OSC 8 超链接、OSC 52 与 OSC 1337 `Copy=:` 剪贴板写入、
   OSC 4/10/11/12/17/19 颜色查询与设置、OSC 21 kitty 颜色协议、OSC 22 指针形状、OSC 104/110/111/112/117/119 颜色重置、OSC 133 提示符标记、OSC 9;4 进度、OSC 1337 `SetUserVar` 用户变量、OSC 7501 程序状态，以及 OSC 9 / OSC 777 / OSC 99 通知。
   OSC 99 遵循 kitty 协议：标题和正文可一次发送，也可在同一 `i` id 下分块发送，可为纯文本或
   base64（`e=1`，可在任意位置分割，末尾填充可省略）；同时最多保留八个未完成通知，总计 16 KiB，
@@ -204,6 +204,42 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
 当前网格。DECRQM `CSI ? 2026 $ p` 的回复是 `CSI ? 2026 ; Ps $ y`：更新进行中时 `Ps`
 为 1，否则为 2。在 Windows 上，ConPTY 可能移动或丢弃这些括号，
 保持只作用于到达解析器的括号。
+
+### 剪贴板写入（OSC 52、OSC 1337 `Copy=:`）
+
+原始收集器负责 `52;` 与 `1337;Copy=:`（键名不区分 ASCII 大小写）。kinds 字段最多 16 字节；
+更长的会被吞掉直到终止符。编码后的负载以至多 64 KiB 的块经由解析器的 `ClipboardInbox`
+传递，该类型不可 `Clone`，其 `Debug` 只打印长度；解析器只发出不带负载的
+`VtEvent::ClipboardStream { stream, phase }` 事件（`Data`、`End { kinds, query }`、`Abort`）。
+只有 BEL 或 ST 之后写入才会提交。CAN、SUB、无关的 ESC 或 60 s 内没有终止符会中止该流，
+释放已排队的块并吞掉该 OSC 的剩余部分。
+
+窗格的 VT worker 在解析器锁之外解码：严格的 Base64 字母表、末尾填充可选、块之间最多携带
+3 个字符，并在流开始时读取 `[terminal] clipboard_write_limit_bytes` 上限。每个缓冲区在分配
+之前都从进程剪贴板暂存预算中预留（见 [内存](Memory-zh-CN)），写入在投递到事件循环之前先取得
+一个程序槽位（最多 8 个），清空也不例外。事件循环重新检查 `[terminal] osc52` 并调用系统剪贴板；
+该调用即提交点，写入的租约在其返回时释放。程序写入与用户复制按事件循环处理的顺序在事件循环
+线程上提交，因此后来的用户复制总是生效。macOS 拒绝超过 512 KiB 的程序写入，因为
+`NSPasteboard` 留在事件循环线程上。
+
+| 形式 | SonicTerm |
+| --- | --- |
+| `c`、`s`、`0`–`9`、空 kinds | 标准剪贴板 |
+| `p` | Linux PRIMARY；macOS 与 Windows 上丢弃 |
+| `cp` | 平台具有的每个目标 |
+| 未知字母 | 忽略；没有已知字母的 kinds 字段被丢弃 |
+| `52;c`（无数据）、`52;c;` | 清空剪贴板 |
+| Base64 填充 | 可选；任何其他字节使写入作废 |
+| 非 UTF-8 负载 | 无效序列变为 U+FFFD |
+| `?`（任意 kinds） | 读取，拒绝；读取从不应答 |
+| `1337;Copy=:<b64>` | `c` 写入；空值或 `?` 不写入任何内容 |
+| `1337;Copy=;<b64>` | 不支持 |
+
+与参考终端的有意差异：没有 PRIMARY 的平台丢弃 `p`（kitty）；非 UTF-8 负载变为 U+FFFD
+（Ghostty 与 kitty 保留原始字节，WezTerm 拒绝）；上限默认 64 MiB、至多 512 MiB，只保存在内存中、
+从不落盘（kitty：512 MB 并可溢出到磁盘）；Windows 只重新写入不超过 512 KiB UTF-16 的写入；
+不支持 WezTerm 的 `Copy=;` 写法（WezTerm 解析它但从不执行）。不通告 DECRQM 或 OSC 5522
+剪贴板能力。
 
 ### 主机报告
 
@@ -395,6 +431,8 @@ system 宿主不带该变量运行，且必须显示未加载 `conpty.dll` 并�
 整次运行上限 150 s，子进程输入读取上限 2 s 和 64 KiB，拆除后 5 s 内 job 中必须没有进程。
 `SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR` 指向已由 `setup-windows-conpty.py --destination`
 放置好的目录；未设置时每个二进制自行放置。
+必需的剪贴板传输行为 `52;c;<b64>`、`52;cp;<b64>`、`52;c` 与 `1337;Copy=:<b64>`；
+4 MiB 的 `52;c;` 负载作为记录。
 
 因此，哪些图像序列能到达解析器取决于控制台运行时。Windows 11 build 26300.9457 的
 系统 ConPTY（`conhost.exe` 10.0.26100.9444）原样转发 iTerm2 `OSC 1337;File=` 序列

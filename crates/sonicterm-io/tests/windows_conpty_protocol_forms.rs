@@ -64,6 +64,11 @@ fn cases() -> Vec<Case> {
         Case::new("osc1-icon-title", "\x1b]1;fixture tab\x07"),
         Case::new("osc1337-set-user-var", "\x1b]1337;SetUserVar=fixture=dmFsdWU=\x07"),
         Case::new("osc1337-current-dir", "\x1b]1337;CurrentDir=file://localhost/C:/fixture\x07"),
+        // OSC 52 writes and OSC 1337 `Copy=:`.
+        Case::new("osc52-c", "\x1b]52;c;Zml4dHVyZQ==\x07").output_required(),
+        Case::new("osc52-cp", "\x1b]52;cp;Zml4dHVyZQ==\x1b\\").output_required(),
+        Case::new("osc52-bare-c", "\x1b]52;c\x07").output_required(),
+        Case::new("osc1337-copy", "\x1b]1337;Copy=:Zml4dHVyZQ==\x07").output_required(),
         Case::new("osc7501-report", "\x1b]7501;app=fixture:state=working:progress=40\x07"),
         Case::new("osc7501-clear", "\x1b]7501;state=clear\x07"),
         Case::new("osc7501-query", "\x1b]7501;?\x07")
@@ -86,6 +91,8 @@ fn cases() -> Vec<Case> {
         Case::new("osc777-notify", "\x1b]777;notify;Fixture\x07"),
         Case::new("prompt-resize", "\x1b]133;A;redraw=last\x07")
             .input(InputPhase::Resize { total_rows: 60, rows: 20 }),
+        // Recorded, not required, and last, so its time cannot crowd out a required row.
+        Case::new("osc52-c-4mib", format!("\x1b]52;c;{}\x07", "QUFB".repeat(1024 * 1024))),
     ]
 }
 

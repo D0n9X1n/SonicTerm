@@ -226,6 +226,16 @@ arguments and replies being written) with one item per live connection. Both are
 and a request line of at most 1 MiB. Stopping the server releases the charge and
 closes the owner. No pane carries this class.
 
+OSC 52 and OSC 1337 `Copy=:` writes reserve every buffer before allocating it from one
+process-wide clipboard staging budget of `max(128 MiB, 2 × clipboard_write_limit_bytes)` at
+startup: the decoded bytes, the U+FFFD expansion of a non-UTF-8 payload, and the native copy
+(`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere). Each retention pass charges what
+live leases hold, as `ClipboardStaging`, to the tracking-only process owner, with one item per
+posted program write (at most 8), so a large write never trips a pane backstop. A lease is
+released when the native clipboard call returns; on Linux the part covering arboard's copy
+stays charged until SonicTerm's next write to that selection, or a user copy, replaces it. A
+write the budget cannot cover is refused busy.
+
 A `memory snapshot` line taken for a perf checkpoint carries the same fields plus
 four tags: `checkpoint_index`, `checkpoint_label`, `checkpoint_attempt`, and
 `checkpoint_complete` (no pane contended and every pane sampled). Taking it

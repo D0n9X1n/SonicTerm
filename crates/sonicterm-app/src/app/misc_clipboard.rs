@@ -28,6 +28,61 @@ impl App {
             // so leave the previous contents intact.
             return false;
         }
+        let written = self.write_clipboard_text(text);
+        if written {
+            // A user copy replaced the clipboard, so arboard's retained copy of an earlier
+            // program write is gone with it.
+            self.clip_state.retained.release_clipboard();
+        }
+        written
+    }
+
+    /// Write a program's `text` to `targets`; an empty text clears them. PRIMARY exists only on
+    /// Linux, where `targets.primary` can be set.
+    pub(in crate::app) fn set_program_clipboard_text(
+        &mut self,
+        text: String,
+        targets: crate::app::osc52_stream::ClipTargets,
+    ) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.pending_osc52_reassert = None;
+        }
+        let mut written = true;
+        if targets.primary {
+            written &= self.write_primary_text(&text);
+        }
+        if targets.clipboard {
+            written &= self.write_clipboard_text(text);
+        }
+        written
+    }
+
+    /// Write PRIMARY through arboard; the test clipboard keeps it off the desktop.
+    #[cfg(target_os = "linux")]
+    fn write_primary_text(&mut self, text: &str) -> bool {
+        use arboard::{LinuxClipboardKind, SetExtLinux};
+        if self.testing.test_clipboard_text.is_some() || self.testing.test_clipboard_files.is_some()
+        {
+            // When: test_clipboard_text or test_clipboard_files is set, the desktop PRIMARY is
+            // never written.
+            return true;
+        }
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            // When: no clipboard handle was created, no write occurred.
+            return false;
+        };
+        clipboard.set().clipboard(LinuxClipboardKind::Primary).text(text).is_ok()
+    }
+
+    /// PRIMARY does not exist here; `clip_targets` never selects it.
+    #[cfg(not(target_os = "linux"))]
+    fn write_primary_text(&mut self, _text: &str) -> bool {
+        false
+    }
+
+    /// Write the clipboard selection; an empty `text` clears it.
+    fn write_clipboard_text(&mut self, text: String) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if self.testing.test_clipboard_write_failure {
             // When: `test_clipboard_write_failure` is true, reject at the set_text
@@ -47,12 +102,18 @@ impl App {
             // must preserve any selection that depends on confirmed delivery.
             return false;
         };
-        if let Err(error) = clipboard.set_text(text.clone()) {
+        let result = if text.is_empty() {
+            clipboard.clear()
+        } else {
+            // When: text is non-empty, it replaces the clipboard's contents.
+            clipboard.set_text(text.clone())
+        };
+        if let Err(error) = result {
             tracing::warn!("clipboard set failed: {error}");
             false
         } else {
-            // When: set_text succeeded; record the byte count so a silent
-            // clipboard failure stays distinguishable from a real copy.
+            // When: result is Ok, record the byte count so a silent clipboard failure stays
+            // distinguishable from a real copy.
             tracing::info!("copied {} bytes", text.len());
             true
         }

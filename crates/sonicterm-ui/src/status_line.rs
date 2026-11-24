@@ -490,8 +490,10 @@ pub enum ClipOutcome {
     SelectionRefused(char),
     /// The payload was over the size cap.
     TooLarge,
-    /// Empty, malformed Base64 or not UTF-8.
+    /// Malformed Base64.
     Invalid,
+    /// The clipboard staging budget or the program-write slots were exhausted.
+    Busy,
 }
 
 /// Where the latest OSC 52 request came from, as seen from one window.

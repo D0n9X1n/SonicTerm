@@ -134,9 +134,11 @@ cargo build -p sonicterm-app
   generation. Hidden parser/image stores are neither locked nor cloned for a frame.
   Only genuine contention enters the retry floor; structural invalidity skips the
   whole assembly with a bounded window warning and a typed non-retry result.
-- Keep PTY redraw coalescing burst-aware; never redraw per byte. OSC 52 writes
-  must stay bounded and reach the native clipboard only on the event-loop thread;
-  clipboard reads/queries remain unsupported.
+- Keep PTY redraw coalescing burst-aware; never redraw per byte. OSC 52 and OSC 1337
+  `Copy=:` writes (`osc52_stream.rs`) reserve every buffer from `ClipboardStaging` before
+  allocating it, take a program slot before posting, and reach the native clipboard only on
+  the event-loop thread, which rechecks the policy at the commit point; clipboard
+  reads/queries remain unsupported.
 - Main and child keyboard, IME, focus and modifier events share source-WindowId
   ownership. Search input has priority over READONLY; quick-select retains its
   hint keys. In READONLY, only the explicit safe action whitelist may execute.

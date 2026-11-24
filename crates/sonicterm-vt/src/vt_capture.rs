@@ -214,6 +214,7 @@ impl Parser {
         let osc_bytes = match &self.raw_osc {
             Some(RawOsc::Semantic { content, .. }) => content.capacity(),
             Some(RawOsc::Iterm2 { capture, .. }) => capture.retained_bytes(),
+            Some(RawOsc::Clipboard(_)) => self.clipboard_retained_bytes(),
             Some(RawOsc::Probe { .. } | RawOsc::Refused { .. }) | None => 0,
         };
         // OSC 99 chunks wait here until their notification completes, at most MAX_NOTIFY_BYTES.
@@ -250,7 +251,12 @@ impl Parser {
             });
         let osc = match &self.raw_osc {
             Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
-            Some(RawOsc::Probe { .. } | RawOsc::Semantic { .. } | RawOsc::Refused { .. })
+            Some(
+                RawOsc::Probe { .. }
+                | RawOsc::Semantic { .. }
+                | RawOsc::Refused { .. }
+                | RawOsc::Clipboard(_),
+            )
             | None => 0,
         };
         direct.saturating_add(osc)
@@ -298,6 +304,12 @@ impl Parser {
         let semantic = match self.raw_osc.as_ref() {
             Some(RawOsc::Semantic { pending_esc, .. } | RawOsc::Refused { pending_esc }) => {
                 Some(*pending_esc)
+            }
+            Some(RawOsc::Clipboard(_)) => {
+                // When: RawOsc::Clipboard is open, it aborts like the host's expiry and the rest
+                // of the OSC is swallowed through its terminator.
+                self.abort_clipboard_stream();
+                return 0;
             }
             _ => None,
         };

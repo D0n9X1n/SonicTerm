@@ -345,7 +345,9 @@ pub(super) fn counting_worker_with_log(
 /// Run one VT batch of `bytes` through pane 7's worker handles and return what it emitted.
 pub(super) fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
     let (_pane, handles) = pane_and_worker_handles();
-    let handles = handles.with_pane_id(7);
+    // A private staging keeps sibling tests' held writes from exhausting this batch's slots.
+    let staging = crate::app::osc52_stream::ClipboardStaging::with_budget(1 << 20, 1 << 20);
+    let handles = handles.with_pane_id(7).with_clipboard_staging(staging);
     let mut emitted = Vec::new();
     process_pane_vt_batch_with(
         &handles,
@@ -359,6 +361,19 @@ pub(super) fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
         |_| {},
     );
     emitted
+}
+
+/// Each event as `(pane, text)` for a write, so tests compare writes by their payload.
+pub(super) fn clip_writes(events: &[UserEvent]) -> Vec<(u64, Option<String>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::ClipboardWrite { pane_id, job } => {
+                Some((*pane_id, job.take().map(|job| job.text)))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The events one batch of `bytes` emits through `handles`.

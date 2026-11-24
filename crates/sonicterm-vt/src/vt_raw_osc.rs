@@ -77,6 +77,7 @@ impl Parser {
                 // `1337;CurrentDir=` still matches, so every other spelling keeps the bound it had.
                 let probe_len = if USER_VAR_OSC_PREFIX.starts_with(&content[..index])
                     || is_current_dir_prefix(&content[..index])
+                    || vt_clipboard::is_copy_prefix(&content[..index])
                 {
                     content.len()
                 } else {
@@ -125,6 +126,15 @@ impl Parser {
                         content: Vec::new(),
                         pending_esc: false,
                     });
+                    return true;
+                }
+                if prefix == b"52;"
+                    || (prefix.len() == vt_clipboard::COPY_OSC_PREFIX.len()
+                        && vt_clipboard::is_copy_prefix(prefix))
+                {
+                    // When: the prefix names OSC 52 or OSC 1337 `Copy=:` in any ASCII case, stream
+                    // the payload to the inbox so no escape cap cuts it and no event carries it.
+                    self.begin_clipboard_stream(prefix != b"52;");
                     return true;
                 }
                 if prefix == b"7501;" {
@@ -188,6 +198,7 @@ impl Parser {
                 if !ITERM2_OSC_PREFIX.starts_with(prefix)
                     && !USER_VAR_OSC_PREFIX.starts_with(prefix)
                     && !is_current_dir_prefix(prefix)
+                    && !vt_clipboard::is_copy_prefix(prefix)
                     && ![b"0;".as_slice(), b"1;", b"2;", b"7;", b"8;"]
                         .iter()
                         .any(|value| value.starts_with(prefix))
@@ -259,6 +270,7 @@ impl Parser {
                 self.raw_osc = Some(RawOsc::Semantic { code, content, pending_esc });
                 true
             }
+            RawOsc::Clipboard(collector) => self.consume_clipboard_byte(collector, byte),
             RawOsc::Refused { pending_esc } => {
                 if matches!(byte, 0x18 | 0x1a) || (pending_esc && byte == b'\\') {
                     // When: byte is CAN, SUB or completes ST, the refused message ends and nothing

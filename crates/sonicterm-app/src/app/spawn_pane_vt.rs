@@ -92,6 +92,29 @@ mod spawn_pane_vt_tests;
 mod spawn_pane_vt_fuzz_tests;
 
 impl PaneVtHandles {
+    /// The worker's wait at `now`: `flush_wait`, shortened to the open clipboard stream's expiry.
+    pub(in crate::app) fn clipboard_wait(&self, now: Instant, flush_wait: Duration) -> Duration {
+        match self.clipboard.borrow().deadline() {
+            Some(deadline) => flush_wait.min(deadline.saturating_duration_since(now)),
+            None => flush_wait,
+        }
+    }
+
+    /// Abort a clipboard stream open past its expiry, in the intake and the parser, releasing its
+    /// lease and queued chunks; the parser swallows the rest of that OSC.
+    // Lock order: the clipboard borrow ends before the parser lock is taken.
+    pub(in crate::app) fn expire_clipboard_stream(&self, now: Instant) {
+        let Some(stream) = self.clipboard.borrow_mut().expire(now) else {
+            // When: no stream expired, the parser is not locked.
+            return;
+        };
+        let mut parser = self.parser.lock();
+        if parser.open_clipboard_stream() == Some(stream) {
+            // The parser still holds the expired stream, so it aborts it too.
+            parser.abort_clipboard_stream();
+        }
+    }
+
     /// Publish whether the program asked for a steady cursor, so blink deadlines stop without
     /// locking the parser; `None` restores the configured cursor, which may blink.
     // Ordering: cursor_steady is a self-contained Relaxed word this worker alone writes.

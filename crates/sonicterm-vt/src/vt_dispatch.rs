@@ -590,14 +590,8 @@ impl Perform for Performer {
                 // is dropped, never stored from vte's split parameters.
             }
             Some(52) => {
-                let sel =
-                    params.get(1).and_then(|param| param.first().copied()).unwrap_or(b'c') as char;
-                let data = params
-                    .get(2)
-                    .and_then(|param| std::str::from_utf8(param).ok())
-                    .unwrap_or_default()
-                    .to_string();
-                self.events.push(VtEvent::Clipboard { selection: sel, data });
+                // The raw collector streams every `52;`; a spelling it missed (`052;`, a C1
+                // introducer) writes nothing, never from vte's capped parameters.
             }
             Some(1337) => {
                 // Only a `File=` image reads vte's joined parameters; the raw collector owns

@@ -146,6 +146,8 @@ cursor_shape = "block"
 cursor_animation = "none"
 # Programs may set the clipboard with OSC 52: "allow" or "deny".
 osc52 = "allow"
+# Most decoded bytes one OSC 52 write may hold in memory (at most 536870912).
+clipboard_write_limit_bytes = {clipboard_write_limit_bytes}
 # A plain click in a shell prompt moves its cursor there: "any-prompt" (every
 # OSC 133 prompt), "declared" (only prompts that ask for it) or "off".
 click_to_move = "any-prompt"
@@ -276,6 +278,7 @@ program_status_text = false
         term_program = cfg.terminal.term_program,
         scrollback = cfg.terminal.scrollback,
         clickable_path_max_chars = cfg.terminal.clickable_path_max_chars,
+        clipboard_write_limit_bytes = cfg.terminal.clipboard_write_limit_bytes,
         tab_min_width = cfg.tab_min_width,
         tab_max_width = cfg.tab_max_width,
     )

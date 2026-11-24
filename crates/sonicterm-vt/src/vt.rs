@@ -38,6 +38,10 @@ pub use staging::{
     CaptureStagingPool, GUARANTEED_CONCURRENT_CAPTURES, MAX_PROCESS_CAPTURE_STAGING_BYTES,
     MIN_CAPTURE_STAGING_BYTES,
 };
+pub use vt_clipboard::{
+    ClipboardInbox, ClipboardKinds, ClipboardPhase, MAX_CLIPBOARD_CHUNK_BYTES,
+    MAX_CLIPBOARD_KINDS_BYTES,
+};
 
 /// Terminal identity reported in answer to CSI > q (XTVERSION): `SonicTerm`
 /// followed by the crate's release version, which the workspace sets.
@@ -229,12 +233,13 @@ pub enum VtEvent {
         /// The target URI; empty string terminates the currently-active link.
         uri: String,
     },
-    /// OSC 52 — shell requested clipboard read/write on the named selection.
-    Clipboard {
-        /// Selection target byte (`c` = clipboard, `p` = primary, etc.).
-        selection: char,
-        /// Base64-encoded payload as received from the shell.
-        data: String,
+    /// OSC 52 or OSC 1337 `Copy=:` — one stage of a clipboard stream. The encoded payload waits
+    /// in [`Parser::clipboard_inbox`]; the event carries no payload bytes.
+    ClipboardStream {
+        /// The stream this stage belongs to.
+        stream: u64,
+        /// What happened to it.
+        phase: ClipboardPhase,
     },
     /// Inline media protocol payload captured from the stream.
     ///
@@ -377,6 +382,10 @@ pub struct Parser {
     kitty_yield: bool,
     pending_esc: bool,
     raw_osc: Option<RawOsc>,
+    /// Encoded clipboard chunks waiting for the host.
+    clipboard_inbox: Arc<ClipboardInbox>,
+    /// The id the last clipboard stream took.
+    clipboard_streams: u64,
     iterm2_metadata: [u8; MAX_ITERM2_METADATA_BYTES],
     iterm2_metadata_len: usize,
     escape_bytes_in_flight: usize,
@@ -409,6 +418,8 @@ enum RawOsc {
     Semantic { code: u16, content: Vec<u8>, pending_esc: bool },
     /// Streaming an iTerm2 file payload through the parser's staging reservation.
     Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
+    /// Streaming an OSC 52 or OSC 1337 `Copy=:` payload to the clipboard inbox.
+    Clipboard(Box<vt_clipboard::ClipboardCollector>),
     /// Swallowing the rest of a refused over-cap `Semantic` payload through the same terminators
     /// an accepted one ends on, retaining nothing; `pending_esc` holds an ESC that may start ST.
     Refused { pending_esc: bool },
@@ -471,6 +482,8 @@ impl Parser {
             kitty_yield: false,
             pending_esc: false,
             raw_osc: None,
+            clipboard_inbox: Arc::default(),
+            clipboard_streams: 0,
             iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
             iterm2_metadata_len: 0,
             escape_bytes_in_flight: 0,
@@ -883,6 +896,9 @@ mod vt_performer;
 
 #[path = "vt_raw_osc.rs"]
 mod vt_raw_osc;
+
+#[path = "vt_clipboard.rs"]
+mod vt_clipboard;
 
 #[path = "vt_color.rs"]
 mod vt_color;

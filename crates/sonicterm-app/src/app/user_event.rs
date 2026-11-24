@@ -117,15 +117,16 @@ pub enum UserEvent {
         /// User-facing explanation of why no draft was inserted.
         message: String,
     },
-    /// A validated OSC 52 clipboard write reached the event-loop thread.
+    /// A complete OSC 52 or OSC 1337 `Copy=:` write reached the event-loop thread.
     ///
-    /// The VT worker decodes and bounds the payload before constructing this
-    /// event; native clipboard access remains confined to the app thread.
+    /// The VT worker decoded and bounded the payload, reserved its staging and took a program
+    /// slot before posting this; native clipboard access remains confined to the app thread. The
+    /// handle shares one job, so cloning or printing the event copies no payload.
     ClipboardWrite {
         /// The pane whose program asked for the write.
         pane_id: u64,
-        /// UTF-8 text requested by the terminal application.
-        text: String,
+        /// The write, taken once by the event loop.
+        job: osc52_stream::ClipboardJobHandle,
     },
     /// One VT batch's OSC 52 requests, counted without payloads, after its writes; refusals
     /// reach the App only through this summary.

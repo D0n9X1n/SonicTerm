@@ -512,6 +512,7 @@ fn the_coverage_table_agrees_with_the_charge_sites() {
                         ResourceClass::ReaperWork
                             | ResourceClass::AccessibilityTree
                             | ResourceClass::ControlConnection
+                            | ResourceClass::ClipboardStaging
                     ),
                     "{class:?} is charged to a non-pane owner without being recorded here"
                 );

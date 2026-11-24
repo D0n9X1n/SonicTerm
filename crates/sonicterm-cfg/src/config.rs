@@ -354,6 +354,9 @@ pub struct TerminalConfig {
     pub cursor_animation: CursorAnimation,
     /// Whether programs may write the clipboard with OSC 52; see [`Osc52Policy`].
     pub osc52: Osc52Policy,
+    /// Most decoded bytes one OSC 52 write may stage in memory; see
+    /// [`TerminalConfig::effective_clipboard_write_limit_bytes`].
+    pub clipboard_write_limit_bytes: usize,
     /// Which macOS Option keys act as Alt instead of composing characters; read only on macOS.
     pub macos_option_as_alt: OptionAsAlt,
     /// Whether a click in a shell prompt moves its cursor; see [`ClickToMove`].
@@ -406,7 +409,7 @@ pub enum CursorAnimation {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Osc52Policy {
-    /// Accepted writes (at most 512 KiB of UTF-8 text) reach the clipboard.
+    /// Accepted writes (at most `clipboard_write_limit_bytes` of decoded text) reach the clipboard.
     #[default]
     Allow,
     /// Every write is refused before the clipboard is touched.
@@ -639,11 +642,23 @@ pub const DEFAULT_CLICKABLE_PATH_CHARS: usize = MAX_CLICKABLE_PATH_CHARS;
 /// scanner's 4 KiB target cap.
 pub const MAX_CLICKABLE_PATH_CHARS: usize = 1024;
 
+/// Default for `[terminal] clipboard_write_limit_bytes`: 64 MiB of decoded OSC 52 text.
+pub const DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Ceiling on `clipboard_write_limit_bytes`; a write is held in memory, never spilled to disk.
+pub const MAX_CLIPBOARD_WRITE_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+
 impl TerminalConfig {
     /// The configured path length cap clamped to `1..=MAX_CLICKABLE_PATH_CHARS`.
     #[must_use]
     pub fn effective_clickable_path_max_chars(&self) -> usize {
         self.clickable_path_max_chars.clamp(1, MAX_CLICKABLE_PATH_CHARS)
+    }
+
+    /// The configured OSC 52 write limit clamped to at most [`MAX_CLIPBOARD_WRITE_LIMIT_BYTES`].
+    #[must_use]
+    pub fn effective_clipboard_write_limit_bytes(&self) -> usize {
+        self.clipboard_write_limit_bytes.min(MAX_CLIPBOARD_WRITE_LIMIT_BYTES)
     }
 }
 
@@ -662,6 +677,7 @@ impl Default for TerminalConfig {
             cursor_shape: CursorShape::default(),
             cursor_animation: CursorAnimation::default(),
             osc52: Osc52Policy::default(),
+            clipboard_write_limit_bytes: DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES,
             click_to_move: ClickToMove::default(),
         }
     }

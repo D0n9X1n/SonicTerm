@@ -131,6 +131,9 @@ pub enum ResourceClass {
     /// The local control server's connection buffers: partial request lines and replies being
     /// written, bounded by its line cap and connection limit.
     ControlConnection,
+    /// OSC 52 and OSC 1337 `Copy=:` writes in flight: decoded text, its U+FFFD expansion and native
+    /// copy, reserved from the process-wide clipboard staging budget before allocation.
+    ClipboardStaging,
 }
 
 /// Why each [`ResourceClass`] is or is not charged in production.
@@ -346,6 +349,8 @@ impl ResourceClass {
             Self::AccessibilityTree => ClassCoverage::Charged,
             // App::charge_mcp_connections charges live connection buffers to the process-level Mcp owner.
             Self::ControlConnection => ClassCoverage::Charged,
+            // App::charge_clipboard_staging charges the clipboard staging leases to the process owner.
+            Self::ClipboardStaging => ClassCoverage::Charged,
             // Owner records are the ledger's own storage. Charging them to a
             // ledger class would make the ledger account for itself, and the
             // recursion has no fixed point.
@@ -467,6 +472,9 @@ impl ResourceClass {
 
             // Charged to the process-level Mcp owner; agents' connections belong to no pane.
             Self::ControlConnection => PaneSeamTerm::ChargedToAnotherOwnerKind,
+
+            // Charged to the tracking-only process owner, so a 512 MiB write never trips a pane backstop.
+            Self::ClipboardStaging => PaneSeamTerm::ChargedToAnotherOwnerKind,
 
             // No subsystem charges these: subscriber owners are absent, registry storage is ledger-owned,
             // font faces have no shared owner, and GPU surface memory has no driver-reported size.

@@ -178,6 +178,14 @@ agent 控制服务器运行期间，在进程根下有一个 `Mcp` owner。每�
 两者都有上限：最多 `[mcp] max_connections` 个连接（默认 4，至多 16），单个请求行至多 1 MiB。停止服务器会释放计费并关闭该 owner。没有窗格
 携带这一类别。
 
+OSC 52 与 OSC 1337 `Copy=:` 写入在分配每个缓冲区之前，先从一个进程级剪贴板暂存预算中预留，
+该预算在启动时为 `max(128 MiB, 2 × clipboard_write_limit_bytes)`：包括解码后的字节、非 UTF-8
+负载的 U+FFFD 扩展，以及系统副本（Windows 上为 `CF_UNICODETEXT`，其他平台为 UTF-8 长度）。
+每次保留量采样把存活租约持有的量以 `ClipboardStaging` 计入只做跟踪的进程 owner，每个已投递
+的程序写入计一个 item（至多 8 个），因此大的写入从不触发窗格的兜底上限。租约在系统剪贴板调用
+返回时释放；在 Linux 上，覆盖 arboard 副本的部分会一直计费，直到 SonicTerm 对同一选区的下一次
+写入或一次用户复制替换它。预算无法覆盖的写入以繁忙拒绝。
+
 为性能检查点采集的 `memory snapshot` 行包含同样字段，另加四个标注：`checkpoint_index`、
 `checkpoint_label`、`checkpoint_attempt` 与 `checkpoint_complete`（没有窗格被锁占用且每个窗格都已采样）。
 采集它不会改变周期性采样所做的任何事：不运行保留量处理、回收或裁剪，也不重置采样节奏。在带裁剪钩子的构建中，它还包含 `trimmed`、`trim_source` 与 `trim_seq`。

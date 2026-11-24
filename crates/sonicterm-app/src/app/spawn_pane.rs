@@ -58,29 +58,19 @@ const CHILD_EXIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(250);
 /// Gap between exit observations while waiting.
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Maximum decoded UTF-8 text one OSC 52 write may place on the clipboard.
-pub(super) const MAX_OSC52_CLIPBOARD_BYTES: usize = 512 * 1024;
-
 /// Why an OSC 52 request did not write the clipboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc52Refusal {
     /// A clipboard read (`?`); reads are never answered.
     Read,
-    /// A selection other than the clipboard `c`.
+    /// A kinds field with no destination this platform has.
     Selection(char),
-    /// The payload decodes past [`MAX_OSC52_CLIPBOARD_BYTES`].
+    /// The payload decodes past `[terminal] clipboard_write_limit_bytes`.
     TooLarge,
-    /// Empty, malformed Base64, or text that is not UTF-8.
+    /// Malformed Base64.
     Invalid,
-}
-
-/// SonicTerm's decision on one OSC 52 request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Osc52Outcome {
-    /// Write this decoded text to the clipboard.
-    Write(String),
-    /// Leave the clipboard alone.
-    Refused(Osc52Refusal),
+    /// The staging budget or the program-write slots are exhausted.
+    Busy,
 }
 
 /// The OSC 52 requests of one VT batch, counted without their payloads.
@@ -94,49 +84,6 @@ pub struct ClipAttempts {
     pub refused: u32,
     /// The last request's refusal; `None` when it was accepted.
     pub latest: Option<Osc52Refusal>,
-}
-
-/// Decide one OSC 52 request. Only target `c` writes are accepted. Queries (`?`), other
-/// selections, malformed Base64, non-UTF-8 payloads and decoded output above the hard cap are
-/// refused with their reason and can never expose or mutate the native clipboard.
-pub(super) fn osc52_decision(selection: char, data: &str) -> Osc52Outcome {
-    if data == "?" {
-        // When: `data` is a query, the request is a clipboard read.
-        return Osc52Outcome::Refused(Osc52Refusal::Read);
-    }
-    if selection != 'c' {
-        // When: `selection` is not clipboard `c`, the selection is unsupported.
-        return Osc52Outcome::Refused(Osc52Refusal::Selection(selection));
-    }
-    if data.is_empty() {
-        // When: `data` is empty, there is nothing to write.
-        return Osc52Outcome::Refused(Osc52Refusal::Invalid);
-    }
-    let max_encoded = MAX_OSC52_CLIPBOARD_BYTES.div_ceil(3) * 4;
-    if data.len() > max_encoded {
-        // When: `data` cannot encode a payload within the decoded cap, reject before allocating the output buffer.
-        return Osc52Outcome::Refused(Osc52Refusal::TooLarge);
-    }
-    let mut decoded = vec![0u8; MAX_OSC52_CLIPBOARD_BYTES];
-    let written = match base64::engine::general_purpose::STANDARD
-        .decode_slice(data.as_bytes(), &mut decoded)
-    {
-        Ok(written) => written,
-        Err(base64::DecodeSliceError::OutputSliceTooSmall) => {
-            // When: OutputSliceTooSmall, the payload decodes past the cap: too large, not malformed.
-            return Osc52Outcome::Refused(Osc52Refusal::TooLarge);
-        }
-        Err(_) => {
-            // When: decode_slice returns any other Err, the Base64 is malformed.
-            return Osc52Outcome::Refused(Osc52Refusal::Invalid);
-        }
-    };
-    decoded.truncate(written);
-    match String::from_utf8(decoded) {
-        Ok(text) if !text.is_empty() => Osc52Outcome::Write(text),
-        // Non-UTF-8 or empty decoded text is never written.
-        _ => Osc52Outcome::Refused(Osc52Refusal::Invalid),
-    }
 }
 
 /// How the pane's child exited, waiting briefly for it to become observable.
@@ -369,6 +316,8 @@ pub(in crate::app) struct PaneVtHandles {
     /// Whether this worker last reported an active `OSC 9;4` progress, so a command end or RIS
     /// sends a clear only when something is shown.
     progress_shown: std::cell::Cell<bool>,
+    /// This worker's clipboard streams; a clone starts with none open, on the same staging.
+    clipboard: std::cell::RefCell<super::osc52_stream::Osc52Intake>,
     /// The pane these handles belong to, named in the events the worker sends; 0 until set.
     pane_id: u64,
 }
@@ -407,8 +356,21 @@ impl PaneVtHandles {
             frame_counters: pane.frame_counters.clone(),
             echo_cache: std::cell::Cell::new(super::echo_watch::EchoCache::default()),
             progress_shown: std::cell::Cell::new(false),
+            clipboard: std::cell::RefCell::new(super::osc52_stream::Osc52Intake::new(
+                super::osc52_stream::ClipboardStaging::process_default(),
+            )),
             pane_id: 0,
         }
+    }
+
+    /// These handles, reserving clipboard writes from `staging` rather than the process default.
+    #[cfg(test)]
+    pub(in crate::app) fn with_clipboard_staging(
+        self,
+        staging: Arc<super::osc52_stream::ClipboardStaging>,
+    ) -> Self {
+        *self.clipboard.borrow_mut() = super::osc52_stream::Osc52Intake::new(staging);
+        self
     }
 
     /// These handles, naming `pane_id` in the events the worker sends.
@@ -446,7 +408,9 @@ pub(super) fn spawn_pane_workers(
                 }
             };
             loop {
-                match out_rx.recv_timeout(flush.wait(Instant::now())) {
+                let now = Instant::now();
+                let wait = worker_handles.clipboard_wait(now, flush.wait(now));
+                match out_rx.recv_timeout(wait) {
                     Ok(bytes) => {
                         // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
                         // The chunk's read stamp is read before the chunk moves into the batch.
@@ -474,10 +438,12 @@ pub(super) fn spawn_pane_workers(
                             },
                         );
                         flush.after_batch(&worker_handles, Instant::now(), send_output);
+                        worker_handles.expire_clipboard_stream(Instant::now());
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         // When: recv_timeout returns Timeout, flush any trailing pending redraw.
                         flush.on_quiet(&worker_handles, Instant::now(), send_output);
+                        worker_handles.expire_clipboard_stream(Instant::now());
                         #[cfg(windows)]
                         if exit_probe.has_exited().unwrap_or(false) {
                             // When: exit_probe reports the child exited on Windows, report it and stop polling.
@@ -766,8 +732,8 @@ mod commands;
 #[path = "spawn_pane_media.rs"]
 mod media_batch;
 
-// Lock order: parser -> echo slot (pre_read, post_read); inline_images -> inline_media_charge after parser releases,
-// command_events after both.
+// Lock order: parser -> echo slot; then, one at a time after the parser releases: clipboard,
+// inline_images -> inline_media_charge, command_events.
 // Ordering: cursor_visible, cursor_steady, keyboard_input, pointer_input, pointer_shape, bells, output_generation are Relaxed;
 // one writer, self-contained words.
 #[allow(clippy::too_many_arguments)]
@@ -808,7 +774,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         // Gate on: one clock read before lock(), three under the guard (four when a new sync epoch opens);
         // an armed echo watch reads the target cell around the parse and may lock its slot, all before the guard drops.
         let before_lock = counters.map(|_| now());
-        let (result, section, section_commands) = {
+        let (result, section, section_commands, clipboard_open, clipboard_inbox) = {
             let mut parser = handles.parser.lock();
             let locked_at = before_lock.map(|_| now());
             let echo_before = counters
@@ -840,10 +806,24 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             publish_sync_output(handles, sync_state, &mut now);
             sync_latch.note_section(sync_state);
             let released_at = before_lock.map(|_| now());
+            // Read under the lock: the stream still open, and the inbox only when this section
+            // raised clipboard events, so a section without them takes no extra reference.
+            let clipboard_open = parser.open_clipboard_stream();
+            let clipboard_inbox = result
+                .1
+                .iter()
+                .any(|event| matches!(event, VtEvent::ClipboardStream { .. }))
+                .then(|| parser.clipboard_inbox().clone());
             // A fair release hands the parser to a selected parked waiter, such as a frame collection,
             // before this worker can relock. On unwind the guard still drops through ordinary RAII release.
             MutexGuard::unlock_fair(parser);
-            (result, (locked_at, parsed_at, released_at), section_commands)
+            (
+                result,
+                (locked_at, parsed_at, released_at),
+                section_commands,
+                clipboard_open,
+                clipboard_inbox,
+            )
         };
         let (consumed, events, replies) = result;
         if let (
@@ -883,8 +863,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                     handles.cursor_visible.store(visible, Ordering::Relaxed);
                 }
                 VtEvent::CursorStyle(style) => handles.publish_cursor_style(style),
-                VtEvent::Clipboard { selection, data } => {
-                    clipboard_requests.push((selection, data));
+                VtEvent::ClipboardStream { stream, phase } => {
+                    clipboard_requests.push((stream, phase));
                 }
                 VtEvent::Command(event) => {
                     let at = now();
@@ -929,19 +909,38 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 
         // Every accepted write is its own event, in order; refusals only count toward one summary.
         let mut attempts = ClipAttempts::default();
-        for (selection, data) in clipboard_requests {
-            attempts.total = attempts.total.saturating_add(1);
-            match osc52_decision(selection, &data) {
-                Osc52Outcome::Write(text) => {
-                    attempts.accepted = attempts.accepted.saturating_add(1);
-                    attempts.latest = None;
-                    emit_event(UserEvent::ClipboardWrite { pane_id: handles.pane_id, text });
-                }
-                Osc52Outcome::Refused(reason) => {
-                    attempts.refused = attempts.refused.saturating_add(1);
-                    attempts.latest = Some(reason);
+        if clipboard_inbox.is_some() || clipboard_open.is_some() {
+            // When: clipboard_inbox or clipboard_open is set, the intake follows this section's
+            // clipboard events outside the parser lock; other sections never touch the intake.
+            let at = Instant::now();
+            let mut intake = handles.clipboard.borrow_mut();
+            for (stream, phase) in clipboard_requests {
+                let Some(inbox) = clipboard_inbox.as_deref() else {
+                    // When: no inbox was taken, the section raised no clipboard event.
+                    break;
+                };
+                let Some(result) = intake.handle(inbox, stream, phase, at) else {
+                    // When: the event was a chunk or an abort, the stream has no outcome yet.
+                    continue;
+                };
+                attempts.total = attempts.total.saturating_add(1);
+                match result {
+                    Ok(job) => {
+                        attempts.accepted = attempts.accepted.saturating_add(1);
+                        attempts.latest = None;
+                        emit_event(UserEvent::ClipboardWrite { pane_id: handles.pane_id, job });
+                    }
+                    Err(reason) => {
+                        attempts.refused = attempts.refused.saturating_add(1);
+                        attempts.latest = Some(reason);
+                    }
                 }
             }
+            intake.reconcile(clipboard_open, at);
+        } else {
+            // When: neither clipboard_inbox nor clipboard_open is set, an intake still tracking a
+            // stream the parser reset without an event releases it.
+            handles.clipboard.borrow_mut().release_open();
         }
         if attempts.total > 0 {
             emit_event(UserEvent::ClipboardAttempts { pane_id: handles.pane_id, attempts });

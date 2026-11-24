@@ -690,6 +690,7 @@ impl super::App {
         // hierarchy reports real memory rather than only structure.
         self.charge_pane_owners();
         self.charge_mcp_connections();
+        self.charge_clipboard_staging();
 
         // The aggregate snapshot, above the DEBUG gate and deliberately so.
         //
