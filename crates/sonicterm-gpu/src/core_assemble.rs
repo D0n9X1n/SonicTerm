@@ -472,7 +472,8 @@ impl GpuRenderer {
             hover_tab_idx,
             tab_now,
         };
-        self.assemble_glyph_rows(geometry, inputs, scratch, &mut missing_chars_this_frame);
+        let active_rows =
+            self.assemble_glyph_rows(geometry, inputs, scratch, &mut missing_chars_this_frame);
         if std::mem::take(&mut self.fault_assembly_error) {
             // When: `fault_assembly_error` is armed, assembly fails as a real `Err` would, after
             // its glyph rows were staged, so the error arm must discard them.
@@ -512,6 +513,7 @@ impl GpuRenderer {
             inputs,
             scratch,
             &active_snapped_cell_x,
+            active_rows,
             &mut frame_recolor,
         );
 

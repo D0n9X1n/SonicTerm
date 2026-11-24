@@ -161,10 +161,19 @@ pub(in crate::core) struct RetainedPixelFixture {
     pub(in crate::core) target: wgpu::Texture,
     pub(in crate::core) view: wgpu::TextureView,
     pub(in crate::core) dual_source: bool,
+    /// The target's size in pixels.
+    pub(in crate::core) width_px: u32,
+    pub(in crate::core) height_px: u32,
 }
 
 impl RetainedPixelFixture {
+    /// A 4x2 retained target.
     pub(in crate::core) fn new() -> Self {
+        Self::sized(4, 2)
+    }
+
+    /// A `width_px` x `height_px` retained target, at most 64 pixels wide (one aligned readback row).
+    pub(in crate::core) fn sized(width_px: u32, height_px: u32) -> Self {
         #[cfg(target_os = "windows")]
         let (backends, fallback) = (wgpu::Backends::DX12, true);
         #[cfg(not(target_os = "windows"))]
@@ -203,7 +212,7 @@ impl RetainedPixelFixture {
         );
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("retained reset pixel fixture"),
-            size: wgpu::Extent3d { width: 4, height: 2, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: width_px, height: height_px, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -212,7 +221,29 @@ impl RetainedPixelFixture {
             view_formats: &[],
         });
         let view = target.create_view(&Default::default());
-        Self { device, queue, pipeline, image_upload, glyph_upload, target, view, dual_source }
+        Self {
+            device,
+            queue,
+            pipeline,
+            image_upload,
+            glyph_upload,
+            target,
+            view,
+            dual_source,
+            width_px,
+            height_px,
+        }
+    }
+
+    /// Bind `atlas` as the glyph atlas later draws sample, uploading its tiles.
+    pub(in crate::core) fn upload_glyphs(&mut self, atlas: &mut GlyphAtlas) {
+        self.glyph_upload = crate::atlas_upload::AtlasUpload::new(
+            &self.device,
+            atlas,
+            self.pipeline.glyph_bind_group_layout(),
+            crate::atlas_upload::AtlasBindingKind::Glyph,
+        );
+        self.glyph_upload.sync(&self.queue, atlas);
     }
 
     pub(in crate::core) fn draw(
@@ -223,11 +254,11 @@ impl RetainedPixelFixture {
         mode: SubpixelAaMode,
         quads: &[QuadInstance],
     ) {
-        self.draw_layers(first, damage, background, mode, &[], quads);
+        self.draw_layers(first, damage, background, mode, &[], (quads, &[]));
     }
 
     /// Draw one retained frame through the production retained draw, `pane_fills` replacing
-    /// before `quads` blend.
+    /// before `quads` and then `glyphs` blend.
     fn draw_layers(
         &mut self,
         first: bool,
@@ -235,7 +266,7 @@ impl RetainedPixelFixture {
         background: wgpu::Color,
         mode: SubpixelAaMode,
         pane_fills: &[QuadInstance],
-        quads: &[QuadInstance],
+        (quads, glyphs): (&[QuadInstance], &[GlyphInstance]),
     ) {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         draw_retained_frame(
@@ -246,8 +277,8 @@ impl RetainedPixelFixture {
             &self.view,
             self.image_upload.image_bind_group(),
             self.glyph_upload.glyph_bind_group(),
-            4.0,
-            2.0,
+            self.width_px as f32,
+            self.height_px as f32,
             first,
             damage,
             background,
@@ -255,7 +286,7 @@ impl RetainedPixelFixture {
             pane_fills,
             quads,
             &[],
-            &[],
+            glyphs,
             &[],
             &[],
         );
@@ -271,14 +302,28 @@ impl RetainedPixelFixture {
         background: wgpu::Color,
         pane_fills: &[QuadInstance],
     ) {
-        self.draw_layers(first, damage, background, SubpixelAaMode::Off, pane_fills, &[]);
+        self.draw_layers(first, damage, background, SubpixelAaMode::Off, pane_fills, (&[], &[]));
+    }
+
+    /// Draw one retained frame of terminal `quads` and `glyphs` over `background`.
+    pub(in crate::core) fn draw_glyphs(
+        &mut self,
+        first: bool,
+        damage: PixelRect,
+        background: wgpu::Color,
+        quads: &[QuadInstance],
+        glyphs: &[GlyphInstance],
+    ) {
+        self.draw_layers(first, damage, background, SubpixelAaMode::Off, &[], (quads, glyphs));
     }
 
     pub(in crate::core) fn pixels(&self) -> Vec<[u8; 4]> {
         const STRIDE: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let (width_px, height_px) = (self.width_px, self.height_px);
+        assert!(width_px * 4 <= STRIDE, "one aligned readback row holds the target's width");
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("retained reset readback"),
-            size: u64::from(STRIDE) * 2,
+            size: u64::from(STRIDE) * u64::from(height_px),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -290,10 +335,10 @@ impl RetainedPixelFixture {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(STRIDE),
-                    rows_per_image: Some(2),
+                    rows_per_image: Some(height_px),
                 },
             },
-            wgpu::Extent3d { width: 4, height: 2, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: width_px, height: height_px, depth_or_array_layers: 1 },
         );
         self.queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
@@ -301,8 +346,8 @@ impl RetainedPixelFixture {
         self.device.poll(wgpu::PollType::wait_indefinitely()).expect("retained readback poll");
         let mapped = slice.get_mapped_range().expect("retained mapped pixels");
         let mut pixels = Vec::new();
-        for y in 0..2 {
-            for x in 0..4 {
+        for y in 0..height_px as usize {
+            for x in 0..width_px as usize {
                 let offset = y * STRIDE as usize + x * 4;
                 pixels.push(mapped[offset..offset + 4].try_into().unwrap());
             }

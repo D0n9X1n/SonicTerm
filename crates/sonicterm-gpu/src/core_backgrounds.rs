@@ -150,6 +150,22 @@ pub(crate) fn focus_flash_quad(
     }
 }
 
+/// The quad that replaces the theme clear over a pane's `clip` with its program background at the
+/// window `opacity`, so blank cells and padding take that color at the configured opacity on full
+/// and partial frames; `None` without a program background or for a pane off the surface.
+pub(crate) fn pane_fill_quad(
+    colors: PaneColors<'_>,
+    opacity: f32,
+    clip: Option<PixelRect>,
+    (sw, sh): (f32, f32),
+) -> Option<QuadInstance> {
+    let (fill, clip) = (colors.background_fill(opacity)?, clip?);
+    Some(QuadInstance::sharp(
+        px_to_ndc(clip.x as f32, clip.y as f32, clip.w as f32, clip.h as f32, sw, sh),
+        fill,
+    ))
+}
+
 /// Where a selection is drawn: its pane's viewport, grid size, origin, cells, clip and surface.
 pub(crate) struct SelectionGeometry {
     pub(crate) view_top_abs: u64,
@@ -160,14 +176,24 @@ pub(crate) struct SelectionGeometry {
     pub(crate) surface: (f32, f32),
 }
 
-/// The selection's rectangles in surface pixels, clipped to its pane, so neither the highlight nor
-/// the selected-glyph recolor can reach a neighbouring pane.
-fn clipped_selection_rects(
+/// `rects` clipped to the selection's pane, so neither the highlight nor the selected-glyph
+/// recolor can reach a neighbouring pane.
+fn clip_to_selection_pane(
+    rects: impl IntoIterator<Item = (f32, f32, f32, f32)>,
+    geometry: &SelectionGeometry,
+) -> impl Iterator<Item = (f32, f32, f32, f32)> {
+    let (clip_x, clip_y, clip_w, clip_h) = geometry.clip;
+    rects
+        .into_iter()
+        .filter_map(move |rect| clip_rect_to_pane(rect, clip_x, clip_y, clip_w, clip_h))
+}
+
+/// The selection's rectangles in surface pixels, before the pane clip.
+fn selection_rects(
     sel: &sonicterm_render_model::boundary::ui::selection::Selection,
     geometry: &SelectionGeometry,
     snapped_cell_x: &[f32],
-) -> impl Iterator<Item = (f32, f32, f32, f32)> {
-    let (clip_x, clip_y, clip_w, clip_h) = geometry.clip;
+) -> Vec<(f32, f32, f32, f32)> {
     selection_quad_rects(
         sel,
         geometry.view_top_abs,
@@ -179,30 +205,71 @@ fn clipped_selection_rects(
         geometry.cell_size.1,
         snapped_cell_x,
     )
-    .into_iter()
-    .filter_map(move |rect| clip_rect_to_pane(rect, clip_x, clip_y, clip_w, clip_h))
 }
 
-/// Draw the glyphs inside the selection in `color`, the program's selection foreground, over the
-/// same clipped rectangles as the highlight. Runs on the frame's emitted instances after the row
-/// glyph cache, so cache keys are unchanged; a color glyph ignores its color and keeps its pixels.
+/// Draw the selected cells' glyph ink in `color`, the program's selection foreground, over the
+/// same clipped rectangles as the highlight. `pane_rows` are the owning pane's glyph rows, so a
+/// neighbour's overhang is never read; a glyph crossing a selected cell's edge is cut there. Runs
+/// on the frame's emitted instances after the row glyph cache, so cache keys are unchanged.
 pub(crate) fn recolor_selected_glyphs(
-    glyphs: &mut [GlyphInstance],
-    rows: &[RowGlyphSpan],
+    glyphs: &mut Vec<GlyphInstance>,
+    pane_rows: &[RowGlyphSpan],
     sel: &sonicterm_render_model::boundary::ui::selection::Selection,
     geometry: &SelectionGeometry,
     snapped_cell_x: &[f32],
     color: [f32; 4],
 ) {
-    let (surface_w, surface_h) = geometry.surface;
-    for (left, top, width, height) in clipped_selection_rects(sel, geometry, snapped_cell_x) {
-        // The selection's own slot damage repaints these glyphs, so the cursor recolor record,
-        // which widens damage for the cursor cell, is not extended by them; the scan is counted.
-        let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
-            glyphs, rows, left, top, width, height, surface_w, surface_h, color,
-        );
-        crate::frame_stats::note_recolor_glyphs_visited(|| visited);
-    }
+    recolor_selected_rects(
+        glyphs,
+        pane_rows,
+        selection_rects(sel, geometry, snapped_cell_x),
+        geometry,
+        color,
+    );
+}
+
+/// Draw the glyph ink of copy mode's selected range in `color`, the program's selection
+/// foreground, by the mouse selection's rule: the owning pane's rows only, clipped to the pane,
+/// and a glyph crossing a selected cell's edge cut there.
+pub(crate) fn recolor_copy_mode_glyphs(
+    glyphs: &mut Vec<GlyphInstance>,
+    pane_rows: &[RowGlyphSpan],
+    copy_mode: &CopyModeState,
+    grid: &Grid,
+    geometry: &SelectionGeometry,
+    snapped_cell_x: &[f32],
+    color: [f32; 4],
+) {
+    let rects = GpuRenderer::copy_mode_selection_rects(
+        copy_mode,
+        grid,
+        geometry.view_top_abs,
+        geometry.origin,
+        geometry.cell_size,
+        snapped_cell_x,
+    );
+    recolor_selected_rects(glyphs, pane_rows, rects, geometry, color);
+}
+
+/// Draw the owning pane's glyph ink inside `rects`, clipped to the pane, in `color`: the mouse
+/// selection and copy mode's selection share this rule. The selection's own slot damage repaints
+/// these glyphs, so the cursor recolor record, which widens damage for the cursor cell, is not
+/// extended by them; the glyphs examined are counted.
+fn recolor_selected_rects(
+    glyphs: &mut Vec<GlyphInstance>,
+    pane_rows: &[RowGlyphSpan],
+    rects: impl IntoIterator<Item = (f32, f32, f32, f32)>,
+    geometry: &SelectionGeometry,
+    color: [f32; 4],
+) {
+    let visited = crate::cursor::recolor_selected_cells(
+        glyphs,
+        pane_rows,
+        clip_to_selection_pane(rects, geometry),
+        geometry.surface,
+        color,
+    );
+    crate::frame_stats::note_recolor_glyphs_visited(|| visited);
 }
 
 /// Push the selection highlight quads, clipped to the pane so a drag across a split cannot bleed.
@@ -213,7 +280,7 @@ pub(crate) fn push_selection_quads(
     snapped_cell_x: &[f32],
     color: [f32; 4],
 ) {
-    for rect in clipped_selection_rects(sel, geometry, snapped_cell_x) {
+    for rect in clip_to_selection_pane(selection_rects(sel, geometry, snapped_cell_x), geometry) {
         out.push(QuadInstance {
             rect: px_to_ndc(rect.0, rect.1, rect.2, rect.3, geometry.surface.0, geometry.surface.1),
             color,

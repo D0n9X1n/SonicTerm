@@ -292,29 +292,189 @@ fn retained_full_clear_preserves_content_blending_and_replaces_prior_frame() {
     );
 }
 
-/// A program background's pane fill replaces the theme clear at the window opacity, on a full
-/// frame and on a partial frame, so a translucent pane shows the override at the configured
-/// opacity instead of blending over the theme; a partial frame without the fill (the override
-/// reset) shows the theme clear again.
+/// At a window opacity of 0.5, a program background set and then reset over the left pane draws
+/// through the production producers (the theme clear the renderer keeps, and the pane fill
+/// assembly pushes from the pane's colors) and the production retained draw: the pane shows the
+/// program color at the configured opacity on a full frame and on a partial frame, never the 0.75
+/// a blend over the theme clear would give, its sibling keeps the theme, and after the reset a full
+/// and then a partial frame show the theme clear again.
 #[test]
-fn a_pane_fill_replaces_the_theme_clear_at_the_window_opacity() {
+fn a_program_background_set_and_reset_keeps_the_window_opacity_across_partial_frames() {
+    use sonicterm_types::{ColorOverrides, DynamicColor};
+    const OPACITY: f32 = 0.5;
+    let theme = Theme::default();
     let mut fixture = RetainedPixelFixture::new();
     let full = full_surface_rect(4, 2);
-    let background = reset_background(0.5);
-    let fill_color = [0.25, 0.125, 0.0625, 0.5];
-    let pane_fill = [QuadInstance::sharp(px_to_ndc(0.0, 0.0, 2.0, 2.0, 4.0, 2.0), fill_color)];
-    let fill_bgra = clear_bgra(wgpu::Color { r: 0.25, g: 0.125, b: 0.0625, a: 0.5 });
-    fixture.draw_filled(true, full, background, &pane_fill);
+    let pane_clip = PixelRect { x: 0, y: 0, w: 2, h: 2 };
+    let background =
+        crate::color::hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), OPACITY);
+    let mut overrides = ColorOverrides::default();
+    overrides.set_dynamic(DynamicColor::Background, Some((200, 100, 50)));
+    let set = PaneColors::new(&theme, Some(&overrides));
+    let fills: Vec<QuadInstance> =
+        pane_fill_quad(set, OPACITY, Some(pane_clip), (4.0, 2.0)).into_iter().collect();
+    assert_eq!(fills.len(), 1, "a program background fills its pane");
+    let lut = crate::color::srgb_u8_to_linear_lut();
+    let fill_bgra = clear_bgra(wgpu::Color {
+        r: f64::from(lut[200] * OPACITY),
+        g: f64::from(lut[100] * OPACITY),
+        b: f64::from(lut[50] * OPACITY),
+        a: f64::from(OPACITY),
+    });
+    fixture.draw_filled(true, full, background, &fills);
     let first = fixture.pixels();
     assert!(pixels_close(first[0], fill_bgra), "full frame: {:?} vs {fill_bgra:?}", first[0]);
+    assert_eq!(first[0][3], 128, "the pane keeps the window opacity");
     assert!(pixels_close(first[3], clear_bgra(background)), "the sibling keeps the theme");
-    let damage = PixelRect { x: 0, y: 0, w: 2, h: 2 };
-    fixture.draw_filled(false, damage, background, &pane_fill);
+    // Partial damage over the pane's top row while the program background stays set.
+    let top_row = PixelRect { x: 0, y: 0, w: 4, h: 1 };
+    fixture.draw_filled(false, top_row, background, &fills);
     let partial = fixture.pixels();
-    assert!(pixels_close(partial[0], fill_bgra), "partial frame: {:?}", partial[0]);
-    fixture.draw_filled(false, damage, background, &[]);
-    let reset = fixture.pixels();
-    assert!(pixels_close(reset[0], clear_bgra(background)), "reset: {:?}", reset[0]);
+    for (pixel, expected) in [(0, fill_bgra), (4, fill_bgra), (3, clear_bgra(background))] {
+        assert!(pixels_close(partial[pixel], expected), "partial frame, pixel {pixel}");
+    }
+    assert_eq!(partial[0][3], 128, "a partial frame keeps the window opacity");
+    // The reset: the pane's colors no longer carry a background, so assembly pushes no fill; the
+    // color change repaints in full, and a later partial frame keeps the theme.
+    overrides.set_dynamic(DynamicColor::Background, None);
+    let reset = PaneColors::new(&theme, Some(&overrides));
+    assert!(pane_fill_quad(reset, OPACITY, Some(pane_clip), (4.0, 2.0)).is_none());
+    fixture.draw_filled(true, full, background, &[]);
+    assert!(pixels_close(fixture.pixels()[0], clear_bgra(background)), "reset full frame");
+    fixture.draw_filled(false, top_row, background, &[]);
+    let after = fixture.pixels();
+    for pixel in [0, 4] {
+        assert!(pixels_close(after[pixel], clear_bgra(background)), "reset partial, {pixel}");
+    }
+}
+
+/// One retained selection frame of a 4x3 grid of 10x20 cells: every row holds a striped two-cell
+/// glyph with a bearing (a ligature) on cells 0-1 and text glyphs on cells 2 and 3, and `selection`
+/// carries a program selection background and foreground. Only the `emitted` rows' glyphs are
+/// drawn, as a partial plan emits only its damaged rows; the selected-glyph recolor reads those
+/// rows, the pane's own.
+fn retained_selection_frame(
+    theme: &Theme,
+    atlas: &mut GlyphAtlas,
+    selection: &Selection,
+    emitted: std::ops::Range<u16>,
+) -> (Vec<QuadInstance>, Vec<GlyphInstance>) {
+    use sonicterm_types::{ColorOverrides, DynamicColor, GlyphKey};
+    let (surface_w, surface_h) = (40.0, 60.0);
+    let mut tile = |key: char, width: u32, striped: bool| {
+        atlas
+            .get_or_insert_lazy_without_eviction(
+                GlyphKey::new(key, false, false),
+                width,
+                20,
+                || sonicterm_text::glyph_atlas::RasterTile {
+                    width,
+                    height: 20,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: width as f32,
+                    coverage: (0..20 * width)
+                        .map(
+                            |index| {
+                                if striped && (index % width).is_multiple_of(3) {
+                                    0
+                                } else {
+                                    255
+                                }
+                            },
+                        )
+                        .collect(),
+                    is_color: false,
+                    is_subpixel: false,
+                },
+            )
+            .expect("selection tile")
+    };
+    let (ligature, text) = (tile('L', 18, true), tile('M', 10, false));
+    let foreground =
+        crate::color::hex_to_premultiplied_rgba(theme.colors.foreground.0.as_str(), 1.0);
+    let (mut glyphs, mut rows) = (Vec::new(), Vec::new());
+    for row in emitted {
+        let top = f32::from(row) * 20.0;
+        let start = glyphs.len();
+        for (left, width, info) in [(1.0, 18.0, ligature), (20.0, 10.0, text), (30.0, 10.0, text)] {
+            glyphs.push(GlyphInstance {
+                rect: px_to_ndc(left, top, width, 20.0, surface_w, surface_h),
+                uv: info.uv,
+                color: foreground,
+                flags: [0.0; 4],
+            });
+        }
+        rows.push(RowGlyphSpan::new(&glyphs, start..glyphs.len(), surface_w, surface_h));
+    }
+    let mut overrides = ColorOverrides::default();
+    overrides.set_dynamic(DynamicColor::SelectionBackground, Some((200, 0, 0)));
+    overrides.set_dynamic(DynamicColor::SelectionForeground, Some((0, 200, 0)));
+    let colors = PaneColors::new(theme, Some(&overrides));
+    let geometry = SelectionGeometry {
+        view_top_abs: 0,
+        grid_size: (3, 4),
+        origin: (0.0, 0.0),
+        cell_size: (10.0, 20.0),
+        clip: (0.0, 0.0, 40.0, 60.0),
+        surface: (surface_w, surface_h),
+    };
+    let theme_highlight =
+        crate::color::hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
+    let mut quads = Vec::new();
+    push_selection_quads(
+        &mut quads,
+        selection,
+        &geometry,
+        &[],
+        colors.selection_rgba(theme_highlight),
+    );
+    let selected = colors.selection_foreground_rgba().expect("the program set one");
+    recolor_selected_glyphs(&mut glyphs, &rows, selection, &geometry, &[], selected);
+    (quads, glyphs)
+}
+
+/// A selection that moves after a full frame is repainted by a partial frame over the rows it left
+/// and entered, and that frame's retained pixels equal a full repaint of the new state: the row it
+/// left draws its glyphs in their own color again, the ligature its new range cuts keeps its
+/// unselected cell's color, and the untouched row is retained.
+#[test]
+fn a_moved_selection_restores_the_glyph_colors_of_rows_it_left() {
+    let theme = Theme::default();
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let mut fixture = RetainedPixelFixture::sized(40, 60);
+    let background = crate::color::hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), 1.0);
+    let full = full_surface_rect(40, 60);
+    let mut first = Selection::new(0, 0);
+    first.extend(0, 3);
+    let (quads, glyphs) = retained_selection_frame(&theme, &mut atlas, &first, 0..3);
+    fixture.upload_glyphs(&mut atlas);
+    fixture.draw_glyphs(true, full, background, &quads, &glyphs);
+    let selected_green = fixture.pixels()[10 * 40 + 25];
+    assert!(
+        pixels_close(selected_green, [0, 200, 0, 255]),
+        "row 0 drew selected: {selected_green:?}"
+    );
+    // The selection moves to cells 1-2 of row 1: the planner damages rows 0 and 1, which emit.
+    let mut moved = Selection::new(1, 1);
+    moved.extend(1, 2);
+    let damage = PixelRect { x: 0, y: 0, w: 40, h: 40 };
+    let (quads, glyphs) = retained_selection_frame(&theme, &mut atlas, &moved, 0..2);
+    fixture.draw_glyphs(false, damage, background, &quads, &glyphs);
+    let narrow = fixture.pixels();
+    let (quads, glyphs) = retained_selection_frame(&theme, &mut atlas, &moved, 0..3);
+    fixture.draw_glyphs(true, full, background, &quads, &glyphs);
+    let repainted = fixture.pixels();
+    let differing: Vec<usize> =
+        (0..narrow.len()).filter(|&pixel| !pixels_close(narrow[pixel], repainted[pixel])).collect();
+    assert!(differing.is_empty(), "the partial frame differs at pixels {differing:?}");
+    let foreground =
+        clear_bgra(crate::color::hex_to_wgpu_with_alpha(theme.colors.foreground.0.as_str(), 1.0));
+    // Row 0 (left) and row 1's ligature half in its unselected cell 0 keep the foreground.
+    for pixel in [10 * 40 + 25, 30 * 40 + 5] {
+        assert!(pixels_close(narrow[pixel], foreground), "pixel {pixel}: {:?}", narrow[pixel]);
+    }
+    assert!(pixels_close(narrow[30 * 40 + 14], [0, 200, 0, 255]), "the selected half turns green");
 }
 
 #[test]

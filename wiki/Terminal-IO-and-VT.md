@@ -330,12 +330,15 @@ Programs can set and reset the colors of their own pane:
 - On Windows, the parser sees only what ConPTY forwards; whether ConPTY forwards these color
   sequences and their replies unchanged has not been verified.
 - In the active pane, the selection highlight and copy mode's selection use the pane's
-  selection background at the theme highlight's 50% opacity. Glyphs in a selection take the
-  selection foreground only once a program set one (copy mode's selection keeps glyph colors);
-  until then they keep their own colors, so existing themes look unchanged, and color glyphs and
-  images always keep theirs. The glyph under a block cursor takes the cursor-text color, which
-  wins over the selection foreground. A selection is clipped to its pane and never recolors a
-  neighbour, and the palette and search fields always keep the theme's selection colors. A
+  selection background at the theme highlight's 50% opacity. Glyph ink in a selection, from the
+  mouse or from copy mode, takes the selection foreground only once a program set one; until then
+  it keeps its own colors, so existing themes look unchanged, and color glyphs and images always
+  keep theirs. Only the ink inside the selected cells changes: a ligature, wide glyph or
+  overhanging glyph that crosses the selection's edge is cut there, and its unselected part keeps
+  its color. The glyph under a block cursor takes the cursor-text color, which wins over the
+  selection foreground. A selection is clipped to its pane and never recolors a neighbour's
+  glyphs, even where they overhang into it, and the palette and search fields always keep the
+  theme's selection colors. A
   change repaints the whole window. Intentional difference: WezTerm and kitty draw selected text
   in their configured selection foreground, while the theme's `selection_fg` colors only those
   fields here, and `OSC 19 ; ?` still answers it. Ghostty parses OSC 17/19/117/119 and does not

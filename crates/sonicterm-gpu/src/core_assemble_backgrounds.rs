@@ -70,17 +70,14 @@ impl GpuRenderer {
             let colors = PaneColors::new(theme, pv.overrides);
             // The pane's row-cache revision, resolved once for all of its rows.
             let style_rev = colors.style_rev(self.style_rev);
-            if let (Some(fill), Some(clip)) =
-                (colors.background_fill(self.bg_opacity), pv.planned.full_clip)
-            {
-                // A program background (`fill`) replaces the theme clear over the pane's clip
-                // before cell backgrounds blend, so blank cells and padding take it at the window
-                // opacity on full and partial frames; chrome keeps the theme.
-                pane_fills.push(QuadInstance::sharp(
-                    px_to_ndc(clip.x as f32, clip.y as f32, clip.w as f32, clip.h as f32, sw, sh),
-                    fill,
-                ));
-            }
+            // A program background replaces the theme clear over the pane's clip before cell
+            // backgrounds blend; chrome keeps the theme.
+            pane_fills.extend(pane_fill_quad(
+                colors,
+                self.bg_opacity,
+                pv.planned.full_clip,
+                (sw, sh),
+            ));
             let pad_bg = pane_rect.x;
             let top_inset_bg = pane_rect.y;
             let max_cols = pv.planned.background_cols;

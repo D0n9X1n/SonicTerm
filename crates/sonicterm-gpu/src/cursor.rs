@@ -650,6 +650,137 @@ fn ink_meets(ink: [f32; 4], target: (f32, f32, f32, f32)) -> bool {
     tx < ink[2] && tx + tw > ink[0] && ty < ink[3] && ty + th > ink[1]
 }
 
+/// A cut closer than this to a glyph edge, in surface pixels, is treated as that edge, so a glyph
+/// already aligned to the selected cells is recolored whole rather than split into a sliver.
+const CUT_EPSILON_PX: f32 = 1.0 / 64.0;
+
+/// Draw the parts of `pane_rows`' glyphs that lie inside the selected cells `targets` (surface-pixel
+/// rectangles) in `color`, and return the number of glyphs examined.
+///
+/// A glyph wholly inside a target is recolored in place. A glyph crossing a target's edge, such as
+/// a ligature, a wide glyph or one that overhangs its cell, is cut at that edge: the inside part
+/// takes `color` and each outside part is appended with its own color, each keeping the atlas
+/// coordinates of the pixels it covers, so only the selected cells' ink changes. Only glyphs of the
+/// owning pane's rows, and parts cut from them, are read, so a neighbour's overhang is never
+/// recolored. A color glyph ignores its color and keeps its pixels, so it is never cut.
+pub(crate) fn recolor_selected_cells(
+    glyphs: &mut Vec<GlyphInstance>,
+    pane_rows: &[RowGlyphSpan],
+    targets: impl IntoIterator<Item = (f32, f32, f32, f32)>,
+    (sw, sh): (f32, f32),
+    color: [f32; 4],
+) -> usize {
+    if sw <= 0.0 || sh <= 0.0 {
+        // When: `sw` or `sh` is nonpositive, no glyph rectangle can be reconstructed.
+        return 0;
+    }
+    // Parts cut from the pane's glyphs are appended past every glyph emitted so far.
+    let cut_start = glyphs.len();
+    let mut visited = 0;
+    for target in targets.into_iter().filter(|target| finite_rect(*target)) {
+        // Parts an earlier target cut lie outside it and may lie inside this one.
+        let earlier_cuts = cut_start..glyphs.len();
+        for row in pane_rows {
+            if !row.ink_px.is_some_and(|ink| ink_meets(ink, target)) {
+                // When: the row's ink misses `target`, none of its glyphs can lie inside it.
+                continue;
+            }
+            for index in row.glyphs.clone() {
+                visited += 1;
+                recolor_glyph_part(glyphs, index, target, (sw, sh), color);
+            }
+        }
+        for index in earlier_cuts {
+            visited += 1;
+            recolor_glyph_part(glyphs, index, target, (sw, sh), color);
+        }
+    }
+    visited
+}
+
+/// Recolor the part of `glyphs[index]` inside `target` to `color`, appending the parts outside it
+/// with the glyph's own color; nothing changes for a color glyph or one that misses `target`.
+fn recolor_glyph_part(
+    glyphs: &mut Vec<GlyphInstance>,
+    index: usize,
+    target: (f32, f32, f32, f32),
+    (sw, sh): (f32, f32),
+    color: [f32; 4],
+) {
+    let glyph = glyphs[index];
+    let (left, top, width, height) = glyph_rect_px(&glyph, sw, sh);
+    if glyph.flags[0] >= 0.5
+        || !finite_rect((left, top, width, height))
+        || !aabb_intersects(target, (left, top, width, height))
+    {
+        // When: a color glyph ignores `color`, and a glyph missing `target` has nothing inside it.
+        return;
+    }
+    let (right, bottom) = (left + width, top + height);
+    let (target_left, target_top, target_width, target_height) = target;
+    // Each cut is the target's edge when it lies inside the glyph, else the glyph's own edge.
+    let cut = |edge: f32, low: f32, high: f32| {
+        if edge <= low + CUT_EPSILON_PX {
+            // The target edge is at or before the glyph's near edge, which bounds the part.
+            low
+        } else if edge >= high - CUT_EPSILON_PX {
+            // When: `edge` is at or past `high`, the glyph's own far edge bounds the part.
+            high
+        } else {
+            // When: `edge` lies strictly between `low` and `high`, the glyph is cut there.
+            edge
+        }
+    };
+    let inner_left = cut(target_left, left, right);
+    let inner_right = cut(target_left + target_width, left, right);
+    let inner_top = cut(target_top, top, bottom);
+    let inner_bottom = cut(target_top + target_height, top, bottom);
+    if inner_right <= inner_left || inner_bottom <= inner_top {
+        // When: `inner_right <= inner_left` or `inner_bottom <= inner_top`, the glyph only grazes
+        // `target`, so no pixel of it is selected.
+        return;
+    }
+    let [u_left, v_top, u_right, v_bottom] = glyph.uv;
+    // A part keeps the atlas coordinates of the pixels it covers, linear across the glyph.
+    let part = |part_left: f32, part_top: f32, part_right: f32, part_bottom: f32, rgba| {
+        let u_at = |pixel_x: f32| u_left + (u_right - u_left) * (pixel_x - left) / width;
+        let v_at = |pixel_y: f32| v_top + (v_bottom - v_top) * (pixel_y - top) / height;
+        GlyphInstance {
+            rect: px_to_ndc(
+                part_left,
+                part_top,
+                part_right - part_left,
+                part_bottom - part_top,
+                sw,
+                sh,
+            ),
+            uv: [u_at(part_left), v_at(part_top), u_at(part_right), v_at(part_bottom)],
+            color: rgba,
+            flags: glyph.flags,
+        }
+    };
+    if (inner_left, inner_top, inner_right, inner_bottom) == (left, top, right, bottom) {
+        // When: `inner_left`..`inner_bottom` equal the glyph's `left`..`bottom`, it lies wholly
+        // inside `target`, so it keeps its rectangle and only recolors.
+        glyphs[index].color = color;
+        return;
+    }
+    glyphs[index] = part(inner_left, inner_top, inner_right, inner_bottom, color);
+    // The outside bands: full-width above and below, then left and right of the inside part.
+    let bands = [
+        (left, top, right, inner_top),
+        (left, inner_bottom, right, bottom),
+        (left, inner_top, inner_left, inner_bottom),
+        (inner_right, inner_top, right, inner_bottom),
+    ];
+    for (band_left, band_top, band_right, band_bottom) in bands {
+        if band_right > band_left && band_bottom > band_top {
+            // The band holds pixels outside `target`, which keep the glyph's own color.
+            glyphs.push(part(band_left, band_top, band_right, band_bottom, glyph.color));
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "cursor_tests.rs"]
 mod cursor_tests;

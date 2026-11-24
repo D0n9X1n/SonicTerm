@@ -699,6 +699,8 @@ pub use settings::RendererSettings;
 
 #[path = "core_pane_colors.rs"]
 mod pane_colors;
+#[cfg(test)]
+pub(crate) use assemble_search::field_selection_colors;
 #[doc(hidden)]
 pub use pane_colors::PaneColors;
 use pane_colors::PaneColorsDigest;
@@ -906,7 +908,9 @@ pub use backgrounds::emit_cell_bg_quads_for_row;
 pub(crate) use backgrounds::emit_row_background;
 pub(crate) use backgrounds::focus_flash_quad;
 use backgrounds::indexed;
+pub(crate) use backgrounds::pane_fill_quad;
 pub(crate) use backgrounds::push_selection_quads;
+pub(crate) use backgrounds::recolor_copy_mode_glyphs;
 pub(crate) use backgrounds::recolor_selected_glyphs;
 pub(crate) use backgrounds::RowBackgroundGeometry;
 pub(crate) use backgrounds::RowBackgroundRow;

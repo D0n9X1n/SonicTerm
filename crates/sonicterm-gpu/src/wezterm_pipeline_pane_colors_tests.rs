@@ -5,13 +5,14 @@
 use super::wezterm_pipeline_tests::headless_device_and_queue;
 use super::*;
 use crate::core::{
-    build_snapped_cell_x, emit_cell_bg_quads_for_row, push_selection_quads,
-    recolor_selected_glyphs, PaneColors, SelectionGeometry,
+    build_snapped_cell_x, emit_cell_bg_quads_for_row, field_selection_colors, push_selection_quads,
+    recolor_copy_mode_glyphs, recolor_selected_glyphs, GpuRenderer, PaneColors, SelectionGeometry,
 };
 use crate::cursor::{recolor_cursor_glyphs_in, RowGlyphSpan};
 use crate::quad::px_to_ndc;
 use sonicterm_render_model::boundary::cfg::theme::{Hex, Theme};
 use sonicterm_render_model::boundary::grid::grid::{CellFlags, Color, Grid};
+use sonicterm_render_model::boundary::ui::copy_mode::CopyModeState;
 use sonicterm_render_model::boundary::ui::selection::Selection;
 use sonicterm_text::glyph_atlas::{GlyphAtlas, RasterTile};
 use sonicterm_types::{ColorOverrides, DynamicColor, GlyphKey};
@@ -119,6 +120,17 @@ fn software_pixels(
     quads: &[QuadInstance],
     glyphs: &[GlyphInstance],
 ) -> Vec<[u8; 4]> {
+    software_pixels_with_overlay(clear, atlas, (quads, glyphs), (&[], &[]))
+}
+
+/// [`software_pixels`] with an overlay layer (a field's quads and glyphs) drawn above the
+/// terminal layer, as palette and search fields are.
+fn software_pixels_with_overlay(
+    clear: [f32; 4],
+    atlas: &GlyphAtlas,
+    (quads, glyphs): (&[QuadInstance], &[GlyphInstance]),
+    (overlay_quads, overlay_glyphs): (&[QuadInstance], &[GlyphInstance]),
+) -> Vec<[u8; 4]> {
     let mut frame =
         crate::software_frame::SoftwareFrame::new(WIDTH_PX, HEIGHT_PX, clear).expect("frame");
     frame.draw_layers_with_subpixel_aa(
@@ -128,8 +140,8 @@ fn software_pixels(
         quads,
         &[],
         glyphs,
-        &[],
-        &[],
+        overlay_quads,
+        overlay_glyphs,
     );
     (0..HEIGHT_PX)
         .flat_map(|y| (0..WIDTH_PX).map(move |x| (x, y)))
@@ -145,9 +157,20 @@ fn wgpu_pixels(
     quads: &[QuadInstance],
     glyphs: &[GlyphInstance],
 ) -> Vec<[u8; 4]> {
+    wgpu_pixels_with_overlay(clear, atlas, (quads, glyphs), (&[], &[]))
+}
+
+/// [`wgpu_pixels`] with an overlay layer drawn above the terminal layer.
+fn wgpu_pixels_with_overlay(
+    clear: [f32; 4],
+    atlas: &mut GlyphAtlas,
+    (quads, glyphs): (&[QuadInstance], &[GlyphInstance]),
+    (overlay_quads, overlay_glyphs): (&[QuadInstance], &[GlyphInstance]),
+) -> Vec<[u8; 4]> {
     let (device, queue) = headless_device_and_queue();
     let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-    let mut pipeline = WeztermPipeline::new(&device, format, quads.len().max(1) as u64);
+    let mut pipeline =
+        WeztermPipeline::new(&device, format, (quads.len() + overlay_quads.len()).max(1) as u64);
     let image_upload = crate::atlas_upload::AtlasUpload::new(
         &device,
         atlas,
@@ -215,8 +238,8 @@ fn wgpu_pixels(
             quads,
             &[],
             glyphs,
-            &[],
-            &[],
+            overlay_quads,
+            overlay_glyphs,
         );
     }
     encoder.copy_texture_to_buffer(
@@ -278,7 +301,7 @@ fn wgpu_split_keeps_each_pane_in_its_own_colors() {
 }
 
 /// Which pane is active, and so holds the selection and the block cursor.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum ActivePane {
     Left,
     Right,
@@ -331,10 +354,12 @@ fn selection_frame(
         }
     }
     let row_spans = [RowGlyphSpan::new(&glyphs, 0..glyphs.len(), surface_w, surface_h)];
-    let (origin, overrides) = match active {
-        ActivePane::Left => (0.0, left_overrides),
-        ActivePane::Right => (40.0, None),
+    // Each pane emitted three glyphs; the selection recolor reads only the active pane's rows.
+    let (origin, overrides, pane_range) = match active {
+        ActivePane::Left => (0.0, left_overrides, 0..3),
+        ActivePane::Right => (40.0, None, 3..6),
     };
+    let pane_rows = [RowGlyphSpan::new(&glyphs, pane_range, surface_w, surface_h)];
     let colors = PaneColors::new(theme, overrides);
     let theme_highlight =
         crate::color::hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
@@ -359,7 +384,7 @@ fn selection_frame(
         colors.selection_rgba(theme_highlight),
     );
     if let Some(selected) = colors.selection_foreground_rgba() {
-        recolor_selected_glyphs(&mut glyphs, &row_spans, &selection, &geometry, &[], selected);
+        recolor_selected_glyphs(&mut glyphs, &pane_rows, &selection, &geometry, &[], selected);
     }
     let _ = recolor_cursor_glyphs_in(
         &mut glyphs,
@@ -465,4 +490,393 @@ fn wgpu_selection_follows_the_active_pane_colors() {
         let pixels = wgpu_pixels(clear, &mut atlas, &quads, &glyphs);
         assert_cells(&format!("wgpu, {case}"), expected, 2, pixel(&pixels));
     }
+}
+
+/// One glyph of a cluster scene: its left edge and width in surface pixels, its pane, its atlas
+/// key, and whether its tile is striped (every third column uncovered) so a split that loses its
+/// atlas coordinates moves the stripes.
+struct ClusterGlyph {
+    left_px: f32,
+    width_px: u32,
+    pane: ActivePane,
+    key: char,
+    striped: bool,
+}
+
+/// The program selection background and foreground of the active pane in every cluster scene.
+const CLUSTER_SELECTION_BG: Srgb = (200, 0, 0);
+/// The selected glyph color of every cluster scene.
+const CLUSTER_SELECTION_FG: Srgb = (0, 200, 0);
+
+/// One cluster scene: `glyphs`, left pane first, and a selection of `selected_cols` on row 0 of the
+/// `active` pane, whose program set [`CLUSTER_SELECTION_BG`] and [`CLUSTER_SELECTION_FG`]. The
+/// recolor sees only the active pane's glyph rows, as assembly passes them.
+fn cluster_frame(
+    theme: &Theme,
+    glyphs: &[ClusterGlyph],
+    active: ActivePane,
+    selected_cols: (u16, u16),
+) -> (GlyphAtlas, Vec<QuadInstance>, Vec<GlyphInstance>) {
+    let (surface_w, surface_h) = (WIDTH_PX as f32, HEIGHT_PX as f32);
+    let mut atlas = GlyphAtlas::new(128, 64);
+    let foreground =
+        crate::color::hex_to_premultiplied_rgba(theme.colors.foreground.0.as_str(), 1.0);
+    let mut instances = Vec::new();
+    for glyph in glyphs {
+        let (width, striped) = (glyph.width_px, glyph.striped);
+        let info = atlas
+            .get_or_insert_lazy_without_eviction(
+                GlyphKey::new(glyph.key, false, false),
+                width,
+                20,
+                || RasterTile {
+                    width,
+                    height: 20,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: width as f32,
+                    coverage: (0..20 * width)
+                        .map(
+                            |index| {
+                                if striped && (index % width).is_multiple_of(3) {
+                                    0
+                                } else {
+                                    255
+                                }
+                            },
+                        )
+                        .collect(),
+                    is_color: false,
+                    is_subpixel: false,
+                },
+            )
+            .expect("cluster tile");
+        instances.push(GlyphInstance {
+            rect: px_to_ndc(glyph.left_px, 0.0, width as f32, 20.0, surface_w, surface_h),
+            uv: info.uv,
+            color: foreground,
+            flags: [0.0; 4],
+        });
+    }
+    let left_count = glyphs.iter().filter(|glyph| glyph.pane == ActivePane::Left).count();
+    let (origin, pane_range) = match active {
+        ActivePane::Left => (0.0, 0..left_count),
+        ActivePane::Right => (40.0, left_count..instances.len()),
+    };
+    let pane_rows = [RowGlyphSpan::new(&instances, pane_range, surface_w, surface_h)];
+    let mut overrides = ColorOverrides::default();
+    let (red, green, blue) = CLUSTER_SELECTION_BG;
+    overrides.set_dynamic(DynamicColor::SelectionBackground, Some((red, green, blue)));
+    let (red, green, blue) = CLUSTER_SELECTION_FG;
+    overrides.set_dynamic(DynamicColor::SelectionForeground, Some((red, green, blue)));
+    let colors = PaneColors::new(theme, Some(&overrides));
+    let theme_highlight =
+        crate::color::hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
+    let mut selection = Selection::new(0, selected_cols.0);
+    selection.extend(0, selected_cols.1);
+    let geometry = SelectionGeometry {
+        view_top_abs: 0,
+        grid_size: (1, 4),
+        origin: (origin, 0.0),
+        cell_size: (10.0, 20.0),
+        clip: (origin, 0.0, 40.0, 20.0),
+        surface: (surface_w, surface_h),
+    };
+    let mut quads = Vec::new();
+    push_selection_quads(
+        &mut quads,
+        &selection,
+        &geometry,
+        &[],
+        colors.selection_rgba(theme_highlight),
+    );
+    let selected = colors.selection_foreground_rgba().expect("the program set one");
+    recolor_selected_glyphs(&mut instances, &pane_rows, &selection, &geometry, &[], selected);
+    (atlas, quads, instances)
+}
+
+/// One cluster scene: its name, glyphs, active pane, selected columns, and the `(pixel column,
+/// color)` pairs of row 10 it must draw.
+type ClusterCase = (&'static str, Vec<ClusterGlyph>, ActivePane, (u16, u16), Vec<(u32, Srgb)>);
+
+/// The cluster scenes and, per scene, the pixel columns of row 10 to check with the color each
+/// must draw:
+/// - a two-cell glyph with a bearing (a ligature) whose second cell alone is selected, beside a
+///   wide glyph whose lead cell alone is selected: only the selected cells' ink turns green, and
+///   the ligature's stripes stay where its atlas coordinates put them on both sides of the cut;
+/// - a neighbouring pane's glyph overhanging into the active pane's selected cells: its ink there
+///   keeps the foreground, while the active pane's own glyph in that cell turns green.
+fn cluster_cases(theme: &Theme) -> Vec<ClusterCase> {
+    let foreground = theme_rgb(&theme.colors.foreground);
+    let background = theme_rgb(&theme.colors.background);
+    let highlight = highlight_over(CLUSTER_SELECTION_BG, background);
+    // The ligature spans pixels 1..19, striped from its own left edge; cells 1 and 2 (pixels
+    // 10..30) are selected.
+    let mut ligature_pixels: Vec<(u32, Srgb)> = (1..19)
+        .map(|pixel_x| {
+            let inked = (pixel_x - 1) % 3 != 0;
+            let selected = pixel_x >= 10;
+            let color = match (inked, selected) {
+                (true, true) => CLUSTER_SELECTION_FG,
+                (true, false) => foreground,
+                (false, true) => highlight,
+                (false, false) => background,
+            };
+            (pixel_x, color)
+        })
+        .collect();
+    ligature_pixels.extend([(25, CLUSTER_SELECTION_FG), (35, foreground)]);
+    let glyph = |left_px, width_px, pane, key, striped| ClusterGlyph {
+        left_px,
+        width_px,
+        pane,
+        key,
+        striped,
+    };
+    vec![
+        (
+            "ligature and wide glyph half selected",
+            vec![
+                glyph(1.0, 18, ActivePane::Left, 'L', true),
+                glyph(20.0, 20, ActivePane::Left, 'W', false),
+            ],
+            ActivePane::Left,
+            (1, 2),
+            ligature_pixels,
+        ),
+        (
+            "neighbouring pane's overhang",
+            vec![
+                glyph(30.0, 16, ActivePane::Left, 'O', false),
+                glyph(47.0, 3, ActivePane::Right, 'N', false),
+            ],
+            ActivePane::Right,
+            (0, 1),
+            vec![(35, foreground), (43, foreground), (48, CLUSTER_SELECTION_FG), (55, highlight)],
+        ),
+    ]
+}
+
+/// Assert each `(column, color)` of row 10 of `pixels` within `tolerance` per channel.
+fn assert_columns(path: &str, expected: &[(u32, Srgb)], tolerance: u8, pixels: &[[u8; 4]]) {
+    for &(pixel_x, (red, green, blue)) in expected {
+        let [blue_seen, green_seen, red_seen, _] = pixels[(10 * WIDTH_PX + pixel_x) as usize];
+        for (seen, wanted) in [(red_seen, red), (green_seen, green), (blue_seen, blue)] {
+            assert!(
+                seen.abs_diff(wanted) <= tolerance,
+                "{path}: pixel {pixel_x} is {:?}, expected {:?}",
+                (red_seen, green_seen, blue_seen),
+                (red, green, blue)
+            );
+        }
+    }
+}
+
+/// The selection foreground recolors only the selected cells of the owning pane on the software
+/// compositor: a glyph crossing the selection's edge is cut there with its atlas coordinates kept,
+/// so its unselected part keeps its color, and a neighbour's overhang is never recolored.
+#[test]
+fn software_selection_foreground_follows_the_selected_cells() {
+    let theme = Theme::default();
+    let clear = crate::color::hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
+    for (case, glyphs, active, cols, expected) in cluster_cases(&theme) {
+        let (atlas, quads, instances) = cluster_frame(&theme, &glyphs, active, cols);
+        let pixels = software_pixels(clear, &atlas, &quads, &instances);
+        assert_columns(&format!("software, {case}"), &expected, 2, &pixels);
+    }
+}
+
+/// The wgpu pipeline draws every cluster scene as the software compositor does.
+#[test]
+fn wgpu_selection_foreground_follows_the_selected_cells() {
+    let theme = Theme::default();
+    let clear = crate::color::hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
+    for (case, glyphs, active, cols, expected) in cluster_cases(&theme) {
+        let (mut atlas, quads, instances) = cluster_frame(&theme, &glyphs, active, cols);
+        let pixels = wgpu_pixels(clear, &mut atlas, &quads, &instances);
+        assert_columns(&format!("wgpu, {case}"), &expected, 2, &pixels);
+    }
+}
+
+/// One copy-mode frame of the left pane, whose program set every selection and cursor-text color
+/// (`overrides`): four text glyphs, copy mode's range over cells 0-2 with its cursor on cell 2,
+/// built with the production copy-mode quads and recolors in the order assembly runs them.
+fn copy_mode_frame(
+    theme: &Theme,
+    overrides: &ColorOverrides,
+) -> (GlyphAtlas, Vec<QuadInstance>, Vec<GlyphInstance>) {
+    let (surface_w, surface_h) = (WIDTH_PX as f32, HEIGHT_PX as f32);
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let text = atlas
+        .get_or_insert_lazy_without_eviction(GlyphKey::new('M', false, false), 10, 20, || {
+            RasterTile {
+                width: 10,
+                height: 20,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 10.0,
+                coverage: vec![255; 10 * 20],
+                is_color: false,
+                is_subpixel: false,
+            }
+        })
+        .expect("text tile");
+    let foreground =
+        crate::color::hex_to_premultiplied_rgba(theme.colors.foreground.0.as_str(), 1.0);
+    let mut glyphs: Vec<GlyphInstance> = (0..4)
+        .map(|column| GlyphInstance {
+            rect: px_to_ndc(column as f32 * 10.0, 0.0, 10.0, 20.0, surface_w, surface_h),
+            uv: text.uv,
+            color: foreground,
+            flags: [0.0; 4],
+        })
+        .collect();
+    let rows = [RowGlyphSpan::new(&glyphs, 0..glyphs.len(), surface_w, surface_h)];
+    let colors = PaneColors::new(theme, Some(overrides));
+    let theme_highlight =
+        crate::color::hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
+    let theme_cursor = crate::color::hex_to_premultiplied_rgba(theme.colors.cursor.0.as_str(), 1.0);
+    let theme_cursor_text =
+        crate::color::hex_to_premultiplied_rgba(theme.colors.cursor_text.0.as_str(), 1.0);
+    let grid = Grid::new(4, 1);
+    let mut copy_mode = CopyModeState::new_at((0, 0));
+    copy_mode.anchor = Some((0, 0));
+    copy_mode.cursor = (2, 0);
+    let geometry = SelectionGeometry {
+        view_top_abs: 0,
+        grid_size: (1, 4),
+        origin: (0.0, 0.0),
+        cell_size: (10.0, 20.0),
+        clip: (0.0, 0.0, 40.0, 20.0),
+        surface: (surface_w, surface_h),
+    };
+    let mut quads = Vec::new();
+    let cursor = GpuRenderer::emit_copy_mode_quads(
+        &copy_mode,
+        &grid,
+        0,
+        0.0,
+        0.0,
+        10.0,
+        20.0,
+        surface_w,
+        surface_h,
+        colors.selection_rgba(theme_highlight),
+        theme_cursor,
+        &mut quads,
+        &[],
+    );
+    if let Some(selected) = colors.selection_foreground_rgba() {
+        recolor_copy_mode_glyphs(&mut glyphs, &rows, &copy_mode, &grid, &geometry, &[], selected);
+    }
+    let (cursor_x, cursor_y) = cursor.expect("copy mode draws its cursor");
+    let _ = recolor_cursor_glyphs_in(
+        &mut glyphs,
+        &rows,
+        cursor_x,
+        cursor_y,
+        10.0,
+        20.0,
+        surface_w,
+        surface_h,
+        colors.cursor_text_rgba(theme_cursor_text),
+    );
+    (atlas, quads, glyphs)
+}
+
+/// Copy mode's selected range follows the mouse selection's rule on both compositors: with a
+/// program selection foreground set, its selected glyphs take that color, the copy cursor's glyph
+/// takes the cursor text over it, and the unselected cell keeps the foreground.
+#[test]
+fn copy_mode_selection_takes_the_program_selection_foreground() {
+    let theme = Theme::default();
+    let clear = crate::color::hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
+    let mut overrides = ColorOverrides::default();
+    overrides.set_dynamic(DynamicColor::SelectionBackground, Some(CLUSTER_SELECTION_BG));
+    overrides.set_dynamic(DynamicColor::SelectionForeground, Some(CLUSTER_SELECTION_FG));
+    overrides.set_dynamic(DynamicColor::CursorText, Some((0, 0, 200)));
+    let foreground = theme_rgb(&theme.colors.foreground);
+    let expected = [
+        (5, CLUSTER_SELECTION_FG),
+        (15, CLUSTER_SELECTION_FG),
+        (25, (0, 0, 200)),
+        (35, foreground),
+    ];
+    let (mut atlas, quads, glyphs) = copy_mode_frame(&theme, &overrides);
+    let software = software_pixels(clear, &atlas, &quads, &glyphs);
+    assert_columns("software, copy mode", &expected, 2, &software);
+    let wgpu = wgpu_pixels(clear, &mut atlas, &quads, &glyphs);
+    assert_columns("wgpu, copy mode", &expected, 2, &wgpu);
+}
+
+/// A palette or search field keeps the theme's selection colors with every selection and
+/// cursor-text color a program can set on the active pane: the field (an overlay over the left
+/// pane's selected cells) draws its selected glyph in the theme's `selection_fg` on the theme's
+/// `selection_bg` and its other glyph in the theme foreground, through the production field marks,
+/// while the terminal's own selected glyph beside it takes the program's selection foreground.
+#[test]
+fn ui_fields_keep_the_theme_selection_colors_beside_a_program_selection() {
+    let theme = Theme::default();
+    let clear = crate::color::hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
+    let mut every = ColorOverrides::default();
+    every.set_dynamic(DynamicColor::SelectionBackground, Some(CLUSTER_SELECTION_BG));
+    every.set_dynamic(DynamicColor::SelectionForeground, Some(CLUSTER_SELECTION_FG));
+    every.set_dynamic(DynamicColor::CursorText, Some((0, 0, 200)));
+    let (mut atlas, quads, glyphs) = selection_frame(&theme, Some(&every), ActivePane::Left);
+    let (surface_w, surface_h) = (WIDTH_PX as f32, HEIGHT_PX as f32);
+    let text = atlas
+        .get_or_insert_lazy_without_eviction(GlyphKey::new('M', false, false), 10, 20, || {
+            unreachable!("the selection frame already holds the text tile")
+        })
+        .expect("text tile");
+    let background =
+        crate::color::hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
+    let foreground =
+        crate::color::hex_to_premultiplied_rgba(theme.colors.foreground.0.as_str(), 1.0);
+    // The field covers cells 1 and 2 of the selected left pane with an opaque backdrop and two glyphs.
+    let mut overlay_quads = vec![QuadInstance::sharp(
+        px_to_ndc(10.0, 0.0, 20.0, 20.0, surface_w, surface_h),
+        background,
+    )];
+    let mut overlay_glyphs: Vec<GlyphInstance> = [10.0, 20.0]
+        .into_iter()
+        .map(|left_px| GlyphInstance {
+            rect: px_to_ndc(left_px, 0.0, 10.0, 20.0, surface_w, surface_h),
+            uv: text.uv,
+            color: foreground,
+            flags: [0.0; 4],
+        })
+        .collect();
+    let (field_selection_bg, field_selection_fg) = field_selection_colors(&theme);
+    crate::cursor::paint_field_marks(
+        &mut overlay_quads,
+        &mut overlay_glyphs,
+        Vec::new(),
+        &[crate::cursor::FieldMark {
+            rect: (10.0, 0.0, 10.0, 20.0),
+            background: field_selection_bg,
+            foreground: field_selection_fg,
+        }],
+        surface_w,
+        surface_h,
+    );
+    let expected = [
+        (5, CLUSTER_SELECTION_FG),
+        (15, theme_rgb(&theme.colors.selection_fg)),
+        (25, theme_rgb(&theme.colors.foreground)),
+    ];
+    let software = software_pixels_with_overlay(
+        clear,
+        &atlas,
+        (&quads, &glyphs),
+        (&overlay_quads, &overlay_glyphs),
+    );
+    assert_columns("software, field", &expected, 2, &software);
+    let wgpu = wgpu_pixels_with_overlay(
+        clear,
+        &mut atlas,
+        (&quads, &glyphs),
+        (&overlay_quads, &overlay_glyphs),
+    );
+    assert_columns("wgpu, field", &expected, 2, &wgpu);
 }

@@ -11,6 +11,7 @@ impl GpuRenderer {
         inputs: AssemblyUi<'_>,
         scratch: &mut frame_scratch::FrameScratch,
         active_snapped_cell_x: &[f32],
+        active_rows: std::ops::Range<usize>,
         frame_recolor: &mut crate::cursor::RecolorRecord,
     ) {
         let AssemblyGeometry {
@@ -50,34 +51,29 @@ impl GpuRenderer {
             theme,
             pane_views.get(plan.active_index).and_then(|view| view.overrides),
         );
+        // Selection highlights are anchored to the active pane's
+        // origin. They MUST be clipped to that pane's rect — otherwise
+        // a selection that extends past the pane's last visible column
+        // (e.g. the user drags across the split into the neighbouring
+        // pane) would emit a quad that visually bleeds into the
+        // neighbouring pane's grid area. Regression-guard for the
+        // bug where dragging in a split-right layout painted the
+        // selection across both panes.
+        // Selection rows are scrollback-ABSOLUTE; the active pane's view top maps them back
+        // to viewport rows, so the highlight follows the TEXT when scrolled.
+        let geometry = SelectionGeometry {
+            view_top_abs: plan.active_view_top_abs,
+            grid_size: (grid.rows, grid.cols),
+            origin: (active_origin_x, active_origin_y),
+            cell_size: (self.cell_w, self.cell_h),
+            // Pane rect_px is the source of truth — see note above.
+            clip: (active_pane_x, active_pane_y, active_pane_w, active_pane_h),
+            surface: (sw, sh),
+        };
+        // A selection recolors only the active pane's glyph rows, the pane it belongs to.
+        let pane_rows = row_spans.get(active_rows).unwrap_or_default();
         if let Some(sel) = selection {
             if !sel.is_empty() {
-                // Selection highlights are anchored to the active pane's
-                // origin. They MUST be clipped to that pane's rect — otherwise
-                // a selection that extends past the pane's last visible column
-                // (e.g. the user drags across the split into the neighbouring
-                // pane) would emit a quad that visually bleeds into the
-                // neighbouring pane's grid area. Regression-guard for the
-                // bug where dragging in a split-right layout painted the
-                // selection across both panes.
-                let pane_x = active_origin_x;
-                let pane_y = active_origin_y;
-                // Pane rect_px is the source of truth — see note above.
-                let pane_w = active_pane_w;
-                let pane_h = active_pane_h;
-                // Selection rows are scrollback-ABSOLUTE; resolve the active
-                // pane's view top so `selection_quad_rects` can map them back
-                // to viewport rows (so the highlight follows the TEXT when
-                // scrolled).
-                let sel_view_top_abs = plan.active_view_top_abs;
-                let geometry = SelectionGeometry {
-                    view_top_abs: sel_view_top_abs,
-                    grid_size: (grid.rows, grid.cols),
-                    origin: (active_origin_x, active_origin_y),
-                    cell_size: (self.cell_w, self.cell_h),
-                    clip: (pane_x, pane_y, pane_w, pane_h),
-                    surface: (sw, sh),
-                };
                 push_selection_quads(
                     &mut *quads,
                     sel,
@@ -90,7 +86,7 @@ impl GpuRenderer {
                     // below run later, so cursor text wins on the cursor cell.
                     recolor_selected_glyphs(
                         &mut *glyph_instances,
-                        row_spans,
+                        pane_rows,
                         sel,
                         &geometry,
                         active_snapped_cell_x,
@@ -117,7 +113,7 @@ impl GpuRenderer {
                 );
             }
             let view_top_abs = plan.active_view_top_abs;
-            if let Some((cx, cy)) = Self::emit_copy_mode_quads(
+            let copy_cursor = Self::emit_copy_mode_quads(
                 copy_mode,
                 grid,
                 view_top_abs,
@@ -131,7 +127,21 @@ impl GpuRenderer {
                 self.cursor_color,
                 &mut *quads,
                 active_snapped_cell_x,
-            ) {
+            );
+            if let Some(selected) = pane_colors.selection_foreground_rgba() {
+                // Copy mode's selected range takes the program's selection foreground by the
+                // mouse selection's rule, before its cursor recolors so cursor text wins there.
+                recolor_copy_mode_glyphs(
+                    &mut *glyph_instances,
+                    pane_rows,
+                    copy_mode,
+                    grid,
+                    &geometry,
+                    active_snapped_cell_x,
+                    selected,
+                );
+            }
+            if let Some((cx, cy)) = copy_cursor {
                 let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
                     &mut *glyph_instances,
                     row_spans,

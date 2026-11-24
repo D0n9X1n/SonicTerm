@@ -4,6 +4,8 @@ use super::*;
 
 impl GpuRenderer {
     /// Emit this phase into the borrowed frame scratch; the caller owns settlement and retries.
+    /// Returns the active pane's row spans as a range of `scratch.row_spans`, empty when that pane
+    /// draws no row, so a selection reads only the glyphs of the pane it belongs to.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn assemble_glyph_rows(
         &mut self,
@@ -11,7 +13,7 @@ impl GpuRenderer {
         inputs: AssemblyUi<'_>,
         scratch: &mut frame_scratch::FrameScratch,
         missing_chars_this_frame: &mut Vec<char>,
-    ) {
+    ) -> std::ops::Range<usize> {
         let AssemblyGeometry {
             fg_default,
             pane_views,
@@ -38,6 +40,7 @@ impl GpuRenderer {
             row_keys,
             ..
         } = scratch;
+        let mut active_rows = 0..0;
         {
             // Post-glyphon the grid path is wezterm-only.
             // FontStack is the sole rasterizer; on test fixtures
@@ -76,6 +79,7 @@ impl GpuRenderer {
                 pane_views.iter().enumerate().filter(|(_, pane)| pane.planned.full_clip.is_some())
             {
                 let pane_staged_start = self.row_ink.staged_len();
+                let pane_rows_start = row_spans.len();
                 // The inspector's record of this pane's emitted slots; `None` in production.
                 let mut pane_emitted = self.emitted_rows_probe.as_ref().map(|_| Vec::new());
                 // Per-cell device-pixel snapping rounds each cell's left edge independently, which
@@ -142,6 +146,10 @@ impl GpuRenderer {
                     },
                 );
                 staged_ranges.push((pv.pane_id, pane_staged_start..self.row_ink.staged_len()));
+                if pane_index == plan.active_index {
+                    // The active pane's rows are contiguous: every pane emits all of its rows in turn.
+                    active_rows = pane_rows_start..row_spans.len();
+                }
                 if let (Some(probe), Some(slots)) = (self.emitted_rows_probe.as_mut(), pane_emitted)
                 {
                     // The inspector is on: keep the slots this pane's rows were emitted at.
@@ -149,5 +157,6 @@ impl GpuRenderer {
                 }
             } // end per-pane loop
         }
+        active_rows
     }
 }

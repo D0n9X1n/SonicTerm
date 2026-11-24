@@ -680,15 +680,7 @@ fn a_batch_of_color_sets_publishes_and_redraws_once() {
 #[test]
 fn the_largest_kitty_color_reply_is_one_spool_submission() {
     let (_pane, handles, _watch) = echo_worker(80, 24, 100);
-    let payload_cap = 16 * 1024;
-    let key_count = 526;
-    // Keys of 30 or 31 bytes and their 525 separators fill the cap exactly.
-    let key_bytes = payload_cap - (key_count - 1);
-    let keys: Vec<String> = (0..key_count)
-        .map(|index| "k".repeat(key_bytes / key_count + usize::from(index < key_bytes % key_count)))
-        .collect();
-    let payload = keys.join(";");
-    assert_eq!(payload.len(), payload_cap);
+    let payload = worst_case_kitty_color_payload();
     let mut submissions = Vec::new();
     publish_pane_vt_batch_with(
         &handles,
@@ -708,5 +700,149 @@ fn the_largest_kitty_color_reply_is_one_spool_submission() {
     let reply = &submissions[0];
     assert!(reply.len() <= 32 * 1024, "{} bytes fit one spool submission", reply.len());
     let answers = reply.windows(8).filter(|window| window == b"unknown=").count();
-    assert_eq!(answers, key_count, "every key is answered");
+    assert_eq!(answers, KITTY_COLOR_ITEM_CAP, "every key is answered");
+}
+
+/// The most counted fields one OSC 21 packet may hold.
+const KITTY_COLOR_ITEM_CAP: usize = 526;
+
+/// The worst-case OSC 21 payload: 526 unknown keys of 30 or 31 bytes and their 525 separators fill
+/// the 16 KiB input cap exactly, so its reply is the largest one packet can produce.
+fn worst_case_kitty_color_payload() -> String {
+    let payload_cap = 16 * 1024;
+    let key_bytes = payload_cap - (KITTY_COLOR_ITEM_CAP - 1);
+    let keys: Vec<String> = (0..KITTY_COLOR_ITEM_CAP)
+        .map(|index| {
+            let extra = usize::from(index < key_bytes % KITTY_COLOR_ITEM_CAP);
+            "k".repeat(key_bytes / KITTY_COLOR_ITEM_CAP + extra)
+        })
+        .collect();
+    let payload = keys.join(";");
+    assert_eq!(payload.len(), payload_cap);
+    payload
+}
+
+/// The environment marker under which this test binary runs as the raw-mode PTY reader.
+#[cfg(unix)]
+const REPLY_READER_CHILD: &str = "SONICTERM_KITTY_REPLY_READER";
+
+/// FNV-1a over `bytes`: a stable digest the reader child and the test compute alike.
+#[cfg(unix)]
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Run as the PTY child: put the terminal in raw mode without echo, say `READY`, then read until
+/// an OSC reply ends in ST (at most 64 KiB) and report its length and digest on one line.
+#[cfg(unix)]
+fn report_one_reply_from_the_terminal() {
+    use std::io::{Read, Write};
+    // Raw mode passes every reply byte through unchanged, and a full input queue then blocks the
+    // terminal's writer rather than dropping bytes as a canonical-mode line limit would.
+    let raw = std::process::Command::new("stty").args(["raw", "-echo"]).status();
+    assert!(raw.is_ok_and(|status| status.success()), "stty raw -echo");
+    let mut out = std::io::stdout();
+    out.write_all(b"READY\n").and_then(|()| out.flush()).expect("announce readiness");
+    let (mut received, mut chunk) = (Vec::new(), [0u8; 4096]);
+    let mut stdin = std::io::stdin().lock();
+    while !received.ends_with(b"\x1b\\") && received.len() < 64 * 1024 {
+        let read = stdin.read(&mut chunk).expect("read the reply");
+        if read == 0 {
+            // When: the terminal closed, the reply is reported as far as it arrived.
+            break;
+        }
+        received.extend_from_slice(&chunk[..read]);
+    }
+    let line = format!("GOT {} {:016x}\n", received.len(), fnv1a(&received));
+    out.write_all(line.as_bytes()).and_then(|()| out.flush()).expect("report the reply");
+}
+
+/// The text from the first `marker` in the terminal's output up to its line end, read from `pty`
+/// into `output` until `deadline`; libtest may print its own `test … ...` prefix on the same line.
+/// Panics with the output's tail when no complete marked line arrives in time.
+#[cfg(unix)]
+fn terminal_line(
+    pty: &sonicterm_io::pty::PtyHandle,
+    output: &mut Vec<u8>,
+    marker: &str,
+    deadline: Instant,
+) -> String {
+    loop {
+        let text = String::from_utf8_lossy(output).into_owned();
+        if let Some(line) = text.find(marker).and_then(|start| {
+            let rest = &text[start..];
+            rest.find(['\r', '\n']).map(|end| rest[..end].to_owned())
+        }) {
+            return line;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(chunk) = pty.out_rx.recv_timeout(remaining) else {
+            let tail = &text[text.len().saturating_sub(300)..];
+            panic!("no `{marker}` line before the deadline; output ends {tail:?}");
+        };
+        output.extend_from_slice(&chunk);
+    }
+}
+
+/// The largest OSC 21 answer travels the pane's real reply path intact: the worst-case packet's one
+/// reply is admitted whole by a live PTY's reply spool (one submission of at most 32 KiB, none
+/// dropped), and the child on the other end reads exactly those bytes. The child is this test
+/// binary re-run under a marker in raw mode; every wait is bounded by a 30 s deadline.
+#[cfg(unix)]
+#[test]
+fn the_largest_kitty_color_reply_reaches_the_pty_child_intact() {
+    use crate::app::pty_test_support::isolated;
+    use sonicterm_io::pty::{CommandSpawn, PtyHandle, ShellSpawnOpts};
+    let name = std::thread::current().name().expect("named unit test").to_owned();
+    if std::env::var(REPLY_READER_CHILD).is_ok_and(|value| value == name) {
+        // This process is the PTY child: it reads the reply and reports it.
+        report_one_reply_from_the_terminal();
+        return;
+    }
+    if isolated() {
+        return;
+    }
+    // Only this isolated process runs, so setting its environment races no other test.
+    std::env::set_var(REPLY_READER_CHILD, &name);
+    let spawn = CommandSpawn {
+        program: std::env::current_exe().expect("test binary path").into_os_string(),
+        args: [name.as_str(), "--exact", "--nocapture", "--test-threads=1"]
+            .map(std::ffi::OsString::from)
+            .into(),
+        cwd: std::env::temp_dir(),
+    };
+    let pty = PtyHandle::spawn_command(&spawn, 120, 40, &ShellSpawnOpts::default())
+        .expect("spawn the reader");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut output = Vec::new();
+    terminal_line(&pty, &mut output, "READY", deadline);
+    let (_pane, handles, _watch) = echo_worker(80, 24, 100);
+    let replies = pty.reply_sender();
+    let mut submitted = Vec::new();
+    publish_pane_vt_batch_with(
+        &handles,
+        format!("\x1b]21;{}\x1b\\", worst_case_kitty_color_payload()).as_bytes(),
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        test_base,
+        |bytes: Vec<u8>| {
+            submitted.push(bytes.clone());
+            replies.send(bytes).expect("the pane's reply spool admits the whole reply");
+        },
+    );
+    assert_eq!(submitted.len(), 1, "one submission");
+    let reply = &submitted[0];
+    assert!(reply.len() <= 32 * 1024, "{} bytes fit one spool submission", reply.len());
+    assert_eq!(replies.stats().dropped_replies, 0, "the spool dropped nothing");
+    let got = terminal_line(&pty, &mut output, "GOT ", deadline);
+    assert_eq!(
+        got,
+        format!("GOT {} {:016x}", reply.len(), fnv1a(reply)),
+        "the child read the reply"
+    );
 }

@@ -269,17 +269,22 @@ fn run_flush_clones_no_cells() {
 }
 
 /// Production order of the selection colors: the highlight is pushed, then selected glyphs take
-/// the program selection foreground, then the copy-mode and block cursors recolor their glyphs, so
-/// cursor text wins over the selection foreground on the cursor cell. The active pane's colors come
-/// from a checked lookup, and the palette and search fields never read a pane's program colors,
-/// so an OSC cannot recolor them. Line endings are normalized before scanning.
+/// the program selection foreground, then copy mode's selected range takes it too, then the
+/// copy-mode and block cursors recolor their glyphs, so cursor text wins over the selection
+/// foreground on the cursor cell. Both selection recolors read only the active pane's glyph rows.
+/// The active pane's colors come from a checked lookup, and the palette and search fields never
+/// read a pane's program colors, so an OSC cannot recolor them (their pixels are pinned in
+/// `wezterm_pipeline_pane_colors_tests`). Line endings are normalized before scanning.
 #[test]
 fn selection_colors_apply_before_cursor_text_and_never_reach_ui_fields() {
     let selection = include_str!("core_assemble_selection.rs").replace("\r\n", "\n");
     let highlight = selection.find("push_selection_quads(").expect("the highlight");
     let selected = selection.find("recolor_selected_glyphs(").expect("the selected glyphs");
+    let copy_selected = selection.find("recolor_copy_mode_glyphs(").expect("copy mode's range");
     let first_cursor = selection.find("recolor_cursor_glyphs_in(").expect("a cursor recolor");
-    assert!(highlight < selected && selected < first_cursor);
+    assert!(highlight < selected && selected < copy_selected && copy_selected < first_cursor);
+    assert_eq!(selection.matches("pane_rows,").count(), 2, "both selection recolors");
+    assert!(selection.contains("let pane_rows = row_spans.get(active_rows).unwrap_or_default();"));
     assert!(selection.contains("pane_views.get(plan.active_index)"));
     assert!(!selection.contains("pane_views[plan.active_index]"));
     for field_source in
