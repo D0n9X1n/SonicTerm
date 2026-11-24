@@ -95,3 +95,48 @@ fn outcome_debug_never_prints_text() {
     assert!(!printed.contains("secret"), "{printed}");
     assert!(printed.contains("12"), "{printed}");
 }
+
+/// Contract: a native type listing names only public types: platform text, file and image types
+/// map to their MIME names, MIME-shaped names pass with their parameters dropped, and private,
+/// dynamic and protocol types are never listed; each MIME name appears once.
+#[test]
+fn native_listing_maps_public_types_only() {
+    let names = [
+        "public.utf8-plain-text",
+        "NSStringPboardType",
+        "CF_UNICODETEXT",
+        "UTF8_STRING",
+        "public.html",
+        "HTML Format",
+        "public.file-url",
+        "CF_HDROP",
+        "public.png",
+        "text/plain;charset=utf-8",
+        "image/jpeg",
+        "dyn.ah62d4rv4gu8y63n2nuuhg5pbsm4ca6dbsr4gnp2",
+        "com.apple.private.secret",
+        "TARGETS",
+        "TIMESTAMP",
+        "SAVE_TARGETS",
+        "Private Format",
+    ];
+    let listing = list_native_types(names.iter().map(|name| (*name).to_owned()));
+    let expected = ["text/plain", "text/html", "text/uri-list", "image/png", "image/jpeg"];
+    assert_eq!(listing, TypeListing::Types(expected.map(str::to_owned).to_vec()));
+}
+
+/// Contract: a listing inspects at most `MAX_NATIVE_TYPES_SCANNED` native names and keeps at most
+/// 16 MIME names, so an owner offering thousands of formats cannot make it unbounded.
+#[test]
+fn native_listing_is_bounded() {
+    let inspected = std::cell::Cell::new(0usize);
+    let names = (0..1000).map(|index| {
+        inspected.set(inspected.get() + 1);
+        format!("application/x-type{index}")
+    });
+    let TypeListing::Types(listing) = list_native_types(names) else {
+        panic!("a listing of names");
+    };
+    assert_eq!(listing.len(), 16);
+    assert!(inspected.get() <= MAX_NATIVE_TYPES_SCANNED, "{} inspected", inspected.get());
+}

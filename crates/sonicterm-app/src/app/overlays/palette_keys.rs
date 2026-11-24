@@ -112,8 +112,9 @@ impl App {
             match logical_key {
                 Key::Named(NamedKey::Escape) => self.close_confirm_page(false),
                 Key::Named(NamedKey::Enter) => {
-                    let apply = self.interaction.command_palette.confirm_applies();
-                    self.close_confirm_page(apply);
+                    let palette = &self.interaction.command_palette;
+                    let (apply, choice) = (palette.confirm_applies(), palette.confirm_choice());
+                    self.close_confirm_page_choosing(apply, choice);
                 }
                 Key::Named(NamedKey::ArrowDown) => {
                     self.interaction.command_palette.move_selection_down();

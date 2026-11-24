@@ -344,6 +344,7 @@ mod kitty_clipboard_read;
 mod kitty_clipboard_tx;
 mod osc52_read;
 mod osc52_read_consent;
+mod osc52_read_grants;
 mod osc52_read_pipeline;
 mod osc52_read_source;
 mod osc52_read_ticket;

@@ -8,14 +8,17 @@ use windows::Win32::{
     Foundation::HGLOBAL,
     System::{
         DataExchange::{
-            CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
+            CloseClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardFormatNameW,
+            GetClipboardSequenceNumber, OpenClipboard,
         },
         Memory::{GlobalLock, GlobalSize, GlobalUnlock},
     },
 };
 
 use super::Snapshot;
-use crate::app::osc52_read_source::{bounded_utf16, utf16_block_admits, ReadOutcome};
+use crate::app::osc52_read_source::{
+    bounded_utf16, utf16_block_admits, ReadOutcome, MAX_NATIVE_TYPES_SCANNED,
+};
 
 /// The standard clipboard format for NUL-terminated UTF-16 text.
 const CF_UNICODETEXT: u32 = 13;
@@ -154,6 +157,46 @@ pub(in crate::app) fn read_text(max_bytes: usize) -> ReadOutcome {
         // SAFETY: block was locked above; a final unlock reports an error with no lock left.
         unsafe { GlobalUnlock(block) };
     outcome
+}
+
+/// The names of the clipboard's formats for an OSC 5522 listing, at most
+/// [`MAX_NATIVE_TYPES_SCANNED`]; `None` when another process held the clipboard throughout.
+/// `EnumClipboardFormats` names formats without rendering or reading any data.
+pub(in crate::app) fn list_formats() -> Option<Vec<String>> {
+    let _open = OpenGuard::open_with(READ_OPEN_ATTEMPTS, READ_OPEN_RETRY)?;
+    let mut names = Vec::new();
+    let mut format = 0;
+    while names.len() < MAX_NATIVE_TYPES_SCANNED {
+        format =
+            // SAFETY: the clipboard is open on this thread; EnumClipboardFormats reads its format list.
+            unsafe { EnumClipboardFormats(format) };
+        if format == 0 {
+            // When: format is 0, the enumeration ended; the names so far stand.
+            break;
+        }
+        names.push(format_name(format));
+    }
+    Some(names)
+}
+
+/// The name of clipboard `format`: a predefined text or file format's constant name, else the
+/// name it was registered under (empty for an unnamed predefined format).
+fn format_name(format: u32) -> String {
+    match format {
+        1 => "CF_TEXT".to_owned(),
+        7 => "CF_OEMTEXT".to_owned(),
+        CF_UNICODETEXT => "CF_UNICODETEXT".to_owned(),
+        15 => "CF_HDROP".to_owned(),
+        _ => {
+            // When: format is no predefined text or file format, its registered name is asked for.
+            let mut buffer = [0u16; 256];
+            let length =
+                // SAFETY: GetClipboardFormatNameW writes at most buffer.len() units into buffer.
+                unsafe { GetClipboardFormatNameW(format, &mut buffer) };
+            let length = usize::try_from(length).unwrap_or(0).min(buffer.len());
+            String::from_utf16_lossy(&buffer[..length])
+        }
+    }
 }
 
 /// The clipboard text, when its block is at most `max_block_bytes`.

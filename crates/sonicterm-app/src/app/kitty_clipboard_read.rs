@@ -14,6 +14,7 @@ use sonicterm_vt::vt::{
     KittyClipboardOperation, KittyClipboardStatus, MAX_KITTY_CLIPBOARD_MIME_BYTES,
 };
 
+use super::osc52_read_grants::GrantCredential;
 pub(in crate::app) use super::osc52_read_source::{
     ClipboardTextSource, ReadLocation, ReadOutcome, TypeListing,
 };
@@ -53,6 +54,8 @@ pub(in crate::app) struct KittyReadRequest {
     pub(in crate::app) types: Vec<String>,
     /// Whether the request ended with BEL, which every reply packet repeats.
     pub(in crate::app) bel: bool,
+    /// The `name` and `pw` a session grant is looked up by; `None` unless both are nonempty.
+    pub(in crate::app) credential: Option<GrantCredential>,
 }
 
 impl KittyReadRequest {
@@ -97,7 +100,8 @@ pub(in crate::app) fn parse_read_request(
         }
     }
     let id = metadata.id.clone();
-    Some(KittyReadRequest { id, location: metadata.location, listing, types, bel })
+    let credential = GrantCredential::new(&metadata.name, &metadata.password);
+    Some(KittyReadRequest { id, location: metadata.location, listing, types, bel, credential })
 }
 
 /// The exact length of one read `DATA` packet: `ESC]5522;type=read:status=DATA` (28 bytes),
@@ -206,6 +210,10 @@ pub(in crate::app) fn build_read_reply(
         Some(TypeListing::Unsupported) => {
             // When: list_types is Unsupported, the platform cannot enumerate types: `ENOSYS`.
             return request.status(KittyClipboardStatus::Enosys);
+        }
+        Some(TypeListing::Failed) => {
+            // When: list_types Failed, the native enumeration could not run: `EIO`.
+            return request.status(KittyClipboardStatus::Eio);
         }
         None => None,
     };

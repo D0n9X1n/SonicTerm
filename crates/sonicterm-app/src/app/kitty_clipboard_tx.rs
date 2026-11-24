@@ -19,6 +19,7 @@ use sonicterm_vt::vt::{
 };
 
 use super::kitty_clipboard_read::parse_read_request;
+use super::osc52_read_grants::GrantCredential;
 use super::osc52_read_ticket::{
     admit_kitty_read, admit_write, ConsentTicket, ReadIdentity, WriteAdmission,
 };
@@ -44,12 +45,25 @@ pub(in crate::app) struct KittyReply {
     id: String,
     location: KittyClipboardLocation,
     bel: bool,
+    /// The opening packet's `name` and `pw`, which session grants are looked up by.
+    credential: Option<GrantCredential>,
 }
 
 impl KittyReply {
     /// The reply address `metadata` opens, answered with `bel`'s terminator.
     fn of(metadata: &KittyClipboardMetadata, bel: bool) -> Self {
-        Self { id: metadata.id.clone(), location: metadata.location, bel }
+        let credential = GrantCredential::new(&metadata.name, &metadata.password);
+        Self { id: metadata.id.clone(), location: metadata.location, bel, credential }
+    }
+
+    /// The location the write targets.
+    pub(in crate::app) fn location(&self) -> KittyClipboardLocation {
+        self.location
+    }
+
+    /// The credential the opening packet offered, if both its `name` and `pw` were nonempty.
+    pub(in crate::app) fn credential(&self) -> Option<&GrantCredential> {
+        self.credential.as_ref()
     }
 
     /// The `type=write` status reply carrying `status`.
@@ -383,8 +397,10 @@ impl KittyClipboardTx {
         let mut steps = Vec::new();
         for request in requests {
             let Some((stream, request, bel, passed)) = request else {
-                // When: the section passed a RIS here, the open write ends without a reply.
+                // When: the section passed a RIS here, the open write ends without a reply and
+                // every session grant bound before the reset is revoked.
                 self.release();
+                self.identity.bump_reset();
                 continue;
             };
             let Some(inbox) = inbox else {

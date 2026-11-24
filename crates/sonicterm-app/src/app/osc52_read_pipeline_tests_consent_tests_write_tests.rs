@@ -132,6 +132,12 @@ fn waiting_ticket_shows_the_clip_hint() {
 /// Run one OSC 5522 write of `text` from the harness pane through a real parser and the pane's
 /// transaction, admitting its `ask` ticket as the VT worker posts it.
 fn kitty_write(harness: &mut Harness, text: &str) {
+    kitty_write_as(harness, text, "");
+}
+
+/// [`kitty_write`] whose opening `type=write` packet carries `extra` metadata, such as
+/// `:name=…:pw=…`.
+fn kitty_write_as(harness: &mut Harness, text: &str, extra: &str) {
     use crate::app::kitty_clipboard_tx::{KittyClipboardTx, KittyStep};
     use base64::Engine as _;
     use sonicterm_vt::vt::CaptureStagingPool;
@@ -142,7 +148,7 @@ fn kitty_write(harness: &mut Harness, text: &str) {
         Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());
     let data = base64::engine::general_purpose::STANDARD.encode(text);
     let wire = format!(
-        "\x1b]5522;type=write:id=k\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;{data}\x1b\\\
+        "\x1b]5522;type=write:id=k{extra}\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;{data}\x1b\\\
          \x1b]5522;type=wdata\x1b\\"
     );
     let events = parser.advance(wire.as_bytes());
@@ -204,3 +210,7 @@ fn cancelled_kitty_write_consent_answers_eperm_to_the_same_program() {
         assert_eq!(slots, (0, 0), "{case}");
     }
 }
+
+#[cfg(test)]
+#[path = "osc52_read_pipeline_tests_consent_tests_write_tests_grants_tests.rs"]
+mod osc52_read_pipeline_tests_consent_tests_write_tests_grants_tests;

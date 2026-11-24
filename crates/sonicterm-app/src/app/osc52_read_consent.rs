@@ -5,7 +5,8 @@
 //! The page opens only while the source window is the OS-frontmost terminal window and the palette
 //! is closed, so it never raises a window, moves focus, or reuses or replaces an open palette; until
 //! then the ticket keeps waiting, up to its expiry. The title names the tab and pane by position,
-//! never by a title a program set, and Deny is highlighted first. Apply consumes the session, and
+//! never by a title a program set, and Deny is highlighted first. A program that names itself with
+//! OSC 5522 `name` and `pw` is also offered Always and Ban, with its name on a separate line. Apply consumes the session, and
 //! the approved ticket then takes the ordinary revalidated read path. Deny, Escape, an outside
 //! click or expiry answer empty, as a rejected prompt is; a lost page or an identity or policy
 //! change ends the ticket silently, except an OSC 5522 write's, which is answered `EPERM` while the
@@ -17,6 +18,7 @@ use sonicterm_ui::command_palette::CommandPaletteMode;
 use winit::window::WindowId;
 
 use super::osc52_read::TICKET_LIFETIME;
+use super::osc52_read_grants::GrantDecision;
 use super::osc52_read_ticket::{CancelReason, ConsentTicket};
 
 /// A waiting ticket shown on the palette's confirm page.
@@ -140,12 +142,25 @@ impl super::App {
             title_key,
             Some(&[("tab", tab_number.as_str()), ("pane", pane_number.as_str())]),
         );
-        let items = item_keys.into_iter().map(|key| self.i18n.translate(key)).collect();
+        let mut items: Vec<String> =
+            item_keys.into_iter().map(|key| self.i18n.translate(key)).collect();
+        let mut choices = Vec::new();
+        if let Some((_, _, credential)) = ticket.grant_scope() {
+            // A program that named itself with `name` and `pw` is offered Always and Ban, and its
+            // name shows on its own labelled line, never in the title.
+            let name = credential.display_name();
+            items.insert(0, self.i18n.t_args("clipboard-grant-name", Some(&[("name", &name)])));
+            choices = ["clipboard-grant-always", "clipboard-grant-ban"]
+                .into_iter()
+                .map(|key| self.i18n.translate(key))
+                .collect();
+        }
         self.interaction.palette_pointer_capture = None;
-        self.interaction.command_palette.start_confirm(
+        self.interaction.command_palette.start_confirm_with_choices(
             title,
             self.i18n.translate("clipboard-read-allow"),
             self.i18n.translate("clipboard-read-deny"),
+            choices,
             items,
         );
         self.interaction.palette_attached_window =
@@ -157,10 +172,16 @@ impl super::App {
         self.request_redraw_for_overlay(self.interaction.palette_attached_window);
     }
 
-    /// Close a read's consent page with its answer; `false`, changing nothing, when the open page
-    /// is not one. Apply approves the ticket only on the page's own session in the window that
-    /// showed it, after revalidation; any other close answers empty.
-    pub(in crate::app) fn close_consent_page(&mut self, allow: bool) -> bool {
+    /// Close a read's consent page with its answer: `allow` for Apply, `choice` for Always (0) or
+    /// Ban (1); `false`, changing nothing, when the open page is not one. Apply or Always approves
+    /// the ticket only on the page's own session in the window that showed it, after revalidation;
+    /// Always and Ban also remember the answer for the program's credential. Any other close
+    /// answers empty.
+    pub(in crate::app) fn close_consent_page(
+        &mut self,
+        allow: bool,
+        choice: Option<usize>,
+    ) -> bool {
         let session = self.interaction.command_palette.session();
         let Some(presented) =
             self.clip_state.reads.presented.take_if(|presented| presented.session == session)
@@ -178,8 +199,8 @@ impl super::App {
         } else if let Err(reason) = self.revalidate_ticket(ticket.binding(), now, false) {
             // When: revalidate_ticket refuses, the answer cannot apply, so the ticket ends silently.
             self.cancel_ticket(ticket, reason);
-        } else if allow
-            && now.saturating_duration_since(ticket.binding().created_at) < TICKET_LIFETIME
+        } else if now.saturating_duration_since(ticket.binding().created_at) < TICKET_LIFETIME
+            && self.record_consent_answer(&ticket, allow, choice)
         {
             // When: allow is set within TICKET_LIFETIME, Apply consumed the page's session and
             // the approval outlives the page.
@@ -200,6 +221,30 @@ impl super::App {
         // The next waiting read can open its own page now.
         self.pump_clipboard_reads();
         true
+    }
+
+    /// Remember the grant a chosen Always (0) or Ban (1) row makes for `ticket`'s credential, and
+    /// return whether the answer allows the request: Apply or Always. Only the trusted page's own
+    /// rows create a grant, and only for a ticket that carries a credential.
+    fn record_consent_answer(
+        &mut self,
+        ticket: &ConsentTicket,
+        allow: bool,
+        choice: Option<usize>,
+    ) -> bool {
+        let decision = match choice {
+            Some(0) => GrantDecision::Always,
+            Some(1) => GrantDecision::Ban,
+            _ => {
+                // When: no choice row was chosen, only Apply allows, once.
+                return allow;
+            }
+        };
+        if let Some(key) = self.grant_key(ticket) {
+            // A ticket carrying a credential keeps the answer for the rest of the session.
+            self.clip_state.reads.grants.record(key, decision);
+        }
+        decision == GrantDecision::Always
     }
 
     /// The clip segment's hint while a read or asked write waits for an answer: the oldest

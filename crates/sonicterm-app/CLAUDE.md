@@ -161,7 +161,11 @@ cargo build -p sonicterm-app
   OSC 5522 write answers `EPERM` while its PTY and command are unchanged; a stopped clipboard
   worker answers its unreported 5522 writes `EIO`. OSC 5522 reads (`kitty_clipboard_read.rs`)
   take the same read ticket (`admit_kitty_read`), reserve 21 MiB from the reply budget and build
-  one OK/DATA/DONE reply on the reader thread, bounded before anything grows. Native reads run one at a time on a disposable reader thread that keeps the ticket and
+  one OK/DATA/DONE reply on the reader thread, bounded before anything grows. Session grants
+  (`osc52_read_grants.rs`) are created only by the consent page's Always/Ban rows for a ticket
+  whose program sent a nonempty `name` and `pw`, keyed by pane, PTY incarnation, owner and RIS
+  epochs, operation, location and `pw`; the pump purges stale ones and a policy change clears all.
+  A reply dropped after its delivery retries leaves an OSC 5522 read one `EBUSY` packet. Native reads run one at a time on a disposable reader thread that keeps the ticket and
   its reply-budget lease until the native call returns. Replies go only to the source PTY through
   `PtyHandle::try_send_reply`, never the reply spool, a broadcast receiver or a log.
 - Main and child keyboard, IME, focus and modifier events share source-WindowId

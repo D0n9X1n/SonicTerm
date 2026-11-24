@@ -18,6 +18,7 @@ use super::osc52_read::{READ_REPLY_BUDGET_BYTES, TICKET_LIFETIME};
 use sonicterm_vt::vt::KittyClipboardStatus;
 
 use super::kitty_clipboard_read::build_read_reply;
+use super::osc52_read_grants::{GrantDecision, GrantKey, SessionGrants};
 use super::osc52_read_source::{read_replies, ClipboardTextSource, NativeSource};
 use super::osc52_read_ticket::{CancelReason, ClipboardTicketHandle, ConsentTicket, ReadBinding};
 use super::osc52_stream::{ClipLease, ClipboardStaging};
@@ -41,6 +42,8 @@ pub(in crate::app) struct InFlight {
     deadline: Instant,
     /// Answered empty at its deadline; its late result is dropped when the native call returns.
     abandoned: bool,
+    /// The `EBUSY` packet an OSC 5522 read hears when its reply cannot be admitted.
+    busy: Option<Vec<u8>>,
 }
 
 /// A reply whose writer admission was contended, retried on a later turn.
@@ -49,6 +52,7 @@ struct Retry {
     reply: SensitiveReply,
     attempts: u32,
     check_age: bool,
+    busy: Option<Vec<u8>>,
 }
 
 /// What a reader thread hands back once its native calls return.
@@ -83,6 +87,8 @@ pub(in crate::app) struct ClipboardReads {
     done_rx: Receiver<ReaderDone>,
     /// Why the last ticket or reply was revoked, for diagnostics.
     pub(in crate::app) last_cancel: Option<CancelReason>,
+    /// The Always and Ban answers OSC 5522 programs named themselves for.
+    pub(in crate::app) grants: SessionGrants,
     /// Replaces the PTY's sensitive-reply slot in tests.
     #[cfg(test)]
     pub(in crate::app) port: Option<ReplyPort>,
@@ -104,6 +110,7 @@ impl Default for ClipboardReads {
             done_tx,
             done_rx,
             last_cancel: None,
+            grants: SessionGrants::default(),
             #[cfg(test)]
             port: None,
         }
@@ -120,18 +127,20 @@ impl std::fmt::Debug for ClipboardReads {
             .field("in_flight", &self.in_flight.is_some())
             .field("retries", &self.retries.len())
             .field("last_cancel", &self.last_cancel)
+            .field("grants", &self.grants.len())
             .finish()
     }
 }
 
 impl ClipboardReads {
-    /// Whether nothing waits, is presented, queues, reads or retries.
+    /// Whether nothing waits, is presented, queues, reads, retries or holds a grant to purge.
     fn idle(&self) -> bool {
         self.waiting.is_empty()
             && self.presented.is_none()
             && self.queued.is_empty()
             && self.in_flight.is_none()
             && self.retries.is_empty()
+            && self.grants.is_empty()
     }
 }
 
@@ -148,13 +157,56 @@ impl super::App {
             self.cancel_ticket(ticket, reason);
             return;
         }
-        if ticket.readable() {
-            self.clip_state.reads.queued.push_back(ticket);
-        } else {
-            // When: the ticket is not readable, it waits for an answer or its expiry.
-            self.clip_state.reads.waiting.push(ticket);
+        let grant =
+            self.grant_key(&ticket).and_then(|key| self.clip_state.reads.grants.lookup(&key));
+        match grant {
+            _ if ticket.readable() => self.clip_state.reads.queued.push_back(ticket),
+            Some(GrantDecision::Always) => {
+                // An Always grant approves a waiting ticket without a page.
+                let mut ticket = ticket;
+                ticket.approve();
+                if ticket.is_write() {
+                    self.submit_approved_write(ticket);
+                } else {
+                    // When: the ticket is a read, it queues for the one native reader.
+                    self.clip_state.reads.queued.push_back(ticket);
+                }
+            }
+            Some(GrantDecision::Ban) => {
+                // A Ban grant refuses the request `EPERM` without a page.
+                self.refuse_ticket(ticket, Instant::now());
+            }
+            None => {
+                // With no grant, the ticket waits for an answer or its expiry.
+                self.clip_state.reads.waiting.push(ticket);
+            }
         }
         self.pump_clipboard_reads();
+    }
+
+    /// The session-grant key `ticket` is looked up and remembered by; `None` without a credential.
+    pub(in crate::app) fn grant_key(&self, ticket: &ConsentTicket) -> Option<GrantKey> {
+        let (write, location, credential) = ticket.grant_scope()?;
+        Some(GrantKey::new(ticket.binding(), write, location, credential))
+    }
+
+    /// Drop every grant whose pane closed, or whose PTY, owner or RIS count moved since it was made.
+    fn purge_grants(&mut self) {
+        if self.clip_state.reads.grants.is_empty() {
+            // When: grants is_empty, there is nothing to purge.
+            return;
+        }
+        let mut grants = std::mem::take(&mut self.clip_state.reads.grants);
+        grants.retain(|key| {
+            self.pane_by_id(key.pane_id).is_some_and(|pane| {
+                let identity = &pane.read_identity;
+                pane.pty.as_ref().map_or(0, |pty| pty.incarnation()) == key.incarnation
+                    && identity.incarnation() == key.incarnation
+                    && identity.owner_epoch() == key.owner_epoch
+                    && identity.reset_epoch() == key.reset_epoch
+            })
+        });
+        self.clip_state.reads.grants = grants;
     }
 
     /// Whether `binding` still names a live read: the pane, its PTY, owner and command epochs and
@@ -225,10 +277,11 @@ impl super::App {
         self.pump_clipboard_reads_at(Instant::now());
     }
 
-    /// Run the read pipeline at `now`: retry contended replies first, so a reply contended this
+    /// Run the read pipeline at `now`: purge stale grants, retry contended replies first, so a reply contended this
     /// turn waits for the next, then settle the reader, sweep tickets and the consent page,
     /// show the next page and start the next read.
     pub(in crate::app) fn pump_clipboard_reads_at(&mut self, now: Instant) {
+        self.purge_grants();
         self.retry_read_replies(now);
         self.settle_reader(now);
         self.sweep_read_tickets(now);
@@ -252,17 +305,18 @@ impl super::App {
             }
             let ReaderDone { replies, ticket, lease } = done;
             let reply = SensitiveReply::new(replies, Box::new((ticket, lease)));
-            self.deliver_read_reply(in_flight.binding, reply, now, true, 0);
+            self.deliver_read_reply(in_flight.binding, reply, now, true, 0, in_flight.busy);
         }
         let mut overdue = None;
         if let Some(in_flight) = self.clip_state.reads.in_flight.as_mut() {
             if !in_flight.abandoned && now >= in_flight.deadline {
                 // Past its deadline the read is answered empty; the thread keeps its slot.
                 in_flight.abandoned = true;
-                overdue = Some((in_flight.binding.clone(), in_flight.failure.clone()));
+                let busy = in_flight.busy.clone();
+                overdue = Some((in_flight.binding.clone(), in_flight.failure.clone(), busy));
             }
         }
-        if let Some((binding, replies)) = overdue {
+        if let Some((binding, replies, busy)) = overdue {
             tracing::warn!(pane_id = binding.pane_id, "OSC 52 read passed its deadline");
             self.deliver_read_reply(
                 binding,
@@ -270,6 +324,7 @@ impl super::App {
                 now,
                 false,
                 0,
+                busy,
             );
         }
     }
@@ -328,12 +383,14 @@ impl super::App {
         }
         let binding = ticket.binding().clone();
         let replies = ticket.failure_reply(status);
+        let busy = ticket.busy_reply();
         self.deliver_read_reply(
             binding,
             SensitiveReply::new(replies, Box::new(ticket)),
             now,
             false,
             0,
+            busy,
         );
     }
 
@@ -374,6 +431,7 @@ impl super::App {
     fn spawn_reader(&mut self, ticket: ConsentTicket, lease: ClipLease, now: Instant) {
         let binding = ticket.binding().clone();
         let failure = ticket.failure_reply(KittyClipboardStatus::Eio);
+        let busy = ticket.busy_reply();
         let reads = &self.clip_state.reads;
         let destination_count = match ticket.kitty_read() {
             Some(request) => request.types.len() + usize::from(request.listing),
@@ -407,13 +465,13 @@ impl super::App {
             Ok(_) => {
                 // The thread is detached; its result arrives through done_rx.
                 self.clip_state.reads.in_flight =
-                    Some(InFlight { binding, failure, deadline, abandoned: false });
+                    Some(InFlight { binding, failure, deadline, abandoned: false, busy });
             }
             Err(error) => {
                 // The thread did not start; the dropped closure already freed the ticket and lease.
                 tracing::warn!("OSC 52 clipboard reader could not start: {error}");
                 let reply = SensitiveReply::new(failure, Box::new(()));
-                self.deliver_read_reply(binding, reply, now, true, 0);
+                self.deliver_read_reply(binding, reply, now, true, 0, busy);
             }
         }
     }
@@ -427,12 +485,14 @@ impl super::App {
                 now,
                 retry.check_age,
                 retry.attempts,
+                retry.busy,
             );
         }
     }
 
     /// Revalidate, then hand `reply` to the source PTY's writer; a contended admission is retried
-    /// up to [`MAX_DELIVERY_RETRIES`] times, and any other refusal drops it. Only lengths are logged.
+    /// up to [`MAX_DELIVERY_RETRIES`] times, and any other refusal drops it, after which an OSC 5522
+    /// read hears its one `busy` packet if that can be admitted. Only lengths are logged.
     fn deliver_read_reply(
         &mut self,
         binding: ReadBinding,
@@ -440,6 +500,7 @@ impl super::App {
         now: Instant,
         check_age: bool,
         attempts_before: u32,
+        busy: Option<Vec<u8>>,
     ) {
         let pane_id = binding.pane_id;
         let bytes = reply.len();
@@ -454,9 +515,25 @@ impl super::App {
             Ok(()) => tracing::debug!(pane_id, bytes, "OSC 52 read answered"),
             Err(SensitiveReplyError::Contended(reply)) if attempts <= MAX_DELIVERY_RETRIES => {
                 // The admission lock was busy and retries remain, so it waits a turn.
-                self.clip_state.reads.retries.push(Retry { binding, reply, attempts, check_age });
+                let retry = Retry { binding, reply, attempts, check_age, busy };
+                self.clip_state.reads.retries.push(retry);
             }
-            Err(error) => tracing::debug!(pane_id, bytes, ?error, "OSC 52 read reply dropped"),
+            Err(error) => {
+                tracing::debug!(pane_id, bytes, ?error, "OSC 52 read reply dropped");
+                // The refused reply and its custody end before the status is tried.
+                drop(error);
+                if let Some(busy) = busy {
+                    // An OSC 5522 read hears one `EBUSY`, or nothing if that cannot be admitted
+                    // either.
+                    let sent =
+                        self.send_read_reply(pane_id, SensitiveReply::new(busy, Box::new(())));
+                    tracing::debug!(
+                        pane_id,
+                        admitted = sent.is_ok(),
+                        "OSC 5522 read answered busy"
+                    );
+                }
+            }
         }
     }
 
@@ -545,6 +622,8 @@ impl super::App {
         let old = &self.config.terminal;
         if new_cfg.terminal.osc52 != old.osc52 || new_cfg.terminal.osc52_read != old.osc52_read {
             staging.bump_policy_generation();
+            // Any policy transition revokes every session grant.
+            self.clip_state.reads.grants.clear();
             self.pump_clipboard_reads();
         }
     }

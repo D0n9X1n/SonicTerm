@@ -138,7 +138,8 @@ fn bad_payload_silent() {
 }
 
 /// Contract: `Unsupported` answers `ENOSYS` and a native `Failed` answers `EIO`, distinct from an
-/// empty read; a listing the platform cannot enumerate answers `ENOSYS`.
+/// empty read; a listing the platform cannot enumerate answers `ENOSYS`, and one whose native
+/// enumeration failed answers `EIO`.
 #[test]
 fn unsupported_enosys_failed_eio() {
     for (outcome, status) in [(ReadOutcome::Unsupported, "ENOSYS"), (ReadOutcome::Failed, "EIO")] {
@@ -148,6 +149,8 @@ fn unsupported_enosys_failed_eio() {
     }
     let source = FakeTypes { listing: TypeListing::Unsupported, ..FakeTypes::holding("") };
     assert_eq!(reply_text(&source, &request("type=read", ".")), packet("ENOSYS"));
+    let source = FakeTypes { listing: TypeListing::Failed, ..FakeTypes::holding("") };
+    assert_eq!(reply_text(&source, &request("type=read", ".")), packet("EIO"));
 }
 
 /// Contract: at most 16 data types are accepted; the seventeenth is never read or served.

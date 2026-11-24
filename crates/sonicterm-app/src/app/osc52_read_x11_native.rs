@@ -11,7 +11,9 @@ use x11rb::protocol::xproto::{
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
-use super::osc52_read_source::{ReadLocation, ReadOutcome};
+use super::osc52_read_source::{
+    list_native_types, ReadLocation, ReadOutcome, TypeListing, MAX_NATIVE_TYPES_SCANNED,
+};
 use super::osc52_read_x11::{
     classify_first, fetch_length_units, FirstReply, IncrTransfer, PropertyKind, PropertyReply,
     SELECTION_WAIT,
@@ -43,13 +45,13 @@ fn atom(connection: &RustConnection, name: &[u8]) -> Option<Atom> {
     Some(connection.intern_atom(false, name).ok()?.reply().ok()?.atom)
 }
 
-/// Run one read on `connection`; `None` on a protocol error.
-fn read_with(
+/// Create the input-only window a conversion is delivered to, and name the selection `location`
+/// reads; `None` on a protocol error.
+fn requestor(
     connection: &RustConnection,
     screen: usize,
     location: ReadLocation,
-    max_bytes: usize,
-) -> Option<ReadOutcome> {
+) -> Option<(Window, Atom)> {
     let root = connection.setup().roots.get(screen)?.root;
     let window = connection.generate_id().ok()?;
     let aux = CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE);
@@ -72,6 +74,67 @@ fn read_with(
         ReadLocation::Clipboard => atom(connection, b"CLIPBOARD")?,
         ReadLocation::Primary => xproto::AtomEnum::PRIMARY.into(),
     };
+    Some((window, selection))
+}
+
+/// The selection owner's `TARGETS` at `location` as an OSC 5522 listing: the conversion carries
+/// atoms only, never content. No X server reads as unsupported; any protocol error fails.
+pub(in crate::app) fn list_targets(location: ReadLocation) -> TypeListing {
+    let Ok((connection, screen)) = RustConnection::connect(None) else {
+        // When: connect fails, no X server is reachable.
+        return TypeListing::Unsupported;
+    };
+    targets_with(&connection, screen, location).map_or(TypeListing::Failed, list_native_types)
+}
+
+/// Ask the owner for `TARGETS` within the selection wait and name at most
+/// [`MAX_NATIVE_TYPES_SCANNED`] of its atoms; `None` on a protocol error, a missed deadline or a
+/// reply that is not an atom list.
+fn targets_with(
+    connection: &RustConnection,
+    screen: usize,
+    location: ReadLocation,
+) -> Option<Vec<String>> {
+    let (window, selection) = requestor(connection, screen, location)?;
+    let targets = atom(connection, b"TARGETS")?;
+    let property = atom(connection, b"SONICTERM_OSC5522_TARGETS")?;
+    connection.convert_selection(window, selection, targets, property, x11rb::CURRENT_TIME).ok()?;
+    connection.flush().ok()?;
+    let notify = wait_for(connection, Instant::now() + SELECTION_WAIT, |event| match event {
+        Event::SelectionNotify(notify) if notify.requestor == window => Some(notify.property),
+        _ => None,
+    })?;
+    if notify == x11rb::NONE {
+        // When: notify is NONE, the owner offers no targets.
+        return Some(Vec::new());
+    }
+    let units = u32::try_from(MAX_NATIVE_TYPES_SCANNED).unwrap_or(u32::MAX);
+    let reply = connection
+        .get_property(true, window, property, xproto::AtomEnum::ANY, 0, units)
+        .ok()?
+        .reply()
+        .ok()?;
+    let atom_list = reply.type_ == Atom::from(xproto::AtomEnum::ATOM) || reply.type_ == targets;
+    if !atom_list {
+        // When: atom_list is false (an INCR transfer or another type), the listing fails.
+        return None;
+    }
+    let listed: Vec<Atom> = reply.value32()?.take(MAX_NATIVE_TYPES_SCANNED).collect();
+    // Every name request is sent before any reply is read, so one round trip names them all.
+    let cookies: Vec<_> =
+        listed.iter().filter_map(|target| connection.get_atom_name(*target).ok()).collect();
+    let names = cookies.into_iter().filter_map(|cookie| cookie.reply().ok());
+    Some(names.map(|reply| String::from_utf8_lossy(&reply.name).into_owned()).collect())
+}
+
+/// Run one read on `connection`; `None` on a protocol error.
+fn read_with(
+    connection: &RustConnection,
+    screen: usize,
+    location: ReadLocation,
+    max_bytes: usize,
+) -> Option<ReadOutcome> {
+    let (window, selection) = requestor(connection, screen, location)?;
     let atoms = Atoms {
         utf8: atom(connection, b"UTF8_STRING")?,
         string: xproto::AtomEnum::STRING.into(),

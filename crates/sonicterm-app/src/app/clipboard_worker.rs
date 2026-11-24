@@ -778,6 +778,10 @@ mod win32;
 #[cfg(target_os = "windows")]
 pub(in crate::app) use win32::read_text as read_windows_text;
 
+/// The Windows OSC 5522 type listing, which shares this module's clipboard open.
+#[cfg(target_os = "windows")]
+pub(in crate::app) use win32::list_formats as list_windows_formats;
+
 #[cfg(test)]
 #[path = "clipboard_worker_tests.rs"]
 mod clipboard_worker_tests;

@@ -433,9 +433,27 @@ newline, at most 16 names and 4096 bytes, payload omitted when empty), `DATA` ch
 A type's text is read with an 8 MiB cap and served only while the whole reply stays within
 12 MiB, checked before anything grows; otherwise it is omitted. An unavailable location
 (`loc=primary` off Linux) or a platform that cannot list types answers `ENOSYS`; a failed or
-overdue native read answers `EIO`; an empty clipboard is `OK` then `DONE`. Native type listing is
-not wired yet, so `.` answers `ENOSYS` on every platform, and session grants (Always, Ban) are
-not offered.
+overdue native read, or a listing whose enumeration failed, answers `EIO`; an empty clipboard is
+`OK` then `DONE`. When a reply's writer admission stays contended through every retry, or the
+writer refuses it, the reply is dropped and the program hears one `EBUSY` packet if that can be
+admitted, never a partial `OK` sequence.
+
+The listing names types without reading any content: `EnumClipboardFormats` on Windows, the
+general pasteboard's `types` on macOS and the owner's `TARGETS` on X11 (within the 2 s selection
+wait). At most 64 native names are inspected; platform text, HTML, RTF, file and image types map
+to their MIME names, MIME-shaped names pass without parameters, and private, dynamic and protocol
+types (`dyn.*`, `TARGETS`, unnamed formats) are never listed.
+
+Under `ask`, a read or write whose program names itself with a nonempty `name` and a `pw` gets
+Always and Ban rows after Deny, and the name on a separate "Program-supplied name" line (at most
+64 characters, control characters replaced). Always allows the request and later ones; Ban
+refuses it `EPERM` and later ones, both without a page. A grant is keyed by the pane, its PTY
+incarnation, owner epoch and RIS count, the operation, the location and the `pw`, never the
+name; a `pw` without a `name` counts as no password, so no grant is looked up or created. A pane
+keeps at most 16 grants, evicting its oldest. RIS, closing the pane, moving it to another window,
+a new PTY and any `osc52`/`osc52_read` change revoke its grants, and `deny` never consults them.
+A read a grant approved is still revalidated at delivery, so a later `deny` or a transfer sends
+nothing. Grants, names and passwords never reach logs or `Debug` output.
 
 Intentional differences: at most 1 MiB per packet (Ghostty 8 MiB; kitty 256 KiB unless the
 packet is complete); a commit with nothing the platform can hold answers `ENOSYS`; Ghostty's

@@ -14,10 +14,11 @@ use std::time::Instant;
 
 use sonicterm_cfg::config::{Osc52Policy, Osc52ReadPolicy};
 
-use sonicterm_vt::vt::KittyClipboardStatus;
+use sonicterm_vt::vt::{KittyClipboardLocation, KittyClipboardStatus};
 
 use super::kitty_clipboard_read::{KittyReadRequest, KITTY_READ_RESERVATION_BYTES};
 use super::osc52_read::{empty_frames, read_reservation_bytes, reply_labels};
+use super::osc52_read_grants::GrantCredential;
 use super::osc52_stream::{ClipboardJob, ClipboardStaging};
 
 /// One pane's read identity, shared by the pane, its VT worker and its intake.
@@ -29,6 +30,8 @@ pub(in crate::app) struct ReadIdentity {
     command_epoch: AtomicU64,
     /// The incarnation of the PTY the VT worker reads; 0 for a pane without one.
     incarnation: AtomicU64,
+    /// The RIS count the VT worker published; a reset revokes every session grant bound before it.
+    reset_epoch: AtomicU64,
     /// Whether this pane holds a read ticket.
     read_pending: AtomicBool,
     /// Whether this pane holds an asked write's ticket.
@@ -65,6 +68,16 @@ impl ReadIdentity {
     pub(in crate::app) fn incarnation(&self) -> u64 {
         self.incarnation.load(Ordering::SeqCst)
     }
+
+    /// Note a RIS at its place in the output, revoking every session grant bound before it.
+    pub(in crate::app) fn bump_reset(&self) {
+        self.reset_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The RIS count a request binds now.
+    pub(in crate::app) fn reset_epoch(&self) -> u64 {
+        self.reset_epoch.load(Ordering::SeqCst)
+    }
 }
 
 /// What a ticket was admitted under; revalidation compares each field with the live value.
@@ -76,6 +89,8 @@ pub(in crate::app) struct ReadBinding {
     pub(in crate::app) incarnation: u64,
     /// Its owner epoch; a window move bumps it, so it also stands for the window.
     pub(in crate::app) owner_epoch: u64,
+    /// The pane's RIS count at admission, which session grants bind.
+    pub(in crate::app) reset_epoch: u64,
     /// The command epoch at the request's position in the output.
     pub(in crate::app) command_epoch: u64,
     /// The process policy generation, sampled before the policy itself.
@@ -208,6 +223,22 @@ impl ConsentTicket {
         self.kitty_read.as_deref()
     }
 
+    /// What a session grant for this request is keyed and shown by: whether it writes, its
+    /// location and the program's credential; `None` for OSC 52 and for a request without one.
+    pub(in crate::app) fn grant_scope(
+        &self,
+    ) -> Option<(bool, KittyClipboardLocation, &GrantCredential)> {
+        if let Some(request) = &self.kitty_read {
+            // When: the ticket holds an OSC 5522 read, its request carries the credential.
+            return request
+                .credential
+                .as_ref()
+                .map(|credential| (false, request.location, credential));
+        }
+        let reply = self.write.as_ref()?.kitty.as_ref()?;
+        reply.credential().map(|credential| (true, reply.location(), credential))
+    }
+
     /// The reply a read gets when it is not served: `status` for an OSC 5522 read, one empty frame
     /// per label for OSC 52.
     pub(in crate::app) fn failure_reply(&self, status: KittyClipboardStatus) -> Vec<u8> {
@@ -215,6 +246,13 @@ impl ConsentTicket {
             Some(request) => request.status(status),
             None => empty_frames(&self.labels),
         }
+    }
+
+    /// The `EBUSY` packet an OSC 5522 read hears when its reply cannot be admitted; `None` for OSC
+    /// 52 reads and writes, which have no status.
+    pub(in crate::app) fn busy_reply(&self) -> Option<Vec<u8>> {
+        let request = self.kitty_read.as_ref()?;
+        Some(request.status(KittyClipboardStatus::Ebusy))
     }
 
     /// What the read reserves from the reply budget before it starts.
@@ -330,6 +368,7 @@ pub(in crate::app) fn admit_write(
         pane_id,
         incarnation: identity.incarnation(),
         owner_epoch: identity.owner_epoch(),
+        reset_epoch: identity.reset_epoch(),
         command_epoch,
         policy_generation,
         created_at: now,
@@ -382,6 +421,7 @@ pub(in crate::app) fn admit_read(
         pane_id,
         incarnation: identity.incarnation(),
         owner_epoch: identity.owner_epoch(),
+        reset_epoch: identity.reset_epoch(),
         command_epoch,
         policy_generation,
         created_at: now,
@@ -427,6 +467,7 @@ pub(in crate::app) fn admit_kitty_read(
         pane_id,
         incarnation: identity.incarnation(),
         owner_epoch: identity.owner_epoch(),
+        reset_epoch: identity.reset_epoch(),
         command_epoch,
         policy_generation,
         created_at: now,

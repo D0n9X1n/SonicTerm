@@ -45,11 +45,76 @@ impl std::fmt::Debug for ReadOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::app) enum TypeListing {
     /// The names the selection offers, in the platform's order.
-    // Native enumeration is not wired yet, so only test sources build this.
-    #[cfg_attr(not(test), allow(dead_code))]
     Types(Vec<String>),
     /// The platform cannot enumerate the selection's types.
     Unsupported,
+    /// The native enumeration failed, as when another process holds the clipboard throughout.
+    #[cfg_attr(not(any(test, target_os = "linux", target_os = "windows")), allow(dead_code))]
+    Failed,
+}
+
+/// Native type names one listing inspects at most, so an owner offering thousands of formats
+/// cannot make it unbounded.
+pub(in crate::app) const MAX_NATIVE_TYPES_SCANNED: usize = 64;
+
+/// MIME names one listing keeps at most, as the listing reply carries.
+const MAX_LISTED_TYPES: usize = 16;
+
+/// The MIME name a native clipboard type stands for: the platform's text, HTML, file and image
+/// types map to theirs, a MIME-shaped name passes without its parameters, and private, dynamic and
+/// protocol types map to `None`, so they are never listed.
+fn native_type_mime(name: &str) -> Option<String> {
+    let mapped = match name {
+        "public.utf8-plain-text"
+        | "public.plain-text"
+        | "NSStringPboardType"
+        | "CF_TEXT"
+        | "CF_UNICODETEXT"
+        | "CF_OEMTEXT"
+        | "UTF8_STRING"
+        | "STRING"
+        | "TEXT" => "text/plain",
+        "public.html" | "Apple HTML pasteboard type" | "HTML Format" => "text/html",
+        "public.rtf" | "Rich Text Format" => "text/rtf",
+        "public.file-url" | "public.url" | "CF_HDROP" => "text/uri-list",
+        "public.png" | "PNG" => "image/png",
+        "public.tiff" => "image/tiff",
+        "public.jpeg" | "JFIF" => "image/jpeg",
+        _ => {
+            // When: the name is no known platform type, only a type/subtype MIME shape passes.
+            let mime = name.split(';').next().unwrap_or_default().trim();
+            let (kind, subtype) = mime.split_once('/')?;
+            let token = |part: &str| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
+            };
+            return (token(kind) && token(subtype)).then(|| mime.to_ascii_lowercase());
+        }
+    };
+    Some(mapped.to_owned())
+}
+
+/// The listing `names`, the owner's native type names in its order, makes: at most
+/// [`MAX_NATIVE_TYPES_SCANNED`] are inspected and at most 16 distinct MIME names kept. Only names
+/// are read, never content.
+pub(in crate::app) fn list_native_types(names: impl IntoIterator<Item = String>) -> TypeListing {
+    let mut listed: Vec<String> = Vec::new();
+    for name in names.into_iter().take(MAX_NATIVE_TYPES_SCANNED) {
+        let Some(mime) = native_type_mime(&name) else {
+            // When: native_type_mime has no public name for it, the type stays unlisted.
+            continue;
+        };
+        if !listed.contains(&mime) {
+            listed.push(mime);
+        }
+        if listed.len() == MAX_LISTED_TYPES {
+            // When: MAX_LISTED_TYPES names are kept, the listing is full.
+            break;
+        }
+    }
+    TypeListing::Types(listed)
 }
 
 /// Reads clipboard text with a byte cap; tests inject a fake, production uses [`NativeSource`].
@@ -57,10 +122,9 @@ pub(in crate::app) trait ClipboardTextSource: Send + Sync {
     /// The text at `location`, refused as [`ReadOutcome::TooLarge`] past `max_bytes` of UTF-8.
     fn read_text_bounded(&self, location: ReadLocation, max_bytes: usize) -> ReadOutcome;
 
-    /// The MIME types `location` offers, found without reading any content.
+    /// The MIME types `location` offers, found without reading any content; a source that cannot
+    /// enumerate types answers `Unsupported`.
     fn list_types(&self, _location: ReadLocation) -> TypeListing {
-        // shortcut: no native type enumeration (EnumClipboardFormats, NSPasteboard types, X11
-        // TARGETS) is wired yet, so a listing answers ENOSYS on every platform.
         TypeListing::Unsupported
     }
 }
@@ -171,6 +235,51 @@ impl ClipboardTextSource for NativeSource {
     fn read_text_bounded(&self, location: ReadLocation, max_bytes: usize) -> ReadOutcome {
         native_read(location, max_bytes)
     }
+
+    fn list_types(&self, location: ReadLocation) -> TypeListing {
+        native_list(location)
+    }
+}
+
+/// Windows: the open clipboard's formats through `EnumClipboardFormats`, named without reading any
+/// data; there is no PRIMARY.
+#[cfg(target_os = "windows")]
+fn native_list(location: ReadLocation) -> TypeListing {
+    match location {
+        ReadLocation::Clipboard => super::clipboard_worker::list_windows_formats()
+            .map_or(TypeListing::Failed, list_native_types),
+        ReadLocation::Primary => TypeListing::Unsupported,
+    }
+}
+
+/// macOS: the general pasteboard's `types`, which names its representations without reading any.
+#[cfg(target_os = "macos")]
+fn native_list(location: ReadLocation) -> TypeListing {
+    use objc2_app_kit::NSPasteboard;
+    if location == ReadLocation::Primary {
+        // When: location is Primary, macOS has no such selection.
+        return TypeListing::Unsupported;
+    }
+    objc2::rc::autoreleasepool(|_| {
+        let Some(types) = NSPasteboard::generalPasteboard().types() else {
+            // When: types is None, the pasteboard offers nothing.
+            return TypeListing::Types(Vec::new());
+        };
+        let count = types.count().min(MAX_NATIVE_TYPES_SCANNED);
+        list_native_types((0..count).map(|index| types.objectAtIndex(index).to_string()))
+    })
+}
+
+/// Linux: the X11 owner's `TARGETS`, named through the server; no X server reads as unsupported.
+#[cfg(target_os = "linux")]
+fn native_list(location: ReadLocation) -> TypeListing {
+    super::osc52_read_x11_native::list_targets(location)
+}
+
+/// Other platforms cannot enumerate a clipboard.
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn native_list(_location: ReadLocation) -> TypeListing {
+    TypeListing::Unsupported
 }
 
 /// Windows: `CF_UNICODETEXT`, sized before it is locked; there is no PRIMARY.

@@ -150,6 +150,8 @@ pub enum ConfirmRow {
     Apply(String),
     /// Close the page and change nothing.
     Cancel(String),
+    /// An extra answer after Cancel, reported by its position among the choices.
+    Choice(String),
     /// One thing the change affects; shown dimmed and never selectable.
     Item(String),
 }
@@ -158,13 +160,13 @@ impl ConfirmRow {
     /// The text the row shows.
     pub fn label(&self) -> &str {
         match self {
-            Self::Apply(label) | Self::Cancel(label) | Self::Item(label) => label,
+            Self::Apply(label) | Self::Cancel(label) | Self::Choice(label) | Self::Item(label) => {
+                label
+            }
         }
     }
 }
 
-/// Number of selectable rows at the top of a confirmation page: Apply, then Cancel.
-const CONFIRM_ACTION_ROWS: usize = 2;
 /// The row a confirmation page highlights when it opens, so a stray Enter cancels.
 const CONFIRM_CANCEL_ROW: usize = 1;
 
@@ -822,8 +824,8 @@ impl CommandPalette {
     /// Highlight the next row, wrapping to the top past the last one.
     pub fn move_selection_down(&mut self) {
         if self.mode == CommandPaletteMode::Confirm {
-            // When: `mode` is `Confirm`, only the page's Apply and Cancel rows can be chosen.
-            self.step_confirm_selection();
+            // When: `mode` is `Confirm`, only the page's Apply, Cancel and choice rows can be chosen.
+            self.step_confirm_selection(true);
             return;
         }
         if self.has_unselectable_rows() {
@@ -849,8 +851,8 @@ impl CommandPalette {
     /// Highlight the previous row, wrapping to the bottom past the first one.
     pub fn move_selection_up(&mut self) {
         if self.mode == CommandPaletteMode::Confirm {
-            // When: `mode` is `Confirm`, only the page's Apply and Cancel rows can be chosen.
-            self.step_confirm_selection();
+            // When: `mode` is `Confirm`, only the page's Apply, Cancel and choice rows can be chosen.
+            self.step_confirm_selection(false);
             return;
         }
         if self.has_unselectable_rows() {

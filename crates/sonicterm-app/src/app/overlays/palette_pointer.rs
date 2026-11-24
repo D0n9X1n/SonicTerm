@@ -259,9 +259,10 @@ impl App {
                 PalettePointerTarget::ConfirmRow(pressed),
                 Some(PalettePointerHit::ConfirmRow { index }),
             ) if pressed == index && self.interaction.command_palette.select_confirm_row(index) => {
-                // The Apply or Cancel row released on is the one pressed: act as Enter on it.
-                let apply = self.interaction.command_palette.confirm_applies();
-                self.close_confirm_page(apply);
+                // The row released on is the one pressed: act as Enter on it.
+                let palette = &self.interaction.command_palette;
+                let (apply, choice) = (palette.confirm_applies(), palette.confirm_choice());
+                self.close_confirm_page_choosing(apply, choice);
             }
             (
                 PalettePointerTarget::PickerRow(pressed),

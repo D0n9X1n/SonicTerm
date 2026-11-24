@@ -391,6 +391,15 @@ mod osc52_read_pipeline_tests_consent_tests;
 
 /// Admit an OSC 5522 read of `types` from the harness pane, as the VT worker does.
 fn kitty_read(harness: &mut Harness, types: &[&str]) {
+    kitty_read_as(harness, types, None);
+}
+
+/// [`kitty_read`] carrying `credential`, the request's `name` and `pw`.
+fn kitty_read_as(
+    harness: &mut Harness,
+    types: &[&str],
+    credential: Option<crate::app::osc52_read_grants::GrantCredential>,
+) {
     use crate::app::kitty_clipboard_read::KittyReadRequest;
     use crate::app::osc52_read_ticket::admit_kitty_read;
     let identity = harness.app.pane_by_id(harness.pane).expect("a live pane").read_identity.clone();
@@ -400,6 +409,7 @@ fn kitty_read(harness: &mut Harness, types: &[&str]) {
         listing: false,
         types: types.iter().map(|mime| (*mime).to_owned()).collect(),
         bel: false,
+        credential,
     };
     let ticket =
         admit_kitty_read(&harness.staging, &identity, harness.pane, 0, request, Instant::now())
@@ -437,4 +447,32 @@ fn fourth_job_ebusy() {
     harness.pump_until(|harness| harness.delivered_count() == 1);
     let delivered = harness.take_delivered();
     assert_eq!(delivered[0].1.bytes(), b"\x1b]5522;type=read:status=EBUSY:id=k\x1b\\");
+}
+
+/// Contract: an OSC 5522 reply whose writer admission stays contended through every retry is
+/// dropped with its custody, and the program then hears exactly one `EBUSY` packet, never a
+/// partial OK sequence.
+#[test]
+fn queue_pressure_single_ebusy_no_partial_ok() {
+    let mut harness = harness(Osc52ReadPolicy::Allow, FakeSource::new("secret"));
+    let refusals = 1 + MAX_DELIVERY_RETRIES as usize;
+    let (sink, calls) = (harness.delivered.clone(), harness.port_calls.clone());
+    harness.app.clip_state.reads.port = Some(Box::new(move |pane_id, reply| {
+        // The first attempt and every retry are contended; the next admission succeeds.
+        if calls.fetch_add(1, Ordering::SeqCst) < refusals {
+            return Err(SensitiveReplyError::Contended(reply));
+        }
+        sink.lock().unwrap().push((pane_id, reply));
+        Ok(())
+    }));
+    kitty_read(&mut harness, &["text/plain"]);
+    harness.pump_until(|harness| harness.port_calls.load(Ordering::SeqCst) >= refusals);
+    for _ in 0..4 {
+        harness.app.pump_clipboard_reads();
+    }
+    let delivered = harness.take_delivered();
+    let bytes: Vec<&[u8]> = delivered.iter().map(|(_, reply)| reply.bytes()).collect();
+    assert_eq!(bytes, vec![&b"\x1b]5522;type=read:status=EBUSY:id=k\x1b\\"[..]]);
+    assert_eq!(harness.budget_bytes(), 0, "the dropped reply released its lease");
+    assert_eq!(harness.staging.ticket_slots_in_use(), 0);
 }
