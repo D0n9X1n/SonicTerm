@@ -34,6 +34,16 @@ pub(super) fn reseed_parser_theme_colors(
     if let Some((red, green, blue)) = theme.colors.cursor.rgb() {
         parser.set_theme_cursor(red, green, blue);
     }
+    // OSC 17, OSC 19 and the OSC 21 `cursor_text` key answer these while a program set none.
+    if let Some((red, green, blue)) = theme.colors.selection_bg.rgb() {
+        parser.set_theme_selection_bg(red, green, blue);
+    }
+    if let Some((red, green, blue)) = theme.colors.selection_fg.rgb() {
+        parser.set_theme_selection_fg(red, green, blue);
+    }
+    if let Some((red, green, blue)) = theme.colors.cursor_text.rgb() {
+        parser.set_theme_cursor_text(red, green, blue);
+    }
     // OSC 4 palette: indices 0..=7 from `ansi.*`, 8..=15 from `bright.*`,
     // in the standard xterm slot order.
     let normal = [

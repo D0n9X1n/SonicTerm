@@ -71,3 +71,25 @@ fn a_store_is_empty_again_after_every_reset() {
     overrides.set_palette(7, None);
     assert!(overrides.is_empty());
 }
+
+/// The selection background, selection foreground and cursor text are held like the other dynamic
+/// colors: each set makes the store non-empty and moves the generation, a palette clear (RIS)
+/// keeps them, and a reset removes them.
+#[test]
+fn selection_and_cursor_text_are_held_dynamic_colors() {
+    for target in [
+        DynamicColor::SelectionBackground,
+        DynamicColor::SelectionForeground,
+        DynamicColor::CursorText,
+    ] {
+        let mut overrides = ColorOverrides::default();
+        let start = overrides.generation();
+        overrides.set_dynamic(target, Some((9, 8, 7)));
+        assert!(!overrides.is_empty(), "{target:?}");
+        assert_ne!(overrides.generation(), start, "{target:?}");
+        overrides.clear_palette();
+        assert_eq!(overrides.dynamic(target), Some((9, 8, 7)), "{target:?} survives RIS");
+        overrides.set_dynamic(target, None);
+        assert!(overrides.is_empty(), "{target:?}");
+    }
+}

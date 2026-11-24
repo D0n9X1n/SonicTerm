@@ -224,7 +224,7 @@ fn a_dynamic_reset_with_a_query_answers_instead() {
     assert_eq!(reply_to(&mut parser, b"\x1b]113;?\x07"), b"", "113 keeps no color to report");
 }
 
-/// OSC 13-19 and 113-119 name colors this terminal does not keep: they are consumed whole,
+/// OSC 13-16, 18, 113-116 and 118 name colors this terminal does not keep: they are consumed whole,
 /// answer nothing, change nothing and print nothing, however many values they carry.
 #[test]
 fn unkept_dynamic_colors_are_consumed_silently() {
@@ -236,16 +236,12 @@ fn unkept_dynamic_colors_are_consumed_silently() {
         b"\x1b]14;?\x07",
         b"\x1b]15;#ffffff\x07",
         b"\x1b]16;?;?\x07",
-        b"\x1b]17;?\x1b\\",
         b"\x1b]18;red\x07",
-        b"\x1b]19;#ffffff\x07",
         b"\x1b]113\x07",
         b"\x1b]114;x\x07",
         b"\x1b]115;?\x07",
         b"\x1b]116\x07",
-        b"\x1b]117;x\x07",
         b"\x1b]118;?\x07",
-        b"\x1b]119\x1b\\",
     ] {
         assert_eq!(reply_to(&mut parser, message), b"", "{message:?}");
         assert!(parser.color_overrides().is_none(), "{message:?}");

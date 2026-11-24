@@ -3,9 +3,10 @@
 //!
 //! A packet is read whole into a bounded item list before anything applies, so a packet past the
 //! item budget changes nothing. Bytes outside printable ASCII are removed first because the reply
-//! echoes keys, and an unknown key is answered by its base64 name, never verbatim. The selection,
-//! cursor-text, visual-bell and transparent-background keys are recognized but not held: a query
-//! answers empty and a set or reset is ignored.
+//! echoes keys, and an unknown key is answered by its base64 name, never verbatim. The selection
+//! and cursor-text keys share their state with OSC 17 and 19. The visual-bell and
+//! transparent-background keys are recognized but not held: a query answers empty and a set or
+//! reset is ignored.
 
 use super::*;
 use base64::Engine;
@@ -24,7 +25,7 @@ const MAX_KITTY_COLOR_ITEMS: usize = 526;
 enum KittyColor {
     /// Palette entry 0-255.
     Palette(u8),
-    /// The foreground, background or cursor.
+    /// The foreground, background, cursor, selection colors or cursor text.
     Dynamic(DynamicColor),
     /// A color kitty keeps and this terminal does not: answered empty, never stored.
     Unheld,
@@ -100,9 +101,10 @@ fn kitty_color_key(key: &[u8]) -> Option<KittyColor> {
         b"foreground" => Some(KittyColor::Dynamic(DynamicColor::Foreground)),
         b"background" => Some(KittyColor::Dynamic(DynamicColor::Background)),
         b"cursor" => Some(KittyColor::Dynamic(DynamicColor::Cursor)),
-        b"selection_background" | b"selection_foreground" | b"cursor_text" | b"visual_bell" => {
-            Some(KittyColor::Unheld)
-        }
+        b"selection_background" => Some(KittyColor::Dynamic(DynamicColor::SelectionBackground)),
+        b"selection_foreground" => Some(KittyColor::Dynamic(DynamicColor::SelectionForeground)),
+        b"cursor_text" => Some(KittyColor::Dynamic(DynamicColor::CursorText)),
+        b"visual_bell" => Some(KittyColor::Unheld),
         _ => {
             // Any other key is known only as a transparent background slot 1-8.
             let slot = key.strip_prefix(b"transparent_background_color").and_then(decimal)?;

@@ -5,9 +5,10 @@
 //! or aborted message never applies a part. Requests apply in order and take the most accepting
 //! reading among Ghostty, WezTerm and kitty: an invalid OSC 4 pair, OSC 104 index or dynamic
 //! value is skipped and the rest still apply, an empty dynamic value advances to the next color,
-//! and OSC 110-112 reset their color unless an argument is `?`, which asks for it instead. Only
-//! the foreground, background and cursor are kept; the other dynamic colors (13-19, 113-119) are
-//! consumed silently. A change only updates the pane's
+//! and OSC 110-119 reset their color unless an argument is `?`, which asks for it instead. The
+//! foreground, background, cursor and the selection background (17) and foreground (19) are kept;
+//! the other dynamic colors (13-16, 18 and their resets) are consumed silently. A change only
+//! updates the pane's
 //! [`ColorOverrides`]; it raises no event and sends no mode 2031 report, and the pane's next
 //! batch publication carries it to the renderer.
 
@@ -65,6 +66,8 @@ fn dynamic_target(code: u16) -> Option<DynamicColor> {
         10 => Some(DynamicColor::Foreground),
         11 => Some(DynamicColor::Background),
         12 => Some(DynamicColor::Cursor),
+        17 => Some(DynamicColor::SelectionBackground),
+        19 => Some(DynamicColor::SelectionForeground),
         _ => None,
     }
 }
@@ -86,11 +89,29 @@ fn palette_target(index: &[u8]) -> Option<PaletteTarget> {
 }
 
 impl Parser {
-    /// The colors the program set for this pane with OSC 4, 10, 11, 12 and 21; `None` while it has
-    /// set none, so a pane draws with its theme alone.
+    /// The colors the program set for this pane with OSC 4, 10-12, 17, 19 and 21; `None` while it
+    /// has set none, so a pane draws with its theme alone.
     #[must_use]
     pub fn color_overrides(&self) -> Option<&ColorOverrides> {
         Some(&self.performer.color_overrides).filter(|overrides| !overrides.is_empty())
+    }
+
+    /// Tell the parser the theme selection background, answering `OSC 17 ; ?` while the program
+    /// set none.
+    pub fn set_theme_selection_bg(&mut self, red: u8, green: u8, blue: u8) {
+        self.performer.theme_selection_bg = Some((red, green, blue));
+    }
+
+    /// Tell the parser the theme selection foreground, answering `OSC 19 ; ?` while the program
+    /// set none.
+    pub fn set_theme_selection_fg(&mut self, red: u8, green: u8, blue: u8) {
+        self.performer.theme_selection_fg = Some((red, green, blue));
+    }
+
+    /// Tell the parser the theme color of the glyph under a block cursor, answering the OSC 21
+    /// `cursor_text` key while the program set none.
+    pub fn set_theme_cursor_text(&mut self, red: u8, green: u8, blue: u8) {
+        self.performer.theme_cursor_text = Some((red, green, blue));
     }
 
     /// Lend the grid for a frame together with [`Parser::color_overrides`], which the renderer
@@ -167,7 +188,7 @@ impl Performer {
 
     /// OSC 110-119: a `?` argument asks for the named color, reported under the request's own
     /// number as kitty does; any other argument, or none, resets it. Only the named color is
-    /// touched, and 113-119 name colors this terminal does not keep.
+    /// touched, and 113-116 and 118 name colors this terminal does not keep.
     fn reset_or_query_dynamic<'payload>(
         &mut self,
         code: u16,
@@ -175,7 +196,7 @@ impl Performer {
         terminator: &[u8],
     ) {
         let Some(target) = dynamic_target(code - 100) else {
-            // When: `dynamic_target` keeps no color for `code` (113-119), it is consumed silently.
+            // When: `dynamic_target` keeps no color for `code` (113-116, 118), it is consumed silently.
             return;
         };
         if fields.any(|field| field == b"?") {
@@ -189,7 +210,7 @@ impl Performer {
 
     /// OSC 10-19: each value targets the next dynamic color from `code` on, up to OSC 19; `?`
     /// answers it and a spec sets it. An empty value, a value naming a color this terminal does
-    /// not keep (13-19), or an unreadable spec does nothing and the walk goes on.
+    /// not keep (13-16, 18), or an unreadable spec does nothing and the walk goes on.
     fn apply_dynamic_requests<'payload>(
         &mut self,
         code: u16,
@@ -198,7 +219,7 @@ impl Performer {
     ) {
         for (osc, value) in (code..=LAST_DYNAMIC_OSC).zip(fields) {
             let Some(target) = dynamic_target(osc) else {
-                // When: `dynamic_target` keeps no color for `osc` (13-19), its value is consumed
+                // When: `dynamic_target` keeps no color for `osc` (13-16, 18), its value is consumed
                 // silently: no reply, no change.
                 continue;
             };
@@ -236,6 +257,9 @@ impl Performer {
             DynamicColor::Foreground => self.theme_fg,
             DynamicColor::Background => self.theme_bg,
             DynamicColor::Cursor => self.theme_cursor,
+            DynamicColor::SelectionBackground => self.theme_selection_bg,
+            DynamicColor::SelectionForeground => self.theme_selection_fg,
+            DynamicColor::CursorText => self.theme_cursor_text,
         };
         let color = self.color_overrides.dynamic(target).or(theme_default);
         if target == DynamicColor::Cursor {
@@ -253,7 +277,7 @@ impl Performer {
         }
     }
 
-    /// Answer an OSC 10-12 query for `target`, reported under OSC number `osc`.
+    /// Answer an OSC 10-19 or 110-119 query for `target`, reported under OSC number `osc`.
     fn reply_dynamic(&self, osc: u16, target: DynamicColor, terminator: &[u8]) {
         if let Some(rgb) = self.effective_dynamic(target) {
             // An unknown color is not reported.
@@ -283,3 +307,7 @@ mod vt_color_tests;
 #[cfg(test)]
 #[path = "vt_color_theme_tests.rs"]
 mod vt_color_theme_tests;
+
+#[cfg(test)]
+#[path = "vt_color_selection_tests.rs"]
+mod vt_color_selection_tests;

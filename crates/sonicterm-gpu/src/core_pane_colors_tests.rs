@@ -105,3 +105,30 @@ fn caches_and_the_frame_key_follow_the_override_generation() {
     let changed = WindowIdentity { pane_colors: first_identity, ..Default::default() };
     assert!(changed.classify(&WindowIdentity::default()).full, "a color change repaints all");
 }
+
+/// The selection and cursor-text colors: without program colors the selection highlight and the
+/// cursor text pass the theme's through and there is no selected-glyph color, so existing themes
+/// look unchanged; a program's OSC 17 takes the theme highlight's opacity, and its OSC 19 and
+/// OSC 21 `cursor_text` become the selected-glyph and cursor-text colors.
+#[test]
+fn selection_and_cursor_text_follow_the_program_colors() {
+    let theme = Theme::default();
+    let highlight = [0.25, 0.5, 0.125, 0.5];
+    let cursor_text = [0.1, 0.2, 0.3, 1.0];
+    let plain = PaneColors::new(&theme, None);
+    assert_eq!(plain.selection_rgba(highlight), highlight);
+    assert_eq!(plain.selection_foreground_rgba(), None);
+    assert_eq!(plain.cursor_text_rgba(cursor_text), cursor_text);
+    let unrelated = program_colors();
+    let only_others = PaneColors::new(&theme, Some(&unrelated));
+    assert_eq!(only_others.selection_rgba(highlight), highlight, "OSC 10-12 leave it alone");
+    assert_eq!(only_others.selection_foreground_rgba(), None);
+    let mut overrides = ColorOverrides::default();
+    overrides.set_dynamic(DynamicColor::SelectionBackground, Some((255, 0, 0)));
+    overrides.set_dynamic(DynamicColor::SelectionForeground, Some((0, 255, 0)));
+    overrides.set_dynamic(DynamicColor::CursorText, Some((0, 0, 255)));
+    let program = PaneColors::new(&theme, Some(&overrides));
+    assert_eq!(program.selection_rgba(highlight), [0.5, 0.0, 0.0, 0.5]);
+    assert_eq!(program.selection_foreground_rgba(), Some([0.0, 1.0, 0.0, 1.0]));
+    assert_eq!(program.cursor_text_rgba(cursor_text), [0.0, 0.0, 1.0, 1.0]);
+}

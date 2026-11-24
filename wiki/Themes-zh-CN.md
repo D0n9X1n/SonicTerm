@@ -136,8 +136,9 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 | `background` | 终端背景和应用 UI 的基础背景 |
 | `foreground` | 默认终端文字和应用文字 |
 | `cursor` | 光标、link 下划线和 link tint 来源 |
-| `cursor_text` | 块状光标下的字符 |
-| `selection_bg` | 选区 overlay，以 50% alpha 绘制 |
+| `cursor_text` | 块状光标下的字符，除非窗格中的程序设置了自己的颜色 |
+| `selection_bg` | 选区 overlay，以 50% alpha 绘制，除非窗格中的程序设置了自己的颜色；也是命令面板和搜索框中选中文字的背景 |
+| `selection_fg` | 命令面板和搜索框中选中的文字；终端选区保持字形自身颜色，除非窗格中的程序设置了选区前景色 |
 | `colors.ansi` | ANSI 颜色 0–7 和派生 UI accent |
 | `colors.bright` | ANSI 颜色 8–15 和派生 UI accent |
 | `colors.tab.bar_bg` | 标签栏、状态栏、集成标题栏带和搜索面板的背景，按主题设置的值原样使用。SonicTerm 不会从终端背景色推导更暗的颜色，也不做对比度筛选，因此请选择能让 `foreground` 和 `colors.tab.active_fg` 清晰可读的 `bar_bg`。 |
@@ -147,7 +148,7 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 搜索的所有命中使用 `colors.ansi.yellow`，当前命中使用
 `colors.bright.green`。两者上方的文字都使用 `background`。
 
-自定义主题应保留 `selection_fg`、`colors.tab.hover_bg`、`colors.tab.hover_fg` 和
+自定义主题应保留 `colors.tab.hover_bg`、`colors.tab.hover_fg` 和
 `colors.tab.close_button_fg`：除 `hover_fg` 外都为 schema 必需字段，尽管目前均不影响渲染。
 
 主题加载后还会应用 `accessibility.high_contrast = true`。该设置把

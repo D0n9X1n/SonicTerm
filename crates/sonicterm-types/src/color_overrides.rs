@@ -1,4 +1,5 @@
-//! Colors a program set for its own pane with OSC 4, 10, 11, 12 and 21, over the theme defaults.
+//! Colors a program set for its own pane with OSC 4, 10, 11, 12, 17, 19 and 21, over the theme
+//! defaults.
 //!
 //! The parser owns one store per pane and the renderer reads it borrowed for a frame, so both
 //! agree on which entries a program overrode. An entry records presence, not a difference from
@@ -9,7 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// One sRGB color, 8 bits per channel.
 pub type Rgb = (u8, u8, u8);
 
-/// The xterm dynamic colors a program can set and reset (OSC 10/11/12 and 110/111/112).
+/// The dynamic colors a program can set and reset (OSC 10/11/12/17/19, their 110-series resets,
+/// and the matching OSC 21 keys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DynamicColor {
     /// Default foreground, OSC 10.
@@ -18,18 +20,27 @@ pub enum DynamicColor {
     Background,
     /// Text cursor, OSC 12.
     Cursor,
+    /// Selection background, OSC 17.
+    SelectionBackground,
+    /// Selection foreground, OSC 19.
+    SelectionForeground,
+    /// The glyph under a block cursor, OSC 21 `cursor_text`.
+    CursorText,
 }
 
 /// Source of store generations, shared by every store in the process so no two states of two
 /// stores carry the same value; a renderer cache salted with a generation cannot mix panes.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// A program's color overrides for one pane: the three dynamic colors and the 256-entry palette.
+/// A program's color overrides for one pane: the six dynamic colors and the 256-entry palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColorOverrides {
     foreground: Option<Rgb>,
     background: Option<Rgb>,
     cursor: Option<Rgb>,
+    selection_background: Option<Rgb>,
+    selection_foreground: Option<Rgb>,
+    cursor_text: Option<Rgb>,
     /// Palette entries; an entry is meaningful only while its bit in `palette_mask` is set.
     palette: [Rgb; 256],
     /// One bit per palette index: set while that index holds a program override.
@@ -44,6 +55,9 @@ impl Default for ColorOverrides {
             foreground: None,
             background: None,
             cursor: None,
+            selection_background: None,
+            selection_foreground: None,
+            cursor_text: None,
             palette: [(0, 0, 0); 256],
             palette_mask: [0; 4],
             generation: 0,
@@ -58,6 +72,9 @@ impl ColorOverrides {
         self.foreground.is_none()
             && self.background.is_none()
             && self.cursor.is_none()
+            && self.selection_background.is_none()
+            && self.selection_foreground.is_none()
+            && self.cursor_text.is_none()
             && self.palette_mask == [0; 4]
     }
 
@@ -75,6 +92,9 @@ impl ColorOverrides {
             DynamicColor::Foreground => self.foreground,
             DynamicColor::Background => self.background,
             DynamicColor::Cursor => self.cursor,
+            DynamicColor::SelectionBackground => self.selection_background,
+            DynamicColor::SelectionForeground => self.selection_foreground,
+            DynamicColor::CursorText => self.cursor_text,
         }
     }
 
@@ -91,6 +111,9 @@ impl ColorOverrides {
             DynamicColor::Foreground => &mut self.foreground,
             DynamicColor::Background => &mut self.background,
             DynamicColor::Cursor => &mut self.cursor,
+            DynamicColor::SelectionBackground => &mut self.selection_background,
+            DynamicColor::SelectionForeground => &mut self.selection_foreground,
+            DynamicColor::CursorText => &mut self.cursor_text,
         };
         if *slot != color {
             // Only a changed entry moves the generation, so a repeated set causes no repaint.

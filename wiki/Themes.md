@@ -143,8 +143,9 @@ default; when omitted, it becomes `#d5c4a1`.
 | `background` | Terminal background and the base for application chrome |
 | `foreground` | Default terminal and application text |
 | `cursor` | Cursor, link underline, and link tint source |
-| `cursor_text` | Character under a block cursor |
-| `selection_bg` | Selection overlay, drawn at 50% alpha |
+| `cursor_text` | Character under a block cursor, unless the pane's program set its own |
+| `selection_bg` | Selection overlay, drawn at 50% alpha unless the pane's program set its own, and the background of selected text in the palette and search fields |
+| `selection_fg` | Selected text in the palette and search fields; a terminal selection keeps its glyph colors unless the pane's program set a selection foreground |
 | `colors.ansi` | ANSI colors 0–7 and derived UI accents |
 | `colors.bright` | ANSI colors 8–15 and derived UI accents |
 | `colors.tab.bar_bg` | Background of the tab bar, the status strip, the integrated titlebar band and the search panel, used exactly as the theme sets it. SonicTerm derives no shade from the terminal background and applies no contrast filter, so pick a `bar_bg` on which `foreground` and `colors.tab.active_fg` read. |
@@ -155,7 +156,7 @@ Search uses `colors.ansi.yellow` for every match and
 `colors.bright.green` for the current match. Both use `background` for the text
 on top of the highlight.
 
-Keep `selection_fg`, `colors.tab.hover_bg`, `colors.tab.hover_fg`, and
+Keep `colors.tab.hover_bg`, `colors.tab.hover_fg`, and
 `colors.tab.close_button_fg` in custom files: the schema requires all except
 `hover_fg`, although none currently affects rendering.
 

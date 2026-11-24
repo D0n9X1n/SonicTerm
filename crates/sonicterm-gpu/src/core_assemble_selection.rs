@@ -44,6 +44,12 @@ impl GpuRenderer {
             row_spans,
             ..
         } = scratch;
+        // The active pane's colors: the theme under its program's colors, read once for the
+        // selection, copy mode and cursor; a missing view draws with the theme alone.
+        let pane_colors = PaneColors::new(
+            theme,
+            pane_views.get(plan.active_index).and_then(|view| view.overrides),
+        );
         if let Some(sel) = selection {
             if !sel.is_empty() {
                 // Selection highlights are anchored to the active pane's
@@ -64,20 +70,33 @@ impl GpuRenderer {
                 // to viewport rows (so the highlight follows the TEXT when
                 // scrolled).
                 let sel_view_top_abs = plan.active_view_top_abs;
+                let geometry = SelectionGeometry {
+                    view_top_abs: sel_view_top_abs,
+                    grid_size: (grid.rows, grid.cols),
+                    origin: (active_origin_x, active_origin_y),
+                    cell_size: (self.cell_w, self.cell_h),
+                    clip: (pane_x, pane_y, pane_w, pane_h),
+                    surface: (sw, sh),
+                };
                 push_selection_quads(
                     &mut *quads,
                     sel,
-                    &SelectionGeometry {
-                        view_top_abs: sel_view_top_abs,
-                        grid_size: (grid.rows, grid.cols),
-                        origin: (active_origin_x, active_origin_y),
-                        cell_size: (self.cell_w, self.cell_h),
-                        clip: (pane_x, pane_y, pane_w, pane_h),
-                        surface: (sw, sh),
-                    },
+                    &geometry,
                     active_snapped_cell_x,
-                    self.selection_color,
+                    pane_colors.selection_rgba(self.selection_color),
                 );
+                if let Some(selected) = pane_colors.selection_foreground_rgba() {
+                    // Selected glyphs take the program's selection foreground; the cursor recolors
+                    // below run later, so cursor text wins on the cursor cell.
+                    recolor_selected_glyphs(
+                        &mut *glyph_instances,
+                        row_spans,
+                        sel,
+                        &geometry,
+                        active_snapped_cell_x,
+                        selected,
+                    );
+                }
             }
         }
 
@@ -108,7 +127,7 @@ impl GpuRenderer {
                 self.cell_h,
                 sw,
                 sh,
-                self.selection_color,
+                pane_colors.selection_rgba(self.selection_color),
                 self.cursor_color,
                 &mut *quads,
                 active_snapped_cell_x,
@@ -122,7 +141,7 @@ impl GpuRenderer {
                     self.cell_h,
                     sw,
                     sh,
-                    self.cursor_text_color,
+                    pane_colors.cursor_text_rgba(self.cursor_text_color),
                 );
                 crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                 *frame_recolor = frame_recolor.merge(record);
@@ -180,8 +199,7 @@ impl GpuRenderer {
                 // fading over the terminal background makes Gruvbox yellow
                 // read as olive/green during real redraws.
                 // The terminal cursor takes the active pane's OSC 12 color when its program set one.
-                let pane_cursor = PaneColors::new(theme, pane_views[plan.active_index].overrides)
-                    .cursor_rgba(self.cursor_color);
+                let pane_cursor = pane_colors.cursor_rgba(self.cursor_color);
                 let color = active_cursor_color(pane_cursor);
                 // Wezterm cursor shapes:
                 //   Block     → full-cell quad, glyph re-rendered in bg
@@ -220,7 +238,7 @@ impl GpuRenderer {
                                 self.cell_h,
                                 sw,
                                 sh,
-                                self.cursor_text_color,
+                                pane_colors.cursor_text_rgba(self.cursor_text_color),
                             );
                             crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                             *frame_recolor = frame_recolor.merge(record);

@@ -559,15 +559,17 @@ pub(super) fn only_the_quad_cache_drops_dirty_rows_inside_each_panes_loop() {
 
 #[test]
 pub(super) fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
-    // The three recolors of glyph_instances go through the row-pruned scan and record the
-    // glyphs it examined; the two field-mark recolors keep their overlay slices and are not counted.
+    // The three cursor recolors of glyph_instances and the selected-glyph recolor, which scans the
+    // same list per selection rectangle, go through the row-pruned scan and record the glyphs it
+    // examined; the two field-mark recolors keep their overlay slices and are not counted.
     let core = core_code();
     let mut main = 0;
     for (offset, _) in core.match_indices("recolor_cursor_glyphs_in(") {
         let call = &core[offset..core.len().min(offset + 80)];
         let after = &core[offset..core.len().min(offset + 260)];
         assert!(
-            call.contains("(&mut*glyph_instances,row_spans,"),
+            call.contains("(&mut*glyph_instances,row_spans,")
+                || call.contains("(glyphs,rows,left,top,width,height,"),
             "unexpected main recolor: {call}"
         );
         assert!(
@@ -594,7 +596,7 @@ pub(super) fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
         assert!(!before.contains("note_recolor_glyphs_visited"), "an overlay recolor was counted");
         overlay += 1;
     }
-    assert_eq!((main, overlay), (3, 2));
+    assert_eq!((main, overlay), (4, 2));
     assert_eq!(core.matches("note_recolor_glyphs_visited(||glyph_instances.len())").count(), 0);
 }
 

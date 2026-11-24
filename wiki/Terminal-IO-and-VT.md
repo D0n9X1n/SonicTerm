@@ -242,8 +242,8 @@ Current protocol support includes:
 - primary and alternate screens, application cursor keys, bracketed paste,
   focus reporting, and kitty keyboard flag set/push/pop/query;
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
-  clipboard events, OSC 4/10/11/12 color queries and sets, the OSC 21 kitty color protocol,
-  OSC 104/110/111/112 color resets, OSC 133 prompt markers, OSC 9;4
+  clipboard events, OSC 4/10/11/12/17/19 color queries and sets, the OSC 21 kitty color
+  protocol, OSC 104/110/111/112/117/119 color resets, OSC 133 prompt markers, OSC 9;4
   progress, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
   title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere,
   the final padding optional), at most eight open at once and 16 KiB in all, and all of them dropped
@@ -281,7 +281,7 @@ SonicTerm answers:
 | DSR 996 `CSI ? 996 n` | `CSI ? 997 ; 1 n` for a dark theme, `; 2 n` for a light one, from the theme's `appearance`. |
 | DEC mode 2031 | While a program has set it, every theme change that alters a readable color (foreground, background, cursor, the 16 theme colors) or the scheme sends the same `CSI ? 997 ; Ps n` report, also when the scheme stays the same, so a program that re-reads colors on the report picks up the new palette. A reload, the theme picker's preview and its choice all count; the report goes through the pane's reply path. SonicTerm does not follow the system's light or dark appearance, so the report fires only when the theme changes. |
 | `OSC 4 ; N ; ?` | `OSC 4 ; N ; rgb:rrrr/gggg/bbbb` with the request's terminator: the color the program set, else 0..=15 from the theme and 16..=255 from the xterm 6×6×6 cube and gray ramp, the same table the renderer draws with. |
-| `OSC 10/11/12 ; ?` | `OSC 1x ; rgb:rrrr/gggg/bbbb` with the request's terminator: the foreground, background or cursor the program set, else the theme's; a cursor with neither reads as the foreground. Each further `?` asks for the next color, so `OSC 10 ; ? ; ?` answers 10 and 11; 13-19 are not answered. |
+| `OSC 10/11/12/17/19 ; ?` | `OSC 1x ; rgb:rrrr/gggg/bbbb` with the request's terminator: the foreground, background, cursor, selection background or selection foreground the program set, else the theme's; a cursor with neither reads as the foreground. Each further `?` asks for the next color, so `OSC 10 ; ? ; ?` answers 10 and 11; 13-16 and 18 are not answered. |
 | `OSC 21 ; key=? ; …` | `OSC 21 ; key=rgb:rr/gg/bb ; …` in request order with the request's terminator; see the kitty color protocol below. |
 | `CSI 16 t` | `CSI 6 ; height ; width t`, the cell size in whole physical pixels; no reply until the window reports a cell size. Other window operations are ignored. |
 
@@ -291,7 +291,8 @@ Programs can set and reset the colors of their own pane:
   `OSC 10`, `11` and `12` set the default foreground, background and cursor; each further
   value targets the next dynamic color, so `OSC 10 ; #fff ; ?` sets the foreground and asks
   for the background, and an empty value only moves on (`OSC 10 ; ; ?` asks for the
-  background). OSC 13-19 are accepted and ignored.
+  background). `OSC 17` and `19` set the selection background and foreground; OSC 13-16 and
+  18 are accepted and ignored.
 - A spec is `rgb:r/g/b` with 1 to 4 hex digits per channel, `rgbi:` intensities from 0 to 1,
   `#rgb`, `#rrggbb`, `#rrrgggbbb`, `#rrrrggggbbbb`, 3 or 6 hex digits without `#`, or an X11
   color name in any case.
@@ -299,13 +300,14 @@ Programs can set and reset the colors of their own pane:
   value is skipped and the rest still apply.
 - `OSC 104 ; N ; …` resets the listed palette entries; a bare `OSC 104`, or one that lists
   only blanks, resets every entry, and a list of only invalid indices changes nothing.
-  `OSC 110`, `111` and `112` reset the foreground, background and cursor with no argument or
-  any argument but `?`; a `?` asks for that color instead, answered under the request's own
-  number. OSC 113-119 are accepted and ignored.
+  `OSC 110`, `111`, `112`, `117` and `119` reset the foreground, background, cursor and
+  selection background and foreground with no argument or any argument but `?`; a `?` asks for
+  that color instead, answered under the request's own number. OSC 113-116 and 118 are
+  accepted and ignored.
 - A program's colors sit over the theme: a reload, the theme picker's preview, cancel and
   choice change only the theme defaults underneath, and a color the program set equal to
   today's default still hides a later theme change. RIS clears the palette colors and keeps
-  the foreground, background and cursor.
+  the foreground, background, cursor, selection and cursor-text colors.
 - A program's own sets and resets send no mode 2031 report, so a program that re-sets colors
   when it gets the report cannot loop; RIS turns mode 2031 off, so it sends none either.
   DSR 996 keeps answering the theme's appearance.
@@ -316,6 +318,17 @@ Programs can set and reset the colors of their own pane:
   the 16-bit `rgb:rrrr/gggg/bbbb` form, Ghostty's default; there is no 8-bit reply option.
 - Below a background opacity of 1, a program's background is drawn over the theme background
   at the same opacity, so it blends with the theme background rather than replacing it.
+- In the active pane, the selection highlight and copy mode's selection use the pane's
+  selection background at the theme highlight's 50% opacity. Glyphs in a selection take the
+  selection foreground only once a program set one (copy mode's selection keeps glyph colors);
+  until then they keep their own colors, so existing themes look unchanged, and color glyphs and
+  images always keep theirs. The glyph under a block cursor takes the cursor-text color, which
+  wins over the selection foreground. A selection is clipped to its pane and never recolors a
+  neighbour, and the palette and search fields always keep the theme's selection colors. A
+  change repaints the whole window. Intentional difference: WezTerm and kitty draw selected text
+  in their configured selection foreground, while the theme's `selection_fg` colors only those
+  fields here, and `OSC 19 ; ?` still answers it. Ghostty parses OSC 17/19/117/119 and does not
+  act on them.
 
 `OSC 21 ; key=value ; …`, the kitty color protocol, reads every `;`-separated field in order and
 answers in one `OSC 21 ; key=value ; …` reply with the request's terminator, sent only when the
@@ -325,7 +338,8 @@ packet asks something:
 | --- | --- | --- | --- |
 | Palette `0`-`255` (digits, leading zeros allowed as in kitty) | the effective entry | sets it | resets it to the theme |
 | `foreground`, `background`, `cursor` | the effective color; `cursor` answers what OSC 12 reports | sets it | resets it to the theme |
-| `selection_background`, `selection_foreground`, `cursor_text`, `visual_bell`, `transparent_background_color1`-`8` | `key=` (not held) | ignored | ignored |
+| `selection_background`, `selection_foreground`, `cursor_text` | the effective color, the same state as OSC 17 and 19 | sets it | resets it to the theme |
+| `visual_bell`, `transparent_background_color1`-`8` | `key=` (not held) | ignored | ignored |
 | any other key, including `256` and `second_transparent_background` | `unknown=` and the key in unpadded base64 | the same | the same |
 
 - Colors are answered in 8-bit `rgb:rr/gg/bb`, and a color with no value as `key=`. A set drops
@@ -339,8 +353,10 @@ packet asks something:
   every reply within one 32 KiB submission. An empty value resets a color, as in Ghostty, where
   kitty sets "none" or its null color. Unknown keys are answered as kitty does, where Ghostty
   skips them, and Ghostty's `second_transparent_background` is unknown here, as in kitty. Values
-  are trimmed, as in Ghostty. The selection, cursor-text, visual-bell and transparent-background
-  colors are recognized but not held. WezTerm does not implement OSC 21.
+  are trimmed, as in Ghostty. The `selection_*` and `cursor_text` keys are kitty-only extras
+  that share their state with OSC 17 and 19; `cursor_text` is set only here, as in kitty. The
+  visual-bell and transparent-background colors are recognized but not held. WezTerm does not
+  implement OSC 21.
 
 SGR pixel mouse reporting (mode 1016) is not supported, and DECRQM says so.
 

@@ -666,6 +666,11 @@ struct Performer {
     /// Theme cursor colour (sRGB), used to answer OSC 12 `?` queries.
     /// Falls back to `theme_fg` if unset.
     theme_cursor: Option<(u8, u8, u8)>,
+    /// Theme selection background, selection foreground and cursor text (sRGB), answering OSC 17,
+    /// OSC 19 and the OSC 21 `cursor_text` key while the program set none.
+    theme_selection_bg: Option<(u8, u8, u8)>,
+    theme_selection_fg: Option<(u8, u8, u8)>,
+    theme_cursor_text: Option<(u8, u8, u8)>,
     /// 16-colour ANSI palette (sRGB) used to answer `OSC 4 ; <i> ; ? ST`
     /// queries (index 0..=15: 0-7 normal, 8-15 bright). Per-slot `None`
     /// suppresses that slot's reply so we never report a colour we were

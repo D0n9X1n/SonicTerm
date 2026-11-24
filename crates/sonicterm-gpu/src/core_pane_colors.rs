@@ -1,4 +1,5 @@
-//! A pane's colors: the window theme under the colors its program set with OSC 4, 10-12 and 21.
+//! A pane's colors: the window theme under the colors its program set with OSC 4, 10-12, 17, 19
+//! and 21.
 //!
 //! Every cell color path resolves through [`PaneColors`], so a pane's glyphs, inverse and dim
 //! cells, backgrounds, decorations and cursor agree. A pane without program colors carries no
@@ -72,6 +73,42 @@ impl<'frame> PaneColors<'frame> {
     #[must_use]
     pub fn cursor_rgba(&self, theme_cursor: [f32; 4]) -> [f32; 4] {
         self.dynamic(DynamicColor::Cursor).map_or(theme_cursor, chrome_color_to_linear_rgba)
+    }
+
+    /// The selection highlight: the program's OSC 17 color at the opacity of `theme_highlight`,
+    /// the renderer's premultiplied theme highlight, else `theme_highlight` itself.
+    #[must_use]
+    pub fn selection_rgba(&self, theme_highlight: [f32; 4]) -> [f32; 4] {
+        let selection = self
+            .overrides
+            .and_then(|overrides| overrides.dynamic(DynamicColor::SelectionBackground));
+        let Some((red, green, blue)) = selection else {
+            // When: the program set no selection background, the theme highlight is drawn.
+            return theme_highlight;
+        };
+        let alpha = theme_highlight[3];
+        let lut = crate::color::srgb_u8_to_linear_lut();
+        [
+            lut[usize::from(red)] * alpha,
+            lut[usize::from(green)] * alpha,
+            lut[usize::from(blue)] * alpha,
+            alpha,
+        ]
+    }
+
+    /// The color selected glyphs draw with: the program's OSC 19 color, opaque premultiplied
+    /// linear; `None` without one, so selected glyphs keep their own colors.
+    #[must_use]
+    pub fn selection_foreground_rgba(&self) -> Option<[f32; 4]> {
+        self.dynamic(DynamicColor::SelectionForeground).map(chrome_color_to_linear_rgba)
+    }
+
+    /// The glyph under a block cursor: the program's OSC 21 `cursor_text`, else `theme_cursor_text`,
+    /// both opaque premultiplied linear.
+    #[must_use]
+    pub fn cursor_text_rgba(&self, theme_cursor_text: [f32; 4]) -> [f32; 4] {
+        self.dynamic(DynamicColor::CursorText)
+            .map_or(theme_cursor_text, chrome_color_to_linear_rgba)
     }
 
     /// The fill under the pane's default-background cells when the program set a background,

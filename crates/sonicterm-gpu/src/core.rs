@@ -905,6 +905,7 @@ pub(crate) use backgrounds::emit_row_background;
 pub(crate) use backgrounds::focus_flash_quad;
 use backgrounds::indexed;
 pub(crate) use backgrounds::push_selection_quads;
+pub(crate) use backgrounds::recolor_selected_glyphs;
 pub(crate) use backgrounds::RowBackgroundGeometry;
 pub(crate) use backgrounds::RowBackgroundRow;
 pub(crate) use backgrounds::SelectionGeometry;

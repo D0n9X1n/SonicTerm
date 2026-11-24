@@ -160,16 +160,15 @@ pub(crate) struct SelectionGeometry {
     pub(crate) surface: (f32, f32),
 }
 
-/// Push the selection highlight quads, clipped to the pane so a drag across a split cannot bleed.
-pub(crate) fn push_selection_quads(
-    out: &mut Vec<QuadInstance>,
+/// The selection's rectangles in surface pixels, clipped to its pane, so neither the highlight nor
+/// the selected-glyph recolor can reach a neighbouring pane.
+fn clipped_selection_rects(
     sel: &sonicterm_render_model::boundary::ui::selection::Selection,
     geometry: &SelectionGeometry,
     snapped_cell_x: &[f32],
-    color: [f32; 4],
-) {
+) -> impl Iterator<Item = (f32, f32, f32, f32)> {
     let (clip_x, clip_y, clip_w, clip_h) = geometry.clip;
-    for rect in selection_quad_rects(
+    selection_quad_rects(
         sel,
         geometry.view_top_abs,
         geometry.grid_size.0,
@@ -181,8 +180,40 @@ pub(crate) fn push_selection_quads(
         snapped_cell_x,
     )
     .into_iter()
-    .filter_map(|rect| clip_rect_to_pane(rect, clip_x, clip_y, clip_w, clip_h))
-    {
+    .filter_map(move |rect| clip_rect_to_pane(rect, clip_x, clip_y, clip_w, clip_h))
+}
+
+/// Draw the glyphs inside the selection in `color`, the program's selection foreground, over the
+/// same clipped rectangles as the highlight. Runs on the frame's emitted instances after the row
+/// glyph cache, so cache keys are unchanged; a color glyph ignores its color and keeps its pixels.
+pub(crate) fn recolor_selected_glyphs(
+    glyphs: &mut [GlyphInstance],
+    rows: &[RowGlyphSpan],
+    sel: &sonicterm_render_model::boundary::ui::selection::Selection,
+    geometry: &SelectionGeometry,
+    snapped_cell_x: &[f32],
+    color: [f32; 4],
+) {
+    let (surface_w, surface_h) = geometry.surface;
+    for (left, top, width, height) in clipped_selection_rects(sel, geometry, snapped_cell_x) {
+        // The selection's own slot damage repaints these glyphs, so the cursor recolor record,
+        // which widens damage for the cursor cell, is not extended by them; the scan is counted.
+        let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
+            glyphs, rows, left, top, width, height, surface_w, surface_h, color,
+        );
+        crate::frame_stats::note_recolor_glyphs_visited(|| visited);
+    }
+}
+
+/// Push the selection highlight quads, clipped to the pane so a drag across a split cannot bleed.
+pub(crate) fn push_selection_quads(
+    out: &mut Vec<QuadInstance>,
+    sel: &sonicterm_render_model::boundary::ui::selection::Selection,
+    geometry: &SelectionGeometry,
+    snapped_cell_x: &[f32],
+    color: [f32; 4],
+) {
+    for rect in clipped_selection_rects(sel, geometry, snapped_cell_x) {
         out.push(QuadInstance {
             rect: px_to_ndc(rect.0, rect.1, rect.2, rect.3, geometry.surface.0, geometry.surface.1),
             color,

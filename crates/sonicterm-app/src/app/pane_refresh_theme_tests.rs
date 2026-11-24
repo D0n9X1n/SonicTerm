@@ -63,3 +63,25 @@ fn propagation_collects_one_report_per_listening_pane() {
     let reports = propagate_theme_to_pane_parsers(panes, &theme_with("#fafafa", Appearance::Light));
     assert_eq!(reports, vec![(listening, b"\x1b[?997;2n".to_vec())]);
 }
+
+/// Every seed tells the parser the theme's selection background, selection foreground and cursor
+/// text, so OSC 17, OSC 19 and the OSC 21 `cursor_text` key answer the theme until a program sets
+/// its own; a reload's new values are answered after the reseed.
+#[test]
+fn seeds_answer_the_theme_selection_and_cursor_text() {
+    let mut theme = Theme::default();
+    theme.colors.selection_bg = Hex("#102030".into());
+    theme.colors.selection_fg = Hex("#405060".into());
+    theme.colors.cursor_text = Hex("#708090".into());
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &theme);
+    // The chain walks 17, 18 and 19; 18 is not kept, so 17 and 19 answer.
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]17;?;?;?\x07");
+    assert_eq!(reply, b"\x1b]17;rgb:1010/2020/3030\x07\x1b]19;rgb:4040/5050/6060\x07");
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]21;cursor_text=?\x07");
+    assert_eq!(reply, b"\x1b]21;cursor_text=rgb:70/80/90\x07");
+    theme.colors.selection_bg = Hex("#a0b0c0".into());
+    let _ = reseed_parser_theme_colors(&mut parser, &theme);
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]17;?\x07");
+    assert_eq!(reply, b"\x1b]17;rgb:a0a0/b0b0/c0c0\x07");
+}
