@@ -43,3 +43,18 @@ fn decscusr_values_name_their_request() {
     }
     assert_eq!(CursorRequest::from_decscusr(7), None);
 }
+
+/// A theme's `#rrggbb` reads each channel pair on its own: a pair that is not hex reads 0 and the
+/// others keep their values, and a value that is not six ASCII characters after its leading `#`s
+/// reads black. The renderer and the parser's seeded defaults both read through it, so a
+/// program's color query always answers the drawn color.
+#[test]
+fn theme_hex_reads_each_channel_leniently() {
+    assert_eq!(theme_hex_rgb("#e04020"), (0xe0, 0x40, 0x20));
+    assert_eq!(theme_hex_rgb("e04020"), (0xe0, 0x40, 0x20));
+    assert_eq!(theme_hex_rgb("#zz4020"), (0, 0x40, 0x20));
+    assert_eq!(theme_hex_rgb("#e0zz20"), (0xe0, 0, 0x20));
+    assert_eq!(theme_hex_rgb("#abc"), (0, 0, 0));
+    assert_eq!(theme_hex_rgb("#0é000"), (0, 0, 0));
+    assert_eq!(theme_hex_rgb(""), (0, 0, 0));
+}

@@ -125,9 +125,10 @@ close_button_fg = "#ff5555"
 tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml` 中的
 `[appearance]`，不属于主题文件。
 
-颜色应使用六位 RGB 字符串 `#rrggbb`。TOML loader 会接受任意字符串，但格式错误的
-颜色会显示为黑色，程序的颜色查询（OSC 4、10-12、17、19 以及 OSC 21 的 `cursor_text` 键）
-也回答这一黑色。缺少必需字段会导致主题解析失败。只有
+颜色应使用六位 RGB 字符串 `#rrggbb`。TOML loader 会接受任意字符串。颜色按每两位一个通道读取，
+不是十六进制的一对显示为 0，其余通道保持原值；`#` 之后不是六个字符的值显示为黑色。格式错误的
+`background` 以 `[appearance]` 的 `opacity` 把窗口清除为黑色。程序的颜色查询（OSC 4、10-12、17、19
+以及 OSC 21 的 `cursor_text` 键）回答实际绘制的颜色。缺少必需字段会导致主题解析失败。只有
 `colors.tab.hover_fg` 有 schema 默认值；省略时为 `#d5c4a1`。
 
 ### 颜色应用

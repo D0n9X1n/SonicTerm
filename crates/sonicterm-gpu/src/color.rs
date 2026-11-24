@@ -152,28 +152,22 @@ pub fn hex_to_wgpu(h: &str) -> wgpu::Color {
 
 /// Parse a `#rrggbb` hex string into a premultiplied `wgpu::Color` in
 /// **linear** space with the requested opacity.
+///
+/// Channels are read by [`sonicterm_types::theme_hex_rgb`], so malformed input clears to the
+/// color the parser seeds for it, black at the requested opacity for a value that does not parse.
 #[doc(hidden)]
 pub fn hex_to_wgpu_with_alpha(h: &str, alpha: f32) -> wgpu::Color {
     let alpha = alpha.clamp(0.0, 1.0) as f64;
-    let h = h.trim_start_matches('#');
-    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f64 / 255.0;
-    if h.len() == 6 && h.is_ascii() {
-        wgpu::Color {
-            r: srgb_channel_to_linear(parse(0)) * alpha,
-            g: srgb_channel_to_linear(parse(2)) * alpha,
-            b: srgb_channel_to_linear(parse(4)) * alpha,
-            a: alpha,
-        }
-    } else {
-        // When: trimmed `h` is not six ASCII bytes, use the documented opaque-black fallback.
-        wgpu::Color::BLACK
-    }
+    let (red, green, blue) = sonicterm_types::theme_hex_rgb(h);
+    let linear = |channel: u8| srgb_channel_to_linear(f64::from(channel) / 255.0) * alpha;
+    wgpu::Color { r: linear(red), g: linear(green), b: linear(blue), a: alpha }
 }
 
 /// Parse a `#rrggbb` color and opacity into premultiplied linear RGBA.
 ///
 /// The sRGB channels are decoded before multiplication by the clamped alpha,
-/// matching the quad pipeline's `src=One` blend contract. Malformed input is
+/// matching the quad pipeline's `src=One` blend contract. Channels are read by
+/// [`sonicterm_types::theme_hex_rgb`], so a value that does not parse is
 /// premultiplied black at the requested clamped opacity.
 ///
 /// Note: the chrome-text path uses a separate [`hex_to_chrome_color`]
@@ -185,26 +179,19 @@ pub fn hex_to_wgpu_with_alpha(h: &str, alpha: f32) -> wgpu::Color {
 #[doc(hidden)]
 pub fn hex_to_premultiplied_rgba(h: &str, alpha: f32) -> [f32; 4] {
     let alpha = alpha.clamp(0.0, 1.0);
-    let h = h.trim_start_matches('#');
-    let parsed = (h.len() == 6 && h.is_ascii()).then(|| {
-        Some([
-            u8::from_str_radix(&h[0..2], 16).ok()?,
-            u8::from_str_radix(&h[2..4], 16).ok()?,
-            u8::from_str_radix(&h[4..6], 16).ok()?,
-        ])
-    });
-    if let Some(Some([r, g, b])) = parsed {
-        let t = srgb_u8_to_linear_lut();
-        [t[r as usize] * alpha, t[g as usize] * alpha, t[b as usize] * alpha, alpha]
-    } else {
-        // When: `parsed` is absent, retain only the clamped opacity over black.
-        [0.0, 0.0, 0.0, alpha]
-    }
+    let (red, green, blue) = sonicterm_types::theme_hex_rgb(h);
+    let lut = srgb_u8_to_linear_lut();
+    [
+        lut[usize::from(red)] * alpha,
+        lut[usize::from(green)] * alpha,
+        lut[usize::from(blue)] * alpha,
+        alpha,
+    ]
 }
 
 /// Parse a `#rrggbb` hex string into a [`ChromeColor`] (sRGB-encoded
-/// u8 channels). Alpha is set to `0xFF` (fully opaque). On malformed
-/// input falls back to opaque black.
+/// u8 channels). Alpha is set to `0xFF` (fully opaque). Channels are read by
+/// [`sonicterm_types::theme_hex_rgb`], so a value that does not parse is opaque black.
 ///
 /// Replaces the legacy `hex_to_glyphon` helper that lived in `core.rs`
 /// and returned a `legacy chrome color`. The byte layout is preserved
@@ -212,14 +199,8 @@ pub fn hex_to_premultiplied_rgba(h: &str, alpha: f32) -> [f32; 4] {
 /// identically through the new path.
 #[must_use]
 pub fn hex_to_chrome_color(h: &str) -> ChromeColor {
-    let h = h.trim_start_matches('#');
-    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
-    if h.len() == 6 && h.is_ascii() {
-        ChromeColor::rgb(parse(0), parse(2), parse(4))
-    } else {
-        // When: trimmed `h` is not six ASCII bytes, return the documented opaque-black chrome color.
-        ChromeColor::rgb(0, 0, 0)
-    }
+    let (red, green, blue) = sonicterm_types::theme_hex_rgb(h);
+    ChromeColor::rgb(red, green, blue)
 }
 
 /// Multiply the alpha channel of a [`ChromeColor`] by `factor`

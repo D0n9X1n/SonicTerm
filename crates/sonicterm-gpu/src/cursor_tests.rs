@@ -145,7 +145,7 @@ fn row_pruned_recolor_matches_the_full_scan() {
                 let mut pruned = frame.glyphs.clone();
                 let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                     &mut pruned,
-                    &frame.rows,
+                    &mut frame.rows.clone(),
                     x,
                     y,
                     w,
@@ -153,6 +153,7 @@ fn row_pruned_recolor_matches_the_full_scan() {
                     surface.0,
                     surface.1,
                     MARK,
+                    false,
                 );
                 for (index, (expected, actual)) in full.iter().zip(&pruned).enumerate() {
                     assert_eq!(
@@ -204,7 +205,7 @@ fn search_recolor_visits_only_matching_rows_and_the_non_row_glyphs() {
             let y = 30.0 + match_row as f32 * cell_h;
             let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                 &mut glyphs,
-                &rows,
+                &mut rows,
                 20.0,
                 y,
                 3.0 * cell_w,
@@ -212,6 +213,7 @@ fn search_recolor_visits_only_matching_rows_and_the_non_row_glyphs() {
                 surface.0,
                 surface.1,
                 MARK,
+                false,
             );
             crate::frame_stats::note_recolor_glyphs_visited(|| visited);
         }
@@ -238,7 +240,7 @@ fn recolor_in_real_call_order_reaches_titles_only_after_they_are_appended() {
 
     let RecolorOutcome { visited: cursor_visits, .. } = recolor_cursor_glyphs_in(
         &mut glyphs,
-        &rows,
+        &mut rows,
         0.0,
         0.0,
         surface.0,
@@ -246,6 +248,7 @@ fn recolor_in_real_call_order_reaches_titles_only_after_they_are_appended() {
         surface.0,
         surface.1,
         MARK,
+        false,
     );
     assert_eq!(cursor_visits, row_glyphs, "the cursor call sees only the rows");
 
@@ -253,7 +256,7 @@ fn recolor_in_real_call_order_reaches_titles_only_after_they_are_appended() {
     glyphs.push(glyph_px(30.0, 2.0, 8.0, 10.0, surface));
     let RecolorOutcome { visited: search_visits, .. } = recolor_cursor_glyphs_in(
         &mut glyphs,
-        &rows,
+        &mut rows,
         4.0,
         0.0,
         10.0,
@@ -261,6 +264,7 @@ fn recolor_in_real_call_order_reaches_titles_only_after_they_are_appended() {
         surface.0,
         surface.1,
         [0.0, 1.0, 0.0, 1.0],
+        false,
     );
     assert_eq!(search_visits, 2, "no row's ink meets the target; both titles are scanned");
     assert_eq!(glyphs[row_glyphs].color, [0.0, 1.0, 0.0, 1.0], "the matching title is recolored");
@@ -335,7 +339,7 @@ fn tall_glyph_over_a_match_draws_identical_pixels() {
         let mut pruned = glyphs.clone();
         recolor_cursor_glyphs_in(
             &mut pruned,
-            &rows,
+            &mut rows,
             target.0,
             target.1,
             target.2,
@@ -343,6 +347,7 @@ fn tall_glyph_over_a_match_draws_identical_pixels() {
             surface.0,
             surface.1,
             MARK,
+            false,
         );
 
         assert!(marked(&full[3]), "pitch {pitch}: the tall glyph of the row above is recolored");
@@ -420,8 +425,18 @@ fn recolor_both(
     let mut full = glyphs.to_vec();
     let full_record = recolor_cursor_glyphs(&mut full, left, top, width, height, sw, sh, MARK);
     let mut pruned = glyphs.to_vec();
-    let RecolorOutcome { record: pruned_record, .. } =
-        recolor_cursor_glyphs_in(&mut pruned, rows, left, top, width, height, sw, sh, MARK);
+    let RecolorOutcome { record: pruned_record, .. } = recolor_cursor_glyphs_in(
+        &mut pruned,
+        &mut rows.to_vec(),
+        left,
+        top,
+        width,
+        height,
+        sw,
+        sh,
+        MARK,
+        false,
+    );
     ((full, full_record), (pruned, pruned_record))
 }
 
@@ -641,4 +656,126 @@ fn a_fractional_selection_edge_cuts_on_the_highlight_row() {
     for row in 20..32 {
         assert_eq!(at_row(row), mark, "row {row} takes the selection color");
     }
+}
+
+/// A 4x4 coverage ramp: every column has its own coverage, so a part that samples a neighbouring
+/// texel draws a different value and resampling is visible.
+struct RampTile;
+
+impl sonicterm_text::glyph_atlas::Rasterizer for RampTile {
+    fn rasterize(
+        &mut self,
+        _key: sonicterm_types::GlyphKey,
+    ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        Some(sonicterm_text::glyph_atlas::RasterTile {
+            width: 4,
+            height: 4,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 4.0,
+            coverage: (0..16).map(|index| [64, 128, 192, 255][index % 4]).collect(),
+            is_color: false,
+            is_subpixel: false,
+        })
+    }
+}
+
+/// A cut keeps sampling relative to the original tile on the software path: a four-texel ramp
+/// drawn six pixels wide and cut at pixel 2 draws every unselected pixel as the uncut glyph does,
+/// and every selected pixel as the whole glyph drawn in the selection color does, whichever side
+/// is selected. Pixels 1 and 4 sample exactly on a texel edge, where a part rescaled on its own
+/// rounded tile picks the neighbouring texel.
+#[test]
+fn a_cut_scaled_glyph_samples_its_original_tile_on_the_software_path() {
+    const WIDTH: u32 = 6;
+    const HEIGHT: u32 = 4;
+    let surface = (WIDTH as f32, HEIGHT as f32);
+    let mut atlas = sonicterm_text::glyph_atlas::GlyphAtlas::new(8, 8);
+    let tile = atlas
+        .get_or_insert(sonicterm_types::GlyphKey::new('R', false, false), &mut RampTile)
+        .expect("ramp tile inserts");
+    let mut glyph = glyph_px(0.0, 0.0, 6.0, 4.0, surface);
+    glyph.uv = tile.uv;
+    let uncut = composite(&atlas, &[glyph], WIDTH, HEIGHT);
+    let marked = composite(&atlas, &[GlyphInstance { color: MARK, ..glyph }], WIDTH, HEIGHT);
+    assert_ne!(uncut[0], uncut[1], "precondition: neighbouring pixels sample different texels");
+    for (target, selected) in [((2.0, 0.0, 4.0, 4.0), 2..6), ((0.0, 0.0, 2.0, 4.0), 0..2)] {
+        let mut glyphs = vec![glyph];
+        let mut rows = vec![RowGlyphSpan::new(&glyphs, 0..1, surface.0, surface.1)];
+        recolor_selected_cells(&mut glyphs, &mut rows, 0..1, [target], surface, MARK);
+        assert_eq!(glyphs.len(), 2, "the glyph is cut in two at pixel 2");
+        let pixels = composite(&atlas, &glyphs, WIDTH, HEIGHT);
+        for row in 0..HEIGHT {
+            for column in 0..WIDTH {
+                let index = (row * WIDTH + column) as usize;
+                let (wanted, side) = if selected.contains(&column) {
+                    (marked[index], "selected")
+                } else {
+                    // When: `column` is outside the selection, it must keep the uncut glyph's pixel.
+                    (uncut[index], "unselected")
+                };
+                assert_eq!(pixels[index], wanted, "{side} pixel ({column}, {row}) of {target:?}");
+            }
+        }
+    }
+}
+
+/// A block cursor over one cell of a two-cell glyph recolors only that cell's part: the glyph is
+/// cut at the cell's edge, its outside part keeps its color right after it in paint order and in
+/// its row, and the repaint record covers only the recolored part, since the outside part draws as
+/// it did before the cursor arrived. Without clipping, as the search highlight runs, the whole
+/// glyph is recolored and recorded.
+#[test]
+fn a_clipped_cursor_recolors_and_records_only_its_cell_of_a_wide_glyph() {
+    let surface = (40.0, 16.0);
+    let source =
+        vec![glyph_px(0.0, 0.0, 20.0, 16.0, surface), glyph_px(30.0, 0.0, 10.0, 16.0, surface)];
+    let rows = vec![
+        RowGlyphSpan::new(&source, 0..1, surface.0, surface.1),
+        RowGlyphSpan::new(&source, 1..2, surface.0, surface.1),
+    ];
+    let pixel_rect =
+        |glyph: &GlyphInstance| outward_rect(ndc_rect_px(glyph.rect, surface.0, surface.1));
+    let cell = PixelRect { x: 10, y: 0, w: 10, h: 16 };
+
+    let (mut clipped, mut clipped_rows) = (source.clone(), rows.clone());
+    let RecolorOutcome { record, .. } = recolor_cursor_glyphs_in(
+        &mut clipped,
+        &mut clipped_rows,
+        10.0,
+        0.0,
+        10.0,
+        16.0,
+        surface.0,
+        surface.1,
+        MARK,
+        true,
+    );
+    assert_eq!(clipped.len(), 3, "the wide glyph is cut in two");
+    assert_eq!((clipped[0].color, pixel_rect(&clipped[0])), (MARK, cell), "the cursor cell's part");
+    let outside = PixelRect { x: 0, y: 0, w: 10, h: 16 };
+    assert_eq!(
+        (clipped[1].color, pixel_rect(&clipped[1])),
+        (INK, outside),
+        "the other cell's part"
+    );
+    assert_eq!(clipped[2].color, INK, "the later glyph still draws after both parts");
+    assert_eq!((clipped_rows[0].glyphs.clone(), clipped_rows[1].glyphs.clone()), (0..2, 2..3));
+    assert_eq!(record.bounds, RecolorBounds::Rect(cell), "only the recolored part is repainted");
+
+    let (mut whole, mut whole_rows) = (source.clone(), rows);
+    let RecolorOutcome { record, .. } = recolor_cursor_glyphs_in(
+        &mut whole,
+        &mut whole_rows,
+        10.0,
+        0.0,
+        10.0,
+        16.0,
+        surface.0,
+        surface.1,
+        MARK,
+        false,
+    );
+    assert_eq!((whole.len(), whole[0].color), (2, MARK), "the whole glyph is recolored");
+    assert_eq!(record.bounds, RecolorBounds::Rect(PixelRect { x: 0, y: 0, w: 20, h: 16 }));
 }

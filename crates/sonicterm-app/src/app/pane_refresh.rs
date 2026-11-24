@@ -6,8 +6,8 @@ use super::*;
 /// Seed a freshly-created parser with the active theme's query-reply colours:
 /// default fg/bg/cursor (OSC 10/11/12 `?`) AND the full 16-colour ANSI palette
 /// (OSC 4 `?`). Every pane-spawn site calls this one function, so the OSC 4
-/// palette wiring cannot be added to one path and forgotten on another. A colour
-/// that does not parse is seeded as the black the renderer draws for it.
+/// palette wiring cannot be added to one path and forgotten on another. Every colour
+/// is seeded as the renderer draws it, through the one shared theme parse.
 pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &Theme) {
     // The creation seed records the pane's starting theme; it never reports a change.
     let _ = reseed_parser_theme_colors(parser, theme);
@@ -25,11 +25,11 @@ pub(super) fn reseed_parser_theme_colors(
         sonicterm_cfg::theme::Appearance::Dark => sonicterm_types::ColorScheme::Dark,
         sonicterm_cfg::theme::Appearance::Light => sonicterm_types::ColorScheme::Light,
     });
-    // Every slot is seeded with the color the renderer draws for it: a value that does not parse
-    // draws black, so it answers black. The parser's default then equals the drawn color, which
-    // its override generation compares against, and a reply or the mode 2031 fingerprint never
-    // keeps the previous theme's color.
-    let drawn = |hex: &sonicterm_cfg::theme::Hex| hex.rgb().unwrap_or((0, 0, 0));
+    // Every slot is seeded with the color the renderer draws for it, read by the renderer's own
+    // parse: a pair that is not hex reads 0 and a value that does not parse reads black. The
+    // parser's default then equals the drawn color, which its override generation compares
+    // against, and a reply or the mode 2031 fingerprint never keeps the previous theme's color.
+    let drawn = |hex: &sonicterm_cfg::theme::Hex| sonicterm_types::theme_hex_rgb(&hex.0);
     let (red, green, blue) = drawn(&theme.colors.foreground);
     parser.set_theme_fg(red, green, blue);
     let (red, green, blue) = drawn(&theme.colors.background);

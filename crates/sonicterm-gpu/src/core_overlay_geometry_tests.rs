@@ -155,3 +155,17 @@ fn the_badge_search_bar_and_notification_clear_a_top_status_line() {
         SearchBarLayout::compute_at_row(surface_w, surface_h, 120.0, 1, scale)
     );
 }
+
+/// The pane splitter reads the theme background and foreground through the shared theme parse, as
+/// every other renderer color does: a partly hex background keeps its valid pairs, and a
+/// foreground that does not parse is the black the terminal text draws, not a separate fallback.
+#[test]
+fn the_splitter_reads_theme_colors_through_the_shared_parse() {
+    let mut theme = Theme::default();
+    theme.colors.background.0 = "#zz4020".into();
+    theme.colors.foreground.0 = "not a color".into();
+    let expected = ThemeColor::rgb(0, 0x40, 0x20)
+        .shift_toward(ThemeColor::rgb(0, 0, 0), 0.18)
+        .to_rgba_f32_linear(1.0);
+    assert_eq!(splitter_color_from_theme(&theme), expected);
+}

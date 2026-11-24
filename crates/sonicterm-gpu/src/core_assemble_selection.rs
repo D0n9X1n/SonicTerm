@@ -154,6 +154,7 @@ impl GpuRenderer {
                     sw,
                     sh,
                     pane_colors.cursor_text_rgba(self.cursor_text_color),
+                    true,
                 );
                 crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                 *frame_recolor = frame_recolor.merge(record);
@@ -239,7 +240,9 @@ impl GpuRenderer {
                             });
                         }
                         // Mid-glide the block passes over text without recolouring it; the frame
-                        // that lands on the cell recolours its glyph as a resting block does.
+                        // that lands on the cell recolours its glyph as a resting block does. Only
+                        // the part inside the cell is recoloured, so a ligature's other half keeps
+                        // its own or its selection color.
                         if gliding.is_none() {
                             let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
                                 &mut *glyph_instances,
@@ -251,6 +254,7 @@ impl GpuRenderer {
                                 sw,
                                 sh,
                                 pane_colors.cursor_text_rgba(self.cursor_text_color),
+                                true,
                             );
                             crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                             *frame_recolor = frame_recolor.merge(record);

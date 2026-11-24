@@ -151,3 +151,18 @@ fn a_presence_only_store_shares_the_theme_rows_and_frame_key() {
     assert_ne!(PaneColors::new(&theme, Some(&overrides)).style_rev(42), 42);
     assert_ne!(pane_colors_identity([(7, Some(&overrides)), (8, None)]), 0);
 }
+
+/// A window background that does not parse is seeded as black, so a program's OSC 11 black keeps
+/// the override generation; that is right only because the pane fill it draws at opacity 0.5
+/// equals the window clear the malformed background draws at that opacity.
+#[test]
+fn a_black_background_over_a_malformed_translucent_theme_draws_the_clear() {
+    let mut theme = Theme::default();
+    theme.colors.background.0 = "#abc".into();
+    let mut overrides = ColorOverrides::default();
+    overrides.set_dynamic(DynamicColor::Background, Some((0, 0, 0)));
+    let fill = PaneColors::new(&theme, Some(&overrides)).background_fill(0.5);
+    let clear = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), 0.5);
+    let clear = [clear.r as f32, clear.g as f32, clear.b as f32, clear.a as f32];
+    assert_eq!(fill, Some(clear));
+}

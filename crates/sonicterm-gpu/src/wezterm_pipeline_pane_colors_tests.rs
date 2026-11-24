@@ -399,7 +399,7 @@ fn selection_frame(
     }
     let _ = recolor_cursor_glyphs_in(
         &mut glyphs,
-        &row_spans,
+        &mut row_spans,
         origin + 30.0,
         0.0,
         10.0,
@@ -407,6 +407,7 @@ fn selection_frame(
         surface_w,
         surface_h,
         colors.cursor_text_rgba(theme_cursor_text),
+        true,
     );
     (atlas, quads, glyphs)
 }
@@ -718,11 +719,13 @@ fn wgpu_selection_foreground_follows_the_selected_cells() {
 }
 
 /// One copy-mode frame of the left pane, whose program set every selection and cursor-text color
-/// (`overrides`): four text glyphs, copy mode's range over cells 0-2 with its cursor on cell 2,
-/// built with the production copy-mode quads and recolors in the order assembly runs them.
+/// (`overrides`): four text glyphs, or with `ligature` one two-cell glyph over cells 1-2 between
+/// two text glyphs, copy mode's range over cells 0-2 with its cursor on cell 2, built with the
+/// production copy-mode quads and recolors in the order assembly runs them.
 fn copy_mode_frame(
     theme: &Theme,
     overrides: &ColorOverrides,
+    ligature: bool,
 ) -> (GlyphAtlas, Vec<QuadInstance>, Vec<GlyphInstance>) {
     let (surface_w, surface_h) = (WIDTH_PX as f32, HEIGHT_PX as f32);
     let mut atlas = GlyphAtlas::new(64, 64);
@@ -742,10 +745,35 @@ fn copy_mode_frame(
         .expect("text tile");
     let foreground =
         crate::color::hex_to_premultiplied_rgba(theme.colors.foreground.0.as_str(), 1.0);
-    let mut glyphs: Vec<GlyphInstance> = (0..4)
-        .map(|column| GlyphInstance {
-            rect: px_to_ndc(column as f32 * 10.0, 0.0, 10.0, 20.0, surface_w, surface_h),
-            uv: text.uv,
+    let wide = atlas
+        .get_or_insert_lazy_without_eviction(GlyphKey::new('L', false, false), 20, 20, || {
+            RasterTile {
+                width: 20,
+                height: 20,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 20.0,
+                coverage: vec![255; 20 * 20],
+                is_color: false,
+                is_subpixel: false,
+            }
+        })
+        .expect("ligature tile");
+    // Each glyph's left cell and width in cells.
+    let layout: &[(u8, u8)] =
+        if ligature { &[(0, 1), (1, 2), (3, 1)] } else { &[(0, 1), (1, 1), (2, 1), (3, 1)] };
+    let mut glyphs: Vec<GlyphInstance> = layout
+        .iter()
+        .map(|&(column, cells)| GlyphInstance {
+            rect: px_to_ndc(
+                f32::from(column) * 10.0,
+                0.0,
+                f32::from(cells) * 10.0,
+                20.0,
+                surface_w,
+                surface_h,
+            ),
+            uv: if cells == 2 { wide.uv } else { text.uv },
             color: foreground,
             flags: [0.0; 4],
         })
@@ -800,7 +828,7 @@ fn copy_mode_frame(
     let (cursor_x, cursor_y) = cursor.expect("copy mode draws its cursor");
     let _ = recolor_cursor_glyphs_in(
         &mut glyphs,
-        &rows,
+        &mut rows,
         cursor_x,
         cursor_y,
         10.0,
@@ -808,6 +836,7 @@ fn copy_mode_frame(
         surface_w,
         surface_h,
         colors.cursor_text_rgba(theme_cursor_text),
+        true,
     );
     (atlas, quads, glyphs)
 }
@@ -830,11 +859,35 @@ fn copy_mode_selection_takes_the_program_selection_foreground() {
         (25, (0, 0, 200)),
         (35, foreground),
     ];
-    let (mut atlas, quads, glyphs) = copy_mode_frame(&theme, &overrides);
+    let (mut atlas, quads, glyphs) = copy_mode_frame(&theme, &overrides, false);
     let software = software_pixels(clear, &atlas, &quads, &glyphs);
     assert_columns("software, copy mode", &expected, 2, &software);
     let wgpu = wgpu_pixels(clear, &mut atlas, &quads, &glyphs);
     assert_columns("wgpu, copy mode", &expected, 2, &wgpu);
+}
+
+/// A two-cell glyph half under the block cursor takes the cursor text only in the cursor's cell:
+/// its other half, in a selected cell, keeps the program's selection foreground, on both
+/// compositors, so the cursor's recolor of a cut fragment never overwrites the selection's.
+#[test]
+fn a_ligature_half_under_the_copy_cursor_keeps_the_selection_foreground_in_its_other_cell() {
+    let theme = Theme::default();
+    let clear = crate::color::hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
+    let mut overrides = ColorOverrides::default();
+    overrides.set_dynamic(DynamicColor::SelectionBackground, Some(CLUSTER_SELECTION_BG));
+    overrides.set_dynamic(DynamicColor::SelectionForeground, Some(CLUSTER_SELECTION_FG));
+    overrides.set_dynamic(DynamicColor::CursorText, Some((0, 0, 200)));
+    let expected = [
+        (5, CLUSTER_SELECTION_FG),
+        (15, CLUSTER_SELECTION_FG),
+        (25, (0, 0, 200)),
+        (35, theme_rgb(&theme.colors.foreground)),
+    ];
+    let (mut atlas, quads, glyphs) = copy_mode_frame(&theme, &overrides, true);
+    let software = software_pixels(clear, &atlas, &quads, &glyphs);
+    assert_columns("software, ligature under cursor", &expected, 2, &software);
+    let wgpu = wgpu_pixels(clear, &mut atlas, &quads, &glyphs);
+    assert_columns("wgpu, ligature under cursor", &expected, 2, &wgpu);
 }
 
 /// A palette or search field keeps the theme's selection colors with every selection and

@@ -177,3 +177,24 @@ fn an_unparsable_theme_color_seeds_the_drawn_black() {
         b"\x1b]10;rgb:0000/0000/0000\x07\x1b]11;rgb:0000/0000/0000\x07\x1b]4;1;rgb:0000/0000/0000\x07"
     );
 }
+
+/// A six-character theme background with one pair that is not hex seeds the channels the renderer
+/// draws for it, not black: OSC 11 answers them, and an OSC 11 set to black, the value a strict
+/// parse would have seeded, still moves the override generation, since it changes the drawn color.
+#[test]
+fn a_partly_hex_theme_color_seeds_the_drawn_channels() {
+    let theme = theme_with("#zz4020", Appearance::Dark);
+    let drawn = sonicterm_gpu::color::hex_to_chrome_color(theme.colors.background.0.as_str());
+    assert_eq!((drawn.r, drawn.g, drawn.b), (0, 0x40, 0x20), "the renderer draws the valid pairs");
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &theme);
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]11;?\x07");
+    assert_eq!(reply, b"\x1b]11;rgb:0000/4040/2020\x07", "the seed answers the drawn color");
+    parser.advance(b"\x1b]11;#000000\x07");
+    // Generations come from one process-wide counter, so the test checks only that it moved.
+    let generation = parser.color_overrides().map(|overrides| overrides.generation());
+    assert!(
+        generation.is_some_and(|generation| generation != 0),
+        "a black background over the drawn channels repaints: {generation:?}"
+    );
+}

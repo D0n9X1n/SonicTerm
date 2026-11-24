@@ -263,7 +263,7 @@ pub(in crate::core) fn render_parity_frame(
         // Focus chrome: the cursor recolours the glyph under it, after the rows were cached.
         let _ = recolor_cursor_glyphs_in(
             &mut glyph_instances,
-            &row_spans,
+            &mut row_spans,
             snapped[2],
             cell_h,
             cell_w,
@@ -271,6 +271,7 @@ pub(in crate::core) fn render_parity_frame(
             surface.0,
             surface.1,
             [0.0, 0.0, 0.0, 1.0],
+            true,
         );
     }
     let decorations = format!("{underlines:?} {missing_tofu:?} {missing_chars:?}");

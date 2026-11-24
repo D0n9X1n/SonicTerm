@@ -112,7 +112,9 @@ impl GpuRenderer {
                         ..Default::default()
                     });
                     // The tab titles were appended after the rows; they lie outside every
-                    // recorded row span, so this scan still examines each of them.
+                    // recorded row span, so this scan still examines each of them. A match
+                    // recolors whole glyphs: cutting at every match edge would move the glyph list
+                    // once per cut glyph.
                     let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                         &mut *glyph_instances,
                         row_spans,
@@ -123,6 +125,7 @@ impl GpuRenderer {
                         sw,
                         sh,
                         fg_color,
+                        false,
                     );
                     crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                 }

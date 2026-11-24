@@ -339,8 +339,9 @@ Programs can set and reset the colors of their own pane:
   keep theirs. Only the ink inside the selected cells changes: a ligature, wide glyph or
   overhanging glyph that crosses the selection's edge is cut there, on the pixel row or column
   where the highlight begins, and its unselected part keeps its color and its place in the
-  drawing order, under any later glyph that overlaps it. The glyph under a block cursor takes the cursor-text color, which wins over the
-  selection foreground. A selection is clipped to its pane and never recolors a neighbour's
+  drawing order, under any later glyph that overlaps it. The ink inside a block cursor's cell takes the cursor-text color, which wins over the
+  selection foreground; a glyph crossing the cell's edge is cut there the same way, so the selected
+  half of a ligature under the cursor keeps the selection foreground. A selection is clipped to its pane and never recolors a neighbour's
   glyphs, even where they overhang into it, and the palette and search fields always keep the
   theme's selection colors. A
   change repaints the whole window. Intentional difference: WezTerm and kitty draw selected text
