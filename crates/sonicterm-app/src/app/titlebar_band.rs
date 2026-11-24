@@ -473,25 +473,19 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 let cursor =
                     self.hover_window_band(window_id, position.x as f32, position.y as f32);
-                let window = self.registry.windows.get_mut(&window_id);
-                if let Some(window) = window {
-                    // the window is live, its resize cursor follows the pointer's edge.
-                    let on_edge = cursor.is_some();
-                    if let (Some(icon), Some(native)) = (cursor, window.window.as_ref()) {
-                        // cursor names an edge icon and the native window exists, show it.
-                        native.set_cursor(icon);
-                    } else if window.band_edge_cursor && !on_edge {
-                        // When: band_edge_cursor was set and the pointer left the edge, the
-                        // default cursor returns until a pane or link sets its own.
-                        if let Some(native) = window.window.as_ref() {
-                            native.set_cursor(CursorIcon::Default);
-                        }
-                    }
-                    window.band_edge_cursor = on_edge;
+                if let Some(window) = self.registry.windows.get_mut(&window_id) {
+                    // The window is live: the turn's cursor sync shows the edge's resize cursor.
+                    window.native_cursor.band_edge = cursor;
                 }
             }
-            WindowEvent::CursorLeft { .. }
-            | WindowEvent::Focused(false)
+            WindowEvent::CursorLeft { .. } => {
+                // The pointer left the window, so it is on no edge and no caption press can end.
+                if let Some(window) = self.registry.windows.get_mut(&window_id) {
+                    window.native_cursor.band_edge = None;
+                }
+                self.cancel_window_band(window_id);
+            }
+            WindowEvent::Focused(false)
             | WindowEvent::Resized(_)
             | WindowEvent::ScaleFactorChanged { .. } => {
                 // CursorLeft, Focused(false), Resized or ScaleFactorChanged, a caption press

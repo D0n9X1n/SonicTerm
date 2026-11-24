@@ -243,7 +243,7 @@ Current protocol support includes:
   focus reporting, and kitty keyboard flag set/push/pop/query;
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12/17/19 color queries and sets, the OSC 21 kitty color
-  protocol, OSC 104/110/111/112/117/119 color resets, OSC 133 prompt markers, OSC 9;4
+  protocol, OSC 22 pointer shapes, OSC 104/110/111/112/117/119 color resets, OSC 133 prompt markers, OSC 9;4
   progress, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
   title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere,
   the final padding optional), at most eight open at once and 16 KiB in all, and all of them dropped
@@ -283,6 +283,7 @@ SonicTerm answers:
 | `OSC 4 ; N ; ?` | `OSC 4 ; N ; rgb:rrrr/gggg/bbbb` with the request's terminator: the color the program set, else 0..=15 from the theme and 16..=255 from the xterm 6×6×6 cube and gray ramp, the same table the renderer draws with. |
 | `OSC 10/11/12/17/19 ; ?` | `OSC 1x ; rgb:rrrr/gggg/bbbb` with the request's terminator: the foreground, background, cursor, selection background or selection foreground the program set, else the theme's; a cursor with neither reads as the foreground. Each further `?` asks for the next color, so `OSC 10 ; ? ; ?` answers 10 and 11; 13-16 and 18 are not answered. |
 | `OSC 21 ; key=? ; …` | `OSC 21 ; key=rgb:rr/gg/bb ; …` in request order with the request's terminator; see the kitty color protocol below. |
+| `OSC 22 ; ? name , …` | `OSC 22 ; answer , …` in request order with the request's terminator; see pointer shapes below. |
 | `CSI 16 t` | `CSI 6 ; height ; width t`, the cell size in whole physical pixels; no reply until the window reports a cell size. Other window operations are ignored. |
 
 Programs can set and reset the colors of their own pane:
@@ -376,6 +377,84 @@ packet queries a color or names an unknown key in any form:
   that share their state with OSC 17 and 19; `cursor_text` is set only here, as in kitty. The
   visual-bell and transparent-background colors are recognized but not held. WezTerm does not
   implement OSC 21.
+
+#### Pointer shapes (OSC 22)
+
+`OSC 22 ; [op] name , name , …` sets the pointer shape shown over the pane, following kitty's
+protocol:
+
+- Each screen, main and alternate, keeps its own stack of at most 16 entries; an entry is a
+  shape or unset. RIS empties both stacks.
+- No operator, or `=`, writes each name in turn into the top entry, pushing one when the stack
+  is empty; an empty name (`OSC 22 ;` or a bare `OSC 22`) stores unset. `>` pushes each known
+  name, evicting the bottom entry when the stack is full; empty and unknown names are skipped.
+  `<` pops one entry and ignores any names. An unknown name, or one longer than 32 bytes,
+  changes nothing.
+- The pane's shape is its active screen's top entry. With an empty stack or an unset top it is
+  `default` while mouse tracking (1000, 1002 or 1003) is on and `text` otherwise. Tracking
+  changes only that fallback, so an explicit shape survives it; switching screens changes the
+  shape to the other screen's.
+- `?` asks, answering each name in order: `1` for an accepted name, `__current__` the top
+  entry's CSS name or `0` when it is unset or the stack is empty, `__default__` `text`,
+  `__grabbed__` `default`, and `0` for anything else. A query changes nothing.
+- A packet is at most 4 KiB and reads its first 64 names; a longer packet, or one cut by CAN,
+  SUB or an ESC that does not start ST, is dropped whole. The longest reply is 903 bytes, one
+  reply-path submission.
+
+The 34 W3C names are accepted (`default`, `context-menu`, `help`, `pointer`, `progress`,
+`wait`, `cell`, `crosshair`, `text`, `vertical-text`, `alias`, `copy`, `move`, `no-drop`,
+`not-allowed`, `grab`, `grabbing`, `all-scroll`, `col-resize`, `row-resize`, `n-resize`,
+`e-resize`, `s-resize`, `w-resize`, `ne-resize`, `nw-resize`, `se-resize`, `sw-resize`,
+`ew-resize`, `ns-resize`, `nesw-resize`, `nwse-resize`, `zoom-in`, `zoom-out`), each shown as
+the window system's cursor of that name; a platform without one draws winit's fallback. These
+aliases are accepted too:
+
+| Shape | Aliases |
+| --- | --- |
+| `default` | `left_ptr`, `arrow` |
+| `help` | `question_arrow`, `whats_this` |
+| `pointer` | `hand`, `hand2`, `pointing_hand` |
+| `progress` | `left_ptr_watch`, `half-busy` |
+| `wait` | `watch`, `clock` |
+| `cell` | `plus` |
+| `crosshair` | `cross`, `tcross` |
+| `text` | `xterm`, `ibeam`, `beam` |
+| `alias` | `dnd-link` |
+| `copy` | `dnd-copy` |
+| `move` | `fleur`, `dnd-move`, `pointer-move` |
+| `no-drop` | `dnd-no-drop` |
+| `not-allowed` | `crossed_circle`, `forbidden` |
+| `grab` | `hand1`, `openhand` |
+| `grabbing` | `closedhand`, `dnd-none` |
+| `n-resize`, `e-resize`, `s-resize`, `w-resize` | `top_side`, `right_side`, `bottom_side`, `left_side` |
+| `ne-resize`, `nw-resize`, `se-resize`, `sw-resize` | `top_right_corner`, `top_left_corner`, `bottom_right_corner`, `bottom_left_corner` |
+| `ew-resize` | `sb_h_double_arrow`, `split_h` |
+| `ns-resize` | `sb_v_double_arrow`, `split_v` |
+| `nesw-resize` | `size_bdiag`, `size-bdiag` |
+| `nwse-resize` | `size_fdiag`, `size-fdiag` |
+| `zoom-in`, `zoom-out` | `zoom_in`, `zoom_out` |
+
+Each window decides its native cursor in one place, once per event-loop turn, and writes it
+only when it changed. SonicTerm's own owners come first: an open command palette (the arrow), a
+splitter hovered or dragged (column or row resize), the scrollbar, a pressed or dragged tab (the
+arrow), a titlebar-band resize edge, a modifier link hover (the hand) and a local selection drag
+(the I-beam). Otherwise the pane under the pointer shows its shape, and anywhere outside a pane
+shows the arrow. The pane's shape is read without the parser lock, so a program's change shows
+with the pointer stationary, and releasing an owner returns the pane's shape without motion.
+
+Intentional differences:
+
+- Tracking modes never overwrite an explicit shape, as in kitty; Ghostty replaces it on every
+  tracking change. With an empty stack or an unset top the result is Ghostty's.
+- kitty and Ghostty disagree on two aliases; SonicTerm follows the X11 cursor glyph each names:
+  `cross` is `crosshair` (Ghostty; kitty reads `cell`) and `fleur` is `move` (kitty; Ghostty reads
+  `all-scroll`).
+- `__default__` is always `text` and `__grabbed__` always `default`: SonicTerm has no
+  pointer-shape settings.
+- A packet reads at most 64 names; kitty has no limit. Replies end with the request's
+  terminator; kitty always uses ST.
+- WezTerm does not implement OSC 22.
+- On Windows, whether ConPTY forwards OSC 22 and its replies is not yet verified.
 
 SGR pixel mouse reporting (mode 1016) is not supported, and DECRQM says so.
 
@@ -505,7 +584,7 @@ URI to 8 KiB and client id to 1 KiB.
   events resets the state before its retained tail, a pane whose process exited is
   `Unknown`, and the state moves with the pane to another tab or window.
 
-The raw color collector owns OSC 4, 10-19, 21, 104 and 110-119 whole, beyond vte's
+The raw color collector owns OSC 4, 10-19, 21, 22, 104 and 110-119 whole, beyond vte's
 parameter count and up to 4 KiB (16 KiB for OSC 21). It applies a message only once its ST or BEL arrived, and
 drops a longer one, or one cut by CAN, SUB or an ESC that does not start ST, without applying
 any part; vte never dispatches the same message. Parser-owned sequence
@@ -871,6 +950,8 @@ fixed screen positions that changed.
 | PTY, shell, queues, teardown | `crates/sonicterm-io/src/pty.rs` |
 | Pane worker and redraw coalescing | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | Main/child input routing | `crates/sonicterm-app/src/app/{window_event,window_keyboard,window_pointer,child_window,child_window_pointer}.rs` |
+| Native pointer cursor decision | `crates/sonicterm-app/src/app/pointer_cursor.rs` |
+| OSC 22 pointer shapes | `crates/sonicterm-vt/src/vt_pointer_shape.rs` |
 | VT parser and modes | `crates/sonicterm-vt/src/vt.rs` |
 | Seeded fuzz tests | `crates/sonicterm-vt/src/vt_fuzz_tests.rs` (parser; `SONICTERM_FUZZ_ITERS` raises its 20,000 iterations), `crates/sonicterm-io/src/reply_spool_tests.rs` (reply spool), `crates/sonicterm-app/src/app/spawn_pane_vt_fuzz_tests.rs` (image fragments through the batch publisher) |
 | Grid and line storage | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |

@@ -164,6 +164,9 @@ fn raw_osc_cap(code: u16) -> usize {
     } else if vt_color::is_color_osc(code) {
         // When: code is a color request, its own bound applies.
         vt_color::color_osc_cap(code)
+    } else if code == 22 {
+        // When: code is a pointer-shape request, its own bound applies.
+        vt_pointer_shape::MAX_POINTER_SHAPE_OSC_BYTES
     } else {
         // When: code is a title, CWD or hyperlink, the semantic bound applies.
         MAX_SEMANTIC_OSC_BYTES
@@ -727,6 +730,8 @@ struct Performer {
     /// Each screen owns independent progressive-enhancement state, as required
     /// by the protocol. Empty stack means flags 0 and legacy encoding.
     kitty_kbd_flags: [Vec<u8>; 2],
+    /// OSC 22 pointer-shape stacks for the main and alternate screens, and the published shape.
+    pointer_shape: vt_pointer_shape::PointerShapeState,
     /// Set when a Sixel or iTerm2 image is queued, ending the advance prefix after it so the host
     /// moves the cursor past the image before the text after it is parsed.
     image_yield: bool,
@@ -792,8 +797,12 @@ mod vt_tap;
 
 #[path = "vt_host_reports.rs"]
 mod vt_host_reports;
+
+#[path = "vt_pointer_shape.rs"]
+mod vt_pointer_shape;
 use vt_host_reports::ThemeFingerprint;
 pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
+pub use vt_pointer_shape::{pointer_shape_of_snapshot, PointerShape};
 pub use vt_tap::{TapAppend, TapHold, TapText, OUTPUT_TAP_CHARS};
 
 use vt_capture::parse_iterm2_file_event;

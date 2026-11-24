@@ -149,6 +149,9 @@ pub struct PaneState {
     /// Pointer-routing modes (`Parser::pointer_input_snapshot`) published after each parser batch,
     /// so pointer handlers route without taking the parser lock.
     pub pointer_input: Arc<std::sync::atomic::AtomicU8>,
+    /// The pane's OSC 22 pointer shape and its change count (`Parser::pointer_shape_snapshot`),
+    /// published after each parser batch so the cursor decision reads it without the parser lock.
+    pub pointer_shape: Arc<std::sync::atomic::AtomicU32>,
     /// Synchronized output (DEC 2026): resets, epoch and set bit in one word, published by the VT worker under the
     /// parser lock after each parser section; travels with this pane across window transfers.
     pub(crate) sync_word: Arc<AtomicU64>,
@@ -321,11 +324,12 @@ impl PaneState {
         pty: Option<PtyHandle>,
         media_pool: &Arc<media::InlineMediaPool>,
     ) -> Self {
-        let (keyboard_input, pointer_input, sync_state) = {
+        let (keyboard_input, pointer_input, pointer_shape, sync_state) = {
             let parser = crate::app::frame_counters::lock_parser(&parser);
             (
                 parser.keyboard_input_snapshot(),
                 parser.pointer_input_snapshot(),
+                parser.pointer_shape_snapshot(),
                 parser.synchronized_output(),
             )
         };
@@ -362,6 +366,7 @@ impl PaneState {
             cursor_steady: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
             pointer_input: Arc::new(std::sync::atomic::AtomicU8::new(pointer_input)),
+            pointer_shape: Arc::new(std::sync::atomic::AtomicU32::new(pointer_shape)),
             sync_word: Arc::new(AtomicU64::new(super::spawn_pane::sync_word_of(sync_state))),
             sync_deadline_word: Arc::new(AtomicU64::new(super::spawn_pane::initial_sync_deadline(
                 sync_state,
@@ -391,15 +396,25 @@ impl PaneState {
         )
     }
 
-    /// Test-only: publish the keyboard and pointer snapshots of `parser`, which the caller
-    /// holds, as the VT worker does after a batch.
-    // Ordering: keyboard_input and pointer_input store Relaxed self-contained snapshots with no dependent reads.
+    /// The pointer shape the VT worker last published, without the parser lock.
+    // Ordering: pointer_shape loads Relaxed; one store carries the shape and its change count.
+    pub(crate) fn pointer_shape(&self) -> sonicterm_vt::vt::PointerShape {
+        sonicterm_vt::vt::pointer_shape_of_snapshot(
+            self.pointer_shape.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Test-only: publish the keyboard, pointer and pointer-shape snapshots of `parser`, which the
+    /// caller holds, as the VT worker does after a batch.
+    // Ordering: keyboard_input, pointer_input and pointer_shape store Relaxed self-contained snapshots with no dependent reads.
     #[doc(hidden)]
     pub fn __test_publish_input_modes(&self, parser: &Parser) {
         self.keyboard_input
             .store(parser.keyboard_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
         self.pointer_input
             .store(parser.pointer_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
+        self.pointer_shape
+            .store(parser.pointer_shape_snapshot(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Resize this pane's PTY, reporting the first failure of a failing run.

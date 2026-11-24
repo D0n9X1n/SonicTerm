@@ -63,6 +63,9 @@ impl ApplicationHandler<UserEvent> for App {
         // A picker page the palette left by another route gives back its original value first.
         self.settle_abandoned_pickers();
         self.do_about_to_wait(event_loop);
+        // Every turn's input, output and owner changes are in, so each window's cursor is
+        // decided once and written only when it changed.
+        self.sync_window_cursors();
         self.acknowledge_tab_activations();
         self.note_frame_dispatch(frame_counters::DispatchKind::AboutToWait, started);
     }

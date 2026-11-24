@@ -26,6 +26,9 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/field_input.rs`, `field_pointer.rs` - source-field clipboard/selection commands and press-owned query dragging; field IME uses presented renderer caret geometry.
 - `src/app/window_pointer.rs` - main-window cursor, wheel and left-button handlers.
 - `src/app/splitter_input.rs` - main and child pane-divider hit-tests, hover and drag.
+- `src/app/pointer_cursor.rs` - the one native cursor writer: each window's owners (palette,
+  splitter, scrollbar, tab, band edge, link, selection) else the hovered pane's OSC 22 shape,
+  decided once per `about_to_wait` and written only on change.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
 - `src/app/event_loop.rs` - window creation and window-ready hooks; `event_loop_wait.rs` owns
   due-work deadlines and wait servicing.

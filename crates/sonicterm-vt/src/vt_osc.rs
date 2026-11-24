@@ -200,6 +200,12 @@ impl Performer {
     }
 
     pub(super) fn handle_semantic_osc(&mut self, code: u16, content: &[u8], bell_terminated: bool) {
+        if code == 22 {
+            // When: code is 22, the pointer-shape grammar reads the names; an unknown or non-UTF-8
+            // name matches nothing and is ignored there.
+            self.apply_pointer_shape_osc(content, bell_terminated);
+            return;
+        }
         if vt_color::is_color_osc(code) {
             // When: code is a color request, apply its whole payload in order; its replies end
             // with the request's own terminator, BEL when `bell_terminated`.

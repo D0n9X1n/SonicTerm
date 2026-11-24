@@ -191,8 +191,8 @@ pub struct WindowState {
     pub(crate) caption: sonicterm_ui::window_band::CaptionState,
     /// The last empty-band left press, for counting a double-click where the platform does not.
     pub(crate) band_last_press: Option<(std::time::Instant, (f32, f32))>,
-    /// The pointer is on a resize edge, so the window shows a resize cursor.
-    pub(crate) band_edge_cursor: bool,
+    /// The native cursor's own inputs (band edge, scrollbar gutter) and the icon last written.
+    pub(crate) native_cursor: super::pointer_cursor::NativeCursorState,
     /// The status line's selection count and last copy result for this window.
     pub(crate) sel_status: super::status_line::SelStatus,
     /// When copy mode last dropped an IME commit in this window; the status line holds it for a while.
@@ -634,10 +634,8 @@ impl WindowState {
         self.hover_link = false;
         if changed {
             // The redraw requested here re-detects the target; until then the hover is unresolved.
+            // The cleared `hover_link` hands the cursor back to the pane at the turn's cursor sync.
             self.hover_unresolved = true;
-            if let Some(window) = self.window.as_ref() {
-                window.set_cursor(winit::window::CursorIcon::Default);
-            }
             self.request_window_redraw();
         }
     }

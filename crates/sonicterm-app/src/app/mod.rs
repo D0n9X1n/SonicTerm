@@ -267,6 +267,7 @@ use pane_refresh::{propagate_theme_to_pane_parsers, update_terminal_ime_cursor_a
 mod pane_state;
 mod pane_target;
 mod perf_control;
+mod pointer_cursor;
 pub use perf_control::{
     PerfControlOutcomeV1, PerfControlPauseV1, PerfControlPhaseV1, PerfControlStopV1,
 };

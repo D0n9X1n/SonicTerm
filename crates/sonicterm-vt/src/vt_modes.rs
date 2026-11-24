@@ -402,6 +402,8 @@ impl Performer {
             }
             self.record_win32_eligibility_transition(before);
         }
+        // A tracking mode or a screen switch may change the effective pointer shape.
+        self.note_pointer_shape();
     }
 }
 

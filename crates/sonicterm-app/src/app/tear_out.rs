@@ -808,7 +808,7 @@ impl App {
             band_press_consumed: false,
             caption: Default::default(),
             band_last_press: None,
-            band_edge_cursor: false,
+            native_cursor: Default::default(),
             sel_status: Default::default(),
             ime_discarded_at: None,
             alert_settings: None,

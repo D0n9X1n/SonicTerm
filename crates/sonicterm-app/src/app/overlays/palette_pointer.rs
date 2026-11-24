@@ -328,10 +328,8 @@ impl App {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
                 window.cursor_pos = (position.x, position.y);
+                // The open palette owns this window's cursor at the turn's cursor sync.
                 window.invalidate_path_hover();
-                if let Some(native) = window.window.as_ref() {
-                    native.set_cursor(CursorIcon::Default);
-                }
                 true
             }
             WindowEvent::CursorLeft { .. } => {

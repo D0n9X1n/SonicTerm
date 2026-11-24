@@ -183,7 +183,7 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
 - 主屏幕与备用屏幕、应用光标键、括号粘贴、焦点报告，以及 kitty 键盘标志的
   set/push/pop/query；
 - OSC 0/2 标题、带主机校验的 OSC 7 工作目录、OSC 8 超链接、OSC 52 剪贴板事件、
-  OSC 4/10/11/12/17/19 颜色查询与设置、OSC 21 kitty 颜色协议、OSC 104/110/111/112/117/119 颜色重置、OSC 133 提示符标记、OSC 9;4 进度，以及 OSC 9 / OSC 777 / OSC 99 通知。
+  OSC 4/10/11/12/17/19 颜色查询与设置、OSC 21 kitty 颜色协议、OSC 22 指针形状、OSC 104/110/111/112/117/119 颜色重置、OSC 133 提示符标记、OSC 9;4 进度，以及 OSC 9 / OSC 777 / OSC 99 通知。
   OSC 99 遵循 kitty 协议：标题和正文可一次发送，也可在同一 `i` id 下分块发送，可为纯文本或
   base64（`e=1`，可在任意位置分割，末尾填充可省略）；同时最多保留八个未完成通知，总计 16 KiB，
   任一分块被拒绝或取消时全部丢弃，因此不会有被截断的通知完成；同一窗格以相同 id
@@ -216,6 +216,7 @@ herdr 等程序在启动时向终端查询自身信息，并等待每个回复�
 | `OSC 4 ; N ; ?` | `OSC 4 ; N ; rgb:rrrr/gggg/bbbb`，结束符与请求相同：程序设置过的颜色；否则 0..=15 来自主题，16..=255 来自 xterm 6×6×6 色立方和灰阶，与渲染器绘制使用的是同一张表。 |
 | `OSC 10/11/12/17/19 ; ?` | `OSC 1x ; rgb:rrrr/gggg/bbbb`，结束符与请求相同：程序设置过的前景、背景、光标、选区背景或选区前景色，否则为主题色；两者都没有的光标读作前景色。后续每个 `?` 询问下一个颜色，因此 `OSC 10 ; ? ; ?` 回答 10 和 11；13-16 和 18 不回答。 |
 | `OSC 21 ; key=? ; …` | `OSC 21 ; key=rgb:rr/gg/bb ; …`，按请求顺序，结束符与请求相同；见下文的 kitty 颜色协议。 |
+| `OSC 22 ; ? name , …` | `OSC 22 ; answer , …`，按请求顺序，结束符与请求相同；见下文的指针形状。 |
 | `CSI 16 t` | `CSI 6 ; 高 ; 宽 t`，单元格尺寸，以整数物理像素计；窗口报告单元格尺寸之前不回复。其他窗口操作一律忽略。 |
 
 程序可以设置和重置自己窗格的颜色：
@@ -281,6 +282,73 @@ kitty 颜色协议 `OSC 21 ; key=value ; …` 按顺序读取每个以 `;` 分�
   会跳过；Ghostty 的 `second_transparent_background` 在这里与 kitty 一样是未知键。值会去掉空格，与
   Ghostty 相同。`selection_*` 和 `cursor_text` 键是 kitty 独有的扩展，与 OSC 17 和 19 共用状态；与 kitty
   一样，`cursor_text` 只能在这里设置。视觉响铃和透明背景颜色可以识别，但不保存。WezTerm 不实现 OSC 21。
+
+#### 指针形状（OSC 22）
+
+`OSC 22 ; [op] name , name , …` 设置窗格上显示的指针形状，遵循 kitty 的协议：
+
+- 主屏幕和备用屏幕各有一个最多 16 项的栈；每一项是一个形状或“未设置”。RIS 清空两个栈。
+- 没有操作符或使用 `=` 时，依次把每个名称写入栈顶，栈为空时先压入一项；空名称（`OSC 22 ;`
+  或单独的 `OSC 22`）写入“未设置”。`>` 压入每个已知名称，栈满时先移除栈底一项；空名称和
+  未知名称被跳过。`<` 弹出一项，忽略其后的名称。未知名称或超过 32 字节的名称不改变任何内容。
+- 窗格的形状是当前屏幕的栈顶。栈为空或栈顶未设置时，鼠标跟踪（1000、1002 或 1003）开启时为
+  `default`，否则为 `text`。跟踪模式只改变这一后备值，因此显式形状不受影响；切换屏幕时形状
+  变为另一屏幕的形状。
+- `?` 用于查询，按顺序回答每个名称：可接受的名称回答 `1`；`__current__` 回答栈顶的 CSS 名称，
+  栈顶未设置或栈为空时回答 `0`；`__default__` 回答 `text`；`__grabbed__` 回答 `default`；
+  其他名称回答 `0`。查询不改变任何状态。
+- 一个数据包最多 4 KiB，只读取前 64 个名称；更长的数据包，或被 CAN、SUB 或不构成 ST 的
+  ESC 截断的数据包，整条丢弃。最长回复为 903 字节，是一次回复通道提交。
+
+接受 34 个 W3C 名称（`default`、`context-menu`、`help`、`pointer`、`progress`、`wait`、
+`cell`、`crosshair`、`text`、`vertical-text`、`alias`、`copy`、`move`、`no-drop`、
+`not-allowed`、`grab`、`grabbing`、`all-scroll`、`col-resize`、`row-resize`、`n-resize`、
+`e-resize`、`s-resize`、`w-resize`、`ne-resize`、`nw-resize`、`se-resize`、`sw-resize`、
+`ew-resize`、`ns-resize`、`nesw-resize`、`nwse-resize`、`zoom-in`、`zoom-out`），每个都显示为
+窗口系统中同名的光标；平台没有该光标时使用 winit 的后备光标。同时接受以下别名：
+
+| 形状 | 别名 |
+| --- | --- |
+| `default` | `left_ptr`、`arrow` |
+| `help` | `question_arrow`、`whats_this` |
+| `pointer` | `hand`、`hand2`、`pointing_hand` |
+| `progress` | `left_ptr_watch`、`half-busy` |
+| `wait` | `watch`、`clock` |
+| `cell` | `plus` |
+| `crosshair` | `cross`、`tcross` |
+| `text` | `xterm`、`ibeam`、`beam` |
+| `alias` | `dnd-link` |
+| `copy` | `dnd-copy` |
+| `move` | `fleur`、`dnd-move`、`pointer-move` |
+| `no-drop` | `dnd-no-drop` |
+| `not-allowed` | `crossed_circle`、`forbidden` |
+| `grab` | `hand1`、`openhand` |
+| `grabbing` | `closedhand`、`dnd-none` |
+| `n-resize`、`e-resize`、`s-resize`、`w-resize` | `top_side`、`right_side`、`bottom_side`、`left_side` |
+| `ne-resize`、`nw-resize`、`se-resize`、`sw-resize` | `top_right_corner`、`top_left_corner`、`bottom_right_corner`、`bottom_left_corner` |
+| `ew-resize` | `sb_h_double_arrow`、`split_h` |
+| `ns-resize` | `sb_v_double_arrow`、`split_v` |
+| `nesw-resize` | `size_bdiag`、`size-bdiag` |
+| `nwse-resize` | `size_fdiag`、`size-fdiag` |
+| `zoom-in`、`zoom-out` | `zoom_in`、`zoom_out` |
+
+每个窗口在一个地方决定原生光标，每轮事件循环决定一次，只在结果变化时写入。SonicTerm 自己的
+所有者优先：打开的命令面板（箭头）、悬停或拖动的分隔条（列或行调整大小）、滚动条、按下或
+拖动的标签页（箭头）、标题栏区域的调整大小边缘、按住修饰键悬停的链接（手形）以及本地选区
+拖动（I 形）。否则显示指针下窗格的形状，窗格之外显示箭头。窗格的形状不经解析器锁读取，因此
+指针静止时程序的改变也会显示，释放所有者后无需移动指针即可恢复窗格的形状。
+
+有意差异：
+
+- 与 kitty 相同，跟踪模式从不覆盖显式形状；Ghostty 每次跟踪变化都会替换它。栈为空或栈顶
+  未设置时，结果与 Ghostty 相同。
+- kitty 和 Ghostty 对两个别名的解释不同；SonicTerm 按各自所指的 X11 光标字形处理：`cross` 是
+  `crosshair`（与 Ghostty 相同；kitty 读作 `cell`），`fleur` 是 `move`（与 kitty 相同；Ghostty
+  读作 `all-scroll`）。
+- `__default__` 始终为 `text`，`__grabbed__` 始终为 `default`：SonicTerm 没有指针形状设置。
+- 一个数据包最多读取 64 个名称；kitty 没有限制。回复使用请求的结束符；kitty 始终使用 ST。
+- WezTerm 不实现 OSC 22。
+- 在 Windows 上，ConPTY 是否转发 OSC 22 及其回复尚未验证。
 
 不支持 SGR 像素鼠标报告（模式 1016），DECRQM 会如实回复。
 
@@ -376,7 +444,7 @@ OSC 8 驻留 URI 仍限 8 KiB、客户端 id 限 1 KiB。
   （来自 `D`，或运行中出现的 `A`，此时该命令记为中途放弃）。不保存退出码。丢弃过事件的队列在应用保留的尾部之前先重置状态，
   进程已退出的窗格为 `Unknown`，该状态随窗格移动到其他标签页或窗口。
 
-原始颜色收集器完整接管 OSC 4、10-19、21、104 和 110-119，可超出 vte 的参数数量，上限 4 KiB（OSC 21 为 16 KiB）。
+原始颜色收集器完整接管 OSC 4、10-19、21、22、104 和 110-119，可超出 vte 的参数数量，上限 4 KiB（OSC 21 为 16 KiB）。
 消息只在其 ST 或 BEL 到达后生效；更长的消息，或被 CAN、SUB 或不构成 ST 的 ESC 截断的消息，
 整条丢弃，不应用任何部分；vte 不会再次分派同一条消息。
 解析器自有序列状态允许 kitty APC 紧跟已完成转义，支持 C1 APC 和跨块 `ESC` / `_`。
@@ -646,6 +714,8 @@ mouse ownership 与 OSC 52 实际配置见 [终端复用器](Terminal-Multiplexe
 | PTY、shell、队列、析构 | `crates/sonicterm-io/src/pty.rs` |
 | 窗格工作线程与重绘合并 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | 主窗口/子窗口输入路由 | `crates/sonicterm-app/src/app/{window_event,window_keyboard,window_pointer,child_window,child_window_pointer}.rs` |
+| 原生指针光标决定 | `crates/sonicterm-app/src/app/pointer_cursor.rs` |
+| OSC 22 指针形状 | `crates/sonicterm-vt/src/vt_pointer_shape.rs` |
 | VT 解析器与模式 | `crates/sonicterm-vt/src/vt.rs` |
 | 带种子的模糊测试 | `crates/sonicterm-vt/src/vt_fuzz_tests.rs`（解析器；`SONICTERM_FUZZ_ITERS` 可提高其 20,000 次迭代）、`crates/sonicterm-io/src/reply_spool_tests.rs`（回复缓冲）、`crates/sonicterm-app/src/app/spawn_pane_vt_fuzz_tests.rs`（经批量发布器的图像片段） |
 | 网格与行存储 | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |

@@ -96,6 +96,7 @@ impl Performer {
             decrqss: None,
             decrqss_awaiting_backslash: false,
             kitty_kbd_flags: [Vec::new(), Vec::new()],
+            pointer_shape: super::vt_pointer_shape::PointerShapeState::default(),
             image_yield: false,
         }
     }
@@ -355,6 +356,7 @@ impl Performer {
         for stack in &mut self.kitty_kbd_flags {
             stack.clear();
         }
+        self.clear_pointer_shapes();
         self.grid.set_autowrap(true);
         if self.grid.is_alt() {
             self.grid.leave_alt_screen();
@@ -366,6 +368,8 @@ impl Performer {
         // and no less correct than scanning to prove the set is empty.
         self.hyperlinks.clear();
         self.hyperlink_reclaim_backoff = 0;
+        // Both stacks are empty and tracking is off, so the pane shows the text fallback.
+        self.note_pointer_shape();
     }
 
     pub(super) fn apply_sgr(&mut self, params: &Params) {

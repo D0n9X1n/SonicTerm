@@ -8,7 +8,7 @@ use winit::{
     event::{ElementState, MouseScrollDelta},
     event_loop::ActiveEventLoop,
     keyboard::ModifiersState,
-    window::{CursorIcon, WindowId},
+    window::WindowId,
 };
 
 use super::tab_gesture::{TabMotion, TabPress, TabRelease};
@@ -37,8 +37,9 @@ impl App {
         if let Some(window_id) = self.registry.main_window_id {
             self.clear_target_hover(window_id);
         }
-        if let Some(main_window) = self.main_window() {
-            main_window.set_cursor(CursorIcon::Default);
+        if let Some(window) = self.main_mut() {
+            // The pointer left, so it rests in no scrollbar gutter.
+            window.native_cursor.on_scrollbar = false;
         }
         if self.clear_scrollbar_hover() {
             redraw = true;
@@ -272,6 +273,9 @@ impl App {
                     ))
                 })
                 .unwrap_or(false);
+            if let Some(window) = self.main_mut() {
+                window.native_cursor.on_scrollbar = scrollbar_owned;
+            }
             let target_hover =
                 self.main().is_some_and(|window| window.hovered_url.is_some() || window.hover_link);
             // Only unheld motion checks READONLY here; latched gestures were routed above.
@@ -469,7 +473,6 @@ impl App {
                         });
                         window.selection = None;
                     }
-                    self.set_splitter_cursor(hit.axis);
                     if let Some(main_window) = self.main_window() {
                         crate::app::frame_counters::request_native_redraw(main_window);
                     }

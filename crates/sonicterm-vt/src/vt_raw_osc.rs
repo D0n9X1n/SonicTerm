@@ -46,13 +46,18 @@ impl Parser {
         // When: raw_osc selects prefix probing, whole-payload capture, or OSC 1337 media staging.
         match raw_osc {
             RawOsc::Probe { mut content, mut content_len } => {
-                // A bare color number in the probe ends at BEL or ESC.
-                let bare_color = matches!(byte, 0x07 | 0x1b)
-                    .then(|| vt_color::color_osc_number(&content[..usize::from(content_len)]))
+                // A bare color or pointer-shape number in the probe ends at BEL or ESC.
+                let bare_code = matches!(byte, 0x07 | 0x1b)
+                    .then(|| {
+                        let probed = &content[..usize::from(content_len)];
+                        (probed == b"22")
+                            .then_some(22)
+                            .or_else(|| vt_color::color_osc_number(probed))
+                    })
                     .flatten();
-                if let Some(code) = bare_color {
-                    // When: bare_color holds a bare color request (`104`, `110`), own it: BEL
-                    // applies it now, ESC waits for the `\` that completes ST.
+                if let Some(code) = bare_code {
+                    // When: bare_code holds a bare color request (`104`, `110`) or a bare `22`, own
+                    // it: BEL applies it now, ESC waits for the `\` that completes ST.
                     self.inner = vte::Parser::new();
                     self.pending_esc = false;
                     if byte == 0x07 {
@@ -89,6 +94,18 @@ impl Parser {
                     self.pending_esc = false;
                     self.raw_osc =
                         Some(RawOsc::Semantic { code, content: Vec::new(), pending_esc: false });
+                    return true;
+                }
+                if prefix == b"22;" {
+                    // When: the prefix names a pointer-shape request, own its whole payload so the
+                    // 4 KiB bound drops an over-cap packet whole.
+                    self.inner = vte::Parser::new();
+                    self.pending_esc = false;
+                    self.raw_osc = Some(RawOsc::Semantic {
+                        code: 22,
+                        content: Vec::new(),
+                        pending_esc: false,
+                    });
                     return true;
                 }
                 if let Some(code) = prefix.strip_suffix(b";").and_then(vt_color::color_osc_number) {

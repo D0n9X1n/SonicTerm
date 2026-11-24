@@ -6,7 +6,7 @@ use winit::{
     dpi::PhysicalPosition,
     event::{ElementState, MouseScrollDelta},
     event_loop::{ActiveEventLoop, EventLoopProxy},
-    window::{CursorIcon, WindowId},
+    window::WindowId,
 };
 
 use super::child_window::{child_no_button_motion_report, scroll_child_pane};
@@ -87,7 +87,6 @@ impl App {
                 child.mouse_down = true;
                 child.request_window_redraw();
             }
-            self.set_child_splitter_cursor(win_id, hit.axis);
             return true;
         }
         // Modifier-click opens a URI or existence-authorized path in
@@ -317,6 +316,7 @@ impl App {
                     )
                 })
             });
+            child.native_cursor.on_scrollbar = scrollbar_owned;
             pointer_cell.and_then(|cell| {
                 child.panes.get(&cell.pane_id).and_then(|pane| {
                     let modes = pane.pointer_modes();
@@ -549,9 +549,6 @@ impl App {
                 // End any in-flight splitter divider drag and restore the
                 // default cursor.
                 if child.splitter_drag.take().is_some() {
-                    if let Some(window) = child.window.as_ref() {
-                        window.set_cursor(CursorIcon::Default);
-                    }
                     child.request_window_redraw();
                 }
                 if let Some(renderer) = child.renderer.as_mut() {
