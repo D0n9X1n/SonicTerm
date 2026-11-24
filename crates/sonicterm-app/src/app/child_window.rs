@@ -102,7 +102,7 @@ pub fn resize_renderer_and_panes_if_present(
     let (cell_width, cell_height) = renderer.cell_size();
     for (pane_id, pane) in panes {
         let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
-        parser.resize(cols, rows);
+        super::pane_refresh::resize_terminal_grid(&mut parser, cols, rows);
         parser.set_cell_pixel_size(cell_width, cell_height);
         drop(parser);
         pane.resize_pty(*pane_id, cols, rows);

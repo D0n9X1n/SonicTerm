@@ -103,3 +103,27 @@ fn a_failed_native_resize_leaves_the_grid_committed() {
     assert_eq!(calls.load(Ordering::Relaxed), 1, "the native call was attempted and failed");
     assert_eq!(warning_count(&log), 1, "the failure was reported once:\n{log}");
 }
+
+/// A failed native resize under a live prompt leaves the grid resized, as for any resize: off
+/// Windows the prompt's cursor row was first kept on the new bottom row, and nothing rolls back.
+/// Windows keeps today's clip until a ConPTY app smoke enables it there.
+#[test]
+fn pty_resize_failure_leaves_grid_resized_as_today() {
+    let (pane, calls, _fail) = pane_with_failing_resize();
+    let parser = pane.parser.clone();
+    let output: String = (0..20).map(|line| format!("o{line}\r\n")).collect();
+    parser.lock().advance(format!("{output}\x1b]133;A\x07$ \x1b]133;B\x07ls").as_bytes());
+    let mut panes = HashMap::new();
+    panes.insert(7u64, pane);
+
+    let log = capture_resize_warnings(|| resize_all_panes(&panes, 80, 10));
+
+    let guard = parser.lock();
+    let grid = guard.grid();
+    assert_eq!((grid.cols, grid.rows), (80, 10), "the grid stays resized; nothing rolls back");
+    let bottom: String = grid.row(9).iter().map(|cell| cell.ch).collect();
+    let expected = if cfg!(windows) { "o9" } else { "$ ls" };
+    assert_eq!(bottom.trim_end(), expected, "the bottom row after the shrink");
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "the native call was attempted and failed");
+    assert_eq!(warning_count(&log), 1, "the failure was reported once:\n{log}");
+}

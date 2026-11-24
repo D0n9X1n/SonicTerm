@@ -95,6 +95,20 @@ pub(super) fn propagate_theme_to_pane_parsers(
     reports
 }
 
+/// Resize `parser` for a terminal geometry change. Off Windows a rows shrink under a live prompt
+/// keeps the cursor's row visible ([`sonicterm_vt::vt::Parser::resize_terminal`]). Windows clips
+/// as before until a ConPTY app smoke shows its post-resize repaint does not duplicate the
+/// scrolled rows. The grid changes before the fallible PTY resize and is never rolled back.
+pub(super) fn resize_terminal_grid(parser: &mut sonicterm_vt::vt::Parser, cols: u16, rows: u16) {
+    if cfg!(windows) {
+        // When: `cfg!(windows)` holds, ConPTY's repaint after a resize is unproven, so clip.
+        parser.resize(cols, rows);
+    } else {
+        // When: not `windows`, the shell's redraw follows the kept cursor row.
+        parser.resize_terminal(cols, rows);
+    }
+}
+
 /// Resize every pane in `panes` to `(cols, rows)`: both the parser's
 /// grid and (if the pane owns one) the PTY child. Used by the window
 /// resize handler and by the font live-reload path, where changing
@@ -106,7 +120,11 @@ pub(super) fn propagate_theme_to_pane_parsers(
 #[doc(hidden)]
 pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
     for (pane_id, pane) in panes {
-        crate::app::frame_counters::lock_parser(&pane.parser).resize(cols, rows);
+        resize_terminal_grid(
+            &mut crate::app::frame_counters::lock_parser(&pane.parser),
+            cols,
+            rows,
+        );
         pane.resize_pty(*pane_id, cols, rows);
     }
 }
@@ -156,7 +174,7 @@ pub fn resize_panes_to_rects(
         let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
         // The clock is read only while the counters are on, to time the resize's parser hold.
         let locked_at = pane.frame_counters.as_ref().map(|_| std::time::Instant::now());
-        parser.resize(cols, rows);
+        resize_terminal_grid(&mut parser, cols, rows);
         // The cell size sizes a kitty image placed without `c` or `r`, and so its cursor move.
         parser.set_cell_pixel_size(cell_w, cell_h);
         drop(parser);

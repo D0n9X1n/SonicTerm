@@ -20,7 +20,7 @@ use std::{
 
 use crossbeam_channel::Sender;
 use sonicterm_grid::{
-    grid::{Cell, CellFlags, Color, Grid, Pos, UnderlineStyle},
+    grid::{Cell, CellFlags, Color, Grid, Pos, PromptRedraw, SemanticMode, UnderlineStyle},
     hyperlink::{HyperlinkId, HyperlinkRegistry, MAX_HYPERLINK_CLIENT_ID_BYTES},
 };
 // Governor accounting type, consumed rather than republished.
@@ -572,6 +572,37 @@ impl Parser {
         }
     }
 
+    /// Resize for the terminal's own geometry (a window or pane size change). When the rows
+    /// shrink under a live prompt on the primary screen (the semantic mode is a prompt or input
+    /// with an anchor, and `redraw` is not `0`) and the cursor would fall off the new height, the
+    /// rows above it first scroll into history, so the cursor's row keeps its cells and column on
+    /// the new bottom row. Nothing is blanked; rows below the cursor are cut as [`Self::resize`]
+    /// cuts them. Every other resize is exactly [`Self::resize`].
+    pub fn resize_terminal(&mut self, cols: u16, rows: u16) -> ResizeOutcome {
+        let (_, bounded_rows) = sonicterm_grid::grid::bounded_grid_size(cols.into(), rows.into());
+        let grid = &mut self.performer.grid;
+        let semantic = grid.semantic();
+        let live_prompt = !grid.is_alt()
+            && semantic.anchor.is_some()
+            && !matches!(semantic.mode, SemanticMode::Output)
+            && semantic.options.redraw != PromptRedraw::Off;
+        let scrolled_rows = if live_prompt && bounded_rows < grid.rows {
+            // A live prompt losing rows scrolls just enough that its cursor row is the last.
+            (grid.cursor.row + 1).saturating_sub(bounded_rows)
+        } else {
+            // When: no `live_prompt` loses rows, the resize clips exactly as `resize` does.
+            0
+        };
+        if scrolled_rows > 0 {
+            // The scroll path keeps the rows in history (or recycles them with scrollback off),
+            // and the cursor follows its row up.
+            grid.scroll_up(scrolled_rows);
+            grid.cursor.row -= scrolled_rows;
+        }
+        self.resize(cols, rows);
+        ResizeOutcome { scrolled_rows }
+    }
+
     /// Borrow the hyperlink registry (OSC 8 interned uris).
     pub fn hyperlinks(&self) -> &HyperlinkRegistry {
         &self.performer.hyperlinks
@@ -617,6 +648,14 @@ impl Parser {
     pub fn cwd_revision(&self) -> u64 {
         self.performer.cwd_revision
     }
+}
+
+/// What [`Parser::resize_terminal`] did beyond a plain resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResizeOutcome {
+    /// Rows scrolled into history to keep a live prompt's cursor row visible; 0 when the resize
+    /// only clipped, as [`Parser::resize`] does.
+    pub scrolled_rows: u16,
 }
 
 /// Constant-size classification of the only supported DECRQSS selector.
@@ -804,6 +843,10 @@ fn split_once_byte(bytes: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
 #[cfg(test)]
 #[path = "vt_tests.rs"]
 mod vt_tests;
+
+#[cfg(test)]
+#[path = "vt_resize_tests.rs"]
+mod vt_resize_tests;
 
 #[path = "vt_modes.rs"]
 mod vt_modes;

@@ -136,7 +136,8 @@ requested columns and rows, and the error, and further failures stay silent
 until a resize succeeds and clears the latch. Warning suppression never
 suppresses a resize attempt: an invalid size and a successful duplicate are the
 only requests that do not reach the native call, and the IO boundary decides
-both, not the warning latch.
+both, not the warning latch. A prompt row kept by `Parser::resize_terminal` (below)
+stays kept when the native call then fails; nothing is undone.
 
 If `[terminal].shell` is absent:
 
@@ -550,6 +551,19 @@ region. Resize does not home the cursor or reset rendition, keyboard protocols,
 existing history, or an incomplete escape sequence; primary-screen scrolling
 still adds history, while proper subregions and the alternate screen do not.
 
+Window and pane size changes go through `Parser::resize_terminal`. It differs from
+`Parser::resize` only when the bounded row count shrinks under a live prompt on the
+primary screen: the semantic mode is a prompt or input with an anchor (OSC 133, above),
+`redraw` is not `0`, and the cursor would fall at or past the new height. The rows above
+the cursor then scroll through the ordinary scroll path, into history, or discarded when
+scrollback is off, so the cursor's row keeps its cells and column on the new bottom row.
+Only that row is promised: input rows below the cursor are cut as before, and the shell
+redraws its own buffer on SIGWINCH. Nothing is blanked, so a shell that does not redraw
+loses nothing `resize` would keep. `redraw=1` and `redraw=last` act alike, since
+SonicTerm never reflows; `redraw=0` keeps the plain clip, as kitty does. Windows keeps the
+plain clip until a ConPTY check shows its repaint after a resize does not duplicate the
+scrolled rows.
+
 OSC handling has a bounded shell-integration scope, not full WezTerm parity.
 OSC 0/1/2/7/8 use a raw collector capped at 16 KiB for the whole payload, avoiding
 vte's 16-parameter truncation. Input must be valid UTF-8 without control characters
@@ -650,7 +664,8 @@ URI to 8 KiB and client id to 1 KiB.
     changes nothing, not even the cursor.
   - Options are read from their first occurrence; a malformed value is unset. `k` takes `i`,
     `r`, `c` or `s`; `redraw` takes `0`, `1` or `last`; `click_events` `1` or `2`; `cl`
-    `line`, `m`, `v` or `w`; `special_key` `0` or `1`. They are stored for later use. `aid` and
+    `line`, `m`, `v` or `w`; `special_key` `0` or `1`. `redraw` decides the resize below; the
+    others are stored for later use. `aid` and
     `err` are ignored, and WezTerm's `D;<code>;aid=…` keeps its positional exit code.
   - Command text is taken only from an authenticated `C`. `cmdline=` (bash `printf %q`
     quoting: `\x`, `'…'` and `$'…'` escapes) wins over `cmdline_url=` (percent-encoded) in
@@ -671,7 +686,8 @@ URI to 8 KiB and client id to 1 KiB.
     | `P` `k=` | yes | no | yes | yes, no region |
     | `I` input to end of line | yes | no | yes | yes |
     | options when absent on `A` | kept | reset | not read | reset |
-    | `redraw`, `click_events`, `cl`, `special_key` | read | read | `cl` parsed | stored |
+    | `click_events`, `cl`, `special_key` | read | read | `cl` parsed | stored |
+    | `redraw` on a rows shrink | reflows, then blanks the prompt (`1`) or its last line (`last`) | saves and restores the prompt rows; `0` turns it off | no | keeps the cursor row, blanks nothing; `0` turns it off; not on Windows |
     | `C` `cmdline`, `cmdline_url` | parsed | shown | no | authenticated `C` only, shown when opted in |
     | `9;12` | as `A` | no | no | as `A` without options, no region |
 - **OSC 1337 `SetUserVar`:** per-pane user variables, as WezTerm's shell integration sends
