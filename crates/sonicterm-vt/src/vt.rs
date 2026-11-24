@@ -912,6 +912,9 @@ mod vt_x11_colors;
 #[path = "vt_kitty.rs"]
 mod vt_kitty;
 
+#[path = "vt_kitty_clipboard.rs"]
+mod vt_kitty_clipboard;
+
 #[path = "vt_kitty_stream.rs"]
 mod vt_kitty_stream;
 
@@ -937,6 +940,13 @@ mod vt_user_vars;
 mod vt_program_status;
 use vt_host_reports::ThemeFingerprint;
 pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
+pub use vt_kitty_clipboard::{
+    kitty_clipboard_operation, kitty_clipboard_status_reply, parse_kitty_clipboard_metadata,
+    KittyClipboardLocation, KittyClipboardMetadata, KittyClipboardMetadataError,
+    KittyClipboardOperation, KittyClipboardStatus, MAX_KITTY_CLIPBOARD_ID_BYTES,
+    MAX_KITTY_CLIPBOARD_METADATA_BYTES, MAX_KITTY_CLIPBOARD_MIME_BYTES,
+    MAX_KITTY_CLIPBOARD_PASSWORD_BYTES,
+};
 pub use vt_pointer_shape::{pointer_shape_of_snapshot, PointerShape};
 pub use vt_program_status::{
     ProgramStatus, StatusKind, StatusRecord, StatusState, StatusSummary, StatusTop,

@@ -9,6 +9,9 @@ grid through the terminal model.
 - `vt.rs` - parser, control sequence handling, terminal state mutation.
 - `vt/staging.rs` - media-capture staging pools (`CaptureStagingPool`) and
   per-capture reservations.
+- `vt_kitty_clipboard.rs` - OSC 5522 metadata grammar (strict Base64 fields, Ghostty's bounds,
+  sanitized ids, overflow classification from complete metadata only) and status replies. It
+  holds no clipboard data and decides no policy.
 - `lib.rs` - public exports.
 
 ## Local gate
