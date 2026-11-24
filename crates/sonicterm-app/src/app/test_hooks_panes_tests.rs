@@ -27,3 +27,17 @@ fn fresh_reply_panes_answer_identically() {
     assert!(!first.is_empty());
     assert_eq!(App::__test_reply_pane(80, 24).replies(query), first);
 }
+
+/// Contract: the F-ConPTY app smoke's clipboard pane answers a read under `allow` from its fake
+/// clipboard with exact ST-terminated bytes, `c` carrying the text and `p` empty except on Linux,
+/// so the smoke's expected reply is the bytes this pins.
+#[test]
+fn clipboard_reply_pane_answers_reads_from_its_fake_clipboard() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    assert_eq!(pane.replies(b"\x1b]52;c;?\x07"), b"\x1b]52;c;Zml4dHVyZQ==\x1b\\".to_vec());
+    let primary = if cfg!(target_os = "linux") { "Zml4dHVyZQ==" } else { "" };
+    let expected = format!("\x1b]52;c;Zml4dHVyZQ==\x1b\\\x1b]52;p;{primary}\x1b\\");
+    assert_eq!(pane.replies(b"\x1b]52;cp;?\x1b\\"), expected.into_bytes());
+    // OSC 52 prints nothing, so the cursor is still home.
+    assert_eq!(pane.replies(b"\x1b[6n"), b"\x1b[1;1R".to_vec(), "other replies are unchanged");
+}

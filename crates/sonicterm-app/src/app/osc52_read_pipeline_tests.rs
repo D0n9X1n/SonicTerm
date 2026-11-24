@@ -174,8 +174,8 @@ fn cp_replies_one_message_within_budget() {
     assert_eq!((harness.staging.read_slots_in_use(), harness.budget_bytes()), (0, 0));
 }
 
-/// Contract: under `ask` a ticket waits and reads nothing; until the consent page exists, its
-/// 120 s expiry answers as a rejected prompt does, with an empty reply.
+/// Contract: under `ask` a ticket whose window is not frontmost gets no page, waits and reads
+/// nothing; at its 120 s expiry it is answered as a rejected prompt is, with an empty reply.
 #[test]
 fn ask_waits_then_expiry_replies_empty() {
     let source = FakeSource::new("secret");
@@ -384,3 +384,7 @@ fn logs_never_contain_clipboard_text() {
     assert!(!logs.contains("secret-clip"), "{logs}");
     assert!(!logs.contains("c2VjcmV0LWNsaXA"), "{logs}");
 }
+
+#[cfg(test)]
+#[path = "osc52_read_pipeline_tests_consent_tests.rs"]
+mod osc52_read_pipeline_tests_consent_tests;

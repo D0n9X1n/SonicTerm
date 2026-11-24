@@ -282,8 +282,11 @@ Terminal applications may also write the clipboard through OSC 52 and OSC 1337
 `Copy=:`, up to `[terminal] clipboard_write_limit_bytes` decoded (64 MiB by default); an
 empty write clears it, and on Linux `p` writes PRIMARY. Malformed Base64 and oversized writes
 are ignored. A clipboard read (`52;c;?`) returns the clipboard's text only under
-`[terminal] osc52_read = "allow"`; under the default `"ask"` it gets an empty reply, and under
-`"deny"` it is silently dropped. See
+`[terminal] osc52_read = "allow"`, or after you choose Allow on its consent page under the
+default `"ask"`. That page opens in the command palette of the requesting pane's window, once
+the window is frontmost and the palette is closed, and asks `Let tab N, pane M read the
+clipboard?`; Deny is highlighted first. Deny, Escape, a click outside the page, or two minutes
+without an answer send the program an empty reply. Under `"deny"` the read is silently dropped. See
 [Terminal IO and VT](Terminal-IO-and-VT).
 
 Copy follows the wraps the terminal recorded. A row that continues the previous

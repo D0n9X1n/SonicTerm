@@ -367,7 +367,7 @@ impl PaneVtHandles {
     }
 
     /// These handles, reserving clipboard writes from `staging` rather than the process default.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::app) fn with_clipboard_staging(
         self,
         staging: Arc<super::osc52_stream::ClipboardStaging>,

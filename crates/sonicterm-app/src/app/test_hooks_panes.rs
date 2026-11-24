@@ -841,7 +841,49 @@ impl App {
         let pane =
             PaneState::new_with_media_pool(parser, None, &super::media::InlineMediaPool::new());
         let handles = super::spawn_pane::PaneVtHandles::from_pane_state(&pane);
-        TestReplyPane { handles, sync_latch: super::spawn_pane::SyncLatch::default(), _pane: pane }
+        TestReplyPane {
+            handles,
+            sync_latch: super::spawn_pane::SyncLatch::default(),
+            clipboard: None,
+            _pane: pane,
+        }
+    }
+}
+
+impl App {
+    /// Test-only: a [`Self::__test_reply_pane`] whose clipboard reads follow `osc52_read = "allow"`
+    /// against a fake clipboard holding `text`, answered through the production reply builder. It
+    /// reserves from a private staging, so the process default's policy is never changed.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn __test_clipboard_reply_pane(cols: u16, rows: u16, text: &str) -> TestReplyPane {
+        let mut pane = Self::__test_reply_pane(cols, rows);
+        let staging = super::osc52_stream::ClipboardStaging::for_startup_limit(
+            sonicterm_cfg::config::DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES,
+        );
+        staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Allow);
+        pane.handles = pane.handles.with_clipboard_staging(staging);
+        pane.clipboard = Some(Arc::new(FixedClipboard(text.to_string())));
+        pane
+    }
+}
+
+/// A fake clipboard that always holds one text, for reply panes; never the user's clipboard.
+#[cfg(any(test, feature = "test-support"))]
+struct FixedClipboard(String);
+
+#[cfg(any(test, feature = "test-support"))]
+impl super::osc52_read_source::ClipboardTextSource for FixedClipboard {
+    fn read_text_bounded(
+        &self,
+        _location: super::osc52_read_source::ReadLocation,
+        max_bytes: usize,
+    ) -> super::osc52_read_source::ReadOutcome {
+        if self.0.len() > max_bytes {
+            // When: the text is longer than max_bytes, it is refused as a native read would be.
+            return super::osc52_read_source::ReadOutcome::TooLarge;
+        }
+        super::osc52_read_source::ReadOutcome::Text(self.0.clone())
     }
 }
 
@@ -852,6 +894,8 @@ impl App {
 pub struct TestReplyPane {
     handles: super::spawn_pane::PaneVtHandles,
     sync_latch: super::spawn_pane::SyncLatch,
+    /// The fake clipboard readable tickets are answered from; `None` answers every read empty.
+    clipboard: Option<Arc<dyn super::osc52_read_source::ClipboardTextSource>>,
     /// Keeps the pane state the handles were cloned from alive for the pane's whole life.
     _pane: PaneState,
 }
@@ -878,10 +922,15 @@ impl TestReplyPane {
             Instant::now,
             |reply: Vec<u8>| replies.extend_from_slice(&reply),
         );
-        // A standalone pane has no App to ask, so each read ticket is answered at once as a
-        // declined prompt is: one empty reply per destination.
+        // A standalone pane has no App to ask, so each read ticket is answered at once: from the
+        // fake clipboard when it is readable (`allow`), else as a declined prompt is, empty.
         for ticket in reads.iter().filter_map(|read| read.take()) {
-            replies.extend(super::osc52_read::empty_frames(ticket.labels()));
+            match &self.clipboard {
+                Some(source) if ticket.readable() => replies.extend(
+                    super::osc52_read_source::read_replies(source.as_ref(), ticket.labels()),
+                ),
+                _ => replies.extend(super::osc52_read::empty_frames(ticket.labels())),
+            }
         }
         replies
     }

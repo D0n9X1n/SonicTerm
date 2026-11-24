@@ -593,7 +593,7 @@ impl Osc52Intake {
     }
 
     /// Reserve from `staging` instead, dropping any open stream; the pane binding stays.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::app) fn replace_staging(&mut self, staging: Arc<ClipboardStaging>) {
         self.open = None;
         self.staging = staging;

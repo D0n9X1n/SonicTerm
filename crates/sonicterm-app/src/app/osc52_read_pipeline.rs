@@ -1,6 +1,7 @@
-//! The event loop's side of OSC 52 reads: an `ask` ticket waits and an `allow` ticket queues; each
-//! is revalidated before its native read and before every delivery attempt; one read at a time runs
-//! on a disposable reader thread with a deadline; and a reply reaches only the source PTY's
+//! The event loop's side of OSC 52 reads: an `ask` ticket waits for its consent page
+//! (`osc52_read_consent.rs`) and an `allow` or approved ticket queues; each is revalidated before
+//! its native read and before every delivery attempt; one read at a time runs on a disposable
+//! reader thread with a deadline; and a reply reaches only the source PTY's
 //! sensitive-reply slot, with the ticket and its budget lease as custody, never the reply spool, a
 //! broadcast receiver or a log.
 
@@ -68,8 +69,12 @@ pub(in crate::app) struct ClipboardReads {
     pub(in crate::app) budget: Arc<ClipboardStaging>,
     /// The deadline per destination a native read gets.
     pub(in crate::app) reader_deadline: Duration,
-    waiting: Vec<ReadTicket>,
-    queued: VecDeque<ReadTicket>,
+    /// `ask` tickets with no page yet, oldest first.
+    pub(in crate::app) waiting: Vec<ReadTicket>,
+    /// The ticket on the palette's consent page; at most one, as the palette is modal.
+    pub(in crate::app) presented: Option<super::osc52_read_consent::PresentedRead>,
+    /// Readable tickets waiting for the one native reader.
+    pub(in crate::app) queued: VecDeque<ReadTicket>,
     pub(in crate::app) in_flight: Option<InFlight>,
     retries: Vec<Retry>,
     done_tx: Sender<ReaderDone>,
@@ -90,6 +95,7 @@ impl Default for ClipboardReads {
             budget: ClipboardStaging::with_budget(READ_REPLY_BUDGET_BYTES, 0),
             reader_deadline: READER_DEADLINE_PER_DESTINATION,
             waiting: Vec::new(),
+            presented: None,
             queued: VecDeque::new(),
             in_flight: None,
             retries: Vec::new(),
@@ -107,6 +113,7 @@ impl std::fmt::Debug for ClipboardReads {
         formatter
             .debug_struct("ClipboardReads")
             .field("waiting", &self.waiting.len())
+            .field("presented", &self.presented.is_some())
             .field("queued", &self.queued.len())
             .field("in_flight", &self.in_flight.is_some())
             .field("retries", &self.retries.len())
@@ -116,9 +123,10 @@ impl std::fmt::Debug for ClipboardReads {
 }
 
 impl ClipboardReads {
-    /// Whether nothing waits, queues, reads or retries.
+    /// Whether nothing waits, is presented, queues, reads or retries.
     fn idle(&self) -> bool {
         self.waiting.is_empty()
+            && self.presented.is_none()
             && self.queued.is_empty()
             && self.in_flight.is_none()
             && self.retries.is_empty()
@@ -187,7 +195,7 @@ impl super::App {
     }
 
     /// Revoke `ticket` silently; dropping it frees its slots.
-    fn cancel_read(&mut self, mut ticket: ReadTicket, reason: CancelReason) {
+    pub(in crate::app) fn cancel_read(&mut self, mut ticket: ReadTicket, reason: CancelReason) {
         ticket.cancel(reason);
         let pane_id = ticket.binding().pane_id;
         tracing::debug!(pane_id, reason = ?ticket.cancel_reason(), "OSC 52 read cancelled");
@@ -200,11 +208,14 @@ impl super::App {
     }
 
     /// Run the read pipeline at `now`: retry contended replies first, so a reply contended this
-    /// turn waits for the next, then settle the reader, sweep tickets and start the next read.
+    /// turn waits for the next, then settle the reader, sweep tickets and the consent page,
+    /// show the next page and start the next read.
     pub(in crate::app) fn pump_clipboard_reads_at(&mut self, now: Instant) {
         self.retry_read_replies(now);
         self.settle_reader(now);
         self.sweep_read_tickets(now);
+        self.sweep_read_page(now);
+        self.present_read_page();
         self.start_reader(now);
     }
 
@@ -253,8 +264,7 @@ impl super::App {
                 self.cancel_read(ticket, reason);
                 continue;
             }
-            // shortcut: no consent page approves a waiting ticket until part 3 of the
-            // clipboard-read work adds one, so expiry answers it as a declined prompt.
+            // A ticket whose page never opened is answered at expiry as a declined prompt is.
             if now.saturating_duration_since(ticket.binding().created_at) >= TICKET_LIFETIME {
                 // When: the ticket's age reaches TICKET_LIFETIME, it is answered empty.
                 self.answer_read_empty(ticket, now);
@@ -273,7 +283,7 @@ impl super::App {
     }
 
     /// Answer `ticket` with one empty reply per label; the ticket rides along as custody.
-    fn answer_read_empty(&mut self, ticket: ReadTicket, now: Instant) {
+    pub(in crate::app) fn answer_read_empty(&mut self, ticket: ReadTicket, now: Instant) {
         let binding = ticket.binding().clone();
         let replies = empty_frames(ticket.labels());
         self.deliver_read_reply(
@@ -427,7 +437,8 @@ impl super::App {
         }
         let reader =
             reads.in_flight.as_ref().filter(|read| !read.abandoned).map(|read| read.deadline);
-        let lifetimes = reads.waiting.iter().chain(&reads.queued);
+        let presented = reads.presented.as_ref().map(|presented| presented.ticket());
+        let lifetimes = reads.waiting.iter().chain(presented).chain(&reads.queued);
         let expiry = lifetimes.map(|ticket| ticket.binding().created_at + TICKET_LIFETIME).min();
         reader.into_iter().chain(expiry).min()
     }

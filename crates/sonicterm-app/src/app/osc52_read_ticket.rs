@@ -98,10 +98,7 @@ pub(in crate::app) enum TicketState {
     AutoAllowed,
     /// Admitted under `ask`: waits for an answer, or its 120 s expiry.
     Waiting,
-    /// Approved on its own consent page.
-    // shortcut: only the consent page enters this state, and it is not built yet (part 3 of the
-    // clipboard-read work adds it), so outside tests nothing constructs it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Approved by Apply on its own consent page.
     Approved,
     /// Revoked; it answers nothing.
     Cancelled(CancelReason),
@@ -124,6 +121,8 @@ pub(in crate::app) enum CancelReason {
     PolicyChanged,
     /// A readable ticket outlived its lifetime.
     Expired,
+    /// Its consent page closed elsewhere, was replaced, or moved to another window.
+    PageLost,
 }
 
 /// One admitted read: its binding, reply labels, state and slots.
@@ -154,6 +153,14 @@ impl ReadTicket {
     /// Whether the ticket may start a native read: auto-allowed, or approved.
     pub(in crate::app) fn readable(&self) -> bool {
         matches!(self.state, TicketState::AutoAllowed | TicketState::Approved)
+    }
+
+    /// Approve a waiting ticket, as Apply on its consent page does; any other state is kept.
+    pub(in crate::app) fn approve(&mut self) {
+        // Only a waiting ticket can be approved; a cancelled one stays cancelled.
+        if self.state == TicketState::Waiting {
+            self.state = TicketState::Approved;
+        }
     }
 
     /// Revoke the ticket for `reason`; it can no longer read.

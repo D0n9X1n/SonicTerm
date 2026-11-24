@@ -334,8 +334,17 @@ reset (RIS), a different PTY, READONLY, and any change to `osc52` or `osc52_read
 ticket silently. It is checked again before the native read starts and before every attempt to
 deliver the reply.
 
-Under `"ask"` the ticket waits for consent. No consent page exists yet, so it is answered with an
-empty reply after 120 s, as a declined prompt is. Under `"allow"` the clipboard is read on a
+Under `"ask"` the ticket waits for a consent page, the command palette's confirm page, titled
+`Let tab N, pane M read the clipboard?` with Allow and Deny rows. It names the tab and pane by
+position, never by a title a program set, and highlights Deny first. It opens only in the window
+that holds the pane, only while that window is frontmost and the palette is closed: it never
+raises a window, moves focus, or reuses or replaces an open palette, and until then the ticket
+keeps waiting. One page is open at a time; other panes' reads wait in order. Allow approves only
+that page's ticket, and only on that page's own palette session in the window that showed it;
+closing the palette afterwards keeps the approval. Deny, Escape, a click outside the page, or
+120 s without an answer close the page and send an empty reply, as a declined prompt is. A page
+closed or replaced by another palette page, moved to another window, or any cancellation above
+ends the ticket silently. An approved or `"allow"` read runs on a
 disposable reader thread, one read at a time, never on the event loop. A read returns at most
 8 MiB of UTF-8 text (4 MiB per destination for `cp`); a larger value, a failed read, or no
 clipboard owner is answered empty. Text that is not valid UTF-8 becomes U+FFFD. Each destination

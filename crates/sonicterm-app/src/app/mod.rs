@@ -341,6 +341,7 @@ mod shared_gpu;
 pub(crate) use shared_gpu::{font_fallback_waker, gpu_device_state_waker};
 mod clipboard_worker;
 mod osc52_read;
+mod osc52_read_consent;
 mod osc52_read_pipeline;
 mod osc52_read_source;
 mod osc52_read_ticket;
