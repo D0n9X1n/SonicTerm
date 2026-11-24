@@ -93,20 +93,22 @@ impl App {
             // When: target identity or the visible error differs, do not reuse a previous copy confirmation.
             return false;
         }
-        let copied = self.set_clipboard_text(target.to_owned());
-        let status = self.i18n.translate(if copied {
-            "path-error-copied"
-        } else {
-            "path-error-copy-failed"
-        });
         let prefix = self.i18n.translate("path-error-title");
         let reason = sonicterm_ui::overlays::link_preview_text(&failed.reason);
         let path = sonicterm_ui::overlays::link_preview_text(target);
-        self.show_notification_for_kind(
-            super::super::FrontmostKind::Child(window_id),
-            sonicterm_ui::overlays::NotificationLevel::Error,
-            format!("{status}\n{path}\n{prefix}: {reason}"),
-        );
+        // The notification reports the clipboard's actual result, once it has answered.
+        let _ = self.copy_text_then(target.to_owned(), move |app, copied| {
+            let status = app.i18n.translate(if copied {
+                "path-error-copied"
+            } else {
+                "path-error-copy-failed"
+            });
+            app.show_notification_for_kind(
+                super::super::FrontmostKind::Child(window_id),
+                sonicterm_ui::overlays::NotificationLevel::Error,
+                format!("{status}\n{path}\n{prefix}: {reason}"),
+            );
+        });
         true
     }
 

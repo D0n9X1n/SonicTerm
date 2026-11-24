@@ -98,6 +98,7 @@ impl App {
             ClipWriteOutcome::Written => ClipOutcome::Written(bytes as u64),
             ClipWriteOutcome::Failed => ClipOutcome::Failed,
             ClipWriteOutcome::Denied => ClipOutcome::Denied,
+            ClipWriteOutcome::TooLarge => ClipOutcome::TooLarge,
         };
         self.status_line.clip_write.insert(pane_id, outcome);
     }

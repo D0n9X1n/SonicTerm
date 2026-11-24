@@ -287,11 +287,16 @@ padding, at most 3 characters carried between chunks, and the
 `[terminal] clipboard_write_limit_bytes` limit read when the stream opens. Every buffer is
 reserved from the process clipboard staging budget before it is allocated (see
 [Memory](Memory)), and a program slot (8 at most) is taken before the write is posted to the
-event loop, even for a clear. The event loop rechecks `[terminal] osc52` and calls the native
-clipboard; that call is the commit point, and the write's lease is released when it returns.
-Program writes and user copies commit on the event-loop thread in the order it handles them,
-so a later user copy always wins. macOS refuses program writes over 512 KiB, because
-`NSPasteboard` stays on the event-loop thread.
+event loop, even for a clear. The event loop refuses it under `[terminal] osc52 = "deny"`. On
+Linux and Windows it posts the write to one clipboard worker thread, which rechecks the policy
+and calls the native clipboard; that call is the commit point, and the write's lease is
+released when it returns. Program writes and user copies share the worker's queue and run
+strictly in the order the event loop handled them, so a later user copy always wins. The event
+loop writes a user copy itself only when nothing is queued and the copy is at most 512 KiB; at
+most 4 user copies wait on the worker, and one more is refused with the copy-failure notice and
+keeps its selection. A batch's status-line summary waits for the worker's result. macOS has no
+worker, because off-thread `NSPasteboard` use is not proven: its program writes over 512 KiB
+are refused, and user copies stay on the event-loop thread.
 
 | Form | SonicTerm |
 | --- | --- |

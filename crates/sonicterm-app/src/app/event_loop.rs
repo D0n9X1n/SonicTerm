@@ -94,6 +94,8 @@ pub(in crate::app) enum ClipWriteOutcome {
     Failed,
     /// `[terminal] osc52 = "deny"` refused it before the clipboard was touched.
     Denied,
+    /// No clipboard worker runs and the text is over the event-loop thread's native write limit.
+    TooLarge,
 }
 
 impl App {
@@ -165,14 +167,17 @@ impl App {
             }
             UserEvent::ClipboardWrite { pane_id, job } => {
                 if let Some(job) = job.take() {
-                    // The job is still untaken, so this is its one commit.
+                    // The job is still untaken, so this is its one commit; a write posted to the
+                    // clipboard worker reports its outcome when the worker finishes it.
                     let bytes = job.text.len();
-                    let outcome = self.handle_clipboard_job(job);
-                    self.note_clip_write(pane_id, bytes, outcome);
+                    if let Some(outcome) = self.submit_program_clipboard(pane_id, job) {
+                        self.note_clip_write(pane_id, bytes, outcome);
+                    }
                 }
             }
+            UserEvent::ClipboardDone => self.drain_clipboard_completions(),
             UserEvent::ClipboardAttempts { pane_id, attempts } => {
-                self.note_clip_attempts(pane_id, attempts, Instant::now());
+                self.note_or_defer_clip_attempts(pane_id, attempts, Instant::now());
             }
             event @ (UserEvent::ProgramProgress { .. } | UserEvent::ProgramNotify { .. }) => {
                 self.handle_program_event(event);
@@ -272,75 +277,12 @@ impl App {
         );
     }
 
-    /// Apply one program write under the live `[terminal] osc52` policy, rechecked here at the
-    /// commit point so a write posted before a reload to `"deny"` is refused too. The lease is
-    /// held until the native call returns; on Linux the part covering arboard's retained X11 copy
-    /// stays held until SonicTerm's next write to that selection replaces it.
-    pub(super) fn handle_clipboard_job(
-        &mut self,
-        job: super::osc52_stream::ClipboardJob,
-    ) -> ClipWriteOutcome {
-        let super::osc52_stream::ClipboardJob { text, targets, mut lease, .. } = job;
-        let native = super::osc52_stream::native_clipboard_bytes(&text);
-        let outcome = self.write_program_clipboard(text, targets);
-        if cfg!(target_os = "linux") && outcome == ClipWriteOutcome::Written {
-            // When: target_os is Linux and outcome is Written, arboard keeps a copy until the
-            // selection is replaced, so the lease's native part stays held as long.
-            lease.shrink_to(native);
-            self.clip_state.retained.retain(targets, lease);
-        }
-        outcome
-    }
-
-    /// Apply one program clipboard-target write; see [`Self::handle_clipboard_job`].
+    /// Route one program clipboard-target write as pane 0, as the event loop routes OSC 52.
     #[cfg(test)]
     pub(super) fn handle_clipboard_write(&mut self, text: String) -> ClipWriteOutcome {
-        let targets = super::osc52_stream::ClipTargets { clipboard: true, primary: false };
-        self.write_program_clipboard(text, targets)
-    }
-
-    /// Write `text` to `targets` under the live policy; an empty text clears them.
-    fn write_program_clipboard(
-        &mut self,
-        text: String,
-        targets: super::osc52_stream::ClipTargets,
-    ) -> ClipWriteOutcome {
-        if self.config.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
-            // When: the `osc52` policy is Deny, the clipboard is never touched.
-            tracing::debug!(
-                bytes = text.len(),
-                "OSC 52 clipboard write denied by [terminal] osc52"
-            );
-            return ClipWriteOutcome::Denied;
-        }
-        // Windows snapshots the previous text only for a write it may reassert: at most 512 KiB
-        // of UTF-16, and a previous value within the same bound.
-        #[cfg(target_os = "windows")]
-        let reassert = (targets.clipboard
-            && !text.is_empty()
-            && super::osc52_stream::reassert_eligible(&text))
-        .then(|| {
-            let previous = self
-                .clipboard_text_for_reassert()
-                .filter(|previous| super::osc52_stream::reassert_eligible(previous));
-            (previous, text.clone())
-        });
-        let written = self.set_program_clipboard_text(text, targets);
-        // Windows reasserts a successful write once; a failed one has no value to reassert.
-        #[cfg(target_os = "windows")]
-        if let (true, Some((previous_text, reassert_text))) = (written, reassert) {
-            self.pending_osc52_reassert = Some(super::PendingOsc52Reassert {
-                text: reassert_text,
-                previous_text,
-                due: Instant::now() + super::OSC52_CLIPBOARD_REASSERT_DELAY,
-            });
-        }
-        if written {
-            ClipWriteOutcome::Written
-        } else {
-            // When: not `written`, the native clipboard refused the write; it is reported as failed.
-            ClipWriteOutcome::Failed
-        }
+        let staging = super::osc52_stream::ClipboardStaging::with_budget(usize::MAX / 4, 0);
+        let job = super::osc52_stream::ClipboardJob::for_test(&staging, &text);
+        self.submit_program_clipboard(0, job).expect("with no worker, the write settles here")
     }
 
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {

@@ -488,9 +488,10 @@ impl App {
         }
         mark_all_panes_dirty(&window.panes);
         if let Some(text) = copied_text {
-            // Parser and window borrows end before the shared clipboard boundary.
-            let copied = self.set_clipboard_text(text);
-            self.note_copy_result(win_id, copied);
+            // When: copied_text is Some, parser and window borrows have ended before the shared
+            // clipboard boundary; the result is noted once the clipboard has answered.
+            let _ =
+                self.copy_text_then(text, move |app, copied| app.note_copy_result(win_id, copied));
         }
     }
 }

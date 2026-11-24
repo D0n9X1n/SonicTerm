@@ -199,8 +199,6 @@ impl App {
                 pty_write_log_enabled: event_loop_proxy.is_none(),
                 ..Default::default()
             },
-            #[cfg(target_os = "windows")]
-            pending_osc52_reassert: None,
             clip_state: osc52_stream::ClipState::new(clip_staging),
             pending_new_window: None,
             reports: Default::default(),

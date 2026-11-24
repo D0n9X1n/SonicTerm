@@ -136,9 +136,13 @@ cargo build -p sonicterm-app
   whole assembly with a bounded window warning and a typed non-retry result.
 - Keep PTY redraw coalescing burst-aware; never redraw per byte. OSC 52 and OSC 1337
   `Copy=:` writes (`osc52_stream.rs`) reserve every buffer from `ClipboardStaging` before
-  allocating it, take a program slot before posting, and reach the native clipboard only on
-  the event-loop thread, which rechecks the policy at the commit point; clipboard
-  reads/queries remain unsupported.
+  allocating it and take a program slot before posting. On Linux and Windows they reach the
+  native clipboard only on the one clipboard worker (`clipboard_worker.rs`), which runs program
+  writes and user copies strictly in the event loop's posting order (at most 4 user copies wait)
+  and rechecks the policy epoch at the commit point; the lease moves into the job and is released
+  when the native call returns. The event loop writes a user copy itself only when nothing is in
+  flight and it is at most 512 KiB. macOS has no worker and refuses program writes over 512 KiB.
+  Clipboard reads/queries remain unsupported.
 - Main and child keyboard, IME, focus and modifier events share source-WindowId
   ownership. Search input has priority over READONLY; quick-select retains its
   hint keys. In READONLY, only the explicit safe action whitelist may execute.

@@ -1,6 +1,7 @@
 //! Window-local clipboard copy, paste and refusal handling.
 
 use super::*;
+use crate::app::osc52_stream::ClipTargets;
 
 /// Whether paste trusts the native clipboard's copied-file list: Windows reads `CF_HDROP` and
 /// macOS reads file URLs. The Linux backend decodes `text/uri-list` lossily, dropping entries it
@@ -9,92 +10,31 @@ pub(in crate::app) const NATIVE_CLIPBOARD_FILE_LIST: bool =
     cfg!(any(target_os = "windows", target_os = "macos"));
 
 impl App {
-    #[cfg(target_os = "windows")]
-    pub(in crate::app) fn clipboard_text_for_reassert(&mut self) -> Option<String> {
-        if let Some(text) = self.testing.test_clipboard_text.as_ref() {
-            // When: test_clipboard_text contains text, expose the test clipboard snapshot.
-            return Some(text.clone());
-        }
-        self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok())
-    }
-
+    /// Copy the user's `text` with no follow-up; true when it was written or queued in order.
     pub(in crate::app) fn set_clipboard_text(&mut self, text: String) -> bool {
-        #[cfg(target_os = "windows")]
-        {
-            self.pending_osc52_reassert = None;
-        }
-        if text.is_empty() {
-            // When: text is empty; writing it would clear the user's clipboard,
-            // so leave the previous contents intact.
-            return false;
-        }
-        let written = self.write_clipboard_text(text);
-        if written {
-            // A user copy replaced the clipboard, so arboard's retained copy of an earlier
-            // program write is gone with it.
-            self.clip_state.retained.release_clipboard();
-        }
-        written
+        self.copy_text_then(text, |_, _| {})
     }
 
-    /// Write a program's `text` to `targets`; an empty text clears them. PRIMARY exists only on
-    /// Linux, where `targets.primary` can be set.
-    pub(in crate::app) fn set_program_clipboard_text(
+    /// Write `text` to `targets` on the event-loop thread; an empty text clears them. A test
+    /// buffer keeps the write off the desktop and never touches PRIMARY.
+    pub(in crate::app) fn write_clipboard_inline(
         &mut self,
-        text: String,
-        targets: crate::app::osc52_stream::ClipTargets,
+        text: &str,
+        targets: ClipTargets,
     ) -> bool {
-        #[cfg(target_os = "windows")]
-        {
-            self.pending_osc52_reassert = None;
-        }
-        let mut written = true;
-        if targets.primary {
-            written &= self.write_primary_text(&text);
-        }
-        if targets.clipboard {
-            written &= self.write_clipboard_text(text);
-        }
-        written
-    }
-
-    /// Write PRIMARY through arboard; the test clipboard keeps it off the desktop.
-    #[cfg(target_os = "linux")]
-    fn write_primary_text(&mut self, text: &str) -> bool {
-        use arboard::{LinuxClipboardKind, SetExtLinux};
-        if self.testing.test_clipboard_text.is_some() || self.testing.test_clipboard_files.is_some()
-        {
-            // When: test_clipboard_text or test_clipboard_files is set, the desktop PRIMARY is
-            // never written.
-            return true;
-        }
-        let Some(clipboard) = self.clipboard.as_mut() else {
-            // When: no clipboard handle was created, no write occurred.
-            return false;
-        };
-        clipboard.set().clipboard(LinuxClipboardKind::Primary).text(text).is_ok()
-    }
-
-    /// PRIMARY does not exist here; `clip_targets` never selects it.
-    #[cfg(not(target_os = "linux"))]
-    fn write_primary_text(&mut self, _text: &str) -> bool {
-        false
-    }
-
-    /// Write the clipboard selection; an empty `text` clears it.
-    fn write_clipboard_text(&mut self, text: String) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if self.testing.test_clipboard_write_failure {
             // When: `test_clipboard_write_failure` is true, reject at the set_text
             // boundary without changing the in-memory or system clipboard.
             return false;
         }
-        if self.testing.test_clipboard_text.is_some() || self.testing.test_clipboard_files.is_some()
-        {
-            // When: test_clipboard_text or test_clipboard_files is set, keep the copy off the system clipboard;
-            // like a native copy, the text replaces any copied file list.
-            self.testing.test_clipboard_text = Some(text.clone());
-            self.testing.test_clipboard_files = None;
+        if self.test_clipboard_installed() {
+            // When: test_clipboard_installed, keep the copy off the system clipboard; like a
+            // native copy, the text replaces any copied file list.
+            if targets.clipboard {
+                self.testing.test_clipboard_text = Some(text.to_owned());
+                self.testing.test_clipboard_files = None;
+            }
             return true;
         }
         let Some(clipboard) = self.clipboard.as_mut() else {
@@ -102,21 +42,12 @@ impl App {
             // must preserve any selection that depends on confirmed delivery.
             return false;
         };
-        let result = if text.is_empty() {
-            clipboard.clear()
-        } else {
-            // When: text is non-empty, it replaces the clipboard's contents.
-            clipboard.set_text(text.clone())
-        };
-        if let Err(error) = result {
-            tracing::warn!("clipboard set failed: {error}");
-            false
-        } else {
-            // When: result is Ok, record the byte count so a silent clipboard failure stays
-            // distinguishable from a real copy.
-            tracing::info!("copied {} bytes", text.len());
-            true
-        }
+        crate::app::clipboard_worker::write_native_clipboard(clipboard, text, targets)
+    }
+
+    /// Whether a test buffer stands in for the native clipboard.
+    pub(in crate::app) fn test_clipboard_installed(&self) -> bool {
+        self.testing.test_clipboard_text.is_some() || self.testing.test_clipboard_files.is_some()
     }
 
     /// Resolve clipboard ownership from the target's open search, even when its active pane is unavailable.

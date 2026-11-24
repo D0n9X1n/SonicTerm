@@ -120,7 +120,7 @@ pub enum UserEvent {
     /// A complete OSC 52 or OSC 1337 `Copy=:` write reached the event-loop thread.
     ///
     /// The VT worker decoded and bounded the payload, reserved its staging and took a program
-    /// slot before posting this; native clipboard access remains confined to the app thread. The
+    /// slot before posting this; the event loop routes it into the clipboard ordering domain. The
     /// handle shares one job, so cloning or printing the event copies no payload.
     ClipboardWrite {
         /// The pane whose program asked for the write.
@@ -128,6 +128,9 @@ pub enum UserEvent {
         /// The write, taken once by the event loop.
         job: osc52_stream::ClipboardJobHandle,
     },
+    /// The clipboard worker reported results; the event loop applies them in posting order. It
+    /// carries no payload.
+    ClipboardDone,
     /// One VT batch's OSC 52 requests, counted without payloads, after its writes; refusals
     /// reach the App only through this summary.
     ClipboardAttempts {

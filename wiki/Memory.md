@@ -232,9 +232,12 @@ startup: the decoded bytes, the U+FFFD expansion of a non-UTF-8 payload, and the
 (`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere). Each retention pass charges what
 live leases hold, as `ClipboardStaging`, to the tracking-only process owner, with one item per
 posted program write (at most 8), so a large write never trips a pane backstop. A lease is
-released when the native clipboard call returns; on Linux the part covering arboard's copy
-stays charged until SonicTerm's next write to that selection, or a user copy, replaces it. A
-write the budget cannot cover is refused busy.
+released when the native clipboard call returns; on Linux and Windows that call runs on the
+clipboard worker, so the lease moves into the worker's job. On Linux the part covering arboard's
+copy stays charged until SonicTerm's next write to that selection, or a user copy, replaces it.
+A Windows write armed for reassertion keeps its lease, plus its snapshot of the replaced value
+(at most 512 KiB, reserved before the read), until the reassertion runs or a newer job cancels
+it. A write the budget cannot cover is refused busy.
 
 A `memory snapshot` line taken for a perf checkpoint carries the same fields plus
 four tags: `checkpoint_index`, `checkpoint_label`, `checkpoint_attempt`, and

@@ -601,11 +601,11 @@ impl App {
             }
         }
 
-        // A reload to `osc52 = "deny"` cancels a write still waiting to be reasserted, so a later
-        // reload back to allow cannot replay what the denial stopped.
-        #[cfg(target_os = "windows")]
+        // A reload to `osc52 = "deny"` refuses every program write the clipboard worker has not
+        // committed and cancels an armed reassertion, so a later reload back to allow cannot
+        // replay what the denial stopped.
         if new_cfg.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
-            self.pending_osc52_reassert = None;
+            self.clip_state.domain.revoke_program_writes();
         }
         // A changed write limit applies to streams opened from now on; open streams and leases
         // keep what they reserved.

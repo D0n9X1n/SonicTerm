@@ -601,3 +601,45 @@ fn a_denied_osc52_write_leaves_the_clipboard_alone() {
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("kept"));
     assert_eq!(app.status_line.clip_write.get(&source), Some(&ClipOutcome::Denied));
 }
+
+/// A write the clipboard worker finishes after its batch summary arrived still shows its native
+/// result: the summary is held until the pane's write settles, then shows the write and its count.
+#[test]
+fn clip_summary_waits_for_a_write_on_the_clipboard_worker() {
+    use crate::app::clipboard_worker::ClipboardSink;
+    use crate::app::osc52_stream::{ClipState, ClipTargets, ClipboardJob, ClipboardStaging};
+    use crate::app::spawn_pane::ClipAttempts;
+    use std::sync::{Arc, Mutex};
+
+    /// A sink whose writes wait while the test holds its gate.
+    struct GatedSink(Arc<Mutex<()>>);
+    impl ClipboardSink for GatedSink {
+        fn write(&mut self, _text: &str, _targets: ClipTargets) -> bool {
+            let _held = self.0.lock().unwrap();
+            true
+        }
+    }
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let source = app.__test_seed_tab("source");
+    app.__test_set_memory_clipboard("old");
+    app.clip_state = ClipState::new(ClipboardStaging::with_budget(1 << 20, 1 << 20));
+    let gate = Arc::new(Mutex::new(()));
+    let sink = Box::new(GatedSink(gate.clone()));
+    assert!(app.clip_state.domain.start_worker(sink, None, Box::new(|| {})));
+    let held = gate.lock().unwrap();
+    let job = ClipboardJob::for_test(&app.clip_state.staging, "hello");
+    assert_eq!(app.submit_program_clipboard(source, job), None, "posted to the worker");
+    let accepted = ClipAttempts { total: 1, accepted: 1, refused: 0, latest: None };
+    app.note_or_defer_clip_attempts(source, accepted, Instant::now());
+    assert!(app.status_line.clip.is_none(), "the summary waits for the write");
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.status_line.clip.is_none() {
+        assert!(Instant::now() < deadline, "the worker never reported the write");
+        app.drain_clipboard_completions();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let record = app.status_line.clip.unwrap();
+    assert_eq!((record.outcome, record.attempts), (ClipOutcome::Written(5), 1));
+}

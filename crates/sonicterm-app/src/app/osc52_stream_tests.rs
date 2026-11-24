@@ -284,31 +284,30 @@ fn policy_revoked_before_commit_point_refused() {
     let mut app = app_with_clipboard("old");
     let job = run(&staging, &osc52("c", &encode(b"late"))).remove(0).expect("a write");
     app.config.terminal.osc52 = sonicterm_cfg::config::Osc52Policy::Deny;
-    let outcome = app.handle_clipboard_job(job.take().expect("untaken"));
-    assert_eq!(outcome, super::super::event_loop::ClipWriteOutcome::Denied);
+    let outcome = app.submit_program_clipboard(1, job.take().expect("untaken"));
+    assert_eq!(outcome, Some(super::super::event_loop::ClipWriteOutcome::Denied));
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("old"));
     assert_eq!((staging.reserved_bytes(), staging.program_slots_in_use()), (0, 0));
 }
 
-/// Program writes and user copies commit on the event loop in the order it handles them, so a
-/// user copy after a program write wins and cancels any pending Windows reassertion.
+/// With no worker, program writes and user copies commit on the event loop in the order it
+/// handles them, so a user copy after a program write wins and replaces its retained copy.
 #[test]
 fn user_copy_after_program_write_wins() {
     let staging = staging(1 << 20, 1 << 20);
     let mut app = app_with_clipboard("old");
     let job = run(&staging, &osc52("c", &encode(b"program"))).remove(0).expect("a write");
-    let outcome = app.handle_clipboard_job(job.take().expect("untaken"));
-    assert_eq!(outcome, super::super::event_loop::ClipWriteOutcome::Written);
+    let outcome = app.submit_program_clipboard(1, job.take().expect("untaken"));
+    assert_eq!(outcome, Some(super::super::event_loop::ClipWriteOutcome::Written));
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("program"));
     assert!(app.set_clipboard_text("user".into()));
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("user"));
-    #[cfg(target_os = "windows")]
-    assert!(app.pending_osc52_reassert.is_none(), "the user copy cancelled the reassertion");
     assert_eq!(app.clip_state.retained.bytes(), 0, "the user copy replaced the retained copy");
 }
 
-/// The job's lease is held until the native call returns; only Linux then keeps the part that
-/// covers arboard's retained copy, and the next write to the selection replaces it.
+/// On the event-loop path the job's lease is held until the native call returns; only Linux then
+/// keeps the part that covers arboard's retained copy, and the next write to the selection
+/// replaces it. The worker path is pinned by `lease_held_until_worker_native_call_returns`.
 #[test]
 fn lease_held_until_native_return() {
     let staging = staging(1 << 20, 1 << 20);
@@ -317,11 +316,11 @@ fn lease_held_until_native_return() {
     let taken = job.take().expect("untaken");
     let native = native_clipboard_bytes(&taken.text);
     assert!(staging.reserved_bytes() >= taken.text.len() + native, "reserved before the call");
-    let _ = app.handle_clipboard_job(taken);
+    let _ = app.submit_program_clipboard(1, taken);
     let retained = if cfg!(target_os = "linux") { native } else { 0 };
     assert_eq!(staging.reserved_bytes(), retained);
     let next = run(&staging, &osc52("c", &encode(b"held"))).remove(0).expect("a write");
-    let _ = app.handle_clipboard_job(next.take().expect("untaken"));
+    let _ = app.submit_program_clipboard(1, next.take().expect("untaken"));
     assert_eq!(staging.reserved_bytes(), retained, "the next write replaced the retained copy");
     assert_eq!(staging.program_slots_in_use(), 0);
 }

@@ -339,6 +339,7 @@ pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
 pub(crate) use shared_gpu::{font_fallback_waker, gpu_device_state_waker};
+mod clipboard_worker;
 mod osc52_stream;
 mod reply_delivery;
 mod report_windows;
@@ -400,21 +401,6 @@ use window_setup::{dpi_transition_inner_size, dpi_transition_size_scale};
 use window_state::TopologyChange;
 pub use window_state::{SplitterDragState, WindowRole, WindowState};
 
-/// Delay allowing a failing Windows clipboard helper to release its open handle.
-#[cfg(target_os = "windows")]
-const OSC52_CLIPBOARD_REASSERT_DELAY: Duration = Duration::from_millis(150);
-
-#[cfg(target_os = "windows")]
-#[derive(Debug)]
-pub(super) struct PendingOsc52Reassert {
-    /// Clipboard text to restore after the helper releases the clipboard.
-    text: String,
-    /// Clipboard value observed before the OSC write.
-    previous_text: Option<String>,
-    /// Event-loop deadline for the one permitted reassertion.
-    due: Instant,
-}
-
 #[doc(hidden)]
 pub struct App {
     /// The windows that exist, the main and frontmost window, each window key, and prepared windows.
@@ -475,9 +461,6 @@ pub struct App {
     // split-borrow the fields disjointly; taking two `main_*_mut()` accessors
     // together is a double borrow of the same map entry.
     pub(super) clipboard: Option<Clipboard>,
-    #[cfg(target_os = "windows")]
-    /// One delayed OSC 52 write that survives a failing clipboard helper's cleanup.
-    pub(super) pending_osc52_reassert: Option<PendingOsc52Reassert>,
     /// Program clipboard writes: the shared staging, its charge, and retained native copies.
     pub(in crate::app) clip_state: osc52_stream::ClipState,
     // `App`-level DPI and hovered_url fields deleted — both

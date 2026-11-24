@@ -25,8 +25,8 @@ pub(super) const MAX_PROGRAM_CLIPBOARD_JOBS: usize = 8;
 /// How long a clipboard stream may stay open without BEL or ST before it is aborted.
 pub(super) const OSC52_STREAM_EXPIRY: Duration = Duration::from_secs(60);
 
-/// The largest program write macOS accepts: `NSPasteboard` is used on the event-loop thread, and
-/// off-thread use is not proven, so larger writes fail closed rather than stall the loop.
+/// The largest program write macOS accepts: macOS has no clipboard worker, because off-thread
+/// `NSPasteboard` use is not proven, so larger writes fail closed rather than stall the loop.
 pub(super) const MACOS_PROGRAM_WRITE_LIMIT_BYTES: usize = 512 * 1024;
 
 /// The largest write Windows reasserts, in UTF-16 units (512 KiB of `CF_UNICODETEXT`).
@@ -156,7 +156,6 @@ pub(in crate::app) struct ClipLease {
 
 impl ClipLease {
     /// Bytes this lease holds.
-    #[cfg(test)]
     pub(in crate::app) fn bytes(&self) -> usize {
         self.bytes
     }
@@ -382,7 +381,6 @@ pub(in crate::app) fn native_clipboard_bytes(text: &str) -> usize {
 }
 
 /// Whether Windows may reassert `text`: at most [`REASSERT_MAX_UTF16_UNITS`] UTF-16 units.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(in crate::app) fn reassert_eligible(text: &str) -> bool {
     text.encode_utf16().nth(REASSERT_MAX_UTF16_UNITS).is_none()
 }
@@ -426,6 +424,19 @@ pub(in crate::app) struct ClipboardJob {
     /// Covers `text` and its native copy until the native call returns.
     pub(in crate::app) lease: ClipLease,
     _slot: ProgramSlot,
+}
+
+impl ClipboardJob {
+    /// A clipboard-target job for `text` on `staging`, its lease and program slot taken as the
+    /// reader thread takes them.
+    #[cfg(test)]
+    pub(in crate::app) fn for_test(staging: &Arc<ClipboardStaging>, text: &str) -> Self {
+        let mut lease = staging.lease();
+        assert!(lease.grow_to(text.len() + native_clipboard_bytes(text)), "test staging budget");
+        let slot = staging.take_program_slot().expect("a free program slot");
+        let targets = ClipTargets { clipboard: true, primary: false };
+        Self { text: text.to_owned(), targets, lease, _slot: slot }
+    }
 }
 
 /// A program write posted to the event loop. Clones share one job, which is taken once; `Debug`
@@ -624,12 +635,23 @@ pub(in crate::app) struct ClipState {
     >,
     /// Leases for arboard's retained copies (Linux).
     pub(in crate::app) retained: RetainedCopies,
+    /// The ordering domain program writes and user copies share, and its worker.
+    pub(in crate::app) domain: super::clipboard_worker::ClipboardDomain,
+    /// Per pane, a batch summary held until its program writes on the worker settle.
+    pub(in crate::app) deferred_attempts:
+        std::collections::HashMap<u64, super::spawn_pane::ClipAttempts>,
 }
 
 impl ClipState {
-    /// State over `staging`, with nothing charged or retained.
+    /// State over `staging`, with nothing charged, retained, posted or held.
     pub(in crate::app) fn new(staging: Arc<ClipboardStaging>) -> Self {
-        Self { staging, charges: std::collections::HashMap::new(), retained: Default::default() }
+        Self {
+            staging,
+            charges: std::collections::HashMap::new(),
+            retained: Default::default(),
+            domain: Default::default(),
+            deferred_attempts: std::collections::HashMap::new(),
+        }
     }
 }
 

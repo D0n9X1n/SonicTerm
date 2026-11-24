@@ -402,7 +402,7 @@ impl App {
                 id
             }
         };
-        let (text, clear_after_copy) = {
+        let (text, clear_after_copy, copied_selection) = {
             let Some(window) = self.registry.windows.get_mut(&window_id) else {
                 // When: windows no longer holds window_id; the window closed before
                 // the copy ran, so there is no selection left to read.
@@ -448,19 +448,25 @@ impl App {
                 // and copying it would clear the clipboard.
                 return;
             }
-            (selection.as_text(grid), selection.on_alt_screen)
+            (selection.as_text(grid), selection.on_alt_screen, selection)
         };
-        let copied = self.set_clipboard_text(text);
-        self.note_copy_result(window_id, copied);
-        if copied && clear_after_copy {
-            // A volatile selection is consumed only after confirmed clipboard delivery.
-            if let Some(window) = self.registry.windows.get_mut(&window_id) {
-                // Clear the highlight and invalidate retained rows before requesting its frame.
-                window.selection = None;
-                mark_all_panes_dirty(&window.panes);
-                window.request_window_redraw();
+        let _ = self.copy_text_then(text, move |app, copied| {
+            app.note_copy_result(window_id, copied);
+            if !(copied && clear_after_copy) {
+                // When: copied is false or clear_after_copy is false, the selection stays.
+                return;
             }
-        }
+            // A volatile selection is consumed only after confirmed clipboard delivery, and only
+            // while it is still the selection that was copied.
+            if let Some(window) = app.registry.windows.get_mut(&window_id) {
+                if window.selection == Some(copied_selection) {
+                    // Clear the highlight and invalidate retained rows before requesting its frame.
+                    window.selection = None;
+                    mark_all_panes_dirty(&window.panes);
+                    window.request_window_redraw();
+                }
+            }
+        });
     }
 }
 

@@ -183,8 +183,10 @@ OSC 52 与 OSC 1337 `Copy=:` 写入在分配每个缓冲区之前，先从一个
 负载的 U+FFFD 扩展，以及系统副本（Windows 上为 `CF_UNICODETEXT`，其他平台为 UTF-8 长度）。
 每次保留量采样把存活租约持有的量以 `ClipboardStaging` 计入只做跟踪的进程 owner，每个已投递
 的程序写入计一个 item（至多 8 个），因此大的写入从不触发窗格的兜底上限。租约在系统剪贴板调用
-返回时释放；在 Linux 上，覆盖 arboard 副本的部分会一直计费，直到 SonicTerm 对同一选区的下一次
-写入或一次用户复制替换它。预算无法覆盖的写入以繁忙拒绝。
+返回时释放；在 Linux 与 Windows 上该调用在剪贴板 worker 上执行，因此租约随任务移交给 worker。
+在 Linux 上，覆盖 arboard 副本的部分会一直计费，直到 SonicTerm 对同一选区的下一次写入或一次用户
+复制替换它。Windows 上已安排重写的写入会保留其租约及被替换值的快照（至多 512 KiB，读取前预留），
+直到重写执行或被更新的任务取消。预算无法覆盖的写入以繁忙拒绝。
 
 为性能检查点采集的 `memory snapshot` 行包含同样字段，另加四个标注：`checkpoint_index`、
 `checkpoint_label`、`checkpoint_attempt` 与 `checkpoint_complete`（没有窗格被锁占用且每个窗格都已采样）。
