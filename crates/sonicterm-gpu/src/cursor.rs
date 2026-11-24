@@ -518,8 +518,9 @@ pub(crate) fn ndc_rect_px([gx, gy, gw, gh]: [f32; 4], sw: f32, sh: f32) -> (f32,
 /// recolored glyph, and any non-finite glyph, in `record`.
 ///
 /// With `cut`, the slice's offset in the main glyph list and the list of cut parts, a text glyph
-/// crossing `target`'s edge is cut there: only its inside part is recolored and noted, and its
-/// outside parts are pushed with its index. A color glyph ignores its color and is never cut.
+/// crossing `target`'s left or right edge is cut there: only its part in `target`'s columns, at
+/// the glyph's full height, is recolored and noted, and its outside parts are pushed with its
+/// index. A color glyph ignores its color and is never cut.
 fn recolor_span(
     glyphs: &mut [GlyphInstance],
     target: (f32, f32, f32, f32),
@@ -546,7 +547,8 @@ fn recolor_span(
         if aabb_intersects(target, glyph_rect) && overlap >= glyph_area * 0.20 {
             match cut.as_mut() {
                 Some((base, parts)) if glyph.flags[0] < 0.5 => {
-                    let outside = recolor_glyph_part(glyph, target, (sw, sh), bg_rgba);
+                    let outside =
+                        recolor_glyph_part(glyph, target, (sw, sh), bg_rgba, CutEdges::Columns);
                     parts.extend(outside.into_iter().flatten().map(|part| (*base + offset, part)));
                     // Only the recolored part changed, as its outside parts draw as before; a glyph
                     // with no pixel centre in the snapped target kept its color and is not noted.
@@ -613,11 +615,12 @@ impl RowGlyphSpan {
 /// Recolor the main glyph list's glyphs under `(cell_x, cell_y, cell_w, cell_h)`, scanning
 /// only rows whose ink meets the target plus every glyph outside the recorded rows.
 ///
-/// Without `clip_to_target`, recolors exactly what [`recolor_cursor_glyphs`] over the whole list
+/// Without `clip_to_columns`, recolors exactly what [`recolor_cursor_glyphs`] over the whole list
 /// would, and returns the same record with the number of glyphs examined. With it, as a block
-/// cursor draws, a text glyph crossing the target's edge is cut there as a selection cuts it: only
-/// its inside part is recolored and recorded, its outside parts keep their color right after it,
-/// and every row span in `rows` moves to cover its glyphs again.
+/// cursor draws, a text glyph crossing the target's left or right edge is cut there: only its part
+/// in the target's columns is recolored and recorded, at the glyph's full height so ink rising
+/// above or hanging below the row keeps its repaint, its outside parts keep their color right after
+/// it, and every row span in `rows` moves to cover its glyphs again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recolor_cursor_glyphs_in(
     glyphs: &mut Vec<GlyphInstance>,
@@ -629,7 +632,7 @@ pub(crate) fn recolor_cursor_glyphs_in(
     sw: f32,
     sh: f32,
     bg_rgba: [f32; 4],
-    clip_to_target: bool,
+    clip_to_columns: bool,
 ) -> RecolorOutcome {
     let mut outcome = RecolorOutcome::default();
     if sw <= 0.0 || sh <= 0.0 {
@@ -654,18 +657,18 @@ pub(crate) fn recolor_cursor_glyphs_in(
         // from indexing past the list.
         let start = row.glyphs.start.clamp(next, total);
         let end = row.glyphs.end.clamp(start, total);
-        let parts = clip_to_target.then_some((next, &mut cut_parts));
+        let parts = clip_to_columns.then_some((next, &mut cut_parts));
         recolor_span(&mut glyphs[next..start], target, sw, sh, bg_rgba, record, parts);
         visited += start - next;
         if row.ink_px.is_some_and(|ink| ink_meets(ink, target)) {
             // The row's ink union meets the target, so one of its glyphs may; scan them all.
-            let parts = clip_to_target.then_some((start, &mut cut_parts));
+            let parts = clip_to_columns.then_some((start, &mut cut_parts));
             recolor_span(&mut glyphs[start..end], target, sw, sh, bg_rgba, record, parts);
             visited += end - start;
         }
         next = end;
     }
-    let parts = clip_to_target.then_some((next, &mut cut_parts));
+    let parts = clip_to_columns.then_some((next, &mut cut_parts));
     recolor_span(&mut glyphs[next..], target, sw, sh, bg_rgba, record, parts);
     outcome.visited = visited + (total - next);
     if !cut_parts.is_empty() {
@@ -727,14 +730,16 @@ pub(crate) fn recolor_selected_cells(
             }
             for index in row.glyphs.clone() {
                 visited += 1;
-                let parts = recolor_glyph_part(&mut glyphs[index], target, (sw, sh), color);
+                let glyph = &mut glyphs[index];
+                let parts = recolor_glyph_part(glyph, target, (sw, sh), color, CutEdges::All);
                 cut_parts.extend(parts.into_iter().flatten().map(|part| (index, part)));
             }
         }
         for part_index in 0..earlier_cuts {
             visited += 1;
             let origin = cut_parts[part_index].0;
-            let parts = recolor_glyph_part(&mut cut_parts[part_index].1, target, (sw, sh), color);
+            let part = &mut cut_parts[part_index].1;
+            let parts = recolor_glyph_part(part, target, (sw, sh), color, CutEdges::All);
             cut_parts.extend(parts.into_iter().flatten().map(|part| (origin, part)));
         }
     }
@@ -781,14 +786,25 @@ fn snap_selection_edge(edge: f32) -> f32 {
     (edge - 0.5).ceil()
 }
 
-/// Recolor the part of `glyph` inside `target` to `color` and return the parts outside it, each
-/// with the glyph's own color (at most four bands); nothing changes for a color glyph or one that
-/// misses `target`.
+/// Which of a target's edges cut a glyph that crosses them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CutEdges {
+    /// Every edge: a selection recolors only the selected cells' rows and columns.
+    All,
+    /// The left and right edges only: a block cursor recolors its columns of a glyph at the
+    /// glyph's full height, so ink above or below the cursor row takes the cursor text color.
+    Columns,
+}
+
+/// Recolor the part of `glyph` inside `target` (or, by `edges`, inside its columns) to `color`
+/// and return the parts outside it, each with the glyph's own color (at most four bands); nothing
+/// changes for a color glyph or one that misses `target`.
 fn recolor_glyph_part(
     glyph: &mut GlyphInstance,
     target: (f32, f32, f32, f32),
     (sw, sh): (f32, f32),
     color: [f32; 4],
+    edges: CutEdges,
 ) -> [Option<GlyphInstance>; 4] {
     let original = *glyph;
     let (left, top, width, height) = glyph_rect_px(&original, sw, sh);
@@ -819,8 +835,13 @@ fn recolor_glyph_part(
     };
     let inner_left = cut(target_left, left, right);
     let inner_right = cut(target_left + target_width, left, right);
-    let inner_top = cut(target_top, top, bottom);
-    let inner_bottom = cut(target_top + target_height, top, bottom);
+    let (inner_top, inner_bottom) = match edges {
+        CutEdges::All => {
+            (cut(target_top, top, bottom), cut(target_top + target_height, top, bottom))
+        }
+        // A column cut keeps the glyph's own top and bottom, so no band above or below splits off.
+        CutEdges::Columns => (top, bottom),
+    };
     if inner_right <= inner_left || inner_bottom <= inner_top {
         // When: `inner_right <= inner_left` or `inner_bottom <= inner_top`, the glyph only grazes
         // `target`, so no pixel of it is selected.

@@ -779,3 +779,46 @@ fn a_clipped_cursor_recolors_and_records_only_its_cell_of_a_wide_glyph() {
     assert_eq!((whole.len(), whole[0].color), (2, MARK), "the whole glyph is recolored");
     assert_eq!(record.bounds, RecolorBounds::Rect(PixelRect { x: 0, y: 0, w: 20, h: 16 }));
 }
+
+/// A block cursor clips a glyph to its cell's columns only: the ink of a glyph under the cursor
+/// that rises above the cursor row is recolored with it, and the repaint record covers that ink, so
+/// the planner's damage reaches it. A two-cell glyph is cut once, at the cell's left edge, into
+/// full-height column parts; a one-cell glyph of the same height is recolored whole, uncut.
+#[test]
+fn a_clipped_cursor_recolors_and_records_a_glyph_rising_above_its_row() {
+    // A power-of-two surface, so every pixel edge survives the NDC round trip exactly.
+    let surface = (64.0, 64.0);
+    let pixel_rect =
+        |glyph: &GlyphInstance| outward_rect(ndc_rect_px(glyph.rect, surface.0, surface.1));
+    // The cursor cell is (10, 32, 10, 16). Each glyph is bottom-aligned with it and two rows tall,
+    // so it rises one row above the cursor, which covers at least the recolorer's fifth of it.
+    let clip = |glyph: GlyphInstance| {
+        let mut glyphs = vec![glyph];
+        let mut rows = vec![RowGlyphSpan::new(&glyphs, 0..1, surface.0, surface.1)];
+        let RecolorOutcome { record, .. } = recolor_cursor_glyphs_in(
+            &mut glyphs,
+            &mut rows,
+            10.0,
+            32.0,
+            10.0,
+            16.0,
+            surface.0,
+            surface.1,
+            MARK,
+            true,
+        );
+        (glyphs, record)
+    };
+    let column = PixelRect { x: 10, y: 16, w: 10, h: 32 };
+
+    let (wide, record) = clip(glyph_px(0.0, 16.0, 20.0, 32.0, surface));
+    assert_eq!(wide.len(), 2, "the two-cell glyph is cut once, at the cell's left edge");
+    assert_eq!((wide[0].color, pixel_rect(&wide[0])), (MARK, column), "the cursor's columns");
+    let other = PixelRect { x: 0, y: 16, w: 10, h: 32 };
+    assert_eq!((wide[1].color, pixel_rect(&wide[1])), (INK, other), "the other cell's columns");
+    assert_eq!(record.bounds, RecolorBounds::Rect(column), "the record reaches the ink above");
+
+    let (narrow, record) = clip(glyph_px(10.0, 16.0, 10.0, 32.0, surface));
+    assert_eq!((narrow.len(), narrow[0].color), (1, MARK), "a one-cell glyph is recolored uncut");
+    assert_eq!(record.bounds, RecolorBounds::Rect(column), "and recorded whole");
+}

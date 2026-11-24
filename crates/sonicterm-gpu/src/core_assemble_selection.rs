@@ -241,8 +241,8 @@ impl GpuRenderer {
                         }
                         // Mid-glide the block passes over text without recolouring it; the frame
                         // that lands on the cell recolours its glyph as a resting block does. Only
-                        // the part inside the cell is recoloured, so a ligature's other half keeps
-                        // its own or its selection color.
+                        // the cell's columns are recoloured, at the glyph's full height, so a
+                        // ligature's other half keeps its color and ink above the row repaints.
                         if gliding.is_none() {
                             let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
                                 &mut *glyph_instances,

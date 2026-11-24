@@ -987,8 +987,9 @@ damaged through the ink-padded strips of the slots that draw the dirty live rows
 The command badge's hash covers the status kind and the drawn badge, so a running
 tab does not repaint the band every second, but a change of kind, such as Idle to
 Running before any badge is drawn, repaints it once. A block cursor recolors only the part of
-each text glyph inside its cell, cutting a glyph that crosses the cell's edge as a selection
-does, but a color glyph whole, and that glyph can be taller than the cursor row plus its pad, so
+each text glyph inside its cell's columns, cutting a glyph that crosses the cell's left or right
+edge, at the glyph's full height, and a color glyph whole; either can be taller than the cursor
+row plus its pad, so
 after assembly the damage also covers the recolored glyphs: both the previous and the
 current bounds whenever the recolor changed, and the current bounds when only the
 cursor or focus class is set. Recolor bounds that are not finite add the active
