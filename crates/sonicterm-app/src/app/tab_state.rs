@@ -249,8 +249,12 @@ impl App {
 ///
 /// The process name and warning come from the pane's cached foreground sample; the frame
 /// sets demand separately, and the worker never runs here.
+///
+/// `pane_id` names `pane`; the tab records it as its label's source, which decides who may read
+/// the label through MCP.
 pub fn refresh_active_tab_title(
     tabs: &mut sonicterm_ui::tabs::TabBar,
+    pane_id: u64,
     pane: &PaneState,
     parser: &Parser,
     tab_idx: usize,
@@ -274,13 +278,16 @@ pub fn refresh_active_tab_title(
         // When: tabs has no active tab, there is no label to refresh.
         return None;
     };
-    if tab.auto_title == auto_title && tab.icon_title.as_deref() == icon_title {
-        // When: tab.auto_title and tab.icon_title already equal auto_title and icon_title, the
-        // label and caption show them and nothing is set.
+    if tab.auto_title == auto_title
+        && tab.icon_title.as_deref() == icon_title
+        && tab.label_source_pane == Some(pane_id)
+    {
+        // When: tab.auto_title, tab.icon_title and tab.label_source_pane already equal auto_title,
+        // icon_title and pane_id, the label and caption show them and nothing is set.
         return None;
     }
     let shown = tab.title.clone();
-    tabs.set_active_titles(auto_title, icon_title.map(str::to_string));
+    tabs.set_active_titles(auto_title, icon_title.map(str::to_string), pane_id);
     let title = tabs.active().map(|tab| tab.title.clone())?;
     (title != shown).then_some(title)
 }

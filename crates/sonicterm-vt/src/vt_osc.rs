@@ -181,6 +181,12 @@ impl Performer {
         }
     }
 
+    /// Store a complete OSC 1 name (the tab name); the parser only stores it and the host decides
+    /// where it shows. An empty name, as a bare OSC 1 sends, clears it.
+    fn set_icon_title(&mut self, text: &str) {
+        self.icon_title = (!text.is_empty()).then(|| text.to_string());
+    }
+
     pub(super) fn invalidate_semantic_osc(&mut self, code: u16) {
         // When: code selects CWD, hyperlink or notification state, revoke it; other codes preserve the prior display title.
         match code {
@@ -242,7 +248,7 @@ impl Performer {
         }
         match code {
             0 => self.osc_dispatch(&[b"0", content], false),
-            1 => self.osc_dispatch(&[b"1", content], false),
+            1 => self.set_icon_title(text),
             2 => self.osc_dispatch(&[b"2", content], false),
             7 => self.osc_dispatch(&[b"7", content], false),
             8 => {

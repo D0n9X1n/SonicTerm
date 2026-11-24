@@ -50,6 +50,8 @@ mod lifecycle;
 mod loop_call;
 #[path = "mcp/read.rs"]
 pub(crate) mod read;
+#[path = "mcp/reply_budget.rs"]
+pub(crate) mod reply_budget;
 #[path = "mcp/run.rs"]
 pub(crate) mod run;
 #[path = "mcp/scan.rs"]
@@ -112,8 +114,9 @@ pub(crate) struct PaneEntry {
     /// Where the pane sits; `Some` only for `list_panes` entries.
     pub(crate) metadata: Option<PaneMetadata>,
     /// The label its tab shows, the same for every pane of the tab; `Some` only for `list_panes`
-    /// entries. Program-supplied text: never logged.
-    pub(crate) tab_title: Option<String>,
+    /// entries. Program-supplied text: never logged. Boxed so a reply carrying one entry stays
+    /// small.
+    pub(crate) tab_title: Option<Box<TabTitle>>,
     /// Who created the pane; `agent_owned` in tool results is `creator.is_agent()`.
     pub(crate) creator: agents::PaneOwner,
     /// The pane's parser, read with one bounded attempt.
@@ -128,6 +131,15 @@ pub(crate) struct PaneEntry {
     pub(crate) run_typed_at: Arc<AtomicU64>,
     /// Set while an agent run owns the pane.
     pub(crate) agent_run: Arc<AtomicBool>,
+}
+
+/// A tab's label as `list_panes` may report it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TabTitle {
+    /// The label, and the creator of the pane it was built from; `None` when that pane is gone.
+    Label { text: String, source: Option<agents::PaneOwner> },
+    /// Withheld: the caller may not read the pane the label was built from.
+    Unreadable,
 }
 
 /// A request waiting in the inbox.

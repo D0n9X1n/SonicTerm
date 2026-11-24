@@ -779,3 +779,37 @@ fn osc1_is_cleared_by_ris_and_refused_whole() {
     parser.advance(b"Z");
     assert_eq!(parser.grid().row(0)[0].ch, 'Z', "nothing printed");
 }
+
+/// OSC 1 has one bounded owner: a bare `1` cut by CAN, SUB or an ESC that does not complete ST
+/// changes nothing, and noncanonical numbers (`01`, `+1`) pass the same cap and control checks as
+/// the canonical `1;`.
+#[test]
+fn osc1_is_owned_whole_whatever_its_spelling_and_abort() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    for aborted in
+        [b"\x1b]1\x18".as_slice(), b"\x1b]1\x1a", b"\x1b]1\x1b[m", b"\x1b]01\x18", b"\x1b]+1\x1a"]
+    {
+        parser.advance(b"\x1b]1;kept\x07");
+        parser.advance(aborted);
+        assert_eq!(parser.icon_title(), Some("kept"), "{aborted:?} changed it");
+    }
+    for spelling in ["01", "+1", "001"] {
+        parser.advance(format!("\x1b]{spelling};named\x07").as_bytes());
+        assert_eq!(parser.icon_title(), Some("named"), "{spelling}");
+        let mut over_cap = format!("\x1b]{spelling};").into_bytes();
+        over_cap.resize(over_cap.len() + super::MAX_SEMANTIC_OSC_BYTES + 1, b'x');
+        over_cap.push(0x07);
+        let control = format!("\x1b]{spelling};a\x01b\x07").into_bytes();
+        for refused in [over_cap, control] {
+            parser.advance(&refused);
+            assert_eq!(parser.icon_title(), Some("named"), "{spelling}: refused whole");
+        }
+        parser.advance(format!("\x1b]{spelling}\x07").as_bytes());
+        assert_eq!(parser.icon_title(), None, "{spelling}: a bare request clears it");
+    }
+    // A number too long for the owner's probe reaches vte, whose fallback never sets the name.
+    parser.advance(b"\x1b]0000000000001;spoof\x07");
+    assert_eq!(parser.icon_title(), None, "the fallback set it");
+    parser.advance(b"Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z', "nothing printed");
+}

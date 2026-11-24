@@ -1,8 +1,8 @@
 //! Pins the control tools at their boundaries with the rest of the app, through the real tool and
 //! loop paths: every control tool refuses out of scope or in READONLY without writing or changing
 //! topology, queued input refuses a run, only typing stamps the pane, an agent closing a child
-//! window's last tab reaps that window, and a helper created with argv is held after a real exit
-//! that `wait_for` reports.
+//! window's last tab reaps that window, a helper created with argv is held after a real exit
+//! that `wait_for` reports, and `list_panes` titles respect the read scope and one reply budget.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -290,4 +290,96 @@ fn a_helper_with_argv_is_held_after_its_real_exit() {
     assert_eq!(waited["structuredContent"]["reason"], "exited", "{waited}");
     assert_eq!(waited["structuredContent"]["exit_code"], 0);
     assert!(app.main().unwrap().panes.contains_key(&helper), "a held pane stays after code 0");
+}
+
+/// Refresh tab `tab_index`'s label from its active pane, as the redraw does for the visible tab.
+fn refresh_label(app: &mut App, tab_index: usize) {
+    let window = app.main_mut().unwrap();
+    window.tabs.activate(tab_index);
+    let source = window.tab_states[tab_index].active_pane;
+    let crate::app::WindowState { tabs, panes, .. } = window;
+    let parser = panes[&source].parser.lock();
+    crate::app::refresh_active_tab_title(tabs, source, &panes[&source], &parser, tab_index);
+}
+
+/// The listed pane with `pane_id` in a `list_panes` result.
+fn listed(result: &Value, pane_id: u64) -> Value {
+    let wanted = pane_id.to_string();
+    let panes = result["structuredContent"]["panes"].as_array().expect("panes");
+    panes.iter().find(|pane| pane["pane_id"] == wanted.as_str()).expect("listed").clone()
+}
+
+/// Under `read = "agent"`, a tab label taken from a pane the caller may not read is withheld, with
+/// an explicit marker, from every pane of the tab, even a readable agent split beside it; once the
+/// agent's own pane is the label's source, the label is listed.
+#[test]
+fn list_panes_withholds_a_tab_label_from_an_unreadable_pane() {
+    let mut app = app();
+    let user = app.__test_seed_tab("user");
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+        10.0,
+        10.0,
+    );
+    app.__test_split_active_right();
+    let window = app.main_mut().unwrap();
+    let agent = window.tab_states[0].active_pane;
+    window.panes.get_mut(&agent).unwrap().creator =
+        crate::app::mcp::agents::PaneOwner::agent_if(true);
+    window.panes[&user].parser.lock().advance(b"\x1b]1;user-secret\x07");
+    window.panes[&agent].parser.lock().advance(b"\x1b]1;agent-name\x07");
+    // The user's pane is active, so the tab shows the user's OSC 1 name.
+    window.tab_states[0].active_pane = user;
+    refresh_label(&mut app, 0);
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Agent);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let panes = result["structuredContent"]["panes"].as_array().unwrap();
+    assert_eq!(panes.len(), 1, "only the agent's pane is readable: {result}");
+    let pane = listed(&result, agent);
+    assert_eq!(pane["tab_title"], Value::Null);
+    assert_eq!(pane["omitted"]["tab_title"], "unreadable");
+    assert_eq!(pane["icon_title"], "agent-name", "the pane's own name is readable");
+    assert!(!result.to_string().contains("user-secret"), "the user's label leaked: {result}");
+    // The agent's own pane becomes the source: the label it gives is listed.
+    app.main_mut().unwrap().tab_states[0].active_pane = agent;
+    refresh_label(&mut app, 0);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let pane = listed(&result, agent);
+    assert!(pane["tab_title"].as_str().is_some_and(|label| label.ends_with("agent-name")));
+    assert_eq!(pane["omitted"], Value::Null, "nothing was omitted: {pane}");
+}
+
+/// Many panes with maximal titles cannot push a `list_panes` reply toward the bridge's 1 MiB line
+/// limit: the title fields share one byte budget per reply, a field past it is `null` with an
+/// explicit `"budget"` marker, the reply still succeeds, and the first panes keep their titles.
+#[test]
+fn list_panes_bounds_every_title_by_one_reply_budget() {
+    // The bridge's relay line limit (`sonicterm_mcp::relay::MAX_LINE_BYTES`).
+    const RELAY_LINE_BYTES: usize = 1 << 20;
+    let mut app = app();
+    let name = "n".repeat(16 * 1024);
+    let mut panes = Vec::new();
+    for tab_index in 0..24 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        let sequence = format!("\x1b]1;{name}\x07\x1b]2;{name}\x07");
+        window.panes[&pane_id].parser.lock().advance(sequence.as_bytes());
+        refresh_label(&mut app, tab_index);
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    assert_eq!(result["isError"], false);
+    let wire_bytes = result.to_string().len();
+    assert!(wire_bytes < RELAY_LINE_BYTES / 2, "the reply took {wire_bytes} bytes");
+    let first = listed(&result, panes[0]);
+    assert_eq!(first["icon_title"], name.as_str(), "the first pane keeps its name");
+    assert_eq!(first["title"], name.as_str());
+    let last = listed(&result, panes[23]);
+    assert_eq!(last["title"], Value::Null);
+    assert_eq!(last["omitted"]["title"], "budget", "{}", last["omitted"]);
+    assert_eq!(last["omitted"]["icon_title"], "budget");
+    assert_eq!(last["omitted"]["tab_title"], "budget");
 }

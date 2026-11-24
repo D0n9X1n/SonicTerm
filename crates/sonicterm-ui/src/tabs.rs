@@ -115,6 +115,9 @@ pub struct Tab {
     pub auto_title: String,
     /// The active pane's OSC 1 name, which replaces the label's body under a user rename.
     pub icon_title: Option<String>,
+    /// The pane whose title, directory, process and OSC 1 name the label was last built from;
+    /// `None` until a refresh names one.
+    pub label_source_pane: Option<u64>,
     pub custom_title: Option<String>,
     pub custom_color: Option<String>,
     /// Whether this tab's current Windows foreground process requires a privilege warning.
@@ -144,6 +147,7 @@ impl Tab {
             title: title.clone(),
             auto_title: title,
             icon_title: None,
+            label_source_pane: None,
             custom_title: None,
             custom_color: None,
             foreground_privileged: false,
@@ -338,10 +342,16 @@ impl TabBar {
     }
 
     /// Replace the active tab's automatic title and the OSC 1 name its label shows instead of the
-    /// automatic body. No-op if empty.
-    pub fn set_active_titles(&mut self, title: String, icon_title: Option<String>) {
+    /// automatic body, both read from pane `source_pane`. No-op if empty.
+    pub fn set_active_titles(
+        &mut self,
+        title: String,
+        icon_title: Option<String>,
+        source_pane: u64,
+    ) {
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.icon_title = icon_title;
+            tab.label_source_pane = Some(source_pane);
             tab.set_auto_title(title);
         }
     }

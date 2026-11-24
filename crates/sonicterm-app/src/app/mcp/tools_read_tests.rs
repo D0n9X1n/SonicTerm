@@ -398,7 +398,10 @@ fn a_busy_list_stops_probing_after_its_budget() {
     let guards: Vec<_> = entries.iter().map(|entry| entry.parser.lock()).collect();
     let started = Instant::now();
     let budget_ends = started + LIST_BUDGET;
-    let panes: Vec<Value> = entries.iter().map(|entry| pane_summary(entry, budget_ends)).collect();
+    let panes: Vec<Value> = entries
+        .iter()
+        .map(|entry| pane_summary(entry, budget_ends, &mut ReplyBudget::new()))
+        .collect();
     let elapsed = started.elapsed();
     drop(guards);
     // 40 panes at a 5 ms wait each would take 200 ms; the budget bounds the whole list. The bound
@@ -425,7 +428,7 @@ fn reads_report_the_shell_integration_state() {
         active: true,
         readonly: false,
     });
-    let summary = pane_summary(&listed, Instant::now() + LIST_BUDGET);
+    let summary = pane_summary(&listed, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new());
     assert_eq!(summary["shell_integration_state"], "unverified");
     assert_eq!(summary["shell_integration"], true, "the boolean keeps its meaning");
 }
@@ -451,12 +454,15 @@ fn list_panes_reports_the_tab_label_and_each_panes_icon_title() {
     window.tab_states[0].active_pane = named;
     let crate::app::WindowState { tabs, panes, .. } = window;
     let parser = panes[&named].parser.lock();
-    crate::app::refresh_active_tab_title(tabs, &panes[&named], &parser, 0);
+    crate::app::refresh_active_tab_title(tabs, named, &panes[&named], &parser, 0);
     drop(parser);
     let label = tabs.active().expect("one tab").title.clone();
     let budget_ends = Instant::now() + LIST_BUDGET;
-    let listed: Vec<Value> =
-        app.mcp_pane_entries().iter().map(|entry| pane_summary(entry, budget_ends)).collect();
+    let listed: Vec<Value> = app
+        .mcp_pane_entries()
+        .iter()
+        .map(|entry| pane_summary(entry, budget_ends, &mut ReplyBudget::new()))
+        .collect();
     let summary = |pane_id: u64| {
         let wanted = pane_id.to_string();
         listed

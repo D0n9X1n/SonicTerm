@@ -465,17 +465,10 @@ impl Perform for Performer {
                     self.events.push(VtEvent::SetTitle(text.to_string()));
                 }
             }
-            Some(1) => match params.get(1).map(|param| std::str::from_utf8(param)) {
-                // OSC 1 names the tab; the parser only stores it, the host decides where it shows.
-                Some(Err(_)) => {
-                    // When: from_utf8 fails on the name, icon_title stays as it was.
-                }
-                Some(Ok(text)) if !text.is_empty() => self.icon_title = Some(text.to_string()),
-                _ => {
-                    // An empty or absent name (a bare OSC 1) clears the icon title.
-                    self.icon_title = None;
-                }
-            },
+            Some(1) => {
+                // The raw collector owns OSC 1 (`set_icon_title`); vte also reaches here on CAN,
+                // SUB or an ESC before a complete ST, so this path changes nothing.
+            }
             Some(7) => {
                 // OSC 7 ; file://<host>/<path> ST — shell-reported cwd.
                 // Used by the tab-title renderer to show `parent/leaf`.

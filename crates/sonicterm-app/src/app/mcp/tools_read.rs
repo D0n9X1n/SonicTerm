@@ -14,7 +14,8 @@ use sonicterm_grid::grid::RowToken;
 use super::agents::OwnerView;
 use super::jsonrpc::{tool_error, tool_result};
 use super::read::{read_pane, ReadLimits, ReadLine, ReadMode, ReadSnapshot, PARSER_WAIT};
-use super::{CallScope, Caller, LoopCall, LoopReply, McpShared, PaneEntry};
+use super::reply_budget::{omit, Omission, ReplyBudget};
+use super::{CallScope, Caller, LoopCall, LoopReply, McpShared, PaneEntry, TabTitle};
 
 /// How soon `wait_for` reads again while the parser was busy or a scan stopped at its budget:
 /// that work is pending on the wait itself, so no pane change will announce it.
@@ -104,11 +105,13 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
     // One budget for every parser probe, so many busy panes cannot stretch the call: once it is
     // spent, later panes are listed without their live details.
     let budget_ends = Instant::now() + LIST_BUDGET;
+    // One byte budget for every pane's titles, so many long ones cannot outgrow the bridge's line.
+    let mut text_budget = ReplyBudget::new();
     let live = |session| shared.sessions.contains(session);
     let panes: Vec<Value> = entries
         .iter()
         .map(|entry| {
-            let mut pane = pane_summary(entry, budget_ends);
+            let mut pane = pane_summary(entry, budget_ends, &mut text_budget);
             pane["owner"] = json!(OwnerView::of(entry.creator, scope.session, live).as_str());
             pane
         })
@@ -131,8 +134,8 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
 
 /// One pane's entry in `list_panes`. Its parser is taken once, waiting at most until
 /// `budget_ends` and never longer than [`PARSER_WAIT`]; a pane reached after the budget is listed
-/// with `"details": "skipped"` and no live fields.
-fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
+/// with `"details": "skipped"` and no live fields. Its titles are charged to `text_budget`.
+fn pane_summary(entry: &PaneEntry, budget_ends: Instant, text_budget: &mut ReplyBudget) -> Value {
     // The loop always fills the position for `list_panes`; an entry without one lists nulls
     // rather than failing the whole call.
     let metadata = entry.metadata;
@@ -143,8 +146,14 @@ fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
         "active": metadata.map(|position| position.active),
         "readonly": metadata.map(|position| position.readonly),
         "agent_owned": entry.creator.is_agent(),
-        "tab_title": entry.tab_title,
     });
+    match entry.tab_title.as_deref() {
+        Some(TabTitle::Label { text, .. }) => {
+            text_budget.place(&mut pane, "tab_title", json!(text))
+        }
+        Some(TabTitle::Unreadable) => omit(&mut pane, "tab_title", Omission::Unreadable),
+        None => pane["tab_title"] = Value::Null,
+    }
     let wait = budget_ends.saturating_duration_since(Instant::now()).min(PARSER_WAIT);
     if wait.is_zero() {
         // When: the `wait` is zero because the list's `budget_ends` passed, details are skipped.
@@ -157,8 +166,8 @@ fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
         return pane;
     };
     let grid = guard.grid();
-    pane["title"] = json!(guard.title());
-    pane["icon_title"] = json!(guard.icon_title());
+    text_budget.place(&mut pane, "title", json!(guard.title()));
+    text_budget.place(&mut pane, "icon_title", json!(guard.icon_title()));
     pane["cwd"] = json!(guard.osc7_cwd().map(|cwd| cwd.path.clone()));
     pane["cols"] = json!(grid.cols);
     pane["rows"] = json!(grid.rows);

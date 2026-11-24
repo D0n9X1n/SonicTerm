@@ -35,7 +35,7 @@ fn the_harnesss_expected_title_equals_the_apps_for_both_final_names() {
         for name in ["sleep", "perf_scenarios"] {
             let (mut tabs, mut pane, parser) = single_tab(output);
             cache(&mut pane, name);
-            refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
+            refresh_active_tab_title(&mut tabs, 0, &pane, &parser.lock(), 0);
             let parser = parser.lock();
             let expected = format_tab_title(0, parser.cwd(), Some(name), parser.title());
             assert_eq!(
@@ -56,7 +56,7 @@ fn a_shell_then_sleep_cached_sample_changes_the_tab_icon() {
         [("bash", "#1 \u{E760} shell"), ("sleep", "#1 \u{F489} shell"), ("sh", "#1 \u{E691} shell")]
     {
         cache(&mut pane, name);
-        refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
+        refresh_active_tab_title(&mut tabs, 0, &pane, &parser.lock(), 0);
         assert_eq!(tabs.active().map(|tab| tab.title.as_str()), Some(title), "{name}");
     }
 }
@@ -77,7 +77,7 @@ fn without_osc1_the_label_and_caption_are_unchanged() {
         for name in ["zsh", "tmux"] {
             let (mut tabs, mut pane, parser) = single_tab(output);
             cache(&mut pane, name);
-            refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
+            refresh_active_tab_title(&mut tabs, 0, &pane, &parser.lock(), 0);
             let parser = parser.lock();
             let expected = format_tab_title(0, parser.cwd(), Some(name), parser.title());
             let tab = tabs.active().expect("one tab");
@@ -100,7 +100,7 @@ fn osc1_names_the_tab_label_but_not_the_caption() {
     let (mut tabs, mut pane, parser) =
         single_tab(b"\x1b]7;file://localhost/work/project\x07\x1b]1;~/project\x07");
     cache(&mut pane, "zsh");
-    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
+    refresh_active_tab_title(&mut tabs, 0, &pane, &parser.lock(), 0);
     let automatic = {
         let parser = parser.lock();
         format_tab_title(0, parser.cwd(), Some("zsh"), parser.title())
@@ -116,10 +116,10 @@ fn a_rename_wins_over_osc1_until_it_is_cleared() {
     let (mut tabs, mut pane, parser) = single_tab(b"\x1b]1;tab name\x07");
     cache(&mut pane, "zsh");
     tabs.set_active_custom_title("mine");
-    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
+    refresh_active_tab_title(&mut tabs, 0, &pane, &parser.lock(), 0);
     assert!(tabs.active().unwrap().title.ends_with(" mine"), "{}", tabs.active().unwrap().title);
     tabs.set_active_custom_title("");
-    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
+    refresh_active_tab_title(&mut tabs, 0, &pane, &parser.lock(), 0);
     assert!(
         tabs.active().unwrap().title.ends_with(" tab name"),
         "{}",
@@ -142,7 +142,7 @@ fn the_label_follows_the_active_panes_osc1() {
         (&other, &other_parser, " work/beta"),
         (&named, &named_parser, " alpha"),
     ] {
-        refresh_active_tab_title(&mut tabs, pane, &parser.lock(), 0);
+        refresh_active_tab_title(&mut tabs, 0, pane, &parser.lock(), 0);
         let title = &tabs.active().unwrap().title;
         assert!(title.ends_with(body), "{title:?} ends with {body:?}");
     }

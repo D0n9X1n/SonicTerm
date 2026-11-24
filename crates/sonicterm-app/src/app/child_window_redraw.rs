@@ -218,6 +218,7 @@ impl App {
             }
             let _ = crate::app::refresh_active_tab_title(
                 &mut child.tabs,
+                active_id,
                 pane,
                 &frame.guards[active_pos].1,
                 tab_idx,

@@ -551,7 +551,9 @@ vte's 16-parameter truncation. Input must be valid UTF-8 without control charact
 and end with BEL or a complete `ESC \`. Cancellation or rejection clears link/CWD
 trust but preserves the prior displayed title. A nonempty OSC 1 sets the tab name
 and an empty or bare one clears it; OSC 0 also clears it, OSC 2 leaves it, and RIS
-clears it. OSC 8 still limits each retained
+clears it. Only the collector applies OSC 1, in every numeric spelling (`1`, `01`,
+`+1`), so a bare OSC 1 cut by CAN, SUB or an ESC that does not complete ST changes
+nothing. OSC 8 still limits each retained
 URI to 8 KiB and client id to 1 KiB.
 
 

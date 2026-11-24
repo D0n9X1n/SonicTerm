@@ -52,12 +52,13 @@ impl Parser {
                         let probed = &content[..usize::from(content_len)];
                         (probed == b"22")
                             .then_some(22)
+                            .or_else(|| is_icon_title_number(probed).then_some(1))
                             .or_else(|| vt_color::color_osc_number(probed))
                     })
                     .flatten();
                 if let Some(code) = bare_code {
-                    // When: bare_code holds a bare color request (`104`, `110`) or a bare `22`, own
-                    // it: BEL applies it now, ESC waits for the `\` that completes ST.
+                    // When: bare_code holds a bare color request (`104`, `110`), a bare `22` or a
+                    // bare OSC 1, own it: BEL applies it now, ESC waits for the `\` that completes ST.
                     self.inner = vte::Parser::new();
                     self.pending_esc = false;
                     if byte == 0x07 {
@@ -76,15 +77,22 @@ impl Parser {
                     content_len += 1;
                 }
                 let prefix = &content[..usize::from(content_len)];
-                if matches!(prefix, b"0;" | b"1;" | b"2;" | b"7;" | b"8;") {
-                    // When: prefix matches 0, 1, 2, 7, or 8, own its payload before vte can split or truncate it.
+                // OSC 1 in any numeric spelling, else the canonical 0, 2, 7 or 8.
+                let text_code = prefix
+                    .strip_suffix(b";")
+                    .is_some_and(is_icon_title_number)
+                    .then_some(1)
+                    .or_else(|| {
+                        matches!(prefix, b"0;" | b"2;" | b"7;" | b"8;")
+                            .then(|| u16::from(prefix[0] - b'0'))
+                    });
+                if let Some(code) = text_code {
+                    // When: text_code names OSC 1 in any spelling, or 0, 2, 7 or 8, own its
+                    // payload before vte can split or truncate it.
                     self.inner = vte::Parser::new();
                     self.pending_esc = false;
-                    self.raw_osc = Some(RawOsc::Semantic {
-                        code: u16::from(prefix[0] - b'0'),
-                        content: Vec::new(),
-                        pending_esc: false,
-                    });
+                    self.raw_osc =
+                        Some(RawOsc::Semantic { code, content: Vec::new(), pending_esc: false });
                     return true;
                 }
                 if let Some(code) = program_osc_number(prefix) {
@@ -262,6 +270,17 @@ impl Parser {
             }
         }
     }
+}
+
+/// Whether `spelling` (digits, optionally signed `+`) names OSC 1, as vte's number parse would
+/// read it, so `01` and `+1` reach the same bounded owner as the canonical `1`.
+fn is_icon_title_number(spelling: &[u8]) -> bool {
+    let digits = spelling.strip_prefix(b"+").unwrap_or(spelling);
+    !digits.is_empty()
+        && digits.iter().all(u8::is_ascii_digit)
+        && digits.iter().fold(0u32, |value, digit| {
+            value.saturating_mul(10).saturating_add(u32::from(digit - b'0'))
+        }) == 1
 }
 
 /// Remove the C0 controls a program or color `code` payload carried, as vte drops them in an OSC

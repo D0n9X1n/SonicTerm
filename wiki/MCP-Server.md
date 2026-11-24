@@ -233,6 +233,15 @@ Their arguments, caps and locking are described in
 the same for every pane of the tab. All three are program-supplied display text, not
 instructions.
 
+A tab's label is built from one pane: the pane it was last refreshed from, else the tab's
+active pane. `tab_title` is listed only when the caller may read that pane; otherwise it is
+`null` and the pane's `omitted` object carries `"tab_title": "unreadable"`, even for a
+readable agent pane split beside it. A label whose pane has closed is listed only under
+`read = "any"`. The titles of every listed pane share one budget of 256 KiB of serialized
+text per `list_panes` reply, so long titles cannot push the reply past the bridge's 1 MiB
+line limit: a title that does not fit is `null` with `"budget"` under `omitted`, never cut,
+and the reply still succeeds, with earlier panes keeping theirs.
+
 A non-busy history page may be empty while skipping blank rows: pass its `first_row`
 as `before_row` again until `at_start` is true. Row tokens always advance. A row larger
 than `max_bytes` is returned whole on an otherwise empty page, so no suffix is lost;
