@@ -399,3 +399,18 @@ fn only_the_collector_stores_program_status() {
     parser.advance(b"\x1b]7501;state=working\x07");
     assert_eq!(status_ids(&parser), vec![(String::new(), "working")]);
 }
+
+/// An OSC 9 or 777 payload past the escape cap is swallowed to its terminator: no event, nothing
+/// of it prints, and the sentinel after it does.
+#[test]
+fn over_length_program_osc_is_swallowed_to_its_terminator() {
+    for prefix in [b"9;".as_slice(), b"777;notify;T;"] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        let mut bytes = b"\x1b]".to_vec();
+        bytes.extend_from_slice(prefix);
+        bytes.resize(bytes.len() + MAX_ESCAPE_SEQUENCE_BYTES + 1, b'a');
+        bytes.extend_from_slice(b"\x07Z");
+        assert!(parser.advance(&bytes).is_empty(), "{:?}: no event", prefix);
+        assert_eq!(row_text(&parser, 0).trim_end(), "Z");
+    }
+}

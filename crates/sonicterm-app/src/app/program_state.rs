@@ -12,10 +12,17 @@ use sonicterm_ui::status_line::{
 use winit::window::WindowId;
 
 use super::{App, FrontmostKind};
-use crate::taskbar_progress::{ProgressReport, ProgressSurface, TaskbarProgressBackend};
+use crate::taskbar_progress::{
+    ProgressReport, ProgressState, ProgressSurface, TaskbarProgressBackend,
+};
 
 /// At most one delivery per surface per interval; the last value of a burst lands at its end.
 pub(super) const PROGRESS_DELIVERY_INTERVAL: Duration = Duration::from_millis(250);
+/// A report clears this long after the sync that first saw it, so a program killed mid-run leaves
+/// no bar behind (kitty).
+pub(super) const PROGRESS_STALE_AFTER: Duration = Duration::from_secs(60);
+/// A normal report at 100 % clears this long after the sync that first saw it (kitty).
+pub(super) const PROGRESS_DONE_STALE_AFTER: Duration = Duration::from_secs(5);
 /// How long a program toast stays up.
 pub(super) const TOAST_DURATION: Duration = Duration::from_secs(5);
 /// A notification from any pane this soon after a toast appears joins it.
@@ -67,6 +74,9 @@ struct Slot {
 pub(crate) struct ProgramState {
     /// Each pane's active report and the update sequence that set it; the newest wins app-wide.
     reports: HashMap<u64, (ProgressReport, u64)>,
+    /// Each pane's stale-progress deadline and the report sequence it was armed for; a deadline
+    /// clears only that report, never a newer one or another pane's.
+    expiry: HashMap<u64, (u64, Instant)>,
     next_sequence: u64,
     slots: HashMap<ProgressSurface, Slot>,
     /// Each live surface's last delivery, kept across a clear until its interval passes, so a set
@@ -134,17 +144,48 @@ pub(super) fn desired_progress(
 }
 
 impl ProgramState {
-    /// Record `pane_id`'s report, or forget it on `None`.
+    /// Record `pane_id`'s report, or forget it on `None`. A report with no percent keeps the
+    /// pane's last one; with none before, it stays `None`, which every backend shows as 0.
     pub(super) fn note_progress(&mut self, pane_id: u64, report: Option<ProgressReport>) {
         match report {
-            Some(report) => {
+            Some(mut report) => {
+                let last = self.reports.get(&pane_id).and_then(|(last, _)| last.percent);
+                report.percent = report.percent.or(last);
                 self.next_sequence += 1;
                 self.reports.insert(pane_id, (report, self.next_sequence));
             }
             None => {
                 self.reports.remove(&pane_id);
+                self.expiry.remove(&pane_id);
             }
         }
+    }
+
+    /// Arm a deadline for each report without one (`PROGRESS_DONE_STALE_AFTER` after a normal
+    /// report at 100 %, else `PROGRESS_STALE_AFTER`), drop each report whose own deadline passed by
+    /// `now`, and return the next deadline.
+    fn expire_stale(&mut self, now: Instant) -> Option<Instant> {
+        let reports = &self.reports;
+        // A deadline armed for a replaced or removed report is dropped, so it can clear nothing.
+        self.expiry.retain(|pane_id, (sequence, _)| {
+            reports.get(pane_id).is_some_and(|(_, current)| current == sequence)
+        });
+        for (pane_id, (report, sequence)) in reports {
+            let done = report.state == ProgressState::Normal && report.percent == Some(100);
+            let lifetime = if done { PROGRESS_DONE_STALE_AFTER } else { PROGRESS_STALE_AFTER };
+            self.expiry.entry(*pane_id).or_insert((*sequence, now + lifetime));
+        }
+        let expired: Vec<u64> = self
+            .expiry
+            .iter()
+            .filter(|(_, (_, deadline))| *deadline <= now)
+            .map(|(pane_id, _)| *pane_id)
+            .collect();
+        for pane_id in expired {
+            self.reports.remove(&pane_id);
+            self.expiry.remove(&pane_id);
+        }
+        self.expiry.values().map(|(_, deadline)| *deadline).min()
     }
 
     /// Whether nothing is reported and nothing is shown, so a sync has no work.
@@ -248,7 +289,8 @@ impl App {
                 if recorded.len() == RECORDED_DELIVERIES_MAX {
                     recorded.remove(0);
                 }
-                recorded.push((Instant::now(), report.map(|report| report.percent)));
+                // A report with no percent records 0, as every backend shows it.
+                recorded.push((Instant::now(), report.map(|report| report.percent.unwrap_or(0))));
             }
         }
         let recorded = RecordedDeliveries::default();
@@ -306,6 +348,8 @@ impl App {
             .flat_map(|window| window.panes.keys().copied())
             .collect();
         self.program.reports.retain(|pane_id, _| live.contains(pane_id));
+        // Expiry runs before arbitration, so an expired report never wins a surface.
+        let expiry = self.program.expire_stale(now);
         let windows: Vec<WindowProgress> = self
             .registry
             .windows
@@ -329,7 +373,8 @@ impl App {
         self.program.backend = Some(backend);
         let delivered = self.program.delivered - delivered_before;
         self.note_status_line(|counters| counters.taskbar_deliveries += delivered);
-        next
+        // The earlier of the trailing-edge delivery and the next stale-progress expiry.
+        next.into_iter().chain(expiry).min()
     }
 
     /// Clear every surface that shows progress and release the backend, at App shutdown.

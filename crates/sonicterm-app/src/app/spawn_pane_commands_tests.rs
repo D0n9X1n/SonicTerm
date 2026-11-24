@@ -728,7 +728,7 @@ fn a_batch_reports_its_last_progress_and_clears_only_what_it_showed() {
     let normal = |percent| {
         Some(sonicterm_vt::vt::ProgressReport {
             state: sonicterm_vt::vt::ProgressState::Normal,
-            percent,
+            percent: Some(percent),
         })
     };
     let first = program_batch(&handles, "\x1b]9;4;1;10\x07\x1b]9;4;1;20\x07");
@@ -819,7 +819,7 @@ fn conpty_child_program_oscs_reach_the_pane() {
             },
         );
     }
-    let set = Some(ProgressReport { state: ProgressState::Normal, percent: 40 });
+    let set = Some(ProgressReport { state: ProgressState::Normal, percent: Some(40) });
     assert_eq!(progress, vec![set, None]);
     let total: u32 = notices.iter().map(|(_, _, more)| more + 1).sum();
     assert_eq!(total, 2, "both notifications arrived: {notices:?}");

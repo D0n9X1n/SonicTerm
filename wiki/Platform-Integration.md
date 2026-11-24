@@ -535,7 +535,9 @@ unchanged.
 On the two app-wide surfaces the shown value is the most recently updated
 active report from any pane of any terminal window. When that pane ends its
 report or closes, the next most recent shows; with none left, or no terminal
-window left, the surface clears. A disabling reload clears every surface at
+window left, the surface clears. A report also ends on its own when stale: 60 s
+after its pane's last report, or 5 s after a normal report at 100 % (see
+[Terminal IO and VT](Terminal-IO-and-VT)). A disabling reload clears every surface at
 once, and quitting clears them before the App exits.
 
 Each surface has one latest-value slot, never a queue, delivered at most once

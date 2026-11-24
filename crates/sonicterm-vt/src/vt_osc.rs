@@ -464,3 +464,7 @@ mod vt_osc_kitty_notify_tests;
 #[cfg(test)]
 #[path = "vt_osc_cwd_tests.rs"]
 mod vt_osc_cwd_tests;
+
+#[cfg(test)]
+#[path = "vt_osc_ignored_tests.rs"]
+mod vt_osc_ignored_tests;

@@ -621,20 +621,43 @@ URI to 8 KiB and client id to 1 KiB.
 - **OSC 8:** preserve the full URI, including semicolons. Only `id=` is extracted
   from the parameter field; other parameters are not treated as the client id.
 - **OSC 9 and OSC 777:** the parser validates and bounds these; the host applies its policy.
-  - `9;<n>` whose `n` is all digits with a value in `1..=12`, leading zeros included (`001`),
-    is a ConEmu subcommand and never a notification. Only `4` (progress), `9` (working
-    directory, above) and `12` (a prompt mark, under OSC 133 below) are implemented; the
-    others are ignored.
-  - `9;4;<st>[;<pr>]`: `st` is one digit, `0` clear, `1` normal, `2` error, `3` indeterminate,
-    `4` paused. `pr` is one to three digits, clamped to 100; a missing `pr` is 0. Any other
-    form (a fraction, a sign, an empty value after a separator, four digits) is ignored and
-    changes nothing. Progress also clears on RIS and on OSC 133 `D`; without shell integration
-    a bar stays until the next `9;4;0`, RIS or pane close.
+  - `9;<n>;…` whose `n` is all digits with a value in `1..=12`, leading zeros included
+    (`001`), is a ConEmu subcommand and never a notification. Only `4` (progress), `9`
+    (working directory, above) and `12` (a prompt mark, under OSC 133 below) are
+    implemented; the others are ignored. A bare `9;<n>`, with no `;` after it, follows
+    Ghostty: `5` and `10` are ignored, `12` is a prompt mark, and every other `n` is
+    notification text, so a bare `9;9` notifies while `9;9;` is an empty directory report.
+    WezTerm notifies for every bare form and kitty ignores them all (an intentional
+    difference).
+  - `9;4;<st>[;<pr>]` (Ghostty): `st` is one digit, `0` clear, `1` normal, `2` error, `3`
+    indeterminate, `4` paused; any other `st` is ignored. A digit `pr` is clamped to 100. A
+    normal report with no `pr` is at 0; error and paused with no `pr`, and any state whose
+    `pr` is empty, not digits (a fraction, a sign) or overflows, keep their state with no
+    percent. Clear and indeterminate ignore `pr`, and parameters after `pr` are ignored. A
+    report with no percent never reads as 0 or a clear: the host keeps the pane's last
+    percent, and a backend with none shows 0.
+  - Progress clears on RIS, on OSC 133 `D`, and on its own when stale (kitty): 60 s after
+    the pane's last report, or 5 s after a normal report at 100 %. Each report arms one
+    deadline for its pane that clears only that report, so a newer report, or another pane's,
+    is never cleared by it; expiry runs before the surfaces are chosen, so an expired report
+    never shows over another pane's live one. Ghostty and WezTerm keep a stale bar (an
+    intentional difference).
   - Any other `9;<text>` is a notification whose body is the text, its parameters rejoined
     with `;`. `777;notify;<title>;<body>` is a notification with a title; further parameters
-    rejoin the body. The `;` after the title is required, so `777;notify;T` is ignored; an
-    empty body after it is allowed. Other OSC 777 subcommands, and an empty title with an
-    empty body, are ignored.
+    rejoin the body, and an empty body after the `;` is allowed. `777;notify;T`, with no
+    body, is body `T` with no title, as WezTerm shows it (kitty makes `T` the title, Ghostty
+    refuses it; an intentional difference). `777;notify;`, a bare `777;notify`, other OSC 777
+    subcommands, and an empty title with an empty body are ignored.
+  - Every other form the reference terminals ignore leaves nothing: no glyph of its payload,
+    no host event, no reply and no state change. This covers OSC 3, 5, 6, 13-16, 18, 46, 50,
+    51, 60, 61, 66, 72, 105, 106, 113-116, 118, 176, 440, 441, 633, 666, 697, 701, 3008,
+    5113, 7704, 7721, 7750, 7770, 7771, 7777, 9001, 30001, 30101, 77119, unknown numbers,
+    Sun's `OSC l` and `OSC L`, ConEmu `9;1`, `9;2`, `9;3`, `9;5`-`9;8`, `9;10` and `9;11`,
+    and the OSC 1337 keys `SetMark`, `RemoteHost`, `StealFocus`, `ClearScrollback`,
+    `SetProfile`, `SetBadgeFormat`, `RequestAttention`, `CopyToClipboard`, `EndCopy`,
+    `HighlightCursorLine`, `MultipartFile`, `SetColors`, `SetKeyLabel`, `ReportCellSize`,
+    `UnicodeVersion` and unknown keys. An OSC past the escape cap is swallowed to its
+    terminator.
   - SonicTerm captures the `9;` and `777;` payloads itself, so a body with more parts than
     vte's 16-parameter limit arrives whole. This capture is the only parser of OSC 9 and 777.
     It accepts the number in up to 9 digits, zero-padded ones such as `09;` and `0777;`

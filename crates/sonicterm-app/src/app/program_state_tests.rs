@@ -42,7 +42,7 @@ fn recording(per_window: bool) -> (RecordingBackend, Deliveries) {
 }
 
 fn report(percent: u8) -> ProgressReport {
-    ProgressReport { state: ProgressState::Normal, percent }
+    ProgressReport { state: ProgressState::Normal, percent: Some(percent) }
 }
 
 fn window(native: Option<isize>, active_pane: u64, panes: &[u64]) -> WindowProgress {
@@ -441,7 +441,7 @@ fn progress_set_and_cleared_by_osc_reaches_the_surface_through_the_app() {
     let worker = worker_of(&app, child, front);
     let start = Instant::now();
     feed_pane(&mut app, &worker, b"\x1b]9;4;1;40\x1b\\");
-    assert_eq!(app.sync_taskbar_progress(start), None);
+    assert_eq!(app.sync_taskbar_progress(start), Some(start + PROGRESS_STALE_AFTER), "expiry");
     feed_pane(&mut app, &worker, b"\x1b]9;4;0\x1b\\");
     let due = app.sync_taskbar_progress(start + Duration::from_millis(10));
     assert_eq!(due, Some(start + PROGRESS_DELIVERY_INTERVAL), "the clear waits for its edge");
@@ -505,7 +505,9 @@ fn reloading_taskbar_progress_off_clears_at_once() {
     app.configs.runtime_config_path = Some(path);
     app.force_reload_config();
     assert!(!app.config.notifications.taskbar_progress);
-    assert_eq!(app.sync_taskbar_progress(start + Duration::from_millis(1)), None);
+    // Only the kept report's stale-progress expiry is still due.
+    let due = app.sync_taskbar_progress(start + Duration::from_millis(1));
+    assert_eq!(due, Some(start + PROGRESS_STALE_AFTER));
     assert_eq!(deliveries.borrow().last(), Some(&(ProgressSurface::App, None)));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -525,7 +527,7 @@ fn program_changes_are_counted_once_each() {
     app.handle_program_notify(front, None, "two", 3, now + Duration::from_millis(100));
     let (backend, deliveries) = recording(false);
     app.set_taskbar_progress_backend(Box::new(backend));
-    assert_eq!(app.sync_taskbar_progress(now), None);
+    assert_eq!(app.sync_taskbar_progress(now), Some(now + PROGRESS_STALE_AFTER), "expiry");
     let counters = &app.frame_counters.as_ref().unwrap().status_line;
     assert_eq!(
         (
@@ -558,4 +560,72 @@ fn the_counting_surface_records_each_delivery_for_the_harness() {
         app.__take_taskbar_progress_deliveries().into_iter().map(|(_, percent)| percent).collect();
     assert_eq!(taken, [Some(40), None]);
     assert!(app.__take_taskbar_progress_deliveries().is_empty(), "a take empties the record");
+}
+
+/// A report clears 60 s after the sync that saw it and a normal report at 100 % 5 s after, each
+/// deadline joining the sync's wake-up; a remove disarms it.
+#[test]
+fn stale_progress_expires_and_its_deadline_wakes_the_sync() {
+    let (mut app, deliveries, _, front, _) = lifecycle_app();
+    let start = Instant::now();
+    let last = |deliveries: &Deliveries| deliveries.borrow().last().copied();
+    app.note_program_progress(front, Some(report(40)));
+    assert_eq!(app.sync_taskbar_progress(start), Some(start + PROGRESS_STALE_AFTER));
+    app.sync_taskbar_progress(start + PROGRESS_STALE_AFTER - Duration::from_millis(1));
+    assert_eq!(last(&deliveries), Some((ProgressSurface::App, Some(report(40)))), "still shown");
+    assert_eq!(app.sync_taskbar_progress(start + PROGRESS_STALE_AFTER), None);
+    assert_eq!(last(&deliveries), Some((ProgressSurface::App, None)), "cleared at 60 s");
+
+    let done = start + PROGRESS_STALE_AFTER * 2;
+    app.note_program_progress(front, Some(report(100)));
+    assert_eq!(app.sync_taskbar_progress(done), Some(done + PROGRESS_DONE_STALE_AFTER));
+    app.sync_taskbar_progress(done + PROGRESS_DONE_STALE_AFTER);
+    assert_eq!(last(&deliveries), Some((ProgressSurface::App, None)), "cleared 5 s after 100 %");
+
+    let removed = start + PROGRESS_STALE_AFTER * 3;
+    app.note_program_progress(front, Some(report(10)));
+    assert_eq!(app.sync_taskbar_progress(removed), Some(removed + PROGRESS_STALE_AFTER));
+    app.note_program_progress(front, None);
+    let due = app.sync_taskbar_progress(removed + PROGRESS_DELIVERY_INTERVAL);
+    assert_eq!(due, None, "a remove disarms the deadline");
+}
+
+/// A deadline clears only the report it was armed for: a newer report on the same pane survives
+/// the older deadline, and one pane's expiry hands the App surface to another pane's live report.
+#[test]
+fn a_deadline_clears_only_the_report_it_was_armed_for() {
+    let (mut app, _, _, front, _) = lifecycle_app();
+    let start = Instant::now();
+    app.note_program_progress(front, Some(report(40)));
+    app.sync_taskbar_progress(start);
+    let renewed = start + Duration::from_secs(30);
+    app.note_program_progress(front, Some(report(50)));
+    assert_eq!(app.sync_taskbar_progress(renewed), Some(renewed + PROGRESS_STALE_AFTER));
+    app.sync_taskbar_progress(start + PROGRESS_STALE_AFTER);
+    assert_eq!(app.program.reports.get(&front).map(|entry| entry.0), Some(report(50)));
+
+    let (mut app, deliveries, _, front, back) = lifecycle_app();
+    app.note_program_progress(back, Some(report(20)));
+    app.sync_taskbar_progress(start);
+    let finished = start + Duration::from_secs(10);
+    app.note_program_progress(front, Some(report(100)));
+    app.sync_taskbar_progress(finished);
+    assert_eq!(deliveries.borrow().last(), Some(&(ProgressSurface::App, Some(report(100)))));
+    app.sync_taskbar_progress(finished + PROGRESS_DONE_STALE_AFTER);
+    assert!(!app.program.reports.contains_key(&front), "the finished report expired");
+    let shown = deliveries.borrow().last().copied();
+    assert_eq!(shown, Some((ProgressSurface::App, Some(report(20)))), "back's live report shows");
+}
+
+/// A report with no readable percent keeps its state and the pane's last percent; with none
+/// before, it stays `None` and the backend shows 0.
+#[test]
+fn a_report_without_a_percent_keeps_the_last_one() {
+    let mut state = ProgramState::default();
+    let paused = |percent| ProgressReport { state: ProgressState::Paused, percent };
+    state.note_progress(1, Some(paused(None)));
+    assert_eq!(state.reports[&1].0, paused(None), "nothing earlier");
+    state.note_progress(1, Some(report(40)));
+    state.note_progress(1, Some(paused(None)));
+    assert_eq!(state.reports[&1].0, paused(Some(40)), "paused stays paused at the last 40");
 }
