@@ -15,6 +15,7 @@ use windows::Win32::{
 };
 
 use super::Snapshot;
+use crate::app::osc52_read_source::{bounded_utf16, utf16_block_admits, ReadOutcome};
 
 /// The standard clipboard format for NUL-terminated UTF-16 text.
 const CF_UNICODETEXT: u32 = 13;
@@ -31,13 +32,24 @@ pub(super) fn sequence() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
 }
 
+/// Attempts an OSC 52 read makes to open a clipboard another process holds.
+const READ_OPEN_ATTEMPTS: usize = 10;
+
+/// The pause between an OSC 52 read's open attempts.
+const READ_OPEN_RETRY: Duration = Duration::from_millis(10);
+
 /// The clipboard, open on this thread until dropped.
 struct OpenGuard;
 
 impl OpenGuard {
     /// Open the clipboard with no owner window, retrying while another process holds it.
     fn open() -> Option<Self> {
-        for _ in 0..OPEN_ATTEMPTS {
+        Self::open_with(OPEN_ATTEMPTS, OPEN_RETRY)
+    }
+
+    /// Open the clipboard in at most `attempts` tries, `pause` apart.
+    fn open_with(attempts: usize, pause: Duration) -> Option<Self> {
+        for _ in 0..attempts {
             let opened =
                 // SAFETY: OpenClipboard with no owner window only claims the clipboard here.
                 unsafe { OpenClipboard(None) }.is_ok();
@@ -45,7 +57,7 @@ impl OpenGuard {
                 // When: opened, Drop closes the clipboard on this thread.
                 return Some(Self);
             }
-            std::thread::sleep(OPEN_RETRY);
+            std::thread::sleep(pause);
         }
         None
     }
@@ -95,6 +107,53 @@ fn with_text_block<T>(
         // SAFETY: block was locked above; a final unlock reports an error with no lock left.
         unsafe { GlobalUnlock(block) };
     Some(result)
+}
+
+/// The clipboard's `CF_UNICODETEXT` for an OSC 52 read, within `max_bytes` of UTF-8. The block's
+/// `GlobalSize` decides `TooLarge` before `GlobalLock`, so an oversized block is never locked or
+/// copied; conversion is measured before it allocates. Delayed rendering runs inside
+/// `GetClipboardData`, which the reader's deadline bounds for the caller.
+pub(in crate::app) fn read_text(max_bytes: usize) -> ReadOutcome {
+    let Some(_open) = OpenGuard::open_with(READ_OPEN_ATTEMPTS, READ_OPEN_RETRY) else {
+        // When: open_with gives up, another process held the clipboard throughout.
+        return ReadOutcome::Failed;
+    };
+    let data =
+        // SAFETY: the clipboard is open on this thread; the handle stays owned by the clipboard.
+        unsafe { GetClipboardData(CF_UNICODETEXT) };
+    let Ok(handle) = data else {
+        // When: data is Err, the clipboard offers no CF_UNICODETEXT, so it holds no text.
+        return ReadOutcome::Empty;
+    };
+    let block = HGLOBAL(handle.0);
+    let block_bytes =
+        // SAFETY: block is the clipboard's live text handle while the clipboard stays open.
+        unsafe { GlobalSize(block) };
+    if block_bytes == 0 {
+        // When: block_bytes is 0, GlobalSize could not size the handle, so nothing is readable.
+        return ReadOutcome::Failed;
+    }
+    if !utf16_block_admits(block_bytes, max_bytes) {
+        // When: utf16_block_admits refuses block_bytes, the block is never locked.
+        return ReadOutcome::TooLarge;
+    }
+    let base =
+        // SAFETY: block is a live moveable allocation, so GlobalLock returns its base or null.
+        unsafe { GlobalLock(block) }.cast::<u16>();
+    if base.is_null() {
+        // When: base is null, GlobalLock failed and there is nothing to read.
+        return ReadOutcome::Failed;
+    }
+    let units =
+        // SAFETY: base points at block_bytes locked bytes until GlobalUnlock; block_bytes / 2
+        // u16 units stay in bounds.
+        unsafe { std::slice::from_raw_parts(base, block_bytes / 2) };
+    let text_units = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
+    let outcome = bounded_utf16(&units[..text_units], max_bytes);
+    let _ =
+        // SAFETY: block was locked above; a final unlock reports an error with no lock left.
+        unsafe { GlobalUnlock(block) };
+    outcome
 }
 
 /// The clipboard text, when its block is at most `max_block_bytes`.

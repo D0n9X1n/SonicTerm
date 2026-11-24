@@ -307,7 +307,7 @@ are refused, and user copies stay on the event-loop thread.
 | `52;c` (no data), `52;c;` | clears the clipboard |
 | Base64 padding | optional; any other byte discards the write |
 | non-UTF-8 payload | invalid sequences become U+FFFD |
-| `?` (any kinds) | read: no clipboard contents are read; answered with empty `ESC ] 52 ; <label> ; ESC \` replies, or silent under `osc52_read = "deny"` |
+| `?` (any kinds) | read: under `osc52_read = "allow"` answered with the clipboard's text as `ESC ] 52 ; <label> ; <b64> ESC \`; see below for `ask`, `deny` and the bounds |
 | `1337;Copy=:<b64>` | `c` write; an empty or `?` value writes nothing |
 | `1337;Copy=;<b64>` | not supported |
 
@@ -318,14 +318,44 @@ on disk (kitty: 512 MB with disk spill); Windows reasserts only writes of at mos
 UTF-16; WezTerm's `Copy=;` spelling is not supported (WezTerm parses it but never acts on it).
 No DECRQM or OSC 5522 clipboard capability is advertised.
 
-A read is answered on the pane's ordinary parser-reply path, after the section's other
-replies, and every reply is ST-terminated whatever ended the request. One letter is echoed
-when it is `c`, `s` or `p` and any other single letter answers `c` (Ghostty; kitty answers `s`
-with `c`); a longer field answers once per destination it names, `c` before `p` (kitty), and
-`c` when it names neither. The reply is always empty, as Ghostty and kitty answer a declined
-prompt, so it carries no clipboard bytes and nothing is reserved for it. `osc52_read = "deny"`
+Every read reply is ST-terminated whatever ended the request. One letter is echoed when it is
+`c`, `s` or `p` and any other single letter answers `c` (Ghostty; kitty answers `s` with `c`);
+a longer field answers once per destination it names, `c` before `p` (kitty), and `c` when it
+names neither. `p` reads PRIMARY on Linux and is answered empty elsewhere. `osc52_read = "deny"`
 drops the read silently (Ghostty and WezTerm; kitty sends an empty reply). WezTerm ignores
 reads under every policy.
+
+Otherwise the pane's VT worker gives the read a ticket before posting anything: one per pane
+and 8 per process. A read past either bound is answered empty at once on the ordinary
+parser-reply path; an empty reply carries no clipboard bytes. A ticket records the pane, its PTY,
+the window it is in, the last prompt or command boundary, and the policy generation. Closing the
+pane, moving it to another window (or away and back), a prompt start, command start or end, a
+reset (RIS), a different PTY, READONLY, and any change to `osc52` or `osc52_read` each cancel the
+ticket silently. It is checked again before the native read starts and before every attempt to
+deliver the reply.
+
+Under `"ask"` the ticket waits for consent. No consent page exists yet, so it is answered with an
+empty reply after 120 s, as a declined prompt is. Under `"allow"` the clipboard is read on a
+disposable reader thread, one read at a time, never on the event loop. A read returns at most
+8 MiB of UTF-8 text (4 MiB per destination for `cp`); a larger value, a failed read, or no
+clipboard owner is answered empty. Text that is not valid UTF-8 becomes U+FFFD. Each destination
+has 2 s on macOS and Windows and 7 s on Linux. A read past its deadline is answered empty, but its
+ticket and its share of the reply budget stay held until the native call returns, and other
+reads are answered empty without reading meanwhile.
+
+| Platform | Bound |
+| --- | --- |
+| Windows | `OpenClipboard` retried 10 times 10 ms apart; `GlobalSize` decides a too-large `CF_UNICODETEXT` before `GlobalLock` |
+| Linux (X11, XWayland) | `ConvertSelection` to `UTF8_STRING`, 2 s for the owner's answer; a format-8 `UTF8_STRING`, `STRING` or `text/plain;charset=utf-8` value within the cap; an `INCR` transfer whose format-32 size is within the cap, 2 s per chunk and 5 s in all; no X server answers empty |
+| macOS | `NSPasteboardTypeString`; AppKit holds the whole value before SonicTerm can measure it, as any paste does, and the copy into SonicTerm is refused past the cap |
+
+The reply for one request, all destinations together, is one message of at most about 10.7 MiB.
+It goes only to the requesting pane's PTY, through the writer's one-slot sensitive channel: never
+the reply spool or its disk spill, a broadcast pane, or a log, which records only lengths and
+outcomes. When the writer's admission lock is busy, delivery is retried on the next three
+event-loop turns, each checking the ticket again; a full slot, a stopped writer, or the last
+failed retry drops the reply, and the program gets none, as in WezTerm. Read replies are not
+ordered against the pane's other replies.
 
 ### Host reports
 

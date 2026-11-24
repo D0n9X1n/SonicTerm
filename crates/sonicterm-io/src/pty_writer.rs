@@ -17,6 +17,7 @@ pub(super) fn spawn_writer_thread(
             let _active = ActivePtyIoThread::enter();
             let mut last_was_reply = false;
             let mut reply_wake = replies.wake.clone();
+            let sensitive = replies.sensitive.clone();
             // Cancellation, closing and a disconnected input channel end the writer on purpose.
             let mut exit = TERMINAL_STOPPED;
             loop {
@@ -29,18 +30,27 @@ pub(super) fn spawn_writer_thread(
                 // A ready UI message gets the next turn after each reply chunk.
                 // Otherwise select fairly between UI input and the reply wake hint.
                 let ui_turn = last_was_reply.then(|| rx.try_recv().ok()).flatten();
-                let (bytes, is_reply) = if let Some(bytes) = ui_turn {
-                    (bytes, false)
+                // A sensitive reply's custody (its clipboard lease) is dropped only after its write.
+                let (bytes, is_reply, custody) = if let Some(bytes) = ui_turn {
+                    (bytes, false, None)
                 } else {
                     // When: ui_turn is absent, park until cancellation or either input source becomes ready.
                     crossbeam_channel::select! {
                         recv(cancel) -> _ => break,
                         recv(rx) -> result => match result {
-                            Ok(bytes) => (bytes, false),
+                            Ok(bytes) => (bytes, false, None),
+                            Err(_) => break,
+                        },
+                        recv(sensitive) -> result => match result {
+                            Ok(reply) => {
+                                let (bytes, custody) = reply.into_parts();
+                                (bytes, true, Some(custody))
+                            }
+                            // The reader keeps a sender, so the slot never disconnects first.
                             Err(_) => break,
                         },
                         recv(reply_wake) -> _ => match replies.pop() {
-                            Ok(Some(bytes)) => (bytes, true),
+                            Ok(Some(bytes)) => (bytes, true, None),
                             Ok(None) => continue,
                             Err(error) => {
                                 if !progress.closing.load(Ordering::SeqCst) {
@@ -84,6 +94,8 @@ pub(super) fn spawn_writer_thread(
                     replies.fail(error);
                     break;
                 }
+                // The bytes are written, so a sensitive reply's lease and ticket are released now.
+                drop(custody);
                 if !is_reply {
                     // Only a flushed user-input message completes an admitted ordinal.
                     progress.input_completed.fetch_add(1, Ordering::Release);

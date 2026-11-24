@@ -178,6 +178,10 @@ struct Spill {
 pub(crate) struct ReplyReader {
     sender: PtyReplySender,
     pub(crate) wake: Receiver<()>,
+    /// Sensitive replies (clipboard reads), which never enter the spool; see `pty_sensitive_reply`.
+    pub(crate) sensitive: Receiver<crate::pty::SensitiveReply>,
+    /// Keeps `sensitive` connected while the reader lives; handed to the PTY handle by clone.
+    sensitive_tx: Sender<crate::pty::SensitiveReply>,
 }
 
 impl PtyReplySender {
@@ -534,10 +538,16 @@ pub(crate) fn reply_spool_with(
         stats: Arc::default(),
         clock,
     };
-    (sender.clone(), ReplyReader { sender, wake: rx })
+    let (sensitive_tx, sensitive) = crate::pty::sensitive_reply_channel();
+    (sender.clone(), ReplyReader { sender, wake: rx, sensitive, sensitive_tx })
 }
 
 impl ReplyReader {
+    /// The sender of this reader's sensitive-reply slot, for the PTY handle.
+    pub(crate) fn sensitive_sender(&self) -> Sender<crate::pty::SensitiveReply> {
+        self.sensitive_tx.clone()
+    }
+
     /// Remove whole submissions fitting a 32 KiB turn, unlocking before native PTY I/O.
     pub(crate) fn pop(&self) -> io::Result<Option<Vec<u8>>> {
         let mut state = self.sender.state.lock();
@@ -560,9 +570,10 @@ impl ReplyReader {
     }
 }
 
-// Lifecycle: ReplyReader closes sender admission and clears state on the native writer thread after in-flight operations.
+// Lifecycle: ReplyReader drops queued sensitive replies (their custody), closes admission and clears spool state.
 impl Drop for ReplyReader {
     fn drop(&mut self) {
+        while self.sensitive.try_recv().is_ok() {}
         self.sender.close();
         let mut state = self.sender.state.lock();
         state.clear();

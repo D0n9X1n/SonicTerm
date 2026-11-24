@@ -672,7 +672,8 @@ fn worker_spawn_roles_publish_their_own_pane_not_an_app_global() {
 }
 
 /// Accepted writes stay separate events in order, then one payload-free summary follows; a batch of
-/// 1,000 reads writes nothing and sends exactly one summary, all naming the worker's pane.
+/// 1,000 reads writes nothing, posts the pane's one read ticket, then exactly one summary, all
+/// naming the worker's pane.
 #[test]
 fn osc52_batch_keeps_each_write_and_sends_one_summary() {
     use base64::Engine as _;
@@ -690,10 +691,10 @@ fn osc52_batch_keeps_each_write_and_sends_one_summary() {
         refused: 1_000,
         latest: Some(Osc52Refusal::Read),
     };
-    assert_eq!(
-        osc52_batch(reads.as_bytes()),
-        [UserEvent::ClipboardAttempts { pane_id: 7, attempts: refused }]
-    );
+    let emitted = osc52_batch(reads.as_bytes());
+    assert_eq!(emitted.len(), 2);
+    assert!(matches!(emitted[0], UserEvent::ClipboardRead { pane_id: 7, .. }));
+    assert_eq!(emitted[1], UserEvent::ClipboardAttempts { pane_id: 7, attempts: refused });
     assert!(osc52_batch(b"plain output").is_empty(), "no OSC 52, no summary");
 }
 

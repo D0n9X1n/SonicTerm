@@ -862,6 +862,7 @@ impl TestReplyPane {
     #[doc(hidden)]
     pub fn replies(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
+        let mut reads = Vec::new();
         super::spawn_pane::publish_pane_vt_batch_with(
             &self.handles,
             bytes,
@@ -869,10 +870,19 @@ impl TestReplyPane {
             &mut None,
             &mut self.sync_latch,
             super::media::decode_inline_image,
-            |_| {},
+            |event| {
+                if let UserEvent::ClipboardRead { read, .. } = event {
+                    reads.push(read);
+                }
+            },
             Instant::now,
             |reply: Vec<u8>| replies.extend_from_slice(&reply),
         );
+        // A standalone pane has no App to ask, so each read ticket is answered at once as a
+        // declined prompt is: one empty reply per destination.
+        for ticket in reads.iter().filter_map(|read| read.take()) {
+            replies.extend(super::osc52_read::empty_frames(ticket.labels()));
+        }
         replies
     }
 }

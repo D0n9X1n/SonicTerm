@@ -239,6 +239,15 @@ A Windows write armed for reassertion keeps its lease, plus its snapshot of the 
 (at most 512 KiB, reserved before the read), until the reassertion runs or a newer job cancels
 it. A write the budget cannot cover is refused busy.
 
+OSC 52 clipboard reads reserve from their own 64 MiB reply budget before the native read starts:
+the largest raw text the read may return (8 MiB, or 4 MiB per destination for `cp`) plus every
+destination's largest reply. Once the replies are built the reservation shrinks to them, and it
+is released when the PTY writer has written them, or when they are dropped. A read the budget
+cannot cover is answered empty. The retention pass adds these bytes to the same
+`ClipboardStaging` charge. At most 8 reads hold tickets at once, one per pane; a read whose
+reader is past its deadline keeps its reservation until its native call returns. On macOS the
+pasteboard's own copy of the value is AppKit's and is not counted.
+
 A `memory snapshot` line taken for a perf checkpoint carries the same fields plus
 four tags: `checkpoint_index`, `checkpoint_label`, `checkpoint_attempt`, and
 `checkpoint_complete` (no pane contended and every pane sampled). Taking it

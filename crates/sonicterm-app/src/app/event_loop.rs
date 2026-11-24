@@ -176,6 +176,10 @@ impl App {
                 }
             }
             UserEvent::ClipboardDone => self.drain_clipboard_completions(),
+            UserEvent::ClipboardRead { pane_id, read } => {
+                tracing::trace!(pane_id, "OSC 52 read admitted");
+                self.admit_clipboard_read(read);
+            }
             UserEvent::ClipboardAttempts { pane_id, attempts } => {
                 self.note_or_defer_clip_attempts(pane_id, attempts, Instant::now());
             }

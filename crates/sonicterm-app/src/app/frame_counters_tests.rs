@@ -327,6 +327,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("taskbar_progress.rs", "thread_slot", 1),
     // A posted clipboard job's one-shot slot: `take` and the length-only `Debug`.
     ("app/osc52_stream.rs", "0", 2),
+    // A posted read ticket's one-shot slot: `take` and the pane-only `Debug`.
+    ("app/osc52_read_ticket.rs", "0", 2),
     ("app/fg_probe.rs", "map", 9),
     ("app/fg_probe.rs", "proxy", 1),
     ("app/fg_probe.rs", "worker", 3),

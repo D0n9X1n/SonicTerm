@@ -7,7 +7,7 @@
 //! one [`ClipboardJobHandle`], whose lease is held until the native clipboard call returns.
 
 use std::sync::{
-    atomic::{AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
     Arc, OnceLock,
 };
 use std::time::{Duration, Instant};
@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 use sonicterm_cfg::config::Osc52ReadPolicy;
 use sonicterm_vt::vt::{ClipboardInbox, ClipboardPhase};
 
+use super::osc52_read_ticket::{admit_read, Admission, ReadIdentity, ReadTicket};
+use super::spawn_pane::ClipAttempts;
 pub(super) use super::spawn_pane::Osc52Refusal;
+use super::UserEvent;
 
 /// The smallest process-wide clipboard staging budget.
 pub(super) const MIN_CLIPBOARD_BUDGET_BYTES: usize = 128 * 1024 * 1024;
@@ -46,6 +49,10 @@ pub(in crate::app) struct ClipboardStaging {
     program_slots: AtomicUsize,
     /// `[terminal] osc52_read`, as [`read_policy_code`] encodes it; VT workers read it per read.
     read_policy: AtomicU8,
+    /// Read tickets held, at most `MAX_READS`.
+    read_slots: AtomicUsize,
+    /// Bumped by every change to `osc52` or `osc52_read`; a ticket bound to another is cancelled.
+    policy_generation: AtomicU64,
 }
 
 /// The stored form of `policy`.
@@ -74,6 +81,8 @@ impl ClipboardStaging {
             stream_limit_bytes: AtomicUsize::new(stream_limit_bytes),
             program_slots: AtomicUsize::new(0),
             read_policy: AtomicU8::new(read_policy_code(Osc52ReadPolicy::default())),
+            read_slots: AtomicUsize::new(0),
+            policy_generation: AtomicU64::new(0),
         })
     }
 
@@ -91,6 +100,35 @@ impl ClipboardStaging {
             1 => Osc52ReadPolicy::Allow,
             _ => Osc52ReadPolicy::Deny,
         }
+    }
+
+    /// Read tickets held now.
+    // Ordering: read_slots is Relaxed; it is a counter that orders no data.
+    #[cfg(test)]
+    pub(in crate::app) fn read_slots_in_use(&self) -> usize {
+        self.read_slots.load(Ordering::Relaxed)
+    }
+
+    /// Take one of `MAX_READS` read slots; false, unchanged, when all are held.
+    pub(in crate::app) fn try_take_read_slot(&self) -> bool {
+        bounded_add(&self.read_slots, 1, super::osc52_read::MAX_READS)
+    }
+
+    /// Return a read slot a dropped ticket held.
+    // Ordering: read_slots is Relaxed; a release only lowers the counter.
+    pub(in crate::app) fn release_read_slot(&self) {
+        self.read_slots.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// The policy generation a read binds now; sampled before [`Self::read_policy`].
+    pub(in crate::app) fn policy_generation(&self) -> u64 {
+        self.policy_generation.load(Ordering::SeqCst)
+    }
+
+    /// Start a new policy generation, after the new policy is stored: a VT worker that samples it
+    /// also reads the new policy, and every ticket bound to an older one is cancelled.
+    pub(in crate::app) fn bump_policy_generation(&self) {
+        self.policy_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// The staging every production pane shares, sized by the startup config through
@@ -497,10 +535,12 @@ impl std::fmt::Debug for ClipboardJobHandle {
 }
 
 impl Clone for Osc52Intake {
-    /// A fresh intake on the same staging: an open stream's decoder and lease belong to the one
-    /// worker that tracks it, never to a copy of its handles.
+    /// A fresh intake on the same staging, pane and read identity: an open stream's decoder and
+    /// lease, and a held read ticket, belong to the one worker that tracks them.
     fn clone(&self) -> Self {
-        Self::new(self.staging.clone())
+        let mut intake = Self::new(self.staging.clone()).with_identity(self.identity.clone());
+        intake.pane_id = self.pane_id;
+        intake
     }
 }
 
@@ -517,12 +557,126 @@ pub(in crate::app) struct Osc52Intake {
     open: Option<OpenStream>,
     /// Empty read replies queued since the last [`Self::take_read_replies`]; never clipboard data.
     read_replies: Vec<u8>,
+    /// The pane's read identity, which every read ticket binds.
+    identity: Arc<ReadIdentity>,
+    /// The pane the tickets name; 0 until bound.
+    pane_id: u64,
+    /// The command epoch at the request being handled, which [`Self::run_section`] sets.
+    request_epoch: Option<u64>,
+    /// Tickets admitted in this section, posted once its command epoch is published.
+    read_tickets: Vec<ReadTicket>,
 }
 
 impl Osc52Intake {
     /// An intake with no open stream, reserving from `staging`.
     pub(in crate::app) fn new(staging: Arc<ClipboardStaging>) -> Self {
-        Self { staging, open: None, read_replies: Vec::new() }
+        Self {
+            staging,
+            open: None,
+            read_replies: Vec::new(),
+            identity: Arc::default(),
+            pane_id: 0,
+            request_epoch: None,
+            read_tickets: Vec::new(),
+        }
+    }
+
+    /// This intake, binding reads to the pane's shared `identity`.
+    pub(in crate::app) fn with_identity(mut self, identity: Arc<ReadIdentity>) -> Self {
+        self.identity = identity;
+        self
+    }
+
+    /// Name `pane_id` in the events and tickets this intake raises.
+    pub(in crate::app) fn bind_pane(&mut self, pane_id: u64) {
+        self.pane_id = pane_id;
+    }
+
+    /// Reserve from `staging` instead, dropping any open stream; the pane binding stays.
+    #[cfg(test)]
+    pub(in crate::app) fn replace_staging(&mut self, staging: Arc<ClipboardStaging>) {
+        self.open = None;
+        self.staging = staging;
+    }
+
+    /// Take the read tickets admitted since the last call.
+    pub(in crate::app) fn take_read_tickets(&mut self) -> Vec<ReadTicket> {
+        std::mem::take(&mut self.read_tickets)
+    }
+
+    /// Answer one read of `kinds`: silent under `deny`, a ticket while this pane and the process
+    /// have a slot, and otherwise empty replies at once, before any event is posted.
+    fn answer_read(&mut self, kinds: &[u8], now: Instant) {
+        let epoch = self.request_epoch.unwrap_or_else(|| self.identity.command_epoch());
+        match admit_read(&self.staging, &self.identity, self.pane_id, epoch, kinds, now) {
+            Admission::Silent => {
+                // When: admit_read returns Admission::Silent, osc52_read is deny: no reply.
+            }
+            Admission::Busy => {
+                self.read_replies.extend(super::osc52_read::empty_replies(kinds));
+            }
+            Admission::Ticket(ticket) => self.read_tickets.push(ticket),
+        }
+    }
+
+    /// Run one parser section's clipboard events, each tagged with the command boundaries the
+    /// section passed before it: post every write in order, publish the section's command epoch,
+    /// then post its read tickets and its refusal summary. Returns the section's empty read replies.
+    pub(in crate::app) fn run_section(
+        &mut self,
+        inbox: Option<&ClipboardInbox>,
+        parser_open: Option<u64>,
+        requests: Vec<(u64, ClipboardPhase, u64)>,
+        boundaries: u64,
+        mut emit: impl FnMut(UserEvent),
+    ) -> Vec<u8> {
+        let base_epoch = self.identity.command_epoch();
+        let mut attempts = ClipAttempts::default();
+        if inbox.is_some() || parser_open.is_some() {
+            // When: inbox or parser_open is set, this section touched a clipboard stream.
+            let at = Instant::now();
+            for (stream, phase, passed) in requests {
+                let Some(inbox) = inbox else {
+                    // When: no inbox was taken, the section raised no clipboard event.
+                    break;
+                };
+                self.request_epoch = Some(base_epoch + passed);
+                let result = self.handle(inbox, stream, phase, at);
+                self.request_epoch = None;
+                let Some(result) = result else {
+                    // When: result is None, the event was a chunk or an abort with no outcome yet.
+                    continue;
+                };
+                attempts.total = attempts.total.saturating_add(1);
+                match result {
+                    Ok(job) => {
+                        attempts.accepted = attempts.accepted.saturating_add(1);
+                        attempts.latest = None;
+                        emit(UserEvent::ClipboardWrite { pane_id: self.pane_id, job });
+                    }
+                    Err(reason) => {
+                        attempts.refused = attempts.refused.saturating_add(1);
+                        attempts.latest = Some(reason);
+                    }
+                }
+            }
+            self.reconcile(parser_open, at);
+        } else {
+            // When: neither inbox nor parser_open is set, a stream the parser reset is released.
+            self.release_open();
+        }
+        if boundaries > 0 {
+            // Published before the tickets: one from before a boundary already mismatches.
+            self.identity.set_command_epoch(base_epoch + boundaries);
+        }
+        for ticket in self.take_read_tickets() {
+            let read = super::osc52_read_ticket::ClipboardReadHandle::new(ticket);
+            emit(UserEvent::ClipboardRead { pane_id: self.pane_id, read });
+        }
+        if attempts.total > 0 {
+            emit(UserEvent::ClipboardAttempts { pane_id: self.pane_id, attempts });
+        }
+        self.take_read_replies()
     }
 
     /// Take the empty read replies queued since the last call, for the batch's reply path.
@@ -566,12 +720,8 @@ impl Osc52Intake {
                 let decoder = std::mem::replace(&mut decoder.decoder, Err(Osc52Refusal::Invalid));
                 self.open = None;
                 if query {
-                    // When: query is set, the payload was `?`, a read: it reads no clipboard and
-                    // is answered empty unless `osc52_read` is deny, which stays silent.
-                    if self.staging.read_policy() != Osc52ReadPolicy::Deny {
-                        self.read_replies
-                            .extend(super::osc52_read::empty_replies(kinds.as_bytes()));
-                    }
+                    // When: query is set, the payload was `?`, a read; it writes nothing.
+                    self.answer_read(kinds.as_bytes(), now);
                     return Some(Err(Osc52Refusal::Read));
                 }
                 Some(self.finish(decoder, kinds.as_bytes()))
@@ -678,6 +828,8 @@ pub(in crate::app) struct ClipState {
     pub(in crate::app) retained: RetainedCopies,
     /// The ordering domain program writes and user copies share, and its worker.
     pub(in crate::app) domain: super::clipboard_worker::ClipboardDomain,
+    /// OSC 52 reads: waiting and queued tickets, the native reader and reply delivery.
+    pub(in crate::app) reads: super::osc52_read_pipeline::ClipboardReads,
     /// Per pane, a batch summary held until its program writes on the worker settle.
     pub(in crate::app) deferred_attempts:
         std::collections::HashMap<u64, super::spawn_pane::ClipAttempts>,
@@ -691,6 +843,7 @@ impl ClipState {
             charges: std::collections::HashMap::new(),
             retained: Default::default(),
             domain: Default::default(),
+            reads: Default::default(),
             deferred_attempts: std::collections::HashMap::new(),
         }
     }
@@ -700,8 +853,10 @@ impl super::App {
     /// Charge the clipboard staging every live lease holds, and the posted program writes, to the
     /// process owner's `ClipboardStaging` class. Runs with the retention sample.
     pub(in crate::app) fn charge_clipboard_staging(&mut self) {
+        // In-flight reads reserve their text and replies from the reads' own budget.
         let amount = sonicterm_types::ResourceAmount {
-            bytes: self.clip_state.staging.reserved_bytes(),
+            bytes: self.clip_state.staging.reserved_bytes()
+                + self.clip_state.reads.budget.reserved_bytes(),
             items: self.clip_state.staging.program_slots_in_use(),
         };
         let root = self.governor.root_owner();

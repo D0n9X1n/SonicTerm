@@ -279,3 +279,20 @@ fn native_clipboard_paste_action_reaches_real_pty() {
     drop(seed);
     station.leave();
 }
+
+/// Contract: an OSC 52 read decides `TooLarge` from `GlobalSize` before `GlobalLock`: a block far
+/// past the cap is refused without being locked, and the same text within the cap reads back.
+#[test]
+fn global_size_refuses_before_lock() {
+    use crate::app::clipboard_worker::read_windows_text;
+    use crate::app::osc52_read_source::ReadOutcome;
+    if isolated() {
+        return;
+    }
+    // Every native clipboard call below runs inside this station, never the interactive one.
+    let _station = PrivateStation::enter();
+    let text = "x".repeat(4096);
+    arboard::Clipboard::new().unwrap().set_text(text.clone()).unwrap();
+    assert_eq!(read_windows_text(1024), ReadOutcome::TooLarge);
+    assert_eq!(read_windows_text(8192), ReadOutcome::Text(text));
+}

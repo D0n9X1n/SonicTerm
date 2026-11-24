@@ -341,6 +341,14 @@ mod shared_gpu;
 pub(crate) use shared_gpu::{font_fallback_waker, gpu_device_state_waker};
 mod clipboard_worker;
 mod osc52_read;
+mod osc52_read_pipeline;
+mod osc52_read_source;
+mod osc52_read_ticket;
+#[cfg(any(test, target_os = "linux"))]
+mod osc52_read_x11;
+#[cfg(target_os = "linux")]
+#[path = "osc52_read_x11_native.rs"]
+mod osc52_read_x11_native;
 mod osc52_stream;
 mod reply_delivery;
 mod report_windows;

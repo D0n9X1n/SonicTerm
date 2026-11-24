@@ -207,6 +207,8 @@ pub struct PaneState {
     pub(crate) last_input_at: Option<Instant>,
     /// Set while an agent's `run_command` owns the pane; every agent write checks it.
     pub(crate) agent_run: Arc<std::sync::atomic::AtomicBool>,
+    /// What every OSC 52 read ticket from this pane binds; shared with its VT worker.
+    pub(in crate::app) read_identity: Arc<super::osc52_read_ticket::ReadIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -401,6 +403,7 @@ impl PaneState {
             run_typed_at: Arc::new(AtomicU64::new(0)),
             last_input_at: None,
             agent_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            read_identity: Arc::default(),
         }
     }
 

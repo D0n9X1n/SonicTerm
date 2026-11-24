@@ -607,8 +607,9 @@ impl App {
         if new_cfg.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
             self.clip_state.domain.revoke_program_writes();
         }
-        // Reads that end from now on follow the reloaded `osc52_read`.
-        self.clip_state.staging.set_read_policy(new_cfg.terminal.osc52_read);
+        // Reads that end from now on follow the reloaded `osc52_read`; a change to either policy
+        // revokes every outstanding read ticket.
+        self.publish_clipboard_policies(&new_cfg);
         // A changed write limit applies to streams opened from now on; open streams and leases
         // keep what they reserved.
         self.clip_state

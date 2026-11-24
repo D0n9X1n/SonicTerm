@@ -281,8 +281,9 @@ does a change to where automatic wrapping joins the selected rows.
 Terminal applications may also write the clipboard through OSC 52 and OSC 1337
 `Copy=:`, up to `[terminal] clipboard_write_limit_bytes` decoded (64 MiB by default); an
 empty write clears it, and on Linux `p` writes PRIMARY. Malformed Base64 and oversized writes
-are ignored. A clipboard read (`52;c;?`) never returns clipboard contents: it is answered with
-an empty reply, or silently dropped under `[terminal] osc52_read = "deny"`. See
+are ignored. A clipboard read (`52;c;?`) returns the clipboard's text only under
+`[terminal] osc52_read = "allow"`; under the default `"ask"` it gets an empty reply, and under
+`"deny"` it is silently dropped. See
 [Terminal IO and VT](Terminal-IO-and-VT).
 
 Copy follows the wraps the terminal recorded. A row that continues the previous

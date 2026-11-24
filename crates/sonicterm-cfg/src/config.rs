@@ -419,16 +419,16 @@ pub enum Osc52Policy {
 }
 
 /// How an OSC 52 clipboard read (`?`) from a program is answered. `Deny` stays silent, as
-/// Ghostty and WezTerm do; `Ask` and `Allow` answer every read with an empty reply terminated by
-/// ST, one per requested destination, so a waiting program never hangs and no clipboard data is
-/// sent.
+/// Ghostty and WezTerm do. `Allow` reads the clipboard (at most 8 MiB) and answers with its text;
+/// `Ask` holds the read for consent and, until a consent page exists, answers it empty after
+/// 120 s. Every reply is ST-terminated, one per requested destination.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Osc52ReadPolicy {
-    /// Reads are answered empty, as a declined consent prompt answers them.
+    /// Reads wait for consent; without an answer they get an empty reply.
     #[default]
     Ask,
-    /// Reads are answered empty; no clipboard contents are read.
+    /// Reads return the clipboard's text.
     Allow,
     /// Reads are dropped silently.
     Deny,

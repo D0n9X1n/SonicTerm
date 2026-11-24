@@ -211,8 +211,8 @@ fn reads_still_refused() {
     }
 }
 
-/// The read replies one request queues on a fresh intake over `staging`.
-fn read_replies(staging: &Arc<ClipboardStaging>, bytes: &[u8]) -> Vec<u8> {
+/// The tickets and empty read replies one run of `bytes` raises on a fresh intake over `staging`.
+fn read_section(staging: &Arc<ClipboardStaging>, bytes: &[u8]) -> (usize, Vec<u8>) {
     let mut parser = Parser::new(Grid::new(80, 24));
     let mut intake = Osc52Intake::new(staging.clone());
     for event in parser.advance(bytes) {
@@ -220,25 +220,30 @@ fn read_replies(staging: &Arc<ClipboardStaging>, bytes: &[u8]) -> Vec<u8> {
             let _ = intake.handle(parser.clipboard_inbox(), stream, phase, Instant::now());
         }
     }
-    intake.take_read_replies()
+    (intake.take_read_tickets().len(), intake.take_read_replies())
 }
 
-/// Under the default `ask`, and under `allow`, a BEL-terminated read is answered with one empty
-/// ST-terminated reply per destination; nothing is reserved from the staging budget.
+/// The empty read replies one run of `bytes` queues on a fresh intake over `staging`.
+fn read_replies(staging: &Arc<ClipboardStaging>, bytes: &[u8]) -> Vec<u8> {
+    read_section(staging, bytes).1
+}
+
+/// Under the default `ask`, and under `allow`, a read takes the pane's one ticket and queues no
+/// reply; a second read while it is held is answered at once with one empty ST-terminated reply
+/// per destination. Nothing is reserved from the write budget, and dropped tickets free slots.
 #[test]
-fn ask_default_and_allow_answer_reads_empty() {
+fn ask_and_allow_hold_one_ticket_then_answer_empty() {
     let staging = staging(1 << 20, 1 << 20);
     assert_eq!(staging.read_policy(), Osc52ReadPolicy::Ask, "the default policy");
     for policy in [Osc52ReadPolicy::Ask, Osc52ReadPolicy::Allow] {
         staging.set_read_policy(policy);
-        assert_eq!(read_replies(&staging, &osc52("c", "?")), b"\x1b]52;c;\x1b\\", "{policy:?}");
-        assert_eq!(
-            read_replies(&staging, &osc52("cp", "?")),
-            b"\x1b]52;c;\x1b\\\x1b]52;p;\x1b\\",
-            "{policy:?}"
-        );
+        let bytes = [osc52("c", "?"), osc52("cp", "?")].concat();
+        let (tickets, replies) = read_section(&staging, &bytes);
+        assert_eq!(tickets, 1, "{policy:?}");
+        assert_eq!(replies, b"\x1b]52;c;\x1b\\\x1b]52;p;\x1b\\", "{policy:?}");
     }
     assert_eq!(staging.reserved_bytes(), 0);
+    assert_eq!(staging.read_slots_in_use(), 0);
 }
 
 /// Under `deny` a read is dropped silently: no reply, nothing reserved, still counted refused.

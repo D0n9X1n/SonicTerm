@@ -142,8 +142,13 @@ cargo build -p sonicterm-app
   and rechecks the policy epoch at the commit point; the lease moves into the job and is released
   when the native call returns. The event loop writes a user copy itself only when nothing is in
   flight and it is at most 512 KiB. macOS has no worker and refuses program writes over 512 KiB.
-  Clipboard reads (`osc52_read.rs`) never read the native clipboard: under `ask` and `allow`
-  each is answered with empty ST replies on the parser-reply path, under `deny` silently.
+  Clipboard reads need a ticket (`osc52_read_ticket.rs`), taken in the VT worker before any event
+  is posted: one per pane, 8 per process, else empty ST replies at once; `deny` is silent. A
+  ticket binds the pane, PTY incarnation, owner and command epochs and the policy generation, and
+  `osc52_read_pipeline.rs` revalidates it before the native read and before every delivery
+  attempt. Native reads run one at a time on a disposable reader thread that keeps the ticket and
+  its reply-budget lease until the native call returns. Replies go only to the source PTY through
+  `PtyHandle::try_send_reply`, never the reply spool, a broadcast receiver or a log.
 - Main and child keyboard, IME, focus and modifier events share source-WindowId
   ownership. Search input has priority over READONLY; quick-select retains its
   hint keys. In READONLY, only the explicit safe action whitelist may execute.

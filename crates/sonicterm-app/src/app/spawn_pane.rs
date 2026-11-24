@@ -356,9 +356,12 @@ impl PaneVtHandles {
             frame_counters: pane.frame_counters.clone(),
             echo_cache: std::cell::Cell::new(super::echo_watch::EchoCache::default()),
             progress_shown: std::cell::Cell::new(false),
-            clipboard: std::cell::RefCell::new(super::osc52_stream::Osc52Intake::new(
-                super::osc52_stream::ClipboardStaging::process_default(),
-            )),
+            clipboard: std::cell::RefCell::new(
+                super::osc52_stream::Osc52Intake::new(
+                    super::osc52_stream::ClipboardStaging::process_default(),
+                )
+                .with_identity(pane.read_identity.clone()),
+            ),
             pane_id: 0,
         }
     }
@@ -369,13 +372,14 @@ impl PaneVtHandles {
         self,
         staging: Arc<super::osc52_stream::ClipboardStaging>,
     ) -> Self {
-        *self.clipboard.borrow_mut() = super::osc52_stream::Osc52Intake::new(staging);
+        self.clipboard.borrow_mut().replace_staging(staging);
         self
     }
 
     /// These handles, naming `pane_id` in the events the worker sends.
     pub(in crate::app) fn with_pane_id(mut self, pane_id: u64) -> Self {
         self.pane_id = pane_id;
+        self.clipboard.borrow_mut().bind_pane(pane_id);
         self
     }
 }
@@ -392,6 +396,8 @@ pub(super) fn spawn_pane_workers(
     let exit_probe = pty.child_exit_probe();
     let input_state = pty.input_sender();
     let in_tx_reply = pty.reply_sender();
+    // Every clipboard read this worker admits binds the PTY it reads.
+    pane.read_identity.set_incarnation(pty.incarnation());
     let worker_handles = PaneVtHandles::from_pane_state(pane).with_pane_id(pane_id);
     let redraw_proxy = proxy.clone();
 
@@ -853,6 +859,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         // The batch's last progress change, latest wins; `Some(None)` clears.
         let mut progress: Option<Option<sonicterm_vt::vt::ProgressReport>> = None;
         let mut notices = ProgramNotices::default();
+        // Command boundaries passed so far in this section; each clipboard request records it.
+        let mut boundaries = 0u64;
         // A batch that rings any number of times is one bell, so a ringing loop marks its tab once.
         if events.iter().any(|event| matches!(event, VtEvent::Bell)) {
             handles.bells.fetch_add(1, Ordering::Relaxed);
@@ -864,9 +872,10 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 }
                 VtEvent::CursorStyle(style) => handles.publish_cursor_style(style),
                 VtEvent::ClipboardStream { stream, phase } => {
-                    clipboard_requests.push((stream, phase));
+                    clipboard_requests.push((stream, phase, boundaries));
                 }
                 VtEvent::Command(event) => {
+                    boundaries += u64::from(event != CommandEvent::PromptEnd);
                     let at = now();
                     let duration = match event {
                         CommandEvent::CmdStart => {
@@ -884,7 +893,10 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 }
                 VtEvent::Media(media) => media_events.push(media),
                 VtEvent::Progress(report) => progress = Some(report),
-                VtEvent::ProgramStateReset => progress = Some(None),
+                VtEvent::ProgramStateReset => {
+                    boundaries += 1;
+                    progress = Some(None);
+                }
                 VtEvent::ProgramStatus(summary) => program_status = Some(summary),
                 VtEvent::Notify { title, body, id, occasion } => {
                     notices.push_notice(title, body, id, occasion)
@@ -907,47 +919,15 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             emit_event(notice.into_event(handles.pane_id));
         }
 
-        // Every accepted write is its own event, in order; refusals only count toward one summary.
-        let mut attempts = ClipAttempts::default();
-        // Empty OSC 52 read replies of this section; they join the section's parser replies.
-        let mut read_replies = Vec::new();
-        if clipboard_inbox.is_some() || clipboard_open.is_some() {
-            // When: clipboard_inbox or clipboard_open is set, the intake follows this section's
-            // clipboard events outside the parser lock; other sections never touch the intake.
-            let at = Instant::now();
-            let mut intake = handles.clipboard.borrow_mut();
-            for (stream, phase) in clipboard_requests {
-                let Some(inbox) = clipboard_inbox.as_deref() else {
-                    // When: no inbox was taken, the section raised no clipboard event.
-                    break;
-                };
-                let Some(result) = intake.handle(inbox, stream, phase, at) else {
-                    // When: the event was a chunk or an abort, the stream has no outcome yet.
-                    continue;
-                };
-                attempts.total = attempts.total.saturating_add(1);
-                match result {
-                    Ok(job) => {
-                        attempts.accepted = attempts.accepted.saturating_add(1);
-                        attempts.latest = None;
-                        emit_event(UserEvent::ClipboardWrite { pane_id: handles.pane_id, job });
-                    }
-                    Err(reason) => {
-                        attempts.refused = attempts.refused.saturating_add(1);
-                        attempts.latest = Some(reason);
-                    }
-                }
-            }
-            intake.reconcile(clipboard_open, at);
-            read_replies = intake.take_read_replies();
-        } else {
-            // When: neither clipboard_inbox nor clipboard_open is set, an intake still tracking a
-            // stream the parser reset without an event releases it.
-            handles.clipboard.borrow_mut().release_open();
-        }
-        if attempts.total > 0 {
-            emit_event(UserEvent::ClipboardAttempts { pane_id: handles.pane_id, attempts });
-        }
+        // Writes post in order, then the section's command epoch, then its read tickets; refusals
+        // only count toward one summary, and busy reads come back as empty replies.
+        let read_replies = handles.clipboard.borrow_mut().run_section(
+            clipboard_inbox.as_deref(),
+            clipboard_open,
+            clipboard_requests,
+            boundaries,
+            &mut emit_event,
+        );
 
         let (kitty_replies, cursor_moves) =
             media_batch::apply_batch_media(handles, media_events, &mut decode_media);
