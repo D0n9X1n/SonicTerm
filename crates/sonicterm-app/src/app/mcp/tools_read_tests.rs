@@ -479,3 +479,85 @@ fn list_panes_reports_the_tab_label_and_each_panes_icon_title() {
     assert_eq!(summary(named)["title"], "window title");
     assert_eq!(summary(other)["icon_title"], Value::Null);
 }
+
+/// `list_panes` copies a pane's live fields and its user-variable snapshot under the parser guard
+/// and builds no JSON until the guard is released, so a long list cannot hold a parser for its
+/// serialization.
+#[test]
+fn a_pane_summary_serializes_after_the_parser_guard_is_released() {
+    let mut entry = test_entry(20, 4, 100);
+    entry.parser.lock().advance(b"\x1b]1337;SetUserVar=a=MQ==\x07\x1b]2;title\x07");
+    entry.metadata = Some(crate::app::mcp::PaneMetadata {
+        window_index: 0,
+        tab_index: 0,
+        active: true,
+        readonly: false,
+    });
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let record = Arc::clone(&observed);
+    SUMMARY_HOOK.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move |entry: &PaneEntry| {
+            *record.lock().unwrap() = Some(entry.parser.is_locked());
+        }));
+    });
+    let summary = pane_summary(&entry, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new());
+    SUMMARY_HOOK.with_borrow_mut(|hook| *hook = None);
+    assert_eq!(*observed.lock().unwrap(), Some(false), "the parser was held while serializing");
+    assert_eq!(summary["title"], "title");
+    assert_eq!(summary["user_vars"], json!([{ "name": "a", "value": "1" }]));
+}
+
+/// Every field's text of each event logged while `body` runs on this thread.
+fn logged_fields(body: impl FnOnce()) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Collects every field of every event, rendered with `Debug`.
+    #[derive(Clone, Default)]
+    struct Fields(Arc<std::sync::Mutex<Vec<String>>>);
+
+    /// Renders one event's fields as `name=value`.
+    struct Render(Vec<String>);
+
+    impl tracing::field::Visit for Render {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push(format!("{}={value:?}", field.name()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Fields {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut render = Render(Vec::new());
+            event.record(&mut render);
+            self.0.lock().unwrap().extend(render.0);
+        }
+    }
+
+    let layer = Fields::default();
+    let subscriber = tracing_subscriber::Registry::default().with(layer.clone());
+    sonicterm_logging::test_capture::with_default(subscriber, body);
+    let fields = layer.0.lock().unwrap().clone();
+    fields
+}
+
+/// User variables are never logged: parsing a valid record and a dropped one, then listing the
+/// pane, logs the drop's reason code and counts but no name or value, while the listing still
+/// carries the variable.
+#[test]
+fn user_var_names_and_values_are_never_logged() {
+    let entry = test_entry(20, 4, 100);
+    let mut summary = Value::Null;
+    let fields = logged_fields(|| {
+        // `c2VjcmV0LXZhbHVl` is `secret-value`; the second record's base64 is invalid.
+        entry.parser.lock().advance(
+            b"\x1b]1337;SetUserVar=secret-name=c2VjcmV0LXZhbHVl;SetUserVar=secret-bad=!!\x07",
+        );
+        summary = pane_summary(&entry, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new());
+    });
+    assert_eq!(summary["user_vars"], json!([{ "name": "secret-name", "value": "secret-value" }]));
+    assert!(fields.iter().any(|field| field == "reason=\"value_base64\""), "{fields:?}");
+    assert!(fields.iter().all(|field| !field.contains("secret")), "leaked: {fields:?}");
+}

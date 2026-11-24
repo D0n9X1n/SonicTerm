@@ -31,7 +31,7 @@ impl Parser {
             if byte == b']' {
                 // When: byte opens OSC after ESC, start the bounded prefix probe alongside vte.
                 self.raw_osc =
-                    Some(RawOsc::Probe { content: [0; ITERM2_OSC_PREFIX.len()], content_len: 0 });
+                    Some(RawOsc::Probe { content: [0; USER_VAR_OSC_PREFIX.len()], content_len: 0 });
                 return;
             }
         }
@@ -72,7 +72,16 @@ impl Parser {
                     return true;
                 }
                 let index = usize::from(content_len);
-                if index < content.len() {
+                // Past `1337;File=`'s length the probe reads on only while `1337;SetUserVar=` still
+                // matches, so every other spelling keeps the bound it had.
+                let probe_len = if USER_VAR_OSC_PREFIX.starts_with(&content[..index]) {
+                    content.len()
+                } else {
+                    // When: `content` no longer starts `USER_VAR_OSC_PREFIX`, the probe keeps the
+                    // `1337;File=` length it had, so color and program digit runs stop as before.
+                    ITERM2_OSC_PREFIX.len()
+                };
+                if index < probe_len {
                     content[index] = byte;
                     content_len += 1;
                 }
@@ -116,6 +125,16 @@ impl Parser {
                     });
                     return true;
                 }
+                if prefix == USER_VAR_OSC_PREFIX {
+                    // When: the prefix names OSC 1337 `SetUserVar=`, own the whole payload so it
+                    // applies only once complete and vte's split parameters never set a variable.
+                    self.inner = vte::Parser::new();
+                    self.pending_esc = false;
+                    let content = vt_user_vars::SET_USER_VAR_KEY.to_vec();
+                    self.raw_osc =
+                        Some(RawOsc::Semantic { code: 1337, content, pending_esc: false });
+                    return true;
+                }
                 if let Some(code) = prefix.strip_suffix(b";").and_then(vt_color::color_osc_number) {
                     // When: the prefix names a color request, own its whole payload so it applies
                     // only once complete and no part is lost to vte's parameter cap.
@@ -128,8 +147,10 @@ impl Parser {
                 // A digit run, optionally signed `+`, with room left in the probe may still become
                 // `9;`, `777;` or a color request.
                 let digits = prefix.strip_prefix(b"+").unwrap_or(prefix);
-                let digits_pending = digits.iter().all(u8::is_ascii_digit) && index < content.len();
+                let digits_pending =
+                    digits.iter().all(u8::is_ascii_digit) && index < ITERM2_OSC_PREFIX.len();
                 if !ITERM2_OSC_PREFIX.starts_with(prefix)
+                    && !USER_VAR_OSC_PREFIX.starts_with(prefix)
                     && ![b"0;".as_slice(), b"1;", b"2;", b"7;", b"8;"]
                         .iter()
                         .any(|value| value.starts_with(prefix))

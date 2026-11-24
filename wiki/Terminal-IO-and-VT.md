@@ -244,7 +244,7 @@ Current protocol support includes:
 - OSC 0/2 titles, the OSC 1 tab name, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12/17/19 color queries and sets, the OSC 21 kitty color
   protocol, OSC 22 pointer shapes, OSC 104/110/111/112/117/119 color resets, OSC 133 prompt markers, OSC 9;4
-  progress, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
+  progress, OSC 1337 `SetUserVar` user variables, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
   title and body sent at once or in chunks under one `i` id, plain or base64 (`e=1`, split anywhere,
   the final padding optional), at most eight open at once and 16 KiB in all, and all of them dropped
   when a chunk is refused or cancelled, so none completes cut; a later notification with the same id from the same
@@ -596,14 +596,33 @@ URI to 8 KiB and client id to 1 KiB.
   which marks the command abandoned). No exit code is kept. A queue that dropped
   events resets the state before its retained tail, a pane whose process exited is
   `Unknown`, and the state moves with the pane to another tab or window.
+- **OSC 1337 `SetUserVar`:** per-pane user variables, as WezTerm's shell integration sends
+  them (`ESC ] 1337 ; SetUserVar=NAME=<base64> BEL`). The raw collector owns the whole payload,
+  at most 64 KiB after `1337;`, and applies it only once its BEL or ST arrived; a longer one, or
+  one cut by CAN, SUB or an ESC that does not complete ST, changes nothing. Only the canonical
+  `1337;SetUserVar=` spelling is owned; any other spelling, a C1 introducer included, sets
+  nothing. Every `SetUserVar=` record of one payload applies in order, as kitty does:
+  `NAME=<base64>` sets, `NAME=` sets an empty value, and `NAME` alone deletes; other records,
+  such as `CurrentDir=`, are skipped. A name is 1 to 128 bytes; a value is standard base64,
+  padding optional, decoding to at most 4 KiB. Names and values must be valid UTF-8, and their
+  C0, DEL and C1 controls are shown as spaces. A record that breaks any rule is dropped alone.
+  A pane holds at most 64 variables and 16 KiB of name and value bytes; setting a name makes
+  it the newest, and an insert past either cap evicts the oldest first. RIS keeps the
+  variables. They are untrusted display metadata: never logged (a dropped record logs only a
+  reason code and counts) and never evaluated. Agents read them through `list_panes` on
+  [MCP Server](MCP-Server). Intentional differences: names and values are strict UTF-8, as
+  WezTerm requires, where kitty replaces invalid bytes; the 64-entry cap is exact and paired
+  with the 16 KiB budget, where kitty can hold 65 entries and has no byte budget; neither
+  reference bounds a name or a value; WezTerm accepts one record per payload and no delete form.
 
 The raw color collector owns OSC 4, 10-19, 21, 22, 104 and 110-119 whole, beyond vte's
 parameter count and up to 4 KiB (16 KiB for OSC 21). It applies a message only once its ST or BEL arrived, and
 drops a longer one, or one cut by CAN, SUB or an ESC that does not start ST, without applying
 any part; vte never dispatches the same message. Parser-owned sequence
 state recognizes kitty APC after completed escapes, including C1 APC and chunk-split
-`ESC` / `_`. A bounded prefix probe takes only confirmed `OSC 1337;File=` media
-out of vte's private OSC buffer.
+`ESC` / `_`. A bounded prefix probe takes only confirmed `OSC 1337;File=` media and
+`OSC 1337;SetUserVar=` payloads out of vte's private OSC buffer; other OSC 1337 commands
+reach vte and change nothing.
 
 An escape sequence may retain at most 1 MiB. After that, the parser discards
 through the sequence terminator instead of treating the payload as printable

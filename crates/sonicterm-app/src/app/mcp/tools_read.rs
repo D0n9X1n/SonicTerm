@@ -134,7 +134,8 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
 
 /// One pane's entry in `list_panes`. Its parser is taken once, waiting at most until
 /// `budget_ends` and never longer than [`PARSER_WAIT`]; a pane reached after the budget is listed
-/// with `"details": "skipped"` and no live fields. Its titles are charged to `text_budget`.
+/// with `"details": "skipped"` and no live fields. Its titles and user variables are charged to
+/// `text_budget`.
 fn pane_summary(entry: &PaneEntry, budget_ends: Instant, text_budget: &mut ReplyBudget) -> Value {
     // The loop always fills the position for `list_panes`; an entry without one lists nulls
     // rather than failing the whole call.
@@ -165,16 +166,31 @@ fn pane_summary(entry: &PaneEntry, budget_ends: Instant, text_budget: &mut Reply
         pane["busy"] = json!(true);
         return pane;
     };
+    // Only owned copies and the user-variable snapshot leave the guard; the JSON is built after
+    // it is released, so serializing many panes never holds a parser.
     let grid = guard.grid();
-    text_budget.place(&mut pane, "title", json!(guard.title()));
-    text_budget.place(&mut pane, "icon_title", json!(guard.icon_title()));
-    pane["cwd"] = json!(guard.osc7_cwd().map(|cwd| cwd.path.clone()));
-    pane["cols"] = json!(grid.cols);
-    pane["rows"] = json!(grid.rows);
-    pane["alt_screen"] = json!(grid.is_alt());
-    pane["shell_integration"] =
-        json!(grid.newest_prompt().is_some_and(|region| region.input_start.is_some()));
-    pane["shell_integration_state"] = json!(guard.shell_integration_state().as_str());
+    let (cols, rows, alt_screen) = (grid.cols, grid.rows, grid.is_alt());
+    let shell_integration = grid.newest_prompt().is_some_and(|region| region.input_start.is_some());
+    let title = guard.title().map(str::to_owned);
+    let icon_title = guard.icon_title().map(str::to_owned);
+    let cwd = guard.osc7_cwd().map(|cwd| cwd.path.clone());
+    let shell_state = guard.shell_integration_state();
+    let user_vars = guard.user_vars();
+    drop(guard);
+    #[cfg(test)]
+    SUMMARY_HOOK.with_borrow(|hook| hook.as_ref().map(|hook| hook(entry)));
+    text_budget.place(&mut pane, "title", json!(title));
+    text_budget.place(&mut pane, "icon_title", json!(icon_title));
+    // Oldest first, as a list: a JSON object would not keep the order they were set in.
+    let user_vars: Vec<Value> =
+        user_vars.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect();
+    text_budget.place(&mut pane, "user_vars", Value::Array(user_vars));
+    pane["cwd"] = json!(cwd);
+    pane["cols"] = json!(cols);
+    pane["rows"] = json!(rows);
+    pane["alt_screen"] = json!(alt_screen);
+    pane["shell_integration"] = json!(shell_integration);
+    pane["shell_integration_state"] = json!(shell_state.as_str());
     pane["exited"] = json!(entry.exit_status.get().is_some());
     pane
 }
@@ -257,6 +273,18 @@ pub(crate) fn read_with_generation(
     let lines = snapshot.lines.iter_mut().map(|line| std::mem::take(&mut line.text)).collect();
     let structured = snapshot_json(&snapshot, entry, generation, lines);
     (snapshot, structured)
+}
+
+/// A test's check, run with the pane `pane_summary` is building.
+#[cfg(test)]
+pub(crate) type SummaryHook = Box<dyn Fn(&PaneEntry)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Run where `pane_summary` starts building a pane's JSON, so a test can check that the
+    /// parser guard is already released there.
+    pub(crate) static SUMMARY_HOOK: std::cell::RefCell<Option<SummaryHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

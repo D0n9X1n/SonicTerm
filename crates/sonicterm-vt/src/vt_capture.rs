@@ -269,7 +269,7 @@ impl Parser {
     /// megabytes of base64 into the grid — the user would lose the image
     /// *and* the screen. The discard ends at the transfer's terminator, or at
     /// the first newline if the sender died and no terminator is ever coming.
-    /// A title, CWD, link, program or color OSC in flight is discarded through
+    /// A title, CWD, link, program, color or user-variable OSC in flight is discarded through
     /// its own collector's terminators instead, as an over-cap one is, and an
     /// open kitty upload reclaimed beside it leaves that discard in place.
     ///

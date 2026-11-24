@@ -218,6 +218,12 @@ impl Performer {
             self.apply_color_osc(code, content, bell_terminated);
             return;
         }
+        if code == 1337 {
+            // When: code is an OSC 1337 `SetUserVar` payload, each record applies alone; names
+            // and values are decoded strictly there, never as this path's title text.
+            vt_user_vars::apply_payload(&mut self.user_vars, content);
+            return;
+        }
         if code == 99 {
             // When: code is 99, kitty's notification grammar reads it, chunk by chunk.
             self.receive_kitty_notify(content);

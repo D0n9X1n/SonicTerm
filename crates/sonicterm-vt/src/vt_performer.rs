@@ -66,6 +66,7 @@ impl Performer {
             sync_resets: 0,
             title: None,
             icon_title: None,
+            user_vars: Arc::default(),
             cwd: None,
             osc7_cwd: None,
             cwd_revision: 0,

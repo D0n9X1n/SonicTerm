@@ -184,6 +184,9 @@ fn raw_osc_cap(code: u16) -> usize {
     } else if code == 22 {
         // When: code is a pointer-shape request, its own bound applies.
         vt_pointer_shape::MAX_POINTER_SHAPE_OSC_BYTES
+    } else if code == 1337 {
+        // When: code is an OSC 1337 `SetUserVar` payload, its own bound applies.
+        vt_user_vars::MAX_USER_VAR_OSC_BYTES
     } else {
         // When: code is a title, CWD or hyperlink, the semantic bound applies.
         MAX_SEMANTIC_OSC_BYTES
@@ -191,6 +194,8 @@ fn raw_osc_cap(code: u16) -> usize {
 }
 const MAX_ITERM2_METADATA_BYTES: usize = 1024;
 const ITERM2_OSC_PREFIX: &[u8; 10] = b"1337;File=";
+/// The OSC 1337 prefix whose whole payload the raw collector owns as user variables.
+const USER_VAR_OSC_PREFIX: &[u8; 16] = b"1337;SetUserVar=";
 /// Public for the same reason as [`MAX_MEDIA_PAYLOAD_BYTES`]: the backstop is
 /// derived from the caps, not parallel to them.
 pub const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
@@ -383,9 +388,9 @@ pub struct Parser {
 /// protocol's own bound or expose whole through its public callback.
 enum RawOsc {
     /// Checking a bounded OSC prefix before choosing vte or media ownership.
-    Probe { content: [u8; ITERM2_OSC_PREFIX.len()], content_len: u8 },
-    /// Complete title, CWD, hyperlink, program-state (`9`, `777`) or color request payload,
-    /// independent of vte's parameter count.
+    Probe { content: [u8; USER_VAR_OSC_PREFIX.len()], content_len: u8 },
+    /// Complete title, CWD, hyperlink, program-state (`9`, `777`), color request or OSC 1337
+    /// `SetUserVar` payload, independent of vte's parameter count.
     Semantic { code: u16, content: Vec<u8>, pending_esc: bool },
     /// Streaming an iTerm2 file payload through the parser's staging reservation.
     Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
@@ -581,6 +586,12 @@ impl Parser {
         self.performer.icon_title.as_deref()
     }
 
+    /// The pane's OSC 1337 `SetUserVar` variables as a shared snapshot, cheap to take under the
+    /// parser lock and read after it. Program-supplied display metadata: never logged or evaluated.
+    pub fn user_vars(&self) -> Arc<UserVars> {
+        Arc::clone(&self.performer.user_vars)
+    }
+
     /// Latest OSC 7 working-directory path (sticky), or `None` if the shell
     /// has not reported one. Kept for tab-title compatibility; security-sensitive
     /// consumers must use [`Self::osc7_cwd`] so authority provenance is retained.
@@ -676,6 +687,8 @@ struct Performer {
     /// Latest OSC 1 icon title, the tab name a program asked for; OSC 0, an empty or bare OSC 1
     /// and RIS clear it, and OSC 2 leaves it.
     icon_title: Option<String>,
+    /// OSC 1337 `SetUserVar` variables, shared with readers as a snapshot; RIS keeps them.
+    user_vars: Arc<UserVars>,
     /// Latest permissively-decoded OSC 7 path used only for tab titles.
     cwd: Option<String>,
     /// Latest strictly parsed host-aware snapshot used for path resolution.
@@ -827,10 +840,14 @@ mod vt_host_reports;
 
 #[path = "vt_pointer_shape.rs"]
 mod vt_pointer_shape;
+
+#[path = "vt_user_vars.rs"]
+mod vt_user_vars;
 use vt_host_reports::ThemeFingerprint;
 pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
 pub use vt_pointer_shape::{pointer_shape_of_snapshot, PointerShape};
 pub use vt_tap::{TapAppend, TapHold, TapText, OUTPUT_TAP_CHARS};
+pub use vt_user_vars::UserVars;
 
 use vt_capture::parse_iterm2_file_event;
 pub use vt_osc::{parse_osc7_cwd, parse_osc7_cwd_snapshot};

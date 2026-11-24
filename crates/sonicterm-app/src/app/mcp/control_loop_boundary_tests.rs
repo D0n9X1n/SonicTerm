@@ -383,3 +383,79 @@ fn list_panes_bounds_every_title_by_one_reply_budget() {
     assert_eq!(last["omitted"]["icon_title"], "budget");
     assert_eq!(last["omitted"]["tab_title"], "budget");
 }
+
+/// A pane's OSC 1337 user variables as `list_panes` lists them: `(name, value)` pairs in order.
+fn listed_user_vars(pane: &Value) -> Vec<(String, String)> {
+    let entries = pane["user_vars"].as_array().expect("user_vars is a list");
+    let field = |entry: &Value, key: &str| entry[key].as_str().expect("a string").to_owned();
+    entries.iter().map(|entry| (field(entry, "name"), field(entry, "value"))).collect()
+}
+
+/// Under `read = "agent"`, `list_panes` carries each readable pane's user variables in the order
+/// they were set, through the real tool and loop paths; a pane the caller may not read is not
+/// listed, and none of its names or values reach the reply.
+#[test]
+fn list_panes_lists_readable_user_vars_in_insertion_order() {
+    let mut app = app();
+    let user = app.__test_seed_tab("user");
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+        10.0,
+        10.0,
+    );
+    app.__test_split_active_right();
+    let window = app.main_mut().unwrap();
+    let agent = window.tab_states[0].active_pane;
+    window.panes.get_mut(&agent).unwrap().creator =
+        crate::app::mcp::agents::PaneOwner::agent_if(true);
+    // `user-secret` in base64, so only a leak of the decoded value could put it in the reply.
+    window.panes[&user].parser.lock().advance(b"\x1b]1337;SetUserVar=private=dXNlci1zZWNyZXQ=\x07");
+    // `zeta` is set before `alpha`, so a sorted listing would differ from insertion order.
+    window.panes[&agent]
+        .parser
+        .lock()
+        .advance(b"\x1b]1337;SetUserVar=zeta=MQ==;SetUserVar=alpha=Mg==\x07");
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Agent);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let panes = result["structuredContent"]["panes"].as_array().unwrap();
+    assert_eq!(panes.len(), 1, "only the agent's pane is readable: {result}");
+    let pane = listed(&result, agent);
+    let expected = [("zeta", "1"), ("alpha", "2")].map(|(name, value)| (name.into(), value.into()));
+    assert_eq!(listed_user_vars(&pane), expected);
+    let wire = result.to_string();
+    assert!(!wire.contains("private") && !wire.contains("user-secret"), "leaked: {wire}");
+}
+
+/// Many panes with full user-variable stores share the one reply budget with the titles: later
+/// panes list `user_vars` as `null` with a `"budget"` marker, never a cut list, the first pane
+/// keeps its whole list, and the reply stays well inside the bridge's line limit.
+#[test]
+fn list_panes_bounds_user_vars_by_the_reply_budget() {
+    // The bridge's relay line limit (`sonicterm_mcp::relay::MAX_LINE_BYTES`).
+    const RELAY_LINE_BYTES: usize = 1 << 20;
+    use base64::Engine;
+    let mut app = app();
+    let value = base64::engine::general_purpose::STANDARD.encode([b'v'; 4000]);
+    // Four 4002-byte variables fill most of a pane's 16 KiB store.
+    let records: Vec<String> = (0..4).map(|index| format!("SetUserVar=n{index}={value}")).collect();
+    let sequence = format!("\x1b]1337;{}\x07", records.join(";"));
+    let mut panes = Vec::new();
+    for _ in 0..20 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        window.panes[&pane_id].parser.lock().advance(sequence.as_bytes());
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    assert_eq!(result["isError"], false);
+    let wire_bytes = result.to_string().len();
+    assert!(wire_bytes < RELAY_LINE_BYTES / 2, "the reply took {wire_bytes} bytes");
+    let first = listed(&result, panes[0]);
+    assert_eq!(listed_user_vars(&first).len(), 4, "the first pane keeps its whole list");
+    let last = listed(&result, panes[19]);
+    assert_eq!(last["user_vars"], Value::Null);
+    assert_eq!(last["omitted"]["user_vars"], "budget", "{}", last["omitted"]);
+}

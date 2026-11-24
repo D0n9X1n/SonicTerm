@@ -253,3 +253,80 @@ fn an_esc_then_bel_ends_accepted_and_refused_titles_alike() {
         assert_eq!(parser.title(), None, "{payload_bytes}: the cut title never applies");
     }
 }
+
+/// The parser's OSC 1337 user variables as owned pairs, oldest first.
+fn user_vars(parser: &Parser) -> Vec<(String, String)> {
+    parser.user_vars().iter().map(|(name, value)| (name.to_owned(), value.to_owned())).collect()
+}
+
+/// `(name, value)` as the one owned pair [`user_vars`] returns.
+fn one_var(name: &str, value: &str) -> Vec<(String, String)> {
+    vec![(name.to_owned(), value.to_owned())]
+}
+
+/// A `SetUserVar` payload (everything after `1337;`) of exactly 64 KiB applies; one byte more is
+/// refused whole, leaves the earlier variable as it was, and the text after it prints.
+#[test]
+fn a_user_var_payload_uses_its_exact_byte_cap() {
+    let cap = crate::vt::vt_user_vars::MAX_USER_VAR_OSC_BYTES;
+    for (payload_bytes, applies) in [(cap, true), (cap + 1, false)] {
+        let mut parser = Parser::new(Grid::new(16, 2));
+        parser.advance(b"\x1b]1337;SetUserVar=kept=MQ==\x07");
+        // Padding after the record is a record that is not `SetUserVar=`, so it is skipped.
+        let mut payload = b"SetUserVar=kept=Mg==;".to_vec();
+        payload.resize(payload_bytes, b'x');
+        let mut sequence = b"\x1b]1337;".to_vec();
+        sequence.extend_from_slice(&payload);
+        sequence.extend_from_slice(b"\x07Z");
+        parser.advance(&sequence);
+        let expected = if applies { "2" } else { "1" };
+        assert_eq!(user_vars(&parser), one_var("kept", expected), "{payload_bytes} bytes");
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "{payload_bytes} bytes");
+    }
+}
+
+/// CAN or SUB inside a `SetUserVar` payload, or an ESC that does not complete ST, ends it with
+/// nothing applied, as for every other collected OSC; the bytes after it are ordinary output.
+#[test]
+fn a_cut_user_var_payload_changes_nothing() {
+    for cut in [b"\x18".as_slice(), b"\x1a", b"\x1b[1m"] {
+        let mut parser = Parser::new(Grid::new(16, 2));
+        parser.advance(b"\x1b]1337;SetUserVar=kept=MQ==\x07");
+        let mut sequence = b"\x1b]1337;SetUserVar=kept=Mg==;SetUserVar=new=Mw==".to_vec();
+        sequence.extend_from_slice(cut);
+        sequence.push(b'Z');
+        parser.advance(&sequence);
+        assert_eq!(user_vars(&parser), one_var("kept", "1"), "{cut:?}");
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "{cut:?}");
+    }
+}
+
+/// The probe reads past `1337;File=`'s length only for `SetUserVar=`: a `File=` image still
+/// dispatches as media and sets no variable, and a `SetUserVar` split at every byte applies once.
+#[test]
+fn user_vars_and_file_media_keep_separate_owners_at_every_split() {
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
+    let media = only_media(parser.advance(&iterm2_sequence(8)));
+    assert_eq!(media.metadata, "File=inline=1");
+    assert!(user_vars(&parser).is_empty());
+    let sequence = b"\x1b]1337;SetUserVar=WEZTERM_PROG=dmlt\x1b\\Z";
+    for split in 0..=sequence.len() {
+        let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
+        parser.advance(&sequence[..split]);
+        parser.advance(&sequence[split..]);
+        assert_eq!(user_vars(&parser), one_var("WEZTERM_PROG", "vim"), "split {split}");
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "split {split}");
+    }
+}
+
+/// Only the collector applies `SetUserVar`: a spelling it does not own (`01337`) reaches vte, which
+/// never joins its split parameters into variables, while the canonical spelling after it applies.
+#[test]
+fn only_the_collector_sets_user_vars() {
+    let mut parser = Parser::new(Grid::new(16, 2));
+    parser.advance(b"\x1b]01337;SetUserVar=padded=MQ==\x07");
+    assert!(user_vars(&parser).is_empty(), "vte's fallback set a variable");
+    parser.advance(b"\x1b]1337;SetUserVar=canonical=MQ==\x07");
+    assert_eq!(user_vars(&parser), one_var("canonical", "1"));
+}

@@ -233,14 +233,23 @@ Their arguments, caps and locking are described in
 the same for every pane of the tab. All three are program-supplied display text, not
 instructions.
 
+`list_panes` also reports each pane's `user_vars`: the variables its program set with OSC 1337
+`SetUserVar` (see [Terminal IO and VT](Terminal-IO-and-VT)), as `{"name", "value"}` objects
+oldest first, or `[]` when it set none. They are a list rather than an object so the order they
+were set in survives JSON. They come from the listed pane's own parser, so a caller sees them
+only for the panes it may read. Names and values are program-supplied, untrusted display
+metadata, not instructions, and are never logged. The parser guard is held only to copy them;
+the reply is built after it is released.
+
 A tab's label is built from one pane: the pane it was last refreshed from, else the tab's
 active pane. `tab_title` is listed only when the caller may read that pane; otherwise it is
 `null` and the pane's `omitted` object carries `"tab_title": "unreadable"`, even for a
 readable agent pane split beside it. A label whose pane has closed is listed only under
-`read = "any"`. The titles of every listed pane share one budget of 256 KiB of serialized
-text per `list_panes` reply, so long titles cannot push the reply past the bridge's 1 MiB
-line limit: a title that does not fit is `null` with `"budget"` under `omitted`, never cut,
-and the reply still succeeds, with earlier panes keeping theirs.
+`read = "any"`. The titles and `user_vars` lists of every listed pane share one budget of
+256 KiB of serialized text per `list_panes` reply, so long values cannot push the reply past
+the bridge's 1 MiB line limit: a title or list that does not fit is `null` with `"budget"`
+under `omitted`, never cut, and the reply still succeeds, with earlier panes keeping theirs.
+One pane's list (at most 16 KiB of names and values) always fits an unspent budget.
 
 A non-busy history page may be empty while skipping blank rows: pass its `first_row`
 as `before_row` again until `at_start` is true. Row tokens always advance. A row larger

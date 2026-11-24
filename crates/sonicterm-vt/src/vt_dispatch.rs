@@ -607,6 +607,8 @@ impl Perform for Performer {
                 self.events.push(VtEvent::Clipboard { selection: sel, data });
             }
             Some(1337) => {
+                // Only a `File=` image reads vte's joined parameters; the raw collector owns
+                // `SetUserVar=`, so a spelling it missed (`01337`, a C1 introducer) sets nothing.
                 let payload = join_osc_params(params.get(1..).unwrap_or(&[]));
                 let row = self.grid.cursor.row;
                 let col = self.grid.cursor.col;
