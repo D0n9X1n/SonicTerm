@@ -629,7 +629,7 @@ fn clip_summary_waits_for_a_write_on_the_clipboard_worker() {
     assert!(app.clip_state.domain.start_worker(sink, None, Box::new(|| {})));
     let held = gate.lock().unwrap();
     let job = ClipboardJob::for_test(&app.clip_state.staging, "hello");
-    assert_eq!(app.submit_program_clipboard(source, job), None, "posted to the worker");
+    assert_eq!(app.submit_program_clipboard(source, job, false), None, "posted to the worker");
     let accepted = ClipAttempts { total: 1, accepted: 1, refused: 0, latest: None };
     app.note_or_defer_clip_attempts(source, accepted, Instant::now());
     assert!(app.status_line.clip.is_none(), "the summary waits for the write");

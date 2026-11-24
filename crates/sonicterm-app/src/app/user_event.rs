@@ -131,13 +131,13 @@ pub enum UserEvent {
     /// The clipboard worker or an OSC 52 reader reported results; the event loop applies them. It
     /// carries no payload.
     ClipboardDone,
-    /// An OSC 52 read the VT worker admitted: its ticket, bound to the pane, PTY, owner and
-    /// command epochs and policy generation. It carries no clipboard data.
-    ClipboardRead {
+    /// An OSC 52 read, or an `ask` write, the VT worker admitted: its consent ticket, bound to the
+    /// pane, PTY, owner and command epochs and policy generation. `Debug` prints no clipboard data.
+    ClipboardTicket {
         /// The pane whose program asked.
         pane_id: u64,
         /// The ticket, taken once by the event loop.
-        read: osc52_read_ticket::ClipboardReadHandle,
+        ticket: osc52_read_ticket::ClipboardTicketHandle,
     },
     /// One VT batch's OSC 52 requests, counted without payloads, after its writes; refusals
     /// reach the App only through this summary.

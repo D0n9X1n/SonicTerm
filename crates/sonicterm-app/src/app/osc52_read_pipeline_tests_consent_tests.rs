@@ -163,7 +163,7 @@ fn deny_escape_and_close_reply_empty() {
         assert_eq!(reply, (harness.pane, &b"\x1b]52;c;\x1b\\"[..]), "{dismiss:?}");
         assert_eq!(source.calls(), 0, "{dismiss:?}");
         drop(delivered);
-        assert_eq!(harness.staging.read_slots_in_use(), 0, "{dismiss:?}");
+        assert_eq!(harness.staging.ticket_slots_in_use(), 0, "{dismiss:?}");
     }
 }
 
@@ -216,7 +216,7 @@ fn policy_flip_to_deny_closes_page_without_read() {
     set_policy(&mut harness.app, Osc52ReadPolicy::Deny);
     assert!(!harness.app.interaction.command_palette.is_open());
     assert_eq!((source.calls(), harness.port_calls.load(Ordering::SeqCst)), (0, 0));
-    assert_eq!(harness.staging.read_slots_in_use(), 0);
+    assert_eq!(harness.staging.ticket_slots_in_use(), 0);
     assert_eq!(harness.app.clip_state.reads.last_cancel, Some(CancelReason::PolicyChanged));
 }
 
@@ -233,7 +233,7 @@ fn identity_change_while_open_closes_page_without_read() {
         assert!(!harness.app.interaction.command_palette.is_open(), "{trigger:?}");
         let calls = (source.calls(), harness.port_calls.load(Ordering::SeqCst));
         assert_eq!(calls, (0, 0), "{trigger:?}");
-        assert_eq!(harness.staging.read_slots_in_use(), 0, "{trigger:?}");
+        assert_eq!(harness.staging.ticket_slots_in_use(), 0, "{trigger:?}");
         assert_eq!(harness.app.clip_state.reads.last_cancel, Some(reason), "{trigger:?}");
     }
 }
@@ -263,8 +263,12 @@ fn apply_after_window_lost_page_reads_nothing() {
         assert!(!harness.app.interaction.command_palette.is_open(), "replaced: {replaced}");
         let calls = (source.calls(), harness.port_calls.load(Ordering::SeqCst));
         assert_eq!(calls, (0, 0), "replaced: {replaced}");
-        assert_eq!(harness.staging.read_slots_in_use(), 0, "replaced: {replaced}");
+        assert_eq!(harness.staging.ticket_slots_in_use(), 0, "replaced: {replaced}");
         let reason = harness.app.clip_state.reads.last_cancel;
         assert_eq!(reason, Some(CancelReason::PageLost), "replaced: {replaced}");
     }
 }
+
+#[cfg(test)]
+#[path = "osc52_read_pipeline_tests_consent_tests_write_tests.rs"]
+mod osc52_read_pipeline_tests_consent_tests_write_tests;

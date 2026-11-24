@@ -103,6 +103,20 @@ impl App {
         self.status_line.clip_write.insert(pane_id, outcome);
     }
 
+    /// Show a write's `outcome` from `pane_id` that settled outside a VT batch (a consent page's
+    /// answer), counting no new request: the request was counted when its batch arrived.
+    pub(in crate::app) fn show_clip_outcome(
+        &mut self,
+        pane_id: u64,
+        outcome: super::super::event_loop::ClipWriteOutcome,
+        bytes: usize,
+        now: Instant,
+    ) {
+        self.note_clip_write(pane_id, bytes, outcome);
+        let settled = super::super::spawn_pane::ClipAttempts::default();
+        self.note_clip_attempts(pane_id, settled, now);
+    }
+
     /// Record one VT batch's OSC 52 requests from `pane_id`: the display shows its last request and
     /// counts every request since the hold began. Refusals log one debug line per pane per second.
     pub(in crate::app) fn note_clip_attempts(

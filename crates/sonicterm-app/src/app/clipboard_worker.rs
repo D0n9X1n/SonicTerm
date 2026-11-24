@@ -496,20 +496,24 @@ impl super::App {
         written
     }
 
-    /// Route one program write: refused here under `osc52 = "deny"`, posted to the worker in
-    /// order when one runs, else written here when it is small enough, else refused too large.
-    /// Returns the outcome when it settled here; a posted write reports through
-    /// [`Self::drain_clipboard_completions`].
+    /// Route one program write: refused here under `osc52 = "deny"`, and under `"ask"` unless it
+    /// was `consented` on its page; posted to the worker in order when one runs, else written here
+    /// when it is small enough, else refused too large. Returns the outcome when it settled here; a
+    /// posted write reports through [`Self::drain_clipboard_completions`].
     pub(in crate::app) fn submit_program_clipboard(
         &mut self,
         pane_id: u64,
         job: ClipboardJob,
+        consented: bool,
     ) -> Option<ClipWriteOutcome> {
-        if self.config.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
-            // When: the `osc52` policy is Deny, the clipboard is never touched; dropping the job
-            // releases its lease and slot.
+        use sonicterm_cfg::config::Osc52Policy;
+        let policy = self.config.terminal.osc52;
+        if policy == Osc52Policy::Deny || (policy == Osc52Policy::Ask && !consented) {
+            // When: osc52 is Deny, or Ask and the write was not consented, the clipboard is never
+            // touched; dropping the job releases its lease and slot.
             tracing::debug!(
                 bytes = job.text.len(),
+                ?policy,
                 "OSC 52 clipboard write denied by [terminal] osc52"
             );
             return Some(ClipWriteOutcome::Denied);

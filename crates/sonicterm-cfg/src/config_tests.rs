@@ -370,14 +370,17 @@ fn only_a_named_family_sets_the_font_family() {
     assert_eq!(template.font.family, DEFAULT_FONT_FAMILY);
 }
 
-/// `[terminal] osc52` defaults to `"allow"`, parses `"deny"`, and refuses any other value.
+/// `[terminal] osc52` defaults to `"allow"`, parses `"ask"` and `"deny"`, and refuses any other
+/// value.
 #[test]
-fn osc52_policy_defaults_to_allow_and_parses_deny() {
+fn osc52_policy_defaults_to_allow_and_parses_each_value() {
     use crate::config::Osc52Policy;
     assert_eq!(Config::default().terminal.osc52, Osc52Policy::Allow);
-    let parsed: Config = toml::from_str("[terminal]\nosc52 = \"deny\"\n").unwrap();
-    assert_eq!(parsed.terminal.osc52, Osc52Policy::Deny);
-    assert!(toml::from_str::<Config>("[terminal]\nosc52 = \"ask\"\n").is_err());
+    for (name, expected) in [("ask", Osc52Policy::Ask), ("deny", Osc52Policy::Deny)] {
+        let parsed: Config = toml::from_str(&format!("[terminal]\nosc52 = \"{name}\"\n")).unwrap();
+        assert_eq!(parsed.terminal.osc52, expected, "{name}");
+    }
+    assert!(toml::from_str::<Config>("[terminal]\nosc52 = \"yes\"\n").is_err());
     assert!(crate::config::default_config_template().contains("\nosc52 = \"allow\"\n"));
 }
 

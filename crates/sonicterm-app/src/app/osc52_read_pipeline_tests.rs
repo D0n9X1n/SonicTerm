@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::osc52_read_source::{ClipboardTextSource, ReadLocation, ReadOutcome};
-use crate::app::osc52_read_ticket::{CancelReason, ClipboardReadHandle};
+use crate::app::osc52_read_ticket::{CancelReason, ClipboardTicketHandle};
 use crate::app::osc52_stream::{ClipState, ClipboardStaging, Osc52Intake};
 use crate::app::App;
 use sonicterm_cfg::config::{Config, Osc52ReadPolicy};
@@ -129,8 +129,8 @@ fn request_on(harness: &mut Harness, pane: u64, bytes: &[u8]) -> Vec<u8> {
             let _ = intake.handle(&inbox, stream, phase, Instant::now());
         }
     }
-    for ticket in intake.take_read_tickets() {
-        harness.app.admit_clipboard_read(ClipboardReadHandle::new(ticket));
+    for ticket in intake.take_tickets() {
+        harness.app.admit_clipboard_ticket(ClipboardTicketHandle::new(ticket));
     }
     intake.take_read_replies()
 }
@@ -152,7 +152,7 @@ fn allow_read_delivers_exact_bytes_with_st() {
         assert_eq!(delivered[0].0, harness.pane);
         assert_eq!(delivered[0].1.bytes(), b"\x1b]52;c;aGVsbG8=\x1b\\");
         drop(delivered);
-        assert_eq!(harness.staging.read_slots_in_use(), 0);
+        assert_eq!(harness.staging.ticket_slots_in_use(), 0);
         assert_eq!(harness.budget_bytes(), 0);
     }
 }
@@ -168,10 +168,10 @@ fn cp_replies_one_message_within_budget() {
     let primary = if cfg!(target_os = "linux") { "aGk=" } else { "" };
     let expected = format!("\x1b]52;c;aGk=\x1b\\\x1b]52;p;{primary}\x1b\\");
     assert_eq!(delivered[0].1.bytes(), expected.as_bytes());
-    assert_eq!(harness.staging.read_slots_in_use(), 1, "the writer holds the ticket");
+    assert_eq!(harness.staging.ticket_slots_in_use(), 1, "the writer holds the ticket");
     assert!(harness.budget_bytes() >= delivered[0].1.len(), "and the lease covering the reply");
     drop(delivered);
-    assert_eq!((harness.staging.read_slots_in_use(), harness.budget_bytes()), (0, 0));
+    assert_eq!((harness.staging.ticket_slots_in_use(), harness.budget_bytes()), (0, 0));
 }
 
 /// Contract: under `ask` a ticket whose window is not frontmost gets no page, waits and reads
@@ -183,7 +183,7 @@ fn ask_waits_then_expiry_replies_empty() {
     request(&mut harness, b"\x1b]52;c;?\x07");
     harness.app.pump_clipboard_reads();
     assert_eq!(harness.delivered_count(), 0, "a waiting ticket answers nothing yet");
-    assert_eq!(harness.staging.read_slots_in_use(), 1);
+    assert_eq!(harness.staging.ticket_slots_in_use(), 1);
     let expired = Instant::now() + TICKET_LIFETIME + Duration::from_secs(1);
     harness.app.pump_clipboard_reads_at(expired);
     let delivered = harness.take_delivered();
@@ -191,7 +191,7 @@ fn ask_waits_then_expiry_replies_empty() {
     assert_eq!(delivered[0].1.bytes(), b"\x1b]52;c;\x1b\\");
     assert_eq!(source.calls(), 0, "the clipboard was never read");
     drop(delivered);
-    assert_eq!(harness.staging.read_slots_in_use(), 0);
+    assert_eq!(harness.staging.ticket_slots_in_use(), 0);
 }
 
 /// What revokes a waiting ticket in [`each_cancellation_trigger_cancels_silently`].
@@ -256,7 +256,7 @@ fn each_cancellation_trigger_cancels_silently() {
         let reason = fire(&mut harness, trigger);
         harness.app.pump_clipboard_reads();
         assert_eq!(harness.delivered_count(), 0, "{trigger:?} answers nothing");
-        assert_eq!(harness.staging.read_slots_in_use(), 0, "{trigger:?} frees the slot");
+        assert_eq!(harness.staging.ticket_slots_in_use(), 0, "{trigger:?} frees the slot");
         assert_eq!(harness.app.clip_state.reads.last_cancel, Some(reason), "{trigger:?}");
     }
 }
@@ -280,7 +280,7 @@ fn policy_change_between_worker_read_and_retry_sends_nothing() {
         release.send(()).unwrap();
         harness.pump_until(|harness| harness.app.clip_state.reads.in_flight.is_none());
         assert_eq!(harness.port_calls.load(Ordering::SeqCst), 0, "{trigger:?}");
-        assert_eq!((harness.staging.read_slots_in_use(), harness.budget_bytes()), (0, 0));
+        assert_eq!((harness.staging.ticket_slots_in_use(), harness.budget_bytes()), (0, 0));
         assert_eq!(harness.app.clip_state.reads.last_cancel, Some(reason), "{trigger:?}");
     }
 }
@@ -300,7 +300,7 @@ fn wedged_reader_holds_slot_and_lease_until_return() {
     assert_eq!(delivered.len(), 1);
     assert_eq!((delivered[0].0, delivered[0].1.bytes()), (harness.pane, &b"\x1b]52;c;\x1b\\"[..]));
     drop(delivered);
-    assert_eq!(harness.staging.read_slots_in_use(), 1, "the wedged reader keeps its ticket");
+    assert_eq!(harness.staging.ticket_slots_in_use(), 1, "the wedged reader keeps its ticket");
     assert!(harness.budget_bytes() > 0, "and its lease");
     request_on(&mut harness, second, b"\x1b]52;c;?\x07");
     harness.app.pump_clipboard_reads();
@@ -311,7 +311,7 @@ fn wedged_reader_holds_slot_and_lease_until_return() {
     release.send(()).unwrap();
     harness.pump_until(|harness| harness.app.clip_state.reads.in_flight.is_none());
     assert_eq!(harness.delivered_count(), 0, "the late result is dropped");
-    assert_eq!((harness.staging.read_slots_in_use(), harness.budget_bytes()), (0, 0));
+    assert_eq!((harness.staging.ticket_slots_in_use(), harness.budget_bytes()), (0, 0));
 }
 
 /// Contract: a contended writer admission is retried once per turn, revalidating each time, at
@@ -326,7 +326,7 @@ fn admission_contention_retries_with_revalidation_then_drops() {
         harness.app.pump_clipboard_reads();
     }
     assert_eq!(harness.port_calls.load(Ordering::SeqCst), 1 + MAX_DELIVERY_RETRIES as usize);
-    assert_eq!((harness.staging.read_slots_in_use(), harness.budget_bytes()), (0, 0));
+    assert_eq!((harness.staging.ticket_slots_in_use(), harness.budget_bytes()), (0, 0));
 
     let mut harness = self::harness(Osc52ReadPolicy::Allow, FakeSource::new("secret"));
     harness.contended.store(true, Ordering::SeqCst);
@@ -337,7 +337,7 @@ fn admission_contention_retries_with_revalidation_then_drops() {
         harness.app.pump_clipboard_reads();
     }
     assert_eq!(harness.port_calls.load(Ordering::SeqCst), 1, "no attempt after the policy flip");
-    assert_eq!(harness.staging.read_slots_in_use(), 0);
+    assert_eq!(harness.staging.ticket_slots_in_use(), 0);
     assert_eq!(harness.app.clip_state.reads.last_cancel, Some(CancelReason::PolicyChanged));
 }
 

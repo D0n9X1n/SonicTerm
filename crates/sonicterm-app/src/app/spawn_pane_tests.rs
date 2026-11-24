@@ -364,7 +364,7 @@ pub(super) fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
 }
 
 /// A read in a VT batch posts its ticket, naming the worker's pane, and puts nothing on the
-/// batch's reply path (the reply spool); it still reaches the summary as a refused attempt.
+/// batch's reply path (the reply spool); a held read is not summarised as refused.
 #[test]
 fn read_becomes_a_ticket_before_any_reply() {
     let (_pane, handles) = pane_and_worker_handles();
@@ -385,14 +385,14 @@ fn read_becomes_a_ticket_before_any_reply() {
     );
     assert!(replies.is_empty(), "a ticket, not a spool reply");
     let posted =
-        emitted.iter().any(|event| matches!(event, UserEvent::ClipboardRead { pane_id: 7, .. }));
+        emitted.iter().any(|event| matches!(event, UserEvent::ClipboardTicket { pane_id: 7, .. }));
     assert!(posted, "the ticket names the worker's pane");
     assert!(clip_writes(&emitted).is_empty(), "a read writes nothing");
     let refused = emitted.iter().any(|event| {
         matches!(event, UserEvent::ClipboardAttempts { attempts, .. }
-            if attempts.refused == 1 && attempts.latest == Some(Osc52Refusal::Read))
+            if attempts.refused > 0 || attempts.latest == Some(Osc52Refusal::Read))
     });
-    assert!(refused, "the read is summarised as refused");
+    assert!(!refused, "a held read is not summarised as refused");
 }
 
 /// A flood of reads in one batch never builds a reply submission past the reply spool's 32 KiB
@@ -422,7 +422,7 @@ fn read_reply_flood_stays_within_the_submission_cap() {
     // Splits fall only between whole answers, so every submission starts a fresh reply.
     assert!(submissions.iter().all(|batch| batch.starts_with(b"\x1b]52;")), "an answer was split");
     let tickets =
-        emitted.iter().filter(|event| matches!(event, UserEvent::ClipboardRead { .. })).count();
+        emitted.iter().filter(|event| matches!(event, UserEvent::ClipboardTicket { .. })).count();
     assert_eq!(tickets, 1, "one ticket per pane");
     let answered = read_count - tickets;
     assert_eq!(submissions.concat(), b"\x1b]52;c;\x1b\\\x1b]52;p;\x1b\\".repeat(answered));

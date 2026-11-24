@@ -484,8 +484,10 @@ pub enum ClipOutcome {
     Failed,
     /// Refused by `[terminal] osc52 = "deny"`.
     Denied,
-    /// A clipboard read; reads are never answered.
+    /// A clipboard read refused by `[terminal] osc52_read = "deny"`; no contents are sent.
     ReadRefused,
+    /// A read or write held for the user's answer on a consent page.
+    Waiting,
     /// Another selection than the clipboard.
     SelectionRefused(char),
     /// The payload was over the size cap.

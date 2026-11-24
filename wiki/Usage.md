@@ -281,7 +281,9 @@ does a change to where automatic wrapping joins the selected rows.
 Terminal applications may also write the clipboard through OSC 52 and OSC 1337
 `Copy=:`, up to `[terminal] clipboard_write_limit_bytes` decoded (64 MiB by default); an
 empty write clears it, and on Linux `p` writes PRIMARY. Malformed Base64 and oversized writes
-are ignored. A clipboard read (`52;c;?`) returns the clipboard's text only under
+are ignored. Under `[terminal] osc52 = "ask"` each write waits for Allow on a consent page,
+`Let tab N, pane M write to the clipboard?`, and is dropped on Deny, Escape or after two
+minutes; while a page waits, the `clip` status segment shows `waiting for you`. A clipboard read (`52;c;?`) returns the clipboard's text only under
 `[terminal] osc52_read = "allow"`, or after you choose Allow on its consent page under the
 default `"ask"`. That page opens in the command palette of the requesting pane's window, once
 the window is frontmost and the palette is closed, and asks `Let tab N, pane M read the

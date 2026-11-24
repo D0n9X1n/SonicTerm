@@ -12,10 +12,12 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use sonicterm_cfg::config::Osc52ReadPolicy;
+use sonicterm_cfg::config::{Osc52Policy, Osc52ReadPolicy};
 use sonicterm_vt::vt::{ClipboardInbox, ClipboardPhase};
 
-use super::osc52_read_ticket::{admit_read, Admission, ReadIdentity, ReadTicket};
+use super::osc52_read_ticket::{
+    admit_read, admit_write, Admission, ConsentTicket, ReadIdentity, WriteAdmission,
+};
 use super::spawn_pane::ClipAttempts;
 pub(super) use super::spawn_pane::Osc52Refusal;
 use super::UserEvent;
@@ -49,10 +51,21 @@ pub(in crate::app) struct ClipboardStaging {
     program_slots: AtomicUsize,
     /// `[terminal] osc52_read`, as [`read_policy_code`] encodes it; VT workers read it per read.
     read_policy: AtomicU8,
-    /// Read tickets held, at most `MAX_READS`.
-    read_slots: AtomicUsize,
+    /// `[terminal] osc52`, as [`write_policy_code`] encodes it; VT workers read it per write.
+    write_policy: AtomicU8,
+    /// Read tickets held, at most `MAX_TICKETS`.
+    ticket_slots: AtomicUsize,
     /// Bumped by every change to `osc52` or `osc52_read`; a ticket bound to another is cancelled.
     policy_generation: AtomicU64,
+}
+
+/// The stored form of the write `policy`.
+fn write_policy_code(policy: Osc52Policy) -> u8 {
+    match policy {
+        Osc52Policy::Allow => 0,
+        Osc52Policy::Ask => 1,
+        Osc52Policy::Deny => 2,
+    }
 }
 
 /// The stored form of `policy`.
@@ -81,7 +94,8 @@ impl ClipboardStaging {
             stream_limit_bytes: AtomicUsize::new(stream_limit_bytes),
             program_slots: AtomicUsize::new(0),
             read_policy: AtomicU8::new(read_policy_code(Osc52ReadPolicy::default())),
-            read_slots: AtomicUsize::new(0),
+            write_policy: AtomicU8::new(write_policy_code(Osc52Policy::default())),
+            ticket_slots: AtomicUsize::new(0),
             policy_generation: AtomicU64::new(0),
         })
     }
@@ -102,22 +116,38 @@ impl ClipboardStaging {
         }
     }
 
-    /// Read tickets held now.
-    // Ordering: read_slots is Relaxed; it is a counter that orders no data.
-    #[cfg(test)]
-    pub(in crate::app) fn read_slots_in_use(&self) -> usize {
-        self.read_slots.load(Ordering::Relaxed)
+    /// Publish `[terminal] osc52`; writes that end from now on follow it.
+    // Ordering: write_policy is Relaxed; each write samples one whole value and orders no data.
+    pub(in crate::app) fn set_write_policy(&self, policy: Osc52Policy) {
+        self.write_policy.store(write_policy_code(policy), Ordering::Relaxed);
     }
 
-    /// Take one of `MAX_READS` read slots; false, unchanged, when all are held.
-    pub(in crate::app) fn try_take_read_slot(&self) -> bool {
-        bounded_add(&self.read_slots, 1, super::osc52_read::MAX_READS)
+    /// The `[terminal] osc52` policy a write ending now follows.
+    // Ordering: write_policy is Relaxed; each write samples one whole value and orders no data.
+    pub(in crate::app) fn write_policy(&self) -> Osc52Policy {
+        match self.write_policy.load(Ordering::Relaxed) {
+            0 => Osc52Policy::Allow,
+            1 => Osc52Policy::Ask,
+            _ => Osc52Policy::Deny,
+        }
+    }
+
+    /// Read tickets held now.
+    // Ordering: ticket_slots is Relaxed; it is a counter that orders no data.
+    #[cfg(test)]
+    pub(in crate::app) fn ticket_slots_in_use(&self) -> usize {
+        self.ticket_slots.load(Ordering::Relaxed)
+    }
+
+    /// Take one of `MAX_TICKETS` read slots; false, unchanged, when all are held.
+    pub(in crate::app) fn try_take_ticket_slot(&self) -> bool {
+        bounded_add(&self.ticket_slots, 1, super::osc52_read::MAX_TICKETS)
     }
 
     /// Return a read slot a dropped ticket held.
-    // Ordering: read_slots is Relaxed; a release only lowers the counter.
-    pub(in crate::app) fn release_read_slot(&self) {
-        self.read_slots.fetch_sub(1, Ordering::Relaxed);
+    // Ordering: ticket_slots is Relaxed; a release only lowers the counter.
+    pub(in crate::app) fn release_ticket_slot(&self) {
+        self.ticket_slots.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// The policy generation a read binds now; sampled before [`Self::read_policy`].
@@ -534,6 +564,15 @@ impl std::fmt::Debug for ClipboardJobHandle {
     }
 }
 
+/// A request the intake accepted: a write to post, or a consent ticket it holds for the section.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::app) enum Accepted {
+    /// A complete write, posted to the event loop.
+    Write(ClipboardJobHandle),
+    /// A read or an asked write took a ticket, posted once the section's epoch is published.
+    Ticket,
+}
+
 impl Clone for Osc52Intake {
     /// A fresh intake on the same staging, pane and read identity: an open stream's decoder and
     /// lease, and a held read ticket, belong to the one worker that tracks them.
@@ -564,7 +603,7 @@ pub(in crate::app) struct Osc52Intake {
     /// The command epoch at the request being handled, which [`Self::run_section`] sets.
     request_epoch: Option<u64>,
     /// Tickets admitted in this section, posted once its command epoch is published.
-    read_tickets: Vec<ReadTicket>,
+    tickets: Vec<ConsentTicket>,
 }
 
 impl Osc52Intake {
@@ -577,7 +616,7 @@ impl Osc52Intake {
             identity: Arc::default(),
             pane_id: 0,
             request_epoch: None,
-            read_tickets: Vec::new(),
+            tickets: Vec::new(),
         }
     }
 
@@ -600,22 +639,40 @@ impl Osc52Intake {
     }
 
     /// Take the read tickets admitted since the last call.
-    pub(in crate::app) fn take_read_tickets(&mut self) -> Vec<ReadTicket> {
-        std::mem::take(&mut self.read_tickets)
+    pub(in crate::app) fn take_tickets(&mut self) -> Vec<ConsentTicket> {
+        std::mem::take(&mut self.tickets)
     }
 
-    /// Answer one read of `kinds`: silent under `deny`, a ticket while this pane and the process
-    /// have a slot, and otherwise empty replies at once, before any event is posted.
-    fn answer_read(&mut self, kinds: &[u8], now: Instant) {
+    /// Answer one read of `kinds`: silent and refused under `deny`, a ticket while this pane and
+    /// the process have a slot, and otherwise empty replies at once, refused busy.
+    fn answer_read(&mut self, kinds: &[u8], now: Instant) -> Result<Accepted, Osc52Refusal> {
         let epoch = self.request_epoch.unwrap_or_else(|| self.identity.command_epoch());
         match admit_read(&self.staging, &self.identity, self.pane_id, epoch, kinds, now) {
-            Admission::Silent => {
-                // When: admit_read returns Admission::Silent, osc52_read is deny: no reply.
-            }
+            Admission::Silent => Err(Osc52Refusal::Read),
             Admission::Busy => {
                 self.read_replies.extend(super::osc52_read::empty_replies(kinds));
+                Err(Osc52Refusal::Busy)
             }
-            Admission::Ticket(ticket) => self.read_tickets.push(ticket),
+            Admission::Ticket(ticket) => {
+                self.tickets.push(ticket);
+                Ok(Accepted::Ticket)
+            }
+        }
+    }
+
+    /// Route one complete `job`: posted under `allow` and `deny`, held on a ticket under `ask`, or
+    /// refused busy when no ticket slot is free.
+    fn route_write(&mut self, job: ClipboardJob, now: Instant) -> Result<Accepted, Osc52Refusal> {
+        let epoch = self.request_epoch.unwrap_or_else(|| self.identity.command_epoch());
+        match admit_write(&self.staging, &self.identity, self.pane_id, epoch, job, now) {
+            WriteAdmission::Post(job) => {
+                Ok(Accepted::Write(ClipboardJobHandle(Arc::new(std::sync::Mutex::new(Some(job))))))
+            }
+            WriteAdmission::Busy => Err(Osc52Refusal::Busy),
+            WriteAdmission::Ticket(ticket) => {
+                self.tickets.push(ticket);
+                Ok(Accepted::Ticket)
+            }
         }
     }
 
@@ -649,10 +706,13 @@ impl Osc52Intake {
                 };
                 attempts.total = attempts.total.saturating_add(1);
                 match result {
-                    Ok(job) => {
+                    Ok(accepted) => {
                         attempts.accepted = attempts.accepted.saturating_add(1);
                         attempts.latest = None;
-                        emit(UserEvent::ClipboardWrite { pane_id: self.pane_id, job });
+                        if let Accepted::Write(job) = accepted {
+                            // A write is posted now; a ticket is posted below, after the epoch.
+                            emit(UserEvent::ClipboardWrite { pane_id: self.pane_id, job });
+                        }
                     }
                     Err(reason) => {
                         attempts.refused = attempts.refused.saturating_add(1);
@@ -669,9 +729,9 @@ impl Osc52Intake {
             // Published before the tickets: one from before a boundary already mismatches.
             self.identity.set_command_epoch(base_epoch + boundaries);
         }
-        for ticket in self.take_read_tickets() {
-            let read = super::osc52_read_ticket::ClipboardReadHandle::new(ticket);
-            emit(UserEvent::ClipboardRead { pane_id: self.pane_id, read });
+        for ticket in self.take_tickets() {
+            let ticket = super::osc52_read_ticket::ClipboardTicketHandle::new(ticket);
+            emit(UserEvent::ClipboardTicket { pane_id: self.pane_id, ticket });
         }
         if attempts.total > 0 {
             emit(UserEvent::ClipboardAttempts { pane_id: self.pane_id, attempts });
@@ -701,7 +761,7 @@ impl Osc52Intake {
         stream: u64,
         phase: ClipboardPhase,
         now: Instant,
-    ) -> Option<Result<ClipboardJobHandle, Osc52Refusal>> {
+    ) -> Option<Result<Accepted, Osc52Refusal>> {
         match phase {
             ClipboardPhase::Data => {
                 let chunk = inbox.pop(stream)?;
@@ -721,10 +781,10 @@ impl Osc52Intake {
                 self.open = None;
                 if query {
                     // When: query is set, the payload was `?`, a read; it writes nothing.
-                    self.answer_read(kinds.as_bytes(), now);
-                    return Some(Err(Osc52Refusal::Read));
+                    return Some(self.answer_read(kinds.as_bytes(), now));
                 }
-                Some(self.finish(decoder, kinds.as_bytes()))
+                let job = self.finish(decoder, kinds.as_bytes());
+                Some(job.and_then(|job| self.route_write(job, now)))
             }
             ClipboardPhase::Abort => {
                 self.open = None;
@@ -733,19 +793,18 @@ impl Osc52Intake {
         }
     }
 
-    /// Turn a terminated stream into a posted job, or the reason it is refused.
+    /// Turn a terminated stream into a job, or the reason it is refused.
     fn finish(
         &self,
         decoder: Result<Base64Stream, Osc52Refusal>,
         kinds: &[u8],
-    ) -> Result<ClipboardJobHandle, Osc52Refusal> {
+    ) -> Result<ClipboardJob, Osc52Refusal> {
         let targets = clip_targets(kinds, cfg!(target_os = "linux"))?;
         let (bytes, lease) = decoder?.finish()?;
         let (text, lease) = into_text(bytes, lease)?;
         // The slot is taken here, in the reader thread, before the write is posted.
         let slot = self.staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
-        let job = ClipboardJob { text, targets, lease, _slot: slot };
-        Ok(ClipboardJobHandle(Arc::new(std::sync::Mutex::new(Some(job)))))
+        Ok(ClipboardJob { text, targets, lease, _slot: slot })
     }
 
     /// Match the parser's open stream after a section: start tracking a stream that opened with

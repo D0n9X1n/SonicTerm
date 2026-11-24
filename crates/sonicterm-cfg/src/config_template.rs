@@ -144,7 +144,9 @@ cursor_blink = false
 cursor_shape = "block"
 # Cursor movement: "none" jumps, "smooth" glides to the new cell over 90 ms.
 cursor_animation = "none"
-# Programs may set the clipboard with OSC 52: "allow" or "deny".
+# Programs may set the clipboard with OSC 52: "allow", "ask" or "deny".
+# "ask" writes only after you choose Allow on a consent page; Deny or 2 minutes
+# without an answer drops the write.
 osc52 = "allow"
 # Programs may ask for the clipboard with OSC 52 reads: "ask", "allow" or "deny".
 # "allow" sends the clipboard's text; "ask" sends it only after you choose Allow on a

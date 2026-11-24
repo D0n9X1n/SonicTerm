@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::osc52_read::MAX_READS;
+use crate::app::osc52_read::MAX_TICKETS;
 use crate::app::osc52_stream::ClipboardStaging;
 use sonicterm_cfg::config::Osc52ReadPolicy;
 
@@ -15,7 +15,7 @@ fn admit(staging: &Arc<ClipboardStaging>, identity: &Arc<ReadIdentity>, kinds: &
     admit_read(staging, identity, 7, identity.command_epoch(), kinds, Instant::now())
 }
 
-/// Contract: one read per pane and `MAX_READS` per process hold tickets; a read past either
+/// Contract: one read per pane and `MAX_TICKETS` per process hold tickets; a read past either
 /// bound is `Busy` before anything is posted (the VT worker answers it empty), and dropping a
 /// ticket frees both bounds.
 #[test]
@@ -25,15 +25,16 @@ fn gate_full_empty_reply_before_queue() {
     let held = admit(&staging, &first, b"c");
     assert!(matches!(held, Admission::Ticket(_)));
     assert!(matches!(admit(&staging, &first, b"c"), Admission::Busy), "one read per pane");
-    let mut others: Vec<Admission> =
-        (1..MAX_READS).map(|_| admit(&staging, &Arc::new(ReadIdentity::default()), b"c")).collect();
+    let mut others: Vec<Admission> = (1..MAX_TICKETS)
+        .map(|_| admit(&staging, &Arc::new(ReadIdentity::default()), b"c"))
+        .collect();
     assert!(others.iter().all(|admission| matches!(admission, Admission::Ticket(_))));
-    assert_eq!(staging.read_slots_in_use(), MAX_READS);
+    assert_eq!(staging.ticket_slots_in_use(), MAX_TICKETS);
     let ninth = admit(&staging, &Arc::new(ReadIdentity::default()), b"c");
     assert!(matches!(ninth, Admission::Busy), "eight per process");
     others.clear();
     drop(held);
-    assert_eq!(staging.read_slots_in_use(), 0);
+    assert_eq!(staging.ticket_slots_in_use(), 0);
     assert!(matches!(admit(&staging, &first, b"c"), Admission::Ticket(_)), "the pane slot is free");
 }
 
@@ -43,7 +44,7 @@ fn deny_silent_no_reservation() {
     let staging = staging(Osc52ReadPolicy::Deny);
     let identity = Arc::new(ReadIdentity::default());
     assert!(matches!(admit(&staging, &identity, b"c"), Admission::Silent));
-    assert_eq!(staging.read_slots_in_use(), 0);
+    assert_eq!(staging.ticket_slots_in_use(), 0);
 }
 
 /// Contract: `allow` admits an `AutoAllowed` ticket, which has no consent session; `ask` admits a
@@ -104,13 +105,13 @@ fn ticket_drop_frees_on_closed_loop() {
     let Admission::Ticket(ticket) = admit(&staging, &identity, b"c") else {
         panic!("a free gate admits a ticket");
     };
-    let handle = ClipboardReadHandle::new(ticket);
+    let handle = ClipboardTicketHandle::new(ticket);
     let clone = handle.clone();
     assert_eq!(handle, clone);
     drop(handle);
-    assert_eq!(staging.read_slots_in_use(), 1, "a clone still holds the ticket");
+    assert_eq!(staging.ticket_slots_in_use(), 1, "a clone still holds the ticket");
     drop(clone);
-    assert_eq!(staging.read_slots_in_use(), 0);
+    assert_eq!(staging.ticket_slots_in_use(), 0);
     assert!(matches!(admit(&staging, &identity, b"c"), Admission::Ticket(_)));
 }
 

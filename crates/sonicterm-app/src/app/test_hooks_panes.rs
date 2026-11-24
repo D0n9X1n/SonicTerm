@@ -915,8 +915,8 @@ impl TestReplyPane {
             &mut self.sync_latch,
             super::media::decode_inline_image,
             |event| {
-                if let UserEvent::ClipboardRead { read, .. } = event {
-                    reads.push(read);
+                if let UserEvent::ClipboardTicket { ticket, .. } = event {
+                    reads.push(ticket);
                 }
             },
             Instant::now,

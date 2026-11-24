@@ -18,7 +18,7 @@ pub(in crate::app) const EMPTY_REPLY_BYTES: usize = 9;
 pub(in crate::app) const READ_TEXT_CAP: usize = 8 * 1024 * 1024;
 
 /// Clipboard reads that may hold a ticket at once in the process; each pane holds at most one.
-pub(in crate::app) const MAX_READS: usize = 8;
+pub(in crate::app) const MAX_TICKETS: usize = 8;
 
 /// How long a ticket may wait or stay readable before it is answered or cancelled.
 pub(in crate::app) const TICKET_LIFETIME: Duration = Duration::from_secs(120);

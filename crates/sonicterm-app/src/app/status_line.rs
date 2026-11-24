@@ -293,6 +293,12 @@ pub(crate) struct SelStatus {
 }
 
 impl StatusLineState {
+    /// Tests: the clip segment's latest record.
+    #[cfg(test)]
+    pub(super) fn clip_record(&self) -> Option<ClipRecord> {
+        self.clip
+    }
+
     /// Mark the startup load check done; `true` only the first time.
     pub(crate) fn take_startup_check(&mut self) -> bool {
         !std::mem::replace(&mut self.startup_checked, true)

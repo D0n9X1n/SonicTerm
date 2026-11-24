@@ -18,7 +18,7 @@ use super::osc52_read::{
     empty_frames, read_reservation_bytes, READ_REPLY_BUDGET_BYTES, TICKET_LIFETIME,
 };
 use super::osc52_read_source::{read_replies, ClipboardTextSource, NativeSource};
-use super::osc52_read_ticket::{CancelReason, ClipboardReadHandle, ReadBinding, ReadTicket};
+use super::osc52_read_ticket::{CancelReason, ClipboardTicketHandle, ConsentTicket, ReadBinding};
 use super::osc52_stream::{ClipLease, ClipboardStaging};
 use super::UserEvent;
 
@@ -52,7 +52,7 @@ struct Retry {
 /// What a reader thread hands back once its native calls return.
 struct ReaderDone {
     replies: Vec<u8>,
-    ticket: ReadTicket,
+    ticket: ConsentTicket,
     lease: ClipLease,
 }
 
@@ -70,11 +70,11 @@ pub(in crate::app) struct ClipboardReads {
     /// The deadline per destination a native read gets.
     pub(in crate::app) reader_deadline: Duration,
     /// `ask` tickets with no page yet, oldest first.
-    pub(in crate::app) waiting: Vec<ReadTicket>,
+    pub(in crate::app) waiting: Vec<ConsentTicket>,
     /// The ticket on the palette's consent page; at most one, as the palette is modal.
-    pub(in crate::app) presented: Option<super::osc52_read_consent::PresentedRead>,
+    pub(in crate::app) presented: Option<super::osc52_read_consent::PresentedTicket>,
     /// Readable tickets waiting for the one native reader.
-    pub(in crate::app) queued: VecDeque<ReadTicket>,
+    pub(in crate::app) queued: VecDeque<ConsentTicket>,
     pub(in crate::app) in_flight: Option<InFlight>,
     retries: Vec<Retry>,
     done_tx: Sender<ReaderDone>,
@@ -136,14 +136,14 @@ impl ClipboardReads {
 impl super::App {
     /// Take a ticket the VT worker posted: cancel it when it no longer matches, else wait (`ask`)
     /// or queue (`allow`) it and run the pipeline.
-    pub(in crate::app) fn admit_clipboard_read(&mut self, read: ClipboardReadHandle) {
+    pub(in crate::app) fn admit_clipboard_ticket(&mut self, read: ClipboardTicketHandle) {
         let Some(ticket) = read.take() else {
             // When: take finds the ticket gone, a clone of the event already admitted it.
             return;
         };
-        if let Err(reason) = self.revalidate_read(ticket.binding(), Instant::now(), false) {
-            // When: revalidate_read refuses, the ticket ends silently.
-            self.cancel_read(ticket, reason);
+        if let Err(reason) = self.revalidate_ticket(ticket.binding(), Instant::now(), false) {
+            // When: revalidate_ticket refuses, the ticket ends silently.
+            self.cancel_ticket(ticket, reason);
             return;
         }
         if ticket.readable() {
@@ -157,7 +157,7 @@ impl super::App {
 
     /// Whether `binding` still names a live read: the pane, its PTY, owner and command epochs and
     /// the policy generation unchanged, its window not READONLY and, with `check_age`, young enough.
-    pub(in crate::app) fn revalidate_read(
+    pub(in crate::app) fn revalidate_ticket(
         &self,
         binding: &ReadBinding,
         now: Instant,
@@ -195,7 +195,11 @@ impl super::App {
     }
 
     /// Revoke `ticket` silently; dropping it frees its slots.
-    pub(in crate::app) fn cancel_read(&mut self, mut ticket: ReadTicket, reason: CancelReason) {
+    pub(in crate::app) fn cancel_ticket(
+        &mut self,
+        mut ticket: ConsentTicket,
+        reason: CancelReason,
+    ) {
         ticket.cancel(reason);
         let pane_id = ticket.binding().pane_id;
         tracing::debug!(pane_id, reason = ?ticket.cancel_reason(), "OSC 52 read cancelled");
@@ -214,8 +218,8 @@ impl super::App {
         self.retry_read_replies(now);
         self.settle_reader(now);
         self.sweep_read_tickets(now);
-        self.sweep_read_page(now);
-        self.present_read_page();
+        self.sweep_consent_page(now);
+        self.present_consent_page();
         self.start_reader(now);
     }
 
@@ -259,31 +263,40 @@ impl super::App {
     /// Cancel tickets that no longer match and answer `ask` tickets past their lifetime.
     fn sweep_read_tickets(&mut self, now: Instant) {
         for ticket in std::mem::take(&mut self.clip_state.reads.waiting) {
-            if let Err(reason) = self.revalidate_read(ticket.binding(), now, false) {
-                // When: revalidate_read refuses, the waiting ticket ends silently.
-                self.cancel_read(ticket, reason);
+            if let Err(reason) = self.revalidate_ticket(ticket.binding(), now, false) {
+                // When: revalidate_ticket refuses, the waiting ticket ends silently.
+                self.cancel_ticket(ticket, reason);
                 continue;
             }
             // A ticket whose page never opened is answered at expiry as a declined prompt is.
             if now.saturating_duration_since(ticket.binding().created_at) >= TICKET_LIFETIME {
                 // When: the ticket's age reaches TICKET_LIFETIME, it is answered empty.
-                self.answer_read_empty(ticket, now);
+                self.refuse_ticket(ticket, now);
                 continue;
             }
             self.clip_state.reads.waiting.push(ticket);
         }
         for ticket in std::mem::take(&mut self.clip_state.reads.queued) {
-            if let Err(reason) = self.revalidate_read(ticket.binding(), now, true) {
-                // When: revalidate_read refuses a queued ticket before its read starts, it ends.
-                self.cancel_read(ticket, reason);
+            if let Err(reason) = self.revalidate_ticket(ticket.binding(), now, true) {
+                // When: revalidate_ticket refuses a queued ticket before its read starts, it ends.
+                self.cancel_ticket(ticket, reason);
                 continue;
             }
             self.clip_state.reads.queued.push_back(ticket);
         }
     }
 
-    /// Answer `ticket` with one empty reply per label; the ticket rides along as custody.
-    pub(in crate::app) fn answer_read_empty(&mut self, ticket: ReadTicket, now: Instant) {
+    /// Answer a refused read with one empty reply per label, the ticket riding along as custody;
+    /// a refused asked write is dropped, writing nothing, and the clip segment says it was denied.
+    pub(in crate::app) fn refuse_ticket(&mut self, ticket: ConsentTicket, now: Instant) {
+        if ticket.is_write() {
+            // When: the ticket holds a write, nothing is sent back; dropping it frees the job.
+            let pane_id = ticket.binding().pane_id;
+            drop(ticket);
+            tracing::debug!(pane_id, "OSC 52 asked write refused");
+            self.show_clip_outcome(pane_id, super::event_loop::ClipWriteOutcome::Denied, 0, now);
+            return;
+        }
         let binding = ticket.binding().clone();
         let replies = empty_frames(ticket.labels());
         self.deliver_read_reply(
@@ -313,13 +326,13 @@ impl super::App {
             };
             if wedged {
                 // When: wedged, a native read is still outstanding, so this one fails fast.
-                self.answer_read_empty(ticket, now);
+                self.refuse_ticket(ticket, now);
                 continue;
             }
             let mut lease = self.clip_state.reads.budget.lease();
             if !lease.grow_to(read_reservation_bytes(ticket.labels().len())) {
                 // When: grow_to fails, the reply budget is busy and the read is answered empty.
-                self.answer_read_empty(ticket, now);
+                self.refuse_ticket(ticket, now);
                 continue;
             }
             self.spawn_reader(ticket, lease, now);
@@ -328,7 +341,7 @@ impl super::App {
 
     /// Run `ticket`'s native reads on a disposable thread holding the ticket and `lease` until the
     /// calls return; the event loop waits only until the deadline.
-    fn spawn_reader(&mut self, ticket: ReadTicket, lease: ClipLease, now: Instant) {
+    fn spawn_reader(&mut self, ticket: ConsentTicket, lease: ClipLease, now: Instant) {
         let binding = ticket.binding().clone();
         let labels = ticket.labels().to_vec();
         let reads = &self.clip_state.reads;
@@ -393,8 +406,8 @@ impl super::App {
     ) {
         let pane_id = binding.pane_id;
         let bytes = reply.len();
-        if let Err(reason) = self.revalidate_read(&binding, now, check_age) {
-            // When: revalidate_read refuses, the reply is dropped unsent with its custody.
+        if let Err(reason) = self.revalidate_ticket(&binding, now, check_age) {
+            // When: revalidate_ticket refuses, the reply is dropped unsent with its custody.
             tracing::debug!(pane_id, bytes, ?reason, "OSC 52 read reply revoked");
             self.clip_state.reads.last_cancel = Some(reason);
             return;
@@ -464,11 +477,32 @@ impl super::App {
         }
     }
 
-    /// Publish a reloaded `osc52_read` to the VT workers; any change to `osc52` or `osc52_read`
-    /// starts a new policy generation, after the policy is stored, and revokes every ticket now.
+    /// Hand an approved write's job to the clipboard ordering domain, with its lease; the ticket
+    /// and its slots end here. The write's native result shows on the clip segment once it settles.
+    pub(in crate::app) fn submit_approved_write(&mut self, mut ticket: ConsentTicket) {
+        let pane_id = ticket.binding().pane_id;
+        let Some(job) = ticket.take_write() else {
+            // When: take_write is None, the ticket holds no write.
+            return;
+        };
+        drop(ticket);
+        let bytes = job.text.len();
+        match self.submit_program_clipboard(pane_id, job, true) {
+            Some(outcome) => self.show_clip_outcome(pane_id, outcome, bytes, Instant::now()),
+            None => {
+                // The write went to the worker, so an empty summary waits for its result.
+                let held = super::spawn_pane::ClipAttempts::default();
+                self.note_or_defer_clip_attempts(pane_id, held, Instant::now());
+            }
+        }
+    }
+
+    /// Publish a reloaded `osc52_read` and `osc52` to the VT workers; any change to either starts a
+    /// new policy generation, after the policies are stored, and revokes every ticket now.
     pub(in crate::app) fn publish_clipboard_policies(&mut self, new_cfg: &Config) {
         let staging = &self.clip_state.staging;
         staging.set_read_policy(new_cfg.terminal.osc52_read);
+        staging.set_write_policy(new_cfg.terminal.osc52);
         let old = &self.config.terminal;
         if new_cfg.terminal.osc52 != old.osc52 || new_cfg.terminal.osc52_read != old.osc52_read {
             staging.bump_policy_generation();

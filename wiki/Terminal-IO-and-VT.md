@@ -287,7 +287,13 @@ padding, at most 3 characters carried between chunks, and the
 `[terminal] clipboard_write_limit_bytes` limit read when the stream opens. Every buffer is
 reserved from the process clipboard staging budget before it is allocated (see
 [Memory](Memory)), and a program slot (8 at most) is taken before the write is posted to the
-event loop, even for a clear. The event loop refuses it under `[terminal] osc52 = "deny"`. On
+event loop, even for a clear. Under `[terminal] osc52 = "ask"` the VT worker instead gives the
+complete write a consent ticket on the same gate as reads (one asked write per pane, 8 tickets per
+process, else refused busy); the ticket holds the write, its lease and its program slot, follows
+the read ticket's revalidation rules below, and its page is titled `Let tab N, pane M write to
+the clipboard?`. Apply hands the write to the clipboard worker's ordering domain; Deny, Escape,
+an outside click or expiry drop it, and nothing is ever sent back to the program. The event loop
+refuses a write under `"deny"`, and under `"ask"` any write that was not approved. On
 Linux and Windows it posts the write to one clipboard worker thread, which rechecks the policy
 and calls the native clipboard; that call is the commit point, and the write's lease is
 released when it returns. Program writes and user copies share the worker's queue and run

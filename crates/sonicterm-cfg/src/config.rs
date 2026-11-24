@@ -407,13 +407,16 @@ pub enum CursorAnimation {
 
 /// Whether OSC 52 clipboard writes from programs in a pane reach the system clipboard. Reads
 /// follow [`Osc52ReadPolicy`] instead. `Deny` suits panes that run untrusted remote programs, since any
-/// program printing to the terminal can otherwise replace the local clipboard.
+/// program printing to the terminal can otherwise replace the local clipboard; `Ask` holds each
+/// write for a consent page in the requesting pane's window.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Osc52Policy {
     /// Accepted writes (at most `clipboard_write_limit_bytes` of decoded text) reach the clipboard.
     #[default]
     Allow,
+    /// Each write waits for Allow on a consent page; Deny, Escape or 120 s unanswered drop it.
+    Ask,
     /// Every write is refused before the clipboard is touched.
     Deny,
 }

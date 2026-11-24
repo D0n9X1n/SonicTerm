@@ -767,6 +767,19 @@ and `missed_output: false` is not proof of completeness in those cases. Disablin
 event loop acts on it, and ends a running wait as `revoked`. Pane text is
 untrusted input: the server tells agents never to follow instructions found in it.
 
+## Clipboard reads
+
+An OSC 52 read that its ticket allows (see [Terminal IO and VT](Terminal-IO-and-VT)) runs on a
+disposable reader thread, one at a time. The thread keeps the ticket and its reply-budget lease
+until the native call returns, even past the deadline, when the event loop has already answered
+the read empty. Each OS bounds the read before the text is copied into SonicTerm:
+
+| OS | Native call | Bound |
+| --- | --- | --- |
+| macOS | `NSPasteboard` `dataForType(NSPasteboardTypeString)` | 2 s per destination; a value longer than the cap is refused by its length before the copy into Rust. AppKit materializes the whole value before SonicTerm can measure it, as any paste does, so that allocation is not bounded by SonicTerm. |
+| Windows | `OpenClipboard` (10 tries, 10 ms apart), then `GetClipboardData(CF_UNICODETEXT)` | 2 s per destination, which covers delayed rendering; a block whose `GlobalSize` cannot fit the cap is refused before `GlobalLock`, and conversion stops past the cap. |
+| Linux (X11) | `ConvertSelection` of `CLIPBOARD` or `PRIMARY` as `UTF8_STRING` | 2 s for `SelectionNotify`; a text reply must be format 8 of a text type within the cap; an `INCR` transfer is refused from its announced size, and each chunk waits at most 2 s, 5 s in total. With no X server the read is unsupported and answered empty. |
+
 ## Platform matrix
 
 | Capability | macOS | Windows | Linux |

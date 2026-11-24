@@ -167,7 +167,7 @@ fn two_user_copies_while_program_write_holds_worker_land_in_order() {
     let mut app = app_with_worker("before", &fake, None);
     let held = fake.gate.lock().unwrap();
     let job = ClipboardJob::for_test(&app.clip_state.staging, "program");
-    assert_eq!(app.submit_program_clipboard(1, job), None, "posted to the worker");
+    assert_eq!(app.submit_program_clipboard(1, job, false), None, "posted to the worker");
     fake.wait_entered(1);
     let results = Rc::new(RefCell::new(Vec::new()));
     for text in ["first", "second"] {
@@ -194,7 +194,7 @@ fn user_copy_queue_full_refused_before_post_keeps_selection() {
     let pane_id = app.__test_seed_tab("source");
     let held = fake.gate.lock().unwrap();
     let job = ClipboardJob::for_test(&app.clip_state.staging, "program");
-    let _ = app.submit_program_clipboard(pane_id, job);
+    let _ = app.submit_program_clipboard(pane_id, job, false);
     fake.wait_entered(1);
     for _ in 0..MAX_USER_CLIPBOARD_JOBS {
         assert!(app.set_clipboard_text("queued".into()));
@@ -224,7 +224,7 @@ fn lease_held_until_worker_native_call_returns() {
     let job = ClipboardJob::for_test(&staging, "leased text");
     let reserved = staging.reserved_bytes();
     let held = fake.gate.lock().unwrap();
-    let _ = app.submit_program_clipboard(1, job);
+    let _ = app.submit_program_clipboard(1, job, false);
     fake.wait_entered(1);
     assert_eq!(staging.reserved_bytes(), reserved, "the lease is held during the native call");
     assert_eq!(staging.program_slots_in_use(), 1, "and so is the program slot");
@@ -247,7 +247,7 @@ fn event_loop_never_writes_natively_past_inline_limit() {
     app.clip_state = ClipState::new(ClipboardStaging::with_budget(64 << 20, 64 << 20));
     let staging = app.clip_state.staging.clone();
     let job = ClipboardJob::for_test(&staging, &large);
-    assert_eq!(app.submit_program_clipboard(1, job), Some(ClipWriteOutcome::TooLarge));
+    assert_eq!(app.submit_program_clipboard(1, job, false), Some(ClipWriteOutcome::TooLarge));
     assert_eq!((staging.reserved_bytes(), staging.program_slots_in_use()), (0, 0));
     assert!(app.may_write_inline(INLINE_WRITE_LIMIT_BYTES, false));
     assert!(!app.may_write_inline(large.len(), false));
@@ -260,7 +260,11 @@ fn event_loop_never_writes_natively_past_inline_limit() {
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("before"), "posted, not written");
     settle(&mut app);
     let job = ClipboardJob::for_test(&app.clip_state.staging, "small program");
-    assert_eq!(app.submit_program_clipboard(1, job), None, "a program write is always posted");
+    assert_eq!(
+        app.submit_program_clipboard(1, job, false),
+        None,
+        "a program write is always posted"
+    );
     settle(&mut app);
     assert_eq!(fake.state().writes, [large, "small program".to_owned()]);
     assert!(app.set_clipboard_text("small user".into()));
@@ -268,32 +272,37 @@ fn event_loop_never_writes_natively_past_inline_limit() {
     assert_eq!(fake.state().writes.len(), 2);
 }
 
-/// A program write posted before a reload to `osc52 = "deny"` is refused at the worker's commit
-/// point, even after a reload back to allow, while the write already in its native call lands.
+/// A program write posted before a reload to `osc52 = "deny"`, or to `"ask"`, which it was never
+/// approved under, is refused at the worker's commit point, even after a reload back to allow,
+/// while the write already in its native call lands.
 #[test]
 fn policy_revoked_while_queued_refused_at_worker_commit() {
-    let fake = FakeClipboard::holding("before");
-    let mut app = app_with_worker("before", &fake, None);
-    let held = fake.gate.lock().unwrap();
-    let first = ClipboardJob::for_test(&app.clip_state.staging, "committed");
-    let _ = app.submit_program_clipboard(3, first);
-    fake.wait_entered(1);
-    let second = ClipboardJob::for_test(&app.clip_state.staging, "queued");
-    assert_eq!(app.submit_program_clipboard(3, second), None, "posted before the reload");
-    let mut deny = Config::default();
-    deny.terminal.osc52 = Osc52Policy::Deny;
-    app.apply_new_config(deny);
-    app.apply_new_config(Config::default());
-    drop(held);
-    settle(&mut app);
-    assert_eq!(fake.state().writes, ["committed"], "the queued write was refused");
-    assert_eq!(app.clip_state.staging.program_slots_in_use(), 0);
+    for policy in [Osc52Policy::Deny, Osc52Policy::Ask] {
+        let fake = FakeClipboard::holding("before");
+        let mut app = app_with_worker("before", &fake, None);
+        let held = fake.gate.lock().unwrap();
+        let first = ClipboardJob::for_test(&app.clip_state.staging, "committed");
+        let _ = app.submit_program_clipboard(3, first, false);
+        fake.wait_entered(1);
+        let second = ClipboardJob::for_test(&app.clip_state.staging, "queued");
+        let posted = app.submit_program_clipboard(3, second, false);
+        assert_eq!(posted, None, "{policy:?}: posted before the reload");
+        let mut reload = Config::default();
+        reload.terminal.osc52 = policy;
+        app.apply_new_config(reload);
+        app.apply_new_config(Config::default());
+        drop(held);
+        settle(&mut app);
+        assert_eq!(fake.state().writes, ["committed"], "{policy:?}: the queued write was refused");
+        assert_eq!(app.clip_state.staging.program_slots_in_use(), 0);
+    }
 }
 
-/// Every reload hands `[terminal] osc52_read` to the staging the VT workers read, so a reload to
-/// `deny` silences reads from the next request on and a reload back restores `ask`.
+/// Every reload hands `[terminal] osc52_read` and `osc52` to the staging the VT workers read, so a
+/// reload to `deny` silences reads from the next request on, a reload back restores `ask`, and
+/// `osc52 = "ask"` reaches the workers that admit writes.
 #[test]
-fn reload_publishes_the_read_policy_to_staging() {
+fn reload_publishes_both_policies_to_staging() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     // A private staging keeps this reload off the process default sibling tests read.
     app.clip_state = ClipState::new(ClipboardStaging::with_budget(1 << 20, 1 << 20));
@@ -303,6 +312,11 @@ fn reload_publishes_the_read_policy_to_staging() {
     assert_eq!(app.clip_state.staging.read_policy(), Osc52ReadPolicy::Deny);
     app.apply_new_config(Config::default());
     assert_eq!(app.clip_state.staging.read_policy(), Osc52ReadPolicy::Ask);
+    assert_eq!(app.clip_state.staging.write_policy(), Osc52Policy::Allow);
+    let mut ask = Config::default();
+    ask.terminal.osc52 = Osc52Policy::Ask;
+    app.apply_new_config(ask);
+    assert_eq!(app.clip_state.staging.write_policy(), Osc52Policy::Ask);
 }
 
 /// Commit `text` over a fake clipboard holding `previous`, with any reassertion due at once.
@@ -392,7 +406,7 @@ fn worker_reassertion_runs_when_due_and_newer_copy_cancels_it() {
     fake.state().revert_to = Some("old".into());
     let mut app = app_with_worker("old", &fake, Some(Duration::from_millis(1)));
     let job = ClipboardJob::for_test(&app.clip_state.staging, "program");
-    let _ = app.submit_program_clipboard(1, job);
+    let _ = app.submit_program_clipboard(1, job, false);
     settle(&mut app);
     assert_eq!(fake.state().value, "program", "the due reassertion restored the write");
     assert_eq!(fake.state().writes, ["program", "program"]);
@@ -400,7 +414,7 @@ fn worker_reassertion_runs_when_due_and_newer_copy_cancels_it() {
     let fake = FakeClipboard::holding("old");
     let mut app = app_with_worker("old", &fake, Some(Duration::from_secs(3600)));
     let job = ClipboardJob::for_test(&app.clip_state.staging, "program");
-    let _ = app.submit_program_clipboard(1, job);
+    let _ = app.submit_program_clipboard(1, job, false);
     wait_until(&mut app, |app| !app.clip_state.domain.program_pending(1));
     assert_eq!(app.clip_state.domain.in_flight(), 1, "the armed reassertion keeps it busy");
     fake.set_external("old");

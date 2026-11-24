@@ -170,15 +170,15 @@ impl App {
                     // The job is still untaken, so this is its one commit; a write posted to the
                     // clipboard worker reports its outcome when the worker finishes it.
                     let bytes = job.text.len();
-                    if let Some(outcome) = self.submit_program_clipboard(pane_id, job) {
+                    if let Some(outcome) = self.submit_program_clipboard(pane_id, job, false) {
                         self.note_clip_write(pane_id, bytes, outcome);
                     }
                 }
             }
             UserEvent::ClipboardDone => self.drain_clipboard_completions(),
-            UserEvent::ClipboardRead { pane_id, read } => {
-                tracing::trace!(pane_id, "OSC 52 read admitted");
-                self.admit_clipboard_read(read);
+            UserEvent::ClipboardTicket { pane_id, ticket } => {
+                tracing::trace!(pane_id, "OSC 52 ticket admitted");
+                self.admit_clipboard_ticket(ticket);
             }
             UserEvent::ClipboardAttempts { pane_id, attempts } => {
                 self.note_or_defer_clip_attempts(pane_id, attempts, Instant::now());
@@ -286,7 +286,8 @@ impl App {
     pub(super) fn handle_clipboard_write(&mut self, text: String) -> ClipWriteOutcome {
         let staging = super::osc52_stream::ClipboardStaging::with_budget(usize::MAX / 4, 0);
         let job = super::osc52_stream::ClipboardJob::for_test(&staging, &text);
-        self.submit_program_clipboard(0, job).expect("with no worker, the write settles here")
+        self.submit_program_clipboard(0, job, false)
+            .expect("with no worker, the write settles here")
     }
 
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {

@@ -142,8 +142,11 @@ cargo build -p sonicterm-app
   and rechecks the policy epoch at the commit point; the lease moves into the job and is released
   when the native call returns. The event loop writes a user copy itself only when nothing is in
   flight and it is at most 512 KiB. macOS has no worker and refuses program writes over 512 KiB.
-  Clipboard reads need a ticket (`osc52_read_ticket.rs`), taken in the VT worker before any event
-  is posted: one per pane, 8 per process, else empty ST replies at once; `deny` is silent. A
+  Clipboard reads and `osc52 = "ask"` writes need a consent ticket (`osc52_read_ticket.rs`), taken
+  in the VT worker before any event is posted: one read and one asked write per pane, 8 per
+  process, else empty ST replies at once (a write is refused busy); `deny` is silent. An asked
+  write's ticket holds its job and lease; Apply hands it to the worker's ordering domain, and the
+  event loop refuses any unapproved write under `ask`. A
   ticket binds the pane, PTY incarnation, owner and command epochs and the policy generation, and
   `osc52_read_pipeline.rs` revalidates it before the native read and before every delivery
   attempt. An `ask` ticket is approved only by Apply on its own palette confirm session

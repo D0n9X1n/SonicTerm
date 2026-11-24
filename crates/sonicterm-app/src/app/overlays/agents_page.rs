@@ -223,8 +223,8 @@ impl App {
         let pending = self.interaction.agent_disconnect.take();
         match pending.filter(|pending| pending.palette_session == session) {
             Some(pending) => self.confirm_agent_disconnect(pending.target, apply),
-            None if self.close_read_consent_page(apply) => {
-                // When: close_read_consent_page owned this session, it already answered the read.
+            None if self.close_consent_page(apply) => {
+                // When: close_consent_page owned this session, it already answered the read.
             }
             None => self.confirm_default_handlers(apply),
         }

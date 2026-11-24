@@ -575,6 +575,18 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 关闭服务器、修改 `control`、断开连接或超过 10 s 截止时间，都会在事件循环执行前丢弃已排队的请求，并以
 `revoked` 结束正在进行的等待。窗格文本是不可信输入：服务器告知 agent 从不执行其中的指令。
 
+## 剪贴板读取
+
+票据允许的 OSC 52 读取（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）在一次性的读取线程上运行，
+同一时间只有一个。该线程持有票据及其应答预算租约，直到系统调用返回为止；即使已过截止时间、事件循环
+已经以空应答回复，也不例外。各系统在文本复制进 SonicTerm 之前先限制读取：
+
+| 系统 | 系统调用 | 上限 |
+| --- | --- | --- |
+| macOS | `NSPasteboard` 的 `dataForType(NSPasteboardTypeString)` | 每个目标 2 秒；长度超过上限的值在复制进 Rust 之前按长度拒绝。AppKit 会像任何粘贴一样，在 SonicTerm 能测量之前先把整个值实体化，因此这次分配不受 SonicTerm 限制。 |
+| Windows | `OpenClipboard`（最多 10 次，间隔 10 毫秒），然后 `GetClipboardData(CF_UNICODETEXT)` | 每个目标 2 秒，涵盖延迟渲染；`GlobalSize` 表明放不进上限的数据块在 `GlobalLock` 之前即被拒绝，转换超过上限即停止。 |
+| Linux（X11） | 以 `UTF8_STRING` 对 `CLIPBOARD` 或 `PRIMARY` 调用 `ConvertSelection` | 等待 `SelectionNotify` 2 秒；文本应答必须是上限之内、格式为 8 的文本类型；`INCR` 传输按其声明的大小拒绝，每个分块最多等 2 秒，总计 5 秒。没有 X 服务器时读取不受支持，以空应答回复。 |
+
 ## 平台矩阵
 
 | 能力 | macOS | Windows | Linux |

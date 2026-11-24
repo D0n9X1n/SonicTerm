@@ -1,19 +1,21 @@
-//! OSC 52 read tickets: what a read binds when the VT worker admits it, and the bounds it holds.
+//! OSC 52 consent tickets: what a read, or an `osc52 = "ask"` write, binds when the VT worker
+//! admits it, and the bounds it holds.
 //!
 //! The VT worker admits a read before posting any event: under `deny` it is silent; otherwise it
-//! takes this pane's one read slot and one of `MAX_READS` process slots, or is answered empty at
-//! once. A [`ReadTicket`] records the pane, PTY incarnation, owner and command epochs and policy
-//! generation it was admitted under, so the event loop can cancel it when any of them moves.
-//! Dropping a ticket frees both slots.
+//! takes this pane's one read slot and one of `MAX_TICKETS` process slots, or is answered empty at
+//! once. An asked write takes the pane's one write slot and a process slot the same way, carrying
+//! its job, or is refused busy. A [`ConsentTicket`] records the pane, PTY incarnation, owner and
+//! command epochs and policy generation it was admitted under, so the event loop can cancel it when
+//! any of them moves. Dropping a ticket frees both slots, and a write's job with them.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use sonicterm_cfg::config::Osc52ReadPolicy;
+use sonicterm_cfg::config::{Osc52Policy, Osc52ReadPolicy};
 
 use super::osc52_read::reply_labels;
-use super::osc52_stream::ClipboardStaging;
+use super::osc52_stream::{ClipboardJob, ClipboardStaging};
 
 /// One pane's read identity, shared by the pane, its VT worker and its intake.
 #[derive(Debug, Default)]
@@ -26,6 +28,8 @@ pub(in crate::app) struct ReadIdentity {
     incarnation: AtomicU64,
     /// Whether this pane holds a read ticket.
     read_pending: AtomicBool,
+    /// Whether this pane holds an asked write's ticket.
+    write_pending: AtomicBool,
 }
 
 impl ReadIdentity {
@@ -81,14 +85,46 @@ pub(in crate::app) struct ReadBinding {
 struct ReadSlot {
     staging: Arc<ClipboardStaging>,
     identity: Arc<ReadIdentity>,
+    /// Whether the pane slot is the write slot rather than the read slot.
+    write: bool,
 }
 
-// Lifecycle: dropping a ReadSlot clears read_pending and returns its process read slot.
+/// The pane flag a slot of kind `write` holds on `identity`.
+fn pending_flag(identity: &ReadIdentity, write: bool) -> &AtomicBool {
+    if write {
+        &identity.write_pending
+    } else {
+        // When: write is false, the slot is the pane's read slot.
+        &identity.read_pending
+    }
+}
+
+// Lifecycle: dropping a ReadSlot clears its pending_flag and calls release_ticket_slot.
 impl Drop for ReadSlot {
     fn drop(&mut self) {
-        self.identity.read_pending.store(false, Ordering::SeqCst);
-        self.staging.release_read_slot();
+        pending_flag(&self.identity, self.write).store(false, Ordering::SeqCst);
+        self.staging.release_ticket_slot();
     }
+}
+
+/// Take the pane's flag of kind `write`, then a process ticket slot; `None`, holding nothing, when
+/// either is taken already. The guard is built only once both are held.
+fn take_slot(
+    staging: &Arc<ClipboardStaging>,
+    identity: &Arc<ReadIdentity>,
+    write: bool,
+) -> Option<ReadSlot> {
+    let flag = pending_flag(identity, write);
+    if flag.swap(true, Ordering::SeqCst) {
+        // When: the pane flag was already set, the pane holds its one ticket of this kind.
+        return None;
+    }
+    if !staging.try_take_ticket_slot() {
+        // When: try_take_ticket_slot finds all MAX_TICKETS process slots held, the pane flag returns.
+        flag.store(false, Ordering::SeqCst);
+        return None;
+    }
+    Some(ReadSlot { staging: Arc::clone(staging), identity: Arc::clone(identity), write })
 }
 
 /// Where a ticket stands.
@@ -125,15 +161,18 @@ pub(in crate::app) enum CancelReason {
     PageLost,
 }
 
-/// One admitted read: its binding, reply labels, state and slots.
-pub(in crate::app) struct ReadTicket {
+/// One admitted read or asked write: its binding, reply labels (none for a write), the write's
+/// job, its state and its slots.
+pub(in crate::app) struct ConsentTicket {
     binding: ReadBinding,
     labels: Vec<u8>,
+    /// An asked write's job, holding its lease and program slot; `None` for a read.
+    write: Option<ClipboardJob>,
     state: TicketState,
     _slot: ReadSlot,
 }
 
-impl ReadTicket {
+impl ConsentTicket {
     /// What the ticket was admitted under.
     pub(in crate::app) fn binding(&self) -> &ReadBinding {
         &self.binding
@@ -142,6 +181,16 @@ impl ReadTicket {
     /// The reply labels, one per destination, in reply order.
     pub(in crate::app) fn labels(&self) -> &[u8] {
         &self.labels
+    }
+
+    /// Whether the ticket holds an asked write rather than a read.
+    pub(in crate::app) fn is_write(&self) -> bool {
+        self.write.is_some()
+    }
+
+    /// Take an approved write's job, to hand it to the clipboard ordering domain.
+    pub(in crate::app) fn take_write(&mut self) -> Option<ClipboardJob> {
+        self.write.take()
     }
 
     /// Where the ticket stands.
@@ -180,34 +229,81 @@ impl ReadTicket {
 /// A ticket posted to the event loop. Clones share one ticket, taken once; `Debug` prints only the
 /// pane, so the event can be cloned or logged. Dropping the last clone untaken frees the slots.
 #[derive(Clone)]
-pub struct ClipboardReadHandle(Arc<std::sync::Mutex<Option<ReadTicket>>>);
+pub struct ClipboardTicketHandle(Arc<std::sync::Mutex<Option<ConsentTicket>>>);
 
-impl ClipboardReadHandle {
+impl ClipboardTicketHandle {
     /// Share `ticket` for one event.
-    pub(in crate::app) fn new(ticket: ReadTicket) -> Self {
+    pub(in crate::app) fn new(ticket: ConsentTicket) -> Self {
         Self(Arc::new(std::sync::Mutex::new(Some(ticket))))
     }
 
     /// Take the ticket; `None` when a clone already took it.
-    pub(in crate::app) fn take(&self) -> Option<ReadTicket> {
+    pub(in crate::app) fn take(&self) -> Option<ConsentTicket> {
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
     }
 }
 
-impl PartialEq for ClipboardReadHandle {
+impl PartialEq for ClipboardTicketHandle {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-impl Eq for ClipboardReadHandle {}
+impl Eq for ClipboardTicketHandle {}
 
-impl std::fmt::Debug for ClipboardReadHandle {
+impl std::fmt::Debug for ClipboardTicketHandle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let guard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let pane_id = guard.as_ref().map(|ticket| ticket.binding.pane_id);
-        formatter.debug_struct("ClipboardReadHandle").field("pane_id", &pane_id).finish()
+        formatter.debug_struct("ClipboardTicketHandle").field("pane_id", &pane_id).finish()
     }
+}
+
+/// How the VT worker routes one complete write.
+pub(in crate::app) enum WriteAdmission {
+    /// `allow` or `deny`: post the job; the event loop applies `deny` before the clipboard.
+    Post(ClipboardJob),
+    /// `ask`, while the pane or the process holds every slot: refused busy, the job dropped.
+    Busy,
+    /// `ask`: a ticket holding the job, posted to the event loop for its consent page.
+    Ticket(ConsentTicket),
+}
+
+/// Admit one complete `job` from `pane_id` at `command_epoch`: under `ask` it takes the pane's one
+/// write slot and a process slot and waits for consent; otherwise it is posted. The generation is
+/// sampled before the policy, as a read's is.
+pub(in crate::app) fn admit_write(
+    staging: &Arc<ClipboardStaging>,
+    identity: &Arc<ReadIdentity>,
+    pane_id: u64,
+    command_epoch: u64,
+    job: ClipboardJob,
+    now: Instant,
+) -> WriteAdmission {
+    let policy_generation = staging.policy_generation();
+    if staging.write_policy() != Osc52Policy::Ask {
+        // When: write_policy is allow or deny, no consent is asked for.
+        return WriteAdmission::Post(job);
+    }
+    let Some(slot) = take_slot(staging, identity, true) else {
+        // When: take_slot finds the pane's write slot or every process slot held, it is busy.
+        return WriteAdmission::Busy;
+    };
+    let binding = ReadBinding {
+        pane_id,
+        incarnation: identity.incarnation(),
+        owner_epoch: identity.owner_epoch(),
+        command_epoch,
+        policy_generation,
+        created_at: now,
+    };
+    WriteAdmission::Ticket(ConsentTicket {
+        binding,
+        labels: Vec::new(),
+        write: Some(job),
+        state: TicketState::Waiting,
+        _slot: slot,
+    })
 }
 
 /// How the VT worker answers one read.
@@ -217,7 +313,7 @@ pub(in crate::app) enum Admission {
     /// The pane or the process holds every slot: answer empty now, before any event is posted.
     Busy,
     /// A ticket to post to the event loop.
-    Ticket(ReadTicket),
+    Ticket(ConsentTicket),
 }
 
 /// Admit one read of `kinds` from `pane_id` at `command_epoch`, the epoch at its position in the
@@ -240,16 +336,10 @@ pub(in crate::app) fn admit_read(
         Osc52ReadPolicy::Ask => TicketState::Waiting,
         Osc52ReadPolicy::Allow => TicketState::AutoAllowed,
     };
-    if identity.read_pending.swap(true, Ordering::SeqCst) {
-        // When: read_pending was already set, this pane holds its one ticket.
+    let Some(slot) = take_slot(staging, identity, false) else {
+        // When: take_slot finds the pane's read slot or every process slot held, it is busy.
         return Admission::Busy;
-    }
-    if !staging.try_take_read_slot() {
-        // When: try_take_read_slot finds all MAX_READS process slots held, the pane slot returns.
-        identity.read_pending.store(false, Ordering::SeqCst);
-        return Admission::Busy;
-    }
-    let slot = ReadSlot { staging: Arc::clone(staging), identity: Arc::clone(identity) };
+    };
     let binding = ReadBinding {
         pane_id,
         incarnation: identity.incarnation(),
@@ -258,7 +348,8 @@ pub(in crate::app) fn admit_read(
         policy_generation,
         created_at: now,
     };
-    Admission::Ticket(ReadTicket { binding, labels: reply_labels(kinds), state, _slot: slot })
+    let labels = reply_labels(kinds);
+    Admission::Ticket(ConsentTicket { binding, labels, write: None, state, _slot: slot })
 }
 
 #[cfg(test)]

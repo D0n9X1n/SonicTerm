@@ -1,6 +1,6 @@
 use super::*;
 use base64::Engine as _;
-use sonicterm_cfg::config::Osc52ReadPolicy;
+use sonicterm_cfg::config::{Osc52Policy, Osc52ReadPolicy};
 use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::{Parser, VtEvent};
 
@@ -9,24 +9,35 @@ fn staging(budget_bytes: usize, stream_limit_bytes: usize) -> Arc<ClipboardStagi
     ClipboardStaging::with_budget(budget_bytes, stream_limit_bytes)
 }
 
-/// Feed `bytes` through a real parser and a fresh intake; return the writes and refusals it raised.
-fn run(
-    staging: &Arc<ClipboardStaging>,
-    bytes: &[u8],
-) -> Vec<Result<ClipboardJobHandle, Osc52Refusal>> {
+/// Feed `bytes` through a real parser and `intake`; return every outcome it raised, in order.
+fn outcomes(intake: &mut Osc52Intake, bytes: &[u8]) -> Vec<Result<Accepted, Osc52Refusal>> {
     let mut parser = Parser::new(Grid::new(80, 24));
-    let mut intake = Osc52Intake::new(staging.clone());
     let now = Instant::now();
     let mut results = Vec::new();
     for event in parser.advance(bytes) {
         if let VtEvent::ClipboardStream { stream, phase } = event {
-            if let Some(result) = intake.handle(parser.clipboard_inbox(), stream, phase, now) {
-                results.push(result);
-            }
+            results.extend(intake.handle(parser.clipboard_inbox(), stream, phase, now));
         }
     }
     intake.reconcile(parser.open_clipboard_stream(), now);
     results
+}
+
+/// Feed `bytes` through a real parser and a fresh intake; return the writes and refusals it
+/// raised. A request that took a consent ticket is neither, so it is left out.
+fn run(
+    staging: &Arc<ClipboardStaging>,
+    bytes: &[u8],
+) -> Vec<Result<ClipboardJobHandle, Osc52Refusal>> {
+    let mut intake = Osc52Intake::new(staging.clone());
+    outcomes(&mut intake, bytes)
+        .into_iter()
+        .filter_map(|outcome| match outcome {
+            Ok(Accepted::Write(job)) => Some(Ok(job)),
+            Ok(Accepted::Ticket) => None,
+            Err(refusal) => Some(Err(refusal)),
+        })
+        .collect()
 }
 
 /// The text and targets of the only write `bytes` raised.
@@ -202,13 +213,46 @@ fn lease_covers_decode_replacement_and_native_buffer() {
     assert_eq!(taken.lease.bytes(), taken.text.capacity() + native);
 }
 
-/// A clipboard read refuses as a read for every kind and writes nothing.
+/// Contract: the clip summary calls a read refused only when it was: under `ask` and `allow` a
+/// read of any kind is accepted as a ticket, a second one while it is held is refused busy, and
+/// only `deny` refuses it as a read. No read writes anything.
 #[test]
-fn reads_still_refused() {
+fn reads_refused_only_when_denied_or_busy() {
     let staging = staging(1 << 20, 1 << 20);
+    for policy in [Osc52ReadPolicy::Ask, Osc52ReadPolicy::Allow] {
+        staging.set_read_policy(policy);
+        for kinds in ["c", "p", "", "x"] {
+            let mut intake = Osc52Intake::new(staging.clone());
+            let results = outcomes(&mut intake, &osc52(kinds, "?").repeat(2));
+            assert_eq!(results, [Ok(Accepted::Ticket), Err(Osc52Refusal::Busy)], "{kinds}");
+        }
+    }
+    staging.set_read_policy(Osc52ReadPolicy::Deny);
     for kinds in ["c", "p", "", "x"] {
         assert_eq!(run(&staging, &osc52(kinds, "?")), [Err(Osc52Refusal::Read)], "{kinds}");
     }
+}
+
+/// Contract: under `osc52 = "ask"` a complete write takes the pane's one write ticket, which holds
+/// the job, its lease and its program slot, and posts no write; a second write while it is held is
+/// refused busy, and a read beside it takes its own ticket. Dropping the tickets frees everything.
+#[test]
+fn ask_write_takes_one_ticket_then_refuses_busy() {
+    let staging = staging(1 << 20, 1 << 20);
+    staging.set_write_policy(Osc52Policy::Ask);
+    let mut intake = Osc52Intake::new(staging.clone());
+    let bytes = [osc52("c", &encode(b"one")), osc52("c", &encode(b"two")), osc52("c", "?")];
+    let results = outcomes(&mut intake, &bytes.concat());
+    assert_eq!(results, [Ok(Accepted::Ticket), Err(Osc52Refusal::Busy), Ok(Accepted::Ticket)]);
+    let tickets = intake.take_tickets();
+    let kinds: Vec<bool> = tickets.iter().map(ConsentTicket::is_write).collect();
+    assert_eq!(kinds, [true, false], "the write's ticket, then the read's");
+    assert_eq!(staging.ticket_slots_in_use(), 2);
+    assert_eq!(staging.program_slots_in_use(), 1, "the held write keeps its program slot");
+    assert!(staging.reserved_bytes() > 0, "and its lease");
+    drop(tickets);
+    let held = (staging.ticket_slots_in_use(), staging.program_slots_in_use());
+    assert_eq!((held, staging.reserved_bytes()), ((0, 0), 0));
 }
 
 /// The tickets and empty read replies one run of `bytes` raises on a fresh intake over `staging`.
@@ -220,7 +264,7 @@ fn read_section(staging: &Arc<ClipboardStaging>, bytes: &[u8]) -> (usize, Vec<u8
             let _ = intake.handle(parser.clipboard_inbox(), stream, phase, Instant::now());
         }
     }
-    (intake.take_read_tickets().len(), intake.take_read_replies())
+    (intake.take_tickets().len(), intake.take_read_replies())
 }
 
 /// The empty read replies one run of `bytes` queues on a fresh intake over `staging`.
@@ -243,7 +287,7 @@ fn ask_and_allow_hold_one_ticket_then_answer_empty() {
         assert_eq!(replies, b"\x1b]52;c;\x1b\\\x1b]52;p;\x1b\\", "{policy:?}");
     }
     assert_eq!(staging.reserved_bytes(), 0);
-    assert_eq!(staging.read_slots_in_use(), 0);
+    assert_eq!(staging.ticket_slots_in_use(), 0);
 }
 
 /// Under `deny` a read is dropped silently: no reply, nothing reserved, still counted refused.
@@ -337,7 +381,7 @@ fn policy_revoked_before_commit_point_refused() {
     let mut app = app_with_clipboard("old");
     let job = run(&staging, &osc52("c", &encode(b"late"))).remove(0).expect("a write");
     app.config.terminal.osc52 = sonicterm_cfg::config::Osc52Policy::Deny;
-    let outcome = app.submit_program_clipboard(1, job.take().expect("untaken"));
+    let outcome = app.submit_program_clipboard(1, job.take().expect("untaken"), false);
     assert_eq!(outcome, Some(super::super::event_loop::ClipWriteOutcome::Denied));
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("old"));
     assert_eq!((staging.reserved_bytes(), staging.program_slots_in_use()), (0, 0));
@@ -350,7 +394,7 @@ fn user_copy_after_program_write_wins() {
     let staging = staging(1 << 20, 1 << 20);
     let mut app = app_with_clipboard("old");
     let job = run(&staging, &osc52("c", &encode(b"program"))).remove(0).expect("a write");
-    let outcome = app.submit_program_clipboard(1, job.take().expect("untaken"));
+    let outcome = app.submit_program_clipboard(1, job.take().expect("untaken"), false);
     assert_eq!(outcome, Some(super::super::event_loop::ClipWriteOutcome::Written));
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("program"));
     assert!(app.set_clipboard_text("user".into()));
@@ -369,11 +413,11 @@ fn lease_held_until_native_return() {
     let taken = job.take().expect("untaken");
     let native = native_clipboard_bytes(&taken.text);
     assert!(staging.reserved_bytes() >= taken.text.len() + native, "reserved before the call");
-    let _ = app.submit_program_clipboard(1, taken);
+    let _ = app.submit_program_clipboard(1, taken, false);
     let retained = if cfg!(target_os = "linux") { native } else { 0 };
     assert_eq!(staging.reserved_bytes(), retained);
     let next = run(&staging, &osc52("c", &encode(b"held"))).remove(0).expect("a write");
-    let _ = app.submit_program_clipboard(1, next.take().expect("untaken"));
+    let _ = app.submit_program_clipboard(1, next.take().expect("untaken"), false);
     assert_eq!(staging.reserved_bytes(), retained, "the next write replaced the retained copy");
     assert_eq!(staging.program_slots_in_use(), 0);
 }
