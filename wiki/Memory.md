@@ -226,7 +226,7 @@ arguments and replies being written) with one item per live connection. Both are
 and a request line of at most 1 MiB. Stopping the server releases the charge and
 closes the owner. No pane carries this class.
 
-OSC 52 and OSC 1337 `Copy=:` writes reserve every buffer before allocating it from one
+OSC 52, OSC 1337 `Copy=:` and OSC 5522 writes reserve every buffer before allocating it from one
 process-wide clipboard staging budget of `max(128 MiB, 2 × clipboard_write_limit_bytes)` at
 startup: the decoded bytes, the U+FFFD expansion of a non-UTF-8 payload, and the native copy
 (`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere). Each retention pass charges what

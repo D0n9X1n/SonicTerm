@@ -178,7 +178,7 @@ agent 控制服务器运行期间，在进程根下有一个 `Mcp` owner。每�
 两者都有上限：最多 `[mcp] max_connections` 个连接（默认 4，至多 16），单个请求行至多 1 MiB。停止服务器会释放计费并关闭该 owner。没有窗格
 携带这一类别。
 
-OSC 52 与 OSC 1337 `Copy=:` 写入在分配每个缓冲区之前，先从一个进程级剪贴板暂存预算中预留，
+OSC 52、OSC 1337 `Copy=:` 与 OSC 5522 写入在分配每个缓冲区之前，先从一个进程级剪贴板暂存预算中预留，
 该预算在启动时为 `max(128 MiB, 2 × clipboard_write_limit_bytes)`：包括解码后的字节、非 UTF-8
 负载的 U+FFFD 扩展，以及系统副本（Windows 上为 `CF_UNICODETEXT`，其他平台为 UTF-8 长度）。
 每次保留量采样把存活租约持有的量以 `ClipboardStaging` 计入只做跟踪的进程 owner，每个已投递

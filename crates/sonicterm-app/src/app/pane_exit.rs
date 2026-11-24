@@ -7,6 +7,7 @@
 //! whatever killed it still legible.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use sonicterm_types::PaneExitStatus;
@@ -14,6 +15,51 @@ use sonicterm_vt::vt::Parser;
 use winit::window::WindowId;
 
 use super::{child_window, App};
+
+/// How long the VT loop waits for an exited child to become observable.
+///
+/// EOF on the pty master and the child becoming reapable are two events with
+/// no ordering between them, so a single probe at EOF can read "still
+/// running" for a shell that has already gone. The wait is bounded because
+/// the answer is only worth having promptly: past this, the pane stays open,
+/// which is the same outcome as an unclean exit and costs the user nothing
+/// but a stale tab they can close.
+const CHILD_EXIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Gap between exit observations while waiting.
+const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How the pane's child exited, waiting briefly for it to become observable.
+///
+/// `Unknown` means the child outlived the wait, the probe failed, or no status
+/// was recorded. Callers must not read that as a crash: it decides only that
+/// the pane stays open, never that it closes.
+pub(in crate::app) fn observe_child_exit_status(
+    probe: &sonicterm_io::pty::PtyChildExitProbe,
+) -> sonicterm_types::PaneExitStatus {
+    use sonicterm_types::PaneExitStatus;
+    let deadline = Instant::now() + CHILD_EXIT_OBSERVE_TIMEOUT;
+    loop {
+        match probe.has_exited() {
+            Ok(true) => {
+                // When: has_exited returns Ok(true), report the child's recorded exit status.
+                return probe.exit_status().unwrap_or(PaneExitStatus::Unknown);
+            }
+            Ok(false) => {
+                // When: has_exited returns Ok(false), keep polling until the observation deadline.
+            }
+            Err(error) => {
+                // When: has_exited returns Err(error), preserve an unknown exit classification.
+                tracing::debug!(%error, "failed to observe pane child exit");
+                return PaneExitStatus::Unknown;
+            }
+        }
+        if Instant::now() >= deadline {
+            // When: Instant::now reaches deadline, stop waiting and preserve an unknown result.
+            return PaneExitStatus::Unknown;
+        }
+        std::thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+    }
+}
 
 /// Write `text` into a pane's own grid as one line, never to its PTY.
 ///

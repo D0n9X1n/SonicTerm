@@ -46,18 +46,6 @@ use super::{
     WindowState,
 };
 
-/// How long the VT loop waits for an exited child to become observable.
-///
-/// EOF on the pty master and the child becoming reapable are two events with
-/// no ordering between them, so a single probe at EOF can read "still
-/// running" for a shell that has already gone. The wait is bounded because
-/// the answer is only worth having promptly: past this, the pane stays open,
-/// which is the same outcome as an unclean exit and costs the user nothing
-/// but a stale tab they can close.
-const CHILD_EXIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(250);
-/// Gap between exit observations while waiting.
-const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
 /// Why an OSC 52 request did not write the clipboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc52Refusal {
@@ -86,38 +74,7 @@ pub struct ClipAttempts {
     pub latest: Option<Osc52Refusal>,
 }
 
-/// How the pane's child exited, waiting briefly for it to become observable.
-///
-/// `Unknown` means the child outlived the wait, the probe failed, or no status
-/// was recorded. Callers must not read that as a crash: it decides only that
-/// the pane stays open, never that it closes.
-pub(super) fn observe_child_exit_status(
-    probe: &PtyChildExitProbe,
-) -> sonicterm_types::PaneExitStatus {
-    use sonicterm_types::PaneExitStatus;
-    let deadline = Instant::now() + CHILD_EXIT_OBSERVE_TIMEOUT;
-    loop {
-        match probe.has_exited() {
-            Ok(true) => {
-                // When: has_exited returns Ok(true), report the child's recorded exit status.
-                return probe.exit_status().unwrap_or(PaneExitStatus::Unknown);
-            }
-            Ok(false) => {
-                // When: has_exited returns Ok(false), keep polling until the observation deadline.
-            }
-            Err(error) => {
-                // When: has_exited returns Err(error), preserve an unknown exit classification.
-                tracing::debug!(%error, "failed to observe pane child exit");
-                return PaneExitStatus::Unknown;
-            }
-        }
-        if Instant::now() >= deadline {
-            // When: Instant::now reaches deadline, stop waiting and preserve an unknown result.
-            return PaneExitStatus::Unknown;
-        }
-        std::thread::sleep(CHILD_EXIT_POLL_INTERVAL);
-    }
-}
+pub(super) use super::pane_exit::observe_child_exit_status;
 
 /// How long a quiescent VT loop parks before looking around.
 ///
@@ -318,6 +275,8 @@ pub(in crate::app) struct PaneVtHandles {
     progress_shown: std::cell::Cell<bool>,
     /// This worker's clipboard streams; a clone starts with none open, on the same staging.
     clipboard: std::cell::RefCell<super::osc52_stream::Osc52Intake>,
+    /// This worker's OSC 5522 write transaction; a clone starts with none open.
+    kitty_clipboard: std::cell::RefCell<super::kitty_clipboard_tx::KittyClipboardTx>,
     /// The pane these handles belong to, named in the events the worker sends; 0 until set.
     pane_id: u64,
 }
@@ -362,24 +321,34 @@ impl PaneVtHandles {
                 )
                 .with_identity(pane.read_identity.clone()),
             ),
+            kitty_clipboard: std::cell::RefCell::new(
+                super::kitty_clipboard_tx::KittyClipboardTx::new(
+                    super::osc52_stream::ClipboardStaging::process_default(),
+                    pane.read_identity.clone(),
+                ),
+            ),
             pane_id: 0,
         }
     }
 
     /// These handles, reserving clipboard writes from `staging` rather than the process default.
+    // Lock order: kitty_clipboard, then clipboard; each RefCell borrow ends before the next.
     #[cfg(any(test, feature = "test-support"))]
     pub(in crate::app) fn with_clipboard_staging(
         self,
         staging: Arc<super::osc52_stream::ClipboardStaging>,
     ) -> Self {
+        self.kitty_clipboard.borrow_mut().replace_staging(staging.clone());
         self.clipboard.borrow_mut().replace_staging(staging);
         self
     }
 
     /// These handles, naming `pane_id` in the events the worker sends.
+    // Lock order: clipboard, then kitty_clipboard; each RefCell borrow ends before the next.
     pub(in crate::app) fn with_pane_id(mut self, pane_id: u64) -> Self {
         self.pane_id = pane_id;
         self.clipboard.borrow_mut().bind_pane(pane_id);
+        self.kitty_clipboard.borrow_mut().bind_pane(pane_id);
         self
     }
 }
@@ -399,6 +368,8 @@ pub(super) fn spawn_pane_workers(
     // Every clipboard read this worker admits binds the PTY it reads.
     pane.read_identity.set_incarnation(pty.incarnation());
     let worker_handles = PaneVtHandles::from_pane_state(pane).with_pane_id(pane_id);
+    // The staging keeps this receiver's sender while the worker lives, so it never disconnects.
+    let policy_wakeups = worker_handles.kitty_clipboard.borrow().staging().register_policy_waker();
     let redraw_proxy = proxy.clone();
 
     std::thread::Builder::new()
@@ -413,13 +384,38 @@ pub(super) fn spawn_pane_workers(
                     send_pane_output(&worker_handles, proxy, pane_id);
                 }
             };
+            let mut send_reply = |reply: Vec<u8>| {
+                if !replies.accepting() {
+                    // When: `replies` is not accepting after a failure, keep consuming output and observing exit without repeated errors.
+                    return;
+                }
+                let rejected_bytes = reply.len();
+                let result = in_tx_reply.send(reply);
+                let closing = input_state.is_closing();
+                replies.report(pane_id, rejected_bytes, &result, closing, || in_tx_reply.stats());
+            };
             loop {
                 let now = Instant::now();
                 let wait = worker_handles.clipboard_wait(now, flush.wait(now));
-                match out_rx.recv_timeout(wait) {
+                // The wait also wakes for a policy change and an open OSC 5522 write's deadline,
+                // so both act while the child prints nothing.
+                let received = crossbeam_channel::select! {
+                    recv(out_rx) -> message => {
+                        Some(message.map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected))
+                    }
+                    recv(policy_wakeups) -> _ => None,
+                    default(wait) => Some(Err(crossbeam_channel::RecvTimeoutError::Timeout)),
+                };
+                let Some(received) = received else {
+                    // When: received is None, the policy wakeup fired and an open OSC 5522 write
+                    // is rechecked now.
+                    worker_handles.service_kitty_clipboard(Instant::now(), &mut send_reply);
+                    continue;
+                };
+                match received {
                     Ok(bytes) => {
-                        // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
-                        // The chunk's read stamp is read before the chunk moves into the batch.
+                        // Output arrived: parse and coalesce the batch. The chunk's read stamp is
+                        // read before the chunk moves into the batch.
                         let read_at = bytes.read_at();
                         worker_handles.count_output(bytes.len());
                         flush.receive(bytes.len(), Instant::now());
@@ -430,26 +426,17 @@ pub(super) fn spawn_pane_workers(
                             &mut command_started,
                             &mut flush.sync_latch,
                             redraw_proxy.as_ref(),
-                            |reply| {
-                                if !replies.accepting() {
-                                    // When: `replies` is not accepting after a failure, keep consuming output and observing exit without repeated errors.
-                                    return;
-                                }
-                                let rejected_bytes = reply.len();
-                                let result = in_tx_reply.send(reply);
-                                let closing = input_state.is_closing();
-                                replies.report(pane_id, rejected_bytes, &result, closing, || {
-                                    in_tx_reply.stats()
-                                });
-                            },
+                            &mut send_reply,
                         );
                         flush.after_batch(&worker_handles, Instant::now(), send_output);
                         worker_handles.expire_clipboard_stream(Instant::now());
+                        worker_handles.service_kitty_clipboard(Instant::now(), &mut send_reply);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         // When: recv_timeout returns Timeout, flush any trailing pending redraw.
                         flush.on_quiet(&worker_handles, Instant::now(), send_output);
                         worker_handles.expire_clipboard_stream(Instant::now());
+                        worker_handles.service_kitty_clipboard(Instant::now(), &mut send_reply);
                         #[cfg(windows)]
                         if exit_probe.has_exited().unwrap_or(false) {
                             // When: exit_probe reports the child exited on Windows, report it and stop polling.
@@ -780,7 +767,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         // Gate on: one clock read before lock(), three under the guard (four when a new sync epoch opens);
         // an armed echo watch reads the target cell around the parse and may lock its slot, all before the guard drops.
         let before_lock = counters.map(|_| now());
-        let (result, section, section_commands, clipboard_open, clipboard_inbox) = {
+        let (result, section, section_commands, clipboard_open, clipboard_inbox, kitty_inbox) = {
             let mut parser = handles.parser.lock();
             let locked_at = before_lock.map(|_| now());
             let echo_before = counters
@@ -820,6 +807,11 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 .iter()
                 .any(|event| matches!(event, VtEvent::ClipboardStream { .. }))
                 .then(|| parser.clipboard_inbox().clone());
+            let kitty_inbox = result
+                .1
+                .iter()
+                .any(|event| matches!(event, VtEvent::KittyClipboard { .. }))
+                .then(|| parser.kitty_clipboard_inbox().clone());
             // A fair release hands the parser to a selected parked waiter, such as a frame collection,
             // before this worker can relock. On unwind the guard still drops through ordinary RAII release.
             MutexGuard::unlock_fair(parser);
@@ -829,6 +821,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 section_commands,
                 clipboard_open,
                 clipboard_inbox,
+                kitty_inbox,
             )
         };
         let (consumed, events, replies) = result;
@@ -854,6 +847,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         remaining = &remaining[consumed..];
 
         let mut clipboard_requests = Vec::new();
+        let mut kitty_requests = Vec::new();
         let mut command_side_effects = Vec::new();
         let mut media_events = Vec::new();
         // The batch's last progress change, latest wins; `Some(None)` clears.
@@ -873,6 +867,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 VtEvent::CursorStyle(style) => handles.publish_cursor_style(style),
                 VtEvent::ClipboardStream { stream, phase } => {
                     clipboard_requests.push((stream, phase, boundaries));
+                }
+                VtEvent::KittyClipboard { stream, request, bel } => {
+                    kitty_requests.push(Some((stream, request, bel, boundaries)));
                 }
                 VtEvent::Command(event) => {
                     boundaries += u64::from(event != CommandEvent::PromptEnd);
@@ -894,6 +891,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 VtEvent::Media(media) => media_events.push(media),
                 VtEvent::Progress(report) => progress = Some(report),
                 VtEvent::ProgramStateReset => {
+                    // RIS releases an open OSC 5522 write silently, at its place in the section.
+                    kitty_requests.push(None);
                     boundaries += 1;
                     progress = Some(None);
                 }
@@ -921,6 +920,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 
         // Writes post in order, then the section's command epoch, then its read tickets; refusals
         // only count toward one summary, and busy reads come back as empty replies.
+        // OSC 5522 packets run first, at their positions' epochs; their tickets post after it.
+        let (kitty_status, kitty_tickets) =
+            handles.run_kitty_section(kitty_inbox.as_deref(), kitty_requests, &mut emit_event);
         let read_replies = handles.clipboard.borrow_mut().run_section(
             clipboard_inbox.as_deref(),
             clipboard_open,
@@ -928,6 +930,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             boundaries,
             &mut emit_event,
         );
+        handles.post_kitty_tickets(kitty_tickets, &mut emit_event);
 
         let (kitty_replies, cursor_moves) =
             media_batch::apply_batch_media(handles, media_events, &mut decode_media);
@@ -954,6 +957,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             send_reply(std::mem::take(&mut reply_batch));
         }
         reply_batch.extend(replies);
+        reply_batch.extend(kitty_status);
         // Read answers join whole, keeping room for the kitty replies that follow them.
         let reserved = kitty_replies.len();
         super::osc52_read::append_answers(

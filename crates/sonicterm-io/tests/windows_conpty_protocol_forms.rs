@@ -73,6 +73,11 @@ fn cases() -> Vec<Case> {
             .output_required()
             .input_required(),
         Case::new("osc1337-copy", "\x1b]1337;Copy=:Zml4dHVyZQ==\x07").output_required(),
+        // OSC 5522 write forms: open, one text/plain chunk, commit.
+        Case::new("osc5522-write", "\x1b]5522;type=write:id=fixture\x07").output_required(),
+        Case::new("osc5522-wdata-text", "\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\")
+            .output_required(),
+        Case::new("osc5522-commit", "\x1b]5522;type=wdata\x07").output_required(),
         Case::new("osc7501-report", "\x1b]7501;app=fixture:state=working:progress=40\x07"),
         Case::new("osc7501-clear", "\x1b]7501;state=clear\x07"),
         Case::new("osc7501-query", "\x1b]7501;?\x07")

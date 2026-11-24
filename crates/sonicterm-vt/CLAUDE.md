@@ -10,8 +10,10 @@ grid through the terminal model.
 - `vt/staging.rs` - media-capture staging pools (`CaptureStagingPool`) and
   per-capture reservations.
 - `vt_kitty_clipboard.rs` - OSC 5522 metadata grammar (strict Base64 fields, Ghostty's bounds,
-  sanitized ids, overflow classification from complete metadata only) and status replies. It
-  holds no clipboard data and decides no policy.
+  sanitized ids, overflow classification from complete metadata only), status replies, and the
+  raw collector that holds one whole `5522;` packet (1 MiB wire cap) until BEL/ST, queues a valid
+  payload in `kitty_clipboard_inbox` and raises a payload-free `VtEvent::KittyClipboard`. It
+  decides no policy.
 - `lib.rs` - public exports.
 
 ## Local gate

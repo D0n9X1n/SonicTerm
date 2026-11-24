@@ -57,6 +57,9 @@ pub(in crate::app) struct ClipboardStaging {
     ticket_slots: AtomicUsize,
     /// Bumped by every change to `osc52` or `osc52_read`; a ticket bound to another is cancelled.
     policy_generation: AtomicU64,
+    /// One capacity-1 wakeup per VT worker, so a policy change reaches an open OSC 5522 write
+    /// even while its child prints nothing.
+    policy_wakers: std::sync::Mutex<Vec<crossbeam_channel::Sender<()>>>,
 }
 
 /// The stored form of the write `policy`.
@@ -97,7 +100,31 @@ impl ClipboardStaging {
             write_policy: AtomicU8::new(write_policy_code(Osc52Policy::default())),
             ticket_slots: AtomicUsize::new(0),
             policy_generation: AtomicU64::new(0),
+            policy_wakers: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Register one VT worker's policy wakeup; a wakeup already pending coalesces with the next.
+    /// Workers that ended are pruned here and at every wake, so the list tracks live panes.
+    pub(in crate::app) fn register_policy_waker(&self) -> crossbeam_channel::Receiver<()> {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let mut wakers =
+            self.policy_wakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A live worker woken here only rechecks its open write, which the policy still admits.
+        wakers.retain(|waker| {
+            !matches!(waker.try_send(()), Err(crossbeam_channel::TrySendError::Disconnected(_)))
+        });
+        wakers.push(sender);
+        receiver
+    }
+
+    /// Wake every VT worker to recheck its open OSC 5522 write against the current policy.
+    pub(in crate::app) fn wake_policy_workers(&self) {
+        let mut wakers =
+            self.policy_wakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        wakers.retain(|waker| {
+            !matches!(waker.try_send(()), Err(crossbeam_channel::TrySendError::Disconnected(_)))
+        });
     }
 
     /// Publish `[terminal] osc52_read`; reads that end from now on follow it.
@@ -454,7 +481,7 @@ impl Base64Stream {
 }
 
 /// The value of one standard-alphabet Base64 character.
-fn sextet(byte: u8) -> Option<u8> {
+pub(in crate::app) fn sextet(byte: u8) -> Option<u8> {
     match byte {
         b'A'..=b'Z' => Some(byte - b'A'),
         b'a'..=b'z' => Some(byte - b'a' + 26),
@@ -521,6 +548,8 @@ pub(in crate::app) struct ClipboardJob {
     /// Covers `text` and its native copy until the native call returns.
     pub(in crate::app) lease: ClipLease,
     _slot: ProgramSlot,
+    /// Where an OSC 5522 write's status goes once it settles; `None` for OSC 52.
+    pub(in crate::app) kitty: Option<super::kitty_clipboard_tx::KittyReply>,
 }
 
 impl ClipboardJob {
@@ -532,7 +561,21 @@ impl ClipboardJob {
         assert!(lease.grow_to(text.len() + native_clipboard_bytes(text)), "test staging budget");
         let slot = staging.take_program_slot().expect("a free program slot");
         let targets = ClipTargets { clipboard: true, primary: false };
-        Self { text: text.to_owned(), targets, lease, _slot: slot }
+        Self { text: text.to_owned(), targets, lease, _slot: slot, kitty: None }
+    }
+
+    /// The write an OSC 5522 commit resolved: `bytes` become text with `lease` grown first, and a
+    /// program slot is taken, as an OSC 52 write's are; its status goes back through `reply`.
+    pub(in crate::app) fn kitty(
+        staging: &Arc<ClipboardStaging>,
+        bytes: Vec<u8>,
+        lease: ClipLease,
+        targets: ClipTargets,
+        reply: super::kitty_clipboard_tx::KittyReply,
+    ) -> Result<Self, Osc52Refusal> {
+        let (text, lease) = into_text(bytes, lease)?;
+        let slot = staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
+        Ok(Self { text, targets, lease, _slot: slot, kitty: Some(reply) })
     }
 }
 
@@ -542,6 +585,11 @@ impl ClipboardJob {
 pub struct ClipboardJobHandle(Arc<std::sync::Mutex<Option<ClipboardJob>>>);
 
 impl ClipboardJobHandle {
+    /// Share `job` for one event.
+    pub(in crate::app) fn new(job: ClipboardJob) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(job))))
+    }
+
     /// Take the job; `None` when a clone already took it.
     pub(in crate::app) fn take(&self) -> Option<ClipboardJob> {
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
@@ -804,7 +852,7 @@ impl Osc52Intake {
         let (text, lease) = into_text(bytes, lease)?;
         // The slot is taken here, in the reader thread, before the write is posted.
         let slot = self.staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
-        Ok(ClipboardJob { text, targets, lease, _slot: slot })
+        Ok(ClipboardJob { text, targets, lease, _slot: slot, kitty: None })
     }
 
     /// Match the parser's open stream after a section: start tracking a stream that opened with

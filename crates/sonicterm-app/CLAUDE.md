@@ -149,7 +149,11 @@ cargo build -p sonicterm-app
   event loop refuses any unapproved write under `ask`. A
   ticket binds the pane, PTY incarnation, owner and command epochs and the policy generation, and
   `osc52_read_pipeline.rs` revalidates it before the native read and before every delivery
-  attempt. An `ask` ticket is approved only by Apply on its own palette confirm session
+  attempt. OSC 5522 writes (`kitty_clipboard_tx.rs`) keep one open transaction per pane in the VT
+  worker, reserved from the same `ClipboardStaging` before every buffer grows; a commit resolves
+  aliases over every staged type, then routes the text like an OSC 52 write, and the job's
+  `KittyReply` is answered on the source PTY when it settles. The worker's `select!` also wakes on
+  the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. An `ask` ticket is approved only by Apply on its own palette confirm session
   (`osc52_read_consent.rs`), opened in the source window while it is frontmost and the palette is
   closed, never raising, focusing, reusing or replacing a palette; the title names the tab and
   pane by position only. Apply also requires the palette still hosted by that window; Deny,

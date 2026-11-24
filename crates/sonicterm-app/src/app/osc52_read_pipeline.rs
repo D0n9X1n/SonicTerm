@@ -290,9 +290,13 @@ impl super::App {
     /// a refused asked write is dropped, writing nothing, and the clip segment says it was denied.
     pub(in crate::app) fn refuse_ticket(&mut self, ticket: ConsentTicket, now: Instant) {
         if ticket.is_write() {
-            // When: the ticket holds a write, nothing is sent back; dropping it frees the job.
+            // When: the ticket holds a write, only an OSC 5522 write is answered (`EPERM`);
+            // dropping the ticket frees the job.
             let pane_id = ticket.binding().pane_id;
+            let mut ticket = ticket;
+            let kitty = ticket.take_write().and_then(|job| job.kitty.clone());
             drop(ticket);
+            self.send_kitty_status(pane_id, kitty, super::event_loop::ClipWriteOutcome::Denied);
             tracing::debug!(pane_id, "OSC 52 asked write refused");
             self.show_clip_outcome(pane_id, super::event_loop::ClipWriteOutcome::Denied, 0, now);
             return;
@@ -424,7 +428,7 @@ impl super::App {
     }
 
     /// Queue `reply` on pane `pane_id`'s sensitive-reply slot, or a test's port.
-    fn send_read_reply(
+    pub(in crate::app) fn send_read_reply(
         &mut self,
         pane_id: u64,
         reply: SensitiveReply,
@@ -503,6 +507,8 @@ impl super::App {
         let staging = &self.clip_state.staging;
         staging.set_read_policy(new_cfg.terminal.osc52_read);
         staging.set_write_policy(new_cfg.terminal.osc52);
+        // Every VT worker rechecks an open OSC 5522 write now, even while its child is silent.
+        staging.wake_policy_workers();
         let old = &self.config.terminal;
         if new_cfg.terminal.osc52 != old.osc52 || new_cfg.terminal.osc52_read != old.osc52_read {
             staging.bump_policy_generation();

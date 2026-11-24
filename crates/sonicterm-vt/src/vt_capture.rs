@@ -215,6 +215,7 @@ impl Parser {
             Some(RawOsc::Semantic { content, .. }) => content.capacity(),
             Some(RawOsc::Iterm2 { capture, .. }) => capture.retained_bytes(),
             Some(RawOsc::Clipboard(_)) => self.clipboard_retained_bytes(),
+            Some(RawOsc::KittyClipboard(_)) => self.kitty_clipboard_retained_bytes(),
             Some(RawOsc::Probe { .. } | RawOsc::Refused { .. }) | None => 0,
         };
         // OSC 99 chunks wait here until their notification completes, at most MAX_NOTIFY_BYTES.
@@ -255,7 +256,8 @@ impl Parser {
                 RawOsc::Probe { .. }
                 | RawOsc::Semantic { .. }
                 | RawOsc::Refused { .. }
-                | RawOsc::Clipboard(_),
+                | RawOsc::Clipboard(_)
+                | RawOsc::KittyClipboard(_),
             )
             | None => 0,
         };
@@ -304,6 +306,11 @@ impl Parser {
         let semantic = match self.raw_osc.as_ref() {
             Some(RawOsc::Semantic { pending_esc, .. } | RawOsc::Refused { pending_esc }) => {
                 Some(*pending_esc)
+            }
+            Some(RawOsc::KittyClipboard(collector)) => {
+                // An open OSC 5522 packet is dropped whole and swallowed as a refused semantic
+                // OSC is, so no part of it is raised or printed.
+                Some(collector.pending_esc)
             }
             Some(RawOsc::Clipboard(_)) => {
                 // When: RawOsc::Clipboard is open, it aborts like the host's expiry and the rest

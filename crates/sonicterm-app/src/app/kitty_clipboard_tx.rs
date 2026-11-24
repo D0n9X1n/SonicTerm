@@ -1,0 +1,590 @@
+//! OSC 5522 write transactions above the parser: one per pane, owned by its VT worker.
+//!
+//! The parser raises one payload-free `VtEvent::KittyClipboard` per complete packet and queues a
+//! valid packet's encoded payload in its kitty inbox. [`KittyClipboardTx`] keeps the pane's one
+//! open write: each MIME representation is decoded into a buffer reserved from
+//! [`ClipboardStaging`] before it is allocated, aliases are kept in order, and a commit resolves
+//! the aliases over every staged representation before it chooses the text the clipboard worker
+//! writes. Representations SonicTerm cannot hold yet are released at the commit.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use base64::Engine as _;
+use sonicterm_cfg::config::Osc52Policy;
+use sonicterm_vt::vt::{
+    kitty_clipboard_status_reply, ClipboardInbox, KittyClipboardLocation, KittyClipboardMetadata,
+    KittyClipboardOperation, KittyClipboardRequest, KittyClipboardStatus,
+    MAX_KITTY_CLIPBOARD_MIME_BYTES,
+};
+
+use super::osc52_read_ticket::{admit_write, ConsentTicket, ReadIdentity, WriteAdmission};
+use super::osc52_stream::{sextet, ClipLease, ClipTargets, ClipboardJob, ClipboardStaging};
+use super::spawn_pane::Osc52Refusal;
+
+/// How long an open write may wait for its next packet before it ends `EBUSY`.
+pub(in crate::app) const KITTY_WRITE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long an open write may stay open in all before it ends `EBUSY`.
+pub(in crate::app) const KITTY_WRITE_ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Most MIME representations one write stages; later types are ignored.
+pub(in crate::app) const MAX_KITTY_WRITE_MIMES: usize = 64;
+
+/// Most aliases one write keeps; later aliases are ignored.
+pub(in crate::app) const MAX_KITTY_WRITE_ALIASES: usize = 64;
+
+/// Where a write's statuses go: the opening `write`'s sanitized id and location, and the
+/// terminator of the packet being answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) struct KittyReply {
+    id: String,
+    location: KittyClipboardLocation,
+    bel: bool,
+}
+
+impl KittyReply {
+    /// The reply address `metadata` opens, answered with `bel`'s terminator.
+    fn of(metadata: &KittyClipboardMetadata, bel: bool) -> Self {
+        Self { id: metadata.id.clone(), location: metadata.location, bel }
+    }
+
+    /// The `type=write` status reply carrying `status`.
+    pub(in crate::app) fn status(&self, status: KittyClipboardStatus) -> Vec<u8> {
+        let write = KittyClipboardOperation::Write;
+        kitty_clipboard_status_reply(write, status, self.location, &self.id, self.bel)
+    }
+}
+
+/// What one packet, deadline or policy change produced for the VT worker.
+pub(in crate::app) enum KittyStep {
+    /// Nothing to send.
+    Silent,
+    /// One status reply for the pane's reply spool; it carries no clipboard data.
+    Reply(Vec<u8>),
+    /// A committed write to post to the event loop under `allow`.
+    Post(ClipboardJob),
+    /// A committed write held on a consent ticket under `ask`.
+    Ticket(ConsentTicket),
+}
+
+impl std::fmt::Debug for KittyStep {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Only lengths are printed, so a step can be logged without its clipboard text.
+        match self {
+            Self::Silent => formatter.write_str("Silent"),
+            Self::Reply(bytes) => write!(formatter, "Reply({:?})", String::from_utf8_lossy(bytes)),
+            Self::Post(job) => write!(formatter, "Post(text_bytes: {})", job.text.len()),
+            Self::Ticket(_) => formatter.write_str("Ticket"),
+        }
+    }
+}
+
+/// One MIME type's strict Base64 stream across packets: a group carries at most 3 sextets between
+/// packets and padding closes it, so a packet ending on padding leaves the next one starting fresh.
+#[derive(Clone, Copy, Default)]
+struct Base64Group {
+    sextets: [u8; 4],
+    filled: usize,
+    padding: usize,
+}
+
+impl Base64Group {
+    /// Decode `chunk`, appending to `output` when given; returns the decoded length, or `Err` on a
+    /// byte outside the alphabet or misplaced padding.
+    fn run(&mut self, chunk: &[u8], mut output: Option<&mut Vec<u8>>) -> Result<usize, ()> {
+        let mut produced = 0;
+        for byte in chunk {
+            if *byte == b'=' {
+                // When: byte is `=`, it is padding: checked and counted, never decoded.
+                if self.filled < 2 || self.filled + self.padding >= 4 {
+                    // When: padding follows fewer than two sextets or overfills the group, the
+                    // stream is malformed.
+                    return Err(());
+                }
+                self.padding += 1;
+            } else {
+                // When: byte is not padding, it must be a sextet with no padding before it.
+                let value = sextet(*byte).ok_or(())?;
+                if self.padding > 0 {
+                    // When: data follows padding inside one group, the stream is malformed.
+                    return Err(());
+                }
+                self.sextets[self.filled] = value;
+                self.filled += 1;
+            }
+            if self.filled + self.padding == 4 {
+                let [first, second, third, fourth] = self.sextets;
+                let decoded =
+                    [first << 2 | second >> 4, second << 4 | third >> 2, third << 6 | fourth];
+                let byte_count = self.filled - 1;
+                if let Some(output) = output.as_deref_mut() {
+                    output.extend_from_slice(&decoded[..byte_count]);
+                }
+                produced += byte_count;
+                *self = Self::default();
+            }
+        }
+        Ok(produced)
+    }
+
+    /// Whether the stream ended on a whole group, as the spec's required padding makes it.
+    fn complete(&self) -> bool {
+        self.filled == 0 && self.padding == 0
+    }
+}
+
+/// One staged representation.
+struct Entry {
+    mime: String,
+    data: Vec<u8>,
+}
+
+/// The pane's open write.
+struct OpenWrite {
+    reply: KittyReply,
+    /// The decoded-byte limit read when the write opened.
+    limit_bytes: usize,
+    entries: Vec<Entry>,
+    /// `(alias, target)` pairs in arrival order; a repeated alias keeps its place.
+    aliases: Vec<(String, String)>,
+    /// The entry receiving data.
+    current: Option<usize>,
+    group: Base64Group,
+    /// Covers every entry's capacity and every alias.
+    lease: ClipLease,
+    opened_at: Instant,
+    last_packet: Instant,
+}
+
+impl OpenWrite {
+    /// End the current entry's stream; `Err` when it did not end on a whole group.
+    fn finish_current(&mut self) -> Result<(), KittyClipboardStatus> {
+        let complete = self.group.complete();
+        self.group = Base64Group::default();
+        self.current = None;
+        complete.then_some(()).ok_or(KittyClipboardStatus::Einval)
+    }
+
+    /// Stage one `wdata` chunk of `mime`.
+    fn append(&mut self, mime: &str, chunk: &[u8]) -> Result<(), KittyClipboardStatus> {
+        if self.current.is_some_and(|index| self.entries[index].mime != mime) {
+            // The chunk switches MIME type, so the previous stream ends here.
+            self.finish_current()?;
+        }
+        if self.current.is_none() {
+            // When: current is none, a repeated mime restarts its region, else a new entry opens.
+            if let Some(index) = self.entries.iter().position(|entry| entry.mime == mime) {
+                self.entries[index].data.clear();
+                self.current = Some(index);
+            } else if self.entries.len() < MAX_KITTY_WRITE_MIMES {
+                // When: entries is below MAX_KITTY_WRITE_MIMES, the new type takes an entry.
+                if !self.lease.grow_to(self.lease.bytes() + mime.len()) {
+                    // When: lease.grow_to fails for the mime name, the write is busy.
+                    return Err(KittyClipboardStatus::Ebusy);
+                }
+                self.entries.push(Entry { mime: mime.to_owned(), data: Vec::new() });
+                self.current = Some(self.entries.len() - 1);
+            } else {
+                // When: every entry slot is taken, this type's data is ignored, as Ghostty does.
+                return Ok(());
+            }
+        }
+        let index = self.current.expect("an entry receives data");
+        // A dry run validates the whole chunk and gives its exact length before anything grows.
+        let decoded =
+            self.group.clone().run(chunk, None).map_err(|()| KittyClipboardStatus::Einval)?;
+        let staged: usize = self.entries.iter().map(|entry| entry.data.len()).sum();
+        if staged + decoded > self.limit_bytes {
+            // When: staged plus decoded passes limit_bytes, the write ends `EFBIG` before allocating.
+            return Err(KittyClipboardStatus::Efbig);
+        }
+        let data = &mut self.entries[index].data;
+        let needed = data.len() + decoded;
+        if needed > data.capacity() {
+            // When: needed passes data.capacity(), the growth is reserved first: doubled within
+            // the limit when the lease allows it, else exactly needed.
+            let doubled = needed.max(data.capacity() * 2).min(self.limit_bytes).max(needed);
+            let base = self.lease.bytes() - data.capacity();
+            let target = if self.lease.grow_to(base + doubled) {
+                doubled
+            } else if self.lease.grow_to(base + needed) {
+                // When: lease.grow_to covers needed but not doubled, exactly needed is reserved.
+                needed
+            } else {
+                // When: lease.grow_to covers neither doubled nor needed, the write is busy.
+                return Err(KittyClipboardStatus::Ebusy);
+            };
+            data.reserve_exact(target - data.len());
+            if !self.lease.grow_to(base + data.capacity()) {
+                // When: lease.grow_to cannot cover the capacity reserve_exact gave, the write is busy.
+                return Err(KittyClipboardStatus::Ebusy);
+            }
+        }
+        self.group.run(chunk, Some(data)).map(|_| ()).map_err(|()| KittyClipboardStatus::Einval)
+    }
+
+    /// Record the aliases a `walias` chunk names for `target`.
+    fn alias(&mut self, target: &str, chunk: &[u8]) -> Result<(), KittyClipboardStatus> {
+        let base = self.lease.bytes();
+        if !self.lease.grow_to(base + chunk.len()) {
+            // When: lease.grow_to cannot cover decoding the chunk, the write is busy.
+            return Err(KittyClipboardStatus::Ebusy);
+        }
+        let decoded = base64::engine::general_purpose::STANDARD.decode(chunk);
+        let names = decoded.ok().and_then(|bytes| String::from_utf8(bytes).ok());
+        self.lease.shrink_to(base);
+        let names = names.ok_or(KittyClipboardStatus::Einval)?;
+        for name in names.split_ascii_whitespace() {
+            if name.len() > MAX_KITTY_CLIPBOARD_MIME_BYTES {
+                // When: name is over the MIME bound, it is skipped.
+                continue;
+            }
+            if let Some(alias) = self.aliases.iter_mut().find(|(alias, _)| alias == name) {
+                // When: aliases already holds name, it points at the newer target, keeping its place.
+                alias.1 = target.to_owned();
+                continue;
+            }
+            if self.aliases.len() == MAX_KITTY_WRITE_ALIASES {
+                // When: every alias slot is taken, further aliases are ignored.
+                return Ok(());
+            }
+            if !self.lease.grow_to(self.lease.bytes() + name.len() + target.len()) {
+                // When: lease.grow_to cannot cover the alias name and target, the write is busy.
+                return Err(KittyClipboardStatus::Ebusy);
+            }
+            self.aliases.push((name.to_owned(), target.to_owned()));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `mime` names plain text, which is what the clipboard worker can write today.
+fn is_text(mime: &str) -> bool {
+    mime == "text/plain" || mime.starts_with("text/plain;")
+}
+
+/// Apply `aliases` in order over `entries` and take the first text representation's bytes;
+/// `Some(empty)` when nothing was staged (a clear), `None` when nothing staged is text.
+fn take_text(mut entries: Vec<Entry>, aliases: &[(String, String)]) -> Option<Vec<u8>> {
+    if entries.is_empty() {
+        // When: entries is empty, the write staged nothing and the commit clears the clipboard.
+        return Some(Vec::new());
+    }
+    // Names map to entry indices, so resolving aliases copies no data.
+    let mut names: Vec<(&str, usize)> =
+        entries.iter().enumerate().map(|(index, entry)| (entry.mime.as_str(), index)).collect();
+    for (alias, target) in aliases {
+        let Some(index) = names.iter().find(|(name, _)| name == target).map(|(_, index)| *index)
+        else {
+            // When: the alias's target has no representation, the alias is dropped.
+            continue;
+        };
+        match names.iter_mut().find(|(name, _)| name == alias) {
+            Some(existing) => existing.1 = index,
+            None => names.push((alias.as_str(), index)),
+        }
+    }
+    let index = names.iter().find(|(name, _)| is_text(name)).map(|(_, index)| *index)?;
+    Some(entries.swap_remove(index).data)
+}
+
+/// One pane's OSC 5522 write transaction, driven by its VT worker outside the parser lock.
+pub(in crate::app) struct KittyClipboardTx {
+    staging: Arc<ClipboardStaging>,
+    identity: Arc<ReadIdentity>,
+    pane_id: u64,
+    open: Option<OpenWrite>,
+}
+
+impl Clone for KittyClipboardTx {
+    /// A transaction with no write open on the same staging, identity and pane: an open write and
+    /// its lease belong to the one worker that tracks it.
+    fn clone(&self) -> Self {
+        let mut tx = Self::new(self.staging.clone(), self.identity.clone());
+        tx.pane_id = self.pane_id;
+        tx
+    }
+}
+
+/// One request a parser section raised, with the command boundaries passed before it; `None` is a
+/// RIS, which releases the open write silently.
+pub(in crate::app) type KittySectionRequest = Option<(u64, KittyClipboardRequest, bool, u64)>;
+
+impl KittyClipboardTx {
+    /// A transaction with no write open, reserving from `staging` and binding tickets to `identity`.
+    pub(in crate::app) fn new(staging: Arc<ClipboardStaging>, identity: Arc<ReadIdentity>) -> Self {
+        Self { staging, identity, pane_id: 0, open: None }
+    }
+
+    /// Name `pane_id` in the tickets this transaction admits.
+    pub(in crate::app) fn bind_pane(&mut self, pane_id: u64) {
+        self.pane_id = pane_id;
+    }
+
+    /// Reserve from `staging` instead, dropping any open write.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::app) fn replace_staging(&mut self, staging: Arc<ClipboardStaging>) {
+        self.open = None;
+        self.staging = staging;
+    }
+
+    /// The staging this transaction reserves from and reads the `osc52` policy of.
+    pub(in crate::app) fn staging(&self) -> &Arc<ClipboardStaging> {
+        &self.staging
+    }
+
+    /// Whether a write is open.
+    #[cfg(test)]
+    pub(in crate::app) fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Release the open write without a reply: RIS, or the pane retiring.
+    pub(in crate::app) fn release(&mut self) {
+        self.open = None;
+    }
+
+    /// When the open write expires: 30 s after its last packet, 10 min after it opened.
+    pub(in crate::app) fn deadline(&self) -> Option<Instant> {
+        self.open.as_ref().map(|open| {
+            (open.last_packet + KITTY_WRITE_IDLE_TIMEOUT)
+                .min(open.opened_at + KITTY_WRITE_ABSOLUTE_TIMEOUT)
+        })
+    }
+
+    /// Finish the open write at `now` when the policy is now `deny` (`EPERM`) or its deadline
+    /// passed (`EBUSY`); returns the status reply. Runs even while the child prints nothing.
+    pub(in crate::app) fn service(&mut self, now: Instant) -> Option<Vec<u8>> {
+        let deadline = self.deadline()?;
+        let status = if self.staging.write_policy() == Osc52Policy::Deny {
+            KittyClipboardStatus::Eperm
+        } else if now >= deadline {
+            // When: now reaches the deadline, the write expired.
+            KittyClipboardStatus::Ebusy
+        } else {
+            // When: the policy still admits the write and its deadline is ahead, it stays open.
+            return None;
+        };
+        self.open.take().map(|open| open.reply.status(status))
+    }
+
+    /// Run one section's requests in order, each at the command epoch of its position.
+    pub(in crate::app) fn run(
+        &mut self,
+        inbox: Option<&ClipboardInbox>,
+        requests: Vec<KittySectionRequest>,
+        now: Instant,
+    ) -> Vec<KittyStep> {
+        let base_epoch = self.identity.command_epoch();
+        let mut steps = Vec::new();
+        for request in requests {
+            let Some((stream, request, bel, passed)) = request else {
+                // When: the section passed a RIS here, the open write ends without a reply.
+                self.release();
+                continue;
+            };
+            let Some(inbox) = inbox else {
+                // When: no inbox was taken, the section raised no packet to read from it.
+                continue;
+            };
+            steps.push(self.handle(inbox, stream, request, bel, base_epoch + passed, now));
+        }
+        steps
+    }
+
+    /// Apply one packet.
+    pub(in crate::app) fn handle(
+        &mut self,
+        inbox: &ClipboardInbox,
+        stream: u64,
+        request: KittyClipboardRequest,
+        bel: bool,
+        command_epoch: u64,
+        now: Instant,
+    ) -> KittyStep {
+        let (metadata, payload) = match request {
+            KittyClipboardRequest::Packet { metadata, payload } => (metadata, payload),
+            KittyClipboardRequest::Overflow(operation) => {
+                // When: the request is Overflow, an open write ends `EFBIG` for wdata/walias.
+                return self.fail_open(operation, KittyClipboardStatus::Efbig, bel);
+            }
+            KittyClipboardRequest::InvalidValue(operation) => {
+                // When: the request is InvalidValue, an open write ends `EINVAL` for wdata/walias.
+                return self.fail_open(operation, KittyClipboardStatus::Einval, bel);
+            }
+        };
+        // A packet with a payload has one chunk in the inbox under `stream`; it leaves the inbox
+        // now, whatever becomes of the packet.
+        let chunk = payload.then(|| inbox.pop(stream)).flatten().unwrap_or_default();
+        match metadata.operation {
+            KittyClipboardOperation::Read => {
+                // shortcut: reads and their grants are not served yet, so every read is refused.
+                let read = KittyClipboardOperation::Read;
+                let status = KittyClipboardStatus::Eperm;
+                KittyStep::Reply(kitty_clipboard_status_reply(
+                    read,
+                    status,
+                    metadata.location,
+                    &metadata.id,
+                    bel,
+                ))
+            }
+            KittyClipboardOperation::Write => self.begin(&metadata, bel, now),
+            KittyClipboardOperation::Wdata if metadata.mime.is_empty() => {
+                self.commit(bel, command_epoch, now)
+            }
+            KittyClipboardOperation::Wdata => {
+                self.step(bel, now, |open| open.append(&metadata.mime, &chunk))
+            }
+            KittyClipboardOperation::Walias => {
+                // When: the operation is Walias, the chunk lists aliases for metadata.mime.
+                if metadata.mime.is_empty() {
+                    // When: metadata.mime is empty, the alias has no target and the write ends `EINVAL`.
+                    return self.step(bel, now, |_| Err(KittyClipboardStatus::Einval));
+                }
+                self.step(bel, now, |open| open.alias(&metadata.mime, &chunk))
+            }
+        }
+    }
+
+    /// Finish an open write with `status` for a `wdata`/`walias` packet; anything else is dropped.
+    fn fail_open(
+        &mut self,
+        operation: KittyClipboardOperation,
+        status: KittyClipboardStatus,
+        bel: bool,
+    ) -> KittyStep {
+        let ends_write =
+            matches!(operation, KittyClipboardOperation::Wdata | KittyClipboardOperation::Walias);
+        match self.open.take() {
+            Some(mut open) if ends_write => {
+                open.reply.bel = bel;
+                KittyStep::Reply(open.reply.status(status))
+            }
+            open => {
+                // No write is open, or the packet is a read or write: it is dropped and an open
+                // write stays as it was.
+                self.open = open;
+                KittyStep::Silent
+            }
+        }
+    }
+
+    /// Open a write, silently replacing one already open; under `deny` answer `EPERM` at once.
+    fn begin(&mut self, metadata: &KittyClipboardMetadata, bel: bool, now: Instant) -> KittyStep {
+        self.open = None;
+        let reply = KittyReply::of(metadata, bel);
+        if self.staging.write_policy() == Osc52Policy::Deny {
+            // When: write_policy is Deny, the write can never succeed, so nothing is staged.
+            return KittyStep::Reply(reply.status(KittyClipboardStatus::Eperm));
+        }
+        self.open = Some(OpenWrite {
+            reply,
+            limit_bytes: self.staging.stream_limit(),
+            entries: Vec::new(),
+            aliases: Vec::new(),
+            current: None,
+            group: Base64Group::default(),
+            lease: self.staging.lease(),
+            opened_at: now,
+            last_packet: now,
+        });
+        KittyStep::Silent
+    }
+
+    /// Apply `change` to the open write; on an error the write ends with that status.
+    fn step(
+        &mut self,
+        bel: bool,
+        now: Instant,
+        change: impl FnOnce(&mut OpenWrite) -> Result<(), KittyClipboardStatus>,
+    ) -> KittyStep {
+        let Some(open) = self.open.as_mut() else {
+            // When: no write is open, data and aliases are ignored, as kitty ignores them.
+            return KittyStep::Silent;
+        };
+        open.last_packet = now;
+        match change(open) {
+            Ok(()) => KittyStep::Silent,
+            Err(status) => self.fail_open(KittyClipboardOperation::Wdata, status, bel),
+        }
+    }
+
+    /// Commit the open write: resolve aliases, choose the text, check the policy again and route it.
+    fn commit(&mut self, bel: bool, command_epoch: u64, now: Instant) -> KittyStep {
+        let Some(mut open) = self.open.take() else {
+            // When: no write is open, a commit is ignored.
+            return KittyStep::Silent;
+        };
+        open.reply.bel = bel;
+        if open.current.is_some() && open.finish_current().is_err() {
+            // When: finish_current fails, the last stream ended mid-group and the write is `EINVAL`.
+            return KittyStep::Reply(open.reply.status(KittyClipboardStatus::Einval));
+        }
+        let OpenWrite { reply, entries, aliases, lease, .. } = open;
+        let primary = reply.location == KittyClipboardLocation::Primary;
+        let Some(text) =
+            take_text(entries, &aliases).filter(|_| !primary || cfg!(target_os = "linux"))
+        else {
+            // When: take_text finds no text, or primary is set off Linux, the commit is `ENOSYS`.
+            return KittyStep::Reply(reply.status(KittyClipboardStatus::Enosys));
+        };
+        if self.staging.write_policy() == Osc52Policy::Deny {
+            // When: write_policy is Deny at the commit, the write is refused `EPERM`.
+            return KittyStep::Reply(reply.status(KittyClipboardStatus::Eperm));
+        }
+        let targets = ClipTargets { clipboard: !primary, primary };
+        let job = match ClipboardJob::kitty(&self.staging, text, lease, targets, reply.clone()) {
+            Ok(job) => job,
+            Err(Osc52Refusal::Busy) => {
+                // When: the refusal is Busy, the budget or the program slots are full.
+                return KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy));
+            }
+            Err(_) => {
+                // When: any other refusal is returned, the text could not be staged.
+                return KittyStep::Reply(reply.status(KittyClipboardStatus::Eio));
+            }
+        };
+        match admit_write(&self.staging, &self.identity, self.pane_id, command_epoch, job, now) {
+            WriteAdmission::Post(job) => KittyStep::Post(job),
+            WriteAdmission::Ticket(ticket) => KittyStep::Ticket(ticket),
+            WriteAdmission::Busy => KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy)),
+        }
+    }
+}
+
+impl super::App {
+    /// Answer a settled OSC 5522 write on pane `pane_id`'s PTY: `DONE` when written, `EIO` on a
+    /// native failure, `EPERM` when the policy or the user refused it, `EFBIG` when too large.
+    /// The reply carries no clipboard data, so it rides a zero-byte custody.
+    pub(in crate::app) fn send_kitty_status(
+        &mut self,
+        pane_id: u64,
+        reply: Option<KittyReply>,
+        outcome: super::event_loop::ClipWriteOutcome,
+    ) {
+        use super::event_loop::ClipWriteOutcome;
+        let Some(reply) = reply else {
+            // When: reply is None, the write came from OSC 52 and has no status to send.
+            return;
+        };
+        let status = match outcome {
+            ClipWriteOutcome::Written => KittyClipboardStatus::Done,
+            ClipWriteOutcome::Failed => KittyClipboardStatus::Eio,
+            ClipWriteOutcome::Denied => KittyClipboardStatus::Eperm,
+            ClipWriteOutcome::TooLarge => KittyClipboardStatus::Efbig,
+        };
+        let bytes = reply.status(status);
+        let sent = self
+            .send_read_reply(pane_id, sonicterm_io::pty::SensitiveReply::new(bytes, Box::new(())));
+        if sent.is_err() {
+            // The pane's writer is gone or busy: the status is dropped and only its name logged.
+            tracing::debug!(pane_id, ?status, "OSC 5522 write status dropped");
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "kitty_clipboard_tx_tests.rs"]
+mod kitty_clipboard_tx_tests;

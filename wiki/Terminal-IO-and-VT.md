@@ -322,7 +322,7 @@ PRIMARY (kitty); non-UTF-8 payloads become U+FFFD (Ghostty and kitty keep raw by
 rejects them); the limit defaults to 64 MiB and is at most 512 MiB, held in memory and never
 on disk (kitty: 512 MB with disk spill); Windows reasserts only writes of at most 512 KiB of
 UTF-16; WezTerm's `Copy=;` spelling is not supported (WezTerm parses it but never acts on it).
-No DECRQM or OSC 5522 clipboard capability is advertised.
+OSC 5522 is described [below](#kitty-clipboard-protocol-osc-5522).
 
 Every read reply is ST-terminated whatever ended the request. One letter is echoed when it is
 `c`, `s` or `p` and any other single letter answers `c` (Ghostty; kitty answers `s` with `c`);
@@ -371,6 +371,55 @@ outcomes. When the writer's admission lock is busy, delivery is retried on the n
 event-loop turns, each checking the ticket again; a full slot, a stopped writer, or the last
 failed retry drops the reply, and the program gets none, as in WezTerm. Read replies are not
 ordered against the pane's other replies.
+
+### Kitty clipboard protocol (OSC 5522)
+
+The raw collector owns `5522;` and holds the whole packet until BEL or ST, at most 1 MiB of wire
+bytes after the prefix; CAN, SUB or an unrelated ESC drop it whole. Metadata with no `;` within
+4 KiB is truncated and the packet is dropped. A valid packet's encoded payload waits in the
+parser's kitty inbox, and the parser raises one payload-free `VtEvent::KittyClipboard` per
+packet. An over-cap packet is classified only from complete, valid metadata, using its last
+`type`: `wdata` or `walias` finishes an open write with `EFBIG`; anything else is dropped.
+
+Each pane's VT worker keeps at most one open write (`kitty_clipboard_tx.rs`), outside the parser
+lock:
+
+| Packet | SonicTerm |
+| --- | --- |
+| record without `=`, missing or unknown `type` | dropped, no reply, even while a write is open |
+| bad `mime`/`name`/`pw` Base64, `mime`/`name` over 256 bytes | `wdata`/`walias` with a write open: `EINVAL`; otherwise dropped |
+| `type=write` | replaces any open write silently; under `osc52 = "deny"` answers `EPERM` at once |
+| `type=wdata:mime=…` | one strict Base64 stream per type; a packet ending on padding restarts it; a type switch ends the previous stream; a repeated type restarts its region |
+| `type=walias:mime=…` | records the aliases in order; an empty `mime` answers `EINVAL` |
+| `type=wdata` without `mime` | commits |
+| `type=read` | `EPERM`; reads are not served |
+| DECRQM `?5522` | `0`; 5522 is not advertised |
+
+Every buffer is reserved from the clipboard staging budget before it grows, and the transaction
+limit is `clipboard_write_limit_bytes`, read when the write opens: past it the write ends
+`EFBIG` before allocating; a budget that cannot cover it ends `EBUSY`. At most 64 MIME types and
+64 aliases are kept; later ones are ignored. After any error, packets are ignored until the next
+`write`. Statuses echo the opening `write`'s sanitized id and `loc=primary`, and end with the
+answered packet's terminator.
+
+At commit the aliases are applied in order over every staged representation, then the first
+`text/plain` one becomes the clipboard text, so an alias that names `text/plain` for another
+type still yields text. A commit with nothing staged clears the clipboard. Nothing holdable,
+or `loc=primary` off Linux, answers `ENOSYS`. The `osc52` policy is checked again: `deny`
+answers `EPERM`, `ask` opens the same consent page as an OSC 52 write, and a refusal there
+answers `EPERM`. The write then follows the OSC 52 write path to the clipboard worker, and the
+event loop answers `DONE`, `EIO` (native failure) or `EPERM` on the source pane's PTY. Other
+representations are released at the commit.
+
+An open write ends `EBUSY` 30 s after its last packet or 10 min after it opened, and `EPERM`
+when the policy becomes `deny`; the VT worker wakes for both even while the child prints
+nothing, because a config reload wakes every worker. RIS and pane retirement release it
+silently.
+
+Intentional differences: at most 1 MiB per packet (Ghostty 8 MiB; kitty 256 KiB unless the
+packet is complete); a commit with nothing the platform can hold answers `ENOSYS`; Ghostty's
+metadata, MIME and alias bounds apply (kitty has none); the idle and absolute timeouts exist
+(neither reference times out); RIS aborts an open write (both references clear only grants).
 
 ### Host reports
 

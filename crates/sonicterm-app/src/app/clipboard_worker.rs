@@ -93,6 +93,8 @@ pub(super) struct Committed {
     /// The part of the lease covering arboard's retained copy (Linux), held until SonicTerm's next
     /// write to that selection replaces it.
     pub(super) retained: Option<ClipLease>,
+    /// Where an OSC 5522 write's status goes.
+    pub(super) kitty: Option<super::kitty_clipboard_tx::KittyReply>,
 }
 
 /// Commit one program write through `sink`: refused when the policy epoch moved since it was
@@ -107,9 +109,14 @@ fn commit_program(
     reassert_delay: Option<Duration>,
 ) -> (Committed, Option<PendingReassert>) {
     // The program slot stays in `job` until this returns, after the native call.
-    let ClipboardJob { text, targets, mut lease, .. } = job;
-    let mut committed =
-        Committed { outcome: ClipWriteOutcome::Denied, bytes: text.len(), targets, retained: None };
+    let ClipboardJob { text, targets, mut lease, kitty, .. } = job;
+    let mut committed = Committed {
+        outcome: ClipWriteOutcome::Denied,
+        bytes: text.len(),
+        targets,
+        retained: None,
+        kitty,
+    };
     if epoch != live_epoch.load(Ordering::SeqCst) {
         // When: the policy epoch moved after the write was posted, a reload denied OSC 52 since.
         return (committed, None);
@@ -506,6 +513,22 @@ impl super::App {
         job: ClipboardJob,
         consented: bool,
     ) -> Option<ClipWriteOutcome> {
+        // An OSC 5522 write settled here is answered now; one on the worker answers on drain.
+        let kitty = job.kitty.clone();
+        let outcome = self.route_program_clipboard(pane_id, job, consented);
+        if let Some(outcome) = outcome {
+            self.send_kitty_status(pane_id, kitty, outcome);
+        }
+        outcome
+    }
+
+    /// The routing [`Self::submit_program_clipboard`] describes, without the OSC 5522 status.
+    fn route_program_clipboard(
+        &mut self,
+        pane_id: u64,
+        job: ClipboardJob,
+        consented: bool,
+    ) -> Option<ClipWriteOutcome> {
         use sonicterm_cfg::config::Osc52Policy;
         let policy = self.config.terminal.osc52;
         if policy == Osc52Policy::Deny || (policy == Osc52Policy::Ask && !consented) {
@@ -549,7 +572,10 @@ impl super::App {
     pub(in crate::app) fn drain_clipboard_completions(&mut self) {
         while let Some(settled) = self.clip_state.domain.next_settled() {
             match settled {
-                Settled::Program { pane_id, committed } => {
+                Settled::Program { pane_id, mut committed } => {
+                    // A worker-settled OSC 5522 write is answered on its source pane now.
+                    let kitty = committed.kitty.take();
+                    self.send_kitty_status(pane_id, kitty, committed.outcome);
                     let bytes = committed.bytes;
                     let outcome = self.settle_program(committed);
                     self.note_clip_write(pane_id, bytes, outcome);

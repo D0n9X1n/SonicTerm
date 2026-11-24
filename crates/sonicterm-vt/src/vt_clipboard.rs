@@ -91,7 +91,7 @@ impl ClipboardInbox {
         self.chunks.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn push(&self, stream: u64, chunk: Vec<u8>) {
+    pub(super) fn push(&self, stream: u64, chunk: Vec<u8>) {
         self.queue().push_back((stream, chunk));
     }
 

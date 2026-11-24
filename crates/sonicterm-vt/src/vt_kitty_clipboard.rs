@@ -8,8 +8,14 @@
 
 use base64::Engine as _;
 
+use super::*;
+
 /// Most metadata bytes a packet may carry before its first `;`; longer metadata is truncated.
 pub const MAX_KITTY_CLIPBOARD_METADATA_BYTES: usize = 4096;
+
+/// Most wire bytes one packet may carry after `5522;` (metadata, `;` and payload); a longer packet
+/// is classified only from its complete metadata and never queued.
+pub const MAX_KITTY_CLIPBOARD_PACKET_BYTES: usize = 1024 * 1024;
 
 /// Most bytes a sanitized `id` keeps.
 pub const MAX_KITTY_CLIPBOARD_ID_BYTES: usize = 512;
@@ -278,6 +284,171 @@ pub fn kitty_clipboard_status_reply(
     }
     reply.extend_from_slice(if bel { b"\x07" } else { b"\x1b\\" });
     reply
+}
+
+/// What one complete OSC 5522 packet asks of the host. Payload bytes never ride on it: a valid
+/// packet's encoded payload waits in [`Parser::kitty_clipboard_inbox`] under the event's stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KittyClipboardRequest {
+    /// Valid metadata; `payload` says whether one inbox chunk holds the packet's payload.
+    Packet {
+        /// The decoded metadata.
+        metadata: KittyClipboardMetadata,
+        /// Whether the packet carried a nonempty payload, queued in the kitty inbox.
+        payload: bool,
+    },
+    /// A decoded-field error in a packet of this operation; its payload is not queued.
+    InvalidValue(KittyClipboardOperation),
+    /// A packet past [`MAX_KITTY_CLIPBOARD_PACKET_BYTES`] whose complete, valid metadata names this
+    /// operation; its payload was discarded.
+    Overflow(KittyClipboardOperation),
+}
+
+/// The collector state of one OSC 5522 packet after its `5522;` prefix.
+pub(super) struct KittyClipboardCollector {
+    /// Metadata bytes before the first `;`, at most [`MAX_KITTY_CLIPBOARD_METADATA_BYTES`].
+    metadata: Vec<u8>,
+    /// Encoded payload bytes after the first `;`; emptied once the packet overflows.
+    payload: Vec<u8>,
+    /// Whether the first `;` arrived, so later bytes are payload.
+    in_payload: bool,
+    /// Wire bytes after `5522;` so far, counted against [`MAX_KITTY_CLIPBOARD_PACKET_BYTES`].
+    wire_bytes: usize,
+    /// Whether the packet passed its wire cap.
+    overflowed: bool,
+    /// The previous byte was an ESC that may start ST.
+    pub(super) pending_esc: bool,
+}
+
+impl Parser {
+    /// The inbox each valid OSC 5522 packet's encoded payload waits in, one chunk per packet.
+    pub fn kitty_clipboard_inbox(&self) -> &Arc<ClipboardInbox> {
+        &self.kitty_clipboard_inbox
+    }
+
+    /// Start collecting an OSC 5522 packet after its `5522;` prefix.
+    pub(super) fn begin_kitty_clipboard(&mut self) {
+        self.inner = vte::Parser::new();
+        self.pending_esc = false;
+        self.raw_osc = Some(RawOsc::KittyClipboard(Box::new(KittyClipboardCollector {
+            metadata: Vec::new(),
+            payload: Vec::new(),
+            in_payload: false,
+            wire_bytes: 0,
+            overflowed: false,
+            pending_esc: false,
+        })));
+    }
+
+    /// Feed one byte to the open OSC 5522 packet; returns whether the collector consumed it.
+    pub(super) fn consume_kitty_clipboard_byte(
+        &mut self,
+        mut collector: Box<KittyClipboardCollector>,
+        byte: u8,
+    ) -> bool {
+        if matches!(byte, 0x18 | 0x1a) {
+            // When: byte matches 0x18 or 0x1a (CAN or SUB), the packet is dropped whole and the
+            // sequence ends here.
+            self.finish_escape();
+            return true;
+        }
+        if collector.pending_esc {
+            // When: pending_esc is set, only `\` completes ST; any other ESC ends the packet
+            // unapplied and reaches vte with this byte, as a semantic OSC's does.
+            if byte == b'\\' {
+                // When: byte completes ST, the complete packet is raised.
+                self.end_kitty_clipboard(*collector, false);
+                self.finish_escape();
+                return true;
+            }
+            self.finish_escape();
+            self.feed_vte_byte(0x1b);
+            return false;
+        }
+        if byte == 0x07 {
+            // When: byte is BEL, the packet is complete and its reply ends with BEL.
+            self.end_kitty_clipboard(*collector, true);
+            self.finish_escape();
+            return true;
+        }
+        if byte == 0x1b {
+            collector.pending_esc = true;
+        } else if !collector.in_payload && byte == b';' {
+            // When: byte is the first `;`, the metadata is complete and the payload begins.
+            collector.in_payload = true;
+            collector.wire_bytes += 1;
+        } else if !collector.in_payload {
+            // When: collector is not in_payload, byte is metadata before the first `;`.
+            if collector.metadata.len() == MAX_KITTY_CLIPBOARD_METADATA_BYTES {
+                // When: metadata.len() reaches MAX_KITTY_CLIPBOARD_METADATA_BYTES with no `;`, the
+                // metadata is truncated, so the packet is dropped and swallowed to its terminator.
+                self.raw_osc = Some(RawOsc::Refused { pending_esc: false });
+                return true;
+            }
+            collector.metadata.push(byte);
+            collector.wire_bytes += 1;
+        } else if collector.wire_bytes >= MAX_KITTY_CLIPBOARD_PACKET_BYTES {
+            // When: wire_bytes reaches MAX_KITTY_CLIPBOARD_PACKET_BYTES, the payload is released;
+            // the complete metadata still classifies the packet at its end.
+            if !collector.overflowed {
+                collector.overflowed = true;
+                collector.payload = Vec::new();
+            }
+        } else {
+            // When: byte is payload under the cap, it is held until the packet completes, so the
+            // host never sees part of a packet that a CAN or an overflow later drops.
+            collector.payload.push(byte);
+            collector.wire_bytes += 1;
+        }
+        self.raw_osc = Some(RawOsc::KittyClipboard(collector));
+        true
+    }
+
+    /// Raise one complete packet: a valid one queues its payload first; an overflow is raised only
+    /// when its metadata is complete and valid; a structure error raises nothing.
+    fn end_kitty_clipboard(&mut self, collector: KittyClipboardCollector, bel: bool) {
+        let KittyClipboardCollector { metadata, payload, overflowed, .. } = collector;
+        let request = if overflowed {
+            // When: overflowed is set, only complete, valid metadata classifies the packet.
+            let Some(operation) = kitty_clipboard_operation(&metadata) else {
+                // When: the over-cap packet's metadata is invalid, it is dropped with no event.
+                return;
+            };
+            KittyClipboardRequest::Overflow(operation)
+        } else {
+            // When: overflowed is false, the packet is under its cap and its metadata decides
+            // what is raised.
+            match parse_kitty_clipboard_metadata(&metadata) {
+                Ok(metadata) => {
+                    KittyClipboardRequest::Packet { metadata, payload: !payload.is_empty() }
+                }
+                Err(KittyClipboardMetadataError::Structure) => {
+                    // When: the metadata has a structure error, the packet is dropped silently.
+                    return;
+                }
+                Err(KittyClipboardMetadataError::InvalidValue(operation)) => {
+                    KittyClipboardRequest::InvalidValue(operation)
+                }
+            }
+        };
+        self.kitty_clipboard_streams = self.kitty_clipboard_streams.wrapping_add(1);
+        let stream = self.kitty_clipboard_streams;
+        if matches!(request, KittyClipboardRequest::Packet { payload: true, .. }) {
+            // The payload is queued before its event, so the host finds it when the event arrives.
+            self.kitty_clipboard_inbox.push(stream, payload);
+        }
+        self.performer.events.push(VtEvent::KittyClipboard { stream, request, bel });
+    }
+
+    /// Bytes the open OSC 5522 packet holds in the parser.
+    pub(super) fn kitty_clipboard_retained_bytes(&self) -> usize {
+        match &self.raw_osc {
+            Some(RawOsc::KittyClipboard(collector)) => {
+                collector.metadata.capacity() + collector.payload.capacity()
+            }
+            _ => 0,
+        }
+    }
 }
 
 #[cfg(test)]

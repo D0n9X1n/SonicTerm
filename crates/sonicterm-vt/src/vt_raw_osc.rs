@@ -137,6 +137,12 @@ impl Parser {
                     self.begin_clipboard_stream(prefix != b"52;");
                     return true;
                 }
+                if prefix == b"5522;" {
+                    // When: the prefix names OSC 5522, own the whole packet so it is raised only
+                    // once complete, its payload never reaches an event, and its wire cap holds.
+                    self.begin_kitty_clipboard();
+                    return true;
+                }
                 if prefix == b"7501;" {
                     // When: the prefix names OSC 7501, own the whole report so kitty's 4087-byte
                     // wire bound drops an over-cap one whole and vte never stores a record.
@@ -271,6 +277,7 @@ impl Parser {
                 true
             }
             RawOsc::Clipboard(collector) => self.consume_clipboard_byte(collector, byte),
+            RawOsc::KittyClipboard(collector) => self.consume_kitty_clipboard_byte(collector, byte),
             RawOsc::Refused { pending_esc } => {
                 if matches!(byte, 0x18 | 0x1a) || (pending_esc && byte == b'\\') {
                     // When: byte is CAN, SUB or completes ST, the refused message ends and nothing

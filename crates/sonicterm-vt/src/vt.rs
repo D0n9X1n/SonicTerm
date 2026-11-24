@@ -241,6 +241,16 @@ pub enum VtEvent {
         /// What happened to it.
         phase: ClipboardPhase,
     },
+    /// OSC 5522 — one complete kitty clipboard packet. A valid packet's encoded payload waits in
+    /// [`Parser::kitty_clipboard_inbox`] under `stream`; the event carries no payload bytes.
+    KittyClipboard {
+        /// The packet's id in the kitty inbox.
+        stream: u64,
+        /// What the packet asks.
+        request: KittyClipboardRequest,
+        /// Whether BEL ended the packet, so the reply ends with BEL too; otherwise ST.
+        bel: bool,
+    },
     /// Inline media protocol payload captured from the stream.
     ///
     /// SonicTerm surfaces this as typed data instead of silently discarding the
@@ -386,6 +396,10 @@ pub struct Parser {
     clipboard_inbox: Arc<ClipboardInbox>,
     /// The id the last clipboard stream took.
     clipboard_streams: u64,
+    /// Encoded OSC 5522 payloads waiting for the host, one chunk per packet.
+    kitty_clipboard_inbox: Arc<ClipboardInbox>,
+    /// The id the last OSC 5522 packet took.
+    kitty_clipboard_streams: u64,
     iterm2_metadata: [u8; MAX_ITERM2_METADATA_BYTES],
     iterm2_metadata_len: usize,
     escape_bytes_in_flight: usize,
@@ -420,6 +434,8 @@ enum RawOsc {
     Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
     /// Streaming an OSC 52 or OSC 1337 `Copy=:` payload to the clipboard inbox.
     Clipboard(Box<vt_clipboard::ClipboardCollector>),
+    /// Collecting one whole OSC 5522 packet, held until its terminator.
+    KittyClipboard(Box<vt_kitty_clipboard::KittyClipboardCollector>),
     /// Swallowing the rest of a refused over-cap `Semantic` payload through the same terminators
     /// an accepted one ends on, retaining nothing; `pending_esc` holds an ESC that may start ST.
     Refused { pending_esc: bool },
@@ -484,6 +500,8 @@ impl Parser {
             raw_osc: None,
             clipboard_inbox: Arc::default(),
             clipboard_streams: 0,
+            kitty_clipboard_inbox: Arc::default(),
+            kitty_clipboard_streams: 0,
             iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
             iterm2_metadata_len: 0,
             escape_bytes_in_flight: 0,
@@ -943,8 +961,9 @@ pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, Ki
 pub use vt_kitty_clipboard::{
     kitty_clipboard_operation, kitty_clipboard_status_reply, parse_kitty_clipboard_metadata,
     KittyClipboardLocation, KittyClipboardMetadata, KittyClipboardMetadataError,
-    KittyClipboardOperation, KittyClipboardStatus, MAX_KITTY_CLIPBOARD_ID_BYTES,
-    MAX_KITTY_CLIPBOARD_METADATA_BYTES, MAX_KITTY_CLIPBOARD_MIME_BYTES,
+    KittyClipboardOperation, KittyClipboardRequest, KittyClipboardStatus,
+    MAX_KITTY_CLIPBOARD_ID_BYTES, MAX_KITTY_CLIPBOARD_METADATA_BYTES,
+    MAX_KITTY_CLIPBOARD_MIME_BYTES, MAX_KITTY_CLIPBOARD_PACKET_BYTES,
     MAX_KITTY_CLIPBOARD_PASSWORD_BYTES,
 };
 pub use vt_pointer_shape::{pointer_shape_of_snapshot, PointerShape};

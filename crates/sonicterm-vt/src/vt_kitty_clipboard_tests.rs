@@ -102,3 +102,154 @@ fn status_reply_echoes_location_id_and_terminator() {
         kitty_clipboard_status_reply(read, KittyClipboardStatus::Eperm, standard, "", false);
     assert_eq!(reply, b"\x1b]5522;type=read:status=EPERM\x1b\\");
 }
+
+/// The OSC 5522 events one `advance` raised, in order.
+fn kitty_events(events: Vec<VtEvent>) -> Vec<(u64, KittyClipboardRequest, bool)> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            VtEvent::KittyClipboard { stream, request, bel } => Some((stream, request, bel)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A parser on a private staging pool, so capture accounting is this test's alone.
+fn capture_parser() -> Parser {
+    Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new())
+}
+
+/// Contract: the raw collector owns a whole `5522;` packet; its encoded payload waits in the kitty
+/// inbox under the event's stream id, the event carries no payload byte, and text after ST prints.
+#[test]
+fn packet_payload_waits_in_inbox_and_event_carries_none() {
+    let mut parser = capture_parser();
+    let events = parser.advance(b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\after");
+    let printed = format!("{events:?}");
+    let [(stream, request, bel)] = kitty_events(events).try_into().expect("one packet");
+    let KittyClipboardRequest::Packet { metadata, payload: true } = request else {
+        panic!("a valid packet with a payload, got {request:?}");
+    };
+    assert_eq!(
+        (metadata.operation, metadata.mime.as_str(), bel),
+        (KittyClipboardOperation::Wdata, "text/plain", false)
+    );
+    assert_eq!(parser.kitty_clipboard_inbox().pop(stream).as_deref(), Some(&b"aGk="[..]));
+    assert!(!printed.contains("aGk="), "{printed}");
+    assert!(crate::vt::vt_test_support::row_text(&parser, 0).starts_with("after"));
+}
+
+/// Contract: BEL ends a packet and is reported so the reply uses it; a packet without `;` has no
+/// payload and queues nothing.
+#[test]
+fn bel_terminated_packet_without_payload() {
+    let mut parser = capture_parser();
+    let [(_, request, bel)] =
+        kitty_events(parser.advance(b"\x1b]5522;type=write:id=a1\x07")).try_into().expect("one");
+    let KittyClipboardRequest::Packet { metadata, payload: false } = request else {
+        panic!("a packet without payload, got {request:?}");
+    };
+    assert_eq!(
+        (metadata.operation, metadata.id.as_str(), bel),
+        (KittyClipboardOperation::Write, "a1", true)
+    );
+    assert!(parser.kitty_clipboard_inbox().is_empty());
+}
+
+/// Contract: CAN or SUB drops the packet whole (no event, nothing queued), and a structure error
+/// raises nothing, so the host never sees part of a packet.
+#[test]
+fn cancelled_or_malformed_packet_raises_nothing() {
+    let mut parser = capture_parser();
+    let mut events = parser.advance(b"\x1b]5522;type=wdata:mime=dGV4dA==;aGk=\x18x");
+    events.extend(parser.advance(b"\x1b]5522;type=wdata:broken;aGk=\x1b\\"));
+    events.extend(parser.advance(b"\x1b]5522;\x07"));
+    assert!(kitty_events(events).is_empty());
+    assert!(parser.kitty_clipboard_inbox().is_empty());
+    assert!(crate::vt::vt_test_support::row_text(&parser, 0).starts_with('x'));
+}
+
+/// Contract: a decoded-field error reaches the host as the packet's operation only, so it can
+/// finish an open write with `EINVAL`; its payload is not queued.
+#[test]
+fn invalid_value_reports_operation_without_payload() {
+    let mut parser = capture_parser();
+    let [(_, request, _)] =
+        kitty_events(parser.advance(b"\x1b]5522;type=walias:mime=!!;eA==\x1b\\"))
+            .try_into()
+            .expect("one");
+    assert_eq!(request, KittyClipboardRequest::InvalidValue(KittyClipboardOperation::Walias));
+    assert!(parser.kitty_clipboard_inbox().is_empty());
+}
+
+/// Feed `metadata`, then `;` and enough payload to pass the 1 MiB wire cap, then ST.
+fn over_cap(parser: &mut Parser, metadata: &str) -> Vec<VtEvent> {
+    let mut events = parser.advance(format!("\x1b]5522;{metadata};").as_bytes());
+    let filler = vec![b'A'; 64 * 1024];
+    for _ in 0..(MAX_KITTY_CLIPBOARD_PACKET_BYTES / filler.len() + 1) {
+        events.extend(parser.advance(&filler));
+    }
+    events.extend(parser.advance(b"\x1b\\after"));
+    events
+}
+
+/// Contract: a packet past the 1 MiB wire cap with complete, valid `wdata` metadata becomes one
+/// payload-free overflow event (the host answers `EFBIG`); nothing is queued or printed and the
+/// collector releases what it held.
+#[test]
+fn overflow_with_complete_valid_wdata_metadata_efbig() {
+    let mut parser = capture_parser();
+    let idle = parser.retained_amount().bytes;
+    let events = over_cap(&mut parser, "type=wdata:mime=dGV4dA==");
+    let [(_, request, _)] = kitty_events(events).try_into().expect("one");
+    assert_eq!(request, KittyClipboardRequest::Overflow(KittyClipboardOperation::Wdata));
+    assert!(parser.kitty_clipboard_inbox().is_empty());
+    assert_eq!(parser.retained_amount().bytes, idle);
+    assert!(crate::vt::vt_test_support::row_text(&parser, 0).starts_with("after"));
+}
+
+/// Contract: metadata with no `;` within 4 KiB is truncated, so the packet is dropped with no
+/// event and an open write is left unchanged; its tail never prints.
+#[test]
+fn overflow_with_truncated_metadata_dropped_write_untouched() {
+    let mut parser = capture_parser();
+    let mut events = parser.advance(b"\x1b]5522;type=wdata:id=");
+    events.extend(parser.advance(&vec![b'a'; MAX_KITTY_CLIPBOARD_METADATA_BYTES + 10]));
+    events.extend(parser.advance(b"\x1b\\after"));
+    assert!(kitty_events(events).is_empty());
+    assert!(crate::vt::vt_test_support::row_text(&parser, 0).starts_with("after"));
+}
+
+/// Contract: an over-cap packet is classified by its last `type`; metadata with a bad record
+/// classifies as nothing and raises no event.
+#[test]
+fn overflow_duplicate_type_uses_last_valid() {
+    let mut parser = capture_parser();
+    let [(_, request, _)] =
+        kitty_events(over_cap(&mut parser, "type=read:type=walias:mime=dGV4dA=="))
+            .try_into()
+            .expect("one");
+    assert_eq!(request, KittyClipboardRequest::Overflow(KittyClipboardOperation::Walias));
+    assert!(kitty_events(over_cap(&mut parser, "type=wdata:broken")).is_empty());
+}
+
+/// Contract: an open packet's held bytes count in `retained_amount`, and its end releases them.
+#[test]
+fn open_packet_counts_in_retained_amount() {
+    let mut parser = capture_parser();
+    let idle = parser.retained_amount().bytes;
+    parser.advance(b"\x1b]5522;type=wdata:mime=dGV4dA==;");
+    parser.advance(&[b'A'; 4096]);
+    assert!(parser.retained_amount().bytes >= idle + 4096);
+    parser.advance(b"\x07");
+    assert_eq!(parser.retained_amount().bytes, idle);
+}
+
+/// Contract: 5522 is not advertised: DECRQM `?5522` answers 0, mode not recognised.
+#[test]
+fn decrqm_5522_zero() {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let mut parser = Parser::new_with_reply(Grid::new(80, 24), tx);
+    parser.advance(b"\x1b[?5522$p");
+    assert_eq!(rx.try_recv().expect("a reply"), b"\x1b[?5522;0$y");
+}

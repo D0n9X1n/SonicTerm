@@ -94,9 +94,69 @@ mod spawn_pane_vt_fuzz_tests;
 impl PaneVtHandles {
     /// The worker's wait at `now`: `flush_wait`, shortened to the open clipboard stream's expiry.
     pub(in crate::app) fn clipboard_wait(&self, now: Instant, flush_wait: Duration) -> Duration {
-        match self.clipboard.borrow().deadline() {
+        let osc52 = self.clipboard.borrow().deadline();
+        let kitty = self.kitty_clipboard.borrow().deadline();
+        match osc52.into_iter().chain(kitty).min() {
             Some(deadline) => flush_wait.min(deadline.saturating_duration_since(now)),
             None => flush_wait,
+        }
+    }
+
+    /// Finish an open OSC 5522 write whose deadline passed (`EBUSY`) or whose policy is now `deny`
+    /// (`EPERM`), sending its status through `send_reply`; runs on every worker wake.
+    pub(in crate::app) fn service_kitty_clipboard(
+        &self,
+        now: Instant,
+        send_reply: &mut impl FnMut(Vec<u8>),
+    ) {
+        let reply = self.kitty_clipboard.borrow_mut().service(now);
+        if let Some(reply) = reply {
+            send_reply(reply);
+        }
+    }
+
+    /// Run one section's OSC 5522 requests: post committed writes now and return the section's
+    /// status replies and the consent tickets to post once its command epoch is published.
+    pub(in crate::app) fn run_kitty_section(
+        &self,
+        inbox: Option<&sonicterm_vt::vt::ClipboardInbox>,
+        requests: Vec<super::super::kitty_clipboard_tx::KittySectionRequest>,
+        emit: &mut impl FnMut(UserEvent),
+    ) -> (Vec<u8>, Vec<super::super::osc52_read_ticket::ConsentTicket>) {
+        use super::super::kitty_clipboard_tx::KittyStep;
+        let mut status = Vec::new();
+        let mut tickets = Vec::new();
+        if requests.is_empty() {
+            // When: requests is empty, the section raised no OSC 5522 packet or RIS and the
+            // transaction is not touched.
+            return (status, tickets);
+        }
+        let steps = self.kitty_clipboard.borrow_mut().run(inbox, requests, Instant::now());
+        for step in steps {
+            match step {
+                KittyStep::Silent => {
+                    // When: the step is Silent, the packet produced nothing to send.
+                }
+                KittyStep::Reply(reply) => status.extend(reply),
+                KittyStep::Post(job) => {
+                    let job = super::super::osc52_stream::ClipboardJobHandle::new(job);
+                    emit(UserEvent::ClipboardWrite { pane_id: self.pane_id, job });
+                }
+                KittyStep::Ticket(ticket) => tickets.push(ticket),
+            }
+        }
+        (status, tickets)
+    }
+
+    /// Post the OSC 5522 consent tickets a section admitted, after its command epoch.
+    pub(in crate::app) fn post_kitty_tickets(
+        &self,
+        tickets: Vec<super::super::osc52_read_ticket::ConsentTicket>,
+        emit: &mut impl FnMut(UserEvent),
+    ) {
+        for ticket in tickets {
+            let ticket = super::super::osc52_read_ticket::ClipboardTicketHandle::new(ticket);
+            emit(UserEvent::ClipboardTicket { pane_id: self.pane_id, ticket });
         }
     }
 
