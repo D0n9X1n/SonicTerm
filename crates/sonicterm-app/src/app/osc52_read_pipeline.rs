@@ -14,9 +14,10 @@ use sonicterm_cfg::config::Config;
 use sonicterm_io::pty::{SensitiveReply, SensitiveReplyError};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
-use super::osc52_read::{
-    empty_frames, read_reservation_bytes, READ_REPLY_BUDGET_BYTES, TICKET_LIFETIME,
-};
+use super::osc52_read::{READ_REPLY_BUDGET_BYTES, TICKET_LIFETIME};
+use sonicterm_vt::vt::KittyClipboardStatus;
+
+use super::kitty_clipboard_read::build_read_reply;
 use super::osc52_read_source::{read_replies, ClipboardTextSource, NativeSource};
 use super::osc52_read_ticket::{CancelReason, ClipboardTicketHandle, ConsentTicket, ReadBinding};
 use super::osc52_stream::{ClipLease, ClipboardStaging};
@@ -35,7 +36,8 @@ const READER_DEADLINE_PER_DESTINATION: Duration = Duration::from_secs(2);
 /// The one native read outstanding.
 pub(in crate::app) struct InFlight {
     binding: ReadBinding,
-    labels: Vec<u8>,
+    /// The reply a read past its deadline gets: empty frames for OSC 52, `EIO` for OSC 5522.
+    failure: Vec<u8>,
     deadline: Instant,
     /// Answered empty at its deadline; its late result is dropped when the native call returns.
     abandoned: bool,
@@ -257,7 +259,7 @@ impl super::App {
             if !in_flight.abandoned && now >= in_flight.deadline {
                 // Past its deadline the read is answered empty; the thread keeps its slot.
                 in_flight.abandoned = true;
-                overdue = Some((in_flight.binding.clone(), empty_frames(&in_flight.labels)));
+                overdue = Some((in_flight.binding.clone(), in_flight.failure.clone()));
             }
         }
         if let Some((binding, replies)) = overdue {
@@ -301,6 +303,17 @@ impl super::App {
     /// Answer a refused read with one empty reply per label, the ticket riding along as custody;
     /// a refused asked write is dropped, writing nothing, and the clip segment says it was denied.
     pub(in crate::app) fn refuse_ticket(&mut self, ticket: ConsentTicket, now: Instant) {
+        self.refuse_ticket_with(ticket, now, KittyClipboardStatus::Eperm);
+    }
+
+    /// [`Self::refuse_ticket`], answering an OSC 5522 read with `status`: `EPERM` for a refusal,
+    /// `EBUSY` for queue pressure or a full reply budget.
+    fn refuse_ticket_with(
+        &mut self,
+        ticket: ConsentTicket,
+        now: Instant,
+        status: KittyClipboardStatus,
+    ) {
         if ticket.is_write() {
             // When: the ticket holds a write, only an OSC 5522 write is answered (`EPERM`);
             // dropping the ticket frees the job.
@@ -314,7 +327,7 @@ impl super::App {
             return;
         }
         let binding = ticket.binding().clone();
-        let replies = empty_frames(ticket.labels());
+        let replies = ticket.failure_reply(status);
         self.deliver_read_reply(
             binding,
             SensitiveReply::new(replies, Box::new(ticket)),
@@ -342,13 +355,14 @@ impl super::App {
             };
             if wedged {
                 // When: wedged, a native read is still outstanding, so this one fails fast.
-                self.refuse_ticket(ticket, now);
+                self.refuse_ticket_with(ticket, now, KittyClipboardStatus::Ebusy);
                 continue;
             }
             let mut lease = self.clip_state.reads.budget.lease();
-            if !lease.grow_to(read_reservation_bytes(ticket.labels().len())) {
-                // When: grow_to fails, the reply budget is busy and the read is answered empty.
-                self.refuse_ticket(ticket, now);
+            if !lease.grow_to(ticket.reservation_bytes()) {
+                // When: grow_to fails, the reply budget is busy and the read is answered empty
+                // (OSC 5522: `EBUSY`).
+                self.refuse_ticket_with(ticket, now, KittyClipboardStatus::Ebusy);
                 continue;
             }
             self.spawn_reader(ticket, lease, now);
@@ -359,21 +373,28 @@ impl super::App {
     /// calls return; the event loop waits only until the deadline.
     fn spawn_reader(&mut self, ticket: ConsentTicket, lease: ClipLease, now: Instant) {
         let binding = ticket.binding().clone();
-        let labels = ticket.labels().to_vec();
+        let failure = ticket.failure_reply(KittyClipboardStatus::Eio);
         let reads = &self.clip_state.reads;
-        let destinations = u32::try_from(labels.len()).unwrap_or(u32::MAX);
+        let destination_count = match ticket.kitty_read() {
+            Some(request) => request.types.len() + usize::from(request.listing),
+            None => ticket.labels().len(),
+        };
+        let destinations = u32::try_from(destination_count.max(1)).unwrap_or(u32::MAX);
         let deadline = now + reads.reader_deadline.saturating_mul(destinations);
         let source = Arc::clone(&reads.source);
         let done_tx = reads.done_tx.clone();
         let proxy = self.event_loop_proxy.clone();
-        let thread_labels = labels.clone();
+        let thread_failure = failure.clone();
         let spawned =
             std::thread::Builder::new().name("sonicterm-clipboard-read".into()).spawn(move || {
                 let mut lease = lease;
-                let read = || read_replies(source.as_ref(), &thread_labels);
+                let read = || match ticket.kitty_read() {
+                    Some(request) => build_read_reply(source.as_ref(), request),
+                    None => read_replies(source.as_ref(), ticket.labels()),
+                };
                 // A panicking native read still returns its ticket, so the slot is not lost.
                 let replies = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read))
-                    .unwrap_or_else(|_| empty_frames(&thread_labels));
+                    .unwrap_or(thread_failure);
                 // The raw text is gone, so only the frames stay reserved.
                 lease.shrink_to(replies.capacity());
                 let _ = done_tx.send(ReaderDone { replies, ticket, lease });
@@ -386,12 +407,12 @@ impl super::App {
             Ok(_) => {
                 // The thread is detached; its result arrives through done_rx.
                 self.clip_state.reads.in_flight =
-                    Some(InFlight { binding, labels, deadline, abandoned: false });
+                    Some(InFlight { binding, failure, deadline, abandoned: false });
             }
             Err(error) => {
                 // The thread did not start; the dropped closure already freed the ticket and lease.
                 tracing::warn!("OSC 52 clipboard reader could not start: {error}");
-                let reply = SensitiveReply::new(empty_frames(&labels), Box::new(()));
+                let reply = SensitiveReply::new(failure, Box::new(()));
                 self.deliver_read_reply(binding, reply, now, true, 0);
             }
         }

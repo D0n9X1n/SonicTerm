@@ -41,10 +41,28 @@ impl std::fmt::Debug for ReadOutcome {
     }
 }
 
+/// What an OSC 5522 type listing found: MIME names only, never content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) enum TypeListing {
+    /// The names the selection offers, in the platform's order.
+    // Native enumeration is not wired yet, so only test sources build this.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Types(Vec<String>),
+    /// The platform cannot enumerate the selection's types.
+    Unsupported,
+}
+
 /// Reads clipboard text with a byte cap; tests inject a fake, production uses [`NativeSource`].
 pub(in crate::app) trait ClipboardTextSource: Send + Sync {
     /// The text at `location`, refused as [`ReadOutcome::TooLarge`] past `max_bytes` of UTF-8.
     fn read_text_bounded(&self, location: ReadLocation, max_bytes: usize) -> ReadOutcome;
+
+    /// The MIME types `location` offers, found without reading any content.
+    fn list_types(&self, _location: ReadLocation) -> TypeListing {
+        // shortcut: no native type enumeration (EnumClipboardFormats, NSPasteboard types, X11
+        // TARGETS) is wired yet, so a listing answers ENOSYS on every platform.
+        TypeListing::Unsupported
+    }
 }
 
 /// The selection a reply label reads: `c` and `s` the clipboard, `p` PRIMARY on Linux only.

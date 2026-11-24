@@ -78,6 +78,14 @@ fn cases() -> Vec<Case> {
         Case::new("osc5522-wdata-text", "\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\")
             .output_required(),
         Case::new("osc5522-commit", "\x1b]5522;type=wdata\x07").output_required(),
+        // OSC 5522 read: the request reaches the host, and an injected OK/DATA/DONE reaches the child.
+        Case::new("osc5522-read", "\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\")
+            .input(echo(
+                b"\x1b]5522;type=read:status=OK:id=r\x1b\\\
+\x1b]5522;type=read:status=DATA:id=r:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=read:status=DONE:id=r\x1b\\",
+            ))
+            .output_required(),
         Case::new("osc7501-report", "\x1b]7501;app=fixture:state=working:progress=40\x07"),
         Case::new("osc7501-clear", "\x1b]7501;state=clear\x07"),
         Case::new("osc7501-query", "\x1b]7501;?\x07")

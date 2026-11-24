@@ -243,7 +243,9 @@ OSC 52 clipboard reads reserve from their own 64 MiB reply budget before the nat
 the largest raw text the read may return (8 MiB, or 4 MiB per destination for `cp`) plus every
 destination's largest reply. Once the replies are built the reservation shrinks to them, and it
 is released when the PTY writer has written them, or when they are dropped. A read the budget
-cannot cover is answered empty. The retention pass adds these bytes to the same
+cannot cover is answered empty. An OSC 5522 read job reserves 21 MiB from the same budget (its
+12 MiB reply, one type's 8 MiB text and the 4 KiB listing), so at most three run at once and a
+fourth answers `EBUSY`. The retention pass adds these bytes to the same
 `ClipboardStaging` charge. At most 8 reads hold tickets at once, one per pane; a read whose
 reader is past its deadline keeps its reservation until its native call returns. On macOS the
 pasteboard's own copy of the value is AppKit's and is not counted.

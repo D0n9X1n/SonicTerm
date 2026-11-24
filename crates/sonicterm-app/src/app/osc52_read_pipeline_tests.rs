@@ -388,3 +388,53 @@ fn logs_never_contain_clipboard_text() {
 #[cfg(test)]
 #[path = "osc52_read_pipeline_tests_consent_tests.rs"]
 mod osc52_read_pipeline_tests_consent_tests;
+
+/// Admit an OSC 5522 read of `types` from the harness pane, as the VT worker does.
+fn kitty_read(harness: &mut Harness, types: &[&str]) {
+    use crate::app::kitty_clipboard_read::KittyReadRequest;
+    use crate::app::osc52_read_ticket::admit_kitty_read;
+    let identity = harness.app.pane_by_id(harness.pane).expect("a live pane").read_identity.clone();
+    let request = KittyReadRequest {
+        id: "k".into(),
+        location: sonicterm_vt::vt::KittyClipboardLocation::Standard,
+        listing: false,
+        types: types.iter().map(|mime| (*mime).to_owned()).collect(),
+        bel: false,
+    };
+    let ticket =
+        admit_kitty_read(&harness.staging, &identity, harness.pane, 0, request, Instant::now())
+            .expect("an admitted read");
+    harness.app.admit_clipboard_ticket(ClipboardTicketHandle::new(ticket));
+}
+
+/// Contract: an OSC 5522 read under `allow` reaches only the source pane's sensitive slot as one
+/// OK/DATA/DONE message, holding its 21 MiB budget lease until the writer drops the reply.
+#[test]
+fn kitty_read_delivered_with_lease_custody() {
+    let mut harness = harness(Osc52ReadPolicy::Allow, FakeSource::new("secret"));
+    kitty_read(&mut harness, &["text/plain"]);
+    harness.pump_until(|harness| harness.delivered_count() == 1);
+    assert!(harness.budget_bytes() > 0, "the lease rides the reply");
+    let delivered = harness.take_delivered();
+    let expected = "\x1b]5522;type=read:status=OK:id=k\x1b\\\
+                    \x1b]5522;type=read:status=DATA:id=k:mime=dGV4dC9wbGFpbg==;c2VjcmV0\x1b\\\
+                    \x1b]5522;type=read:status=DONE:id=k\x1b\\";
+    assert_eq!(delivered[0].0, harness.pane);
+    assert_eq!(delivered[0].1.bytes(), expected.as_bytes());
+    drop(delivered);
+    assert_eq!(harness.budget_bytes(), 0);
+}
+
+/// Contract: three OSC 5522 read jobs fit the 64 MiB reply budget; a fourth gets one `EBUSY`
+/// packet and never a partial OK sequence.
+#[test]
+fn fourth_job_ebusy() {
+    use crate::app::kitty_clipboard_read::KITTY_READ_RESERVATION_BYTES;
+    let mut harness = harness(Osc52ReadPolicy::Allow, FakeSource::new("secret"));
+    let mut leases: Vec<_> = (0..3).map(|_| harness.app.clip_state.reads.budget.lease()).collect();
+    assert!(leases.iter_mut().all(|lease| lease.grow_to(KITTY_READ_RESERVATION_BYTES)));
+    kitty_read(&mut harness, &["text/plain"]);
+    harness.pump_until(|harness| harness.delivered_count() == 1);
+    let delivered = harness.take_delivered();
+    assert_eq!(delivered[0].1.bytes(), b"\x1b]5522;type=read:status=EBUSY:id=k\x1b\\");
+}

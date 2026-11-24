@@ -4,8 +4,8 @@
 //! (`App::__test_clipboard_reply_pane`), so
 //! the child reports the exact reply bytes a pane's reply path wrote back through ConPTY. The
 //! expected reply comes from a fresh reference pane fed only that case's output, except the
-//! clipboard read's and the OSC 5522 write's, which are the literal [`OSC52_READ_REPLY`] and
-//! [`KITTY_WRITE_DONE`]. Every pane settles clipboard writes against a fake clipboard and reads
+//! clipboard reads' and the OSC 5522 write's, which are the literal [`OSC52_READ_REPLY`],
+//! [`KITTY_READ_REPLY`] and [`KITTY_WRITE_DONE`]. Every pane settles clipboard writes against a fake clipboard and reads
 //! clipboard text under `osc52_read = "allow"` from one holding [`CLIPBOARD_FIXTURE`], never the
 //! user's clipboard.
 //!
@@ -39,6 +39,15 @@ const KITTY_WRITE_DONE: &[u8] = b"\x1b]5522;type=write:status=DONE:id=fixture\x0
 /// The name of the OSC 5522 write row, whose expectation is [`KITTY_WRITE_DONE`].
 const KITTY_WRITE_CASE: &str = "osc5522-write-done";
 
+/// The exact reply to an OSC 5522 `text/plain` read under `allow`: OK, one DATA packet repeating
+/// the id and MIME with the fixture's Base64, then DONE, each ST-terminated as the request was.
+const KITTY_READ_REPLY: &[u8] = b"\x1b]5522;type=read:status=OK:id=r\x1b\\\
+\x1b]5522;type=read:status=DATA:id=r:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=read:status=DONE:id=r\x1b\\";
+
+/// The name of the OSC 5522 read row, whose expectation is [`KITTY_READ_REPLY`].
+const KITTY_READ_CASE: &str = "osc5522-read";
+
 /// A reply pane whose clipboard reads answer from the fake clipboard.
 fn clipboard_pane() -> TestReplyPane {
     App::__test_clipboard_reply_pane(PTY_COLS, PTY_ROWS, CLIPBOARD_FIXTURE)
@@ -63,6 +72,10 @@ impl Engine for AppEngine {
             // When: the case is the OSC 5522 write, `DONE` is pinned, so no other status passes.
             return KITTY_WRITE_DONE.to_vec();
         }
+        if case.name == KITTY_READ_CASE {
+            // When: the case is the OSC 5522 read, its OK/DATA/DONE bytes are pinned.
+            return KITTY_READ_REPLY.to_vec();
+        }
         clipboard_pane().replies(&case.output)
     }
 }
@@ -85,13 +98,17 @@ fn cases() -> Vec<Case> {
         Case::new("osc7501-query", "\x1b]7501;?\x07").input(reply()).input_required(),
         Case::new(OSC52_READ_CASE, "\x1b]52;cp;?\x07").input(reply()).input_required(),
         Case::new(KITTY_WRITE_CASE, KITTY_WRITE).input(reply()).input_required(),
+        Case::new(KITTY_READ_CASE, "\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\")
+            .input(reply())
+            .input_required(),
     ]
 }
 
 /// Contract: a pane's replies to color, pointer, program-status and clipboard-read queries reach
 /// a program behind a real pseudoconsole byte for byte on the packaged runtime, the clipboard
-/// read under `allow` as the exact fake-clipboard reply and an OSC 5522 write as exactly
-/// `type=write:status=DONE`; the positive control is exact on both runtimes.
+/// read under `allow` as the exact fake-clipboard reply, an OSC 5522 write as exactly
+/// `type=write:status=DONE` and an OSC 5522 read as its exact OK/DATA/DONE sequence; the positive
+/// control is exact on both runtimes.
 #[test]
 #[ignore = "needs a staged ConPTY runtime; run with --ignored (the windows-conpty-forms gate step)"]
 fn windows_conpty_app_smoke() {

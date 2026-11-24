@@ -930,10 +930,16 @@ impl TestReplyPane {
         // fake clipboard when it is readable (`allow`), else as a declined prompt is, empty.
         for ticket in reads.iter().filter_map(|read| read.take()) {
             match &self.clipboard {
-                Some(source) if ticket.readable() => replies.extend(
-                    super::osc52_read_source::read_replies(source.as_ref(), ticket.labels()),
-                ),
-                _ => replies.extend(super::osc52_read::empty_frames(ticket.labels())),
+                Some(source) if ticket.readable() => replies.extend(match ticket.kitty_read() {
+                    Some(request) => {
+                        super::kitty_clipboard_read::build_read_reply(source.as_ref(), request)
+                    }
+                    None => {
+                        super::osc52_read_source::read_replies(source.as_ref(), ticket.labels())
+                    }
+                }),
+                _ => replies
+                    .extend(ticket.failure_reply(sonicterm_vt::vt::KittyClipboardStatus::Eperm)),
             }
         }
         // The fake clipboard takes every posted write, so an OSC 5522 write is answered `DONE`

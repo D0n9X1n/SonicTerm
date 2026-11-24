@@ -18,7 +18,10 @@ use sonicterm_vt::vt::{
     MAX_KITTY_CLIPBOARD_MIME_BYTES,
 };
 
-use super::osc52_read_ticket::{admit_write, ConsentTicket, ReadIdentity, WriteAdmission};
+use super::kitty_clipboard_read::parse_read_request;
+use super::osc52_read_ticket::{
+    admit_kitty_read, admit_write, ConsentTicket, ReadIdentity, WriteAdmission,
+};
 use super::osc52_stream::{sextet, ClipLease, ClipTargets, ClipboardJob, ClipboardStaging};
 use super::spawn_pane::Osc52Refusal;
 
@@ -259,8 +262,8 @@ impl OpenWrite {
     }
 }
 
-/// Whether `mime` names plain text, which is what the clipboard worker can write today.
-fn is_text(mime: &str) -> bool {
+/// Whether `mime` names plain text, which is what the clipboard can write and read today.
+pub(in crate::app) fn is_text(mime: &str) -> bool {
     mime == "text/plain" || mime.starts_with("text/plain;")
 }
 
@@ -418,18 +421,7 @@ impl KittyClipboardTx {
         // now, whatever becomes of the packet.
         let chunk = payload.then(|| inbox.pop(stream)).flatten().unwrap_or_default();
         match metadata.operation {
-            KittyClipboardOperation::Read => {
-                // shortcut: reads and their grants are not served yet, so every read is refused.
-                let read = KittyClipboardOperation::Read;
-                let status = KittyClipboardStatus::Eperm;
-                KittyStep::Reply(kitty_clipboard_status_reply(
-                    read,
-                    status,
-                    metadata.location,
-                    &metadata.id,
-                    bel,
-                ))
-            }
+            KittyClipboardOperation::Read => self.read(&metadata, &chunk, bel, command_epoch, now),
             KittyClipboardOperation::Write => self.begin(&metadata, bel, now),
             KittyClipboardOperation::Wdata if metadata.mime.is_empty() => {
                 self.commit(bel, command_epoch, now)
@@ -445,6 +437,43 @@ impl KittyClipboardTx {
                 }
                 self.step(bel, now, |open| open.alias(&metadata.mime, &chunk))
             }
+        }
+    }
+
+    /// Admit one read: an undecodable payload is dropped, `loc=primary` off Linux is `ENOSYS`, and
+    /// otherwise the read takes a ticket or is answered as [`admit_kitty_read`] decides. Decoding the
+    /// payload is reserved from the staging first, so a full budget answers `EBUSY`.
+    fn read(
+        &mut self,
+        metadata: &KittyClipboardMetadata,
+        chunk: &[u8],
+        bel: bool,
+        command_epoch: u64,
+        now: Instant,
+    ) -> KittyStep {
+        let status = |status| {
+            let read = KittyClipboardOperation::Read;
+            kitty_clipboard_status_reply(read, status, metadata.location, &metadata.id, bel)
+        };
+        let mut lease = self.staging.lease();
+        if !lease.grow_to(chunk.len()) {
+            // When: lease.grow_to cannot cover decoding the payload, the read is busy.
+            return KittyStep::Reply(status(KittyClipboardStatus::Ebusy));
+        }
+        let Some(request) = parse_read_request(metadata, chunk, bel) else {
+            // When: parse_read_request refuses the payload, the read is dropped with no reply.
+            return KittyStep::Silent;
+        };
+        drop(lease);
+        let primary = metadata.location == KittyClipboardLocation::Primary;
+        if primary && !cfg!(target_os = "linux") {
+            // When: primary is asked for off Linux, the location does not exist.
+            return KittyStep::Reply(status(KittyClipboardStatus::Enosys));
+        }
+        let (staging, identity) = (&self.staging, &self.identity);
+        match admit_kitty_read(staging, identity, self.pane_id, command_epoch, request, now) {
+            Ok(ticket) => KittyStep::Ticket(ticket),
+            Err(reply) => KittyStep::Reply(reply),
         }
     }
 

@@ -14,7 +14,10 @@ use std::time::Instant;
 
 use sonicterm_cfg::config::{Osc52Policy, Osc52ReadPolicy};
 
-use super::osc52_read::reply_labels;
+use sonicterm_vt::vt::KittyClipboardStatus;
+
+use super::kitty_clipboard_read::{KittyReadRequest, KITTY_READ_RESERVATION_BYTES};
+use super::osc52_read::{empty_frames, read_reservation_bytes, reply_labels};
 use super::osc52_stream::{ClipboardJob, ClipboardStaging};
 
 /// One pane's read identity, shared by the pane, its VT worker and its intake.
@@ -107,24 +110,33 @@ impl Drop for ReadSlot {
     }
 }
 
-/// Take the pane's flag of kind `write`, then a process ticket slot; `None`, holding nothing, when
-/// either is taken already. The guard is built only once both are held.
+/// Why no slot was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotRefusal {
+    /// The pane already holds its one ticket of this kind.
+    PaneBusy,
+    /// Every process slot is held.
+    ProcessFull,
+}
+
+/// Take the pane's flag of kind `write`, then a process ticket slot; refused, holding nothing,
+/// when either is taken already. The guard is built only once both are held.
 fn take_slot(
     staging: &Arc<ClipboardStaging>,
     identity: &Arc<ReadIdentity>,
     write: bool,
-) -> Option<ReadSlot> {
+) -> Result<ReadSlot, SlotRefusal> {
     let flag = pending_flag(identity, write);
     if flag.swap(true, Ordering::SeqCst) {
         // When: the pane flag was already set, the pane holds its one ticket of this kind.
-        return None;
+        return Err(SlotRefusal::PaneBusy);
     }
     if !staging.try_take_ticket_slot() {
         // When: try_take_ticket_slot finds all MAX_TICKETS process slots held, the pane flag returns.
         flag.store(false, Ordering::SeqCst);
-        return None;
+        return Err(SlotRefusal::ProcessFull);
     }
-    Some(ReadSlot { staging: Arc::clone(staging), identity: Arc::clone(identity), write })
+    Ok(ReadSlot { staging: Arc::clone(staging), identity: Arc::clone(identity), write })
 }
 
 /// Where a ticket stands.
@@ -166,8 +178,11 @@ pub(in crate::app) enum CancelReason {
 pub(in crate::app) struct ConsentTicket {
     binding: ReadBinding,
     labels: Vec<u8>,
-    /// An asked write's job, holding its lease and program slot; `None` for a read.
-    write: Option<ClipboardJob>,
+    /// An asked write's job, holding its lease and program slot, boxed so every ticket stays
+    /// small; `None` for a read.
+    write: Option<Box<ClipboardJob>>,
+    /// An OSC 5522 read's request, boxed so every ticket stays small; `None` for OSC 52 and writes.
+    kitty_read: Option<Box<KittyReadRequest>>,
     state: TicketState,
     _slot: ReadSlot,
 }
@@ -188,9 +203,31 @@ impl ConsentTicket {
         self.write.is_some()
     }
 
+    /// An OSC 5522 read's request, if the ticket holds one.
+    pub(in crate::app) fn kitty_read(&self) -> Option<&KittyReadRequest> {
+        self.kitty_read.as_deref()
+    }
+
+    /// The reply a read gets when it is not served: `status` for an OSC 5522 read, one empty frame
+    /// per label for OSC 52.
+    pub(in crate::app) fn failure_reply(&self, status: KittyClipboardStatus) -> Vec<u8> {
+        match &self.kitty_read {
+            Some(request) => request.status(status),
+            None => empty_frames(&self.labels),
+        }
+    }
+
+    /// What the read reserves from the reply budget before it starts.
+    pub(in crate::app) fn reservation_bytes(&self) -> usize {
+        match &self.kitty_read {
+            Some(_) => KITTY_READ_RESERVATION_BYTES,
+            None => read_reservation_bytes(self.labels.len()),
+        }
+    }
+
     /// Take an approved write's job, to hand it to the clipboard ordering domain.
     pub(in crate::app) fn take_write(&mut self) -> Option<ClipboardJob> {
-        self.write.take()
+        self.write.take().map(|job| *job)
     }
 
     /// Where the ticket stands.
@@ -285,7 +322,7 @@ pub(in crate::app) fn admit_write(
         // When: write_policy is allow or deny, no consent is asked for.
         return WriteAdmission::Post(job);
     }
-    let Some(slot) = take_slot(staging, identity, true) else {
+    let Ok(slot) = take_slot(staging, identity, true) else {
         // When: take_slot finds the pane's write slot or every process slot held, it is busy.
         return WriteAdmission::Busy;
     };
@@ -300,7 +337,8 @@ pub(in crate::app) fn admit_write(
     WriteAdmission::Ticket(ConsentTicket {
         binding,
         labels: Vec::new(),
-        write: Some(job),
+        write: Some(Box::new(job)),
+        kitty_read: None,
         state: TicketState::Waiting,
         _slot: slot,
     })
@@ -336,7 +374,7 @@ pub(in crate::app) fn admit_read(
         Osc52ReadPolicy::Ask => TicketState::Waiting,
         Osc52ReadPolicy::Allow => TicketState::AutoAllowed,
     };
-    let Some(slot) = take_slot(staging, identity, false) else {
+    let Ok(slot) = take_slot(staging, identity, false) else {
         // When: take_slot finds the pane's read slot or every process slot held, it is busy.
         return Admission::Busy;
     };
@@ -349,7 +387,52 @@ pub(in crate::app) fn admit_read(
         created_at: now,
     };
     let labels = reply_labels(kinds);
-    Admission::Ticket(ConsentTicket { binding, labels, write: None, state, _slot: slot })
+    let ticket =
+        ConsentTicket { binding, labels, write: None, kitty_read: None, state, _slot: slot };
+    Admission::Ticket(ticket)
+}
+
+/// Admit one OSC 5522 read from `pane_id` at `command_epoch`: under `deny`, or while this pane
+/// reads, the reply is `EPERM`; with every process slot held it is `EBUSY`. A listing-only request
+/// reads no content, so it skips the prompt under `ask`.
+pub(in crate::app) fn admit_kitty_read(
+    staging: &Arc<ClipboardStaging>,
+    identity: &Arc<ReadIdentity>,
+    pane_id: u64,
+    command_epoch: u64,
+    request: KittyReadRequest,
+    now: Instant,
+) -> Result<ConsentTicket, Vec<u8>> {
+    let policy_generation = staging.policy_generation();
+    let state = match staging.read_policy() {
+        Osc52ReadPolicy::Deny => {
+            // When: read_policy is Deny, the read is refused `EPERM` and reserves nothing.
+            return Err(request.status(KittyClipboardStatus::Eperm));
+        }
+        Osc52ReadPolicy::Ask if !request.listing_only() => TicketState::Waiting,
+        Osc52ReadPolicy::Ask | Osc52ReadPolicy::Allow => TicketState::AutoAllowed,
+    };
+    let slot = match take_slot(staging, identity, false) {
+        Ok(slot) => slot,
+        Err(SlotRefusal::PaneBusy) => {
+            // When: take_slot finds this pane already reading, the read is refused `EPERM`.
+            return Err(request.status(KittyClipboardStatus::Eperm));
+        }
+        Err(SlotRefusal::ProcessFull) => {
+            // When: take_slot finds every process slot held, the read is busy, `EBUSY`.
+            return Err(request.status(KittyClipboardStatus::Ebusy));
+        }
+    };
+    let binding = ReadBinding {
+        pane_id,
+        incarnation: identity.incarnation(),
+        owner_epoch: identity.owner_epoch(),
+        command_epoch,
+        policy_generation,
+        created_at: now,
+    };
+    let kitty_read = Some(Box::new(request));
+    Ok(ConsentTicket { binding, labels: Vec::new(), write: None, kitty_read, state, _slot: slot })
 }
 
 #[cfg(test)]

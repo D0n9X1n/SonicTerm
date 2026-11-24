@@ -392,7 +392,7 @@ lock:
 | `type=wdata:mime=…` | one strict Base64 stream per type; a packet ending on padding restarts it; a type switch ends the previous stream; a repeated type restarts its region |
 | `type=walias:mime=…` | records the aliases in order; an empty `mime` answers `EINVAL` |
 | `type=wdata` without `mime` | commits |
-| `type=read` | `EPERM`; reads are not served |
+| `type=read` | served as below; a payload that is not strict Base64 of UTF-8 is dropped with no reply |
 | DECRQM `?5522` | `0`; 5522 is not advertised |
 
 Every buffer is reserved from the clipboard staging budget before it grows, and the transaction
@@ -420,10 +420,30 @@ when the policy becomes `deny`; the VT worker wakes for both even while the chil
 nothing, because a config reload wakes every worker. RIS and pane retirement release it
 silently.
 
+A read's payload is a Base64 list of MIME types; `.` asks for the type listing. At most 16 data
+types are accepted. Reads follow `osc52_read` and take the same consent ticket as an OSC 52 read:
+`deny`, a read while the same pane already reads, or a refused or expired page answer `EPERM`; a
+full process gate, queue pressure or a full reply budget answers `EBUSY`. A listing-only request
+reads no content, so it skips the page under `ask`. An approved read runs on the disposable
+reader thread and is delivered as one message through the sensitive reply channel, never the
+reply spool: `OK`, the listing as one `DATA` packet with `mime=Lg==` (types space-joined plus a
+newline, at most 16 names and 4096 bytes, payload omitted when empty), `DATA` chunks of at most
+4096 raw bytes per served type with the id and MIME repeated in every packet, then `DONE`. Only
+`text/plain` types are read now; another type is omitted, which the protocol reads as unavailable.
+A type's text is read with an 8 MiB cap and served only while the whole reply stays within
+12 MiB, checked before anything grows; otherwise it is omitted. An unavailable location
+(`loc=primary` off Linux) or a platform that cannot list types answers `ENOSYS`; a failed or
+overdue native read answers `EIO`; an empty clipboard is `OK` then `DONE`. Native type listing is
+not wired yet, so `.` answers `ENOSYS` on every platform, and session grants (Always, Ban) are
+not offered.
+
 Intentional differences: at most 1 MiB per packet (Ghostty 8 MiB; kitty 256 KiB unless the
 packet is complete); a commit with nothing the platform can hold answers `ENOSYS`; Ghostty's
 metadata, MIME and alias bounds apply (kitty has none); the idle and absolute timeouts exist
-(neither reference times out); RIS aborts an open write (both references clear only grants).
+(neither reference times out); RIS aborts an open write (both references clear only grants);
+reads accept at most 16 data types (Ghostty 4, kitty all), serve at most 8 MiB per type and a
+12 MiB reply (kitty has no limit), and a read while the same pane already reads answers `EPERM`
+(as kitty) while a full process gate answers `EBUSY`.
 
 ### Host reports
 

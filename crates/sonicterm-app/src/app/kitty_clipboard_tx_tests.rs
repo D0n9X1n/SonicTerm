@@ -354,14 +354,62 @@ fn ask_commit_takes_a_ticket() {
     assert!(matches!(rig.send("type=wdata").pop(), Some(KittyStep::Ticket(_))));
 }
 
-/// Contract: reads are not served yet: `type=read` answers `EPERM` with its id and terminator.
+/// Contract: under `osc52_read = "deny"` a read answers `EPERM` at once, with its id and
+/// terminator, and takes no ticket.
 #[test]
-fn read_eperm_before_6b() {
+fn deny_eperm() {
     let mut rig = rig();
+    rig.staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Deny);
     assert_eq!(
         rig.reply("type=read:id=q;dGV4dC9wbGFpbg=="),
         "\x1b]5522;type=read:status=EPERM:id=q\x1b\\"
     );
+    assert_eq!(rig.staging.ticket_slots_in_use(), 0);
+}
+
+/// The ticket one read packet `body` admitted.
+fn read_ticket(rig: &mut Rig, body: &str) -> crate::app::osc52_read_ticket::ConsentTicket {
+    match rig.send(body).pop() {
+        Some(KittyStep::Ticket(ticket)) => ticket,
+        other => panic!("expected a read ticket for {body:?}, got {other:?}"),
+    }
+}
+
+/// Contract: a read takes a consent ticket carrying its request: readable at once under `allow`
+/// and for a listing-only request under `ask`, which skips the prompt; a data read under `ask`
+/// waits. A payload that is not strict Base64 is dropped with no reply and no ticket.
+#[test]
+fn read_takes_a_ticket_and_listing_skips_the_prompt() {
+    use sonicterm_cfg::config::Osc52ReadPolicy;
+    let mut rig = rig();
+    rig.staging.set_read_policy(Osc52ReadPolicy::Allow);
+    let ticket = read_ticket(&mut rig, "type=read:id=a;dGV4dC9wbGFpbg==");
+    assert!(ticket.readable());
+    assert_eq!(ticket.kitty_read().map(|read| read.types.clone()), Some(vec!["text/plain".into()]));
+    drop(ticket);
+    rig.staging.set_read_policy(Osc52ReadPolicy::Ask);
+    assert!(read_ticket(&mut rig, "type=read;Lg==").readable(), "a listing skips the prompt");
+    assert!(!read_ticket(&mut rig, "type=read;dGV4dC9wbGFpbg==").readable(), "data waits");
+    assert!(rig.send("type=read;!!!!").iter().all(|step| matches!(step, KittyStep::Silent)));
+    assert_eq!(rig.staging.ticket_slots_in_use(), 0);
+}
+
+/// Contract: a read while the same pane holds a read ticket answers `EPERM`; a read while every
+/// process slot is taken answers `EBUSY`.
+#[test]
+fn same_pane_busy_eperm_and_full_gate_ebusy() {
+    let mut rig = rig();
+    rig.staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Allow);
+    let held = read_ticket(&mut rig, "type=read;dGV4dC9wbGFpbg==");
+    let busy = rig.reply("type=read:id=s;dGV4dC9wbGFpbg==");
+    assert_eq!(busy, "\x1b]5522;type=read:status=EPERM:id=s\x1b\\");
+    drop(held);
+    let max = crate::app::osc52_read::MAX_TICKETS;
+    let taken = (0..max).filter(|_| rig.staging.try_take_ticket_slot()).count();
+    assert_eq!(taken, max);
+    let full = rig.reply("type=read:id=g;dGV4dC9wbGFpbg==");
+    assert_eq!(full, "\x1b]5522;type=read:status=EBUSY:id=g\x1b\\");
+    (0..max).for_each(|_| rig.staging.release_ticket_slot());
 }
 
 /// Contract: an OSC 5522 write the event loop refuses (`osc52` changed to `deny` after the commit

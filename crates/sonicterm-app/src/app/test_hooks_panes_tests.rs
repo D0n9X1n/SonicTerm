@@ -59,3 +59,16 @@ fn clipboard_reply_pane_answers_a_kitty_write_done() {
     let whole = [&write[..], &data[..], &commit[..]].concat();
     assert_eq!(App::__test_clipboard_reply_pane(80, 24, "fixture").replies(&whole), done);
 }
+
+/// Contract: the F-ConPTY app smoke's clipboard pane answers an OSC 5522 `text/plain` read under
+/// `allow` from its fake clipboard with exactly OK, one DATA packet repeating the id and MIME, and
+/// DONE, each ST-terminated as the request was, so the smoke's expected reply is the bytes this pins.
+#[test]
+fn clipboard_reply_pane_answers_a_kitty_read_exactly() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    let expected = "\x1b]5522;type=read:status=OK:id=r\x1b\\\
+                    \x1b]5522;type=read:status=DATA:id=r:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+                    \x1b]5522;type=read:status=DONE:id=r\x1b\\";
+    let reply = pane.replies(b"\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\");
+    assert_eq!(String::from_utf8(reply).unwrap(), expected);
+}
