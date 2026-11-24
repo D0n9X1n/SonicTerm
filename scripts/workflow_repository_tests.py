@@ -457,12 +457,21 @@ jobs:
         # declared perf feature is in exactly one set. `test-support` is turned on
         # by sonicterm-app's dev-dependency on itself, so workspace Clippy and
         # tests build it on, and each core job lints the library once with it off.
+        # `sonicterm-io`'s `test-support` is turned on the same way, by its own dev-dependency on itself and
+        # by sonicterm-app's dev-dependency, so workspace Clippy and tests build it; it only adds the Windows
+        # job-object API the real-ConPTY fixture uses.
         self.assertEqual(
             workflow_test_fixture.optional_feature_packages(),
             {"sonicterm-resource": ("test-util",),
+             "sonicterm-io": ("test-support",),
              "sonicterm-app": ("perf-counters", "perf-echo-trace", "perf-frame-texture",
                                "perf-hook-checkpoint-memory", "perf-hook-trim", "test-support")},
         )
+        io_manifest = (workflow_test_fixture._HERE.parent / "crates" / "sonicterm-io" / "Cargo.toml").read_text(
+            encoding="utf-8"
+        )
+        io_dev_dependencies = io_manifest.split("\n[dev-dependencies]\n", 1)[1].split("\n[", 1)[0]
+        self.assertIn('sonicterm-io = { path = ".", features = ["test-support"] }', io_dev_dependencies)
         app_manifest = (workflow_test_fixture._HERE.parent / "crates" / "sonicterm-app" / "Cargo.toml").read_text(
             encoding="utf-8"
         )
