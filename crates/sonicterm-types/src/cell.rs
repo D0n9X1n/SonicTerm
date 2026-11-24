@@ -75,6 +75,9 @@ bitflags::bitflags! {
         const WIDE          = 1 << 8;
         /// Continuation of a wide cell (right half)
         const WIDE_CONT     = 1 << 9;
+        /// Printed while the shell's OSC 133 state was input; read only by prompt click-to-move,
+        /// never by rendering, so [`Cell`]'s hash ignores it.
+        const PROMPT_INPUT  = 1 << 10;
     }
 }
 
@@ -127,7 +130,7 @@ impl FatAttributes {
 /// of trailing pad before the 8-byte [`Option<Box<FatAttributes>>`];
 /// total 24. Grid capacity ceilings multiply this size, so growing
 /// it inflates every per-pane memory budget.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 // Named by callers outside this crate.
 #[allow(clippy::min_ident_chars)]
 pub struct Cell {
@@ -147,6 +150,18 @@ pub struct Cell {
     /// limited to keep the box lifecycle (alloc on first rare
     /// attr, collapse to `None` when last clears) in one place.
     fat: Option<Box<FatAttributes>>,
+}
+
+impl std::hash::Hash for Cell {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // `PROMPT_INPUT` changes no pixel, so row caches and line hashes must not see it; cells
+        // that compare equal still hash equal, because equal flags stay equal once masked.
+        self.ch.hash(state);
+        self.fg.hash(state);
+        self.bg.hash(state);
+        self.flags.difference(CellFlags::PROMPT_INPUT).hash(state);
+        self.fat.hash(state);
+    }
 }
 
 impl Cell {

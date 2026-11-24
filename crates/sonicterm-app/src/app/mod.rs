@@ -294,6 +294,7 @@ const _: () = {
 };
 mod privilege;
 mod program_state;
+mod prompt_click;
 use privilege::refresh_window_tab_privileges;
 mod quit_hold;
 mod reaper_driver;

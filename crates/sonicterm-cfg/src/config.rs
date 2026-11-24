@@ -356,6 +356,21 @@ pub struct TerminalConfig {
     pub osc52: Osc52Policy,
     /// Which macOS Option keys act as Alt instead of composing characters; read only on macOS.
     pub macos_option_as_alt: OptionAsAlt,
+    /// Whether a click in a shell prompt moves its cursor; see [`ClickToMove`].
+    pub click_to_move: ClickToMove,
+}
+
+/// Whether a plain left click inside an OSC 133 shell prompt moves the shell's cursor there.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClickToMove {
+    /// Any marked prompt: a click report when the prompt asks for one, else arrow keys (kitty).
+    #[default]
+    AnyPrompt,
+    /// Only prompts that declare `click_events` or `cl` (Ghostty).
+    Declared,
+    /// Clicks never move the cursor.
+    Off,
 }
 
 /// Which macOS Option keys send Alt chords instead of composed characters.
@@ -647,6 +662,7 @@ impl Default for TerminalConfig {
             cursor_shape: CursorShape::default(),
             cursor_animation: CursorAnimation::default(),
             osc52: Osc52Policy::default(),
+            click_to_move: ClickToMove::default(),
         }
     }
 }

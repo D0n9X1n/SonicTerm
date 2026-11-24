@@ -137,3 +137,20 @@ fn cmdline_text_is_bounded_and_counted() {
     assert!(grid.retained_amount().bytes >= before + MAX_CMDLINE_BYTES);
     assert_eq!(grid.retained_amount_by_region().total(), grid.retained_amount());
 }
+
+/// `input_seen` records that this generation's shell marked input (B or I), so click-to-move can
+/// count typed input cells; a new prompt and RIS clear it, and output keeps it for the generation.
+#[test]
+fn input_seen_is_set_by_input_and_cleared_by_a_new_generation() {
+    let mut grid = Grid::new(10, 4);
+    prompt(&mut grid);
+    assert!(!grid.semantic().input_seen);
+    grid.mark_semantic_input(false);
+    grid.mark_semantic_output();
+    assert!(grid.semantic().input_seen, "output keeps the generation's input mark");
+    prompt(&mut grid);
+    assert!(!grid.semantic().input_seen, "a new prompt starts without input");
+    grid.mark_semantic_input(true);
+    grid.reset_semantic();
+    assert!(!grid.semantic().input_seen, "RIS clears it");
+}

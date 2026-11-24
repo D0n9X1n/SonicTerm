@@ -844,3 +844,14 @@ fn same_as_fill_agrees_with_cell_equality() {
         }
     }
 }
+
+/// A row whose cells differ only by `PROMPT_INPUT` hashes the same, in flat and cluster storage,
+/// so the flag never reaches a line-hash consumer (render identity, path-detection row stamps).
+#[test]
+fn prompt_input_flag_is_absent_from_the_line_hash() {
+    let typed = Cell::plain('a', Color::Default, Color::Default, CellFlags::PROMPT_INPUT);
+    let (plain_flat, plain_cluster) = flat_and_cluster(&[(plain_cell('a'), 2)]);
+    let (typed_flat, typed_cluster) = flat_and_cluster(&[(typed, 2)]);
+    assert_eq!(hash_of(&plain_flat), hash_of(&typed_flat));
+    assert_eq!(hash_of(&plain_cluster), hash_of(&typed_cluster));
+}

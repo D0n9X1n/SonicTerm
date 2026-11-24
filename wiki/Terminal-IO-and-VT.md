@@ -685,7 +685,7 @@ URI to 8 KiB and client id to 1 KiB.
   - Options are read from their first occurrence; a malformed value is unset. `k` takes `i`,
     `r`, `c` or `s`; `redraw` takes `0`, `1` or `last`; `click_events` `1` or `2`; `cl`
     `line`, `m`, `v` or `w`; `special_key` `0` or `1`. `redraw` decides the resize below; the
-    others are stored for later use. `aid` and
+    click options drive prompt click-to-move ([Usage](Usage)). `aid` and
     `err` are ignored, and WezTerm's `D;<code>;aid=…` keeps its positional exit code.
   - Command text is taken only from an authenticated `C`. `cmdline=` (bash `printf %q`
     quoting: `\x`, `'…'` and `$'…'` escapes) wins over `cmdline_url=` (percent-encoded) in
@@ -709,10 +709,28 @@ URI to 8 KiB and client id to 1 KiB.
     | `P` `k=` | yes | no | yes | yes, no region |
     | `I` input to end of line | yes | no | yes | yes |
     | options when absent on `A` | kept | reset | not read | reset |
-    | `click_events`, `cl`, `special_key` | read | read | `cl` parsed | stored |
+    | `click_events`, `cl`, `special_key` | read | read | `cl` parsed | read; see below |
     | `redraw` on a rows shrink | reflows, then blanks the prompt (`1`) or its last line (`last`) | saves and restores the prompt rows; `0` turns it off | no | keeps the cursor row, blanks nothing; `0` turns it off; not on Windows |
     | `C` `cmdline`, `cmdline_url` | parsed | shown | no | authenticated `C` only, shown when opted in |
     | `9;12` | as `A` | no | no | as `A` without options, no region |
+  - Prompt click-to-move, set by `[terminal] click_to_move` ([Configuration](Configuration)):
+    a cell printed while the shell is in input (after `B`, or `I` until the line ends) carries
+    an input mark that no renderer, row cache or line hash reads.
+
+    | Behavior | G | K | W | SonicTerm |
+    | --- | --- | --- | --- | --- |
+    | `click_events=1` | SGR press only, row = viewport row + 1 | same | no | same |
+    | `click_events=2` | row = click − prompt + 1 | same, anchored on a secondary prompt at or above the click | no | as K |
+    | cursor keys | only with `cl`; counts input cells; left/right using DECCKM | at any marked prompt; counts text cells; full key encoder | `cl` parsed, unused | `"any-prompt"` (default, as K), `"declared"` (as G) or `"off"`; input cells when the prompt marked input, else text cells; SonicTerm's key encoder |
+    | `special_key=1` | no | `CSI 1u` right, `CSI 1;1u` left | no | as K |
+    | `cl=v`, `cl=w` | left and right | no | no | left and right (G) |
+
+    Intentional differences: a click with Ctrl, Alt or Super never moves the cursor, and
+    neither does a click over an open palette, search, copy mode or READONLY, or while the
+    pane's parser is busy. In `"any-prompt"` mode any admitted prompt enables cursor keys, as
+    in kitty, but only a user's click sends them. Under the kitty keyboard protocol's
+    report-events flag each key is followed by its release. A click is sent whole or not at
+    all: at most 16,384 cells are read, and at most 4,096 keys and 12 KiB are written.
 - **OSC 1337 `SetUserVar`:** per-pane user variables, as WezTerm's shell integration sends
   them (`ESC ] 1337 ; SetUserVar=NAME=<base64> BEL`). The raw collector owns the whole payload,
   at most 64 KiB after `1337;`, and applies it only once its BEL or ST arrived; a longer one, or

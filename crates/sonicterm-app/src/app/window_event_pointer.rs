@@ -59,7 +59,13 @@ pub(in crate::app) fn begin_pointer_gesture(
             PointerGestureOwner::Terminal { tracking, format, is_alt }
         }
     };
-    Some(PointerGesture { owner, press_pane: cell.pane_id, last_cell: cell, anchor: None })
+    Some(PointerGesture {
+        owner,
+        press_pane: cell.pane_id,
+        last_cell: cell,
+        anchor: None,
+        prompt: None,
+    })
 }
 
 impl WindowState {
@@ -79,6 +85,7 @@ impl WindowState {
                 press_pane: cell.pane_id,
                 last_cell: cell,
                 anchor: None,
+                prompt: None,
             })
         } else {
             // When: copy_mode is not READONLY, retain the normal Shift and tracking ownership decision.

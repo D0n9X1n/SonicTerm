@@ -146,6 +146,9 @@ cursor_shape = "block"
 cursor_animation = "none"
 # Programs may set the clipboard with OSC 52: "allow" or "deny".
 osc52 = "allow"
+# A plain click in a shell prompt moves its cursor there: "any-prompt" (every
+# OSC 133 prompt), "declared" (only prompts that ask for it) or "off".
+click_to_move = "any-prompt"
 
 [logging]
 # Logs are written to {config_dir}/logs/sonicterm.log.

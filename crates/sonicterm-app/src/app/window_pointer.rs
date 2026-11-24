@@ -680,18 +680,19 @@ impl App {
             }
             ElementState::Released => {
                 // When: `state` is Released, commit or cancel the press-latched pointer gesture.
-                let (terminal_owned, pointer_release) = self
+                let (terminal_owned, pointer_release, released_gesture) = self
                     .main_mut()
                     .map(|window| {
                         let terminal_owned = matches!(
                             window.pointer_gesture.as_ref().map(|gesture| gesture.owner),
                             Some(PointerGestureOwner::Terminal { .. })
                         );
+                        let gesture = window.pointer_gesture;
                         let modifiers = window.modifiers;
                         let release = take_pointer_release(&mut window.pointer_gesture, modifiers);
-                        (terminal_owned, release)
+                        (terminal_owned, release, gesture)
                     })
-                    .unwrap_or((false, None));
+                    .unwrap_or((false, None, None));
                 // Clear before enqueue: saturation or disconnect must not
                 // leave the completed gesture latched for a later event.
                 if let Some(route) = pointer_release {
@@ -758,6 +759,8 @@ impl App {
                         }
                     }
                 }
+                // A plain single click in a shell prompt moves its cursor, once the selection settled.
+                self.try_prompt_click(win_id, released_gesture);
                 let cursor = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
                 if !self.refresh_splitter_hover(cursor.0 as f32, cursor.1 as f32) {
                     self.refresh_hovered_url();

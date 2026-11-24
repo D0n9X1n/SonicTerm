@@ -414,3 +414,22 @@ fn macos_option_as_alt_defaults_none_and_round_trips() {
     assert!(toml::from_str::<Config>("[terminal]\nmacos_option_as_alt = \"meta\"\n").is_err());
     assert!(default_config_template().contains("macos_option_as_alt = \"none\""));
 }
+
+/// `[terminal] click_to_move` defaults to `"any-prompt"`, parses `"declared"` and `"off"`, refuses
+/// any other value, and the shipped template names the default.
+#[test]
+fn click_to_move_defaults_to_any_prompt_and_parses_each_mode() {
+    use crate::config::ClickToMove;
+    assert_eq!(Config::default().terminal.click_to_move, ClickToMove::AnyPrompt);
+    for (text, mode) in [
+        ("any-prompt", ClickToMove::AnyPrompt),
+        ("declared", ClickToMove::Declared),
+        ("off", ClickToMove::Off),
+    ] {
+        let parsed: Config =
+            toml::from_str(&format!("[terminal]\nclick_to_move = \"{text}\"\n")).unwrap();
+        assert_eq!(parsed.terminal.click_to_move, mode, "{text}");
+    }
+    assert!(toml::from_str::<Config>("[terminal]\nclick_to_move = \"always\"\n").is_err());
+    assert!(crate::config::default_config_template().contains("click_to_move = \"any-prompt\""));
+}

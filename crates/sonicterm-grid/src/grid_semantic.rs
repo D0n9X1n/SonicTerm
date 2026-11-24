@@ -73,7 +73,7 @@ pub enum ClickLine {
     SmartVertical,
 }
 
-/// The click options an OSC 133 prompt declares; stored, not yet acted on.
+/// The click options an OSC 133 prompt declares; prompt click-to-move reads them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PromptClick {
     /// The `click_events` value, when valid.
@@ -138,6 +138,8 @@ pub struct SemanticState {
     pub last_secondary_row: Option<u64>,
     /// The newest region's command text, from an authenticated C.
     pub cmdline: Option<CmdlineText>,
+    /// This generation's shell marked input (B or I), so its typed cells carry `PROMPT_INPUT`.
+    pub input_seen: bool,
 }
 
 impl SemanticState {
@@ -147,6 +149,7 @@ impl SemanticState {
         self.anchor = Some(row);
         self.last_secondary_row = None;
         self.cmdline = None;
+        self.input_seen = false;
         self.mode = SemanticMode::Prompt(kind);
     }
 }
@@ -181,6 +184,7 @@ impl Grid {
     /// Record input starting (B, or I when `until_eol`).
     pub fn mark_semantic_input(&mut self, until_eol: bool) {
         self.semantic.mode = SemanticMode::Input { until_eol };
+        self.semantic.input_seen = true;
     }
 
     /// Record output starting (C or D); the anchor and generation stay until the next prompt.

@@ -295,6 +295,16 @@ command line, such as zsh with syntax highlighting, still copies it as one line.
 A wide character that does not fit in the last column wraps early and leaves that
 column blank; the blank copies as a space.
 
+Click inside a shell prompt to move its cursor there, when the shell marks its prompt with
+OSC 133 (fish, or SonicTerm's shell integration). A plain single click sends the shell a click
+report if the prompt asked for one, or the arrow keys that reach the clicked cell. Drags,
+double- and triple-clicks, link clicks and clicks with Ctrl, Alt or Super keep their usual
+meaning and move nothing. When a program tracks the mouse, Shift-click still moves the cursor.
+Nothing moves while a palette, search, copy mode or READONLY is open, or when the prompt, the
+pane's layout or the view changed between press and release. The keys go to the clicked pane
+only, never to broadcast receivers. `[terminal] click_to_move` chooses `"any-prompt"` (the
+default), `"declared"` or `"off"`; see [Configuration](Configuration).
+
 READONLY mode blocks terminal input while you inspect history. Arrow keys or
 `h/j/k/l` move its reading cursor; `w/b`, `0/$`, and `g` / `G` move by word, line, and buffer. Press `Escape` to exit. READONLY does not create a text
 selection. Search, tab switching, pane focus, update checks, and saving current

@@ -568,6 +568,7 @@ impl App {
                 // When: the button was `Released`, so any drag, selection or
                 // tab-move started by the press is resolved here.
                 let modifiers = child.modifiers;
+                let released_gesture = child.pointer_gesture;
                 let terminal_owned = matches!(
                     child.pointer_gesture.as_ref().map(|gesture| gesture.owner),
                     Some(PointerGestureOwner::Terminal { .. })
@@ -627,6 +628,8 @@ impl App {
                     }
                 }
                 let _ = child;
+                // A plain single click in a shell prompt moves its cursor, once the selection settled.
+                self.try_prompt_click(win_id, released_gesture);
                 self.apply_tab_release(release, |app, source, index| {
                     app.tear_out_from_child(event_loop, source, index);
                 });

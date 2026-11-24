@@ -52,6 +52,11 @@ impl App {
         })
     }
 
+    /// Whether the terminal owns `win_id`'s input: no palette, composition, search or copy mode.
+    pub(super) fn terminal_owns_keys(&self, win_id: WindowId) -> bool {
+        self.window_key_owner(win_id) == Some(WindowKeyOwner::Terminal)
+    }
+
     fn copy_mode_allows_keymap(&self, win_id: WindowId) -> bool {
         self.registry
             .windows

@@ -198,11 +198,16 @@ impl Performer {
         let region = (self.scroll_top.is_some() || self.scroll_bottom.is_some())
             .then(|| self.effective_scroll_region());
         let fill = self.erase_fill_cell();
+        let mut flags = self.flags;
+        // A cell printed while the shell's OSC 133 state is input is typed input click-to-move counts.
+        if matches!(self.grid.semantic().mode, SemanticMode::Input { .. }) {
+            flags |= CellFlags::PROMPT_INPUT;
+        }
         self.grid.put_char_styled_in_region(
             character,
             self.fg,
             self.bg,
-            self.flags,
+            flags,
             self.current_hyperlink,
             self.underline_style,
             self.underline_color,

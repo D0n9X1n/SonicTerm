@@ -195,3 +195,23 @@ fn cell_stays_within_its_documented_size_budget() {
     const _: () = assert!(core::mem::size_of::<Cell>() <= 24);
     assert_eq!(core::mem::size_of::<Cell>(), 24);
 }
+
+/// `PROMPT_INPUT` marks typed prompt input for click-to-move only: it is bit 10, and a cell's hash
+/// ignores it, so every hash-keyed cache and fingerprint sees the same content either way.
+#[test]
+fn prompt_input_flag_is_bit_ten_and_absent_from_the_cell_hash() {
+    use std::hash::{Hash, Hasher};
+    let hash_of = |cell: &Cell| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        cell.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_eq!(CellFlags::PROMPT_INPUT.bits(), 1 << 10);
+    let plain = Cell::plain('a', Color::Default, Color::Default, CellFlags::BOLD);
+    let typed =
+        Cell::plain('a', Color::Default, Color::Default, CellFlags::BOLD | CellFlags::PROMPT_INPUT);
+    assert_eq!(hash_of(&plain), hash_of(&typed));
+    // Every other flag still changes the hash.
+    let italic = Cell::plain('a', Color::Default, Color::Default, CellFlags::ITALIC);
+    assert_ne!(hash_of(&plain), hash_of(&italic));
+}

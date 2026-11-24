@@ -191,6 +191,9 @@ cargo build -p sonicterm-app
   layout lookup, so a removed pane or tab, any tab switch, a screen change, an evicted
   anchor, or any real resize of the press pane's grid (`Grid::size_generation`) cancels
   the drag instead of retargeting it.
+- Prompt click-to-move (`prompt_click.rs`) latches the press identity and the semantic anchor,
+  never intercepts a terminal-owned release, writes only to the source pane, and never runs under
+  READONLY, overlays or a contended parser.
 - Per-pane budgets do not impose a process quota; process and window owners
   are tracking-only. Inline media has a 256 MiB process target plus a possible
   4 MiB newest-image residual per live pane. Decode-time trimming and the

@@ -571,3 +571,16 @@ fn a_row_admitted_before_an_eviction_misses_after_it() {
     assert!(atlas.evictions() > evictions, "precondition: an eviction happened");
     assert!(cache.get(1, 5, atlas.identity(), |_| true).is_none(), "the kept row misses after it");
 }
+
+/// `PROMPT_INPUT` is not render input: a row whose cells carry it shares the key of the same row
+/// without it, so typing at a prompt never costs a row re-shape.
+#[test]
+fn prompt_input_flag_is_absent_from_the_content_key() {
+    let cache = tracked(1, 2, 8);
+    let row = cells("ab");
+    let mut typed = row.clone();
+    for cell in &mut typed {
+        cell.flags |= CellFlags::PROMPT_INPUT;
+    }
+    assert_eq!(cache.content_key(&typed, 8, &inputs()), cache.content_key(&row, 8, &inputs()));
+}

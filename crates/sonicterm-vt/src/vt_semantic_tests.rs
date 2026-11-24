@@ -413,3 +413,29 @@ fn conemu_prompt_fixture_refused_after_latch() {
     assert_eq!(parser.grid().semantic(), &before);
     assert_eq!(parser.shell_integration_state(), ShellIntegrationState::Unverified);
 }
+
+/// Cells printed while the semantic mode is input (after B, or I until the line ends) carry
+/// `PROMPT_INPUT`; prompt text, output and erased cells never do, and I's input ends at LF.
+#[test]
+fn printed_input_cells_carry_the_prompt_input_flag() {
+    use sonicterm_types::CellFlags;
+    let mut parser = plain();
+    let mut bytes = mark("A", &[]);
+    bytes.extend_from_slice(b"$ ");
+    bytes.extend(mark("B", &[]));
+    bytes.extend_from_slice("ab\u{4e2d}".as_bytes());
+    bytes.extend(mark("C", &[]));
+    bytes.extend_from_slice(b"\r\nout\r\n");
+    bytes.extend(mark("I", &[]));
+    bytes.extend_from_slice(b"x\ny");
+    parser.advance(&bytes);
+    let grid = parser.grid();
+    let flagged = |row: u16, col: usize| grid.row(row)[col].flags.contains(CellFlags::PROMPT_INPUT);
+    assert!(!flagged(0, 0) && !flagged(0, 1), "prompt text");
+    assert!(flagged(0, 2) && flagged(0, 3), "typed input");
+    assert!(flagged(0, 4) && flagged(0, 5), "a wide input cell and its continuation");
+    assert!(!flagged(0, 6), "an untouched cell");
+    assert!(!flagged(1, 0), "output");
+    assert!(flagged(2, 0), "I input before the line feed");
+    assert!(!flagged(3, 1), "I input ends at the line feed");
+}
