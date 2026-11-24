@@ -12,6 +12,9 @@ pub(super) struct ThemeFingerprint {
     background: Option<(u8, u8, u8)>,
     cursor: Option<(u8, u8, u8)>,
     palette: [Option<(u8, u8, u8)>; 16],
+    selection_background: Option<(u8, u8, u8)>,
+    selection_foreground: Option<(u8, u8, u8)>,
+    cursor_text: Option<(u8, u8, u8)>,
     scheme: Option<ColorScheme>,
 }
 
@@ -41,6 +44,9 @@ impl Parser {
             background: performer.theme_bg,
             cursor: performer.theme_cursor,
             palette: performer.theme_palette,
+            selection_background: performer.theme_selection_bg,
+            selection_foreground: performer.theme_selection_fg,
+            cursor_text: performer.theme_cursor_text,
             scheme: performer.theme_color_scheme,
         };
         let previous = performer.reported_theme.replace(current);

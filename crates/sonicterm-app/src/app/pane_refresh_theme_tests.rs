@@ -85,3 +85,21 @@ fn seeds_answer_the_theme_selection_and_cursor_text() {
     let (_, _, reply) = parser.advance_with_replies(b"\x1b]17;?\x07");
     assert_eq!(reply, b"\x1b]17;rgb:a0a0/b0b0/c0c0\x07");
 }
+
+/// A theme change that alters only the selection or cursor-text colors still sends the mode 2031
+/// report, because OSC 17, OSC 19 and the OSC 21 `cursor_text` key read those colors back.
+#[test]
+fn selection_or_cursor_text_change_alone_sends_the_report() {
+    let base = theme_with("#101010", Appearance::Dark);
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &base);
+    parser.advance(b"\x1b[?2031h");
+    let mut selection = base.clone();
+    selection.colors.selection_bg = Hex("#123456".into());
+    let report = reseed_parser_theme_colors(&mut parser, &selection);
+    assert_eq!(report.as_deref(), Some(&b"\x1b[?997;1n"[..]), "selection background");
+    let mut cursor_text = selection.clone();
+    cursor_text.colors.cursor_text = Hex("#abcdef".into());
+    let report = reseed_parser_theme_colors(&mut parser, &cursor_text);
+    assert_eq!(report.as_deref(), Some(&b"\x1b[?997;1n"[..]), "cursor text");
+}
