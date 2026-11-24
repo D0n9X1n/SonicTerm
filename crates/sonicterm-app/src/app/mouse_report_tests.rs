@@ -145,6 +145,8 @@ use crate::app::window_event::{pointer_route_bytes, take_pointer_release, Pointe
 use crate::app::PointerCell;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 use sonicterm_vt::vt::MouseTracking;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use winit::{
     dpi::PhysicalPosition,
     event::{ElementState, MouseScrollDelta},
@@ -393,4 +395,83 @@ fn child_split_and_zoomed_panes_measure_from_their_own_origin() {
     assert!(app.__test_invoke_toggle_active_pane_zoom_in_child(child));
     app.handle_child_cursor_moved(child, PhysicalPosition::new(75.4, 115.6), &config);
     assert_eq!(writes(&app)[1..], [b"\x1b[<35;3;86M".to_vec(), b"\x1b[<35;55;86M".to_vec()]);
+}
+
+/// Arm the queue hook to switch `pane_id` to the alternate screen and publish it, as the VT worker
+/// does, after the motion route has read the modes it encodes under and before the report queues.
+fn switch_screen_before_queueing(app: &App, window_id: WindowId, pane_id: u64) {
+    let pane = &app.registry.windows[&window_id].panes[&pane_id];
+    let (parser, published) = (Arc::clone(&pane.parser), Arc::clone(&pane.pointer_input));
+    MOTION_QUEUE_HOOK.set(Some(Box::new(move || {
+        let mut parser = parser.lock();
+        parser.advance(b"\x1b[?1049h");
+        // Ordering: pointer_input stores Relaxed; this thread is the handler's only reader.
+        published.store(parser.pointer_input_snapshot(), Ordering::Relaxed);
+    })));
+}
+
+/// A main-window no-button motion is queued under the modes it was encoded with: a screen switch
+/// published between encoding and queueing, with the same tracking and format, does not retag it,
+/// so the writer drops a primary-screen report instead of sending it to the alternate screen.
+#[test]
+fn a_main_motion_keeps_its_encode_time_screen() {
+    let (mut app, main, left, _right) = split_main();
+    attach_shell(&mut app, left);
+    publish(&app, main, left, b"\x1b[?1003h\x1b[?1006h");
+    let submitted = crate::app::mod_tests::PtySubmissions::start();
+    switch_screen_before_queueing(&app, main, left);
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    flush_all(&mut app);
+    assert!(
+        admitted(&submitted).is_empty(),
+        "a primary-screen report reached the alternate screen"
+    );
+}
+
+/// A child-window no-button motion keeps its encode-time screen the same way as the main window's.
+#[test]
+fn a_child_motion_keeps_its_encode_time_screen() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["child"]);
+    assert!(app.__test_set_child_pane_viewport(
+        child,
+        Rect::new(0.0, 0.0, 800.0, 240.0),
+        10.0,
+        10.0
+    ));
+    let pane_id = app.__test_child_active_pane(child).unwrap();
+    #[cfg(windows)]
+    let (program, args) = ("cmd.exe", vec!["/D".to_owned(), "/Q".to_owned()]);
+    #[cfg(unix)]
+    let (program, args) = ("/bin/sh", vec!["-s".to_owned()]);
+    let pty =
+        sonicterm_io::pty::PtyHandle::spawn_with_args(program, &args, 80, 24).expect("PTY fixture");
+    app.registry.windows.get_mut(&child).unwrap().panes.get_mut(&pane_id).unwrap().pty = Some(pty);
+    publish(&app, child, pane_id, b"\x1b[?1003h\x1b[?1006h");
+    let submitted = crate::app::mod_tests::PtySubmissions::start();
+    switch_screen_before_queueing(&app, child, pane_id);
+    let config = app.config.clone();
+    app.handle_child_cursor_moved(child, PhysicalPosition::new(55.0, 85.0), &config);
+    flush_all(&mut app);
+    assert!(
+        admitted(&submitted).is_empty(),
+        "a primary-screen report reached the alternate screen"
+    );
+}
+
+/// The 1016 repeat rule compares the whole profile a report was admitted under: the first motion
+/// on the alternate screen is sent even when its bytes equal the primary screen's last report.
+#[test]
+fn the_first_alternate_screen_pixel_motion_is_not_a_repeat() {
+    let (mut app, main, left, _right) = split_main();
+    attach_shell(&mut app, left);
+    publish(&app, main, left, b"\x1b[?1003h\x1b[?1016h");
+    let submitted = crate::app::mod_tests::PtySubmissions::start();
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    flush_all(&mut app);
+    publish(&app, main, left, b"\x1b[?1049h");
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    flush_all(&mut app);
+    assert_eq!(admitted(&submitted), [b"\x1b[<35;55;85M".to_vec(), b"\x1b[<35;55;85M".to_vec()]);
 }

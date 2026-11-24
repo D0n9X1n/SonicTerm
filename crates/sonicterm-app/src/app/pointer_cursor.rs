@@ -129,8 +129,9 @@ pub(crate) struct NativeCursorState {
 }
 
 impl App {
-    /// Follow which window owns the pointer: the one it entered or moved in, until it leaves that
-    /// window. A leave, a resize, a scale or a focus change marks `window_id`'s owners stale.
+    /// Follow which window owns the pointer: the one it entered or moved in inside its client area,
+    /// until it leaves that window. A leave, a resize, a scale or a focus change marks
+    /// `window_id`'s owners stale.
     pub(in crate::app) fn track_pointer_owner(
         &mut self,
         window_id: WindowId,
@@ -138,8 +139,15 @@ impl App {
     ) {
         use winit::event::WindowEvent;
         match event {
-            WindowEvent::CursorEntered { .. } | WindowEvent::CursorMoved { .. } => {
+            WindowEvent::CursorEntered { .. } => {
                 self.interaction.pointer_window = Some(window_id);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                // A captured drag keeps reporting moves to its source from outside the client area
+                // after `CursorLeft`; such a move keeps its routing but claims no cursor.
+                if self.pointer_in_client(window_id, (position.x, position.y)) {
+                    self.interaction.pointer_window = Some(window_id);
+                }
             }
             WindowEvent::CursorLeft { .. } => {
                 if self.interaction.pointer_window == Some(window_id) {
@@ -156,6 +164,22 @@ impl App {
                 // When: any other event, the pointer's owner and the hover owners stand.
             }
         }
+    }
+
+    /// Whether `position` lies in `window_id`'s client area: not negative, and inside its native
+    /// inner size when it has a native window (a headless window has no far edge to check).
+    fn pointer_in_client(&self, window_id: WindowId, position: (f64, f64)) -> bool {
+        let (pointer_x, pointer_y) = position;
+        if pointer_x < 0.0 || pointer_y < 0.0 {
+            // When: pointer_x or pointer_y is negative, the pointer is left of or above the client area.
+            return false;
+        }
+        let native =
+            self.registry.windows.get(&window_id).and_then(|window| window.window.as_ref());
+        native.is_none_or(|native| {
+            let size = native.inner_size();
+            pointer_x < f64::from(size.width) && pointer_y < f64::from(size.height)
+        })
     }
 
     /// Reclassify `window_id`'s splitter, scrollbar and band-edge owners at its next decision.

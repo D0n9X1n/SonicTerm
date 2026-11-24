@@ -256,13 +256,20 @@ A tab's label is built from one pane: the pane it was last refreshed from, else 
 active pane. `tab_title` is listed only when the caller may read that pane; otherwise it is
 `null` and the pane's `omitted` object carries `"tab_title": "unreadable"`, even for a
 readable agent pane split beside it. A label whose pane has closed is listed only under
-`read = "any"`. The titles, `user_vars` lists and `program_status` lists of every listed pane
-share one budget of 256 KiB of serialized text per `list_panes` reply, so long values cannot
-push the reply past the bridge's 1 MiB line limit: a title or list that does not fit is `null`
-with `"budget"` under `omitted`, never cut, and the reply still succeeds, with earlier panes
-keeping theirs; `program_state` is outside the budget, so it stays when the list is omitted.
-One pane's `user_vars` list (at most 16 KiB of names and values) or `program_status` list (at
-most 32 records) always fits an unspent budget.
+`read = "any"`. The titles, `cwd`, `user_vars` lists and `program_status` lists of every listed
+pane share one budget of 256 KiB of serialized text per `list_panes` reply: a title, directory
+or list that does not fit is `null` with `"budget"` under `omitted`, never cut, and the reply
+still succeeds, with earlier panes keeping theirs; `program_state` is outside the budget, so it
+stays when the list is omitted. One pane's `user_vars` list (at most 16 KiB of names and values)
+or `program_status` list (at most 32 records) always fits an unspent budget.
+
+The whole `list_panes` result, its fixed fields and every pane record together, is also bounded
+at 768 KiB of serialized JSON, below the bridge's 1 MiB line limit, so a reply never makes the
+bridge close the connection, however many panes are open. Panes are listed in order until the
+next record would cross that bound; that pane and every later one are left out, `partial` is
+`true`, and `truncated_panes` counts them (`0` when every pane is listed). `partial` is also
+`true` when the parser-probe budget ran out and some panes are listed with
+`"details": "skipped"`.
 
 A non-busy history page may be empty while skipping blank rows: pass its `first_row`
 as `before_row` again until `at_start` is true. Row tokens always advance. A row larger

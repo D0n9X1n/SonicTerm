@@ -348,6 +348,101 @@ fn a_program_background_set_and_reset_keeps_the_window_opacity_across_partial_fr
     }
 }
 
+/// The production planner's plan for a 4x2 window of 1x1 cells split into pane 7 (left, 2x2) and
+/// pane 8 (right, 2x2), with `pane_colors` as the frame key's color identity, after `previous`.
+fn opacity_plan(
+    pane_colors: u64,
+    previous: Option<&crate::frame_plan::FrameKey>,
+) -> crate::frame_plan::FramePlan {
+    use crate::frame_plan::{FrameFacts, FramePlan, PaneMetadata, WindowIdentity};
+    let facts = FrameFacts {
+        window: WindowIdentity { width: 4, height: 2, pane_colors, ..Default::default() },
+        cell_w: 1.0,
+        cell_h: 1.0,
+        padding: [0.0; 4],
+        vertical_ink_pad: 0.0,
+        scrollbar_mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode::Never,
+        degraded: false,
+        tab_bar_top: None,
+        status_band: None,
+        scale: 1.0,
+        previous_recolor: Default::default(),
+    };
+    let pane = |id: u64, pane_x: i32| PaneMetadata {
+        id,
+        revision: 1,
+        dirty_generation: 0,
+        rect: PixelRect { x: pane_x, y: 0, w: 2, h: 2 },
+        cols: 2,
+        rows: 2,
+        scrollback_len: 0,
+        viewport_top_abs: None,
+        is_active: id == 7,
+        is_alt: false,
+        scrollbar_alpha: 0.0,
+        dirty_rows: Vec::new(),
+        row_ink: Vec::new(),
+    };
+    FramePlan::build(facts, [pane(7, 0), pane(8, 2)], previous)
+}
+
+/// The pane fills production assembly pushes come from one walk over a real `FramePlan`: at a
+/// window opacity of 0.5 a pane whose program set a background gets exactly one fill over its
+/// planned clip, drawn at the window opacity while its sibling keeps the theme, and a reset of that
+/// background changes the frame's color identity, so the planner repaints the whole window and
+/// the walk pushes no fill, leaving the theme clear.
+#[test]
+fn the_planned_pane_fill_walk_follows_a_program_background_set_and_reset() {
+    use sonicterm_types::{ColorOverrides, DynamicColor};
+    const OPACITY: f32 = 0.5;
+    let theme = Theme::default();
+    let mut overrides = ColorOverrides::default();
+    overrides.set_dynamic(DynamicColor::Background, Some((200, 100, 50)));
+    overrides.advance_generation();
+    let identity = |overrides: &ColorOverrides| {
+        crate::core::pane_colors::pane_colors_identity([(7, Some(overrides)), (8, None)])
+    };
+    let set_plan = opacity_plan(identity(&overrides), None);
+    let mut fills = Vec::new();
+    push_planned_pane_fills(
+        &mut fills,
+        &theme,
+        OPACITY,
+        set_plan.panes.iter().map(|pane| (pane, (pane.id == 7).then_some(&overrides))),
+        (4.0, 2.0),
+    );
+    let pane_clip = set_plan.panes[0].full_clip;
+    let expected =
+        pane_fill_quad(PaneColors::new(&theme, Some(&overrides)), OPACITY, pane_clip, (4.0, 2.0));
+    assert_eq!(fills.len(), 1, "one fill, for the pane whose program set a background");
+    assert_eq!(bytemuck::bytes_of(&fills[0]), bytemuck::bytes_of(&expected.unwrap()));
+    let background =
+        crate::color::hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), OPACITY);
+    let mut fixture = RetainedPixelFixture::new();
+    fixture.draw_filled(true, full_surface_rect(4, 2), background, &fills);
+    let drawn = fixture.pixels();
+    assert_eq!(drawn[0][3], 128, "the pane keeps the window opacity");
+    assert!(pixels_close(drawn[3], clear_bgra(background)), "the sibling keeps the theme");
+    // The same identity again plans no repaint, so only the reset below can cause one.
+    assert_eq!(opacity_plan(identity(&overrides), Some(&set_plan.key)).mode, RenderMode::Noop);
+    overrides.set_dynamic(DynamicColor::Background, None);
+    overrides.advance_generation();
+    let reset_plan = opacity_plan(identity(&overrides), Some(&set_plan.key));
+    assert_ne!(reset_plan.key, set_plan.key, "the reset changes the frame's identity");
+    assert_eq!(reset_plan.mode, RenderMode::Full, "a color reset repaints the whole window");
+    let mut reset_fills = Vec::new();
+    push_planned_pane_fills(
+        &mut reset_fills,
+        &theme,
+        OPACITY,
+        reset_plan.panes.iter().map(|pane| (pane, (pane.id == 7).then_some(&overrides))),
+        (4.0, 2.0),
+    );
+    assert!(reset_fills.is_empty(), "a reset background pushes no fill");
+    fixture.draw_filled(true, full_surface_rect(4, 2), background, &reset_fills);
+    assert!(pixels_close(fixture.pixels()[0], clear_bgra(background)), "the theme clear returns");
+}
+
 /// One retained selection frame of a 4x3 grid of 10x20 cells: every row holds a striped two-cell
 /// glyph with a bearing (a ligature) on cells 0-1 and text glyphs on cells 2 and 3, and `selection`
 /// carries a program selection background and foreground. Only the `emitted` rows' glyphs are

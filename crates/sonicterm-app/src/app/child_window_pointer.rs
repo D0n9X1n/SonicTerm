@@ -10,6 +10,7 @@ use winit::{
 };
 
 use super::child_window::{child_no_button_motion_report, scroll_child_pane};
+use super::input_dispatch::MotionProfile;
 use super::tab_gesture::TabPress;
 use super::{
     pane_id_at_point, scrollbar_input::HitOutcome, App, FrontmostKind, PointerCell,
@@ -315,6 +316,8 @@ impl App {
             }
             return;
         }
+        // The modes a no-button report is encoded under, so they, not a later read, stamp it.
+        let mut encoded_modes = None;
         let pointer_route = if child.mouse_down {
             let modifiers = child.modifiers;
             child.pointer_gesture.as_mut().map(|gesture| {
@@ -351,6 +354,7 @@ impl App {
             pointer_cell.and_then(|cell| {
                 child.panes.get(&cell.pane_id).and_then(|pane| {
                     let modes = pane.pointer_modes();
+                    encoded_modes = Some(modes);
                     child_no_button_motion_report(
                         child,
                         cell,
@@ -384,7 +388,15 @@ impl App {
                     // bounded effect path resolves and enqueues the PTY write.
                     let _ = child;
                     if let Some((pane_id, bytes)) = report {
-                        self.write_pointer_motion(pane_id, format, held, bytes);
+                        // A no-button report is stamped by the modes it was encoded under; a held
+                        // gesture, encoded in its press-time `format`, by the live modes.
+                        match encoded_modes {
+                            Some(modes) => {
+                                let profile = MotionProfile::of(modes, held);
+                                self.queue_pointer_motion(pane_id, profile, bytes);
+                            }
+                            None => self.write_pointer_motion(pane_id, format, held, bytes),
+                        }
                     }
                     return;
                 }

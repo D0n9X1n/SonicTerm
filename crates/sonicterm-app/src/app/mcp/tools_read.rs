@@ -14,7 +14,7 @@ use sonicterm_grid::grid::RowToken;
 use super::agents::OwnerView;
 use super::jsonrpc::{tool_error, tool_result};
 use super::read::{read_pane, ReadLimits, ReadLine, ReadMode, ReadSnapshot, PARSER_WAIT};
-use super::reply_budget::{omit, Omission, ReplyBudget};
+use super::reply_budget::{omit, reply_bytes_limit, Omission, ReplyBudget};
 use super::{CallScope, Caller, LoopCall, LoopReply, McpShared, PaneEntry, TabTitle};
 
 /// How soon `wait_for` reads again while the parser was busy or a scan stopped at its budget:
@@ -105,38 +105,52 @@ fn list_panes(shared: &McpShared, caller: &Caller, scope: &CallScope) -> Value {
     // One budget for every parser probe, so many busy panes cannot stretch the call: once it is
     // spent, later panes are listed without their live details.
     let budget_ends = Instant::now() + LIST_BUDGET;
-    // One byte budget for every pane's titles, so many long ones cannot outgrow the bridge's line.
+    // One byte budget for every pane's program-supplied text, so many long values share it.
     let mut text_budget = ReplyBudget::new();
     let status_text = shared.program_status_text();
     let live = |session| shared.sessions.contains(session);
-    let panes: Vec<Value> = entries
-        .iter()
-        .map(|entry| {
-            let mut pane = pane_summary(entry, budget_ends, &mut text_budget, status_text);
-            pane["owner"] = json!(OwnerView::of(entry.creator, scope.session, live).as_str());
-            pane
-        })
-        .collect();
-    let partial = panes.iter().any(|pane| pane["details"] == "skipped");
-    let summary = format!("{} pane(s)", panes.len());
     let self_pane = caller.self_pane.filter(|id| entries.iter().any(|entry| entry.pane_id == *id));
-    tool_result(
-        &summary,
-        json!({
-            "self_pane_id": self_pane.map(|id| id.to_string()),
-            "instance_pid": std::process::id(),
-            "control": super::lifecycle::control_name(shared.control()),
-            "read": shared.read().as_str(),
-            "partial": partial,
-            "panes": panes,
-        }),
-    )
+    let listing = |panes: Vec<Value>, partial: bool, truncated_panes: usize| {
+        tool_result(
+            &format!("{} pane(s)", panes.len()),
+            json!({
+                "self_pane_id": self_pane.map(|id| id.to_string()),
+                "instance_pid": std::process::id(),
+                "control": super::lifecycle::control_name(shared.control()),
+                "read": shared.read().as_str(),
+                "partial": partial,
+                "truncated_panes": truncated_panes,
+                "panes": panes,
+            }),
+        )
+    };
+    // The whole result stays within its bound: the result without panes, with `false` and every
+    // count at its widest (the summary's digits added), leaves the room the pane records may take.
+    let envelope_bytes = listing(Vec::new(), false, entries.len()).to_string().len()
+        + entries.len().to_string().len();
+    let room_bytes = reply_bytes_limit().saturating_sub(envelope_bytes);
+    let (mut used_bytes, mut panes) = (0, Vec::new());
+    for entry in &entries {
+        let mut pane = pane_summary(entry, budget_ends, &mut text_budget, status_text);
+        pane["owner"] = json!(OwnerView::of(entry.creator, scope.session, live).as_str());
+        // A record costs its serialized length and the comma before the next one.
+        let cost_bytes = pane.to_string().len() + 1;
+        if used_bytes + cost_bytes > room_bytes {
+            // When: this record would carry the result past `room_bytes`, it and later panes are only counted.
+            break;
+        }
+        used_bytes += cost_bytes;
+        panes.push(pane);
+    }
+    let truncated_panes = entries.len() - panes.len();
+    let partial = truncated_panes > 0 || panes.iter().any(|pane| pane["details"] == "skipped");
+    listing(panes, partial, truncated_panes)
 }
 
 /// One pane's entry in `list_panes`. Its parser is taken once, waiting at most until
 /// `budget_ends` and never longer than [`PARSER_WAIT`]; a pane reached after the budget is listed
-/// with `"details": "skipped"` and no live fields. Its titles, user variables and program status
-/// records are charged to `text_budget`; `status_text` adds the records' free text.
+/// with `"details": "skipped"` and no live fields. Its titles, directory, user variables and
+/// program status records are charged to `text_budget`; `status_text` adds the records' free text.
 fn pane_summary(
     entry: &PaneEntry,
     budget_ends: Instant,
@@ -201,7 +215,7 @@ fn pane_summary(
         "program_status",
         super::read::program_status_json(&program_status, status_text),
     );
-    pane["cwd"] = json!(cwd);
+    text_budget.place(&mut pane, "cwd", json!(cwd));
     pane["cols"] = json!(cols);
     pane["rows"] = json!(rows);
     pane["alt_screen"] = json!(alt_screen);

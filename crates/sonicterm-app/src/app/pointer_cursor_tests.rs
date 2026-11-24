@@ -285,6 +285,70 @@ fn only_the_window_under_the_pointer_writes_the_native_cursor() {
     assert_eq!(applied(&app, unrelated), (None, 0), "a window the pointer is not over");
 }
 
+/// A captured drag (Windows `SetCapture`) reports `CursorLeft`, then keeps reporting moves to the
+/// source window from outside its client area: such a move keeps the drag's routing but never
+/// claims the native cursor, which Windows sets for the whole thread, so the source's icon is not
+/// written over another window; a move back inside the client area claims it again.
+#[test]
+fn a_captured_move_outside_the_client_area_does_not_claim_the_cursor() {
+    let (mut app, left, _right) = split_main();
+    let main = app.registry.main_window_id.unwrap();
+    publish(&app, main, left, b"\x1b]22;crosshair\x07");
+    enter(&mut app, main);
+    app.handle_main_cursor_moved(PhysicalPosition::new(55.0, 85.0));
+    app.sync_window_cursors();
+    assert_eq!(applied(&app, main), (Some(CursorIcon::Crosshair), 1));
+    leave(&mut app, main);
+    let outside = WindowEvent::CursorMoved {
+        device_id: DeviceId::dummy(),
+        position: PhysicalPosition::new(-30.0, 85.0),
+    };
+    app.track_pointer_owner(main, &outside);
+    app.sync_window_cursors();
+    assert_eq!(app.interaction.pointer_window, None, "an out-of-client move claimed the cursor");
+    assert_eq!(applied(&app, main), (Some(CursorIcon::Crosshair), 1), "no write after the leave");
+    let inside = WindowEvent::CursorMoved {
+        device_id: DeviceId::dummy(),
+        position: PhysicalPosition::new(55.0, 85.0),
+    };
+    app.track_pointer_owner(main, &inside);
+    assert_eq!(app.interaction.pointer_window, Some(main), "an in-client move claims it");
+}
+
+/// Ending a scrollbar thumb drag, as the main and child release paths do through
+/// `end_scrollbar_drag`, reclassifies the gutter from the pointer's current position: a thumb
+/// dragged into a pane with a program cursor and released there without moving shows the pane's
+/// shape, not the arrow the gutter held when the drag began.
+#[test]
+fn ending_a_scrollbar_drag_reclassifies_the_gutter() {
+    let (mut app, left, _right) = split_main();
+    let main = app.registry.main_window_id.unwrap();
+    publish(&app, main, left, b"\x1b]22;crosshair\x07");
+    enter(&mut app, main);
+    let track_rect = sonicterm_ui::scrollbar::Rect { x: 392.0, y: 0.0, w: 8.0, h: 240.0 };
+    let window = app.main_mut().unwrap();
+    // The press was in the gutter; the drag then carried the pointer into the pane.
+    window.native_cursor.on_scrollbar = true;
+    window.scrollbar_drag = Some(crate::app::scrollbar_input::ScrollbarDragState {
+        pane_id: left,
+        geometry: sonicterm_ui::scrollbar::ScrollbarGeometry {
+            track_rect,
+            thumb_rect: sonicterm_ui::scrollbar::Rect { h: 24.0, ..track_rect },
+        },
+        press_y: 10.0,
+        grab_offset: 10.0,
+        viewport_rows: 24,
+        total_rows: 240,
+    });
+    window.cursor_pos = (55.0, 85.0);
+    app.sync_window_cursors();
+    assert_eq!(applied(&app, main).0, Some(CursorIcon::Default), "the drag owns the pointer");
+    let mode = app.config.appearance.scrollbar;
+    assert!(app.main_mut().unwrap().end_scrollbar_drag(mode, std::time::Instant::now()));
+    app.sync_window_cursors();
+    assert_eq!(applied(&app, main).0, Some(CursorIcon::Crosshair), "the pane under the pointer");
+}
+
 /// Closing the palette by key with the pointer still reclassifies the owners it hid: a splitter
 /// hovered before the palette opened no longer owns the pointer once it moved onto a pane inside
 /// the palette, so the pane's shape shows, not the stale resize cursor.

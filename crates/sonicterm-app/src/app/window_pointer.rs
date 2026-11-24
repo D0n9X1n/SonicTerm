@@ -11,6 +11,7 @@ use winit::{
     window::WindowId,
 };
 
+use super::input_dispatch::MotionProfile;
 use super::tab_gesture::{TabMotion, TabPress, TabRelease};
 use super::window_event::{
     no_button_motion_report, pointer_route_bytes, route_pressed_pointer_motion,
@@ -304,24 +305,29 @@ impl App {
             if !ui_consumed_motion {
                 let pointer_cell = held_cell;
                 let pointer_profile = pointer_cell.and_then(|cell| {
-                    self.main().and_then(|window| window.panes.get(&cell.pane_id)).map(|pane| {
-                        let modes = pane.pointer_modes();
-                        (cell, modes.tracking(), modes.format())
-                    })
+                    self.main()
+                        .and_then(|window| window.panes.get(&cell.pane_id))
+                        .map(|pane| (cell, pane.pointer_modes()))
                 });
-                if let Some((cell, tracking, format)) = pointer_profile {
+                if let Some((cell, modes)) = pointer_profile {
                     // The published modes are read without the parser lock before the bounded PTY effect path.
                     let modifiers = self
                         .main()
                         .map(|window| window.modifiers)
                         .unwrap_or_else(ModifiersState::empty);
-                    if let Some(route) =
-                        no_button_motion_report(cell, tracking, format, modifiers, false)
-                    {
+                    if let Some(route) = no_button_motion_report(
+                        cell,
+                        modes.tracking(),
+                        modes.format(),
+                        modifiers,
+                        false,
+                    ) {
                         if let Some((pane_id, bytes)) =
                             pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
                         {
-                            self.write_pointer_motion(pane_id, format, false, bytes);
+                            // The modes read for encoding stamp the report; none is read again.
+                            let profile = MotionProfile::of(modes, false);
+                            self.queue_pointer_motion(pane_id, profile, bytes);
                         }
                     }
                 }

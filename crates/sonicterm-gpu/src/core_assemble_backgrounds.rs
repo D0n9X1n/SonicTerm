@@ -53,6 +53,15 @@ impl GpuRenderer {
         });
         let total_visible_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
         self.line_quad_cache.resize(total_visible_rows.max(1));
+        // A program background replaces the theme clear over the pane's clip before cell
+        // backgrounds blend; chrome keeps the theme. Panes off the surface have no clip.
+        push_planned_pane_fills(
+            pane_fills,
+            theme,
+            self.bg_opacity,
+            pane_views.iter().map(|pv| (pv.planned, pv.overrides)),
+            (sw, sh),
+        );
         for (pane_index, pv) in
             pane_views.iter().enumerate().filter(|(_, pane)| pane.planned.full_clip.is_some())
         {
@@ -70,14 +79,6 @@ impl GpuRenderer {
             let colors = PaneColors::new(theme, pv.overrides);
             // The pane's row-cache revision, resolved once for all of its rows.
             let style_rev = colors.style_rev(self.style_rev);
-            // A program background replaces the theme clear over the pane's clip before cell
-            // backgrounds blend; chrome keeps the theme.
-            pane_fills.extend(pane_fill_quad(
-                colors,
-                self.bg_opacity,
-                pv.planned.full_clip,
-                (sw, sh),
-            ));
             let pad_bg = pane_rect.x;
             let top_inset_bg = pane_rect.y;
             let max_cols = pv.planned.background_cols;

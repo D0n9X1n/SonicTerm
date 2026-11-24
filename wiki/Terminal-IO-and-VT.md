@@ -441,9 +441,12 @@ aliases are accepted too:
 The window under the pointer decides its native cursor in one place, once per event-loop turn,
 and writes it only when it changed; no other window writes, because Windows sets one cursor for
 the whole thread and a departing or unrelated window would replace the icon of the window the
-pointer is over. A window whose owners may have gone stale (its palette closed, the pointer left,
-a resize, a scale or focus change) first reclassifies its splitter, scrollbar and titlebar-band
-edge from the pointer's current position. SonicTerm's own owners come first: an open command palette (the arrow), a
+pointer is over. A window becomes the pointer's window when the pointer enters it or moves inside
+its client area; a captured drag keeps reporting moves to its source window from outside the
+client area after the pointer left, and those moves keep routing the drag without taking the
+cursor. A window whose owners may have gone stale (its palette closed, the pointer left, a
+scrollbar drag ended, a resize, a scale or focus change) first reclassifies its splitter,
+scrollbar and titlebar-band edge from the pointer's current position. SonicTerm's own owners come first: an open command palette (the arrow), a
 splitter hovered or dragged (column or row resize), the scrollbar, a pressed or dragged tab (the
 arrow), a titlebar-band resize edge, a modifier link hover (the hand) and a local selection drag
 (the I-beam). Otherwise the terminal pane under the pointer shows its shape, and anywhere outside
@@ -552,9 +555,10 @@ vte's 16-parameter truncation. Input must be valid UTF-8 without control charact
 and end with BEL or a complete `ESC \`. Cancellation or rejection clears link/CWD
 trust but preserves the prior displayed title. A nonempty OSC 1 sets the tab name
 and an empty or bare one clears it; OSC 0 also clears it, OSC 2 leaves it, and RIS
-clears it. Only the collector applies OSC 1, in every numeric spelling (`1`, `01`,
-`+1`), so a bare OSC 1 cut by CAN, SUB or an ESC that does not complete ST changes
-nothing. OSC 8 still limits each retained
+clears it. Only the collector applies OSC 1, in every numeric spelling short enough for
+its 10-byte prefix probe (`1`, `01`, `+1`), so a bare OSC 1 cut by CAN, SUB or an ESC that
+does not complete ST changes nothing. A longer selector, such as `0000000000001`, is
+ignored rather than applied. OSC 8 still limits each retained
 URI to 8 KiB and client id to 1 KiB.
 
 
@@ -903,11 +907,12 @@ Control 16) and motion (32) bits:
 | `?1016` SGR pixels | `CSI < Cb ; Px ; Py M`, `m` on release, where `Px ; Py` are zero-based physical pixels from the pane's cell area: signed and unclamped, so a drag out of the pane reports negative or past-edge pixels. |
 
 In 1016 every motion is reported, also within one cell; only a report identical to the last 1016
-motion that pane admitted under the same tracking mode is dropped (a refused motion is not
-recorded), so the same pixel with a new
-modifier or button is still sent. The cell encodings report motion as before. A queued motion is
-dropped when the pane's tracking, encoding or screen changes before it is sent, so it is never
-sent in another encoding.
+motion that pane admitted under the same tracking mode, screen and held button is dropped (a
+refused motion is not recorded), so the same pixel with a new modifier or button, or the first
+one on the other screen, is still sent. The cell encodings report motion as before. A motion is
+queued under the modes it was encoded with and is never retagged; it is dropped when the pane's
+tracking, encoding or screen changes before it is sent, so it is never sent in another encoding
+or to the other screen.
 
 Intentional differences: 1016 is zero-based (Ghostty, kitty; WezTerm adds 1). 1005 clamps each
 coordinate to index 2014 (two UTF-8 bytes), where Ghostty and kitty send longer sequences and

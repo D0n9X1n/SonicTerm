@@ -193,8 +193,12 @@ impl super::super::WindowState {
 
     /// End any scrollbar thumb drag (release, focus loss or drag cancel), so a
     /// bar past its idle window starts fading at `now`. Returns whether a drag ended.
+    /// An ended drag marks the window's cursor owners stale: the drag may have carried the
+    /// pointer off the gutter, so the next decision reclassifies it from where the pointer is.
     pub(crate) fn end_scrollbar_drag(&mut self, mode: ScrollbarMode, now: Instant) -> bool {
         let ended = self.scrollbar_drag.take().is_some();
+        // An ended thumb drag leaves the gutter owner it held to be recomputed at the next decision.
+        self.native_cursor.reclassify |= ended;
         self.retarget_scrollbars(mode, now);
         ended
     }

@@ -127,12 +127,11 @@ impl App {
         press_pane.map_or((0, 0), |pane_id| self.pane_pixel(window_id, pane_id))
     }
 
-    /// Queue one motion report for `pane_id`, encoded in `format` with a button `held` or not. The
-    /// report carries the profile it was encoded under (the pane's published tracking, format and
-    /// screen), so the writer admits it only while the parser's live modes still match. A held
-    /// motion latched to a format the pane no longer publishes is dropped: the program reads new
-    /// motion in the new format, and only the release keeps the press-time format. In 1016 a report
-    /// identical to the last one the writer admitted under the same tracking mode is dropped.
+    /// Queue one held-button motion report for `pane_id`, encoded in the press-time `format` with
+    /// a button `held` or not. Its bytes depend only on that latched format, so the pane's published
+    /// modes, read once here, stamp it. A held motion latched to a format the pane no longer
+    /// publishes is dropped: the program reads new motion in the new format, and only the release
+    /// keeps the press-time format.
     pub(in crate::app) fn write_pointer_motion(
         &mut self,
         pane_id: u64,
@@ -144,15 +143,29 @@ impl App {
             // When: pane_id names no live pane, the motion has no destination.
             return;
         };
-        let profile = MotionProfile {
-            tracking: modes.tracking(),
-            format: modes.format(),
-            is_alt: modes.is_alt(),
-            held,
-        };
-        if profile.format != format || !profile.reports_motion() {
-            // When: the published format is not the encoding, or its tracking reports no such
-            // motion, the program would misread the report.
+        if modes.format() != format {
+            // When: the published format is not the encoding, the program would misread the report.
+            return;
+        }
+        self.queue_pointer_motion(pane_id, MotionProfile::of(modes, held), bytes);
+    }
+
+    /// Queue one motion report for `pane_id` under `profile`, the modes it was encoded with; the
+    /// modes are never read again here, so a switch published after encoding cannot retag it. The
+    /// writer admits it only while the parser's live modes still match the profile. In 1016 a
+    /// report identical to the last one the writer admitted under the same profile is dropped.
+    pub(in crate::app) fn queue_pointer_motion(
+        &mut self,
+        pane_id: u64,
+        profile: MotionProfile,
+        bytes: Vec<u8>,
+    ) {
+        #[cfg(test)]
+        if let Some(hook) = MOTION_QUEUE_HOOK.take() {
+            hook();
+        }
+        if !profile.reports_motion() {
+            // When: the profile's tracking reports no such motion, the program would misread it.
             return;
         }
         self.log_test_write(pane_id, &bytes, PtyInputSource::PointerMotion);
@@ -161,6 +174,14 @@ impl App {
             pane.pending_pointer_motion.offer(profile, &bytes);
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run once where an encoded motion report reaches the queue, so a test can publish a mode
+    /// change after the route read the modes it encoded under.
+    pub(in crate::app) static MOTION_QUEUE_HOOK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

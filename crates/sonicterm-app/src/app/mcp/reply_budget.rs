@@ -11,6 +11,28 @@ use serde_json::Value;
 /// bridge's 1 MiB line limit, leaving room for every pane's fixed fields.
 pub(crate) const REPLY_TEXT_BUDGET_BYTES: usize = 256 * 1024;
 
+/// The serialized bytes one whole `list_panes` result may take, its fixed fields and every pane
+/// record together: below the bridge's 1 MiB line limit, leaving room for the JSON-RPC envelope.
+pub(crate) const REPLY_BYTES_LIMIT: usize = 768 * 1024;
+
+/// The whole-result bound `list_panes` applies on this thread: [`REPLY_BYTES_LIMIT`], or the
+/// smaller one a test set so a few panes can reach it.
+pub(crate) fn reply_bytes_limit() -> usize {
+    #[cfg(test)]
+    if let Some(limit_bytes) = REPLY_LIMIT_OVERRIDE.get() {
+        // When: a test set `REPLY_LIMIT_OVERRIDE` on this worker thread, its bound applies.
+        return limit_bytes;
+    }
+    REPLY_BYTES_LIMIT
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's whole-result bound for `list_panes` calls run on this thread.
+    pub(crate) static REPLY_LIMIT_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Why a field is `null` with a marker under `omitted`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Omission {

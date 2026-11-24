@@ -46,6 +46,11 @@ pub(super) struct MotionProfile {
 }
 
 impl MotionProfile {
+    /// The profile of a report encoded under the published `modes`, with a button `held` or not.
+    pub(super) fn of(modes: sonicterm_vt::vt::PointerModes, held: bool) -> Self {
+        Self { tracking: modes.tracking(), format: modes.format(), is_alt: modes.is_alt(), held }
+    }
+
     /// Whether the profile's tracking mode reports this motion at all.
     pub(super) fn reports_motion(self) -> bool {
         match self.tracking {
@@ -63,9 +68,9 @@ pub(super) struct PendingPointerMotion {
     bytes: [u8; 64],
     pub(super) len: usize,
     profile: Option<MotionProfile>,
-    /// The tracking mode and bytes of the last 1016 report the writer admitted; `None` after an
+    /// The whole profile and bytes of the last 1016 report the writer admitted; `None` after an
     /// admitted report in a cell format.
-    last_admitted: Option<(MouseTracking, Vec<u8>)>,
+    last_admitted: Option<(MotionProfile, Vec<u8>)>,
 }
 
 impl Default for PendingPointerMotion {
@@ -76,14 +81,15 @@ impl Default for PendingPointerMotion {
 
 impl PendingPointerMotion {
     /// Queue `bytes`, encoded under `profile`, in place of any older motion. A 1016 report
-    /// identical to the last one the writer admitted says nothing new: the child already has that
-    /// position, so the queued older motion is dropped too.
+    /// identical to the last one the writer admitted under the same whole profile (tracking,
+    /// format, screen, held) says nothing new: the child already has that position, so the queued
+    /// older motion is dropped too. The same bytes on the other screen are a new report.
     pub(super) fn offer(&mut self, profile: MotionProfile, bytes: &[u8]) {
         let repeats_admitted = profile.format == sonicterm_vt::vt::MouseFormat::SgrPixels
             && self
                 .last_admitted
                 .as_ref()
-                .is_some_and(|(tracking, last)| *tracking == profile.tracking && last == bytes);
+                .is_some_and(|(admitted, last)| *admitted == profile && last == bytes);
         if repeats_admitted {
             // When: repeats_admitted, the bytes repeat the last admitted 1016 report the child holds.
             self.len = 0;
@@ -112,7 +118,7 @@ impl PendingPointerMotion {
     fn remember_admitted(&mut self, profile: Option<MotionProfile>, bytes: Vec<u8>) {
         self.last_admitted = profile
             .filter(|profile| profile.format == sonicterm_vt::vt::MouseFormat::SgrPixels)
-            .map(|profile| (profile.tracking, bytes));
+            .map(|profile| (profile, bytes));
     }
 
     fn replace(&mut self, bytes: &[u8]) {

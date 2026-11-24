@@ -166,6 +166,24 @@ pub(crate) fn pane_fill_quad(
     ))
 }
 
+/// Push the fill of every planned pane whose program set a background onto `pane_fills`, in plan
+/// order: each `(planned pane, program colors)` pair draws its planned clip at the window
+/// `opacity`, the walk production assembly and its tests share.
+pub(crate) fn push_planned_pane_fills<'frame>(
+    pane_fills: &mut Vec<QuadInstance>,
+    theme: &'frame Theme,
+    opacity: f32,
+    panes: impl IntoIterator<
+        Item = (&'frame PlannedPane, Option<&'frame sonicterm_types::ColorOverrides>),
+    >,
+    surface: (f32, f32),
+) {
+    for (planned, overrides) in panes {
+        let colors = PaneColors::new(theme, overrides);
+        pane_fills.extend(pane_fill_quad(colors, opacity, planned.full_clip, surface));
+    }
+}
+
 /// Where a selection is drawn: its pane's viewport, grid size, origin, cells, clip and surface.
 pub(crate) struct SelectionGeometry {
     pub(crate) view_top_abs: u64,

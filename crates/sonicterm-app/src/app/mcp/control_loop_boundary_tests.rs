@@ -2,7 +2,8 @@
 //! loop paths: every control tool refuses out of scope or in READONLY without writing or changing
 //! topology, queued input refuses a run, only typing stamps the pane, an agent closing a child
 //! window's last tab reaps that window, a helper created with argv is held after a real exit
-//! that `wait_for` reports, and `list_panes` titles respect the read scope and one reply budget.
+//! that `wait_for` reports, `list_panes` titles respect the read scope and one reply budget, and
+//! a whole `list_panes` result stays inside its bound.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,11 +55,25 @@ fn call_through_loop(
     shared: &Arc<McpShared>,
     name: &str,
     arguments: Value,
+    tick: impl FnMut(&mut App),
+) -> Value {
+    call_through_loop_within(app, shared, name, arguments, None, tick)
+}
+
+/// [`call_through_loop`], with the worker's `list_panes` whole-result bound set to `limit_bytes`
+/// when given, so a few panes can reach it.
+fn call_through_loop_within(
+    app: &mut App,
+    shared: &Arc<McpShared>,
+    name: &str,
+    arguments: Value,
+    limit_bytes: Option<usize>,
     mut tick: impl FnMut(&mut App),
 ) -> Value {
     let worker_shared = Arc::clone(shared);
     let params = json!({ "name": name, "arguments": arguments });
     let worker = std::thread::spawn(move || {
+        crate::app::mcp::reply_budget::REPLY_LIMIT_OVERRIDE.set(limit_bytes);
         let scope = CallScope::admit(&worker_shared, &Arc::new(AtomicBool::new(false)));
         let caller = Caller { self_pane: None, client: None, initialized: true };
         tools_read::call(&worker_shared, &caller, &params, &scope)
@@ -547,4 +562,74 @@ fn list_panes_bounds_program_status_by_the_reply_budget() {
     assert_eq!(last["program_status"], Value::Null);
     assert_eq!(last["omitted"]["program_status"], "budget");
     assert_eq!(last["program_state"], "working", "the lightweight state stays");
+}
+
+/// Many panes with long OSC 7 directories share the one reply budget with the titles, so the
+/// complete JSON-RPC response line stays below the bridge's 1 MiB limit instead of closing the
+/// connection: later panes list `cwd` as `null` with a `"budget"` marker, the first keeps its own.
+#[test]
+fn list_panes_charges_every_cwd_to_the_reply_budget() {
+    use crate::app::mcp::jsonrpc::{response, MAX_LINE_BYTES};
+    let mut app = app();
+    // Each directory serializes to about 14 KiB, so 80 of them would pass 1 MiB on their own.
+    let directory = format!("/{}", "d".repeat(14 * 1024));
+    let mut panes = Vec::new();
+    for _ in 0..80 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        let sequence = format!("\x1b]7;file://{directory}\x07");
+        window.panes[&pane_id].parser.lock().advance(sequence.as_bytes());
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    assert_eq!(result["isError"], false);
+    let line_bytes = response(&json!(1), result.clone()).len();
+    assert!(line_bytes < MAX_LINE_BYTES, "the response line took {line_bytes} bytes");
+    let first = listed(&result, panes[0]);
+    assert_eq!(first["cwd"], directory.as_str(), "the first pane keeps its directory");
+    let last = listed(&result, panes[79]);
+    assert_eq!(last["cwd"], Value::Null);
+    assert_eq!(last["omitted"]["cwd"], "budget", "{}", last["omitted"]);
+}
+
+/// The whole `list_panes` result, fixed fields and every pane record, stays within its bound:
+/// once the next pane would cross it, no later pane is listed, the result is `partial` and
+/// `truncated_panes` counts the panes left out, so no reply reaches the bridge's line limit.
+#[test]
+fn list_panes_stops_listing_at_the_whole_result_bound() {
+    const LIMIT_BYTES: usize = 8 * 1024;
+    let mut app = app();
+    let mut panes = Vec::new();
+    for _ in 0..40 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        window.panes[&pane_id].parser.lock().advance(b"\x1b]7;file:///tmp/work\x07\x1b]2;job\x07");
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    let result = call_through_loop_within(
+        &mut app,
+        &shared,
+        "list_panes",
+        json!({}),
+        Some(LIMIT_BYTES),
+        |_| {},
+    );
+    assert_eq!(result["isError"], false);
+    let wire_bytes = result.to_string().len();
+    assert!(wire_bytes <= LIMIT_BYTES, "the result took {wire_bytes} bytes");
+    let structured = &result["structuredContent"];
+    let listed_panes = structured["panes"].as_array().expect("panes");
+    let truncated = structured["truncated_panes"].as_u64().expect("truncated_panes");
+    assert!(truncated > 0 && !listed_panes.is_empty(), "{structured}");
+    assert_eq!(listed_panes.len() as u64 + truncated, 40, "every pane is listed or counted");
+    assert_eq!(structured["partial"], true);
+    // The panes listed are the first ones, in order: the cut drops only the tail.
+    let listed_ids: Vec<&str> =
+        listed_panes.iter().filter_map(|pane| pane["pane_id"].as_str()).collect();
+    let expected: Vec<String> = panes[..listed_panes.len()].iter().map(u64::to_string).collect();
+    assert_eq!(listed_ids, expected);
 }
