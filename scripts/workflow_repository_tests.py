@@ -471,7 +471,7 @@ jobs:
             encoding="utf-8"
         )
         io_dev_dependencies = io_manifest.split("\n[dev-dependencies]\n", 1)[1].split("\n[", 1)[0]
-        self.assertIn('sonicterm-io = { path = ".", features = ["test-support"] }', io_dev_dependencies)
+        self.assertIn('sonicterm-io = { workspace = true, features = ["test-support"] }', io_dev_dependencies)
         app_manifest = (workflow_test_fixture._HERE.parent / "crates" / "sonicterm-app" / "Cargo.toml").read_text(
             encoding="utf-8"
         )

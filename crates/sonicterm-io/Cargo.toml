@@ -48,7 +48,7 @@ test-support = ["windows/Win32_System_JobObjects"]
 
 [dev-dependencies]
 # Turns on `test-support` for this crate's own unit and integration tests.
-sonicterm-io = { path = ".", features = ["test-support"] }
+sonicterm-io = { workspace = true, features = ["test-support"] }
 
 # Spawns itself through `PtyHandle::spawn_command` and checks the exact argv, so it owns its main.
 [[test]]
