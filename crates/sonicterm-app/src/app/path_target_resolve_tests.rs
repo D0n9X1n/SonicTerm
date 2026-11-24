@@ -522,3 +522,13 @@ fn source_location_feedback_excludes_unverified_prose() {
         }
     }
 }
+
+/// A bare drive designator (`C:`, or OSC 7's `/C:`) names that drive's current directory, which a
+/// terminal cannot know, so it is never a base for relative targets; a drive root still is.
+#[test]
+fn a_bare_drive_is_not_a_working_directory_base() {
+    assert_eq!(normalize_windows_cwd("C:"), None);
+    assert_eq!(normalize_windows_cwd("/C:"), None);
+    assert_eq!(normalize_windows_cwd("C:/"), Some("C:\\".to_string()));
+    assert_eq!(normalize_windows_cwd("/C:/Users"), Some("C:\\Users".to_string()));
+}

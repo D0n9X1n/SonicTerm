@@ -272,6 +272,15 @@ pub(super) fn normalize_windows_home(path: &str) -> Option<String> {
 
 pub(super) fn normalize_windows_cwd(path: &str) -> Option<String> {
     let normalized = path.replace('/', "\\");
+    let drive_part = normalized.strip_prefix('\\').unwrap_or(&normalized);
+    if drive_part.len() == 2
+        && drive_part.as_bytes()[0].is_ascii_alphabetic()
+        && drive_part.as_bytes()[1] == b':'
+    {
+        // When: the reported directory is a bare drive designator (`C:` or OSC 7's `/C:`), it names
+        // that drive's current directory, not its root, so it is no base for relative targets.
+        return None;
+    }
     let normalized = if normalized.len() >= 4
         && normalized.starts_with('\\')
         && normalized.as_bytes()[1].is_ascii_alphabetic()
