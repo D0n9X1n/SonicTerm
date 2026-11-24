@@ -187,3 +187,19 @@ fn cell_size_report_uses_the_host_cell_size() {
         assert_eq!(reply_to(&mut parser, ignored), b"", "{ignored:?}");
     }
 }
+
+/// Contract: DECSET 5522 (paste events) is stored per parser, cleared by DECRST and by RIS, and
+/// DECRQM still answers 0 for it, because a paste sends no event yet and a program that saw the
+/// mode advertised would wait for one.
+#[test]
+fn paste_events_mode_stored_reset_and_not_advertised() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    assert!(!parser.paste_events_enabled(), "a fresh parser has the mode reset");
+    parser.advance(b"\x1b[?5522h");
+    assert!(parser.paste_events_enabled());
+    assert_eq!(reply_to(&mut parser, b"\x1b[?5522$p"), b"\x1b[?5522;0$y");
+    parser.advance(b"\x1b[?5522l");
+    assert!(!parser.paste_events_enabled(), "DECRST resets it");
+    parser.advance(b"\x1b[?5522h\x1bc");
+    assert!(!parser.paste_events_enabled(), "RIS resets it");
+}

@@ -307,7 +307,7 @@ Linux 与 Windows 上，事件循环把写入投递给唯一的剪贴板 worker 
 | `type=walias:mime=…` | 按顺序记录别名；空的 `mime` 回复 `EINVAL` |
 | 不含 `mime` 的 `type=wdata` | 提交 |
 | `type=read` | 按下文提供；载荷不是 UTF-8 的严格 Base64 时丢弃，不回复 |
-| DECRQM `?5522` | `0`；不通告 5522 |
+| DECSET/DECRST `?5522`、DECRQM `?5522` | 每个窗格保存该模式，DECRST 和 RIS 会将其复位；DECRQM 回复 `0`，粘贴仍发送文本，因为尚未发送粘贴事件 |
 
 每个缓冲区在增长前都从剪贴板暂存预算中预留，事务上限为写入打开时读取的
 `clipboard_write_limit_bytes`：超过它时写入在分配前以 `EFBIG` 结束；预算不足时以 `EBUSY` 结束。

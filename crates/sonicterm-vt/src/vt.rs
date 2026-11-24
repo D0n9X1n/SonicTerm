@@ -743,6 +743,8 @@ struct Performer {
     /// Cursor saved by DECSET ?1049 when entering the alt screen.
     saved_cursor: Option<Pos>,
     bracketed_paste: bool,
+    /// DECSET 5522: the program asked for paste events instead of pasted text.
+    paste_events: bool,
     /// DECSET 1005/1006/1015/1016 mouse report encoding.
     mouse_format: MouseFormat,
     /// DECCKM ?1 — application cursor keys. When set, the arrow keys (and the

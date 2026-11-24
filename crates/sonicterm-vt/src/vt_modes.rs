@@ -177,6 +177,12 @@ impl Parser {
         self.performer.bracketed_paste
     }
 
+    /// Whether DECSET ?5522 (paste events) is set; RIS and DECRST reset it. DECRQM does not report
+    /// it until a paste sends the event the mode asks for.
+    pub fn paste_events_enabled(&self) -> bool {
+        self.performer.paste_events
+    }
+
     /// The mouse report encoding the program selected (DECSET 1005, 1006, 1015 or 1016).
     pub fn mouse_format(&self) -> MouseFormat {
         self.performer.mouse_format
@@ -394,6 +400,7 @@ impl Performer {
                 }
                 9001 => self.win32_input = set,
                 2004 => self.bracketed_paste = set,
+                5522 => self.paste_events = set,
                 1005 | 1006 | 1015 | 1016 => {
                     self.mouse_format = match (set, code) {
                         (true, 1005) => MouseFormat::Utf8,

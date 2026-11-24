@@ -393,7 +393,7 @@ lock:
 | `type=walias:mime=…` | records the aliases in order; an empty `mime` answers `EINVAL` |
 | `type=wdata` without `mime` | commits |
 | `type=read` | served as below; a payload that is not strict Base64 of UTF-8 is dropped with no reply |
-| DECRQM `?5522` | `0`; 5522 is not advertised |
+| DECSET/DECRST `?5522`, DECRQM `?5522` | the mode is stored per pane and reset by DECRST and RIS; DECRQM answers `0` and a paste still sends text, because paste events are not sent yet |
 
 Every buffer is reserved from the clipboard staging budget before it grows, and the transaction
 limit is `clipboard_write_limit_bytes`, read when the write opens: past it the write ends
