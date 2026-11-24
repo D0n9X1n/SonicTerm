@@ -456,10 +456,26 @@ impl Perform for Performer {
             Some(0) | Some(2) => {
                 if let Some(text) = params.get(1).and_then(|param| std::str::from_utf8(param).ok())
                 {
+                    if code == Some(0) {
+                        // OSC 0 names icon and window together, so a tab name an earlier OSC 1
+                        // set is cleared, as WezTerm does.
+                        self.icon_title = None;
+                    }
                     self.title = Some(text.to_string());
                     self.events.push(VtEvent::SetTitle(text.to_string()));
                 }
             }
+            Some(1) => match params.get(1).map(|param| std::str::from_utf8(param)) {
+                // OSC 1 names the tab; the parser only stores it, the host decides where it shows.
+                Some(Err(_)) => {
+                    // When: from_utf8 fails on the name, icon_title stays as it was.
+                }
+                Some(Ok(text)) if !text.is_empty() => self.icon_title = Some(text.to_string()),
+                _ => {
+                    // An empty or absent name (a bare OSC 1) clears the icon title.
+                    self.icon_title = None;
+                }
+            },
             Some(7) => {
                 // OSC 7 ; file://<host>/<path> ST — shell-reported cwd.
                 // Used by the tab-title renderer to show `parent/leaf`.

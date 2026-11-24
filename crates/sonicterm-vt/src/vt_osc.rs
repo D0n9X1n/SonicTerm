@@ -242,6 +242,7 @@ impl Performer {
         }
         match code {
             0 => self.osc_dispatch(&[b"0", content], false),
+            1 => self.osc_dispatch(&[b"1", content], false),
             2 => self.osc_dispatch(&[b"2", content], false),
             7 => self.osc_dispatch(&[b"7", content], false),
             8 => {

@@ -241,7 +241,7 @@ Current protocol support includes:
   background-color erase semantics;
 - primary and alternate screens, application cursor keys, bracketed paste,
   focus reporting, and kitty keyboard flag set/push/pop/query;
-- OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
+- OSC 0/2 titles, the OSC 1 tab name, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12/17/19 color queries and sets, the OSC 21 kitty color
   protocol, OSC 22 pointer shapes, OSC 104/110/111/112/117/119 color resets, OSC 133 prompt markers, OSC 9;4
   progress, and OSC 9 / OSC 777 / OSC 99 notifications. OSC 99 follows kitty's protocol: a
@@ -542,10 +542,12 @@ existing history, or an incomplete escape sequence; primary-screen scrolling
 still adds history, while proper subregions and the alternate screen do not.
 
 OSC handling has a bounded shell-integration scope, not full WezTerm parity.
-OSC 0/2/7/8 use a raw collector capped at 16 KiB for the whole payload, avoiding
+OSC 0/1/2/7/8 use a raw collector capped at 16 KiB for the whole payload, avoiding
 vte's 16-parameter truncation. Input must be valid UTF-8 without control characters
 and end with BEL or a complete `ESC \`. Cancellation or rejection clears link/CWD
-trust but preserves the prior displayed title. OSC 8 still limits each retained
+trust but preserves the prior displayed title. A nonempty OSC 1 sets the tab name
+and an empty or bare one clears it; OSC 0 also clears it, OSC 2 leaves it, and RIS
+clears it. OSC 8 still limits each retained
 URI to 8 KiB and client id to 1 KiB.
 
 

@@ -172,11 +172,26 @@ outside either edge does not automatically scroll. Text or layout changes reset 
 position, and a changed search match counter resets it too. The prompt and counter
 are never part of the selectable query.
 
+### Tab names
+
+Each tab is labelled `#N`, an icon for its foreground process, and a body: a
+multiplexer's (tmux, screen, rmux, herdr) OSC 0/2 title, else the last two parts of
+the shell's OSC 7 working directory, else a program's OSC 0/2 title, else `shell`.
+A program can name the tab with OSC 1, as oh-my-zsh and fish do at every prompt: a
+nonempty `OSC 1 ; name` replaces the body, an empty or bare OSC 1 clears it, OSC 0
+clears it while setting the title, OSC 2 leaves it, and RIS clears it; a name of only
+spaces names nothing. In a split the label follows the active pane's OSC 1 name;
+another pane's name is kept and shows when that pane becomes active. **Rename Active
+Tab** wins over both, and clearing the rename brings back the automatic or OSC 1 body.
+The window title never shows an OSC 1 name. This follows WezTerm and is an intentional
+difference from kitty and Ghostty, which ignore OSC 1.
+
 ### Window names and numbers
 
 Terminal windows receive process-local numbers starting at 1. A window without
 a custom name is titled after its active tab, for example `#1 code/sonicterm`:
-the text the tab bar shows for that tab, without the tab's own `#N` and icon,
+the text the tab bar shows for that tab, without the tab's own `#N` and icon
+and never a program's OSC 1 tab name,
 or the tab's custom title when it has one. It follows the active tab as you
 switch, close, move or retitle tabs, and falls back to `#1 SonicTerm` when the
 window has no titled tab. Control characters in a program's title are replaced

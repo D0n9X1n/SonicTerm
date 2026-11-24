@@ -65,6 +65,7 @@ impl Performer {
             sync_epoch: 0,
             sync_resets: 0,
             title: None,
+            icon_title: None,
             cwd: None,
             osc7_cwd: None,
             cwd_revision: 0,
@@ -325,6 +326,8 @@ impl Performer {
         self.advance_keyboard_protocol_epoch();
         self.win32_input = false;
         self.reset_attrs();
+        // A reset program has named no tab; the window title stays, as before.
+        self.icon_title = None;
         self.saved_cursor = None;
         self.bracketed_paste = false;
         self.mouse_format = MouseFormat::X10;

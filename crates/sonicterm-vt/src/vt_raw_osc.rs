@@ -76,8 +76,8 @@ impl Parser {
                     content_len += 1;
                 }
                 let prefix = &content[..usize::from(content_len)];
-                if matches!(prefix, b"0;" | b"2;" | b"7;" | b"8;") {
-                    // When: prefix matches 0, 2, 7, or 8, own its payload before vte can split or truncate it.
+                if matches!(prefix, b"0;" | b"1;" | b"2;" | b"7;" | b"8;") {
+                    // When: prefix matches 0, 1, 2, 7, or 8, own its payload before vte can split or truncate it.
                     self.inner = vte::Parser::new();
                     self.pending_esc = false;
                     self.raw_osc = Some(RawOsc::Semantic {
@@ -122,7 +122,7 @@ impl Parser {
                 let digits = prefix.strip_prefix(b"+").unwrap_or(prefix);
                 let digits_pending = digits.iter().all(u8::is_ascii_digit) && index < content.len();
                 if !ITERM2_OSC_PREFIX.starts_with(prefix)
-                    && ![b"0;".as_slice(), b"2;", b"7;", b"8;"]
+                    && ![b"0;".as_slice(), b"1;", b"2;", b"7;", b"8;"]
                         .iter()
                         .any(|value| value.starts_with(prefix))
                     && !digits_pending

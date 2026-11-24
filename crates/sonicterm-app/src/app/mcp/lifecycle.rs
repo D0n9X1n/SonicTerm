@@ -365,6 +365,10 @@ impl App {
         pane_id: u64,
     ) -> Option<PaneEntry> {
         let pane = window.panes.get(&pane_id)?;
+        // The label comes from the tab bar, not the parser, so it is what the tab shows.
+        let tab_title = position
+            .and_then(|(_, tab_index)| window.tabs.tabs().get(tab_index))
+            .map(|tab| tab.title.clone());
         let metadata = match position {
             Some((window_index, tab_index)) => {
                 let tab_state = window.tab_states.get(tab_index)?;
@@ -383,6 +387,7 @@ impl App {
         Some(PaneEntry {
             pane_id,
             metadata,
+            tab_title,
             creator: pane.creator,
             parser: Arc::clone(&pane.parser),
             output_generation: Arc::clone(&pane.output_generation),

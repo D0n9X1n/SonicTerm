@@ -429,3 +429,47 @@ fn reads_report_the_shell_integration_state() {
     assert_eq!(summary["shell_integration_state"], "unverified");
     assert_eq!(summary["shell_integration"], true, "the boolean keeps its meaning");
 }
+
+/// `list_panes` reports both panes of a split under the tab's one displayed label (`tab_title`,
+/// after the active pane's OSC 1) and each pane's own OSC 1 request (`icon_title`, `null` when it
+/// sent none), while `title` stays the OSC 0/2 title.
+#[test]
+fn list_panes_reports_the_tab_label_and_each_panes_icon_title() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+    let named = app.__test_seed_tab("main");
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+        10.0,
+        10.0,
+    );
+    app.__test_split_active_right();
+    let window = app.main_mut().expect("main window");
+    let other = window.tab_states[0].active_pane;
+    assert_ne!(other, named, "precondition: the split's new pane is active");
+    window.panes[&named].parser.lock().advance(b"\x1b]1;alpha\x07\x1b]2;window title\x07");
+    window.tab_states[0].active_pane = named;
+    let crate::app::WindowState { tabs, panes, .. } = window;
+    let parser = panes[&named].parser.lock();
+    crate::app::refresh_active_tab_title(tabs, &panes[&named], &parser, 0);
+    drop(parser);
+    let label = tabs.active().expect("one tab").title.clone();
+    let budget_ends = Instant::now() + LIST_BUDGET;
+    let listed: Vec<Value> =
+        app.mcp_pane_entries().iter().map(|entry| pane_summary(entry, budget_ends)).collect();
+    let summary = |pane_id: u64| {
+        let wanted = pane_id.to_string();
+        listed
+            .iter()
+            .find(|pane| pane["pane_id"].as_str() == Some(&wanted))
+            .expect("listed")
+            .clone()
+    };
+    for pane_id in [named, other] {
+        assert_eq!(summary(pane_id)["tab_title"], label.as_str(), "pane {pane_id}");
+    }
+    assert!(label.ends_with(" alpha"), "{label}");
+    assert_eq!(summary(named)["icon_title"], "alpha");
+    assert_eq!(summary(named)["title"], "window title");
+    assert_eq!(summary(other)["icon_title"], Value::Null);
+}

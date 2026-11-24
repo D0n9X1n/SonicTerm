@@ -575,6 +575,12 @@ impl Parser {
         self.performer.title.as_deref()
     }
 
+    /// Latest OSC 1 icon title (sticky), the tab name a program asked for, or `None` while none is
+    /// set. Program-supplied display text: never logged or evaluated.
+    pub fn icon_title(&self) -> Option<&str> {
+        self.performer.icon_title.as_deref()
+    }
+
     /// Latest OSC 7 working-directory path (sticky), or `None` if the shell
     /// has not reported one. Kept for tab-title compatibility; security-sensitive
     /// consumers must use [`Self::osc7_cwd`] so authority provenance is retained.
@@ -667,6 +673,9 @@ struct Performer {
     sync_resets: u64,
     /// Latest OSC 0/2 title (sticky — survives consumed events).
     title: Option<String>,
+    /// Latest OSC 1 icon title, the tab name a program asked for; OSC 0, an empty or bare OSC 1
+    /// and RIS clear it, and OSC 2 leaves it.
+    icon_title: Option<String>,
     /// Latest permissively-decoded OSC 7 path used only for tab titles.
     cwd: Option<String>,
     /// Latest strictly parsed host-aware snapshot used for path resolution.

@@ -268,22 +268,21 @@ pub fn refresh_active_tab_title(
         proc_name.as_deref(),
         raw_title.as_deref(),
     );
-    let effective_title = tabs
-        .active()
-        .and_then(|tab| tab.custom_title.as_ref())
-        .map(|custom| sonicterm_ui::tabs::title_with_replaced_body(&auto_title, custom))
-        .unwrap_or_else(|| auto_title.clone());
-    let cur = tabs.active().map(|tab| tab.title.clone());
-    if cur.as_deref() == Some(effective_title.as_str()) {
-        // When: the shown title already equals `effective_title`, so nothing needs
-        // repainting; only the stored auto base may still have drifted underneath.
-        if tabs.active().is_some_and(|tab| tab.auto_title != auto_title) {
-            tabs.set_active_title(auto_title);
-        }
+    // The active pane's OSC 1 name names the label only; a blank one names nothing.
+    let icon_title = parser.icon_title().map(str::trim).filter(|name| !name.is_empty());
+    let Some(tab) = tabs.active() else {
+        // When: tabs has no active tab, there is no label to refresh.
+        return None;
+    };
+    if tab.auto_title == auto_title && tab.icon_title.as_deref() == icon_title {
+        // When: tab.auto_title and tab.icon_title already equal auto_title and icon_title, the
+        // label and caption show them and nothing is set.
         return None;
     }
-    tabs.set_active_title(auto_title);
-    Some(effective_title)
+    let shown = tab.title.clone();
+    tabs.set_active_titles(auto_title, icon_title.map(str::to_string));
+    let title = tabs.active().map(|tab| tab.title.clone())?;
+    (title != shown).then_some(title)
 }
 
 /// Per-tab state. The `TabBar` keeps title/order; this struct tracks the

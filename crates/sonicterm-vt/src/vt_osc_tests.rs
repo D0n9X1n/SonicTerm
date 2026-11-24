@@ -737,3 +737,45 @@ fn ris_reports_a_program_state_reset() {
     // RIS clears program-reported state on the host side; the event carries no grid change.
     assert_eq!(program_events(b"\x1bc"), vec![Seen::Reset]);
 }
+
+/// OSC 1 sets the icon title (the tab name) whole, a `;` included, under BEL or ST; OSC 2 leaves
+/// it, OSC 0 clears it while setting the title, and an empty or bare OSC 1 clears it, as WezTerm.
+#[test]
+fn osc1_sets_the_icon_title_and_osc0_clears_it() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    assert_eq!(parser.icon_title(), None, "a fresh parser has none");
+    parser.advance(b"\x1b]1;~/src;tab\x07");
+    assert_eq!(parser.icon_title(), Some("~/src;tab"), "the payload is kept whole");
+    parser.advance(b"\x1b]2;long window title\x1b\\");
+    assert_eq!(parser.icon_title(), Some("~/src;tab"), "OSC 2 leaves it");
+    assert_eq!(parser.title(), Some("long window title"));
+    parser.advance(b"\x1b]0;both\x07");
+    assert_eq!(parser.icon_title(), None, "OSC 0 clears it");
+    assert_eq!(parser.title(), Some("both"), "and sets the title");
+    for clear in [b"\x1b]1;\x07".as_slice(), b"\x1b]1\x07", b"\x1b]1;\x1b\\", b"\x1b]1\x1b\\"] {
+        parser.advance(b"\x1b]1;name\x1b\\");
+        assert_eq!(parser.icon_title(), Some("name"), "{clear:?}: precondition");
+        parser.advance(clear);
+        assert_eq!(parser.icon_title(), None, "{clear:?} clears it");
+    }
+    parser.advance(b"Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z', "no OSC 1 byte printed");
+}
+
+/// RIS clears the icon title; an over-cap, cancelled or control-bearing OSC 1 changes nothing.
+#[test]
+fn osc1_is_cleared_by_ris_and_refused_whole() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b]1;name\x07\x1bc");
+    assert_eq!(parser.icon_title(), None, "RIS clears it");
+    parser.advance(b"\x1b]1;kept\x07");
+    let mut over_cap = b"\x1b]1;".to_vec();
+    over_cap.resize(over_cap.len() + super::MAX_SEMANTIC_OSC_BYTES + 1, b'x');
+    over_cap.push(0x07);
+    for refused in [over_cap, b"\x1b]1;cut\x18".to_vec(), b"\x1b]1;a\x01b\x07".to_vec()] {
+        parser.advance(&refused);
+        assert_eq!(parser.icon_title(), Some("kept"), "{} bytes change nothing", refused.len());
+    }
+    parser.advance(b"Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z', "nothing printed");
+}

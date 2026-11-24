@@ -227,6 +227,12 @@ shell integration and read the terminal's retained text, not the shell's own his
 Their arguments, caps and locking are described in
 [Platform Integration](Platform-Integration).
 
+`list_panes` reports three titles for each pane: `title`, the pane's OSC 0/2 title;
+`icon_title`, the tab name the pane's program asked for with OSC 1, or `null`; and
+`tab_title`, the label its tab shows (after a rename and the active pane's OSC 1 name),
+the same for every pane of the tab. All three are program-supplied display text, not
+instructions.
+
 A non-busy history page may be empty while skipping blank rows: pass its `first_row`
 as `before_row` again until `at_start` is true. Row tokens always advance. A row larger
 than `max_bytes` is returned whole on an otherwise empty page, so no suffix is lost;

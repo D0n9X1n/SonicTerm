@@ -33,7 +33,7 @@ pub(crate) struct NativeTitleState {
     name: String,
     /// The active tab the applied title was composed from; `None` without a tab.
     tab_id: Option<TabId>,
-    /// The active tab's displayed title the applied title was composed from; `None` without a tab.
+    /// The active tab's automatic title the applied title was composed from; `None` without a tab.
     tab_title: Option<String>,
     /// The active tab's custom title the applied title was composed from.
     custom_title: Option<String>,
@@ -61,7 +61,7 @@ impl NativeTitleState {
     fn composed_from(&self, name: &str, tab: Option<&Tab>) -> bool {
         self.name == name
             && self.tab_id == tab.map(|tab| tab.id)
-            && self.tab_title.as_deref() == tab.map(|tab| tab.title.as_str())
+            && self.tab_title.as_deref() == tab.map(|tab| tab.auto_title.as_str())
             && self.custom_title.as_deref() == tab.and_then(|tab| tab.custom_title.as_deref())
     }
 
@@ -69,7 +69,7 @@ impl NativeTitleState {
     fn remember_inputs(&mut self, name: &str, tab: Option<&Tab>) {
         name.clone_into(&mut self.name);
         self.tab_id = tab.map(|tab| tab.id);
-        self.tab_title = tab.map(|tab| tab.title.clone());
+        self.tab_title = tab.map(|tab| tab.auto_title.clone());
         self.custom_title = tab.and_then(|tab| tab.custom_title.clone());
     }
 
@@ -89,7 +89,8 @@ pub(super) fn tab_display_body(tab: &Tab) -> &str {
         // When: the user named the tab, that name is shown as typed, never re-parsed.
         return custom;
     }
-    formatted_body(&tab.title).unwrap_or(&tab.title)
+    // The caption reads the automatic title, so a program's OSC 1 tab name never reaches it.
+    formatted_body(&tab.auto_title).unwrap_or(&tab.auto_title)
 }
 
 /// The body of a title the tab formatter produced, `#<digits> <icon> <body>`, where the icon is

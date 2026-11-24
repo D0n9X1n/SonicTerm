@@ -111,7 +111,10 @@ pub struct ActivationLog {
 pub struct Tab {
     pub id: TabId,
     pub title: String,
+    /// The formatter's title, which the native window caption reads; never an OSC 1 name.
     pub auto_title: String,
+    /// The active pane's OSC 1 name, which replaces the label's body under a user rename.
+    pub icon_title: Option<String>,
     pub custom_title: Option<String>,
     pub custom_color: Option<String>,
     /// Whether this tab's current Windows foreground process requires a privilege warning.
@@ -140,6 +143,7 @@ impl Tab {
             id: TabId::next(),
             title: title.clone(),
             auto_title: title,
+            icon_title: None,
             custom_title: None,
             custom_color: None,
             foreground_privileged: false,
@@ -159,11 +163,13 @@ impl Tab {
         self.laid_out.map(|measure| measure.width_px)
     }
 
+    /// The label: the user's rename, else the OSC 1 name, as the body of the automatic title.
     fn refresh_effective_title(&mut self) {
         self.title = self
             .custom_title
             .as_ref()
-            .map(|custom| title_with_replaced_body(&self.auto_title, custom))
+            .or(self.icon_title.as_ref())
+            .map(|body| title_with_replaced_body(&self.auto_title, body))
             .unwrap_or_else(|| self.auto_title.clone());
     }
 
@@ -328,6 +334,15 @@ impl TabBar {
     pub fn set_active_title(&mut self, title: impl Into<String>) {
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.set_auto_title(title.into());
+        }
+    }
+
+    /// Replace the active tab's automatic title and the OSC 1 name its label shows instead of the
+    /// automatic body. No-op if empty.
+    pub fn set_active_titles(&mut self, title: String, icon_title: Option<String>) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.icon_title = icon_title;
+            tab.set_auto_title(title);
         }
     }
 

@@ -143,6 +143,7 @@ fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
         "active": metadata.map(|position| position.active),
         "readonly": metadata.map(|position| position.readonly),
         "agent_owned": entry.creator.is_agent(),
+        "tab_title": entry.tab_title,
     });
     let wait = budget_ends.saturating_duration_since(Instant::now()).min(PARSER_WAIT);
     if wait.is_zero() {
@@ -157,6 +158,7 @@ fn pane_summary(entry: &PaneEntry, budget_ends: Instant) -> Value {
     };
     let grid = guard.grid();
     pane["title"] = json!(guard.title());
+    pane["icon_title"] = json!(guard.icon_title());
     pane["cwd"] = json!(guard.osc7_cwd().map(|cwd| cwd.path.clone()));
     pane["cols"] = json!(grid.cols);
     pane["rows"] = json!(grid.rows);

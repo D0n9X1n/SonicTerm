@@ -111,6 +111,9 @@ pub(crate) struct PaneEntry {
     pub(crate) pane_id: u64,
     /// Where the pane sits; `Some` only for `list_panes` entries.
     pub(crate) metadata: Option<PaneMetadata>,
+    /// The label its tab shows, the same for every pane of the tab; `Some` only for `list_panes`
+    /// entries. Program-supplied text: never logged.
+    pub(crate) tab_title: Option<String>,
     /// Who created the pane; `agent_owned` in tool results is `creator.is_agent()`.
     pub(crate) creator: agents::PaneOwner,
     /// The pane's parser, read with one bounded attempt.
