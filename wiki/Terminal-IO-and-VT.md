@@ -488,10 +488,10 @@ native layer (see [Platform Integration](Platform-Integration)): HTML stripped t
 Windows, PNG and custom types byte for byte, `text/uri-list` from file and URL items. A type the
 clipboard does not hold is omitted, which the protocol reads as unavailable. Each type is read
 with an 8 MiB cap and served only while the whole reply stays within 12 MiB, checked before
-anything grows; otherwise it is omitted. Another type is read only while the reply built so far
-leaves the job's 21 MiB reservation room for that type's worst case (8 MiB of raw bytes plus
-their conversion or the reply regrown to 12 MiB), so once the reply passes about 1 MiB every
-later type is omitted unread. An unavailable location
+anything grows; otherwise it is omitted. Each later type's cap shrinks to what the job's 21 MiB
+reservation still holds: the reply built so far, a moved copy of it while it regrows, the type's
+raw bytes and its packets must all fit. A small type after a large one is therefore still read,
+and a type is omitted unread only once the reply leaves no room at all. An unavailable location
 (`loc=primary` off Linux) or a platform that cannot list types answers `ENOSYS`; a failed or
 overdue native read, or a listing whose enumeration failed, answers `EIO`; an empty clipboard is
 `OK` then `DONE`. When a reply's writer admission stays contended through every retry, or the

@@ -309,6 +309,49 @@ fn peak_working_set_within_21_mib_reservation() {
     assert!(4 * KITTY_READ_RESERVATION_BYTES > budget);
 }
 
+/// Contract: a small type after a large one is still read and served. The read cap follows the
+/// reservation the frame leaves, not a fixed worst case, so a 3 MiB text followed by a short URI
+/// list returns both, the URI list read with a smaller cap than the first type, and the job's
+/// measured peak stays within its reservation.
+#[test]
+fn a_small_type_after_a_large_one_is_served_within_the_reservation() {
+    let mut source = FakeTypes::holding(&"t".repeat(3 * 1024 * 1024));
+    source.typed = vec![("text/uri-list".into(), b"file:///tmp/fixture\r\n".to_vec())];
+    let both = request("type=read", "text/plain text/uri-list");
+    let counter = CountAllocations::start();
+    let reply = build_read_reply(&source, &both);
+    let peak = counter.peak_bytes();
+    drop(counter);
+    let served = data_packets(&String::from_utf8(reply).unwrap());
+    let uri = b64("text/uri-list");
+    assert!(served.iter().any(|(metadata, body)| metadata.ends_with(&format!("mime={uri}"))
+        && body == b"file:///tmp/fixture\r\n"));
+    let caps = source.caps();
+    assert_eq!(caps[0], KITTY_READ_TYPE_CAP_BYTES, "the first type reads with the whole cap");
+    assert!(caps[1] < KITTY_READ_TYPE_CAP_BYTES, "the second cap shrinks: {caps:?}");
+    assert!(peak <= KITTY_READ_RESERVATION_BYTES, "peak {peak}");
+}
+
+/// Contract: every type's cap keeps the worst case within the reservation: a full frame, a moved
+/// copy, the raw bytes and the regrown frame, for the widest id and MIME and any frame size.
+#[test]
+fn every_types_allowance_keeps_its_worst_case_within_the_reservation() {
+    let id = "i".repeat(512);
+    let mime = format!("text/plain;x={:x<243}", 0);
+    let wide = request(&format!("type=read:id={id}"), &mime);
+    let done_len = wide.data_len(0, 0);
+    for frame in (0..=KITTY_READ_FRAME_CAP_BYTES).step_by(256 * 1024) {
+        let raw = type_allowance(&wide, frame, mime.len(), done_len);
+        if raw == 0 {
+            // When: raw is 0, the frame left no room and the type is never read.
+            continue;
+        }
+        let chunks = raw.div_ceil(KITTY_READ_CHUNK_BYTES);
+        let packets = chunks * wide.data_len(mime.len(), KITTY_READ_CHUNK_BYTES);
+        assert!(2 * frame + raw + packets + done_len <= KITTY_READ_RESERVATION_BYTES, "{frame}");
+    }
+}
+
 /// Contract: a type whose packets would pass the 12 MiB frame is omitted before the frame grows:
 /// the reply's peak is the type's raw text and the fixed OK/DONE packets, never a 12 MiB frame.
 #[test]
@@ -430,7 +473,7 @@ fn clipboard_name_text_aliases_read_as_text() {
     let source = FakeTypes::holding("test");
     for name in ["UTF8_STRING", "TEXT", "STRING"] {
         assert_eq!(
-            read_one(&source, ReadLocation::Clipboard, name),
+            read_one(&source, ReadLocation::Clipboard, name, KITTY_READ_TYPE_CAP_BYTES),
             Ok(Some(b"test".to_vec())),
             "{name}"
         );

@@ -192,10 +192,9 @@ cargo build -p sonicterm-app
   OSC 5522 write answers `EPERM` while its PTY and command are unchanged; a stopped clipboard
   worker answers its unreported 5522 writes `EIO`. OSC 5522 reads (`kitty_clipboard_read.rs`)
   take the same read ticket (`admit_kitty_read`), reserve 21 MiB from the reply budget and build
-  one OK/DATA/DONE reply on the reader thread, bounded before anything grows; another type is read
-  only while the frame so far plus `TYPE_HEADROOM_BYTES` (raw bytes plus the larger of their
-  conversion and a regrown frame) fits the reservation, and conversions build into buffers reserved
-  first. Non-text types go through `ClipboardTextSource::read_type_bounded` (8 MiB each, one alive
+  one OK/DATA/DONE reply on the reader thread, bounded before anything grows; each type is read
+  with the cap `type_allowance` leaves (twice the frame so far, the raw bytes and their packets
+  must fit the reservation, at most 8 MiB), and conversions build into buffers reserved first. Non-text types go through `ClipboardTextSource::read_type_bounded` (8 MiB each, one alive
   at a time). Session grants
   (`osc52_read_grants.rs`) are created only by the consent page's Always/Ban rows for a ticket
   whose program sent a nonempty `name` and `pw`, keyed by pane, PTY incarnation, owner and RIS

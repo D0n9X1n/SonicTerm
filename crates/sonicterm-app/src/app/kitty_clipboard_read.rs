@@ -39,15 +39,9 @@ pub(in crate::app) const KITTY_LISTING_CAP_BYTES: usize = 4096;
 const MAX_KITTY_LISTING_NAMES: usize = 64;
 
 /// What one read job reserves from the reply budget before its first native read, so three jobs fit
-/// the 64 MiB budget and a fourth is refused. It covers the frame already built plus
-/// [`TYPE_HEADROOM_BYTES`] for the type being read, which [`build_read_reply`] checks before every
-/// type.
+/// the 64 MiB budget and a fourth is refused. [`type_allowance`] sizes every type's read so the
+/// frame already built, that type's raw bytes and the regrown frame fit it.
 pub(in crate::app) const KITTY_READ_RESERVATION_BYTES: usize = 21 * 1024 * 1024;
-
-/// The most reading and serving one type may add to the frame already built: its raw bytes (8 MiB),
-/// plus the larger of their conversion's output (8 MiB, while the native bytes are alive) and the
-/// frame regrown to hold its packets (12 MiB, while the old frame is moved and the text is alive).
-const TYPE_HEADROOM_BYTES: usize = KITTY_READ_TYPE_CAP_BYTES + KITTY_READ_FRAME_CAP_BYTES;
 
 /// One parsed `type=read` request: where its replies go and what it asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,9 +230,8 @@ fn join_listing(names: Vec<String>) -> String {
 /// The whole reply to `request`, read through `source`: a status alone when the location is
 /// unavailable (`ENOSYS`) or a native read fails (`EIO`), else OK, the listing, every servable
 /// type's chunks and DONE. At most one type's raw text is alive at once, the frame never grows past
-/// [`KITTY_READ_FRAME_CAP_BYTES`], and a type is read only while the frame built so far plus
-/// [`TYPE_HEADROOM_BYTES`] fits [`KITTY_READ_RESERVATION_BYTES`], so the job's peak stays within
-/// what it reserved.
+/// [`KITTY_READ_FRAME_CAP_BYTES`], and each type is read with a cap [`type_allowance`] sizes from
+/// the frame built so far, so the job's peak stays within [`KITTY_READ_RESERVATION_BYTES`].
 pub(in crate::app) fn build_read_reply(
     source: &dyn ClipboardTextSource,
     request: &KittyReadRequest,
@@ -276,12 +269,13 @@ pub(in crate::app) fn build_read_reply(
         push_packet(&mut reply, request, "DATA", Some((".", joined.as_bytes())));
     }
     for mime in &request.types {
-        if reply.capacity() + TYPE_HEADROOM_BYTES > KITTY_READ_RESERVATION_BYTES {
-            // When: reply.capacity plus TYPE_HEADROOM_BYTES passes KITTY_READ_RESERVATION_BYTES,
-            // this and every later type are omitted unread, since the frame only grows.
+        let allowance = type_allowance(request, reply.capacity(), mime.len(), done_len);
+        if allowance == 0 {
+            // When: allowance == 0, the reservation holds no type's bytes now and the frame only
+            // grows, so this and every later type are omitted unread.
             break;
         }
-        let bytes = match read_one(source, location, mime) {
+        let bytes = match read_one(source, location, mime, allowance) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 // When: read_one omitted the type (absent, empty or too large), it is skipped,
@@ -310,19 +304,41 @@ pub(in crate::app) fn build_read_reply(
     reply
 }
 
-/// One requested type's bytes through `source` with the per-type cap: text through the bounded
+/// The most raw bytes the next type may read: [`KITTY_READ_TYPE_CAP_BYTES`], or less once the frame
+/// built so far leaves the reservation too little. While a type is served the frame of
+/// `frame_capacity` bytes, its raw bytes and the regrown frame (the old frame plus one packet per
+/// chunk, `mime_len` named in each) are alive at once; a conversion inside the source peaks lower,
+/// at the frame plus twice the raw bytes. So the largest raw size `raw` fits when
+/// `2 × frame + raw + packets(raw) + done ≤ reservation`, with one packet per started chunk.
+fn type_allowance(
+    request: &KittyReadRequest,
+    frame_capacity: usize,
+    mime_len: usize,
+    done_len: usize,
+) -> usize {
+    let packet = request.data_len(mime_len, KITTY_READ_CHUNK_BYTES);
+    let room = KITTY_READ_RESERVATION_BYTES
+        .saturating_sub(2 * frame_capacity)
+        .saturating_sub(packet + done_len);
+    // `packets(raw) ≤ raw × packet / CHUNK + packet`, so `raw × (CHUNK + packet) ≤ room × CHUNK`.
+    let raw = room * KITTY_READ_CHUNK_BYTES / (KITTY_READ_CHUNK_BYTES + packet);
+    raw.min(KITTY_READ_TYPE_CAP_BYTES)
+}
+
+/// One requested type's bytes through `source` with at most `max_bytes`: text through the bounded
 /// text read, any other type through the bounded typed read. `Ok(None)` when it is omitted
 /// (absent, empty or too large); `Err` with the status that ends the whole read.
 fn read_one(
     source: &dyn ClipboardTextSource,
     location: ReadLocation,
     mime: &str,
+    max_bytes: usize,
 ) -> Result<Option<Vec<u8>>, KittyClipboardStatus> {
     let read = if super::kitty_clipboard_tx::is_text(mime) {
-        source.read_plain_bytes(location, KITTY_READ_TYPE_CAP_BYTES)
+        source.read_plain_bytes(location, max_bytes)
     } else {
         // When: is_text rejects mime, use the named native representation and its own decoder.
-        source.read_type_bounded(location, mime, KITTY_READ_TYPE_CAP_BYTES)
+        source.read_type_bounded(location, mime, max_bytes)
     };
     match read {
         TypeRead::Bytes(bytes) => Ok(Some(bytes)),
