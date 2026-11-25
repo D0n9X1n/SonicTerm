@@ -324,7 +324,7 @@ refuse the large selections users copy.
 | `cp` | every destination the platform has |
 | unknown letter | ignored; a kinds field with no known letter is dropped |
 | `52;c` (no data), `52;c;` | clears the clipboard |
-| Base64 padding | optional; any other byte discards the write |
+| Base64 padding | optional, but padding that is present must complete the last group (`aG=` is refused); any other byte discards the write |
 | non-UTF-8 payload | invalid sequences become U+FFFD |
 | `?` (any kinds) | read: under `osc52_read = "allow"` answered with the clipboard's text as `ESC ] 52 ; <label> ; <b64> ESC \`; see below for `ask`, `deny` and the bounds |
 | `1337;Copy=:<b64>` | `c` write; an empty or `?` value writes nothing |
@@ -405,7 +405,7 @@ lock:
 | record without `=`, missing or unknown `type` | dropped, no reply, even while a write is open |
 | bad `mime`/`name`/`pw` Base64, `mime`/`name` over 256 bytes | `wdata`/`walias` with a write open: `EINVAL`; otherwise dropped |
 | `type=write` | replaces any open write silently; under `osc52 = "deny"` answers `EPERM` at once |
-| `type=wdata:mime=…` | one strict Base64 stream per type; a packet ending on padding restarts it; a type switch ends the previous stream; a repeated type restarts its region |
+| `type=wdata:mime=…` | one strict Base64 stream per type; a padded group ends its packet and restarts the stream, so data after it in the same packet, or a padded group with nonzero unused bits, answers `EINVAL`; a type switch ends the previous stream; a repeated type restarts its region |
 | `type=walias:mime=…` | records the aliases in order; an empty `mime` answers `EINVAL` |
 | `type=wdata` without `mime` | commits |
 | `type=read` | served as below; a payload that is not strict Base64 of UTF-8 is dropped with no reply |

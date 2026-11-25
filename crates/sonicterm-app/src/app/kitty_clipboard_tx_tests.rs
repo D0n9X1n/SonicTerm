@@ -136,6 +136,22 @@ fn bad_final_padding_einval() {
     assert_eq!(rig.staging.reserved_bytes(), 0);
 }
 
+/// Contract: the stream is strict Base64 on the wire: a padded group ends its packet, so more data
+/// after it in the same packet ends the write `EINVAL` at that packet, and so does a padded group
+/// whose unused low bits are not zero (`aGl=` is not the canonical `aGk=`).
+#[test]
+fn padded_group_ends_its_packet_and_unused_bits_are_zero() {
+    for (payload, label) in
+        [("aGk=aGk=", "data after padding in one packet"), ("aGl=", "unused bits")]
+    {
+        let mut rig = rig();
+        rig.send("type=write:id=s");
+        let packet = format!("type=wdata:mime={};{payload}", b64("text/plain"));
+        assert_eq!(rig.reply(&packet), status("EINVAL", "s"), "{label}");
+        assert_eq!(rig.staging.reserved_bytes(), 0, "{label}");
+    }
+}
+
 /// Contract: switching MIME type finishes the previous stream, which must then be complete; a
 /// repeated MIME type restarts its region.
 #[test]

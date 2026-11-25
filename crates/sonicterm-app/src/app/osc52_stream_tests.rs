@@ -125,6 +125,17 @@ fn non_alphabet_discards() {
     }
 }
 
+/// Padding is optional, but explicit padding must complete its group: `aGk` and `aGk=` decode,
+/// while `aG=` (two sextets, one `=`) is incomplete and discards the write.
+#[test]
+fn incomplete_explicit_padding_discards() {
+    let staging = staging(1 << 20, 1 << 20);
+    assert_eq!(written(&staging, &osc52("c", "aGk")).0, "hi");
+    assert_eq!(written(&staging, &osc52("c", "aGk=")).0, "hi");
+    assert_eq!(run(&staging, &osc52("c", "aG=")), [Err(Osc52Refusal::Invalid)]);
+    assert_eq!(staging.reserved_bytes(), 0);
+}
+
 /// Non-UTF-8 bytes become U+FFFD, and the lease covers the expanded text and its native buffer
 /// before the `String` is built.
 #[test]

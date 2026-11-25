@@ -109,11 +109,18 @@ struct Base64Group {
 }
 
 impl Base64Group {
-    /// Decode `chunk`, appending to `output` when given; returns the decoded length, or `Err` on a
-    /// byte outside the alphabet or misplaced padding.
+    /// Decode `chunk`, one packet's payload, appending to `output` when given; returns the decoded
+    /// length, or `Err` on a byte outside the alphabet, misplaced padding, data after a padded group
+    /// in the same packet, or a padded group whose unused low bits are not zero.
     fn run(&mut self, chunk: &[u8], mut output: Option<&mut Vec<u8>>) -> Result<usize, ()> {
         let mut produced = 0;
+        let mut padded_group_ended = false;
         for byte in chunk {
+            if padded_group_ended {
+                // When: padded_group_ended, a padded group ends its packet; only the next packet
+                // may start a new group.
+                return Err(());
+            }
             if *byte == b'=' {
                 // When: byte is `=`, it is padding: checked and counted, never decoded.
                 if self.filled < 2 || self.filled + self.padding >= 4 {
@@ -133,7 +140,18 @@ impl Base64Group {
                 self.filled += 1;
             }
             if self.filled + self.padding == 4 {
+                // When: filled plus padding reaches 4, the group is whole: checked, then decoded.
                 let [first, second, third, fourth] = self.sextets;
+                // The sextet before the padding carries bits no byte uses; strict Base64 has them 0.
+                let unused_bits = match self.filled {
+                    2 => second & 0x0f,
+                    3 => third & 0x03,
+                    _ => 0,
+                };
+                if unused_bits != 0 {
+                    // When: unused_bits are set, the group is not canonical Base64.
+                    return Err(());
+                }
                 let decoded =
                     [first << 2 | second >> 4, second << 4 | third >> 2, third << 6 | fourth];
                 let byte_count = self.filled - 1;
@@ -141,6 +159,7 @@ impl Base64Group {
                     output.extend_from_slice(&decoded[..byte_count]);
                 }
                 produced += byte_count;
+                padded_group_ended = self.padding > 0;
                 *self = Self::default();
             }
         }

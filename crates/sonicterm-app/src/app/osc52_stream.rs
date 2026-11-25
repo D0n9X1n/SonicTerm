@@ -434,8 +434,13 @@ impl Base64Stream {
         Ok(())
     }
 
-    /// End the stream: decode the final group and return the bytes with their lease.
+    /// End the stream: decode the final group and return the bytes with their lease. Padding is
+    /// optional, but padding that is present must complete the final group.
     pub(in crate::app) fn finish(mut self) -> Result<(Vec<u8>, ClipLease), Osc52Refusal> {
+        if self.padding > 0 && self.pending + self.padding != 4 {
+            // When: padding is present but does not complete the group (`aG=`), it is malformed.
+            return Err(Osc52Refusal::Invalid);
+        }
         match self.pending {
             0 => {
                 // When: pending is 0, every group was already decoded.
