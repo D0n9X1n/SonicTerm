@@ -483,16 +483,47 @@ impl App {
             }
         }
         drop(guard);
-        if !should_exit {
+        // A copy that exits keeps its state until the clipboard answers, so a refusal can return it.
+        let kept_for_copy = if should_exit {
+            copied_text.is_some().then_some(state)
+        } else {
+            // When: should_exit is false, the window keeps copy mode with the moved cursor.
             window.copy_mode = Some(state);
-        }
+            None
+        };
         mark_all_panes_dirty(&window.panes);
         if let Some(text) = copied_text {
             // When: copied_text is Some, parser and window borrows have ended before the shared
             // clipboard boundary; the result is noted once the clipboard has answered.
-            let _ =
-                self.copy_text_then(text, move |app, copied| app.note_copy_result(win_id, copied));
+            let _ = self.copy_text_then(text, move |app, copied| {
+                app.note_copy_result(win_id, copied);
+                // A refused copy returns copy mode and its selection; a written one leaves it.
+                let returned = (!copied).then_some(kept_for_copy).flatten();
+                app.restore_copy_mode(win_id, active_pane, returned);
+            });
         }
+    }
+
+    /// Return `state` to window `win_id`'s copy mode after its copy was refused, only while
+    /// `pane_id` is still that window's active pane and no other copy mode has started there.
+    fn restore_copy_mode(&mut self, win_id: WindowId, pane_id: u64, state: Option<CopyModeState>) {
+        let Some(state) = state else {
+            // When: no state was kept (copy mode had not exited), there is nothing to return.
+            return;
+        };
+        let Some(window) = self.registry.windows.get_mut(&win_id) else {
+            // When: the window has closed, its copy mode is gone with it.
+            return;
+        };
+        let active = window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane);
+        if window.copy_mode.is_some() || active != Some(pane_id) {
+            // When: `copy_mode` is set again or `active` is not `pane_id`, the kept cursor would
+            // name the wrong owner or grid, so it is not returned.
+            return;
+        }
+        window.copy_mode = Some(state);
+        mark_all_panes_dirty(&window.panes);
+        window.request_window_redraw();
     }
 }
 
@@ -509,6 +540,10 @@ fn copy_mode_selected_text(state: &CopyModeState, grid: &Grid) -> Option<String>
 #[cfg(test)]
 #[path = "window_keyboard_tests.rs"]
 mod window_keyboard_tests;
+
+#[cfg(test)]
+#[path = "window_keyboard_copy_tests.rs"]
+mod window_keyboard_copy_tests;
 
 #[path = "window_keyboard_ime.rs"]
 mod ime;
