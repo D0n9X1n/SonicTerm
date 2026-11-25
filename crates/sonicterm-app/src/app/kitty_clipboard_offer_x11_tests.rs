@@ -40,7 +40,7 @@ fn dest(window: u32) -> Destination {
     Destination { window, property: 97 }
 }
 
-/// TARGETS advertises every text spelling; each yields the same bytes. TIMESTAMP identifies the
+/// TARGETS advertises each raw-text spelling, but not STRING for invalid UTF-8. TIMESTAMP identifies the
 /// acquisition. Deleting each INCR property pulls one chunk, then a zero-length terminator.
 #[test]
 fn x11_targets_timestamp_and_incr_serving() {
@@ -66,7 +66,6 @@ fn x11_targets_timestamp_and_incr_serving() {
         "UTF8_STRING",
         "text/plain;charset=utf-8",
         "text/plain",
-        "STRING",
         "TEXT",
         "x/custom",
         "text/html",
@@ -80,11 +79,11 @@ fn x11_targets_timestamp_and_incr_serving() {
     assert_eq!(port.words.last().unwrap().1, expected);
     assert!(owner.request(&mut port, dest(7), timestamp, now));
     assert_eq!(port.words.last().unwrap().1, [27]);
-    for target in &atoms[..5] {
+    for target in &atoms[..4] {
         assert!(owner.request(&mut port, dest(7), *target, now));
         assert_eq!(port.bytes.last().unwrap(), &(*target, vec![0xff]));
     }
-    assert!(owner.request(&mut port, dest(7), atoms[5], now));
+    assert!(owner.request(&mut port, dest(7), atoms[4], now));
     let incr = port.intern("INCR").unwrap();
     assert_eq!(port.words.last().unwrap(), &(incr, vec![300_001]));
     for expected in [&payload[..256 * 1024], &payload[256 * 1024..], &[]] {
@@ -338,4 +337,41 @@ fn x11_unconfirmed_primary_keeps_clipboard_serving() {
     assert!(active.owner.request(&mut data, dest(8), target, now));
     active.owner.deleted(&mut data, dest(8), now);
     assert_eq!(data.bytes.last().unwrap().1, [0xfe; 2]);
+}
+
+/// ICCCM STRING can encode printable Latin-1 plus TAB and LF, not arbitrary Unicode, opaque
+/// binary data or control sequences. The other text targets retain the original bytes.
+#[test]
+fn x11_string_target_only_offers_representable_latin1() {
+    let now = Instant::now();
+    let staging = ClipboardStaging::with_budget(1 << 20, 1 << 20);
+    for (raw, encoded) in [
+        ("café\t\n".as_bytes(), Some(&b"caf\xe9\t\n"[..])),
+        ("猫".as_bytes(), None),
+        (&[0xff][..], None),
+        (b"\x1bx", None),
+        ("\u{80}".as_bytes(), None),
+    ] {
+        let mut port = Port::default();
+        let mut owner = Owner::stage(
+            &mut port,
+            NativeOffer::raw_text(raw.to_vec()),
+            staging.lease(),
+            9,
+            1024,
+            now,
+        )
+        .unwrap();
+        let string = port.intern("STRING").unwrap();
+        let targets = port.intern("TARGETS").unwrap();
+        let utf8 = port.intern("UTF8_STRING").unwrap();
+        assert!(owner.request(&mut port, dest(7), targets, now));
+        assert_eq!(port.words.last().unwrap().1.contains(&string), encoded.is_some());
+        assert_eq!(owner.request(&mut port, dest(7), string, now), encoded.is_some());
+        if let Some(expected) = encoded {
+            assert_eq!(port.bytes.last().unwrap().1, expected);
+        }
+        assert!(owner.request(&mut port, dest(7), utf8, now));
+        assert_eq!(port.bytes.last().unwrap().1, raw);
+    }
 }

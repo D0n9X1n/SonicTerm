@@ -174,7 +174,8 @@ struct Cursor {
 
 struct Owner {
     offer: NativeOffer,
-    _lease: ClipLease,
+    /// STRING alone may need a different encoding; its index is one past the original buffers.
+    latin1: Option<Vec<u8>>,
     /// TARGETS and TIMESTAMP precede the data atoms; indices maps each data atom to its payload.
     atoms: Vec<u32>,
     indices: Vec<usize>,
@@ -186,6 +187,7 @@ struct Owner {
     expires: Instant,
     accepting: bool,
     cursors: Vec<Cursor>,
+    _lease: ClipLease,
 }
 
 fn data_atoms(offer: &NativeOffer) -> usize {
@@ -210,7 +212,38 @@ pub(super) fn raw_tables(count: usize) -> usize {
         + MAX_REQUESTORS * size_of::<Cursor>()
 }
 
+/// Encode ICCCM STRING only for text representable as Latin-1 graphics, TAB or LF. ASCII can
+/// reuse the original buffer. The optional encoded buffer never exceeds the reserved text copy.
+fn string_index(
+    raw: &[u8],
+    index: usize,
+    extra: usize,
+    latin1: &mut Option<Vec<u8>>,
+) -> Option<usize> {
+    let text = std::str::from_utf8(raw).ok()?;
+    if !text.chars().all(|scalar| matches!(scalar, '\t' | '\n' | ' '..='~' | '\u{a0}'..='\u{ff}')) {
+        // When: text includes a scalar outside the ICCCM repertoire, do not advertise STRING.
+        return None;
+    }
+    if text.is_ascii() {
+        // When: text is ASCII, STRING can share its original bytes.
+        return Some(index);
+    }
+    let mut bytes = Vec::with_capacity(text.chars().count());
+    bytes.extend(text.chars().map(|scalar| scalar as u8));
+    *latin1 = Some(bytes);
+    Some(extra)
+}
+
 impl Owner {
+    fn data(&self, index: usize) -> &[u8] {
+        if index == self.offer.entries.len() {
+            self.latin1.as_deref().expect("encoded STRING index")
+        } else {
+            // When: index names a staged entry, no Latin-1 conversion is needed.
+            &self.offer.entries[index]
+        }
+    }
     fn stage(
         port: &mut impl OwnerPort,
         offer: NativeOffer,
@@ -227,6 +260,7 @@ impl Owner {
         let mut atoms = Vec::with_capacity(count + 2);
         let mut indices = Vec::with_capacity(count);
         atoms.extend([port.intern("TARGETS")?, port.intern("TIMESTAMP")?]);
+        let mut latin1 = None;
         for (format, index) in &offer.representations {
             let single: [&str; 1];
             let names: &[&str] = match format {
@@ -240,13 +274,30 @@ impl Owner {
                 }
             };
             for name in names {
+                let index = if *name == "STRING" {
+                    // When: name is STRING, the wire encoding is Latin-1 rather than raw UTF-8.
+                    let Some(source) = string_index(
+                        &offer.entries[*index],
+                        *index,
+                        offer.entries.len(),
+                        &mut latin1,
+                    ) else {
+                        // When: string_index has no encoding, omit just that target.
+                        continue;
+                    };
+                    source
+                } else {
+                    // When: name is not STRING, preserve the original representation.
+                    *index
+                };
                 atoms.push(port.intern(name)?);
-                indices.push(*index);
+                indices.push(index);
             }
         }
         Some(Self {
             offer,
             _lease: lease,
+            latin1,
             atoms,
             indices,
             atom_type: port.intern("ATOM")?,
@@ -309,7 +360,7 @@ impl Owner {
             _ => {
                 // When: slot names data rather than metadata, its index selects the staged bytes.
                 let index = self.indices[slot - 2];
-                let bytes = &self.offer.entries[index];
+                let bytes = self.data(index);
                 if bytes.len() <= self.direct_bytes {
                     // When: bytes fit direct_bytes, the reply fits one ChangeProperty request.
                     return port.bytes(dest, target, bytes);
@@ -341,8 +392,8 @@ impl Owner {
             // When: dest has no cursor, the deletion belongs to another property.
             return;
         };
-        let cursor = &mut self.cursors[slot];
-        let bytes = &self.offer.entries[cursor.index];
+        let cursor = &self.cursors[slot];
+        let bytes = self.data(cursor.index);
         let end = bytes.len().min(cursor.offset + CHUNK_BYTES.min(self.direct_bytes));
         let chunk = &bytes[cursor.offset..end];
         if !port.bytes(dest, cursor.target, chunk) || chunk.is_empty() {
@@ -351,6 +402,7 @@ impl Owner {
             port.watch(dest.window, false);
         } else {
             // When: bytes wrote a nonempty chunk, extend only this cursor's deadline.
+            let cursor = &mut self.cursors[slot];
             cursor.offset = end;
             cursor.deadline = now + CHUNK_WAIT;
         }

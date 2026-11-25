@@ -254,18 +254,18 @@ fn version_of(owners: &[u32], stamp: PropertyReply) -> Option<u64> {
     offer_version_with(&mut owner)
 }
 
-/// Contract: the offer version is the owner window and its one nonzero format-32 `TIMESTAMP`,
+/// Contract: the offer version is the owner window and its one nonzero format-32 INTEGER `TIMESTAMP`,
 /// taken only when the owner is the same before and after the conversion; a raced owner, no
 /// owner, or a malformed answer (another format, an `INCR`, a zero, more or less than one item)
 /// gives no version, so no paste grant can match it.
 #[test]
 fn offer_version_needs_one_owner_and_a_well_formed_timestamp() {
-    let stamp = |value: &[u8]| reply(PropertyKind::Other, 32, 0, value);
+    let stamp = |value: &[u8]| reply(PropertyKind::Integer, 32, 0, value);
     let good = 42u32.to_ne_bytes();
     assert_eq!(version_of(&[5, 5], stamp(&good)), Some((5 << 32) | 42));
     assert_eq!(version_of(&[5, 6], stamp(&good)), None, "the owner changed during conversion");
     assert_eq!(version_of(&[0], stamp(&good)), None, "no owner");
-    assert_eq!(version_of(&[5, 5], reply(PropertyKind::Other, 8, 0, &good)), None);
+    assert_eq!(version_of(&[5, 5], reply(PropertyKind::Integer, 8, 0, &good)), None);
     assert_eq!(version_of(&[5, 5], reply(PropertyKind::Incr, 32, 0, &good)), None);
     assert_eq!(version_of(&[5, 5], stamp(&0u32.to_ne_bytes())), None, "a zero timestamp");
     assert_eq!(version_of(&[5, 5], stamp(&[1, 0, 0, 0, 2, 0, 0, 0])), None, "two items");
@@ -307,4 +307,24 @@ fn x11_listing_keeps_exact_mime_atoms() {
             "text/plain".into()
         ])
     );
+}
+
+/// A correctly sized property with the wrong type is not evidence of an ownership timestamp.
+#[test]
+fn x11_non_integer_timestamp_has_no_version() {
+    let bytes = 42u32.to_ne_bytes();
+    assert_eq!(version_of(&[5, 5], reply(PropertyKind::Other, 32, 0, &bytes)), None);
+}
+
+/// A legacy owner refuses UTF8_STRING but converts STRING. It must receive the fallback
+/// conversion, and its Latin-1 bytes are decoded under the same output cap as other text.
+#[test]
+fn x11_string_only_owner_converts_latin1_within_cap() {
+    for (cap, expected) in [(2, ReadOutcome::Text("é".into())), (1, ReadOutcome::TooLarge)] {
+        let mut owner =
+            FakeOwner::answering(vec![reply(PropertyKind::Latin1, 8, 0, &[0xe9])], Polled::Idle);
+        owner.events = VecDeque::from([Polled::Notify(false), Polled::Notify(true)]);
+        assert_eq!(read_selection(&mut owner, cap), Some(expected));
+        assert_eq!(&owner.log[..2], ["convert Text", "convert Latin1"]);
+    }
 }

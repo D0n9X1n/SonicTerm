@@ -40,6 +40,7 @@ struct NativePort {
     selection: Atom,
     property: Atom,
     requested: Option<Atom>,
+    conversion: Atom,
     utf8: Atom,
     text_plain: Atom,
     incr: Atom,
@@ -112,6 +113,7 @@ impl NativePort {
             selection,
             property,
             requested: None,
+            conversion: x11rb::NONE,
             utf8,
             text_plain,
             incr,
@@ -122,6 +124,7 @@ impl NativePort {
 
     /// Ask the owner to convert the selection to `target` into the read property.
     fn convert_to(&mut self, target: Atom) -> bool {
+        self.conversion = target;
         let sent = self.connection.convert_selection(
             self.window,
             self.selection,
@@ -177,6 +180,7 @@ impl SelectionPort for NativePort {
     fn convert(&mut self, target: ConvertTarget) -> bool {
         let target = match target {
             ConvertTarget::Text => self.utf8,
+            ConvertTarget::Latin1 => xproto::AtomEnum::STRING.into(),
             ConvertTarget::Timestamp => self.timestamp,
             ConvertTarget::Mime(atom) => {
                 self.requested = Some(atom);
@@ -190,7 +194,12 @@ impl SelectionPort for NativePort {
         match self.connection.poll_for_event() {
             Err(_) => Polled::Closed,
             Ok(None) => Polled::Idle,
-            Ok(Some(Event::SelectionNotify(notify))) if notify.requestor == self.window => {
+            Ok(Some(Event::SelectionNotify(notify)))
+                if notify.requestor == self.window
+                    && notify.selection == self.selection
+                    && notify.target == self.conversion
+                    && (notify.property == self.property || notify.property == x11rb::NONE) =>
+            {
                 Polled::Notify(notify.property != x11rb::NONE)
             }
             Ok(Some(Event::PropertyNotify(change)))
@@ -223,6 +232,7 @@ impl SelectionPort for NativePort {
             kind if kind == self.utf8 || kind == self.text_plain => PropertyKind::Utf8,
             kind if kind == Atom::from(xproto::AtomEnum::STRING) => PropertyKind::Latin1,
             kind if kind == self.incr => PropertyKind::Incr,
+            kind if kind == Atom::from(xproto::AtomEnum::INTEGER) => PropertyKind::Integer,
             _ => PropertyKind::Other,
         };
         // The reply's value moves into the result; nothing is copied.

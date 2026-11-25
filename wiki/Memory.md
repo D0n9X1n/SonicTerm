@@ -237,7 +237,7 @@ with its header and wrapper (and the transient header string), `PNG` and custom 
 size, and a `CF_HDROP` list at up to four bytes per URI byte (its UTF-16 paths and their decoded
 strings); on macOS each type's `NSData` or URL string at its size. X11 reserves the
 atom and buffer-index tables, the format-32 property buffer and eight INCR cursors before staging.
-Text targets and aliases share the staged bytes; INCR sends slices rather than allocating chunk
+Text targets and aliases share the staged bytes, except that a non-ASCII `STRING` uses the reserved text copy for Latin-1; INCR sends slices rather than allocating chunk
 buffers. The owner keeps the lease after publication. Losing a selection stops admission there;
 the lease is released after the last selection is lost and admitted readers finish or time out
 (five seconds per chunk), or when the still-owned offer expires after one hour. A commit the budget cannot

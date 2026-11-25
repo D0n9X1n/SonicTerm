@@ -29,6 +29,8 @@ pub(in crate::app) enum PropertyKind {
     Incr,
     /// The exact atom requested by a non-text MIME read.
     Requested,
+    /// INTEGER, the type required for a TIMESTAMP conversion.
+    Integer,
     /// Anything else.
     Other,
 }
@@ -65,7 +67,10 @@ fn decode(kind: PropertyKind, value: Vec<u8>, max_bytes: usize) -> ReadOutcome {
     match kind {
         PropertyKind::Utf8 => bounded_utf8(value, max_bytes),
         PropertyKind::Latin1 => bounded_latin1(&value, max_bytes),
-        PropertyKind::Incr | PropertyKind::Requested | PropertyKind::Other => ReadOutcome::Failed,
+        PropertyKind::Incr
+        | PropertyKind::Requested
+        | PropertyKind::Integer
+        | PropertyKind::Other => ReadOutcome::Failed,
     }
 }
 
@@ -166,6 +171,8 @@ pub(in crate::app) enum Polled {
 pub(in crate::app) enum ConvertTarget {
     /// The text, as `UTF8_STRING`.
     Text,
+    /// Legacy ICCCM STRING, used after an explicit refusal of UTF8_STRING.
+    Latin1,
     /// The existing atom named by a MIME read.
     Mime(u32),
     /// When the owner took the selection, as `TIMESTAMP`.
@@ -243,8 +250,15 @@ pub(in crate::app) fn read_selection(
     }
     let deadline = port.now() + SELECTION_WAIT;
     if !wait_for_notify(port, deadline)? {
-        // When: wait_for_notify reports no stored property, the owner has nothing to convert.
-        return Some(ReadOutcome::Empty);
+        // When: wait_for_notify reports refusal, try the legacy STRING target on the same deadline.
+        if !port.convert(ConvertTarget::Latin1) {
+            // When: convert fails, the fallback request could not be sent.
+            return None;
+        }
+        if !wait_for_notify(port, deadline)? {
+            // When: wait_for_notify reports a second refusal, no text target was available.
+            return Some(ReadOutcome::Empty);
+        }
     }
     // The first reply is read without deleting it: deleting an `INCR` announcement asks the owner
     // for the first chunk, so an announced size is validated before that.
@@ -371,7 +385,7 @@ fn mime_bytes(reply: PropertyReply, room: usize) -> TypeRead {
 /// answer in the low 32. X11 cannot read both at once, so the owner is read before the conversion
 /// and again after the answer, and must be the same. `None`, so no paste grant can match, with no
 /// owner, a raced owner, a protocol error, a missed selection wait, or a malformed answer: anything
-/// but one nonzero format-32 item.
+/// but one nonzero format-32 INTEGER item.
 pub(in crate::app) fn offer_version_with(port: &mut dyn SelectionPort) -> Option<u64> {
     let owner = port.owner()?;
     if owner == 0 {
@@ -395,7 +409,8 @@ pub(in crate::app) fn offer_version_with(port: &mut dyn SelectionPort) -> Option
     if !incr {
         port.delete();
     }
-    let well_formed = !incr && reply.format == 32 && reply.bytes_after == 0;
+    let well_formed =
+        reply.kind == PropertyKind::Integer && reply.format == 32 && reply.bytes_after == 0;
     let item: [u8; 4] = reply.value.as_slice().try_into().ok().filter(|_| well_formed)?;
     let stamp = u32::from_ne_bytes(item);
     if stamp == 0 || port.owner()? != owner {

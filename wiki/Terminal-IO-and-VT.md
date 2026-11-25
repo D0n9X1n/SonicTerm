@@ -381,7 +381,7 @@ its deadline is also answered empty, however soon the event loop picks up its re
 | Platform | Bound |
 | --- | --- |
 | Windows | `OpenClipboard` retried 10 times 10 ms apart; `GlobalSize` decides a too-large `CF_UNICODETEXT` before `GlobalLock` |
-| Linux (X11, XWayland) | `ConvertSelection` to `UTF8_STRING`, 2 s for the owner's answer; a format-8 `UTF8_STRING`, `STRING` or `text/plain;charset=utf-8` value within the cap; an `INCR` transfer whose format-32 size is within the cap, checked before the announcement is deleted (deleting it asks for the first chunk), 2 s per chunk and 5 s in all, the deadline checked before every event so a busy owner cannot extend it; no X server answers empty |
+| Linux (X11, XWayland) | `ConvertSelection` to `UTF8_STRING`, then to `STRING` on refusal, sharing 2 s for the owner's answer; a format-8 `UTF8_STRING`, `STRING` or `text/plain;charset=utf-8` value within the cap; an `INCR` transfer whose format-32 size is within the cap, checked before the announcement is deleted (deleting it asks for the first chunk), 2 s per chunk and 5 s in all, the deadline checked before every event so a busy owner cannot extend it; no X server answers empty |
 | macOS | `NSPasteboardTypeString`; AppKit holds the whole value before SonicTerm can measure it, as any paste does, and the copy into SonicTerm is refused past the cap |
 
 The reply for one request, all destinations together, is one message of at most about 10.7 MiB.
@@ -448,7 +448,7 @@ as input. A write dropped at its commit point because its binding changed answer
 Omitted representations are released at the commit.
 
 On X11 the same MIME mappings apply to CLIPBOARD and PRIMARY: each non-text type uses its own
-atom, and five text targets share the original bytes. The process admits 256 data atom names.
+atom, and four text targets share the original bytes; `STRING` is offered in Latin-1 only for representable text. The process admits 256 data atom names.
 `TARGETS` lists the offer and `TIMESTAMP` identifies it for paste events. `INCR` serves at most
 eight requestors per offer, up to 256 KiB per chunk and five seconds per chunk. Losing ownership
 stops new requests but not admitted transfers; without ownership loss the offer expires after one
@@ -534,7 +534,7 @@ version of the offer the user pasted:
 | --- | --- |
 | macOS | the general pasteboard's `changeCount` |
 | Windows | `GetClipboardSequenceNumber`; 0 (no clipboard access) is no version |
-| Linux (X11, XWayland) | the selection owner's window and its `TIMESTAMP` answer, within the 2 s selection wait; the owner is read before the conversion and again after the answer and must not change; no owner, a changed owner, no answer, or an answer that is not one nonzero format-32 item is no version |
+| Linux (X11, XWayland) | the selection owner's window and its `TIMESTAMP` answer, within the 2 s selection wait; the owner is read before the conversion and again after the answer and must not change; no owner, a changed owner, no answer, or an answer that is not one nonzero format-32 `INTEGER` item is no version |
 
 The paste binds that offer at the gesture, on the event loop. On macOS and Windows it reads the
 version there, since both are counter reads that open nothing, and a grant needs the capture's
