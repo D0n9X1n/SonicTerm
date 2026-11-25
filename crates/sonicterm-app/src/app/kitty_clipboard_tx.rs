@@ -20,7 +20,7 @@ use sonicterm_vt::vt::{
 };
 
 use super::kitty_clipboard_offer::{plan, platform_holds, NativeFormat, NativeOffer, OfferPlan};
-use super::kitty_clipboard_read::parse_read_request;
+use super::kitty_clipboard_read::{parse_read_request, read_payload_valid};
 use super::osc52_read_grants::GrantCredential;
 use super::osc52_read_ticket::{
     admit_kitty_read, admit_write, ConsentTicket, ReadIdentity, WriteAdmission,
@@ -515,9 +515,10 @@ impl KittyClipboardTx {
         }
     }
 
-    /// Admit one read: an undecodable payload is dropped, `loc=primary` off Linux is `ENOSYS`, and
-    /// otherwise the read takes a ticket or is answered as [`admit_kitty_read`] decides. Decoding the
-    /// payload is reserved from the staging first, so a full budget answers `EBUSY`.
+    /// Admit one read: an undecodable payload is dropped first, before the budget or the policy
+    /// could answer it; `loc=primary` off Linux is `ENOSYS`, and otherwise the read takes a ticket
+    /// or is answered as [`admit_kitty_read`] decides. Decoding the payload is reserved from the
+    /// staging first, so a full budget answers `EBUSY`.
     fn read(
         &mut self,
         metadata: &KittyClipboardMetadata,
@@ -530,6 +531,11 @@ impl KittyClipboardTx {
             let read = KittyClipboardOperation::Read;
             kitty_clipboard_status_reply(read, status, metadata.location, &metadata.id, bel)
         };
+        if !read_payload_valid(chunk) {
+            // When: read_payload_valid refuses the payload, it is malformed and dropped silently,
+            // before the budget or the policy could choose a status.
+            return KittyStep::Silent;
+        }
         let denied = self.staging.read_policy() == Osc52ReadPolicy::Deny;
         let mut lease = self.staging.lease();
         if !lease.grow_to(chunk.len()) {

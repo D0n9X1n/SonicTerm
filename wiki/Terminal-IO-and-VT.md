@@ -459,8 +459,10 @@ silently.
 A read's payload is a Base64 list of MIME types; `.` asks for the type listing. At most 16 data
 types are accepted. Reads follow `osc52_read` and take the same consent ticket as an OSC 52 read:
 `deny`, a read while the same pane already reads, or a refused or expired page answer `EPERM`; a
-full process gate, queue pressure or a full reply budget answers `EBUSY`. `deny` decides a valid
-read first, so it answers `EPERM` where the budget or a missing PRIMARY would otherwise answer.
+full process gate, queue pressure or a full reply budget answers `EBUSY`. A payload that is not
+strict Base64 of UTF-8 is checked before anything else, without allocating, and dropped with no
+reply even under `deny` or a full budget. `deny` then decides a valid read first, so it answers
+`EPERM` where the budget or a missing PRIMARY would otherwise answer.
 A listing-only request reads no content, so it skips the page under `ask`, unless a Ban (below)
 covers its password. An approved read runs on the disposable
 reader thread and is delivered as one message through the sensitive reply channel, never the

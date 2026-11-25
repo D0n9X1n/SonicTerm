@@ -431,6 +431,30 @@ fn read_takes_a_ticket_and_listing_skips_the_prompt() {
     assert_eq!(rig.staging.ticket_slots_in_use(), 0);
 }
 
+/// Contract: a malformed read payload is dropped with no reply even when the staging budget cannot
+/// cover decoding it, under `deny` as under `ask`: it is validated before the budget or the policy
+/// chooses a status. A valid payload under that budget still answers.
+#[test]
+fn malformed_read_under_full_budget_is_silent() {
+    use sonicterm_cfg::config::Osc52ReadPolicy;
+    // Bad alphabet, a non-UTF-8 byte (`/w==` is 0xFF), a bad length and padding mid-stream; each
+    // payload is longer than the 2-byte budget.
+    let malformed = ["!!!!", "/w==", "dGV4dC9wbGFpbg=", "dA==dA=="];
+    for policy in [Osc52ReadPolicy::Ask, Osc52ReadPolicy::Deny] {
+        for payload in malformed {
+            let mut rig = rig_with(2, 1 << 16, Osc52Policy::Allow);
+            rig.staging.set_read_policy(policy);
+            let steps = rig.send(&format!("type=read:id=m;{payload}"));
+            let silent = steps.iter().all(|step| matches!(step, KittyStep::Silent));
+            assert!(silent, "{policy:?} {payload:?}: {steps:?}");
+        }
+    }
+    let mut rig = rig_with(2, 1 << 16, Osc52Policy::Allow);
+    rig.staging.set_read_policy(Osc52ReadPolicy::Ask);
+    let reply = rig.reply("type=read:id=v;dGV4dC9wbGFpbg==");
+    assert_eq!(reply, "\x1b]5522;type=read:status=EBUSY:id=v\x1b\\", "a valid read still answers");
+}
+
 /// Contract: a read while the same pane holds a read ticket answers `EPERM`; a read while every
 /// process slot is taken answers `EBUSY`.
 #[test]

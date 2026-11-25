@@ -85,6 +85,46 @@ impl KittyReadRequest {
     }
 }
 
+/// Whether `payload` is strict padded Base64 of UTF-8, as [`parse_read_request`] requires, decided
+/// in fixed steps on the stack with no allocation, so a malformed read is dropped silently before
+/// any budget or policy chooses a status.
+pub(in crate::app) fn read_payload_valid(payload: &[u8]) -> bool {
+    use base64::Engine as _;
+    /// Encoded bytes per step: a multiple of 4, decoding to at most 768 bytes.
+    const STEP_BYTES: usize = 1024;
+    if !payload.len().is_multiple_of(4) {
+        // When: payload.len() is_multiple_of 4 fails, the padded encoding is incomplete.
+        return false;
+    }
+    // At most 3 bytes of an unfinished UTF-8 character carried from the previous step.
+    let mut decoded = [0u8; 3 + STEP_BYTES / 4 * 3];
+    let mut carried = 0usize;
+    let steps = payload.chunks(STEP_BYTES);
+    let last_step = steps.len().saturating_sub(1);
+    for (index, step) in steps.enumerate() {
+        if index < last_step && step.contains(&b'=') {
+            // When: padding appears before the last step, it sits mid-stream.
+            return false;
+        }
+        let engine = &base64::engine::general_purpose::STANDARD;
+        let Ok(length) = engine.decode_slice(step, &mut decoded[carried..]) else {
+            // When: decode_slice refuses the step, it is not strict Base64.
+            return false;
+        };
+        let filled = carried + length;
+        carried = match std::str::from_utf8(&decoded[..filled]) {
+            Ok(_) => 0,
+            Err(error) if error.error_len().is_none() => filled - error.valid_up_to(),
+            Err(_) => {
+                // When: from_utf8 finds an invalid sequence, not a cut one, it is not UTF-8.
+                return false;
+            }
+        };
+        decoded.copy_within(filled - carried..filled, 0);
+    }
+    carried == 0
+}
+
 /// The request `metadata` and its decoded `payload` make; `None`, answered with nothing, when the
 /// payload is not strict Base64 of UTF-8. Names over the MIME bound and past the type bound drop.
 pub(in crate::app) fn parse_read_request(

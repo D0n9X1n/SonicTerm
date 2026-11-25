@@ -158,6 +158,37 @@ fn bad_payload_silent() {
     assert!(parse_read_request(&metadata, b"/w==", false).is_none(), "not UTF-8");
 }
 
+/// Contract: the allocation-free payload check accepts exactly what `parse_read_request` decodes:
+/// strict padded Base64 of UTF-8, including a character split across its decode steps, and it
+/// allocates nothing, so a read can be judged before any budget is reserved.
+#[test]
+fn payload_check_matches_the_decoder_without_allocating() {
+    // A two-byte character straddling the 768-byte decode step, and one at the very end.
+    let straddling = format!("{}é tail", "a".repeat(767));
+    let cases: Vec<Vec<u8>> = vec![
+        Vec::new(),
+        STANDARD.encode("text/plain").into_bytes(),
+        STANDARD.encode(&straddling).into_bytes(),
+        STANDARD.encode(format!("{}é", "b".repeat(1500))).into_bytes(),
+        b"!!!!".to_vec(),
+        b"dGV4dA".to_vec(),
+        b"/w==".to_vec(),
+        b"dA==dA==".to_vec(),
+        b"dB==".to_vec(),
+        // A UTF-8 lead byte with no continuation: valid Base64, invalid text.
+        STANDARD.encode([b'a', 0xC3]).into_bytes(),
+    ];
+    for payload in cases {
+        let expected =
+            STANDARD.decode(&payload).ok().and_then(|bytes| String::from_utf8(bytes).ok());
+        let counter = CountAllocations::start();
+        let valid = read_payload_valid(&payload);
+        assert_eq!(counter.count(), 0, "the check allocates nothing");
+        drop(counter);
+        assert_eq!(valid, expected.is_some(), "{:?}", String::from_utf8_lossy(&payload));
+    }
+}
+
 /// Contract: `Unsupported` answers `ENOSYS` and a native `Failed` answers `EIO`, distinct from an
 /// empty read; a listing the platform cannot enumerate answers `ENOSYS`, and one whose native
 /// enumeration failed answers `EIO`.
