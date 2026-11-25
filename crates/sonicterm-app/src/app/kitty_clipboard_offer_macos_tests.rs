@@ -214,3 +214,17 @@ fn osc52_non_utf8_text_published_byte_for_byte() {
         assert_eq!(board.data("public.utf8-plain-text").as_deref(), Some(raw));
     });
 }
+
+/// Contract: two MIME names the system maps to one pasteboard type (`image/jpeg` and `image/jpg`
+/// are both `public.jpeg`) publish that type once, with the first name's bytes; the second never
+/// silently replaces it while the write reports every type written.
+#[test]
+fn names_sharing_one_pasteboard_type_publish_it_once() {
+    objc2::rc::autoreleasepool(|_| {
+        let board = Private::new();
+        let offer = offer(&[("image/jpeg", b"first"), ("image/jpg", b"second")]);
+        let published = publish_offer(&mut Pasteboard::on(board.0.clone()), &offer, &|| true);
+        assert_eq!(published, Published::Written);
+        assert_eq!(board.data("public.jpeg").as_deref(), Some(&b"first"[..]));
+    });
+}

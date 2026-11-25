@@ -318,9 +318,16 @@ impl OpenWrite {
     }
 }
 
-/// Whether `mime` names plain text, which is what the clipboard can write and read today.
+/// Whether `mime` names plain text: `text/plain`, or `text/plain;` with parameters of printable
+/// ASCII other than space (`charset=utf-8`), as programs offer it.
 pub(in crate::app) fn is_text(mime: &str) -> bool {
-    mime == "text/plain" || mime.starts_with("text/plain;")
+    match mime.strip_prefix("text/plain") {
+        Some("") => true,
+        Some(rest) => rest.strip_prefix(';').is_some_and(|parameters| {
+            !parameters.is_empty() && parameters.bytes().all(|byte| byte.is_ascii_graphic())
+        }),
+        None => false,
+    }
 }
 
 /// The most `plan` allocates for names of `name_lengths` (every staged type, then every alias):

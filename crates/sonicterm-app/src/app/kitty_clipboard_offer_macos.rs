@@ -18,6 +18,11 @@ use crate::app::osc52_read_source::{
     list_native_types, TypeListing, TypeRead, MAX_NATIVE_TYPES_SCANNED,
 };
 
+// `UTType` lives in UniformTypeIdentifiers; linking it here keeps the class resolvable in every
+// binary that holds this backend, not only one that links the framework for its own use.
+#[link(name = "UniformTypeIdentifiers", kind = "framework")]
+extern "C" {}
+
 /// The pasteboard type of one file URL.
 const FILE_URL_TYPE: &str = "public.file-url";
 
@@ -181,6 +186,11 @@ impl OfferBackend for Pasteboard {
             // When: format has no pasteboard type, the offer cannot be staged.
             return false;
         };
+        if self.item.types().containsObject(&kind) {
+            // When: the item's types already contain kind (`image/jpeg` and `image/jpg` are both
+            // `public.jpeg`), the first name keeps it, never replaced.
+            return true;
+        }
         self.item.setData_forType(&NSData::with_bytes(bytes), &kind)
     }
 
