@@ -88,10 +88,40 @@ pub(in crate::app) fn publish_grid_change(
 mod spawn_pane_vt_tests;
 
 #[cfg(test)]
+#[path = "spawn_pane_vt_clipboard_tests.rs"]
+mod spawn_pane_vt_clipboard_tests;
+
+#[cfg(test)]
 #[path = "spawn_pane_vt_fuzz_tests.rs"]
 mod spawn_pane_vt_fuzz_tests;
 
 impl PaneVtHandles {
+    /// Settle the clipboard intake at `now`: abort an OSC 52 stream past its expiry, and finish an
+    /// open OSC 5522 write past its deadline or under `deny`, sending its status through
+    /// `send_reply`.
+    pub(in crate::app) fn settle_clipboard_intake(
+        &self,
+        now: Instant,
+        send_reply: &mut impl FnMut(Vec<u8>),
+    ) {
+        self.expire_clipboard_stream(now);
+        self.service_kitty_clipboard(now, send_reply);
+    }
+
+    /// Take one ready output chunk at `now`: settle the clipboard intake first, then `parse` it,
+    /// so a terminator or commit the chunk carries never lands on a stream or write that expired
+    /// or whose policy generation moved before it was read. The worker loop and its tests run
+    /// this one step, so they share its order.
+    pub(in crate::app) fn take_ready_output<Reply: FnMut(Vec<u8>)>(
+        &self,
+        now: Instant,
+        send_reply: &mut Reply,
+        parse: impl FnOnce(&mut Reply),
+    ) {
+        self.settle_clipboard_intake(now, send_reply);
+        parse(send_reply);
+    }
+
     /// The worker's wait at `now`: `flush_wait`, shortened to the open clipboard stream's expiry.
     pub(in crate::app) fn clipboard_wait(&self, now: Instant, flush_wait: Duration) -> Duration {
         let osc52 = self.clipboard.borrow().deadline();

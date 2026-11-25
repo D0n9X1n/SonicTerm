@@ -174,6 +174,8 @@ struct OpenWrite {
     lease: ClipLease,
     opened_at: Instant,
     last_packet: Instant,
+    /// The policy generation the write opened under; any `osc52`/`osc52_read` change ends it.
+    policy_generation: u64,
 }
 
 impl OpenWrite {
@@ -365,11 +367,14 @@ impl KittyClipboardTx {
         })
     }
 
-    /// Finish the open write at `now` when the policy is now `deny` (`EPERM`) or its deadline
-    /// passed (`EBUSY`); returns the status reply. Runs even while the child prints nothing.
+    /// Finish the open write at `now` when the policy is now `deny` or changed since it opened, even
+    /// back to the same policy (`EPERM`), or its deadline passed (`EBUSY`); returns the status
+    /// reply. Runs before every ready chunk and while the child prints nothing.
     pub(in crate::app) fn service(&mut self, now: Instant) -> Option<Vec<u8>> {
         let deadline = self.deadline()?;
-        let status = if self.staging.write_policy() == Osc52Policy::Deny {
+        let generation = self.staging.policy_generation();
+        let moved = self.open.as_ref().is_some_and(|open| open.policy_generation != generation);
+        let status = if moved || self.staging.write_policy() == Osc52Policy::Deny {
             KittyClipboardStatus::Eperm
         } else if now >= deadline {
             // When: now reaches the deadline, the write expired.
@@ -529,6 +534,7 @@ impl KittyClipboardTx {
             lease: self.staging.lease(),
             opened_at: now,
             last_packet: now,
+            policy_generation: self.staging.policy_generation(),
         });
         KittyStep::Silent
     }

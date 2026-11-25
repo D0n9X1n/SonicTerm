@@ -457,3 +457,13 @@ fn two_selection_write_reserves_a_native_copy_each() {
         assert!(result.is_ok() || matches!(result, Err(Osc52Refusal::Busy)), "{targets:?}");
     }
 }
+
+/// Contract: formatting a program write for a log shows its length, never the clipboard text.
+#[test]
+fn clipboard_job_debug_prints_no_text() {
+    let staging = ClipboardStaging::with_budget(1 << 20, 1 << 16);
+    let job = ClipboardJob::for_test(&staging, "secret clipboard text");
+    let printed = format!("{job:?}");
+    assert!(!printed.contains("secret"), "{printed}");
+    assert!(printed.contains("text_bytes: 21"), "{printed}");
+}

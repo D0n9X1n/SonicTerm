@@ -817,8 +817,8 @@ impl super::App {
     /// Whether this thread may make a native write of `bytes`: up to
     /// [`INLINE_WRITE_LIMIT_BYTES`], any size into a test buffer, and a macOS user copy.
     fn may_write_inline(&self, bytes: usize, user_copy: bool) -> bool {
-        // shortcut: a macOS user copy of any size still writes NSPasteboard on this thread, as
-        // off-thread pasteboard use is not proven; only program writes over the limit fail closed.
+        // A macOS user copy of any size writes NSPasteboard on this thread: off-thread pasteboard
+        // use is not proven, and a size cap would refuse the large selections users copy.
         bytes <= INLINE_WRITE_LIMIT_BYTES
             || self.test_clipboard_installed()
             || (user_copy && cfg!(target_os = "macos"))

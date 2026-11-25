@@ -280,7 +280,10 @@ chunks of at most 64 KiB through the parser's `ClipboardInbox`, which is not `Cl
 `Debug` prints only lengths, and the parser raises only payload-free
 `VtEvent::ClipboardStream { stream, phase }` events (`Data`, `End { kinds, query }`, `Abort`).
 A write commits only after BEL or ST. CAN, SUB, an unrelated ESC, or 60 s without a
-terminator abort the stream, release its queued chunks and swallow the rest of the OSC.
+terminator abort the stream, release its queued chunks and swallow the rest of the OSC. A stream
+also ends when `osc52` or `osc52_read` changes after it opened, even back to the same policy. The
+VT worker applies both before it parses the next ready output, so a terminator read at or after
+the expiry, or after a policy change, never commits.
 
 The pane's VT worker decodes outside the parser lock: a strict Base64 alphabet, optional final
 padding, at most 3 characters carried between chunks, and the
@@ -306,9 +309,11 @@ the write's lease is released when it returns. Program writes and user copies sh
 strictly in the order the event loop handled them, so a later user copy always wins. The event
 loop writes a user copy itself only when nothing is queued and the copy is at most 512 KiB; at
 most 4 user copies wait on the worker, and one more is refused with the copy-failure notice and
-keeps its selection. A batch's status-line summary waits for the worker's result. macOS has no
+keeps its selection; a refused copy-mode copy returns to copy mode with its selection while
+the same pane is still active. A batch's status-line summary waits for the worker's result. macOS has no
 worker, because off-thread `NSPasteboard` use is not proven: its program writes over 512 KiB
-are refused, and user copies stay on the event-loop thread.
+are refused, and user copies of any size stay on the event-loop thread, because a cap would
+refuse the large selections users copy.
 
 | Form | SonicTerm |
 | --- | --- |
@@ -436,8 +441,10 @@ as input. A write dropped at its commit point because its binding changed answer
 Omitted representations are released at the commit.
 
 An open write ends `EBUSY` 30 s after its last packet or 10 min after it opened, and `EPERM`
-when the policy becomes `deny`; the VT worker wakes for both even while the child prints
-nothing, because a config reload wakes every worker. RIS and pane retirement release it
+when the policy becomes `deny` or `osc52`/`osc52_read` changes at all after it opened (a quick
+`deny` then `allow` still ends it). The VT worker checks both before it parses each ready output
+chunk, so a commit read at or after a deadline never commits, and it also wakes for them while
+the child prints nothing, because a config reload wakes every worker. RIS and pane retirement release it
 silently.
 
 A read's payload is a Base64 list of MIME types; `.` asks for the type listing. At most 16 data

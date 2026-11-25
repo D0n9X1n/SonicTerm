@@ -500,63 +500,8 @@ pub(in crate::app) fn sextet(byte: u8) -> Option<u8> {
     }
 }
 
-/// Bytes the native clipboard copy of `text` takes: `CF_UNICODETEXT` on Windows (2 per UTF-16
-/// unit plus the terminator), the UTF-8 length for `NSString` and arboard's X11 copy.
-pub(in crate::app) fn native_clipboard_bytes(text: &str) -> usize {
-    if cfg!(target_os = "windows") {
-        // When: target_os is Windows, CF_UNICODETEXT holds UTF-16 and a terminator.
-        text.encode_utf16().count() * 2 + 2
-    } else {
-        // When: target_os is not Windows, the native copy holds UTF-8.
-        text.len()
-    }
-}
-
-/// Whether Windows may reassert `text`: at most [`REASSERT_MAX_UTF16_UNITS`] UTF-16 units.
-pub(in crate::app) fn reassert_eligible(text: &str) -> bool {
-    text.encode_utf16().nth(REASSERT_MAX_UTF16_UNITS).is_none()
-}
-
-/// Build the text for decoded `bytes`, invalid sequences replaced by U+FFFD, with `lease` grown
-/// first to cover the text and one native copy per selection `targets` names: arboard keeps a
-/// separate copy of each selection it wrote (X11 PRIMARY and CLIPBOARD are independent buffers).
-fn into_text(
-    bytes: Vec<u8>,
-    mut lease: ClipLease,
-    targets: ClipTargets,
-) -> Result<(String, ClipLease), Osc52Refusal> {
-    let copies = usize::from(targets.clipboard) + usize::from(targets.primary);
-    let mut lossy_len = 0usize;
-    let mut valid = true;
-    for chunk in bytes.utf8_chunks() {
-        lossy_len += chunk.valid().len();
-        if !chunk.invalid().is_empty() {
-            // An invalid sequence becomes one 3-byte U+FFFD.
-            lossy_len += 3;
-            valid = false;
-        }
-    }
-    let text = if valid {
-        String::from_utf8(bytes).expect("every chunk was valid UTF-8")
-    } else {
-        // When: valid is false, the expanded text is reserved before it is built.
-        if !lease.grow_to(bytes.capacity() + lossy_len) {
-            // When: lease cannot grow over the expansion, the write is refused busy.
-            return Err(Osc52Refusal::Busy);
-        }
-        String::from_utf8_lossy(&bytes).into_owned()
-    };
-    lease.shrink_to(text.capacity());
-    let native_bytes = native_clipboard_bytes(&text).saturating_mul(copies);
-    if !lease.grow_to(text.capacity().saturating_add(native_bytes)) {
-        // When: lease cannot grow over every selection's native copy, the write is refused busy.
-        return Err(Osc52Refusal::Busy);
-    }
-    Ok((text, lease))
-}
-
-/// One complete program write: its text, destinations, lease and program slot.
-#[derive(Debug)]
+/// One complete program write: its text, destinations, lease and program slot. Its `Debug`
+/// prints lengths only, so a job can be logged without the clipboard text.
 pub(in crate::app) struct ClipboardJob {
     pub(in crate::app) text: String,
     pub(in crate::app) targets: ClipTargets,
@@ -674,10 +619,12 @@ impl Clone for Osc52Intake {
     }
 }
 
-/// The open stream of one pane: its id, when it opened, and its decoder (`None` once refused).
+/// The open stream of one pane: its id, when it opened, the policy generation it opened under, and
+/// its decoder (`None` once refused).
 struct OpenStream {
     stream: u64,
     opened_at: Instant,
+    policy_generation: u64,
     decoder: Result<Base64Stream, Osc52Refusal>,
 }
 
@@ -840,7 +787,10 @@ impl Osc52Intake {
         if self.open.as_ref().is_none_or(|open| open.stream != stream) {
             // `stream` is new, so it reads the stream limit now.
             let decoder = Base64Stream::new(self.staging.lease(), self.staging.stream_limit());
-            self.open = Some(OpenStream { stream, opened_at: now, decoder: Ok(decoder) });
+            let policy_generation = self.staging.policy_generation();
+            let open =
+                OpenStream { stream, opened_at: now, policy_generation, decoder: Ok(decoder) };
+            self.open = Some(open);
         }
         self.open.as_mut().expect("tracked above")
     }
@@ -920,11 +870,16 @@ impl Osc52Intake {
         self.open.as_ref().map(|open| open.opened_at + OSC52_STREAM_EXPIRY)
     }
 
-    /// Release the open stream once it is [`OSC52_STREAM_EXPIRY`] old; returns its id so the
+    /// Release the open stream once it is [`OSC52_STREAM_EXPIRY`] old, or once `osc52` or
+    /// `osc52_read` changed since it opened (even back to the same policy); returns its id so the
     /// caller aborts it in the parser too.
     pub(in crate::app) fn expire(&mut self, now: Instant) -> Option<u64> {
-        if self.deadline().is_none_or(|deadline| now < deadline) {
-            // When: deadline is unset or now is before it, nothing expires.
+        let generation = self.staging.policy_generation();
+        let stale = self.open.as_ref().is_some_and(|open| {
+            now >= open.opened_at + OSC52_STREAM_EXPIRY || open.policy_generation != generation
+        });
+        if !stale {
+            // When: stale is false, no stream is open, or it is young and under its policy.
             return None;
         }
         self.open.take().map(|open| open.stream)
@@ -933,7 +888,15 @@ impl Osc52Intake {
 
 #[path = "osc52_stream_retained.rs"]
 mod retained;
+
+#[path = "osc52_stream_debug.rs"]
+mod debug;
+
+#[path = "osc52_stream_text.rs"]
+mod text;
 pub(in crate::app) use retained::{RetainedCopies, RetainedShares};
+use text::into_text;
+pub(in crate::app) use text::{native_clipboard_bytes, reassert_eligible};
 
 /// The App's clipboard-write state: the shared staging, its governor charge, retained copies.
 #[derive(Debug)]

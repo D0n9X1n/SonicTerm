@@ -409,9 +409,9 @@ pub(super) fn spawn_pane_workers(
                     default(wait) => Some(Err(crossbeam_channel::RecvTimeoutError::Timeout)),
                 };
                 let Some(received) = received else {
-                    // When: received is None, the policy wakeup fired and an open OSC 5522 write
-                    // is rechecked now.
-                    worker_handles.service_kitty_clipboard(Instant::now(), &mut send_reply);
+                    // When: received is None, the policy wakeup fired and the open OSC 52 stream
+                    // and OSC 5522 write are rechecked now.
+                    worker_handles.settle_clipboard_intake(Instant::now(), &mut send_reply);
                     continue;
                 };
                 match received {
@@ -421,24 +421,30 @@ pub(super) fn spawn_pane_workers(
                         let read_at = bytes.read_at();
                         worker_handles.count_output(bytes.len());
                         flush.receive(bytes.len(), Instant::now());
-                        process_pane_vt_batch_and_publish(
-                            &worker_handles,
-                            bytes,
-                            read_at,
-                            &mut command_started,
-                            &mut flush.sync_latch,
-                            redraw_proxy.as_ref(),
+                        let sync_latch = &mut flush.sync_latch;
+                        let started = &mut command_started;
+                        let proxy = redraw_proxy.as_ref();
+                        worker_handles.take_ready_output(
+                            Instant::now(),
                             &mut send_reply,
+                            |send_reply| {
+                                process_pane_vt_batch_and_publish(
+                                    &worker_handles,
+                                    bytes,
+                                    read_at,
+                                    started,
+                                    sync_latch,
+                                    proxy,
+                                    send_reply,
+                                );
+                            },
                         );
                         flush.after_batch(&worker_handles, Instant::now(), send_output);
-                        worker_handles.expire_clipboard_stream(Instant::now());
-                        worker_handles.service_kitty_clipboard(Instant::now(), &mut send_reply);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         // When: recv_timeout returns Timeout, flush any trailing pending redraw.
                         flush.on_quiet(&worker_handles, Instant::now(), send_output);
-                        worker_handles.expire_clipboard_stream(Instant::now());
-                        worker_handles.service_kitty_clipboard(Instant::now(), &mut send_reply);
+                        worker_handles.settle_clipboard_intake(Instant::now(), &mut send_reply);
                         #[cfg(windows)]
                         if exit_probe.has_exited().unwrap_or(false) {
                             // When: exit_probe reports the child exited on Windows, report it and stop polling.

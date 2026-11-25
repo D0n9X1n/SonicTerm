@@ -167,7 +167,10 @@ cargo build -p sonicterm-app
   `kitty_clipboard_offer_win32.rs`), which empties the clipboard again when any
   `SetClipboardData` fails; `DONE` only when all published, `EIO` otherwise; the job's
   `KittyReply` is answered on the source PTY when it settles. The worker's `select!` also wakes on
-  the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. An `ask` ticket is approved only by Apply on its own palette confirm session
+  the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. Each ready
+  chunk first settles the intake (`PaneVtHandles::take_ready_output`): an OSC 52 stream or OSC 5522
+  write past its deadline, or whose recorded policy generation moved, ends before the chunk is
+  parsed, so a queued terminator or commit never lands on it. An `ask` ticket is approved only by Apply on its own palette confirm session
   (`osc52_read_consent.rs`), opened in the source window while it is frontmost and the palette is
   closed, never raising, focusing, reusing or replacing a palette; the title names the tab and
   pane by position only. Apply also requires the palette still hosted by that window; Deny,
