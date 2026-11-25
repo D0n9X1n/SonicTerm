@@ -818,3 +818,24 @@ fn refusal_order_stale_worker_text() {
     });
     assert_eq!(reading, before);
 }
+
+/// arboard's CLIPBOARD clear relinquishes the selection but does not synchronously replace
+/// its stored bytes. Only the next nonempty arboard write may retire the large retained share.
+#[test]
+fn arboard_clear_keeps_large_share_until_replacement() {
+    let mut fake = FakeClipboard::holding("old");
+    fake.state().retains = true;
+    let staging = ClipboardStaging::with_budget(8 << 20, 2 << 20);
+    let clipboard = ClipTargets { clipboard: true, primary: false };
+    let text = "a".repeat(1 << 20);
+    let large = native_clipboard_bytes(&text);
+    let mut retained = crate::app::osc52_stream::RetainedCopies::default();
+    for (value, expected) in
+        [(text.as_str(), large), ("", large), ("b", native_clipboard_bytes("b"))]
+    {
+        let (write, _) = commit_program(&mut fake, job_to(&staging, value, clipboard), None);
+        assert_eq!(write.outcome, ClipWriteOutcome::Written);
+        retained.retain(write.retained);
+        assert_eq!(retained.bytes(), expected);
+    }
+}

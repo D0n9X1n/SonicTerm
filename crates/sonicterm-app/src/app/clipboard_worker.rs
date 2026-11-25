@@ -251,7 +251,9 @@ fn commit_program(
     if sink.retains_copies() {
         // Each selection that took the text, or may have, keeps one native copy's share until it
         // is replaced, even when the other selection refused the write.
-        let (clipboard, primary) = (result.clipboard, result.primary);
+        // CLIPBOARD.clear only relinquishes ownership. PRIMARY uses set_text even for empty text.
+        let clipboard = if text.is_empty() { TargetOutcome::Untouched } else { result.clipboard };
+        let primary = result.primary;
         let copy_bytes = native_clipboard_bytes(&text);
         committed.retained = RetainedShares::split(&mut lease, copy_bytes, clipboard, primary);
     }

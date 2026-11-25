@@ -1,6 +1,6 @@
 //! Leases covering the copies the native clipboard keeps of SonicTerm's writes: arboard on Linux
 //! holds its own copy of each selection it wrote, PRIMARY and CLIPBOARD separately, until that
-//! selection is replaced through arboard. X11 server confirmation alone cannot prove arboard
+//! selection is synchronously replaced through arboard. Neither clear nor X11 takeover proves arboard
 //! has processed SelectionClear and released the bytes.
 
 use super::super::clipboard_worker::TargetOutcome;
