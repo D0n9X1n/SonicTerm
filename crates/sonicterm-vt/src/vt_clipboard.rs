@@ -11,6 +11,11 @@ use super::*;
 /// Most encoded payload bytes one inbox chunk carries.
 pub const MAX_CLIPBOARD_CHUNK_BYTES: usize = 64 * 1024;
 
+/// Clipboard payload one parse section may queue, over both inboxes, before the parser yields so
+/// the host drains it: the inboxes hold encoded bytes the staging budget does not charge, so a
+/// section of many packets must not pile them up.
+pub const MAX_CLIPBOARD_INBOX_SECTION_BYTES: usize = 1024 * 1024;
+
 /// Most bytes an OSC 52 kinds field may hold; a longer one is swallowed to its terminator.
 pub const MAX_CLIPBOARD_KINDS_BYTES: usize = 16;
 
@@ -265,6 +270,7 @@ impl Parser {
     /// Queue `chunk` for the host and announce it.
     fn queue_clipboard_chunk(&mut self, collector: &mut ClipboardCollector, chunk: Vec<u8>) {
         self.clipboard_inbox.push(collector.stream, chunk);
+        self.yield_on_full_clipboard_inboxes();
         collector.pushed = true;
         self.performer.events.push(VtEvent::ClipboardStream {
             stream: collector.stream,

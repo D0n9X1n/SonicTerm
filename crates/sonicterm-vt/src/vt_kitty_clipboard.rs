@@ -436,8 +436,17 @@ impl Parser {
         if matches!(request, KittyClipboardRequest::Packet { payload: true, .. }) {
             // The payload is queued before its event, so the host finds it when the event arrives.
             self.kitty_clipboard_inbox.push(stream, payload);
+            self.yield_on_full_clipboard_inboxes();
         }
         self.performer.events.push(VtEvent::KittyClipboard { stream, request, bel });
+    }
+
+    /// End the section once the clipboard inboxes hold [`MAX_CLIPBOARD_INBOX_SECTION_BYTES`], so
+    /// the host drains them before more packets queue; the staging budget does not charge them.
+    pub(super) fn yield_on_full_clipboard_inboxes(&mut self) {
+        let queued =
+            self.kitty_clipboard_inbox.queued_bytes() + self.clipboard_inbox.queued_bytes();
+        self.kitty_yield |= queued >= super::vt_clipboard::MAX_CLIPBOARD_INBOX_SECTION_BYTES;
     }
 
     /// Bytes the open OSC 5522 packet holds in the parser.

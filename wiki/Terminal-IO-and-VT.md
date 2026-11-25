@@ -394,7 +394,8 @@ The raw collector owns `5522;` and holds the whole packet until BEL or ST, at mo
 bytes after the prefix; CAN, SUB or an unrelated ESC drop it whole. Metadata with no `;` within
 4 KiB is truncated and the packet is dropped. A valid packet's encoded payload waits in the
 parser's kitty inbox, and the parser raises one payload-free `VtEvent::KittyClipboard` per
-packet. An over-cap packet is classified only from complete, valid metadata, using its last
+packet. Once the OSC 52 and OSC 5522 inboxes together hold 1 MiB, the parser ends its section so
+the worker drains them before more packets queue. An over-cap packet is classified only from complete, valid metadata, using its last
 `type`: `wdata` or `walias` finishes an open write with `EFBIG`; anything else is dropped.
 
 Each pane's VT worker keeps at most one open write (`kitty_clipboard_tx.rs`), outside the parser

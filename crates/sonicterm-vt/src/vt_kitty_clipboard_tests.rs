@@ -256,3 +256,20 @@ fn decrqm_5522_reports_on_the_reply_channel() {
     parser.advance(b"\x1b[?5522h\x1b[?5522$p");
     assert_eq!(rx.try_recv().expect("a reply"), b"\x1b[?5522;1$y");
 }
+
+/// Contract: one parse section queues at most [`MAX_CLIPBOARD_INBOX_SECTION_BYTES`] of clipboard
+/// payload before it yields to the host, which drains the inbox before the next section: many
+/// large OSC 5522 packets in one read never pile up in the inbox, which the staging budget does
+/// not charge.
+#[test]
+fn many_packets_yield_before_the_inbox_passes_its_section_bound() {
+    let mut parser = capture_parser();
+    let payload = "A".repeat(MAX_KITTY_CLIPBOARD_PACKET_BYTES - 64);
+    let packet = format!("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;{payload}\x1b\\");
+    let bytes = packet.repeat(8);
+    let (consumed, _, _) = parser.advance_with_replies(bytes.as_bytes());
+    assert!(consumed < bytes.len(), "the section yielded before the last packet");
+    let queued = parser.kitty_clipboard_inbox().queued_bytes();
+    let bound = MAX_CLIPBOARD_INBOX_SECTION_BYTES + MAX_KITTY_CLIPBOARD_PACKET_BYTES;
+    assert!(queued <= bound, "{queued} queued past {bound}");
+}

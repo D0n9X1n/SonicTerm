@@ -40,7 +40,7 @@ pub use staging::{
 };
 pub use vt_clipboard::{
     ClipboardInbox, ClipboardKinds, ClipboardPhase, MAX_CLIPBOARD_CHUNK_BYTES,
-    MAX_CLIPBOARD_KINDS_BYTES,
+    MAX_CLIPBOARD_INBOX_SECTION_BYTES, MAX_CLIPBOARD_KINDS_BYTES,
 };
 
 /// Terminal identity reported in answer to CSI > q (XTVERSION): `SonicTerm`
@@ -388,7 +388,8 @@ pub struct Parser {
     performer: Performer,
     /// The kitty APC in flight: its bounded control section and, for an image, its payload.
     apc_scratch: Option<Box<vt_kitty_stream::ApcScratch>>,
-    /// Set when a kitty event needs the host's reply, ending the advance prefix after it.
+    /// Set when a kitty event needs the host's reply, or the clipboard inboxes reach their
+    /// section bound, ending the advance prefix after it.
     kitty_yield: bool,
     pending_esc: bool,
     raw_osc: Option<RawOsc>,
