@@ -557,8 +557,9 @@ touches the clipboard or the PTY: the reader thread before each clipboard source
 Windows read that is retrying to open the clipboard finishes that operation) and after
 its offer-version check, and the PTY writer, which checks it under its admission lock
 immediately before it queues the reply, retries included. A read whose
-grant ends first makes no further native call, its data is dropped, and it waits for an
-ordinary answer instead; this holds for a read whose result arrives after its deadline too. A
+grant ends first starts no new content-source operation once the check sees the end (one
+already started can finish, and a version lookup may still run), its data is dropped, and it
+waits for an ordinary answer instead; this holds for a read whose result arrives after its deadline too. A
 read already answered at its deadline keeps that answer: it is a status with no clipboard data,
 so it is sent even after the grant ended. Only a reply carrying clipboard data needs the grant. The approval stays bound to the recipient and the offer until delivery: the reader
 thread compares the offer version before its native read and again after it, and the recipient

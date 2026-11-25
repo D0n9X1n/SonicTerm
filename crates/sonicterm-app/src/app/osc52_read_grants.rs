@@ -308,14 +308,6 @@ impl PasteGrants {
         self.entries.len()
     }
 
-    /// Make every held grant `age` older, as if it had been issued that much earlier.
-    #[cfg(test)]
-    pub(in crate::app) fn age(&mut self, age: std::time::Duration) {
-        for grant in &mut self.entries {
-            grant.issued_at = grant.issued_at.checked_sub(age).expect("a past instant");
-        }
-    }
-
     /// When the oldest held grant was issued, so the pipeline can wake at its expiry.
     pub(in crate::app) fn oldest_issue(&self) -> Option<std::time::Instant> {
         self.entries.iter().map(|grant| grant.issued_at).min()
@@ -327,19 +319,57 @@ impl PasteGrants {
     }
 }
 
-/// The clipboard a read uses on its reader thread: each native content call is made only while
-/// the consumed paste grant that approved the read is live, so a grant that ends mid-read makes no
-/// further call. A read no grant approved has no end.
+/// The clock consumed paste grants' ends are checked against: the system clock, plus an advance
+/// only tests make, so a test lands a grant's end at a chosen phase of a read instead of sleeping.
+#[derive(Debug, Clone, Default)]
+pub(in crate::app) struct GrantClock {
+    /// How far tests moved this clock and every clone of it, in milliseconds.
+    #[cfg(test)]
+    advanced_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl GrantClock {
+    /// The instant a grant's end is compared with now.
+    pub(in crate::app) fn now(&self) -> std::time::Instant {
+        std::time::Instant::now() + self.advanced()
+    }
+
+    /// How far tests moved the clock.
+    #[cfg(test)]
+    fn advanced(&self) -> std::time::Duration {
+        let advanced_ms = self.advanced_ms.load(std::sync::atomic::Ordering::SeqCst);
+        std::time::Duration::from_millis(advanced_ms)
+    }
+
+    /// Outside tests the clock is never moved.
+    #[cfg(not(test))]
+    fn advanced(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+
+    /// Move this clock, and every clone of it, `step` forward.
+    #[cfg(test)]
+    pub(in crate::app) fn advance(&self, step: std::time::Duration) {
+        let step_ms = u64::try_from(step.as_millis()).unwrap_or(u64::MAX);
+        self.advanced_ms.fetch_add(step_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The clipboard a read uses on its reader thread: no new content-source operation starts once the
+/// consumed paste grant that approved the read has ended by `clock`; one already started can
+/// finish, and version lookups pass through. A read no grant approved has no end.
 pub(in crate::app) struct GrantBoundSource<'source> {
     pub(in crate::app) source: &'source dyn ClipboardTextSource,
     /// When the grant ends; `None` for a read no paste grant approved.
     pub(in crate::app) expires_at: Option<std::time::Instant>,
+    /// The clock the grant's end is read on.
+    pub(in crate::app) clock: GrantClock,
 }
 
 impl GrantBoundSource<'_> {
-    /// Whether the grant, if any, is still live by the clock now.
+    /// Whether the grant, if any, is still live by the grant clock now.
     pub(in crate::app) fn live(&self) -> bool {
-        self.expires_at.is_none_or(|expires_at| std::time::Instant::now() < expires_at)
+        self.expires_at.is_none_or(|expires_at| self.clock.now() < expires_at)
     }
 }
 

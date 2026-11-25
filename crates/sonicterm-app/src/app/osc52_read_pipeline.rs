@@ -19,7 +19,7 @@ use sonicterm_vt::vt::KittyClipboardStatus;
 
 use super::kitty_clipboard_read::build_read_reply;
 use super::osc52_read_grants::{
-    GrantBoundSource, GrantDecision, GrantKey, PasteApproval, PasteBinding, PasteGrant,
+    GrantBoundSource, GrantClock, GrantDecision, GrantKey, PasteApproval, PasteBinding, PasteGrant,
     SessionGrants, PASTE_GRANT_LIFETIME,
 };
 use super::osc52_read_source::{read_replies, ClipboardTextSource, NativeSource, ReadLocation};
@@ -101,6 +101,8 @@ pub(in crate::app) struct ClipboardReads {
     retries: Vec<Retry>,
     done_tx: Sender<ReaderDone>,
     done_rx: Receiver<ReaderDone>,
+    /// The clock consumed paste grants' ends are checked against; tests move it.
+    pub(in crate::app) grant_clock: GrantClock,
     /// Why the last ticket or reply was revoked, for diagnostics.
     pub(in crate::app) last_cancel: Option<CancelReason>,
     /// The Always and Ban answers OSC 5522 programs named themselves for.
@@ -129,6 +131,7 @@ impl Default for ClipboardReads {
             retries: Vec::new(),
             done_tx,
             done_rx,
+            grant_clock: GrantClock::default(),
             last_cancel: None,
             grants: SessionGrants::default(),
             paste_grants: super::osc52_read_grants::PasteGrants::default(),
@@ -155,6 +158,17 @@ impl std::fmt::Debug for ClipboardReads {
 }
 
 impl ClipboardReads {
+    /// Test-only: whether the reader's result waits to be settled, as (carries replies, completed
+    /// before its deadline); the result is put back untouched.
+    #[cfg(test)]
+    pub(in crate::app) fn peek_finished_read(&self) -> Option<(bool, bool)> {
+        let done = self.done_rx.try_recv().ok()?;
+        let deadline = self.in_flight.as_ref().map(|in_flight| in_flight.deadline);
+        let seen = (done.replies.is_some(), deadline.is_some_and(|at| done.completed_at < at));
+        let _ = self.done_tx.send(done);
+        Some(seen)
+    }
+
     /// Whether nothing waits, is presented, queues, reads, retries or holds a grant to purge.
     fn idle(&self) -> bool {
         self.waiting.is_empty()
@@ -239,7 +253,7 @@ impl super::App {
             // When: take_for finds no grant for this pane, location and password, none applies.
             return None;
         };
-        let now = Instant::now();
+        let now = self.clip_state.reads.grant_clock.now();
         if !self.paste_grant_live(&grant, now)
             || grant.binding.reset_epoch != ticket.binding().reset_epoch
         {
@@ -347,8 +361,10 @@ impl super::App {
             // When: admits_new_user_input refuses, the window is READONLY.
             return Err(CancelReason::ReadOnly);
         }
+        // A grant's end is read on the grant clock, never earlier than `now`.
+        let grant_now = now.max(self.clip_state.reads.grant_clock.now());
         let live_paste = |paste: &PasteApproval| {
-            now < paste.expires_at
+            grant_now < paste.expires_at
                 && self.paste_binding(binding.pane_id).as_ref() == Some(&paste.binding)
         };
         if binding.paste.as_deref().is_some_and(|paste| !live_paste(paste)) {
@@ -602,11 +618,13 @@ impl super::App {
         let paste = ticket.paste_approval().map(|paste| (paste.location, paste.offer_version));
         // The grant's end travels with the read, so the reader checks it against the clock.
         let expires_at = ticket.paste_approval().map(|paste| paste.expires_at);
+        let clock = self.clip_state.reads.grant_clock.clone();
         let spawned =
             std::thread::Builder::new().name("sonicterm-clipboard-read".into()).spawn(move || {
                 let mut lease = lease;
                 let read = || {
-                    let bound = GrantBoundSource { source: source.as_ref(), expires_at };
+                    let clock = clock.clone();
+                    let bound = GrantBoundSource { source: source.as_ref(), expires_at, clock };
                     // The offer must still be the announced one, and the grant still live after the
                     // version read, which can wait on the owner.
                     let offer_holds = || {
@@ -683,7 +701,7 @@ impl super::App {
         let bytes = reply.len();
         // Admission is checked against the clock, not the turn's start, so a grant that ends
         // during the turn never admits its reply; a retry is checked the same way.
-        let admitted_at = now.max(Instant::now());
+        let admitted_at = now.max(self.clip_state.reads.grant_clock.now());
         if let Err(reason) = self.revalidate_ticket(&binding, admitted_at, check_age) {
             // When: revalidate_ticket refuses, the reply is dropped unsent with its custody.
             tracing::debug!(pane_id, bytes, ?reason, "OSC 52 read reply revoked");

@@ -33,7 +33,7 @@ struct FakeOffer {
     gate: Mutex<Option<crossbeam_channel::Receiver<()>>>,
     reads: AtomicUsize,
     /// With a gate, each version read blocks, as an X11 owner that does not answer does, until
-    /// released or for at most 500 ms.
+    /// released or for at most 5 s.
     version_gate: Mutex<Option<crossbeam_channel::Receiver<()>>>,
     /// The thread each version read ran on.
     version_threads: Mutex<Vec<std::thread::ThreadId>>,
@@ -60,7 +60,7 @@ impl ClipboardTextSource for FakeOffer {
         self.version_threads.lock().unwrap().push(std::thread::current().id());
         let gate = self.version_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
-            let _ = gate.recv_timeout(Duration::from_millis(500));
+            let _ = gate.recv_timeout(Duration::from_secs(5));
         }
         *self.version.lock().unwrap()
     }
@@ -181,6 +181,27 @@ impl Harness {
 
     fn waiting(&self) -> usize {
         self.app.clip_state.reads.waiting.len()
+    }
+
+    /// The offer-version reads made so far, which the reader's version check adds to.
+    fn version_calls(&self) -> usize {
+        self.offer.version_threads.lock().unwrap().len()
+    }
+
+    /// Wait, without running the pipeline, until `phase` holds: a phase signal from the fake
+    /// clipboard or the reader. Panics after 5 s, so a missed phase fails instead of hanging.
+    fn wait_for(&self, phase: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !phase(self) {
+            assert!(Instant::now() < deadline, "the phase was never reached");
+            std::thread::yield_now();
+        }
+    }
+
+    /// End every consumed and held paste grant by moving the grant clock past its lifetime.
+    fn end_grants(&self) {
+        let past = PASTE_GRANT_LIFETIME + Duration::from_secs(1);
+        self.app.clip_state.reads.grant_clock.advance(past);
     }
 
     /// Block every later content read until the returned sender sends once for it.
@@ -808,6 +829,8 @@ fn newer_paste_supersedes_a_capture_in_progress() {
     assert_eq!(events.len(), 2, "each paste sends its event");
     assert_eq!(harness.grant_count(), 1, "the newest paste grants");
     let (_, newest) = password_of(&events[1].1);
+    // The captures are done; the follow-up read's own version checks run ungated.
+    *harness.offer.version_gate.lock().unwrap() = None;
     harness.follow_up(pane, "Paste event", &newest);
     assert!(harness.pump_until_served(pane), "the newest password approves the read");
 }
@@ -847,15 +870,13 @@ fn consumed_grant_expiring_before_its_read_is_not_served() {
     let events = harness.events();
     let (_, source_password) = password_of(&events[0].1);
     let (_, receiver_password) = password_of(&events[1].1);
-    // Both grants end 600 ms from now, so both are still live when the reads consume them.
-    let margin = Duration::from_millis(600);
-    harness.app.clip_state.reads.paste_grants.age(PASTE_GRANT_LIFETIME - margin);
     let release = harness.gate_reads();
     harness.follow_up(receiver, "Paste event", &receiver_password);
     harness.pump_until(|harness| harness.reads() == 1);
     harness.follow_up(source, "Paste event", &source_password);
     assert_eq!(harness.app.clip_state.reads.queued.len(), 1, "queued behind the busy reader");
-    std::thread::sleep(margin + Duration::from_millis(200));
+    // Both grants end while one read runs and the other queues.
+    harness.end_grants();
     release.send(()).unwrap();
     release.send(()).unwrap();
     harness.pump_until_reader_idle();
