@@ -57,6 +57,11 @@ pub(super) trait ClipboardSink {
     fn holds(&mut self, _snapshot: &Snapshot) -> bool {
         false
     }
+
+    /// Publish every representation of `offer` in one native operation; true when it took all.
+    fn publish_offer(&mut self, _offer: &super::kitty_clipboard_offer::NativeOffer) -> bool {
+        false
+    }
 }
 
 /// Clipboard text read before a write: its native block size and its UTF-16 units.
@@ -109,16 +114,24 @@ fn commit_program(
     reassert_delay: Option<Duration>,
 ) -> (Committed, Option<PendingReassert>) {
     // The program slot stays in `job` until this returns, after the native call.
-    let ClipboardJob { text, targets, mut lease, kitty, .. } = job;
+    let ClipboardJob { text, targets, mut lease, kitty, offer, .. } = job;
     let mut committed = Committed {
         outcome: ClipWriteOutcome::Denied,
-        bytes: text.len(),
+        bytes: offer.as_ref().map_or(text.len(), |offer| offer.byte_len()),
         targets,
         retained: None,
         kitty,
     };
     if epoch != live_epoch.load(Ordering::SeqCst) {
         // When: the policy epoch moved after the write was posted, a reload denied OSC 52 since.
+        return (committed, None);
+    }
+    if let Some(offer) = offer {
+        // When: the job carries an offer, every representation is published in one native call,
+        // never reasserted; the lease ends when the call returns.
+        let published = sink.publish_offer(&offer);
+        committed.outcome =
+            if published { ClipWriteOutcome::Written } else { ClipWriteOutcome::Failed };
         return (committed, None);
     }
     let reassertable = reassert_delay.is_some()
@@ -556,17 +569,17 @@ impl super::App {
             return Some(ClipWriteOutcome::Denied);
         }
         self.drain_clipboard_completions();
-        if job.offer.is_some() {
-            // When: the job carries an offer, it is published here in one native operation. Only
-            // macOS holds more than text, and it has no worker, so no posted write is overtaken.
-            return Some(self.publish_offer_inline(job));
-        }
         self.ensure_clipboard_worker();
         if self.clip_state.domain.has_worker() {
             // When: has_worker, every program write goes to it, in order with user copies; a
             // stopped worker refuses the post and the write fails.
             let posted = self.clip_state.domain.post_program(pane_id, job);
             return (!posted).then_some(ClipWriteOutcome::Failed);
+        }
+        if job.offer.is_some() {
+            // When: no worker runs and the job carries an offer, it is published here in one
+            // native operation (macOS, a test buffer); no posted write can be overtaken.
+            return Some(self.publish_offer_inline(job));
         }
         if !self.may_write_inline(job.text.len(), false) {
             // When: may_write_inline refuses its size with no worker, the write is refused.
@@ -593,6 +606,11 @@ impl super::App {
             let text = String::from_utf8_lossy(offer.text().unwrap_or_default()).into_owned();
             let written = self.write_clipboard_inline(&text, job.targets);
             return if written { ClipWriteOutcome::Written } else { ClipWriteOutcome::Failed };
+        }
+        if !cfg!(target_os = "macos") {
+            // When: target_os is not macOS, an offer publishes only on the clipboard worker, so
+            // without one it fails rather than block the event loop on the clipboard.
+            return ClipWriteOutcome::Failed;
         }
         if super::kitty_clipboard_offer::publish_native(offer) {
             ClipWriteOutcome::Written
@@ -738,6 +756,10 @@ impl ClipboardSink for NativeSink {
             return false;
         };
         write_native_clipboard(clipboard, text, targets)
+    }
+
+    fn publish_offer(&mut self, offer: &super::kitty_clipboard_offer::NativeOffer) -> bool {
+        super::kitty_clipboard_offer::publish_native(offer)
     }
 
     #[cfg(target_os = "windows")]

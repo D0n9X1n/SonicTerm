@@ -331,6 +331,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/osc52_stream.rs", "policy_wakers", 2),
     // A posted read ticket's one-shot slot: `take` and the pane-only `Debug`.
     ("app/osc52_read_ticket.rs", "0", 2),
+    // The admitted custom clipboard format names, checked at an OSC 5522 commit's preflight.
+    ("app/kitty_clipboard_offer_windows.rs", "0", 1),
     ("app/fg_probe.rs", "map", 9),
     ("app/fg_probe.rs", "proxy", 1),
     ("app/fg_probe.rs", "worker", 3),

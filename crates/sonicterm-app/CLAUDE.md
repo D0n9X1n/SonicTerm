@@ -153,9 +153,12 @@ cargo build -p sonicterm-app
   worker, reserved from the same `ClipboardStaging` before every buffer grows; a commit resolves
   aliases over every staged type and plans a native offer (`kitty_clipboard_offer.rs`): names the
   platform cannot hold are omitted (all omitted is `ENOSYS`), text alone routes like an OSC 52
-  write, and text beside other types (macOS only) reserves its native copies, then stages every
-  buffer before one `clearContents`/`writeObjects` on the event loop, `DONE` only when all
-  published, `EIO` otherwise; the job's
+  write, and text beside other types reserves its native copies (`native_copy_bytes`), then stages
+  every buffer before one publish: `clearContents`/`writeObjects` on the event loop on macOS
+  (`kitty_clipboard_offer_macos.rs`), one `OpenClipboard` session on the clipboard worker on
+  Windows (`kitty_clipboard_offer_windows.rs` over the `Win32Clipboard` seam,
+  `kitty_clipboard_offer_win32.rs`), which empties the clipboard again when any
+  `SetClipboardData` fails; `DONE` only when all published, `EIO` otherwise; the job's
   `KittyReply` is answered on the source PTY when it settles. The worker's `select!` also wakes on
   the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. An `ask` ticket is approved only by Apply on its own palette confirm session
   (`osc52_read_consent.rs`), opened in the source window while it is frontmost and the palette is
@@ -165,7 +168,8 @@ cargo build -p sonicterm-app
   OSC 5522 write answers `EPERM` while its PTY and command are unchanged; a stopped clipboard
   worker answers its unreported 5522 writes `EIO`. OSC 5522 reads (`kitty_clipboard_read.rs`)
   take the same read ticket (`admit_kitty_read`), reserve 21 MiB from the reply budget and build
-  one OK/DATA/DONE reply on the reader thread, bounded before anything grows. Session grants
+  one OK/DATA/DONE reply on the reader thread, bounded before anything grows; non-text types go
+  through `ClipboardTextSource::read_type_bounded` (8 MiB each, one alive at a time). Session grants
   (`osc52_read_grants.rs`) are created only by the consent page's Always/Ban rows for a ticket
   whose program sent a nonempty `name` and `pw`, keyed by pane, PTY incarnation, owner and RIS
   epochs, operation, location and `pw`; the pump purges stale ones and a policy change clears all.

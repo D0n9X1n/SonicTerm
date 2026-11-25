@@ -103,12 +103,17 @@ impl NativeOffer {
         self.representations().map(|(_, bytes)| bytes.len()).sum()
     }
 
-    /// The staging this offer needs: its kept buffers plus one native copy per representation.
+    /// The staging this offer needs: its kept buffers plus one native copy per representation,
+    /// sized as this platform's clipboard holds it.
     pub(in crate::app) fn reserved_bytes(&self) -> usize {
         let kept: usize = self.entries.iter().map(Vec::capacity).sum();
         let names: usize =
             self.representations.iter().map(|(format, _)| format_name_bytes(format)).sum();
-        kept + names + self.byte_len()
+        let copies: usize = self
+            .representations()
+            .map(|(format, bytes)| native_copy_bytes(format, bytes.len()))
+            .sum();
+        kept + names + copies
     }
 
     /// Whether text is the only representation, which the text path writes as before.
@@ -138,11 +143,12 @@ pub(in crate::app) enum OfferPlan {
 }
 
 /// Plan the offer `entries` (name and decoded bytes, in staging order) and `aliases` (`(alias,
-/// target)` in arrival order) give, keeping each format the platform `holds` once, first first.
+/// target)` in arrival order) give, keeping each format the platform `holds` with its bytes once,
+/// first first.
 pub(in crate::app) fn plan(
     entries: Vec<(String, Vec<u8>)>,
     aliases: &[(String, String)],
-    holds: &dyn Fn(&NativeFormat) -> bool,
+    holds: &dyn Fn(&NativeFormat, &[u8]) -> bool,
 ) -> OfferPlan {
     if entries.is_empty() {
         // When: entries is empty, the write staged nothing and the commit clears the clipboard.
@@ -165,7 +171,8 @@ pub(in crate::app) fn plan(
     let mut omitted = 0;
     let mut representations: Vec<(NativeFormat, usize)> = Vec::new();
     for (name, index) in names {
-        let Some(format) = native_format(name).filter(|format| holds(format)) else {
+        let bytes = entries[index].1.as_slice();
+        let Some(format) = native_format(name).filter(|format| holds(format, bytes)) else {
             // When: native_format gives no format holds accepts, the name is omitted.
             omitted += 1;
             continue;
@@ -194,6 +201,29 @@ pub(in crate::app) fn plan(
     OfferPlan::Offer(NativeOffer { entries: kept, representations, omitted })
 }
 
+/// The URIs of a `text/uri-list` (RFC 2483): its lines without line ends, blank lines and `#`
+/// comments skipped; `None` when it is not UTF-8.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+fn uri_list_items(bytes: &[u8]) -> Option<Vec<&str>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let items = text.lines().map(str::trim);
+    Some(items.filter(|line| !line.is_empty() && !line.starts_with('#')).collect())
+}
+
+/// The staging one native copy of `format` from `byte_len` bytes takes: Windows converts text to
+/// UTF-16 and wraps HTML and file lists; elsewhere the copy is the bytes.
+fn native_copy_bytes(format: &NativeFormat, byte_len: usize) -> usize {
+    #[cfg(target_os = "windows")]
+    {
+        windows_formats::copy_bound(format, byte_len)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = format;
+        byte_len
+    }
+}
+
 /// The bytes a format's native name takes beside its buffer.
 fn format_name_bytes(format: &NativeFormat) -> usize {
     match format {
@@ -202,37 +232,75 @@ fn format_name_bytes(format: &NativeFormat) -> usize {
     }
 }
 
-/// Whether this platform's clipboard can hold `format`: text everywhere; on macOS also HTML,
-/// PNG and any MIME name with a uniform type. It may run on any thread.
-pub(in crate::app) fn platform_holds(format: &NativeFormat) -> bool {
+/// Whether this platform's clipboard can hold `format` with `bytes`: text everywhere; on macOS and
+/// Windows also HTML, PNG, `text/uri-list` in the layouts each takes, and custom MIME names. It may
+/// run on any thread.
+pub(in crate::app) fn platform_holds(format: &NativeFormat, bytes: &[u8]) -> bool {
     #[cfg(target_os = "macos")]
     {
-        macos::holds(format)
+        macos::holds(format, bytes)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
+        windows_formats::holds(format, bytes)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = bytes;
         *format == NativeFormat::Text
     }
 }
 
-/// Publish `offer` to the system clipboard in one operation on the event-loop thread; true only
-/// when it took every representation.
+/// Publish `offer` to the system clipboard in one operation, true only when it took every
+/// representation: on the event-loop thread on macOS, on the clipboard worker on Windows.
 pub(in crate::app) fn publish_native(offer: &NativeOffer) -> bool {
     #[cfg(target_os = "macos")]
     {
         objc2::rc::autoreleasepool(|_| publish_offer(&mut macos::Pasteboard::general(), offer))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        win32::publish(offer)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         publish_offer(&mut TextOnly, offer)
     }
 }
 
+/// The general pasteboard's MIME names for an OSC 5522 listing; names only, never content.
+#[cfg(target_os = "macos")]
+pub(in crate::app) fn list_general_types() -> super::osc52_read_source::TypeListing {
+    use objc2_app_kit::NSPasteboard;
+    objc2::rc::autoreleasepool(|_| macos::list_types(&NSPasteboard::generalPasteboard()))
+}
+
+/// The general pasteboard's bytes under the non-text MIME name `mime`, within `max_bytes`.
+#[cfg(target_os = "macos")]
+pub(in crate::app) fn read_general_type(
+    mime: &str,
+    max_bytes: usize,
+) -> super::osc52_read_source::TypeRead {
+    use objc2_app_kit::NSPasteboard;
+    objc2::rc::autoreleasepool(|_| {
+        macos::read_type(&NSPasteboard::generalPasteboard(), mime, max_bytes)
+    })
+}
+
+/// The Windows clipboard's bytes under the non-text MIME name `mime`, within `max_bytes`.
+#[cfg(target_os = "windows")]
+pub(in crate::app) fn read_windows_type(
+    mime: &str,
+    max_bytes: usize,
+) -> super::osc52_read_source::TypeRead {
+    win32::read_type(mime, max_bytes)
+}
+
 /// Where only text is held no offer is planned; one that arrives fails closed, untouched.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 struct TextOnly;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl OfferBackend for TextOnly {
     fn stage(&mut self, _format: &NativeFormat, _bytes: &[u8]) -> bool {
         false
@@ -271,6 +339,14 @@ pub(in crate::app) fn publish_offer(backend: &mut dyn OfferBackend, offer: &Nati
 #[cfg(target_os = "macos")]
 #[path = "kitty_clipboard_offer_macos.rs"]
 mod macos;
+
+#[cfg(any(test, target_os = "windows"))]
+#[path = "kitty_clipboard_offer_windows.rs"]
+mod windows_formats;
+
+#[cfg(target_os = "windows")]
+#[path = "kitty_clipboard_offer_win32.rs"]
+mod win32;
 
 #[cfg(test)]
 #[path = "kitty_clipboard_offer_tests.rs"]

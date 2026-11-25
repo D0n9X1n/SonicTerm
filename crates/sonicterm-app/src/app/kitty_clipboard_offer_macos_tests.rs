@@ -1,5 +1,6 @@
 use super::super::{plan, publish_offer, NativeOffer, OfferPlan};
 use super::*;
+use crate::app::osc52_read_source::{TypeListing, TypeRead};
 use objc2::runtime::AnyObject;
 
 /// A private pasteboard with a unique name, released when dropped; never the user's clipboard.
@@ -27,7 +28,7 @@ impl Drop for Private {
 /// The offer `pairs` plan to on this platform.
 fn offer(pairs: &[(&str, &[u8])]) -> NativeOffer {
     let entries = pairs.iter().map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec())).collect();
-    match plan(entries, &[], &holds) {
+    match plan(entries, &[], &|format, bytes| holds(format, bytes)) {
         OfferPlan::Offer(offer) => offer,
         other => panic!("expected an offer, got {other:?}"),
     }
@@ -91,14 +92,15 @@ fn stage_failure_leaves_previous_offer() {
             &offer(&[("text/plain", b"previous")])
         ));
         let before = board.0.changeCount();
-        // A uri-list cannot be held here, so a fake plan that kept it fails at staging.
+        // A uri-list line that is not a URI cannot be held, so a fake plan that kept it fails at
+        // staging.
         let forced = match plan(
             vec![
                 ("text/plain".into(), b"new".to_vec()),
-                ("text/uri-list".into(), b"file:///".to_vec()),
+                ("text/uri-list".into(), b"not a uri".to_vec()),
             ],
             &[],
-            &|_| true,
+            &|_, _| true,
         ) {
             OfferPlan::Offer(offer) => offer,
             other => panic!("{other:?}"),
@@ -106,5 +108,79 @@ fn stage_failure_leaves_previous_offer() {
         assert!(!publish_offer(&mut Pasteboard::on(board.0.clone()), &forced));
         assert_eq!(board.0.changeCount(), before, "nothing was cleared");
         assert_eq!(board.data("public.utf8-plain-text").as_deref(), Some(&b"previous"[..]));
+    });
+}
+
+/// The strings each item of `board` holds under `kind`, in item order.
+fn item_strings(board: &Private, kind: &str) -> Vec<Option<String>> {
+    let kind = NSString::from_str(kind);
+    let items = board.0.pasteboardItems().expect("items");
+    (0..items.count())
+        .map(|index| items.objectAtIndex(index).stringForType(&kind).map(|text| text.to_string()))
+        .collect()
+}
+
+/// Contract: a `text/uri-list` of `file:` URIs publishes one `public.file-url` item per file in the
+/// same operation (the first item also carrying the other types); one non-file URL publishes as
+/// `public.url`; a list mixing them, or of several non-file URLs, is not held. Reading
+/// `text/uri-list` joins the items' URLs with CRLF.
+#[test]
+fn macos_uri_list_file_and_url_items() {
+    objc2::rc::autoreleasepool(|_| {
+        let board = Private::new();
+        let list: &[u8] = b"file:///tmp/a%20b\r\n# note\r\nfile:///tmp/c\r\n";
+        let files_offer = offer(&[("text/plain", b"t"), ("text/uri-list", list)]);
+        assert_eq!(files_offer.omitted(), 0);
+        let before = board.0.changeCount();
+        assert!(publish_offer(&mut Pasteboard::on(board.0.clone()), &files_offer));
+        assert_eq!(board.0.changeCount(), before + 1, "one publish, one change");
+        let files = item_strings(&board, "public.file-url");
+        assert_eq!(files, [Some("file:///tmp/a%20b".into()), Some("file:///tmp/c".into())]);
+        assert_eq!(item_strings(&board, "public.utf8-plain-text")[0].as_deref(), Some("t"));
+        let joined = b"file:///tmp/a%20b\r\nfile:///tmp/c\r\n".to_vec();
+        assert_eq!(read_type(&board.0, "text/uri-list", 1 << 20), TypeRead::Bytes(joined));
+        assert_eq!(read_type(&board.0, "text/uri-list", 10), TypeRead::TooLarge);
+
+        let url = Private::new();
+        let url_offer = offer(&[("text/uri-list", b"https://example.com/x\r\n")]);
+        assert!(publish_offer(&mut Pasteboard::on(url.0.clone()), &url_offer));
+        assert_eq!(item_strings(&url, "public.url"), [Some("https://example.com/x".into())]);
+        for refused in [
+            &b"file:///tmp/a\r\nhttps://example.com/\r\n"[..],
+            b"https://a.example/\r\nhttps://b.example/\r\n",
+            b"# only a comment\r\n",
+            b"not a uri",
+        ] {
+            assert!(!holds(&NativeFormat::UriList, refused), "{refused:?}");
+        }
+    });
+}
+
+/// Contract: HTML, PNG and a custom MIME type read back byte for byte through their pasteboard
+/// types within the cap; one over the cap is refused by its length before the copy, a type the
+/// board does not hold is absent, and the listing names the custom type by its MIME name.
+#[test]
+fn read_and_list_non_text_types() {
+    objc2::rc::autoreleasepool(|_| {
+        let board = Private::new();
+        let custom = "application/x-sonicterm-test";
+        let typed = offer(&[
+            ("text/plain", b"t"),
+            ("text/html", b"<b>h</b>"),
+            ("image/png", b"\x89PNG"),
+            (custom, b"custom"),
+        ]);
+        assert!(publish_offer(&mut Pasteboard::on(board.0.clone()), &typed));
+        let read = |mime: &str, cap: usize| read_type(&board.0, mime, cap);
+        assert_eq!(read("text/html", 64), TypeRead::Bytes(b"<b>h</b>".to_vec()));
+        assert_eq!(read("image/png", 64), TypeRead::Bytes(b"\x89PNG".to_vec()));
+        assert_eq!(read(custom, 64), TypeRead::Bytes(b"custom".to_vec()));
+        assert_eq!(read(custom, 5), TypeRead::TooLarge);
+        assert_eq!(read("text/uri-list", 64), TypeRead::Absent);
+        assert_eq!(read("application/x-absent", 64), TypeRead::Absent);
+        let TypeListing::Types(names) = list_types(&board.0) else { panic!("a listing") };
+        for expected in ["text/plain", "text/html", "image/png", custom] {
+            assert!(names.iter().any(|name| name == expected), "{expected} in {names:?}");
+        }
     });
 }

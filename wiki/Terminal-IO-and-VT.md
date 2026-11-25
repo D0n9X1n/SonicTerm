@@ -437,11 +437,14 @@ full process gate, queue pressure or a full reply budget answers `EBUSY`. A list
 reads no content, so it skips the page under `ask`. An approved read runs on the disposable
 reader thread and is delivered as one message through the sensitive reply channel, never the
 reply spool: `OK`, the listing as one `DATA` packet with `mime=Lg==` (types space-joined plus a
-newline, at most 16 names and 4096 bytes, payload omitted when empty), `DATA` chunks of at most
-4096 raw bytes per served type with the id and MIME repeated in every packet, then `DONE`. Only
-`text/plain` types are read now; another type is omitted, which the protocol reads as unavailable.
-A type's text is read with an 8 MiB cap and served only while the whole reply stays within
-12 MiB, checked before anything grows; otherwise it is omitted. An unavailable location
+newline, at most 64 names and 4096 bytes so it fits one packet, payload omitted when empty),
+`DATA` chunks of at most 4096 raw bytes per served type with the id and MIME repeated in every
+packet, then `DONE`. `text/plain` types are read as text; any other type is read through the
+native layer (see [Platform Integration](Platform-Integration)): HTML stripped to its fragment on
+Windows, PNG and custom types byte for byte, `text/uri-list` from file and URL items. A type the
+clipboard does not hold is omitted, which the protocol reads as unavailable. Each type is read
+with an 8 MiB cap and served only while the whole reply stays within 12 MiB, checked before
+anything grows; otherwise it is omitted. An unavailable location
 (`loc=primary` off Linux) or a platform that cannot list types answers `ENOSYS`; a failed or
 overdue native read, or a listing whose enumeration failed, answers `EIO`; an empty clipboard is
 `OK` then `DONE`. When a reply's writer admission stays contended through every retry, or the
@@ -451,8 +454,11 @@ admitted, never a partial `OK` sequence.
 The listing names types without reading any content: `EnumClipboardFormats` on Windows, the
 general pasteboard's `types` on macOS and the owner's `TARGETS` on X11 (within the 2 s selection
 wait). At most 64 native names are inspected; platform text, HTML, RTF, file and image types map
-to their MIME names, MIME-shaped names pass without parameters, and private, dynamic and protocol
-types (`dyn.*`, `TARGETS`, unnamed formats) are never listed.
+to their MIME names, MIME-shaped names pass without parameters (so a Windows format registered
+under a MIME name lists as that name), and on macOS a type whose uniform type has a preferred MIME
+name lists as that name, so a dynamic type SonicTerm published lists as its MIME name. Private
+and protocol types with no MIME name (other `dyn.*` types, `TARGETS`, unnamed formats) are never
+listed.
 
 Under `ask`, a read or write whose program names itself with a nonempty `name` and a `pw` gets
 Always and Ban rows after Deny, and the name on a separate "Program-supplied name" line (at most

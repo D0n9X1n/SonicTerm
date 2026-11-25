@@ -25,6 +25,10 @@ struct FakeState {
     revert_to: Option<String>,
     /// Advance the counter during the next comparison, as a newer write racing it would.
     race_comparison: bool,
+    /// Offers published through the sink, each one native call.
+    offers: usize,
+    /// Refuse the next offers, as a failed `SetClipboardData` does.
+    refuse_offer: bool,
 }
 
 /// A fake native clipboard; while the test holds `gate`, a write waits inside the native call.
@@ -82,6 +86,12 @@ impl ClipboardSink for FakeClipboard {
 
     fn sequence(&mut self) -> Option<u32> {
         Some(self.state().sequence)
+    }
+
+    fn publish_offer(&mut self, _offer: &crate::app::kitty_clipboard_offer::NativeOffer) -> bool {
+        let mut state = self.state();
+        state.offers += 1;
+        !state.refuse_offer
     }
 
     fn snapshot(&mut self, max_block_bytes: usize) -> Option<Snapshot> {
@@ -423,4 +433,45 @@ fn worker_reassertion_runs_when_due_and_newer_copy_cancels_it() {
     settle(&mut app);
     assert_eq!(fake.state().value, "user");
     assert_eq!(fake.state().writes, ["program", "user"]);
+}
+
+/// A test job carrying a text and HTML offer instead of text.
+fn offer_job(staging: &Arc<ClipboardStaging>) -> ClipboardJob {
+    use crate::app::kitty_clipboard_offer::{plan, OfferPlan};
+    let entries =
+        vec![("text/plain".to_owned(), b"t".to_vec()), ("text/html".to_owned(), b"h".to_vec())];
+    let OfferPlan::Offer(offer) = plan(entries, &[], &|_, _| true) else { panic!("an offer") };
+    let mut job = ClipboardJob::for_test(staging, "");
+    job.offer = Some(offer);
+    job
+}
+
+/// Contract: an offer job commits as one native publish of every representation, never a text
+/// write or a reassertion: written when the sink took them all, failed (answered `EIO`) when it
+/// refused; its lease ends when the call returns. A posted offer runs on the worker, not inline.
+#[test]
+fn offer_job_publishes_once_on_worker_eio_on_refusal() {
+    for refuse in [false, true] {
+        let mut fake = FakeClipboard::holding("before");
+        fake.state().refuse_offer = refuse;
+        let staging = ClipboardStaging::with_budget(64 << 20, 64 << 20);
+        let job = offer_job(&staging);
+        let delay = Some(Duration::ZERO);
+        let (committed, pending) = commit_program(&mut fake, job, 0, &AtomicU64::new(0), delay);
+        let expected = if refuse { ClipWriteOutcome::Failed } else { ClipWriteOutcome::Written };
+        assert_eq!(committed.outcome, expected);
+        assert!(pending.is_none(), "an offer is never reasserted");
+        assert_eq!(committed.bytes, 2, "the offer's representations");
+        let state = fake.state();
+        assert_eq!((state.offers, state.writes.len()), (1, 0));
+        drop(state);
+        drop(committed);
+        assert_eq!(staging.reserved_bytes(), 0, "the lease ended with the call");
+    }
+    let fake = FakeClipboard::holding("before");
+    let mut app = app_with_worker("before", &fake, None);
+    let job = offer_job(&app.clip_state.staging);
+    assert_eq!(app.submit_program_clipboard(1, job, false), None, "posted to the worker");
+    settle(&mut app);
+    assert_eq!(fake.state().offers, 1);
 }

@@ -10,6 +10,10 @@ struct FakeTypes {
     text: ReadOutcome,
     caps: Mutex<Vec<usize>>,
     forbid_reads: bool,
+    /// Non-text representations a typed read serves.
+    typed: Vec<(String, Vec<u8>)>,
+    /// Fail every typed read, as a native read that cannot open the clipboard does.
+    fail_typed: bool,
 }
 
 impl FakeTypes {
@@ -19,6 +23,8 @@ impl FakeTypes {
             text: ReadOutcome::Text(text.into()),
             caps: Mutex::default(),
             forbid_reads: false,
+            typed: Vec::new(),
+            fail_typed: false,
         }
     }
 
@@ -39,6 +45,19 @@ impl ClipboardTextSource for FakeTypes {
 
     fn list_types(&self, _location: ReadLocation) -> TypeListing {
         self.listing.clone()
+    }
+
+    fn read_type_bounded(&self, _location: ReadLocation, mime: &str, max_bytes: usize) -> TypeRead {
+        assert!(!self.forbid_reads, "a listing read clipboard content");
+        self.caps.lock().unwrap().push(max_bytes);
+        if self.fail_typed {
+            return TypeRead::Failed;
+        }
+        match self.typed.iter().find(|(name, _)| name == mime) {
+            Some((_, bytes)) if bytes.len() > max_bytes => TypeRead::TooLarge,
+            Some((_, bytes)) => TypeRead::Bytes(bytes.clone()),
+            None => TypeRead::Absent,
+        }
     }
 }
 
@@ -92,17 +111,18 @@ fn listing_only_never_reads_content() {
     assert!(source.caps().is_empty(), "no content was read");
 }
 
-/// Contract: a listing carries at most 16 names of at most 256 bytes, joined with the newline
-/// into at most 4096 bytes; longer names are skipped and later ones dropped.
+/// Contract: a listing carries at most 64 names of at most 256 bytes, joined with the newline
+/// into at most 4096 bytes, so it fits one DATA packet; longer names are skipped and later ones
+/// dropped.
 #[test]
-fn listing_bounded_16_and_4096() {
-    let mut names: Vec<String> = (0..20).map(|index| format!("type/{index}")).collect();
+fn listing_64_names_4096_bytes() {
+    let mut names: Vec<String> = (0..70).map(|index| format!("type/{index}")).collect();
     names.insert(1, "x".repeat(MAX_KITTY_CLIPBOARD_MIME_BYTES + 1));
     let source = FakeTypes { listing: TypeListing::Types(names), ..FakeTypes::holding("") };
     let packets = data_packets(&reply_text(&source, &request("type=read", ".")));
     let listing = String::from_utf8(packets[0].1.clone()).unwrap();
     let kept: Vec<&str> = listing.trim_end().split(' ').collect();
-    assert_eq!(kept, (0..16).map(|index| format!("type/{index}")).collect::<Vec<_>>());
+    assert_eq!(kept, (0..64).map(|index| format!("type/{index}")).collect::<Vec<_>>());
     let wide: Vec<String> = (0..16).map(|index| format!("{index:0>256}")).collect();
     let source = FakeTypes { listing: TypeListing::Types(wide), ..FakeTypes::holding("") };
     let packets = data_packets(&reply_text(&source, &request("type=read", ".")));
@@ -167,7 +187,7 @@ fn seventeenth_type_never_served() {
 }
 
 /// Contract: text served under an alias keeps the requested name, in request order, and a type
-/// SonicTerm cannot read yet is omitted, which the protocol reads as unavailable.
+/// the clipboard does not hold is omitted, which the protocol reads as unavailable.
 #[test]
 fn alias_served_in_order_under_requested_name() {
     let source = FakeTypes::holding("hi");
@@ -262,4 +282,46 @@ fn paste_event_bytes_match_the_reference_layout() {
          \x1b]5522;type=read:status=DATA:mime=Lg==\x1b\\\
          \x1b]5522;type=read:status=DONE\x1b\\"
     );
+}
+
+/// Contract: a non-text type is read through the bounded typed read with the 8 MiB per-type cap
+/// and served byte for byte, in request order beside text; one past the cap is omitted.
+#[test]
+fn read_custom_mime_bounded() {
+    let custom = "application/x-sonicterm-test";
+    let source = FakeTypes {
+        typed: vec![
+            ("text/html".into(), b"<b>h</b>".to_vec()),
+            (custom.into(), b"\x00\xffbin".to_vec()),
+            ("image/png".into(), vec![0; KITTY_READ_TYPE_CAP_BYTES + 1]),
+        ],
+        ..FakeTypes::holding("t")
+    };
+    let types = format!("text/html image/png {custom} text/plain");
+    let packets = data_packets(&reply_text(&source, &request("type=read", &types)));
+    let served: Vec<(&str, &[u8])> =
+        packets.iter().map(|(metadata, payload)| (metadata.as_str(), payload.as_slice())).collect();
+    let mime = |name: &str| format!("type=read:status=DATA:mime={}", b64(name));
+    assert_eq!(
+        served,
+        [
+            (mime("text/html").as_str(), &b"<b>h</b>"[..]),
+            (mime(custom).as_str(), b"\x00\xffbin"),
+            (mime("text/plain").as_str(), b"t"),
+        ]
+    );
+    assert!(
+        source.caps().iter().all(|cap| *cap == KITTY_READ_TYPE_CAP_BYTES),
+        "{:?}",
+        source.caps()
+    );
+}
+
+/// Contract: a typed read whose native call failed answers `EIO` for the whole read, never a
+/// partial or empty one.
+#[test]
+fn typed_read_failure_eio() {
+    let source = FakeTypes { fail_typed: true, ..FakeTypes::holding("t") };
+    let reply = reply_text(&source, &request("type=read:id=f", "text/plain image/png"));
+    assert_eq!(reply, packet("EIO:id=f"));
 }

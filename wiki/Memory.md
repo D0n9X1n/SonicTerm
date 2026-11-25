@@ -229,7 +229,13 @@ closes the owner. No pane carries this class.
 OSC 52, OSC 1337 `Copy=:` and OSC 5522 writes reserve every buffer before allocating it from one
 process-wide clipboard staging budget of `max(128 MiB, 2 × clipboard_write_limit_bytes)` at
 startup: the decoded bytes, the U+FFFD expansion of a non-UTF-8 payload, and the native copy
-(`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere). Each retention pass charges what
+(`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere). An OSC 5522 commit of several types
+reserves, before its job is posted, every kept buffer plus one native copy of each type: on
+Windows the `CF_UNICODETEXT` block (two bytes per UTF-8 byte and a terminator), the CF_HTML block
+with its header and wrapper (and the transient header string), `PNG` and custom blocks at their
+size, and a `CF_HDROP` list at up to four bytes per URI byte (its UTF-16 paths and their decoded
+strings); on macOS each type's `NSData` or URL string at its size. A commit the budget cannot
+cover answers `EBUSY`. Each retention pass charges what
 live leases hold, as `ClipboardStaging`, to the tracking-only process owner, with one item per
 posted program write (at most 8), so a large write never trips a pane backstop. A lease is
 released when the native clipboard call returns; on Linux and Windows that call runs on the
@@ -244,7 +250,8 @@ the largest raw text the read may return (8 MiB, or 4 MiB per destination for `c
 destination's largest reply. Once the replies are built the reservation shrinks to them, and it
 is released when the PTY writer has written them, or when they are dropped. A read the budget
 cannot cover is answered empty. An OSC 5522 read job reserves 21 MiB from the same budget (its
-12 MiB reply, one type's 8 MiB text and the 4 KiB listing), so at most three run at once and a
+12 MiB reply, one type's 8 MiB of text or other bytes and the 4 KiB listing; types are read one
+at a time), so at most three run at once and a
 fourth answers `EBUSY`. The retention pass adds these bytes to the same
 `ClipboardStaging` charge. At most 8 reads hold tickets at once, one per pane; a read whose
 reader is past its deadline keeps its reservation until its native call returns. On macOS the

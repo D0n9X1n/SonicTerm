@@ -774,8 +774,8 @@ the OS can hold and omits the others:
 
 | OS | Holds | Publish |
 | --- | --- | --- |
-| macOS | text as `public.utf8-plain-text`, `text/html` as `public.html`, `image/png` as `public.png`, and any other MIME name as the uniform type `UTType typeWithMIMEType:` gives it: a system type when one exists, else the dynamic `dyn.*` type the system derives. `text/uri-list` is omitted. | One `NSPasteboardItem` carries every type, then `clearContents` and `writeObjects` on the event-loop thread, so the change count moves once. A type that cannot be staged leaves the pasteboard untouched; a refused `writeObjects` answers `EIO`. Text beside other types keeps its bytes exact; text alone is written as before. An offer over 512 KiB is refused `EFBIG`, as other program writes are. |
-| Windows | text only, as `CF_UNICODETEXT` | through the clipboard worker; other types are omitted |
+| macOS | text as `public.utf8-plain-text`, `text/html` as `public.html`, `image/png` as `public.png`, and any other MIME name as the uniform type `UTType typeWithMIMEType:` gives it: a system type when one exists, else the dynamic `dyn.*` type the system derives. A `text/uri-list` whose items are all `file:` URIs is one `public.file-url` item per file; one other absolute URL is `public.url`; a list mixing them, several other URLs, or a line that is not a URI is omitted. | One `NSPasteboardItem` carries every type (and the first file URL), plus one item per further file, then `clearContents` and `writeObjects` on the event-loop thread, so the change count moves once. A type that cannot be staged leaves the pasteboard untouched; a refused `writeObjects` answers `EIO`. Text beside other types keeps its bytes exact; text alone is written as before. An offer over 512 KiB is refused `EFBIG`, as other program writes are. |
+| Windows | text as `CF_UNICODETEXT` (UTF-16; invalid UTF-8 becomes U+FFFD), `text/html` as the registered `HTML Format` (CF_HTML: a `Version:0.9` header whose `StartHTML`, `EndHTML`, `StartFragment` and `EndFragment` are ten-digit byte offsets, the fragment wrapped in `<html><body>` with fragment comments), `image/png` as the registered `PNG` format only (no `CF_DIB` conversion), `text/uri-list` as `CF_HDROP` when every item is a `file:` URI naming a drive or UNC path, and any other MIME name as the format `RegisterClipboardFormatW` registers under that name. Registered names are session-global and never freed, so at most 128 distinct custom names are registered per process; a later new name is omitted. An empty PNG or custom payload is omitted. | On the clipboard worker, never the event loop: every block is allocated and filled before `OpenClipboard` (10 tries, 10 ms apart), then `EmptyClipboard` and one `SetClipboardData` per block in the same session. When any block is refused, the remaining ones are freed and the clipboard is emptied again before `CloseClipboard`, so no program sees part of the offer, and the write answers `EIO`. An allocation failure, or a clipboard another process holds throughout, leaves the previous clipboard and answers `EIO`. |
 | Linux (X11) | text only | through `arboard` on the clipboard worker; other types are omitted. Wayland has no native backend. |
 
 ## Clipboard reads
@@ -790,6 +790,15 @@ the read empty. Each OS bounds the read before the text is copied into SonicTerm
 | macOS | `NSPasteboard` `dataForType(NSPasteboardTypeString)` | 2 s per destination; a value longer than the cap is refused by its length before the copy into Rust. AppKit materializes the whole value before SonicTerm can measure it, as any paste does, so that allocation is not bounded by SonicTerm. |
 | Windows | `OpenClipboard` (10 tries, 10 ms apart), then `GetClipboardData(CF_UNICODETEXT)` | 2 s per destination, which covers delayed rendering; a block whose `GlobalSize` cannot fit the cap is refused before `GlobalLock`, and conversion stops past the cap. |
 | Linux (X11) | `ConvertSelection` of `CLIPBOARD` or `PRIMARY` as `UTF8_STRING` | 2 s for `SelectionNotify`; a text reply must be format 8 of a text type within the cap; an `INCR` transfer is refused from its announced size, and each chunk waits at most 2 s, 5 s in total. With no X server the read is unsupported and answered empty. |
+
+An OSC 5522 read of a type other than text goes through the same native layer, with the 8 MiB
+per-type cap, and a type the clipboard does not hold is omitted:
+
+| OS | Native call | Bound |
+| --- | --- | --- |
+| macOS | `dataForType` of the type the MIME name maps to (`public.html`, `public.png`, or the uniform type of a custom name); `text/uri-list` joins each item's `public.file-url`, else `public.url`, with CRLF, over at most 4096 items | a value longer than the cap is refused by its length before the copy into Rust |
+| Windows | the format found by `EnumClipboardFormats` (at most 64 inspected) under its registered name, so a read never registers a name; `CF_HDROP` for `text/uri-list` | `GlobalSize` decides before `GlobalLock`: a block past the cap is refused (for `CF_HDROP`, past twice the cap). CF_HTML is served as its fragment; `CF_HDROP` as `file:` URIs. A `PNG` or custom block is served at its `GlobalSize`, which may include allocation slack after the data. |
+| Linux (X11) | none yet | non-text types are omitted |
 
 ## Platform matrix
 

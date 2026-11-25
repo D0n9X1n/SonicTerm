@@ -482,12 +482,12 @@ fn worker_loss_answers_eio_on_source_pane() {
 }
 
 /// A clipboard that holds text only.
-fn text_only(format: &NativeFormat) -> bool {
+fn text_only(format: &NativeFormat, _bytes: &[u8]) -> bool {
     *format == NativeFormat::Text
 }
 
 /// A clipboard that holds text and HTML.
-fn text_and_html(format: &NativeFormat) -> bool {
+fn text_and_html(format: &NativeFormat, _bytes: &[u8]) -> bool {
     matches!(format, NativeFormat::Text | NativeFormat::Html)
 }
 
@@ -544,7 +544,9 @@ fn native_copies_reserved_or_ebusy() {
     ];
     let OfferPlan::Offer(offer) = plan(both, &[], &text_and_html) else { panic!("an offer") };
     assert!(budget < offer.reserved_bytes(), "{budget} must not cover the offer");
-    for (holds, posts) in [(text_and_html as fn(&NativeFormat) -> bool, false), (text_only, true)] {
+    for (holds, posts) in
+        [(text_and_html as fn(&NativeFormat, &[u8]) -> bool, false), (text_only, true)]
+    {
         let mut rig = rig_with(budget, 1 << 16, Osc52Policy::Allow);
         rig.tx.set_holds(holds);
         rig.send("type=write:id=b");

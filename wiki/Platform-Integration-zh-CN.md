@@ -581,8 +581,8 @@ OSC 5522 提交（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）发布系�
 
 | 系统 | 保存 | 发布 |
 | --- | --- | --- |
-| macOS | 文本为 `public.utf8-plain-text`，`text/html` 为 `public.html`，`image/png` 为 `public.png`，其他 MIME 名称使用 `UTType typeWithMIMEType:` 给出的统一类型：有系统类型时用系统类型，否则用系统派生的动态 `dyn.*` 类型。`text/uri-list` 被省略。 | 一个 `NSPasteboardItem` 携带所有类型，然后在事件循环线程上调用 `clearContents` 和 `writeObjects`，因此变更计数只增加一次。无法暂存的类型不会改动剪贴板；`writeObjects` 被拒绝时回复 `EIO`。与其他类型并存的文本保持字节不变；只有文本时照旧写入。超过 512 KiB 的提供与其他程序写入一样以 `EFBIG` 拒绝。 |
-| Windows | 只保存文本，格式为 `CF_UNICODETEXT` | 经剪贴板工作线程；其他类型被省略 |
+| macOS | 文本为 `public.utf8-plain-text`，`text/html` 为 `public.html`，`image/png` 为 `public.png`，其他 MIME 名称使用 `UTType typeWithMIMEType:` 给出的统一类型：有系统类型时用系统类型，否则用系统派生的动态 `dyn.*` 类型。所有项都是 `file:` URI 的 `text/uri-list` 为每个文件一个 `public.file-url` 项；单个其他绝对 URL 为 `public.url`；两者混合、多个其他 URL 或含非 URI 行的列表被省略。 | 一个 `NSPasteboardItem` 携带所有类型（以及第一个文件 URL），每个后续文件再各占一项，然后在事件循环线程上调用 `clearContents` 和 `writeObjects`，因此变更计数只增加一次。无法暂存的类型不会改动剪贴板；`writeObjects` 被拒绝时回复 `EIO`。与其他类型并存的文本保持字节不变；只有文本时照旧写入。超过 512 KiB 的提供与其他程序写入一样以 `EFBIG` 拒绝。 |
+| Windows | 文本为 `CF_UNICODETEXT`（UTF-16；无效 UTF-8 变为 U+FFFD），`text/html` 为注册格式 `HTML Format`（CF_HTML：`Version:0.9` 头部，其中 `StartHTML`、`EndHTML`、`StartFragment` 与 `EndFragment` 为十位字节偏移，片段包在带片段注释的 `<html><body>` 中），`image/png` 只用注册格式 `PNG`（不转换为 `CF_DIB`），每项都是指向驱动器或 UNC 路径的 `file:` URI 时 `text/uri-list` 为 `CF_HDROP`，其他 MIME 名称用 `RegisterClipboardFormatW` 以该名称注册的格式。注册名称在会话内全局且永不释放，因此每个进程至多注册 128 个不同的自定义名称；之后的新名称被省略。空的 PNG 或自定义负载被省略。 | 在剪贴板工作线程上执行，绝不在事件循环上：每个数据块都在 `OpenClipboard`（最多 10 次，间隔 10 毫秒）之前分配并填充，然后在同一会话中调用 `EmptyClipboard`，并对每个数据块调用一次 `SetClipboardData`。任何数据块被拒绝时，其余数据块被释放，剪贴板在 `CloseClipboard` 之前再次清空，因此没有程序看到部分提供，写入回复 `EIO`。分配失败，或剪贴板始终被其他进程占用时，保留原剪贴板并回复 `EIO`。 |
 | Linux（X11） | 只保存文本 | 经剪贴板工作线程上的 `arboard`；其他类型被省略。Wayland 没有原生后端。 |
 
 ## 剪贴板读取
@@ -596,6 +596,14 @@ OSC 5522 提交（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）发布系�
 | macOS | `NSPasteboard` 的 `dataForType(NSPasteboardTypeString)` | 每个目标 2 秒；长度超过上限的值在复制进 Rust 之前按长度拒绝。AppKit 会像任何粘贴一样，在 SonicTerm 能测量之前先把整个值实体化，因此这次分配不受 SonicTerm 限制。 |
 | Windows | `OpenClipboard`（最多 10 次，间隔 10 毫秒），然后 `GetClipboardData(CF_UNICODETEXT)` | 每个目标 2 秒，涵盖延迟渲染；`GlobalSize` 表明放不进上限的数据块在 `GlobalLock` 之前即被拒绝，转换超过上限即停止。 |
 | Linux（X11） | 以 `UTF8_STRING` 对 `CLIPBOARD` 或 `PRIMARY` 调用 `ConvertSelection` | 等待 `SelectionNotify` 2 秒；文本应答必须是上限之内、格式为 8 的文本类型；`INCR` 传输按其声明的大小拒绝，每个分块最多等 2 秒，总计 5 秒。没有 X 服务器时读取不受支持，以空应答回复。 |
+
+OSC 5522 读取文本以外的类型时经过同一系统层，每个类型上限 8 MiB；剪贴板没有的类型被省略：
+
+| 系统 | 系统调用 | 上限 |
+| --- | --- | --- |
+| macOS | 对 MIME 名称映射到的类型（`public.html`、`public.png` 或自定义名称的统一类型）调用 `dataForType`；`text/uri-list` 以 CRLF 连接每项的 `public.file-url`（否则 `public.url`），至多检查 4096 项 | 长度超过上限的值在复制进 Rust 之前按长度拒绝 |
+| Windows | 经 `EnumClipboardFormats`（至多检查 64 个）按注册名称找到的格式，因此读取从不注册名称；`text/uri-list` 读取 `CF_HDROP` | `GlobalSize` 在 `GlobalLock` 之前决定：超过上限的数据块被拒绝（`CF_HDROP` 为上限的两倍）。CF_HTML 以其片段提供；`CF_HDROP` 以 `file:` URI 提供。`PNG` 或自定义数据块按其 `GlobalSize` 提供，可能包含数据之后的分配余量。 |
+| Linux（X11） | 暂无 | 非文本类型被省略 |
 
 ## 平台矩阵
 

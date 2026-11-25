@@ -126,7 +126,7 @@ fn native_listing_maps_public_types_only() {
 }
 
 /// Contract: a listing inspects at most `MAX_NATIVE_TYPES_SCANNED` native names and keeps at most
-/// 16 MIME names, so an owner offering thousands of formats cannot make it unbounded.
+/// 64 MIME names, so an owner offering thousands of formats cannot make it unbounded.
 #[test]
 fn native_listing_is_bounded() {
     let inspected = std::cell::Cell::new(0usize);
@@ -137,7 +137,7 @@ fn native_listing_is_bounded() {
     let TypeListing::Types(listing) = list_native_types(names) else {
         panic!("a listing of names");
     };
-    assert_eq!(listing.len(), 16);
+    assert_eq!(listing.len(), 64);
     assert!(inspected.get() <= MAX_NATIVE_TYPES_SCANNED, "{} inspected", inspected.get());
 }
 

@@ -300,7 +300,7 @@ pub(in crate::app) struct KittyClipboardTx {
     pane_id: u64,
     open: Option<OpenWrite>,
     /// Which native formats a commit may publish; the platform's, unless a test narrows it.
-    holds: fn(&NativeFormat) -> bool,
+    holds: fn(&NativeFormat, &[u8]) -> bool,
 }
 
 impl Clone for KittyClipboardTx {
@@ -325,7 +325,7 @@ impl KittyClipboardTx {
 
     /// Publish only the formats `holds` accepts, instead of the platform's.
     #[cfg(test)]
-    pub(in crate::app) fn set_holds(&mut self, holds: fn(&NativeFormat) -> bool) {
+    pub(in crate::app) fn set_holds(&mut self, holds: fn(&NativeFormat, &[u8]) -> bool) {
         self.holds = holds;
     }
 
@@ -565,7 +565,7 @@ impl KittyClipboardTx {
         let OpenWrite { reply, entries, aliases, mut lease, .. } = open;
         let primary = reply.location == KittyClipboardLocation::Primary;
         // PRIMARY holds text only, and exists only on Linux.
-        let text_only: fn(&NativeFormat) -> bool = |format| *format == NativeFormat::Text;
+        let text_only: fn(&NativeFormat, &[u8]) -> bool = |format, _| *format == NativeFormat::Text;
         let holds = if primary { text_only } else { self.holds };
         if primary && !cfg!(target_os = "linux") {
             // When: primary is set off Linux, there is no PRIMARY and the commit is `ENOSYS`.

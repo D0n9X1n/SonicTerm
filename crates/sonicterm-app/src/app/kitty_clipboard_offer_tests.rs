@@ -46,7 +46,7 @@ fn entries(pairs: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
 }
 
 /// The offer `pairs` plan to under `holds`; panics when the plan is not an offer.
-fn offer(pairs: &[(&str, &str)], holds: &dyn Fn(&NativeFormat) -> bool) -> NativeOffer {
+fn offer(pairs: &[(&str, &str)], holds: &dyn Fn(&NativeFormat, &[u8]) -> bool) -> NativeOffer {
     match plan(entries(pairs), &[], holds) {
         OfferPlan::Offer(offer) => offer,
         other => panic!("expected an offer, got {other:?}"),
@@ -87,7 +87,7 @@ fn well_known_and_text_alias_mapping() {
 /// clipboard stays) and the result is a failure, which the commit answers `EIO`.
 #[test]
 fn second_native_format_failure_publishes_nothing_eio() {
-    let offer = offer(&[("text/plain", "t"), ("text/html", "<b>h</b>")], &|_| true);
+    let offer = offer(&[("text/plain", "t"), ("text/html", "<b>h</b>")], &|_, _| true);
     let mut fake = Fake { fail_stage_at: Some(1), ..previous() };
     assert!(!publish_offer(&mut fake, &offer));
     assert_eq!(fake.publishes, 0, "no publish after a staging failure");
@@ -98,7 +98,7 @@ fn second_native_format_failure_publishes_nothing_eio() {
 /// Contract: a staging failure of the first format keeps the previous clipboard as well.
 #[test]
 fn stage_failure_keeps_previous_clipboard() {
-    let offer = offer(&[("image/png", "png")], &|_| true);
+    let offer = offer(&[("image/png", "png")], &|_, _| true);
     let mut fake = Fake { fail_stage_at: Some(0), ..previous() };
     assert!(!publish_offer(&mut fake, &offer));
     assert_eq!((fake.publishes, fake.clipboard.len()), (0, 1));
@@ -107,7 +107,7 @@ fn stage_failure_keeps_previous_clipboard() {
 /// Contract: a failed publish operation is never success, even after every format was staged.
 #[test]
 fn publish_failure_is_never_done() {
-    let offer = offer(&[("text/plain", "t"), ("image/png", "p")], &|_| true);
+    let offer = offer(&[("text/plain", "t"), ("image/png", "p")], &|_, _| true);
     let mut fake = Fake { fail_publish: true, ..previous() };
     assert!(!publish_offer(&mut fake, &offer));
     assert_eq!(fake.publishes, 1);
@@ -118,14 +118,15 @@ fn publish_failure_is_never_done() {
 #[test]
 fn all_omitted_enosys() {
     let pairs = [("image/png", "p"), ("not a mime", "x"), ("application/x-y", "y")];
-    let text_only = |format: &NativeFormat| *format == NativeFormat::Text;
+    let text_only = |format: &NativeFormat, _: &[u8]| *format == NativeFormat::Text;
     assert!(matches!(plan(entries(&pairs), &[], &text_only), OfferPlan::Unavailable));
 }
 
 /// Contract: omitted types are counted, the holdable ones are all published, and that is success.
 #[test]
 fn omitted_plus_published_done() {
-    let holds = |format: &NativeFormat| matches!(format, NativeFormat::Text | NativeFormat::Html);
+    let holds =
+        |format: &NativeFormat, _: &[u8]| matches!(format, NativeFormat::Text | NativeFormat::Html);
     let pairs = [("image/png", "p"), ("text/html", "h"), ("bad", "b"), ("text/plain", "t")];
     let offer = offer(&pairs, &holds);
     assert_eq!(offer.omitted(), 2);
@@ -141,7 +142,7 @@ fn omitted_plus_published_done() {
 fn aliases_resolve_before_mapping_and_first_format_wins() {
     let aliases = [("text/plain".to_owned(), "x/source".to_owned())];
     let pairs = entries(&[("text/html", "h"), ("x/source", "src"), ("text/plain", "late")]);
-    let OfferPlan::Offer(offer) = plan(pairs, &aliases, &|_| true) else { panic!("an offer") };
+    let OfferPlan::Offer(offer) = plan(pairs, &aliases, &|_, _| true) else { panic!("an offer") };
     assert_eq!(offer.text(), Some(&b"src"[..]), "the alias overrode the staged text");
     let formats: Vec<_> = offer.representations().map(|(format, _)| format.clone()).collect();
     let source = NativeFormat::Custom("x/source".to_owned());
@@ -152,7 +153,7 @@ fn aliases_resolve_before_mapping_and_first_format_wins() {
 /// Contract: a commit that staged nothing clears the clipboard.
 #[test]
 fn empty_commit_clears() {
-    assert!(matches!(plan(Vec::new(), &[], &|_| true), OfferPlan::Clear));
+    assert!(matches!(plan(Vec::new(), &[], &|_, _| true), OfferPlan::Clear));
 }
 
 /// Contract: an offer reserves its kept buffers plus one native copy per representation, and a
@@ -160,14 +161,14 @@ fn empty_commit_clears() {
 #[test]
 fn reservation_counts_native_copies_and_text_only() {
     let aliases = [("text/html".to_owned(), "text/plain".to_owned())];
-    let OfferPlan::Offer(shared) = plan(entries(&[("text/plain", "abcd")]), &aliases, &|_| true)
+    let OfferPlan::Offer(shared) = plan(entries(&[("text/plain", "abcd")]), &aliases, &|_, _| true)
     else {
         panic!("an offer")
     };
     assert!(shared.reserved_bytes() >= 4 + 2 * 4, "{}", shared.reserved_bytes());
     assert_eq!(shared.byte_len(), 8, "two representations of four bytes");
     assert!(!shared.is_text_only());
-    let text_only = |format: &NativeFormat| *format == NativeFormat::Text;
+    let text_only = |format: &NativeFormat, _: &[u8]| *format == NativeFormat::Text;
     let text = offer(&[("text/plain", "t"), ("text/html", "h")], &text_only);
     assert!(text.is_text_only());
     assert_eq!(text.into_text(), b"t".to_vec());

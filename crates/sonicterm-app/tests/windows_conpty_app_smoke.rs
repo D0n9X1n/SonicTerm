@@ -6,8 +6,8 @@
 //! expected reply comes from a fresh reference pane fed only that case's output, except the
 //! clipboard reads', the OSC 5522 write's and DECRQM 5522's, which are the literal
 //! [`OSC52_READ_REPLY`], [`KITTY_READ_REPLY`], [`KITTY_WRITE_DONE`] and [`DECRQM_5522_REPLY`]. Every pane settles clipboard writes against a fake clipboard and reads
-//! clipboard text under `osc52_read = "allow"` from one holding [`CLIPBOARD_FIXTURE`], never the
-//! user's clipboard.
+//! clipboard text under `osc52_read = "allow"` from one holding [`CLIPBOARD_FIXTURE`] beside fixed
+//! HTML, PNG and custom-type representations, never the user's clipboard.
 //!
 //! Opt-in: `cargo test --locked -p sonicterm-io -p sonicterm-app --test windows_conpty_protocol_forms
 //! --test windows_conpty_app_smoke -- --ignored --nocapture`.
@@ -55,7 +55,7 @@ const DECRQM_5522: &str = "\x1b[?5522h\x1b[?5522$p";
 const DECRQM_5522_REPLY: &[u8] = b"\x1b[?5522;1$y";
 
 /// An OSC 5522 write of `text/html`, `image/png`, a custom MIME type and `text/plain`; Windows
-/// holds text only, so the other types are omitted and the write is `DONE`.
+/// holds every one, so the commit posts one offer and the write is `DONE`.
 const KITTY_MULTI_WRITE: &[u8] = b"\x1b]5522;type=write:id=multi\x07\
 \x1b]5522;type=wdata:mime=dGV4dC9odG1s;PGI+Zml4dHVyZTwvYj4=\x1b\\\
 \x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;UE5H\x1b\\\
@@ -73,8 +73,12 @@ const KITTY_MULTI_WRITE_CASE: &str = "osc5522-write-multi";
 const KITTY_MULTI_READ: &str = "\x1b]5522;type=read:id=m;\
 dGV4dC9odG1sIGltYWdlL3BuZyBhcHBsaWNhdGlvbi94LXNvbmljdGVybS10ZXN0IHRleHQvcGxhaW4=\x1b\\";
 
-/// The exact reply to [`KITTY_MULTI_READ`]: only the `text/plain` the fake clipboard holds is read.
+/// The exact reply to [`KITTY_MULTI_READ`]: every requested type the fake clipboard holds, in
+/// request order: `text/html`, `image/png`, the custom type and `text/plain`.
 const KITTY_MULTI_READ_REPLY: &[u8] = b"\x1b]5522;type=read:status=OK:id=m\x1b\\\
+\x1b]5522;type=read:status=DATA:id=m:mime=dGV4dC9odG1s;PGI+Zml4dHVyZTwvYj4=\x1b\\\
+\x1b]5522;type=read:status=DATA:id=m:mime=aW1hZ2UvcG5n;UE5H\x1b\\\
+\x1b]5522;type=read:status=DATA:id=m:mime=YXBwbGljYXRpb24veC1zb25pY3Rlcm0tdGVzdA==;Y3VzdG9t\x1b\\\
 \x1b]5522;type=read:status=DATA:id=m:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
 \x1b]5522;type=read:status=DONE:id=m\x1b\\";
 
@@ -117,7 +121,7 @@ impl Engine for AppEngine {
             return KITTY_MULTI_WRITE_DONE.to_vec();
         }
         if case.name == KITTY_MULTI_READ_CASE {
-            // When: the case is the multi-type OSC 5522 read, its text-only reply is pinned.
+            // When: the case is the multi-type OSC 5522 read, its every-type reply is pinned.
             return KITTY_MULTI_READ_REPLY.to_vec();
         }
         if case.name == DECRQM_5522_CASE {

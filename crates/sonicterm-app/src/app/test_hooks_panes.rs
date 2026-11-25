@@ -852,7 +852,9 @@ impl App {
 
 impl App {
     /// Test-only: a [`Self::__test_reply_pane`] whose clipboard reads follow `osc52_read = "allow"`
-    /// against a fake clipboard holding `text`, answered through the production reply builder. It
+    /// against a fake clipboard holding `text` beside fixed `text/html`, `image/png` and
+    /// `application/x-sonicterm-test` representations, answered through the production reply
+    /// builder. It
     /// reserves from a private staging, so the process default's policy is never changed.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
@@ -868,9 +870,19 @@ impl App {
     }
 }
 
-/// A fake clipboard that always holds one text, for reply panes; never the user's clipboard.
+/// A fake clipboard that always holds one text and [`REPLY_PANE_TYPES`], for reply panes; never
+/// the user's clipboard.
 #[cfg(any(test, feature = "test-support"))]
 struct FixedClipboard(String);
+
+/// The non-text representations every reply pane's fake clipboard holds, which the F-ConPTY
+/// multi-type rows read.
+#[cfg(any(test, feature = "test-support"))]
+const REPLY_PANE_TYPES: &[(&str, &[u8])] = &[
+    ("text/html", b"<b>fixture</b>"),
+    ("image/png", b"PNG"),
+    ("application/x-sonicterm-test", b"custom"),
+];
 
 #[cfg(any(test, feature = "test-support"))]
 impl super::osc52_read_source::ClipboardTextSource for FixedClipboard {
@@ -884,6 +896,20 @@ impl super::osc52_read_source::ClipboardTextSource for FixedClipboard {
             return super::osc52_read_source::ReadOutcome::TooLarge;
         }
         super::osc52_read_source::ReadOutcome::Text(self.0.clone())
+    }
+
+    fn read_type_bounded(
+        &self,
+        _location: super::osc52_read_source::ReadLocation,
+        mime: &str,
+        max_bytes: usize,
+    ) -> super::osc52_read_source::TypeRead {
+        use super::osc52_read_source::TypeRead;
+        match REPLY_PANE_TYPES.iter().find(|(name, _)| *name == mime) {
+            Some((_, bytes)) if bytes.len() > max_bytes => TypeRead::TooLarge,
+            Some((_, bytes)) => TypeRead::Bytes(bytes.to_vec()),
+            None => TypeRead::Absent,
+        }
     }
 }
 

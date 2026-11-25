@@ -16,7 +16,7 @@ use sonicterm_vt::vt::{
 
 use super::osc52_read_grants::GrantCredential;
 pub(in crate::app) use super::osc52_read_source::{
-    ClipboardTextSource, ReadLocation, ReadOutcome, TypeListing,
+    ClipboardTextSource, ReadLocation, ReadOutcome, TypeListing, TypeRead,
 };
 
 /// Raw bytes one `DATA` packet carries at most.
@@ -35,7 +35,7 @@ pub(in crate::app) const KITTY_READ_FRAME_CAP_BYTES: usize = 12 * 1024 * 1024;
 pub(in crate::app) const KITTY_LISTING_CAP_BYTES: usize = 4096;
 
 /// Names one listing carries at most.
-const MAX_KITTY_LISTING_NAMES: usize = 16;
+const MAX_KITTY_LISTING_NAMES: usize = 64;
 
 /// What one read job reserves from the reply budget before its first native read: its frame, one
 /// type's raw text and the listing, rounded up, so three jobs fit the 64 MiB budget and a fourth
@@ -157,7 +157,7 @@ fn push_packet(
     out.extend_from_slice(if request.bel { b"\x07" } else { b"\x1b\\" });
 }
 
-/// The listing payload: at most 16 names of at most 256 bytes, space-joined with a newline, at
+/// The listing payload: at most 64 names of at most 256 bytes, space-joined with a newline, at
 /// most [`KITTY_LISTING_CAP_BYTES`]; empty when no name fits.
 fn join_listing(names: Vec<String>) -> String {
     let mut joined = String::new();
@@ -226,27 +226,19 @@ pub(in crate::app) fn build_read_reply(
         push_packet(&mut reply, request, "DATA", Some((".", joined.as_bytes())));
     }
     for mime in &request.types {
-        if !super::kitty_clipboard_tx::is_text(mime) {
-            // When: is_text refuses mime, the type is omitted, which reads as unavailable.
-            // shortcut: only text representations are read; native multi-format reads come later.
-            continue;
-        }
-        let text = match source.read_text_bounded(location, KITTY_READ_TYPE_CAP_BYTES) {
-            ReadOutcome::Text(text) => text,
-            ReadOutcome::Empty | ReadOutcome::TooLarge => {
-                // When: the read is Empty or TooLarge (refused before any copy), the type is omitted.
+        let bytes = match read_one(source, location, mime) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                // When: read_one omitted the type (absent, empty or too large), it is skipped,
+                // which the protocol reads as unavailable.
                 continue;
             }
-            ReadOutcome::Unsupported => {
-                // When: the read is Unsupported, the location cannot be read: `ENOSYS`.
-                return request.status(KittyClipboardStatus::Enosys);
-            }
-            ReadOutcome::Failed => {
-                // When: the native read Failed, the whole read answers `EIO`, not an empty read.
-                return request.status(KittyClipboardStatus::Eio);
+            Err(status) => {
+                // When: read_one gave a status, the native read failed and it ends the whole read.
+                return request.status(status);
             }
         };
-        let chunks = text.as_bytes().chunks(KITTY_READ_CHUNK_BYTES);
+        let chunks = bytes.chunks(KITTY_READ_CHUNK_BYTES);
         let cost: usize =
             chunks.clone().map(|chunk| request.data_len(mime.len(), chunk.len())).sum();
         if reply.len() + cost + done_len > KITTY_READ_FRAME_CAP_BYTES {
@@ -261,6 +253,30 @@ pub(in crate::app) fn build_read_reply(
     }
     push_packet(&mut reply, request, "DONE", None);
     reply
+}
+
+/// One requested type's bytes through `source` with the per-type cap: text through the bounded
+/// text read, any other type through the bounded typed read. `Ok(None)` when it is omitted
+/// (absent, empty or too large); `Err` with the status that ends the whole read.
+fn read_one(
+    source: &dyn ClipboardTextSource,
+    location: ReadLocation,
+    mime: &str,
+) -> Result<Option<Vec<u8>>, KittyClipboardStatus> {
+    if super::kitty_clipboard_tx::is_text(mime) {
+        // When: is_text accepts mime, it is read as text, converted as an OSC 52 read is.
+        return match source.read_text_bounded(location, KITTY_READ_TYPE_CAP_BYTES) {
+            ReadOutcome::Text(text) => Ok(Some(text.into_bytes())),
+            ReadOutcome::Empty | ReadOutcome::TooLarge => Ok(None),
+            ReadOutcome::Unsupported => Err(KittyClipboardStatus::Enosys),
+            ReadOutcome::Failed => Err(KittyClipboardStatus::Eio),
+        };
+    }
+    match source.read_type_bounded(location, mime, KITTY_READ_TYPE_CAP_BYTES) {
+        TypeRead::Bytes(bytes) => Ok(Some(bytes)),
+        TypeRead::Absent | TypeRead::TooLarge => Ok(None),
+        TypeRead::Failed => Err(KittyClipboardStatus::Eio),
+    }
 }
 
 /// The unsolicited paste event DECSET 5522 asks for: OK, the listing `DATA` packet and DONE, ST

@@ -1,0 +1,317 @@
+use super::super::{plan, publish_offer, NativeOffer, OfferPlan};
+use super::*;
+use std::collections::HashMap;
+
+/// A fake Win32 clipboard: registered names, the blocks SonicTerm still owns, what the clipboard
+/// holds, and the calls one publish made; it fails the chosen allocation or `SetClipboardData`.
+#[derive(Default)]
+struct FakeWin32 {
+    registered: Vec<String>,
+    live: HashMap<u64, Vec<u8>>,
+    next_block: u64,
+    clipboard: Vec<(u32, Vec<u8>)>,
+    opens: usize,
+    empties: usize,
+    closes: usize,
+    is_open: bool,
+    refuse_open: bool,
+    allocs: usize,
+    fail_alloc_at: Option<usize>,
+    sets: usize,
+    fail_set_at: Option<usize>,
+}
+
+impl Win32Clipboard for FakeWin32 {
+    type Block = u64;
+
+    fn register(&mut self, name: &str) -> Option<u32> {
+        let index = match self.registered.iter().position(|known| known.eq_ignore_ascii_case(name))
+        {
+            Some(index) => index,
+            None => {
+                self.registered.push(name.to_owned());
+                self.registered.len() - 1
+            }
+        };
+        Some(0xC000 + u32::try_from(index).unwrap())
+    }
+
+    fn alloc(&mut self, byte_len: usize, fill: &dyn Fn(&mut [u8])) -> Option<u64> {
+        let call = self.allocs;
+        self.allocs += 1;
+        if self.fail_alloc_at == Some(call) {
+            return None;
+        }
+        // A sentinel, so a fill that skips a byte shows.
+        let mut bytes = vec![0xAA; byte_len];
+        fill(&mut bytes);
+        self.next_block += 1;
+        self.live.insert(self.next_block, bytes);
+        Some(self.next_block)
+    }
+
+    fn free(&mut self, block: u64) {
+        assert!(self.live.remove(&block).is_some(), "a block is freed once, only while owned");
+    }
+
+    fn open(&mut self) -> bool {
+        if self.refuse_open {
+            return false;
+        }
+        self.opens += 1;
+        self.is_open = true;
+        true
+    }
+
+    fn empty(&mut self) -> bool {
+        assert!(self.is_open, "EmptyClipboard only while open");
+        self.empties += 1;
+        self.clipboard.clear();
+        true
+    }
+
+    fn set(&mut self, format: u32, block: u64) -> Result<(), u64> {
+        assert!(self.is_open, "SetClipboardData only while open");
+        let call = self.sets;
+        self.sets += 1;
+        if self.fail_set_at == Some(call) {
+            return Err(block);
+        }
+        let bytes = self.live.remove(&block).expect("a live block");
+        self.clipboard.push((format, bytes));
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        assert!(self.is_open, "CloseClipboard only while open");
+        self.closes += 1;
+        self.is_open = false;
+    }
+}
+
+/// A fake whose clipboard holds one previous text.
+fn previous() -> FakeWin32 {
+    FakeWin32 { clipboard: vec![(CF_UNICODETEXT, b"o\0\0\0".to_vec())], ..FakeWin32::default() }
+}
+
+/// The offer `pairs` plan to when every format is held.
+fn offer(pairs: &[(&str, &[u8])]) -> NativeOffer {
+    let entries = pairs.iter().map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec())).collect();
+    match plan(entries, &[], &|_, _| true) {
+        OfferPlan::Offer(offer) => offer,
+        other => panic!("expected an offer, got {other:?}"),
+    }
+}
+
+/// `text` as `CF_UNICODETEXT` bytes: UTF-16LE and a terminator.
+fn utf16_block(text: &str) -> Vec<u8> {
+    text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
+}
+
+/// The native block `format` gives `bytes`.
+fn block(format: &NativeFormat, bytes: &[u8]) -> Vec<u8> {
+    let data = encode(format, bytes).expect("an encodable representation");
+    let mut out = vec![0xAA; data.byte_len()];
+    data.fill(&mut out);
+    out
+}
+
+/// Contract: when `SetClipboardData` fails for the second format, the open clipboard is emptied
+/// again before it closes, every block SonicTerm still owns is freed, and the publish is a
+/// failure (`EIO`), never success, so no other process sees a partial offer.
+#[test]
+fn set_clipboard_data_failure_empties_and_eio_never_done() {
+    let offer = offer(&[("text/plain", b"t"), ("text/html", b"<b>h</b>"), ("image/png", b"png")]);
+    let mut backend = WindowsOffer::new(FakeWin32 { fail_set_at: Some(1), ..previous() });
+    assert!(!publish_offer(&mut backend, &offer));
+    let fake = &backend.clipboard;
+    assert!(fake.clipboard.is_empty(), "the first format was emptied again");
+    assert_eq!((fake.opens, fake.empties, fake.closes), (1, 2, 1));
+    assert!(fake.live.is_empty(), "every block SonicTerm owned was freed");
+    assert!(backend.staged.is_empty());
+}
+
+/// Contract: one publish opens the clipboard once, empties it once and sets every staged format
+/// in the commit's order: `CF_UNICODETEXT`, the registered `HTML Format` and `PNG`, a format
+/// registered under the custom MIME name, and `CF_HDROP`; the clipboard then owns every block.
+#[test]
+fn windows_publish_every_format_in_one_session() {
+    let custom = "application/x-sonicterm-test";
+    let offer = offer(&[
+        ("text/plain", "h\u{e9}llo".as_bytes()),
+        ("text/html", b"<b>h</b>"),
+        ("image/png", b"\x89PNG"),
+        (custom, b"custom"),
+        ("text/uri-list", b"file:///C:/a%20b.txt\r\n"),
+    ]);
+    let mut backend = WindowsOffer::new(previous());
+    assert!(publish_offer(&mut backend, &offer));
+    let fake = &backend.clipboard;
+    assert_eq!((fake.opens, fake.empties, fake.closes), (1, 1, 1));
+    assert_eq!(fake.registered, [HTML_FORMAT_NAME, PNG_FORMAT_NAME, custom]);
+    let formats: Vec<u32> = fake.clipboard.iter().map(|(format, _)| *format).collect();
+    assert_eq!(formats, [CF_UNICODETEXT, 0xC000, 0xC001, 0xC002, CF_HDROP]);
+    assert_eq!(fake.clipboard[0].1, utf16_block("h\u{e9}llo"));
+    assert_eq!(fake.clipboard[2].1, b"\x89PNG");
+    assert!(fake.live.is_empty(), "the clipboard owns every block");
+}
+
+/// Contract: a custom MIME type is published under the format `RegisterClipboardFormatW` gives its
+/// own name, with its bytes exactly as staged.
+#[test]
+fn windows_registered_custom_mime_round_trip() {
+    let custom = "application/vnd.sonicterm+json";
+    let mut backend = WindowsOffer::new(previous());
+    assert!(publish_offer(&mut backend, &offer(&[(custom, b"{\"a\":1}")])));
+    assert_eq!(backend.clipboard.registered, [custom]);
+    assert_eq!(backend.clipboard.clipboard, [(0xC000, b"{\"a\":1}".to_vec())]);
+}
+
+/// Contract: a staging failure (an allocation) never opens the clipboard: the previous value stays
+/// and every block already staged is freed; a clipboard another process holds fails the same way.
+#[test]
+fn stage_or_open_failure_keeps_previous_clipboard() {
+    let offer = offer(&[("text/plain", b"t"), ("text/html", b"h")]);
+    let mut backend = WindowsOffer::new(FakeWin32 { fail_alloc_at: Some(1), ..previous() });
+    assert!(!publish_offer(&mut backend, &offer));
+    assert_eq!(backend.clipboard.opens, 0);
+    assert!(backend.clipboard.live.is_empty());
+    assert_eq!(backend.clipboard.clipboard, previous().clipboard);
+    let mut backend = WindowsOffer::new(FakeWin32 { refuse_open: true, ..previous() });
+    assert!(!publish_offer(&mut backend, &offer));
+    assert!(backend.clipboard.live.is_empty());
+    assert_eq!(backend.clipboard.clipboard, previous().clipboard);
+}
+
+/// Contract: registered names are session-global and never freed, so at most 128 distinct custom
+/// names are admitted per process; a later new name is omitted at preflight, a known name (case
+/// insensitively, as Windows matches them) stays admitted, and an empty custom payload is omitted.
+#[test]
+fn registration_and_atom_caps_omit_extra_names() {
+    let names = CustomNames::new();
+    for index in 0..MAX_CUSTOM_FORMAT_NAMES {
+        assert!(names.admit(&format!("application/x-{index}")), "{index}");
+    }
+    assert!(!names.admit("application/x-extra"), "past the cap");
+    assert!(names.admit("APPLICATION/X-0"), "a known name");
+    let extra = NativeFormat::Custom("application/x-extra".to_owned());
+    assert!(!holds_with(&names, &extra, b"x"));
+    let known = NativeFormat::Custom("application/x-1".to_owned());
+    assert!(holds_with(&names, &known, b"x"));
+    assert!(!holds_with(&names, &known, b""), "an empty custom payload");
+    assert!(!holds_with(&names, &NativeFormat::Png, b""), "an empty PNG");
+    assert!(holds_with(&names, &NativeFormat::Text, b""), "text, even empty, has a terminator");
+}
+
+/// Contract: CF_HTML carries the five-line header with ten-digit byte offsets: `StartHTML` right
+/// after the header, `StartFragment`/`EndFragment` exactly around the fragment (counted in bytes,
+/// so non-ASCII text shifts them), `EndHTML` before the terminating NUL; a read strips the block
+/// back to the fragment, and a header with missing or out-of-range offsets has none.
+#[test]
+fn windows_cf_html_offsets_round_trip() {
+    let fragment = "<b>h\u{e9}</b>".as_bytes();
+    let html = block(&NativeFormat::Html, fragment);
+    let header = "Version:0.9\r\nStartHTML:0000000105\r\nEndHTML:0000000187\r\n\
+                  StartFragment:0000000141\r\nEndFragment:0000000151\r\n";
+    assert_eq!(&html[..105], header.as_bytes());
+    assert_eq!(&html[105..141], b"<html>\r\n<body>\r\n<!--StartFragment-->");
+    assert_eq!(&html[141..151], fragment);
+    assert_eq!(&html[151..187], b"<!--EndFragment-->\r\n</body>\r\n</html>");
+    assert_eq!(html.len(), 188, "a terminating NUL");
+    assert_eq!(html[187], 0);
+    assert_eq!(html_fragment(&html), Some(fragment));
+    let foreign = b"Version:1.0\r\nStartFragment:50\r\nEndFragment:52\r\n<x>hi</x>";
+    assert_eq!(html_fragment(foreign), Some(&b"hi"[..]), "unpadded offsets from another program");
+    assert_eq!(html_fragment(b"Version:0.9\r\nStartFragment:0000000090\r\n<p>"), None);
+    let past = b"Version:0.9\r\nStartFragment:0000000010\r\nEndFragment:0000009999\r\n<p>";
+    assert_eq!(html_fragment(past), None);
+}
+
+/// Contract: `text/uri-list` is `CF_HDROP` only when every item is a `file:` URI with a Windows
+/// path: a DROPFILES header (`pFiles` 20, `fWide` 1), each path NUL-terminated as UTF-16, and a
+/// final NUL. A read turns a `CF_HDROP` back into `file:` URIs within the cap; a malformed or
+/// ANSI list reads as absent.
+#[test]
+fn windows_hdrop_file_uris_only() {
+    let list = b"file:///C:/a%20b.txt\r\n# a comment\r\nfile://server/share/x\r\n";
+    let paths = uri_list_windows_paths(list).expect("every item is a file path");
+    assert_eq!(paths, ["C:\\a b.txt", "\\\\server\\share\\x"]);
+    let names = CustomNames::new();
+    for refused in [&b"file:///C:/a\r\nhttps://example.com/\r\n"[..], b"# only a comment\r\n", b""]
+    {
+        assert_eq!(uri_list_windows_paths(refused), None, "{refused:?}");
+        assert!(!holds_with(&names, &NativeFormat::UriList, refused));
+    }
+    let hdrop = block(&NativeFormat::UriList, list);
+    assert_eq!(&hdrop[..4], &20u32.to_le_bytes());
+    assert_eq!(&hdrop[4..16], &[0; 12], "pt and fNC");
+    assert_eq!(&hdrop[16..20], &1u32.to_le_bytes(), "fWide");
+    let units: Vec<u8> =
+        "C:\\a b.txt\0\\\\server\\share\\x\0\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    assert_eq!(&hdrop[20..], units.as_slice());
+    let uris = b"file:///C:/a%20b.txt\r\nfile://server/share/x\r\n".to_vec();
+    assert_eq!(hdrop_uri_list(&hdrop, 1 << 20), TypeRead::Bytes(uris));
+    assert_eq!(hdrop_uri_list(&hdrop, 10), TypeRead::TooLarge);
+    assert_eq!(hdrop_uri_list(&hdrop[..10], 1 << 20), TypeRead::Absent, "a short header");
+    let mut ansi = hdrop.clone();
+    ansi[16] = 0;
+    assert_eq!(hdrop_uri_list(&ansi, 1 << 20), TypeRead::Absent, "an ANSI list");
+    let mut past = hdrop;
+    past[..4].copy_from_slice(&999u32.to_le_bytes());
+    assert_eq!(hdrop_uri_list(&past, 1 << 20), TypeRead::Absent, "pFiles past the block");
+}
+
+/// Contract: a `file:` URI maps to a Windows path only when it names a drive (empty or
+/// `localhost` host) or a UNC share (another host), percent-decoded to UTF-8 with no controls and
+/// no query or fragment; a path maps back to a percent-encoded `file:` URI.
+#[test]
+fn windows_file_uri_paths() {
+    for (uri, path) in [
+        ("file:///C:/a%20b.txt", Some("C:\\a b.txt")),
+        ("FILE://localhost/D:/x/y", Some("D:\\x\\y")),
+        ("file://server/share/dir", Some("\\\\server\\share\\dir")),
+        ("file:///C:/%E2%82%AC", Some("C:\\\u{20ac}")),
+        ("file:///home/user", None),
+        ("file:///C:/x?y", None),
+        ("file:///C:/x#y", None),
+        ("file:///C:/%00", None),
+        ("file:///C:/%zz", None),
+        ("file:///C:/%+1", None),
+        ("file:///C:/%ff", None),
+        ("file://C:/x", None),
+        ("file://server", None),
+        ("https://example.com/C:/x", None),
+    ] {
+        assert_eq!(file_uri_windows_path(uri).as_deref(), path, "{uri}");
+    }
+    for (path, uri) in [
+        ("C:\\a b.txt", Some("file:///C:/a%20b.txt")),
+        ("\\\\server\\share\\x", Some("file://server/share/x")),
+        ("C:\\\u{20ac}", Some("file:///C:/%E2%82%AC")),
+        ("relative\\x", None),
+    ] {
+        assert_eq!(windows_path_file_uri(path).as_deref(), uri, "{path}");
+    }
+}
+
+/// Contract: text converts to UTF-16 with each invalid UTF-8 sequence as one U+FFFD and a
+/// terminator, and every native block fits the copy reserved for it before it is posted.
+#[test]
+fn native_copies_fit_their_reservation() {
+    assert_eq!(block(&NativeFormat::Text, b"a\xffb"), utf16_block("a\u{fffd}b"));
+    let custom = NativeFormat::Custom("application/x-y".to_owned());
+    for (format, bytes) in [
+        (NativeFormat::Text, &b""[..]),
+        (NativeFormat::Text, b"\xff\xfe\xfd"),
+        (NativeFormat::Text, "\u{1f600}".as_bytes()),
+        (NativeFormat::Html, b""),
+        (NativeFormat::Html, b"<b>x</b>"),
+        (NativeFormat::Png, b"\x89PNG"),
+        (custom, b"c"),
+        (NativeFormat::UriList, b"file:///C:/%F0%9F%98%80\r\n"),
+        (NativeFormat::UriList, b"file:///C:/a\r\nfile:///D:/b"),
+    ] {
+        let native = encode(&format, bytes).expect("encodable").byte_len();
+        assert!(native <= copy_bound(&format, bytes.len()), "{format:?} {bytes:?}: {native}");
+    }
+}
