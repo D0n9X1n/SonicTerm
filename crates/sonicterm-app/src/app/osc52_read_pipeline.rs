@@ -103,6 +103,9 @@ pub(in crate::app) struct ClipboardReads {
     done_rx: Receiver<ReaderDone>,
     /// The clock consumed paste grants' ends are checked against; tests move it.
     pub(in crate::app) grant_clock: GrantClock,
+    /// Test-only: refuse to start the reader, running the callback at that moment.
+    #[cfg(test)]
+    pub(in crate::app) fail_spawn: Option<Box<dyn Fn()>>,
     /// Why the last ticket or reply was revoked, for diagnostics.
     pub(in crate::app) last_cancel: Option<CancelReason>,
     /// The Always and Ban answers OSC 5522 programs named themselves for.
@@ -132,6 +135,8 @@ impl Default for ClipboardReads {
             done_tx,
             done_rx,
             grant_clock: GrantClock::default(),
+            #[cfg(test)]
+            fail_spawn: None,
             last_cancel: None,
             grants: SessionGrants::default(),
             paste_grants: super::osc52_read_grants::PasteGrants::default(),
@@ -415,7 +420,7 @@ impl super::App {
 
     /// Run the read pipeline at `now`: purge stale grants, retry contended replies first, so a reply contended this
     /// turn waits for the next, then settle the reader, sweep tickets and the consent page,
-    /// show the next page and start the next read.
+    /// start the next read, then show the next page.
     pub(in crate::app) fn pump_clipboard_reads_at(&mut self, now: Instant) {
         self.purge_grants(now);
         self.pump_paste_capture(now);
@@ -423,8 +428,10 @@ impl super::App {
         self.settle_reader(now);
         self.sweep_read_tickets(now);
         self.sweep_consent_page(now);
-        self.present_consent_page();
         self.start_reader(now);
+        // Presented last, so a ticket any step above returned to `waiting`, starting the reader
+        // included, gets its page this turn rather than at some later event.
+        self.present_consent_page();
     }
 
     /// Deliver a finished read, drop a late one, and answer a read past its deadline empty.
@@ -619,9 +626,15 @@ impl super::App {
         // The grant's end travels with the read, so the reader checks it against the clock.
         let expires_at = ticket.paste_approval().map(|paste| paste.expires_at);
         let clock = self.clip_state.reads.grant_clock.clone();
+        // The ticket and lease reach the reader only once it started, so a reader that cannot
+        // start leaves both here, to be answered through their custody.
+        let (handoff_tx, handoff_rx) = crossbeam_channel::bounded::<(ConsentTicket, ClipLease)>(1);
         let spawned =
             std::thread::Builder::new().name("sonicterm-clipboard-read".into()).spawn(move || {
-                let mut lease = lease;
+                let Ok((ticket, mut lease)) = handoff_rx.recv() else {
+                    // When: recv finds the handoff dropped, the start was refused; nothing to read.
+                    return;
+                };
                 let read = || {
                     let clock = clock.clone();
                     let bound = GrantBoundSource { source: source.as_ref(), expires_at, clock };
@@ -656,19 +669,41 @@ impl super::App {
                     let _ = proxy.send_event(UserEvent::ClipboardDone);
                 }
             });
+        #[cfg(test)]
+        let spawned = self.refused_spawn_for_test(spawned);
         match spawned {
             Ok(_) => {
-                // The thread is detached; its result arrives through done_rx.
+                // When: spawned is Ok, the detached thread waits for its ticket; its result
+                // arrives through done_rx.
+                let _ = handoff_tx.send((ticket, lease));
                 self.clip_state.reads.in_flight =
                     Some(InFlight { binding, failure, deadline, abandoned: false, busy });
             }
             Err(error) => {
-                // The thread did not start; the dropped closure already freed the ticket and lease.
+                // The reader never started and the ticket never left, so the failure is answered
+                // through its custody; a read whose paste approval ended asks again.
                 tracing::warn!("OSC 52 clipboard reader could not start: {error}");
-                let reply = SensitiveReply::new(failure, Box::new(()));
+                drop(lease);
+                let custody = ReadCustody { ticket, lease: None };
+                let reply = SensitiveReply::new(failure, Box::new(custody));
                 self.deliver_read_reply(binding, reply, now, true, 0, busy);
             }
         }
+    }
+
+    /// Test-only: `spawned`, or a refused start when a test set `fail_spawn`, whose callback runs
+    /// at that moment.
+    #[cfg(test)]
+    fn refused_spawn_for_test(
+        &self,
+        spawned: std::io::Result<std::thread::JoinHandle<()>>,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        let Some(fail) = self.clip_state.reads.fail_spawn.as_ref() else {
+            // When: fail_spawn is None, the start stands.
+            return spawned;
+        };
+        fail();
+        spawned.and_then(|_| Err(std::io::Error::other("reader start refused by a test")))
     }
 
     /// Retry each reply whose writer admission was contended last turn.

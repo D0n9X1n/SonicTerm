@@ -144,3 +144,21 @@ fn reply_refused_as_expired_at_admission_returns_to_consent() {
     assert!(deadlines[0].is_some(), "the reply carries its grant's end");
     assert_eq!(harness.waiting(), 1, "the read asks again");
 }
+
+/// Contract: a read whose reader cannot start, and whose grant ended by then, returns its ticket to
+/// `waiting` through its custody, and its consent page opens in that same pump turn, without
+/// waiting for an unrelated event.
+#[test]
+fn ticket_requeued_when_its_reader_cannot_start_is_presented_at_once() {
+    let (mut harness, pane, password) = granted();
+    let main = harness.app.registry.main_window_id.expect("a main window");
+    harness.app.registry.frontmost_window = Some(main);
+    let clock = harness.app.clip_state.reads.grant_clock.clone();
+    harness.app.clip_state.reads.fail_spawn = Some(Box::new(move || {
+        // The grant ends while the reader is starting.
+        clock.advance(PASTE_GRANT_LIFETIME + Duration::from_secs(1));
+    }));
+    harness.follow_up(pane, "Paste event", &password);
+    assert!(!harness.served(pane));
+    assert!(harness.app.clip_state.reads.presented.is_some(), "the page opens in the same turn");
+}
