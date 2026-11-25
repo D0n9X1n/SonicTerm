@@ -125,3 +125,24 @@ fn abandoned_read_past_its_grant_is_answered_once() {
     assert_eq!(answers, 1, "the deadline answer goes out once");
     assert!(!harness.served(pane), "no clipboard data");
 }
+
+/// Contract: a paste-approved reply carries its grant's end to the PTY writer, which checks it under
+/// its admission lock immediately before queuing; a reply the writer refuses there as expired is
+/// not lost and not retried as busy: its data is dropped and the read asks again.
+#[test]
+fn reply_refused_as_expired_at_admission_returns_to_consent() {
+    let (mut harness, pane, password) = granted(Duration::from_secs(30));
+    let deadlines = Arc::new(Mutex::new(Vec::new()));
+    let seen = deadlines.clone();
+    harness.app.clip_state.reads.port = Some(Box::new(move |_pane, reply: SensitiveReply| {
+        seen.lock().unwrap().push(reply.valid_until());
+        // The writer finds the grant's end passed at its admission instant.
+        Err(SensitiveReplyError::Expired(reply))
+    }));
+    harness.follow_up(pane, "Paste event", &password);
+    harness.pump_until_reader_idle();
+    let deadlines = deadlines.lock().unwrap().clone();
+    assert_eq!(deadlines.len(), 1, "one admission attempt, no busy status after it");
+    assert!(deadlines[0].is_some(), "the reply carries its grant's end");
+    assert_eq!(harness.waiting(), 1, "the read asks again");
+}

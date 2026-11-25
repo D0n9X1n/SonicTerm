@@ -27,13 +27,29 @@ pub(crate) fn sensitive_reply_channel() -> (Sender<SensitiveReply>, Receiver<Sen
 pub struct SensitiveReply {
     bytes: Vec<u8>,
     custody: Box<dyn std::any::Any + Send>,
+    /// When the authority to send these bytes ends; the writer refuses the reply at or past it.
+    valid_until: Option<std::time::Instant>,
 }
 
 impl SensitiveReply {
     /// A reply of `bytes` whose `custody` the writer drops after writing or discarding them.
     #[must_use]
     pub fn new(bytes: Vec<u8>, custody: Box<dyn std::any::Any + Send>) -> Self {
-        Self { bytes, custody }
+        Self { bytes, custody, valid_until: None }
+    }
+
+    /// This reply, refused as [`SensitiveReplyError::Expired`] if it reaches admission at or past
+    /// `until`, as a reply carrying a one-time grant's data must.
+    #[must_use]
+    pub fn with_valid_until(mut self, until: std::time::Instant) -> Self {
+        self.valid_until = Some(until);
+        self
+    }
+
+    /// When the authority to send this reply ends, if it does.
+    #[must_use]
+    pub fn valid_until(&self) -> Option<std::time::Instant> {
+        self.valid_until
     }
 
     /// The reply's length in bytes.
@@ -78,10 +94,13 @@ pub enum SensitiveReplyError {
     Full(SensitiveReply),
     /// The writer stopped; nothing will be written.
     WriterStopped(SensitiveReply),
+    /// The reply's `valid_until` passed by its admission instant; nothing was queued.
+    Expired(SensitiveReply),
 }
 
 /// Queue `reply` on `slot` without waiting: refused past the message cap, when the admission lock
-/// is taken, once the writer recorded its end, or when the slot is full. Under the admission lock,
+/// is taken, once the writer recorded its end, at or past the reply's `valid_until`, or when the
+/// slot is full. Under the admission lock,
 /// so no reply is admitted after `record_terminal`, and `input_seen` is never touched.
 // Ordering: terminal loads Acquire under the admission lock, pairing with record_terminal's store.
 pub(super) fn try_admit_sensitive(
@@ -100,6 +119,11 @@ pub(super) fn try_admit_sensitive(
     if progress.terminal.load(Ordering::Acquire) != TERMINAL_RUNNING {
         // When: terminal is recorded, the writer ended and would never write the reply.
         return Err(SensitiveReplyError::WriterStopped(reply));
+    }
+    if reply.valid_until.is_some_and(|until| std::time::Instant::now() >= until) {
+        // When: valid_until passed by this admission instant, the reply's authority ended under
+        // the lock, immediately before queuing: it is refused unqueued, with its custody.
+        return Err(SensitiveReplyError::Expired(reply));
     }
     slot.try_send(reply).map_err(|error| match error {
         crossbeam_channel::TrySendError::Full(reply) => SensitiveReplyError::Full(reply),

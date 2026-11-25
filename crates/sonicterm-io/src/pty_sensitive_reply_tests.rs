@@ -135,6 +135,29 @@ fn reply_bytes_freed_before_custody_released() {
     }
 }
 
+/// Contract: a reply's `valid_until` is checked under the admission lock immediately before it is
+/// queued: one already past it comes back `Expired` with its custody and nothing is queued, so no
+/// window between the caller's own check and admission can let it through; one still in time is
+/// admitted.
+#[test]
+fn expired_reply_is_refused_at_admission() {
+    let (sender, _rx) = diagnostic_input_channel();
+    let (_replies, reader) = reply_spool();
+    let sensitive = reader.sensitive_sender();
+    let marker = Arc::new(());
+    let past = Instant::now().checked_sub(Duration::from_millis(1)).expect("a past instant");
+    let expired = reply(b"secret", &marker).with_valid_until(past);
+    let refused = try_admit_sensitive(&sender.writer_progress, &sensitive, expired);
+    let Err(SensitiveReplyError::Expired(returned)) = refused else {
+        panic!("an expired reply is refused at admission");
+    };
+    assert_eq!(Arc::strong_count(&marker), 2, "its custody comes back with it");
+    drop(returned);
+    assert!(reader.sensitive.try_recv().is_err(), "nothing was queued");
+    let live = reply(b"secret", &marker).with_valid_until(Instant::now() + Duration::from_secs(60));
+    assert!(try_admit_sensitive(&sender.writer_progress, &sensitive, live).is_ok());
+}
+
 /// Contract: admission never waits for the admission lock; a contended lock hands the reply back
 /// whole, custody included, so the caller retries on a later turn.
 #[test]

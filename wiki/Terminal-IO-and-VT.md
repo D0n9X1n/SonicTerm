@@ -554,7 +554,8 @@ password and a nonempty `name` consumes the grant atomically on the event loop. 
 without a page only while the recipient is unchanged and within 60 s; otherwise it takes normal
 consent. The approval keeps the grant's 60 s end and checks it against the clock where the read
 touches the clipboard or the PTY: the reader thread before each native content call and after
-its offer-version check, and writer admission for the reply, retries included. A read whose
+its offer-version check, and the PTY writer, which checks it under its admission lock
+immediately before it queues the reply, retries included. A read whose
 grant ends first makes no further native call, its data is dropped, and it waits for an
 ordinary answer instead; this holds for a read whose result arrives after its deadline too. A
 read already answered at its deadline keeps that answer: it is a status with no clipboard data,

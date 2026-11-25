@@ -689,24 +689,30 @@ impl super::App {
             tracing::debug!(pane_id, bytes, ?reason, "OSC 52 read reply revoked");
             self.clip_state.reads.last_cancel = Some(reason);
             if reason == CancelReason::PasteRevoked {
-                // Only the paste approval ended. A reply holding a ticket drops its stale bytes and
-                // the ticket asks again; one holding none is a deadline status with no clipboard
-                // data, which needs no grant, so it is answered under the rest of its binding.
-                if let Some(status) = self.requeue_revoked(reply) {
-                    let mut binding = binding;
-                    binding.paste = None;
-                    self.deliver_read_reply(binding, status, now, check_age, attempts_before, busy);
-                }
+                // Only the paste approval ended.
+                self.answer_revoked(binding, reply, now, check_age, attempts_before, busy);
             }
             return;
         }
         let attempts = attempts_before + 1;
+        let mut reply = reply;
+        if let Some(paste) = binding.paste.as_deref() {
+            // A paste-approved reply carries its grant's end to the PTY writer, which checks it
+            // under its admission lock, so no delay after the check above can send it late.
+            reply = reply.with_valid_until(paste.expires_at);
+        }
         match self.send_read_reply(pane_id, reply) {
             Ok(()) => tracing::debug!(pane_id, bytes, "OSC 52 read answered"),
             Err(SensitiveReplyError::Contended(reply)) if attempts <= MAX_DELIVERY_RETRIES => {
                 // The admission lock was busy and retries remain, so it waits a turn.
                 let retry = Retry { binding, reply, attempts, check_age, busy };
                 self.clip_state.reads.retries.push(retry);
+            }
+            Err(SensitiveReplyError::Expired(reply)) => {
+                // The writer found the grant's end passed at its admission instant.
+                tracing::debug!(pane_id, bytes, "OSC 52 read reply expired at admission");
+                self.clip_state.reads.last_cancel = Some(CancelReason::PasteRevoked);
+                self.answer_revoked(binding, reply, now, check_age, attempts_before, busy);
             }
             Err(error) => {
                 tracing::debug!(pane_id, bytes, ?error, "OSC 52 read reply dropped");
@@ -724,6 +730,25 @@ impl super::App {
                     );
                 }
             }
+        }
+    }
+
+    /// Handle `reply` after its paste approval ended: a reply holding a ticket drops its stale
+    /// bytes and the ticket asks again; one holding none is a deadline status with no clipboard
+    /// data, which needs no grant, so it is answered under the rest of `binding`.
+    fn answer_revoked(
+        &mut self,
+        binding: ReadBinding,
+        reply: SensitiveReply,
+        now: Instant,
+        check_age: bool,
+        attempts_before: u32,
+        busy: Option<Vec<u8>>,
+    ) {
+        if let Some(status) = self.requeue_revoked(reply) {
+            let mut binding = binding;
+            binding.paste = None;
+            self.deliver_read_reply(binding, status, now, check_age, attempts_before, busy);
         }
     }
 

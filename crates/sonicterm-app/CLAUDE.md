@@ -218,7 +218,9 @@ cargo build -p sonicterm-app
   grant's `expires_at` (its 60 s end); the reader thread reads through `GrantBoundSource`, which
   checks `expires_at` against the clock before each native content call, and checks it again after
   its offer-version read; `deliver_read_reply` revalidates at `now.max(Instant::now())`, retries
-  included. A reply refused as `PasteRevoked` returns its ticket from its typed `ReadCustody` to
+  included, and gives a paste-approved reply the grant's end as `SensitiveReply::valid_until`,
+  which `try_admit_sensitive` checks under the admission lock immediately before queuing; an
+  `Expired` refusal is handled as `PasteRevoked` (`answer_revoked`). A reply refused as `PasteRevoked` returns its ticket from its typed `ReadCustody` to
   `waiting`; a changed offer drops the data the same way. A reply with no ticket is a deadline
   status with no data (`requeue_revoked` hands it back), sent without the grant: an abandoned
   reader still gets its deadline answer once. Only replies carrying data hold a ticket.
