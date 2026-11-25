@@ -332,6 +332,49 @@ fn a_small_type_after_a_large_one_is_served_within_the_reservation() {
     assert!(peak <= KITTY_READ_RESERVATION_BYTES, "peak {peak}");
 }
 
+/// Contract: a type whose long name leaves it no room is omitted alone; a later type with a short
+/// name, which still fits, is read and served. The packet cost depends on the name, so a zero
+/// allowance for one type says nothing about the next. The first text's length is chosen so the
+/// frame it leaves gives the long name no room and the short name a little.
+#[test]
+fn a_long_name_with_no_room_does_not_suppress_a_short_one_that_fits() {
+    let long = format!("image/x-{:x<247}", 0);
+    let short = "image/png";
+    let probe = request("type=read", "text/plain");
+    let done_len = probe.data_len(0, 0);
+    let frame_after = |text_len: usize| {
+        let wire = request("type=read", &format!("text/plain {long} {short}"));
+        let fixed = wire.data_len(0, 0) * 2;
+        let whole = text_len / KITTY_READ_CHUNK_BYTES;
+        let full = whole * wire.data_len(10, KITTY_READ_CHUNK_BYTES);
+        let tail = text_len % KITTY_READ_CHUNK_BYTES;
+        let last = if tail == 0 { 0 } else { wire.data_len(10, tail) };
+        (wire, fixed + full + last + done_len)
+    };
+    let text_len = (7 * 1024 * 1024..KITTY_READ_TYPE_CAP_BYTES)
+        .step_by(64)
+        .find(|&len| {
+            let (wire, frame) = frame_after(len);
+            type_allowance(&wire, frame, long.len(), done_len) == 0
+                && type_allowance(&wire, frame, short.len(), done_len) >= 3
+        })
+        .expect("a first text that leaves the long name no room and the short name some");
+    let mut source = FakeTypes::holding(&"t".repeat(text_len));
+    source.typed = vec![(long.clone(), b"L".to_vec()), (short.into(), b"PNG".to_vec())];
+    let (wire, _) = frame_after(text_len);
+    let reply = build_read_reply(&source, &wire);
+    let served = data_packets(&String::from_utf8(reply).unwrap());
+    let png = b64(short);
+    assert!(
+        served
+            .iter()
+            .any(|(metadata, body)| metadata.ends_with(&format!("mime={png}")) && body == b"PNG"),
+        "the short type is served"
+    );
+    let wide = b64(&long);
+    assert!(!served.iter().any(|(metadata, _)| metadata.ends_with(&format!("mime={wide}"))));
+}
+
 /// Contract: every type's cap keeps the worst case within the reservation: a full frame, a moved
 /// copy, the raw bytes and the regrown frame, for the widest id and MIME and any frame size.
 #[test]

@@ -271,9 +271,9 @@ pub(in crate::app) fn build_read_reply(
     for mime in &request.types {
         let allowance = type_allowance(request, reply.capacity(), mime.len(), done_len);
         if allowance == 0 {
-            // When: allowance == 0, the reservation holds no type's bytes now and the frame only
-            // grows, so this and every later type are omitted unread.
-            break;
+            // When: allowance == 0, this type's packets leave no room; a later, shorter name can
+            // still fit, so only this type is omitted unread.
+            continue;
         }
         let bytes = match read_one(source, location, mime, allowance) {
             Ok(Some(bytes)) => bytes,
