@@ -136,13 +136,25 @@ fn incomplete_explicit_padding_discards() {
     assert_eq!(staging.reserved_bytes(), 0);
 }
 
-/// Non-UTF-8 bytes become U+FFFD, and the lease covers the expanded text and its native buffer
-/// before the `String` is built.
+/// Non-UTF-8 bytes become U+FFFD off macOS, and the lease covers the expanded text and its native
+/// buffer before the `String` is built; on macOS the same write is a raw text offer of the exact
+/// bytes, its buffer and one native copy reserved.
 #[test]
 fn non_utf8_replaced_and_expansion_reserved() {
     let staging = staging(1 << 20, 1 << 20);
-    let (text, _) = written(&staging, &osc52("c", &encode(b"a\xffb\xfe")));
-    assert_eq!(text, "a\u{fffd}b\u{fffd}");
+    let raw = b"a\xffb\xfe";
+    let mut results = run(&staging, &osc52("c", &encode(raw)));
+    let taken = results.remove(0).expect("a write").take().expect("untaken");
+    if cfg!(target_os = "macos") {
+        // macOS publishes text that is not UTF-8 byte for byte, as a text-only offer.
+        let offer = taken.offer.as_ref().expect("a raw text offer");
+        assert_eq!(offer.text(), Some(&raw[..]));
+        assert!(taken.text.is_empty());
+        assert!(taken.lease.bytes() >= 2 * raw.len(), "the bytes and their native copy");
+        return;
+    }
+    assert_eq!(taken.text, "a\u{fffd}b\u{fffd}");
+    drop(taken);
     let mut results = run(&staging, &osc52("c", &encode(&[0xff; 100])));
     let job = results.remove(0).expect("a write");
     let taken = job.take().expect("untaken");

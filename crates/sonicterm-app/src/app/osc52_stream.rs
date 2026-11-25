@@ -551,10 +551,7 @@ impl ClipboardJob {
         targets: ClipTargets,
         reply: super::kitty_clipboard_tx::KittyReply,
     ) -> Result<Self, Osc52Refusal> {
-        let (text, lease) = into_text(bytes, lease, targets)?;
-        let slot = staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
-        let binding = WriteBinding::unbound(staging);
-        Ok(Self { text, targets, lease, _slot: slot, kitty: Some(reply), offer: None, binding })
+        Self::program_text(staging, bytes, lease, targets, Some(reply))
     }
 
     /// The multi-representation write an OSC 5522 commit planned, `lease` already covering it.
@@ -862,11 +859,8 @@ impl Osc52Intake {
     ) -> Result<ClipboardJob, Osc52Refusal> {
         let targets = clip_targets(kinds, cfg!(target_os = "linux"))?;
         let (bytes, lease) = decoder?.finish()?;
-        let (text, lease) = into_text(bytes, lease, targets)?;
         // The slot is taken here, in the reader thread, before the write is posted.
-        let slot = self.staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
-        let binding = WriteBinding::unbound(&self.staging);
-        Ok(ClipboardJob { text, targets, lease, _slot: slot, kitty: None, offer: None, binding })
+        ClipboardJob::program_text(&self.staging, bytes, lease, targets, None)
     }
 
     /// Match the parser's open stream after a section: start tracking a stream that opened with
@@ -915,6 +909,7 @@ mod debug;
 #[path = "osc52_stream_text.rs"]
 mod text;
 pub(in crate::app) use retained::{RetainedCopies, RetainedShares};
+#[cfg(test)]
 use text::into_text;
 pub(in crate::app) use text::{native_clipboard_bytes, reassert_eligible};
 

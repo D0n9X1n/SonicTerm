@@ -243,12 +243,12 @@ PTY、所在窗口、命令以及“允许”时窗口的 READONLY 状态。对 
 | 未知字母 | 忽略；没有已知字母的 kinds 字段被丢弃 |
 | `52;c`（无数据）、`52;c;` | 清空剪贴板 |
 | Base64 填充 | 可选，但出现的填充必须补全最后一组（拒绝 `aG=`）；任何其他字节使写入作废 |
-| 非 UTF-8 负载 | 无效序列变为 U+FFFD |
+| 非 UTF-8 负载 | 在 macOS 剪贴板上逐字节保留；其他平台以及 PRIMARY 中无效序列变为 U+FFFD |
 | `?`（任意 kinds） | 读取：`osc52_read = "allow"` 时以剪贴板文本应答，形如 `ESC ] 52 ; <标签> ; <b64> ESC \`；`ask`、`deny` 与上限见下文 |
 | `1337;Copy=:<b64>` | `c` 写入；空值或 `?` 不写入任何内容 |
 | `1337;Copy=;<b64>` | 不支持 |
 
-与参考终端的有意差异：没有 PRIMARY 的平台丢弃 `p`（kitty）；非 UTF-8 负载变为 U+FFFD
+与参考终端的有意差异：没有 PRIMARY 的平台丢弃 `p`（kitty）；非 UTF-8 负载除 macOS 剪贴板保留原字节外变为 U+FFFD
 （Ghostty 与 kitty 保留原始字节，WezTerm 拒绝）；上限默认 64 MiB、至多 512 MiB，只保存在内存中、
 从不落盘（kitty：512 MB 并可溢出到磁盘）；Windows 只重新写入不超过 512 KiB UTF-16 的写入；
 不支持 WezTerm 的 `Copy=;` 写法（WezTerm 解析它但从不执行）。OSC 5522 见下文

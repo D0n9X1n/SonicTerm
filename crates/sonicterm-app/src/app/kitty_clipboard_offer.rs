@@ -116,6 +116,12 @@ impl NativeOffer {
         kept + names + copies
     }
 
+    /// A text-only offer of raw `bytes`, published as they are: the macOS pasteboard holds text
+    /// that is not valid UTF-8 byte for byte this way.
+    pub(in crate::app) fn raw_text(bytes: Vec<u8>) -> Self {
+        Self { entries: vec![bytes], representations: vec![(NativeFormat::Text, 0)], omitted: 0 }
+    }
+
     /// Whether text is the only representation, which the text path writes as before.
     pub(in crate::app) fn is_text_only(&self) -> bool {
         matches!(self.representations.as_slice(), [(NativeFormat::Text, _)])

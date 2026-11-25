@@ -188,3 +188,29 @@ fn read_and_list_non_text_types() {
         }
     });
 }
+
+/// Contract: an OSC 52 write whose text is not UTF-8 reaches the macOS pasteboard byte for byte,
+/// through the same raw text offer and publish an OSC 5522 text write uses; nothing becomes U+FFFD.
+#[test]
+fn osc52_non_utf8_text_published_byte_for_byte() {
+    objc2::rc::autoreleasepool(|_| {
+        let board = Private::new();
+        let staging = crate::app::osc52_stream::ClipboardStaging::with_budget(1 << 20, 1 << 20);
+        let raw: &[u8] = b"caf\xe9 \xff";
+        let mut lease = staging.lease();
+        assert!(lease.grow_to(raw.len()));
+        let targets = crate::app::osc52_stream::ClipTargets { clipboard: true, primary: false };
+        let job = crate::app::osc52_stream::ClipboardJob::program_text(
+            &staging,
+            raw.to_vec(),
+            lease,
+            targets,
+            None,
+        )
+        .expect("admitted");
+        let offer = job.offer.as_ref().expect("a raw text offer");
+        let published = publish_offer(&mut Pasteboard::on(board.0.clone()), offer, &|| true);
+        assert_eq!(published, Published::Written);
+        assert_eq!(board.data("public.utf8-plain-text").as_deref(), Some(raw));
+    });
+}

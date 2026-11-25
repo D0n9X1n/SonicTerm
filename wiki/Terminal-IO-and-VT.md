@@ -325,14 +325,14 @@ refuse the large selections users copy.
 | unknown letter | ignored; a kinds field with no known letter is dropped |
 | `52;c` (no data), `52;c;` | clears the clipboard |
 | Base64 padding | optional, but padding that is present must complete the last group (`aG=` is refused); any other byte discards the write |
-| non-UTF-8 payload | invalid sequences become U+FFFD |
+| non-UTF-8 payload | kept byte for byte on the macOS clipboard; elsewhere, and in PRIMARY, invalid sequences become U+FFFD |
 | `?` (any kinds) | read: under `osc52_read = "allow"` answered with the clipboard's text as `ESC ] 52 ; <label> ; <b64> ESC \`; see below for `ask`, `deny` and the bounds |
 | `1337;Copy=:<b64>` | `c` write; an empty or `?` value writes nothing |
 | `1337;Copy=;<b64>` | not supported |
 
 Intentional differences from the reference terminals: `p` is dropped where there is no
-PRIMARY (kitty); non-UTF-8 payloads become U+FFFD (Ghostty and kitty keep raw bytes, WezTerm
-rejects them); the limit defaults to 64 MiB and is at most 512 MiB, held in memory and never
+PRIMARY (kitty); non-UTF-8 payloads become U+FFFD except on the macOS clipboard, which keeps
+them (Ghostty and kitty keep raw bytes, WezTerm rejects them); the limit defaults to 64 MiB and is at most 512 MiB, held in memory and never
 on disk (kitty: 512 MB with disk spill); Windows reasserts only writes of at most 512 KiB of
 UTF-16; WezTerm's `Copy=;` spelling is not supported (WezTerm parses it but never acts on it).
 OSC 5522 is described [below](#kitty-clipboard-protocol-osc-5522).

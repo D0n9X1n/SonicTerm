@@ -1,7 +1,12 @@
 //! The text a decoded OSC 52 write becomes: its UTF-8 conversion, reserved before it grows, and
 //! the native copies each selection keeps, plus the Windows reassertion bound.
 
-use super::{ClipLease, ClipTargets, Osc52Refusal, REASSERT_MAX_UTF16_UNITS};
+use std::sync::Arc;
+
+use super::{
+    ClipLease, ClipTargets, ClipboardJob, ClipboardStaging, Osc52Refusal, WriteBinding,
+    REASSERT_MAX_UTF16_UNITS,
+};
 
 /// Bytes the native clipboard copy of `text` takes: `CF_UNICODETEXT` on Windows (2 per UTF-16
 /// unit plus the terminator), the UTF-8 length for `NSString` and arboard's X11 copy.
@@ -65,4 +70,39 @@ pub(super) fn into_text(
         return Err(Osc52Refusal::Busy);
     }
     Ok((text, lease))
+}
+
+impl ClipboardJob {
+    /// A program's text write of decoded `bytes`: on macOS, text for the standard clipboard that
+    /// is not valid UTF-8 is a raw text offer, published byte for byte; anything else becomes
+    /// text, invalid sequences replaced by U+FFFD. The program slot is taken last.
+    pub(in crate::app) fn program_text(
+        staging: &Arc<ClipboardStaging>,
+        bytes: Vec<u8>,
+        mut lease: ClipLease,
+        targets: ClipTargets,
+        kitty: Option<crate::app::kitty_clipboard_tx::KittyReply>,
+    ) -> Result<ClipboardJob, Osc52Refusal> {
+        let raw = cfg!(target_os = "macos")
+            && targets.clipboard
+            && !targets.primary
+            && std::str::from_utf8(&bytes).is_err();
+        let (text, offer) = if raw {
+            // When: raw, the bytes and their one native copy are reserved, then kept as they are.
+            if !lease.grow_to(bytes.capacity() + bytes.len()) {
+                // When: lease cannot grow over the bytes and their native copy, the write is busy.
+                return Err(Osc52Refusal::Busy);
+            }
+            let offer = crate::app::kitty_clipboard_offer::NativeOffer::raw_text(bytes);
+            (String::new(), Some(offer))
+        } else {
+            // When: raw is false, the bytes become UTF-8 text for the text path.
+            let (text, grown) = into_text(bytes, lease, targets)?;
+            lease = grown;
+            (text, None)
+        };
+        let slot = staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
+        let binding = WriteBinding::unbound(staging);
+        Ok(ClipboardJob { text, targets, lease, _slot: slot, kitty, offer, binding })
+    }
 }
