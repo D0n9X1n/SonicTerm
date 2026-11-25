@@ -40,6 +40,7 @@ fn headless_app_defaults_to_unprivileged() {
 struct CountingAllocator;
 
 thread_local! {
+    static FREE_PROBE: std::cell::Cell<Option<(usize,fn())>> = const {std::cell::Cell::new(None)};
     /// Whether this thread counts its allocations; const-initialized with no destructor.
     static COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The allocations this thread counted since its last [`CountAllocations::start`].
@@ -49,6 +50,11 @@ thread_local! {
     static LIVE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The most [`LIVE_BYTES`] held at once since the last start.
     static PEAK_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Invoke an allocation-free probe once on this thread when this exact block is deallocated.
+pub(crate) fn watch_free(address: usize, probe: fn()) {
+    FREE_PROBE.set(Some((address, probe)));
 }
 
 /// Whether this thread counts; a thread in TLS teardown never does.
@@ -97,6 +103,14 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     // SAFETY: `block` came from this allocator, which is `System` underneath, with this `layout`.
     unsafe fn dealloc(&self, block: *mut u8, layout: std::alloc::Layout) {
         note_free(layout.size());
+        let _ = FREE_PROBE.try_with(|watch| {
+            if let Some((address, probe)) = watch.get() {
+                if block as usize == address {
+                    watch.set(None);
+                    probe();
+                }
+            }
+        });
         // SAFETY: `block` was returned by `System` through this allocator with this `layout`.
         unsafe { std::alloc::System.dealloc(block, layout) }
     }

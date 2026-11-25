@@ -515,8 +515,6 @@ pub(in crate::app) fn sextet(byte: u8) -> Option<u8> {
 pub(in crate::app) struct ClipboardJob {
     pub(in crate::app) text: String,
     pub(in crate::app) targets: ClipTargets,
-    /// Covers `text` and one native copy per selection until the native call returns.
-    pub(in crate::app) lease: ClipLease,
     _slot: ProgramSlot,
     /// Where an OSC 5522 write's status goes once it settles; `None` for OSC 52.
     pub(in crate::app) kitty: Option<super::kitty_clipboard_tx::KittyReply>,
@@ -524,6 +522,8 @@ pub(in crate::app) struct ClipboardJob {
     pub(in crate::app) offer: Option<super::kitty_clipboard_offer::NativeOffer>,
     /// What the write was admitted under, checked at the commit point and before its status.
     pub(in crate::app) binding: WriteBinding,
+    /// Lifecycle: fields drop in declaration order; keep the lease until text and offer payloads are freed.
+    pub(in crate::app) lease: ClipLease,
 }
 
 impl ClipboardJob {

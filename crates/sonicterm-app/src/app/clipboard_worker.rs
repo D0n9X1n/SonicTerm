@@ -220,18 +220,12 @@ fn commit_program(
     let mut committed = Committed { outcome, bytes, retained, kitty, binding: binding.clone() };
     let gate = || binding.may_commit();
     if let Some(offer) = offer {
-        // When: the job carries an offer, every representation is published in one native call
-        // behind the gate. On X11 the owner takes the lease for the lifetime of the offer.
-        let mut marker = lease.split_off(0);
+        // When: the job carries an offer, its owner takes the lease. X11 confirmation does not
+        // prove arboard freed its old buffer, so leave arboard's shares alone.
         let result = sink.publish_offer(offer, lease, targets, binding);
         if !result.committed {
             // When: committed is false, the gate refused before either selection was changed.
             return (committed.into_stale(), None);
-        }
-        if sink.retains_copies() {
-            // The owner holds its own lease. Retire only confirmed arboard shares, even on EIO.
-            committed.retained =
-                RetainedShares::split(&mut marker, 0, result.clipboard, result.primary);
         }
         committed.outcome =
             if result.written() { ClipWriteOutcome::Written } else { ClipWriteOutcome::Failed };

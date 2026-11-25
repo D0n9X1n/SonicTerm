@@ -699,10 +699,10 @@ fn partial_failure_keeps_the_share_of_the_selection_that_took_it() {
     assert_eq!(staging.reserved_bytes(), expected, "the larger CLIPBOARD share and PRIMARY's");
 }
 
-/// Replacing arboard with an owner-backed offer releases only the confirmed selection's arboard
-/// share. Failure must keep both shares; the offer's own lease belongs to the selection owner.
+/// Server confirmation cannot prove arboard processed SelectionClear. Both old shares stay
+/// charged until arboard itself replaces a selection.
 #[test]
-fn x11_confirmed_offer_retires_only_replaced_arboard_share() {
+fn x11_confirmed_offer_keeps_arboard_shares_until_arboard_replaces_them() {
     let fake = FakeClipboard::holding("old");
     fake.state().retains = true;
     let mut app = app_with_worker("old", &fake, None);
@@ -711,18 +711,21 @@ fn x11_confirmed_offer_retires_only_replaced_arboard_share() {
     let _ = app.submit_program_clipboard(1, job_to(&staging, "both", both), false);
     settle(&mut app);
     let copy_bytes = native_clipboard_bytes("both");
-    for (fail, shares) in [(true, 2), (false, 1)] {
+    for fail in [true, false] {
         fake.state().refuse_offer = fail;
         let _ = app.submit_program_clipboard(1, offer_job(&staging), false);
         settle(&mut app);
-        assert_eq!(staging.reserved_bytes(), shares * copy_bytes);
+        assert_eq!(staging.reserved_bytes(), 2 * copy_bytes);
     }
+    let clipboard = ClipTargets { clipboard: true, primary: false };
+    let _ = app.submit_program_clipboard(1, job_to(&staging, "a", clipboard), false);
+    settle(&mut app);
+    assert_eq!(staging.reserved_bytes(), copy_bytes + native_clipboard_bytes("a"));
 }
 
-/// A cp offer whose PRIMARY claim loses is reported as a native failure, but the worker retires
-/// the old CLIPBOARD share. Different prior sizes identify which share survives settlement.
+/// Even a partial ownership transfer does not confirm release of the old arboard CLIPBOARD bytes.
 #[test]
-fn x11_partial_offer_answers_eio_and_retires_only_clipboard_share() {
+fn x11_partial_offer_answers_eio_and_keeps_arboard_shares() {
     let staging = ClipboardStaging::with_budget(1 << 20, 1 << 20);
     let mut retained = crate::app::osc52_stream::RetainedCopies::default();
     let clipboard = ClipTargets { clipboard: true, primary: false };
@@ -740,5 +743,31 @@ fn x11_partial_offer_answers_eio_and_retires_only_clipboard_share() {
     let (write, _) = commit_program(&mut sink, job, None);
     assert_eq!(write.outcome, ClipWriteOutcome::Failed, "partial confirmation answers EIO");
     retained.retain(write.retained);
-    assert_eq!(retained.bytes(), native_clipboard_bytes("primary"));
+    assert_eq!(
+        retained.bytes(),
+        native_clipboard_bytes("clip") + native_clipboard_bytes("primary")
+    );
+}
+
+/// Settling a refused job must free its payload before returning its staging budget. Sample the
+/// actual private staging count in the allocator as it frees this particular payload address.
+#[test]
+fn refused_offer_payload_freed_before_lease() {
+    thread_local! { static SAMPLE: RefCell<Option<(Arc<ClipboardStaging>,usize)>> = const { RefCell::new(None) }; }
+    let staging = ClipboardStaging::with_budget(8192, 8192);
+    let mut job = ClipboardJob::for_test(&staging, "");
+    assert!(job.lease.grow_to(4096));
+    let payload = vec![0xff; 2048];
+    let address = payload.as_ptr() as usize;
+    job.offer = Some(NativeOffer::raw_text(payload));
+    SAMPLE.set(Some((staging.clone(), 0)));
+    crate::lib_tests::watch_free(address, || {
+        SAMPLE.with_borrow_mut(|sample| {
+            let (staging, count) = sample.as_mut().unwrap();
+            *count = staging.reserved_bytes();
+        })
+    });
+    drop(Committed::settled(job, ClipWriteOutcome::Denied));
+    assert_eq!(SAMPLE.take().unwrap().1, 4096, "lease still held at payload deallocation");
+    assert_eq!(staging.reserved_bytes(), 0);
 }

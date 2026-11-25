@@ -246,8 +246,7 @@ live leases hold, as `ClipboardStaging`, to the tracking-only process owner, wit
 posted program write (at most 8), so a large write never trips a pane backstop. Apart from the X11 owner, a lease is
 released or split when the native clipboard call returns; on Linux and Windows that call runs on the
 clipboard worker, so the lease moves into the worker's job. On Linux each selection keeps its own
-share covering arboard's copy, charged until SonicTerm's next write to that selection, or a user
-copy to it, replaces it: a CLIPBOARD-only write releases only CLIPBOARD's share. When one
+share covering arboard's copy, charged until arboard replaces it on a later write to that selection, or the application exits: a CLIPBOARD-only write releases only CLIPBOARD's share. When one
 selection refuses a write, the other's share is still kept; when a native call fails after it may
 have stored the text, the larger of the old and new shares stays charged.
 A Windows write armed for reassertion keeps its lease, plus its snapshot of the replaced value
