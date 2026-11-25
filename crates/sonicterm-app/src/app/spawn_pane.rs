@@ -974,17 +974,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             send_reply(std::mem::take(&mut reply_batch));
         }
         reply_batch.extend(replies);
-        reply_batch.extend(kitty_status);
-        // Read answers join whole, keeping room for the kitty replies that follow them.
-        let reserved = kitty_replies.len();
-        super::osc52_read::append_answers(
-            &mut reply_batch,
-            &read_replies,
-            reserved,
-            &mut send_reply,
-        );
-        // A kitty reply ends its advance prefix, so it follows every VT reply of that prefix.
-        reply_batch.extend(kitty_replies);
+        let clipboard = super::osc52_read::ClipboardReplies { kitty_status, read_replies };
+        clipboard.append_before(&mut reply_batch, kitty_replies, &mut send_reply);
         if remaining.is_empty() {
             // When: remaining is empty, publish trailing replies without waiting for more child output.
             if !reply_batch.is_empty() {

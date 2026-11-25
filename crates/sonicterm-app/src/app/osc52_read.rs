@@ -120,6 +120,48 @@ pub(in crate::app) fn append_answers(
     }
 }
 
+/// One section's clipboard replies: OSC 5522 status packets and empty OSC 52 read answers.
+pub(in crate::app) struct ClipboardReplies {
+    pub(in crate::app) kitty_status: Vec<Vec<u8>>,
+    pub(in crate::app) read_replies: Vec<u8>,
+}
+
+impl ClipboardReplies {
+    /// Join these replies to `batch` whole, packet by packet, keeping room for `kitty_replies`,
+    /// which end the advance prefix and so follow every reply of it; no submission passes the
+    /// spool's 32 KiB cap.
+    pub(in crate::app) fn append_before(
+        self,
+        batch: &mut Vec<u8>,
+        kitty_replies: Vec<u8>,
+        mut send: impl FnMut(Vec<u8>),
+    ) {
+        let reserved = kitty_replies.len();
+        append_packets(batch, self.kitty_status, reserved, &mut send);
+        append_answers(batch, &self.read_replies, reserved, &mut send);
+        batch.extend(kitty_replies);
+    }
+}
+
+/// Append whole `packets` to `batch` as [`append_answers`] does: a packet that would pass one
+/// submission's cap, with `reserved_bytes` kept for what follows, sends the batch first, so no
+/// submission passes the cap the reply spool enforces and no packet is split.
+pub(in crate::app) fn append_packets(
+    batch: &mut Vec<u8>,
+    packets: Vec<Vec<u8>>,
+    reserved_bytes: usize,
+    mut send: impl FnMut(Vec<u8>),
+) {
+    for packet in packets {
+        let fits = batch.len() + packet.len() + reserved_bytes <= REPLY_SUBMISSION_CAP_BYTES;
+        if !fits && !batch.is_empty() {
+            // The packet would pass the cap, so the batch so far is sent before it joins.
+            send(std::mem::take(batch));
+        }
+        batch.extend(packet);
+    }
+}
+
 #[cfg(test)]
 #[path = "osc52_read_tests.rs"]
 mod osc52_read_tests;

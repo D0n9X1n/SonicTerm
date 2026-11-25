@@ -95,11 +95,11 @@ mod spawn_pane_vt_clipboard_tests;
 #[path = "spawn_pane_vt_fuzz_tests.rs"]
 mod spawn_pane_vt_fuzz_tests;
 
-/// What one section's OSC 5522 requests produced: status replies, committed writes by wire
-/// position, and consent tickets.
+/// What one section's OSC 5522 requests produced: status replies (one packet each, so the batch
+/// can bound them at packet boundaries), committed writes by wire position, and consent tickets.
 #[derive(Default)]
 pub(in crate::app) struct KittySection {
-    pub(in crate::app) status: Vec<u8>,
+    pub(in crate::app) status: Vec<Vec<u8>>,
     pub(in crate::app) writes: Vec<(usize, super::super::osc52_stream::ClipboardJobHandle)>,
     pub(in crate::app) tickets: Vec<super::super::osc52_read_ticket::ConsentTicket>,
 }
@@ -175,7 +175,7 @@ impl PaneVtHandles {
                 KittyStep::Silent => {
                     // When: the step is Silent, the packet produced nothing to send.
                 }
-                KittyStep::Reply(reply) => section.status.extend(reply),
+                KittyStep::Reply(reply) => section.status.push(reply),
                 KittyStep::Post(job) => {
                     let job = super::super::osc52_stream::ClipboardJobHandle::new(job);
                     section.writes.push((position, job));

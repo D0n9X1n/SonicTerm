@@ -142,3 +142,44 @@ fn osc52_and_osc5522_writes_post_in_wire_order() {
     let texts = posted_texts(&handles, &[kitty.as_slice(), osc52].concat());
     assert_eq!(texts, ["hi", "osc52"], "OSC 5522 first on the wire posts first");
 }
+
+/// Contract: OSC 5522 status replies are bounded at packet boundaries within one 32 KiB reply
+/// submission, as the reply spool refuses a larger one whole: many denied reads with long ids in
+/// one chunk reach the program as several submissions, each under the cap, every packet whole.
+#[test]
+fn status_replies_split_at_packets_within_the_spool_cap() {
+    let (_pane, handles, staging) = clipboard_worker();
+    staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Deny);
+    let id = "i".repeat(512);
+    let packet = format!("\x1b]5522;type=read:id={id};dGV4dC9wbGFpbg==\x1b\\");
+    let chunk = packet.repeat(64);
+    let mut submissions = Vec::new();
+    let mut send_reply = |reply: Vec<u8>| submissions.push(reply);
+    handles.take_ready_output(Instant::now(), &mut send_reply, |send_reply| {
+        process_pane_vt_batch_with(
+            &handles,
+            chunk.as_bytes(),
+            None,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            Instant::now,
+            send_reply,
+        );
+    });
+    drop(send_reply);
+    let sizes: Vec<usize> = submissions.iter().map(Vec::len).collect();
+    assert!(submissions.len() > 1, "the statuses did not fit one submission: {sizes:?}");
+    let cap = 32 * 1024;
+    for submission in &submissions {
+        assert!(submission.len() <= cap, "a submission of {} bytes", submission.len());
+        let text = String::from_utf8_lossy(submission);
+        assert!(text.starts_with("\x1b]5522;") && text.ends_with("\x1b\\"), "whole packets");
+    }
+    let statuses: usize = submissions
+        .iter()
+        .map(|submission| String::from_utf8_lossy(submission).matches("status=EPERM").count())
+        .sum();
+    assert_eq!(statuses, 64, "every denied read answered once");
+}
