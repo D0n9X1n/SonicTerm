@@ -313,7 +313,7 @@ OSC 133 `A`, `B`, `C` and `D`, as the shell-integration scripts of WezTerm,
 iTerm2 and kitty do. It refuses a pane whose prompt has text typed after it, whose
 input queue is not empty, or into which anyone typed while the previous command
 ran. It also refuses (`no_shell_integration`) when the marks no longer locate the input:
-the prompt's `A` left the grid, a resize clipped `B` or nonblank input (including a later draft row),
+the prompt's `A` or first `B` left the grid, a resize clipped `B` or nonblank input (including a later draft row),
 or in-place scrolling after `B` moved marked rows or their possible input. A partial-margin scroll
 while the shell draws a multiline prompt does not invalidate the first `B` that follows it.
 Growing the grid or repeating `B`

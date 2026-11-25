@@ -56,7 +56,8 @@ cargo test -p sonicterm-vt
 - OSC 133 annotations (L/N/P/I, A options) and OSC 9;12 pass `admit_annotation`, which never
   latches, and update only the per-screen semantic state, never prompt regions; a fresh line's
   physical scroll can rebase or evict marks on a full-screen upward scroll, or invalidate MCP
-  input proof when a partial margin moves marked rows. Neither directly changes a pinned run.
+  input proof when a partial margin moves marked rows after B has arrived. Scrolling before the
+  first B does not invalidate that later marker. Neither directly changes a pinned run.
 - `cancel_capture` is called by the host on a stalled transfer, and the
   sender is never told. It must leave the parser swallowing the remaining
   payload rather than returning to ground — a payload is printable ASCII

@@ -183,10 +183,10 @@ impl Grid {
     }
 
     /// Record an OSC 133 `B` (input-start) marker at the cursor in the newest region; a duplicate
-    /// keeps the first position.
+    /// cannot replace the first position, even when that row has left history.
     pub fn record_input_start(&mut self) {
         let at = (self.cursor_absolute_row(), self.cursor.col.min(self.cols.saturating_sub(1)));
-        if let Some(last) = self.prompts.back_mut().filter(|last| last.input_start.is_none()) {
+        if let Some(last) = self.prompts.back_mut().filter(|last| last.input_start_at.is_none()) {
             last.input_start = Some(at);
             last.input_start_at = Some(Instant::now());
         }
@@ -198,11 +198,13 @@ impl Grid {
     pub(super) fn invalidate_input_on_row_move(&mut self, top: usize, bottom: usize) {
         let history = self.scrollback.len() as u64;
         let moved = history + top as u64..=history + bottom as u64;
-        if let Some(prompt) = self.prompts.back_mut().filter(|prompt| !prompt.output_seen) {
-            prompt.input_proof_lost |= prompt.input_start.is_some_and(|(input_row, _)| {
-                input_row <= *moved.end()
-                    || prompt.start_row.is_some_and(|row| moved.contains(&row))
-            });
+        if let Some(prompt) = self
+            .prompts
+            .back_mut()
+            .filter(|prompt| !prompt.output_seen && prompt.input_start_at.is_some())
+        {
+            prompt.input_proof_lost |= prompt.start_row.is_some_and(|row| moved.contains(&row))
+                || prompt.input_start.is_some_and(|(row, _)| row <= *moved.end());
         }
     }
 
@@ -515,6 +517,9 @@ impl Grid {
             prompt.start_row = start;
             prompt.input_start =
                 prompt.input_start.and_then(|(row, col)| Some((row.checked_sub(removed)?, col)));
+            // The first B is still recorded. Only a fresh A/B pair can replace its evicted row.
+            prompt.input_proof_lost |=
+                prompt.input_start_at.is_some() && prompt.input_start.is_none();
             prompt.output_start_row = rebase(prompt.output_start_row);
             prompt.end_row = rebase(prompt.end_row);
             true

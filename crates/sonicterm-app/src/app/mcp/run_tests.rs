@@ -420,3 +420,33 @@ fn two_line_prompt_at_partial_bottom_margin_is_ready_after_b() {
     parser.advance(b"draft");
     assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
 }
+
+/// B can be above A after cursor motion. Once B and its draft leave history, a duplicate B on
+/// a blank row is not fresh evidence, whether or not a partial scroll has since moved A's row.
+#[test]
+fn evicted_input_start_needs_a_fresh_prompt_pair() {
+    for move_prompt in [true, false] {
+        let mut parser =
+            parsed_sized(20, 6, 1, b"\x1b[4;1H\x1b]133;A\x07p\x1b[H\x1b]133;B\x07draft");
+        let old = *parser.grid().newest_prompt().unwrap();
+        assert_eq!((old.start_row, old.input_start), (Some(3), Some((0, 0))));
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+        parser.advance(b"\x1b[2S");
+        let retained = parser.grid().newest_prompt().unwrap();
+        assert_eq!((retained.start_row, retained.input_start), (Some(2), None));
+        if move_prompt {
+            parser.advance(b"\x1b[1;3r\x1b[S");
+            assert_eq!(parser.grid().row(0).get(0).unwrap().ch, 'p');
+        }
+        parser.advance(b"\x1b[5;1H\x1b]133;B\x07");
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+        let prompt = parser.grid().newest_prompt().unwrap();
+        assert_eq!((prompt.input_start, prompt.input_start_at), (None, old.input_start_at));
+        // A on the retained A coordinate must open a new region, not coalesce with the stale one.
+        parser.advance(b"\x1b[2;1H\x1b]133;A\x07");
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+        parser.advance(b"$ \x1b]133;B\x07");
+        let fresh = check_prompt(parser.grid(), None).expect("fresh A and B");
+        assert_ne!(fresh, old.seq);
+    }
+}
