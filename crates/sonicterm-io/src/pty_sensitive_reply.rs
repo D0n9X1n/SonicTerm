@@ -54,8 +54,9 @@ impl SensitiveReply {
         self.bytes.is_empty()
     }
 
-    /// The bytes to write and the custody to drop once they are written.
-    pub(super) fn into_parts(self) -> (Vec<u8>, Box<dyn std::any::Any + Send>) {
+    /// The bytes to write and the custody to drop once they are written; a caller whose reply was
+    /// refused takes its custody back this way.
+    pub fn into_parts(self) -> (Vec<u8>, Box<dyn std::any::Any + Send>) {
         (self.bytes, self.custody)
     }
 }

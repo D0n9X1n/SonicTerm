@@ -10,7 +10,9 @@
 
 use sonicterm_vt::vt::KittyClipboardLocation;
 
-use super::osc52_read_source::ReadLocation;
+use super::osc52_read_source::{
+    ClipboardTextSource, GestureOffer, ReadLocation, ReadOutcome, TypeListing, TypeRead,
+};
 use super::osc52_read_ticket::ReadBinding;
 
 /// Grants one pane keeps at most; recording another evicts that pane's oldest.
@@ -322,6 +324,56 @@ impl PasteGrants {
     /// Whether no grant is held.
     pub(in crate::app) fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// The clipboard a read uses on its reader thread: each native content call is made only while
+/// the consumed paste grant that approved the read is live, so a grant that ends mid-read makes no
+/// further call. A read no grant approved has no end.
+pub(in crate::app) struct GrantBoundSource<'source> {
+    pub(in crate::app) source: &'source dyn ClipboardTextSource,
+    /// When the grant ends; `None` for a read no paste grant approved.
+    pub(in crate::app) expires_at: Option<std::time::Instant>,
+}
+
+impl GrantBoundSource<'_> {
+    /// Whether the grant, if any, is still live by the clock now.
+    pub(in crate::app) fn live(&self) -> bool {
+        self.expires_at.is_none_or(|expires_at| std::time::Instant::now() < expires_at)
+    }
+}
+
+impl ClipboardTextSource for GrantBoundSource<'_> {
+    fn read_text_bounded(&self, location: ReadLocation, max_bytes: usize) -> ReadOutcome {
+        if !self.live() {
+            // When: live is false, the grant ended: no native call is made.
+            return ReadOutcome::Failed;
+        }
+        self.source.read_text_bounded(location, max_bytes)
+    }
+
+    fn list_types(&self, location: ReadLocation) -> TypeListing {
+        if !self.live() {
+            // When: live is false, the grant ended: no native call is made.
+            return TypeListing::Failed;
+        }
+        self.source.list_types(location)
+    }
+
+    fn read_type_bounded(&self, location: ReadLocation, mime: &str, max_bytes: usize) -> TypeRead {
+        if !self.live() {
+            // When: live is false, the grant ended: no native call is made.
+            return TypeRead::Failed;
+        }
+        self.source.read_type_bounded(location, mime, max_bytes)
+    }
+
+    fn offer_version(&self, location: ReadLocation) -> Option<u64> {
+        self.source.offer_version(location)
+    }
+
+    fn gesture_offer(&self, location: ReadLocation) -> GestureOffer {
+        self.source.gesture_offer(location)
     }
 }
 

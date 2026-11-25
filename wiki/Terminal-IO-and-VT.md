@@ -549,8 +549,12 @@ during the listing, an offer other than the one bound at the gesture, or no pass
 is still sent but issues no grant. The first OSC 5522 read from that pane at that location carrying the
 password and a nonempty `name` consumes the grant atomically on the event loop. It is approved
 without a page only while the recipient is unchanged and within 60 s; otherwise it takes normal
-consent. The approval keeps the grant's 60 s end: a read that has not started its native read, or
-whose reply is not yet admitted, by then waits for an ordinary answer instead. The approval stays bound to the recipient and the offer until delivery: the reader
+consent. The approval keeps the grant's 60 s end and checks it against the clock where the read
+touches the clipboard or the PTY: the reader thread before each native content call and after
+its offer-version check, and writer admission for the reply, retries included. A read whose
+grant ends first makes no further native call, its data is dropped, and it waits for an
+ordinary answer instead; this holds for a read whose result arrives after its deadline too. A
+read already answered at its deadline keeps that answer. The approval stays bound to the recipient and the offer until delivery: the reader
 thread compares the offer version before its native read and again after it, and the recipient
 is checked before the read starts and before delivery. A changed offer, DECRST 5522 or RIS after
 the read was accepted, or any other change to the recipient drops whatever was read, so nothing

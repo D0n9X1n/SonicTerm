@@ -213,9 +213,12 @@ cargo build -p sonicterm-app
   `PasteGrant` exists only after that admission, binds the recipient identity, the 5522 word and
   the offer version (`ClipboardTextSource::offer_version`), and one named read consumes it into a
   `PasteApproval` its `ReadBinding` carries to delivery: revalidation checks the recipient and the
-  grant's `expires_at` (its 60 s end) before the native read and before reply admission, the
-  reader compares the offer version before and after its native read, and a changed offer or a
-  revoked or expired approval drops the data and returns the ticket to `waiting`.
+  grant's `expires_at` (its 60 s end); the reader thread reads through `GrantBoundSource`, which
+  checks `expires_at` against the clock before each native content call, and checks it again after
+  its offer-version read; `deliver_read_reply` revalidates at `now.max(Instant::now())`, retries
+  included. A reply refused as `PasteRevoked` returns its ticket from its typed `ReadCustody` to
+  `waiting`; a changed offer drops the data the same way. An abandoned reader keeps its deadline
+  answer.
   A reply dropped after its delivery retries leaves an OSC 5522 read one `EBUSY` packet. Native reads run one at a time on a disposable reader thread that keeps the ticket and
   its reply-budget lease until the native call returns; a result completed at or past its deadline
   (`ReaderDone::completed_at`) is answered as an overdue read. The X11 protocol runs over the

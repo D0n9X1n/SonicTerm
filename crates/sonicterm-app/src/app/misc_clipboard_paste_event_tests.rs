@@ -84,6 +84,10 @@ struct Harness {
     offer: Arc<FakeOffer>,
     sent: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
     refuse: Arc<AtomicBool>,
+    /// While set, every sensitive reply finds the writer's admission lock taken (`Contended`).
+    contend: Arc<AtomicBool>,
+    /// The admissions refused as contended so far.
+    contended: Arc<AtomicUsize>,
 }
 
 fn harness() -> Harness {
@@ -104,8 +108,14 @@ fn harness() -> Harness {
     app.clip_state.reads.source = offer.clone();
     let sent = Arc::new(Mutex::new(Vec::new()));
     let refuse = Arc::new(AtomicBool::new(false));
+    let (contend, contended) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
     let (sink, refusing) = (sent.clone(), refuse.clone());
+    let (contending, contentions) = (contend.clone(), contended.clone());
     app.clip_state.reads.port = Some(Box::new(move |pane_id, reply: SensitiveReply| {
+        if contending.load(Ordering::SeqCst) {
+            contentions.fetch_add(1, Ordering::SeqCst);
+            return Err(SensitiveReplyError::Contended(reply));
+        }
         if refusing.load(Ordering::SeqCst) {
             return Err(SensitiveReplyError::Full(reply));
         }
@@ -116,7 +126,7 @@ fn harness() -> Harness {
     app.testing.test_clipboard_text = Some("plain".into());
     app.testing.test_clipboard_files = Some(Vec::new());
     app.__test_enable_pty_write_log();
-    Harness { app, pane, staging, offer, sent, refuse }
+    Harness { app, pane, staging, offer, sent, refuse, contend, contended }
 }
 
 /// Reload `[terminal] osc52_read` through the production config path.
@@ -235,12 +245,17 @@ impl Harness {
     /// Admit an OSC 5522 `text/plain` read from `pane` naming itself `name` with `password`, as
     /// its VT worker posts one.
     fn follow_up(&mut self, pane: u64, name: &str, password: &str) {
+        self.follow_up_types(pane, name, password, &["text/plain"]);
+    }
+
+    /// [`Self::follow_up`] asking for `types`, in order.
+    fn follow_up_types(&mut self, pane: u64, name: &str, password: &str, types: &[&str]) {
         let identity = self.app.pane_by_id(pane).expect("a live pane").read_identity.clone();
         let request = KittyReadRequest {
             id: "k".into(),
             location: KittyClipboardLocation::Standard,
             listing: false,
-            types: vec!["text/plain".into()],
+            types: types.iter().map(|mime| (*mime).to_owned()).collect(),
             bel: false,
             credential: GrantCredential::new(name, password),
         };
@@ -849,3 +864,7 @@ fn consumed_grant_expiring_before_its_read_is_not_served() {
     assert_eq!(harness.waiting(), 2, "both ask instead");
     assert_eq!(harness.reads(), 1, "the queued read never reached the clipboard");
 }
+
+#[cfg(test)]
+#[path = "misc_clipboard_paste_event_tests_expiry_tests.rs"]
+mod misc_clipboard_paste_event_tests_expiry_tests;

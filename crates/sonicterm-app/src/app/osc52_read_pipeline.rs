@@ -19,8 +19,8 @@ use sonicterm_vt::vt::KittyClipboardStatus;
 
 use super::kitty_clipboard_read::build_read_reply;
 use super::osc52_read_grants::{
-    GrantDecision, GrantKey, PasteApproval, PasteBinding, PasteGrant, SessionGrants,
-    PASTE_GRANT_LIFETIME,
+    GrantBoundSource, GrantDecision, GrantKey, PasteApproval, PasteBinding, PasteGrant,
+    SessionGrants, PASTE_GRANT_LIFETIME,
 };
 use super::osc52_read_source::{read_replies, ClipboardTextSource, NativeSource, ReadLocation};
 use super::osc52_read_ticket::{CancelReason, ClipboardTicketHandle, ConsentTicket, ReadBinding};
@@ -56,6 +56,14 @@ struct Retry {
     attempts: u32,
     check_age: bool,
     busy: Option<Vec<u8>>,
+}
+
+/// What a read reply keeps until its bytes are written: its ticket, and the reply-budget lease of
+/// a served read. Typed, so a reply refused because its paste approval ended returns its ticket to
+/// `waiting`. Fields drop in order: the ticket's slots, then the lease.
+struct ReadCustody {
+    ticket: ConsentTicket,
+    lease: Option<ClipLease>,
 }
 
 /// What a reader thread hands back once its native calls return.
@@ -425,7 +433,8 @@ impl super::App {
                     pane_id = in_flight.binding.pane_id,
                     "OSC 52 read passed its deadline"
                 );
-                let reply = SensitiveReply::new(in_flight.failure, Box::new(ticket));
+                let custody = ReadCustody { ticket, lease: None };
+                let reply = SensitiveReply::new(in_flight.failure, Box::new(custody));
                 self.deliver_read_reply(in_flight.binding, reply, now, false, 0, in_flight.busy);
                 continue;
             }
@@ -441,7 +450,8 @@ impl super::App {
                 self.clip_state.reads.waiting.push(ticket);
                 continue;
             };
-            let reply = SensitiveReply::new(replies, Box::new((ticket, lease)));
+            let custody = ReadCustody { ticket, lease: Some(lease) };
+            let reply = SensitiveReply::new(replies, Box::new(custody));
             self.deliver_read_reply(in_flight.binding, reply, now, true, 0, in_flight.busy);
         }
         let mut overdue = None;
@@ -531,7 +541,7 @@ impl super::App {
         let busy = ticket.busy_reply();
         self.deliver_read_reply(
             binding,
-            SensitiveReply::new(replies, Box::new(ticket)),
+            SensitiveReply::new(replies, Box::new(ReadCustody { ticket, lease: None })),
             now,
             false,
             0,
@@ -590,22 +600,27 @@ impl super::App {
         let thread_failure = failure.clone();
         // A paste-approved read is bound to the offer its event announced.
         let paste = ticket.paste_approval().map(|paste| (paste.location, paste.offer_version));
+        // The grant's end travels with the read, so the reader checks it against the clock.
+        let expires_at = ticket.paste_approval().map(|paste| paste.expires_at);
         let spawned =
             std::thread::Builder::new().name("sonicterm-clipboard-read".into()).spawn(move || {
                 let mut lease = lease;
                 let read = || {
+                    let bound = GrantBoundSource { source: source.as_ref(), expires_at };
+                    // The offer must still be the announced one, and the grant still live after the
+                    // version read, which can wait on the owner.
                     let offer_holds = || {
                         paste.is_none_or(|(location, version)| {
                             source.offer_version(location) == Some(version)
-                        })
+                        }) && bound.live()
                     };
                     if !offer_holds() {
                         // When: offer_holds is false, the offer already changed: nothing is read.
                         return None;
                     }
                     let replies = match ticket.kitty_read() {
-                        Some(request) => build_read_reply(source.as_ref(), request),
-                        None => read_replies(source.as_ref(), ticket.labels()),
+                        Some(request) => build_read_reply(&bound, request),
+                        None => read_replies(&bound, ticket.labels()),
                     };
                     // Sampled again after the read: data read across an offer change is dropped
                     // here, so it never leaves this thread.
@@ -666,10 +681,18 @@ impl super::App {
     ) {
         let pane_id = binding.pane_id;
         let bytes = reply.len();
-        if let Err(reason) = self.revalidate_ticket(&binding, now, check_age) {
+        // Admission is checked against the clock, not the turn's start, so a grant that ends
+        // during the turn never admits its reply; a retry is checked the same way.
+        let admitted_at = now.max(Instant::now());
+        if let Err(reason) = self.revalidate_ticket(&binding, admitted_at, check_age) {
             // When: revalidate_ticket refuses, the reply is dropped unsent with its custody.
             tracing::debug!(pane_id, bytes, ?reason, "OSC 52 read reply revoked");
             self.clip_state.reads.last_cancel = Some(reason);
+            if reason == CancelReason::PasteRevoked {
+                // Only the paste approval ended: the stale bytes are dropped and the ticket the
+                // reply carries asks again.
+                self.requeue_revoked(reply);
+            }
             return;
         }
         let attempts = attempts_before + 1;
@@ -697,6 +720,21 @@ impl super::App {
                 }
             }
         }
+    }
+
+    /// Return the ticket a refused `reply` carries to `waiting` after its paste approval ended: the
+    /// stale bytes are dropped first, then the approval is withdrawn, so the read asks again.
+    fn requeue_revoked(&mut self, reply: SensitiveReply) {
+        let (bytes, custody) = reply.into_parts();
+        drop(bytes);
+        let Ok(custody) = custody.downcast::<ReadCustody>() else {
+            // When: downcast finds no ReadCustody (an overdue answer), no ticket is left to ask.
+            return;
+        };
+        let ReadCustody { mut ticket, lease } = *custody;
+        drop(lease);
+        ticket.withdraw_paste();
+        self.clip_state.reads.waiting.push(ticket);
     }
 
     /// Queue `reply` on pane `pane_id`'s sensitive-reply slot, or a test's port.
