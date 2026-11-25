@@ -1,5 +1,6 @@
 use super::*;
 use crate::lib_tests::CountAllocations;
+use std::collections::VecDeque;
 
 /// One `GetProperty` reply of `kind`.
 fn reply(kind: PropertyKind, format: u8, bytes_after: u32, value: &[u8]) -> PropertyReply {
@@ -121,4 +122,152 @@ fn incr_transfer_peak_within_raw_and_scratch() {
     let Some(ReadOutcome::Text(text)) = outcome else { panic!("a text outcome") };
     assert_eq!(text.len(), cap);
     assert!(peak <= 2 * cap, "peak {peak} over twice the cap");
+}
+
+/// A scripted X11 selection owner on a fake clock. Each poll advances the clock by `step` and
+/// returns the next scripted event, then `after_events` forever; fetches return the scripted
+/// replies, then `endless_chunk`. `log` records the conversions, fetches and deletes in order.
+struct FakeOwner {
+    clock: Instant,
+    step: Duration,
+    owners: VecDeque<u32>,
+    events: VecDeque<Polled>,
+    after_events: Polled,
+    replies: VecDeque<PropertyReply>,
+    endless_chunk: Option<PropertyReply>,
+    log: Vec<String>,
+    polls: usize,
+}
+
+impl FakeOwner {
+    /// An owner that answers a conversion with `replies` after storing the property, then sends
+    /// `after_events`.
+    fn answering(replies: Vec<PropertyReply>, after_events: Polled) -> Self {
+        Self {
+            clock: Instant::now(),
+            step: Duration::from_millis(10),
+            owners: VecDeque::new(),
+            events: VecDeque::from([Polled::Notify(true)]),
+            after_events,
+            replies: replies.into(),
+            endless_chunk: None,
+            log: Vec::new(),
+            polls: 0,
+        }
+    }
+}
+
+impl SelectionPort for FakeOwner {
+    fn owner(&mut self) -> Option<u32> {
+        self.owners.pop_front()
+    }
+
+    fn convert(&mut self, target: ConvertTarget) -> bool {
+        self.log.push(format!("convert {target:?}"));
+        true
+    }
+
+    fn poll(&mut self) -> Polled {
+        self.polls += 1;
+        self.clock += self.step;
+        // A runaway wait ends instead of hanging the test.
+        if self.polls > 100_000 {
+            return Polled::Closed;
+        }
+        self.events.pop_front().unwrap_or(self.after_events)
+    }
+
+    fn fetch(&mut self, delete: bool, _max_bytes: usize) -> Option<PropertyReply> {
+        self.log.push(format!("fetch delete={delete}"));
+        self.replies.pop_front().or_else(|| self.endless_chunk.clone())
+    }
+
+    fn delete(&mut self) {
+        self.log.push("delete".into());
+    }
+
+    fn now(&self) -> Instant {
+        self.clock
+    }
+
+    fn pause(&mut self) {
+        self.clock += self.step;
+    }
+}
+
+/// A format-32 `INCR` announcement of `size` bytes.
+fn announcement(size: u32) -> PropertyReply {
+    reply(PropertyKind::Incr, 32, 0, &size.to_ne_bytes())
+}
+
+/// Contract: an `INCR` announcement past the cap is refused from a fetch that does not delete it,
+/// and the property is never deleted, because deleting it asks the owner for the first chunk.
+#[test]
+fn incr_too_large_refused_before_delete() {
+    let mut owner = FakeOwner::answering(vec![announcement(9)], Polled::Idle);
+    assert_eq!(read_selection(&mut owner, 8), Some(ReadOutcome::TooLarge));
+    assert_eq!(owner.log, ["convert Text", "fetch delete=false"]);
+}
+
+/// Contract: an announcement within the cap is validated before it is deleted, so only then is
+/// the owner asked for a chunk; an owner that then stays silent ends the read at the 2 s chunk
+/// wait, with no answer.
+#[test]
+fn silent_incr_owner_ends_at_chunk_wait() {
+    let mut owner = FakeOwner::answering(vec![announcement(8)], Polled::Idle);
+    let start = owner.clock;
+    assert_eq!(read_selection(&mut owner, 8), None);
+    assert_eq!(owner.log, ["convert Text", "fetch delete=false", "delete"]);
+    let elapsed = owner.clock - start;
+    assert!(elapsed <= CHUNK_WAIT + Duration::from_millis(100), "{elapsed:?}");
+}
+
+/// Contract: an owner that answers every chunk request at once, a byte at a time, cannot keep the
+/// transfer running: the deadline is checked before every poll, so the read ends with no answer
+/// at the 5 s total bound, long before the cap is reached.
+#[test]
+fn continuously_active_owner_bounded_by_total_deadline() {
+    let mut owner = FakeOwner::answering(vec![announcement(4096)], Polled::NewValue);
+    owner.endless_chunk = Some(reply(PropertyKind::Utf8, 8, 0, b"a"));
+    let start = owner.clock;
+    assert_eq!(read_selection(&mut owner, 4096), None);
+    let elapsed = owner.clock - start;
+    assert!(elapsed <= INCR_TOTAL_WAIT + Duration::from_millis(100), "{elapsed:?}");
+}
+
+/// Contract: an owner that never answers while unrelated events keep arriving cannot hold the read
+/// past the 2 s selection wait: the deadline is checked before every poll, not after draining.
+#[test]
+fn flooding_owner_bounded_by_selection_wait() {
+    let mut owner = FakeOwner::answering(Vec::new(), Polled::Other);
+    owner.events.clear();
+    let start = owner.clock;
+    assert_eq!(read_selection(&mut owner, 8), None);
+    let elapsed = owner.clock - start;
+    assert!(elapsed <= SELECTION_WAIT + Duration::from_millis(100), "{elapsed:?}");
+}
+
+/// The offer version `owners` (sampled in order) and a `TIMESTAMP` answer `stamp` give.
+fn version_of(owners: &[u32], stamp: PropertyReply) -> Option<u64> {
+    let mut owner = FakeOwner::answering(vec![stamp], Polled::Idle);
+    owner.owners = owners.iter().copied().collect();
+    offer_version_with(&mut owner)
+}
+
+/// Contract: the offer version is the owner window and its one nonzero format-32 `TIMESTAMP`,
+/// taken only when the owner is the same before and after the conversion; a raced owner, no
+/// owner, or a malformed answer (another format, an `INCR`, a zero, more or less than one item)
+/// gives no version, so no paste grant can match it.
+#[test]
+fn offer_version_needs_one_owner_and_a_well_formed_timestamp() {
+    let stamp = |value: &[u8]| reply(PropertyKind::Other, 32, 0, value);
+    let good = 42u32.to_ne_bytes();
+    assert_eq!(version_of(&[5, 5], stamp(&good)), Some((5 << 32) | 42));
+    assert_eq!(version_of(&[5, 6], stamp(&good)), None, "the owner changed during conversion");
+    assert_eq!(version_of(&[0], stamp(&good)), None, "no owner");
+    assert_eq!(version_of(&[5, 5], reply(PropertyKind::Other, 8, 0, &good)), None);
+    assert_eq!(version_of(&[5, 5], reply(PropertyKind::Incr, 32, 0, &good)), None);
+    assert_eq!(version_of(&[5, 5], stamp(&0u32.to_ne_bytes())), None, "a zero timestamp");
+    assert_eq!(version_of(&[5, 5], stamp(&[1, 0, 0, 0, 2, 0, 0, 0])), None, "two items");
+    assert_eq!(version_of(&[5, 5], stamp(&[])), None, "no item");
 }

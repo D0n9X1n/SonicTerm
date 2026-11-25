@@ -303,6 +303,11 @@ impl PasteGrants {
         self.entries.len()
     }
 
+    /// When the oldest held grant was issued, so the pipeline can wake at its expiry.
+    pub(in crate::app) fn oldest_issue(&self) -> Option<std::time::Instant> {
+        self.entries.iter().map(|grant| grant.issued_at).min()
+    }
+
     /// Whether no grant is held.
     pub(in crate::app) fn is_empty(&self) -> bool {
         self.entries.is_empty()

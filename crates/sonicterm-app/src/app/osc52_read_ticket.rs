@@ -24,7 +24,8 @@ use super::osc52_stream::{ClipboardJob, ClipboardStaging};
 /// One pane's read identity, shared by the pane, its VT worker and its intake.
 #[derive(Debug, Default)]
 pub(in crate::app) struct ReadIdentity {
-    /// Bumped whenever the pane leaves a window: a tab move, transfer or tear-out.
+    /// Bumped whenever the pane leaves a window (a tab move, transfer or tear-out) or its tab
+    /// changes position within one, since a consent page names the tab by position.
     owner_epoch: AtomicU64,
     /// The command boundaries (prompt start, command start and end, RIS) the VT worker published.
     command_epoch: AtomicU64,
@@ -41,7 +42,8 @@ pub(in crate::app) struct ReadIdentity {
 }
 
 impl ReadIdentity {
-    /// Note that the pane left its window, revoking every read bound to its old owner.
+    /// Note that the pane left its window or its tab moved, revoking every read bound to its old
+    /// owner.
     pub(in crate::app) fn bump_owner(&self) {
         self.owner_epoch.fetch_add(1, Ordering::SeqCst);
     }
@@ -290,7 +292,7 @@ pub(in crate::app) enum TicketState {
 pub(in crate::app) enum CancelReason {
     /// The pane closed.
     PaneClosed,
-    /// The pane left its window since admission.
+    /// The pane left its window, or its tab moved within it, since admission.
     OwnerChanged,
     /// A prompt or command boundary passed since the request.
     CommandChanged,

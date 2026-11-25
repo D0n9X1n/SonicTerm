@@ -789,7 +789,7 @@ the read empty. Each OS bounds the read before the text is copied into SonicTerm
 | --- | --- | --- |
 | macOS | `NSPasteboard` `dataForType(NSPasteboardTypeString)` | 2 s per destination; a value longer than the cap is refused by its length before the copy into Rust. AppKit materializes the whole value before SonicTerm can measure it, as any paste does, so that allocation is not bounded by SonicTerm. |
 | Windows | `OpenClipboard` (10 tries, 10 ms apart), then `GetClipboardData(CF_UNICODETEXT)` | 2 s per destination, which covers delayed rendering; a block whose `GlobalSize` cannot fit the cap is refused before `GlobalLock`, and conversion stops past the cap. |
-| Linux (X11) | `ConvertSelection` of `CLIPBOARD` or `PRIMARY` as `UTF8_STRING` | 2 s for `SelectionNotify`; a text reply must be format 8 of a text type within the cap; an `INCR` transfer is refused from its announced size, and each chunk waits at most 2 s, 5 s in total. With no X server the read is unsupported and answered empty. |
+| Linux (X11) | `ConvertSelection` of `CLIPBOARD` or `PRIMARY` as `UTF8_STRING` | 2 s for `SelectionNotify`; a text reply must be format 8 of a text type within the cap; an `INCR` transfer is refused from its announced size before the announcement is deleted, so the owner is never asked for a chunk, and each chunk waits at most 2 s, 5 s in total, checked before every event. With no X server the read is unsupported and answered empty. |
 
 An OSC 5522 read of a type other than text goes through the same native layer, with the 8 MiB
 per-type cap, and a type the clipboard does not hold is omitted:

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use super::{CommitGate, NativeFormat, OfferBackend, Published};
 use crate::app::clipboard_worker::Snapshot;
-use crate::app::osc52_read_source::TypeRead;
+use crate::app::osc52_read_source::{bounded_utf16, utf16_block_admits, ReadOutcome, TypeRead};
 
 /// The standard clipboard format for NUL-terminated UTF-16 text.
 pub(super) const CF_UNICODETEXT: u32 = 13;
@@ -364,22 +364,37 @@ pub(super) trait Win32Clipboard {
     fn close(&mut self);
     /// The clipboard's change counter, which every change to its contents advances.
     fn sequence(&mut self) -> u32;
-    /// Run `read` over the open clipboard's `CF_UNICODETEXT` block size and its units before the
-    /// terminator, only when `admit` accepts the size reported before the block is locked; `None`
-    /// when there is no text block or `admit` refused it.
-    fn with_text(
-        &mut self,
-        admit: &dyn Fn(usize) -> bool,
-        read: &mut dyn FnMut(usize, &[u16]),
-    ) -> Option<()>;
+    /// The `GlobalSize` of the open clipboard's `CF_UNICODETEXT` block, read without locking it
+    /// (0 when the size is unknown); `None` when the clipboard holds no text block.
+    fn text_block_bytes(&mut self) -> Option<usize>;
+    /// Lock the open clipboard's text block, whose size was admitted as `block_bytes`, and run
+    /// `read` over its units before the terminator; nothing runs when the block is gone, has
+    /// another size, or cannot be locked.
+    fn lock_text(&mut self, block_bytes: usize, read: &mut dyn FnMut(&[u16]));
+}
+
+/// Run `read` over the open clipboard's text block size and units, only when `admit` accepts the
+/// size `GlobalSize` reported before the block is locked; nothing runs otherwise.
+fn with_text<C: Win32Clipboard>(
+    clipboard: &mut C,
+    admit: impl Fn(usize) -> bool,
+    read: &mut dyn FnMut(usize, &[u16]),
+) {
+    let Some(block_bytes) = clipboard.text_block_bytes() else {
+        // When: text_block_bytes is None, the clipboard holds no text block.
+        return;
+    };
+    if block_bytes != 0 && admit(block_bytes) {
+        clipboard.lock_text(block_bytes, &mut |units| read(block_bytes, units));
+    }
 }
 
 /// The text the open clipboard holds as a [`Snapshot`], when its block is at most `max_bytes`.
 fn read_snapshot<C: Win32Clipboard>(clipboard: &mut C, max_bytes: usize) -> Option<Snapshot> {
     let mut snapshot = None;
-    clipboard.with_text(&|block_bytes| block_bytes <= max_bytes, &mut |block_bytes, units| {
+    with_text(clipboard, |block_bytes| block_bytes <= max_bytes, &mut |block_bytes, units| {
         snapshot = Some(Snapshot { block_bytes, units: units.to_vec() });
-    })?;
+    });
     snapshot
 }
 
@@ -388,8 +403,45 @@ fn read_snapshot<C: Win32Clipboard>(clipboard: &mut C, max_bytes: usize) -> Opti
 fn holds_snapshot<C: Win32Clipboard>(clipboard: &mut C, previous: &Snapshot) -> bool {
     let mut same = false;
     let admit = |block_bytes: usize| block_bytes == previous.block_bytes;
-    let _ = clipboard.with_text(&admit, &mut |_, units| same = units == previous.units.as_slice());
+    with_text(clipboard, admit, &mut |_, units| same = units == previous.units.as_slice());
     same
+}
+
+/// The clipboard's `CF_UNICODETEXT` for an OSC 52 read, within `max_bytes` of UTF-8, in one
+/// acquisition. The block's `GlobalSize` decides `TooLarge` before it is locked, so an oversized
+/// block is never locked or copied; conversion is measured before it allocates. Delayed rendering
+/// runs inside `GetClipboardData`, which the reader's deadline bounds for the caller.
+pub(super) fn read_text_with<C: Win32Clipboard>(
+    clipboard: &mut C,
+    max_bytes: usize,
+) -> ReadOutcome {
+    if !clipboard.open() {
+        // When: open gives up, another process held the clipboard throughout.
+        return ReadOutcome::Failed;
+    }
+    let outcome = read_open_text(clipboard, max_bytes);
+    clipboard.close();
+    outcome
+}
+
+/// [`read_text_with`] on a clipboard this thread already opened.
+fn read_open_text<C: Win32Clipboard>(clipboard: &mut C, max_bytes: usize) -> ReadOutcome {
+    let Some(block_bytes) = clipboard.text_block_bytes() else {
+        // When: text_block_bytes is None, the clipboard offers no CF_UNICODETEXT: no text.
+        return ReadOutcome::Empty;
+    };
+    if block_bytes == 0 {
+        // When: block_bytes is 0, GlobalSize could not size the handle, so nothing is readable.
+        return ReadOutcome::Failed;
+    }
+    if !utf16_block_admits(block_bytes, max_bytes) {
+        // When: utf16_block_admits refuses block_bytes, the block is never locked.
+        return ReadOutcome::TooLarge;
+    }
+    // A block that cannot be locked, or changed size, leaves the read failed.
+    let mut outcome = ReadOutcome::Failed;
+    clipboard.lock_text(block_bytes, &mut |units| outcome = bounded_utf16(units, max_bytes));
+    outcome
 }
 
 /// One Windows publish: every representation staged as a filled global block before the

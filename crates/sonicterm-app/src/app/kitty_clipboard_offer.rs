@@ -334,6 +334,12 @@ pub(in crate::app) fn read_general_type(
     })
 }
 
+/// The Windows clipboard's text for an OSC 52 read within `max_bytes`, sized before it is locked.
+#[cfg(target_os = "windows")]
+pub(in crate::app) fn read_windows_text(max_bytes: usize) -> super::osc52_read_source::ReadOutcome {
+    win32::read_text(max_bytes)
+}
+
 /// The Windows clipboard's bytes under the non-text MIME name `mime`, within `max_bytes`.
 #[cfg(target_os = "windows")]
 pub(in crate::app) fn read_windows_type(

@@ -341,7 +341,8 @@ Otherwise the pane's VT worker gives the read a ticket before posting anything: 
 and 8 per process. A read past either bound is answered empty at once on the ordinary
 parser-reply path; an empty reply carries no clipboard bytes. A ticket records the pane, its PTY,
 the window it is in, the last prompt or command boundary, and the policy generation. Closing the
-pane, moving it to another window (or away and back), a prompt start, command start or end, a
+pane, moving it to another window (or away and back), moving its tab to another position in its
+window (the consent page names the tab by position), a prompt start, command start or end, a
 reset (RIS), a different PTY, READONLY, and any change to `osc52` or `osc52_read` each cancel the
 ticket silently. It is checked again before the native read starts and before every attempt to
 deliver the reply.
@@ -362,12 +363,13 @@ disposable reader thread, one read at a time, never on the event loop. A read re
 clipboard owner is answered empty. Text that is not valid UTF-8 becomes U+FFFD. Each destination
 has 2 s on macOS and Windows and 7 s on Linux. A read past its deadline is answered empty, but its
 ticket and its share of the reply budget stay held until the native call returns, and other
-reads are answered empty without reading meanwhile.
+reads are answered empty without reading meanwhile. A read whose native call returned at or after
+its deadline is also answered empty, however soon the event loop picks up its result.
 
 | Platform | Bound |
 | --- | --- |
 | Windows | `OpenClipboard` retried 10 times 10 ms apart; `GlobalSize` decides a too-large `CF_UNICODETEXT` before `GlobalLock` |
-| Linux (X11, XWayland) | `ConvertSelection` to `UTF8_STRING`, 2 s for the owner's answer; a format-8 `UTF8_STRING`, `STRING` or `text/plain;charset=utf-8` value within the cap; an `INCR` transfer whose format-32 size is within the cap, 2 s per chunk and 5 s in all; no X server answers empty |
+| Linux (X11, XWayland) | `ConvertSelection` to `UTF8_STRING`, 2 s for the owner's answer; a format-8 `UTF8_STRING`, `STRING` or `text/plain;charset=utf-8` value within the cap; an `INCR` transfer whose format-32 size is within the cap, checked before the announcement is deleted (deleting it asks for the first chunk), 2 s per chunk and 5 s in all, the deadline checked before every event so a busy owner cannot extend it; no X server answers empty |
 | macOS | `NSPasteboardTypeString`; AppKit holds the whole value before SonicTerm can measure it, as any paste does, and the copy into SonicTerm is refused past the cap |
 
 The reply for one request, all destinations together, is one message of at most about 10.7 MiB.
@@ -476,8 +478,9 @@ Always and Ban rows after Deny, and the name on a separate "Program-supplied nam
 refuses it `EPERM` and later ones, both without a page. A grant is keyed by the pane, its PTY
 incarnation, owner epoch and RIS count, the operation, the location and the `pw`, never the
 name; a `pw` without a `name` counts as no password, so no grant is looked up or created. A pane
-keeps at most 16 grants, evicting its oldest. RIS, closing the pane, moving it to another window,
-a new PTY and any `osc52`/`osc52_read` change revoke its grants, and `deny` never consults them.
+keeps at most 16 grants, evicting its oldest. RIS, closing the pane, moving it to another window
+or its tab to another position, a new PTY and any `osc52`/`osc52_read` change revoke its grants,
+and `deny` never consults them.
 A read a grant approved is still revalidated at delivery, so a later `deny` or a transfer sends
 nothing. Grants, names and passwords never reach logs or `Debug` output.
 
@@ -502,7 +505,7 @@ clipboard offer version, read before and after the listing:
 | --- | --- |
 | macOS | the general pasteboard's `changeCount` |
 | Windows | `GetClipboardSequenceNumber`; 0 (no clipboard access) is no version |
-| Linux (X11, XWayland) | the selection owner's window and its `TIMESTAMP` answer, within the 2 s selection wait; no owner or no answer is no version |
+| Linux (X11, XWayland) | the selection owner's window and its `TIMESTAMP` answer, within the 2 s selection wait; the owner is read before the conversion and again after the answer and must not change; no owner, a changed owner, no answer, or an answer that is not one nonzero format-32 item is no version |
 
 With no version, a version that moved during the listing, or no password, the event is still sent
 but issues no grant. The first OSC 5522 read from that pane at that location carrying the
@@ -515,10 +518,15 @@ the read was accepted, or any other change to the recipient drops whatever was r
 from a later offer is delivered on the grant; while the pane and its command are unchanged, the
 read then waits for an ordinary answer (a consent page under `ask`). A session grant's Always or
 Ban still decides first. A replay, a read without a `name`, and a read from another pane find no grant.
-DECRST 5522, RIS, a move to another window, a new PTY, any `osc52`/`osc52_read` change and 60 s
-revoke it. The event's listing and version reads run on the event loop, as a paste's text read does, so
-on X11 an owner that never answers holds the paste for the 2 s selection wait per read. One-time
-passwords never reach logs or `Debug` output.
+DECRST 5522, RIS, a move to another window or tab position, a new PTY, any
+`osc52`/`osc52_read` change and 60 s revoke it; an idle grant is purged when its 60 s end. The
+event's listing and version reads run on a disposable capture thread, never on the event loop:
+the paste fixes its recipients and their identities at the gesture, and each event goes out when
+the capture settles, only to a recipient that still has that identity (the same PTY, window, tab
+position, mode 5522 state and policy) and still accepts input. One capture runs at a time within
+the reader's deadline (2 s, or 7 s on Linux) and at most 4 pastes wait; past the deadline, while a
+capture is past its deadline, or with 4 waiting, the event goes out at once with an empty listing
+and no grant. One-time passwords never reach logs or `Debug` output.
 
 Intentional differences: at most 1 MiB per packet (Ghostty 8 MiB; kitty 256 KiB unless the
 packet is complete); a commit with nothing the platform can hold answers `ENOSYS`; Ghostty's

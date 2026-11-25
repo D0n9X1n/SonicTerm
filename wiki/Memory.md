@@ -254,7 +254,7 @@ the largest raw text one destination may return (8 MiB, or 4 MiB per destination
 its largest reply, and for `cp` two more replies, because appending the second reply can move the
 first while the second destination's text is alive. Conversions to UTF-8 are built into a buffer
 reserved at the measured length, and an X11 property's value moves into the text. Once the replies are built the reservation shrinks to them, and it
-is released when the PTY writer has written them, or when they are dropped. A read the budget
+is released when the PTY writer has written them and freed their bytes, or when they are dropped. A read the budget
 cannot cover is answered empty. An OSC 5522 read job reserves 21 MiB from the same budget: the
 reply built so far plus, for the type being read, its 8 MiB of raw bytes and the larger of their
 conversion (8 MiB) and the reply regrown to at most 12 MiB. Types are read one at a time, and

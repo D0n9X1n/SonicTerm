@@ -314,6 +314,32 @@ fn wedged_reader_holds_slot_and_lease_until_return() {
     assert_eq!((harness.staging.ticket_slots_in_use(), harness.budget_bytes()), (0, 0));
 }
 
+/// Contract: a reader whose native call returns after its deadline never delivers its data, even
+/// when its result is drained before the deadline branch runs: the read is answered empty, as an
+/// overdue read is, and its slot and lease are released.
+#[test]
+fn reader_completed_after_deadline_never_delivered() {
+    let (release, source) = FakeSource::gated("secret");
+    let mut harness = harness(Osc52ReadPolicy::Allow, source.clone());
+    harness.app.clip_state.reads.reader_deadline = Duration::from_millis(50);
+    request(&mut harness, b"\x1b]52;c;?\x07");
+    harness.pump_until(|_| source.calls() == 1);
+    // The deadline passes with no pump, then the native call returns.
+    std::thread::sleep(Duration::from_millis(100));
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while harness.app.clip_state.reads.done_rx.is_empty() {
+        assert!(Instant::now() < deadline, "the reader did not return");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    harness.app.pump_clipboard_reads();
+    let delivered = harness.take_delivered();
+    let bytes: Vec<&[u8]> = delivered.iter().map(|(_, reply)| reply.bytes()).collect();
+    assert_eq!(bytes, vec![&b"\x1b]52;c;\x1b\\"[..]], "answered empty, never the late text");
+    drop(delivered);
+    assert_eq!((harness.staging.ticket_slots_in_use(), harness.budget_bytes()), (0, 0));
+}
+
 /// Contract: a contended writer admission is retried once per turn, revalidating each time, at
 /// most `MAX_DELIVERY_RETRIES` times, then dropped; a policy change between attempts stops it.
 #[test]

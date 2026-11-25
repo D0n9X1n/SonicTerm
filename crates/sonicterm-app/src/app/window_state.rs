@@ -715,6 +715,15 @@ impl WindowState {
         self.tabs.reorder(from, to);
         let state = self.tab_states.remove(from);
         self.tab_states.insert(to, state);
+        // A clipboard consent page names its tab by position, so every pane whose tab moved gets a
+        // new owner epoch, revoking a page or approval that named the old position.
+        for tab in &self.tab_states[from.min(to)..=from.max(to)] {
+            for leaf in tab.tree.leaves() {
+                if let Some(pane) = self.panes.get(&leaf) {
+                    pane.read_identity.bump_owner();
+                }
+            }
+        }
         self.complete_topology_change(
             TopologyChange {
                 resize_visible: false,

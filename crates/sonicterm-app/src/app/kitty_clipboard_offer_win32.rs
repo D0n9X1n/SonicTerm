@@ -18,12 +18,12 @@ use windows::Win32::{
 };
 
 use super::windows_formats::{
-    hdrop_uri_list, html_fragment, Win32Clipboard, WindowsOffer, CF_HDROP, CF_UNICODETEXT,
-    HTML_FORMAT_NAME, PNG_FORMAT_NAME,
+    hdrop_uri_list, html_fragment, read_text_with, Win32Clipboard, WindowsOffer, CF_HDROP,
+    CF_UNICODETEXT, HTML_FORMAT_NAME, PNG_FORMAT_NAME,
 };
 use super::{native_format, publish_offer, CommitGate, NativeFormat, NativeOffer, Published};
 use crate::app::clipboard_worker::Snapshot;
-use crate::app::osc52_read_source::{TypeRead, MAX_NATIVE_TYPES_SCANNED};
+use crate::app::osc52_read_source::{ReadOutcome, TypeRead, MAX_NATIVE_TYPES_SCANNED};
 
 /// Attempts to open a clipboard another process briefly holds.
 const OPEN_ATTEMPTS: usize = 10;
@@ -115,40 +115,57 @@ impl Win32Clipboard for Win32 {
         unsafe { GetClipboardSequenceNumber() }
     }
 
-    fn with_text(
-        &mut self,
-        admit: &dyn Fn(usize) -> bool,
-        read: &mut dyn FnMut(usize, &[u16]),
-    ) -> Option<()> {
-        let handle =
-            // SAFETY: the clipboard is open on this thread; the handle stays owned by the clipboard.
-            unsafe { GetClipboardData(CF_UNICODETEXT) }.ok()?;
-        let block = HGLOBAL(handle.0);
+    fn text_block_bytes(&mut self) -> Option<usize> {
+        let block = text_block()?;
         let block_bytes =
             // SAFETY: block is the clipboard's live text handle while the clipboard stays open.
             unsafe { GlobalSize(block) };
-        if block_bytes == 0 || !admit(block_bytes) {
-            // When: block_bytes is unknown or admit refuses it, the block is never locked.
-            return None;
+        Some(block_bytes)
+    }
+
+    fn lock_text(&mut self, block_bytes: usize, read: &mut dyn FnMut(&[u16])) {
+        let Some(block) = text_block() else {
+            // When: text_block is None, the text block is gone, so nothing is locked.
+            return;
+        };
+        let current_bytes =
+            // SAFETY: block is the clipboard's live text handle while the clipboard stays open.
+            unsafe { GlobalSize(block) };
+        if current_bytes != block_bytes {
+            // When: current_bytes differs from the admitted block_bytes, it is never locked.
+            return;
         }
         let base =
             // SAFETY: block is a live moveable allocation, so GlobalLock returns its base or null.
             unsafe { GlobalLock(block) }.cast::<u16>();
         if base.is_null() {
             // When: base is null, GlobalLock failed and there is nothing to read.
-            return None;
+            return;
         }
         let units =
             // SAFETY: base points at block_bytes locked bytes until GlobalUnlock; block_bytes / 2
             // u16 units stay in bounds.
             unsafe { std::slice::from_raw_parts(base, block_bytes / 2) };
         let text_units = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
-        read(block_bytes, &units[..text_units]);
+        read(&units[..text_units]);
         let _ =
             // SAFETY: block was locked above; a final unlock reports an error with no lock left.
             unsafe { GlobalUnlock(block) };
-        Some(())
     }
+}
+
+/// The open clipboard's `CF_UNICODETEXT` handle; `None` when it holds no text.
+fn text_block() -> Option<HGLOBAL> {
+    let handle =
+        // SAFETY: the clipboard is open on this thread; the handle stays owned by the clipboard.
+        unsafe { GetClipboardData(CF_UNICODETEXT) }.ok()?;
+    Some(HGLOBAL(handle.0))
+}
+
+/// The clipboard's `CF_UNICODETEXT` for an OSC 52 read within `max_bytes` of UTF-8, sized with
+/// `GlobalSize` before it is locked.
+pub(super) fn read_text(max_bytes: usize) -> ReadOutcome {
+    read_text_with(&mut Win32, max_bytes)
 }
 
 /// Publish `offer` on the Windows clipboard in one `OpenClipboard` session, `gate` checked

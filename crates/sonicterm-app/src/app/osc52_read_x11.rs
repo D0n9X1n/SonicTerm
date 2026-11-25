@@ -1,13 +1,13 @@
-//! The X11 selection reply checks for OSC 52 reads, apart from the connection so every platform
-//! tests them: a text reply's type, format and size, the `INCR` announcement (ICCCM 2.7.2), and
-//! the incremental transfer's chunks and deadlines.
+//! The X11 selection protocol for OSC 52 reads, apart from the connection so every platform tests
+//! it: a text reply's type, format and size, the `INCR` announcement (ICCCM 2.7.2), the incremental
+//! transfer's chunks and deadlines, and the offer version a paste grant binds. The native client in
+//! `osc52_read_x11_native.rs` implements [`SelectionPort`]; tests drive a scripted owner.
 
 use std::time::{Duration, Instant};
 
 use super::osc52_read_source::{bounded_latin1, bounded_utf8, ReadOutcome};
 
 /// How long the selection owner may take to answer `ConvertSelection`.
-#[cfg(target_os = "linux")]
 pub(in crate::app) const SELECTION_WAIT: Duration = Duration::from_secs(2);
 
 /// How long one `INCR` chunk may take to arrive.
@@ -139,6 +139,175 @@ impl IncrTransfer {
         self.bytes.extend_from_slice(&chunk.value);
         None
     }
+}
+
+/// What one poll of the X11 connection found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum Polled {
+    /// The owner answered the conversion: `true` when it stored the property, `false` when it
+    /// refused.
+    Notify(bool),
+    /// The read property received a new value: the next `INCR` chunk.
+    NewValue,
+    /// Any other event.
+    Other,
+    /// No event is waiting.
+    Idle,
+    /// The connection failed.
+    Closed,
+}
+
+/// The target a conversion asks the owner for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum ConvertTarget {
+    /// The text, as `UTF8_STRING`.
+    Text,
+    /// When the owner took the selection, as `TIMESTAMP`.
+    Timestamp,
+}
+
+/// The X11 calls one read makes on its own connection and requestor window.
+pub(in crate::app) trait SelectionPort {
+    /// The selection's owner window: `Some(0)` with no owner, `None` on a protocol error.
+    fn owner(&mut self) -> Option<u32>;
+    /// Ask the owner to convert the selection to `target` into the read property; false on error.
+    fn convert(&mut self, target: ConvertTarget) -> bool;
+    /// The next waiting event, without blocking.
+    fn poll(&mut self) -> Polled;
+    /// Fetch the read property, asking for one unit past `max_bytes`, deleting it when `delete`.
+    fn fetch(&mut self, delete: bool, max_bytes: usize) -> Option<PropertyReply>;
+    /// Delete the read property.
+    fn delete(&mut self);
+    /// The current time.
+    fn now(&self) -> Instant;
+    /// Wait briefly before the next poll.
+    fn pause(&mut self);
+}
+
+/// Wait until `deadline` for an event `select` accepts; `None` on timeout or a closed connection.
+/// The deadline is checked before every poll, so an owner or client that keeps events coming
+/// cannot hold the wait past it.
+pub(in crate::app) fn wait_for_event<T>(
+    port: &mut dyn SelectionPort,
+    deadline: Instant,
+    mut select: impl FnMut(Polled) -> Option<T>,
+) -> Option<T> {
+    loop {
+        if port.now() >= deadline {
+            // When: now reached the deadline, the owner did not answer in time.
+            return None;
+        }
+        match port.poll() {
+            Polled::Idle => port.pause(),
+            Polled::Closed => {
+                // When: poll reports Closed, the connection failed and no answer can come.
+                return None;
+            }
+            event => {
+                // When: poll returned an event, select decides whether it ends the wait.
+                if let Some(found) = select(event) {
+                    // When: select accepts the event, the wait ends with what it found.
+                    return Some(found);
+                }
+            }
+        }
+    }
+}
+
+/// Wait until `deadline` for the owner's answer to a conversion: whether it stored the property.
+pub(in crate::app) fn wait_for_notify(
+    port: &mut dyn SelectionPort,
+    deadline: Instant,
+) -> Option<bool> {
+    wait_for_event(port, deadline, |event| match event {
+        Polled::Notify(stored) => Some(stored),
+        Polled::NewValue | Polled::Other | Polled::Idle | Polled::Closed => None,
+    })
+}
+
+/// Read the selection as text within `max_bytes` through `port`; `None` on a protocol error or a
+/// missed deadline.
+pub(in crate::app) fn read_selection(
+    port: &mut dyn SelectionPort,
+    max_bytes: usize,
+) -> Option<ReadOutcome> {
+    if !port.convert(ConvertTarget::Text) {
+        // When: convert fails, the request never reached the server.
+        return None;
+    }
+    let deadline = port.now() + SELECTION_WAIT;
+    if !wait_for_notify(port, deadline)? {
+        // When: wait_for_notify reports no stored property, the owner has nothing to convert.
+        return Some(ReadOutcome::Empty);
+    }
+    // The first reply is read without deleting it: deleting an `INCR` announcement asks the owner
+    // for the first chunk, so an announced size is validated before that.
+    let first = port.fetch(false, max_bytes)?;
+    let incr = first.kind == PropertyKind::Incr;
+    match classify_first(first, max_bytes) {
+        FirstReply::Done(outcome) => {
+            // When: classify_first is Done, the read ends; a text or malformed reply is removed,
+            // and a refused INCR announcement stays, so the owner is never asked for a chunk.
+            if !incr {
+                port.delete();
+            }
+            return Some(outcome);
+        }
+        FirstReply::Incr => {
+            // Deleting the validated announcement asks the owner for the first chunk.
+            port.delete();
+        }
+    }
+    let mut transfer = IncrTransfer::new(max_bytes, port.now());
+    loop {
+        let deadline = transfer.chunk_deadline(port.now());
+        wait_for_event(port, deadline, |event| (event == Polled::NewValue).then_some(()))?;
+        let chunk = port.fetch(true, transfer.remaining())?;
+        if let Some(outcome) = transfer.push(chunk) {
+            // When: push ends the transfer, a property left by a refused chunk is removed.
+            port.delete();
+            return Some(outcome);
+        }
+    }
+}
+
+/// The offer the selection holds now: its owner's window in the high 32 bits and its `TIMESTAMP`
+/// answer in the low 32. X11 cannot read both at once, so the owner is read before the conversion
+/// and again after the answer, and must be the same. `None`, so no paste grant can match, with no
+/// owner, a raced owner, a protocol error, a missed selection wait, or a malformed answer: anything
+/// but one nonzero format-32 item.
+pub(in crate::app) fn offer_version_with(port: &mut dyn SelectionPort) -> Option<u64> {
+    let owner = port.owner()?;
+    if owner == 0 {
+        // When: owner is 0, nothing is offered, so there is no version.
+        return None;
+    }
+    if !port.convert(ConvertTarget::Timestamp) {
+        // When: convert fails, the request never reached the server.
+        return None;
+    }
+    let deadline = port.now() + SELECTION_WAIT;
+    if !wait_for_notify(port, deadline)? {
+        // When: wait_for_notify reports no stored property, the owner cannot answer TIMESTAMP.
+        return None;
+    }
+    // Fetched one unit past a single item, without deleting, so an extra item and an `INCR`
+    // announcement both show, and an announcement is never answered with a chunk request.
+    let reply = port.fetch(false, 4)?;
+    let incr = reply.kind == PropertyKind::Incr;
+    // The answer is removed; an INCR announcement is left unanswered.
+    if !incr {
+        port.delete();
+    }
+    let well_formed = !incr && reply.format == 32 && reply.bytes_after == 0;
+    let item: [u8; 4] = reply.value.as_slice().try_into().ok().filter(|_| well_formed)?;
+    let stamp = u32::from_ne_bytes(item);
+    if stamp == 0 || port.owner()? != owner {
+        // When: stamp is 0 (CurrentTime, no real time) or the owner changed during the
+        // conversion, the answer may not describe the offer, so there is no version.
+        return None;
+    }
+    Some((u64::from(owner) << 32) | u64::from(stamp))
 }
 
 #[cfg(test)]

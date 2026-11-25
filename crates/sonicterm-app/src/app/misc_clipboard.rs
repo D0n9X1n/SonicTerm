@@ -146,7 +146,8 @@ impl App {
             return;
         };
         self.note_paste_gesture(source_pane, blocked);
-        self.send_paste_events(&event_panes);
+        // The offer is listed and versioned off the event loop; each event follows its capture.
+        self.capture_paste_events(&event_panes);
         if text_panes.is_empty() {
             // When: text_panes is empty, every pane took an event and the clipboard is never read.
             return;
@@ -171,58 +172,10 @@ impl App {
     /// Whether `pane_id` gets a paste event instead of its paste: its program set DECSET 5522, read
     /// without the parser lock, and `osc52_read` is not `deny`, under which the program could not
     /// read what the event announces, so the paste stays text.
-    fn takes_paste_event(&self, pane_id: u64) -> bool {
+    pub(in crate::app) fn takes_paste_event(&self, pane_id: u64) -> bool {
         use sonicterm_cfg::config::Osc52ReadPolicy;
         let readable = self.clip_state.staging.read_policy() != Osc52ReadPolicy::Deny;
         readable && self.pane_by_id(pane_id).is_some_and(|pane| pane.paste_events_mode() & 1 == 1)
-    }
-
-    /// Send each of `panes` its own paste event through its PTY's sensitive-reply slot, with its
-    /// own one-time password, and bind a grant to each event its writer admitted: the recipient's
-    /// identity and the offer version read around the listing. A version the platform cannot give,
-    /// or one that moved during the listing, issues no grant, so the follow-up read asks.
-    fn send_paste_events(&mut self, panes: &[u64]) {
-        use crate::app::osc52_read_grants::{one_time_password, PasteGrant};
-        use crate::app::osc52_read_source::ReadLocation;
-        // shortcut: a paste reads the standard clipboard only, so its event names that location.
-        let location = sonicterm_vt::vt::KittyClipboardLocation::Standard;
-        let source = Arc::clone(&self.clip_state.reads.source);
-        // shortcut: the offer is listed and versioned on the event loop, as a paste's text read is;
-        // on X11 each call can wait the 2 s selection wait for an owner that does not answer.
-        let before = source.offer_version(ReadLocation::Clipboard);
-        let listing = source.list_types(ReadLocation::Clipboard);
-        let after = before.and_then(|_| source.offer_version(ReadLocation::Clipboard));
-        let version = before.filter(|version| after == Some(*version));
-        for &pane_id in panes {
-            // A new paste ends the pane's earlier grant, whatever becomes of this event.
-            self.clip_state.reads.paste_grants.revoke(pane_id);
-            let password = one_time_password();
-            let event = crate::app::kitty_clipboard_read::paste_event_reply(
-                location,
-                password.as_deref(),
-                &listing,
-            );
-            let binding = self.paste_binding(pane_id);
-            let bytes = event.len();
-            let reply = sonicterm_io::pty::SensitiveReply::new(event, Box::new(()));
-            // shortcut: a refused event is not retried; the user pastes again.
-            if let Err(error) = self.send_read_reply(pane_id, reply) {
-                // When: send_read_reply refuses the event (writer busy or stopped), no grant is made.
-                tracing::debug!(pane_id, bytes, ?error, "paste event not admitted");
-                continue;
-            }
-            let grant = match (password, binding, version) {
-                (Some(password), Some(binding), Some(version)) => {
-                    Some(PasteGrant::new(binding, location, version, password, Instant::now()))
-                }
-                _ => None,
-            };
-            tracing::debug!(pane_id, bytes, granted = grant.is_some(), "paste event sent");
-            if let Some(grant) = grant {
-                // The grant exists only once its event was admitted to the pane's writer.
-                self.clip_state.reads.paste_grants.issue(grant);
-            }
-        }
     }
 
     /// Paste the clipboard's copied files, else its text, into each terminal destination.

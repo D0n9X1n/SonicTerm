@@ -944,9 +944,10 @@ fn write_primary(_clipboard: &mut arboard::Clipboard, _text: &str) -> bool {
 #[path = "clipboard_worker_win32.rs"]
 mod win32;
 
-/// The Windows OSC 52 read, which shares this module's clipboard open and block sizing.
+/// The Windows OSC 52 read, which sizes the text block through the offer backend's
+/// `Win32Clipboard` seam before it locks it.
 #[cfg(target_os = "windows")]
-pub(in crate::app) use win32::read_text as read_windows_text;
+pub(in crate::app) use super::kitty_clipboard_offer::read_windows_text;
 
 /// The Windows OSC 5522 type listing, which shares this module's clipboard open.
 #[cfg(target_os = "windows")]

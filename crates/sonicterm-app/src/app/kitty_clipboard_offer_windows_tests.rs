@@ -28,6 +28,8 @@ struct FakeWin32 {
     external_copy: Option<Vec<u8>>,
     /// Every clipboard call in order, shared so a test's gate can record itself between them.
     log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    /// The text blocks locked, as `GlobalLock` would.
+    locks: usize,
 }
 
 impl Win32Clipboard for FakeWin32 {
@@ -112,25 +114,31 @@ impl Win32Clipboard for FakeWin32 {
         self.sequence
     }
 
-    fn with_text(
-        &mut self,
-        admit: &dyn Fn(usize) -> bool,
-        read: &mut dyn FnMut(usize, &[u16]),
-    ) -> Option<()> {
+    fn text_block_bytes(&mut self) -> Option<usize> {
         assert!(self.is_open, "GetClipboardData only while open");
         self.log.borrow_mut().push("read");
-        let bytes = self.clipboard.iter().find(|(format, _)| *format == CF_UNICODETEXT)?.1.clone();
+        let block_bytes =
+            self.clipboard.iter().find(|(format, _)| *format == CF_UNICODETEXT)?.1.len();
         if std::mem::take(&mut self.race_read) {
             self.sequence += 1;
         }
-        if !admit(bytes.len()) {
-            return None;
+        Some(block_bytes)
+    }
+
+    fn lock_text(&mut self, block_bytes: usize, read: &mut dyn FnMut(&[u16])) {
+        assert!(self.is_open, "GlobalLock only while the clipboard is open");
+        let Some((_, bytes)) = self.clipboard.iter().find(|(format, _)| *format == CF_UNICODETEXT)
+        else {
+            return;
+        };
+        if bytes.len() != block_bytes {
+            return;
         }
+        self.locks += 1;
         let units: Vec<u16> =
             bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
         let text_units = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
-        read(bytes.len(), &units[..text_units]);
-        Some(())
+        read(&units[..text_units]);
     }
 }
 
@@ -477,4 +485,22 @@ fn empty_text_write_clears_in_one_acquisition() {
     let fake = &backend.clipboard;
     assert_eq!((fake.opens, fake.empties, fake.sets, fake.closes), (1, 1, 0, 1));
     assert!(fake.clipboard.is_empty());
+}
+
+/// Contract: an OSC 52 read sizes the `CF_UNICODETEXT` block with `GlobalSize` before it locks it:
+/// a block holding more UTF-16 units than the cap plus a terminator is `TooLarge` and never locked,
+/// one within the cap is locked once and converted, and the clipboard is closed either way.
+#[test]
+fn global_size_refuses_before_lock() {
+    let mut fake = holding_text("hello");
+    assert_eq!(read_text_with(&mut fake, 4), ReadOutcome::TooLarge);
+    assert_eq!(fake.locks, 0, "an oversized block is never locked");
+    assert_eq!((fake.opens, fake.closes), (1, 1));
+    let mut fake = holding_text("hello");
+    assert_eq!(read_text_with(&mut fake, 5), ReadOutcome::Text("hello".into()));
+    assert_eq!((fake.locks, fake.closes), (1, 1));
+    let mut fake = FakeWin32::default();
+    assert_eq!(read_text_with(&mut fake, 5), ReadOutcome::Empty, "no text block");
+    let mut fake = FakeWin32 { refuse_open: true, ..holding_text("x") };
+    assert_eq!(read_text_with(&mut fake, 5), ReadOutcome::Failed, "the clipboard stayed held");
 }

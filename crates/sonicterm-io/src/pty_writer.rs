@@ -1,5 +1,12 @@
 use super::*;
 
+/// Free a written or discarded message's `bytes`, then its `custody`: a sensitive reply's ticket
+/// and budget lease are released only once its clipboard text is gone.
+fn release(bytes: Outgoing, custody: Option<Box<dyn std::any::Any + Send>>) {
+    drop(bytes);
+    drop(custody);
+}
+
 // Ordering: queued_bytes, in_flight_bytes, completed_messages, operation Relaxed; closing SeqCst;
 // writer_on, input_completed Release.
 pub(super) fn spawn_writer_thread(
@@ -80,6 +87,7 @@ pub(super) fn spawn_writer_thread(
                         exit = TERMINAL_FAILED_WRITE;
                     }
                     replies.fail(e);
+                    release(bytes, custody);
                     break;
                 }
                 progress.begin(PtyWriterPhase::Flushing);
@@ -92,10 +100,12 @@ pub(super) fn spawn_writer_thread(
                         exit = TERMINAL_FAILED_FLUSH;
                     }
                     replies.fail(error);
+                    release(bytes, custody);
                     break;
                 }
-                // The bytes are written, so a sensitive reply's lease and ticket are released now.
-                drop(custody);
+                // The bytes are written, so they are freed and then a sensitive reply's lease and
+                // ticket are released.
+                release(bytes, custody);
                 if !is_reply {
                     // Only a flushed user-input message completes an admitted ordinal.
                     progress.input_completed.fetch_add(1, Ordering::Release);

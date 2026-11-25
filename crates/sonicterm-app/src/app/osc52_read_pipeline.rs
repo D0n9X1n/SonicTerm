@@ -65,6 +65,9 @@ struct ReaderDone {
     replies: Option<Vec<u8>>,
     ticket: ConsentTicket,
     lease: ClipLease,
+    /// When the native calls returned; a result completed at or past its deadline is never
+    /// delivered, however soon the event loop drains it.
+    completed_at: Instant,
 }
 
 /// A test's stand-in for the source PTY's sensitive-reply slot.
@@ -96,6 +99,8 @@ pub(in crate::app) struct ClipboardReads {
     pub(in crate::app) grants: SessionGrants,
     /// The one-time grants DECSET 5522 paste events issued, one per pane at most.
     pub(in crate::app) paste_grants: super::osc52_read_grants::PasteGrants,
+    /// Paste events waiting for, or being built by, the off-loop offer capture.
+    pub(in crate::app) paste_capture: super::osc52_read_paste::PasteCapture,
     /// Replaces the PTY's sensitive-reply slot in tests.
     #[cfg(test)]
     pub(in crate::app) port: Option<ReplyPort>,
@@ -119,6 +124,7 @@ impl Default for ClipboardReads {
             last_cancel: None,
             grants: SessionGrants::default(),
             paste_grants: super::osc52_read_grants::PasteGrants::default(),
+            paste_capture: super::osc52_read_paste::PasteCapture::default(),
             #[cfg(test)]
             port: None,
         }
@@ -150,6 +156,7 @@ impl ClipboardReads {
             && self.retries.is_empty()
             && self.grants.is_empty()
             && self.paste_grants.is_empty()
+            && self.paste_capture.is_idle()
     }
 }
 
@@ -237,9 +244,10 @@ impl super::App {
         Some(PasteApproval { binding: grant.binding, location, offer_version: grant.offer_version })
     }
 
-    /// Whether `grant`'s recipient still has the identity it was issued to and it is young enough.
+    /// Whether `grant`'s recipient still has the identity it was issued to and it is young enough:
+    /// a grant ends at exactly its lifetime, the instant its expiry wake is scheduled for.
     fn paste_grant_live(&self, grant: &PasteGrant, now: Instant) -> bool {
-        let fresh = now.saturating_duration_since(grant.issued_at) <= PASTE_GRANT_LIFETIME;
+        let fresh = now.saturating_duration_since(grant.issued_at) < PASTE_GRANT_LIFETIME;
         fresh && self.paste_binding(grant.binding.pane_id).as_ref() == Some(&grant.binding)
     }
 
@@ -382,6 +390,7 @@ impl super::App {
     /// show the next page and start the next read.
     pub(in crate::app) fn pump_clipboard_reads_at(&mut self, now: Instant) {
         self.purge_grants(now);
+        self.pump_paste_capture(now);
         self.retry_read_replies(now);
         self.settle_reader(now);
         self.sweep_read_tickets(now);
@@ -403,7 +412,20 @@ impl super::App {
                 tracing::debug!(pane_id = in_flight.binding.pane_id, "late OSC 52 read dropped");
                 continue;
             }
-            let ReaderDone { replies, mut ticket, lease } = done;
+            if done.completed_at >= in_flight.deadline {
+                // When: completed_at reached the deadline, the read is late: its data and lease
+                // are dropped, and it is answered as an overdue read is, the ticket as custody.
+                let ReaderDone { replies, ticket, lease, .. } = done;
+                drop((replies, lease));
+                tracing::warn!(
+                    pane_id = in_flight.binding.pane_id,
+                    "OSC 52 read passed its deadline"
+                );
+                let reply = SensitiveReply::new(in_flight.failure, Box::new(ticket));
+                self.deliver_read_reply(in_flight.binding, reply, now, false, 0, in_flight.busy);
+                continue;
+            }
+            let ReaderDone { replies, mut ticket, lease, .. } = done;
             let revoked = self.revalidate_ticket(ticket.binding(), now, true)
                 == Err(CancelReason::PasteRevoked);
             let Some(replies) = replies.filter(|_| !revoked) else {
@@ -590,7 +612,8 @@ impl super::App {
                     .unwrap_or(Some(thread_failure));
                 // The raw text is gone, so only the frames stay reserved.
                 lease.shrink_to(replies.as_ref().map_or(0, Vec::capacity));
-                let _ = done_tx.send(ReaderDone { replies, ticket, lease });
+                let completed_at = Instant::now();
+                let _ = done_tx.send(ReaderDone { replies, ticket, lease, completed_at });
                 if let Some(proxy) = proxy {
                     // When: proxy is Some, the loop is woken; a closed loop has nothing to wake.
                     let _ = proxy.send_event(UserEvent::ClipboardDone);
@@ -690,7 +713,8 @@ impl super::App {
     }
 
     /// When the pipeline next needs a turn: now while a retry waits, else the earliest of the
-    /// running read's deadline and every ticket's lifetime end.
+    /// running read's deadline, every ticket's lifetime end and every paste grant's expiry, so an
+    /// idle grant is purged when it ends.
     pub(in crate::app) fn next_clipboard_read_wake(&self) -> Option<Instant> {
         let reads = &self.clip_state.reads;
         if !reads.retries.is_empty() {
@@ -702,7 +726,9 @@ impl super::App {
         let presented = reads.presented.as_ref().map(|presented| presented.ticket());
         let lifetimes = reads.waiting.iter().chain(presented).chain(&reads.queued);
         let expiry = lifetimes.map(|ticket| ticket.binding().created_at + TICKET_LIFETIME).min();
-        reader.into_iter().chain(expiry).min()
+        let grant_expiry = reads.paste_grants.oldest_issue().map(|at| at + PASTE_GRANT_LIFETIME);
+        let capture = reads.paste_capture.next_wake();
+        reader.into_iter().chain(expiry).chain(grant_expiry).chain(capture).min()
     }
 
     /// Run the pipeline once per event-loop turn and wake the loop no later than it next needs.

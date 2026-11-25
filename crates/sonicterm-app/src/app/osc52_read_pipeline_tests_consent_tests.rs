@@ -272,3 +272,23 @@ fn apply_after_window_lost_page_reads_nothing() {
 #[cfg(test)]
 #[path = "osc52_read_pipeline_tests_consent_tests_write_tests.rs"]
 mod osc52_read_pipeline_tests_consent_tests_write_tests;
+
+/// Contract: moving the source tab within its window through the production reorder advances its
+/// panes' owner epoch, because the page names the tab by position: the waiting page is cancelled,
+/// nothing is read or answered, and its slot is freed.
+#[test]
+fn tab_reorder_cancels_a_waiting_page() {
+    let source = FakeSource::new("secret");
+    let mut harness = harness(Osc52ReadPolicy::Ask, source.clone());
+    harness.app.__test_seed_tab("second");
+    let main = main_window(&harness);
+    focus(&mut harness, Some(main));
+    request(&mut harness, b"\x1b]52;c;?\x07");
+    assert!(page_open(&harness), "the page names tab 1");
+    assert!(harness.app.registry.windows.get_mut(&main).unwrap().reorder_tab(0, 1));
+    harness.app.pump_clipboard_reads();
+    assert!(!page_open(&harness), "the page naming the old position closed");
+    assert_eq!(harness.app.clip_state.reads.last_cancel, Some(CancelReason::OwnerChanged));
+    assert_eq!((source.calls(), harness.delivered_count()), (0, 0));
+    assert_eq!(harness.staging.ticket_slots_in_use(), 0);
+}

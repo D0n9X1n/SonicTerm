@@ -30,6 +30,11 @@ struct FakeOffer {
     version: Mutex<Option<u64>>,
     gate: Mutex<Option<crossbeam_channel::Receiver<()>>>,
     reads: AtomicUsize,
+    /// With a gate, each version read blocks, as an X11 owner that does not answer does, until
+    /// released or for at most 500 ms.
+    version_gate: Mutex<Option<crossbeam_channel::Receiver<()>>>,
+    /// The thread each version read ran on.
+    version_threads: Mutex<Vec<std::thread::ThreadId>>,
 }
 
 impl ClipboardTextSource for FakeOffer {
@@ -48,6 +53,11 @@ impl ClipboardTextSource for FakeOffer {
     }
 
     fn offer_version(&self, _location: ReadLocation) -> Option<u64> {
+        self.version_threads.lock().unwrap().push(std::thread::current().id());
+        let gate = self.version_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            let _ = gate.recv_timeout(Duration::from_millis(500));
+        }
         *self.version.lock().unwrap()
     }
 }
@@ -75,6 +85,8 @@ fn harness() -> Harness {
         version: Mutex::new(Some(7)),
         gate: Mutex::new(None),
         reads: AtomicUsize::new(0),
+        version_gate: Mutex::new(None),
+        version_threads: Mutex::new(Vec::new()),
     });
     app.clip_state.reads.source = offer.clone();
     let sent = Arc::new(Mutex::new(Vec::new()));
@@ -120,8 +132,10 @@ fn broadcast(harness: &mut Harness) -> (winit::window::WindowId, u64, u64) {
 }
 
 impl Harness {
+    /// Paste, then run the read pipeline until the off-loop offer capture has sent its events.
     fn paste(&mut self) {
         self.app.paste_clipboard_for_kind(FrontmostKind::Main);
+        self.pump_until(|harness| harness.app.clip_state.reads.paste_capture.is_idle());
     }
 
     /// The paste events sent so far, in order; an event carries no `id`, a read reply does.
@@ -151,6 +165,22 @@ impl Harness {
         let (release, gate) = crossbeam_channel::unbounded();
         *self.offer.gate.lock().unwrap() = Some(gate);
         release
+    }
+
+    /// Block every later version read until the returned sender sends once for it.
+    fn gate_versions(&self) -> crossbeam_channel::Sender<()> {
+        let (release, gate) = crossbeam_channel::unbounded();
+        *self.offer.version_gate.lock().unwrap() = Some(gate);
+        release
+    }
+
+    /// Run the read pipeline for `period`.
+    fn pump_for(&mut self, period: Duration) {
+        let end = Instant::now() + period;
+        while Instant::now() < end {
+            self.app.pump_clipboard_reads();
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// The content reads the fake clipboard served so far.
@@ -609,4 +639,76 @@ fn decrst_or_ris_after_otp_approval_revokes_before_delivery() {
     assert!(!harness.served(source), "the queued read lost its approval");
     assert_eq!(harness.waiting(), 1, "and asks again");
     assert_eq!(harness.reads(), 1, "without reading the clipboard");
+}
+
+/// Contract: an idle paste grant schedules the pipeline's wake at its expiry, so it is purged when
+/// its 60 s end rather than whenever something next runs the pipeline.
+#[test]
+fn idle_paste_grant_schedules_its_expiry_wake() {
+    let mut harness = harness();
+    feed(&harness.app, harness.pane, b"\x1b[?5522h");
+    let before = Instant::now();
+    harness.paste();
+    assert_eq!(harness.grant_count(), 1);
+    let wake = harness.app.next_clipboard_read_wake().expect("a wake at the grant's expiry");
+    assert!(wake >= before + PASTE_GRANT_LIFETIME, "not before the grant ends");
+    assert!(wake <= Instant::now() + PASTE_GRANT_LIFETIME, "not after it");
+    harness.app.pump_clipboard_reads_at(wake);
+    assert_eq!(harness.grant_count(), 0, "purged at its wake");
+}
+
+/// Contract: a paste never waits for the clipboard owner on the event loop: the offer version and
+/// the listing are read on the capture thread, so an owner that does not answer leaves the gesture
+/// prompt, and the event follows once the capture settles.
+#[test]
+fn paste_capture_runs_off_the_event_loop() {
+    let mut harness = harness();
+    feed(&harness.app, harness.pane, b"\x1b[?5522h");
+    let release = harness.gate_versions();
+    let started = Instant::now();
+    harness.app.paste_clipboard_for_kind(FrontmostKind::Main);
+    let elapsed = started.elapsed();
+    let threads = harness.offer.version_threads.lock().unwrap().clone();
+    assert!(!threads.contains(&std::thread::current().id()), "no version read on the event loop");
+    assert!(elapsed < Duration::from_millis(250), "the gesture returned in {elapsed:?}");
+    assert!(harness.events().is_empty(), "the event waits for the capture");
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    harness.pump_until(|harness| !harness.events().is_empty());
+    assert_eq!(harness.grant_count(), 1, "a stable version grants");
+}
+
+/// Contract: an owner that never answers within the reader's deadline cannot hold the paste: the
+/// event goes out at the deadline with an empty listing and no grant, so a follow-up read asks.
+#[test]
+fn wedged_capture_sends_unlisted_event_without_grant() {
+    let mut harness = harness();
+    harness.app.clip_state.reads.reader_deadline = Duration::from_millis(50);
+    feed(&harness.app, harness.pane, b"\x1b[?5522h");
+    let _release = harness.gate_versions();
+    harness.app.paste_clipboard_for_kind(FrontmostKind::Main);
+    harness.pump_until(|harness| !harness.events().is_empty());
+    let events = harness.events();
+    assert!(contains(&events[0].1, b":mime=Lg==:pw="), "the listing packet is still sent");
+    assert!(!contains(&events[0].1, b";dGV4dC9wbGFpbgo="), "with no listing");
+    assert_eq!(harness.grant_count(), 0, "and no grant");
+}
+
+/// Contract: recipients and their identities are fixed at the paste gesture: one whose program
+/// reset DECSET 5522 while the capture ran gets neither the event nor a grant, and no text.
+#[test]
+fn recipient_reset_during_capture_gets_nothing() {
+    let mut harness = harness();
+    let pane = harness.pane;
+    feed(&harness.app, pane, b"\x1b[?5522h");
+    let release = harness.gate_versions();
+    harness.app.paste_clipboard_for_kind(FrontmostKind::Main);
+    feed(&harness.app, pane, b"\x1b[?5522l");
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    harness.pump_until(|harness| harness.offer.version_threads.lock().unwrap().len() >= 2);
+    harness.pump_for(Duration::from_millis(100));
+    assert!(harness.events().is_empty(), "the reset recipient gets no event");
+    assert_eq!(harness.grant_count(), 0);
+    assert!(harness.app.__test_drain_pty_writes().is_empty(), "nor the text");
 }

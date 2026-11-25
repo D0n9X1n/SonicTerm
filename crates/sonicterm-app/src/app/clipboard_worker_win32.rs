@@ -1,24 +1,16 @@
-//! Win32 clipboard reads: the change counter, the OSC 52 text read and the OSC 5522 format
-//! listing. The `CF_UNICODETEXT` block is sized with `GlobalSize` before `GlobalLock`, so an
-//! oversized block is never locked or copied. Program writes, their pre-write snapshot and the
-//! reassertion's comparison run in one acquisition in `kitty_clipboard_offer_win32.rs`.
+//! Win32 clipboard reads: the change counter and the OSC 5522 format listing. The OSC 52 text read,
+//! program writes, their pre-write snapshot and the reassertion's comparison run over the
+//! `Win32Clipboard` seam in `kitty_clipboard_offer_windows.rs` and `kitty_clipboard_offer_win32.rs`,
+//! which size a text block with `GlobalSize` before `GlobalLock`.
 
 use std::time::Duration;
 
-use windows::Win32::{
-    Foundation::HGLOBAL,
-    System::{
-        DataExchange::{
-            CloseClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardFormatNameW,
-            GetClipboardSequenceNumber, OpenClipboard,
-        },
-        Memory::{GlobalLock, GlobalSize, GlobalUnlock},
-    },
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EnumClipboardFormats, GetClipboardFormatNameW, GetClipboardSequenceNumber,
+    OpenClipboard,
 };
 
-use crate::app::osc52_read_source::{
-    bounded_utf16, utf16_block_admits, ReadOutcome, MAX_NATIVE_TYPES_SCANNED,
-};
+use crate::app::osc52_read_source::MAX_NATIVE_TYPES_SCANNED;
 
 /// The standard clipboard format for NUL-terminated UTF-16 text.
 const CF_UNICODETEXT: u32 = 13;
@@ -62,53 +54,6 @@ impl Drop for OpenGuard {
             // SAFETY: this thread opened the clipboard in OpenGuard::open, closed once here.
             unsafe { CloseClipboard() };
     }
-}
-
-/// The clipboard's `CF_UNICODETEXT` for an OSC 52 read, within `max_bytes` of UTF-8. The block's
-/// `GlobalSize` decides `TooLarge` before `GlobalLock`, so an oversized block is never locked or
-/// copied; conversion is measured before it allocates. Delayed rendering runs inside
-/// `GetClipboardData`, which the reader's deadline bounds for the caller.
-pub(in crate::app) fn read_text(max_bytes: usize) -> ReadOutcome {
-    let Some(_open) = OpenGuard::open_with(READ_OPEN_ATTEMPTS, READ_OPEN_RETRY) else {
-        // When: open_with gives up, another process held the clipboard throughout.
-        return ReadOutcome::Failed;
-    };
-    let data =
-        // SAFETY: the clipboard is open on this thread; the handle stays owned by the clipboard.
-        unsafe { GetClipboardData(CF_UNICODETEXT) };
-    let Ok(handle) = data else {
-        // When: data is Err, the clipboard offers no CF_UNICODETEXT, so it holds no text.
-        return ReadOutcome::Empty;
-    };
-    let block = HGLOBAL(handle.0);
-    let block_bytes =
-        // SAFETY: block is the clipboard's live text handle while the clipboard stays open.
-        unsafe { GlobalSize(block) };
-    if block_bytes == 0 {
-        // When: block_bytes is 0, GlobalSize could not size the handle, so nothing is readable.
-        return ReadOutcome::Failed;
-    }
-    if !utf16_block_admits(block_bytes, max_bytes) {
-        // When: utf16_block_admits refuses block_bytes, the block is never locked.
-        return ReadOutcome::TooLarge;
-    }
-    let base =
-        // SAFETY: block is a live moveable allocation, so GlobalLock returns its base or null.
-        unsafe { GlobalLock(block) }.cast::<u16>();
-    if base.is_null() {
-        // When: base is null, GlobalLock failed and there is nothing to read.
-        return ReadOutcome::Failed;
-    }
-    let units =
-        // SAFETY: base points at block_bytes locked bytes until GlobalUnlock; block_bytes / 2
-        // u16 units stay in bounds.
-        unsafe { std::slice::from_raw_parts(base, block_bytes / 2) };
-    let text_units = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
-    let outcome = bounded_utf16(&units[..text_units], max_bytes);
-    let _ =
-        // SAFETY: block was locked above; a final unlock reports an error with no lock left.
-        unsafe { GlobalUnlock(block) };
-    outcome
 }
 
 /// The names of the clipboard's formats for an OSC 5522 listing, at most

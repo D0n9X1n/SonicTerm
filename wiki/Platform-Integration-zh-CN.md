@@ -595,7 +595,7 @@ OSC 5522 提交（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）发布系�
 | --- | --- | --- |
 | macOS | `NSPasteboard` 的 `dataForType(NSPasteboardTypeString)` | 每个目标 2 秒；长度超过上限的值在复制进 Rust 之前按长度拒绝。AppKit 会像任何粘贴一样，在 SonicTerm 能测量之前先把整个值实体化，因此这次分配不受 SonicTerm 限制。 |
 | Windows | `OpenClipboard`（最多 10 次，间隔 10 毫秒），然后 `GetClipboardData(CF_UNICODETEXT)` | 每个目标 2 秒，涵盖延迟渲染；`GlobalSize` 表明放不进上限的数据块在 `GlobalLock` 之前即被拒绝，转换超过上限即停止。 |
-| Linux（X11） | 以 `UTF8_STRING` 对 `CLIPBOARD` 或 `PRIMARY` 调用 `ConvertSelection` | 等待 `SelectionNotify` 2 秒；文本应答必须是上限之内、格式为 8 的文本类型；`INCR` 传输按其声明的大小拒绝，每个分块最多等 2 秒，总计 5 秒。没有 X 服务器时读取不受支持，以空应答回复。 |
+| Linux（X11） | 以 `UTF8_STRING` 对 `CLIPBOARD` 或 `PRIMARY` 调用 `ConvertSelection` | 等待 `SelectionNotify` 2 秒；文本应答必须是上限之内、格式为 8 的文本类型；`INCR` 传输在删除声明之前按其声明的大小拒绝，因此从不向所有者请求分块；每个分块最多等 2 秒，总计 5 秒，每个事件之前都检查。没有 X 服务器时读取不受支持，以空应答回复。 |
 
 OSC 5522 读取文本以外的类型时经过同一系统层，每个类型上限 8 MiB；剪贴板没有的类型被省略：
 

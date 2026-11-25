@@ -62,6 +62,45 @@ fn lease_released_by_writer_after_write() {
     writer.finish("gated sensitive writer");
 }
 
+/// Custody that reports, as the writer drops it, whether the reply's watched bytes were freed.
+struct ReleaseProbe(Sender<bool>);
+
+// Lifecycle: dropping ReleaseProbe reports whether the watched block was freed before it.
+impl Drop for ReleaseProbe {
+    fn drop(&mut self) {
+        let _ = self.0.send(crate::lib_tests::watched_block_freed());
+    }
+}
+
+/// Contract: once a sensitive reply is written, the writer frees its bytes before it releases the
+/// reply's custody (the read ticket and its budget lease), so the budget never reads as free while
+/// the clipboard text is still held.
+#[test]
+fn reply_bytes_freed_before_custody_released() {
+    const WATCHED: usize = 3_000_017;
+    let (sender, rx) = diagnostic_input_channel();
+    let (_replies, reader) = reply_spool();
+    let sensitive = reader.sensitive_sender();
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(std::io::sink()),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+        reader,
+    );
+    crate::lib_tests::watch_frees_of(WATCHED);
+    let (report_tx, report_rx) = crossbeam_channel::bounded(1);
+    let reply = SensitiveReply::new(vec![b'x'; WATCHED], Box::new(ReleaseProbe(report_tx)));
+    assert!(try_admit_sensitive(&sender.writer_progress, &sensitive, reply).is_ok());
+    let freed_first = report_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    crate::lib_tests::watch_frees_of(0);
+    assert!(freed_first, "the bytes are freed before the custody is released");
+    cancel_tx.send(()).unwrap();
+    writer.finish("sensitive release order");
+}
+
 /// Contract: admission never waits for the admission lock; a contended lock hands the reply back
 /// whole, custody included, so the caller retries on a later turn.
 #[test]
