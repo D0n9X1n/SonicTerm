@@ -773,6 +773,11 @@ impl KittyClipboardTx {
         pairs.extend(entries.into_iter().map(|entry| (entry.mime, entry.data)));
         let planned = plan(pairs, &aliases, &self.holds);
         drop(aliases);
+        if clock + entered.elapsed() >= absolute {
+            // When: clock plus entered.elapsed() (the time planning took) reaches absolute, the
+            // write expired while planning: `EBUSY` before the plan is read, never `ENOSYS`.
+            return KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy));
+        }
         let offer = match planned {
             OfferPlan::Offer(offer) => Some(offer),
             OfferPlan::Clear => None,

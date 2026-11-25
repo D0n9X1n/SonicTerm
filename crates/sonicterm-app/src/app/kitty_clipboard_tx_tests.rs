@@ -376,6 +376,25 @@ fn stalled_planner_crossing_the_absolute_deadline_posts_nothing() {
     assert_eq!(rig.staging.reserved_bytes(), 0);
 }
 
+/// Contract: a commit whose planning crosses the absolute deadline answers `EBUSY` even when the
+/// plan omitted every format: the deadline is checked before the plan is read, so an expired write
+/// never answers `ENOSYS`.
+#[test]
+fn stalled_planner_omitting_every_format_answers_ebusy() {
+    let mut rig = rig();
+    // Planning asks the clipboard which formats it holds; this one takes 600 ms and holds none.
+    rig.tx.set_holds(|_, _| {
+        std::thread::sleep(Duration::from_millis(600));
+        false
+    });
+    let start = Instant::now();
+    rig.send_at("type=write:id=n", start);
+    keep_busy(&mut rig, start, 23);
+    let commit_at = start + KITTY_WRITE_ABSOLUTE_TIMEOUT - Duration::from_millis(300);
+    let steps = rig.send_at("type=wdata", commit_at);
+    assert_eq!(replies_of(&steps), [status("EBUSY", "n")]);
+}
+
 /// Contract: an accepted packet records the admission clock it was checked against, not its
 /// section's older stamp, so a packet delayed by earlier work in its section still gets its whole
 /// idle window: a commit 6 s after it posts. A write opened under an old stamp is timed the same
