@@ -559,11 +559,11 @@ impl ClipboardJob {
         Self::program_text(staging, bytes, lease, targets, Some(reply))
     }
 
-    /// The multi-representation write an OSC 5522 commit planned, `lease` already covering it.
+    /// Lifecycle: lease precedes offer so a slot refusal drops the payload before its reservation.
     pub(in crate::app) fn kitty_offer(
         staging: &Arc<ClipboardStaging>,
-        offer: super::kitty_clipboard_offer::NativeOffer,
         lease: ClipLease,
+        offer: super::kitty_clipboard_offer::NativeOffer,
         targets: ClipTargets,
         reply: super::kitty_clipboard_tx::KittyReply,
     ) -> Result<Self, Osc52Refusal> {
@@ -988,3 +988,6 @@ impl super::App {
 #[cfg(test)]
 #[path = "osc52_stream_tests.rs"]
 mod osc52_stream_tests;
+
+#[cfg(test)]
+pub(in crate::app) use osc52_stream_tests::reserved_at_free;

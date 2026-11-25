@@ -189,7 +189,7 @@ struct OpenWrite {
     /// The entry receiving data.
     current: Option<usize>,
     group: Base64Group,
-    /// Covers every entry's capacity and every alias.
+    /// Lifecycle: keep this lease alive until all entries and aliases are gone, including after destructuring.
     lease: ClipLease,
     opened_at: Instant,
     last_packet: Instant,
@@ -700,7 +700,9 @@ impl KittyClipboardTx {
             // When: finish_current fails, the last stream ended mid-group and the write is `EINVAL`.
             return KittyStep::Reply(open.reply.status(KittyClipboardStatus::Einval));
         }
-        let OpenWrite { reply, entries, aliases, mut lease, policy_generation, .. } = open;
+        // Bind the lease before the data: locals drop in reverse order on every early return.
+        let mut lease = open.lease;
+        let OpenWrite { reply, entries, aliases, policy_generation, .. } = open;
         let primary = reply.location == KittyClipboardLocation::Primary;
         if primary && !cfg!(target_os = "linux") {
             // When: primary is set off Linux, there is no PRIMARY and the commit is `ENOSYS`.
@@ -744,7 +746,7 @@ impl KittyClipboardTx {
                     // When: size_lease cannot cover offer.reserved_bytes, the write is busy.
                     return KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy));
                 }
-                ClipboardJob::kitty_offer(&self.staging, offer, lease, targets, reply.clone())
+                ClipboardJob::kitty_offer(&self.staging, lease, offer, targets, reply.clone())
             }
             offer => {
                 // Text alone, or a clear, takes the text path as before.

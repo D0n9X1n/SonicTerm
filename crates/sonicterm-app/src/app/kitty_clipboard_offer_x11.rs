@@ -142,6 +142,13 @@ fn install_claim(
     result
 }
 
+/// Lifecycle: the native setup owns these fields together. Every early return drops the staged
+/// offer before its reservation, independently of the number of fallible setup steps.
+struct PendingInstall {
+    offer: NativeOffer,
+    lease: ClipLease,
+}
+
 struct Active {
     owner: Owner,
     selections: [u32; 2],
@@ -244,17 +251,17 @@ impl Owner {
             &self.offer.entries[index]
         }
     }
-    /// Lifecycle: lease precedes offer so any early return drops the payload before its reservation.
+    /// Keep pending intact until staging succeeds, including failed reservations and atom lookups.
     fn stage(
         port: &mut impl OwnerPort,
-        mut lease: ClipLease,
-        offer: NativeOffer,
+        mut pending: PendingInstall,
         stamp: u32,
         direct_bytes: usize,
         now: Instant,
     ) -> Option<Self> {
-        let count = data_atoms(&offer);
-        if !lease.grow_to(offer.reserved_bytes().max(owner_workspace(&offer))) {
+        let offer = &pending.offer;
+        let count = data_atoms(offer);
+        if !pending.lease.grow_to(offer.reserved_bytes().max(owner_workspace(offer))) {
             // When: lease cannot cover the offer table, do not allocate or take ownership.
             return None;
         }
@@ -300,8 +307,8 @@ impl Owner {
         let integer_type = port.intern("INTEGER")?;
         let incr = port.intern("INCR")?;
         Some(Self {
-            offer,
-            _lease: lease,
+            offer: pending.offer,
+            _lease: pending.lease,
             latin1,
             atoms,
             indices,

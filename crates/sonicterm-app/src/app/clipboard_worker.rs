@@ -208,13 +208,15 @@ impl Committed {
 /// write within the reassertion bound reads the value it replaces in that same acquisition and,
 /// once written, arms one reassertion that keeps the lease; otherwise the lease is released when
 /// the call returns.
+/// Lifecycle: bind the lease before the payloads so the worker frees its buffers before releasing their budget.
 fn commit_program(
     sink: &mut dyn ClipboardSink,
     job: ClipboardJob,
     reassert_delay: Option<Duration>,
 ) -> (Committed, Option<PendingReassert>) {
     // The program slot stays in `job` until this returns, after the native call.
-    let ClipboardJob { text, targets, mut lease, kitty, offer, binding, .. } = job;
+    let mut lease = job.lease;
+    let ClipboardJob { text, targets, kitty, offer, binding, .. } = job;
     let bytes = offer.as_ref().map_or(text.len(), NativeOffer::byte_len);
     let (outcome, retained) = (ClipWriteOutcome::Denied, RetainedShares::default());
     let mut committed = Committed { outcome, bytes, retained, kitty, binding: binding.clone() };

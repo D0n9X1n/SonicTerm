@@ -512,7 +512,7 @@ fn two_selection_write_reserves_a_native_copy_each() {
         let mut lease = staging.lease();
         let bytes = text.as_bytes().to_vec();
         assert!(lease.grow_to(bytes.capacity()));
-        let result = into_text(bytes, lease, targets);
+        let result = into_text(lease, bytes, targets);
         assert_eq!(result.is_ok(), admitted, "{targets:?}");
         assert!(result.is_ok() || matches!(result, Err(Osc52Refusal::Busy)), "{targets:?}");
     }
@@ -540,7 +540,7 @@ fn lossy_text_is_built_in_its_reserved_buffer() {
     let targets = ClipTargets { clipboard: true, primary: false };
     let input_bytes = bytes.capacity();
     let counter = CountAllocations::start();
-    let (text, lease) = into_text(bytes, staging.lease(), targets).expect("admitted");
+    let (text, lease) = into_text(staging.lease(), bytes, targets).expect("admitted");
     let peak = counter.peak_bytes();
     drop(counter);
     let expanded = (1 << 20) + 2;
@@ -558,9 +558,63 @@ fn x11_program_text_routes_both_selections_byte_exact() {
     for clipboard in [false, true] {
         let targets = ClipTargets { clipboard, primary: true };
         let job =
-            text::program_text_for(&staging, vec![0xff], staging.lease(), targets, None, true)
+            text::program_text_for(&staging, staging.lease(), vec![0xff], targets, None, true)
                 .unwrap();
         assert_eq!(job.offer.as_ref().and_then(|offer| offer.text()), Some(&[0xff][..]));
         assert_eq!(job.targets, targets);
     }
+}
+
+/// Measure the private staging count at the instant this thread's allocator frees `address`.
+/// The sentinel distinguishes a missed deallocation from observing a fully released budget.
+pub(in crate::app) fn reserved_at_free(
+    staging: &Arc<ClipboardStaging>,
+    address: usize,
+    operation: impl FnOnce(),
+) -> usize {
+    use std::cell::RefCell;
+    thread_local! {static SAMPLE: RefCell<Option<(Arc<ClipboardStaging>,Option<usize>)>> = const {RefCell::new(None)};}
+    SAMPLE.set(Some((staging.clone(), None)));
+    crate::lib_tests::watch_free(address, || {
+        SAMPLE.with_borrow_mut(|sample| {
+            let (staging, reading) = sample.as_mut().unwrap();
+            *reading = Some(staging.reserved_bytes());
+        })
+    });
+    operation();
+    SAMPLE.take().unwrap().1.expect("watched buffer freed")
+}
+
+/// Expanding invalid bytes may need a second buffer. Under pressure the input still owns its
+/// reservation all the way to deallocation, whether the raw or replacement-text path refused.
+#[test]
+fn refusal_order_raw_growth() {
+    let staging = staging(256, 256);
+    let bytes = vec![0xff; 256];
+    let mut lease = staging.lease();
+    assert!(lease.grow_to(bytes.capacity()));
+    let targets = ClipTargets { clipboard: true, primary: false };
+    let reading = reserved_at_free(&staging, bytes.as_ptr() as usize, || {
+        assert!(matches!(
+            text::program_text_for(&staging, lease, bytes, targets, None, true),
+            Err(Osc52Refusal::Busy)
+        ));
+    });
+    assert_eq!(reading, 256);
+}
+
+/// The lossy branch must also free its input before a refused expansion gives back its lease.
+#[test]
+fn refusal_order_lossy_growth() {
+    let staging = staging(256, 256);
+    let bytes = vec![0xff; 256];
+    let mut lease = staging.lease();
+    assert!(lease.grow_to(bytes.capacity()));
+    let reading = reserved_at_free(&staging, bytes.as_ptr() as usize, || {
+        assert!(matches!(
+            into_text(lease, bytes, ClipTargets { clipboard: true, primary: false }),
+            Err(Osc52Refusal::Busy)
+        ));
+    });
+    assert_eq!(reading, 256);
 }

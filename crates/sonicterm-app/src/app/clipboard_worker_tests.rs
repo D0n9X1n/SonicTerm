@@ -802,3 +802,19 @@ fn refused_native_publish_frees_payload_before_lease() {
     assert_eq!(SAMPLE.take().unwrap().1, 4096);
     assert_eq!(staging.reserved_bytes(), 0);
 }
+
+/// A policy change can refuse plain text at the worker gate, after destructuring the job.
+/// Observe the original text allocation, not a fake sink's unrelated copy.
+#[test]
+fn refusal_order_stale_worker_text() {
+    let staging = ClipboardStaging::with_budget(8192, 8192);
+    let job = ClipboardJob::for_test(&staging, "plain");
+    let address = job.text.as_ptr() as usize;
+    let before = staging.reserved_bytes();
+    staging.bump_policy_generation();
+    let reading = crate::app::osc52_stream::reserved_at_free(&staging, address, || {
+        let (write, _) = commit_program(&mut FakeClipboard::holding("old"), job, None);
+        assert_eq!(write.outcome, ClipWriteOutcome::Denied);
+    });
+    assert_eq!(reading, before);
+}

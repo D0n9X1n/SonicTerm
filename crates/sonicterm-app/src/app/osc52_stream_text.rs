@@ -28,9 +28,10 @@ pub(in crate::app) fn reassert_eligible(text: &str) -> bool {
 /// Build the text for decoded `bytes`, invalid sequences replaced by U+FFFD, with `lease` grown
 /// first to cover the text and one native copy per selection `targets` names: arboard keeps a
 /// separate copy of each selection it wrote (X11 PRIMARY and CLIPBOARD are independent buffers).
+/// Lifecycle: lease precedes bytes so a refused expansion frees the input before returning its charge.
 pub(super) fn into_text(
-    bytes: Vec<u8>,
     mut lease: ClipLease,
+    bytes: Vec<u8>,
     targets: ClipTargets,
 ) -> Result<(String, ClipLease), Osc52Refusal> {
     let copies = usize::from(targets.clipboard) + usize::from(targets.primary);
@@ -82,16 +83,17 @@ impl ClipboardJob {
         targets: ClipTargets,
         kitty: Option<crate::app::kitty_clipboard_tx::KittyReply>,
     ) -> Result<ClipboardJob, Osc52Refusal> {
-        program_text_for(staging, bytes, lease, targets, kitty, cfg!(target_os = "linux"))
+        program_text_for(staging, lease, bytes, targets, kitty, cfg!(target_os = "linux"))
     }
 }
 
 /// The X11 byte-preserving owner accepts either selection; the macOS pasteboard accepts only
 /// the standard clipboard. Valid text stays on the ordinary text path on both platforms.
+/// Lifecycle: lease precedes bytes so a refused raw offer cannot outlive the input reservation.
 pub(super) fn program_text_for(
     staging: &Arc<ClipboardStaging>,
-    bytes: Vec<u8>,
     mut lease: ClipLease,
+    bytes: Vec<u8>,
     targets: ClipTargets,
     kitty: Option<crate::app::kitty_clipboard_tx::KittyReply>,
     x11: bool,
@@ -109,7 +111,7 @@ pub(super) fn program_text_for(
         (String::new(), Some(offer))
     } else {
         // When: raw is false, the bytes become UTF-8 text for the text path.
-        let (text, grown) = into_text(bytes, lease, targets)?;
+        let (text, grown) = into_text(lease, bytes, targets)?;
         lease = grown;
         (text, None)
     };

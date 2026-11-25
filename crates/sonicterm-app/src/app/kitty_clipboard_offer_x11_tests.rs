@@ -59,7 +59,9 @@ fn x11_targets_timestamp_and_incr_serving() {
         panic!("offer")
     };
     let mut port = Port::default();
-    let mut owner = Owner::stage(&mut port, staging.lease(), offer, 27, 290_000, now).unwrap();
+    let mut owner =
+        Owner::stage(&mut port, PendingInstall { lease: staging.lease(), offer }, 27, 290_000, now)
+            .unwrap();
     let targets = port.intern("TARGETS").unwrap();
     let timestamp = port.intern("TIMESTAMP").unwrap();
     let names = [
@@ -94,7 +96,14 @@ fn x11_targets_timestamp_and_incr_serving() {
 }
 
 fn raw_owner(port: &mut Port, staging: &std::sync::Arc<ClipboardStaging>, now: Instant) -> Owner {
-    Owner::stage(port, staging.lease(), NativeOffer::raw_text(vec![0xfe; 3]), 18, 2, now).unwrap()
+    Owner::stage(
+        port,
+        PendingInstall { lease: staging.lease(), offer: NativeOffer::raw_text(vec![0xfe; 3]) },
+        18,
+        2,
+        now,
+    )
+    .unwrap()
 }
 
 /// Losing the selection refuses new clients, not the old client's remaining chunks. The real
@@ -206,7 +215,14 @@ fn x11_table_is_reserved_before_interning() {
     assert!(tables >= size_of::<Cursor>() * 8 + size_of::<u32>() * 7);
     let staging = ClipboardStaging::with_budget(tables - 1, 64);
     let mut port = Port::default();
-    assert!(Owner::stage(&mut port, staging.lease(), raw, 2, 256, Instant::now()).is_none());
+    assert!(Owner::stage(
+        &mut port,
+        PendingInstall { lease: staging.lease(), offer: raw },
+        2,
+        256,
+        Instant::now()
+    )
+    .is_none());
     assert_eq!(staging.reserved_bytes(), 0);
     assert!(port.names.is_empty());
 }
@@ -355,8 +371,7 @@ fn x11_string_target_only_offers_representable_latin1() {
         let mut port = Port::default();
         let mut owner = Owner::stage(
             &mut port,
-            staging.lease(),
-            NativeOffer::raw_text(raw.to_vec()),
+            PendingInstall { lease: staging.lease(), offer: NativeOffer::raw_text(raw.to_vec()) },
             9,
             1024,
             now,
@@ -395,13 +410,27 @@ fn refused_owner_stage_frees_payload_before_lease() {
     });
     assert!(Owner::stage(
         &mut Port::default(),
-        lease,
-        NativeOffer::raw_text(payload),
+        PendingInstall { lease, offer: NativeOffer::raw_text(payload) },
         2,
         256,
         Instant::now()
     )
     .is_none());
     assert_eq!(SAMPLE.take().unwrap().1, 4096);
+    assert_eq!(staging.reserved_bytes(), 0);
+}
+
+/// Failing native setup (window creation or timestamp acquisition) drops the still-pending
+/// installation, before Owner::stage. Probe the same move-only custody the server receives.
+#[test]
+fn refusal_order_x11_pending_install() {
+    let staging = ClipboardStaging::with_budget(256, 256);
+    let bytes = vec![0xfe; 256];
+    let address = bytes.as_ptr() as usize;
+    let mut lease = staging.lease();
+    assert!(lease.grow_to(256));
+    let pending = PendingInstall { offer: NativeOffer::raw_text(bytes), lease };
+    let reading = crate::app::osc52_stream::reserved_at_free(&staging, address, || drop(pending));
+    assert_eq!(reading, 256);
     assert_eq!(staging.reserved_bytes(), 0);
 }

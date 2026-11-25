@@ -735,3 +735,49 @@ fn plan_workspace_reserved_or_ebusy() {
     assert_eq!(rig.reply("type=wdata"), status("EBUSY", "w"));
     assert_eq!(rig.staging.reserved_bytes(), 0, "nothing stays reserved");
 }
+
+/// A full program-slot gate rejects an already reserved offer; holding the slots must not let
+/// the payload outlive its charge. The slot holders themselves have zero-byte text leases.
+#[test]
+fn refusal_order_full_program_slots() {
+    let mut rig = rig();
+    rig.send("type=write");
+    let reply = rig.tx.open.take().unwrap().reply;
+    let slots: Vec<_> = (0..crate::app::osc52_stream::MAX_PROGRAM_CLIPBOARD_JOBS)
+        .map(|_| ClipboardJob::for_test(&rig.staging, ""))
+        .collect();
+    let bytes = vec![0xff; 512];
+    let address = bytes.as_ptr() as usize;
+    let offer = NativeOffer::raw_text(bytes);
+    let mut lease = rig.staging.lease();
+    assert!(lease.grow_to(offer.reserved_bytes()));
+    let before = rig.staging.reserved_bytes();
+    let reading = crate::app::osc52_stream::reserved_at_free(&rig.staging, address, || {
+        let result = ClipboardJob::kitty_offer(
+            &rig.staging,
+            lease,
+            offer,
+            ClipTargets { clipboard: true, primary: false },
+            reply,
+        );
+        assert!(matches!(result, Err(Osc52Refusal::Busy)));
+    });
+    assert_eq!(reading, before);
+    drop(slots);
+}
+
+/// A parser-produced write that cannot grow the planning workspace must free its actual staged
+/// entry while the reservation is still counted, not merely reach a zero total afterwards.
+#[test]
+fn refusal_order_open_write_planning_budget() {
+    let mut rig = rig_with(32, 64, Osc52Policy::Allow);
+    rig.send("type=write:id=b");
+    rig.data("text/plain", &b64("abc"));
+    let address = rig.tx.open.as_ref().unwrap().entries[0].data.as_ptr() as usize;
+    let staging = rig.staging.clone();
+    let before = staging.reserved_bytes();
+    let reading = crate::app::osc52_stream::reserved_at_free(&staging, address, || {
+        assert_eq!(rig.reply("type=wdata"), status("EBUSY", "b"))
+    });
+    assert_eq!(reading, before);
+}
