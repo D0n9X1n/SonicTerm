@@ -794,6 +794,57 @@ fn normal_start(active: &ActiveEventLoop, software: bool) -> Result<(), String> 
     reconciles(&renderer)
 }
 
+/// A covered-window trim shrinks a normal atlas that grew past its start back to that start, on
+/// the CPU and, under wgpu, the GPU upload (GDI keeps 1x1). It is not shrunk while the growing
+/// frame's timing is still pending, and the frame after the shrink presents with the atlas regrown
+/// only as far as the screen needs.
+fn trim_shrinks_a_grown_atlas(active: &ActiveEventLoop, software: bool) -> Result<(), String> {
+    let size = PhysicalSize::new(1000, 700);
+    let role = if software { "atlas-shrink-gdi" } else { "atlas-shrink-wgpu" };
+    let (window, mut renderer) = match renderer_starting_at(
+        active,
+        role,
+        software,
+        LARGE_FONT_PX,
+        size,
+        GlyphAtlasStart::Normal,
+    ) {
+        Err(reason) if reason.starts_with("HOST_INCAPABLE") => {
+            // When: the host cannot create a wgpu renderer, report the capability, not a pass.
+            println!("capability=HOST_INCAPABLE case={role} reason={reason}");
+            return Ok(());
+        }
+        other => other?,
+    };
+    let start = start_dim(window.scale_factor() as f32, GlyphAtlasStart::Normal);
+    let mut grid = filled_grid(&renderer, &window);
+    let outcome = frame(&mut renderer, &window, &mut grid);
+    let grown = renderer.glyph_atlas_facts().dim;
+    check(grown > start, &format!("{role}: precondition: a full frame grew {start} to {grown}"))?;
+    check(matches!(outcome, PresentOutcome::AtlasRetry), &format!("{role}: growth: {outcome:?}"))?;
+    let pending = renderer.trim_for_occlusion();
+    check(pending.glyph_atlas_shrunk.is_none(), &format!("{role}: kept while timing is pending"))?;
+    check(renderer.glyph_atlas_facts().dim == grown, &format!("{role}: the grown atlas is kept"))?;
+    present(&mut renderer, &window, &mut grid)?;
+    let report = renderer.trim_for_occlusion();
+    check(
+        report.glyph_atlas_shrunk == Some((grown, start)),
+        &format!("{role}: the trim shrank {grown} to {start}: {report:?}"),
+    )?;
+    let ((cpu_w, cpu_h), gpu) = renderer.__test_glyph_atlas_dimensions();
+    check((cpu_w, cpu_h) == (start, start), &format!("{role}: CPU atlas {cpu_w}x{cpu_h}"))?;
+    let expected_gpu = if software { (1, 1) } else { (start, start) };
+    check(gpu == expected_gpu, &format!("{role}: the upload is {gpu:?}, want {expected_gpu:?}"))?;
+    let resident = renderer.glyph_atlas_len();
+    check(resident == 0, &format!("{role}: the shrunk atlas holds no tile, not {resident}"))?;
+    present(&mut renderer, &window, &mut grid)?;
+    check(
+        renderer.glyph_atlas_len() > 0,
+        &format!("{role}: the next frame rasterized its glyphs"),
+    )?;
+    reconciles(&renderer)
+}
+
 fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     let mut failures = Vec::new();
     for (name, case) in [
@@ -801,6 +852,8 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         ("growth retry gdi", |active| growth_retry(active, true)),
         ("normal start wgpu", |active| normal_start(active, false)),
         ("normal start gdi", |active| normal_start(active, true)),
+        ("trim shrinks wgpu", |active| trim_shrinks_a_grown_atlas(active, false)),
+        ("trim shrinks gdi", |active| trim_shrinks_a_grown_atlas(active, true)),
         ("growth with eviction", growth_with_eviction),
         ("growth then device loss", growth_then_device_loss),
         ("two growths in one frame", two_growths_in_one_frame),

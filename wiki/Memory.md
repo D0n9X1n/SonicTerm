@@ -640,9 +640,16 @@ buffers, back to their initial 4,096 quads, and the vertex scratch; the row
 glyph, row quad and row ink caches; both atlas uploads' staging buffers and rect
 lists; the held frame scratch (a lent one is dropped when its lease returns);
 the chrome title and run tables, keeping the palette; and a promoted image atlas
-when no media is visible. It keeps the glyph atlas and its GPU texture, a
-pending atlas retry and its eviction state, the Windows software frame and the
-preedit cache. A device that refuses the work changes nothing. The next frame
+when no media is visible. A glyph atlas that grew past the start for the
+window's current scale shrinks back to that start, on the CPU and, under the GPU
+presenter, its texture: every tile is dropped, and the next frame rasterizes
+only what it shows. On macOS the old pixels' whole pages are marked reusable
+(`MADV_FREE_REUSABLE`) before they are freed, because the allocator otherwise
+keeps a freed large block's pages dirty and they stay in the footprint as
+"Malloc Large (empty)". The atlas is kept while an atlas retry or a growth's timing
+is still pending, and is never grown toward the start. The trim keeps a pending
+atlas retry and its eviction state, the Windows software frame and the preedit
+composition. A device that refuses the work changes nothing. The next frame
 is a full first frame, and everything regrows on its normal path; returning to
 view clears the trim mark.
 

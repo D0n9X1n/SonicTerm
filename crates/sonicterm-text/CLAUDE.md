@@ -38,6 +38,11 @@ cargo build -p sonicterm-text
   running sum and report uses that one function.
 - UV-bearing caches use `GlyphAtlas::identity()`, not the resettable eviction
   counter, and still clear promptly when their owning seam changes.
+- `GlyphAtlas::shrink_to` empties a grown growable atlas to a smaller power of two (at or above
+  `MIN_ATLAS_DIM`), replacing the pixel buffer so its capacity falls, and keeps the growth and
+  eviction counts, the eviction permission, `ever_evicted` and the cap. The old buffer goes
+  through `page_release::release_pixel_pages`, which on macOS marks its whole pages
+  `MADV_FREE_REUSABLE` first: macOS keeps a freed large block's pages dirty otherwise.
 - A `GlyphAtlas::growable` atlas doubles up to its maximum before it evicts;
   `new` and `default_size` stay fixed. `grow_to` accepts only the policy's
   next doubling and refuses anything else without changing the atlas. Growth

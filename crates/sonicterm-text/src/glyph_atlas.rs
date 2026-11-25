@@ -834,6 +834,8 @@ mod glyph_atlas_tests;
 mod growth;
 #[path = "glyph_atlas_packing.rs"]
 mod packing;
+#[path = "glyph_atlas_page_release.rs"]
+mod page_release;
 #[path = "glyph_atlas_pixels.rs"]
 mod pixels;
 pub use packing::{fit_outcome_of_tiles, FitOutcome, ShelfPacker};

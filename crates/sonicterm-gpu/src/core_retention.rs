@@ -12,8 +12,10 @@ pub struct TrimReport {
     /// Bytes both present buffers requested before the trim.
     pub present_buffer_bytes_before: u64,
     /// Requested device bytes the trim gave back: the frame texture minus its 1x1 replacement,
-    /// plus each present buffer minus its initial-size replacement.
+    /// plus each present buffer minus its initial-size replacement, plus a shrunk glyph texture.
     pub gpu_released_requested_bytes: u64,
+    /// The glyph atlas side before and after a shrink; `None` when the atlas was kept.
+    pub glyph_atlas_shrunk: Option<(u32, u32)>,
 }
 
 impl TrimReport {
@@ -209,8 +211,10 @@ impl GpuRenderer {
     /// Release what a covered window does not need until it is shown again, inside the device
     /// gate. A refused admission changes nothing; once admitted, the releases are not rolled back.
     ///
-    /// The glyph atlas, its GPU texture, the retry and eviction state, the software frame and the
-    /// preedit cache are kept. The next frame is a full first frame.
+    /// A glyph atlas grown past the start for the current scale shrinks back to it
+    /// ([`Self::shrink_glyph_atlas_to_start`]), unless an atlas retry or growth timing is pending.
+    /// The retry and eviction state, the software frame and the preedit composition are kept. The
+    /// next frame is a full first frame.
     pub fn trim_for_occlusion(&mut self) -> TrimReport {
         let Some(_scope) = self.device_errors.enter_gpu_work("trim") else {
             // When: enter_gpu_work refuses, the stopped device keeps every resource untouched.
@@ -247,6 +251,14 @@ impl GpuRenderer {
         self.chrome_caches.release_runs();
         self.release_image_atlas_for_trim();
         self.last_frame_key = None;
+        let glyph_atlas_shrunk = self.shrink_glyph_atlas_to_start();
+        // A shrunk GPU-presented atlas gave back its texture's request; GDI's upload stays 1x1.
+        if let Some((before, after)) =
+            glyph_atlas_shrunk.filter(|_| !self.uses_windows_software_presenter())
+        {
+            released_bytes += atlas_payload_bytes(before, before)
+                .saturating_sub(atlas_payload_bytes(after, after));
+        }
         tracing::debug!(
             target: "memory",
             renderer_role = self.render_timing_label,
@@ -256,6 +268,7 @@ impl GpuRenderer {
             frame_texture_height = frame_texture_before.1,
             present_buffer_bytes_before,
             gpu_released_requested_bytes = released_bytes,
+            glyph_atlas_shrunk = ?glyph_atlas_shrunk,
             reason = "occlusion_trim",
             "covered window trimmed"
         );
@@ -264,6 +277,7 @@ impl GpuRenderer {
             frame_texture_before,
             present_buffer_bytes_before,
             gpu_released_requested_bytes: released_bytes,
+            glyph_atlas_shrunk,
         }
     }
 }

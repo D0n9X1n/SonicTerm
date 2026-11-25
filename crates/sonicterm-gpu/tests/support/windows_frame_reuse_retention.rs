@@ -31,8 +31,8 @@ pub(super) fn released_parts(renderer: &GpuRenderer) -> [sonicterm_types::Resour
     ]
 }
 
-/// A trim on the GPU presenter returns every released part to a new renderer's figure, keeps the
-/// glyph atlas, lowers the vertex and upload storage, leaves a 1x1 frame texture marked trimmed, and
+/// A trim on the GPU presenter returns every released part to a new renderer's figure, keeps a
+/// glyph atlas still at its start, lowers the vertex and upload storage, leaves a 1x1 frame texture marked trimmed, and
 /// reports the frame texture and present buffers it gave back as request sizes.
 pub(super) fn trim_releases_and_accounts(active: &ActiveEventLoop) -> Result<(), String> {
     // The fresh renderer is built first: the case's own binding shadows the helper's name.
@@ -48,6 +48,8 @@ pub(super) fn trim_releases_and_accounts(active: &ActiveEventLoop) -> Result<(),
     let after = renderer.retained_amounts();
     check(!report.refused, "a usable device admits the trim")?;
     check(released_parts(&renderer) == released_parts(&fresh), "released parts read as new")?;
+    // The split scene fits the atlas's start, so there is nothing to shrink and the atlas is kept.
+    check(report.glyph_atlas_shrunk.is_none(), "an atlas at its start is not shrunk")?;
     check(after.glyph_atlas == before.glyph_atlas, "the glyph atlas is kept")?;
     check(after.image_atlas == fresh.retained_amounts().image_atlas, "no media: the placeholder")?;
     check(

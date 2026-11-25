@@ -126,6 +126,43 @@ impl GlyphAtlas {
         );
     }
 
+    /// Shrink a grown atlas to an empty `dim × dim`, returning its pixel memory; returns whether it
+    /// shrank.
+    ///
+    /// Only a `Growable` atlas shrinks, and only to a power of two below its current size and at
+    /// or above [`MIN_ATLAS_DIM`]; every other call is refused and changes nothing. Every tile and
+    /// pending upload is dropped and the pixel buffer is replaced, so its capacity, not only its
+    /// length, falls to the new size. The identity advances like a reset, so every UV-bearing cache
+    /// rebuilds. The growth and eviction counts, the eviction permission, `ever_evicted` and the
+    /// entry cap survive, and a later insert grows by doubling.
+    #[must_use = "a refused shrink leaves the atlas at its current size"]
+    pub fn shrink_to(&mut self, dim: u32) -> bool {
+        let growable = matches!(self.growth, GrowthPolicy::Growable { .. });
+        if !growable || !dim.is_power_of_two() || dim < MIN_ATLAS_DIM || dim >= self.width {
+            // When: the atlas is Fixed or dim is not a smaller power of two at or above the floor.
+            return false;
+        }
+        // A new buffer, not a truncation: `Vec::truncate` would keep the grown capacity. The old
+        // one's pages go back to the system rather than staying in the allocator's cache.
+        let fresh = vec![0u8; dim as usize * dim as usize * BYTES_PER_PIXEL as usize];
+        super::page_release::release_pixel_pages(std::mem::replace(&mut self.pixels, fresh));
+        self.width = dim;
+        self.height = dim;
+        // A reset would restart the eviction count and re-enable eviction; shrinking is neither an
+        // eviction nor a policy change, so both carry over (`ever_evicted` and the cap survive it).
+        let (evictions, eviction_enabled) = (self.evictions, self.eviction_enabled);
+        self.reset_in_place();
+        self.evictions = evictions;
+        self.eviction_enabled = eviction_enabled;
+        tracing::debug!(
+            target: "sonic::glyph_atlas",
+            dim,
+            growths = self.growths,
+            "glyph atlas shrank"
+        );
+        true
+    }
+
     /// Allocate a `width × height` slot, growing the atlas before giving up. Never evicts.
     pub(super) fn alloc_rect_growing(
         &mut self,

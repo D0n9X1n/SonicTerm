@@ -20,3 +20,8 @@ sonicterm-types.workspace = true
 # don't reference cosmic-text after the chrome migration.
 bytemuck.workspace = true
 tracing.workspace = true
+
+# The freed-page release after a glyph atlas shrink (`page_release.rs`): macOS keeps a freed
+# large allocation's pages dirty until they are marked reusable.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true

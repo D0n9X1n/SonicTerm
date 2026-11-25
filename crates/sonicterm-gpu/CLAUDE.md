@@ -46,7 +46,7 @@ cargo build -p sonicterm-gpu
 ```
 
 ## Guardrails
-- `trim_for_occlusion` releases only what the next frame rebuilds, inside the device gate; it never touches the glyph atlas, its retry or eviction state. A trimmed frame texture is restored by `ensure_frame_texture`, the first step of the wgpu present, and every other texture install clears the mark.
+- `trim_for_occlusion` releases only what the next frame rebuilds, inside the device gate. It may shrink a glyph atlas that grew past `start_dim` for the current scale (`shrink_glyph_atlas_to_start`), only between attempts and with no atlas retry or growth timing pending; it never changes the retry, its eviction mode or the counters. A texture-only idle trim keeps the atlas. A trimmed frame texture is restored by `ensure_frame_texture`, the first step of the wgpu present, and every other texture install clears the mark.
 - `core.rs` and `text_pipeline.rs` are hot files; keep changes narrow.
 - CPU composition stays in `software_frame`, compiled for Windows and every host's
   unit tests; its shared color encoding also compiles on every host. Keep pixel loops and
