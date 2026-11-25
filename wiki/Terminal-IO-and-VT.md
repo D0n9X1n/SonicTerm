@@ -819,9 +819,14 @@ stdout, never through the PTY: `exact` (the digest equals the expected form), `t
 rows answer only the console's own cursor and device-attribute queries and inject canned
 replies, so they prove forwarding, not behavior; app rows answer through a pane that runs the
 production VT publisher. The positive control must be `exact` on both runtimes and every
-required row on the packaged runtime; the other rows are printed as evidence. A host stops
-scanning after 5 s without a sentinel and is bounded at 60 s, a run at 150 s, a child's input
-read at 2 s and 64 KiB, and the job must hold no process 5 s after teardown.
+required row on the packaged runtime; the other rows are printed as evidence. Each case has
+one 5 s deadline from its first section, which no later sentinel extends, and a sentinel whose
+output arrived at or past it is not evidence; between cases a host waits at most 5 s. One 150 s
+deadline covers staging, both hosts and their teardowns: a host runs at most 60 s, is not
+launched when too little time is left for its scan and report, and the job must hold no process
+within one 5 s teardown. A child reads a reply for 2 s, up to 64 KiB, after earlier input has
+been quiet for 300 ms; more bytes, or input that never goes quiet within 1 s, reads as
+`OVERFLOW`, not as a shortened reply.
 `SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR` names a directory that
 `setup-windows-conpty.py --destination` already staged; without it each binary stages its own.
 The required clipboard transport rows are `52;c;<b64>`, `52;cp;<b64>`, `52;c`,

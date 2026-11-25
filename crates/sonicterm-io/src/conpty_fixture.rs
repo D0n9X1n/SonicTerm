@@ -3,8 +3,13 @@
 //!
 //! This module is platform-free so its scanner and digest are tested on every host; the
 //! Windows drivers that put a real pseudoconsole between a host and a child live in
-//! `conpty_fixture_windows.rs`. Only tests reach it, through the `test-support` feature.
+//! `conpty_fixture_windows.rs`, and their clocks and bounded input in `conpty_fixture_clock.rs`.
+//! Only tests reach it, through the `test-support` feature.
 
+// Only the Windows drivers call the clocks; other hosts compile them for their unit tests.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[path = "conpty_fixture_clock.rs"]
+mod clock;
 #[cfg(windows)]
 #[path = "conpty_fixture_windows.rs"]
 mod driver;

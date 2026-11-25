@@ -42,6 +42,10 @@ use windows::{
     },
 };
 
+use super::clock::{
+    abandon, collect_input, confirmed, reap, settle_input, wait_until, Arrival, CaseClock, Input,
+    Launch, RunClock, Teardown, Unjobbed, HOST_BUDGET, REPORT_MARGIN, TEARDOWN_BUDGET,
+};
 use super::{
     classify, classify_repaint, find, hex, json_field, row_line, Case, Evidence, Expected,
     InputPhase, Outcome, ScanEvent, Scanner, LINE_PREFIX, PTY_COLS as COLS, PTY_ROWS as ROWS,
@@ -54,22 +58,11 @@ const ROLE_ENV: &str = "SONICTERM_CONPTY_FIXTURE_ROLE";
 const RUNTIME_DIR_ENV: &str = "SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR";
 /// Makes a missing packaged runtime fail startup instead of falling back (`conpty_runtime`).
 const REQUIRE_ENV: &str = "SONICTERM_REQUIRE_CONPTY";
+/// The host's scanning-loop length in milliseconds, set by the outer test from its admitted run.
+const LOOP_MS_ENV: &str = "SONICTERM_CONPTY_FIXTURE_LOOP_MS";
 const CP_UTF8: u32 = 65_001;
-const TOTAL_BUDGET: Duration = Duration::from_secs(150);
-const HOST_BUDGET: Duration = Duration::from_secs(60);
-/// The host's own loop ends first, so its rows and end line reach the outer test in time.
-const HOST_LOOP_BUDGET: Duration = Duration::from_secs(50);
-/// Silence allowed between two sentinels of one case before its open sections read inconclusive.
-const CASE_BUDGET: Duration = Duration::from_secs(5);
-/// One case's whole run, from its first section opening, however many sentinels it sends: its
-/// output, its input phase and a resize wait together stay under it.
-const WHOLE_CASE_BUDGET: Duration = Duration::from_secs(15);
 /// Chunks the child's stdin reader may queue ahead of the case reading them; each is at most 4 KiB.
 const INPUT_QUEUE_CHUNKS: usize = 16;
-const REAP_BUDGET: Duration = Duration::from_secs(5);
-const READ_DEADLINE: Duration = Duration::from_secs(2);
-const READ_QUIET: Duration = Duration::from_millis(300);
-const MAX_READ_BYTES: usize = 64 * 1024;
 const RESIZE_DELAY: Duration = Duration::from_millis(700);
 const REPAINT_WAIT: Duration = Duration::from_millis(1500);
 
@@ -138,9 +131,17 @@ fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: 
     // bytes) means the parent never confirmed the job, so the host spawns nothing.
     let read = std::io::stdin().read_line(&mut go_line);
     assert!(
-        read.is_ok() && go_line == "go\n",
+        confirmed(&read, &go_line),
         "the parent did not confirm this host's job object; no PTY is spawned"
     );
+    // The outer test admits the loop's length from its total deadline; a missing or invalid value
+    // falls back to the most a host may use.
+    let loop_budget = std::env::var(LOOP_MS_ENV)
+        .ok()
+        .and_then(|millis| millis.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(HOST_BUDGET - REPORT_MARGIN)
+        .min(HOST_BUDGET - REPORT_MARGIN);
     let selection = Arc::new(Mutex::new(None));
     // A fresh host process has no subscriber yet; failure would only lose the selection record,
     // which then fails the runtime check below instead of passing silently.
@@ -170,7 +171,7 @@ fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: 
         selected.unwrap_or_default(),
     );
     let closed = match spawned {
-        Ok(pty) => drive(&pty, cases, &mut engine),
+        Ok(pty) => drive(&pty, cases, &mut engine, loop_budget),
         Err(error) => {
             // The launch failed, so every row is inconclusive; the error names no payload.
             println!(
@@ -184,24 +185,28 @@ fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: 
     println!("{LINE_PREFIX}{{\"kind\":\"end\",\"role\":\"{role}\"}}");
 }
 
-/// Scan the child's output until `DONE`, the host budget, or a case budget with no sentinel;
-/// return each closed section's evidence. Dropping `pty` afterwards kills and reaps the child.
-fn drive<E: Engine>(pty: &PtyHandle, cases: &[Case], engine: &mut E) -> HashMap<String, Evidence> {
-    let host_deadline = Instant::now() + HOST_LOOP_BUDGET;
-    let mut case_deadline = Instant::now() + CASE_BUDGET;
-    // The case whose sections are open and when it must finish, whatever sentinels it sends.
-    let mut whole_case: Option<(String, Instant)> = None;
+/// Scan the child's output until `DONE` or the deadline [`CaseClock`] puts in force; return each
+/// section's evidence that closed in time. Dropping `pty` afterwards kills and reaps the child.
+fn drive<E: Engine>(
+    pty: &PtyHandle,
+    cases: &[Case],
+    engine: &mut E,
+    loop_budget: Duration,
+) -> HashMap<String, Evidence> {
+    let started = Instant::now();
+    let mut clock = CaseClock::new(started, started + loop_budget);
     let mut scanner = Scanner::default();
     let mut closed = HashMap::new();
     let mut resize_at: Option<(Instant, u16)> = None;
     loop {
         let now = Instant::now();
-        let whole_deadline = whole_case.as_ref().map_or(host_deadline, |(_, due)| *due);
-        if now >= host_deadline.min(case_deadline).min(whole_deadline) {
-            // When: `now` passed the host, silence or whole-case deadline, open sections read
+        let Some(left) =
+            clock.deadline().checked_duration_since(now).filter(|left| !left.is_zero())
+        else {
+            // When: checked_duration_since finds the deadline in force passed, open sections read
             // inconclusive.
             return closed;
-        }
+        };
         if let Some((_, rows)) = resize_at.filter(|(due, _)| now >= *due) {
             resize_at = None;
             if (pty.resize)(COLS, rows).is_err() {
@@ -209,7 +214,8 @@ fn drive<E: Engine>(pty: &PtyHandle, cases: &[Case], engine: &mut E) -> HashMap<
                 println!("{LINE_PREFIX}{{\"kind\":\"resize-error\",\"rows\":{rows}}}");
             }
         }
-        let chunk = match pty.out_rx.recv_timeout(Duration::from_millis(50)) {
+        // The wait never runs past the deadline in force, so a chunk is stamped when it arrived.
+        let chunk = match pty.out_rx.recv_timeout(left.min(Duration::from_millis(50))) {
             Ok(chunk) => chunk,
             Err(RecvTimeoutError::Timeout) => {
                 // When: the read hit its Timeout, recheck the budgets and any due resize.
@@ -220,21 +226,19 @@ fn drive<E: Engine>(pty: &PtyHandle, cases: &[Case], engine: &mut E) -> HashMap<
                 return closed;
             }
         };
+        let received_at = Instant::now();
         let reply = engine.output(&chunk);
         if !reply.is_empty() {
             // When: the engine produced a `reply`; a refused one shows as a mismatch in the report.
             let _ = pty.send_input_nonblocking(reply);
         }
         for event in scanner.feed(&chunk) {
-            case_deadline = Instant::now() + CASE_BUDGET;
             match event {
                 ScanEvent::Opened(name) => {
                     // When: a section `Opened`, an `/in` section may need injected bytes or a resize.
-                    let case_name = name.rsplit_once('/').map_or(name.as_str(), |(case, _)| case);
-                    if whole_case.as_ref().is_none_or(|(open, _)| open != case_name) {
-                        // A section of another case opened, so that case's whole clock starts now.
-                        whole_case =
-                            Some((case_name.to_owned(), Instant::now() + WHOLE_CASE_BUDGET));
+                    if clock.opened(&name, received_at) == Arrival::Late {
+                        // When: clock.opened says Arrival::Late, nothing after it is evidence.
+                        return closed;
                     }
                     let phase = name
                         .strip_suffix("/in")
@@ -254,10 +258,17 @@ fn drive<E: Engine>(pty: &PtyHandle, cases: &[Case], engine: &mut E) -> HashMap<
                     }
                 }
                 ScanEvent::Closed(name, evidence) => {
+                    // When: a section `Closed`, its evidence counts only inside its case's deadline.
+                    if clock.closed(received_at) == Arrival::Late {
+                        // When: clock.closed says Arrival::Late, the late row is refused.
+                        return closed;
+                    }
                     closed.insert(name, evidence);
                 }
                 ScanEvent::Abandoned(_) => {
-                    // When: a section was `Abandoned`, its row stays missing and reads inconclusive.
+                    // An abandoned section's row stays missing and reads inconclusive; silence is
+                    // measured from it.
+                    clock.abandoned(received_at);
                 }
                 ScanEvent::Done => {
                     // When: the child printed `Done`, every section it will print has arrived.
@@ -326,8 +337,9 @@ fn run_child(cases: &[Case]) {
     });
     let mut stdout = std::io::stdout().lock();
     for case in cases {
-        // Input left from an earlier case must not be counted as this case's reply.
-        while receiver.try_recv().is_ok() {}
+        // Input left from an earlier case must not be counted as this case's reply; input that
+        // never settles within its bounds makes the reply untrustworthy rather than wrong.
+        let settled = !matches!(case.input, Some(InputPhase::Echo(_))) || settle_input(&receiver);
         let mut frame = case.preamble.clone();
         frame.extend_from_slice(format!("@@BEGIN {}/out@@", case.name).as_bytes());
         frame.extend_from_slice(&case.output);
@@ -338,10 +350,20 @@ fn run_child(cases: &[Case]) {
         write_flushed(&mut stdout, &frame);
         match &case.input {
             Some(InputPhase::Echo(_)) => {
-                let received = collect_input(&receiver);
+                let input = if settled {
+                    collect_input(&receiver)
+                } else {
+                    // When: settled is false, earlier input never stopped, so no reply is trusted.
+                    Input::Overflow
+                };
+                // An overflow is reported as such, never as hex, so it cannot read as a reply.
+                let report = match input {
+                    Input::Bytes(received) => hex(&received),
+                    Input::Overflow => "OVERFLOW".to_owned(),
+                };
                 write_flushed(
                     &mut stdout,
-                    format!("{}@@END {}/in@@\r\n", hex(&received), case.name).as_bytes(),
+                    format!("{report}@@END {}/in@@\r\n", case.name).as_bytes(),
                 );
             }
             Some(InputPhase::Resize { total_rows, .. }) => {
@@ -366,32 +388,6 @@ fn run_child(cases: &[Case]) {
 fn write_flushed(stdout: &mut impl Write, bytes: &[u8]) {
     let _ = stdout.write_all(bytes);
     let _ = stdout.flush();
-}
-
-/// Bytes received within [`READ_DEADLINE`], ending [`READ_QUIET`] after the last one, at most
-/// [`MAX_READ_BYTES`].
-fn collect_input(receiver: &mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
-    let deadline = Instant::now() + READ_DEADLINE;
-    let mut received = Vec::new();
-    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-        let wait = if received.is_empty() {
-            left
-        } else {
-            // When: some input was `received`, the reply ends after READ_QUIET of silence.
-            left.min(READ_QUIET)
-        };
-        let Ok(bytes) = receiver.recv_timeout(wait) else {
-            // When: the wait expired (or the reader ended), the reply is complete.
-            break;
-        };
-        received.extend_from_slice(&bytes);
-        if received.len() >= MAX_READ_BYTES {
-            // When: `received` reached MAX_READ_BYTES, stop; the row then shows the cut.
-            received.truncate(MAX_READ_BYTES);
-            break;
-        }
-    }
-    received
 }
 
 /// UTF-8 code pages, raw VT input (no line editing, echo or Ctrl-C processing) and VT output.
@@ -446,30 +442,45 @@ fn run_outer(test_name: &str, manifest_dir: &Path, cases: &[Case]) {
         .parent()
         .expect("test executable directory")
         .join(format!("conpty-fixture-{}", std::process::id()));
-    // The total budget covers staging the runtime too, so a slow copy cannot add to it unseen.
-    let started = Instant::now();
+    // One total deadline covers staging, both hosts and their teardowns; nothing restarts it.
+    let run = RunClock::new(Instant::now());
     // A leftover directory from an earlier process with the same id is replaced.
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).expect("create fixture directory");
-    let runtime = std::env::var_os(RUNTIME_DIR_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| stage_runtime(manifest_dir, &base.join("staged")));
+    let runtime = match std::env::var_os(RUNTIME_DIR_ENV) {
+        Some(staged) => PathBuf::from(staged),
+        None => stage_runtime(manifest_dir, &base.join("staged"), run.work_deadline()),
+    };
     let mut problems = Vec::new();
     for role in ["packaged", "system"] {
         let role_dir = base.join(role);
-        std::fs::create_dir_all(&role_dir).expect("create role directory");
         let host = role_dir.join(&file_name);
-        std::fs::copy(&executable, &host).expect("copy host executable");
-        if role == "packaged" {
-            let target = role_dir.join("conpty");
-            std::fs::create_dir_all(&target).expect("create runtime directory");
-            for member in ["conpty.dll", "OpenConsole.exe"] {
-                std::fs::copy(runtime.join("conpty").join(member), target.join(member))
-                    .expect("copy staged runtime member");
+        let (source, runtime) = (executable.clone(), runtime.clone());
+        let copy_host = host.clone();
+        let copied = within(run.work_deadline(), move || {
+            std::fs::create_dir_all(&role_dir)?;
+            std::fs::copy(&source, &copy_host)?;
+            if role == "packaged" {
+                // The packaged host gets the pinned runtime beside it.
+                let target = role_dir.join("conpty");
+                std::fs::create_dir_all(&target)?;
+                for member in ["conpty.dll", "OpenConsole.exe"] {
+                    std::fs::copy(runtime.join("conpty").join(member), target.join(member))?;
+                }
             }
+            Ok(())
+        });
+        if let Err(problem) = copied {
+            // When: copied is an Err (a failed copy or a passed deadline), the host never launches.
+            problems.push(format!("{role}: preparing the host failed: {problem}"));
+            continue;
         }
-        let budget = TOTAL_BUDGET.saturating_sub(started.elapsed()).min(HOST_BUDGET);
-        let report = run_one_host(&host, role, test_name, budget);
+        let Some(launch) = run.launch(Instant::now()) else {
+            // When: launch finds too little time left, the host never starts.
+            problems.push(format!("{role}: the total deadline left no time to run this host"));
+            continue;
+        };
+        let report = run_one_host(&host, role, test_name, launch);
         check_report(role, cases, &report, &mut problems);
     }
     // Copies an unreaped host still holds stay behind; that host is already a reported problem.
@@ -477,18 +488,47 @@ fn run_outer(test_name: &str, manifest_dir: &Path, cases: &[Case]) {
     assert!(problems.is_empty(), "F-ConPTY fixture failed:\n{}", problems.join("\n"));
 }
 
-/// Stage the pinned runtime with the reviewed setup script into `destination`.
-fn stage_runtime(manifest_dir: &Path, destination: &Path) -> PathBuf {
+/// Run `work` on its own thread and wait for it until `deadline`; a late result is an error and
+/// the thread is left to finish on its own, so a stuck copy cannot hold the fixture past it.
+fn within(
+    deadline: Instant,
+    work: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+) -> Result<(), String> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        // A send fails only when the deadline already passed and nobody waits.
+        let _ = sender.send(work());
+    });
+    let left = deadline.saturating_duration_since(Instant::now());
+    match receiver.recv_timeout(left) {
+        Ok(result) => result.map_err(|error| error.to_string()),
+        Err(_) => Err("it did not finish before the total deadline".to_owned()),
+    }
+}
+
+/// Stage the pinned runtime with the reviewed setup script into `destination` before `deadline`;
+/// a script still running then is killed and reaped, and the failure says whether it was.
+fn stage_runtime(manifest_dir: &Path, destination: &Path, deadline: Instant) -> PathBuf {
     std::fs::create_dir_all(destination).expect("create staging directory");
     let script = manifest_dir.join("../../scripts/setup-windows-conpty.py");
-    let status = Command::new("python")
+    let mut child = Command::new("python")
         .arg(&script)
         .arg("--destination")
         .arg(destination)
-        .status()
+        .spawn()
         .expect("run python scripts/setup-windows-conpty.py");
+    let mut status = None;
+    let finished = wait_until(deadline, || {
+        status = child.try_wait().ok().flatten();
+        status.is_some()
+    });
+    if !finished {
+        // The script is still running at the deadline: end it within the teardown budget.
+        let (killed, reaped) = abandon(&mut child, Instant::now() + TEARDOWN_BUDGET);
+        panic!("staging the ConPTY runtime passed the total deadline (killed: {killed}, reaped: {reaped})");
+    }
     assert!(
-        status.success(),
+        status.is_some_and(|status| status.success()),
         "staging the ConPTY runtime failed; stage it with `python scripts/setup-windows-conpty.py --destination <dir>` and set {RUNTIME_DIR_ENV}=<dir>"
     );
     destination.to_path_buf()
@@ -501,11 +541,12 @@ struct HostReport {
     reaped: bool,
 }
 
-fn run_one_host(host: &Path, role: &str, test_name: &str, budget: Duration) -> HostReport {
+fn run_one_host(host: &Path, role: &str, test_name: &str, launch: Launch) -> HostReport {
     let mut command = Command::new(host);
     command
         .args(test_args(test_name))
         .env(ROLE_ENV, role)
+        .env(LOOP_MS_ENV, launch.loop_budget.as_millis().to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -520,8 +561,7 @@ fn run_one_host(host: &Path, role: &str, test_name: &str, budget: Duration) -> H
     if let Err(error) = job.assign(&child) {
         // The host is outside the job: kill and reap it before the failure, so it never reads
         // `go` from a closed pipe and spawns its PTY.
-        let killed = child.kill().is_ok();
-        let reaped = wait_exit(&mut child, REAP_BUDGET);
+        let (killed, reaped) = abandon(&mut child, Instant::now() + TEARDOWN_BUDGET);
         panic!("assign fixture host to its job: {error} (killed: {killed}, reaped: {reaped})");
     }
     if let Some(mut stdin) = child.stdin.take() {
@@ -538,10 +578,11 @@ fn run_one_host(host: &Path, role: &str, test_name: &str, budget: Duration) -> H
             }
         }
     });
-    let deadline = Instant::now() + budget;
     let mut lines = Vec::new();
     let mut finished = false;
-    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+    // The deadline was fixed when the run admitted this host, so spawning and the handshake
+    // count against it.
+    while let Some(left) = launch.host_deadline.checked_duration_since(Instant::now()) {
         let Ok(line) = receiver.recv_timeout(left) else {
             // When: `recv_timeout` expired or the reader ended, no further `line` arrives in budget.
             break;
@@ -558,31 +599,39 @@ fn run_one_host(host: &Path, role: &str, test_name: &str, budget: Duration) -> H
             break;
         }
     }
-    let exited = wait_exit(&mut child, REAP_BUDGET);
-    if !exited {
-        // The host outlived its budget: end its whole tree; it is already a failure.
-        job.terminate();
-    }
-    let reaped = exited && job.wait_empty(REAP_BUDGET);
-    if !exited {
-        wait_exit(&mut child, REAP_BUDGET);
-    }
+    // One teardown allowance after the host's run, which the run clock held back.
+    let teardown_deadline = launch.host_deadline.max(Instant::now()) + TEARDOWN_BUDGET;
+    let reaped = reap(&mut HostTeardown { child: &mut child, job: &job }, teardown_deadline);
     HostReport { lines, finished, reaped }
 }
 
-/// Poll `child` for exit within `budget`.
-fn wait_exit(child: &mut std::process::Child, budget: Duration) -> bool {
-    let deadline = Instant::now() + budget;
-    loop {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            // When: the `child` matches an exit status, the host has exited and is reaped.
-            return true;
-        }
-        if Instant::now() >= deadline {
-            // When: the `deadline` passed with the host alive, report it as not exited.
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
+/// The real teardown steps of one host and its job.
+struct HostTeardown<'a> {
+    child: &'a mut std::process::Child,
+    job: &'a Job,
+}
+
+impl Teardown for HostTeardown<'_> {
+    fn host_exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+
+    fn terminate_job(&mut self) {
+        self.job.terminate();
+    }
+
+    fn job_empty(&mut self) -> bool {
+        self.job.is_empty()
+    }
+}
+
+impl Unjobbed for std::process::Child {
+    fn kill(&mut self) -> bool {
+        std::process::Child::kill(self).is_ok()
+    }
+
+    fn exited(&mut self) -> bool {
+        matches!(self.try_wait(), Ok(Some(_)))
     }
 }
 
@@ -663,32 +712,21 @@ impl Job {
             unsafe { TerminateJobObject(self.0, 1) };
     }
 
-    /// Wait within `budget` for the job to hold no live process.
-    fn wait_empty(&self, budget: Duration) -> bool {
-        let deadline = Instant::now() + budget;
-        loop {
-            let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-            let queried =
-                // SAFETY: `info` is a live accounting record of the size passed, written by this call.
-                unsafe {
-                QueryInformationJobObject(
-                    Some(self.0),
-                    JobObjectBasicAccountingInformation,
-                    std::ptr::from_mut(&mut info).cast(),
-                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
-                    None,
-                )
-            };
-            if queried.is_ok() && info.ActiveProcesses == 0 {
-                // When: the job reports zero ActiveProcesses, every process in it was reaped.
-                return true;
-            }
-            if Instant::now() >= deadline {
-                // When: the `deadline` passed with a process left, the job was not emptied.
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+    /// Whether the job holds no live process; a failed query counts as not empty.
+    fn is_empty(&self) -> bool {
+        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        let queried =
+            // SAFETY: `info` is a live accounting record of the size passed, written by this call.
+            unsafe {
+            QueryInformationJobObject(
+                Some(self.0),
+                JobObjectBasicAccountingInformation,
+                std::ptr::from_mut(&mut info).cast(),
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                None,
+            )
+        };
+        queried.is_ok() && info.ActiveProcesses == 0
     }
 }
 

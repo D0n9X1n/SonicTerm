@@ -10,8 +10,10 @@ process information.
 - `foreground_proc.rs` - foreground command detection.
 - `proc_info.rs` - process metadata helpers.
 - `lib.rs` - public exports.
-- `conpty_fixture.rs`, `conpty_fixture_windows.rs` - the F-ConPTY real-pseudoconsole protocol
-  fixture (sentinel scanner, outcomes, packaged/system hosts); compiled only with `test-support`.
+- `conpty_fixture.rs`, `conpty_fixture_windows.rs`, `conpty_fixture_clock.rs` - the F-ConPTY
+  real-pseudoconsole protocol fixture (sentinel scanner, outcomes, packaged/system hosts, and the
+  platform-free case and run deadlines, teardown and bounded child input); compiled only with
+  `test-support`.
 
 ## Local gate
 ```bash
